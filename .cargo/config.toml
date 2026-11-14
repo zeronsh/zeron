@@ -1,0 +1,9 @@
+# Read by every build in this repository, apps/zgx's included (Cargo reads the
+# parents' config too).
+[env]
+# transcribe.cpp (dictation, crates/voice) built for x86-64 CPUs with AVX2 and
+# FMA, never for the machine that builds it (ggml's default, `-march=native`).
+# 2.8× faster than its plain-SSE floor; CPUs without them are told so before
+# a model loads (`zeron_voice::cpu_supported`). Apple silicon and arm64 Linux
+# ignore these.
+TRANSCRIBE_CMAKE_ARGS = "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON"

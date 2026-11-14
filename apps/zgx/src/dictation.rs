@@ -22,28 +22,48 @@ use crate::plugins::{json_value, off_thread, value_json};
 mod meter;
 use meter::Meter;
 
-const MODEL: &str = "parakeet-tdt-0.6b-v3-int8";
-
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn zeron_microphone_permission() -> i32;
-    fn zeron_request_microphone();
+    fn zeron_request_microphone_then(
+        done: extern "C" fn(*mut std::ffi::c_void, i32),
+        context: *mut std::ffi::c_void,
+    );
 }
-fn authorize() -> Result<(), String> {
+
+/// Whether the microphone may be used, as the system says. (Only macOS
+/// asks; elsewhere it's always granted, the rest tests.)
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum Access {
+    Granted,
+    /// Not decided yet: the system is asking now; its answer comes here.
+    Asked(mpsc::Receiver<bool>),
+    Refused(String),
+}
+const REFUSED: &str =
+    "Allow Zeron microphone access in System Settings → Privacy & Security → Microphone.";
+
+/// Asks the system on first use (macOS's own prompt), never twice at once.
+fn access() -> Access {
     #[cfg(target_os = "macos")]
     match unsafe { zeron_microphone_permission() } {
         1 => (),
         0 => {
-            unsafe { zeron_request_microphone() };
-            return Err("Allow microphone access, then hold to dictate again.".into());
+            // The answer comes on a queue of AVFoundation's: it crosses to
+            // the window's thread through the channel its poll reads.
+            extern "C" fn answered(context: *mut std::ffi::c_void, granted: i32) {
+                let tell = unsafe { Box::from_raw(context.cast::<mpsc::Sender<bool>>()) };
+                let _ = tell.send(granted != 0);
+            }
+            let (tell, answer) = mpsc::channel();
+            let context = Box::into_raw(Box::new(tell)).cast();
+            unsafe { zeron_request_microphone_then(answered, context) };
+            return Access::Asked(answer);
         }
-        -2 => return Err("Microphone access requires a packaged Zeron app.".into()),
-        _ => return Err(
-            "Allow Zeron microphone access in System Settings → Privacy & Security → Microphone."
-                .into(),
-        ),
+        -2 => return Access::Refused("Microphone access requires a packaged Zeron app.".into()),
+        _ => return Access::Refused(REFUSED.into()),
     }
-    Ok(())
+    Access::Granted
 }
 
 /// One recording. Dropping it stops capture and throws away its result.
@@ -82,11 +102,26 @@ impl Drop for DownloadJob {
 }
 
 struct Service {
-    /// The model's folder (none: the data folder isn't known).
-    dir: Option<PathBuf>,
+    /// `<data>/models`, a folder a model (none: the data folder isn't known).
+    models: Option<PathBuf>,
     session: Option<Box<dyn Recording>>,
+    /// Opens a recording; `Err(None)`: the worker is still finishing the
+    /// last one (a cancelled recording's model still loading).
+    open: Box<dyn Fn(PathBuf, Option<String>) -> Result<Box<dyn Recording>, Option<String>>>,
+    /// A start waiting for the worker: its folder, microphone, and when it
+    /// gives up. Meanwhile the bar keeps its starting look.
+    waiting: Option<(PathBuf, Option<String>, Instant)>,
+    /// Whether the microphone may be used (the system's answer).
+    access: Box<dyn Fn() -> Access>,
+    /// A start waiting for the system's answer (its prompt showing): the
+    /// answer, its folder and microphone. Meanwhile the starting look.
+    asking: Option<(mpsc::Receiver<bool>, PathBuf, Option<String>)>,
     download: Option<DownloadJob>,
     deadline: Option<Instant>,
+    /// When the recording began to listen, and whether its model is slow
+    /// here (Cohere on the CPU): how long finalizing may take.
+    listening: Option<Instant>,
+    slow: bool,
     state: Json,
     serial: u64,
     /// The voice bar's waveform while listening, and whether its bars
@@ -95,12 +130,24 @@ struct Service {
     levels_changed: bool,
 }
 impl Service {
-    fn new(dir: Option<PathBuf>) -> Self {
+    fn new(models: Option<PathBuf>) -> Self {
         Self {
-            dir,
+            models,
             session: None,
+            open: Box::new(
+                |dir, device| match zeron_voice::Session::start(dir, device) {
+                    Ok(session) => Ok(Box::new(session) as Box<dyn Recording>),
+                    Err(_) if zeron_voice::busy() => Err(None),
+                    Err(e) => Err(Some(e.to_string())),
+                },
+            ),
+            waiting: None,
+            access: Box::new(access),
+            asking: None,
             download: None,
             deadline: None,
+            listening: None,
+            slow: false,
             state: json!({"phase":"idle"}),
             serial: 0,
             meter: Meter::default(),
@@ -108,7 +155,10 @@ impl Service {
         }
     }
     fn needs_poll(&self) -> bool {
-        self.session.is_some() || self.download.is_some()
+        self.session.is_some()
+            || self.download.is_some()
+            || self.waiting.is_some()
+            || self.asking.is_some()
     }
     fn clear_levels(&mut self) {
         self.meter.reset();
@@ -128,28 +178,64 @@ impl Service {
     }
     fn cancel(&mut self) {
         self.session = None;
+        self.waiting = None;
+        self.asking = None;
         // (What was drawn stays until the next recording: the bar is on
         // its way out.)
         self.meter.reset();
-        if let Some(job) = &self.download {
-            job.cancel.store(true, Ordering::Release);
-        }
         self.deadline = None;
+        if let Some(job) = &self.download {
+            // Still "downloading" until its worker has cleaned up: Settings
+            // asks what's on disk then, and a new download can start.
+            job.cancel.store(true, Ordering::Release);
+            return;
+        }
         self.state = json!({"phase":"cancelled", "serial":self.serial});
     }
     fn stop(&mut self) {
+        // Let go before the microphone opened: nothing was recorded.
+        if self.waiting.take().is_some() || self.asking.take().is_some() {
+            self.state = json!({"phase":"cancelled", "serial":self.serial});
+            return;
+        }
         if let Some(session) = &mut self.session {
             session.finish();
             self.meter.freeze(Instant::now());
-            self.deadline
-                .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
-            self.state["phase"] = json!("finalizing");
+            // (Overdue already, Send pressed meanwhile: still late.)
+            if self.state["phase"] != "late" {
+                self.state["phase"] = json!("finalizing");
+                self.finalizing();
+            }
         }
     }
-    fn dir(&self) -> Result<PathBuf, String> {
-        self.dir
-            .clone()
-            .ok_or_else(|| "Zeron's data folder isn't known".to_string())
+    /// The words are due: 30 s, plus as long again as the recording (three
+    /// times for a model slow here), from now. Past it the person is told,
+    /// and words that still come land all the same.
+    fn finalizing(&mut self) {
+        let recorded = self.listening.map_or(Duration::ZERO, |at| at.elapsed());
+        let per_second = if self.slow { 3 } else { 1 };
+        self.deadline.get_or_insert_with(|| {
+            Instant::now() + Duration::from_secs(30) + recorded * per_second
+        });
+    }
+    /// The folder of the model `args` names (`model`, an id; none or empty:
+    /// the default). One it doesn't offer is an error, never another's folder.
+    fn dir(&self, args: &Json) -> Result<PathBuf, String> {
+        let models_dir = self
+            .models
+            .as_ref()
+            .ok_or("Zeron's data folder isn't known")?;
+        let id = match args["model"].as_str().filter(|id| !id.is_empty()) {
+            Some(id) => {
+                zeron_voice::models()
+                    .into_iter()
+                    .find(|m| m.id == id)
+                    .ok_or("No such speech model")?
+                    .id
+            }
+            None => zeron_voice::manifest().id,
+        };
+        Ok(models_dir.join(id))
     }
     fn idle(&self) -> Result<(), String> {
         if self.needs_poll() || zeron_voice::busy() || DOWNLOADING.load(Ordering::Acquire) {
@@ -157,33 +243,79 @@ impl Service {
         }
         Ok(())
     }
+    /// The models on offer, the default first, and which are here.
     fn status(&self) -> Result<Json, String> {
-        Ok(json!({
-            "installed": zeron_voice::installed(&self.dir()?),
-            "size": zeron_voice::download_size(),
-        }))
+        let models = self
+            .models
+            .as_ref()
+            .ok_or("Zeron's data folder isn't known")?;
+        let list: Vec<Json> = zeron_voice::models()
+            .into_iter()
+            .map(|m| {
+                json!({"id":m.id, "name":m.name, "size":m.size(), "languages":m.languages,
+                    "installed":m.installed(&models.join(&m.id)),
+                    "present":models.join(&m.id).exists(),
+                    "memory":m.memory,
+                    "marks":m.marks,
+                    "slow":m.cpu_slow && cfg!(not(target_os = "macos"))})
+            })
+            .collect();
+        Ok(json!({ "models": list, "supported": zeron_voice::cpu_supported() }))
     }
     fn start(&mut self, args: &Json) -> Result<Json, String> {
-        let dir = self.dir()?;
-        self.idle()?;
+        let dir = self.dir(args)?;
+        if !zeron_voice::cpu_supported() {
+            return Err(zeron_voice::CPU_UNSUPPORTED.into());
+        }
+        if self.needs_poll() || DOWNLOADING.load(Ordering::Acquire) {
+            return Err("Dictation is busy; try again when it finishes".into());
+        }
         // (The page says what to do about it: no words for the composer.)
         if !zeron_voice::installed(&dir) {
             return Err("no_model".into());
         }
-        authorize()?;
         let device = args["device"]
             .as_str()
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
-        let session = zeron_voice::Session::start(dir, device).map_err(|e| e.to_string())?;
-        self.session = Some(Box::new(session));
+        self.slow = zeron_voice::model_for(&dir).is_some_and(|m| m.cpu_slow)
+            && cfg!(not(target_os = "macos"));
+        match (self.access)() {
+            Access::Granted => self.open(dir, device)?,
+            // macOS is asking (first use): no error, the starting look until
+            // it's answered; held (or toggled) still then, it records.
+            Access::Asked(answer) => self.asking = Some((answer, dir, device)),
+            Access::Refused(why) => return Err(why),
+        }
+        self.listening = None;
         self.clear_levels();
         self.serial += 1;
         self.state = json!({"phase":"starting", "serial":self.serial, "hold":args["hold"], "target":args["target"]});
+        if self.asking.is_some() {
+            // (Letting go now isn't a tap to explain: the system is asking.)
+            self.state["asking"] = json!(true);
+        }
         Ok(self.state.clone())
     }
-    fn download(&mut self) -> Result<Json, String> {
-        let dir = self.dir()?;
+    /// Records, or waits for the worker still finishing the last recording
+    /// (a tap or a cancel while its model loaded): not an error, the bar in
+    /// its starting look meanwhile.
+    fn open(&mut self, dir: PathBuf, device: Option<String>) -> Result<(), String> {
+        match (self.open)(dir.clone(), device.clone()) {
+            Ok(session) => self.session = Some(session),
+            Err(None) => {
+                self.waiting = Some((dir, device, Instant::now() + Duration::from_secs(15)))
+            }
+            Err(Some(e)) => return Err(e),
+        }
+        Ok(())
+    }
+    fn download(&mut self, args: &Json) -> Result<Json, String> {
+        let dir = self.dir(args)?;
+        if !zeron_voice::cpu_supported() {
+            return Err(zeron_voice::CPU_UNSUPPORTED.into());
+        }
+        let total = zeron_voice::model_for(&dir).map_or(0, |m| m.size());
         self.idle()?;
         if DOWNLOADING.swap(true, Ordering::AcqRel) {
             return Err("Another window is downloading the model".into());
@@ -200,14 +332,14 @@ impl Service {
             let _ = tell.send(Download::Done(result));
         });
         self.download = Some(DownloadJob { cancel, events });
-        self.state =
-            json!({"phase":"downloading", "bytes":0, "total":zeron_voice::download_size()});
+        self.state = json!({"phase":"downloading", "bytes":0, "total":total});
         Ok(self.state.clone())
     }
-    fn remove(&mut self) -> Result<(), String> {
-        let dir = self.dir()?;
+    fn remove(&mut self, args: &Json) -> Result<(), String> {
+        let dir = self.dir(args)?;
         self.idle()?;
-        zeron_voice::unload();
+        // (Its weights, if they are the ones loaded; the model in use stays.)
+        zeron_voice::unload(&dir);
         if dir.exists() {
             std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
         }
@@ -215,6 +347,34 @@ impl Service {
         Ok(())
     }
     fn poll(&mut self) {
+        if let Some((answer, dir, device)) = self.asking.take() {
+            match answer.try_recv() {
+                Ok(true) => {
+                    if let Err(e) = self.open(dir, device) {
+                        self.state["phase"] = json!("failed");
+                        self.state["error"] = json!(e);
+                    }
+                }
+                Ok(false) | Err(mpsc::TryRecvError::Disconnected) => {
+                    self.state["phase"] = json!("failed");
+                    self.state["error"] = json!(REFUSED);
+                }
+                Err(mpsc::TryRecvError::Empty) => self.asking = Some((answer, dir, device)),
+            }
+        }
+        if let Some((dir, device, until)) = self.waiting.take() {
+            match (self.open)(dir.clone(), device.clone()) {
+                Ok(session) => self.session = Some(session),
+                Err(None) if Instant::now() < until => self.waiting = Some((dir, device, until)),
+                Err(e) => {
+                    self.state["phase"] = json!("failed");
+                    self.state["error"] = json!(e.unwrap_or_else(|| {
+                        "Dictation is still finishing the last recording. Try again in a moment."
+                            .into()
+                    }));
+                }
+            }
+        }
         let mut done = None;
         if let Some(job) = &self.download {
             while let Ok(event) = job.events.try_recv() {
@@ -238,28 +398,25 @@ impl Service {
                 }
             }
         }
-        if self.deadline.is_some_and(|end| Instant::now() >= end) {
-            self.cancel();
-            self.state["phase"] = json!("failed");
-            self.state["error"] = json!("Transcription timed out. Your draft is safe.");
-        }
         let mut ended = false;
+        let mut due = false;
         if let Some(session) = &mut self.session {
             while let Some(event) = session.poll() {
                 match event {
                     zeron_voice::Event::Listening => {
                         if self.deadline.is_none() {
+                            self.listening = Some(Instant::now());
                             self.state["phase"] = json!("listening");
                             self.meter.start(Instant::now());
                             session.take_level();
                         }
                     }
-                    zeron_voice::Event::Finalizing => {
+                    zeron_voice::Event::Finalizing if self.state["phase"] != "late" => {
                         self.state["phase"] = json!("finalizing");
                         self.meter.freeze(Instant::now());
-                        self.deadline
-                            .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
+                        due = true;
                     }
+                    zeron_voice::Event::Finalizing => {}
                     zeron_voice::Event::Final(text) => {
                         self.state["phase"] = json!("final");
                         self.state["text"] = json!(text);
@@ -276,6 +433,15 @@ impl Service {
                 self.levels_changed = true;
             }
         }
+        if due {
+            self.finalizing();
+        }
+        // Overdue: "late", said once; the session goes on (Send waits, it can
+        // be cancelled), and its words, if they come, land as ever.
+        if !ended && self.deadline.is_some_and(|end| Instant::now() >= end) {
+            self.deadline = None;
+            self.state["phase"] = json!("late");
+        }
         if ended {
             self.session = None;
             self.deadline = None;
@@ -284,39 +450,27 @@ impl Service {
     }
 }
 
-/// The draft a recording belongs to, as it was when it began. Catches an edit
-/// changed back before a script's effect runs, and IME composition.
+/// The draft a recording belongs to. Typing on in it is fine (the words
+/// land at the caret); it ends as the editor can't take them any more.
 struct EditorLease {
     editor: zgx::widgets::EditorHandle,
-    revision: u64,
-    selection: (usize, usize),
 }
 impl EditorLease {
+    /// None mid-composition (an IME's): a recording starts on settled text.
     fn new(editor: zgx::widgets::EditorHandle) -> Option<Self> {
-        if editor.is_read_only() {
+        if editor.is_read_only() || editor.editor.borrow().preedit().is_some() {
             return None;
         }
-        let revision = {
-            let model = editor.editor.borrow();
-            if model.preedit().is_some() {
-                return None;
-            }
-            model.revision()
-        };
-        let selection = editor.selection();
-        Some(Self {
-            editor,
-            revision,
-            selection,
-        })
+        Some(Self { editor })
     }
     fn valid(&self) -> bool {
-        let model = self.editor.editor.borrow();
         !self.editor.is_read_only()
-            && model.revision() == self.revision
-            && model.preedit().is_none()
-            && self.editor.selection() == self.selection
     }
+}
+/// Whether `editor` is mid-composition (an IME's): the words wait for it to
+/// end, as inserting would throw the composition away.
+fn composing(editor: Option<&zgx::widgets::EditorHandle>) -> Value {
+    Value::Bool(editor.is_some_and(|e| e.editor.borrow().preedit().is_some()))
 }
 
 struct Dictation {
@@ -354,11 +508,18 @@ fn levels_value(levels: &[f32]) -> Value {
 /// what's happening in the shared `dictation`.
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let (wake, mut work) = zgx::task::latest::<()>();
-    let dir = crate::engine::data_dir().map(|d| d.join("models").join(MODEL));
+    let models = crate::engine::data_dir().map(|d| d.join("models"));
+    static RETIRED: std::sync::Once = std::sync::Once::new();
+    if let Some(models) = models.clone() {
+        RETIRED.call_once(|| {
+            std::thread::spawn(move || zeron_voice::retire_old_models(&models));
+        });
+    }
+
     let me = Rc::new(Dictation {
         shared: host.shared("dictation", json_value(&json!({"phase":"idle"}))),
         levels: host.shared("dictation_levels", json_value(&json!([]))),
-        service: RefCell::new(Service::new(dir)),
+        service: RefCell::new(Service::new(models)),
         lease: RefCell::default(),
         wake,
     });
@@ -381,9 +542,22 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 }
                 Some("status") => me.service.borrow().status()?,
                 Some("start") => me.service.borrow_mut().start(&args)?,
-                Some("download") => me.service.borrow_mut().download()?,
+                Some("download") => me.service.borrow_mut().download(&args)?,
                 Some("remove") => {
-                    me.service.borrow_mut().remove()?;
+                    me.service.borrow_mut().remove(&args)?;
+                    Json::Null
+                }
+                // Another model is now the one in use: the one loaded goes.
+                Some("use") => {
+                    let dir = me.service.borrow().dir(&args)?;
+                    zeron_voice::use_model(&dir);
+                    Json::Null
+                }
+                // How long the model stays ready (seconds; 0: released at
+                // once; -1: while Zeron is open).
+                Some("keep") => {
+                    let seconds = args["seconds"].as_i64().unwrap_or(300);
+                    zeron_voice::keep_ready(u64::try_from(seconds).ok().map(Duration::from_secs));
                     Json::Null
                 }
                 Some("stop") => {
@@ -419,6 +593,12 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         }
         *me.lease.borrow_mut() = lease;
         me.publish();
+    });
+    let weak = Rc::downgrade(&me);
+    host.function("dictation.composing", move |_| {
+        let me = weak.upgrade();
+        let lease = me.as_ref().map(|me| me.lease.borrow());
+        composing(lease.as_ref().and_then(|l| l.as_ref()).map(|l| &l.editor))
     });
     // The window's tasks keep it, so closing the window ends a recording.
     // No timer while nothing is recording or downloading.
@@ -517,7 +697,10 @@ mod tests {
         s.poll();
         assert_eq!(s.take_levels(), None);
         let wait = s.poll_wait();
-        assert!(wait <= Duration::from_millis(61) && wait > Duration::ZERO, "{wait:?}");
+        assert!(
+            wait <= Duration::from_millis(61) && wait > Duration::ZERO,
+            "{wait:?}"
+        );
         std::thread::sleep(meter::STEP);
         s.poll();
         let bars = s.take_levels().unwrap();
@@ -541,12 +724,14 @@ mod tests {
         assert_eq!(s.state["phase"], "listening");
         s.cancel();
         assert!(cancelled.get());
-        events.borrow_mut().push_back(Event::Final("private".into()));
+        events
+            .borrow_mut()
+            .push_back(Event::Final("private".into()));
         s.poll();
         assert!(s.state["text"].is_null());
     }
     #[test]
-    fn dictation_stop_waits_for_final_and_timeout_invalidates_results() {
+    fn dictation_stop_waits_for_final_and_late_words_still_land() {
         let (mut s, events, cancelled, stopped) = service();
         s.stop();
         assert!(stopped.get());
@@ -556,53 +741,411 @@ mod tests {
         s.poll();
         assert_eq!(s.state["text"], "hola");
         assert!(s.session.is_none());
+        // A minute's recording on a model slow here has 3.5 minutes.
+        let (mut s, _, _, _) = service();
+        s.listening = Some(Instant::now() - Duration::from_secs(60));
+        s.slow = true;
+        s.stop();
+        let due = s.deadline.unwrap() - Instant::now();
+        assert!(
+            due > Duration::from_secs(205) && due < Duration::from_secs(211),
+            "{due:?}"
+        );
+        // Overdue: late, not failed. The session goes on: Send (a stop)
+        // keeps it late, the words that come still land.
         let (mut s, events, cancelled, _) = service();
+        s.stop();
         s.deadline = Some(Instant::now());
-        events.borrow_mut().push_back(Event::Final("too late".into()));
         s.poll();
-        assert!(cancelled.get());
+        assert!(!cancelled.get());
+        assert_eq!(s.state["phase"], "late");
+        assert!(s.state["error"].is_null());
+        assert!(s.session.is_some());
+        s.stop();
+        assert_eq!(s.state["phase"], "late");
+        events
+            .borrow_mut()
+            .push_back(Event::Final("late words".into()));
+        s.poll();
+        assert_eq!(s.state["phase"], "final");
+        assert_eq!(s.state["text"], "late words");
+    }
+    #[test]
+    fn dictation_download_cancelled_ends_once_its_files_are_gone() {
+        let mut s = Service::new(None);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tell, events) = mpsc::channel();
+        s.download = Some(DownloadJob {
+            cancel: cancel.clone(),
+            events,
+        });
+        s.state = json!({"phase":"downloading", "bytes":0, "total":1});
+        // Cancel: the worker is told, the download goes on until it's done.
+        s.cancel();
+        assert!(cancel.load(Ordering::Acquire));
+        assert_eq!(s.state["phase"], "downloading");
+        s.poll();
+        assert_eq!(s.state["phase"], "downloading");
+        // Its folder deleted: now it's over (Settings asks what's on disk).
+        tell.send(Download::Done(Err("Download cancelled".into())))
+            .unwrap();
+        s.poll();
+        assert_eq!(s.state["phase"], "cancelled");
+        assert!(s.download.is_none());
+    }
+    /// The model in use, as downloaded (sizes and marker; no weights read).
+    fn downloaded() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let m = zeron_voice::manifest();
+        let dir = root.path().join(&m.id);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in &m.files {
+            std::fs::File::create(dir.join(&f.name))
+                .unwrap()
+                .set_len(f.size)
+                .unwrap();
+        }
+        std::fs::write(dir.join("verified"), m.marker()).unwrap();
+        root
+    }
+    /// A service whose microphone opens (counted), the system answering
+    /// `answer` after `after`, as macOS's prompt would.
+    fn asked(
+        root: &tempfile::TempDir,
+        answer: bool,
+        after: Duration,
+    ) -> (Service, Rc<Cell<u32>>, Rc<RefCell<VecDeque<Event>>>) {
+        let opened = Rc::new(Cell::new(0));
+        let events = Rc::new(RefCell::new(VecDeque::new()));
+        let mut s = Service::new(Some(root.path().to_owned()));
+        let (counted, queued) = (opened.clone(), events.clone());
+        s.open = Box::new(move |_, _| {
+            counted.set(counted.get() + 1);
+            Ok(Box::new(Fake {
+                events: queued.clone(),
+                cancelled: Rc::default(),
+                stopped: Rc::default(),
+                level: Rc::default(),
+            }) as Box<dyn Recording>)
+        });
+        s.access = Box::new(move || {
+            let (tell, answered) = mpsc::channel();
+            std::thread::spawn(move || {
+                std::thread::sleep(after);
+                let _ = tell.send(answer);
+            });
+            Access::Asked(answered)
+        });
+        (s, opened, events)
+    }
+    #[test]
+    fn dictation_first_use_waits_for_the_microphone_prompt_instead_of_failing() {
+        let root = downloaded();
+        // Granted after 300 ms, still held: it records, no error on the way.
+        let (mut s, opened, events) = asked(&root, true, Duration::from_millis(300));
+        let started = s.start(&json!({})).unwrap();
+        assert_eq!(started["phase"], "starting");
+        assert_eq!(started["asking"], true);
+        let asked_at = Instant::now();
+        while opened.get() == 0 && asked_at.elapsed() < Duration::from_secs(5) {
+            s.poll();
+            assert_eq!(s.state["phase"], "starting", "no error while macOS asks");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(opened.get(), 1);
+        events.borrow_mut().push_back(Event::Listening);
+        s.poll();
+        assert_eq!(s.state["phase"], "listening");
+        // Denied: the one error, saying where to allow it.
+        let (mut s, opened, _) = asked(&root, false, Duration::from_millis(50));
+        s.start(&json!({})).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        s.poll();
         assert_eq!(s.state["phase"], "failed");
-        assert!(s.state["text"].is_null());
+        assert!(
+            s.state["error"]
+                .as_str()
+                .unwrap()
+                .contains("System Settings")
+        );
+        assert_eq!(opened.get(), 0);
+        assert!(!s.needs_poll());
+        // Let go before the answer: nothing, even once it's granted.
+        let (mut s, opened, _) = asked(&root, true, Duration::from_millis(50));
+        s.start(&json!({})).unwrap();
+        s.stop();
+        assert_eq!(s.state["phase"], "cancelled");
+        std::thread::sleep(Duration::from_millis(150));
+        s.poll();
+        assert_eq!(opened.get(), 0);
+        assert_eq!(s.state["phase"], "cancelled");
+    }
+    #[test]
+    fn dictation_pressed_while_the_last_one_finishes_waits_instead_of_failing() {
+        let root = downloaded();
+        // The worker finishes a cancelled recording's load for three tries.
+        let tries = Rc::new(Cell::new(0));
+        let events = Rc::new(RefCell::new(VecDeque::new()));
+        let mut s = Service::new(Some(root.path().to_owned()));
+        // (The microphone allowed, as a packaged app's: a test binary isn't.)
+        s.access = Box::new(|| Access::Granted);
+        let (counted, queued) = (tries.clone(), events.clone());
+        s.open = Box::new(move |_, _| {
+            counted.set(counted.get() + 1);
+            if counted.get() <= 3 {
+                return Err(None);
+            }
+            Ok(Box::new(Fake {
+                events: queued.clone(),
+                cancelled: Rc::default(),
+                stopped: Rc::default(),
+                level: Rc::default(),
+            }) as Box<dyn Recording>)
+        });
+        // Not an error: starting, as long as it takes.
+        assert_eq!(s.start(&json!({})).unwrap()["phase"], "starting");
+        s.poll();
+        s.poll();
+        assert_eq!(s.state["phase"], "starting");
+        assert!(s.session.is_none());
+        s.poll();
+        assert!(s.session.is_some());
+        events.borrow_mut().push_back(Event::Listening);
+        s.poll();
+        assert_eq!(s.state["phase"], "listening");
+        // Let go before the microphone opened: nothing recorded, no error.
+        let mut s = Service::new(Some(root.path().to_owned()));
+        s.access = Box::new(|| Access::Granted);
+        s.open = Box::new(|_, _| Err(None));
+        s.start(&json!({})).unwrap();
+        s.stop();
+        assert_eq!(s.state["phase"], "cancelled");
+        assert!(!s.needs_poll());
     }
     #[test]
     fn dictation_without_a_data_folder_says_so_and_never_panics() {
         let mut s = Service::new(None);
         assert!(s.status().is_err());
         assert!(s.start(&json!({})).is_err());
-        assert!(s.download().is_err());
-        assert!(s.remove().is_err());
+        assert!(s.download(&json!({})).is_err());
+        assert!(s.remove(&json!({})).is_err());
     }
     #[test]
     fn dictation_without_the_model_asks_for_it_before_touching_the_microphone() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = Service::new(Some(dir.path().join(MODEL)));
-        assert_eq!(s.status().unwrap()["installed"], false);
-        assert_eq!(s.start(&json!({})).unwrap_err(), "no_model");
+        let mut s = Service::new(Some(dir.path().to_owned()));
+        assert_eq!(s.status().unwrap()["models"][0]["installed"], false);
+        // (A processor without AVX2 is told that first.)
+        let refused = if zeron_voice::cpu_supported() {
+            "no_model"
+        } else {
+            zeron_voice::CPU_UNSUPPORTED
+        };
+        assert_eq!(s.start(&json!({})).unwrap_err(), refused);
         assert!(s.session.is_none());
     }
-    #[test]
-    fn dictation_lease_rejects_ime_and_edits_changed_back() {
-        let mut app = zgx_script::testing::TestApp::new(|r| {
-            zgx_script::ScriptHost::new(
+    /// The composer of ui/dictation_fixture.luau, with the host's dictation
+    /// played: the ops the scripts ask for, start answering as the host does.
+    fn fixture() -> (zgx_script::testing::TestApp, Rc<RefCell<Vec<String>>>) {
+        let ops = Rc::new(RefCell::new(Vec::<String>::new()));
+        let asked = ops.clone();
+        let editor = Rc::new(RefCell::new(None::<zgx::widgets::EditorHandle>));
+        let leased = editor.clone();
+        let mut app = zgx_script::testing::TestApp::new(move |r| {
+            let host = zgx_script::ScriptHost::new(
                 r,
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/dictation_fixture.luau"),
-            )
+            );
+            let shared = host.shared("dictation", json_value(&json!({"phase":"idle"})));
+            host.async_action("dictation.call", move |args: Value| {
+                let args = value_json(&args);
+                let op = args["op"].as_str().unwrap_or("").to_owned();
+                if op != "keep" && op != "use" {
+                    asked.borrow_mut().push(op.clone());
+                }
+                let state = match op.as_str() {
+                    "start" => json!({"phase":"listening", "serial":0, "hold":args["hold"], "target":"main"}),
+                    "stop" => json!({"phase":"finalizing", "serial":0, "target":"main"}),
+                    _ => json!({"phase":"cancelled", "serial":0}),
+                };
+                shared.set(json_value(&state));
+                async move { Ok::<_, String>(json_value(&state)) }
+            });
+            host.action("dictation.guard", |_: Value| {});
+            host.function("dictation.composing", move |_| {
+                composing(leased.borrow().as_ref())
+            });
+            host
         });
         app.ui.scene.borrow_mut().resize(960., 700.);
         app.frames(30);
-        assert_eq!(app.error(), None);
+        // (The composer's editor stands for the lease the guard takes.)
         app.click("role:textbox \"Message\"");
+        *editor.borrow_mut() = app.ui.focused_editor();
+        (app, ops)
+    }
+    #[test]
+    fn dictation_shortcut_key_held_past_its_modifier_never_types_over_the_words() {
+        use zgx::input::{InputEvent, Modifiers};
+        let (mut app, ops) = fixture();
+        app.click("role:textbox \"Message\"");
+        let (d, chord) = zgx_script::driver::parse_keys("cmd+d").unwrap();
+        // A key as the window delivers it: the shortcut runs its command;
+        // else a press nothing prevents, with neither Command nor Control
+        // held, also types its text.
+        let press = |app: &mut zgx_script::testing::TestApp, modifiers: Modifiers, repeat: bool| {
+            zgx::input::set_held_modifiers(&app.ui.runtime, modifiers);
+            if modifiers == chord {
+                assert!(app.host.run_command("shell.dictate"));
+            } else {
+                let result = app.ui.dispatch(InputEvent::KeyDown {
+                    key: d.clone(),
+                    modifiers,
+                    repeat,
+                });
+                if !result.default_prevented && !modifiers.control && !modifiers.meta {
+                    app.ui.dispatch(InputEvent::Text("d".into()));
+                }
+            }
+            app.settle();
+            app.frames(2);
+        };
+        // ⌘ down, D down (and its repeats while ⌘ is held): dictating.
+        press(&mut app, chord, false);
+        press(&mut app, chord, true);
+        // (Held past a tap.)
+        std::thread::sleep(Duration::from_millis(350));
+        // ⌘ up first: the hold ends, the words are on their way.
+        zgx::input::set_held_modifiers(&app.ui.runtime, Modifiers::default());
+        app.settle();
+        app.frames(2);
+        // D still down: bare repeats, then D up.
+        for _ in 0..3 {
+            press(&mut app, Modifiers::default(), true);
+        }
+        app.ui.dispatch(InputEvent::KeyUp {
+            key: d.clone(),
+            modifiers: Modifiers::default(),
+        });
+        app.settle();
+        app.host.run_command("final");
+        app.settle();
+        app.frames(5);
+        assert_eq!(app.error(), None);
+        assert_eq!(*ops.borrow(), ["start", "stop", "cancel"]);
+        let editor = app.ui.focused_editor().unwrap();
+        assert_eq!(editor.editor.borrow().text().as_ref(), "你好 🌎");
+        // A fresh press of D after it came up types, as ever.
+        press(&mut app, Modifiers::default(), false);
+        assert_eq!(editor.editor.borrow().text().as_ref(), "你好 🌎d");
+    }
+    #[test]
+    fn dictation_overdue_is_still_under_way_and_its_words_land() {
+        let (mut app, ops) = fixture();
+        assert!(app.host.run_command("begin"));
+        app.settle();
+        app.host.run_command("late");
+        app.settle();
+        app.frames(5);
+        assert_eq!(app.error(), None);
+        // The bar in its finalizing look, and a toast that says the words
+        // are still coming: nothing stopped.
+        assert!(app.shown("#voice-wave"));
+        let toasts = format!(
+            "{:?}",
+            app.host
+                .states()
+                .into_iter()
+                .find(|(k, _)| k.ends_with("ds_toasts"))
+        );
+        assert!(toasts.contains("Still transcribing"), "{toasts}");
+        assert!(!toasts.contains("Dictation stopped"), "{toasts}");
+        // Still under way: ⌘D starts nothing, and the words land.
+        assert!(app.host.run_command("shell.dictate"));
+        app.settle();
+        assert!(
+            !ops.borrow().iter().any(|op| op == "start"),
+            "{:?}",
+            ops.borrow()
+        );
+        app.host.run_command("final");
+        app.settle();
+        app.frames(3);
+        let editor = app.ui.focused_editor().unwrap();
+        assert_eq!(editor.editor.borrow().text().as_ref(), "你好 🌎");
+        // Cancelled while late: the session goes.
+        assert!(app.host.run_command("begin"));
+        app.settle();
+        app.host.run_command("late");
+        app.settle();
+        ops.borrow_mut().clear();
+        app.host.run_command("cancel");
+        app.settle();
+        assert_eq!(*ops.borrow(), ["cancel"]);
+    }
+    #[test]
+    fn dictation_typing_on_puts_the_words_at_the_caret_and_another_chat_drops_them() {
+        let (mut app, _) = fixture();
+        app.type_text("role:textbox \"Message\"", "Hello ");
         let editor = app.ui.focused_editor().unwrap();
         let lease = EditorLease::new(editor.clone()).unwrap();
+        let text = |e: &zgx::widgets::EditorHandle| e.editor.borrow().text().to_string();
+        // Listening, then typed on, an IME's composition included.
+        assert!(app.host.run_command("begin"));
+        app.settle();
+        app.ui
+            .dispatch(zgx::input::InputEvent::Text("there".into()));
         editor.set_composition("正在", None, &[]);
-        assert!(!lease.valid());
-        assert!(EditorLease::new(editor.clone()).is_none());
         editor.set_composition("", None, &[]);
-        let lease = EditorLease::new(editor.clone()).unwrap();
-        editor.paste("x");
-        editor.set_selection(0, 1);
-        editor.paste("");
-        assert_eq!(editor.editor.borrow().text().as_ref(), "");
-        assert!(!lease.valid(), "revision protects against edit-and-revert");
+        app.settle();
+        assert!(lease.valid());
+        editor.set_selection(5, 5);
+        app.host.run_command("final");
+        app.settle();
+        app.frames(3);
+        assert_eq!(app.error(), None);
+        assert_eq!(text(&editor), "Hello你好 🌎 there");
+        // One undo takes the words back out, and only them.
+        app.keys("cmd+z");
+        assert_eq!(text(&editor), "Hello there");
+        // Mid-composition when the words come: they wait for it to end,
+        // and the composition is kept.
+        editor.set_selection(11, 11);
+        assert!(app.host.run_command("begin"));
+        app.settle();
+        editor.set_composition("正在", None, &[]);
+        app.host.run_command("final");
+        app.settle();
+        app.frames(3);
+        assert_eq!(
+            editor
+                .editor
+                .borrow()
+                .preedit()
+                .map(|p| p.text.to_string())
+                .as_deref(),
+            Some("正在")
+        );
+        assert_eq!(text(&editor), "Hello there");
+        app.ui
+            .dispatch(zgx::input::InputEvent::ImeCommit("正在".into()));
+        app.settle();
+        std::thread::sleep(Duration::from_millis(150));
+        app.frames(10);
+        assert_eq!(text(&editor), "Hello there正在你好 🌎");
+        app.keys("cmd+z");
+        assert_eq!(text(&editor), "Hello there正在");
+        // Another chat's draft: the words aren't for it.
+        assert!(app.host.run_command("begin"));
+        app.settle();
+        app.host.run_command("move");
+        app.settle();
+        app.host.run_command("final");
+        app.settle();
+        app.frames(3);
+        assert_eq!(text(&editor), "Hello there正在");
+        // Nor mid-composition does one start.
+        editor.set_composition("正在", None, &[]);
+        assert!(EditorLease::new(editor.clone()).is_none());
     }
 }

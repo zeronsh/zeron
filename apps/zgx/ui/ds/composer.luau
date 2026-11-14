@@ -1977,6 +1977,10 @@ return ui.component(function(props: Props): Node
 				-- first, then a question's (1 to 9 pick, Escape goes back
 				-- or closes), then ⌘Enter sending the newest queued row.
 				on_key = function(e)
+					-- (A dictation shortcut's own key, held on: never typed.)
+					if spoken and spoken.on_key and spoken.on_key(e) then
+						return true
+					end
 					if dictating() and e.key == "Escape" then
 						if props.on_cancel_dictation then
 							props.on_cancel_dictation()

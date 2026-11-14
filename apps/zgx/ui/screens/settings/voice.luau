@@ -7,6 +7,7 @@ local ds = require("@ds")
 local toast = require("@ds/toast")
 local Shortcut = require("@ds/shortcut_recorder")
 local prefs = require("@app/screens/settings/prefs")
+local people = require("@ds/people")
 local search = require("@app/screens/settings/search")
 local visits = require("@app/screens/settings/visits")
 local keys = require("@app/screens/shell/keys")
@@ -22,19 +23,38 @@ search.index(M.ID, ui.t("settings.voice.title"), ui.t("settings.voice.terms"), {
 	{ key = "dictation", title = ui.t("settings.voice.dictation.label") },
 	{ key = "microphone", title = ui.t("settings.voice.microphone") },
 	{ key = "shortcut", title = ui.t("settings.voice.shortcut.label") },
-	{ key = "model", title = ui.t("settings.voice.model.label") },
+	{ key = "model", title = ui.t("settings.voice.model.title") },
 })
 
-local installed = ui.state("settings_voice_installed", false)
-local size = ui.state("settings_voice_size", 0)
+-- The models on offer, as the host lists them: { id, name, size,
+-- languages, installed }, the default first.
+local models = ui.state("settings_voice_models", {} :: { any })
+-- This computer's processor runs them (x86-64 without AVX2 doesn't).
+local supported = ui.state("settings_voice_supported", true)
+-- The chosen one (its first when the saved one isn't offered).
+local function chosen(): any?
+	local list, want = models:get(), prefs.dictation_model:get()
+	for _, m in list do
+		if m.id == want then return m end
+	end
+	return list[1]
+end
+local installed = ui.computed(function(): boolean
+	local m = chosen()
+	return m ~= nil and m.installed
+end)
+local size = ui.computed(function(): number
+	local m = chosen()
+	return if m then m.size else 0
+end)
 local inputs = ui.state("settings_voice_inputs", {} :: { any })
 local on = ui.state("settings_voice_on", false)
 
 local function refresh()
 	host.call("dictation.call", { op = "status" }):after(function(s: any)
 		ui.batch(function()
-			installed:set(s.installed)
-			size:set(s.size)
+			models:set(s.models or {})
+			supported:set(s.supported ~= false)
 		end)
 	end, function() end)
 	host.call("dictation.call", { op = "inputs" }):after(function(list: any)
@@ -48,56 +68,100 @@ local function refused(err: any)
 		tone = "warning",
 	}
 end
-local function downloading(): boolean
-	return dictation.state:get().phase == "downloading"
-end
 local function mb(bytes: number): string
 	return string.format("%.0f", bytes / 1e6)
 end
+-- A model's size: "740 MB", "1.8 GB".
+local function weight(bytes: number): string
+	return if bytes >= 1e9
+		then ui.t("settings.voice.model.gb", { n = string.format("%.1f", bytes / 1e9) }):get()
+		else ui.t("settings.voice.model.mb", { n = mb(bytes) }):get()
+end
 
--- The switch says what's so: on while downloading, or on with the model here.
+-- The model downloading, by id ("" none), and whether the switch asked
+-- for it (dictation turning on for the first time).
+local fetching = ui.state("settings_voice_fetching", "")
+local switching = ui.state("settings_voice_switching", false)
+-- The switch says what's so: on with the model in use here, or on its way
+-- because the switch asked. (Another model downloading leaves it be.)
 ui.effect(function()
-	local now = downloading() or (prefs.dictation:get() and installed:get())
+	local now = (prefs.dictation:get() and installed:get()) or (switching:get() and fetching:get() ~= "")
 	if on:peek() ~= now then
 		on:set(now)
 	end
 end)
--- A download ending: on when it arrived, and why not when it didn't.
-local fetching = ui.state("settings_voice_fetching", false)
+-- A download ending: that model in use and dictation on when it arrived,
+-- why not when it didn't; what's on disk asked again either way (a stopped
+-- download may have left files to resume from, or to remove).
 ui.effect(function()
 	local s = dictation.state:get()
-	if s.phase == "downloading" then
-		fetching:set(true)
-	elseif fetching:peek() then
-		fetching:set(false)
-		if s.phase == "ready" then
-			installed:set(true)
-			prefs.dictation:set(true)
-		else
-			on:set(false)
-			if s.phase == "download_failed" then
-				refused({ message = s.error })
-			end
-		end
+	local id = fetching:peek()
+	if s.phase == "downloading" or id == "" then
+		return
 	end
+	ui.batch(function()
+		fetching:set("")
+		switching:set(false)
+		if s.phase == "ready" then
+			prefs.dictation_model:set(id)
+			prefs.dictation:set(true)
+		elseif s.phase == "download_failed" then
+			refused({ message = s.error })
+		end
+	end)
+	refresh()
 end)
+local function download(id: string, from_switch: boolean?)
+	ui.batch(function()
+		fetching:set(id)
+		switching:set(from_switch == true)
+	end)
+	host.call("dictation.call", { op = "download", model = id }):after(function() end, function(err: any)
+		ui.batch(function()
+			fetching:set("")
+			switching:set(false)
+		end)
+		refused(err)
+	end)
+end
+local function cancel_download()
+	host.call("dictation.call", { op = "cancel" }):after(function() end, refused)
+end
 local function flip(want: boolean)
-	if downloading() then
-		host.call("dictation.call", { op = "cancel" }):after(function() end, refused)
+	local m = chosen()
+	if fetching:peek() ~= "" and switching:peek() and not want then
+		cancel_download()
 	elseif installed:peek() or not want then
 		prefs.dictation:set(want)
-	else
-		host.call("dictation.call", { op = "download" }):after(function() end, function(err: any)
-			on:set(false)
-			refused(err)
-		end)
+	elseif m then
+		download(m.id, true)
 	end
 end
-local function remove()
-	host.call("dictation.call", { op = "remove" }):after(function()
+-- Removing the model in use hands over to another downloaded one, if any;
+-- else dictation goes off, as with no model at all.
+local function remove(id: string)
+	host.call("dictation.call", { op = "remove", model = id }):after(function()
+		local list = table.clone(models:peek())
+		for i, m in list do
+			if m.id == id then
+				list[i] = table.clone(m)
+				list[i].installed, list[i].present = false, false
+			end
+		end
 		ui.batch(function()
-			installed:set(false)
-			prefs.dictation:set(false)
+			local was = chosen()
+			models:set(list)
+			if was and was.id == id then
+				local other: any = nil
+				for _, m in list do
+					if m.installed then other = m; break end
+				end
+				if other then
+					prefs.dictation_model:set(other.id)
+				else
+					prefs.dictation:set(false)
+				end
+			end
 		end)
 	end, refused)
 end
@@ -120,6 +184,171 @@ local function microphones(): { any }
 	return options
 end
 
+-- A model's line: its size, how many languages it speaks, and whether it's
+-- slow here (on the CPU).
+local function about(m: any): string
+	if not supported:get() then
+		return ui.t("settings.voice.model.unsupported"):get()
+	end
+	return ui.t(if m.slow then "settings.voice.model.about_slow" else "settings.voice.model.about", { size = weight(m.size), n = #(m.languages or {}) }):get()
+end
+-- What a model's row offers (`m`: the model as it is now): Cancel while it
+-- downloads; else Download (or resume) when it isn't all here, and Remove
+-- whenever any of it is.
+local function model_action(m: () -> any?): Node
+	local function getting(): boolean
+		local now = m()
+		return now ~= nil and fetching:get() == now.id
+	end
+	return ui.row {
+		gap = "$space.2",
+		ui.show(getting, ds.Button { ui.t("common.cancel"), tone = "secondary", size = "sm", on_click = cancel_download }),
+		ui.show(function(): boolean
+			local now = m()
+			return now ~= nil and not getting() and not now.installed and supported:get()
+		end, ds.Button {
+			ui.t("settings.voice.model.download"), tone = "secondary", size = "sm",
+			disabled = function(): boolean return fetching:get() ~= "" end,
+			on_click = function() download(m().id) end,
+		}),
+		ui.show(function(): boolean
+			local now = m()
+			return now ~= nil and not getting() and (now.installed or now.present == true)
+		end, ds.Button {
+			ui.t("settings.voice.model.remove"), tone = "secondary", size = "sm",
+			on_click = function() remove(m().id) end,
+		}),
+	}
+end
+-- A model's line while it downloads: how far.
+local function progress(m: any): string?
+	local s = dictation.state:get()
+	if fetching:get() ~= m.id or s.phase ~= "downloading" then
+		return nil
+	end
+	return ui.t("settings.voice.model.downloading", { done = weight(s.bytes or 0), total = weight(s.total or m.size) }):get()
+end
+
+-- How long the model in use stays ready after a dictation, what that holds,
+-- and what the wait is otherwise.
+local function holds(): string
+	local m = chosen()
+	return if m and m.memory then weight(m.memory) else ""
+end
+local function name(): string
+	local m = chosen()
+	return if m then m.name else ""
+end
+-- Seconds (prefs.dictation_keep): 0 released at once, -1 while Zeron is open.
+local keep_choices = {
+	{ value = 0, key = "settings.voice.keep.instant" },
+	{ value = 15, key = "settings.voice.keep.s15" },
+	{ value = 60, key = "settings.voice.keep.m1" },
+	{ value = 300, key = "settings.voice.keep.m5" },
+	{ value = 900, key = "settings.voice.keep.m15" },
+	{ value = 3600, key = "settings.voice.keep.h1" },
+	{ value = -1, key = "settings.voice.keep.always" },
+}
+local function keep_row(): Node
+	return ui.show(installed, ds.Settings.Group {
+		ds.Settings.Row {
+			label = ui.t("settings.voice.keep.label"),
+			description = function(): string
+				return ui.t("settings.voice.keep.description", { name = name(), memory = holds() }):get()
+			end,
+			control = ds.Select {
+				value = prefs.dictation_keep,
+				name = ui.t("settings.voice.keep.label"),
+				options = function(): { any }
+					local list = {}
+					for _, c in keep_choices do
+						table.insert(list, { value = c.value, label = ui.t(c.key):get() })
+					end
+					return list
+				end,
+				w = 200,
+			},
+		},
+	})
+end
+
+-- Its makers' marks, round, at Providers' size, overlapping as faces in a
+-- stack do (each cut where the next sits: ds/people), the base model's
+-- maker behind.
+-- Marks that are round already, their own disc: drawn whole, no tile.
+local ROUND = { moondream = true }
+local function marks(list: { string }, size: number): Node
+	local overlap = math.floor(size * 0.3)
+	local cut = { x = size - overlap + size / 2, r = size / 2 + 1.5 }
+	local items: { Node } = {}
+	for i, name in list do
+		local whole = ROUND[name] == true
+		local held: { [any]: any } = {
+			w = size,
+			h = size,
+			shrink = 0,
+			rounded = "$radius.full",
+			overflow = "hidden",
+			items = "center",
+			justify = "center",
+			bg = if whole then nil else "$zeron.mark.bg",
+			border = if whole then nil else 1,
+			border_color = if whole then nil else "$zeron.mark.border",
+			ds.Mark { name = name, size = if whole then size else size * 0.62, bare = true },
+		}
+		if i < #list then
+			people.cut_into(held, size, cut)
+		end
+		table.insert(items, ui.div {
+			shrink = 0,
+			ml = if i == 1 then 0 else ui.raw(-overlap, "marks overlap by a third, as faces do"),
+			ui.column(held),
+		})
+	end
+	return ui.row { shrink = 0, items = "center", table.unpack(items) }
+end
+local function lead(m: () -> any): Node?
+	local list = m().marks or {}
+	if #list == 0 then return nil end
+	-- As wide as two overlapping marks, on every row: the names line up.
+	local size = 32
+	return ui.row {
+		w = ui.raw(2 * size - math.floor(size * 0.3), "two overlapping marks, on every row"),
+		shrink = 0,
+		marks(list, size),
+	}
+end
+
+-- A row a model, the one in use marked.
+local function model_rows(): Node
+	return search.anchor("model", ds.Settings.Section {
+		title = ui.t("settings.voice.model.title"),
+		ds.Settings.Each(models, function(_, _, now: any): Node
+			local function m(): any return now:get() end
+			local function in_use(): boolean
+				local active = chosen()
+				return active ~= nil and active.id == m().id and m().installed
+			end
+			return ds.Settings.Row {
+				lead = lead(m),
+				label = function(): string return m().name end,
+				badge = ui.show(in_use, ds.Badge { ui.t("settings.voice.model.in_use"), size = "sm" }),
+				description = function(): string return progress(m()) or about(m()) end,
+				control = ui.row {
+					gap = "$space.2",
+					items = "center",
+					ui.show(function(): boolean return m().installed and not in_use() end, ds.Button {
+						ui.t("settings.voice.model.use"), tone = "secondary", size = "sm",
+						on_click = function() prefs.dictation_model:set(m().id) end,
+					}),
+					model_action(m),
+				},
+			}
+		end, { key = function(m: any): string return m.id end }),
+		keep_row(),
+	})
+end
+
 function M.view(): Node
 	visits.once(M.ID, refresh)
 	return ds.Settings.Page {
@@ -130,11 +359,10 @@ function M.view(): Node
 				row("dictation", {
 					label = ui.t("settings.voice.dictation.label"),
 					description = function(): string
-						local s = dictation.state:get()
-						if s.phase == "downloading" then
-							return ui.t("settings.voice.dictation.downloading", { done = mb(s.bytes or 0), total = mb(s.total or 0) }):get()
+						if not supported:get() then
+							return ui.t("settings.voice.model.unsupported"):get()
 						elseif not installed:get() then
-							return ui.t("settings.voice.dictation.needs_download", { total = mb(size:get()) }):get()
+							return ui.t("settings.voice.dictation.needs_download", { total = weight(size:get()) }):get()
 						end
 						return ui.t("settings.voice.dictation.description"):get()
 					end,
@@ -178,19 +406,7 @@ function M.view(): Node
 				}),
 			},
 		},
-		ui.show(function(): boolean
-			return installed:get() and not downloading()
-		end, ds.Settings.Section {
-			ds.Settings.Group {
-				row("model", {
-					label = ui.t("settings.voice.model.label"),
-					description = function(): string
-						return ui.t("settings.voice.model.description", { total = mb(size:get()) }):get()
-					end,
-					control = ds.Button { ui.t("settings.voice.model.remove"), tone = "secondary", size = "sm", on_click = remove },
-				}),
-			},
-		}),
+		model_rows(),
 	}
 end
 

@@ -2289,7 +2289,7 @@
     },
     "voice": {
       "title": "语音",
-      "terms": "语音 听写 麦克风 模型 parakeet speech dictation microphone",
+      "terms": "语音 听写 麦克风 模型 speech dictation microphone model parakeet cohere",
       "description": "对着输入框说话。转写在本设备上完成,音频不会被保存或发送。",
       "couldnt": "语音无法完成此操作",
       "microphone": "麦克风",
@@ -2298,16 +2298,34 @@
       "dictation": {
         "label": "听写",
         "description": "按住麦克风说话,松开即可。发送前可以编辑文字。",
-        "needs_download": "开启后将下载 {total} MB 的语音模型。",
-        "downloading": "正在下载 · {done} / {total} MB。关闭以取消。"
+        "needs_download": "开启后将下载 {total} 的语音模型。"
       },
       "shortcut": {
         "label": "快捷键",
         "description": "按住说话,松开转写。"
       },
+      "keep": {
+        "label": "保持模型就绪",
+        "description": "就绪时，{name} 占用 {memory} 内存。释放后，会在你开始说话时重新加载。",
+        "instant": "立即释放",
+        "s15": "15 秒",
+        "m1": "1 分钟",
+        "m5": "5 分钟",
+        "m15": "15 分钟",
+        "h1": "1 小时",
+        "always": "始终"
+      },
       "model": {
-        "label": "语音模型",
-        "description": "Parakeet v3 · {total} MB",
+        "title": "语音模型",
+        "about": "{size} · {n} 种语言",
+        "unsupported": "这台电脑的处理器无法运行语音模型（需要 AVX2）。",
+        "downloading": "正在下载 · {done} / {total}",
+        "about_slow": "{size} · {n} 种语言 · 在这台电脑上较慢",
+        "mb": "{n} MB",
+        "gb": "{n} GB",
+        "download": "下载",
+        "use": "使用",
+        "in_use": "使用中",
         "remove": "移除"
       }
     }
@@ -2960,6 +2978,8 @@
       "hold": "按住听写",
       "hold_hint": "说话时请按住麦克风或快捷键。",
       "no_speech": "未识别到语音。草稿未更改。",
+      "late": "仍在转写",
+      "late_body": "文字转写完成后会插入草稿。按 Esc 停止。",
       "transcribing": "正在转写…",
       "starting": "正在启动…"
     },

@@ -2289,7 +2289,7 @@
     },
     "voice": {
       "title": "Voice",
-      "terms": "speech dictation microphone model parakeet",
+      "terms": "speech dictation microphone model parakeet cohere",
       "description": "Speak into the composer. Transcription runs on this device; audio is never saved or sent.",
       "couldnt": "Voice couldn't do that",
       "microphone": "Microphone",
@@ -2298,16 +2298,34 @@
       "dictation": {
         "label": "Dictation",
         "description": "Hold the microphone, speak, and let go. You edit the words before sending.",
-        "needs_download": "Turning this on downloads a {total} MB speech model.",
-        "downloading": "Downloading · {done} of {total} MB. Turn off to cancel."
+        "needs_download": "Turning this on downloads a {total} speech model."
       },
       "shortcut": {
         "label": "Shortcut",
         "description": "Hold to talk, release to transcribe."
       },
+      "keep": {
+        "label": "Keep the model ready",
+        "description": "While ready, {name} holds {memory} of memory. Once released, it loads again as you start speaking.",
+        "instant": "Instant",
+        "s15": "15 seconds",
+        "m1": "1 minute",
+        "m5": "5 minutes",
+        "m15": "15 minutes",
+        "h1": "1 hour",
+        "always": "Always"
+      },
       "model": {
-        "label": "Speech model",
-        "description": "Parakeet v3 · {total} MB",
+        "title": "Speech models",
+        "about": "{size} · {n, plural, one {# language} other {# languages}}",
+        "unsupported": "This computer's processor can't run speech models (they need AVX2).",
+        "downloading": "Downloading · {done} of {total}",
+        "about_slow": "{size} · {n, plural, one {# language} other {# languages}} · Slower on this computer",
+        "mb": "{n} MB",
+        "gb": "{n} GB",
+        "download": "Download",
+        "use": "Use",
+        "in_use": "In use",
         "remove": "Remove"
       }
     }
@@ -2960,6 +2978,8 @@
       "hold": "Hold to dictate",
       "hold_hint": "Hold the microphone or shortcut while speaking.",
       "no_speech": "No speech recognized. Your draft is unchanged.",
+      "late": "Still transcribing",
+      "late_body": "The words land in your draft when they're ready. Escape stops it.",
       "transcribing": "Transcribing…",
       "starting": "Starting…"
     },
