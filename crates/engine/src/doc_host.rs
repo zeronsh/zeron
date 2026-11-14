@@ -4315,6 +4315,7 @@ impl DocHost {
         payload: SessionCommandPayload,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        tracing::debug!(target: "first_word", chat = %chat_id, "queue command");
         let handle = self.open(chat_id)?;
         // A chat hosted on Cloud: the bytes go to the edge's store first, and
         // the message enters the chat only once they're there.
@@ -6191,6 +6192,7 @@ impl DocHost {
                         SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
                     ) {
                         crate::wake_trace::mark_command(entry.issued_at);
+                        tracing::debug!(target: "first_word", chat = %handle.chat_id, "drain picked the run");
                         self.await_earlier_controls(handle, &entry.id).await;
                     }
                     let (status, resolution) = match self.execute(&sessions, handle, &entry).await {
@@ -6847,9 +6849,15 @@ impl DocHost {
     async fn capture_source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {
         let repos = self.inner.repos.get()?;
         let path = Path::new(cwd);
-        let identity = repos.checkout_identity(path).await.ok()?;
-        let branch = repos.current_branch(path).await.ok()?;
-        let head_sha = repos.head_sha(path).await.ok().flatten();
+        // Three `git` processes: side by side, not one after another.
+        let (identity, branch, head_sha) = tokio::join!(
+            repos.checkout_identity(path),
+            repos.current_branch(path),
+            repos.head_sha(path),
+        );
+        let identity = identity.ok()?;
+        let branch = branch.ok()?;
+        let head_sha = head_sha.ok().flatten();
         Some(ConversationSourceContext {
             checkout_id: identity.id,
             repo_root: identity.root.to_string_lossy().into_owned(),
@@ -6861,10 +6869,13 @@ impl DocHost {
     }
 
     /// Every fresh harness dispatch crosses this boundary, including
-    /// steer/input fallbacks and crash recovery. Capture immediately before
-    /// dispatch so the conversation records the checkout the harness will
-    /// actually observe, rather than whichever checkout state was current on
-    /// an earlier turn.
+    /// steer/input fallbacks and crash recovery. The conversation records
+    /// the checkout the harness will actually observe, rather than whichever
+    /// checkout state was current on an earlier turn: read as the dispatch
+    /// starts, beside it rather than before it. Its `git` processes took
+    /// ~25 ms (M5 Max; more on slower Macs) in front of every agent start,
+    /// and the agent reads nothing of its checkout for far longer than that
+    /// (its own startup is ~250 ms before its first request).
     pub(crate) async fn dispatch_with_source_context(
         &self,
         sessions: &SessionsEngine,
@@ -6873,11 +6884,21 @@ impl DocHost {
         request: zeron_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        if let Some(workspace) = self.workspace()
-            && let Some(context) = self.capture_source_context(&request.cwd).await
-            && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
-        {
-            tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
+        // Stamped on a task of its own: the drain resolves the command as
+        // soon as the run is dispatched, never behind the `git` processes.
+        if self.workspace().is_some() {
+            let host = self.clone();
+            let chat_id = chat_id.to_owned();
+            let cwd = request.cwd.clone();
+            self.spawn_worker(async move {
+                if let Some(workspace) = host.workspace()
+                    && let Some(context) = host.capture_source_context(&cwd).await
+                    && let Err(err) = workspace.set_chat_source_context(&chat_id, &context)
+                {
+                    tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
+                }
+                tracing::debug!(target: "first_word", chat = %chat_id, "source context: stamped");
+            });
         }
         sessions
             .dispatch(chat_id, harness, request, message_id)

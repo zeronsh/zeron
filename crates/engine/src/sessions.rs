@@ -1253,6 +1253,7 @@ impl SessionsEngine {
             tracing::info!(chat = %chat_id, "message cancelled by a later Stop: not dispatched");
             return Ok(String::new());
         }
+        tracing::debug!(target: "first_word", chat = %chat_id, "dispatch: fresh run");
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
@@ -1465,14 +1466,24 @@ impl SessionsEngine {
             self.inner.note_message(chat_id, &request.prompt);
         }
 
-        // Name the chat NOW, off the first prompt — not after the first
-        // exchange completes ("called New session for a long time for no
-        // reason"; the titler only needs the prompt and skips titled chats;
-        // the Done-time call below stays as the retry for a failed
-        // generation).
-        if !idle && let Some(titles) = self.inner.titles.get() {
-            titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
-        }
+        // Name the chat off the first prompt as soon as the agent answers —
+        // not after the first exchange completes ("called New session for a
+        // long time for no reason"; the titler only needs the prompt and
+        // skips titled chats; the Done-time call below stays as the retry
+        // for a failed generation). Not before the agent's first output:
+        // the titling agent's own startup competed with this one's.
+        let title = (!idle)
+            .then(|| self.inner.titles.get().cloned())
+            .flatten()
+            .map(|titles| {
+                crate::titles::TitleAfterFirstOutput::new(
+                    titles,
+                    chat_id,
+                    harness_id,
+                    &request.prompt,
+                    &request.cwd,
+                )
+            });
 
         tokio::spawn(drive_run(
             self.inner.clone(),
@@ -1498,6 +1509,7 @@ impl SessionsEngine {
             },
             turn,
             side_chats_only,
+            title,
         ));
         Ok(run_id)
     }
@@ -4365,6 +4377,7 @@ async fn drive_run(
     resume_state: RunResumeState,
     turn: TurnControl,
     side_chats_only: bool,
+    mut title: Option<crate::titles::TitleAfterFirstOutput>,
 ) {
     let device_id = inner.device_id.clone();
     // Captured for post-run auto-titling (the request moves into the harness).
@@ -4603,6 +4616,7 @@ async fn drive_run(
                         h.credential = now;
                     }
                 }
+                tracing::debug!(target: "first_word", chat = %chat_id, "drive_run: prepared");
                 match prepared {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
                     Ok(()) => {
@@ -5185,10 +5199,22 @@ async fn drive_run(
                 }
                 next = stream.next() => match next {
                     Some(Ok(event)) => {
-                        crate::wake_trace::note_agent_event(matches!(
-                            event,
-                            AgentEvent::SessionStarted { .. }
-                        ));
+                        let started = matches!(event, AgentEvent::SessionStarted { .. });
+                        crate::wake_trace::note_agent_event(started);
+                        // The agent's first output: its chat's title may start.
+                        // (Not its startup's reports: the session, its usage
+                        // and its commands come before its request.)
+                        let report = started
+                            || matches!(
+                                event,
+                                AgentEvent::ContextUsage { .. }
+                                    | AgentEvent::PlanUsage { .. }
+                                    | AgentEvent::Usage { .. }
+                                    | AgentEvent::AvailableCommands { .. }
+                            );
+                        if !report && let Some(mut title) = title.take() {
+                            title.fire();
+                        }
                         event
                     }
                     // A stream error while PARKED is a post-turn child death —
@@ -5229,6 +5255,7 @@ async fn drive_run(
                     // (parent + any dirty subagent docs).
                     last_flush = Some(tokio::time::Instant::now());
                     if dirty {
+                        tracing::debug!(target: "first_word", chat = %chat_id, "segment commit");
                         if let Err(err) = sync_segment(
                             doc_ref, &mut writer, &entry_id, &device_id, segment_started, &folded,
                         ) {
