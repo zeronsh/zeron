@@ -34,9 +34,9 @@ fn model_each_transcribes_english_and_french() {
             println!("{}: {load} {:?}", m.name, started.elapsed());
         }
         let mut model = Recognizer::load(&dir).unwrap();
-        // Someone whose system speaks English, then French: a model that
-        // can't tell the language hears which, each time.
-        model.speaks(&["en", "fr"]);
+        // Someone whose system speaks only English: a model that can't
+        // tell the language still hears French when it's spoken.
+        model.speaks(&["en"]);
         for (wav, says) in [
             (
                 &include_bytes!("../testdata/en-fleurs-1548.wav")[..],
