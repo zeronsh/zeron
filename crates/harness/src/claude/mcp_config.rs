@@ -226,13 +226,18 @@ fn project_roots(cwd: &Path) -> Vec<PathBuf> {
     roots
 }
 
+/// A config file's JSON. Several of these sit in the project, which may be
+/// a cloned repository: one that is a symlink to `/dev/zero`, a FIFO or a
+/// runaway file is refused at once ([`crate::bounded_file`]).
 fn read_json(path: &Path, max: u64) -> Option<Value> {
-    let size = std::fs::metadata(path).ok()?.len();
-    if size > max {
-        tracing::debug!(target: "zeron_harness::claude", path = %path.display(), size, "MCP config too large to read");
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = match crate::bounded_file::read(path, max) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            tracing::debug!(target: "zeron_harness::claude", path = %path.display(), error = %err, "MCP config not read");
+            return None;
+        }
+    };
     match serde_json::from_slice(&bytes) {
         Ok(value) => Some(value),
         Err(err) => {
@@ -442,6 +447,38 @@ mod tests {
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join(".claude.json"), b"{ not json").unwrap();
         assert_eq!(servers(&config, dir.path()), Vec::<KnownServer>::new());
+    }
+
+    /// A cloned repository whose config files are a symlink to `/dev/zero`
+    /// and a FIFO: both skipped at once, and the other servers still read.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_config_that_is_a_device_or_a_fifo_is_skipped_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        write(
+            &config.join(".claude.json"),
+            &json!({ "mcpServers": { "user-one": { "command": "uvx", "args": ["user-server"] } } }),
+        );
+        std::os::unix::fs::symlink("/dev/zero", project.join(".mcp.json")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", project.join(".claude").join("settings.json"))
+            .unwrap();
+        let fifo = project.join(".claude").join("settings.local.json");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(servers(&config, &project));
+        });
+        let found = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading the project's config hung");
+        assert_eq!(found, vec![known("uvx", &["user-server"])]);
     }
 
     #[test]

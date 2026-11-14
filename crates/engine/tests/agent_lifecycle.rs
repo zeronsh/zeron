@@ -43,10 +43,15 @@ struct Ledger {
     mcp: Mutex<Vec<Option<zeron_proto::McpServer>>>,
     /// The real process standing in for the agent CLI, told to the host.
     process: Mutex<Option<u32>>,
+    /// Starts a wake turn (one nobody sent) with this prompt.
+    wake: Mutex<Option<mpsc::UnboundedSender<String>>>,
 }
 
 /// `bg` in a prompt starts background work (the test ends it); `wake`
-/// schedules a wake-up (Claude's `ScheduleWakeup`).
+/// schedules a wake-up (Claude's `ScheduleWakeup`) with no input seen;
+/// `wake:<secs>` / `wake:stop` call it with that delay or `stop`, and
+/// `cron:<id>` / `uncron:<id>` create and delete a session cron, each
+/// answered as the CLI would.
 struct Agent {
     ledger: Arc<Ledger>,
     stops_when_idle: bool,
@@ -134,7 +139,52 @@ impl Harness for Agent {
                     if prompt.contains("bg") {
                         turn.set_background(1);
                     }
+                    for (n, word) in prompt.split_whitespace().enumerate() {
+                        let id = format!("t-{n}-{word}");
+                        let (name, input, output) = if let Some(delay) = word.strip_prefix("wake:")
+                        {
+                            let input = match delay.parse::<u64>() {
+                                Ok(secs) => serde_json::json!({ "delaySeconds": secs }),
+                                Err(_) => serde_json::json!({ "stop": true }),
+                            };
+                            ("ScheduleWakeup", input, "Scheduled".to_owned())
+                        } else if let Some(cron) = word.strip_prefix("cron:") {
+                            (
+                                "CronCreate",
+                                serde_json::json!({ "cron": "*/5 * * * *" }),
+                                format!("Scheduled recurring job {cron} (*/5 * * * *)"),
+                            )
+                        } else if let Some(cron) = word.strip_prefix("uncron:") {
+                            (
+                                "CronDelete",
+                                serde_json::json!({ "id": cron }),
+                                format!("Cancelled job {cron}"),
+                            )
+                        } else {
+                            continue;
+                        };
+                        let call = AgentEvent::ToolCall {
+                            id: id.clone(),
+                            call: ToolCall::Unknown {
+                                name: name.into(),
+                                input: Some(input),
+                            },
+                        };
+                        let result = AgentEvent::ToolResult {
+                            id,
+                            is_error: false,
+                            output: Some(output),
+                            diff: None,
+                            preview_paths: Vec::new(),
+                            image_payloads: Vec::new(),
+                            exit_code: None,
+                        };
+                        if !send(call).await || !send(result).await {
+                            return false;
+                        }
+                    }
                     if prompt.contains("wake")
+                        && !prompt.contains("wake:")
                         && !send(AgentEvent::ToolCall {
                             id: "t-wake".into(),
                             call: ToolCall::Unknown {
@@ -165,9 +215,17 @@ impl Harness for Agent {
             if !answer(request.prompt.clone()).await {
                 return;
             }
+            let (wake_tx, mut wakes) = mpsc::unbounded_channel::<String>();
+            *ledger.wake.lock().unwrap() = Some(wake_tx);
             loop {
                 tokio::select! {
                     biased;
+                    Some(prompt) = wakes.recv() => {
+                        turn.note_wake();
+                        if !answer(prompt).await {
+                            return;
+                        }
+                    }
                     _ = controls.interrupt.cancelled() => {
                         ledger.kills.fetch_add(1, Ordering::SeqCst);
                         let _ = tx.send(Ok(AgentEvent::Done {
@@ -272,6 +330,23 @@ impl Rig {
                     && self.ledger.prompts.lock().unwrap().len() > before
             },
             "the turn to park",
+        )
+        .await;
+    }
+
+    /// A wake turn: the runtime starts a turn of its own (as when a
+    /// background task ends, or a wake-up fires), which then parks.
+    async fn wake_turn(&self, prompt: &str) {
+        let before = self.ledger.prompts.lock().unwrap().len();
+        let wake = self.ledger.wake.lock().unwrap().clone().unwrap();
+        wake.send(prompt.into()).unwrap();
+        wait_for(
+            || {
+                self.ledger.prompts.lock().unwrap().len() > before
+                    && self.core.sessions.session_status(CHAT).map(|s| s.status)
+                        == Some(SessionStatus::Idle)
+            },
+            "the wake turn to park",
         )
         .await;
     }
@@ -397,6 +472,52 @@ async fn an_agent_with_a_scheduled_wake_up_is_never_stopped() {
     rig.core.sessions.shutdown().await;
 }
 
+/// A `/loop` that rescheduled its wake-up twice and then stopped holds
+/// nothing: each call replaced the last, and `stop` ended it.
+#[tokio::test(start_paused = true)]
+async fn a_wake_up_loop_that_stopped_lets_the_agent_stop() {
+    let rig = rig(true);
+    rig.send("wake:600").await;
+    rig.send("wake:900").await;
+    rig.send("wake:stop").await;
+    tokio::time::sleep(AGENT_IDLE_STOP * 3).await;
+    rig.stopped().await;
+    rig.core.sessions.shutdown().await;
+}
+
+/// A background task's wake turn, long before the wake-up's time, isn't
+/// its firing: the wake-up still holds the agent. Once its time (and grace)
+/// has passed with no turn of its own, it holds nothing.
+#[tokio::test(start_paused = true)]
+async fn a_wake_turn_before_the_wake_up_keeps_it_pending() {
+    let rig = rig(true);
+    rig.send("wake:1800").await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    rig.wake_turn("a background task ended").await;
+    tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+    assert!(rig.live(), "stopped with its wake-up still to come");
+    assert_eq!(rig.kills(), 0);
+    tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+    rig.stopped().await;
+    rig.core.sessions.shutdown().await;
+}
+
+/// The same cron deleted twice cancels it once: the other still holds.
+#[tokio::test(start_paused = true)]
+async fn a_cron_deleted_twice_still_leaves_the_other_holding() {
+    let rig = rig(true);
+    rig.send("cron:aaaa1111 cron:bbbb2222").await;
+    rig.send("uncron:aaaa1111").await;
+    rig.send("uncron:aaaa1111").await;
+    tokio::time::sleep(Duration::from_secs(3 * 60 * 60)).await;
+    assert!(rig.live(), "stopped with a cron still scheduled");
+    assert_eq!(rig.kills(), 0);
+    rig.send("uncron:bbbb2222").await;
+    tokio::time::sleep(AGENT_IDLE_STOP * 3).await;
+    rig.stopped().await;
+    rig.core.sessions.shutdown().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_driver_that_does_not_opt_in_keeps_the_long_window() {
     let rig = rig(false);
@@ -519,6 +640,55 @@ impl AgentProcess {
         }
         Self(agent)
     }
+
+    /// Leading its own process group, as Zeron starts agents, with no child
+    /// left: its shell ran `sleep <secs> &` and exited, so the sleep is
+    /// re-parented to init but still in the agent's group.
+    fn with_orphan_in_its_group(secs: &str) -> Self {
+        use std::os::unix::process::CommandExt as _;
+        let agent = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                &format!("/bin/sh -c 'sleep {secs} >/dev/null 2>&1 &'; read _"),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = agent.id() as i32;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            // `ppid pgid stat args` of every process.
+            let out = std::process::Command::new("ps")
+                .args(["-A", "-o", "ppid=,pgid=,stat=,args="])
+                .output()
+                .unwrap();
+            let rows: Vec<(i32, i32, String, String)> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let mut cols = line.split_whitespace();
+                    let ppid = cols.next()?.parse().ok()?;
+                    let pgid = cols.next()?.parse().ok()?;
+                    let stat = cols.next()?.to_owned();
+                    Some((ppid, pgid, stat, cols.collect::<Vec<_>>().join(" ")))
+                })
+                .filter(|(_, _, stat, _)| !stat.starts_with('Z'))
+                .collect();
+            // The sleep in the group, and its shell gone.
+            let orphan = rows.iter().any(|(ppid, pgid, _, args)| {
+                *pgid == group && *ppid != group && args == &format!("sleep {secs}")
+            });
+            if orphan && !rows.iter().any(|(ppid, ..)| *ppid == group) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the orphan never appeared"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Self(agent)
+    }
 }
 
 #[cfg(unix)]
@@ -533,6 +703,12 @@ impl Drop for AgentProcess {
                 .and_then(|p| p.parse::<i32>().ok())
             {
                 unsafe { libc::kill(child, libc::SIGKILL) };
+            }
+        }
+        // SAFETY: as above; a group only when the agent leads its own.
+        unsafe {
+            if libc::getpgid(pid) == pid {
+                libc::kill(-pid, libc::SIGKILL);
             }
         }
         let _ = self.0.kill();
@@ -563,6 +739,26 @@ async fn an_agent_whose_process_runs_an_unreported_child_is_never_stopped() {
     assert!(
         rig.live(),
         "stopped while its process ran an unreported child"
+    );
+    assert_eq!(rig.kills(), 0);
+    drop(agent);
+    rig.core.sessions.shutdown().await;
+}
+
+/// The agent's shell ran `cmd &` and exited: the process it left has no
+/// parent under the agent any more, but it's in the agent's process group,
+/// which a stop would signal. Never stopped, however long.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn an_orphan_left_in_the_agents_process_group_holds_the_stop() {
+    let rig = rig(true);
+    let agent = AgentProcess::with_orphan_in_its_group("3609");
+    *rig.ledger.process.lock().unwrap() = Some(agent.0.id());
+    rig.send("hello").await;
+    tokio::time::sleep(Duration::from_secs(3 * 60 * 60)).await;
+    assert!(
+        rig.live(),
+        "stopped while an orphan of its shell ran in its process group"
     );
     assert_eq!(rig.kills(), 0);
     drop(agent);

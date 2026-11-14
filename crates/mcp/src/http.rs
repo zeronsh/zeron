@@ -81,6 +81,13 @@ const KEEP_ALIVE_EVERY: Duration = Duration::from_secs(15);
 /// How long a client may cache `tools/list` (modern `ttlMs`): plugin tools
 /// come and go, and a client not listening for changes re-lists after this.
 const TOOLS_TTL_MS: u64 = 30_000;
+/// The most connections served at once; more wait to be accepted. Each warm
+/// agent may hold one open (its `subscriptions/listen` stream), and its
+/// long calls one each.
+const MAX_CONNECTIONS: usize = 128;
+/// How long a client has to send a request's headers once it starts one:
+/// a connection trickling them (or sending none) is closed.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Body = UnsyncBoxBody<Bytes, Infallible>;
 
@@ -89,14 +96,17 @@ type Body = UnsyncBoxBody<Bytes, Infallible>;
 pub type ToolsFactory = Arc<dyn Fn(&Origin) -> Arc<Tools> + Send + Sync>;
 
 /// One run's access: who it speaks for, its tools (made at its first
-/// call), and its calls in flight (so a 2025 client's
-/// `notifications/cancelled` can stop one). Not connection state: the same
-/// for every request the run's token makes.
+/// call), its calls in flight (so a 2025 client's
+/// `notifications/cancelled` can stop one) and its `subscriptions/listen`
+/// streams. Not connection state: the same for every request the run's
+/// token makes. Its calls and streams end when the run's [`Grant`] drops.
 struct GrantState {
     token: String,
     origin: Origin,
     tools: std::sync::OnceLock<Arc<Tools>>,
     in_flight: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    listens: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
+    next_listen: std::sync::atomic::AtomicU64,
 }
 
 struct Inner {
@@ -130,9 +140,13 @@ impl Drop for Grant {
             return;
         };
         lock(&inner.grants).retain(|grant| !Arc::ptr_eq(grant, &self.state));
-        // Calls still running for a finished run end with it.
+        // Calls still running for a finished run end with it, and so do
+        // its listen streams (each held its tools' engine connection).
         for (_, call) in lock(&self.state.in_flight).drain() {
             call.abort();
+        }
+        for (_, stream) in lock(&self.state.listens).drain() {
+            stream.abort();
         }
     }
 }
@@ -152,6 +166,11 @@ impl Drop for McpHttpServer {
 impl McpHttpServer {
     /// Bind `127.0.0.1` on a free port and serve until dropped.
     pub async fn bind(factory: ToolsFactory) -> std::io::Result<Self> {
+        Self::bind_with(factory, MAX_CONNECTIONS).await
+    }
+
+    /// [`Self::bind`], serving at most `max_connections` at once.
+    async fn bind_with(factory: ToolsFactory, max_connections: usize) -> std::io::Result<Self> {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
         let inner = Arc::new(Inner {
@@ -160,8 +179,13 @@ impl McpHttpServer {
             grants: Mutex::new(Vec::new()),
         });
         let weak = Arc::downgrade(&inner);
+        let slots = Arc::new(tokio::sync::Semaphore::new(max_connections));
         let accept = tokio::spawn(async move {
             loop {
+                // A free slot before the next connection is taken.
+                let Ok(slot) = slots.clone().acquire_owned().await else {
+                    return;
+                };
                 let (stream, peer) = match listener.accept().await {
                     Ok(accepted) => accepted,
                     Err(err) => {
@@ -171,7 +195,10 @@ impl McpHttpServer {
                     }
                 };
                 let Some(inner) = weak.upgrade() else { return };
-                tokio::spawn(serve_socket(inner, stream, peer));
+                tokio::spawn(async move {
+                    serve_socket(inner, stream, peer).await;
+                    drop(slot);
+                });
             }
         });
         tracing::info!(port, "agent MCP endpoint listening");
@@ -195,6 +222,8 @@ impl McpHttpServer {
             origin,
             tools: std::sync::OnceLock::new(),
             in_flight: Mutex::new(HashMap::new()),
+            listens: Mutex::new(HashMap::new()),
+            next_listen: std::sync::atomic::AtomicU64::new(0),
         });
         lock(&self.inner.grants).push(state.clone());
         Ok(Grant {
@@ -215,6 +244,15 @@ impl McpHttpServer {
     pub fn live_grants(&self) -> usize {
         lock(&self.inner.grants).len()
     }
+
+    /// `subscriptions/listen` streams open now, across runs (tests,
+    /// diagnostics).
+    pub fn listens_open(&self) -> usize {
+        lock(&self.inner.grants)
+            .iter()
+            .map(|grant| lock(&grant.listens).len())
+            .sum()
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -231,7 +269,10 @@ async fn serve_socket(inner: Arc<Inner>, stream: tokio::net::TcpStream, peer: So
         async move { Ok::<_, Infallible>(handle(inner, request).await) }
     });
     let io = hyper_util::rt::TokioIo::new(stream);
+    // (The timer is what makes the header timeout apply.)
     if let Err(err) = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT)
         .keep_alive(true)
         .serve_connection(io, service)
         .await
@@ -596,17 +637,27 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
     }
 }
 
-/// Aborts the call it guards when the response stream is dropped: the
-/// client closed it (the 2026 cancel) or the connection went.
-struct AbortOnDrop(tokio::task::AbortHandle);
+/// Ends the listen stream it guards when the response stream is dropped
+/// (the client closed it, or the connection went), and takes it off its
+/// grant's streams.
+struct ListenGuard {
+    stream: tokio::task::AbortHandle,
+    grant: Weak<GrantState>,
+    key: u64,
+}
 
-impl Drop for AbortOnDrop {
+impl Drop for ListenGuard {
     fn drop(&mut self) {
-        self.0.abort();
+        self.stream.abort();
+        if let Some(grant) = self.grant.upgrade() {
+            lock(&grant.listens).remove(&self.key);
+        }
     }
 }
 
-/// [`AbortOnDrop`] for a call: it also leaves its grant's calls in flight.
+/// Aborts the call it guards when the response stream is dropped (the
+/// client closed it: the 2026 cancel; or the connection went), and takes it
+/// off its grant's calls in flight.
 struct CallGuard {
     call: tokio::task::AbortHandle,
     grant: Weak<GrantState>,
@@ -740,6 +791,8 @@ fn listen(inner: &Arc<Inner>, grant: &Arc<GrantState>, id: Value, params: &Value
         .unwrap_or(false);
     let tools = tools_for(inner, grant);
     let (out_tx, out_rx) = mpsc::channel::<Bytes>(16);
+    // Registered before it runs, under the lock a dropping grant drains.
+    let mut listens = lock(&grant.listens);
     let task = tokio::spawn(async move {
         let honoured = if wants_tools {
             json!({ "toolsListChanged": true })
@@ -785,7 +838,17 @@ fn listen(inner: &Arc<Inner>, grant: &Arc<GrantState>, id: Value, params: &Value
             () = forward => {}
         }
     });
-    let mut response = Response::new(sse_body(out_rx, AbortOnDrop(task.abort_handle())));
+    let key = grant
+        .next_listen
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    listens.insert(key, task.abort_handle());
+    drop(listens);
+    let guard = ListenGuard {
+        stream: task.abort_handle(),
+        grant: Arc::downgrade(grant),
+        key,
+    };
+    let mut response = Response::new(sse_body(out_rx, guard));
     sse_headers(&mut response);
     response
 }

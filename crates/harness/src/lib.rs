@@ -450,6 +450,7 @@ pub mod approval;
 pub mod archive_install;
 mod background;
 pub use background::{MarkOutcome, MarkRefused, OutputSource};
+pub mod bounded_file;
 mod catalog;
 mod catalog_failure;
 pub(crate) mod code_signature;

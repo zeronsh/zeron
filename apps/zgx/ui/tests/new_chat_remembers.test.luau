@@ -153,3 +153,38 @@ test("the new page's settings, draft and what it carries survive a relaunch", fu
 	expect(app:text('role:textbox "Message"')).to_be("Half a thought")
 	expect(#(app:state("chat.composer.cargo") or {})).to_be(cargo)
 end)
+
+-- The page's draft is saved at most every 250 ms (screens/chat/shared):
+-- what was typed since the last save waits on a timer, which never fires
+-- once the window has closed. Closing (quitting, or the window closed),
+-- Zeron's window sets `app.closing` (src/main.rs) before it writes what was
+-- saved: the waiting save goes then, the last keystrokes with it.
+local function saved_text(app: any): string?
+	local saved = app:state("chat_new_draft")
+	return if type(saved) == "table" then saved.text else nil
+end
+
+test("the new page's last keystrokes are saved as the window closes", function()
+	local app = open()
+	app:fill('role:textbox "Message"', "Half")
+	settle(app)
+	expect(saved_text(app)).to_be("Half")
+	-- Typed on at once: its save waits its turn.
+	app:fill('role:textbox "Message"', "Half a thought")
+	expect(saved_text(app)).to_be("Half")
+	app:set_state("app.closing", true)
+	expect(saved_text(app)).to_be("Half a thought")
+end)
+
+test("a message sent from the new page is no longer its saved draft, at once", function()
+	local app = open()
+	app:fill('role:textbox "Message"', "Start something")
+	settle(app)
+	expect(saved_text(app)).to_be("Start something")
+	app:key("Enter")
+	-- (Before the throttle's next turn: a quit now keeps what's saved.)
+	expect(saved_text(app)).to_be_nil()
+	settle(app)
+	expect(app:state("calls")).to_contain("send:new1:Start something")
+	expect(saved_text(app)).to_be_nil()
+end)

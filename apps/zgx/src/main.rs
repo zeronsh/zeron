@@ -1106,6 +1106,12 @@ fn serve_with(
     cx.on_closed(move || {
         reloading.borrow_mut().take();
         if let Some((host, devtools, commands, corner)) = keep.borrow_mut().take() {
+            // The scripts' last word before what they saved is written: a
+            // save still waiting on a timer (the new chat's draft,
+            // ui/screens/chat/shared.luau) goes now, as no timer fires
+            // after this. (Read at once: setting it runs what follows it.)
+            host.shared("app.closing", Value::Bool(false))
+                .set(Value::Bool(true));
             host.save();
             drop(devtools);
             drop(commands);

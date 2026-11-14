@@ -51,7 +51,11 @@ fn origin(chat: &str) -> Origin {
 }
 
 async fn server(engine: Arc<Engine>) -> McpHttpServer {
-    let factory: ToolsFactory = Arc::new(move |origin: &Origin| {
+    McpHttpServer::bind(factory(engine)).await.unwrap()
+}
+
+fn factory(engine: Arc<Engine>) -> ToolsFactory {
+    Arc::new(move |origin: &Origin| {
         let service = zeron_rpc::agent_service(
             engine.clone(),
             origin.chat_id.clone().unwrap_or_default(),
@@ -60,8 +64,7 @@ async fn server(engine: Arc<Engine>) -> McpHttpServer {
             memory_client(service),
             origin.clone(),
         ))))
-    });
-    McpHttpServer::bind(factory).await.unwrap()
+    })
 }
 
 /// One raw HTTP/1.1 exchange: (status, head, body as sent — chunked or not).
@@ -315,4 +318,107 @@ async fn a_2025_cancel_notification_stops_its_call() {
     // The call's own stream ends without an answer.
     let (_, _, body) = pending.await.unwrap();
     assert!(!body.contains("\"result\""), "{body}");
+}
+
+/// Reads from `stream` until `text` has come, or panics.
+async fn read_until(stream: &mut tokio::net::TcpStream, text: &str) -> String {
+    let mut seen = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while !String::from_utf8_lossy(&seen).contains(text) {
+        let read = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut chunk))
+            .await
+            .expect("came in time")
+            .unwrap();
+        assert!(read > 0, "closed before {text:?}: {}", String::from_utf8_lossy(&seen));
+        seen.extend_from_slice(&chunk[..read]);
+    }
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+/// A `subscriptions/listen` stream opened with `token` (`Connection:
+/// close`, so its end ends the connection), past its acknowledgement.
+async fn open_listen(port: u16, token: &str) -> tokio::net::TcpStream {
+    let body = modern(1, "subscriptions/listen", json!({ "notifications": { "toolsListChanged": true } }));
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: subscriptions/listen\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    read_until(&mut stream, "notifications/subscriptions/acknowledged").await;
+    stream
+}
+
+/// A run's listen stream ends with its token: it held the tools (and their
+/// engine connection) for as long as the client kept it open.
+#[tokio::test]
+async fn a_listen_stream_ends_when_its_run_s_token_does() {
+    let server = server(Arc::default()).await;
+    let grant = server.grant(origin("chat-a")).unwrap();
+    let mut stream = open_listen(server.port(), grant.token()).await;
+    assert_eq!(server.listens_open(), 1);
+    drop(grant);
+    // The stream's last chunk, then the connection closes.
+    let mut rest = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut rest))
+        .await
+        .expect("the listen stream outlived its token")
+        .unwrap();
+}
+
+/// A listen stream the client closes leaves its run's streams.
+#[tokio::test]
+async fn a_closed_listen_stream_is_let_go() {
+    let server = server(Arc::default()).await;
+    let grant = server.grant(origin("chat-a")).unwrap();
+    let stream = open_listen(server.port(), grant.token()).await;
+    assert_eq!(server.listens_open(), 1);
+    drop(stream);
+    for _ in 0..500 {
+        if server.listens_open() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the closed listen stream is still held");
+}
+
+/// A connection that never finishes its request's headers is closed.
+#[tokio::test(start_paused = true)]
+async fn a_connection_trickling_its_headers_is_closed() {
+    let server = server(Arc::default()).await;
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", server.port())).await.unwrap();
+    stream
+        .write_all(format!("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n", server.port()).as_bytes())
+        .await
+        .unwrap();
+    let mut rest = Vec::new();
+    tokio::time::timeout(HEADER_READ_TIMEOUT * 3, stream.read_to_end(&mut rest))
+        .await
+        .expect("still open long past the header timeout")
+        .unwrap();
+}
+
+/// Past the connection cap, a new connection waits until one ends.
+#[tokio::test]
+async fn connections_past_the_cap_wait_for_a_free_one() {
+    let engine = Arc::<Engine>::default();
+    let server = McpHttpServer::bind_with(factory(engine), 2).await.unwrap();
+    let grant = server.grant(origin("chat-a")).unwrap();
+    let port = server.port();
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap());
+    }
+    let token = grant.token().to_owned();
+    let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }).to_string();
+    let third = tokio::spawn(async move { exchange(port, "POST", &[accept(), bearer(&token)], &init).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!third.is_finished(), "served past the cap");
+    drop(held.pop());
+    let (status, ..) = tokio::time::timeout(Duration::from_secs(5), third)
+        .await
+        .expect("served once a connection ended")
+        .unwrap();
+    assert_eq!(status, 200);
 }

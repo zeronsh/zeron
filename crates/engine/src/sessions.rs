@@ -4963,12 +4963,10 @@ async fn drive_run(
     // silent this long (4h by default) is presumed lost; the reap stamps its
     // chip failed.
     let subagent_silence = idle_override.map_or(SUBAGENT_SILENCE, |idle| idle * 8);
-    // Wake-ups the agent scheduled for itself (Claude's `ScheduleWakeup`,
-    // until a wake turn starts) and session crons it created (`CronCreate`
-    // less `CronDelete`): both live in its process, so it is never stopped
-    // while any is pending.
-    let mut scheduled_wakeups: u32 = 0;
-    let mut session_crons: u32 = 0;
+    // Wake-ups the agent scheduled for itself (Claude's `ScheduleWakeup`)
+    // and session crons it created (`CronCreate`): both live in its
+    // process, so it is never stopped while any is pending.
+    let mut self_scheduled = crate::self_schedule::SelfScheduled::default();
     let mut idle_since: Option<tokio::time::Instant> =
         resume_state.idle.then(tokio::time::Instant::now);
     // A parked runtime whose agent reports background work (see
@@ -5123,7 +5121,9 @@ async fn drive_run(
                 // ended): a turn is running from this moment, not from its
                 // first words.
                 () = turn.woke() => {
-                    scheduled_wakeups = 0;
+                    // (The wake-up's turn only if its time has come: a
+                    // background task's ending wakes the agent too.)
+                    self_scheduled.woke(tokio::time::Instant::now());
                     if idle_since.is_some() {
                         tracing::info!(chat = %chat_id, "parked session resumed by a wake turn");
                         idle_since = None;
@@ -5224,10 +5224,11 @@ async fn drive_run(
                     // too: the agent said it waits on work, it scheduled a
                     // wake-up or a cron, or a question waits on the person.
                     // Checked again a full window later.
+                    let scheduled = self_scheduled.pending(tokio::time::Instant::now());
                     let held = if wait.is_some() {
                         Some("the agent waits on background work")
-                    } else if scheduled_wakeups > 0 || session_crons > 0 {
-                        Some("the agent scheduled a wake-up")
+                    } else if scheduled.is_some() {
+                        scheduled
                     } else if inner.awaiting_input(&chat_id) {
                         Some("a question waits on the person")
                     } else {
@@ -5436,18 +5437,7 @@ async fn drive_run(
             event
         };
         // Scheduled wake-ups and session crons live in the agent's process.
-        if let AgentEvent::ToolCall {
-            call: zeron_proto::ToolCall::Unknown { name, .. },
-            ..
-        } = &event
-        {
-            match name.as_str() {
-                "ScheduleWakeup" => scheduled_wakeups += 1,
-                "CronCreate" => session_crons += 1,
-                "CronDelete" => session_crons = session_crons.saturating_sub(1),
-                _ => {}
-            }
-        }
+        self_scheduled.observe(&event, tokio::time::Instant::now());
 
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream

@@ -14,15 +14,21 @@
 //!
 //! Lines are written in batches: a streaming agent sends tens of events a second, and
 //! a `write` each (under the one lock every chat's appends share) was a large part of
-//! a streaming engine's work. An event waits in memory at most [`FLUSH_AFTER`] (until
-//! the next append or [`RunJournal::flush`], which a run calls with each doc commit),
-//! a turn's `Done` is written at once, and every read writes what's waiting first.
+//! a streaming engine's work. An event waits in memory for [`FLUSH_AFTER`] while
+//! appends keep coming (or until [`RunJournal::flush`], which a run calls with each doc
+//! commit), a turn's `Done` is written at once, and every read writes what's waiting
+//! first. What the last appends left waiting (a turn's usage after its `Done`) a
+//! flusher thread writes [`IDLE_FLUSH`] later: it sleeps while nothing waits.
+//!
+//! A write that fails keeps what didn't reach the file to retry with the next write,
+//! so a passing failure leaves no gap; only past [`MAX_PENDING`] is it dropped, and
+//! that is logged as an error.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +59,11 @@ struct JournalLineRef<'a> {
 const FLUSH_AFTER: std::time::Duration = std::time::Duration::from_millis(100);
 /// Lines waiting past this many bytes are written at once.
 const FLUSH_BYTES: usize = 64 * 1024;
+/// The longest a line waits when no append follows it (the flusher thread).
+const IDLE_FLUSH: std::time::Duration = std::time::Duration::from_secs(1);
+/// What a chat's journal keeps to retry while its writes fail; past it, what waits is
+/// dropped (a gap in the journal, logged as an error).
+const MAX_PENDING: usize = 8 * 1024 * 1024;
 
 struct ChatJournal {
     file: File,
@@ -60,34 +71,135 @@ struct ChatJournal {
     /// True when the file ends without a newline (torn write) — the next append
     /// starts with one so the torn line stays isolated.
     needs_newline: bool,
-    /// Lines appended and not yet written, and since when.
+    /// Lines appended and not yet written, and since when (or since the last failed
+    /// write of them, which the flusher retries from).
     pending: Vec<u8>,
     pending_since: Option<std::time::Instant>,
+    /// The last write failed (logged once until one succeeds).
+    failing: bool,
 }
 
 impl ChatJournal {
-    fn write_pending(&mut self) -> Result<(), JournalError> {
+    /// Write what's waiting. A failure keeps the unwritten rest to retry (it
+    /// continues the line it stopped in, so nothing is torn or written twice) and
+    /// is `Ok`; `Err` only when lines were dropped, past [`MAX_PENDING`].
+    fn write_pending(&mut self, chat: &str) -> Result<(), JournalError> {
         if self.pending.is_empty() {
             return Ok(());
         }
-        let result = self.file.write_all(&self.pending);
-        // A failed write keeps nothing half-sent in memory: what reached the
-        // file is a torn line the next append isolates.
+        let mut written = 0;
+        let result = loop {
+            match self.file.write(&self.pending[written..]) {
+                Ok(0) => break Err(std::io::Error::from(std::io::ErrorKind::WriteZero)),
+                Ok(n) => {
+                    written += n;
+                    if written == self.pending.len() {
+                        break Ok(());
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => break Err(err),
+            }
+        };
+        self.pending.drain(..written);
+        let Err(err) = result else {
+            self.pending_since = None;
+            if std::mem::take(&mut self.failing) {
+                tracing::info!(chat = %chat, "journal writes recovered");
+            }
+            return Ok(());
+        };
+        if self.pending.len() <= MAX_PENDING {
+            if !std::mem::replace(&mut self.failing, true) {
+                tracing::warn!(chat = %chat, error = %err, waiting = self.pending.len(), "journal write failed; retrying");
+            }
+            // Retried by the next append, or the flusher a while from now.
+            self.pending_since = Some(std::time::Instant::now());
+            return Ok(());
+        }
+        let lost = self.pending.iter().filter(|b| **b == b'\n').count();
         self.pending.clear();
         self.pending_since = None;
-        self.needs_newline = result.is_err();
-        Ok(result?)
+        // What reached the file may end mid-line: the next append starts with a
+        // newline, so that torn line stays isolated.
+        self.needs_newline = true;
+        tracing::error!(chat = %chat, error = %err, lost, "journal write failed; events dropped");
+        Err(err.into())
     }
 }
 
 /// Append-only JSONL journal store, one file per chat.
 pub struct RunJournal {
     dir: PathBuf,
+    shared: Arc<Shared>,
+    flusher: Option<std::thread::JoinHandle<()>>,
+}
+
+/// What the journal shares with its flusher thread.
+struct Shared {
     open_files: Mutex<HashMap<String, ChatJournal>>,
+    /// Lines started waiting, or the journal closed.
+    wake: Condvar,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, ChatJournal>> {
+        self.open_files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The flusher: writes what has waited [`IDLE_FLUSH`] with no append to take it
+    /// along; asleep while nothing waits.
+    fn flush_idle(&self) {
+        use std::sync::atomic::Ordering;
+        let mut files = self.lock();
+        while !self.closed.load(Ordering::SeqCst) {
+            let now = std::time::Instant::now();
+            let mut next: Option<std::time::Instant> = None;
+            for (chat, journal) in files.iter_mut() {
+                let Some(since) = journal.pending_since else {
+                    continue;
+                };
+                if since + IDLE_FLUSH <= now {
+                    // (A drop is logged where it happens.)
+                    let _ = journal.write_pending(chat);
+                }
+                if let Some(since) = journal.pending_since {
+                    let due = since + IDLE_FLUSH;
+                    next = Some(next.map_or(due, |next| next.min(due)));
+                }
+            }
+            files = match next {
+                Some(due) => {
+                    self.wake
+                        .wait_timeout(files, due.saturating_duration_since(now))
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+                None => self
+                    .wake
+                    .wait(files)
+                    .unwrap_or_else(PoisonError::into_inner),
+            };
+        }
+    }
 }
 
 impl Drop for RunJournal {
     fn drop(&mut self) {
+        self.shared
+            .closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        {
+            // (Under the lock: the flusher is waiting, or sees `closed` first.)
+            let _files = self.lock();
+            self.shared.wake.notify_all();
+        }
+        if let Some(flusher) = self.flusher.take() {
+            let _ = flusher.join();
+        }
         self.flush_all();
     }
 }
@@ -96,16 +208,26 @@ impl RunJournal {
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, JournalError> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
+        let shared = Arc::new(Shared {
+            open_files: Mutex::new(HashMap::new()),
+            wake: Condvar::new(),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        });
+        let flusher = {
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("journal-flush".into())
+                .spawn(move || shared.flush_idle())?
+        };
         Ok(Self {
             dir,
-            open_files: Mutex::new(HashMap::new()),
+            shared,
+            flusher: Some(flusher),
         })
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, ChatJournal>> {
-        self.open_files
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.shared.lock()
     }
 
     fn path_for(&self, chat_id: &str) -> PathBuf {
@@ -222,8 +344,11 @@ impl RunJournal {
             const OPEN_FILE_CAP: usize = 16;
             if files.len() >= OPEN_FILE_CAP {
                 for (chat, journal) in files.iter_mut() {
-                    if let Err(err) = journal.write_pending() {
-                        tracing::warn!(chat = %chat, error = %err, "journal write failed");
+                    // (A failure is logged by the write; what still waits is lost
+                    // with the entry, as an error.)
+                    let _ = journal.write_pending(chat);
+                    if !journal.pending.is_empty() {
+                        tracing::error!(chat = %chat, bytes = journal.pending.len(), "journal closed with unwritten events");
                     }
                 }
                 files.clear();
@@ -239,6 +364,7 @@ impl RunJournal {
                     needs_newline,
                     pending: Vec::new(),
                     pending_since: None,
+                    failing: false,
                 },
             );
         }
@@ -251,10 +377,12 @@ impl RunJournal {
         let seq = journal.next_seq;
         let line = serde_json::to_vec(&JournalLineRef { seq, event })?;
         if journal.pending.is_empty() {
-            if journal.needs_newline {
+            if std::mem::take(&mut journal.needs_newline) {
                 journal.pending.push(b'\n');
             }
             journal.pending_since = Some(std::time::Instant::now());
+            // The flusher writes it if no append comes to.
+            self.shared.wake.notify_one();
         }
         journal.pending.extend_from_slice(&line);
         journal.pending.push(b'\n');
@@ -265,7 +393,7 @@ impl RunJournal {
                 .pending_since
                 .is_some_and(|since| since.elapsed() >= FLUSH_AFTER);
         if due {
-            journal.write_pending()?;
+            journal.write_pending(chat_id)?;
         }
         Ok(seq)
     }
@@ -273,19 +401,16 @@ impl RunJournal {
     /// Write what's waiting of a chat's journal (a run calls this with each
     /// doc commit, so the journal is never behind its transcript).
     pub fn flush(&self, chat_id: &str) {
-        if let Some(journal) = self.lock().get_mut(chat_id)
-            && let Err(err) = journal.write_pending()
-        {
-            tracing::warn!(chat = %chat_id, error = %err, "journal write failed");
+        if let Some(journal) = self.lock().get_mut(chat_id) {
+            // (A failure is logged by the write.)
+            let _ = journal.write_pending(chat_id);
         }
     }
 
     /// Write what's waiting of every chat's journal.
     pub fn flush_all(&self) {
         for (chat, journal) in self.lock().iter_mut() {
-            if let Err(err) = journal.write_pending() {
-                tracing::warn!(chat = %chat, error = %err, "journal write failed");
-            }
+            let _ = journal.write_pending(chat);
         }
     }
 
@@ -671,6 +796,93 @@ mod tests {
         assert!(matches!(after[0].1, AgentEvent::Done { .. }));
         // Era fallback: cursor ahead of last seq replays everything.
         assert_eq!(journal.replay("chat-1", 99).unwrap().len(), 3);
+    }
+
+    /// The lines on disk, read without the journal (whose reads write what
+    /// waits first).
+    fn on_disk(dir: &Path, chat: &str) -> Vec<u64> {
+        read_lines(&dir.join(format!("{chat}.jsonl")))
+            .unwrap()
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect()
+    }
+
+    /// A turn's usage comes after its `Done`, and then nothing: it reaches
+    /// the file within a second or so, with no append or read to take it.
+    #[test]
+    fn an_event_left_waiting_is_written_without_another_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("chat-1", &text("a")).unwrap();
+        journal.append("chat-1", &done()).unwrap();
+        journal.append("chat-1", &text("usage")).unwrap();
+        assert_eq!(on_disk(dir.path(), "chat-1"), vec![1, 2], "batched still");
+        let deadline = std::time::Instant::now() + IDLE_FLUSH * 5;
+        while on_disk(dir.path(), "chat-1") != vec![1, 2, 3] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the waiting event was never written"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Writes that fail keep what waits and retry it: once the file takes
+    /// writes again, every event is there, in order, with no gap.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_is_retried_not_left_as_a_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("chat-1", &text("a")).unwrap();
+        journal.flush("chat-1");
+        let path = dir.path().join("chat-1.jsonl");
+        // A handle that can't write: every write fails (EBADF).
+        let writable = {
+            let mut files = journal.lock();
+            let entry = files.get_mut("chat-1").unwrap();
+            std::mem::replace(&mut entry.file, File::open(&path).unwrap())
+        };
+        assert_eq!(journal.append("chat-1", &text("b")).unwrap(), 2);
+        assert_eq!(
+            journal.append("chat-1", &done()).unwrap(),
+            3,
+            "kept to retry"
+        );
+        journal.flush("chat-1");
+        assert_eq!(on_disk(dir.path(), "chat-1"), vec![1]);
+        journal.lock().get_mut("chat-1").unwrap().file = writable;
+        assert_eq!(journal.append("chat-1", &text("c")).unwrap(), 4);
+        journal.flush("chat-1");
+        assert_eq!(on_disk(dir.path(), "chat-1"), vec![1, 2, 3, 4]);
+    }
+
+    /// Past [`MAX_PENDING`] what waits is dropped: reported as an error, and
+    /// the journal goes on from a fresh line.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_failing_past_the_cap_reports_the_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("chat-1", &text("a")).unwrap();
+        journal.flush("chat-1");
+        let path = dir.path().join("chat-1.jsonl");
+        let writable = {
+            let mut files = journal.lock();
+            let entry = files.get_mut("chat-1").unwrap();
+            std::mem::replace(&mut entry.file, File::open(&path).unwrap())
+        };
+        let big = "x".repeat(1024 * 1024);
+        let mut failed = false;
+        for _ in 0..(MAX_PENDING / big.len() + 2) {
+            failed |= journal.append("chat-1", &text(&big)).is_err();
+        }
+        assert!(failed, "the drop was not reported");
+        journal.lock().get_mut("chat-1").unwrap().file = writable;
+        let next = journal.append("chat-1", &done()).unwrap();
+        journal.flush("chat-1");
+        assert_eq!(on_disk(dir.path(), "chat-1").last(), Some(&next));
     }
 
     #[test]

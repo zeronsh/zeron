@@ -2573,7 +2573,12 @@ impl View {
         // (the answer is read once that frame is done). The message carries
         // the same agent and model, and the engine stamps them on a chat
         // whose config hasn't landed yet, so the two may land in any order.
+        // Not when the agent changes from the one the chat was made with (a
+        // side chat takes its parent's): the engine refuses that switch
+        // while a turn runs, and the message starts one. Then the config is
+        // awaited first, and the message goes only once it has landed.
         let set_config = fresh.then(|| json!({ "op": "setChatConfig", "chatId": id, "config": config }));
+        let switching = fresh && changes_agent(&chat["config"], &config);
         let field = |key: &str| req.field(key).map(text).filter(|s| !s.is_empty());
         let cwd = field("cwd")
             .or_else(|| chat["cwd"].as_str().map(Into::into))
@@ -2609,14 +2614,17 @@ impl View {
         let sent = match set_config {
             Some(params) => {
                 let engine = engine::get();
-                // (Polled together: both go out at once, the config first.)
-                let (configured, sent) =
-                    both(engine.call("Mutate", params), command_with(&id, run.clone(), &transfers)).await;
-                if let Err(e) = configured {
-                    // (The run went with its own agent and model all the same.)
-                    eprintln!("zeron-zgx: chat: a new chat's config wasn't set: {e}");
+                match first_send(switching, engine.call("Mutate", params), command_with(&id, run.clone(), &transfers)).await {
+                    Ok(sent) => sent,
+                    Err(e) => {
+                        // Refused (a turn already running, a host too old to
+                        // switch provider): the message never went, and the
+                        // person is told, as for any send that fails.
+                        eprintln!("zeron-zgx: chat: {id}: a new chat's agent wasn't set: {e}");
+                        self.mark_failed(&id, &message_id, None);
+                        return Err(engine::outcome(&e));
+                    }
                 }
-                sent
             }
             None => command_with(&id, run.clone(), &transfers).await,
         };
@@ -3147,7 +3155,33 @@ async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
     command_with(chat, command, &[]).await
 }
 
-/// [`command`], with the files the engine delivers for it.
+/// Whether `next` runs another agent than the `current` config names (one
+/// that names none changes nothing the engine would refuse).
+fn changes_agent(current: &Json, next: &Json) -> bool {
+    current["harness"].as_str().is_some_and(|harness| next["harness"].as_str() != Some(harness))
+}
+
+/// A new chat's config (`configure`) and first message (`send`). Switching
+/// agent, the config is awaited first: refused, the message never goes and
+/// the refusal is the answer. Otherwise both go out at once ([`both`]), the
+/// config first, and the message's answer stands (it carries the same agent
+/// and model; a config that didn't land is only logged).
+async fn first_send<C, S>(switching: bool, configure: C, send: S) -> Result<S::Output, String>
+where
+    C: Future<Output = Result<Json, String>>,
+    S: Future,
+{
+    if switching {
+        configure.await?;
+        return Ok(send.await);
+    }
+    let (configured, sent) = both(configure, send).await;
+    if let Err(e) = configured {
+        eprintln!("zeron-zgx: chat: a new chat's config wasn't set: {e}");
+    }
+    Ok(sent)
+}
+
 /// Both futures, polled together (`a` first each time), and both answers.
 async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
     let (mut a, mut b) = (std::pin::pin!(a), std::pin::pin!(b));
@@ -3172,6 +3206,7 @@ async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
     .await
 }
 
+/// [`command`], with the files the engine delivers for it.
 async fn command_with(chat: &str, command: Json, transfers: &[Json]) -> Result<(), Outcome> {
     let mut params = json!({ "chatId": chat, "command": command });
     if !transfers.is_empty() {
@@ -6625,6 +6660,72 @@ mod tests {
         let words = super::thought_words(&format!("\n{}\n", long.join("\n")));
         assert!(words.starts_with("line 1\n") && words.ends_with("\nline 30"), "{words}");
         assert_eq!(words.lines().count(), 30);
+    }
+
+    /// A new side chat switched from its parent's agent: its config is
+    /// awaited before its first message goes, and a refusal (a turn already
+    /// running, a host too old to switch) stops the message and is the
+    /// answer. The same agent: both go out in one poll, and a config that
+    /// didn't land leaves the sent message standing.
+    #[test]
+    fn a_new_chat_switching_agent_sends_its_message_only_once_the_config_landed() {
+        use std::task::{Context, Poll, Waker};
+        let claude = json!({ "harness": "claude-code", "model": "opus" });
+        let codex = json!({ "harness": "codex", "model": "gpt" });
+        assert!(super::changes_agent(&claude, &codex));
+        assert!(!super::changes_agent(&claude, &json!({ "harness": "claude-code", "model": "sonnet" })));
+        assert!(!super::changes_agent(&Json::Null, &codex), "made with no agent: nothing to refuse");
+
+        // Config, then message, never both at once.
+        let log = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (config_gate, a, b) = (Rc::new(std::cell::Cell::new(false)), log.clone(), log.clone());
+        let gate = config_gate.clone();
+        let configure = std::future::poll_fn(move |_| {
+            if gate.get() {
+                a.borrow_mut().push("config landed");
+                Poll::Ready(Ok::<Json, String>(Json::Null))
+            } else {
+                Poll::Pending
+            }
+        });
+        let send = async move {
+            b.borrow_mut().push("message");
+            "sent"
+        };
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut sending = std::pin::pin!(super::first_send(true, configure, send));
+        assert!(sending.as_mut().poll(&mut cx).is_pending());
+        assert!(log.borrow().is_empty(), "the message went before the config landed");
+        config_gate.set(true);
+        assert_eq!(sending.as_mut().poll(&mut cx), Poll::Ready(Ok("sent")));
+        assert_eq!(*log.borrow(), ["config landed", "message"]);
+
+        // Refused: the message never goes, and the refusal is the answer.
+        let went = Rc::new(std::cell::Cell::new(false));
+        let w = went.clone();
+        let refused = std::pin::pin!(super::first_send(
+            true,
+            async { Err::<Json, String>("Wait for the current turn to finish before switching provider".into()) },
+            async move { w.set(true) },
+        ))
+        .poll(&mut cx);
+        assert!(matches!(refused, Poll::Ready(Err(ref e)) if e.contains("switching provider")));
+        assert!(!went.get());
+
+        // The same agent: one poll sends both, and the message's answer stands.
+        let went = Rc::new(std::cell::Cell::new(false));
+        let w = went.clone();
+        let together = std::pin::pin!(super::first_send(
+            false,
+            async { Err::<Json, String>("offline".into()) },
+            async move {
+                w.set(true);
+                "sent"
+            },
+        ))
+        .poll(&mut cx);
+        assert_eq!(together, Poll::Ready(Ok("sent")));
+        assert!(went.get());
     }
 
     /// A new chat's config and first message go out in the same poll, the

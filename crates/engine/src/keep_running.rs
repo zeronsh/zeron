@@ -55,7 +55,8 @@ fn path(data_dir: &Path) -> PathBuf {
 
 /// The saved setting; the default when none is saved (or it can't be read).
 pub fn load(data_dir: &Path) -> BackgroundSettings {
-    std::fs::read(path(data_dir))
+    // (Bounded, and never a FIFO or device: a few bytes are expected.)
+    zeron_harness::bounded_file::read(&path(data_dir), 64 * 1024)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
@@ -136,6 +137,16 @@ mod tests {
         assert!(!load(dir.path()).keep_running_after_quit);
         std::fs::write(path(dir.path()), b"not json").unwrap();
         assert!(load(dir.path()).keep_running_after_quit, "unreadable reads as the default");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_setting_file_that_is_a_device_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/dev/zero", path(dir.path())).unwrap();
+        let started = std::time::Instant::now();
+        assert!(load(dir.path()).keep_running_after_quit);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[tokio::test(start_paused = true)]
