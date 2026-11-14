@@ -25,7 +25,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the service's state file says about it. The password is never
 /// logged or shown; it only becomes the `Authorization` header.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub(super) struct ServiceInfo {
     pub url: String,
     pub password: String,

@@ -771,11 +771,76 @@ local function settings_dialog(): Node
 	local oc_sync = ui.state("settings_agent_oc_sync", false)
 	local oc_projects = ui.state("settings_agent_oc_projects", false)
 	local oc_service = ui.state("settings_agent_oc_service", true)
+	-- A remote server in this computer's service's place: how it's reached
+	-- (address and password, a pairing link, SSH), and whether it answered.
+	local oc_remote = ui.state("settings_agent_oc_remote", false)
+	local oc_mode = ui.state("settings_agent_oc_mode", "address")
+	local oc_name = ui.state("settings_agent_oc_name", "")
+	local oc_url = ui.state("settings_agent_oc_url", "")
+	local oc_password = ui.state("settings_agent_oc_password", "")
+	local oc_link = ui.state("settings_agent_oc_link", "")
+	local oc_ssh = ui.state("settings_agent_oc_ssh", "")
+	local oc_error = ui.state("settings_agent_oc_error", "")
+	local oc_connecting = ui.state("settings_agent_oc_connecting", false)
 	local function oc_show(v: any)
 		if type(v) == "table" then
 			oc_sync:set(v.syncSessions == true)
 			oc_projects:set(v.addProjects == true)
 			oc_service:set(v.backgroundService ~= false)
+			oc_remote:set(v.remote == true)
+			oc_mode:set(if type(v.remoteMode) == "string" and v.remoteMode ~= "" then v.remoteMode else "address")
+			oc_name:set(v.remoteName or "")
+			oc_url:set(v.remoteUrl or "")
+			oc_password:set(v.remotePassword or "")
+			oc_ssh:set(v.remoteSsh or "")
+			-- (A link refused stays, to see what was pasted.)
+			local refused = type(v.remoteError) == "string"
+			if not refused then
+				oc_link:set("")
+			end
+			oc_error:set(if refused then v.remoteError else "")
+		end
+	end
+	-- Every field, each save: one missing reads as its default.
+	local function oc_params(): { [string]: any }
+		return {
+			syncSessions = oc_sync:peek(),
+			addProjects = oc_projects:peek(),
+			backgroundService = oc_service:peek(),
+			remote = oc_remote:peek(),
+			remoteMode = oc_mode:peek(),
+			remoteName = oc_name:peek(),
+			remoteUrl = oc_url:peek(),
+			remotePassword = oc_password:peek(),
+			remoteLink = oc_link:peek(),
+			remoteSsh = oc_ssh:peek(),
+		}
+	end
+	local function oc_connect()
+		if oc_connecting:peek() then
+			return
+		end
+		oc_connecting:set(true)
+		oc_error:set("")
+		local params = oc_params()
+		params.remote = true
+		host.call("settings.engine", { method = "SetOpencodeSettings", params = params }):after(function(v: any)
+			oc_connecting:set(false)
+			oc_show(v)
+			if type(v) == "table" and v.remoteError == nil then
+				toast.show { title = ui.t("settings.providers.opencode.remote.connected"):get(), tone = "success" }
+			end
+		end, function(err: any)
+			oc_connecting:set(false)
+			oc_error:set(if type(err) == "table" and type(err.message) == "string" and err.message ~= "offline" then err.message else ui.t("settings.engine.couldnt_save"):get())
+		end)
+	end
+	local function oc_remote_on(): boolean
+		return opencode() and oc_remote:get()
+	end
+	local function oc_in(mode: string): () -> boolean
+		return function()
+			return oc_remote_on() and oc_mode:get() == mode
 		end
 	end
 	ui.effect(function()
@@ -785,11 +850,7 @@ local function settings_dialog(): Node
 	end)
 	local function oc_set(key: string, state: State<boolean>): (on: boolean) -> ()
 		return function(on: boolean)
-			local params = {
-				syncSessions = oc_sync:peek(),
-				addProjects = oc_projects:peek(),
-				backgroundService = oc_service:peek(),
-			}
+			local params = oc_params()
 			params[key] = on
 			host.call("settings.engine", { method = "SetOpencodeSettings", params = params }):after(oc_show, function()
 				state:set(not on)
@@ -845,6 +906,115 @@ local function settings_dialog(): Node
 					value = oc_service,
 					label = ui.t("settings.providers.opencode.service.label"),
 					on_change = oc_set("backgroundService", oc_service),
+				},
+			}),
+			ui.show(opencode, ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.label"),
+				description = ui.t("settings.providers.opencode.remote.description"),
+				control = ds.Switch {
+					value = oc_remote,
+					label = ui.t("settings.providers.opencode.remote.label"),
+					on_change = function(on: boolean)
+						-- On waits for Connect; off is back to this computer's
+						-- service at once.
+						if not on then
+							oc_set("remote", oc_remote)(false)
+						end
+					end,
+				},
+			}),
+			ui.show(oc_remote_on, ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.mode.label"),
+				control = ds.Select {
+					value = oc_mode,
+					name = ui.t("settings.providers.opencode.remote.mode.label"),
+					size = "sm",
+					w = 180,
+					options = {
+						{ value = "address", label = ui.t("settings.providers.opencode.remote.mode.address") },
+						{ value = "pairing", label = ui.t("settings.providers.opencode.remote.mode.pairing") },
+						{ value = "ssh", label = ui.t("settings.providers.opencode.remote.mode.ssh") },
+					} :: any,
+					on_change = function()
+						oc_error:set("")
+					end,
+				},
+			}),
+			ui.show(oc_remote_on, ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.name.label"),
+				stacked = true,
+				control = ds.TextField {
+					value = oc_name,
+					name = ui.t("settings.providers.opencode.remote.name.label"),
+					placeholder = ui.t("settings.providers.opencode.remote.name.placeholder"),
+					w_full = true,
+				},
+			}),
+			ui.show(oc_in("address"), ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.url.label"),
+				stacked = true,
+				control = ds.TextField {
+					value = oc_url,
+					name = ui.t("settings.providers.opencode.remote.url.label"),
+					placeholder = "http://192.168.1.10:4096",
+					inputmode = "url",
+					w_full = true,
+				},
+			}),
+			ui.show(oc_in("address"), ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.password.label"),
+				description = ui.t("settings.providers.opencode.remote.password.description"),
+				stacked = true,
+				control = ds.TextField {
+					value = oc_password,
+					name = ui.t("settings.providers.opencode.remote.password.label"),
+					password = true,
+					w_full = true,
+					on_commit = oc_connect,
+				},
+			}),
+			ui.show(oc_in("pairing"), ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.link.label"),
+				description = function()
+					local url = oc_url:get()
+					return if url ~= ""
+						then ui.t("settings.providers.opencode.remote.link.paired", { url = url }):get()
+						else ui.t("settings.providers.opencode.remote.link.description"):get()
+				end,
+				stacked = true,
+				control = ds.TextField {
+					value = oc_link,
+					name = ui.t("settings.providers.opencode.remote.link.label"),
+					placeholder = "http://192.168.1.10:4096/auth/connect/…",
+					inputmode = "url",
+					w_full = true,
+					on_commit = oc_connect,
+				},
+			}),
+			ui.show(oc_in("ssh"), ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.ssh.label"),
+				description = ui.t("settings.providers.opencode.remote.ssh.description"),
+				stacked = true,
+				control = ds.TextField {
+					value = oc_ssh,
+					name = ui.t("settings.providers.opencode.remote.ssh.label"),
+					placeholder = "me@box  ·  ssh -p 2222 me@box",
+					w_full = true,
+					on_commit = oc_connect,
+				},
+			}),
+			ui.show(oc_remote_on, ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.connect.label"),
+				description = function()
+					local err = oc_error:get()
+					return if err ~= "" then err else ui.t("settings.providers.opencode.remote.connect.description"):get()
+				end,
+				control = ds.Button {
+					ui.t("settings.providers.opencode.remote.connect.button"),
+					tone = "secondary",
+					size = "sm",
+					busy = oc_connecting,
+					on_click = oc_connect,
 				},
 			}),
 			ui.div {

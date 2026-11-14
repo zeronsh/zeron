@@ -3378,9 +3378,39 @@ impl RpcService for EngineRpc {
             }
             methods::GET_OPENCODE_SETTINGS => RpcReply::value(&self.registry.opencode_settings()),
             methods::SET_OPENCODE_SETTINGS => {
-                let p: crate::registry::OpencodeSettings = parse_params(params)?;
+                let mut p: crate::registry::OpencodeSettings = parse_params(params)?;
+                // A pairing link is redeemed once, for the server's address
+                // and the session token that is its password from now on.
+                // One refused saves nothing: what was typed comes back with
+                // why, to show (an RPC error would reach Settings wordless).
+                if p.remote && p.remote_mode == "pairing" && !p.remote_link.trim().is_empty() {
+                    match zeron_harness::redeem_opencode_pairing_link(&p.remote_link).await {
+                        Ok((url, token)) => {
+                            p.remote_url = url;
+                            p.remote_password = token;
+                            p.remote_link.clear();
+                        }
+                        Err(error) => {
+                            let mut reply = serde_json::to_value(&p).map_err(|e| RpcError::Failed(e.to_string()))?;
+                            if let Some(map) = reply.as_object_mut() {
+                                map.insert("remoteError".into(), error.to_string().into());
+                            }
+                            return RpcReply::value(&reply);
+                        }
+                    }
+                }
+                let remote = p.remote_server().is_some();
                 self.registry.set_opencode_settings(p);
-                RpcReply::value(&self.registry.opencode_settings())
+                // (Whether a remote server answers, said with them.)
+                let mut reply = serde_json::to_value(self.registry.opencode_settings())
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if remote
+                    && let Err(error) = zeron_harness::OpencodeHarness::new().check_remote().await
+                    && let Some(map) = reply.as_object_mut()
+                {
+                    map.insert("remoteError".into(), error.into());
+                }
+                RpcReply::value(&reply)
             }
             methods::SET_HARNESS_ENABLED => {
                 let include = include_registry(&params);

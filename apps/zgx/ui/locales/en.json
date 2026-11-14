@@ -1539,6 +1539,43 @@
           "label": "Use the background service",
           "terms": "opencode service server tui desktop shared",
           "description": "Run on the service OpenCode's TUI and desktop app share, so a session moves between them live. Off, each chat runs on a server of its own."
+        },
+        "remote": {
+          "label": "Remote server",
+          "terms": "opencode remote server ssh tailscale pairing password address",
+          "description": "Use an OpenCode server on another computer in place of this one's service: chats, synced sessions and sign-ins go to it, and its tools work on that computer's files.",
+          "connected": "Connected to the OpenCode server",
+          "mode": {
+            "label": "Connect with",
+            "address": "Address and password",
+            "pairing": "Pairing link",
+            "ssh": "SSH"
+          },
+          "name": {
+            "label": "Name",
+            "placeholder": "Optional"
+          },
+          "url": {
+            "label": "Server address"
+          },
+          "password": {
+            "label": "Password",
+            "description": "On the server's computer, run opencode service get password."
+          },
+          "link": {
+            "label": "Pairing link",
+            "description": "From opencode pair, or Settings → Pairing on the server's computer. It's used once.",
+            "paired": "Paired with {url}. Paste a new link to pair again."
+          },
+          "ssh": {
+            "label": "SSH host",
+            "description": "A host SSH reaches with a key or agent (user@host, an alias from ~/.ssh/config), or an ssh command. OpenCode is installed there if it's missing."
+          },
+          "connect": {
+            "label": "Connect",
+            "description": "Saves these and checks that the server answers.",
+            "button": "Connect"
+          }
         }
       },
       "more": {

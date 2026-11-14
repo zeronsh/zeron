@@ -1539,6 +1539,43 @@
           "label": "使用后台服务",
           "terms": "服务 opencode service server tui desktop shared",
           "description": "在 OpenCode 终端界面和桌面应用共享的服务上运行，会话可在它们之间实时切换。关闭后，每个聊天都在自己的服务器上运行。"
+        },
+        "remote": {
+          "label": "远程服务器",
+          "terms": "opencode remote server ssh tailscale pairing password address 远程 服务器 配对",
+          "description": "使用另一台电脑上的 OpenCode 服务器代替本机服务：聊天、同步的会话和登录都会转到它，它的工具作用于那台电脑上的文件。",
+          "connected": "已连接到 OpenCode 服务器",
+          "mode": {
+            "label": "连接方式",
+            "address": "地址和密码",
+            "pairing": "配对链接",
+            "ssh": "SSH"
+          },
+          "name": {
+            "label": "名称",
+            "placeholder": "可选"
+          },
+          "url": {
+            "label": "服务器地址"
+          },
+          "password": {
+            "label": "密码",
+            "description": "在服务器所在的电脑上运行 opencode service get password。"
+          },
+          "link": {
+            "label": "配对链接",
+            "description": "来自 opencode pair，或服务器电脑上的设置 → 配对。只能使用一次。",
+            "paired": "已与 {url} 配对。粘贴新链接可重新配对。"
+          },
+          "ssh": {
+            "label": "SSH 主机",
+            "description": "SSH 可通过密钥或代理访问的主机（user@host、~/.ssh/config 中的别名），或一条 ssh 命令。如果那里没有 OpenCode，会自动安装。"
+          },
+          "connect": {
+            "label": "连接",
+            "description": "保存这些设置并检查服务器是否响应。",
+            "button": "连接"
+          }
         }
       },
       "more": {

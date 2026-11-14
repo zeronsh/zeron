@@ -117,6 +117,9 @@ impl Mirror {
                 tokio::time::sleep(IDLE_RETRY).await;
                 continue;
             }
+            // (The server followed: this computer's service, or the remote
+            // one Settings name. Another named, the feed follows it instead.)
+            let server = self.registry.opencode_settings().remote_server();
             let mut feed = match self.harness.follow_native().await {
                 Ok(feed) => feed,
                 Err(error) => {
@@ -156,6 +159,11 @@ impl Mirror {
                     }
                 }
                 if !self.registry.enabled_set().contains(&HarnessId::Opencode) {
+                    break;
+                }
+                if self.registry.opencode_settings().remote_server() != server {
+                    self.read.clear();
+                    self.summaries.clear();
                     break;
                 }
             }

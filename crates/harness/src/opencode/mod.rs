@@ -104,12 +104,14 @@ pub const OPENCODE_ACCESS_MODES: [AccessMode; 2] = [AccessMode::Supervised, Acce
 mod actions;
 mod client_mcp;
 mod credentials;
+mod remote;
 mod service;
 mod sync;
 
 use actions::TuiAction;
 
 pub use credentials::NativeCredential;
+pub use remote::{Remote as OpencodeRemote, redeem_pairing_link, set_remote};
 pub use sync::{
     CompactionStatus, NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession,
     RevertedFile,
@@ -536,7 +538,13 @@ impl OpencodeHarness {
         // The access mode needs no server of its own there — it is
         // answered here, as the TUI's auto-accept is — and Zeron's MCP
         // servers are offered over client MCP ([`client_mcp`]).
-        if run_env.keys().all(|key| key == zeron_proto::ORIGIN_ENV)
+        // A remote server set in place of the service takes every run that
+        // could have had the service; none falls back to this computer.
+        let shareable = run_env.keys().all(|key| key == zeron_proto::ORIGIN_ENV);
+        if shareable && !self.private_only && remote::current().is_some() {
+            return self.remote_server().await;
+        }
+        if shareable
             && RUNS_ON_SERVICE.load(std::sync::atomic::Ordering::Relaxed)
             && let Some(server) = self.service_server().await
         {
@@ -562,6 +570,15 @@ impl OpencodeHarness {
         if self.private_only {
             return None;
         }
+        if remote::current().is_some() {
+            return match self.remote_server().await {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    tracing::warn!(target: "zeron_harness::opencode", %error, "opencode remote server unreachable");
+                    None
+                }
+            };
+        }
         let exe = self.resolve_executable().ok()?;
         if opencode_version(&exe).await?.major < 2 {
             return None;
@@ -582,6 +599,25 @@ impl OpencodeHarness {
         );
         *cached = Some(info.clone());
         Some(Server::service(&info, client))
+    }
+
+    /// The remote server Settings name in place of this computer's service
+    /// ([`remote`]), connected (over SSH, through a forward kept open).
+    async fn remote_server(&self) -> Result<Server, HarnessError> {
+        let remote = remote::current()
+            .ok_or_else(|| HarnessError::Protocol("no remote OpenCode server is set".into()))?;
+        let local = match self.resolve_executable() {
+            Ok(exe) => opencode_version(&exe).await,
+            Err(_) => None,
+        };
+        let client = http_client();
+        let info = remote::connect(&remote, &client, local.as_ref()).await?;
+        Ok(Server::service(&info, client))
+    }
+
+    /// Whether the remote server Settings name answers: `Err` says why not.
+    pub async fn check_remote(&self) -> Result<(), String> {
+        self.remote_server().await.map(drop).map_err(|e| e.to_string())
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -641,8 +677,10 @@ impl OpencodeHarness {
     /// The catalog generation now, after making sure something bumps it.
     fn generation(&self) -> u64 {
         self.watch_catalog();
+        // (A remote server set or unset is another catalog altogether.)
         self.catalog_generation
             .load(std::sync::atomic::Ordering::Acquire)
+            + remote::generation()
     }
 
     /// Follow the background service for catalog changes (an agent or
