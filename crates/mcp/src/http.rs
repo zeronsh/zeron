@@ -89,14 +89,17 @@ type Body = UnsyncBoxBody<Bytes, Infallible>;
 pub type ToolsFactory = Arc<dyn Fn(&Origin) -> Arc<Tools> + Send + Sync>;
 
 /// One run's access: who it speaks for, its tools (made at its first
-/// call), and its calls in flight (so a 2025 client's
-/// `notifications/cancelled` can stop one). Not connection state: the same
-/// for every request the run's token makes.
+/// call), its calls in flight (so a 2025 client's
+/// `notifications/cancelled` can stop one) and its `subscriptions/listen`
+/// streams. Not connection state: the same for every request the run's
+/// token makes. Its calls and streams end when the run's [`Grant`] drops.
 struct GrantState {
     token: String,
     origin: Origin,
     tools: std::sync::OnceLock<Arc<Tools>>,
     in_flight: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    listens: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
+    next_listen: std::sync::atomic::AtomicU64,
 }
 
 struct Inner {
@@ -130,9 +133,13 @@ impl Drop for Grant {
             return;
         };
         lock(&inner.grants).retain(|grant| !Arc::ptr_eq(grant, &self.state));
-        // Calls still running for a finished run end with it.
+        // Calls still running for a finished run end with it, and so do
+        // its listen streams (each held its tools' engine connection).
         for (_, call) in lock(&self.state.in_flight).drain() {
             call.abort();
+        }
+        for (_, stream) in lock(&self.state.listens).drain() {
+            stream.abort();
         }
     }
 }
@@ -195,6 +202,8 @@ impl McpHttpServer {
             origin,
             tools: std::sync::OnceLock::new(),
             in_flight: Mutex::new(HashMap::new()),
+            listens: Mutex::new(HashMap::new()),
+            next_listen: std::sync::atomic::AtomicU64::new(0),
         });
         lock(&self.inner.grants).push(state.clone());
         Ok(Grant {
@@ -214,6 +223,15 @@ impl McpHttpServer {
     /// How many runs hold a live token (tests, diagnostics).
     pub fn live_grants(&self) -> usize {
         lock(&self.inner.grants).len()
+    }
+
+    /// `subscriptions/listen` streams open now, across runs (tests,
+    /// diagnostics).
+    pub fn listens_open(&self) -> usize {
+        lock(&self.inner.grants)
+            .iter()
+            .map(|grant| lock(&grant.listens).len())
+            .sum()
     }
 }
 
@@ -596,17 +614,27 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
     }
 }
 
-/// Aborts the call it guards when the response stream is dropped: the
-/// client closed it (the 2026 cancel) or the connection went.
-struct AbortOnDrop(tokio::task::AbortHandle);
+/// Ends the listen stream it guards when the response stream is dropped
+/// (the client closed it, or the connection went), and takes it off its
+/// grant's streams.
+struct ListenGuard {
+    stream: tokio::task::AbortHandle,
+    grant: Weak<GrantState>,
+    key: u64,
+}
 
-impl Drop for AbortOnDrop {
+impl Drop for ListenGuard {
     fn drop(&mut self) {
-        self.0.abort();
+        self.stream.abort();
+        if let Some(grant) = self.grant.upgrade() {
+            lock(&grant.listens).remove(&self.key);
+        }
     }
 }
 
-/// [`AbortOnDrop`] for a call: it also leaves its grant's calls in flight.
+/// Aborts the call it guards when the response stream is dropped (the
+/// client closed it: the 2026 cancel; or the connection went), and takes it
+/// off its grant's calls in flight.
 struct CallGuard {
     call: tokio::task::AbortHandle,
     grant: Weak<GrantState>,
@@ -740,6 +768,8 @@ fn listen(inner: &Arc<Inner>, grant: &Arc<GrantState>, id: Value, params: &Value
         .unwrap_or(false);
     let tools = tools_for(inner, grant);
     let (out_tx, out_rx) = mpsc::channel::<Bytes>(16);
+    // Registered before it runs, under the lock a dropping grant drains.
+    let mut listens = lock(&grant.listens);
     let task = tokio::spawn(async move {
         let honoured = if wants_tools {
             json!({ "toolsListChanged": true })
@@ -785,7 +815,17 @@ fn listen(inner: &Arc<Inner>, grant: &Arc<GrantState>, id: Value, params: &Value
             () = forward => {}
         }
     });
-    let mut response = Response::new(sse_body(out_rx, AbortOnDrop(task.abort_handle())));
+    let key = grant
+        .next_listen
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    listens.insert(key, task.abort_handle());
+    drop(listens);
+    let guard = ListenGuard {
+        stream: task.abort_handle(),
+        grant: Arc::downgrade(grant),
+        key,
+    };
+    let mut response = Response::new(sse_body(out_rx, guard));
     sse_headers(&mut response);
     response
 }
