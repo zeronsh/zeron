@@ -18,10 +18,15 @@
 --                                (`{ op = "dump", text }`): a promise of its
 --                                reply
 --   orchestration.dump(text)     the Brain dump takes it: a promise of its id
---   orchestration.answer(id, { option?, text? })  an ask answered (option
---                                1-based); orchestration.answer_ask on the host
+--   orchestration.answer(id, { option?, text? }, ask?)  an ask answered
+--                                (option 1-based); orchestration.answer_ask
+--                                on the host, else the `answerAsk` op in
+--                                plain words (`ask`, or its option's label,
+--                                gives them); fails after TIMEOUT_MS
 --   orchestration.defer(id, until_ms?)  an ask put off (nil: back now);
---                                orchestration.defer_ask on the host
+--                                orchestration.defer_ask on the host, else
+--                                the `deferAsk` op
+--   orchestration.reason(err)    a failure's words
 --   orchestration.dismiss(id)    an ask put away
 --   orchestration.reroute(dump, route, target)  a route moved (or an unsure
 --                                one placed): `target` as a route's
@@ -186,27 +191,210 @@ function M.dump(text: string, attachments: { any }?, chat: string?, picks: { [st
 	return M.op(op)
 end
 
+-- A host action called (`ui.call`): kept apart so the fixtures can stand
+-- in for the host (one without an action, one whose engine refuses).
+function M.host(name: string, arg: any): any
+	return ui.call(name, arg)
+end
+
+-- How long an answer or a defer waits on the engine before it's said to
+-- have failed.
+M.TIMEOUT_MS = 15000
+
+-- What went wrong, in words: a promise's error (a `UiError`'s `message`),
+-- or what a call raised, its script position gone.
+function M.reason(err: any): string
+	if type(err) == "string" then
+		return (string.gsub(err, "^.-:%d+: ", ""))
+	end
+	if type(err) == "table" or type(err) == "userdata" then
+		local ok, message = pcall(function(): any
+			return (err :: any).message
+		end)
+		if ok and type(message) == "string" then
+			return message
+		end
+	end
+	return tostring(err)
+end
+
+-- Whether a call raised because the host has no such action (an app built
+-- before it).
+local function missing(err: any): boolean
+	return string.find(M.reason(err), "no host action named", 1, true) ~= nil
+end
+
+-- A promise of our own (its `:after` as `ui.call`'s), settled once: by the
+-- engine's reply, its error, or the timeout (`{ kind = "timeout" }`).
+local function promise(): any
+	local p: any = { done = false }
+	type Waiter = { on_value: ((any) -> ())?, on_error: ((any) -> ())? }
+	local waiting: { Waiter } = {}
+	local stop: (() -> ())? = nil
+	local function settle(ok: boolean, v: any)
+		if p.done then
+			return
+		end
+		p.done, p.ok, p.value = true, ok, v
+		p.error = if ok then nil else v
+		local cancel = stop
+		stop = nil
+		if cancel then
+			cancel()
+		end
+		for _, w in waiting do
+			local f = if ok then w.on_value else w.on_error
+			if f then
+				f(v)
+			end
+		end
+		table.clear(waiting)
+	end
+	function p.after(self: any, on_value: ((any) -> ())?, on_error: ((any) -> ())?): any
+		if self.done then
+			local f = if self.ok then on_value else on_error
+			if f then
+				f(self.value)
+			end
+		else
+			table.insert(waiting, { on_value = on_value, on_error = on_error })
+		end
+		return self
+	end
+	p.resolve = function(v: any)
+		settle(true, v)
+	end
+	p.reject = function(e: any)
+		settle(false, e)
+	end
+	stop = ui.after(M.TIMEOUT_MS, function()
+		stop = nil
+		settle(false, { kind = "timeout", message = "timeout" })
+	end)
+	return p
+end
+
+-- `call`'s promise, or (nil and) what it raised.
+local function attempt(call: () -> any): (any?, any?)
+	local ok, p = pcall(call)
+	if ok then
+		return p, nil
+	end
+	return nil, p
+end
+
+-- An answer as plain words, for an engine that takes only words: the
+-- option's label, and " — <words>" when there are words too. `about` is
+-- the ask (its options give the label) or the label itself.
+function M.plain_answer(about: any, o: { option: number?, text: string? }): string
+	local label: string? = nil
+	if type(about) == "string" then
+		label = about
+	elseif type(about) == "table" and o.option then
+		local opt = (about.options or {})[o.option]
+		label = opt and opt.label
+	end
+	if label == "" then
+		label = nil
+	end
+	local words = if o.text then string.match(o.text, "^%s*(.-)%s*$") or "" else ""
+	if label and words ~= "" then
+		return `{label} — {words}`
+	end
+	return label or words
+end
+
+-- Whether the engine turned the option down (one from before options: an
+-- unknown field, or an empty answer when only the option was sent).
+local function refuses_option(err: any): boolean
+	local r = string.lower(M.reason(err))
+	return string.find(r, "option", 1, true) ~= nil or string.find(r, "empty", 1, true) ~= nil
+end
+
 -- An ask answered: an option of it (1-based, as Luau counts), words of
--- the person's, or both (one of them, at least). Needs you, a board card
--- and the decision overlay all answer through here. (A plain string is
--- taken as the words.) A promise of the engine's `{ id }`.
-function M.answer(ask_id: string, opts: { option: number?, text: string? } | string): any
+-- the person's, or both (one of them, at least). Needs you, a board card,
+-- the decision overlay and the floating composer all answer through here.
+-- (A plain string is taken as the words.) `about`, the ask or its
+-- option's label, gives the plain words an older engine takes instead. A
+-- promise of the engine's `{ id }`, rejected with what went wrong (or
+-- `{ kind = "timeout" }` past TIMEOUT_MS).
+--
+-- An app without `orchestration.answer_ask` sends the `answerAsk` op, the
+-- answer as plain words; an engine that refuses the option (or says the
+-- answer is empty) is asked once more, with the plain words.
+function M.answer(ask_id: string, opts: { option: number?, text: string? } | string, about: any?): any
 	local o: { option: number?, text: string? } = if type(opts) == "string" then { text = opts } else opts
+	local plain = M.plain_answer(about, o)
+	local out = promise()
+	local function by_op(err: any)
+		if plain == "" then
+			out.reject(err)
+			return
+		end
+		local p, raised = attempt(function(): any
+			return M.op({ op = "answerAsk", id = ask_id, answer = plain })
+		end)
+		if not p then
+			out.reject(raised)
+			return
+		end
+		p:after(out.resolve, out.reject)
+	end
+	local function by_host(call: { [string]: any }, again: boolean)
+		local p, raised = attempt(function(): any
+			return M.host("orchestration.answer_ask", call)
+		end)
+		if not p then
+			if missing(raised) then
+				by_op(raised)
+			else
+				out.reject(raised)
+			end
+			return
+		end
+		p:after(out.resolve, function(e: any)
+			if again and call.option and plain ~= "" and refuses_option(e) then
+				by_host({ id = ask_id, text = plain }, false)
+			else
+				out.reject(e)
+			end
+		end)
+	end
 	local call: { [string]: any } = { id = ask_id }
 	call.option = o.option
 	if o.text and o.text ~= "" then
 		call.text = o.text
 	end
-	return ui.call("orchestration.answer_ask", call)
+	by_host(call, true)
+	return out
 end
 
 -- An ask put off until `until_ms` (Unix milliseconds): out of Needs you,
 -- "Deferred" on its card, back (and said again) when the time comes. No
--- time: back now. A promise of the engine's `{ id }`.
+-- time: back now. A promise of the engine's `{ id }`, rejected as
+-- `answer`'s is. An app without `orchestration.defer_ask` sends the
+-- `deferAsk` op; an engine without that op says so, and that's the error.
 function M.defer(ask_id: string, until_ms: number?): any
+	local secs = if until_ms then math.floor(until_ms / 1000) else nil
+	local out = promise()
 	local call: { [string]: any } = { id = ask_id }
-	call["until"] = if until_ms then math.floor(until_ms / 1000) else nil
-	return ui.call("orchestration.defer_ask", call)
+	call["until"] = secs
+	local p, raised = attempt(function(): any
+		return M.host("orchestration.defer_ask", call)
+	end)
+	if not p and missing(raised) then
+		local op: { [string]: any } = { op = "deferAsk", id = ask_id }
+		op["until"] = if secs then os.date("!%Y-%m-%dT%H:%M:%SZ", secs) else nil
+		p, raised = attempt(function(): any
+			return M.op(op)
+		end)
+	end
+	if not p then
+		out.reject(raised)
+	else
+		p:after(out.resolve, out.reject)
+	end
+	return out
 end
 
 function M.dismiss(ask_id: string): any
