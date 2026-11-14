@@ -238,6 +238,35 @@ function M.highlight(line: string, state: number): ({ { any } }, number)
 	return runs(marks), 0
 end
 
+-- How many of the lines in the first `upto` bytes of `text` start with
+-- `fence` after blanks (`%s`): found with a plain search, which skips the
+-- lines between them rather than matching each.
+local function fences(text: string, upto: number, fence: string): number
+	local count, from = 0, 1
+	while true do
+		local s = string.find(text, fence, from, true)
+		if s == nil or s + #fence - 1 > upto then
+			return count
+		end
+		local i = s - 1
+		while i >= 1 do
+			local c = string.byte(text, i)
+			if c == 10 or (c ~= 32 and (c < 9 or c > 13)) then
+				break
+			end
+			i -= 1
+		end
+		if i < 1 or string.byte(text, i) == 10 then
+			count += 1
+		end
+		local nl = string.find(text, "\n", s + #fence, true)
+		if nl == nil then
+			return count
+		end
+		from = nl + 1
+	end
+end
+
 -- What a line break does at the selection `a`..`b` (bytes from 0) in a
 -- list item: `(from, to, text)` to put in place of `from`..`to`, or nil
 -- for a plain break.
@@ -245,32 +274,31 @@ function M.newline(text: string, a: number, b: number): (number?, number?, strin
 	if a ~= b then
 		return nil, nil, nil
 	end
-	-- The caret's line, in bytes from 0.
+	-- The caret's line, in bytes from 0: its start looked for back from the
+	-- caret a window at a time, not from the draft's top (a break in a
+	-- draft of 30,000 lines walked them all, then matched them all for
+	-- fences, 20 ms of an Enter).
 	local start = 0
-	local i = 0
-	while true do
-		local nl = string.find(text, "\n", i + 1, true)
-		if not nl or nl > a then
+	local hi = a
+	while hi > 0 do
+		local lo = math.max(1, hi - 1023)
+		local after = string.match(string.sub(text, lo, hi), "^.*\n()")
+		if after then
+			start = lo + after - 2
 			break
 		end
-		start = nl
-		i = nl
+		hi = lo - 1
 	end
 	local stop = string.find(text, "\n", a + 1, true)
 	local line_end = if stop then stop - 1 else #text
 	local line = string.sub(text, start + 1, line_end)
-	-- Not inside a fenced code block: count the fences above.
-	local fences = 0
-	for fence in string.gmatch(string.sub(text, 1, start), "[^\n]*") do
-		if string.match(fence, "^%s*```") or string.match(fence, "^%s*~~~") then
-			fences += 1
-		end
-	end
-	if fences % 2 == 1 then
-		return nil, nil, nil
-	end
 	local p = prefix(line)
 	if not p or a < start + p.stop then
+		return nil, nil, nil
+	end
+	-- Not inside a fenced code block: count the fences above (lines
+	-- starting, after blanks, with ``` or ~~~: never both).
+	if (fences(text, start, "```") + fences(text, start, "~~~")) % 2 == 1 then
 		return nil, nil, nil
 	end
 	if string.match(string.sub(line, p.stop + 1), "^%s*$") then
