@@ -353,6 +353,12 @@ struct Inner {
 /// a reply and writing the next message in one sitting, so a conversation
 /// in progress stays warm, while a chat left alone gives its memory back
 /// soon.
+///
+/// Two guards don't trust the agent's own report of its work: the window
+/// applies only to a CLI known to make that report (Claude's version gate,
+/// in its driver), and before stopping one the engine looks at its
+/// process's live children — anything but its configured MCP servers holds
+/// it ([`zeron_harness::process::unexpected_descendants`]).
 pub const AGENT_IDLE_STOP: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// The idle window of drivers not stopped after [`AGENT_IDLE_STOP`].
@@ -4393,6 +4399,21 @@ async fn drive_run(
         .get()
         .map(crate::plugins::Plugins::native_mcp_servers)
         .unwrap_or_default();
+    // The MCP servers the agent starts from this run's config: the only
+    // children it may hold when stopped idle (see the reaper).
+    let mut known_servers: Vec<zeron_harness::process::KnownServer> = request
+        .mcp
+        .iter()
+        .chain(&request.extra_mcp)
+        .map(|server| (server.command.clone(), server.args.clone()))
+        .collect();
+    // And those it starts from its user's own MCP config, read now (once,
+    // off the runtime's threads) and joined in when the reaper first looks.
+    let mut configured_servers = Some({
+        let harness = harness.clone();
+        let request = request.clone();
+        tokio::task::spawn_blocking(move || harness.configured_mcp_servers(&request))
+    });
     // A revived turn the resumed session already holds: the provider gets
     // the continuation, while the transcript, preview and title keep the
     // user's own message (and the retries carry the revival on).
@@ -4830,6 +4851,13 @@ async fn drive_run(
     // reaper off, and the window restarts at hang-up. Nothing pending is
     // ever stopped (see the reaper arm). `ZERON_SESSION_IDLE_MS` overrides
     // every window (tests, the measurement rig).
+    // (May ask the CLI its version: off the runtime's threads.)
+    let stops_when_idle = {
+        let harness = harness.clone();
+        tokio::task::spawn_blocking(move || harness.stops_when_idle())
+            .await
+            .unwrap_or(false)
+    };
     let idle_override = std::env::var("ZERON_SESSION_IDLE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -4837,7 +4865,7 @@ async fn drive_run(
     let session_idle = idle_override.unwrap_or(
         if zeron_proto::voice::is_orchestrator_chat(&chat_id) {
             std::time::Duration::from_secs(5 * 60)
-        } else if harness.stops_when_idle() {
+        } else if stops_when_idle {
             AGENT_IDLE_STOP
         } else {
             SESSION_IDLE
@@ -5108,6 +5136,30 @@ async fn drive_run(
                         tracing::info!(chat = %chat_id, why, "idle reaper deferred");
                         reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
                         continue;
+                    }
+                    // Belt and braces, trusting no report of the agent's:
+                    // a child of its process that isn't one of its MCP
+                    // servers (a background shell, a dev server) holds it.
+                    if let Some(pid) = turn.agent_pid() {
+                        // (Unreadable: nothing added, and its servers hold.)
+                        if let Some(reading) = configured_servers.take() {
+                            known_servers.extend(reading.await.unwrap_or_default());
+                        }
+                        let known = known_servers.clone();
+                        let lingering = tokio::task::spawn_blocking(move || {
+                            zeron_harness::process::unexpected_descendants(pid, &known)
+                        })
+                        .await
+                        .unwrap_or_else(|_| vec!["(the check failed)".to_owned()]);
+                        if !lingering.is_empty() {
+                            tracing::info!(
+                                chat = %chat_id,
+                                ?lingering,
+                                "idle reaper deferred: the agent's process runs children it didn't report"
+                            );
+                            reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
+                            continue;
+                        }
                     }
                     tracing::info!(
                         chat = %chat_id,
