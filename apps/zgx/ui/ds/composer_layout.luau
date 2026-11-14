@@ -59,7 +59,7 @@ end
 -- wraps to. Measuring a long draft walks every line at each keystroke; this
 -- looks for at most a dozen newlines. Nil: the draft must be measured.
 function M.estimate(text: string, line_height: number): Sample?
-	local need = math.ceil((TEXT_MAX - TEXT_TOP - TEXT_BOTTOM) / math.max(1, line_height))
+	local need = M.capped_lines(line_height)
 	local lines, at = 1, 1
 	while lines < need do
 		local newline = string.find(text, "\n", at, true)
@@ -69,7 +69,22 @@ function M.estimate(text: string, line_height: number): Sample?
 		lines += 1
 		at = newline + 1
 	end
-	return { unwrapped_width = 0, wrapped_height = lines * line_height, line_height = line_height }
+	return M.estimate_lines(lines, line_height)
+end
+
+-- How many hard lines fill the text box to its cap at `line_height`.
+function M.capped_lines(line_height: number): number
+	return math.ceil((TEXT_MAX - TEXT_TOP - TEXT_BOTTOM) / math.max(1, line_height))
+end
+
+-- `estimate` for a draft of `lines` hard lines (counted up to
+-- `capped_lines`, where it's held: the draft itself never read for it).
+function M.estimate_lines(lines: number, line_height: number): Sample?
+	local need = M.capped_lines(line_height)
+	if lines < need then
+		return nil
+	end
+	return { unwrapped_width = 0, wrapped_height = need * line_height, line_height = line_height }
 end
 
 -- Whether two targets lay the composer out alike: every field a view binds

@@ -68,6 +68,26 @@ test("commands and skills replace to their end too", function()
 	expect(mentions.token("costs $12", 7)).to_be_nil()
 end)
 
+test("a token on a draft's later line, and none in a fence, however long the draft", function()
+	local head = string.rep("a line of the draft before it\n", 3000)
+	local text = head .. "Compare @queue.rs with"
+	local t = mentions.token(text, #head + 12)
+	assert(t, "no token at the caret")
+	expect(t.query).to_be("que")
+	expect(t.from).to_be(#head + 8)
+	expect(t.to).to_be(#head + 17)
+	expect(picked(text, #head + 12, MESSAGE_QUEUE)).to_be(head .. "Compare @message_queue.rs with")
+	-- A fence opened (after blanks): nothing in it; closed, a token again.
+	local fence = head .. "  ```lua\n@queue"
+	expect(mentions.token(fence, #fence)).to_be_nil()
+	local closed = fence .. "\nnot a ``` fence\n```\n/com"
+	local c = mentions.token(closed, #closed)
+	assert(c, "no command after the fence")
+	expect(c.trigger).to_be("/")
+	expect(c.query).to_be("com")
+	expect(c.from).to_be(#closed - 4)
+end)
+
 test("a file is named by the shortest end of its path that is its own", function()
 	expect(mentions.short(FILES, FILES[1])).to_be("queue.rs")
 	expect(mentions.short(FILES, FILES[2])).to_be("message_queue.rs")

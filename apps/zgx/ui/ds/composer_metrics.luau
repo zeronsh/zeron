@@ -12,7 +12,8 @@ export type Sample = {
 }
 type Request = {
 	width: number, editor: Element?, source: Sample?, estimate: Size?, revision: number,
-	text: string, theme: string, mount: number,
+	-- Which edit of the draft (`edits`), not the draft itself.
+	edit: number, theme: string, mount: number,
 }
 export type Result = {
 	-- A complete last sample, never one axis from a different request.
@@ -36,7 +37,7 @@ export type Props = {
 	-- the exact one can't change its layout (a long draft past the cap),
 	-- with the line height last measured; nil to measure. Measuring walks
 	-- every line of the draft, so a long one paid that at every keystroke.
-	estimate: ((text: string, line_height: number) -> Size?)?,
+	estimate: ((line_height: number) -> Size?)?,
 }
 
 function M.use(props: Props)
@@ -71,10 +72,19 @@ function M.use(props: Props)
 		local s = size:get()
 		return s == nil or s.unwrapped_width >= math.max(0, props.width()) - 1
 	end)
+	-- Each edit of the draft, counted: what a request follows edits by.
+	-- The draft itself was copied into the request (and out again at each
+	-- read of it): 2 ms of a keystroke in a draft of 30,000 lines.
+	local edit_count = 0
+	local edits = ui.computed(function(): number
+		props.value:len()
+		edit_count += 1
+		return edit_count
+	end)
 	local last: Request? = nil
 	local request = ui.computed(function(): Request
 		-- Track edits even when the measured dimensions stay equal.
-		local text = props.value:get()
+		local edit = edits:get()
 		local width = math.max(0, if follows:get() then props.width() else props.width(true))
 		local theme = ui.theme.current:get()
 		local mount = mounted:get()
@@ -82,7 +92,7 @@ function M.use(props: Props)
 		local source, estimate = nil, nil
 		if el and width > 0 then
 			if props.estimate and exact and exact.mount == mount.revision and exact.theme == theme then
-				estimate = props.estimate(text, exact.line_height)
+				estimate = props.estimate(exact.line_height)
 			end
 			-- Reading follows the editor's settled content/IME/style revision.
 			if estimate == nil then
@@ -100,11 +110,11 @@ function M.use(props: Props)
 			return was
 		end
 		revision += 1
-		local now: Request = { width = width, editor = el, source = source, estimate = estimate, revision = revision, text = text, theme = theme, mount = mount.revision }
+		local now: Request = { width = width, editor = el, source = source, estimate = estimate, revision = revision, edit = edit, theme = theme, mount = mount.revision }
 		last = now
 		return now
 	end)
-	local settled: { mount: number, text: string, theme: string, revision: number, width: number }? = nil
+	local settled: { mount: number, edit: number, theme: string, revision: number, width: number }? = nil
 	local function publish(wanted: Request, source: Size, width: number)
 		ui.batch(function()
 			-- (An equal size notifies nobody: layout wakes only for a new one.)
@@ -123,7 +133,7 @@ function M.use(props: Props)
 		end)
 	end
 	local function publish_exact(wanted: Request, source: Sample)
-		settled = { mount = wanted.mount, text = wanted.text, theme = wanted.theme,
+		settled = { mount = wanted.mount, edit = wanted.edit, theme = wanted.theme,
 			revision = source.revision, width = wanted.width }
 		exact = { mount = wanted.mount, theme = wanted.theme, line_height = source.line_height }
 		publish(wanted, source, source.width)
@@ -149,7 +159,7 @@ function M.use(props: Props)
 		-- round-trip for every frame of a page resize. Content, IME, style,
 		-- editor replacement and initial requests still need acknowledgement.
 		if settled and settled.width ~= wanted.width and settled.mount == wanted.mount
-			and settled.text == wanted.text and settled.theme == wanted.theme
+			and settled.edit == wanted.edit and settled.theme == wanted.theme
 			and settled.revision == wanted.source.revision then
 			publish_exact(wanted, wanted.source)
 			return
