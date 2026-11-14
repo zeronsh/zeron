@@ -323,6 +323,36 @@ mod proc_table {
         )
     }
 
+    /// The process's name as the kernel keeps it (its executable's file
+    /// name, at most 15 bytes): never its arguments.
+    #[cfg(target_os = "linux")]
+    pub(super) fn name(pid: i32) -> Option<String> {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        let comm = comm.trim_end_matches('\n');
+        (!comm.is_empty()).then(|| comm.to_owned())
+    }
+
+    /// The process's name as the kernel keeps it (its executable's file
+    /// name, at most 32 bytes): never its arguments.
+    #[cfg(target_os = "macos")]
+    pub(super) fn name(pid: i32) -> Option<String> {
+        let info = bsd_info(pid)?;
+        let field = |raw: &[libc::c_char]| {
+            let bytes: Vec<u8> = raw
+                .iter()
+                .take_while(|byte| **byte != 0)
+                .map(|byte| *byte as u8)
+                .collect();
+            (!bytes.is_empty()).then(|| String::from_utf8_lossy(&bytes).into_owned())
+        };
+        field(&info.pbi_name).or_else(|| field(&info.pbi_comm))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn name(_pid: i32) -> Option<String> {
+        None
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn zombie(pid: i32) -> bool {
         // SZOMB (sys/proc.h).
@@ -420,7 +450,8 @@ pub type KnownServer = (String, Vec<String>);
 
 /// The live descendants of `root` (an agent CLI) that aren't MCP servers its
 /// run was configured with (`known`, and whatever those start), each as
-/// `"<pid> <argv>"`. Independent of what the agent reports about its own
+/// `"<pid> <name>"`: the process's name only, never its arguments (they
+/// can hold anything, and this is logged). Independent of what the agent reports about its own
 /// background work: a shell or dev server it started shows up here whether
 /// or not the agent listed it. Zombies don't count. Blocking: one
 /// process-table read and an argv read per child.
@@ -471,15 +502,13 @@ pub fn unexpected_descendants(root: u32, known: &[KnownServer]) -> Vec<String> {
             {
                 continue;
             }
-            let mut shown = argv.join(" ");
-            if shown.len() > 160 {
-                let mut end = 160;
-                while !shown.is_char_boundary(end) {
-                    end -= 1;
-                }
-                shown.truncate(end);
-            }
-            found.push(format!("{} {shown}", entry.pid));
+            let name = proc_table::name(entry.pid)
+                .or_else(|| {
+                    let program = std::path::Path::new(argv.first()?).file_name()?;
+                    Some(program.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "?".to_owned());
+            found.push(format!("{} {name}", entry.pid));
         }
         found
     }
@@ -802,8 +831,17 @@ mod unexpected_descendants_tests {
         let agent = agent();
         let mcp: Vec<KnownServer> = vec![("sleep".into(), vec!["3602".into()])];
         let found = unexpected_descendants(agent.id(), &mcp);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].ends_with("sleep 3601"), "{found:?}");
+        let unconfigured = proc_table::read()
+            .into_iter()
+            .find(|entry| {
+                entry.ppid == agent.id() as i32
+                    && proc_table::argv(entry.pid)
+                        .is_some_and(|argv| argv.ends_with(&["3601".into()]))
+            })
+            .unwrap()
+            .pid;
+        // Its name only: never its arguments.
+        assert_eq!(found, vec![format!("{unconfigured} sleep")]);
         // Both configured: nothing unexpected.
         let both: Vec<KnownServer> = vec![
             ("/bin/sleep".into(), vec!["3601".into()]),
