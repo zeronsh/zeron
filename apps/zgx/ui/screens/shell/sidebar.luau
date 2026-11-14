@@ -34,6 +34,7 @@ local ds_session_row = require("@ds/session_row")
 local activity = require("@app/screens/shell/activity")
 local orchestration = require("@account/orchestration")
 local orch_data = require("@ds/orch_data")
+local orch_decide = require("@ds/orch_decide")
 local Name = require("@ds/orch_name")
 local orch_actions = require("@app/screens/orchestrator/actions")
 local ChatMenu = require("@app/screens/shell/chat_menu")
@@ -1590,9 +1591,10 @@ end)
 M.orchestrator_rows = orch_rows
 -- Show → Orchestrator chats (fixtures put it away for their pictures).
 M.show_orchestrator_chats = shared.details.orchestrator_chats
--- What needs you, everywhere: open asks and chats awaiting input.
+-- What needs you, everywhere: open asks and chats awaiting input (not an
+-- ask answered and on its way: ds/orch_decide).
 M.needs_you = ui.computed(function(): number
-	return #orch_data.needs(orchestration.now:get(), sessions.now:get())
+	return #orch_data.waiting_for_you(orchestration.now:get(), sessions.now:get(), nil, orch_decide.counted).needs
 end)
 
 -- An orchestrator's row menu: open it, pause or resume it, its settings,

@@ -50,37 +50,124 @@ test("a waiting chat with no ask of its own has a row to open it", function()
 	end
 end)
 
-test("an option answers its ask after its Undo, and the row slides out", function()
+local function head(app: any): string
+	return app:tree("#control-widget-needs >> .orch-block-head")
+end
+
+test("an option answers its ask after its Undo; once taken it says so, then leaves the list and the counts", function()
 	local app = open()
+	expect(head(app)).to_contain('"1 urgent"')
 	app:click('#control-widget-needs >> role:button "Approve"')
 	app:frames(4)
-	-- Answered at once, Undo for a moment; nothing sent yet.
-	expect(app:has('#control-widget-needs >> .orch-answered >> "Approve"')).to_be(true)
+	-- On its way, Undo for a moment; nothing sent yet, and "Answered" not
+	-- said before the engine has it. Counted out already.
+	expect(app:has('#control-widget-needs >> .orch-sending >> "Approve"')).to_be(true)
 	expect(app:has('#control-widget-needs >> role:button "Undo"')).to_be(true)
+	expect(app:has('#control-widget-needs >> "Answered"')).to_be(false)
+	expect(head(app)).never.to_contain("urgent")
 	expect(calls(app)).never.to_contain("answer:")
-	-- Past it: sent once, its option 1-based, and the row goes.
+	-- Past it: sent once, its option 1-based; the engine takes it.
 	expect(app:wait('#control-widget-needs >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
-	app:frames(4)
+	expect(app:wait('#control-widget-needs >> .orch-answered >> "Approve"', { timeout_ms = 2000 })).to_be(true)
 	expect(calls(app)).to_contain("answer:ak-2:1:")
-	expect(app:wait('#control-widget-needs >> "Approve"', { gone = true, timeout_ms = 4000 })).to_be(true)
+	-- (Still said while the engine's state, answered, has come.)
+	app:frames(40)
+	expect(app:has('#control-widget-needs >> .orch-answered >> "Answered"')).to_be(true)
+	-- Then out of Needs you, and in Recent answers.
+	expect(app:wait('#control-widget-needs >> .orch-need >> "Approve"', { gone = true, timeout_ms = 5000 })).to_be(true)
+	app:frames(10)
 	expect(app:count("#control-widget-needs >> .orch-need")).to_be(1)
+	expect(head(app)).never.to_contain("urgent")
+	app:click('#control-widget-needs >> role:button "Recent answers"')
+	app:frames(6)
+	expect(app:has('#control-widget-needs >> .orch-recent-row >> "Approve"')).to_be(true)
 	local n = 0
 	for _ in calls(app):gmatch("answer:") do
 		n += 1
 	end
 	expect(n).to_be(1)
+	expect(app:error()).to_be_nil()
 end)
 
-test("Undo takes a pick back: nothing is sent and the chips come back", function()
+test("Undo takes a pick back: nothing is sent, and the chips and counts come back", function()
 	local app = open()
-	app:click('#control-widget-needs >> role:button "Not tonight"')
+	app:click('#control-widget-needs >> role:button "Approve"')
 	app:frames(4)
+	expect(head(app)).never.to_contain("urgent")
 	app:click('#control-widget-needs >> role:button "Undo"')
 	app:frames(4)
 	expect(app:has('#control-widget-needs >> role:button "Approve"')).to_be(true)
+	expect(head(app)).to_contain('"1 urgent"')
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
 	app:frames(30)
 	app:wait('#control-widget-needs >> "never there"', { timeout_ms = 6000 })
 	expect(calls(app)).never.to_contain("answer:")
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
+end)
+
+test("an answer the engine turns down comes back with why, and Retry sends it again", function()
+	local app = open()
+	app:command("fixture.answers_refuse")
+	app:click('#control-widget-needs >> role:button "Approve"')
+	expect(app:wait('#control-widget-needs >> .orch-answer-error', { timeout_ms = 8000 })).to_be(true)
+	app:frames(4)
+	-- Never said answered; the chips back, why under them, counted again.
+	expect(app:has('#control-widget-needs >> "Answered"')).to_be(false)
+	expect(app:has('#control-widget-needs >> role:button "Approve"')).to_be(true)
+	expect(app:has('#control-widget-needs >> "Couldn\'t send your answer: That ask was already answered or dismissed"')).to_be(true)
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
+	expect(head(app)).to_contain('"1 urgent"')
+	expect(calls(app)).to_contain("answer:ak-2:1:")
+	-- Retry: sent again at once; taken this time.
+	app:command("fixture.answers_ok")
+	app:click('#control-widget-needs >> role:button "Retry"')
+	app:frames(4)
+	local n = 0
+	for _ in calls(app):gmatch("answer:ak%-2:1:") do
+		n += 1
+	end
+	expect(n).to_be(2)
+	expect(app:wait('#control-widget-needs >> .orch-answered >> "Approve"', { timeout_ms = 2000 })).to_be(true)
+	expect(app:has('#control-widget-needs >> .orch-answer-error')).to_be(false)
+	expect(app:wait('#control-widget-needs >> .orch-need >> "Approve"', { gone = true, timeout_ms = 5000 })).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("an app without the answer action sends the answer's plain words through the op", function()
+	local app = open()
+	app:command("fixture.answers_no_host")
+	app:click('#control-widget-needs >> role:button "Approve"')
+	expect(app:wait('#control-widget-needs >> .orch-answered >> "Approve"', { timeout_ms = 8000 })).to_be(true)
+	expect(calls(app)).to_contain("answer-op:ak-2:Approve")
+	expect(calls(app)).never.to_contain("answer:")
+	expect(app:has('#control-widget-needs >> .orch-answer-error')).to_be(false)
+	expect(app:wait('#control-widget-needs >> .orch-need >> "Approve"', { gone = true, timeout_ms = 5000 })).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("an engine from before options is asked again with the plain words", function()
+	local app = open()
+	app:command("fixture.answers_old_engine")
+	app:click('#control-widget-needs >> role:button "Approve"')
+	expect(app:wait('#control-widget-needs >> .orch-answered >> "Approve"', { timeout_ms = 8000 })).to_be(true)
+	-- The option first, refused as empty; then its label, as words.
+	expect(calls(app)).to_contain("answer:ak-2:1:,answer:ak-2::Approve")
+	expect(app:has('#control-widget-needs >> .orch-answer-error')).to_be(false)
+end)
+
+test("waiting for you leaves out an ask answered here", function()
+	local data = require("@ds/orch_data")
+	local now = {
+		asks = {
+			{ id = "a1", from_chat = "c1", kind = "approval", question = "Go?", options = {}, urgent = true, state = "open", created = 10 },
+			{ id = "a2", from_chat = "c2", kind = "question", question = "?", options = {}, urgent = false, state = "open", created = 20 },
+		},
+	}
+	local w = data.waiting_for_you(now, {}, nil, function(id: string): boolean
+		return id ~= "a1"
+	end)
+	expect(w.count).to_be(1)
+	expect(w.urgent).to_be(0)
 end)
 
 test("an ask is dismissed from its row", function()

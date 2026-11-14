@@ -16,6 +16,7 @@ local data = require("@ds/orch_data")
 local OrchBoard = require("@ds/orch_board")
 local OrchCrew = require("@ds/orch_crew")
 local Asks = require("@ds/orch_asks")
+local decide = require("@ds/orch_decide")
 local Links = require("@ds/links")
 local Block = require("@ds/orch_block")
 local Counter = require("@ds/orch_counter")
@@ -128,8 +129,15 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 		end
 		return n
 	end)
+	-- (Not an ask answered and on its way: ds/orch_decide.)
 	local needs = ui.computed(function(): number
-		return #needs_of(props.of())
+		local n = 0
+		for _, need in needs_of(props.of()) do
+			if not need.ask or decide.counted(need.ask.id) then
+				n += 1
+			end
+		end
+		return n
 	end)
 	local function own_chat(): any
 		local id = props.of()
@@ -345,10 +353,9 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					name_of = function(id: string?): string?
 						return data.name_of(orchestration.now:get(), chats:get(), id)
 					end,
-					on_answer = function(ask: any, choice: any)
-						orchestration.answer(ask.id, choice):after(function() end, function()
-							ds.toast.show { title = locale.s("orch.page.answer_failed"), tone = "danger" }
-						end)
+					-- (A failure is said on the ask, with Retry: ds/orch_decide.)
+					on_answer = function(ask: any, choice: any): any
+						return orchestration.answer(ask.id, choice, ask)
 					end,
 					on_dismiss = function(ask: any)
 						orchestration.dismiss(ask.id)

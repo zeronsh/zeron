@@ -102,12 +102,17 @@ return function()
 	end
 
 	local stub = orchestration :: any
-	-- An ask answered (account/orchestration's `answer`, its option
-	-- 1-based), noted `answer:<id>:<option>:<text>`; answered a beat later.
-	stub.answer = function(id: string, opts: any): any
-		local o = if type(opts) == "string" then { text = opts } else opts
-		note(`answer:{id}:{o.option or ""}:{o.text or ""}`)
-		local label = o.text
+	local function rejected(message: string): any
+		return {
+			after = function(_self: any, _done: any, failed: ((any) -> ())?)
+				if failed then
+					failed({ kind = "action", message = message })
+				end
+			end,
+		}
+	end
+	-- An ask the engine marked answered, a beat later (as its state comes).
+	local function mark_answered(id: string, answer: string?)
 		ui.after(400, function()
 			republish(function(n)
 				local asks = {}
@@ -115,31 +120,80 @@ return function()
 					if a.id == id then
 						a = table.clone(a)
 						a.state = "answered"
-						a.answer = label or ((a.options or {})[o.option or 0] or {}).label
+						a.answer = answer
+						a.answered = os.time()
 					end
 					table.insert(asks, a)
 				end
 				n.asks = asks
 			end)
 		end)
-		return settled({ id = id })
 	end
-	-- An ask put off, noted `defer:<id>:<until in seconds>`.
-	stub.defer = function(id: string, until_ms: number?): any
-		local secs = if until_ms then math.floor(until_ms / 1000) else nil
-		note(`defer:{id}:{secs or ""}`)
-		republish(function(n)
-			local asks = {}
-			for _, a in n.asks do
-				if a.id == id then
-					a = table.clone(a)
-					a.deferred_until = secs
-				end
-				table.insert(asks, a)
+	-- Which host and engine answer (`answer_mode`, or the
+	-- `fixture.answers_*` commands): "ok", this build's; "refuse", an
+	-- engine that turns answers and defers down; "no_host", an app from
+	-- before `orchestration.answer_ask`/`defer_ask` on an engine from before
+	-- options and `deferAsk` (the ops alone); "old_engine", this app on that
+	-- engine (it says an option with no words is empty).
+	local mode = ui.state("answer_mode", "ok")
+	-- The host's calls (account/orchestration's `host`): `answer_ask`
+	-- noted `answer:<id>:<option>:<text>`, `defer_ask`
+	-- `defer:<id>:<until in seconds>`, each as the mode has it.
+	stub.host = function(name: string, args: any): any
+		local m = mode:peek()
+		if m == "no_host" then
+			error(`no host action named \`{name}\``)
+		end
+		if name == "orchestration.answer_ask" then
+			note(`answer:{args.id}:{args.option or ""}:{args.text or ""}`)
+			if m == "refuse" then
+				return rejected("That ask was already answered or dismissed")
 			end
-			n.asks = asks
-		end)
-		return settled({ id = id })
+			if m == "old_engine" then
+				local text = if args.text then string.match(args.text, "^%s*(.-)%s*$") else ""
+				if text == "" then
+					return rejected("An answer can't be empty")
+				end
+				mark_answered(args.id, text)
+				return settled({ id = args.id })
+			end
+			local label = args.text
+			if not label then
+				for _, a in orchestration.now:peek().asks or {} do
+					if a.id == args.id then
+						label = ((a.options or {})[args.option or 0] or {}).label
+					end
+				end
+			end
+			mark_answered(args.id, label)
+			return settled({ id = args.id })
+		elseif name == "orchestration.defer_ask" then
+			local secs = args["until"]
+			note(`defer:{args.id}:{secs or ""}`)
+			if m == "refuse" then
+				return rejected("That ask was already answered or dismissed")
+			elseif m == "old_engine" then
+				return rejected("unknown variant `deferAsk`")
+			end
+			republish(function(n)
+				local asks = {}
+				for _, a in n.asks do
+					if a.id == args.id then
+						a = table.clone(a)
+						a.deferred_until = secs
+					end
+					table.insert(asks, a)
+				end
+				n.asks = asks
+			end)
+			return settled({ id = args.id })
+		end
+		return settled(nil)
+	end
+	for _, m in { "ok", "refuse", "no_host", "old_engine" } do
+		ui.command { id = `fixture.answers_{m}`, title = `Fixture: answers go to the {m} host`, run = function()
+			mode:set(m)
+		end }
 	end
 	-- A thread opened, noted `open:<chat>:<message>` (then opened).
 	local route = require("@app/screens/shell/route") :: any
@@ -198,21 +252,19 @@ return function()
 			end)
 			return settled({ id = id })
 		elseif kind == "answerAsk" then
-			note(`answer:{op.id}:{op.answer}`)
-			ui.after(400, function()
-				republish(function(n)
-					local asks = {}
-					for _, a in n.asks do
-						if a.id == op.id then
-							a = table.clone(a)
-							a.state = "answered"
-							a.answer = op.answer
-						end
-						table.insert(asks, a)
-					end
-					n.asks = asks
-				end)
-			end)
+			-- (The op an older app sends, its answer plain words.)
+			note(`answer-op:{op.id}:{op.answer}`)
+			if mode:peek() == "refuse" then
+				return rejected("That ask was already answered or dismissed")
+			end
+			mark_answered(op.id, op.answer)
+			return settled(nil)
+		elseif kind == "deferAsk" then
+			note(`defer-op:{op.id}:{op["until"] or ""}`)
+			-- (An engine from before it.)
+			if mode:peek() == "no_host" or mode:peek() == "old_engine" then
+				return rejected("unknown variant `deferAsk`, expected one of `createOrchestrator`, `answerAsk`, `dismissAsk`")
+			end
 			return settled(nil)
 		elseif kind == "dismissAsk" then
 			note(`dismiss:{op.id}`)
@@ -532,6 +584,30 @@ return function()
 	-- A thread asking the person to pick between two variants, with
 	-- pictures, scores, a recommendation, context and links; its card on
 	-- the board (the decision UI's whole case).
+	-- The engine's state again, every ask and session a fresh copy (as its
+	-- watch sends the whole of it), nothing changed.
+	ui.command { id = "fixture.republish", title = "Fixture: the engine publishes its state again", run = function()
+		republish(function(n)
+			local asks = {}
+			for _, a in n.asks or {} do
+				table.insert(asks, table.clone(a))
+			end
+			n.asks = asks
+			n.items = table.clone(n.items or {})
+		end)
+		sessions.now:set(table.clone(sessions.now:peek()))
+	end }
+	-- The engine's state for a moment without its asks (an engine coming
+	-- up again publishes before it has read them back), then whole again.
+	ui.command { id = "fixture.asks_blip", title = "Fixture: the asks gone a moment", run = function()
+		local before = orchestration.now:peek()
+		republish(function(n)
+			n.asks = {}
+		end)
+		ui.after(2000, function()
+			orchestration.now:set(table.clone(before))
+		end)
+	end }
 	ui.command { id = "fixture.decision", title = "Fixture: a decision with pictures", run = function()
 		for _, a in orchestration.now:peek().asks or {} do
 			if a.id == "ak-topo" then
