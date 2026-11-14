@@ -198,8 +198,11 @@ impl Service {
         if let Some(session) = &mut self.session {
             session.finish();
             self.meter.freeze(Instant::now());
-            self.state["phase"] = json!("finalizing");
-            self.finalizing();
+            // (Overdue already, Send pressed meanwhile: still late.)
+            if self.state["phase"] != "late" {
+                self.state["phase"] = json!("finalizing");
+                self.finalizing();
+            }
         }
     }
     /// The words are due: 30 s, plus as long again as the recording (three
@@ -404,11 +407,12 @@ impl Service {
                             session.take_level();
                         }
                     }
-                    zeron_voice::Event::Finalizing => {
+                    zeron_voice::Event::Finalizing if self.state["phase"] != "late" => {
                         self.state["phase"] = json!("finalizing");
                         self.meter.freeze(Instant::now());
                         due = true;
                     }
+                    zeron_voice::Event::Finalizing => {}
                     zeron_voice::Event::Final(text) => {
                         self.state["phase"] = json!("final");
                         self.state["text"] = json!(text);
@@ -428,14 +432,11 @@ impl Service {
         if due {
             self.finalizing();
         }
-        // Overdue: said, once; the session goes on, and its words, if they
-        // come, land as ever (`late`).
+        // Overdue: "late", said once; the session goes on (Send waits, it can
+        // be cancelled), and its words, if they come, land as ever.
         if !ended && self.deadline.is_some_and(|end| Instant::now() >= end) {
             self.deadline = None;
-            self.state["phase"] = json!("failed");
-            self.state["late"] = json!(true);
-            self.state["error"] =
-                json!("Transcription is taking long. The words will land if they come.");
+            self.state["phase"] = json!("late");
         }
         if ended {
             self.session = None;
@@ -740,14 +741,18 @@ mod tests {
             due > Duration::from_secs(205) && due < Duration::from_secs(211),
             "{due:?}"
         );
-        // Overdue: said, but the words that come late still land.
+        // Overdue: late, not failed. The session goes on: Send (a stop)
+        // keeps it late, the words that come still land.
         let (mut s, events, cancelled, _) = service();
         s.stop();
         s.deadline = Some(Instant::now());
         s.poll();
         assert!(!cancelled.get());
-        assert_eq!(s.state["phase"], "failed");
-        assert_eq!(s.state["late"], true);
+        assert_eq!(s.state["phase"], "late");
+        assert!(s.state["error"].is_null());
+        assert!(s.session.is_some());
+        s.stop();
+        assert_eq!(s.state["phase"], "late");
         events
             .borrow_mut()
             .push_back(Event::Final("late words".into()));
@@ -994,6 +999,50 @@ mod tests {
         // A fresh press of D after it came up types, as ever.
         press(&mut app, Modifiers::default(), false);
         assert_eq!(editor.editor.borrow().text().as_ref(), "你好 🌎d");
+    }
+    #[test]
+    fn dictation_overdue_is_still_under_way_and_its_words_land() {
+        let (mut app, ops) = fixture();
+        assert!(app.host.run_command("begin"));
+        app.settle();
+        app.host.run_command("late");
+        app.settle();
+        app.frames(5);
+        assert_eq!(app.error(), None);
+        // The bar in its finalizing look, and a toast that says the words
+        // are still coming: nothing stopped.
+        assert!(app.shown("#voice-wave"));
+        let toasts = format!(
+            "{:?}",
+            app.host
+                .states()
+                .into_iter()
+                .find(|(k, _)| k.ends_with("ds_toasts"))
+        );
+        assert!(toasts.contains("Still transcribing"), "{toasts}");
+        assert!(!toasts.contains("Dictation stopped"), "{toasts}");
+        // Still under way: ⌘D starts nothing, and the words land.
+        assert!(app.host.run_command("shell.dictate"));
+        app.settle();
+        assert!(
+            !ops.borrow().iter().any(|op| op == "start"),
+            "{:?}",
+            ops.borrow()
+        );
+        app.host.run_command("final");
+        app.settle();
+        app.frames(3);
+        let editor = app.ui.focused_editor().unwrap();
+        assert_eq!(editor.editor.borrow().text().as_ref(), "你好 🌎");
+        // Cancelled while late: the session goes.
+        assert!(app.host.run_command("begin"));
+        app.settle();
+        app.host.run_command("late");
+        app.settle();
+        ops.borrow_mut().clear();
+        app.host.run_command("cancel");
+        app.settle();
+        assert_eq!(*ops.borrow(), ["cancel"]);
     }
     #[test]
     fn dictation_typing_on_puts_the_words_at_the_caret_and_another_chat_drops_them() {
