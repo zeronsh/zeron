@@ -16,7 +16,7 @@
 
 pub(crate) mod inline_code_links;
 mod link_destination;
-mod link_interaction;
+pub(crate) mod link_interaction;
 mod link_presentation;
 pub mod links;
 pub(crate) mod math;
