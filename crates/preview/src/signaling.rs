@@ -244,7 +244,7 @@ async fn connect(
             serde_json::json!({"type":"catalog", "services":advertised}).to_string(),
         ))
         .await?;
-    let mut ping = tokio::time::interval(Duration::from_secs(10));
+    let mut ping = beat_interval(Duration::from_secs(10));
     let mut last_message = tokio::time::Instant::now();
     // A woken socket's probe: it must hear something by this deadline.
     let mut probe: Option<tokio::time::Instant> = None;
@@ -342,4 +342,21 @@ mod tests {
             "wss://edge.example/preview/org/ws?device=laptop&signIn=1"
         );
     }
+}
+
+/// `zeron_sync::wake::beat_interval`, which this crate doesn't link: ticks on
+/// whole multiples of `period` of wall-clock time, so this ping wakes the
+/// engine at the same instants as its other sockets' pings. The first tick is
+/// the next such instant, not at once (the socket was just proven by its
+/// opening catalog frame).
+fn beat_interval(period: Duration) -> tokio::time::Interval {
+    let period_ns = period.as_nanos().max(1);
+    let wall_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos();
+    let wait = Duration::from_nanos((period_ns - wall_ns % period_ns).min(u64::MAX as u128) as u64);
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + wait, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
 }

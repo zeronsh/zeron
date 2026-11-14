@@ -790,9 +790,8 @@ impl DeviceLink {
                 SILENCE_LEASE,
             );
             let protocol = async {
-                let mut ping = tokio::time::interval(client_ping_interval());
-                ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                ping.tick().await; // consume the immediate first tick
+                // On the beat grid, with the socket pings (`zeron_sync::wake`).
+                let mut ping = zeron_sync::wake::beat_interval(client_ping_interval());
                 // End-to-end liveness (see ECHO_DEADLINE): armed only once the
                 // host has echoed at least once, so old hosts keep working.
                 let mut last_echo = tokio::time::Instant::now();

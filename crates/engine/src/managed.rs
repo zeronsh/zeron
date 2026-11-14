@@ -245,7 +245,8 @@ fn stop_when_uninstalled(
     let terminals = runtime.core().terminals.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(CHECK).await;
+            // On the beat grid (`zeron_sync::wake`): it wakes with the pings.
+            tokio::time::sleep_until(zeron_sync::wake::next_beat(CHECK)).await;
             if installed.exists() || sessions.any_active() || terminals.any_open() {
                 continue;
             }

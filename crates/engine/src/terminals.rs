@@ -967,9 +967,8 @@ async fn pump_output(
 /// process. Only EXITED sessions are swept after [`EXITED_TTL`]: they're inert
 /// replay buffers held so a returning viewer can show the tail + exit status.
 async fn reaper_task(inner: Weak<TerminalsInner>) {
-    let mut tick = tokio::time::interval(REAPER_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tick.tick().await; // consume the immediate first tick
+    // On the beat grid (`zeron_sync::wake`): it wakes with the sockets' pings.
+    let mut tick = zeron_sync::wake::beat_interval(REAPER_INTERVAL);
     loop {
         tick.tick().await;
         let Some(inner) = inner.upgrade() else { break };

@@ -2005,10 +2005,12 @@ fn merge_sessions(device_id: &str, rows: &[Session], local: &[Session]) -> Vec<S
 /// point the device is, for every purpose the app has, genuinely offline.
 /// Steady state (healthy room, fresh heartbeats) probes nothing.
 async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tick.tick().await; // consume the immediate first tick
+    // On the beat grid (`zeron_sync::wake`): it wakes with the sockets' pings.
+    let mut tick =
+        zeron_sync::wake::beat_interval(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
     let client = reqwest::Client::new();
+    // When each device was last probed (epoch ms).
+    let mut probed: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     loop {
         tick.tick().await;
         let Some(inner) = weak.upgrade() else { return };
@@ -2083,10 +2085,9 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
 /// and refreshes presence every [`PRESENCE_INTERVAL_MS`]. Holds only a weak
 /// handle so a dropped host tears the task down.
 async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::Receiver<u64>) {
+    // On the beat grid, with the sockets' pings (`zeron_sync::wake`).
     let mut presence =
-        tokio::time::interval(std::time::Duration::from_millis(PRESENCE_INTERVAL_MS));
-    presence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    presence.tick().await; // consume the immediate first tick
+        zeron_sync::wake::beat_interval(std::time::Duration::from_millis(PRESENCE_INTERVAL_MS));
     let mut save_deadline: Option<tokio::time::Instant> = None;
     let mut last_change = tokio::time::Instant::now();
     // When the oldest row delta not yet in a whole save was written.

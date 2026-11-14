@@ -90,9 +90,9 @@ pub async fn pump_with_timing<S, T>(
     // stop reads or silence detection; a full actor inbox must not stop the
     // writer's deadline. Neither future is detached from this session.
     let writer = async {
-        let mut ping = tokio::time::interval(ping_interval);
-        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ping.tick().await;
+        // On the process-wide beat grid: every socket's ping (and the
+        // presence beat) wakes this process at the same instants.
+        let mut ping = crate::wake::beat_interval(ping_interval);
         loop {
             let frame = tokio::select! {
                 frame = out_rx.recv() => match frame {
