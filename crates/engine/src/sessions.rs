@@ -5148,7 +5148,17 @@ async fn drive_run(
                         let started = matches!(event, AgentEvent::SessionStarted { .. });
                         crate::wake_trace::note_agent_event(started);
                         // The agent's first output: its chat's title may start.
-                        if !started && let Some(mut title) = title.take() {
+                        // (Not its startup's reports: the session, its usage
+                        // and its commands come before its request.)
+                        let report = started
+                            || matches!(
+                                event,
+                                AgentEvent::ContextUsage { .. }
+                                    | AgentEvent::PlanUsage { .. }
+                                    | AgentEvent::Usage { .. }
+                                    | AgentEvent::AvailableCommands { .. }
+                            );
+                        if !report && let Some(mut title) = title.take() {
                             title.fire();
                         }
                         event
