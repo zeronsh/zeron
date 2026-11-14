@@ -190,28 +190,73 @@ fn mcp_config_arg(mcp: &zeron_proto::McpServer) -> String {
     .to_string()
 }
 
-/// The inline `--mcp-config` JSON for Zeron's own server plus the plugins'
-/// native servers ([`RunRequest::extra_mcp`]), or `None` when there are none.
-/// Zeron's own server wins a name clash.
-fn mcp_servers_config_arg(
+/// One `mcpServers` entry: Zeron's own over Streamable HTTP when the engine
+/// serves it ([`McpServer::http`]; Claude Code takes `"type": "http"` with
+/// headers), else a stdio command.
+fn mcp_server_entry(server: &zeron_proto::McpServer) -> Value {
+    match &server.http {
+        Some(http) => serde_json::json!({
+            "type": "http",
+            "url": http.url,
+            "headers": http.headers,
+        }),
+        None => serde_json::json!({
+            "command": server.command,
+            "args": server.args,
+            "env": server.env,
+        }),
+    }
+}
+
+/// Whether an entry carries a credential (a run's MCP token), so the config
+/// must not ride the command line, where `ps` shows it to every local user.
+fn carries_secret(server: &zeron_proto::McpServer) -> bool {
+    server.http.is_some() || server.env.contains_key(McpServer::TOKEN_ENV)
+}
+
+/// The `--mcp-config` JSON for Zeron's own server plus the plugins'
+/// native servers ([`RunRequest::extra_mcp`]), or `None` when there are none,
+/// and whether it carries a credential. Zeron's own server wins a name clash.
+fn mcp_servers_config(
     mcp: Option<&zeron_proto::McpServer>,
     extras: &[zeron_proto::McpServer],
-) -> Option<String> {
+) -> Option<(String, bool)> {
     if mcp.is_none() && extras.is_empty() {
         return None;
     }
     let mut servers = serde_json::Map::new();
     for server in extras.iter().chain(mcp) {
-        servers.insert(
-            server.name.clone(),
-            serde_json::json!({
-                "command": server.command,
-                "args": server.args,
-                "env": server.env,
-            }),
-        );
+        servers.insert(server.name.clone(), mcp_server_entry(server));
     }
-    Some(serde_json::json!({ "mcpServers": servers }).to_string())
+    let secret = extras.iter().chain(mcp).any(carries_secret);
+    Some((serde_json::json!({ "mcpServers": servers }).to_string(), secret))
+}
+
+#[cfg(test)]
+fn mcp_servers_config_arg(
+    mcp: Option<&zeron_proto::McpServer>,
+    extras: &[zeron_proto::McpServer],
+) -> Option<String> {
+    mcp_servers_config(mcp, extras).map(|(config, _)| config)
+}
+
+/// `config` in an owner-only file of its own (`0600`, in a `0700` directory
+/// removed when the returned guard drops): `--mcp-config` takes a path.
+fn private_mcp_config(config: &str) -> std::io::Result<(crate::scratch::ScratchDir, PathBuf)> {
+    use std::io::Write as _;
+    let dir = crate::scratch::ScratchDir::new("claude-mcp")?;
+    let path = dir.path().join("mcp.json");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    file.write_all(config.as_bytes())?;
+    file.sync_all()?;
+    Ok((dir, path))
 }
 
 /// The `--model` value: the 1M context window is selected via a model-id
@@ -487,7 +532,19 @@ impl ClaudeHarness {
         args
     }
 
+    #[cfg(test)]
     fn build_command(exe: &std::path::Path, request: &RunRequest, title_only: bool) -> Command {
+        Self::build_command_with_config(exe, request, title_only).0
+    }
+
+    /// The CLI command, and the private file its MCP config was written to
+    /// when that config carries a credential (kept until the run ends).
+    fn build_command_with_config(
+        exe: &std::path::Path,
+        request: &RunRequest,
+        title_only: bool,
+    ) -> (Command, Option<crate::scratch::ScratchDir>) {
+        let mut mcp_config_dir = None;
         let mut cmd = Command::new(exe);
         // Its own process group, so teardown reaches the MCP servers and
         // tools it started; and no inherited Claude Code session markers.
@@ -535,8 +592,24 @@ impl ClaudeHarness {
             // Zeron's own server (and the plugins' native ones) ride beside
             // the user's configured servers (no `--strict-mcp-config`): the
             // CLI merges an inline JSON config with settings-sourced ones.
-            if let Some(config) = mcp_servers_config_arg(request.mcp.as_ref(), &request.extra_mcp) {
-                cmd.args(["--mcp-config", &config]);
+            // A config with a run's MCP token goes in an owner-only file:
+            // inline JSON would sit on the command line.
+            if let Some((config, secret)) =
+                mcp_servers_config(request.mcp.as_ref(), &request.extra_mcp)
+            {
+                match secret.then(|| private_mcp_config(&config)) {
+                    Some(Ok((dir, path))) => {
+                        cmd.arg("--mcp-config").arg(path);
+                        mcp_config_dir = Some(dir);
+                    }
+                    Some(Err(err)) => {
+                        tracing::warn!(target: "zeron_harness::claude", error = %err, "no private MCP config file; passing it inline");
+                        cmd.args(["--mcp-config", &config]);
+                    }
+                    None => {
+                        cmd.args(["--mcp-config", &config]);
+                    }
+                }
             }
             // When to say it waits on background work (the Zeron tool
             // `wait_on_background`), where that tool is offered. Its own
@@ -570,7 +643,7 @@ impl ClaudeHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        cmd
+        (cmd, mcp_config_dir)
     }
 
     /// Start one CLI process for a run, with its stdio wired up.
@@ -579,7 +652,8 @@ impl ClaudeHarness {
         request: &RunRequest,
         title_only: bool,
     ) -> Result<Runtime, HarnessError> {
-        let mut child = Self::build_command(exe, request, title_only)
+        let (mut command, mcp_config) = Self::build_command_with_config(exe, request, title_only);
+        let mut child = command
             .spawn()
             .map_err(|e| {
                 let cwd = (!request.cwd.is_empty()).then(|| std::path::Path::new(&request.cwd));
@@ -606,6 +680,7 @@ impl ClaudeHarness {
                 refresh_lock::config_dir_for(&request.env),
             ),
             stderr_tail,
+            mcp_config,
         })
     }
 
@@ -812,6 +887,13 @@ impl Harness for ClaudeHarness {
     }
     /// Live-verified 2.1.319: a new turn 0.1 s after a background task ends.
     fn wakes_on_background(&self) -> bool {
+        true
+    }
+    /// `--resume` brings the session back whole (live-verified 2.1.322
+    /// against a replay server: the resumed request carries every earlier
+    /// turn), and teardown never signals mid login refresh
+    /// ([`refresh_lock::settle`]).
+    fn stops_when_idle(&self) -> bool {
         true
     }
     fn display_name(&self) -> &str {
@@ -1040,6 +1122,7 @@ impl ClaudeHarness {
             stdout_lines,
             mut stdin,
             stderr_tail,
+            mcp_config,
         } = Self::launch(&exe, &request, title_only)?;
 
         let lock_dir = refresh_lock::config_dir_for(&request.env);
@@ -1082,6 +1165,7 @@ impl ClaudeHarness {
             kill_grace: self.kill_grace,
             lock_dir,
             stderr_tail,
+            _mcp_config: mcp_config,
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -1108,6 +1192,8 @@ struct Runtime {
     stdout_lines: crate::lossy_lines::LossyLines<crate::process::ChildStdout>,
     stdin: Stdin,
     stderr_tail: crate::StderrTail,
+    /// The private MCP config file the process was launched with.
+    mcp_config: Option<crate::scratch::ScratchDir>,
 }
 
 /// The run's stdin, through its writer task. Until the CLI reports its
@@ -1285,6 +1371,8 @@ struct Session {
     lock_dir: PathBuf,
     /// Rolling stderr tail for the crash message on an unexpected exit.
     stderr_tail: crate::StderrTail,
+    /// The private MCP config file, removed when the run ends.
+    _mcp_config: Option<crate::scratch::ScratchDir>,
 }
 
 /// The per-run event loop: one task multiplexing stdout frames, the steering
@@ -1306,6 +1394,7 @@ async fn run_session(session: Session) {
         kill_grace,
         lock_dir,
         mut stderr_tail,
+        mut _mcp_config,
     } = session;
     let RunControls {
         realtime: _,
@@ -1421,6 +1510,7 @@ async fn run_session(session: Session) {
                     stdout_lines = runtime.stdout_lines;
                     stdin = runtime.stdin;
                     stderr_tail = runtime.stderr_tail;
+                    _mcp_config = runtime.mcp_config;
                 }
                 Err(error) => {
                     let _ = event_tx.send(Err(error)).await;
@@ -2370,6 +2460,7 @@ mod tests {
             command: "zeron-engine".into(),
             args: vec!["mcp".into()],
             env: env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+            http: None,
         };
         let waits = (McpServer::WAITS_ON_BACKGROUND_ENV, "1");
         assert_eq!(
@@ -2652,6 +2743,91 @@ mod resolution_tests {
 mod mcp_injection_tests {
     use super::*;
 
+    fn engine_served() -> zeron_proto::McpServer {
+        zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron-engine".into(),
+            args: vec!["mcp-proxy".into()],
+            env: [
+                (McpServer::CHAT_ID_ENV.to_owned(), "chat-1".to_owned()),
+                (McpServer::TOKEN_ENV.to_owned(), "secret-token".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            http: Some(zeron_proto::McpHttp {
+                url: "http://127.0.0.1:4321/mcp".into(),
+                headers: [("Authorization".to_owned(), "Bearer secret-token".to_owned())]
+                    .into_iter()
+                    .collect(),
+            }),
+        }
+    }
+
+    /// The engine serves Zeron's tools itself: Claude gets the HTTP endpoint
+    /// (no server process), and the token never reaches the command line —
+    /// the config is an owner-only file, gone when the run ends.
+    #[test]
+    fn an_engine_served_server_is_http_in_a_private_file() {
+        let (config, secret) = mcp_servers_config(Some(&engine_served()), &[]).unwrap();
+        assert!(secret);
+        let parsed: Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(parsed["mcpServers"]["zeron"]["type"], "http");
+        assert_eq!(parsed["mcpServers"]["zeron"]["url"], "http://127.0.0.1:4321/mcp");
+        assert_eq!(
+            parsed["mcpServers"]["zeron"]["headers"]["Authorization"],
+            "Bearer secret-token"
+        );
+        assert!(parsed["mcpServers"]["zeron"].get("command").is_none());
+
+        let mut request = access_tests_request();
+        request.mcp = Some(engine_served());
+        let (cmd, dir) = ClaudeHarness::build_command_with_config(
+            std::path::Path::new("claude"),
+            &request,
+            false,
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().all(|arg| !arg.contains("secret-token")), "{args:?}");
+        let at = args.iter().position(|arg| arg == "--mcp-config").unwrap();
+        let path = std::path::PathBuf::from(&args[at + 1]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), config);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+            let dir_mode = std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode();
+            assert_eq!(dir_mode & 0o777, 0o700);
+        }
+        drop(dir);
+        assert!(!path.exists(), "the config goes with the run");
+    }
+
+    fn access_tests_request() -> RunRequest {
+        RunRequest {
+            mcp: None,
+            prompt: "hi".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            access: AccessMode::FullAccess,
+            plan: false,
+            attachments: Vec::new(),
+            worktree: None,
+            resume: None,
+            env: Default::default(),
+            extra_mcp: Vec::new(),
+        }
+    }
+
     #[test]
     fn mcp_config_arg_spells_the_server_the_way_the_cli_reads_it() {
         let mcp = zeron_proto::McpServer {
@@ -2661,6 +2837,7 @@ mod mcp_injection_tests {
             env: [("ZERON_CHAT_ID".to_owned(), "chat-1".to_owned())]
                 .into_iter()
                 .collect(),
+            http: None,
         };
         let parsed: Value = serde_json::from_str(&mcp_config_arg(&mcp)).unwrap();
         assert_eq!(parsed["mcpServers"]["zeron"]["command"], "/opt/zeron/zeron");
@@ -2680,12 +2857,14 @@ mod mcp_injection_tests {
             command: "/opt/zeron/zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         let extra = zeron_proto::McpServer {
             name: "plugin-focus".into(),
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec!["--stdio".into()],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
         assert_eq!(mcp_servers_config_arg(None, &[]), None);
         let both: Value = serde_json::from_str(

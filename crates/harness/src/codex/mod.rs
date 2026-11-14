@@ -152,10 +152,21 @@ fn agent_tools_off() -> [(String, Value); 3] {
 /// to the user's `mcp_servers` table.
 fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
     let key = |field: &str| format!("mcp_servers.{}.{field}", mcp.name);
-    vec![
-        (key("command"), mcp.command.clone().into()),
-        (key("args"), json!(mcp.args)),
-        (key("env"), json!(mcp.env)),
+    // The engine serves Zeron's tools itself over Streamable HTTP, which
+    // Codex speaks: no server process. These overrides ride `thread/start`
+    // on the app-server's stdin, never the command line.
+    let transport = match &mcp.http {
+        Some(http) => vec![
+            (key("url"), http.url.clone().into()),
+            (key("http_headers"), json!(http.headers)),
+        ],
+        None => vec![
+            (key("command"), mcp.command.clone().into()),
+            (key("args"), json!(mcp.args)),
+            (key("env"), json!(mcp.env)),
+        ],
+    };
+    transport.into_iter().chain([
         // Our injected server's tools are Zeron's own: approve them in every
         // access mode, so Codex neither rejects a call under `never` nor
         // asks about one under the others.
@@ -167,7 +178,8 @@ fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
         // A cold start (a fresh machine paging the binary in) can outlast
         // the 10 s default before the server answers `initialize`.
         (key("startup_timeout_sec"), 30.into()),
-    ]
+    ])
+    .collect()
 }
 
 /// Dotted `thread/start` config overrides for the plugins' native MCP
@@ -3417,6 +3429,32 @@ mod tests {
 mod mcp_injection_tests {
     use super::*;
 
+    /// The engine serves Zeron's tools itself: Codex gets its URL and
+    /// header (over the app-server's stdin), no command to start.
+    #[test]
+    fn an_engine_served_zeron_server_is_codex_http() {
+        let mcp = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron-engine".into(),
+            args: vec!["mcp-proxy".into()],
+            env: Default::default(),
+            http: Some(zeron_proto::McpHttp {
+                url: "http://127.0.0.1:4321/mcp".into(),
+                headers: [("Authorization".to_owned(), "Bearer t".to_owned())]
+                    .into_iter()
+                    .collect(),
+            }),
+        };
+        let overrides: std::collections::HashMap<String, Value> =
+            codex_mcp_overrides(&mcp).into_iter().collect();
+        assert_eq!(overrides["mcp_servers.zeron.url"], "http://127.0.0.1:4321/mcp");
+        assert_eq!(overrides["mcp_servers.zeron.http_headers"]["Authorization"], "Bearer t");
+        assert!(!overrides.contains_key("mcp_servers.zeron.command"));
+        assert!(!overrides.contains_key("mcp_servers.zeron.env"));
+        assert_eq!(overrides["mcp_servers.zeron.default_tools_approval_mode"], "approve");
+        assert_eq!(overrides["mcp_servers.zeron.tool_timeout_sec"], ZERON_TOOL_TIMEOUT_SECS);
+    }
+
     #[test]
     fn codex_mcp_overrides_use_the_dotted_mcp_servers_keys() {
         let mcp = zeron_proto::McpServer {
@@ -3426,6 +3464,7 @@ mod mcp_injection_tests {
             env: [("ZERON_CHAT_ID".to_owned(), "chat-1".to_owned())]
                 .into_iter()
                 .collect(),
+            http: None,
         };
         let overrides: serde_json::Map<String, Value> =
             codex_mcp_overrides(&mcp).into_iter().collect();
@@ -3450,6 +3489,7 @@ mod mcp_injection_tests {
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec!["--stdio".into()],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
         let overrides: serde_json::Map<String, Value> =
             codex_extra_mcp_overrides(&[extra]).into_iter().collect();

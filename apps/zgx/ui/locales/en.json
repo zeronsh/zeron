@@ -1182,6 +1182,12 @@
         "terms": "co-author coauthor attribution bot commit message",
         "cloud": "Always on for Cloud",
         "on": "Agents' commits add zeronsh[bot] as a co-author"
+      },
+      "keep_running": {
+        "label": "Keep Zeron running after you quit",
+        "on": "Chats keep working, and other devices can reach them.",
+        "off": "When you quit, Zeron stops once its chats are done.",
+        "terms": "background quit close engine agents running stop memory battery"
       }
     },
     "engine": {
@@ -3343,6 +3349,12 @@
       "old": "This Zeron needs a newer engine",
       "old_tip": "Its engine is older than this version needs. Open About & updates to go back to Stable.",
       "short_old": "Needs a newer engine"
+    },
+    "quit": {
+      "working": "{n, plural, one {# chat is still working.} other {# chats are still working.}}",
+      "detail": "Keep running in the background until they finish, or stop them now?",
+      "keep": "Keep Running",
+      "stop": "Stop Them Now"
     }
   },
   "account": {

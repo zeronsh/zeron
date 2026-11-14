@@ -1182,6 +1182,12 @@
         "terms": "共同作者 署名 机器人 提交消息 co-author coauthor attribution bot commit message",
         "cloud": "Cloud 始终启用",
         "on": "智能体的提交会将 zeronsh[bot] 添加为共同作者"
+      },
+      "keep_running": {
+        "label": "退出后让 Zeron 继续运行",
+        "on": "对话会继续进行，其他设备也能访问它们。",
+        "off": "退出时，Zeron 会在对话完成后停止。",
+        "terms": "后台 退出 关闭 引擎 智能体 运行 停止 内存 电池 background quit close engine agents"
       }
     },
     "engine": {
@@ -3343,6 +3349,12 @@
       "old": "此版本 Zeron 需要更新的引擎",
       "old_tip": "引擎版本低于此版本的要求。打开“关于与更新”即可回到稳定版。",
       "short_old": "需要更新的引擎"
+    },
+    "quit": {
+      "working": "{n, plural, other {还有 # 个对话正在进行。}}",
+      "detail": "要在后台继续运行直到完成，还是现在停止？",
+      "keep": "继续运行",
+      "stop": "立即停止"
     }
   },
   "account": {

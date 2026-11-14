@@ -60,6 +60,7 @@ mod mermaid;
 mod plugins;
 mod previews;
 mod projects;
+mod quit_prompt;
 mod relaunch;
 mod session_home;
 mod sessions;
@@ -373,6 +374,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             links::open(url);
         }
     })?;
+    // Quitting with "Keep Zeron running after you quit" off: the engine
+    // stops once its work is done, asking first about any still running
+    // (src/quit_prompt.rs). (Not for a relaunch: the app is coming back.)
+    if !relaunch::asked() {
+        quit_prompt::after_quit();
+    }
     // Quitting: an update downloaded and never restarted for installs now,
     // so the next launch is on it (src/about.rs).
     about::install_on_quit();
