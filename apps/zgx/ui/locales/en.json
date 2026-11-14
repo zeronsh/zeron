@@ -938,6 +938,8 @@
       "unavailable_hint": "Agents already set up keep working. Zeron will look again when it can.",
       "sign_in": "Sign in to {name}",
       "sign_in_hint": "Opens your browser to sign in.",
+      "own_sign_in": "Signs in through {name}",
+      "own_sign_in_hint": "{agent, select, droid {Run droid in a terminal, then /login.} other {Sign in from its own CLI.}} Zeron uses that sign-in.",
       "banked_now_soon": "One starts the session and week over now.",
       "reset_using": "Using a reset…",
       "reset_failed": "Couldn't use the reset",
@@ -1494,7 +1496,7 @@
     },
     "providers": {
       "title": "Providers",
-      "terms": "harnesses agents cli claude code codex cursor devin grok hermes pi opencode antigravity muse install enable disable accounts sign in login",
+      "terms": "harnesses agents cli claude code codex cursor devin grok hermes pi opencode antigravity muse factory droid install enable disable accounts sign in login",
       "agent_settings": "Agent settings",
       "agents": {
         "label": "Your agents",

@@ -33,7 +33,7 @@ cd "$(dirname "$0")/../.."
 # Test binaries that run nothing on Linux are left out: they would still be
 # compiled and linked. Windows-only files (#![cfg(windows)]), and files whose
 # every test is #[ignore]d because it needs a live service or a real CLI.
-skip=" codex_availability windows_native managed_install muse_account_live pi_live real_acp_lifecycle real_quiet_survey coordinator "
+skip=" codex_availability windows_native managed_install muse_account_live pi_live droid_live real_acp_lifecycle real_quiet_survey coordinator "
 tests=()
 for f in crates/harness/tests/*.rs crates/preview/tests/*.rs crates/doc/tests/*.rs; do
   name="$(basename "$f" .rs)"

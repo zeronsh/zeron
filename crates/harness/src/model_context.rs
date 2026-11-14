@@ -70,6 +70,11 @@ pub(crate) fn context(
         HarnessId::Pi => {
             vec![root("PI_CODING_AGENT_DIR", home.join(".pi/agent")).join("auth.json")]
         }
+        HarnessId::Droid => {
+            // The override replaces the home directory, not `.factory`.
+            let root = root("FACTORY_HOME_OVERRIDE", home).join(".factory");
+            vec![root.join("settings.json"), root.join("settings.local.json")]
+        }
         HarnessId::Devin => {
             let data = root("XDG_DATA_HOME", home.join(".local/share"));
             let mut files = vec![data.join("devin/credentials.toml")];
@@ -114,6 +119,7 @@ pub(crate) fn context(
         HarnessId::Antigravity => &["GEMINI_", "GOOGLE_"],
         HarnessId::Cursor => &["CURSOR_"],
         HarnessId::Fx => &["FX_", "AI_GATEWAY_", "OPENAI_", "ANTHROPIC_"],
+        HarnessId::Droid => &["FACTORY_", "DROID_"],
         _ => &[],
     };
     let mut env: Vec<_> = std::env::vars_os()

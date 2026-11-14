@@ -26,6 +26,7 @@ export type Name =
 	| "provider-gemini"
 	| "provider-xai"
 	| "provider-deepseek"
+	| "droid"
 
 local FILES: { [Name]: string } = {
 	claude = "claude-mark",
@@ -44,6 +45,7 @@ local FILES: { [Name]: string } = {
 	["provider-gemini"] = "provider-gemini",
 	["provider-xai"] = "provider-xai",
 	["provider-deepseek"] = "provider-deepseek",
+	droid = "droid-mark",
 }
 
 -- Marks drawn in one ink (black, for the white tile): bare, they take the
@@ -54,6 +56,7 @@ local MONO: { [Name]: boolean } = {
 	cursor = true,
 	devin = true,
 	hermes = true,
+	droid = true,
 	["provider-anthropic"] = true,
 	["provider-openai"] = true,
 	["provider-openrouter"] = true,

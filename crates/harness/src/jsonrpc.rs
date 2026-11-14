@@ -46,6 +46,30 @@ type StdoutObserver = Box<dyn Fn(&str) + Send>;
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
+/// What a peer wants on each frame beyond JSON-RPC 2.0.
+#[derive(Clone, Copy)]
+enum Envelope {
+    Plain,
+    /// Factory's stream-jsonrpc: the frame's kind, the API version, and
+    /// string ids.
+    Factory,
+}
+
+impl Envelope {
+    fn frame(self, mut frame: Value, kind: &str) -> Value {
+        if matches!(self, Self::Factory) {
+            frame["type"] = json!(kind);
+            frame["factoryApiVersion"] = json!("1.0.0");
+            if let Some(id) = frame.get_mut("id")
+                && !id.is_string()
+            {
+                *id = json!(id.to_string());
+            }
+        }
+        frame
+    }
+}
+
 /// How a request fails when the transport lost its answer: the app server
 /// exited first, or its stdin could not take the request (then with the
 /// write error after it). [`transport_lost`] recognizes both.
@@ -72,6 +96,7 @@ struct VoiceRouter {
 
 #[derive(Clone)]
 pub(crate) struct RpcClient {
+    envelope: Envelope,
     next_id: Arc<AtomicI64>,
     pending: Pending,
     writer: mpsc::UnboundedSender<String>,
@@ -79,8 +104,6 @@ pub(crate) struct RpcClient {
     voice_router: Arc<Mutex<Option<VoiceRouter>>>,
     /// Ends the writer task (and with it the child's stdin) once the lines
     /// already queued are written, whichever clones are still alive.
-    /// Only Windows' teardown needs it.
-    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     close_stdin: Arc<tokio::sync::Notify>,
 }
 
@@ -89,6 +112,13 @@ impl RpcClient {
     /// client and the incoming (notification/request) channel.
     pub fn new(stdin: ChildStdin, stdout: ChildStdout) -> (Self, mpsc::Receiver<Incoming>) {
         Self::with_stdout_observer(stdin, stdout, None)
+    }
+
+    /// [`Self::new`] for a peer speaking Factory's stream-jsonrpc.
+    pub fn factory(stdin: ChildStdin, stdout: ChildStdout) -> (Self, mpsc::Receiver<Incoming>) {
+        let (mut client, incoming) = Self::new(stdin, stdout);
+        client.envelope = Envelope::Factory;
+        (client, incoming)
     }
 
     pub(crate) fn with_stdout_observer(
@@ -119,6 +149,7 @@ impl RpcClient {
         ));
         (
             Self {
+                envelope: Envelope::Plain,
                 next_id: Arc::new(AtomicI64::new(0)),
                 pending,
                 writer: writer_tx,
@@ -173,8 +204,7 @@ impl RpcClient {
     }
 
     /// Close the child's stdin once the lines already queued are written.
-    #[cfg(any(windows, test))]
-    fn close_stdin(&self) {
+    pub(crate) fn close_stdin(&self) {
         self.close_stdin.notify_one();
     }
 
@@ -191,8 +221,30 @@ impl RpcClient {
         method: &str,
         params: Value,
     ) -> futures::future::BoxFuture<'static, Result<Value, HarnessError>> {
-        let method = method.to_owned();
+        self.request_with_id(method, params).1
+    }
+
+    /// [`Self::request_now`], with the id the request went out under as a
+    /// Factory peer writes it: it correlates later notifications by that id.
+    pub fn request_with_id(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> (
+        String,
+        futures::future::BoxFuture<'static, Result<Value, HarnessError>>,
+    ) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        (id.to_string(), self.send_request(id, method, params))
+    }
+
+    fn send_request(
+        &self,
+        id: i64,
+        method: &str,
+        params: Value,
+    ) -> futures::future::BoxFuture<'static, Result<Value, HarnessError>> {
+        let method = method.to_owned();
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("pending lock");
@@ -205,7 +257,10 @@ impl RpcClient {
             }
             pending.insert(id, tx);
         }
-        let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let line = self.envelope.frame(
+            json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+            "request",
+        );
         if self.writer.send(line.to_string()).is_err() {
             self.pending.lock().expect("pending lock").remove(&id);
             return Box::pin(async move {
@@ -228,13 +283,17 @@ impl RpcClient {
             Some(params) => json!({ "jsonrpc": "2.0", "method": method, "params": params }),
             None => json!({ "jsonrpc": "2.0", "method": method }),
         };
-        let _ = self.writer.send(line.to_string());
+        let _ = self
+            .writer
+            .send(self.envelope.frame(line, "notification").to_string());
     }
 
     /// Answer a server→client request.
     pub fn respond(&self, id: &Value, result: Value) {
         let line = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-        let _ = self.writer.send(line.to_string());
+        let _ = self
+            .writer
+            .send(self.envelope.frame(line, "response").to_string());
     }
 
     /// Reject a server→client request (e.g. unknown method).
@@ -244,7 +303,9 @@ impl RpcClient {
             "id": id,
             "error": { "code": code, "message": message },
         });
-        let _ = self.writer.send(line.to_string());
+        let _ = self
+            .writer
+            .send(self.envelope.frame(line, "response").to_string());
     }
 }
 
@@ -457,9 +518,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn droid_factory_envelope_is_opt_in_and_plain_frames_stay_identical() {
+        let request = json!({"jsonrpc":"2.0","id":7,"method":"example","params":{}});
+        assert_eq!(Envelope::Plain.frame(request.clone(), "request"), request);
+        assert_eq!(
+            Envelope::Factory.frame(request, "request"),
+            json!({"jsonrpc":"2.0","factoryApiVersion":"1.0.0","type":"request","id":"7","method":"example","params":{}})
+        );
+        let response = json!({"jsonrpc":"2.0","id":"native-id","result":{}});
+        assert_eq!(
+            Envelope::Factory.frame(response, "response")["id"],
+            "native-id"
+        );
+    }
+
+    #[test]
     fn cancel_notification_wire_has_no_id() {
         let (writer, mut receiver) = mpsc::unbounded_channel();
         let client = RpcClient {
+            envelope: Envelope::Plain,
             next_id: Arc::new(AtomicI64::new(0)),
             pending: Arc::default(),
             writer,
@@ -480,6 +557,7 @@ mod tests {
     #[test]
     fn stale_voice_unsubscribe_keeps_the_newer_subscription() {
         let client = RpcClient {
+            envelope: Envelope::Plain,
             next_id: Arc::new(AtomicI64::new(0)),
             pending: Arc::default(),
             writer: mpsc::unbounded_channel().0,
@@ -499,6 +577,7 @@ mod tests {
     async fn requests_after_eof_fail_without_entering_pending_map() {
         let (writer, mut receiver) = mpsc::unbounded_channel();
         let client = RpcClient {
+            envelope: Envelope::Plain,
             next_id: Arc::new(AtomicI64::new(0)),
             pending: Arc::default(),
             writer,

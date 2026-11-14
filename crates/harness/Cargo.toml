@@ -21,6 +21,11 @@ name = "harness-pi-fixture"
 path = "tests/fixtures/pi_rpc.rs"
 required-features = ["native-fixture"]
 
+[[bin]]
+name = "harness-droid-fixture"
+path = "tests/fixtures/droid_rpc.rs"
+required-features = ["native-fixture"]
+
 [dependencies]
 zeron-voice-media.workspace = true
 zeron-proto.workspace = true

@@ -174,10 +174,13 @@ fn auth_context_child() {
     }
     let claude = zeron_harness::ClaudeHarness::new().with_executable(&binary);
     let opencode = zeron_harness::OpencodeHarness::new().with_executable(&binary);
+    let droid = zeron_harness::DroidHarness::new().with_executable(&binary);
     for (harness, file) in [
         (&claude as &dyn Harness, ".claude/settings.json"),
         (&opencode as &dyn Harness, ".local/share/opencode/auth.json"),
         (&opencode as &dyn Harness, "opencode.json"),
+        (&droid as &dyn Harness, "factory/.factory/settings.json"),
+        (&droid as &dyn Harness, "factory/.factory/settings.local.json"),
     ] {
         let before = harness.model_context().unwrap().unwrap().hash;
         let path = root.join(file);
@@ -198,6 +201,8 @@ fn each_spec_hashes_its_auth_file_contents() {
         .args(["--exact", "auth_context_child", "--nocapture"])
         .current_dir(dir.path())
         .env("HOME", dir.path())
+        // Replaces the home Droid keeps `.factory` under.
+        .env("FACTORY_HOME_OVERRIDE", dir.path().join("factory"))
         .env("ZERON_MODEL_CONTEXT_TEST_ROOT", dir.path());
     for key in [
         "CLAUDE_CONFIG_DIR",

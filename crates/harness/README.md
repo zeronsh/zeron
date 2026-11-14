@@ -17,6 +17,7 @@ pinned Antigravity archive.
 | [Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/installation) | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `irm https://hermes-agent.nousresearch.com/install.ps1 \| iex` |
 | [Devin](https://cli.devin.ai/) | macOS, when brew resolves: `brew install --cask devin-cli`; otherwise `curl -fsSL https://cli.devin.ai/install.sh \| bash` | `irm https://static.devin.ai/cli/setup.ps1 \| iex` |
 | [Muse Code](https://dev.meta.ai/docs/muse-code/) | `curl -fsSL https://dev.meta.ai/install.sh \| sh` | `irm https://dev.meta.ai/install.ps1 \| iex` |
+| [Factory Droid](https://docs.factory.com/droid-cli/quickstart.md) | `curl -fsSL https://app.factory.ai/cli \| sh` | `irm https://app.factory.ai/cli/windows \| iex` |
 | [fx](https://fx.sh/docs) | `curl -fsSL https://fx.sh/setup.sh \| bash` | Manual setup (no native Windows installer) |
 | Antigravity | Existing verified 1.1.1 archive in `acp::antigravity_archive`; no shell command | Same archive path on supported architectures |
 
@@ -68,7 +69,47 @@ drops an inherited `META_API_KEY` and sets `MUSE_NO_AUTO_UPDATE=1`.
 `tests/muse.rs` replays sessions recorded from a real Muse Code 1.4.x host
 (`tests/fixtures/muse/*.ndjson`, through `fake-muse.py`).
 
-## Verification
+## Factory Droid
+
+`droid::DroidHarness` drives
+`droid exec --input-format stream-jsonrpc --output-format stream-jsonrpc`
+(never ACP), checked against Droid 1.10.0 and `@factory/droid-sdk` 0.11.0:
+[src/droid/PROTOCOL.md](src/droid/PROTOCOL.md) is the wire as it was observed.
+A runtime is one process with one session (`droid.initialize_session`, or
+`droid.load_session` by id), kept across turns and engine restarts. Before
+every prompt the request's settings are sent and must come back in the
+`settings_updated` notification that carries the request's id. Only
+`agent_turn_completed` ends a turn. Later prompts are
+`droid.add_user_message`, reported as steered once Droid consumes them; stops
+are `droid.interrupt_session` and keep the process.
+
+Plan mode is Droid's Spec mode: the plan arrives as assistant Markdown, then
+the shared **Approve plan** question. Supervised, Auto-accept edits and Full
+access map to autonomy Off, Medium and High; Medium is broader than
+edit-only, as Droid also runs medium-risk local commands unprompted.
+A subagent's transcript is read from the child history Droid writes under
+`<home>/.factory/sessions`, with TaskOutput progress as the fallback when
+there is none, and children may outlive their parent's turn.
+
+Droid owns its sign-in (`droid`, then `/login`, or `FACTORY_API_KEY`): Zeron
+has no sign-in, account switching or usage meters for it. `DROID_EXECUTABLE`
+overrides discovery. Updates use `droid update`, or the package manager that
+owns the copy. The ACP registry's `factory-droid` is left out of the registry
+Zeron lists; one added earlier stays, as an agent that has left the registry,
+and its chats keep their ACP sessions.
+
+`tests/droid.rs` drives a synthetic peer (`tests/fixtures/droid_rpc.rs`,
+`--features native-fixture`). The real CLI is checked by the ignored
+`tests/droid_live.rs`, which needs `FACTORY_API_KEY`, spends tokens
+(`DROID_LIVE_MODEL` names the model) and keeps project files and Factory state
+in temporary directories:
+
+```sh
+DROID_LIVE_EXECUTABLE="$(command -v droid)" \
+  cargo test --locked -p zeron-harness --test droid_live -- --ignored --test-threads=1
+```
+
+## Installer verification
 
 The `installer-fixture` feature exposes an explicit command injection seam for
 integration tests. The engine's command environment override is compiled only
