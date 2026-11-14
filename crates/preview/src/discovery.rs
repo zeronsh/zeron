@@ -197,6 +197,20 @@ impl Owned {
     pub fn is_empty(&self) -> bool {
         self.pids.is_empty()
     }
+    /// Which processes these are (each pid with its start): equal while the
+    /// same ones live, whatever order they were found in.
+    pub fn signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut pids: Vec<(u32, u64)> = self
+            .pids
+            .iter()
+            .map(|pid| (*pid, self.processes.get(pid).map_or(0, |p| p.started_at)))
+            .collect();
+        pids.sort_unstable();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        pids.hash(&mut hasher);
+        hasher.finish()
+    }
     pub fn len(&self) -> usize {
         self.pids.len()
     }
