@@ -458,8 +458,9 @@ pub fn compose_login_shell_path(cmd: &mut tokio::process::Command) {
 /// npm-shim CLIs are `#!/usr/bin/env node` scripts whose `node` lives beside
 /// them in the version manager's bin dir, and the CLIs themselves shell out
 /// to tools (git, rg, node) that a GUI/service launch's own PATH may lack.
-/// Also hands the child the login shell's TLS, SSH-agent and locale
-/// variables when this process has none of its own.
+/// Also hands the child the login shell's TLS, SSH-agent, locale and proxy
+/// variables when this process has none of its own; the proxy variables go
+/// in as one all-or-nothing group.
 pub fn compose_child_path(cmd: &mut process::Command, exe: &std::path::Path) {
     compose_path(
         cmd.as_std_mut(),
@@ -566,19 +567,40 @@ fn child_path_entries(
     paths
 }
 
-/// Login-shell variables (TLS trust, SSH agent, locale) the child lacks:
-/// absent from our own environment and not set or removed by the driver.
+/// Login-shell variables (TLS trust, SSH agent, locale, proxy) the child
+/// lacks: absent from our own environment and not set or removed by the
+/// driver. Proxy variables are one group — when the driver explicitly set or
+/// removed any of them on the command, the whole group is left to it.
 fn apply_login_shell_env(cmd: &mut std::process::Command) {
     let defaults = shell_env::child_env_defaults();
     if defaults.is_empty() {
         return;
     }
     let explicit: Vec<std::ffi::OsString> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
-    for (key, value) in defaults {
-        if !explicit.contains(&key) {
-            cmd.env(key, value);
-        }
+    for (key, value) in filter_child_env_defaults(defaults, &explicit) {
+        cmd.env(key, value);
     }
+}
+
+/// Of the login-shell defaults, the ones to actually set on the child:
+/// everything the driver has not explicitly handled (`explicit` holds every
+/// key the driver set or env-removed on the command). A proxy variable in
+/// `explicit` means the driver manages the proxy itself, so the whole proxy
+/// group is dropped rather than half-overridden; non-proxy variables are
+/// unaffected.
+fn filter_child_env_defaults(
+    defaults: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    explicit: &[std::ffi::OsString],
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let driver_sets_proxy = explicit
+        .iter()
+        .any(|key| shell_env::is_proxy_var(key.as_os_str()));
+    defaults
+        .into_iter()
+        .filter(|(key, _)| {
+            !explicit.contains(key) && !(driver_sets_proxy && shell_env::is_proxy_var(key))
+        })
+        .collect()
 }
 
 /// Rolling tail of a child's stderr, shared between the reader task and the
@@ -870,7 +892,7 @@ pub fn switches_native_subagents(id: HarnessId) -> bool {
 
 #[cfg(test)]
 mod path_tests {
-    use super::child_path_entries;
+    use super::{child_path_entries, filter_child_env_defaults};
     use crate::executable::Platform;
     use std::path::PathBuf;
 
@@ -957,6 +979,43 @@ mod path_tests {
         assert_eq!(
             paths,
             [r"C:\Users\a\AppData\Roaming\npm", r"C:\nvm4w\nodejs"].map(PathBuf::from)
+        );
+    }
+
+    fn env_pairs(values: &[(&str, &str)]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        values
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect()
+    }
+
+    #[test]
+    fn driver_proxy_choice_suppresses_the_whole_login_shell_proxy_group() {
+        let defaults = env_pairs(&[
+            ("SSL_CERT_FILE", "/etc/corp.pem"),
+            ("HTTPS_PROXY", "http://proxy.example:8080"),
+            ("https_proxy", "http://proxy.example:8080"),
+            ("no_proxy", "localhost"),
+        ]);
+        // Nothing explicit: every default goes in, proxy group included.
+        assert_eq!(filter_child_env_defaults(defaults.clone(), &[]), defaults);
+        // The driver set (or env_remove'd: `get_envs` reports both) one proxy
+        // variable: no login-shell proxy variable is mixed in, the rest is.
+        let mut cmd = std::process::Command::new("true");
+        cmd.env_remove("HTTPS_PROXY");
+        let explicit: Vec<_> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
+        assert_eq!(
+            filter_child_env_defaults(defaults.clone(), &explicit),
+            env_pairs(&[("SSL_CERT_FILE", "/etc/corp.pem")])
+        );
+        // A non-proxy explicit key only drops itself.
+        assert_eq!(
+            filter_child_env_defaults(defaults, &["SSL_CERT_FILE".into()]),
+            env_pairs(&[
+                ("HTTPS_PROXY", "http://proxy.example:8080"),
+                ("https_proxy", "http://proxy.example:8080"),
+                ("no_proxy", "localhost"),
+            ])
         );
     }
 }
