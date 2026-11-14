@@ -704,6 +704,76 @@ impl Harness for CodexHarness {
     fn id(&self) -> HarnessId {
         HarnessId::Codex
     }
+    async fn name_session_if_unnamed(
+        &self,
+        session_id: &str,
+        title: &str,
+    ) -> Result<(), HarnessError> {
+        let exe = self.resolve_executable()?;
+        let mut cmd = Command::new(&exe);
+        cmd.arg("app-server");
+        crate::compose_child_path(&mut cmd, &exe);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().map_err(|e| {
+            crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
+        })?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            shutdown_child(&mut child, self.kill_grace).await;
+            return Err(HarnessError::Protocol("codex child has no stdio".into()));
+        };
+        let (client, _incoming) = RpcClient::new(stdin, stdout);
+        let naming = async {
+            client
+                .request(
+                    "initialize",
+                    json!({
+                        "clientInfo": {
+                            "name": "zeron-native",
+                            "title": "Zeron",
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                        "capabilities": { "experimentalApi": true },
+                    }),
+                )
+                .await?;
+            client.notify("initialized", None);
+            // Metadata only: neither resume the coding runtime nor start a turn.
+            // Recheck immediately before writing in case another client named
+            // the thread since the initial read. The API has no conditional set.
+            for _ in 0..2 {
+                let metadata = client
+                    .request(
+                        "thread/read",
+                        json!({
+                            "threadId": session_id, "includeTurns": false,
+                        }),
+                    )
+                    .await?;
+                if metadata["thread"]["name"]
+                    .as_str()
+                    .is_some_and(|n| !n.trim().is_empty())
+                {
+                    return Ok(());
+                }
+            }
+            client
+                .request(
+                    "thread/name/set",
+                    json!({
+                        "threadId": session_id, "name": title,
+                    }),
+                )
+                .await?;
+            Ok::<(), HarnessError>(())
+        };
+        let result = tokio::time::timeout(Duration::from_secs(10), naming).await;
+        client.close_stdin_for_teardown();
+        shutdown_child(&mut child, self.kill_grace).await;
+        result.unwrap_or_else(|_| Err(HarnessError::Protocol("session naming timed out".into())))
+    }
     fn display_name(&self) -> &str {
         // "Codex" (not "Codex CLI") — comet composer/defaults.ts
         // HARNESS_LABEL; must also match the registry's lazy descriptor so

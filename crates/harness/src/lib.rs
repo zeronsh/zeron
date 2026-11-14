@@ -347,6 +347,15 @@ pub trait Harness: Send + Sync {
     fn supports_plan(&self) -> bool {
         false
     }
+    /// Give an unnamed provider session its generated chat title. Existing
+    /// provider names take precedence; drivers without native names do nothing.
+    async fn name_session_if_unnamed(
+        &self,
+        _session_id: &str,
+        _title: &str,
+    ) -> Result<(), HarnessError> {
+        Ok(())
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
     fn model_context(&self) -> Result<Option<ModelContext>, HarnessError> {
         Ok(None)

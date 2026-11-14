@@ -1159,6 +1159,8 @@
         "terms": "web link url browser tab panel zeron external"
       },
       "thread_naming": {
+        "agent_titles": "Use agent session titles",
+        "agent_titles_description": "Use Claude Code session titles and sync generated titles to Codex.",
         "label": "Thread naming",
         "terms": "titles rename sessions model",
         "session_agent": "Session agent",
