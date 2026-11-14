@@ -176,10 +176,13 @@ impl Service {
                     "slow":m.cpu_slow && cfg!(not(target_os = "macos"))})
             })
             .collect();
-        Ok(json!({ "models": list }))
+        Ok(json!({ "models": list, "supported": zeron_voice::cpu_supported() }))
     }
     fn start(&mut self, args: &Json) -> Result<Json, String> {
         let dir = self.dir(args)?;
+        if !zeron_voice::cpu_supported() {
+            return Err(zeron_voice::CPU_UNSUPPORTED.into());
+        }
         self.idle()?;
         // (The page says what to do about it: no words for the composer.)
         if !zeron_voice::installed(&dir) {
@@ -199,6 +202,9 @@ impl Service {
     }
     fn download(&mut self, args: &Json) -> Result<Json, String> {
         let dir = self.dir(args)?;
+        if !zeron_voice::cpu_supported() {
+            return Err(zeron_voice::CPU_UNSUPPORTED.into());
+        }
         let total = zeron_voice::model_for(&dir).map_or(0, |m| m.size());
         self.idle()?;
         if DOWNLOADING.swap(true, Ordering::AcqRel) {

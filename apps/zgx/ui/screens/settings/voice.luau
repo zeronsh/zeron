@@ -28,6 +28,8 @@ search.index(M.ID, ui.t("settings.voice.title"), ui.t("settings.voice.terms"), {
 -- The models on offer, as the host lists them: { id, name, size,
 -- languages, installed }, the default first.
 local models = ui.state("settings_voice_models", {} :: { any })
+-- This computer's processor runs them (x86-64 without AVX2 doesn't).
+local supported = ui.state("settings_voice_supported", true)
 -- The chosen one (its first when the saved one isn't offered).
 local function chosen(): any?
 	local list, want = models:get(), prefs.dictation_model:get()
@@ -49,7 +51,10 @@ local on = ui.state("settings_voice_on", false)
 
 local function refresh()
 	host.call("dictation.call", { op = "status" }):after(function(s: any)
-		models:set(s.models or {})
+		ui.batch(function()
+			models:set(s.models or {})
+			supported:set(s.supported ~= false)
+		end)
 	end, function() end)
 	host.call("dictation.call", { op = "inputs" }):after(function(list: any)
 		inputs:set(list)
@@ -167,6 +172,9 @@ end
 -- A model's line: its size, how many languages it speaks, and whether it's
 -- slow here (on the CPU).
 local function about(m: any): string
+	if not supported:get() then
+		return ui.t("settings.voice.model.unsupported"):get()
+	end
 	return ui.t(if m.slow then "settings.voice.model.about_slow" else "settings.voice.model.about", { size = weight(m.size), n = #(m.languages or {}) }):get()
 end
 -- Download or Remove `m` (a function: the model as it is now).
@@ -180,7 +188,7 @@ local function model_action(m: () -> any?): Node
 			ui.t("settings.voice.model.remove"), tone = "secondary", size = "sm",
 			on_click = function() remove(m().id) end,
 		}),
-		ui.show(function(): boolean return m() ~= nil and not here() end, ds.Button {
+		ui.show(function(): boolean return m() ~= nil and not here() and supported:get() end, ds.Button {
 			ui.t("settings.voice.model.download"), tone = "secondary", size = "sm", disabled = downloading,
 			on_click = function() download(m().id) end,
 		}),
@@ -271,6 +279,8 @@ function M.view(): Node
 						local s = dictation.state:get()
 						if s.phase == "downloading" then
 							return ui.t("settings.voice.dictation.downloading", { done = weight(s.bytes or 0), total = weight(s.total or 0) }):get()
+						elseif not supported:get() then
+							return ui.t("settings.voice.model.unsupported"):get()
 						elseif not installed:get() then
 							return ui.t("settings.voice.dictation.needs_download", { total = weight(size:get()) }):get()
 						end

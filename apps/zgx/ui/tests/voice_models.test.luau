@@ -6,10 +6,11 @@
 
 local PAGE = "#settings-page"
 
-local function voice(): any
+local function voice(stub: any?): any
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 900)
 	app:frames(30)
+	if stub then app:set_state("settings_stub_voice", stub) end
 	app:set_state("settings_dictation", true)
 	app:command("shell.settings")
 	app:frames(20)
@@ -43,5 +44,12 @@ test("removing the model in use turns dictation off, nothing in use", function()
 	expect(app:state("settings_dictation")).to_be(false)
 	expect(shows(app, "In use")).to_be(false)
 	expect(app:count(`{PAGE} >> role:button "Download"`)).to_be(2)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a processor that can't run them says so and offers no download", function()
+	local app = voice({ cohere = "absent", supported = false })
+	expect(shows(app, "can't run speech models")).to_be(true)
+	expect(app:has(`{PAGE} >> role:button "Download"`)).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
