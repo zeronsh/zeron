@@ -810,8 +810,11 @@ local function Composer(): Node
 	-- the focus; back from Settings): the composer takes the keys. Once
 	-- what brought it here is done (a palette closing
 	-- puts focus back where it was first), so this comes last; a field
-	-- that takes the keys after (a rename) has them. (Kept: a reload, or
-	-- the window opening, isn't an arrival.)
+	-- that takes the keys after (a rename) has them. The window opening on
+	-- a chat is an arrival too: what's typed from the launch on goes into
+	-- the composer, with no click first (Zeron's composer has the keys as it
+	-- opens; ademark's A1 types from the launch and timed out on every run
+	-- while they were nowhere). (Kept: a reload isn't one.)
 	local arrived = ui.state("chat_composer_arrived", "?")
 	ui.effect(function()
 		local now = route.current:get()
@@ -824,7 +827,7 @@ local function Composer(): Node
 		end
 		arrived:set(at)
 		-- (A tab strip's arrows keep the keys on the tab they chose.)
-		if route.take_keys_kept() or was == "?" or not chat then
+		if route.take_keys_kept() or not chat then
 			return
 		end
 		ui.after(0, function()
