@@ -749,6 +749,8 @@ pub struct DeviceLink {
     client: Arc<RpcClient>,
     closed_rx: watch::Receiver<Option<String>>,
     pump: tokio::task::JoinHandle<()>,
+    /// When an RPC frame last went either way (not the liveness echoes).
+    last_used: Arc<Mutex<tokio::time::Instant>>,
 }
 
 impl DeviceLink {
@@ -778,6 +780,8 @@ impl DeviceLink {
         let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
         let (in_tx, in_rx) = mpsc::channel::<String>(256);
         let (closed_tx, closed_rx) = watch::channel::<Option<String>>(None);
+        let last_used = Arc::new(Mutex::new(tokio::time::Instant::now()));
+        let used = last_used.clone();
 
         let pump = tokio::spawn(async move {
             let transport = zeron_sync::socket::pump_with_timing(
@@ -810,6 +814,7 @@ impl DeviceLink {
                     tokio::select! {
                         frame = out_rx.recv() => match frame {
                             Some(text) => {
+                                *lock(&used) = tokio::time::Instant::now();
                                 let header = DeviceFrameHeader::new(RPC_CHUNKS_STREAM, RPC_KIND);
                                 let encoded = match encode_device_frame(&header, text.as_bytes()) {
                                     Ok(bytes) => bytes,
@@ -840,6 +845,7 @@ impl DeviceLink {
                                         // An RPC frame from the host proves the
                                         // whole path just as well as an echo.
                                         last_echo = tokio::time::Instant::now();
+                                        *lock(&used) = last_echo;
                                         let text = String::from_utf8_lossy(&payload).into_owned();
                                         if in_tx.send(text).await.is_err() {
                                             break "client dropped".to_string();
@@ -899,7 +905,14 @@ impl DeviceLink {
             client: Arc::new(RpcClient::new(out_tx, in_rx)),
             closed_rx,
             pump,
+            last_used,
         }
+    }
+
+    /// Nothing waits on this link (no call awaiting a reply, no open
+    /// stream) and no RPC frame has crossed it for `quiet`.
+    fn idle_for(&self, quiet: Duration) -> bool {
+        self.client.outstanding() == 0 && lock(&self.last_used).elapsed() >= quiet
     }
 
     pub fn client(&self) -> Arc<RpcClient> {
@@ -1014,6 +1027,11 @@ impl LinkCacheConfig {
     }
 }
 
+/// A peer link nothing has used for this long is closed ([`LinkCache`]).
+const LINK_IDLE_CLOSE: Duration = Duration::from_secs(300);
+/// How often open links are checked for idleness.
+const LINK_IDLE_SWEEP: Duration = Duration::from_secs(60);
+
 /// Consecutive failures older than this decay to zero — a blip an hour ago must
 /// not escalate today's first retry up the backoff curve.
 const FAILURE_DECAY: Duration = Duration::from_secs(600);
@@ -1034,8 +1052,17 @@ pub struct LinkCache {
     config: LinkCacheConfig,
     revoked: AtomicBool,
     links: Mutex<HashMap<String, Arc<DeviceLink>>>,
+    /// A link was cached (or the cache went): wakes the idle sweeper.
+    linked: Arc<tokio::sync::Notify>,
     dial_state: Mutex<HashMap<String, DialState>>,
     dial_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl Drop for LinkCache {
+    fn drop(&mut self) {
+        // The idle sweeper may be parked waiting for a link: let it end.
+        self.linked.notify_one();
+    }
 }
 
 impl LinkCache {
@@ -1044,9 +1071,13 @@ impl LinkCache {
             config,
             revoked: AtomicBool::new(false),
             links: Mutex::new(HashMap::new()),
+            linked: Arc::new(tokio::sync::Notify::new()),
             dial_state: Mutex::new(HashMap::new()),
             dial_locks: Mutex::new(HashMap::new()),
         });
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(Self::close_idle_links(Arc::downgrade(&cache), cache.linked.clone()));
+        }
         // Wake = every cached link is half-open and every cooldown is moot
         // (the failures belonged to the pre-suspend network). Drop them so the
         // next call redials immediately with fresh credentials. An online
@@ -1162,6 +1193,7 @@ impl LinkCache {
                     }
                     links.insert(device_id.to_string(), link.clone());
                     drop(links);
+                    self.linked.notify_one();
                     self.spawn_evictor(device_id.to_string(), &link);
                     tracing::info!(device = %device_id, "peer: connected via device room");
                     return Ok(link.client());
@@ -1176,6 +1208,33 @@ impl LinkCache {
         // curve — the in-call retries must not escalate it by themselves.
         self.note_failure(device_id);
         Err(last_err.unwrap_or(RpcError::Closed))
+    }
+
+    /// Close links nothing has used for [`LINK_IDLE_CLOSE`]: each one pings
+    /// and echoes every 10 s, on both devices, for as long as it's open, and
+    /// a link used once (a remote list, a status query) was otherwise held
+    /// until the network or the process went. The next call dials again
+    /// (one connect and a readiness round trip). Sleeps while none is open.
+    async fn close_idle_links(weak: std::sync::Weak<Self>, linked: Arc<tokio::sync::Notify>) {
+        loop {
+            let Some(cache) = weak.upgrade() else { return };
+            let open = !lock(&cache.links).is_empty();
+            drop(cache);
+            if !open {
+                linked.notified().await;
+                continue;
+            }
+            tokio::time::sleep(LINK_IDLE_SWEEP).await;
+            let Some(cache) = weak.upgrade() else { return };
+            let mut links = lock(&cache.links);
+            links.retain(|device, link| {
+                let idle = link.idle_for(LINK_IDLE_CLOSE);
+                if idle {
+                    tracing::info!(device = %device, "peer: idle link closed");
+                }
+                !idle
+            });
+        }
     }
 
     /// Drop a cached link after a failed RPC so the next call re-dials.
