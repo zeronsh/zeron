@@ -76,6 +76,17 @@
 --                        the code under it)                              ("compose")
 --   zeron.composed()     in a build: your comments still on a draft, by key
 --                        ({ [key] = { session, hovered } }), reactive    ("compose")
+--   zeron.draft()        the composer's draft as you type it: { session?,
+--                        text, attachments = { { kind, name } } }, reactive
+--                                                                 ("draft")
+--   zeron.take_draft(key), zeron.put_draft(key), zeron.swap_draft(key),
+--   zeron.drop_draft(key)
+--                        the draft taken whole (words, chips, quotes) and
+--                        kept by Zeron under your key, the composer
+--                        cleared; put back on the draft shown; the two
+--                        traded; let go                           ("draft")
+--   zeron.drafts()       what Zeron keeps for you, by key: { session?, text,
+--                        attachments, at }, reactive              ("draft")
 --   zeron.toast(text)    a short note at the window's foot   (always)
 --   zeron.notify { title, body?, session? }  a notification, as Zeron's
 --                        own (Settings → Notifications)     ("notifications")
@@ -1372,6 +1383,50 @@ return function(id: string): any
 	local composed = ui.shared(`{prefix}.composed`, {} :: { [string]: any })
 	function M.composed(): { [string]: { session: string?, hovered: boolean } }
 		return composed:get() or {}
+	end
+
+	-- The composer's draft as you type it: the chat it's for (nil, a new
+	-- chat), its words, and what it carries, each chip's kind ("file",
+	-- "image", "chat", …) and name, never a file's path. Read in a build or
+	-- an effect: it changes as the draft does. Nil until Zeron says.
+	-- (Reached on first read: only a plugin allowed "draft" may.)
+	local draft: any = nil
+	function M.draft(): { session: string?, text: string, attachments: { { kind: string, name: string } } }?
+		draft = draft or ui.shared("zeron.draft", nil :: any)
+		return draft:get()
+	end
+
+	-- The draft shown, taken whole (its words, its chips, the passages
+	-- quoted in it) and kept by Zeron under `key`, yours, the composer
+	-- cleared; what that key kept before is replaced. An empty draft isn't
+	-- taken. Up to 16 kept at once.
+	function M.take_draft(key: string)
+		ui.invoke(`{prefix}.draft`, { op = "take", key = key })
+	end
+
+	-- What `key` kept, put back on the draft shown as it was taken (after
+	-- what's there, if the composer isn't empty), and no longer kept.
+	function M.put_draft(key: string)
+		ui.invoke(`{prefix}.draft`, { op = "put", key = key })
+	end
+
+	-- The draft shown and what `key` keeps, traded: either may be empty, so
+	-- one call sets the draft aside, brings it back, or swaps the two.
+	function M.swap_draft(key: string)
+		ui.invoke(`{prefix}.draft`, { op = "swap", key = key })
+	end
+
+	-- What `key` kept, let go of.
+	function M.drop_draft(key: string)
+		ui.invoke(`{prefix}.draft`, { op = "drop", key = key })
+	end
+
+	-- What Zeron keeps for you, by key: the chat each was taken from, its
+	-- words, what it carries (as `draft()` says it) and when (os.time).
+	-- Read in a build: it changes as you take and put back.
+	local drafts = ui.shared(`{prefix}.drafts`, {} :: { [string]: any })
+	function M.drafts(): { [string]: { session: string?, text: string, attachments: { { kind: string, name: string } }, at: number } }
+		return drafts:get() or {}
 	end
 
 	function M.toast(text: string)

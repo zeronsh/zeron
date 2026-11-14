@@ -228,6 +228,11 @@ function M.showing(): string
 	return here:peek()
 end
 
+-- The same, read as it changes.
+function M.showing_now(): string
+	return here:get()
+end
+
 function M.show(key: string)
 	local was = here:peek()
 	if was == key then
@@ -262,6 +267,52 @@ function M.take(): (string, { any })
 		M.quotes:set({})
 	end)
 	return text, cargo
+end
+
+-- The draft shown, lifted out whole to be put back later (a plugin's
+-- `zeron.take_draft`): its words as typed, its chips and the passages
+-- quoted in it, the composer cleared. Nil when there's nothing to lift.
+function M.lift(): { text: string, cargo: { any }, quotes: { [string]: string } }?
+	local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
+	if text == "" and #cargo == 0 then
+		return nil
+	end
+	ui.batch(function()
+		M.text:set("")
+		M.cargo:set({})
+		M.quotes:set({})
+	end)
+	return { text = text, cargo = cargo, quotes = quotes }
+end
+
+-- A lifted draft put back on the draft shown (`zeron.put_draft`). Onto an
+-- empty composer it's as it was; onto words already there, its words follow
+-- them after a blank line and its chips follow theirs, its files numbered
+-- after those there.
+function M.lay(d: { text: string, cargo: { any }, quotes: { [string]: string } })
+	local here_text, here_cargo = M.text:peek(), M.cargo:peek()
+	ui.batch(function()
+		if here_text == "" and #here_cargo == 0 then
+			M.text:set(d.text)
+			M.cargo:set(d.cargo)
+			M.quotes:set(d.quotes)
+			return
+		end
+		local quotes = table.clone(M.quotes:peek())
+		for line, passage in d.quotes do
+			quotes[line] = passage
+		end
+		M.quotes:set(quotes)
+		if d.text ~= "" then
+			M.text:set(if here_text == "" then d.text else `{here_text}\n\n{d.text}`)
+		end
+		for _, item in d.cargo do
+			local moved = table.clone(item)
+			moved.mention = nil
+			M.push_cargo(nil, moved)
+		end
+	end)
+	M.focus:add(1)
 end
 
 -- A passage of the transcript, quoted into the draft (its line marks it)

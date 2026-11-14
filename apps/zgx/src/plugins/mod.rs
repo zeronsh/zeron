@@ -456,6 +456,23 @@ pub(crate) fn comment(asked: &Value, shown: &str) -> Option<Value> {
     Some(json_value(&out))
 }
 
+/// The longest key a plugin keeps a taken draft under.
+const DRAFT_KEY: usize = 64;
+
+/// A plugin's ask of the composer's draft (`zeron.take_draft`,
+/// `put_draft`, `swap_draft`, `drop_draft`), held to `{ op, key }`: `op`
+/// one of "take", "put", "swap" or "drop", `key` 1 to 64 characters with
+/// no control characters. Anything else is refused.
+pub(crate) fn draft_ask(asked: &Value) -> Option<Value> {
+    let op = asked.field("op").map(text)?;
+    let key = asked.field("key").map(text)?;
+    let valid_key = !key.is_empty() && key.chars().count() <= DRAFT_KEY && !key.chars().any(char::is_control);
+    if !matches!(op.as_str(), "take" | "put" | "swap" | "drop") || !valid_key {
+        return None;
+    }
+    Some(Value::record([("op", Value::from(op.as_str())), ("key", Value::from(key.as_str()))]))
+}
+
 /// Plugins for the main window `cx` shows `host` in.
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     expose_surface(host);
@@ -2398,6 +2415,24 @@ impl Bridge {
                 }
             }
         });
+        // The composer's draft taken (its words, its chips, the passages
+        // quoted in it), put back or let go, under a key of the plugin's,
+        // for a plugin allowed "draft": screens/plugins keeps what's taken
+        // (the plugin never holds its files' paths) and tells it what it
+        // keeps as `plugin.<id>.drafts`.
+        host.action(format!("plugin.{id}.draft"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                if let Some(b) = me.upgrade()
+                    && b.item(&plugin).is_some_and(|i| i.may("draft"))
+                {
+                    match draft_ask(&asked) {
+                        Some(asked) => b.request("draft", &plugin, asked),
+                        None => eprintln!("zeron-zgx: plugin {plugin}: a draft ask that isn't take, put, swap or drop with a key, refused"),
+                    }
+                }
+            }
+        });
         host.action(format!("plugin.{id}.open_url"), {
             let (me, plugin) = (me.clone(), plugin.clone());
             move |url| {
@@ -3460,6 +3495,23 @@ mod tests {
         assert!(comment(&asked, "").is_none(), "no chat shown");
         let wide = json_value(&json!({ "file": "a.rs", "line": 1, "note": "n", "snippet": "é".repeat(3000) }));
         assert!(text(comment(&wide, "s1").unwrap().field("snippet").unwrap()).len() <= COMMENT_BYTES);
+    }
+
+    /// A plugin's ask of the draft is take, put, swap or drop, under a key
+    /// of 1 to 64 characters; nothing else rides along to the app.
+    #[test]
+    fn a_draft_ask_is_take_put_or_drop_with_a_key() {
+        let ask = |v: Json| draft_ask(&json_value(&v));
+        let took = ask(json!({ "op": "take", "key": "stash", "extra": "dropped" })).expect("a take");
+        assert_eq!(value_json(&took), json!({ "op": "take", "key": "stash" }));
+        assert!(ask(json!({ "op": "put", "key": "k".repeat(64) })).is_some());
+        assert!(ask(json!({ "op": "drop", "key": "é" })).is_some());
+        assert!(ask(json!({ "op": "swap", "key": "stash" })).is_some());
+        assert!(ask(json!({ "op": "send", "key": "stash" })).is_none(), "not an op");
+        assert!(ask(json!({ "op": "take", "key": "" })).is_none(), "no key");
+        assert!(ask(json!({ "op": "take" })).is_none(), "no key");
+        assert!(ask(json!({ "op": "take", "key": "k".repeat(65) })).is_none(), "too long");
+        assert!(ask(json!({ "op": "take", "key": "a\nb" })).is_none(), "a control character");
     }
 
     #[test]
