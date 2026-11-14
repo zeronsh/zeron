@@ -17,7 +17,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -86,31 +87,47 @@ pub fn pending(sessions: &crate::sessions::SessionsEngine) -> usize {
 
 /// A quit-when-idle request, shared between the RPC that sets it and the
 /// watcher that acts on it.
-#[derive(Clone, Default)]
-pub struct QuitWhenIdle(Arc<AtomicBool>);
+#[derive(Clone)]
+pub struct QuitWhenIdle(Arc<tokio::sync::watch::Sender<bool>>);
+
+impl Default for QuitWhenIdle {
+    fn default() -> Self {
+        Self(Arc::new(tokio::sync::watch::Sender::new(false)))
+    }
+}
 
 impl QuitWhenIdle {
     pub fn arm(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.send_replace(true);
     }
 
     /// The app is back: keep running.
     pub fn disarm(&self) -> bool {
-        self.0.swap(false, Ordering::SeqCst)
+        self.0.send_replace(false)
     }
 
     pub fn armed(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        *self.0.borrow()
     }
 }
 
 /// Until armed and nothing has been pending for [`QUIET_BEFORE_STOP`]:
-/// then the engine stops. `pending` is read every [`CHECK_EVERY`].
+/// then the engine stops. `pending` is read every [`CHECK_EVERY`] while
+/// armed; unarmed (the app open, or set to keep running) it sleeps until
+/// armed, rather than waking the engine every second to find it isn't.
 pub async fn wait_until_idle_after_quit(quit: QuitWhenIdle, pending: impl Fn() -> usize) {
     let mut quiet_since: Option<tokio::time::Instant> = None;
+    let mut armed = quit.0.subscribe();
     let mut tick = tokio::time::interval(CHECK_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        if !*armed.borrow_and_update() {
+            quiet_since = None;
+            // (The sender lives in `quit`, held here: never closed.)
+            let _ = armed.changed().await;
+            tick.reset();
+            continue;
+        }
         tick.tick().await;
         if !quit.armed() || pending() > 0 {
             quiet_since = None;
