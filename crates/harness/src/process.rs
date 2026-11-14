@@ -164,6 +164,8 @@ pub(crate) async fn descendants(root: u32) -> Vec<Tracked> {
 struct ProcEntry {
     pid: i32,
     ppid: i32,
+    /// Its process group (0 where the table doesn't say).
+    pgid: i32,
     start: Option<u64>,
 }
 
@@ -185,7 +187,7 @@ fn tree_of(root: i32, table: &[ProcEntry]) -> Vec<i32> {
 #[cfg(unix)]
 async fn ps_table() -> Vec<ProcEntry> {
     let Ok(out) = tokio::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid="])
+        .args(["-A", "-o", "pid=,ppid=,pgid="])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
@@ -199,9 +201,11 @@ async fn ps_table() -> Vec<ProcEntry> {
         .filter_map(|line| {
             let mut cols = line.split_whitespace().map(str::parse::<i32>);
             let (pid, ppid) = (cols.next()?.ok()?, cols.next()?.ok()?);
+            let pgid = cols.next().and_then(Result::ok).unwrap_or(0);
             Some(ProcEntry {
                 pid,
                 ppid,
+                pgid,
                 start: proc_table::start_time(pid),
             })
         })
@@ -223,10 +227,11 @@ mod proc_table {
             .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
             .filter_map(|pid| {
                 let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-                let (ppid, start) = parse_stat(&stat)?;
+                let (ppid, pgid, start) = parse_stat(&stat)?;
                 Some(ProcEntry {
                     pid,
                     ppid,
+                    pgid,
                     start: Some(start),
                 })
             })
@@ -236,7 +241,7 @@ mod proc_table {
     #[cfg(target_os = "linux")]
     pub(super) fn start_time(pid: i32) -> Option<u64> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        parse_stat(&stat).map(|(_, start)| start)
+        parse_stat(&stat).map(|(_, _, start)| start)
     }
 
     #[cfg(target_os = "macos")]
@@ -261,6 +266,7 @@ mod proc_table {
                 Some(ProcEntry {
                     pid,
                     ppid: info.pbi_ppid as i32,
+                    pgid: info.pbi_pgid as i32,
                     start: Some(start_of(&info)),
                 })
             })
@@ -393,14 +399,18 @@ mod proc_table {
         None
     }
 
-    /// `(ppid, starttime)` from a `/proc/<pid>/stat` line: fields 4 and 22,
-    /// counted after the parenthesized command name (which may itself hold
-    /// spaces and parentheses).
+    /// `(ppid, pgrp, starttime)` from a `/proc/<pid>/stat` line: fields 4,
+    /// 5 and 22, counted after the parenthesized command name (which may
+    /// itself hold spaces and parentheses).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(super) fn parse_stat(stat: &str) -> Option<(i32, u64)> {
+    pub(super) fn parse_stat(stat: &str) -> Option<(i32, i32, u64)> {
         let rest = &stat[stat.rfind(')')? + 1..];
         let fields: Vec<&str> = rest.split_whitespace().collect();
-        Some((fields.get(1)?.parse().ok()?, fields.get(19)?.parse().ok()?))
+        Some((
+            fields.get(1)?.parse().ok()?,
+            fields.get(2)?.parse().ok()?,
+            fields.get(19)?.parse().ok()?,
+        ))
     }
 }
 
@@ -415,6 +425,15 @@ pub type KnownServer = (String, Vec<String>);
 /// or not the agent listed it. Zombies don't count. Blocking: one
 /// process-table read and an argv read per child.
 ///
+/// An agent that leads its own process group (every agent Zeron starts
+/// through `owned::configure`) also holds on to what was left in that
+/// group: a stop signals the whole group, so `cmd &` run by a shell that
+/// has since exited (re-parented to init, but still in the group) would be
+/// ended with the agent. Those count too, whoever their parent is now.
+/// (Claude Code 2.1.322 runs each Bash command in a session and group of
+/// its own, so what its commands leave behind is outside its group: the
+/// stop never signals it, and it outlives the agent either way.)
+///
 /// A process table that can't be read answers with one entry saying so, so
 /// a caller holding on "anything here" errs toward keeping the agent.
 /// (Windows: not traced here; always empty.)
@@ -426,11 +445,22 @@ pub fn unexpected_descendants(root: u32, known: &[KnownServer]) -> Vec<String> {
             return vec!["(the process table can't be read)".to_owned()];
         }
         let root = root as i32;
-        let mut found = Vec::new();
-        for entry in table
+        // Its group only if it leads one: an agent sharing its parent's
+        // group would count every process of that parent's.
+        let group = table
             .iter()
-            .filter(|entry| entry.ppid == root && entry.pid > 1)
-        {
+            .any(|entry| entry.pid == root && entry.pgid == root)
+            .then_some(root);
+        let tree = group.map(|_| tree_of(root, &table)).unwrap_or_default();
+        let mut found = Vec::new();
+        for entry in table.iter().filter(|entry| {
+            entry.pid > 1
+                && entry.pid != root
+                && (entry.ppid == root
+                    // Left in the group, and no longer under the agent
+                    // (what is under it counts through its child).
+                    || (group == Some(entry.pgid) && !tree.contains(&entry.pid)))
+        }) {
             if proc_table::zombie(entry.pid) {
                 continue;
             }
@@ -657,7 +687,7 @@ mod tests {
     fn proc_stat_fields_survive_hostile_command_names() {
         // Field 22 (starttime) and 4 (ppid), with a comm holding ") (".
         let stat = "4242 (evil) (name) S 17 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 10";
-        assert_eq!(proc_table::parse_stat(stat), Some((17, 987654)));
+        assert_eq!(proc_table::parse_stat(stat), Some((17, 4242, 987654)));
         assert_eq!(proc_table::parse_stat("4242 (truncated) S 17"), None);
     }
 
@@ -802,5 +832,74 @@ mod unexpected_descendants_tests {
             "npx",
             &[]
         ));
+    }
+
+    /// An agent leading its own group (as Zeron starts them) whose shell ran
+    /// `sleep 3608 &` and exited: the orphan is re-parented, but still in
+    /// the group a stop signals, so it counts. Configured as an MCP
+    /// server, it doesn't.
+    #[test]
+    fn an_orphan_left_in_the_agents_group_is_reported() {
+        use std::os::unix::process::CommandExt as _;
+        let mut agent = std::process::Command::new("/bin/sh")
+            .args(["-c", "/bin/sh -c 'sleep 3608 >/dev/null 2>&1 &'; read _"])
+            .stdin(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = agent.id() as i32;
+        /// Ends the agent's whole group, the orphan with it.
+        struct Reap(i32);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                // SAFETY: SIGKILL to the test's own process group.
+                unsafe { libc::kill(-self.0, libc::SIGKILL) };
+            }
+        }
+        let _reap = Reap(group);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let orphan = loop {
+            let table = proc_table::read();
+            let orphan = table.iter().find(|entry| {
+                entry.pgid == group
+                    && entry.ppid != group
+                    && entry.pid != group
+                    && !proc_table::zombie(entry.pid)
+                    && proc_table::argv(entry.pid)
+                        .is_some_and(|argv| argv.last().is_some_and(|arg| arg == "3608"))
+            });
+            // (Its shell has exited: the agent has no child left.)
+            if let Some(orphan) = orphan
+                && !table
+                    .iter()
+                    .any(|entry| entry.ppid == group && !proc_table::zombie(entry.pid))
+            {
+                break orphan.pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the orphan never appeared"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let found = unexpected_descendants(group as u32, &[]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].starts_with(&format!("{orphan} ")), "{found:?}");
+        let mcp: Vec<KnownServer> = vec![("sleep".into(), vec!["3608".into()])];
+        assert_eq!(
+            unexpected_descendants(group as u32, &mcp),
+            Vec::<String>::new()
+        );
+        let _ = agent.kill();
+        let _ = agent.wait();
+    }
+
+    /// An agent sharing its parent's group (this test runner's) counts its
+    /// own children only, never the rest of that group.
+    #[test]
+    fn an_agent_without_its_own_group_counts_only_its_children() {
+        let agent = agent();
+        assert_eq!(unexpected_descendants(agent.id(), &[]).len(), 2);
+        end(agent);
     }
 }

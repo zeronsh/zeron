@@ -492,6 +492,55 @@ impl AgentProcess {
         }
         Self(agent)
     }
+
+    /// Leading its own process group, as Zeron starts agents, with no child
+    /// left: its shell ran `sleep <secs> &` and exited, so the sleep is
+    /// re-parented to init but still in the agent's group.
+    fn with_orphan_in_its_group(secs: &str) -> Self {
+        use std::os::unix::process::CommandExt as _;
+        let agent = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                &format!("/bin/sh -c 'sleep {secs} >/dev/null 2>&1 &'; read _"),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = agent.id() as i32;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            // `ppid pgid stat args` of every process.
+            let out = std::process::Command::new("ps")
+                .args(["-A", "-o", "ppid=,pgid=,stat=,args="])
+                .output()
+                .unwrap();
+            let rows: Vec<(i32, i32, String, String)> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let mut cols = line.split_whitespace();
+                    let ppid = cols.next()?.parse().ok()?;
+                    let pgid = cols.next()?.parse().ok()?;
+                    let stat = cols.next()?.to_owned();
+                    Some((ppid, pgid, stat, cols.collect::<Vec<_>>().join(" ")))
+                })
+                .filter(|(_, _, stat, _)| !stat.starts_with('Z'))
+                .collect();
+            // The sleep in the group, and its shell gone.
+            let orphan = rows.iter().any(|(ppid, pgid, _, args)| {
+                *pgid == group && *ppid != group && args == &format!("sleep {secs}")
+            });
+            if orphan && !rows.iter().any(|(ppid, ..)| *ppid == group) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the orphan never appeared"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Self(agent)
+    }
 }
 
 #[cfg(unix)]
@@ -506,6 +555,12 @@ impl Drop for AgentProcess {
                 .and_then(|p| p.parse::<i32>().ok())
             {
                 unsafe { libc::kill(child, libc::SIGKILL) };
+            }
+        }
+        // SAFETY: as above; a group only when the agent leads its own.
+        unsafe {
+            if libc::getpgid(pid) == pid {
+                libc::kill(-pid, libc::SIGKILL);
             }
         }
         let _ = self.0.kill();
@@ -536,6 +591,26 @@ async fn an_agent_whose_process_runs_an_unreported_child_is_never_stopped() {
     assert!(
         rig.live(),
         "stopped while its process ran an unreported child"
+    );
+    assert_eq!(rig.kills(), 0);
+    drop(agent);
+    rig.core.sessions.shutdown().await;
+}
+
+/// The agent's shell ran `cmd &` and exited: the process it left has no
+/// parent under the agent any more, but it's in the agent's process group,
+/// which a stop would signal. Never stopped, however long.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn an_orphan_left_in_the_agents_process_group_holds_the_stop() {
+    let rig = rig(true);
+    let agent = AgentProcess::with_orphan_in_its_group("3609");
+    *rig.ledger.process.lock().unwrap() = Some(agent.0.id());
+    rig.send("hello").await;
+    tokio::time::sleep(Duration::from_secs(3 * 60 * 60)).await;
+    assert!(
+        rig.live(),
+        "stopped while an orphan of its shell ran in its process group"
     );
     assert_eq!(rig.kills(), 0);
     drop(agent);
