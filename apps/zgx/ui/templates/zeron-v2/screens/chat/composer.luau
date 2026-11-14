@@ -37,6 +37,7 @@ local files = require("@app/screens/files/api")
 local Where = require("@app/screens/chat/where")
 local DropOverlay = require("@ds/drop_overlay")
 local mentions = require("@ds/composer_mentions")
+local Draft = require("@ds/draft_text")
 local Invocations = require("@app/screens/chat/invocations")
 local Completions = require("@app/screens/chat/completions")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
@@ -586,10 +587,10 @@ local function Composer(): Node
 		end
 		return LinkNotice.of {
 			connection = sessions.connection:get(),
-			cloud = machine.cloud_link(string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0),
+			cloud = machine.cloud_link(Draft.has_text(shared.text) or #shared.cargo:get() > 0 or #queue:get() > 0),
 			host_unreachable = host_unreachable,
 			host = host,
-			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,
+			intent = Draft.has_text(shared.text) or #shared.cargo:get() > 0 or #queue:get() > 0,
 		}
 	end)
 
