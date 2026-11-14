@@ -189,21 +189,45 @@ do
 		end)
 	end
 end
-ui.effect(function()
+-- Saved as it changes, at most every SAVE_EVERY ms: each save reads the
+-- whole draft (into the saved state, then its file), and a long one read
+-- at every keystroke cost a copy of it each.
+local SAVE_EVERY = 250
+local saved_at = -math.huge
+local function save_new()
+	saved_at = ui.now()
 	local now: any = nil
-	if here:get() == "" then
-		local text, cargo, quotes = M.text:get(), M.cargo:get(), M.quotes:get()
+	if here:peek() == "" then
+		local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
 		if text ~= "" or #cargo > 0 then
 			now = { text = text, cargo = cargo, quotes = quotes }
 		end
 	else
-		local put = kept:get()[""]
+		local put = kept:peek()[""]
 		if put then
 			now = { text = put.text, cargo = put.cargo, quotes = put.quotes }
 		end
 	end
 	if now ~= nil or saved_new:peek() ~= nil then
 		saved_new:set(now)
+	end
+end
+ui.effect(function()
+	-- What it's saved from, followed (the draft's edits, not the draft).
+	if here:get() == "" then
+		M.text:len()
+		M.cargo:get()
+		M.quotes:get()
+	else
+		kept:get()
+	end
+	-- (A run's timer goes as the next run begins: steady typing saves every
+	-- SAVE_EVERY, and the last keystroke's once it has waited that long.)
+	local wait = SAVE_EVERY - (ui.now() - saved_at)
+	if wait <= 0 then
+		save_new()
+	else
+		ui.after(wait, save_new)
 	end
 end)
 
