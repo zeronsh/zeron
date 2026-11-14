@@ -340,7 +340,9 @@ fun SessionScreen(
         Box(Modifier.weight(1f).fillMaxWidth()) {
             val density = LocalDensity.current
             var stack by remember { mutableStateOf(0.dp) }
-            LaunchedEffect(stack) { transcript.bottomInset = stack.value + 12f }
+            // Rest the last row just above the fade (FADE, not the gradient's
+            // full stack + FADE height) so the newest line reads uncovered.
+            LaunchedEffect(stack) { transcript.bottomInset = stack.value + FADE.value }
             Transcript(transcript, actions, Modifier.fillMaxSize())
             // Why a transcript with nothing in it has nothing in it.
             androidx.compose.animation.Crossfade(
