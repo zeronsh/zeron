@@ -20,6 +20,7 @@ object ZIcons {
     val TabSessions = R.drawable.zi_tab_chat
     val TabSettings = R.drawable.zi_tab_settings
     val Back = R.drawable.zi_arrow_left
+    val History = R.drawable.zi_list
     val More = R.drawable.zi_more_horizontal
     val Close = R.drawable.zi_close
     val Plus = R.drawable.zi_plus
