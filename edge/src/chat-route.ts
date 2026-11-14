@@ -22,7 +22,7 @@ export function chatRoute(request: Request, env: Pick<Env, "CHAT_ROOMS">, userId
   } else {
     const routes: Record<string, string[]> = {
       checkpoint: ["GET", "POST"], "checkpoint-part": ["POST"], rows: ["GET", "POST"],
-      tail: ["GET", "PUT"], diff: ["GET", "PUT"], stats: ["GET"], reset: ["POST"]
+      tail: ["GET", "PUT"], diff: ["GET", "PUT"], stats: ["GET"], reset: ["POST"], heal: ["POST"]
     };
     if (!routes[route]?.includes(request.method)) return new Response("not found", { status: 404 });
   }
