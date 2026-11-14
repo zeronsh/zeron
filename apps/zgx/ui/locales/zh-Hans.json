@@ -2289,7 +2289,7 @@
     },
     "voice": {
       "title": "语音",
-      "terms": "语音 听写 麦克风 模型 parakeet speech dictation microphone",
+      "terms": "语音 听写 麦克风 模型 speech dictation microphone model parakeet cohere",
       "description": "对着输入框说话。转写在本设备上完成,音频不会被保存或发送。",
       "couldnt": "语音无法完成此操作",
       "microphone": "麦克风",

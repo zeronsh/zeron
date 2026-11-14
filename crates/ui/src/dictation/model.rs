@@ -581,7 +581,7 @@ impl Render for VoiceCard {
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
-                                    "Parakeet v3".into_any_element(),
+                                    "Parakeet Ultra".into_any_element(),
                                     format!("{size_mb:.0} MB").into_any_element(),
                                 ],
                             )),

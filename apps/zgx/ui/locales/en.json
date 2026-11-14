@@ -2289,7 +2289,7 @@
     },
     "voice": {
       "title": "Voice",
-      "terms": "speech dictation microphone model parakeet",
+      "terms": "speech dictation microphone model parakeet cohere",
       "description": "Speak into the composer. Transcription runs on this device; audio is never saved or sent.",
       "couldnt": "Voice couldn't do that",
       "microphone": "Microphone",

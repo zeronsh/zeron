@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
-// No Rust callbacks or audio retained by permission blocks.
+// No audio is retained by permission blocks; zeron_request_microphone_then's
+// block retains only its Rust callback and context, until it answers once.
 int zeron_microphone_permission(void) {
     NSBundle *bundle = NSBundle.mainBundle;
     if (![bundle.bundlePath.pathExtension isEqualToString:@"app"] || ![bundle objectForInfoDictionaryKey:@"NSMicrophoneUsageDescription"]) return -2;
