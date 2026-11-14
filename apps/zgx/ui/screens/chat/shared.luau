@@ -18,6 +18,7 @@ local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
 local route = require("@app/screens/shell/route")
 
+local Draft = require("@ds/draft_text")
 local M = {}
 
 -- The draft, what it carries, the options picked in a question being
@@ -219,7 +220,7 @@ ui.effect(function()
 		M.cargo:get()
 		M.quotes:get()
 	else
-		kept:get()
+		kept:len()
 	end
 	-- (A run's timer goes as the next run begins: steady typing saves every
 	-- SAVE_EVERY, and the last keystroke's once it has waited that long.)
@@ -915,6 +916,39 @@ function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [str
 		cargo = if d and type(d.cargo) == "table" then d.cargo else {},
 		chosen = if d and type(d.chosen) == "table" then d.chosen else {},
 	}
+end
+
+-- Follows chat `key`'s draft as `draft_of` does, wherever it is, without
+-- reading its words (a long draft isn't copied for it): what follows it to
+-- learn that it changed reads it only then (a split pane's mirror of it).
+function M.track_draft_of(key: string)
+	if here:get() == key then
+		M.text:len()
+		M.cargo:get()
+		M.chosen:get()
+	else
+		kept:len()
+	end
+end
+
+-- The options picked in chat `key`'s question, as `draft_of` reads them,
+-- without its words.
+function M.chosen_of(key: string): { [string]: boolean }
+	if here:get() == key then
+		return M.chosen:get()
+	end
+	local d = kept:get()[key]
+	return if d and type(d.chosen) == "table" then d.chosen else {}
+end
+
+-- The length of chat `key`'s draft's words, in bytes, as `draft_of`
+-- reads them (out in the composer, its draft not copied for it).
+function M.draft_size_of(key: string): number
+	if here:peek() == key then
+		return Draft.size(M.text)
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then #d.text else 0
 end
 
 -- Chat `key`'s draft changed where it's shown by its id (`field`: "text"

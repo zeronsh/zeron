@@ -28,6 +28,7 @@ local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
+local Draft = require("@ds/draft_text")
 -- (The chat page's places in its chats, which a split's panes share.)
 local Shared = require("@app/screens/chat/shared")
 local Asks = require("@app/screens/chat/asks")
@@ -250,22 +251,53 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		-- picks, one draft per chat (screens/chat/shared), shown here and
 		-- written back as they change, wherever it's kept. Never the focused
 		-- chat's: the focus moving changes nothing this shows.)
+		--
+		-- Each side's write is told to the other by its length (`pulled`,
+		-- `pushed`), so its echo isn't read back: both read the whole draft
+		-- and compared it at every keystroke, both ways (3 ms a key at
+		-- 30,000 lines). By length, so a write that changed nothing, and so
+		-- came back as no run, never hides the next change. `known`: this
+		-- pane's draft's length as last seen, so the mirror from the chat's
+		-- draft reads this one's only where the lengths agree.
+		local pulled, pushed, known = nil :: number?, nil :: number?, -1
 		ui.effect(function()
+			Shared.track_draft_of(chat)
+			local echo = pushed
+			pushed = nil
+			local size = Shared.draft_size_of(chat)
+			if echo ~= nil and size == echo then
+				return
+			end
 			local d = Shared.draft_of(chat)
-			if draft:peek() ~= d.text then
+			if size ~= known or draft:peek() ~= d.text then
+				pulled, known = size, size
 				draft:set(d.text)
 			end
 			chosen:set(d.chosen)
 		end)
+		local first = true
 		ui.effect(function()
-			local text = draft:get()
-			if Shared.draft_of(chat).text ~= text then
-				Shared.set_draft_of(chat, "text", text)
+			local size = Draft.size(draft)
+			known = size
+			local echo = pulled
+			pulled = nil
+			if echo ~= nil and size == echo then
+				return
 			end
+			-- (Typed: it differs. Made: it may not.)
+			local text = draft:peek()
+			if first then
+				first = false
+				if Shared.draft_of(chat).text == text then
+					return
+				end
+			end
+			pushed = size
+			Shared.set_draft_of(chat, "text", text)
 		end)
 		ui.effect(function()
 			local picked = chosen:get()
-			if Shared.draft_of(chat).chosen ~= picked then
+			if Shared.chosen_of(chat) ~= picked then
 				Shared.set_draft_of(chat, "chosen", picked)
 			end
 		end)
@@ -724,7 +756,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			if mine then
 				return mine
 			end
-			local link = machine.cloud_link(string.find(draft:get(), "%S") ~= nil)
+			local link = machine.cloud_link(Draft.has_text(draft))
 			return if link then LinkNotice.of { cloud = link } else nil
 		end),
 		on_dismiss_notice = function()
