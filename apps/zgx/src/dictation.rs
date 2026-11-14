@@ -85,6 +85,10 @@ struct Service {
     session: Option<Box<dyn Recording>>,
     download: Option<DownloadJob>,
     deadline: Option<Instant>,
+    /// When the recording began to listen, and whether its model is slow
+    /// here (Cohere on the CPU): how long finalizing may take.
+    listening: Option<Instant>,
+    slow: bool,
     state: Json,
     serial: u64,
     /// The voice bar's waveform while listening, and whether its bars
@@ -99,6 +103,8 @@ impl Service {
             session: None,
             download: None,
             deadline: None,
+            listening: None,
+            slow: false,
             state: json!({"phase":"idle"}),
             serial: 0,
             meter: Meter::default(),
@@ -139,10 +145,18 @@ impl Service {
         if let Some(session) = &mut self.session {
             session.finish();
             self.meter.freeze(Instant::now());
-            self.deadline
-                .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
             self.state["phase"] = json!("finalizing");
+            self.finalizing();
         }
+    }
+    /// The words are due: 30 s, plus as long again as the recording (three
+    /// times for a model slow here), from now. Past it the person is told,
+    /// and words that still come land all the same.
+    fn finalizing(&mut self) {
+        let recorded = self.listening.map_or(Duration::ZERO, |at| at.elapsed());
+        let per_second = if self.slow { 3 } else { 1 };
+        self.deadline
+            .get_or_insert_with(|| Instant::now() + Duration::from_secs(30) + recorded * per_second);
     }
     /// The folder of the model `args` names (`model`, an id; none or empty:
     /// the default). One it doesn't offer is an error, never another's folder.
@@ -193,7 +207,10 @@ impl Service {
             .as_str()
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
+        self.slow = zeron_voice::model_for(&dir).is_some_and(|m| m.cpu_slow)
+            && cfg!(not(target_os = "macos"));
         let session = zeron_voice::Session::start(dir, device).map_err(|e| e.to_string())?;
+        self.listening = None;
         self.session = Some(Box::new(session));
         self.clear_levels();
         self.serial += 1;
@@ -260,17 +277,14 @@ impl Service {
                 }
             }
         }
-        if self.deadline.is_some_and(|end| Instant::now() >= end) {
-            self.cancel();
-            self.state["phase"] = json!("failed");
-            self.state["error"] = json!("Transcription timed out. Your draft is safe.");
-        }
         let mut ended = false;
+        let mut due = false;
         if let Some(session) = &mut self.session {
             while let Some(event) = session.poll() {
                 match event {
                     zeron_voice::Event::Listening => {
                         if self.deadline.is_none() {
+                            self.listening = Some(Instant::now());
                             self.state["phase"] = json!("listening");
                             self.meter.start(Instant::now());
                             session.take_level();
@@ -279,8 +293,7 @@ impl Service {
                     zeron_voice::Event::Finalizing => {
                         self.state["phase"] = json!("finalizing");
                         self.meter.freeze(Instant::now());
-                        self.deadline
-                            .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
+                        due = true;
                     }
                     zeron_voice::Event::Final(text) => {
                         self.state["phase"] = json!("final");
@@ -297,6 +310,17 @@ impl Service {
             if !ended && self.meter.record(Instant::now(), session.take_level()) {
                 self.levels_changed = true;
             }
+        }
+        if due {
+            self.finalizing();
+        }
+        // Overdue: said, once; the session goes on, and its words, if they
+        // come, land as ever (`late`).
+        if !ended && self.deadline.is_some_and(|end| Instant::now() >= end) {
+            self.deadline = None;
+            self.state["phase"] = json!("failed");
+            self.state["late"] = json!(true);
+            self.state["error"] = json!("Transcription is taking long. The words will land if they come.");
         }
         if ended {
             self.session = None;
@@ -565,7 +589,7 @@ mod tests {
         assert!(s.state["text"].is_null());
     }
     #[test]
-    fn dictation_stop_waits_for_final_and_timeout_invalidates_results() {
+    fn dictation_stop_waits_for_final_and_late_words_still_land() {
         let (mut s, events, cancelled, stopped) = service();
         s.stop();
         assert!(stopped.get());
@@ -575,13 +599,25 @@ mod tests {
         s.poll();
         assert_eq!(s.state["text"], "hola");
         assert!(s.session.is_none());
+        // A minute's recording on a model slow here has 3.5 minutes.
+        let (mut s, _, _, _) = service();
+        s.listening = Some(Instant::now() - Duration::from_secs(60));
+        s.slow = true;
+        s.stop();
+        let due = s.deadline.unwrap() - Instant::now();
+        assert!(due > Duration::from_secs(205) && due < Duration::from_secs(211), "{due:?}");
+        // Overdue: said, but the words that come late still land.
         let (mut s, events, cancelled, _) = service();
+        s.stop();
         s.deadline = Some(Instant::now());
-        events.borrow_mut().push_back(Event::Final("too late".into()));
         s.poll();
-        assert!(cancelled.get());
+        assert!(!cancelled.get());
         assert_eq!(s.state["phase"], "failed");
-        assert!(s.state["text"].is_null());
+        assert_eq!(s.state["late"], true);
+        events.borrow_mut().push_back(Event::Final("late words".into()));
+        s.poll();
+        assert_eq!(s.state["phase"], "final");
+        assert_eq!(s.state["text"], "late words");
     }
     #[test]
     fn dictation_without_a_data_folder_says_so_and_never_panics() {

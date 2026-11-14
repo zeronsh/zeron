@@ -285,6 +285,12 @@ ui.effect(function()
 			return
 		end
 		op("cancel") -- The words are in the draft: nothing keeps them.
+	elseif s.phase == "failed" and s.late then
+		-- Overdue, not over: the words still land if they come.
+		if not p.told then
+			p.told = true
+			say(s.error)
+		end
 	elseif s.phase == "failed" or s.phase == "cancelled" then
 		pending = nil
 		if s.phase == "failed" then say(s.error) end
