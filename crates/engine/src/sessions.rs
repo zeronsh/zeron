@@ -345,11 +345,14 @@ struct Inner {
 /// ([`Harness::stops_when_idle`]). Then it is stopped, and the next message
 /// resumes the session (`--resume`), paying a cold start once.
 ///
-/// Measured (docs in the PR): a parked Claude CLI holds ~200 MB and wakes
-/// ~1% of a core at rest, and resuming one costs the next message ~0.5 s
-/// before its request leaves. Two minutes covers reading a reply and
-/// writing the next message in one sitting, so a conversation in progress
-/// stays warm, while a chat left alone gives its memory back soon.
+/// Measured (Claude CLI 2.1.322 against a local replay server, M5 Max): a
+/// parked CLI holds ~130 MB phys_footprint (~200 MB with a real login and
+/// plugins) and keeps waking at rest; a stopped one costs the next message
+/// ~0.18 s more before its request leaves (0.22 s resumed vs 0.04 s warm,
+/// medians of 5), with the whole context back. Two minutes covers reading
+/// a reply and writing the next message in one sitting, so a conversation
+/// in progress stays warm, while a chat left alone gives its memory back
+/// soon.
 pub const AGENT_IDLE_STOP: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// The idle window of drivers not stopped after [`AGENT_IDLE_STOP`].
