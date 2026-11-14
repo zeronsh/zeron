@@ -86,6 +86,12 @@ mod split_tests;
 #[cfg(test)]
 mod route_motion_tests;
 #[cfg(test)]
+mod composer_metrics_tests;
+#[cfg(test)]
+mod composer_layout_tests;
+#[cfg(test)]
+mod composer_motion_tests;
+#[cfg(test)]
 mod hit_sweep_tests;
 #[cfg(test)]
 mod hit_tests;

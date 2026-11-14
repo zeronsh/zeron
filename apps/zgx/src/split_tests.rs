@@ -25,7 +25,10 @@ const W: f32 = 1400.;
 const H: f32 = 860.;
 
 fn ui() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui")
+    // Compare an archived interface with the same host and frame clock.
+    std::env::var_os("ZERON_ZGX_TEST_UI")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"))
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -1636,7 +1639,9 @@ fn drag_script_of(fixture: &Path, panes_n: usize) -> u64 {
     app.frames(60);
     let calls = app.calls();
     drag_sidebar(&mut app, 120., |_| ());
-    (app.calls() - calls) / 20
+    let per_frame = (app.calls() - calls) / 20;
+    eprintln!("RESIZE-CALLS {panes_n} panes: {per_frame}");
+    per_frame
 }
 
 /// The sidebar's edge dragged, the sidebar's list isn't built again, and

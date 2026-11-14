@@ -54,8 +54,16 @@ local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
 local VoiceWave = require("@self/voice_wave").VoiceWave
 local context_usage = require("@self/context_usage")
-local motion = require("@self/motion")
+local TextMetrics = require("@self/composer_metrics")
+local Layout = require("@self/composer_layout")
+local ComposerMotion = require("@self/composer_motion")
 local EditorMenu = require("@self/editor_menu")
+
+type ViewGeometry = {
+	height: number, header_height: number, tray_inset: number,
+	text: { left: number, right: number, top: number, height: number },
+	controls: Layout.Controls,
+}
 
 -- What the model's context holds, as its agent reports it: the tokens in
 -- it and the window's size (either may be missing).
@@ -91,7 +99,9 @@ export type Notice = {
 export type Answer = { values: { string }, text: string }
 -- Where an existing chat works (`branch_fixed`).
 export type Fixed = { device: string?, name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string? }
+export type Sizes = { rest: number, target: number, presented: number, active: boolean, ready: boolean, settling: boolean, context: number }
 export type Props = {
+	on_sizes: ((sizes: Sizes) -> ())?,
 	value: State<string>,
 	placeholder: (string | Message)?,
 	-- What sends (the shipping app's setting): "enter", ↩ sends and ⇧↩
@@ -294,39 +304,6 @@ export type Props = {
 	mention_sections: { [string]: { { id: string, label: any } } }?,
 }
 
--- Zeron's geometry. The one line: 47 points inside the hairline, the text
--- centred in it. Opened out: the text box (16 above the text, 4 below)
--- between its floor and cap, then the controls' row (2, a 32-point chip
--- zone, 8). Round controls are 28 across, concentric with the pill's
--- corner: on one line (a pill, its corner half its height) centred in it,
--- as far from its sides as from its foot; opened out, as far in from the
--- side and the foot as the pill's corner (inside its hairline) is round
--- less theirs.
-local LINE = 22
-local ONE_LINE = 47
-local TEXT_TOP, TEXT_BOTTOM, TEXT_MIN, TEXT_MAX = 16, 4, 76, 260
-local ACTIONS = 42
-local HAIRLINES = 2
-local CONTROL = 28
-local INSET_LINE = (ONE_LINE - CONTROL) / 2
-local function open_inset(): number
-	return control.nest("$zeron.composer.radius", 1) - CONTROL / 2
-end
--- The controls' row opened out: its 42 points, or more where a rounder
--- pill (a template's) sets its controls further in from the foot, so they
--- keep the room over them they have at Zeron's own corner (its controls'
--- top 3 under the row's) rather than rising into the text.
-local ACTIONS_OVER = 3
-local function actions(): number
-	return math.max(ACTIONS, open_inset() + CONTROL + ACTIONS_OVER)
-end
--- The draft's own inset either side on one line, and opened out.
-local TEXT_SIDE = 8
-local TEXT_OPEN_SIDE = 16
--- Opened out, the pill folds back to one line only once the text is this
--- much narrower than the line holds, so a width at the boundary cannot
--- flicker between the two.
-local HYSTERESIS = 32
 -- How wide where-it-works stays before the access mode folds: its project's
 -- name (to PROJECT_MAX) and BRANCH_KEEP of the branch's, with the chip's
 -- own room (its padding, the glyph, the gaps, the chevron); until
@@ -983,14 +960,6 @@ fn fill(input: FillInput) -> vec4<f32> {
 local lightboxes = 0
 
 return ui.component(function(props: Props): Node
-	-- Opened out, the controls' inset: from the theme's corner, as this one
-	-- is built.
-	local INSET_OPEN = open_inset()
-	-- On the tray, the chips' inset from the pill's edge above them, the
-	-- tray's foot and its sides: the pill's own controls' (+ and Send sit
-	-- this far in from its edge, its hairline and INSET_OPEN), so the row
-	-- keeps the pill's spacing and its chips line up with those buttons.
-	local TRAY_INSET = INSET_OPEN + HAIRLINES / 2
 	-- On the tray, the step under the pill and above the tray's foot (one
 	-- token: the footer's margins and the tray's height both read it), and
 	-- how far the tray tucks up behind the pill, its top hidden there.
@@ -1019,8 +988,26 @@ return ui.component(function(props: Props): Node
 		return if props.keep then ui.state(`composer:{props.keep}:{key}`, initial) else ui.use_state(initial)
 	end
 	local pill_w = kept("pill_w", 0)
-	local line_w = kept("line_w", 0)
-	local wrapped_h = kept("wrapped_h", 0)
+	local metrics = TextMetrics.use {
+		value = value,
+		keep = props.keep,
+		editor = field,
+		width = function(peek: boolean?): number
+			-- The surface's content box excludes its two hairlines. Both
+			-- expanded text insets come out of that, never the eased field.
+			return Layout.measurement(if peek then pill_w:peek() else pill_w:get()).width
+		end,
+		-- Past the cap a draft is measured no more: its size changes nothing
+		-- (Layout.estimate). The type's line height changed (tracked), it is
+		-- measured again.
+		estimate = function(text: string, line_height: number): Layout.Sample?
+			local line = ui.theme.get("zeron.composer.line")
+			if type(line) == "number" and math.abs(line - line_height) > 0.01 then
+				return nil
+			end
+			return Layout.estimate(text, line_height)
+		end,
+	}
 	local head_h_seen = kept("head_h", 0)
 	local trailing_seen = kept("trailing_w", 0)
 	local footer_w = kept("footer_w", 0)
@@ -1172,128 +1159,62 @@ return ui.component(function(props: Props): Node
 		return (if w > 0 then w else 1000) < NARROW
 	end
 
-	-- One line or opened out. On one line the text has the pill less the
-	-- leading control and the trailing ones; opened out, it folds back only
-	-- once comfortably short again. Anything over the draft opens it out.
-	-- The controls at the right, as measured; until they are (a composer
-	-- just made, a reload's), their usual two (the microphone and Send),
-	-- so the text is laid out where it rests from the first frame rather
-	-- than easing in from the full width.
-	local function trailing_w(): number
-		local w = trailing_seen:get()
-		return if w > 0 then w else CONTROL * 2 + 8
+	-- A pure calculation owns all target geometry. The effect commits the
+	-- explicit text-hysteresis state; rendering/computeds mutate no history.
+	local previous_text_expanded = ui.use_state(read(props.expanded) == true)
+	local function layout_input(): Layout.Input
+		local _ = ui.theme.current:get()
+		return {
+			width = pill_w:get(),
+			-- Retain the last complete sample while a request is stale.
+			sample = metrics.sample:get(),
+			trailing_width = trailing_seen:get(),
+			control_corner = control.nest("$zeron.composer.radius", Layout.BORDER),
+			header_height = head_h_seen:get(),
+			header_gap = head_gap(),
+			expanded = read(props.expanded) == true,
+			cargo = has_cargo(),
+			asking = asking(),
+			dictating = dictating(),
+			multiline = string.find(value:get(), "\n") ~= nil,
+		}
 	end
-	local function expanded(): boolean
-		return read(props.expanded) == true
-	end
-	local was_open = expanded()
-	local open = ui.computed(function(): boolean
-		-- Dictating, the words land in the draft over the track.
-		if expanded() or has_cargo() or asking() or dictating() then
-			return true
-		end
-		local text = value:get()
-		local width = pill_w:get()
-		local tail = trailing_w()
-		local need = line_w:get()
-		if width <= 0 then
-			return false
-		end
-		local room = width - HAIRLINES - (INSET_LINE + CONTROL + TEXT_SIDE) - (TEXT_SIDE + tail + INSET_LINE)
-		local want
-		if string.find(text, "\n") then
-			want = true
-		elseif was_open then
-			want = need > room - HYSTERESIS
-		else
-			want = need > room
-		end
-		was_open = want
-		return want
-	end)
-
-	-- What is over the draft: nothing, or its measured height.
-	local head_h = ui.computed(function(): number
-		if not has_cargo() and not asking() then
-			return 0
-		end
-		return head_h_seen:get()
-	end)
-	-- The text box opened out: the wrapped text with its insets, between
-	-- the floor and the cap.
-	local box = ui.computed(function(): number
-		local h = math.max(wrapped_h:get(), LINE)
-		return math.clamp(h + TEXT_TOP + TEXT_BOTTOM, TEXT_MIN, TEXT_MAX)
-	end)
-	local HEAD_GAP = head_gap()
-	local height = ui.computed(function(): number
-		if open:get() then
-			local head = head_h:get()
-			-- With something over it, the draft's box starts under that
-			-- with the strip's own gap rather than the pill's top.
-			return head + (if head > 0 then box:get() - TEXT_TOP + HEAD_GAP else box:get()) + actions() + HAIRLINES
-		end
-		return ONE_LINE + HAIRLINES
-	end)
-	-- Where the text sits: beside the controls on one line, over them
-	-- opened out, under whatever is over it.
-	local text_left = ui.computed(function(): number
-		return if open:get() then TEXT_OPEN_SIDE else INSET_LINE + CONTROL + TEXT_SIDE
-	end)
-	local text_right = ui.computed(function(): number
-		return if open:get() then TEXT_OPEN_SIDE else TEXT_SIDE + trailing_w() + INSET_LINE
-	end)
-	local text_top = ui.computed(function(): number
-		if not open:get() then
-			return (ONE_LINE - LINE) / 2
-		end
-		local head = head_h:get()
-		return if head > 0 then head + HEAD_GAP else TEXT_TOP
-	end)
-	local text_h = ui.computed(function(): number
-		return if open:get() then box:get() - TEXT_TOP - TEXT_BOTTOM else LINE
-	end)
-	local EASE: TweenOptions = { duration = 220, ease = "out(3)" }
-	-- Each of the pill's measures as it shows: eased (EASE) as it grows or
-	-- shrinks in place; at once for a moment after `snap` moves (what
-	-- settles its size, measured, lands over a frame or two), and with
-	-- motion reduced.
-	local SNAP_MS = 400
-	local snap_seen = if props.snap then props.snap:peek() else nil
-	local snap_until = 0
-	local function at_once(): boolean
-		if props.snap then
-			local n = props.snap:get()
-			if n ~= snap_seen then
-				snap_seen = n
-				snap_until = ui.now() + SNAP_MS
+	local target_geometry = ui.use_state(Layout.calculate(layout_input(), previous_text_expanded:peek()))
+	ui.effect(function()
+		local next = Layout.calculate(layout_input(), previous_text_expanded:peek())
+		ui.batch(function()
+			previous_text_expanded:set(next.next_text_expanded)
+			-- Only a target laid out differently: a pane resized changes the
+			-- widths layout applies itself, and a new target at each of its
+			-- frames woke the motion, its frame and every binding of it.
+			if not Layout.same_target(target_geometry:peek(), next) then
+				target_geometry:set(next)
 			end
-		end
-		return motion.reduced_now() or ui.now() < snap_until
-	end
-	local function eased(src: ReadOnlyState<number>): State<number>
-		local value = ui.use_state(src:peek())
-		local run: any = nil
-		ui.effect(function()
-			local v = src:get()
-			local now = at_once()
-			if run then
-				run:cancel()
-				run = nil
-			end
-			if now or math.abs(value:peek() - v) < 0.01 then
-				value:set(v)
-				return
-			end
-			run = anime.animate(value, { value = v, duration = EASE.duration, ease = EASE.ease })
 		end)
-		return value
-	end
-	-- (One on a line, another opened out.)
-	local function by_open(line: number, opened: number): State<number>
-		return eased(ui.computed(function(): number
-			return if open:get() then opened else line
-		end))
+	end)
+	local settlement = ui.computed(function()
+		local metrics_now = metrics.result:get()
+		local actual = pill.height
+		return { revision = metrics_now.revision,
+			status = if metrics_now.status == "ready" and actual ~= nil
+				and math.abs(actual - target_geometry:get().height) < 0.5 then "ready" else "pending" }
+	end)
+	local transition = ComposerMotion.use(target_geometry, props.snap, settlement)
+	local frame_geometry = transition.frame
+	-- Width is applied by layout, not a view binding. Project the presented
+	-- snapshot once so width/measurement metadata alone cannot wake every
+	-- height, inset and control binding in each split composer.
+	local view_geometry = ui.computed(function(): ViewGeometry
+		local g = frame_geometry:get()
+		return { height = g.height, header_height = g.header_height,
+			text = { left = g.text.left, right = g.text.right, top = g.text.top, height = g.text.height },
+			controls = g.controls, tray_inset = g.tray_inset }
+	end)
+	-- Every binding reads the same frame snapshot; none starts an animation.
+	local function presented(select: (ViewGeometry) -> number): () -> number
+		return function(): number
+			return select(view_geometry:get())
+		end
 	end
 
 	-- +, as a secondary button: a fill of its own, so it reads as a control
@@ -1660,9 +1581,9 @@ return ui.component(function(props: Props): Node
 		return ui.div {
 			absolute = true,
 			-- (Insets take points: the control, the sides, and a breath.)
-			left = by_open(INSET_LINE + CONTROL + 8, INSET_OPEN + CONTROL + 8),
-			right = by_open(INSET_LINE + CONTROL * 2 + 8 + 8, INSET_OPEN + CONTROL * 2 + 8 + 8),
-			bottom = by_open(INSET_LINE, INSET_OPEN),
+			left = presented(function(g) return g.controls.voice.left end),
+			right = presented(function(g) return g.controls.voice.right end),
+			bottom = presented(function(g) return g.controls.voice.bottom end),
 			h = "$zeron.composer.voice.h",
 			ref = track_w,
 			overflow = "hidden",
@@ -1837,14 +1758,14 @@ return ui.component(function(props: Props): Node
 		on_resize = measure(pill_w, "w"),
 		relative = true,
 		w_full = true,
-		h = eased(height),
+		h = presented(function(g) return g.height end),
 		overflow = "hidden",
 		-- (Its glass, edge and shadow are the frame's, round it and the deck
 		-- over it: one surface. Its own corner only clips what's in it, and
 		-- its edge, clear, keeps the room the frame's takes, so everything in
 		-- it sits where it always has.)
 		rounded = "$zeron.composer.radius",
-		border = 1,
+		border = Layout.BORDER,
 		border_color = "#00000000",
 		-- (Neither `on_files` nor its overlay: files are what's around it to
 		-- take, the drop going on up to it.)
@@ -1875,44 +1796,21 @@ return ui.component(function(props: Props): Node
 			focus_on_press = false,
 			on_press = to_draft,
 		},
-		-- The measures: the draft on one line, and wrapped as it would be
-		-- opened out (a mark after it, so a last empty line counts).
-		ui.text {
-			on_resize = measure(line_w, "w"),
-			absolute = true,
-			left = 0,
-			top = 0,
-			opacity = 0,
-			pointer_events = "none",
-			text_size = "$zeron.composer.text",
-			line_height = "$zeron.composer.line",
-			function()
-				return value:get()
-			end,
+		-- Measure the natural header inside a separate presented clip. The
+		-- clip's animated height must never feed the header measurement.
+		ui.div {
+			absolute = true, left = 0, right = 0, top = 0,
+			h = presented(function(g) return g.header_height end),
+			overflow = "hidden",
+			head,
 		},
-		ui.text {
-			on_resize = measure(wrapped_h, "h"),
-			absolute = true,
-			left = TEXT_OPEN_SIDE,
-			right = TEXT_OPEN_SIDE,
-			top = 0,
-			opacity = 0,
-			pointer_events = "none",
-			wrap = true,
-			text_size = "$zeron.composer.text",
-			line_height = "$zeron.composer.line",
-			function()
-				return value:get() .. "\u{200B}"
-			end,
-		},
-		head,
 		-- The draft.
 		ui.div {
 			absolute = true,
-			left = eased(text_left),
-			right = eased(text_right),
-			top = eased(text_top),
-			h = eased(text_h),
+			left = presented(function(g) return g.text.left end),
+			right = presented(function(g) return g.text.right end),
+			top = presented(function(g) return g.text.top end),
+			h = presented(function(g) return g.text.height end),
 			ui.textarea(EditorMenu.on({
 				ref = field,
 				value = value,
@@ -2061,8 +1959,8 @@ return ui.component(function(props: Props): Node
 		-- The controls, on the pill's foot.
 		ui.div {
 			absolute = true,
-			left = by_open(INSET_LINE, INSET_OPEN),
-			bottom = by_open(INSET_LINE, INSET_OPEN),
+			left = presented(function(g) return g.controls.leading.left end),
+			bottom = presented(function(g) return g.controls.leading.bottom end),
 			ui.show(function()
 				return not asking()
 			end, attach),
@@ -2071,10 +1969,10 @@ return ui.component(function(props: Props): Node
 		ui.row {
 			on_resize = measure(trailing_seen, "w"),
 			absolute = true,
-			right = by_open(INSET_LINE, INSET_OPEN),
+			right = presented(function(g) return g.controls.trailing.right end),
 			-- (Its row is 32: the control centred in it.)
-			bottom = by_open(INSET_LINE - 2, INSET_OPEN - 2),
-			h = 32,
+			bottom = presented(function(g) return g.controls.trailing.bottom end),
+			h = presented(function(g) return g.controls.trailing.height end),
 			items = "center",
 			gap = "$space.2",
 			ui.show(asking, ask_controls()),
@@ -2305,7 +2203,7 @@ return ui.component(function(props: Props): Node
 				return if on_tray() then `${TRAY_GAP}` else 0
 			end :: any,
 			px = function(): any
-				return if on_tray() then ui.raw(TRAY_INSET, "the pill's controls' inset") else "$zeron.space.snug"
+				return if on_tray() then ui.raw(view_geometry:get().tray_inset, "the pill's controls' inset") else "$zeron.space.snug"
 			end :: any,
 			items = "center",
 			gap = "$space.1",
@@ -2433,6 +2331,7 @@ return ui.component(function(props: Props): Node
 
 	-- The pill (the mentions' popover anchored on it: its panel opens at
 	-- the caret inside), its trays behind, the footer under.
+	local footer_size, deck_size, outer_size = ui.ref(), ui.ref(), ui.ref()
 	local body = ui.column {
 		w_full = true,
 		relative = true,
@@ -2443,7 +2342,7 @@ return ui.component(function(props: Props): Node
 		-- footer, tucked behind the pill (its top hidden under it, its sides
 		-- the pill's), so the chips sit on the composer's surface rather than
 		-- on the art. They sit as far in from its sides as the pill's own
-		-- controls sit in it (TRAY_INSET), a tight step (TRAY_GAP) below the
+		-- controls sit in it, a tight step (TRAY_GAP) below the
 		-- pill and above its foot; its height is theirs (tray_h), its corner
 		-- the trays'.
 		ui.presence(function(): string?
@@ -2511,10 +2410,10 @@ return ui.component(function(props: Props): Node
 					return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
 				end,
 			},
-			trays,
+			ui.column { ref = deck_size, w_full = true, shrink = 0, trays },
 			ui.popover(m.popover(surface)),
 		},
-		footer,
+		ui.column { ref = footer_size, w_full = true, shrink = 0, footer },
 		-- Folded, what waits on the agent: a pill floating just over the
 		-- composer's middle, out of the layout (the conversation shows under
 		-- it, as under "Scroll to end", which it moves aside for).
@@ -2532,7 +2431,49 @@ return ui.component(function(props: Props): Node
 			else nil,
 	}
 
+	if props.on_sizes then
+		local on_sizes = props.on_sizes
+		-- Each its own computed, so what changes and leaves it the same (the
+		-- pill's width, a keystroke, a new metrics revision) wakes nothing.
+		local rest = ui.computed(function(): number
+			local _ = ui.theme.current:get()
+			return Layout.calculate({
+				-- (Its height is the same at any width: it is never measured.)
+				width = pill_w:peek(), sample = nil, trailing_width = trailing_seen:get(),
+				control_corner = control.nest("$zeron.composer.radius", Layout.BORDER),
+				header_height = 0, header_gap = 0, expanded = read(props.expanded) == true,
+				cargo = false, asking = false, dictating = false, multiline = false,
+			}, false).height
+		end)
+		local ready = ui.computed(function(): boolean
+			return settlement:get().status == "ready"
+		end)
+		local target_h = ui.computed(function(): number
+			return target_geometry:get().height
+		end)
+		local last: Sizes? = nil
+		ui.effect(function()
+			local footer_h, deck_h, actual = footer_size.height, deck_size.height, outer_size.height
+			local context = if props.snap then props.snap:get() else 0
+			if footer_h == nil or deck_h == nil or not actual or actual <= 0 then
+				return
+			end
+			local sizes: Sizes = { rest = rest:get() + footer_h + deck_h, target = target_h:get() + footer_h + deck_h,
+				presented = actual, active = transition.active:get(), ready = ready:get(),
+				settling = transition.settling:get(), context = context }
+			local was = last
+			if was and was.rest == sizes.rest and was.target == sizes.target and was.presented == sizes.presented
+				and was.active == sizes.active and was.ready == sizes.ready and was.settling == sizes.settling
+				and was.context == sizes.context then
+				return
+			end
+			last = sizes
+			on_sizes(sizes)
+		end)
+	end
+
 	return ui.column {
+		ref = outer_size,
 		w_full = true,
 		gap = 0,
 		body,

@@ -6,6 +6,8 @@
 ui.theme.strict("warn")
 local ds = require("@ds")
 local Composer = require("@ds/composer")
+local Cargo = require("@ds/composer_cargo")
+local Ask = require("@ds/composer_ask")
 ds.setup()
 
 local HARNESSES: { ds.Harness } = { { id = "claude", label = "Claude", mark = "claude" } }
@@ -28,6 +30,9 @@ return ui.column {
 		harnesses = HARNESSES,
 		models = MODELS,
 		notice = ui.state("test_composer_notice", nil :: Composer.Notice?),
+		dictating = ui.state("test_composer_dictating", false),
+		cargo = ui.state("test_composer_cargo", {} :: { Cargo.Item }),
+		question = ui.state("test_composer_question", nil :: Ask.Question?),
 		project = ui.state("test_composer_project", "atlas" :: string?),
 		projects = PROJECTS,
 	},
