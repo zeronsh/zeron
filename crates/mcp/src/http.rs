@@ -81,6 +81,13 @@ const KEEP_ALIVE_EVERY: Duration = Duration::from_secs(15);
 /// How long a client may cache `tools/list` (modern `ttlMs`): plugin tools
 /// come and go, and a client not listening for changes re-lists after this.
 const TOOLS_TTL_MS: u64 = 30_000;
+/// The most connections served at once; more wait to be accepted. Each warm
+/// agent may hold one open (its `subscriptions/listen` stream), and its
+/// long calls one each.
+const MAX_CONNECTIONS: usize = 128;
+/// How long a client has to send a request's headers once it starts one:
+/// a connection trickling them (or sending none) is closed.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Body = UnsyncBoxBody<Bytes, Infallible>;
 
@@ -159,6 +166,11 @@ impl Drop for McpHttpServer {
 impl McpHttpServer {
     /// Bind `127.0.0.1` on a free port and serve until dropped.
     pub async fn bind(factory: ToolsFactory) -> std::io::Result<Self> {
+        Self::bind_with(factory, MAX_CONNECTIONS).await
+    }
+
+    /// [`Self::bind`], serving at most `max_connections` at once.
+    async fn bind_with(factory: ToolsFactory, max_connections: usize) -> std::io::Result<Self> {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
         let inner = Arc::new(Inner {
@@ -167,8 +179,13 @@ impl McpHttpServer {
             grants: Mutex::new(Vec::new()),
         });
         let weak = Arc::downgrade(&inner);
+        let slots = Arc::new(tokio::sync::Semaphore::new(max_connections));
         let accept = tokio::spawn(async move {
             loop {
+                // A free slot before the next connection is taken.
+                let Ok(slot) = slots.clone().acquire_owned().await else {
+                    return;
+                };
                 let (stream, peer) = match listener.accept().await {
                     Ok(accepted) => accepted,
                     Err(err) => {
@@ -178,7 +195,10 @@ impl McpHttpServer {
                     }
                 };
                 let Some(inner) = weak.upgrade() else { return };
-                tokio::spawn(serve_socket(inner, stream, peer));
+                tokio::spawn(async move {
+                    serve_socket(inner, stream, peer).await;
+                    drop(slot);
+                });
             }
         });
         tracing::info!(port, "agent MCP endpoint listening");
@@ -249,7 +269,10 @@ async fn serve_socket(inner: Arc<Inner>, stream: tokio::net::TcpStream, peer: So
         async move { Ok::<_, Infallible>(handle(inner, request).await) }
     });
     let io = hyper_util::rt::TokioIo::new(stream);
+    // (The timer is what makes the header timeout apply.)
     if let Err(err) = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT)
         .keep_alive(true)
         .serve_connection(io, service)
         .await
