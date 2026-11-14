@@ -120,6 +120,8 @@ pub(crate) struct ChatRelayState {
     heal_version: Mutex<Option<loro::VersionVector>>,
     /// The edge takes heal claims. Off once it says it doesn't know them.
     heal_claims: AtomicBool,
+    /// A commit, or a peer's update kept: wakes a resting maintenance loop.
+    stirred: tokio::sync::Notify,
 }
 
 impl ChatRelayState {
@@ -143,6 +145,7 @@ impl ChatRelayState {
             journal: Mutex::new(Journal::default()),
             heal_version: Mutex::new(None),
             heal_claims: AtomicBool::new(true),
+            stirred: tokio::sync::Notify::new(),
         })
     }
 
@@ -252,7 +255,17 @@ impl ChatRelayState {
         if relaying {
             lock(&self.unretired).ids.push(batch_id.to_string());
         }
+        self.stirred.notify_one();
         relaying
+    }
+
+    /// Nothing kept that a save has yet to cover: no relayed commits waiting
+    /// in the outbox, no peers' updates in the inbox.
+    fn settled(&self) -> bool {
+        lock(&self.unretired).ids.is_empty() && {
+            let journal = lock(&self.journal);
+            journal.newest == 0 && journal.settled == 0
+        }
     }
 
     /// `epoch`: the mode epoch sampled before this checkpoint's export. An export
@@ -340,6 +353,7 @@ impl ChatDocHandle {
     pub(crate) fn note_journaled(&self, ordinal: i64) {
         if let Some(state) = &*lock(&self.relay) {
             lock(&state.journal).newest = ordinal;
+            state.stirred.notify_one();
         }
     }
 }
@@ -380,14 +394,22 @@ impl DocHost {
         let weak = Arc::downgrade(handle);
         self.spawn_sync_worker(cancel, async move {
             let mut events = state.relay.events();
-            let mut tick = tokio::time::interval(MAINTENANCE_TICK);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first look is at once, as the interval this replaced gave it.
+            let mut next_tick = Instant::now();
+            let mut resting = false;
+            let mut adopt_owed = true;
             let mut last_refresh: Option<Instant> = None;
             let mut last_room = None;
             let mut last_commits = 0u64;
             let mut last_commit_at = Instant::now();
             loop {
                 tokio::select! {
+                    // Resting: a commit, or a peer's update kept, is looked at
+                    // at once.
+                    _ = state.stirred.notified(), if resting => {
+                        resting = false;
+                        next_tick = Instant::now();
+                    }
                     event = events.recv() => {
                         let Some(handle) = weak.upgrade() else { return };
                         if matches!(event, Ok(RelayEvent::LegacyPeer)) {
@@ -396,16 +418,28 @@ impl DocHost {
                             last_refresh = Some(Instant::now());
                         }
                     }
-                    _ = tick.tick() => {
+                    _ = tokio::time::sleep_until(next_tick) => {
                         let Some(handle) = weak.upgrade() else { return };
                         let now = Instant::now();
                         let room = lock(&handle.chat2).as_ref().and_then(|c| c.relay_answer());
+                        let was_relaying = state.relaying();
                         if room != last_room || last_refresh.is_none_or(|at| now - at >= MODE_REFRESH) {
                             last_room = room;
                             last_refresh = Some(now);
                             host.refresh_relay_mode(&handle, &state);
+                            // And with each refresh, a look for rows to adopt.
+                            adopt_owed = true;
                         }
+                        // Rows a relaying host didn't relay come from before it
+                        // relayed (a restart, a stretch of storing): its own
+                        // commits since are relayed as they're made. So it
+                        // looks when relaying begins and with each mode
+                        // refresh, not every second: each look reads every
+                        // pending row's bytes, and while it streams the
+                        // outbox holds a second of its commits.
+                        adopt_owed |= state.relaying() != was_relaying;
                         if state.relaying()
+                            && std::mem::take(&mut adopt_owed)
                             && let Ok(pending) = host.inner.store.pending_chat_updates(&handle.chat_id)
                             && !pending.is_empty()
                         {
@@ -415,10 +449,9 @@ impl DocHost {
                             }
                         }
                         let saved = handle.persistence.as_ref().is_some_and(|p| p.is_clean());
-                        for id in state.retirable(saved) {
-                            if let Err(err) = host.inner.store.acknowledge_chat_update(&handle.chat_id, &id) {
-                                tracing::warn!(%err, "chat relay: outbox retirement failed");
-                            }
+                        let retired = state.retirable(saved);
+                        if let Err(err) = host.inner.store.acknowledge_chat_updates(&handle.chat_id, &retired) {
+                            tracing::warn!(%err, "chat relay: outbox retirement failed");
                         }
                         if let Some(through) = state.retirable_journal(saved)
                             && let Err(err) = host.inner.store.retire_chat_inbox(&handle.chat_id, through)
@@ -445,6 +478,21 @@ impl DocHost {
                         if state.relaying() && crate::runner::session().is_some() {
                             host.cloud_checkpoint_due(&handle, &state, now, last_commit_at);
                         }
+                        // Nothing time can move: no answer awaited, nothing to
+                        // retire or heal, no Cloud checkpoint to follow, no
+                        // commit since the last look. Rest until something
+                        // stirs, or the mode's next refresh.
+                        resting = room.is_some()
+                            && state.caught_up()
+                            && !state.heal_owed.load(Ordering::Acquire)
+                            && crate::runner::session().is_none()
+                            && last_commit_at < now
+                            && state.settled();
+                        next_tick = if resting {
+                            last_refresh.map_or(now, |at| at + MODE_REFRESH).max(now + MAINTENANCE_TICK)
+                        } else {
+                            now + MAINTENANCE_TICK
+                        };
                     }
                 }
             }

@@ -2461,7 +2461,25 @@ impl DocHost {
                         _ = tokio::time::sleep_until(last + SYNC_PASS_SPACING), if busy => {}
                         _ = kick.notified() => {}
                         Ok(()) = jobs.changed() => {}
-                        Ok(()) = outbox.changed() => {}
+                        Ok(()) = outbox.changed() => {
+                            // Rows a started chat's own client sends: nothing
+                            // for a pass to admit. A streaming chat adds
+                            // several a second, and each pass reads the store.
+                            let Some(inner) = weak.upgrade() else { return };
+                            let changed = inner.store.take_outbox_changes();
+                            let handles = lock(&inner.handles);
+                            let own = changed.iter().all(|id| {
+                                !stopping_ids.contains(id)
+                                    && handles.get(id).is_some_and(|h| {
+                                        h.sync_started.load(Ordering::Acquire)
+                                            && !h.publication_failed.load(Ordering::Acquire)
+                                    })
+                            });
+                            drop(handles);
+                            if own && !busy {
+                                continue;
+                            }
+                        }
                         Ok(()) = socket_contention.changed() => {}
                         Some(Ok(())) = changed(&mut registry_chats) => {}
                         Some(Ok(())) = changed(&mut registry_synced) => {}
@@ -2482,6 +2500,9 @@ impl DocHost {
                 // Whatever changes from here on wakes the next pass.
                 jobs.borrow_and_update();
                 outbox.borrow_and_update();
+                if let Some(inner) = weak.upgrade() {
+                    inner.store.take_outbox_changes();
+                }
                 socket_contention.borrow_and_update();
                 let Some(inner) = weak.upgrade() else { return };
                 let host = Self { inner };
