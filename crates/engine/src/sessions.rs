@@ -4401,12 +4401,19 @@ async fn drive_run(
         .unwrap_or_default();
     // The MCP servers the agent starts from this run's config: the only
     // children it may hold when stopped idle (see the reaper).
-    let known_servers: Vec<zeron_harness::process::KnownServer> = request
+    let mut known_servers: Vec<zeron_harness::process::KnownServer> = request
         .mcp
         .iter()
         .chain(&request.extra_mcp)
         .map(|server| (server.command.clone(), server.args.clone()))
         .collect();
+    // And those it starts from its user's own MCP config, read now (once,
+    // off the runtime's threads) and joined in when the reaper first looks.
+    let mut configured_servers = Some({
+        let harness = harness.clone();
+        let request = request.clone();
+        tokio::task::spawn_blocking(move || harness.configured_mcp_servers(&request))
+    });
     // A revived turn the resumed session already holds: the provider gets
     // the continuation, while the transcript, preview and title keep the
     // user's own message (and the retries carry the revival on).
@@ -5134,6 +5141,10 @@ async fn drive_run(
                     // a child of its process that isn't one of its MCP
                     // servers (a background shell, a dev server) holds it.
                     if let Some(pid) = turn.agent_pid() {
+                        // (Unreadable: nothing added, and its servers hold.)
+                        if let Some(reading) = configured_servers.take() {
+                            known_servers.extend(reading.await.unwrap_or_default());
+                        }
                         let known = known_servers.clone();
                         let lingering = tokio::task::spawn_blocking(move || {
                             zeron_harness::process::unexpected_descendants(pid, &known)

@@ -323,6 +323,14 @@ pub trait Harness: Send + Sync {
     fn stops_when_idle(&self) -> bool {
         false
     }
+    /// The stdio MCP servers the agent starts on its own, from its user's
+    /// configuration, beyond the ones in the run request: children of its
+    /// process that aren't background work ([`process::unexpected_descendants`]).
+    /// Never their `env`. Blocking (reads files); once per run, off the
+    /// async threads.
+    fn configured_mcp_servers(&self, _request: &RunRequest) -> Vec<process::KnownServer> {
+        Vec::new()
+    }
     /// Whether this driver honors [`TurnControl::stop_turn`]: it ends only
     /// the in-flight turn (`Done { Interrupted }`) and the runtime stays up
     /// with its background work. Otherwise stopping a turn tears the runtime

@@ -88,6 +88,20 @@ impl Harness for Agent {
     fn stops_when_idle(&self) -> bool {
         self.stops_when_idle
     }
+    /// Claude's own reading of its user's MCP config, where the test gave
+    /// the run a config dir of its own.
+    fn configured_mcp_servers(
+        &self,
+        request: &RunRequest,
+    ) -> Vec<zeron_harness::process::KnownServer> {
+        if !request.env.contains_key("CLAUDE_CONFIG_DIR") {
+            return Vec::new();
+        }
+        zeron_harness::claude::configured_mcp_servers(
+            &request.env,
+            std::path::Path::new(&request.cwd),
+        )
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
     }
@@ -454,12 +468,22 @@ struct AgentProcess(std::process::Child);
 #[cfg(unix)]
 impl AgentProcess {
     fn with_child(secs: &str) -> Self {
+        Self::with_children(&[secs])
+    }
+
+    /// One `sleep <secs>` child for each.
+    fn with_children(secs: &[&str]) -> Self {
+        let script: String = secs
+            .iter()
+            .map(|s| format!("sleep {s} & "))
+            .collect::<String>()
+            + "wait";
         let agent = std::process::Command::new("/bin/sh")
-            .args(["-c", &format!("sleep {secs} & wait")])
+            .args(["-c", &script])
             .spawn()
             .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while zeron_harness::process::unexpected_descendants(agent.id(), &[]).is_empty() {
+        while zeron_harness::process::unexpected_descendants(agent.id(), &[]).len() < secs.len() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the child never started"
@@ -536,6 +560,80 @@ async fn an_agent_whose_only_child_is_its_mcp_server_is_stopped() {
     rig.send_request(first).await;
     tokio::time::sleep(AGENT_IDLE_STOP + Duration::from_secs(10)).await;
     rig.stopped().await;
+    drop(agent);
+    rig.core.sessions.shutdown().await;
+}
+
+/// A run whose user configured an MCP server of their own (user scope, in a
+/// config dir of the test's): `config` holds `.claude.json` as written.
+#[cfg(unix)]
+fn with_user_config(prompt: &str, config: &std::path::Path, claude_json: &str) -> RunRequest {
+    std::fs::create_dir_all(config).unwrap();
+    std::fs::write(config.join(".claude.json"), claude_json).unwrap();
+    let mut run = request(prompt);
+    run.env.insert(
+        "CLAUDE_CONFIG_DIR".into(),
+        config.to_string_lossy().into_owned(),
+    );
+    run
+}
+
+#[cfg(unix)]
+const USER_SERVER: &str =
+    r#"{"mcpServers":{"mine":{"command":"sleep","args":["3605"],"env":{"TOKEN":"x"}}}}"#;
+
+/// The user's own MCP server (from their Claude config) is the agent's only
+/// child: recognised, so the idle agent is stopped.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn an_agent_whose_only_child_is_a_server_from_its_user_s_config_is_stopped() {
+    let rig = rig(true);
+    let config = tempfile::tempdir().unwrap();
+    let agent = AgentProcess::with_child("3605");
+    *rig.ledger.process.lock().unwrap() = Some(agent.0.id());
+    rig.send_request(with_user_config("hello", config.path(), USER_SERVER))
+        .await;
+    tokio::time::sleep(AGENT_IDLE_STOP + Duration::from_secs(10)).await;
+    rig.stopped().await;
+    drop(agent);
+    rig.core.sessions.shutdown().await;
+}
+
+/// The same server, beside a background shell nobody configured: held.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_background_shell_beside_a_configured_server_still_holds() {
+    let rig = rig(true);
+    let config = tempfile::tempdir().unwrap();
+    let agent = AgentProcess::with_children(&["3605", "3606"]);
+    *rig.ledger.process.lock().unwrap() = Some(agent.0.id());
+    rig.send_request(with_user_config("hello", config.path(), USER_SERVER))
+        .await;
+    tokio::time::sleep(Duration::from_secs(3 * 60 * 60)).await;
+    assert!(rig.live(), "stopped with an unconfigured child running");
+    assert_eq!(rig.kills(), 0);
+    drop(agent);
+    rig.core.sessions.shutdown().await;
+}
+
+/// A config that can't be read recognises nothing: its server holds the
+/// stop, the safe side.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_malformed_user_config_holds() {
+    let rig = rig(true);
+    let config = tempfile::tempdir().unwrap();
+    let agent = AgentProcess::with_child("3605");
+    *rig.ledger.process.lock().unwrap() = Some(agent.0.id());
+    let broken = &USER_SERVER[..USER_SERVER.len() - 3];
+    rig.send_request(with_user_config("hello", config.path(), broken))
+        .await;
+    tokio::time::sleep(Duration::from_secs(3 * 60 * 60)).await;
+    assert!(
+        rig.live(),
+        "stopped although its child couldn't be recognised"
+    );
+    assert_eq!(rig.kills(), 0);
     drop(agent);
     rig.core.sessions.shutdown().await;
 }

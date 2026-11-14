@@ -54,6 +54,8 @@ mod background;
 pub mod catalog;
 mod discovery;
 mod fork_tail;
+mod mcp_config;
+pub use mcp_config::configured_mcp_servers;
 mod normalize;
 pub mod refresh_lock;
 mod wire;
@@ -908,6 +910,16 @@ impl Harness for ClaudeHarness {
     /// background work (`background_tasks_changed`,
     /// [`REPORTS_BACKGROUND_SINCE`]): the host's other guard against
     /// stopping one mid-work. Blocking: may ask the CLI its version once.
+    /// Launched without `--strict-mcp-config`, the CLI also starts the
+    /// servers of the user's own MCP scopes ([`mcp_config`]).
+    fn configured_mcp_servers(&self, request: &RunRequest) -> Vec<crate::process::KnownServer> {
+        let cwd = if request.cwd.is_empty() {
+            std::env::current_dir().unwrap_or_default()
+        } else {
+            PathBuf::from(&request.cwd)
+        };
+        configured_mcp_servers(&request.env, &cwd)
+    }
     fn stops_when_idle(&self) -> bool {
         reports_background(
             self.executable_path()
