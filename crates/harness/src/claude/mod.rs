@@ -275,6 +275,67 @@ fn private_mcp_config(config: &str) -> std::io::Result<(crate::scratch::ScratchD
     Ok((dir, path))
 }
 
+/// What [`mcp_config_args`] decided.
+struct McpConfigArgs {
+    /// `--mcp-config <path or JSON>`, or nothing.
+    args: Vec<std::ffi::OsString>,
+    /// The private file's directory, kept until the run ends.
+    dir: Option<crate::scratch::ScratchDir>,
+    /// Zeron's own server was configured but left out (see below).
+    zeron_left_out: bool,
+}
+
+/// The `--mcp-config` arguments for Zeron's own server and the plugins'
+/// native ones. A config carrying a credential (a run's MCP token) goes in
+/// an owner-only file made by `write`, never inline: the command line is
+/// visible to every local user in `ps`. Should that file not be made, the
+/// run fails closed: the servers carrying a credential are left out (with a
+/// warning) and the chat goes on without their tools.
+fn mcp_config_args(
+    mcp: Option<&zeron_proto::McpServer>,
+    extras: &[zeron_proto::McpServer],
+    write: impl FnOnce(&str) -> std::io::Result<(crate::scratch::ScratchDir, PathBuf)>,
+) -> McpConfigArgs {
+    let mut out = McpConfigArgs {
+        args: Vec::new(),
+        dir: None,
+        zeron_left_out: false,
+    };
+    let Some((config, secret)) = mcp_servers_config(mcp, extras) else {
+        return out;
+    };
+    if !secret {
+        out.args = vec!["--mcp-config".into(), config.into()];
+        return out;
+    }
+    match write(&config) {
+        Ok((dir, path)) => {
+            out.args = vec!["--mcp-config".into(), path.into()];
+            out.dir = Some(dir);
+        }
+        Err(err) => {
+            let mcp_kept = mcp.filter(|server| !carries_secret(server));
+            let extras_kept: Vec<_> = extras
+                .iter()
+                .filter(|server| !carries_secret(server))
+                .cloned()
+                .collect();
+            out.zeron_left_out = mcp.is_some() && mcp_kept.is_none();
+            tracing::warn!(
+                target: "zeron_harness::claude",
+                error = %err,
+                left_out = extras.len() - extras_kept.len() + usize::from(out.zeron_left_out),
+                "no private MCP config file: starting without the MCP servers that carry a token"
+            );
+            if let Some((config, secret)) = mcp_servers_config(mcp_kept, &extras_kept) {
+                debug_assert!(!secret);
+                out.args = vec!["--mcp-config".into(), config.into()];
+            }
+        }
+    }
+    out
+}
+
 /// The `--model` value: the 1M context window is selected via a model-id
 /// suffix (`sonnet[1m]`), exactly how the CLI itself does it.
 fn model_arg(request: &RunRequest) -> Option<String> {
@@ -610,30 +671,22 @@ impl ClaudeHarness {
             // CLI merges an inline JSON config with settings-sourced ones.
             // A config with a run's MCP token goes in an owner-only file:
             // inline JSON would sit on the command line.
-            if let Some((config, secret)) =
-                mcp_servers_config(request.mcp.as_ref(), &request.extra_mcp)
-            {
-                match secret.then(|| private_mcp_config(&config)) {
-                    Some(Ok((dir, path))) => {
-                        cmd.arg("--mcp-config").arg(path);
-                        mcp_config_dir = Some(dir);
-                    }
-                    Some(Err(err)) => {
-                        tracing::warn!(target: "zeron_harness::claude", error = %err, "no private MCP config file; passing it inline");
-                        cmd.args(["--mcp-config", &config]);
-                    }
-                    None => {
-                        cmd.args(["--mcp-config", &config]);
-                    }
-                }
-            }
+            let config =
+                mcp_config_args(request.mcp.as_ref(), &request.extra_mcp, private_mcp_config);
+            cmd.args(&config.args);
+            mcp_config_dir = config.dir;
             // When to say it waits on background work (the Zeron tool
             // `wait_on_background`), where that tool is offered. Its own
             // description and the server's instructions say so too, but
             // neither reaches the model before it decides to end a turn:
             // live-probed on 2.1.319, Sonnet never called it with those
             // alone, and Sonnet and Opus both did with this note.
-            if request.mcp.as_ref().is_some_and(McpServer::waits_on_background) {
+            if !config.zeron_left_out
+                && request
+                    .mcp
+                    .as_ref()
+                    .is_some_and(McpServer::waits_on_background)
+            {
                 cmd.args(["--append-system-prompt", WAIT_ON_BACKGROUND_NOTE]);
             }
             // Delegation goes through that server's side chats only. A bare
@@ -2861,6 +2914,53 @@ mod mcp_injection_tests {
         }
         drop(dir);
         assert!(!path.exists(), "the config goes with the run");
+    }
+
+    /// The private file can't be made (a full disk, an unwritable temp
+    /// directory): the token never falls back onto the command line. The
+    /// run starts without the servers carrying one; the rest are kept.
+    #[test]
+    fn a_config_whose_private_file_fails_leaves_the_token_off_the_command_line() {
+        let plugin = zeron_proto::McpServer {
+            name: "plugin".into(),
+            command: "/opt/plugin/server".into(),
+            args: vec!["--stdio".into()],
+            ..Default::default()
+        };
+        let tokened_plugin = zeron_proto::McpServer {
+            name: "tokened".into(),
+            command: "/opt/plugin/other".into(),
+            env: [(McpServer::TOKEN_ENV.to_owned(), "plugin-secret".to_owned())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let config = mcp_config_args(Some(&engine_served()), &[plugin, tokened_plugin], |_| {
+            Err(std::io::Error::other("no space left on device"))
+        });
+        assert!(config.dir.is_none());
+        assert!(config.zeron_left_out);
+        let args: Vec<String> = config
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter()
+                .all(|arg| !arg.contains("secret-token") && !arg.contains("plugin-secret")),
+            "{args:?}"
+        );
+        assert_eq!(args[0], "--mcp-config");
+        let parsed: Value = serde_json::from_str(&args[1]).unwrap();
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.keys().collect::<Vec<_>>(), vec!["plugin"]);
+
+        // Only Zeron's own: no `--mcp-config` at all.
+        let config = mcp_config_args(Some(&engine_served()), &[], |_| {
+            Err(std::io::Error::other("no space left on device"))
+        });
+        assert!(config.args.is_empty());
+        assert!(config.zeron_left_out);
     }
 
     fn access_tests_request() -> RunRequest {
