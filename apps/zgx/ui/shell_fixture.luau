@@ -939,6 +939,44 @@ ui.command {
 		publish()
 	end,
 }
+-- Three chats with one name on different devices (a user naming each
+-- machine's chat "School Management"), and a fourth another name; the
+-- interleaved moves below tell them apart by id alone.
+local function twins()
+	if find("sm1") then
+		return
+	end
+	table.insert(model.chats, { id = "sm1", title = "School Management", project = "atlas", device = "mac", updated = NOW - 10, created = NOW - 7 * HOUR, agent = "claude" })
+	table.insert(model.chats, { id = "sm2", title = "School Management", project = "borealis", device = "box", status = "working", updated = NOW - 20, created = NOW - 8 * HOUR, agent = "claude" })
+	table.insert(model.chats, { id = "sm3", title = "School Management", project = "atlas", device = "mac", status = "input", updated = NOW - 30, created = NOW - 9 * HOUR, agent = "claude" })
+	publish()
+end
+ui.command {
+	id = "twins",
+	title = "Three chats named School Management",
+	run = twins,
+}
+-- The one on devbox finishes: it was the working one.
+ui.command {
+	id = "twin_finish",
+	title = "School Management on devbox finishes",
+	run = function()
+		twins()
+		find("sm2").status = "done"
+		find("sm2").updated = os.time()
+		publish()
+	end,
+}
+-- The one on devbox is put to sleep.
+ui.command {
+	id = "twin_sleep",
+	title = "School Management on devbox sleeps",
+	run = function()
+		twins()
+		find("sm2").sleep_until = os.time() + 3 * 3600
+		publish()
+	end,
+}
 ui.command {
 	id = "rename_elsewhere",
 	title = "Tidy the tests renamed on another device",
