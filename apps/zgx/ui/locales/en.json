@@ -2974,8 +2974,6 @@
       }
     },
     "dictation": {
-      "allow_microphone": "Allow microphone access",
-      "allow_then_hold": "Then hold to dictate again.",
       "failed": "Dictation stopped",
       "hold": "Hold to dictate",
       "hold_hint": "Hold the microphone or shortcut while speaking.",

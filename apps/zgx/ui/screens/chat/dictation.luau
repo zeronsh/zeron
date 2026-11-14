@@ -117,7 +117,8 @@ local function finish()
 	if starting or M.active:peek() then
 		local tap = ui.now() - since < TAP
 		op(if tap then "cancel" else "stop")
-		if tap then toast.show { title = ui.t("chat.dictation.hold_hint"):get() } end
+		-- (Not while macOS asks for the microphone: nothing to explain.)
+		if tap and not M.state:peek().asking then toast.show { title = ui.t("chat.dictation.hold_hint"):get() } end
 	end
 end
 local function start(combo: string?, target: string?)
@@ -139,8 +140,6 @@ local function start(combo: string?, target: string?)
 		local why = if type(err) == "table" then tostring(err.message) else tostring(err)
 		if why == "no_model" then
 			route.settings("voice")
-		elseif why == "permission_asked" then
-			toast.show { title = ui.t("chat.dictation.allow_microphone"):get(), body = ui.t("chat.dictation.allow_then_hold"):get() }
 		else
 			say(why)
 		end

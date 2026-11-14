@@ -25,25 +25,45 @@ use meter::Meter;
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn zeron_microphone_permission() -> i32;
-    fn zeron_request_microphone();
+    fn zeron_request_microphone_then(
+        done: extern "C" fn(*mut std::ffi::c_void, i32),
+        context: *mut std::ffi::c_void,
+    );
 }
-fn authorize() -> Result<(), String> {
+
+/// Whether the microphone may be used, as the system says. (Only macOS
+/// asks; elsewhere it's always granted, the rest tests.)
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum Access {
+    Granted,
+    /// Not decided yet: the system is asking now; its answer comes here.
+    Asked(mpsc::Receiver<bool>),
+    Refused(String),
+}
+const REFUSED: &str =
+    "Allow Zeron microphone access in System Settings → Privacy & Security → Microphone.";
+
+/// Asks the system on first use (macOS's own prompt), never twice at once.
+fn access() -> Access {
     #[cfg(target_os = "macos")]
     match unsafe { zeron_microphone_permission() } {
         1 => (),
-        // First use (or, for a dev build, each new signature): macOS asks,
-        // and the page says what to do, not that something failed.
         0 => {
-            unsafe { zeron_request_microphone() };
-            return Err("permission_asked".into());
+            // The answer comes on a queue of AVFoundation's: it crosses to
+            // the window's thread through the channel its poll reads.
+            extern "C" fn answered(context: *mut std::ffi::c_void, granted: i32) {
+                let tell = unsafe { Box::from_raw(context.cast::<mpsc::Sender<bool>>()) };
+                let _ = tell.send(granted != 0);
+            }
+            let (tell, answer) = mpsc::channel();
+            let context = Box::into_raw(Box::new(tell)).cast();
+            unsafe { zeron_request_microphone_then(answered, context) };
+            return Access::Asked(answer);
         }
-        -2 => return Err("Microphone access requires a packaged Zeron app.".into()),
-        _ => return Err(
-            "Allow Zeron microphone access in System Settings → Privacy & Security → Microphone."
-                .into(),
-        ),
+        -2 => return Access::Refused("Microphone access requires a packaged Zeron app.".into()),
+        _ => return Access::Refused(REFUSED.into()),
     }
-    Ok(())
+    Access::Granted
 }
 
 /// One recording. Dropping it stops capture and throws away its result.
@@ -91,6 +111,11 @@ struct Service {
     /// A start waiting for the worker: its folder, microphone, and when it
     /// gives up. Meanwhile the bar keeps its starting look.
     waiting: Option<(PathBuf, Option<String>, Instant)>,
+    /// Whether the microphone may be used (the system's answer).
+    access: Box<dyn Fn() -> Access>,
+    /// A start waiting for the system's answer (its prompt showing): the
+    /// answer, its folder and microphone. Meanwhile the starting look.
+    asking: Option<(mpsc::Receiver<bool>, PathBuf, Option<String>)>,
     download: Option<DownloadJob>,
     deadline: Option<Instant>,
     /// When the recording began to listen, and whether its model is slow
@@ -115,6 +140,8 @@ impl Service {
                 Err(e) => Err(Some(e.to_string())),
             }),
             waiting: None,
+            access: Box::new(access),
+            asking: None,
             download: None,
             deadline: None,
             listening: None,
@@ -126,7 +153,10 @@ impl Service {
         }
     }
     fn needs_poll(&self) -> bool {
-        self.session.is_some() || self.download.is_some() || self.waiting.is_some()
+        self.session.is_some()
+            || self.download.is_some()
+            || self.waiting.is_some()
+            || self.asking.is_some()
     }
     fn clear_levels(&mut self) {
         self.meter.reset();
@@ -147,6 +177,7 @@ impl Service {
     fn cancel(&mut self) {
         self.session = None;
         self.waiting = None;
+        self.asking = None;
         // (What was drawn stays until the next recording: the bar is on
         // its way out.)
         self.meter.reset();
@@ -158,7 +189,7 @@ impl Service {
     }
     fn stop(&mut self) {
         // Let go before the microphone opened: nothing was recorded.
-        if self.waiting.take().is_some() {
+        if self.waiting.take().is_some() || self.asking.take().is_some() {
             self.state = json!({"phase":"cancelled", "serial":self.serial});
             return;
         }
@@ -226,16 +257,33 @@ impl Service {
         if !zeron_voice::installed(&dir) {
             return Err("no_model".into());
         }
-        authorize()?;
         let device = args["device"]
             .as_str()
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
         self.slow = zeron_voice::model_for(&dir).is_some_and(|m| m.cpu_slow)
             && cfg!(not(target_os = "macos"));
-        // The worker still finishing the last recording (a tap or a cancel
-        // while its model loaded) isn't an error: this one starts as soon
-        // as it's done, the bar in its starting look meanwhile.
+        match (self.access)() {
+            Access::Granted => self.open(dir, device)?,
+            // macOS is asking (first use): no error, the starting look until
+            // it's answered; held (or toggled) still then, it records.
+            Access::Asked(answer) => self.asking = Some((answer, dir, device)),
+            Access::Refused(why) => return Err(why),
+        }
+        self.listening = None;
+        self.clear_levels();
+        self.serial += 1;
+        self.state = json!({"phase":"starting", "serial":self.serial, "hold":args["hold"], "target":args["target"]});
+        if self.asking.is_some() {
+            // (Letting go now isn't a tap to explain: the system is asking.)
+            self.state["asking"] = json!(true);
+        }
+        Ok(self.state.clone())
+    }
+    /// Records, or waits for the worker still finishing the last recording
+    /// (a tap or a cancel while its model loaded): not an error, the bar in
+    /// its starting look meanwhile.
+    fn open(&mut self, dir: PathBuf, device: Option<String>) -> Result<(), String> {
         match (self.open)(dir.clone(), device.clone()) {
             Ok(session) => self.session = Some(session),
             Err(None) => {
@@ -243,11 +291,7 @@ impl Service {
             }
             Err(Some(e)) => return Err(e),
         }
-        self.listening = None;
-        self.clear_levels();
-        self.serial += 1;
-        self.state = json!({"phase":"starting", "serial":self.serial, "hold":args["hold"], "target":args["target"]});
-        Ok(self.state.clone())
+        Ok(())
     }
     fn download(&mut self, args: &Json) -> Result<Json, String> {
         let dir = self.dir(args)?;
@@ -286,6 +330,21 @@ impl Service {
         Ok(())
     }
     fn poll(&mut self) {
+        if let Some((answer, dir, device)) = self.asking.take() {
+            match answer.try_recv() {
+                Ok(true) => {
+                    if let Err(e) = self.open(dir, device) {
+                        self.state["phase"] = json!("failed");
+                        self.state["error"] = json!(e);
+                    }
+                }
+                Ok(false) | Err(mpsc::TryRecvError::Disconnected) => {
+                    self.state["phase"] = json!("failed");
+                    self.state["error"] = json!(REFUSED);
+                }
+                Err(mpsc::TryRecvError::Empty) => self.asking = Some((answer, dir, device)),
+            }
+        }
         if let Some((dir, device, until)) = self.waiting.take() {
             match (self.open)(dir.clone(), device.clone()) {
                 Ok(session) => self.session = Some(session),
@@ -675,9 +734,8 @@ mod tests {
         assert_eq!(s.state["phase"], "final");
         assert_eq!(s.state["text"], "late words");
     }
-    #[test]
-    fn dictation_pressed_while_the_last_one_finishes_waits_instead_of_failing() {
-        // The model in use, as downloaded (sizes and marker; no weights read).
+    /// The model in use, as downloaded (sizes and marker; no weights read).
+    fn downloaded() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         let m = zeron_voice::manifest();
         let dir = root.path().join(&m.id);
@@ -686,10 +744,84 @@ mod tests {
             std::fs::File::create(dir.join(&f.name)).unwrap().set_len(f.size).unwrap();
         }
         std::fs::write(dir.join("verified"), m.marker()).unwrap();
+        root
+    }
+    /// A service whose microphone opens (counted), the system answering
+    /// `answer` after `after`, as macOS's prompt would.
+    fn asked(
+        root: &tempfile::TempDir,
+        answer: bool,
+        after: Duration,
+    ) -> (Service, Rc<Cell<u32>>, Rc<RefCell<VecDeque<Event>>>) {
+        let opened = Rc::new(Cell::new(0));
+        let events = Rc::new(RefCell::new(VecDeque::new()));
+        let mut s = Service::new(Some(root.path().to_owned()));
+        let (counted, queued) = (opened.clone(), events.clone());
+        s.open = Box::new(move |_, _| {
+            counted.set(counted.get() + 1);
+            Ok(Box::new(Fake {
+                events: queued.clone(),
+                cancelled: Rc::default(),
+                stopped: Rc::default(),
+                level: Rc::default(),
+            }) as Box<dyn Recording>)
+        });
+        s.access = Box::new(move || {
+            let (tell, answered) = mpsc::channel();
+            std::thread::spawn(move || {
+                std::thread::sleep(after);
+                let _ = tell.send(answer);
+            });
+            Access::Asked(answered)
+        });
+        (s, opened, events)
+    }
+    #[test]
+    fn dictation_first_use_waits_for_the_microphone_prompt_instead_of_failing() {
+        let root = downloaded();
+        // Granted after 300 ms, still held: it records, no error on the way.
+        let (mut s, opened, events) = asked(&root, true, Duration::from_millis(300));
+        let started = s.start(&json!({})).unwrap();
+        assert_eq!(started["phase"], "starting");
+        assert_eq!(started["asking"], true);
+        let asked_at = Instant::now();
+        while opened.get() == 0 && asked_at.elapsed() < Duration::from_secs(5) {
+            s.poll();
+            assert_eq!(s.state["phase"], "starting", "no error while macOS asks");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(opened.get(), 1);
+        events.borrow_mut().push_back(Event::Listening);
+        s.poll();
+        assert_eq!(s.state["phase"], "listening");
+        // Denied: the one error, saying where to allow it.
+        let (mut s, opened, _) = asked(&root, false, Duration::from_millis(50));
+        s.start(&json!({})).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        s.poll();
+        assert_eq!(s.state["phase"], "failed");
+        assert!(s.state["error"].as_str().unwrap().contains("System Settings"));
+        assert_eq!(opened.get(), 0);
+        assert!(!s.needs_poll());
+        // Let go before the answer: nothing, even once it's granted.
+        let (mut s, opened, _) = asked(&root, true, Duration::from_millis(50));
+        s.start(&json!({})).unwrap();
+        s.stop();
+        assert_eq!(s.state["phase"], "cancelled");
+        std::thread::sleep(Duration::from_millis(150));
+        s.poll();
+        assert_eq!(opened.get(), 0);
+        assert_eq!(s.state["phase"], "cancelled");
+    }
+    #[test]
+    fn dictation_pressed_while_the_last_one_finishes_waits_instead_of_failing() {
+        let root = downloaded();
         // The worker finishes a cancelled recording's load for three tries.
         let tries = Rc::new(Cell::new(0));
         let events = Rc::new(RefCell::new(VecDeque::new()));
         let mut s = Service::new(Some(root.path().to_owned()));
+        // (The microphone allowed, as a packaged app's: a test binary isn't.)
+        s.access = Box::new(|| Access::Granted);
         let (counted, queued) = (tries.clone(), events.clone());
         s.open = Box::new(move |_, _| {
             counted.set(counted.get() + 1);
@@ -716,6 +848,7 @@ mod tests {
         assert_eq!(s.state["phase"], "listening");
         // Let go before the microphone opened: nothing recorded, no error.
         let mut s = Service::new(Some(root.path().to_owned()));
+        s.access = Box::new(|| Access::Granted);
         s.open = Box::new(|_, _| Err(None));
         s.start(&json!({})).unwrap();
         s.stop();

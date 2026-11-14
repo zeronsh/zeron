@@ -12,6 +12,13 @@ int zeron_microphone_permission(void) {
 void zeron_request_microphone(void) {
     [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {}];
 }
+// The answer, to `done` with `context` (once, on whatever queue AVFoundation
+// picks: the caller hands it to its own thread).
+void zeron_request_microphone_then(void (*done)(void *context, int granted), void *context) {
+    [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+        done(context, granted ? 1 : 0);
+    }];
+}
 uintptr_t zeron_microphone_window(void) {
     return NSApp.active ? (uintptr_t)(__bridge void *)NSApp.keyWindow : 0;
 }
