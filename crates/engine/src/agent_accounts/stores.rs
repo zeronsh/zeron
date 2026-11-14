@@ -1506,10 +1506,10 @@ fn hermes_env_secret(var: &str, hermes_home: &Path) -> bool {
         !value.is_empty()
     };
     // (Only a regular file of a sane size: no FIFO or runaway file is read
-    // while the accounts are listed.)
+    // while the accounts are listed; checked on the open file, so one
+    // swapped in after a check of the path is refused too.)
     let env_file = hermes_home.join(".env");
-    let readable = std::fs::metadata(&env_file).is_ok_and(|m| m.is_file() && m.len() <= 1 << 20);
-    if readable && let Ok(text) = std::fs::read_to_string(&env_file) {
+    if let Ok(text) = zeron_harness::bounded_file::read_to_string(&env_file, 1 << 20) {
         for line in text.lines() {
             let line = line.trim();
             let line = line.strip_prefix("export ").unwrap_or(line);
