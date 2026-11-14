@@ -335,7 +335,8 @@ impl Service {
     fn remove(&mut self, args: &Json) -> Result<(), String> {
         let dir = self.dir(args)?;
         self.idle()?;
-        zeron_voice::unload();
+        // (Its weights, if they are the ones loaded; the model in use stays.)
+        zeron_voice::unload(&dir);
         if dir.exists() {
             std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
         }
@@ -541,6 +542,12 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 Some("download") => me.service.borrow_mut().download(&args)?,
                 Some("remove") => {
                     me.service.borrow_mut().remove(&args)?;
+                    Json::Null
+                }
+                // Another model is now the one in use: the one loaded goes.
+                Some("use") => {
+                    let dir = me.service.borrow().dir(&args)?;
+                    zeron_voice::use_model(&dir);
                     Json::Null
                 }
                 // How long the model stays ready (seconds; 0: released at
@@ -921,7 +928,7 @@ mod tests {
             host.async_action("dictation.call", move |args: Value| {
                 let args = value_json(&args);
                 let op = args["op"].as_str().unwrap_or("").to_owned();
-                if op != "keep" {
+                if op != "keep" && op != "use" {
                     asked.borrow_mut().push(op.clone());
                 }
                 let state = match op.as_str() {

@@ -200,7 +200,7 @@ impl VoiceCard {
             return;
         }
         self.set_enabled(false, cx);
-        zeron_voice::unload();
+        zeron_voice::unload(&self.directory);
         match std::fs::remove_dir_all(&self.directory) {
             Ok(()) => {
                 self.cache_present = false;

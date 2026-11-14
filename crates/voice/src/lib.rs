@@ -750,9 +750,27 @@ enum Command {
     Transcribe(Job, Option<BusyGuard>),
     /// How long to keep the model changed: look again.
     Keep,
-    /// Answers once the weights are gone: a loaded model maps its file, which
-    /// Windows won't delete while it is mapped.
-    Unload(std::sync::mpsc::SyncSender<()>),
+    /// Lets the loaded model go if `which` says so (its folder), and answers
+    /// once its weights are gone: a loaded model maps its file, which Windows
+    /// won't delete while it is mapped.
+    Unload(std::sync::mpsc::SyncSender<()>, Which),
+}
+/// Which loaded model `Command::Unload` lets go.
+enum Which {
+    Any,
+    /// This one (it's being removed).
+    Only(PathBuf),
+    /// Any but this one (it's now the one in use).
+    Except(PathBuf),
+}
+impl Which {
+    fn goes(&self, loaded: &Path) -> bool {
+        match self {
+            Which::Any => true,
+            Which::Only(dir) => dir == loaded,
+            Which::Except(dir) => dir != loaded,
+        }
+    }
 }
 static WORKER: std::sync::OnceLock<std::sync::mpsc::SyncSender<Command>> =
     std::sync::OnceLock::new();
@@ -806,8 +824,10 @@ fn serve<C: Recording, M: Model>(
         let (job, _admission) = match command {
             Ok(Command::Transcribe(j, admission)) => (j, admission),
             Ok(Command::Keep) => continue,
-            Ok(Command::Unload(done)) => {
-                cached = None;
+            Ok(Command::Unload(done, which)) => {
+                if cached.as_ref().is_some_and(|(dir, _)| which.goes(dir)) {
+                    cached = None;
+                }
                 let _ = done.try_send(());
                 continue;
             }
@@ -964,7 +984,7 @@ fn release(worker: &std::sync::mpsc::SyncSender<Command>, running: &Running, wit
     }
     let until = Instant::now() + within;
     let (done, released) = std::sync::mpsc::sync_channel(1);
-    let mut command = Command::Unload(done);
+    let mut command = Command::Unload(done, Which::Any);
     // (A job may be queued ahead: Zeron exiting, it ends before it starts.)
     loop {
         match worker.try_send(command) {
@@ -985,13 +1005,26 @@ unsafe extern "C" {
     fn atexit(callback: extern "C" fn()) -> i32;
 }
 
-/// Retire cached weights on the worker, and wait (briefly) until they are.
-pub fn unload() {
+/// The model in `dir` is being removed: its weights go, if they're the ones
+/// loaded, and this waits (briefly) until they are. Another model stays.
+pub fn unload(dir: &Path) {
     if let Some(worker) = WORKER.get() {
         let (done, unloaded) = std::sync::mpsc::sync_channel(1);
-        if worker.try_send(Command::Unload(done)).is_ok() {
+        if worker
+            .try_send(Command::Unload(done, Which::Only(dir.to_owned())))
+            .is_ok()
+        {
             let _ = unloaded.recv_timeout(Duration::from_secs(2));
         }
+    }
+}
+
+/// The model in `dir` is now the one in use: any other loaded goes at once
+/// (after a dictation under way), without waiting for it.
+pub fn use_model(dir: &Path) {
+    if let Some(worker) = WORKER.get() {
+        let (done, _) = std::sync::mpsc::sync_channel(1);
+        let _ = worker.try_send(Command::Unload(done, Which::Except(dir.to_owned())));
     }
 }
 

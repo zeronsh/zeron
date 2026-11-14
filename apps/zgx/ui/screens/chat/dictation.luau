@@ -101,6 +101,14 @@ ui.effect(function()
 	end)
 end)
 
+-- The model in use (Settings → Voice): another one loaded goes at once.
+ui.effect(function()
+	local model = prefs.dictation_model:get()
+	pcall(function()
+		ui.call("dictation.call", { op = "use", model = model }):after(function() end, function() end)
+	end)
+end)
+
 -- Holding. A tap explains the gesture; it never inserts or sends anything.
 local TAP = 300
 local starting, held, since = false, false, 0
