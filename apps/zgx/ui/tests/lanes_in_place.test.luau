@@ -233,6 +233,8 @@ test("a message that didn't go says so above the side chat's composer, never ove
 	app:frames(30)
 	app:type('.side-chat-tab >> role:textbox', "lost words")
 	app:key("Enter")
+	-- (Frames for the deck to open in: no loop plays here to bring them.)
+	app:frames(30)
 	-- An alert of the composer's deck: in its pill, opened to read.
 	app:wait('.side-chat-tab >> role:button "Open Alerts"', { timeout_ms = 3000 })
 	app:click('.side-chat-tab >> role:button "Open Alerts"')

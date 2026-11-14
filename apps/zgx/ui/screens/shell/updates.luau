@@ -472,7 +472,7 @@ local function row(r: any, close: () -> ()): Node
 				tabular = true,
 			},
 		},
-		if r.active then ui.div { shrink = 0, status.StatusIcon { kind = "working", size = 14 } } else nil,
+		if r.active then ui.div { shrink = 0, status.Spinner { size = 14 } } else nil,
 		if r.phase == "updated" then ui.div { shrink = 0, color = "$success", ds.Icon { name = "check", size = 14 } } else nil,
 		skip_button(r),
 		if r.action then action_button(r, close) else nil,
@@ -933,7 +933,7 @@ M.Button = ui.component(function(): Node
 			ui.div(stack),
 			ui.presence(state, function(which: string): Node
 				if which == "working" then
-					return status.StatusIcon { kind = "working", size = GLYPH }
+					return status.Spinner { size = GLYPH }
 				end
 				return ds.Icon { name = if which == "done" then "check" else "download", size = GLYPH }
 			end, { w = GLYPH, h = GLYPH, shrink = 0 }),

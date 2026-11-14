@@ -1524,7 +1524,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			color = "$text.tertiary",
 			ui.show(function(): boolean
 				return loading:get() or searching:get()
-			end, status.StatusIcon { kind = "working", size = 14 }, Icon { name = "palette-search", size = 16 }),
+			end, status.Spinner { size = 14 }, Icon { name = "palette-search", size = 16 }),
 		},
 		ui.show(function(): boolean
 			-- (A root without scopes is a step: its title shows.)

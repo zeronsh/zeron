@@ -330,7 +330,7 @@ function M.subagents(n: () -> number): Node
 				return locale.s("ds.sidebar.subagents_running", { n = n() })
 			end,
 			ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, rounded = "$radius.full", bg = "$zeron.status.working", opacity = 0.1 },
-			status.StatusDot { kind = "working", size = 5 },
+			status.StatusDot { kind = "working", size = 6 },
 			ui.text {
 				function(): string
 					local c = n()

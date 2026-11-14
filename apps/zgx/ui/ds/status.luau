@@ -1,12 +1,15 @@
 -- What an agent is doing, at a glance: a state's glyph in its hue with its
 -- name (in a chat's header; working, it counts the time), or a list row's
--- dot (pulsing while it works), its name a tooltip. A first pass, to iterate
--- from.
+-- dot (pulsing while it works), its name a tooltip. An agent at work is its
+-- light sweep (ds/sweep): the mark, or a sub-agent's dot glyph; the ring is
+-- for anything else loading (`Spinner`).
 --
 -- `Status { kind = "working", since = os.time() }`, `StatusDot { kind =
--- "input" }`, `StatusIcon { kind = "done" }`.
+-- "input" }`, `StatusIcon { kind = "done" }`, `StatusIcon { kind =
+-- "working", who = "subagent" }`.
 
 local motion = require("@self/motion")
+local sweep = require("@self/sweep")
 local Icon = require("@self/icon")
 local prefers = require("@self/prefers")
 local locale = require("@self/locale")
@@ -49,8 +52,8 @@ end
 local KINDS: { [Kind]: KindInfo } = {
 	working = kind("working", "status-working", true),
 	connecting = kind("connecting", "status-working", true),
-	-- Waiting on background work that will wake it: under way, drawn as
-	-- working is (its ring, in working's hue), its name its own.
+	-- Waiting on background work that will wake it: present, at rest (its
+	-- sweep standing still, in working's hue), its name its own.
 	waiting = kind("waiting", "status-working", true),
 	input = kind("input", "status-input"),
 	approval = kind("approval", "status-approval"),
@@ -150,8 +153,7 @@ fn fill(input:FillInput)->vec4<f32> {
 ]])
 
 -- The ring's run (seconds, as the shader has it), its rest between runs
--- (milliseconds) and its frame rate; the dots pulse at the same rate, so
--- the frames that draw one draw them all.
+-- (milliseconds) and its frame rate.
 local RUN, REST, FPS = 3.9, 900, 30
 
 -- Its loop put where one clock has it: a loop of `period` ms that started
@@ -219,31 +221,202 @@ function M.Spinner(props: { size: number?, ink: string? }): Node
 	return ring(props.ink or "$zeron.status.working", props.size or 14)
 end
 
--- A state's glyph, `size` points: working, waiting and connecting their
--- ring.
-local function glyph(kind: Kind, size: number): Node?
-	local k = KINDS[kind]
-	if kind == "working" or kind == "connecting" or kind == "waiting" then
-		return ring(`$zeron.status.{hue(kind)}`, size)
+-- An agent's presence: one sweep where you look, still marks elsewhere.
+-- A glyph's `role`: "primary" sweeps while it shows (the open chat's foot,
+-- its running sub-agents, `presence.primaries` of those at most); "quiet"
+-- (the default: rows, tabs, the palette, badges) sweeps for `presence.
+-- start` as it's drawn (its agent started or came back) and then holds the
+-- mark still, lit through its gap, in its hue. A "needs you" glyph drawn
+-- quietly flashes for a moment. Nothing moves while the window isn't the
+-- active one or motion is reduced.
+export type Who = "agent" | "subagent"
+export type Role = "primary" | "quiet"
+local P = motion.presence
+
+-- The beat: what moves (`frame(k)`: the properties of its k-th frame,
+-- every `every` beats), all set at once by one timer on the beat's own
+-- boundaries, from `ui.now()`, so everything on screen shows the same frame
+-- whenever it came into sight. No animation plays for it: the engine stays
+-- idle (a loop capped to a low frame rate keeps any other that starts
+-- meanwhile waiting for its next frame). The timer runs only while
+-- something moves, the window is active and motion isn't reduced; what's
+-- gone from the window drops out. A quiet one ends (`done`: set to `last`)
+-- when its time is up.
+type Beat = {
+	every: number,
+	frame: (k: number) -> { [string]: any },
+	last: { [string]: any }?,
+	done: boolean?,
+	primary: boolean?,
+	el: Element?,
+	shown: number?,
+}
+local beating: { [Beat]: boolean } = {}
+local next_beat: (() -> ())? = nil
+local watching = false
+local function beat()
+	next_beat = nil
+	if ui.window.active:peek() == false then
+		return
 	end
-	return if k.glyph then Icon { name = k.glyph, size = size } else nil
+	local now = ui.now()
+	for b in beating do
+		local el = b.el :: Element
+		if not (el :: any).mounted then
+			beating[b] = nil
+			continue
+		end
+		local k = math.floor(now / (P.beat * b.every) + 0.001)
+		if k ~= b.shown then
+			b.shown = k
+			anime.utils.set(el, b.frame(k))
+		end
+	end
+	if next(beating) ~= nil then
+		next_beat = ui.after(P.beat - now % P.beat, beat)
+	end
+end
+-- How many sub-agents sweep now (primaries past `presence.primaries` hold
+-- still), and how many glyphs move at all.
+local subagents = 0
+function M.moving(): number
+	local n = 0
+	for _ in beating do
+		n += 1
+	end
+	return n
+end
+local function stop(b: Beat)
+	if beating[b] then
+		beating[b] = nil
+		if b.primary then
+			subagents -= 1
+		end
+	end
+end
+local function on_beat(props: ContainerProps, b: Beat, quiet: boolean): Node
+	if quiet then
+		ui.after(P.start, function()
+			b.done = true
+			if beating[b] and b.last then
+				anime.utils.set(b.el :: Element, b.last)
+			end
+			stop(b)
+		end)
+	end
+	props.on_visible = function(visible: boolean, el: Element)
+		b.el = el
+		if not visible or motion.reduced_now() or b.done or (b.primary and subagents >= P.primaries) then
+			if b.last and (b.done or visible) then
+				anime.utils.set(el, b.last)
+			end
+			stop(b)
+			return
+		end
+		if not beating[b] then
+			beating[b] = true
+			b.shown = nil
+			if b.primary then
+				subagents += 1
+			end
+		end
+		if not watching then
+			-- (The window coming back: what moves picks up.)
+			watching = true
+			ui.effect(function()
+				if ui.window.active:get() ~= false and not next_beat and next(beating) ~= nil then
+					ui.after(0, beat)
+				end
+			end)
+		end
+		if not next_beat then
+			beat()
+		end
+	end
+	return ui.div(props)
 end
 
--- A state's glyph alone, in its hue. `kind` may be a function: the glyph
--- and its hue follow it in place, and only a move between the working ring
--- and a glyph (or between the ring's two kinds) swaps what's drawn.
-function M.StatusIcon(props: { kind: Kind | () -> Kind, size: number? }): Node
+-- An agent's light sweep (ds/sweep), as its role has it: still when it
+-- waits or motion is reduced.
+function M.Sweep(props: sweep.Props & { role: Role? }): Node
+	local given = table.clone(props)
+	given.reduced = motion.reduced_now()
+	given.rest = P.rest
+	local node, every, glyph = sweep.node(given)
+	if not every then
+		return ui.div(node)
+	end
+	local primary = props.role == "primary"
+	return on_beat(node, {
+		every = every,
+		frame = function(k: number)
+			return { shaderTime = sweep.band(glyph, k) }
+		end,
+		last = { shaderTime = sweep.GLYPHS[glyph].still },
+		-- (A sub-agent's: one of the few that sweep.)
+		primary = primary and props.who == "subagent",
+	}, not primary)
+end
+local function present(kind: Kind, size: number, who: Who?, role: Role?, ink: string?): Node
+	local hue = if kind == "connecting" then "connecting" else "working"
+	return M.Sweep {
+		who = who,
+		size = size,
+		role = role,
+		pace = if kind == "waiting" then "still" else hue :: any,
+		ink = ink or `$zeron.status.{hue}`,
+	}
+end
+
+-- "Needs you" (input, approval) drawn quietly: a flash as it's drawn, a
+-- dimming and back twice, then still.
+local FLASH = { 0.3, 1 }
+local function needs(kind: Kind): boolean
+	return kind == "input" or kind == "approval"
+end
+local function flash(child: Node): Node
+	return on_beat({ shrink = 0, child }, {
+		every = 2,
+		frame = function(k: number)
+			return { opacity = FLASH[k % 2 + 1] }
+		end,
+		last = { opacity = 1 },
+	}, true)
+end
+
+-- A state's glyph, `size` points: working, waiting and connecting an
+-- agent's sweep.
+local function glyph(kind: Kind, size: number, who: Who?, role: Role?): Node?
+	local k = KINDS[kind]
+	if kind == "working" or kind == "connecting" or kind == "waiting" then
+		return present(kind, size, who, role)
+	end
+	if not k.glyph then
+		return nil
+	end
+	local icon = Icon { name = k.glyph, size = size }
+	return if needs(kind) and role ~= "primary" then flash(icon) else icon
+end
+
+-- A state's glyph alone, in its hue: at work, the agent's sweep (`who`:
+-- "agent", the mark, by default; "subagent", the dot glyph), as its `role`
+-- has it (quiet by default). `kind` may be a function: the glyph and its
+-- hue follow it in place, and only a move between the sweep's kinds, a
+-- "needs you" and a glyph swaps what's drawn.
+function M.StatusIcon(props: { kind: Kind | () -> Kind, size: number?, who: Who?, role: Role? }): Node
 	local size = props.size or 16
 	local given = props.kind
 	if type(given) ~= "function" then
 		local kind = given :: Kind
-		return ui.div { shrink = 0, color = `$zeron.status.{hue(kind)}`, glyph(kind, size) }
+		return ui.div { shrink = 0, color = `$zeron.status.{hue(kind)}`, glyph(kind, size, props.who, props.role) }
 	end
 	local kind = given :: () -> Kind
-	-- (Working and waiting share one ring: a move between them keeps it.)
 	local function drawn(): string
-		local k = hue(kind())
-		return if k == "working" or k == "connecting" then k else "glyph"
+		local k = kind()
+		return if k == "working" or k == "connecting" or k == "waiting"
+			then k
+			elseif needs(k) then k
+			else "glyph"
 	end
 	return ui.div {
 		shrink = 0,
@@ -251,8 +424,11 @@ function M.StatusIcon(props: { kind: Kind | () -> Kind, size: number? }): Node
 			return `$zeron.status.{hue(kind())}`
 		end,
 		ui.switch(drawn, {
-			working = ring("$zeron.status.working", size),
-			connecting = ring("$zeron.status.connecting", size),
+			working = present("working", size, props.who, props.role),
+			connecting = present("connecting", size, props.who, props.role),
+			waiting = present("waiting", size, props.who, props.role),
+			input = glyph("input", size, props.who, props.role),
+			approval = glyph("approval", size, props.who, props.role),
 			glyph = ui.show(function(): boolean
 				return KINDS[kind()].glyph ~= nil
 			end, Icon {
@@ -267,7 +443,7 @@ end
 
 -- A state's glyph and its name, in its hue; working, the time it has taken
 -- (from `since`, in `os.time()` seconds) after it.
-M.Status = ui.component(function(props: { kind: Kind, label: string?, since: number? }): Node
+M.Status = ui.component(function(props: { kind: Kind, label: string?, since: number?, who: Who? }): Node
 	local k = KINDS[props.kind]
 	local now = ui.use_state(os.time())
 	if props.since and props.kind == "working" then
@@ -281,7 +457,7 @@ M.Status = ui.component(function(props: { kind: Kind, label: string?, since: num
 		color = `$zeron.status.{hue(props.kind)}`,
 		text_size = "$font.size.sm",
 		weight = "$font.weight.medium",
-		glyph(props.kind, 16),
+		glyph(props.kind, 16, props.who),
 		ui.text { props.label or locale.t(NAMES[props.kind][1]) },
 		if props.since and props.kind == "working"
 			then ui.text {
@@ -294,12 +470,20 @@ M.Status = ui.component(function(props: { kind: Kind, label: string?, since: num
 end)
 
 -- A list row's dot: 9 points, its state's hue, its long name a tooltip;
--- working, waiting or connecting, it pulses (dimming to half and back every
--- two seconds, in six steps each way).
+-- working, waiting or connecting, the agent's micro mark instead (quiet:
+-- see `StatusIcon`).
 function M.StatusDot(props: { kind: Kind, size: number? }): Node
 	local k = KINDS[props.kind]
 	local size = props.size or 9
-	local dot: ContainerProps = {
+	if props.kind == "working" or props.kind == "connecting" or props.kind == "waiting" then
+		return ui.div {
+			shrink = 0,
+			tooltip = k.long,
+			label = k.long,
+			present(props.kind, size, nil, "quiet", `$zeron.status.dot.{hue(props.kind)}`),
+		}
+	end
+	return ui.div {
 		w = size,
 		h = size,
 		shrink = 0,
@@ -308,23 +492,6 @@ function M.StatusDot(props: { kind: Kind, size: number? }): Node
 		tooltip = k.long,
 		label = k.long,
 	}
-	if not k.pulse then
-		return ui.div(dot)
-	end
-	return looping(dot, function(el)
-		-- The dimming and the brightening alone, each held for the loop's
-		-- pause (which draws nothing) before the next.
-		return anime.animate(el, {
-			opacity = { 1, 0.5 },
-			duration = 200,
-			ease = "steps(6)",
-			loop = true,
-			alternate = true,
-			loopDelay = 800,
-			frameRate = FPS,
-		})
-		-- (A dimming and a brightening, each with its pause.)
-	end, 2 * (200 + 800))
 end
 
 -- A state's dot and its long name beside it, small, in its hue (a list

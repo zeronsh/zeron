@@ -24,6 +24,7 @@ local sidebar = require("@self/sidebar")
 export type SidebarSession = sidebar.Session
 export type SidebarProject = sidebar.Project
 export type StatusKind = status.Kind
+export type StatusWho = status.Who
 export type Harness = model_picker.Harness
 export type Model = model_picker.Model
 export type ComposerDevice = composer.Device
@@ -190,6 +191,8 @@ return {
 	StatusDot = status.StatusDot,
 	StatusIcon = status.StatusIcon,
 	StatusTag = status.StatusTag,
+	-- An agent's light sweep, held or at work.
+	Sweep = status.Sweep,
 	-- Effects.
 	decode = require("@self/decode"),
 	effects = require("@self/effects"),

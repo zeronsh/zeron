@@ -749,7 +749,7 @@ local function connection_line(): Node
 					return if connection() == "reconnecting" then "ring" else "dot"
 				end, function(glyph: string): Node
 					if glyph == "ring" then
-						return ui.div { shrink = 0, status.StatusIcon { kind = "connecting", size = 10 } }
+						return ui.div { shrink = 0, status.Spinner { size = 10, ink = "$zeron.status.connecting" } }
 					end
 					return ui.div { shrink = 0, w = 5, h = 5, rounded = "$radius.full", bg = "$warning" }
 				end),
