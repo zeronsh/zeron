@@ -775,7 +775,7 @@ fn enable_dictation(dir: &std::path::Path, cx: &mut TestAppContext) {
             .set_len(file.size)
             .unwrap();
     }
-    std::fs::write(model.join("verified"), zeron_voice::manifest().revision).unwrap();
+    std::fs::write(model.join("verified"), zeron_voice::manifest().marker()).unwrap();
     cx.update(|cx| {
         crate::dictation::init(dir.into(), cx);
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |s| {

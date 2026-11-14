@@ -186,6 +186,7 @@ impl Service {
             .map(|m| {
                 json!({"id":m.id, "name":m.name, "size":m.size(), "languages":m.languages,
                     "installed":m.installed(&models.join(&m.id)),
+                    "present":models.join(&m.id).exists(),
                     "memory":m.memory,
                     "slow":m.cpu_slow && cfg!(not(target_os = "macos"))})
             })

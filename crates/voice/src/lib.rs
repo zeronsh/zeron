@@ -118,45 +118,113 @@ impl Manifest {
         self.files
             .iter()
             .all(|f| std::fs::metadata(dir.join(&f.name)).is_ok_and(|m| m.len() == f.size))
-            && std::fs::read_to_string(dir.join("verified")).is_ok_and(|r| r == self.revision)
+            && std::fs::read_to_string(dir.join("verified")).is_ok_and(|r| r == self.marker())
+    }
+    /// What `verified` says once every file matched its pin: each file's
+    /// SHA-256 and name, so a pin changed on any of them verifies again.
+    pub fn marker(&self) -> String {
+        self.files
+            .iter()
+            .map(|f| format!("{}  {}\n", f.sha256, f.name))
+            .collect()
     }
     /// Called only on a worker. Temporary files never establish readiness.
+    /// A file already here that matches its pin is kept (an earlier attempt
+    /// stopped after it); a cancelled download leaves nothing behind.
     pub fn download(
         &self,
         dir: &Path,
         cancel: &AtomicBool,
         mut progress: impl FnMut(u64),
     ) -> Result<()> {
-        tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-        std::fs::create_dir_all(dir)?;
-        let client = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).build()?;
-        let m=self; let mut total=0;
-        for file in &m.files {
-            if cancel.load(Ordering::Acquire) { bail!("Download cancelled") }
-            let staging=dir.join(format!("{}.part",file.name));
-            let result=async {
-                let mut response=tokio::select! {
-                    _=cancelled(cancel)=>bail!("Download cancelled"),
-                    response=tokio::time::timeout(std::time::Duration::from_secs(30),client.get(format!("https://huggingface.co/{}/resolve/{}/{}",file.repository.as_ref().unwrap_or(&m.repository),file.revision.as_ref().unwrap_or(&m.revision),file.name)).send())=>response??.error_for_status()?,
-                };
-                let mut out=std::fs::File::create(&staging)?;let mut hash=Sha256::new();let mut size=0;
-                loop {
-                    let chunk=tokio::select! {
-                        _=cancelled(cancel)=>bail!("Download cancelled"),
-                        chunk=tokio::time::timeout(std::time::Duration::from_secs(30),response.chunk())=>chunk??,
-                    };
-                    let Some(chunk)=chunk else {break};
-                    size+=chunk.len() as u64;if size>file.size {bail!("Unexpected model size")}
-                    hash.update(&chunk);out.write_all(&chunk)?;total+=chunk.len() as u64;progress(total);
-                }
-                if size!=file.size || format!("{:x}",hash.finalize())!=file.sha256 {bail!("Model checksum verification failed")}
-                out.sync_all()?;std::fs::rename(&staging,dir.join(&file.name))?;Ok::<_,anyhow::Error>(())
-            }.await;
-            if result.is_err() {let _=std::fs::remove_file(staging);} result?;
+        let result = self.fetch(dir, cancel, &mut progress);
+        if cancel.load(Ordering::Acquire) {
+            let _ = std::fs::remove_dir_all(dir);
+            bail!("Download cancelled")
         }
-        if cancel.load(Ordering::Acquire) {bail!("Download cancelled")}
-        std::fs::write(dir.join("verified"),&m.revision)?;Ok(())
-    })
+        result
+    }
+    fn fetch(&self, dir: &Path, cancel: &AtomicBool, progress: &mut impl FnMut(u64)) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let _ = std::fs::remove_file(dir.join("verified"));
+        let mut total = 0;
+        let mut wanted = Vec::new();
+        for file in &self.files {
+            let path = dir.join(&file.name);
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() == file.size) {
+                let mut hash = Sha256::new();
+                std::io::copy(&mut std::fs::File::open(&path)?, &mut hash)?;
+                if format!("{:x}", hash.finalize()) == file.sha256 {
+                    total += file.size;
+                    progress(total);
+                    continue;
+                }
+            }
+            let _ = std::fs::remove_file(&path);
+            wanted.push(file);
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let client = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(20))
+                    .build()?;
+                for file in wanted {
+                    if cancel.load(Ordering::Acquire) {
+                        bail!("Download cancelled")
+                    }
+                    let staging = dir.join(format!("{}.part", file.name));
+                    let url = format!(
+                        "https://huggingface.co/{}/resolve/{}/{}",
+                        file.repository.as_ref().unwrap_or(&self.repository),
+                        file.revision.as_ref().unwrap_or(&self.revision),
+                        file.name
+                    );
+                    let result = async {
+                        let mut response = tokio::select! {
+                            _ = cancelled(cancel) => bail!("Download cancelled"),
+                            response = tokio::time::timeout(Duration::from_secs(30), client.get(&url).send()) =>
+                                response??.error_for_status()?,
+                        };
+                        let mut out = std::fs::File::create(&staging)?;
+                        let mut hash = Sha256::new();
+                        let mut size = 0;
+                        loop {
+                            let chunk = tokio::select! {
+                                _ = cancelled(cancel) => bail!("Download cancelled"),
+                                chunk = tokio::time::timeout(Duration::from_secs(30), response.chunk()) => chunk??,
+                            };
+                            let Some(chunk) = chunk else { break };
+                            size += chunk.len() as u64;
+                            if size > file.size {
+                                bail!("Unexpected model size")
+                            }
+                            hash.update(&chunk);
+                            out.write_all(&chunk)?;
+                            total += chunk.len() as u64;
+                            progress(total);
+                        }
+                        if size != file.size || format!("{:x}", hash.finalize()) != file.sha256 {
+                            bail!("Model checksum verification failed")
+                        }
+                        out.sync_all()?;
+                        std::fs::rename(&staging, dir.join(&file.name))?;
+                        Ok::<_, anyhow::Error>(())
+                    }
+                    .await;
+                    if result.is_err() {
+                        let _ = std::fs::remove_file(staging);
+                    }
+                    result?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })?;
+        if cancel.load(Ordering::Acquire) {
+            bail!("Download cancelled")
+        }
+        std::fs::write(dir.join("verified"), self.marker())?;
+        Ok(())
     }
 }
 async fn cancelled(cancel: &AtomicBool) {
@@ -875,23 +943,60 @@ mod tests {
     }
     #[test]
     fn cancelled_download_never_establishes_readiness() {
-        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let m = manifest();
+        let dir = root.path().join(&m.id);
         assert!(
-            download(dir.path(), &AtomicBool::new(true), |_| panic!(
+            m.download(&dir, &AtomicBool::new(true), |_| panic!(
                 "no progress after cancellation"
             ))
             .is_err()
         );
-        assert!(!installed(dir.path()));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert!(!m.installed(&dir));
+        assert!(!dir.exists(), "a cancelled download leaves nothing behind");
+    }
+    #[test]
+    fn files_already_verified_are_kept_not_fetched_again() {
+        // A download that stopped after its first file: retried, that file
+        // is kept as it matches its pin, and only what's missing is fetched
+        // (here nothing: no network is touched).
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"weights".as_slice();
+        let m = Manifest {
+            id: "tiny".into(),
+            files: vec![Artifact {
+                name: "weights.gguf".into(),
+                size: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+                role: None,
+                repository: Some("nowhere/never".into()),
+                revision: None,
+            }],
+            ..manifest()
+        };
+        let dir = root.path().join("tiny");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("weights.gguf"), bytes).unwrap();
+        let mut seen = 0;
+        m.download(&dir, &AtomicBool::new(false), |n| seen = n)
+            .unwrap();
+        assert_eq!(seen, bytes.len() as u64);
+        assert!(m.installed(&dir));
+        // A pin changed on any file verifies again.
+        let mut changed = m.clone();
+        changed.files[0].sha256 = "0".repeat(64);
+        assert!(!changed.installed(&dir));
     }
     #[test]
     fn partial_or_corrupt_model_cannot_load() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = &manifest().files[0];
-        std::fs::write(dir.path().join(&f.name), b"corrupt").unwrap();
-        assert!(!installed(dir.path()));
-        assert!(Recognizer::load(dir.path()).is_err());
+        let root = tempfile::tempdir().unwrap();
+        let m = manifest();
+        let dir = root.path().join(&m.id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(&m.files[0].name), b"corrupt").unwrap();
+        std::fs::write(dir.join("verified"), m.marker()).unwrap();
+        assert!(!installed(&dir));
+        assert!(Recognizer::load(&dir).is_err());
     }
 }
 
