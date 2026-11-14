@@ -37,6 +37,7 @@ local ContextMenu = require("@self/context_menu")
 local ToggleButton = require("@self/toggle_button")
 local git = require("@self/git")
 local locale = require("@self/locale")
+local look = require("@self/look")
 
 local M = {}
 
@@ -260,6 +261,23 @@ local List = ui.component(function(props: ListProps): Node
 	local remeasure = ui.use_state(0)
 	-- How tall the list is, for its rail.
 	local seen = ui.use_state(0)
+	local view_w = ui.use_state(0)
+	local across = ui.use_state(0)
+	local hovered = ui.use_state(false)
+	local code_w = ui.use_state(0)
+	local function content_w(): number
+		return math.max(view_w:get(), if wrap:get() then 0 else code_w:get())
+	end
+	ui.effect(function()
+		local limit = math.max(0, content_w() - view_w:get())
+		if across:peek() > limit then
+			across:set(limit)
+		end
+	end)
+	-- Cache by the parsed lines themselves, not by the mounted rows. A
+	-- line outside the virtual window still determines the scroll range.
+	type Width = { font: string, size: number, small: number, code: number, hunk: number }
+	local widths: { [{ git.Line }]: Width } = setmetatable({}, { __mode = "k" })
 	-- What the rows show, kept here in Lua as the rows are worked out: each
 	-- open file's lines (and side by side, their pairs), each file by its
 	-- path, each row by its key. (The rows are state: a value in them is
@@ -658,45 +676,110 @@ local List = ui.component(function(props: ListProps): Node
 	end
 	return ui.div {
 		id = id,
+		on_hover = function(inside: boolean) hovered:set(inside) end,
 		w_full = true,
 		grow = 1,
 		min_h = 0,
 		relative = true,
 		on_resize = function(size, el)
 			seen:set(size.h)
+			view_w:set(size.w)
 			if props.on_frame then
 				props.on_frame(el)
 			end
 		end,
-		ui.list {
-			ref = props.ref,
+		-- The horizontal viewport surrounds the virtual list, whose height
+		-- stays bounded: opening a large diff still mounts only its slice.
+		ui.scroll_x {
+			id = `{id}-horizontal`,
+			offset = across,
 			w_full = true,
 			h_full = true,
-			offset = offset,
-			overscan = 6,
-			heights = function(): { number }
-				return heights:get()
-			end,
-			sticky = function(): { number }
-				return sticky:get()
-			end,
-			-- (Read as the rows are: rows whose keys change and whose
-			-- heights don't, a diff wrapped or split, are drawn anew.)
-			key = function(i: number): string
-				local r = rows:get()[i]
-				return if r then r.key else `none:{i}`
-			end,
-			row = function(key: string): Node
-				return build(key)
-			end,
-			row_text = function(i: number): string
-				local r = rows:peek()[i]
-				if r and r.kind == "line" then
-					local l = (file_lines[r.path :: string] or {})[r.index or 0]
-					return if l then l.text else ""
+			ui.list {
+				ref = props.ref,
+				w = content_w,
+				shrink = 0,
+				h_full = true,
+				offset = offset,
+				overscan = 6,
+				heights = function(): { number }
+					return heights:get()
+				end,
+				sticky = function(): { number }
+					return sticky:get()
+				end,
+				-- (Read as the rows are: rows whose keys change and whose
+				-- heights don't, a diff wrapped or split, are drawn anew.)
+				key = function(i: number): string
+					local r = rows:get()[i]
+					return if r then r.key else `none:{i}`
+				end,
+				row = function(key: string): Node
+					local node = build(key)
+					local r = row_of[key]
+					if r and (r.kind == "line" or r.kind == "pair" or r.kind == "hunk") then
+						return node
+					end
+					-- File/folder headers (including sticky ones), comments and
+					-- composers keep the viewport's width and position.
+					return ui.div {
+						w = function(): number return view_w:get() end,
+						x = function(): number return across:get() end,
+						node,
+					}
+				end,
+				row_text = function(i: number): string
+					local r = rows:peek()[i]
+					if r and r.kind == "line" then
+						local l = (file_lines[r.path :: string] or {})[r.index or 0]
+						return if l then l.text else ""
+					end
+					return if r and r.file then r.file.path elseif r and r.path then r.path elseif r and r.dir then r.dir else ""
+				end,
+			},
+		},
+		-- Measuring doesn't mount text for every line. The cache is invalidated
+		-- by a new diff or a different font/size, never by vertical scrolling.
+		ui.canvas {
+			absolute = true, top = 0, left = 0, w = 1, h = 1, pointer_events = "none", aria_hidden = true,
+			draw = function(c)
+				rows:get()
+				local font = look.code_family()
+				local size = ui.theme.get("font.size.sm") :: number
+				local small = ui.theme.get("font.size.xs") :: number
+				local pad = ui.theme.get("space.3") :: number
+				local max_code, max_hunk = 0, 0
+				for _, lines in file_lines do
+					local cached = widths[lines]
+					if not cached or cached.font ~= font or cached.size ~= size or cached.small ~= small then
+						local code, hunk = 0, 0
+						for _, l in lines do
+							if l.kind == "hunk" then
+								local w = c:measure_text(l.text, { font = font, size = small })
+								hunk = math.max(hunk, w)
+							else
+								local w = c:measure_text(git.expand(l.text), { font = font, size = size })
+								code = math.max(code, w)
+							end
+						end
+						cached = { font = font, size = size, small = small, code = code, hunk = hunk }
+						widths[lines] = cached
+					end
+					max_code = math.max(max_code, cached.code)
+					max_hunk = math.max(max_hunk, cached.hunk + 3 * pad)
 				end
-				return if r and r.file then r.file.path elseif r and r.path then r.path elseif r and r.dir then r.dir else ""
+				local width = if wrap:get() then 0 else math.ceil(math.max(max_hunk,
+					if split:get() then 2 * (git.gutter(true) + max_code + pad) + 1
+					else git.gutter(one_column) + max_code + pad))
+				if width ~= code_w:peek() then
+					ui.after(0, function() code_w:set(width) end)
+				end
 			end,
+		},
+		Rail {
+			id = `{id}-horizontal-rail`, horizontal = true,
+			offset = across, extent = content_w, view = view_w,
+			hint = function(): boolean return hovered:get() end,
 		},
 		Rail { id = if props.id then `{props.id}-rail` else "changes-rail", offset = offset, extent = total, view = seen },
 	}
