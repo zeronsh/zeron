@@ -266,6 +266,12 @@ pub fn provider_accounts(
         .collect()
 }
 
+fn is_unreadable_login(account: &AgentAccount) -> bool {
+    !account.switchable
+        && switches_accounts(account.harness)
+        && account.auth_kind != Some(zeron_proto::AgentAuthKind::ApiKey)
+}
+
 /// The optimistic half of a switch: `account` becomes the live login of its
 /// group — its agent, or for agents that keep a login per model provider,
 /// that provider — and every other group keeps its own. Pure.
@@ -1234,7 +1240,7 @@ impl AccountsPage {
         if !reports_usage(account.harness) {
             return None;
         }
-        let note = if !account.switchable && switches_accounts(account.harness) {
+        let note = if is_unreadable_login(account) {
             match account.harness {
                 // Keychain denied: the login is there, its secret isn't.
                 HarnessId::ClaudeCode => "Credentials unavailable".to_string(),
@@ -2567,6 +2573,36 @@ mod tests {
             .map(|a| a.id.as_str())
             .collect();
         assert_eq!(live, ["gpt-b", "copilot", "grok-a"]);
+    }
+
+    #[test]
+    fn a_read_only_api_key_is_not_an_unreadable_login() {
+        use zeron_proto::AgentAuthKind::{ApiKey, Oauth};
+        let row = |harness, auth_kind, switchable| AgentAccount {
+            id: "row".into(),
+            harness,
+            email: None,
+            plan_label: None,
+            active: true,
+            usage_windows: vec![],
+            usage_fetched_at: None,
+            usage_error: None,
+            display_name: None,
+            organization: None,
+            auth_kind: Some(auth_kind),
+            switchable,
+            saved_at: None,
+            provider: Some("nan".into()),
+        };
+        assert!(is_unreadable_login(&row(HarnessId::Opencode, Oauth, false)));
+        assert!(!is_unreadable_login(&row(
+            HarnessId::Opencode,
+            ApiKey,
+            false
+        )));
+        assert!(!is_unreadable_login(&row(HarnessId::Pi, ApiKey, false)));
+        assert!(!is_unreadable_login(&row(HarnessId::Opencode, Oauth, true)));
+        assert!(!is_unreadable_login(&row(HarnessId::Hermes, Oauth, false)));
     }
 
     fn page(cx: &mut gpui::TestAppContext) -> gpui::WindowHandle<AccountsPage> {
