@@ -69,6 +69,12 @@ SolidCompression=yes
 ; replaced; the updated app starts again from the finish page.
 CloseApplications=yes
 RestartApplications=no
+; Inno Setup 6.7+ turns on Windows' RedirectionGuard for Setup, and a
+; per-user Setup passes it to the zeron.exe it opens from the finish page,
+; then to the engine and every agent. None of them can then follow a junction
+; or symlink the user made, such as skills linked into ~/.claude/skills
+; (error 448, "untrusted mount point"), and in-app updates keep it.
+RedirectionGuard=no
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
