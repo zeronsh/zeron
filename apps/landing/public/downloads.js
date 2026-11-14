@@ -59,4 +59,16 @@
       if (first !== -1 && a[first] < b[first]) return;
       apply(version);
     }).catch(() => {});
+  // The beta: its GitHub release (notes and every platform's file), from the
+  // beta channel's manifest; all releases if that can't be read.
+  const beta = document.getElementById("beta-download");
+  if (beta) {
+    fetch(`${base}beta/manifest.json`, { credentials: "omit" })
+      .then((r) => r.ok ? r.json() : Promise.reject())
+      .then((manifest) => {
+        const version = typeof manifest?.version === "string" ? manifest.version.trim() : "";
+        if (!/^\d+\.\d+\.\d+-beta\.\d+$/.test(version)) return;
+        beta.href = `https://github.com/zeronsh/zeron/releases/tag/beta-v${version}`;
+      }).catch(() => {});
+  }
 })();
