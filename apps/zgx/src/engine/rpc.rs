@@ -53,6 +53,39 @@ pub fn read_token(data_dir: &Path) -> Option<String> {
     (!token.is_empty()).then(|| token.to_string())
 }
 
+/// One answer of `method` from the engine on `port`, read here and now, on
+/// this thread: a call's reply, or a stream's first item. `None` when
+/// nothing answers, it refuses the token, says an error, or not within
+/// `within` all told. For a launch reading what an engine that's already
+/// running has (`plugins::preload`) before its window is built; everything
+/// else goes through the connection ([`connect`]).
+pub fn ask_now(port: u16, data_dir: &Path, method: &str, params: Value, within: Duration) -> Option<Value> {
+    let until = std::time::Instant::now() + within;
+    let token = read_token(data_dir);
+    let mut socket = dial_within(port, token.as_deref(), within).ok()?;
+    let request = json!({ "id": 1, "method": method, "params": params }).to_string();
+    socket.send(tungstenite::Message::text(request)).ok()?;
+    let answer = loop {
+        let left = until.checked_duration_since(std::time::Instant::now())?;
+        let _ = socket.get_mut().set_read_timeout(Some(left.max(Duration::from_millis(1))));
+        let tungstenite::Message::Text(text) = socket.read().ok()? else { continue };
+        let Ok(mut frame) = serde_json::from_str::<Value>(&text) else { continue };
+        if frame.get("id").and_then(Value::as_u64) != Some(1) {
+            continue;
+        }
+        if frame.get("err").is_some() || frame.get("done").is_some() {
+            break None;
+        }
+        if let Some(item) = frame.get_mut("item") {
+            break Some(item.take());
+        }
+        break frame.get_mut("ok").map(Value::take);
+    };
+    let _ = socket.close(None);
+    let _ = socket.flush();
+    answer
+}
+
 #[derive(Default)]
 struct Inbox {
     frames: VecDeque<Value>,
@@ -99,16 +132,20 @@ type Socket = tungstenite::WebSocket<TcpStream>;
 
 /// The handshake, blocking (on the network thread).
 fn dial(port: u16, token: Option<&str>) -> Result<Socket, DialError> {
+    dial_within(port, token, DIAL_TIMEOUT)
+}
+
+fn dial_within(port: u16, token: Option<&str>, within: Duration) -> Result<Socket, DialError> {
     use tungstenite::client::IntoClientRequest;
     let address = SocketAddr::from(([127, 0, 0, 1], port));
-    let stream = TcpStream::connect_timeout(&address, DIAL_TIMEOUT).map_err(|error| {
+    let stream = TcpStream::connect_timeout(&address, within).map_err(|error| {
         if error.kind() == std::io::ErrorKind::ConnectionRefused {
             DialError::Refused
         } else {
             DialError::Other(error.to_string())
         }
     })?;
-    let _ = stream.set_read_timeout(Some(DIAL_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(within));
     let _ = stream.set_nodelay(true);
     let mut request = format!("ws://127.0.0.1:{port}")
         .into_client_request()
@@ -642,6 +679,54 @@ impl Drop for Watch {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// An engine on a port of its own that answers each request with
+    /// `answer` (or, `None`, never answers), and a data dir holding a token.
+    fn engine_answering(answer: Option<Value>) -> (u16, std::path::PathBuf) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = std::env::temp_dir().join(format!("zgx-ask-now-{port}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ipc-token"), "token").unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let Ok(tungstenite::Message::Text(text)) = socket.read() else { return };
+            let request: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(request["method"], "WatchPlugins");
+            match answer {
+                Some(item) => {
+                    // (Another stream's frame first: only this request's counts.)
+                    let other = json!({ "id": 7, "item": "not this one" }).to_string();
+                    socket.send(tungstenite::Message::text(other)).unwrap();
+                    let frame = json!({ "id": request["id"], "item": item }).to_string();
+                    socket.send(tungstenite::Message::text(frame)).unwrap();
+                    let _ = socket.read();
+                }
+                None => std::thread::sleep(Duration::from_secs(2)),
+            }
+        });
+        (port, dir)
+    }
+
+    /// A launch reads what an engine already running says, at once; nothing
+    /// running, or none answering in time, is no answer, and no wait past it.
+    #[test]
+    fn asking_now_takes_the_first_answer_or_none_in_time() {
+        let (port, dir) = engine_answering(Some(json!({ "plugins": [{ "id": "git" }] })));
+        let list = ask_now(port, &dir, "WatchPlugins", json!({}), Duration::from_secs(2)).unwrap();
+        assert_eq!(list["plugins"][0]["id"], "git");
+
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let started = std::time::Instant::now();
+        assert!(ask_now(free, &dir, "WatchPlugins", json!({}), Duration::from_secs(2)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(1), "refused at once");
+
+        let (port, dir) = engine_answering(None);
+        let started = std::time::Instant::now();
+        assert!(ask_now(port, &dir, "WatchPlugins", json!({}), Duration::from_millis(150)).is_none());
+        assert!(started.elapsed() < Duration::from_millis(600), "waited {:?}", started.elapsed());
+    }
 
     /// A connection with no socket: frames handed to it as the network
     /// thread would.

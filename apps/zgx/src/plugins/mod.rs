@@ -306,6 +306,9 @@ pub struct Bridge {
     /// (`plugins.remote`; never loaded here).
     pub(crate) remote: remote::Remote,
     me: RefCell<Weak<Bridge>>,
+    /// The window's first load is still to come (until `set_view`):
+    /// plugins applied before it load with it, no reload.
+    first_load: Cell<bool>,
 }
 
 /// What plugins may read and ask of the app, each behind its permission,
@@ -355,6 +358,29 @@ pub fn expose_own(host: &ScriptHost, id: &str) {
 /// finished (no organization chosen): then they're asked again once it is
 /// (`auth::set_up`), on the same connection, so plugins load as setup
 /// finishes, with no relaunch. Settings → Plugins says so meanwhile.
+/// How long a launch waits for an engine already running to say which
+/// plugins it allows: an answer is a few milliseconds; past this the
+/// window doesn't wait, and they come with the connection as ever.
+const PRELOAD_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The plugins an engine that's already running allows (`WatchPlugins`'
+/// first word), heard before the window's first load, which then loads
+/// them with it. Otherwise their list came with the connection, after the
+/// first frame, and loading them took a reload of every script in the
+/// window (a fifth of a second on an M5 Max, as the first keys are typed);
+/// the list the connection brings is now the one loaded, and changes
+/// nothing. Only what the engine says is loaded, as ever: with no engine
+/// running (a cold start), or none answering in `PRELOAD_WAIT`, nothing.
+fn preload(b: &Rc<Bridge>) {
+    let Some((port, data_dir)) = engine::get().ipc_endpoint() else { return };
+    let Some(list) = crate::engine::rpc::ask_now(port, &data_dir, "WatchPlugins", json!({}), PRELOAD_WAIT) else {
+        return;
+    };
+    if list.get("plugins").is_some_and(Json::is_array) {
+        b.heard(&list);
+    }
+}
+
 fn connect(b: &Rc<Bridge>, rpc: &Rpc) {
     // Zeron's own plugins, shipped beside the app's scripts: the engine
     // scans them with yours (each connection: an engine started again
@@ -527,6 +553,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         reviewed: Cell::new(false),
         remote: remote::Remote::new(host.shared("plugins.remote", remote::Remote::initial())),
         me: RefCell::default(),
+        first_load: Cell::new(true),
     });
     *bridge.me.borrow_mut() = Rc::downgrade(&bridge);
     BRIDGE.with(|b| *b.borrow_mut() = Rc::downgrade(&bridge));
@@ -552,6 +579,10 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             b.later_blame(error.to_string());
         }
     });
+
+    // A launch whose engine already runs (it outlives the app): the plugins
+    // it has allowed, in the window's first load (`preload`).
+    preload(&bridge);
 
     let weak = Rc::downgrade(&bridge);
     engine::get().on_connect(move |rpc| {
@@ -1031,6 +1062,7 @@ fn dev_service(host: &ScriptHost, id: &str) {
 /// elements in it.
 pub fn set_view(handle: zgx::compose::ViewHandle) {
     if let Some(b) = BRIDGE.with(|b| b.borrow().upgrade()) {
+        b.first_load.set(false);
         *b.view.borrow_mut() = Some(handle);
         b.publish_page();
     }
@@ -1366,7 +1398,10 @@ impl Bridge {
         }
         *self.loaded.borrow_mut() = want.clone();
         self.host.set_plugins(want);
-        self.reload();
+        // (Before the window's first load: that load takes them.)
+        if !self.first_load.get() {
+            self.reload();
+        }
     }
 
     fn reload(&self) {
