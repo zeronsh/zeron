@@ -16,6 +16,7 @@
 --   draft_text.token(s, caret)   the mention token the caret is in
 --                                (ds/mention_tokens), or nil
 --   draft_text.end_token(s)      the one at its end
+--   draft_text.holds(s, text)    whether `text` is anywhere in it
 
 local tokens = require("@self/mention_tokens")
 
@@ -57,6 +58,13 @@ function M.has_text(s: any): boolean
 		return true
 	end
 	return s:len() > HEAD and string.find(s:get(), "%S") ~= nil
+end
+
+function M.holds(s: any, text: string): boolean
+	if not native(s) then
+		return string.find(s:get(), text, 1, true) ~= nil
+	end
+	return (s:count(text, { limit = 1 })) > 0
 end
 
 function M.multiline(s: any): boolean

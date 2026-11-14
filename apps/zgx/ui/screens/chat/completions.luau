@@ -150,6 +150,13 @@ function M.bind(b: Bind): { [string]: any }
 		end
 		return out
 	end
+	-- Whether the draft has an `@` anywhere: `@`'s other chats are listed
+	-- only then. (They're made from every chat, and the chat list changes
+	-- every few seconds while chats work on any device: each change made
+	-- them all again for a list no one had open.)
+	local at_typed = ui.computed(function(): boolean
+		return Draft.holds(b.text, "@")
+	end)
 	local lists = ui.computed(function(): any
 		local given = table.clone(sources:get())
 		-- `@`: the files found, then the other chats, then what's carried.
@@ -159,8 +166,10 @@ function M.bind(b: Bind): { [string]: any }
 			item.section = "files"
 			table.insert(at, item)
 		end
-		for _, c in chats() do
-			table.insert(at, c)
+		if at_typed:get() then
+			for _, c in chats() do
+				table.insert(at, c)
+			end
 		end
 		for _, a in attachments() do
 			table.insert(at, a)
