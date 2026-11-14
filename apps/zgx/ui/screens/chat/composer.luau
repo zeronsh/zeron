@@ -118,6 +118,18 @@ local function equal(a: any, b: any): boolean
 	end
 	return a == b
 end
+-- Whether two picks hold the same choices.
+local function same_pick(a: { [string]: any }?, b: { [string]: any }?): boolean
+	if a == nil or b == nil then
+		return a == b
+	end
+	for k in DRAFTED do
+		if not equal(a[k], b[k]) then
+			return false
+		end
+	end
+	return true
+end
 -- The tray open behind the composer (its todos, tasks or queue), kept
 -- across a reload.
 local TRAY = ui.state("chat_tray", nil :: ("todos" | "tasks" | "queue")?)
@@ -905,7 +917,9 @@ local function Composer(): Node
 					-- Sent with it: the session has it now; no pick left.
 					if req.model or req.effort or req.fast ~= nil or req.options then
 						local all = table.clone(shared.picks:peek())
-						if all[id] == pick then
+						-- (By what it holds, not which table: a state's snapshot
+						-- read again needn't be the same table.)
+						if same_pick(all[id], pick) then
 							all[id] = nil
 							shared.picks:set(all)
 						end
