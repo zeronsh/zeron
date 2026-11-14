@@ -291,6 +291,9 @@ fn access_permission_mode(request: &RunRequest) -> &'static str {
     }
     match request.access {
         AccessMode::AutoAcceptEdits => "acceptEdits",
+        // The CLI's classifier decides; what it escalates comes as
+        // `can_use_tool`, and is asked.
+        AccessMode::Auto => "auto",
         AccessMode::Supervised | AccessMode::FullAccess => "default",
     }
 }
@@ -309,9 +312,12 @@ fn permission_mode(request: &RunRequest) -> &'static str {
 fn strictness(mode: &str) -> u8 {
     match mode {
         "bypassPermissions" => 0,
-        "acceptEdits" => 1,
-        "default" => 2,
-        _ => 3, // plan
+        // (Its reviewer lets through more than acceptEdits does: commands
+        // it judges safe.)
+        "auto" => 1,
+        "acceptEdits" => 2,
+        "default" => 3,
+        _ => 4, // plan
     }
 }
 
@@ -881,7 +887,7 @@ impl Harness for ClaudeHarness {
             && strictness(permission_mode(next)) <= strictness(permission_mode(live))
     }
     fn access_modes(&self) -> &[AccessMode] {
-        &AccessMode::ALL
+        &AccessMode::WITH_AUTO
     }
     /// The CLI's own plan mode; approving `ExitPlanMode` ends it.
     fn supports_plan(&self) -> bool {
@@ -1619,6 +1625,14 @@ async fn run_session(session: Session) {
                         stdin.replay = None;
                     }
                     for ev in events {
+                        // A refusal is Auto's reviewer's only in Auto; in
+                        // another mode it was a rule's, and the failed call
+                        // says enough.
+                        if matches!(ev, AgentEvent::ToolReviewed { .. })
+                            && access(&config) != AccessMode::Auto
+                        {
+                            continue;
+                        }
                         match &ev {
                             AgentEvent::ToolCall { id, .. } => {
                                 open_tools.insert(id.clone());
@@ -2430,7 +2444,7 @@ mod access_tests {
     #[test]
     fn modes_launch_with_their_permission_mode() {
         use AccessMode::*;
-        let cases: [(AccessMode, bool, bool, &[&str]); 8] = [
+        let cases: [(AccessMode, bool, bool, &[&str]); 10] = [
             // Full access launches exactly as before modes.
             (
                 FullAccess,
@@ -2475,6 +2489,9 @@ mod access_tests {
             ),
             (AutoAcceptEdits, false, true, &["--permission-mode", "plan"]),
             (Supervised, false, true, &["--permission-mode", "plan"]),
+            // Auto is the CLI's own auto mode.
+            (Auto, false, false, &["--permission-mode", "auto"]),
+            (Auto, false, true, &["--permission-mode", "plan"]),
         ];
         for (access, auto_approve, plan, expected) in cases {
             assert_eq!(
@@ -2507,6 +2524,11 @@ mod access_tests {
         let auto_edits = request(AutoAcceptEdits, false, false);
         assert!(harness.reconfigures_in_place(&supervised, &auto_edits));
         assert!(!harness.reconfigures_in_place(&auto_edits, &supervised));
+        // Auto lets through more than auto-accept edits: switching to it is
+        // in place, and back from it relaunches.
+        let auto_mode = request(Auto, false, false);
+        assert!(harness.reconfigures_in_place(&auto_edits, &auto_mode));
+        assert!(!harness.reconfigures_in_place(&auto_mode, &auto_edits));
         let auto_planning = request(FullAccess, true, true);
         let auto = request(FullAccess, true, false);
         assert!(harness.reconfigures_in_place(&auto_planning, &auto));
@@ -2514,7 +2536,7 @@ mod access_tests {
         assert!(!harness.reconfigures_in_place(&full, &auto));
         // Under `auto_approve` the mode changes nothing.
         assert!(harness.same_runtime(&auto, &request(Supervised, true, false)));
-        assert_eq!(harness.access_modes(), &AccessMode::ALL);
+        assert_eq!(harness.access_modes(), &AccessMode::WITH_AUTO);
         assert!(harness.supports_plan());
     }
 

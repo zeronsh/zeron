@@ -590,6 +590,8 @@
         "supervised_hint": "运行命令和更改文件前先询问。",
         "edits": "自动接受编辑",
         "edits_hint": "应用编辑，执行其他操作前先询问。",
+        "auto": "自动",
+        "auto_hint": "由智能体自己的审查判断：安全的操作直接执行，有风险的会询问你。",
         "full": "完全访问",
         "full_hint": "运行命令和编辑时不询问。"
       },
@@ -718,7 +720,18 @@
       "show_all_lines": "显示全部 {n} 行",
       "open_subagent": "打开子智能体 {title}",
       "subagent": "子智能体",
-      "worked_for": "运行了 {secs} 秒 · {summary}"
+      "worked_for": "运行了 {secs} 秒 · {summary}",
+      "review": {
+        "reviewing": "审查中…",
+        "approved": "已自动批准",
+        "denied": "已被自动审查拦截",
+        "timed-out": "审查超时",
+        "reviewing_hint": "智能体的审查正在检查此操作，之后才会执行。",
+        "approved_hint": "智能体的审查判断此操作安全，已允许执行。",
+        "denied_hint": "智能体的审查拦截了此操作，它没有执行。",
+        "timed-out_hint": "智能体的审查未能及时做出判断，此操作没有执行。",
+        "risk": "风险：{risk}"
+      }
     },
     "transcript": {
       "copy_message": "拷贝消息",

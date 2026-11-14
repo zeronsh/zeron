@@ -415,6 +415,10 @@ pub enum AccessMode {
     Supervised,
     /// Apply file changes without asking; ask before anything else.
     AutoAcceptEdits,
+    /// The agent's own auto mode: its reviewer (Claude Code's classifier,
+    /// Codex's auto-review) approves safe actions and blocks risky ones;
+    /// what it escalates is asked. Only agents that have one list it.
+    Auto,
     /// Run commands and change files without asking. Every run before modes
     /// existed ran this way, so it is the default.
     #[default]
@@ -422,10 +426,20 @@ pub enum AccessMode {
 }
 
 impl AccessMode {
-    /// Every mode, least to most trusting (the picker's order).
+    /// The modes every permission-aware agent honors, least to most
+    /// trusting (the picker's order). [`AccessMode::Auto`] is offered only
+    /// by agents with an auto mode of their own ([`AccessMode::WITH_AUTO`]).
     pub const ALL: [AccessMode; 3] = [
         AccessMode::Supervised,
         AccessMode::AutoAcceptEdits,
+        AccessMode::FullAccess,
+    ];
+
+    /// [`AccessMode::ALL`] with the agent's own auto mode, in order.
+    pub const WITH_AUTO: [AccessMode; 4] = [
+        AccessMode::Supervised,
+        AccessMode::AutoAcceptEdits,
+        AccessMode::Auto,
         AccessMode::FullAccess,
     ];
 
@@ -433,10 +447,30 @@ impl AccessMode {
         *self == AccessMode::FullAccess
     }
 
+    /// The mode an agent offering `modes` runs a request for `self` in:
+    /// `self` when offered. Auto, on an agent without an auto mode, is the
+    /// nearest stricter mode it offers (auto-accept edits, else supervised)
+    /// rather than more trust than asked for. Anything else falls back to
+    /// full access, as it always has.
+    pub fn honored_by(self, modes: &[AccessMode]) -> AccessMode {
+        if modes.contains(&self) {
+            return self;
+        }
+        if self == AccessMode::Auto {
+            for stricter in [AccessMode::AutoAcceptEdits, AccessMode::Supervised] {
+                if modes.contains(&stricter) {
+                    return stricter;
+                }
+            }
+        }
+        AccessMode::FullAccess
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             AccessMode::Supervised => "Supervised",
             AccessMode::AutoAcceptEdits => "Auto-accept edits",
+            AccessMode::Auto => "Auto",
             AccessMode::FullAccess => "Full access",
         }
     }
@@ -445,6 +479,7 @@ impl AccessMode {
         match self {
             AccessMode::Supervised => "Ask before commands and file changes.",
             AccessMode::AutoAcceptEdits => "Apply edits, ask before other actions.",
+            AccessMode::Auto => "The agent's reviewer approves safe actions; risky ones ask.",
             AccessMode::FullAccess => "Run commands and edits without asking.",
         }
     }
@@ -479,7 +514,10 @@ pub fn cap_access(
         all.iter().position(|y| y == x).unwrap_or(0)
     }
     let sandbox_over = rank(&SandboxLevel::ALL, &sandbox) > rank(&SandboxLevel::ALL, &max_sandbox);
-    let access_over = rank(&AccessMode::ALL, &access) > rank(&AccessMode::ALL, &max_access);
+    // (Ranked among every mode: one missing from the list would rank as the
+    // least trusting, and slip under any ceiling.)
+    let access_over =
+        rank(&AccessMode::WITH_AUTO, &access) > rank(&AccessMode::WITH_AUTO, &max_access);
     (
         if sandbox_over { max_sandbox } else { sandbox },
         if access_over { max_access } else { access },
@@ -1008,6 +1046,34 @@ pub struct ToolResultImage {
 }
 
 /// A file modification carried inline on a tool result (ACP
+/// Where an agent's own reviewer (Codex's auto-review, Claude Code's auto
+/// mode) stands on one of its tool calls, in [`AccessMode::Auto`]. Shown on
+/// the call, so a person can tell what the reviewer let through or stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolReviewStatus {
+    /// The reviewer is looking at it.
+    Reviewing,
+    /// The reviewer let it run.
+    Approved,
+    /// The reviewer stopped it; it didn't run.
+    Denied,
+    /// The reviewer didn't decide in time.
+    TimedOut,
+}
+
+/// A reviewer's verdict on a tool call: its status, and, when the reviewer
+/// says, how risky it judged the call (`low` to `critical`) and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolReview {
+    pub status: ToolReviewStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1126,6 +1192,10 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
     },
+    /// The agent's own reviewer on tool call `id` (Auto): reviewing it,
+    /// or its verdict. Folds onto the call's part; a later one replaces it.
+    #[serde(rename_all = "camelCase")]
+    ToolReviewed { id: String, review: ToolReview },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.
     #[serde(rename_all = "camelCase")]
@@ -1218,6 +1288,37 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_ranks_between_auto_accept_edits_and_full_access() {
+        let ws = SandboxLevel::WorkspaceWrite;
+        // A supervised or auto-accept-edits chat can't hand work to Auto.
+        for max in [AccessMode::Supervised, AccessMode::AutoAcceptEdits] {
+            assert_eq!(cap_access((ws, AccessMode::Auto), (ws, max)), (ws, max, true));
+        }
+        // Auto caps full access, and lets Auto and what's below it through.
+        assert_eq!(
+            cap_access((ws, AccessMode::FullAccess), (ws, AccessMode::Auto)),
+            (ws, AccessMode::Auto, true)
+        );
+        for asked in [AccessMode::Supervised, AccessMode::AutoAcceptEdits, AccessMode::Auto] {
+            assert_eq!(cap_access((ws, asked), (ws, AccessMode::Auto)), (ws, asked, false));
+        }
+        assert_eq!(serde_json::to_string(&AccessMode::Auto).unwrap(), "\"auto\"");
+    }
+
+    #[test]
+    fn auto_falls_back_to_the_nearest_stricter_mode() {
+        use AccessMode::*;
+        assert_eq!(Auto.honored_by(&AccessMode::WITH_AUTO), Auto);
+        assert_eq!(Auto.honored_by(&AccessMode::ALL), AutoAcceptEdits);
+        assert_eq!(Auto.honored_by(&[Supervised, FullAccess]), Supervised);
+        // An agent with full access alone has nothing stricter to give.
+        assert_eq!(Auto.honored_by(&[FullAccess]), FullAccess);
+        // The other modes fall back as before.
+        assert_eq!(Supervised.honored_by(&[FullAccess]), FullAccess);
+        assert_eq!(AutoAcceptEdits.honored_by(&AccessMode::ALL), AutoAcceptEdits);
+    }
 
     #[test]
     fn agent_event_round_trips() {

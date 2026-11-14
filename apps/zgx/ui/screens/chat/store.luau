@@ -118,6 +118,21 @@ M.session = ui.shared("chat.session", nil :: Session?)
 M.messages = ui.shared("chat.messages", {} :: { Message })
 M.draft = ui.shared("chat.draft", { id = "", text = "" } :: Draft)
 M.catalog = ui.shared("chat.catalog", { state = "looking", harnesses = {}, models = {} } :: Catalog)
+
+-- Whether the agent `model` ("<harness>/<id>") runs on has an auto mode of
+-- its own (the catalog's `auto`): the access picker offers Auto.
+function M.offers_auto(model: string?): boolean
+	if not model then
+		return false
+	end
+	local harness = string.match(model, "^([^/]+)/")
+	for _, h in (M.catalog:get() :: any).harnesses do
+		if h.id == harness then
+			return h.auto == true
+		end
+	end
+	return false
+end
 -- A call nothing waits on: its failure lands in the session's notice (the
 -- host sets it), so the script needn't hear it.
 local function quietly(p: any)

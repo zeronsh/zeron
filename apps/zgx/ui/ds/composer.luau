@@ -123,9 +123,12 @@ export type Props = {
 	-- A turn is running: Send becomes Stop while the draft is empty, and
 	-- queues what is typed.
 	running: State<boolean>?,
-	-- What the agent may do unasked: "supervised", "edits" or "full"; and
-	-- plan mode (explore and propose before changing anything).
+	-- What the agent may do unasked: "supervised", "edits", "auto" or
+	-- "full"; and plan mode (explore and propose before changing anything).
 	access: State<string?>?,
+	-- The chat's agent has an auto mode of its own (Claude Code's, Codex's
+	-- auto-review): the picker offers Auto.
+	access_auto: (() -> boolean)?,
 	plan: State<boolean>?,
 	-- The model (a ModelPicker: its agents' tabs, its models, its reasoning,
 	-- Fast mode and its other options' picks).
@@ -362,23 +365,32 @@ end
 -- The access modes, as Zeron offers them; their icons (Central Icons,
 -- centralicons.com, round outlined, radius 2, stroke 1.5) say what each
 -- does: it waits for you (a raised hand), edits go through (a pencil with
--- sparkles), nothing is held back (an open padlock). (Made as they're
--- read, in the locale's words.)
-local function ACCESS(): { Dropdown.Item }
-	return {
-	worded({ value = "supervised", icon = "access-supervised" }, {
-		label = "ds.composer.access.supervised",
-		description = "ds.composer.access.supervised_hint",
-	}),
-	worded({ value = "edits", icon = "access-edits" }, {
-		label = "ds.composer.access.edits",
-		description = "ds.composer.access.edits_hint",
-	}),
-	worded({ value = "full", icon = "access-full" }, {
+-- sparkles), the agent's reviewer vets each action (a shield), nothing is
+-- held back (an open padlock). Auto only where the agent has one (`auto`),
+-- or while it's the mode chosen. (Made as they're read, in the locale's
+-- words.)
+local function ACCESS(auto: boolean): { Dropdown.Item }
+	local items = {
+		worded({ value = "supervised", icon = "access-supervised" }, {
+			label = "ds.composer.access.supervised",
+			description = "ds.composer.access.supervised_hint",
+		}),
+		worded({ value = "edits", icon = "access-edits" }, {
+			label = "ds.composer.access.edits",
+			description = "ds.composer.access.edits_hint",
+		}),
+	}
+	if auto then
+		table.insert(items, worded({ value = "auto", icon = "shield-check" }, {
+			label = "ds.composer.access.auto",
+			description = "ds.composer.access.auto_hint",
+		}))
+	end
+	table.insert(items, worded({ value = "full", icon = "access-full" }, {
 		label = "ds.composer.access.full",
 		description = "ds.composer.access.full_hint",
-	}),
-	}
+	}))
+	return items
 end
 
 -- Plan mode's row at the access panel's foot: an item's shape, its icon on
@@ -1418,7 +1430,10 @@ return ui.component(function(props: Props): Node
 				end
 				else nil,
 			value = props.access,
-			items = ACCESS,
+			items = function(): { Dropdown.Item }
+				local chosen = props.access and props.access:get()
+				return ACCESS(chosen == "auto" or (props.access_auto ~= nil and props.access_auto()))
+			end,
 			tone = "chip",
 			label = locale.t("ds.composer.access.label") :: any,
 			search = false,

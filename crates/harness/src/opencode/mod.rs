@@ -6239,6 +6239,7 @@ http.createServer((req, res) => {
                     assert_eq!((edit, bash), (&json!("allow"), &json!("ask")))
                 }
                 AccessMode::Supervised => assert_eq!((edit, bash), (&json!("ask"), &json!("ask"))),
+                AccessMode::Auto => unreachable!("OpenCode has no auto mode to offer"),
             }
         }
     }

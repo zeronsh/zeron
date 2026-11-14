@@ -590,6 +590,8 @@
         "supervised_hint": "Ask before commands and file changes.",
         "edits": "Auto-accept edits",
         "edits_hint": "Apply edits, ask before other actions.",
+        "auto": "Auto",
+        "auto_hint": "The agent's reviewer approves safe actions; risky ones ask.",
         "full": "Full access",
         "full_hint": "Run commands and edits without asking."
       },
@@ -718,7 +720,18 @@
       "show_all_lines": "Show all {n} lines",
       "open_subagent": "Open subagent {title}",
       "subagent": "Subagent",
-      "worked_for": "Worked for {secs}s · {summary}"
+      "worked_for": "Worked for {secs}s · {summary}",
+      "review": {
+        "reviewing": "Reviewing…",
+        "approved": "Auto-approved",
+        "denied": "Blocked by auto-review",
+        "timed-out": "Review timed out",
+        "reviewing_hint": "The agent's reviewer is checking this before it runs.",
+        "approved_hint": "The agent's reviewer judged this safe and let it run.",
+        "denied_hint": "The agent's reviewer stopped this. It didn't run.",
+        "timed-out_hint": "The agent's reviewer didn't decide in time, so this didn't run.",
+        "risk": "Risk: {risk}"
+      }
     },
     "transcript": {
       "copy_message": "Copy message",
