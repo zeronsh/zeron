@@ -347,6 +347,11 @@ impl EditorLease {
         !self.editor.is_read_only()
     }
 }
+/// Whether `editor` is mid-composition (an IME's): the words wait for it to
+/// end, as inserting would throw the composition away.
+fn composing(editor: Option<&zgx::widgets::EditorHandle>) -> Value {
+    Value::Bool(editor.is_some_and(|e| e.editor.borrow().preedit().is_some()))
+}
 
 struct Dictation {
     service: RefCell<Service>,
@@ -462,6 +467,12 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         }
         *me.lease.borrow_mut() = lease;
         me.publish();
+    });
+    let weak = Rc::downgrade(&me);
+    host.function("dictation.composing", move |_| {
+        let me = weak.upgrade();
+        let lease = me.as_ref().map(|me| me.lease.borrow());
+        composing(lease.as_ref().and_then(|l| l.as_ref()).map(|l| &l.editor))
     });
     // The window's tasks keep it, so closing the window ends a recording.
     // No timer while nothing is recording or downloading.
@@ -640,6 +651,8 @@ mod tests {
     fn fixture() -> (zgx_script::testing::TestApp, Rc<RefCell<Vec<String>>>) {
         let ops = Rc::new(RefCell::new(Vec::<String>::new()));
         let asked = ops.clone();
+        let editor = Rc::new(RefCell::new(None::<zgx::widgets::EditorHandle>));
+        let leased = editor.clone();
         let mut app = zgx_script::testing::TestApp::new(move |r| {
             let host = zgx_script::ScriptHost::new(
                 r,
@@ -661,10 +674,14 @@ mod tests {
                 async move { Ok::<_, String>(json_value(&state)) }
             });
             host.action("dictation.guard", |_: Value| {});
+            host.function("dictation.composing", move |_| composing(leased.borrow().as_ref()));
             host
         });
         app.ui.scene.borrow_mut().resize(960., 700.);
         app.frames(30);
+        // (The composer's editor stands for the lease the guard takes.)
+        app.click("role:textbox \"Message\"");
+        *editor.borrow_mut() = app.ui.focused_editor();
         (app, ops)
     }
     #[test]
@@ -740,6 +757,24 @@ mod tests {
         // One undo takes the words back out, and only them.
         app.keys("cmd+z");
         assert_eq!(text(&editor), "Hello there");
+        // Mid-composition when the words come: they wait for it to end,
+        // and the composition is kept.
+        editor.set_selection(11, 11);
+        assert!(app.host.run_command("begin"));
+        app.settle();
+        editor.set_composition("正在", None, &[]);
+        app.host.run_command("final");
+        app.settle();
+        app.frames(3);
+        assert_eq!(editor.editor.borrow().preedit().map(|p| p.text.to_string()).as_deref(), Some("正在"));
+        assert_eq!(text(&editor), "Hello there");
+        app.ui.dispatch(zgx::input::InputEvent::ImeCommit("正在".into()));
+        app.settle();
+        std::thread::sleep(Duration::from_millis(150));
+        app.frames(10);
+        assert_eq!(text(&editor), "Hello there正在你好 🌎");
+        app.keys("cmd+z");
+        assert_eq!(text(&editor), "Hello there正在");
         // Another chat's draft: the words aren't for it.
         assert!(app.host.run_command("begin"));
         app.settle();
@@ -748,7 +783,7 @@ mod tests {
         app.host.run_command("final");
         app.settle();
         app.frames(3);
-        assert_eq!(text(&editor), "Hello there");
+        assert_eq!(text(&editor), "Hello there正在");
         // Nor mid-composition does one start.
         editor.set_composition("正在", None, &[]);
         assert!(EditorLease::new(editor.clone()).is_none());
