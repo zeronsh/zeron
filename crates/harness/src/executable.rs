@@ -461,7 +461,7 @@ pub(crate) fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
         .find_map(|word| {
             let word = word.trim_matches(|c: char| matches!(c, '(' | ')' | ','));
             // `omp --version` prints `omp/18.11.1`.
-            let word = word.rsplit_once('/').map_or(word, |(_, version)| version);
+            let word = word.strip_prefix("omp/").unwrap_or(word);
             semver::Version::parse(word.trim_start_matches('v')).ok()
         })
 }
