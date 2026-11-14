@@ -231,6 +231,16 @@ ui.effect(function()
 		ui.after(wait, save_new)
 	end
 end)
+-- The window closing (the app quitting, or the window closed): Zeron's
+-- window sets `app.closing` (src/main.rs) before it writes what the scripts
+-- saved, and a save still waiting its turn goes now. (A timer never fires
+-- once the window has closed, and the last keystrokes were lost with it.)
+local closing = ui.shared("app.closing", false)
+ui.effect(function()
+	if closing:get() == true then
+		save_new()
+	end
+end)
 
 -- Whether a file's name is a picture the window can draw. (zgx decodes
 -- no GIF or HEIC yet: those are file chips, so a thumbnail never fails.)
@@ -286,6 +296,12 @@ function M.take(): (string, { any })
 		M.cargo:set({})
 		M.quotes:set({})
 	end)
+	-- A new chat's draft, sent: saved empty at once, not on the throttle's
+	-- next turn, which a quit in between would never reach (the message
+	-- coming back as the draft at the next launch).
+	if here:peek() == "" then
+		save_new()
+	end
 	return text, cargo
 end
 
