@@ -674,27 +674,42 @@ pub fn prepare_live() -> PathBuf {
         preview::set_template_running(id != live::BUILTIN);
         preview::set((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }));
     }
-    if let Err(error) = live::sync_zeron(&crate::ui_dir(), &root) {
-        eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
-        return fallback;
-    }
     // The built-in themes once installed as templates, retired: one in use
     // gives way to the default template, wearing that theme
     // (retired_themes.rs).
     if let Some(data) = crate::engine::data_dir() {
         retired_themes::retire(&root, &data);
     }
+    let ui = crate::ui_dir();
     let id = live::active(&root);
+    // `.live` as the last launch left it, from the same Zeron and template:
+    // it runs as it is (live::LaunchStamp), nothing read or written.
+    let stamp = live::LaunchStamp::now(&ui, &root, &id);
+    if stamp.still_laid(&ui, &root) {
+        let (_, overlay) = live::plan(&root, &id, &Default::default(), false);
+        LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
+        let laid = live::Laid { ui_stamp: stamp.ui, id, template_stamp: stamp.template, ..Default::default() };
+        LIVE_LAID.with(|l| *l.borrow_mut() = laid);
+        return root.join(live::LIVE).join("app.luau");
+    }
+    if let Err(error) = live::sync_zeron(&ui, &root) {
+        eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
+        return fallback;
+    }
     match live::compose(&root, &id, &Default::default(), false) {
         Ok((_, overlay)) => {
             LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
-            let template_stamp = if id == live::BUILTIN { String::new() } else { live::template_stamp(&root.join(&id)) };
-            let laid = live::Laid { ui_stamp: live::ui_stamp(&crate::ui_dir()), id, template_stamp, ..Default::default() };
-            LIVE_LAID.with(|l| *l.borrow_mut() = laid);
             // (Pictures of templates taken from the window, before their
             // previews were drawn from their colours: gone.)
             let _ = std::fs::remove_dir_all(root.join(".previews"));
             let _ = std::fs::remove_dir_all(root.join(live::LIVE).join("previews"));
+            // What the next launch can run as it is: `.live` as this left it.
+            let laid_now = live::LaunchStamp::now(&ui, &root, &id);
+            if let Err(error) = laid_now.write(&root) {
+                eprintln!("zeron-zgx: the launch stamp wasn't kept ({error})");
+            }
+            let laid = live::Laid { ui_stamp: laid_now.ui, id, template_stamp: laid_now.template, ..Default::default() };
+            LIVE_LAID.with(|l| *l.borrow_mut() = laid);
             root.join(live::LIVE).join("app.luau")
         }
         Err(error) => {
