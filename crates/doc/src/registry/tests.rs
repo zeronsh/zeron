@@ -3225,3 +3225,62 @@ fn a_broken_delta_chain_keeps_its_pending_writes() {
     let ids: Vec<String> = loaded.read_chats().unwrap().into_iter().map(|c| c.id).collect();
     assert_eq!(ids, ["after", "kept"], "the pending write after the break was lost");
 }
+
+/// A session whose agent left a lot of background work (long commands, many
+/// of them) still makes a row the room takes: the edge refuses an op over
+/// `MAX_OP_BYTES` and the refusal wedged that row's every later write.
+#[test]
+fn a_session_with_huge_background_work_still_fits_the_room() {
+    let mut doc = RegistryDoc::new("dev");
+    let mut big = session("chat-big", "dev", SessionStatus::Working);
+    big.background_tasks = (0..200)
+        .map(|i| zeron_proto::BackgroundTask {
+            id: format!("task-{i}"),
+            command: format!("cat > /tmp/f{i} <<'EOF'\n{}\nEOF", "x".repeat(4000)),
+            description: Some("d".repeat(3000)),
+            started_at: ts(1_000 + i),
+        })
+        .collect();
+    big.waiting = Some(zeron_proto::SessionWaiting {
+        since: ts(5),
+        on: (0..100)
+            .map(|i| zeron_proto::WaitingOn {
+                id: format!("w{i}"),
+                kind: zeron_proto::WaitingKind::Process,
+                label: "l".repeat(5000),
+            })
+            .collect(),
+    });
+    doc.upsert_session(&big).unwrap();
+    let pushed = doc.take_pushable();
+    let op = &pushed.last().unwrap().ops[0];
+    assert!(wire_bytes(op) <= MAX_OP_BYTES, "{} bytes", wire_bytes(op));
+    let set = op.set.as_ref().unwrap();
+    let tasks = set["backgroundTasks"].as_array().unwrap();
+    assert!(!tasks.is_empty() && tasks.len() <= SESSION_LIST_ITEMS);
+    // The newest work is what's kept.
+    assert_eq!(tasks.last().unwrap()["id"], "task-199");
+}
+
+/// A batch an older build queued with an op over the room's limit is
+/// refused whole forever; the oversized op is dropped so the rest of its
+/// batch (and the queue behind it) syncs.
+#[test]
+fn a_queued_op_too_large_for_the_room_is_dropped_not_retried() {
+    let mut doc = RegistryDoc::new("dev");
+    let mut huge = upsert(&[("note", json!("n".repeat(MAX_OP_BYTES)))], 10);
+    huge.kind = "chats".into();
+    huge.id = "c1".into();
+    let mut small = upsert(&[("name", json!("ok"))], 11);
+    small.kind = "chats".into();
+    small.id = "c2".into();
+    doc.pending.push(PendingBatch {
+        batch: "b-old".into(),
+        ops: vec![huge, small],
+        in_flight: false,
+    });
+    let pushed = doc.take_pushable();
+    assert_eq!(pushed.len(), 1);
+    assert_eq!(pushed[0].ops.len(), 1);
+    assert_eq!(pushed[0].ops[0].id, "c2");
+}

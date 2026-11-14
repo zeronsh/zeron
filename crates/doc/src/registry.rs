@@ -942,6 +942,30 @@ impl RegistryDoc {
 
     /// Batches to push: everything not already in flight on this connection.
     pub fn take_pushable(&mut self) -> Vec<PendingBatch> {
+        // A batch an older build queued with an op over the room's limit is
+        // refused whole at every push, and the error names no batch to
+        // retire: drop that op (the room would never take it), so the rest
+        // of its batch goes through.
+        let mut dropped = false;
+        for batch in &mut self.pending {
+            if batch.in_flight {
+                continue;
+            }
+            batch.ops.retain(|op| {
+                let bytes = wire_bytes(op);
+                let fits = bytes <= MAX_OP_BYTES;
+                if !fits {
+                    tracing::warn!(kind = %op.kind, id = %op.id, bytes, limit = MAX_OP_BYTES,
+                        "registry: dropped a queued write too large for the room");
+                    dropped = true;
+                }
+                fits
+            });
+        }
+        if dropped {
+            self.pending.retain(|batch| !batch.ops.is_empty());
+            self.generation += 1;
+        }
         let mut out = Vec::new();
         for batch in &mut self.pending {
             if !batch.in_flight {
@@ -979,6 +1003,19 @@ impl RegistryDoc {
     }
 
     fn enqueue_ops(&mut self, mut ops: Vec<RowOp>) {
+        if !self.local_only {
+            // Never queue what the room is sure to refuse (see MAX_OP_BYTES):
+            // one such op wedges its whole batch. The local row keeps it.
+            ops.retain(|op| {
+                let bytes = wire_bytes(op);
+                let fits = bytes <= MAX_OP_BYTES;
+                if !fits {
+                    tracing::warn!(kind = %op.kind, id = %op.id, bytes, limit = MAX_OP_BYTES,
+                        "registry: write too large for the room; kept on this device only");
+                }
+                fits
+            });
+        }
         if ops.is_empty() {
             return;
         }
@@ -1936,7 +1973,38 @@ impl RegistryDoc {
     /// Upsert a session-status row (writer discipline: each device writes only
     /// its own runs' rows). Staleness is checked client-side via `updatedAt`.
     pub fn upsert_session(&mut self, session: &Session) -> Result<(), DocError> {
-        let set = fields([
+        // The room refuses an op over MAX_OP_BYTES, and a refused write never
+        // retires: the row's every later write fails the same way. Bound
+        // what grows with the agent (its background work and what it waits
+        // on), then halve those lists until the row fits.
+        let mut bounded = bounded_session(session);
+        loop {
+            let set = Self::session_fields(&bounded)?;
+            let fits = op_bytes(KIND_SESSIONS, &bounded.chat_id, &set) <= SESSION_ROW_BUDGET;
+            let shrinkable = !bounded.background_tasks.is_empty()
+                || bounded.waiting.as_ref().is_some_and(|w| !w.on.is_empty())
+                || bounded.terminal_activity.is_some();
+            if fits || !shrinkable {
+                if !fits {
+                    tracing::warn!(chat = %session.chat_id, "registry: session row too large to sync even trimmed");
+                }
+                self.write(KIND_SESSIONS, &bounded.chat_id.clone(), OpKind::Upsert, set);
+                return Ok(());
+            }
+            if !bounded.background_tasks.is_empty() {
+                let keep = bounded.background_tasks.len() / 2;
+                bounded.background_tasks.drain(..bounded.background_tasks.len() - keep);
+            } else if let Some(waiting) = bounded.waiting.as_mut().filter(|w| !w.on.is_empty()) {
+                let keep = waiting.on.len() / 2;
+                waiting.on.truncate(keep);
+            } else {
+                bounded.terminal_activity = None;
+            }
+        }
+    }
+
+    fn session_fields(session: &Session) -> Result<BTreeMap<String, Value>, DocError> {
+        Ok(fields([
             ("chatId", json!(session.chat_id)),
             ("deviceId", json!(session.device_id)),
             ("status", serde_json::to_value(session.status)?),
@@ -1954,9 +2022,7 @@ impl RegistryDoc {
                 serde_json::to_value(&session.background_tasks)?,
             ),
             ("waiting", serde_json::to_value(&session.waiting)?),
-        ]);
-        self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
-        Ok(())
+        ]))
     }
 
     pub fn read_sessions(&self) -> Result<Vec<Session>, DocError> {
@@ -2188,6 +2254,66 @@ fn replay_row<'a>(
         }
     }
     row
+}
+
+// ── op size ─────────────────────────────────────────────────────────────────
+
+/// What a session row aims to stay under: the limit, less room for the
+/// HLC and for JSON escaping the room counts differently.
+const SESSION_ROW_BUDGET: usize = MAX_OP_BYTES - 1024;
+
+/// Text a session row keeps of a background task's command or description,
+/// or of what a waiting agent waits on, and how many of each it lists.
+const SESSION_TEXT_CHARS: usize = 240;
+const SESSION_LIST_ITEMS: usize = 16;
+
+/// An op's size on the wire, as the room measures it (the longest HLC this
+/// device can write stands in for the real one).
+fn op_bytes(kind: &str, id: &str, set: &BTreeMap<String, Value>) -> usize {
+    let op = RowOp {
+        kind: kind.to_string(),
+        id: id.to_string(),
+        op: OpKind::Upsert,
+        set: Some(set.clone()),
+        hlc: format!("{}-{}-{}", "0".repeat(13), "0".repeat(6), "x".repeat(64)),
+        clocks: None,
+    };
+    wire_bytes(&op)
+}
+
+fn wire_bytes(op: &RowOp) -> usize {
+    serde_json::to_string(op).map_or(usize::MAX, |json| json.len())
+}
+
+fn clip(text: &mut String, chars: usize) {
+    if let Some((at, _)) = text.char_indices().nth(chars) {
+        text.truncate(at);
+        text.push('…');
+    }
+}
+
+/// A session as its registry row carries it: the newest background tasks
+/// and the oldest waits, each one's text clipped (the host keeps the whole
+/// of them; the row is what other devices show).
+fn bounded_session(session: &Session) -> Session {
+    let mut bounded = session.clone();
+    let tasks = &mut bounded.background_tasks;
+    if tasks.len() > SESSION_LIST_ITEMS {
+        tasks.drain(..tasks.len() - SESSION_LIST_ITEMS);
+    }
+    for task in tasks.iter_mut() {
+        clip(&mut task.command, SESSION_TEXT_CHARS);
+        if let Some(description) = task.description.as_mut() {
+            clip(description, SESSION_TEXT_CHARS);
+        }
+    }
+    if let Some(waiting) = bounded.waiting.as_mut() {
+        waiting.on.truncate(SESSION_LIST_ITEMS);
+        for on in &mut waiting.on {
+            clip(&mut on.label, SESSION_TEXT_CHARS);
+        }
+    }
+    bounded
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────
