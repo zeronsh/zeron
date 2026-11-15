@@ -1,6 +1,6 @@
 # Zeron
 
-Pilotez vos agents de codage (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) en local par défaut, avec une synchronisation facultative entre plusieurs appareils.
+Pilotez vos agents de code (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) en local par défaut, avec une synchronisation facultative entre plusieurs appareils.
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [Español](README.es.md) | Français*
 
@@ -18,7 +18,7 @@ Aucun compte ni aucune connexion réseau n’est nécessaire ; les sessions res
 
 ## Mode headless (CLI)
 
-Pour les serveurs et les autres machines sans écran, comme un VPS qui continue de faire tourner vos agents une fois votre portable fermé. Linux uniquement :
+Pour les serveurs et les autres machines sans écran, comme un VPS qui garde vos agents actifs une fois votre portable fermé. Linux uniquement :
 
 ```bash
 curl -fsSL https://zeron.sh/install.sh | sh

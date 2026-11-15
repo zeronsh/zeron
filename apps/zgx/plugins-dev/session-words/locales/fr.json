@@ -1,7 +1,7 @@
 {
   "status": {
     "working": "En cours",
-    "input": "Vous attend",
+    "input": "Action requise",
     "approval": "Attend votre accord",
     "failed": "Arrêté",
     "done": "Terminé"
