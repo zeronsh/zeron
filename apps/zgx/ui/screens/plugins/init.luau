@@ -180,8 +180,24 @@ end
 
 -- The composer's draft, for plugins allowed "draft" (`zeron.draft()`): the
 -- chat it's for (nil, a new chat), its words, and what it carries.
+-- Written only while a plugin that's on may read it: otherwise no key
+-- typed copies the draft (a long one, every key) for no one.
 local draft_out = ui.shared("zeron.draft", nil :: any)
+local draft_read = ui.computed(function(): boolean
+	for _, it in state.now:get().list or {} do
+		if it.status == "on" and table.find(it.permissions or {}, "draft") then
+			return true
+		end
+	end
+	return false
+end)
 ui.effect(function()
+	if not draft_read:get() then
+		if draft_out:peek() ~= nil then
+			put(draft_out, nil)
+		end
+		return
+	end
 	local key = ChatShared.showing_now()
 	put(draft_out, {
 		session = if key ~= "" then key else ui.null,
