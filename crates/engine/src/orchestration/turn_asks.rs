@@ -202,6 +202,16 @@ pub(crate) fn plan(
     {
         return Plan::Nothing;
     }
+    // Already asked through `ask` (open, in the same words): nothing more.
+    if asks.iter().any(|a| {
+        a.from_chat == chat
+            && a.origin == AskOrigin::Tool
+            && a.state == AskState::Open
+            && !a.quiet
+            && turn_question::same_question(&a.question, &labels(a), &found.question, &found.options)
+    }) {
+        return Plan::Nothing;
+    }
     let same = |a: &&Ask| {
         a.from_chat == chat
             && a.origin == AskOrigin::TurnEnd
@@ -378,12 +388,27 @@ pub(crate) async fn answered_after_asking(
     entries: &[SessionMessageEntry],
     sent: Option<&str>,
 ) -> Option<String> {
-    let from = sent
+    let (asked, found) = last_decision_since(entries, sent)?;
+    let later: Vec<&SessionMessageEntry> = entries[asked + 1..].iter().filter(|e| e.role == MessageRole::User).collect();
+    first_answer(orch, rpc, chat, &found.question, &found.options, &later).await
+}
+
+/// How far back a pending decision is looked for: the transcript's last
+/// this many messages.
+pub(crate) const LOOK_BACK: usize = 50;
+
+/// The most recent message in `entries` that waits on a decision from the
+/// person ([`turn_question::detect`]'s `Ask`), after the message carrying
+/// `sent` (a route's delivery) and within the last [`LOOK_BACK`]: its index
+/// and its question. A thread that moved on to other work since keeps it.
+pub(crate) fn last_decision_since(entries: &[SessionMessageEntry], sent: Option<&str>) -> Option<(usize, Found)> {
+    let delivered = sent
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .and_then(|s| entries.iter().rposition(|e| e.role == MessageRole::User && texts(e).contains(s)))
         .map_or(0, |i| i + 1);
-    let (asked, found) = entries[from..].iter().enumerate().rev().find_map(|(i, e)| {
+    let from = delivered.max(entries.len().saturating_sub(LOOK_BACK));
+    entries[from..].iter().enumerate().rev().find_map(|(i, e)| {
         if e.role != MessageRole::Assistant {
             return None;
         }
@@ -391,9 +416,7 @@ pub(crate) async fn answered_after_asking(
             Verdict::Ask(found) => Some((from + i, found)),
             _ => None,
         }
-    })?;
-    let later: Vec<&SessionMessageEntry> = entries[asked + 1..].iter().filter(|e| e.role == MessageRole::User).collect();
-    first_answer(orch, rpc, chat, &found.question, &found.options, &later).await
+    })
 }
 
 /// `chat`'s open turn-end asks that a message after their turn answers

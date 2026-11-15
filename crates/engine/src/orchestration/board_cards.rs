@@ -454,16 +454,18 @@ impl EngineRpc {
                     .and_then(|h| h.doc().read_entries().ok())
                     .unwrap_or_default();
                 let sent = if route.message.trim().is_empty() { &route.excerpt } else { &route.message };
-                let others = dump_messages_to(&state.dumps, chat);
-                let latest = super::watchers::latest_reply_until(&entries, sent, &others);
-                let evidence: Vec<&str> =
-                    [latest.as_deref(), route.answer_full.as_deref(), card.outcome.as_deref()].into_iter().flatten().collect();
-                let Some(found) = evidence.iter().find_map(|t| match detect(t) {
-                    Verdict::Ask(found) => Some(found),
-                    _ => None,
-                }) else {
-                    continue;
-                };
+                // The decision it waits on: the most recent one its thread
+                // asked since the card's delivery (however much other work
+                // came after), else what its route's or its own outcome says.
+                let found = super::turn_asks::last_decision_since(&entries, Some(sent))
+                    .map(|(_, found)| found)
+                    .or_else(|| {
+                        [route.answer_full.as_deref(), card.outcome.as_deref()].into_iter().flatten().find_map(|t| match detect(t) {
+                            Verdict::Ask(found) => Some(found),
+                            _ => None,
+                        })
+                    });
+                let Some(found) = found else { continue };
                 // (Its open ask: nothing to raise; still checked for an
                 // answer that came since.)
                 if self.ask_or_settle_decision(chat, &entries, sent, &found, &dump.id, &route.id, item).await {
