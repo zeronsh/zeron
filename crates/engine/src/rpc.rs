@@ -492,6 +492,15 @@ struct RunCommandParams {
     chat_id: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// Leave it running and reply at once (`CommandStatus`).
+    #[serde(default)]
+    background: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandIdParams {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2634,6 +2643,9 @@ fn forwardable(method: &str) -> bool {
             | methods::TERMINAL_STATUS
             // A command runs on the device it names.
             | methods::RUN_COMMAND
+            | methods::READ_COMMAND_OUTPUT
+            | methods::STOP_COMMAND
+            | methods::LIST_BACKGROUND_COMMANDS
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
@@ -5654,6 +5666,11 @@ impl RpcService for EngineRpc {
                     .and_then(|chat| chat.cwd);
                 let cwd = resolve_open_terminal_cwd(p.cwd, chat_cwd, None, &self.repos.scratch_root())
                     .map_err(RpcError::Failed)?;
+                if p.background {
+                    let started = crate::run_command::start(&cwd, &p.command, p.chat_id.as_deref())
+                        .map_err(RpcError::Failed)?;
+                    return RpcReply::value(&started);
+                }
                 let timeout = p
                     .timeout_ms
                     .map(Duration::from_millis)
@@ -5662,6 +5679,18 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&outcome)
+            }
+            methods::READ_COMMAND_OUTPUT => {
+                let p: CommandIdParams = parse_params(params)?;
+                RpcReply::value(&crate::run_command::read(&p.id).map_err(RpcError::Failed)?)
+            }
+            methods::STOP_COMMAND => {
+                let p: CommandIdParams = parse_params(params)?;
+                RpcReply::value(&crate::run_command::stop(&p.id).await.map_err(RpcError::Failed)?)
+            }
+            methods::LIST_BACKGROUND_COMMANDS => {
+                let chat = params.get("chatId").and_then(|c| c.as_str());
+                RpcReply::value(&crate::run_command::list(chat))
             }
             methods::TERMINAL_STATUS => {
                 let p: TerminalIdParams = parse_params(params)?;

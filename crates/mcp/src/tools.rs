@@ -53,6 +53,8 @@ pub struct Tools {
     /// Which plugin tools the client was last shown ([`Self::list_all`],
     /// [`Self::watch_plugin_tools`]).
     plugins: plugins::PluginState,
+    /// Each device's folder after this chat's last command there.
+    command_state: commands::CommandState,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -302,7 +304,7 @@ fn catalog() -> Vec<ToolDef> {
     });
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
-    tools.push(commands::tool());
+    tools.extend(commands::catalog());
     tools
 }
 
@@ -821,6 +823,7 @@ impl Tools {
             zeron,
             pending_turns: Default::default(),
             plugins: Default::default(),
+            command_state: Default::default(),
         }
     }
 
@@ -896,7 +899,9 @@ impl Tools {
             plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
                 return self.template_packages(name, args).await;
             }
-            commands::RUN_COMMAND => self.run_command(parse(args)?).await,
+            command if commands::NAMES.contains(&command) => {
+                return self.commands(command, args).await;
+            }
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
             }

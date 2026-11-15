@@ -158,8 +158,10 @@ device (`run_command`), as an agent on the laptop can. Enforced at the edge:
   Presence is unfiltered, but a runner socket's presence/attribution device is pinned to its
   verified id.
 - **Engine** (`crates/engine/src/rpc/agent_gate.rs`): what an agent may do is the same on
-  Cloud as on a computer. It runs commands (`RunCommand`, here or on another device) only
-  from a chat with full access and no sandbox.
+  Cloud as on a computer. It runs commands (`RunCommand`, `ReadCommandOutput`, `StopCommand`,
+  `ListBackgroundCommands`, here or on another device) only from a chat with full access and no
+  sandbox. A command running on a Cloud machine counts as background work in its heartbeat,
+  so the machine stays awake for it.
 
 User bearers are unaffected by all of the above.
 

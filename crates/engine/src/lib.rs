@@ -391,6 +391,8 @@ impl EngineCore {
         );
         let terminals = Terminals::new();
         sessions.track_terminal_activity(terminals.clone(), workspace.clone());
+        // An agent's background commands end with its chat.
+        run_command::follow_chats(workspace.watch_chats());
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = zeron_preview::PreviewService::new(
@@ -525,8 +527,8 @@ impl EngineCore {
         self.workspace_scope
     }
 
-    /// When an update may restart this engine: never under a live run or an open
-    /// terminal. On a Cloud machine, a message waiting counts too: nothing is
+    /// When an update may restart this engine: never under a live run, an open
+    /// terminal or a running command. On a Cloud machine, a message waiting counts too: nothing is
     /// running yet, and a restart would land just as its turn starts.
     pub fn update_quiescence(&self, cloud: bool) -> zeron_update::QuiescentCheck {
         let sessions = self.sessions.clone();
@@ -535,6 +537,7 @@ impl EngineCore {
         Arc::new(move || {
             !sessions.any_active()
                 && !terminals.any_open()
+                && run_command::running_count() == 0
                 && !doc_host.as_ref().is_some_and(DocHost::has_waiting_commands)
         })
     }
@@ -759,6 +762,7 @@ impl EngineCore {
         }
         self.sessions.shutdown().await;
         self.terminals.shutdown();
+        run_command::shutdown();
         self.sessions.stop_activity_projection().await;
         self.agent_accounts.shutdown();
         self.change_requests.shutdown();

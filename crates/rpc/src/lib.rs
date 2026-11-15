@@ -314,11 +314,20 @@ pub mod methods {
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
     /// Whether closing a terminal would end a program running in it.
     pub const TERMINAL_STATUS: &str = "TerminalStatus";
-    /// `{command, cwd?, chatId?, timeoutMs?}` → `RunOutcome`: one shell
-    /// command run to its end on the target device (no PTY, no session),
-    /// its output capped and its process group killed at the timeout.
-    /// Relay-forwardable (Zeron MCP's `run_command`).
+    /// `{command, cwd?, chatId?, timeoutMs?, background?}` → `RunOutcome`:
+    /// one shell command run to its end on the target device (no PTY, no
+    /// session), its output capped and its process group killed at the
+    /// timeout; with `background`, → `CommandStatus` of one left running.
+    /// Relay-forwardable, as are the three below (Zeron MCP's `run_command`,
+    /// `command_output`, `stop_command`, `list_commands`).
     pub const RUN_COMMAND: &str = "RunCommand";
+    /// `{id}` → `CommandStatus`: a background command's output since it was
+    /// last read, and whether it still runs.
+    pub const READ_COMMAND_OUTPUT: &str = "ReadCommandOutput";
+    /// `{id}` → `CommandStatus`: stop a background command and all it started.
+    pub const STOP_COMMAND: &str = "StopCommand";
+    /// `{chatId?}` → `[CommandStatus]`: the background commands a chat started.
+    pub const LIST_BACKGROUND_COMMANDS: &str = "ListBackgroundCommands";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
@@ -834,9 +843,12 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::PUBLISH_IMAGE
             // Saying what the calling chat's agent waits on.
             | methods::AWAIT_BACKGROUND
-            // A command on any of the person's devices (Zeron MCP's
-            // run_command): full access only (the engine's agent gate).
+            // Commands on any of the person's devices (Zeron MCP's
+            // run_command & co.): full access only (the engine's agent gate).
             | methods::RUN_COMMAND
+            | methods::READ_COMMAND_OUTPUT
+            | methods::STOP_COMMAND
+            | methods::LIST_BACKGROUND_COMMANDS
             // Plugins: authoring, installing (lands waiting for the person),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their

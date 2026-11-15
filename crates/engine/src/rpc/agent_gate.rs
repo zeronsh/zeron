@@ -87,7 +87,10 @@ impl EngineRpc {
             params["chatId"] = json!(chat);
             return Ok(params);
         }
-        let command = method == methods::RUN_COMMAND;
+        let command = matches!(
+            method,
+            methods::RUN_COMMAND | methods::READ_COMMAND_OUTPUT | methods::STOP_COMMAND | methods::LIST_BACKGROUND_COMMANDS
+        );
         if !command && !matches!(method, methods::MUTATE | methods::QUEUE_MESSAGE | methods::QUEUE_COMMAND) {
             return Ok(params);
         }
@@ -320,7 +323,7 @@ mod tests {
         chat(&core, "free", "Free", "danger-full-access", "full-access").await;
         let rpc = core.rpc_service();
         let open = json!({"command":"ls", "targetDeviceId":"laptop"});
-        for method in [methods::RUN_COMMAND] {
+        for method in [methods::RUN_COMMAND, methods::READ_COMMAND_OUTPUT, methods::STOP_COMMAND, methods::LIST_BACKGROUND_COMMANDS] {
             for who in ["careful", "sandboxed", "nowhere"] {
                 let refused = with_caller(agent(who), async { rpc.agent_gate(method, open.clone()) }).await;
                 assert!(

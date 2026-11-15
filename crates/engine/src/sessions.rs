@@ -860,7 +860,9 @@ impl SessionsEngine {
         crate::runner::RunCounts {
             active,
             waiting,
-            background: self.background_count(),
+            // An agent's commands (a dev server left running) keep the
+            // machine awake as background work does.
+            background: self.background_count() + crate::run_command::running_count(),
         }
     }
 
