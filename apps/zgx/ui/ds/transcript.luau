@@ -2086,6 +2086,10 @@ local function Transcript(props: Props): Node
 				focused_at = ui.now()
 			end,
 			follow = true,
+			-- While a reply is written, the end is glided to as it grows
+			-- (a line at a time otherwise steps the view); opening a chat,
+			-- a send and the way back to the latest still land at once.
+			glide = writing,
 			at_end = at_end,
 			height = ESTIMATE,
 			overscan = 3,
