@@ -5,16 +5,16 @@
 -- transcript, no title). The agent asks its model nothing until Enter. Only
 -- a new chat's: an existing chat's agent is never started early.
 --
--- Only the person's own doing starts one: opening a new chat themselves
--- (⌘N, New chat: `M.intend` just before the route moves), or typing into a
--- new chat's draft. Never a launch, a window put back, a new chat merely
--- shown, a draft restored with it, or anything a plugin, template, link or
--- agent does. And never for a chat that will run on another device, on
+-- Only the person's own typing starts one: the first key in a new chat's
+-- draft. Not opening a new chat (most are opened and left, or opened long
+-- before anything is written: an agent waiting meanwhile held some 100 MB),
+-- a launch, a window put back, a draft restored, or anything a plugin,
+-- template, link or agent does. Typing a message takes longer than the
+-- agent's start, so it is ready by Enter all the same. And never for a chat that will run on another device, on
 -- Cloud, or in a worktree made as it's sent (the composer's `request` is nil
 -- then).
 --
 -- It stops when:
---   nothing is typed a minute after the open (the engine's lease);
 --   the draft is cleared and left empty for 10 s (the host's `warm_cleared`);
 --   the window moves on with that draft empty;
 --   another chat's draft is typed into (one per window);
@@ -33,17 +33,6 @@ local M = {}
 
 -- While the person types, the engine hears of it this often at most.
 local RENEW_MS = 10000
--- An open is the person's own when its page comes within this of their ⌘N.
-local INTENT_MS = 2000
-
--- When the person last opened a new chat themselves (⌘N, New chat), heard
--- by the new chat's composer as it opens.
-local intent = ui.shared("chat.warm_intent", 0)
-
--- The person is opening a new chat themselves.
-function M.intend()
-	intent:set(ui.now())
-end
 
 export type Bind = {
 	-- The chat the composer is on (nil: a new chat's).
@@ -83,9 +72,6 @@ function M.bind(b: Bind): Warm
 	local sent = ""
 	local sent_at = 0
 	local cleared = false
-	-- The open this composer has heard (none at its start: a launch or a
-	-- window put back is never one).
-	local heard = intent:peek()
 	-- The chat the draft's length was last seen on ("" a new chat's), and
 	-- that length: a key is a change of it on the same chat (a draft put
 	-- back is none).
@@ -122,19 +108,6 @@ function M.bind(b: Bind): Warm
 		sent, sent_at = key, ui.now()
 		store.warm(id :: string, req, typed)
 	end
-
-	-- A new chat opened by the person (the host starts it once the page's
-	-- first frames are out).
-	ui.effect(function()
-		local at = intent:get()
-		if at ~= heard and b.session() == nil then
-			heard = at
-			if id == nil and ui.now() - at < INTENT_MS then
-				typed = false
-				ask(b.request(), false)
-			end
-		end
-	end)
 
 	-- Typed into (a key), cleared, or left.
 	ui.effect(function()

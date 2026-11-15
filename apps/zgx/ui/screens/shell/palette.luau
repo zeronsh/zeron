@@ -13,7 +13,6 @@ local material = require("@ds/material")
 local locale = require("@ds/locale")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
-local Warm = require("@app/screens/chat/warm")
 local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
 local appearance = require("@app/screens/shell/appearance")
@@ -428,8 +427,6 @@ local function root(): { Item }
 			shortcut = "cmd+n",
 			keywords = "session start",
 			run = function()
-				-- (The person's own new chat: its agent may start early.)
-				Warm.intend()
 				route.new_chat()
 			end,
 		},

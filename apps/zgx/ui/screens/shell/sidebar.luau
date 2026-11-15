@@ -24,7 +24,6 @@ local auth = require("@account/auth")
 local PrivateText = require("@ds/private_text")
 local status = require("@ds/status")
 local route = require("@app/screens/shell/route")
-local Warm = require("@app/screens/chat/warm")
 local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
 local motion = require("@ds/motion")
@@ -1627,8 +1626,6 @@ M.Sidebar = ui.component(function(props: Props): Node
 		card = not props.island,
 		-- (A device's "+", inside a project's group: on that device too.)
 		on_new = function(project: string?, device: string?)
-			-- (The person's own new chat: its agent may start early.)
-			Warm.intend()
 			route.new_chat(if device then project else checkout_here(project), if device then device_named(device, project) else nil)
 		end,
 		on_archive = M.archive,

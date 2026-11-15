@@ -32,7 +32,6 @@ local material = require("@ds/material")
 local auth = require("@account/auth")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
-local Warm = require("@app/screens/chat/warm")
 local boundary = require("@app/screens/shell/boundary")
 local view = require("@app/screens/shell/view")
 local Links = require("@ds/links")
@@ -129,8 +128,6 @@ return function(): Node
 		return find ~= nil and find.open ~= nil and (find.open :: any)() == true
 	end
 	runs["shell.new_chat"] = function()
-		-- (The person's own new chat: its agent may start early.)
-		Warm.intend()
 		route.new_chat()
 	end
 	runs["shell.palette"] = function()

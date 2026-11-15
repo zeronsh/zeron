@@ -2149,7 +2149,6 @@ ui.command {
 	id = "go_new_by_hand",
 	title = "New chat, by hand",
 	run = function()
-		require("@app/screens/chat/warm").intend()
 		route.new_chat("atlas")
 	end,
 }
