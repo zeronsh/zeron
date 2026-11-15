@@ -55,16 +55,71 @@ local all = ui.state("progress_all", false)
 -- computed made at the top of a module required inside a build belongs to
 -- that build. Gone with it (the Control room left), it would keep its last
 -- value for every screen after: Progress showing nothing working.)
-local function derived<T>(f: () -> T): { get: (any) -> T }
+-- Each is worked out again only when what it's made from changes: its
+-- `sources` are read on every `get` (so a reader still follows them), and
+-- the last answer is given back while they're the same. A large shared
+-- value keeps its table while it stands; a small one is read anew each
+-- time, and compared through (it's small).
+local function same(a: any, b: any, left: { n: number }): boolean
+	if rawequal(a, b) then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return false
+	end
+	for k, v in a do
+		left.n -= 1
+		if left.n < 0 or not same(v, b[k], left) then
+			return false
+		end
+	end
+	for k in b do
+		left.n -= 1
+		if left.n < 0 or a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+local function derived<T>(sources: () -> ...any, f: (...any) -> T): { get: (any) -> T }
+	local last: any = nil
+	local value: any = nil
 	return {
 		get = function(_self: any): T
-			return f()
+			local now = table.pack(sources())
+			if last and last.n == now.n then
+				local hit = true
+				for i = 1, now.n do
+					if not same(now[i], last[i], { n = 256 }) then
+						hit = false
+						break
+					end
+				end
+				if hit then
+					return value
+				end
+			end
+			value = f(table.unpack(now, 1, now.n))
+			last = now
+			return value
 		end,
 	}
 end
 
-local chats_now = derived(function(): { [string]: any }
-	return data.chats(sessions.now:get())
+local chats_now = derived(function(): any
+	return sessions.now:get()
+end, function(s: any): { [string]: any }
+	return data.chats(s)
+end)
+local leads_now = derived(function(): any
+	return orchestration.now:get()
+end, function(now: any): { [string]: any }
+	return data.orchestrators(now)
+end)
+local crew_now = derived(function(): any
+	return orchestration.now:get()
+end, function(now: any): { [string]: any }
+	return data.crew_by_chat(now)
 end)
 -- Chats a check found nothing to say about yet.
 local quiet = ui.state("progress_quiet", {} :: { [string]: boolean })
@@ -82,11 +137,11 @@ local FRESH = 3 * 3600
 -- made, if that was lately (a crew thread, a task's chat); else the first
 -- of its latest unbroken run of busy entries as this app saw them; else
 -- when its activity began; else its last change.
-local function stretch_start(c: any): number?
+local function stretch_start(c: any, lines: { [string]: { any } }): number?
 	if type(c.created) == "number" and os.time() - c.created <= FRESH then
 		return c.created
 	end
-	local entries = timeline:get()[c.id]
+	local entries = lines[c.id]
 	local start: number? = nil
 	if entries then
 		for i = #entries, 1, -1 do
@@ -107,8 +162,11 @@ local function stretch_start(c: any): number?
 end
 
 -- Every chat at work now that isn't archived: a row drawn from its session.
-local stood_in = derived(function(): { [string]: any }
-	local now = sessions.now:get()
+-- (Worked out again each minute too: a chat made lately stops counting as
+-- made for its task as it ages.)
+local stood_in = derived(function(): ...any
+	return sessions.now:get(), timeline:get(), os.time() // 60
+end, function(now: any, lines: any): { [string]: any }
 	local out: { [string]: any } = {}
 	local function take(c: any)
 		local state = STATE[c.status or ""]
@@ -117,7 +175,7 @@ local stood_in = derived(function(): { [string]: any }
 				chat_id = c.id,
 				device_id = c.device,
 				state = state,
-				started = stretch_start(c),
+				started = stretch_start(c, lines or {}),
 				stalled = false,
 				refreshing = false,
 				updated = c.updated,
@@ -143,19 +201,19 @@ end)
 -- it has none for; a thread that ended its turn asking the person (an
 -- open ask raised from its turn's end) and is at rest since (idle or done;
 -- not an orchestrator's own chat) waits on them, from when it asked.
-M.rows = derived(function(): { [string]: any }
-	local out = table.clone(orchestration.progress:get())
-	for id, r in stood_in:get() do
+M.rows = derived(function(): ...any
+	return orchestration.progress:get(), stood_in:get(), orchestration.now:get(), chats_now:get(), leads_now:get()
+end, function(progress: any, stood: any, now: any, chats: any, leads: any): { [string]: any }
+	local out = table.clone(progress or {})
+	for id, r in stood do
 		if out[id] == nil then
 			out[id] = r
 		end
 	end
-	local now = orchestration.now:get()
-	local leads = data.orchestrators(now)
 	for id, a in data.open_asks(now) do
 		local r = out[id]
 		local state = r and r.state
-		local c = chats_now:get()[id]
+		local c = chats[id]
 		if data.turn_end(a) and not leads[id] and (r or c) and (state == nil or state == "done") then
 			local w = if r then table.clone(r) else { chat_id = id, device_id = c and c.device, stalled = false, refreshing = false }
 			w.state = "awaiting_input"
@@ -231,11 +289,10 @@ M.row = row_of
 -- Whose work it is and where it runs: its orchestrator (or project) and
 -- its machine.
 function M.context(id: string): string
-	local now = orchestration.now:get()
 	local c = chats_now:get()[id]
 	local parts = {}
-	local m = data.crew_by_chat(now)[id]
-	local orchestrator = m and data.orchestrators(now)[m.orchestrator_id]
+	local m = crew_now:get()[id]
+	local orchestrator = m and leads_now:get()[m.orchestrator_id]
 	if orchestrator then
 		table.insert(parts, orchestrator.name)
 	elseif c and c.project then
@@ -316,10 +373,11 @@ end
 
 -- The widget's threads: those pinned first (in their order), then every
 -- one working now, the latest started first.
-M.listed = derived(function(): { { id: string } }
-	local rows = M.rows:get()
+M.listed = derived(function(): ...any
+	return M.rows:get(), M.pins:get()
+end, function(rows: any, pins: { string }): { { id: string } }
 	local out, seen = {}, {}
-	for _, id in M.pins:get() do
+	for _, id in pins do
 		if rows[id] and not seen[id] then
 			seen[id] = true
 			table.insert(out, { id = id })
