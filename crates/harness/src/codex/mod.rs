@@ -828,7 +828,7 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false, false).await
+        self.run_with_mode(request, controls, false, None).await
     }
 
     async fn start_idle(
@@ -836,12 +836,21 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false, true).await
+        self.run_with_mode(request, controls, true, None).await
     }
 
     async fn run_title(
         &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_instructions(request, crate::TITLE_INSTRUCTIONS.into(), controls).await
+    }
+
+    async fn run_instructions(
+        &self,
         mut request: RunRequest,
+        instructions: String,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         request.resume = None;
@@ -854,7 +863,7 @@ impl Harness for CodexHarness {
         request.auto_approve = false;
         request.access = AccessMode::Supervised;
         request.plan = false;
-        self.run_with_mode(request, controls, true, false).await
+        self.run_with_mode(request, controls, false, Some(instructions)).await
     }
 }
 
@@ -863,8 +872,8 @@ impl CodexHarness {
         &self,
         mut request: RunRequest,
         controls: RunControls,
-        title_only: bool,
         idle: bool,
+        instructions: Option<String>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let native = command_request(&request.prompt, "")?;
         if native
@@ -900,7 +909,7 @@ impl CodexHarness {
         }
         // The sandbox is the access mode's (see [`permissions`]), never the
         // request's own level.
-        request.sandbox = permissions(run_access(&request), title_only).1;
+        request.sandbox = permissions(run_access(&request), instructions.is_some()).1;
         let AppServer {
             child,
             client,
@@ -909,7 +918,7 @@ impl CodexHarness {
         } = spawn_app_server(&exe, &request)?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
-            title_only,
+            one_shot: instructions,
             idle,
             executable: exe,
             child,
@@ -1152,7 +1161,9 @@ async fn resume_thread(client: &RpcClient, params: Value) -> Result<Value, Harne
 
 struct Session {
     executable: PathBuf,
-    title_only: bool,
+    /// The system prompt of a one-shot run (a title, a plugin's ask), or
+    /// `None` for a chat's run.
+    one_shot: Option<String>,
     idle: bool,
     child: Child,
     client: RpcClient,
@@ -1360,7 +1371,7 @@ struct ThreadMode {
 async fn run_session(session: Session) {
     let Session {
         executable,
-        title_only,
+        one_shot,
         idle,
         mut child,
         mut client,
@@ -1381,6 +1392,8 @@ async fn run_session(session: Session) {
         turn,
     } = controls;
     let request_input = Arc::new(request_input);
+    // A title's restrictions hold for any one-shot run.
+    let title_only = one_shot.is_some();
 
     // ---- wire params ------------------------------------------------------
     // The access mode's approval policy and sandbox (see [`permissions`]).
@@ -1393,12 +1406,9 @@ async fn run_session(session: Session) {
 
     let start_params = {
         let mut p = serde_json::Map::new();
-        if title_only {
-            p.insert("baseInstructions".into(), crate::TITLE_INSTRUCTIONS.into());
-            p.insert(
-                "developerInstructions".into(),
-                crate::TITLE_INSTRUCTIONS.into(),
-            );
+        if let Some(instructions) = &one_shot {
+            p.insert("baseInstructions".into(), instructions.clone().into());
+            p.insert("developerInstructions".into(), instructions.clone().into());
             p.insert("ephemeral".into(), true.into());
             let mut config = json!({
                 "project_doc_max_bytes": 0,

@@ -229,6 +229,18 @@ case "$turnline" in
   ;;
 
 
+*scenario:oneshot*)
+  # A plugin's one-shot ask (`Harness::run_instructions`): our instructions
+  # stand in for the title ones, and the same restrictions hold.
+  for want in '"sandbox":"read-only"' '"ephemeral":true' '"baseInstructions":"Rewrite the prompt.' '"developerInstructions":"Rewrite the prompt.' '"features.shell_tool":false' '"mcp_servers.test.enabled":false' '"agents.enabled":false'; do
+    has "$thread_line" "$want" || { fail_turn "$tid" "ask restriction missing"; exit 0; }
+  done
+  has "$turnline" '"sandboxPolicy":{"type":"readOnly"}' || { fail_turn "$tid" "ask turn not read-only"; exit 0; }
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","delta":"A rewritten prompt"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  ;;
+
 *scenario:reasoning*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"call_alpha","type":"subAgentActivity","kind":"spawned","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'

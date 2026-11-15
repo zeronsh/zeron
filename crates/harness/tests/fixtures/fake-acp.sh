@@ -33,10 +33,12 @@ emit "{\"id\":$(rid "$line"),\"result\":{\"protocolVersion\":1,\"agentCapabiliti
 read -r line || exit 1
 SID="s-1"
 MODEL_API=0
+LOADED=0
 if has "$line" '"sessionId":"existing-grok-session"'; then
   MODEL_API=1
 fi
 if has "$line" '"method":"session/load"'; then
+  LOADED=1
   if has "$line" '"sessionId":"load-fail"'; then
     emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32602,\"message\":\"unknown session\"}}"
     read -r line || exit 1
@@ -131,6 +133,16 @@ case "$promptline" in
   has "$line" '"name":"ZERON_CHAT_ID","value":"origin-chat"' || exit 1
   has "$line" '"name":"ZERON_IPC_PORT","value":"27699"' || exit 1
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"mcp configured"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:oneshot*)
+  # A one-shot ask on a driver with no one-shot path of its own: the
+  # instructions ride the prompt, ahead of the one message, and the run
+  # starts a fresh session (a one-shot never resumes).
+  [ "$LOADED" = 0 ] || exit 1
+  has "$promptline" 'Rewrite the prompt.\n\n---\n\nscenario:oneshot' || exit 1
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"A rewritten prompt"}}'
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 

@@ -1199,7 +1199,7 @@ return function(id: string): any
 	-- ── Agents: usage, accounts, models, and their events ─────────────────
 	-- Each asks the engine, which checks what this device (or `device`,
 	-- another of yours) allowed this plugin: "usage.read", "accounts.read",
-	-- "accounts.switch", "accounts.pin", "models.read", "models.set". Each is a promise; a
+	-- "accounts.switch", "accounts.pin", "models.read", "models.set", "models.ask". Each is a promise; a
 	-- refusal fails it with "<reason>: <words>" (`zeron.reason(err)`:
 	-- not_allowed, paced, already, loop, not_found, offline, …).
 	local function agents(op: string, args: any?, device: string?): any
@@ -1265,6 +1265,16 @@ return function(id: string): any
 	-- turn, on the provider it has.
 	function M.set_model(s: { chat: string, model: string?, effort: string?, options: { [string]: string }? }): any
 		return agents("set_model", { chat = s.chat, model = s.model, effort = s.effort, options = s.options })
+	end
+
+	-- One turn through a model of its own ("models.ask"): `instructions` is
+	-- what it's told to do, `input` its only message, and it runs with no
+	-- MCP servers, no skills and none of your files, on the harness's own
+	-- login. `harness` and `model` pick what runs it (see `M.models`);
+	-- without them, the first enabled agent on its default model. A promise
+	-- of { text }.
+	function M.ask(s: { instructions: string, input: string, harness: string?, model: string? }): any
+		return agents("ask", { instructions = s.instructions, input = s.input, harness = s.harness, model = s.model })
 	end
 
 	-- What a new chat starts with here ("models.set").

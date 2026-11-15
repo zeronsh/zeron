@@ -371,6 +371,14 @@ local function service(id: string): any
 		return agents("chat_model", { chat = chat })
 	end
 
+	-- One turn through a model of its own ("models.ask"): `instructions` is
+	-- what it's told to do, `input` its only message, and it runs with no
+	-- MCP servers, no skills and none of your files, on the harness's own
+	-- login. A promise of { text }.
+	function M.ask(s: { instructions: string, input: string, harness: string?, model: string? }): any
+		return agents("ask", s)
+	end
+
 	-- Set a chat's model, effort or options ("models.set"): for its next
 	-- turn, on the provider it has.
 	function M.set_model(s: { chat: string, model: string?, effort: string?, options: { [string]: string }? }): any

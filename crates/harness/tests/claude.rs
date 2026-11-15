@@ -1245,6 +1245,48 @@ async fn title_run_disables_tools_and_denies_unexpected_permissions() {
 }
 
 #[tokio::test]
+async fn instructions_run_disables_tools_and_takes_its_own_system_prompt() {
+    let (controls, _steer, token) = controls("Yes");
+    let mut stream = harness()
+        .run_instructions(request("scenario:oneshot"), "Rewrite the prompt.".into(), controls)
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .unwrap();
+    token.cancel();
+    // The fixture exits unless `--system-prompt` is ours, `--tools ""` is
+    // there and `--strict-mcp-config` is on.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "A rewritten prompt")),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn command_discovery_tracks_project_changes() {
     let h = harness();
     for name in ["project-a", "project-b"] {

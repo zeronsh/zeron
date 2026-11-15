@@ -21,7 +21,7 @@ use zeron_doc::SessionCommandPayload;
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot, Chat, ChatConfig, HarnessId, Model, Session, SessionStatus, UserInputAnswer};
 
 use crate::agent_accounts::AgentAccounts;
-use crate::plugins::agents::{AgentHost, Delivery, NewChat, Pin};
+use crate::plugins::agents::{AgentHost, Delivery, NewChat, OneShot, Pin};
 use crate::registry::HarnessRegistry;
 use crate::sessions::SessionsEngine;
 use crate::workspace_host::WorkspaceHost;
@@ -62,6 +62,11 @@ impl AgentHost for EngineAgentHost {
                 .await
                 .map_err(|e| e.to_string())
         })
+    }
+
+    fn ask(&self, one: OneShot) -> BoxFuture<'static, Result<String, String>> {
+        let registry = self.registry.clone();
+        Box::pin(async move { crate::oneshot::ask(&registry, one).await.map_err(|e| e.to_string()) })
     }
 
     fn chats(&self) -> Vec<Chat> {

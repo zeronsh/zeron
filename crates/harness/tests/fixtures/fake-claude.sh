@@ -55,6 +55,26 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"Fix Login Flow","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-title"}'
   ;;
 
+*scenario:oneshot*)
+  # A plugin's one-shot ask (`Harness::run_instructions`): our instructions
+  # replace the CLI's own, and its tools and settings stay off.
+  tools_off=false
+  system_set=false
+  mcp_off=false
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tools) shift; [ "$1" = "" ] && tools_off=true ;;
+      --system-prompt) shift; case "$1" in "Rewrite the prompt."*) system_set=true ;; esac ;;
+      --strict-mcp-config) mcp_off=true ;;
+      --dangerously-skip-permissions) exit 1 ;;
+    esac
+    shift
+  done
+  [ "$tools_off" = true ] && [ "$system_set" = true ] && [ "$mcp_off" = true ] || exit 1
+  emit '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"A rewritten prompt"}}}'
+  emit '{"type":"result","subtype":"success","result":"A rewritten prompt","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ask"}'
+  ;;
+
 *scenario:native-subagents*)
   # A bare `--disallowedTools` rule takes the tools out of the init frame's
   # list, as 2.1.310 does (it lists the `Agent` tool as `Task`). The reply

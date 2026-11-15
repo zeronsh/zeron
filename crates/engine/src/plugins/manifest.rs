@@ -53,6 +53,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "accounts.pin",
     "models.read",
     "models.set",
+    // One-shot runs of a model of its own (`zeron.ask`): a single turn with
+    // instructions of its own, no MCP servers or repository context.
+    "models.ask",
     // Sending messages in your chats, starting chats and answering their
     // questions, as you would from the composer (plugins/agents).
     "messages.send",

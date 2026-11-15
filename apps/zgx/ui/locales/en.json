@@ -3483,6 +3483,10 @@
           "title": "Change the model your chats use",
           "detail": "A chat's model, effort and options for its next turn, and what new chats start with."
         },
+        "models_ask": {
+          "title": "Ask a model of its own",
+          "detail": "One turn through your agent's own login, with instructions of its own and no MCP servers, skills or files: what it says comes back to the plugin, not to a chat. It spends the plan that login is on."
+        },
         "messages_send": {
           "title": "Send messages to your agents as you",
           "detail": "It can send any chat a message, start new chats and answer their questions, as if you'd typed it. Your agents then do what it says."

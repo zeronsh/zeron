@@ -385,11 +385,20 @@ fn agents_pinning_is_known_and_stays_outside_the_sandbox() {
 
 #[test]
 fn agents_permissions_are_known_and_controls_stay_outside_the_sandbox() {
-    for p in ["usage.read", "accounts.read", "accounts.switch", "models.read", "models.set"] {
+    for p in [
+        "usage.read",
+        "accounts.read",
+        "accounts.switch",
+        "models.read",
+        "models.set",
+        "models.ask",
+    ] {
         assert!(manifest::KNOWN_PERMISSIONS.contains(&p), "{p}");
     }
     assert!(capability::OUTSIDE_SANDBOX.contains(&"accounts.switch"));
     assert!(capability::OUTSIDE_SANDBOX.contains(&"models.set"));
+    // A one-shot run spends the plan, so it's never granted by installing.
+    assert!(capability::OUTSIDE_SANDBOX.contains(&"models.ask"));
     assert!(!capability::OUTSIDE_SANDBOX.contains(&"usage.read"));
 }
 
