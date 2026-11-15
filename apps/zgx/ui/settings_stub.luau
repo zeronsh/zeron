@@ -569,6 +569,29 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "settings_stub.opencode",
+	title = "OpenCode among the agents",
+	run = function()
+		local now = table.clone(agents.now:peek())
+		local list = table.clone(now.list)
+		table.insert(list, {
+			id = "opencode",
+			name = "OpenCode",
+			mark = "opencode",
+			installed = true,
+			can_install = true,
+			enabled = true,
+			version = "2.3.0",
+			installing = false,
+			login = "idle",
+			accounts = {},
+		})
+		now.list = list
+		now.state = "ready"
+		agents.now:set(now)
+	end,
+}
+ui.command {
 	id = "settings_stub.sign_in",
 	title = "Signed in",
 	run = function()

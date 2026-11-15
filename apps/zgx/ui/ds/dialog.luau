@@ -135,7 +135,22 @@ local function stage(props: { open: State<boolean>, label: Label, dismissable: b
 		rounded = "$zeron.dialog.radius",
 		bg = "#00000000",
 		border = 0,
-		shadow = "$zeron.dialog.stage",
+		-- (Its shadow, not the panel's: a modal clips what it holds, so a
+		-- panel's shadow would be cut to the modal's box — square, and a
+		-- band under the panel where the box is taller than it. Its own
+		-- shadow is drawn outside it, round its corner.)
+		shadow = "$zeron.dialog.shadow",
+		-- (It and its shadow move as one: the panel's own arrival would
+		-- leave the shadow standing.)
+		opacity = function(): number
+			return phase:get()
+		end,
+		scale = function(): number
+			return 0.98 + 0.02 * phase:get()
+		end,
+		y = function(): number
+			return 4 * (1 - phase:get())
+		end,
 		dismiss_on_backdrop = props.dismissable,
 		build = function()
 			return ui.column {
@@ -154,7 +169,8 @@ local function stage(props: { open: State<boolean>, label: Label, dismissable: b
 	}
 end
 
--- The panel: a dialog's glass, corner and shadow.
+-- The panel: a dialog's glass and corner. (Its shadow is the stage's, drawn
+-- outside it: in here the modal would cut it.)
 local function panel(props: ContainerProps): ContainerProps
 	glass.style(props, "menu")
 	props.bg = function()
@@ -163,14 +179,14 @@ local function panel(props: ContainerProps): ContainerProps
 		return if material.menus_see_through() then "$zeron.dialog.tint" else "$zeron.dialog.solid"
 	end
 	props.rounded = "$zeron.dialog.radius"
-	props.shadow = "$zeron.dialog.shadow"
+	props.shadow = nil
 	return props
 end
 
 -- What a dialog says, built fresh each time it opens (a typed confirmation
 -- starts empty).
-local DialogBody = ui.component(function(args: { props: DialogProps, close: () -> (), phase: State<number> }): Node
-	local props, close, phase = args.props, args.close, args.phase
+local DialogBody = ui.component(function(args: { props: DialogProps, close: () -> () }): Node
+	local props, close = args.props, args.close
 	local danger = props.tone == "danger"
 	local typed = ui.use_state("")
 	local function ready(): boolean
@@ -218,17 +234,14 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 	end
 	return ui.column(panel {
 		w_full = true,
+		-- (Held to a height, the panel is that height: its edge is the
+		-- dialog's, so its corner and its border are the ones seen, and its
+		-- body takes what its title and its foot leave.)
+		h_full = function(): boolean
+			return props.h ~= nil
+		end,
 		p = "$space.5",
 		gap = "$space.5",
-		opacity = function()
-			return phase:get()
-		end,
-		scale = function()
-			return 0.98 + 0.02 * phase:get()
-		end,
-		y = function()
-			return 4 * (1 - phase:get())
-		end,
 		on_key = function(e)
 			if e.key == "Enter" and not danger and props.confirm then
 				go()
@@ -344,8 +357,8 @@ M.Dialog = ui.component(function(props: DialogProps): Node
 		hold = props.hold,
 		w = `$zeron.dialog.{props.size or "sm"}`,
 		h = props.h,
-		panel = function(phase: State<number>): Node
-			return DialogBody { props = props, close = close, phase = phase }
+		panel = function(): Node
+			return DialogBody { props = props, close = close }
 		end,
 	}
 end)

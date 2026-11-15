@@ -67,6 +67,16 @@ local function bottom(app: any, node: string): number?
 	return tonumber(y) + tonumber(h)
 end
 
+-- The dialog's box: where it stands, and how big it is.
+local function box(app: any, node: string): any
+	local line = app:tree(node):match("[^\n]+")
+	local x, y, w, h = string.match(line or "", " (%d+),(%d+) (%d+)x(%d+)")
+	if not x then
+		return nil
+	end
+	return { tonumber(x), tonumber(y), tonumber(w), tonumber(h) }
+end
+
 -- Where `node` stands: its top left.
 local function place(app: any, node: string): { number }?
 	local line = app:tree(node):match("[^\n]+")
@@ -203,5 +213,21 @@ test("OpenCode settings: a remote's fields scroll under the tabs, its foot in pl
 	app:scroll('role:button "Chats run on"', 400)
 	app:frames(10)
 	expect(bottom(app, 'role:textbox "Password"') <= foot).to_be(true)
+	expect(bottom(app, 'role:button "Done"')).to_equal(foot)
+end)
+
+test("OpenCode settings: the same dialog as any agent's, its foot at its pane's", function()
+	local app = open()
+	local here = box(app, "role:dialog")
+	local foot = bottom(app, 'role:button "Done"')
+	expect(here ~= nil and foot ~= nil).to_be(true)
+	-- (Its pane fills it — its edge is the dialog's, its corner and its border
+	-- the ones seen — so its foot stands its padding above the dialog's.)
+	expect(here[2] + here[4] - foot).to_equal(25)
+	app:click('role:button "Done"')
+	app:frames(20)
+	app:click(`{PAGE} >> role:button "Claude Code settings"`)
+	app:frames(20)
+	expect(box(app, "role:dialog")).to_equal(here)
 	expect(bottom(app, 'role:button "Done"')).to_equal(foot)
 end)
