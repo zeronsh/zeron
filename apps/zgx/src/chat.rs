@@ -4823,7 +4823,13 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .flatten()
                 .find(|p| p["kind"].as_str() == Some("compaction")) =>
         {
-            let status = part["message"].as_str().unwrap_or_default();
+            // (The part as `MessagePart::Compaction` reads on the wire: its
+            // `status` — the doc's own part says `message`, which an older
+            // engine's frames may still carry.)
+            let status = part["status"]
+                .as_str()
+                .or_else(|| part["message"].as_str())
+                .unwrap_or_default();
             let live = matches!(status, "running" | "pending");
             let summary = entry["parts"]
                 .as_array()
@@ -4854,9 +4860,15 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .flatten()
                 .find(|p| p["kind"].as_str() == Some("revert")) =>
         {
-            let count = part["reverted"].as_u64().unwrap_or_default();
-            let files: Vec<Value> = part["revertedFiles"]
+            // (The part as `MessagePart::Revert` reads on the wire: its
+            // `messages`, and the `files` the undo put back.)
+            let count = part["messages"]
+                .as_u64()
+                .or_else(|| part["reverted"].as_u64())
+                .unwrap_or_default();
+            let files: Vec<Value> = part["files"]
                 .as_array()
+                .or_else(|| part["revertedFiles"].as_array())
                 .into_iter()
                 .flatten()
                 .map(|file| {
@@ -4868,6 +4880,8 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                     ])
                 })
                 .collect();
+            // (`1 message reverted`, `3 messages reverted` — as the engine's
+            // `revert_note` says it.)
             let s = if count == 1 { "" } else { "s" };
             Some(Value::record([
                 ("id", Value::from(id)),
@@ -7465,7 +7479,7 @@ mod tests {
     #[test]
     fn a_compaction_shows_between_its_rules_and_an_undo_says_what_it_took() {
         let compaction = |status: &str, summary: Option<&str>| {
-            let mut parts = vec![json!({ "id": "c0", "kind": "compaction", "message": status, "tokensIn": 648_371, "tokensOut": 2_812 })];
+            let mut parts = vec![json!({ "id": "c0", "kind": "compaction", "status": status, "tokensIn": 648_371, "tokensOut": 2_812 })];
             parts.extend(summary.map(|text| json!({ "id": "s0", "kind": "text", "text": text })));
             message(&json!({ "id": "oc:c", "role": "system", "parts": parts }), None).expect("a compaction shows")
         };
@@ -7476,16 +7490,31 @@ mod tests {
         assert!(matches!(running.field("live"), Some(Value::Bool(true))));
         let done = compaction("completed", Some("## Goal\n- tides"));
         assert!(matches!(done.field("close"), Some(Value::Str(s)) if s.as_ref() == "Session compacted · 648.4K in · 2.8K out"));
-        let undo = message(
-            &json!({ "id": "oc:revert", "role": "system", "parts": [{ "id": "r0", "kind": "revert", "reverted": 2,
-                "revertedFiles": [{ "path": "a.rs", "status": "modified", "additions": 3, "deletions": 1 }] }] }),
+        // (A frame from before the part carried `status` still reads: the
+        // doc's own part says `message`.)
+        let older = message(
+            &json!({ "id": "oc:c", "role": "system", "parts": [{ "id": "c0", "kind": "compaction", "message": "running" }] }),
             None,
         )
-        .expect("an undo shows");
-        assert!(matches!(undo.field("text"), Some(Value::Str(s)) if s.as_ref() == "2 messages reverted"));
-        assert!(matches!(undo.field("close"), Some(Value::Str(s)) if s.as_ref() == "/redo to restore"));
-        let Some(Value::List(files)) = undo.field("files") else { panic!("no files") };
+        .expect("a compaction shows");
+        assert!(matches!(older.field("live"), Some(Value::Bool(true))));
+        let undo = |part: serde_json::Value| {
+            message(&json!({ "id": "oc:revert", "role": "system", "parts": [part] }), None)
+                .expect("an undo shows")
+        };
+        // (The part as `MessagePart::Revert` writes it: `messages`, `files`.)
+        let two = undo(json!({ "id": "r0", "kind": "revert", "messages": 2,
+            "files": [{ "path": "a.rs", "status": "modified", "additions": 3, "deletions": 1 }] }));
+        assert!(matches!(two.field("text"), Some(Value::Str(s)) if s.as_ref() == "2 messages reverted"));
+        assert!(matches!(two.field("close"), Some(Value::Str(s)) if s.as_ref() == "/redo to restore"));
+        let Some(Value::List(files)) = two.field("files") else { panic!("no files") };
         assert!(matches!(files[0].field("path"), Some(Value::Str(s)) if s.as_ref() == "a.rs"));
+        // (One: `message`, not `messages` — and a doc written before the
+        // part carried `messages` still reads.)
+        let one = undo(json!({ "id": "r0", "kind": "revert", "messages": 1 }));
+        assert!(matches!(one.field("text"), Some(Value::Str(s)) if s.as_ref() == "1 message reverted"));
+        let old = undo(json!({ "id": "r0", "kind": "revert", "reverted": 1 }));
+        assert!(matches!(old.field("text"), Some(Value::Str(s)) if s.as_ref() == "1 message reverted"));
     }
 
     #[test]
