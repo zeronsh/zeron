@@ -90,10 +90,23 @@ local PROVIDERS: { [string]: { Provider } } = {
 		{ id = "xai", name = "xAI", key = "xAI" },
 		{ id = "deepseek", name = "DeepSeek", key = "DeepSeek" },
 	},
+	codegraff = {
+		{ id = "codegraff", name = "Codegraff", login = "Codegraff" },
+		{ id = "chatgpt-new", name = "ChatGPT", login = "ChatGPT" },
+		{ id = "anthropic", name = "Anthropic", login = "Claude", key = "Anthropic" },
+		{ id = "kimi", name = "Kimi", login = "Kimi" },
+		{ id = "xai", name = "xAI", login = "xAI", key = "xAI" },
+		{ id = "openai", name = "OpenAI", key = "OpenAI" },
+		{ id = "openrouter", name = "OpenRouter", key = "OpenRouter" },
+		{ id = "google", name = "Google Gemini", key = "Google Gemini" },
+		{ id = "deepseek", name = "DeepSeek", key = "DeepSeek" },
+		{ id = "groq", name = "Groq", key = "Groq" },
+		{ id = "mistral", name = "Mistral", key = "Mistral" },
+	},
 }
 
 -- (Who each provider is, as the host names it in a row.)
-local VENDOR_NAME = { anthropic = "Anthropic", openai = "OpenAI", ["openai-api"] = "OpenAI", openrouter = "OpenRouter", google = "Google Gemini", gemini = "Google Gemini", xai = "xAI", deepseek = "DeepSeek" }
+local VENDOR_NAME = { anthropic = "Anthropic", openai = "OpenAI", ["openai-api"] = "OpenAI", openrouter = "OpenRouter", google = "Google Gemini", gemini = "Google Gemini", xai = "xAI", deepseek = "DeepSeek", groq = "Groq", mistral = "Mistral" }
 
 local model: { any } = {
 	agent("claude-code", "Claude Code", "claude", {
@@ -115,6 +128,12 @@ local model: { any } = {
 		account("h2", "second@chatgpt.test", "ChatGPT Plus", "openai-codex", false, false),
 		-- (Seeded from OPENROUTER_API_KEY: never titled by that variable.)
 		key_account(account("h3", "API key ···9f3e", "OpenRouter · from environment", "openrouter", true, false)),
+	}),
+	agent("codegraff", "Codegraff", "codegraff", {
+		account("cg1", "ada@codegraff.test", "Codegraff", "codegraff", true),
+		account("cg2", "ada@chatgpt.test", "ChatGPT Plus", "chatgpt-new", true),
+		account("cg3", "work@chatgpt.test", "ChatGPT Pro", "chatgpt-new", false),
+		key_account(account("cg4", "API key ···4c1a", "OpenRouter", "openrouter", true)),
 	}),
 }
 
@@ -351,11 +370,25 @@ ui.command {
 	end,
 }
 
+ui.command {
+	id = "groups.only_codegraff",
+	title = "Show Codegraff at the top",
+	run = function()
+		model = { find("codegraff"), find("claude-code") }
+		publish()
+	end,
+}
+
 publish()
+
+local dark = ui.state("dark", true)
 
 return ui.column {
 	w_full = true,
 	h_full = true,
+	theme = function()
+		return if dark:get() then "zeron-dark" else "zeron-light"
+	end,
 	ds.toast.Host {},
 	ui.scroll {
 		id = "page",

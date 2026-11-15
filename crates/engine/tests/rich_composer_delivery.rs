@@ -23,13 +23,14 @@ use zeron_proto::{
 use zeron_rpc::RpcService;
 
 const CHAT: &str = "rich-delivery";
-const HARNESSES: [HarnessId; 9] = [
+const HARNESSES: [HarnessId; 10] = [
     HarnessId::ClaudeCode,
     HarnessId::Codex,
     HarnessId::Cursor,
     HarnessId::Devin,
     HarnessId::Grok,
     HarnessId::Hermes,
+    HarnessId::Codegraff,
     HarnessId::Pi,
     HarnessId::Antigravity,
     HarnessId::Opencode,

@@ -212,7 +212,7 @@ fn looks_like_a_key(text: &str) -> bool {
 /// `api_key`, OpenCode `api`).
 pub(super) fn key_entry_secret(harness: HarnessId, entry: &serde_json::Value) -> Option<String> {
     let kind = match harness {
-        HarnessId::Pi => "api_key",
+        HarnessId::Pi | HarnessId::Codegraff => "api_key",
         HarnessId::Opencode => "api",
         _ => return None,
     };
@@ -335,7 +335,7 @@ impl AgentAccounts {
                 let _ops = self.inner.ops.lock().await;
                 self.list_locked(false).await
             }
-            HarnessId::Pi | HarnessId::Opencode => {
+            HarnessId::Pi | HarnessId::Opencode | HarnessId::Codegraff => {
                 let entry = key_entry(harness, key);
                 let mut detected = key_detected(harness, provider, &entry)
                     .ok_or_else(|| EngineError::Other("That key couldn't be stored.".into()))?;

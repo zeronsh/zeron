@@ -496,6 +496,15 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: None,
             manual_command: "curl -fsSL https://fx.sh/setup.sh | bash",
         },
+        HarnessId::Codegraff => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Github {
+                repository: "justrach/codegraff",
+                tag_prefix: "v",
+            },
+            update_args: Some(&["update"]),
+            manual_command: "graff update",
+        },
         HarnessId::Hermes => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Hermes,
@@ -6297,7 +6306,12 @@ esac
         assert!(ok(command(&plain), HarnessId::Cursor));
         assert!(ok(command(&grok_standalone), HarnessId::Grok));
         assert!(!ok(command(&grok_npm), HarnessId::Grok));
-        for harness in [HarnessId::Pi, HarnessId::Hermes, HarnessId::Opencode] {
+        for harness in [
+            HarnessId::Pi,
+            HarnessId::Hermes,
+            HarnessId::Opencode,
+            HarnessId::Codegraff,
+        ] {
             assert!(!ok(command(&plain), harness), "{harness:?}");
         }
         assert!(ok(UpdatePlan::AntigravityArchive, HarnessId::Antigravity));
@@ -6685,7 +6699,13 @@ esac
     #[cfg(target_os = "linux")]
     #[test]
     fn a_system_package_is_left_to_the_system_package_manager() {
-        for harness in [HarnessId::Opencode, HarnessId::Pi, HarnessId::Grok, HarnessId::Hermes] {
+        for harness in [
+            HarnessId::Opencode,
+            HarnessId::Pi,
+            HarnessId::Grok,
+            HarnessId::Hermes,
+            HarnessId::Codegraff,
+        ] {
             let path = std::path::Path::new("/usr/bin/agent-cli");
             assert!(!super::can_apply_update(harness, path), "{harness:?}");
         }
@@ -6772,6 +6792,21 @@ esac
         assert!(version_is_newer("2026.11.05-86047df", "2026.08.11-e8db854"));
         assert!(!version_is_newer("2026.11.05-86047df", "2026.11.05-86047df"));
         assert!(matches!(provider(HarnessId::Cursor).latest, LatestSource::Cursor));
+    }
+
+    #[test]
+    fn codegraff_uses_github_releases_and_self_updater() {
+        let spec = provider(HarnessId::Codegraff);
+        assert_eq!(spec.version_args, &["--version"]);
+        assert!(matches!(
+            spec.latest,
+            LatestSource::Github {
+                repository: "justrach/codegraff",
+                tag_prefix: "v",
+            }
+        ));
+        assert_eq!(spec.update_args, Some(&["update"][..]));
+        assert_eq!(spec.manual_command, "graff update");
     }
 
     /// A harness whose CLI is wherever a file says, as PATH resolution finds

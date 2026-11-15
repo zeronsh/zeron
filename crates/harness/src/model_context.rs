@@ -70,6 +70,15 @@ pub(crate) fn context(
         HarnessId::Pi => {
             vec![root("PI_CODING_AGENT_DIR", home.join(".pi/agent")).join("auth.json")]
         }
+        HarnessId::Codegraff => vec![
+            home.join(".simple-harness-codegraff.json"),
+            home.join(".simple-harness-keys.json"),
+            home.join(".graff/credentials/chatgpt-new.json"),
+            home.join(".anthropic/credentials/graff-oauth.json"),
+            home.join(".kimi/credentials/graff-oauth.json"),
+            home.join(".xai/credentials/graff-oauth.json"),
+            home.join(".graff/saved_model.json"),
+        ],
         HarnessId::Devin => {
             let data = root("XDG_DATA_HOME", home.join(".local/share"));
             let mut files = vec![data.join("devin/credentials.toml")];
@@ -114,6 +123,20 @@ pub(crate) fn context(
         HarnessId::Antigravity => &["GEMINI_", "GOOGLE_"],
         HarnessId::Cursor => &["CURSOR_"],
         HarnessId::Fx => &["FX_", "AI_GATEWAY_", "OPENAI_", "ANTHROPIC_"],
+        HarnessId::Codegraff => &[
+            "GRAFF_",
+            "CODEGRAFF_",
+            "OPENAI_",
+            "ANTHROPIC_",
+            "XAI_",
+            "KIMI_",
+            "OPENROUTER_",
+            "GEMINI_",
+            "GOOGLE_",
+            "DEEPSEEK_",
+            "GROQ_",
+            "MISTRAL_",
+        ],
         _ => &[],
     };
     let mut env: Vec<_> = std::env::vars_os()

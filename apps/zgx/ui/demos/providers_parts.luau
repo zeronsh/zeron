@@ -78,6 +78,7 @@ local MORE: { Agent } = {
 	{ id = "pi", name = "Pi", mark = "pi" },
 	{ id = "hermes", name = "Hermes", mark = "hermes" },
 	{ id = "muse", name = "Muse Code", mark = "muse" },
+	{ id = "codegraff", name = "Codegraff", mark = "codegraff" },
 }
 M.MORE = MORE
 -- Who each agent is signed in as: a plan, and how much of its session and

@@ -149,6 +149,7 @@ pub(super) fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Opencode => "opencode",
         HarnessId::Pi => "pi",
         HarnessId::Hermes => "hermes",
+        HarnessId::Codegraff => "graff",
         HarnessId::Fx => "fx",
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Muse => "muse",
@@ -165,6 +166,9 @@ pub(super) fn upstream_vendor(store_key: &str) -> &'static str {
         "github-copilot" | "copilot" => "GitHub",
         "nous" => "Nous",
         "xai-oauth" | "xai" => "xAI",
+        "codegraff" => "Codegraff",
+        "chatgpt-new" => "OpenAI",
+        "kimi" => "Moonshot",
         _ => "the provider",
     }
 }
@@ -174,6 +178,9 @@ pub(super) fn upstream_vendor(store_key: &str) -> &'static str {
 /// (Its Claude flow wants a pasted code; Qwen imports Qwen CLI's login;
 /// OpenRouter mints an API key; MiniMax wasn't verified.)
 pub(super) const HERMES_LOGINS: &[&str] = &["openai-codex", "nous", "xai-oauth"];
+
+pub(super) const CODEGRAFF_LOGINS: &[&str] =
+    &["codegraff", "chatgpt-new", "anthropic", "kimi", "xai"];
 
 pub(super) fn unsupported_login(harness: HarnessId, provider: &str) -> EngineError {
     let reason = match (harness, provider) {
@@ -1597,6 +1604,351 @@ pub(super) fn scan_grok_url(output: &str) -> Option<String> {
 
 pub(super) fn scan_hermes_url(output: &str) -> Option<String> {
     scan_https_url(output, &["nousresearch.com", "openai.com", "x.ai"])
+}
+
+pub(super) fn scan_codegraff_url(output: &str) -> Option<String> {
+    scan_https_url(
+        output,
+        &[
+            "codegraff.com",
+            "chatgpt.com",
+            "openai.com",
+            "claude.ai",
+            "anthropic.com",
+            "kimi.com",
+            "moonshot.cn",
+            "moonshot.ai",
+            "x.ai",
+            "grok.com",
+        ],
+    )
+}
+
+fn codegraff_oauth_file(home: &Path, provider: &str) -> Option<PathBuf> {
+    Some(match provider {
+        "codegraff" => home.join(".simple-harness-codegraff.json"),
+        "chatgpt-new" => home
+            .join(".graff")
+            .join("credentials")
+            .join("chatgpt-new.json"),
+        "anthropic" => home
+            .join(".anthropic")
+            .join("credentials")
+            .join("graff-oauth.json"),
+        "kimi" => home
+            .join(".kimi")
+            .join("credentials")
+            .join("graff-oauth.json"),
+        "xai" => home
+            .join(".xai")
+            .join("credentials")
+            .join("graff-oauth.json"),
+        _ => return None,
+    })
+}
+
+fn codegraff_keys_file(home: &Path) -> PathBuf {
+    home.join(".simple-harness-keys.json")
+}
+
+fn parse_codegraff_oauth(
+    provider: &str,
+    creds: serde_json::Value,
+    existing_slots: &[Slot],
+) -> Option<Detected> {
+    match provider {
+        "codegraff" => {
+            let key = str_field(&creds, "api_key").filter(|k| !k.is_empty())?;
+            let account_key = format!("codegraff:{}", hashed_key(&key));
+            let profile = SlotProfile {
+                email: format!("Codegraff {}", api_keys::masked(&key)),
+                display_name: None,
+                organization: None,
+                plan: Some("Codegraff".to_string()),
+                auth_kind: AgentAuthKind::Oauth,
+            };
+            Some(Detected::known(account_key, profile, creds).keyed("codegraff"))
+        }
+        "chatgpt-new" => {
+            let access = str_field(&creds, "access_token").filter(|s| !s.is_empty())?;
+            let access_claims = jwt_claims(&access).unwrap_or_default();
+            let id_claims = str_field(&creds, "id_token")
+                .as_deref()
+                .and_then(jwt_claims)
+                .unwrap_or_default();
+            let auth = access_claims
+                .get("https://api.openai.com/auth")
+                .or_else(|| id_claims.get("https://api.openai.com/auth"))
+                .cloned()
+                .unwrap_or_default();
+            let email = str_field(&creds, "email")
+                .or_else(|| {
+                    access_claims
+                        .get("https://api.openai.com/profile")
+                        .and_then(|p| str_field(p, "email"))
+                })
+                .or_else(|| str_field(&id_claims, "email"));
+            let account_id =
+                str_field(&creds, "subject").or_else(|| str_field(&auth, "chatgpt_account_id"));
+            let identity = account_id.or_else(|| email.clone()).unwrap_or_else(|| {
+                hashed_key(str_field(&creds, "refresh_token").as_deref().unwrap_or(&access))
+            });
+            let plan = str_field(&auth, "chatgpt_plan_type")
+                .and_then(|p| codex_plan(Some(&p)))
+                .or_else(|| Some("ChatGPT".to_string()));
+            let profile = SlotProfile {
+                email: email.unwrap_or_else(|| "ChatGPT account".to_string()),
+                display_name: str_field(&id_claims, "name"),
+                organization: None,
+                plan,
+                auth_kind: AgentAuthKind::Oauth,
+            };
+            Some(
+                Detected::known(format!("chatgpt-new:{identity}"), profile, creds)
+                    .keyed("chatgpt-new"),
+            )
+        }
+        "anthropic" | "kimi" | "xai" => {
+            let access = str_field(&creds, "access_token").filter(|s| !s.is_empty())?;
+            let refresh = str_field(&creds, "refresh_token").filter(|s| !s.is_empty());
+            if let Some(slot) = existing_slots.iter().find(|slot| {
+                slot.store_key.as_deref() == Some(provider)
+                    && slot.profile.auth_kind == AgentAuthKind::Oauth
+                    && (str_field(&slot.credentials, "access_token").as_deref()
+                        == Some(access.as_str())
+                        || refresh.as_ref().is_some_and(|r| {
+                            str_field(&slot.credentials, "refresh_token").as_deref()
+                                == Some(r.as_str())
+                        }))
+            }) {
+                return Some(
+                    Detected::known(slot.account_key.clone(), slot.profile.clone(), creds)
+                        .keyed(provider),
+                );
+            }
+            let claims = jwt_claims(&access).unwrap_or_default();
+            let email = str_field(&creds, "email").or_else(|| str_field(&claims, "email"));
+            let sub = str_field(&creds, "sub")
+                .or_else(|| str_field(&creds, "subject"))
+                .or_else(|| str_field(&claims, "sub"));
+            let identity = email
+                .clone()
+                .or(sub)
+                .unwrap_or_else(|| hashed_key(refresh.as_deref().unwrap_or(&access)));
+            let label = match provider {
+                "anthropic" => "Claude",
+                "kimi" => "Kimi",
+                "xai" => "xAI",
+                _ => provider,
+            };
+            let profile = SlotProfile {
+                email: email.unwrap_or_else(|| format!("{label} {}", api_keys::masked(&access))),
+                display_name: None,
+                organization: None,
+                plan: Some(label.to_string()),
+                auth_kind: AgentAuthKind::Oauth,
+            };
+            Some(Detected::known(format!("{provider}:{identity}"), profile, creds).keyed(provider))
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn detect_codegraff_in_home(home: &Path, existing_slots: &[Slot]) -> Vec<Detected> {
+    let mut resolved = Vec::new();
+    let mut oauth_seen: HashSet<&'static str> = HashSet::new();
+    for &provider in CODEGRAFF_LOGINS {
+        let Some(path) = codegraff_oauth_file(home, provider) else {
+            continue;
+        };
+        let Some(creds) = read_json(&path) else {
+            continue;
+        };
+        if let Some(detected) = parse_codegraff_oauth(provider, creds, existing_slots) {
+            oauth_seen.insert(provider);
+            resolved.push(detected);
+        }
+    }
+    if let Some(map) = read_json(&codegraff_keys_file(home))
+        .as_ref()
+        .and_then(|v| v.as_object())
+    {
+        for (provider, secret) in map {
+            if oauth_seen.contains(provider.as_str()) {
+                continue;
+            }
+            let Some(secret) = secret.as_str() else {
+                continue;
+            };
+            let entry = serde_json::json!({ "type": "api_key", "key": secret });
+            if let Some(detected) = api_keys::key_detected(HarnessId::Codegraff, provider, &entry)
+            {
+                resolved.push(detected);
+            }
+        }
+    }
+    resolved
+}
+
+fn detect_codegraff_entry_in_home(
+    home: &Path,
+    provider: &str,
+    existing_slots: &[Slot],
+) -> Option<Detected> {
+    if CODEGRAFF_LOGINS.contains(&provider)
+        && let Some(path) = codegraff_oauth_file(home, provider)
+        && let Some(creds) = read_json(&path)
+        && let Some(detected) = parse_codegraff_oauth(provider, creds, existing_slots)
+    {
+        return Some(detected);
+    }
+    let keys = read_json(&codegraff_keys_file(home))?;
+    let secret = keys.get(provider)?.as_str()?;
+    let entry = serde_json::json!({ "type": "api_key", "key": secret });
+    api_keys::key_detected(HarnessId::Codegraff, provider, &entry)
+}
+
+impl AgentAccounts {
+    pub(super) fn detect_codegraff(&self) -> Vec<Detected> {
+        detect_codegraff_in_home(
+            &self.inner.config.codegraff_home,
+            &self.read_slots(HarnessId::Codegraff),
+        )
+    }
+
+    pub(super) fn detect_codegraff_entry(&self, provider: &str) -> Option<Detected> {
+        detect_codegraff_entry_in_home(
+            &self.inner.config.codegraff_home,
+            provider,
+            &self.read_slots(HarnessId::Codegraff),
+        )
+    }
+
+    pub(super) fn swap_codegraff(&self, provider: &str, slot: &Slot) -> Result<(), EngineError> {
+        if let Some(live) = self.detect_codegraff_entry(provider)
+            && live.account_key != slot.account_key
+        {
+            self.snapshot_detected(HarnessId::Codegraff, &live)?;
+        }
+        self.write_codegraff_entry(provider, Some(&slot.credentials))
+    }
+
+    pub(super) fn write_codegraff_entry(
+        &self,
+        provider: &str,
+        creds: Option<&serde_json::Value>,
+    ) -> Result<(), EngineError> {
+        let home = &self.inner.config.codegraff_home;
+        let keys_file = codegraff_keys_file(home);
+        let root = self.inner.config.private_root()?;
+        let keys_lock = StoreLock::File(root.join("codegraff-keys.lock"));
+        match creds {
+            Some(creds) if api_keys::key_entry_secret(HarnessId::Codegraff, creds).is_some() => {
+                let secret = api_keys::key_entry_secret(HarnessId::Codegraff, creds).unwrap();
+                let val = serde_json::Value::String(secret);
+                merge_json_entry(&keys_file, provider, Some(&val), keys_lock)?;
+                if let Some(oauth) = codegraff_oauth_file(home, provider) {
+                    remove_if_exists(&oauth)?;
+                }
+            }
+            Some(creds) => {
+                let oauth = codegraff_oauth_file(home, provider).ok_or_else(|| {
+                    EngineError::Other(format!("Unknown Codegraff provider {provider}."))
+                })?;
+                if let Some(dir) = oauth.parent() {
+                    if provider == "codegraff" {
+                        std::fs::create_dir_all(dir)?;
+                    } else {
+                        private_dir(dir)?;
+                    }
+                }
+                let json = serde_json::to_string_pretty(creds)
+                    .map_err(|e| EngineError::Other(format!("serialize codegraff auth: {e}")))?;
+                write_file_atomic(&oauth, json.as_bytes(), true)?;
+                if provider == "chatgpt-new"
+                    && let Some(host_id) = str_field(creds, "ext_agent_host_id")
+                    && let Some(dir) = oauth.parent()
+                {
+                    write_file_atomic(&dir.join("chatgpt-new-host-id"), host_id.as_bytes(), true)?;
+                }
+                merge_json_entry(&keys_file, provider, None, keys_lock)?;
+            }
+            None => {
+                if let Some(oauth) = codegraff_oauth_file(home, provider) {
+                    remove_if_exists(&oauth)?;
+                }
+                if provider == "chatgpt-new" {
+                    remove_if_exists(
+                        &home
+                            .join(".graff")
+                            .join("credentials")
+                            .join("chatgpt-new-host-id"),
+                    )?;
+                }
+                merge_json_entry(&keys_file, provider, None, keys_lock)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn start_codegraff_login(
+        &self,
+        provider: &str,
+        requester: Option<&str>,
+    ) -> Result<AgentLoginStart, EngineError> {
+        if !CODEGRAFF_LOGINS.contains(&provider) {
+            return Err(unsupported_login(HarnessId::Codegraff, provider));
+        }
+        self.reap_spawned_flows(HarnessId::Codegraff);
+        let login_id = new_id();
+        let home = self.login_home(&login_id)?;
+        if provider == "chatgpt-new" {
+            let live_host_id = self
+                .inner
+                .config
+                .codegraff_home
+                .join(".graff")
+                .join("credentials")
+                .join("chatgpt-new-host-id");
+            if let Ok(bytes) = std::fs::read(&live_host_id) {
+                let creds_dir = home.join(".graff").join("credentials");
+                if private_dir(&creds_dir).is_ok() {
+                    let _ = write_file_atomic(&creds_dir.join("chatgpt-new-host-id"), &bytes, true);
+                }
+            }
+        }
+        let args: &[&str] = if provider == "codegraff" {
+            &["login"]
+        } else {
+            &["login", provider]
+        };
+        let mut command = match self.cli_command(HarnessId::Codegraff, args).await {
+            Ok(command) => command,
+            Err(err) => {
+                let _ = std::fs::remove_dir_all(&home);
+                return Err(err);
+            }
+        };
+        command
+            .env("HOME", &home)
+            .env("GRAFF_NO_BROWSER", "1");
+        #[cfg(windows)]
+        command.env("USERPROFILE", &home);
+        #[cfg(unix)]
+        if let Some(noop) = ensure_noop_browser(&self.inner.config.root_dir()) {
+            command.env("BROWSER", noop);
+        }
+        self.spawn_login_child(
+            login_id,
+            HarnessId::Codegraff,
+            command,
+            home,
+            SpawnedCompletion::CredentialFile,
+            scan_codegraff_url,
+            requester,
+        )
+        .await
+    }
 }
 
 /// Devin's sign-in page — its CLI-auth page (`/auth/cli/…`) or the Windsurf

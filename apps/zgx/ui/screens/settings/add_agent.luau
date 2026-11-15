@@ -77,6 +77,7 @@ local BUILT_IN_MARKS: { [string]: string } = {
 	opencode = "opencode",
 	pi = "pi",
 	antigravity = "antigravity",
+	codegraff = "codegraff",
 }
 
 local function by_id(a: registry.Agent): string

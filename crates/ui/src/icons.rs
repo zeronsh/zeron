@@ -240,6 +240,7 @@ icon_assets![
     (ANTIGRAVITY_MARK, "antigravity-mark"),
     // Muse Code's mark (Meta's infinity), tinted its brand blue at call sites.
     (MUSE_MARK, "muse-mark"),
+    (CODEGRAFF_MARK, "codegraff-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity
@@ -389,6 +390,7 @@ mod tests {
             GIT_BRANCH,
             CLOSE_CIRCLE,
             FOLDER_TREE,
+            CODEGRAFF_MARK,
         ] {
             let bytes = Assets.load(path).unwrap().unwrap();
             let image = renderer.render_single_frame(&bytes, 1.0).unwrap();

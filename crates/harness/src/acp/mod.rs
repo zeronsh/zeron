@@ -548,6 +548,60 @@ fn hermes_spec() -> AcpAgentSpec {
     }
 }
 
+fn codegraff_install_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = crate::executable::home_dir() {
+        paths.push(home.join("bin").join("graff"));
+        paths.push(home.join(".harness").join("bin").join("graff"));
+        paths.push(home.join(".local").join("bin").join("graff"));
+    }
+    if cfg!(windows)
+        && let Some(local_app_data) = std::env::var_os("LOCALAPPDATA")
+    {
+        paths.push(
+            PathBuf::from(local_app_data)
+                .join("Programs")
+                .join("graff")
+                .join("bin")
+                .join("graff.exe"),
+        );
+    }
+    paths.push(PathBuf::from("/opt/homebrew/bin/graff"));
+    paths.push(PathBuf::from("/usr/local/bin/graff"));
+    paths
+}
+
+fn codegraff_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Codegraff,
+        display_name: "Codegraff",
+        executable: "graff",
+        env_override: "GRAFF_EXECUTABLE",
+        args: &["acp"],
+        npm_package: None,
+        archive: None,
+        extra_paths: codegraff_install_paths,
+        cli_executable: "graff",
+        cli_extra_paths: codegraff_install_paths,
+        install_hint: "Install with `curl -fsSL https://github.com/justrach/codegraff/releases/latest/download/install.sh | bash` (or `irm https://github.com/justrach/codegraff/releases/latest/download/install.ps1 | iex` on Windows), then sign in with `graff login`. Set GRAFF_EXECUTABLE for a custom installation.",
+        models: Vec::new,
+        steering_mode: SteeringMode::TurnBoundary,
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "Check Codegraff's provider credentials with `graff login` or `~/.simple-harness-keys.json`.",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: false,
+        access_modes: &[AccessMode::Supervised, AccessMode::FullAccess],
+    }
+}
+
 /// google's builds as the acp registry lists them (`antigravity-acp`); `None`
 /// on platforms without one, where only an explicit override can launch.
 fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
@@ -1748,6 +1802,11 @@ impl AcpHarness {
         Self::with_spec(hermes_spec())
     }
 
+    /// Codegraff (`graff acp`) — multi-provider ACP coding agent.
+    pub fn codegraff() -> Self {
+        Self::with_spec(codegraff_spec())
+    }
+
     /// An agent added from the ACP registry, launched from its record
     /// ([`crate::acp_registry`]): the generic harness, the same for every
     /// registry agent. `name` is how it's shown.
@@ -2943,15 +3002,41 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
     models
 }
 
+fn codegraff_provider_name(id: &str) -> String {
+    match id {
+        "codegraff" => "Codegraff".to_owned(),
+        "chatgpt-new" => "ChatGPT".to_owned(),
+        "codex" => "Codex".to_owned(),
+        "claude-agent" => "Claude Code".to_owned(),
+        "kimi" => "Kimi".to_owned(),
+        "deepseek" => "DeepSeek".to_owned(),
+        _ => crate::pi::provider_name(id),
+    }
+}
+
 /// A model an agent names `<provider>:<model>` and labels
 /// `<Provider> · <model>` (Hermes: `anthropic:claude-fable-5.1`, "Anthropic ·
-/// claude-fable-5.1"): its label is the model, and its provider rides on
-/// `provider`, named as people say it (`openai-codex` → Codex, as for Pi and
-/// OpenCode), else as the agent wrote it. The picker shows it beside the
-/// name, like every agent that reaches models through several providers.
+/// claude-fable-5.1"), or `<provider>/<model>` labeled `<model> · <provider>`
+/// (Codegraff: `chatgpt-new/gpt-5.4`, "GPT-5.4 · chatgpt-new"): its label is
+/// the model, and its provider rides on `provider`, named as people say it.
 fn split_provider_label(model: &mut Model) {
     if model.provider.is_some() {
         return;
+    }
+    if let Some((pid, mid)) = model.id.split_once('/')
+        && !pid.trim().is_empty()
+        && !mid.trim().is_empty()
+        && let Some((name, suffix)) = model.label.rsplit_once(" \u{b7} ")
+    {
+        let (pid, name, suffix) = (pid.trim(), name.trim(), suffix.trim());
+        if !name.is_empty() && suffix == pid {
+            model.label = name.to_owned();
+            model.provider = Some(zeron_proto::ModelProvider {
+                id: pid.to_owned(),
+                name: codegraff_provider_name(pid),
+            });
+            return;
+        }
     }
     let Some((pid, _)) = model.id.split_once(':') else {
         return;
@@ -5137,7 +5222,7 @@ async fn select_session_config(
         )),
         model => model.map(str::to_owned),
     };
-    if rules.harness == HarnessId::Antigravity {
+    if matches!(rules.harness, HarnessId::Antigravity | HarnessId::Codegraff) {
         validate_config_model_selection(
             &session_response,
             requested_model.as_deref(),
@@ -5223,7 +5308,10 @@ async fn select_session_config(
                 Err(e) => {
                     if matches!(
                         rules.harness,
-                        HarnessId::Antigravity | HarnessId::Devin | HarnessId::Fx
+                        HarnessId::Antigravity
+                            | HarnessId::Codegraff
+                            | HarnessId::Devin
+                            | HarnessId::Fx
                     ) && requested_model.is_some()
                         && is_model_config_option(&options_snapshot, &config_id)
                     {
@@ -7752,6 +7840,50 @@ mod tests {
         assert_eq!(nous.provider.as_ref().map(|p| p.name.as_str()), Some("Nous Portal Plus"));
         let plain = row("local-model");
         assert_eq!(plain.label, "Local Model");
+        assert!(plain.provider.is_none());
+    }
+
+    #[test]
+    fn codegraff_provider_badge_splits_from_label() {
+        let response = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "chatgpt-new/gpt-5.4",
+                    "options": [
+                        { "value": "chatgpt-new/gpt-5.4", "name": "GPT-5.4 \u{b7} chatgpt-new" },
+                        { "value": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet 4.6 \u{b7} anthropic" },
+                        { "value": "kimi/kimi-k2.5", "name": "Kimi K2.5 \u{b7} kimi" },
+                        { "value": "openrouter/model-a", "name": "Unlabeled Model" },
+                    ],
+                },
+            ],
+        });
+        let models = models_from_session(&response, &[]);
+        let row = |id: &str| models.iter().find(|m| m.id == id).unwrap_or_else(|| panic!("{id}"));
+        let gpt = row("chatgpt-new/gpt-5.4");
+        assert_eq!(gpt.label, "GPT-5.4");
+        assert_eq!(
+            gpt.provider.as_ref().map(|p| (p.id.as_str(), p.name.as_str())),
+            Some(("chatgpt-new", "ChatGPT"))
+        );
+        let sonnet = row("anthropic/claude-sonnet-4-6");
+        assert_eq!(sonnet.label, "Claude Sonnet 4.6");
+        assert_eq!(
+            sonnet.provider.as_ref().map(|p| (p.id.as_str(), p.name.as_str())),
+            Some(("anthropic", "Anthropic"))
+        );
+        let kimi = row("kimi/kimi-k2.5");
+        assert_eq!(kimi.label, "Kimi K2.5");
+        assert_eq!(
+            kimi.provider.as_ref().map(|p| (p.id.as_str(), p.name.as_str())),
+            Some(("kimi", "Kimi"))
+        );
+        let plain = row("openrouter/model-a");
+        assert_eq!(plain.label, "Unlabeled Model");
         assert!(plain.provider.is_none());
     }
 
