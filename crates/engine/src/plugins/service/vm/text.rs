@@ -7,9 +7,13 @@
 //!
 //! Each VM has its own, made on its first use, so a font one plugin loads
 //! reaches no other (a window's `ui.load_font` reaches every window, and
-//! asks for the "fonts" grant).
+//! asks for the "fonts" grant). A font loaded again is the one it has, and
+//! a VM loads [`MAX_FONTS`] and [`MAX_FONT_BYTES`] at most: what fonts keep
+//! is outside the service's memory limit.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -41,10 +45,32 @@ pub(super) const APP_FONTS: [&[u8]; 9] = [
     include_bytes!("../../../../../../apps/zgx/fonts/InstrumentSerif-Italic.ttf"),
 ];
 
+/// The most fonts a VM loads.
+pub(super) const MAX_FONTS: usize = 64;
+/// The most bytes of fonts a VM loads, together.
+pub(super) const MAX_FONT_BYTES: usize = 256 << 20;
+
 /// A VM's text: its fonts, and a scene to measure in, as a canvas does.
-#[derive(Default)]
 pub(super) struct Text {
-    ready: OnceCell<(TextServices, Scene)>,
+    pub(super) ready: OnceCell<(TextServices, Scene)>,
+    /// The fonts loaded, by their bytes' hash: their families.
+    pub(super) loaded: RefCell<HashMap<u64, Vec<String>>>,
+    /// Their bytes, together.
+    pub(super) bytes: std::cell::Cell<usize>,
+    pub(super) max_fonts: usize,
+    pub(super) max_bytes: usize,
+}
+
+impl Default for Text {
+    fn default() -> Self {
+        Self {
+            ready: OnceCell::new(),
+            loaded: RefCell::default(),
+            bytes: std::cell::Cell::new(0),
+            max_fonts: MAX_FONTS,
+            max_bytes: MAX_FONT_BYTES,
+        }
+    }
 }
 
 impl Text {
@@ -94,12 +120,28 @@ impl Text {
     /// The font in `bytes` (`what` names it in an error), beside the faces
     /// it has: the family names it holds.
     pub(super) fn install(&self, bytes: Vec<u8>, what: &str) -> Result<Vec<String>, String> {
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        let hash = hasher.finish();
+        if let Some(families) = self.loaded.borrow().get(&hash) {
+            return Ok(families.clone());
+        }
+        if self.loaded.borrow().len() >= self.max_fonts {
+            return Err(format!("{what}: a service loads {} fonts at most", self.max_fonts));
+        }
+        let len = bytes.len();
+        if self.bytes.get() + len > self.max_bytes {
+            return Err(format!("{what}: a service loads {} MB of fonts at most", self.max_bytes >> 20));
+        }
         let font = FontData::new(bytes).map_err(|why| format!("{what}: {why}"))?;
         let (services, _) = self.ready();
         font.install(&mut services.text_system().borrow_mut());
         // Text shaped before in a family that fell back shapes in it now.
         services.release_unused();
-        Ok(font.families().to_vec())
+        let families = font.families().to_vec();
+        self.loaded.borrow_mut().insert(hash, families.clone());
+        self.bytes.set(self.bytes.get() + len);
+        Ok(families)
     }
 }
 

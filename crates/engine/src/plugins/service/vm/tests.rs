@@ -431,6 +431,22 @@ fn json_round_trips_through_luau() {
     }
 }
 
+#[test]
+fn a_font_loaded_again_is_the_one_there_and_a_vm_loads_so_many() {
+    let text = text::Text { max_fonts: 2, ..Default::default() };
+    let geist = text::APP_FONTS[0].to_vec();
+    let first = text.install(geist.clone(), "Geist").unwrap();
+    // Again: the same families, nothing more kept.
+    assert_eq!(text.install(geist, "Geist").unwrap(), first);
+    text.install(text::APP_FONTS[1].to_vec(), "Geist Italic").unwrap();
+    let past = text.install(text::APP_FONTS[2].to_vec(), "Geist Medium").unwrap_err();
+    assert!(past.contains("2 fonts at most"), "{past}");
+    let small = text::Text { max_bytes: text::APP_FONTS[0].len() + 1, ..Default::default() };
+    small.install(text::APP_FONTS[0].to_vec(), "Geist").unwrap();
+    let past = small.install(text::APP_FONTS[1].to_vec(), "Geist Italic").unwrap_err();
+    assert!(past.contains("MB of fonts at most"), "{past}");
+}
+
 const MEASURING: &str = r#"
 local zeron = require("./zeron")("svc")
 
