@@ -12,7 +12,7 @@
 //! | `accounts.read` | read the saved accounts (and their email); account events |
 //! | `accounts.switch` | make another saved account the active one |
 //! | `accounts.pin` | run one chat on a saved account of its own, and answer the pre-run hook |
-//! | `models.read` | read a harness's models and a chat's model; model events |
+//! | `models.read` | the enabled agents, a harness's models and a chat's model; model events |
 //! | `models.set` | set a chat's model, effort and options |
 //! | `models.ask` | one turn through a model of its own: no MCP servers, skills or files |
 //! | `messages.send` | send a chat a message, start a chat, answer a question, as the composer does |
@@ -170,6 +170,10 @@ pub trait AgentHost: Send + Sync + 'static {
     fn activate(&self, harness: HarnessId, account: String) -> BoxFuture<'static, Result<AgentAccountsSnapshot, String>>;
     /// `ListModels` on this device.
     fn models(&self, harness: HarnessId) -> BoxFuture<'static, Result<Vec<Model>, String>>;
+    /// The agents enabled on this device, in Zeron's order, with their names.
+    fn agents(&self) -> Vec<(HarnessId, String)> {
+        Vec::new()
+    }
     /// The workspace's chats.
     fn chats(&self) -> Vec<Chat>;
     /// This device's sessions (their status).
@@ -563,6 +567,7 @@ fn model_row(m: &Model) -> Json {
         "id": m.id,
         "label": m.label,
         "description": m.description,
+        "default": m.default,
         "efforts": m.reasoning_levels.iter().map(|l| effort_word(*l)).collect::<Vec<_>>(),
         "options": m.options.iter().map(|o| json!({
             "id": o.id,
@@ -731,6 +736,13 @@ impl Agents {
             "switch_account" => {
                 need(ACCOUNTS_SWITCH, "switch your agents' accounts")?;
                 self.switch(&by, &args).await
+            }
+            "agents" => {
+                need(MODELS_READ, "see your agents' models")?;
+                let host = self.host()?;
+                let agents = host.agents().into_iter();
+                let rows = agents.map(|(id, name)| json!({ "id": id.as_str(), "name": name }));
+                Ok(Json::Array(rows.collect()))
             }
             "models" => {
                 need(MODELS_READ, "see your agents' models")?;

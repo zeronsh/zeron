@@ -64,6 +64,12 @@ impl AgentHost for EngineAgentHost {
         })
     }
 
+    fn agents(&self) -> Vec<(HarnessId, String)> {
+        let descriptors = self.registry.descriptors().into_iter();
+        let on = descriptors.filter(|d| d.enabled == Some(true) && d.installed);
+        on.map(|d| (d.id, d.name)).collect()
+    }
+
     fn ask(&self, one: OneShot) -> BoxFuture<'static, Result<String, String>> {
         let registry = self.registry.clone();
         Box::pin(async move { crate::oneshot::ask(&registry, one).await.map_err(|e| e.to_string()) })

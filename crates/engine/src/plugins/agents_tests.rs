@@ -131,6 +131,10 @@ impl AgentHost for Host {
         Box::pin(async { Ok(vec![model("opus"), model("sonnet")]) })
     }
 
+    fn agents(&self) -> Vec<(HarnessId, String)> {
+        vec![(HarnessId::ClaudeCode, "Claude Code".into()), (HarnessId::Codex, "Codex".into())]
+    }
+
     fn ask(&self, one: OneShot) -> BoxFuture<'static, Result<String, String>> {
         lock(&self.asks).push(one);
         Box::pin(async { Ok("a rewritten prompt".into()) })
@@ -316,6 +320,7 @@ async fn agents_each_op_is_refused_without_its_permission_and_answered_with_it()
         (ACCOUNTS_READ, json!({ "op": "accounts" })),
         (ACCOUNTS_SWITCH, json!({ "op": "switch_account", "provider": "claude-code", "account": "a2" })),
         (MODELS_READ, json!({ "op": "models", "harness": "claude-code" })),
+        (MODELS_READ, json!({ "op": "agents" })),
         (MODELS_READ, json!({ "op": "chat_model", "chat": "c1" })),
         (MODELS_SET, json!({ "op": "set_model", "chat": "c1", "model": "sonnet" })),
         (
@@ -1224,6 +1229,17 @@ async fn with_nobody_listening_the_pre_run_hook_reads_nothing_and_waits_for_no_o
     f.hook("p");
     f.answer("p", Ok(json!({ "account": "a2" })), Duration::ZERO);
     assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, "c1").await.as_deref(), Some("a2"));
+}
+
+#[tokio::test]
+async fn agents_lists_the_enabled_agents_in_order() {
+    let f = Fixture::new();
+    f.grant("p", &[MODELS_READ]);
+    let agents = f.op("p", json!({ "op": "agents" })).await.unwrap();
+    assert_eq!(
+        agents,
+        json!([{ "id": "claude-code", "name": "Claude Code" }, { "id": "codex", "name": "Codex" }])
+    );
 }
 
 #[tokio::test]

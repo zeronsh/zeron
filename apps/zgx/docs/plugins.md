@@ -66,7 +66,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `accounts.read` | read the saved agent accounts: which is active, which can be switched to, each one's email and name |
 | `accounts.switch` | make another saved account the active one for a provider, on this device or one it names. Always asked, even for your own plugins |
 | `accounts.pin` | run one chat on a saved account of its own, beside the active one (which stays as it is), and decide the account a new chat starts on. Always asked, even for your own plugins. See [Pinning chats](#pinning-chats-to-accounts) |
-| `models.read` | read each harness's models, efforts and options, and a chat's model |
+| `models.read` | read which agents are enabled, each harness's models, efforts and options, and a chat's model |
 | `models.set` | set a chat's model, effort and options, and what new chats start with. Always asked, even for your own plugins |
 | `models.ask` | run one turn of a model of its own (`zeron.ask`): instructions of its own, no MCP servers, skills or files, on the harness's own login. Always asked, even for your own plugins |
 | `messages.send` | send a chat a message, start a chat, answer a chat's question, as you would from the composer. Always asked, even for your own plugins. See [Sending messages](#sending-messages) |
@@ -452,7 +452,8 @@ A plugin can watch how much of your agents' plans you've used, switch which save
 | `zeron.switch_account { provider, account, when_idle?, device? }` | make a saved account the active one: a promise of `{ status = "switched" }`, or `"waiting"` with `when_idle` | `accounts.switch` |
 | `zeron.pin_account { provider, chat, account?, device? }` | run a chat on a saved account of its own, from its next run, while the active account stays as it is; no `account` takes the pin back: a promise of `{ provider, chat, account? }`, or `already` when nothing changes | `accounts.pin` |
 | `zeron.pins { provider?, device? }` | the chats pinned to an account: `{ { provider, account, since, chat? } }` (`chat` with `sessions.read`) | `accounts.read` |
-| `zeron.models(harness, { device? })` | a harness's models: `{ { id, label, efforts, options = { { id, label, default, choices } } } }` | `models.read` |
+| `zeron.agents({ device? })` | the agents enabled on that device, in Zeron's order: `{ { id, name } }` | `models.read` |
+| `zeron.models(harness, { device? })` | a harness's models: `{ { id, label, default, efforts, options = { { id, label, default, choices } } } }` (a model's `default`: what a chat naming none runs) | `models.read` |
 | `zeron.chat_model(chat)` | a chat's `{ provider, model, effort, options }` | `models.read` |
 | `zeron.set_model { chat, model?, effort?, options? }` | a chat's model, effort or options, for its next turn, on the provider it has | `models.set` |
 | `zeron.set_default_model { harness, model, effort? }` | what a new chat starts with in this window (a window's call only) | `models.set` |
@@ -463,7 +464,7 @@ A plugin can watch how much of your agents' plans you've used, switch which save
 
 **What it never gets.** No sign-in, token or password; it can't add or remove an account, or read another plugin's grants. A read never makes Zeron ask a provider again (that can spend a saved login's one-time refresh); only `usage_refresh` does, paced.
 
-**Asking a model.** `zeron.ask` is one turn, not a chat: no MCP servers, no skills and no repository, so what it costs is one short turn and nothing it says reaches a chat. It runs on the harness's own login, whichever agent you have enabled: Claude Code and Codex take your instructions as the run's system prompt and switch their tools off, while the rest get them ahead of the one message, in a read-only run in an empty folder — an ask that reaches for a tool fails rather than doing work. `harness` and `model` are yours to pick (see `zeron.models`); without `model` it runs on the harness's default. One ask at a time for each plugin — a second is refused `paced` — and at most 32,000 characters of `input` with 8,000 of `instructions` (`bad_call` otherwise).
+**Asking a model.** `zeron.ask` is one turn, not a chat: no MCP servers, no skills and no repository, so what it costs is one short turn and nothing it says reaches a chat. It runs on the harness's own login, whichever agent you have enabled: Claude Code and Codex take your instructions as the run's system prompt and switch their tools off, while the rest get them ahead of the one message, in a read-only run in an empty folder — an ask that reaches for a tool fails rather than doing work. `harness` and `model` are yours to pick (see `zeron.agents` and `zeron.models`); without `model` it runs on the harness's default. One ask at a time for each plugin — a second is refused `paced` — and at most 32,000 characters of `input` with 8,000 of `instructions` (`bad_call` otherwise).
 
 **Switching.** A switch happens at once, chats running or not; pass `when_idle = true` to switch once that provider's chats on that device have finished (within 30 minutes). Switching to the account that's active already is refused (`already`). Each change says which plugin made it: in its event (`by = { plugin, name }`), and in `plugin_status` (`agents.actions`).
 

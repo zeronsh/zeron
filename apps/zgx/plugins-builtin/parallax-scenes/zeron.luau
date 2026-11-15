@@ -1251,7 +1251,14 @@ return function(id: string): any
 		return agents("pins", { provider = o.provider }, o.device)
 	end
 
-	-- A harness's models ("models.read"): { { id, label, efforts, options } }.
+	-- The agents enabled on this device, in Zeron's order ("models.read"):
+	-- { { id, name } }.
+	function M.agents(opts: { device: string? }?): any
+		return agents("agents", {}, opts and opts.device)
+	end
+
+	-- A harness's models ("models.read"): { { id, label, default, efforts,
+	-- options } }, `default` the one a chat naming none runs.
 	function M.models(harness: string, opts: { device: string? }?): any
 		return agents("models", { harness = harness }, opts and opts.device)
 	end

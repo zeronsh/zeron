@@ -361,7 +361,14 @@ local function service(id: string): any
 		return agents("pins", opts)
 	end
 
-	-- A harness's models ("models.read"): { { id, label, efforts, options } }.
+	-- The agents enabled on this device, in Zeron's order ("models.read"):
+	-- { { id, name } }.
+	function M.agents(): any
+		return agents("agents", {})
+	end
+
+	-- A harness's models ("models.read"): { { id, label, default, efforts,
+	-- options } }, `default` the one a chat naming none runs.
 	function M.models(harness: string): any
 		return agents("models", { harness = harness })
 	end
