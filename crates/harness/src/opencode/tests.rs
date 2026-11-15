@@ -2706,7 +2706,7 @@ async fn command_http_failure_errors_turn_without_watchdog() {
 fn agent_model_option_filters_and_preserves_ids() {
     let option = agent_option(&json!({"data":[
         {"id":"build-id","name":"Build","mode":"primary","hidden":false},
-        {"id":"all-id","name":"All","mode":"all"},
+        {"id":"all-id","name":"all","mode":"all"},
         {"id":"hidden","name":"Hidden","mode":"primary","hidden":true},
         {"id":"sub","name":"Sub","mode":"subagent"}
     ]}));

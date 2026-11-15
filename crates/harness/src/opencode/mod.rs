@@ -2034,7 +2034,7 @@ fn agent_option(agents: &Value) -> ModelOption {
     let choices: Vec<ModelOptionChoice> = primary_agents(agents)
         .map(|(id, name)| ModelOptionChoice {
             id: id.into(),
-            label: name.into(),
+            label: capitalised(name),
         })
         .collect();
     ModelOption {
@@ -2042,6 +2042,16 @@ fn agent_option(agents: &Value) -> ModelOption {
         label: "Agent".into(),
         default_choice: choices.first().map(|c| c.id.clone()).unwrap_or_default(),
         choices,
+    }
+}
+
+/// `lead` as `Lead`: the service spells some of its agents' names in lower
+/// case, and a list of them reads as names.
+fn capitalised(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        _ => String::new(),
     }
 }
 
