@@ -1,4 +1,4 @@
-﻿//! The Zeron engine this app works through: its account (src/auth.rs), the
+//! The Zeron engine this app works through: its account (src/auth.rs), the
 //! agents on this Mac (src/agents.rs) and GitHub for Cloud (src/github.rs)
 //! are all the engine's, reached over its local IPC ([`rpc`]). One
 //! connection for every window, kept open: dialled again when it drops,
