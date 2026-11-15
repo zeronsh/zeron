@@ -301,6 +301,51 @@ mod proc_table {
         info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
     }
 
+    /// Its parent's pid: 1 once its parent died and init adopted it.
+    #[cfg(target_os = "linux")]
+    pub(super) fn ppid(pid: i32) -> Option<i32> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        parse_stat(&stat).map(|(ppid, _, _)| ppid)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn ppid(pid: i32) -> Option<i32> {
+        bsd_info(pid).map(|info| info.pbi_ppid as i32)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn ppid(_pid: i32) -> Option<i32> {
+        None
+    }
+
+    /// The image the process runs: the interpreter for a `#!` script. A
+    /// file deleted since (an updated CLI) keeps the path it was run from.
+    #[cfg(target_os = "linux")]
+    pub(super) fn exe(pid: i32) -> Option<std::path::PathBuf> {
+        let link = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        let text = link.to_str()?;
+        Some(text.strip_suffix(" (deleted)").unwrap_or(text).into())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn exe(pid: i32) -> Option<std::path::PathBuf> {
+        use std::os::unix::ffi::OsStrExt as _;
+        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: `buf` is the size passed; proc_pidpath writes at most that
+        // and returns how many bytes it wrote.
+        let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        if len <= 0 {
+            return None;
+        }
+        buf.truncate(len as usize);
+        Some(std::ffi::OsStr::from_bytes(&buf).into())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn exe(_pid: i32) -> Option<std::path::PathBuf> {
+        None
+    }
+
     #[cfg(target_os = "linux")]
     pub(super) fn zombie(pid: i32) -> bool {
         std::fs::read_to_string(format!("/proc/{pid}/stat"))
@@ -793,6 +838,8 @@ mod tests {
 }
 
 pub(crate) mod owned;
+pub mod registry;
+pub use registry::spawn as spawn_agent;
 
 #[cfg(all(test, unix))]
 mod unexpected_descendants_tests {

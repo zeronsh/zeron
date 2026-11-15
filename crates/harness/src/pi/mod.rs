@@ -173,7 +173,7 @@ impl PiHarness {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let scratch = self::mcp::configure_all(&mut cmd, mcp, extra_mcp)?;
-        let child = cmd.spawn().map_err(|e| {
+        let child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, Some(cwd), || crate::executable::binary_hint(&exe))
         })?;
         let mut child = Child::new(child);

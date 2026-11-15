@@ -745,12 +745,10 @@ impl ClaudeHarness {
     ) -> Result<Runtime, HarnessError> {
         let (mut command, mcp_config) = Self::build_command_with_config(exe, request, title_only);
         tracing::debug!(target: "first_word", title_only, "claude spawning");
-        let mut child = command
-            .spawn()
-            .map_err(|e| {
-                let cwd = (!request.cwd.is_empty()).then(|| std::path::Path::new(&request.cwd));
-                crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
-            })?;
+        let mut child = crate::process::spawn_agent(&mut command).map_err(|e| {
+            let cwd = (!request.cwd.is_empty()).then(|| std::path::Path::new(&request.cwd));
+            crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
+        })?;
         tracing::debug!(target: "first_word", title_only, pid = child.id(), "claude spawned");
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
@@ -829,7 +827,7 @@ impl ClaudeHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&exe))
         })?;
         let stdio = (child.stdin.take(), child.stdout.take());

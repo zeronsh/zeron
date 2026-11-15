@@ -1016,7 +1016,7 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             let cwd = cwd.map(std::path::Path::new);
             fatal(crate::executable::spawn_error(e, cwd, || {
                 crate::executable::binary_hint(exe)

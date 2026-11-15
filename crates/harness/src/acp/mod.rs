@@ -1917,7 +1917,7 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             let home = std::env::var_os("HOME");
             let cwd = home.as_deref().map(std::path::Path::new);
             crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&exe))
@@ -2049,7 +2049,7 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         if let Some(stderr) = child.stderr.take() {
@@ -2332,7 +2332,7 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         let (client, incoming) = match (child.stdin.take(), child.stdout.take()) {
@@ -2420,9 +2420,9 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut login = cmd
-            .spawn()
-            .map_err(|e| crate::executable::spawn_error(e, None, || crate::executable::binary_hint(exe)))?;
+        let mut login = crate::process::spawn_agent(&mut cmd).map_err(|e| {
+            crate::executable::spawn_error(e, None, || crate::executable::binary_hint(exe))
+        })?;
         let mut readers = Vec::new();
         if let Some(out) = login.stdout.take() {
             readers.push(tokio::spawn(report_lines(out, on_progress.clone())));
@@ -2733,7 +2733,7 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let child = cmd.spawn().map_err(|e| {
+        let child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             let cwd = cwd.filter(|c| !c.is_empty()).map(std::path::Path::new);
             crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&exe))
         })?;

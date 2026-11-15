@@ -851,6 +851,15 @@ pub(crate) async fn shutdown_agent(
 /// terminated, descendants included — at once for a child with no stdin
 /// pipe, one whose stdin is still held elsewhere, or one that ignores EOF.
 pub(crate) async fn shutdown_child(child: &mut process::Child, kill_grace: std::time::Duration) {
+    let pid = child.id();
+    end_child(child, kill_grace).await;
+    // Off the engine's agent ledger only once it is gone.
+    if let Some(pid) = pid {
+        process::registry::forget(pid);
+    }
+}
+
+async fn end_child(child: &mut process::Child, kill_grace: std::time::Duration) {
     #[cfg(windows)]
     {
         if !matches!(child.try_wait(), Ok(Some(_))) && child.stdin_eof_coming().await {
