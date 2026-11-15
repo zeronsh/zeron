@@ -38,7 +38,9 @@ const INSTRUCTIONS: &str = "\
 Zeron runs coding agents in chats, each on a device and optionally in a project there. \
 These tools find devices, projects, harnesses, models and chats; create chats to delegate \
 work to, on any connected provider (not only your own); and message, wait on, read and \
-answer them. Chats are named by id, unique id prefix, or exact title; `whoami` gives yours. \
+answer them, on any of the person's devices. `run_command` runs shell commands on any online \
+device as your own shell tool does here. Chats are named by id, unique id prefix, or exact \
+title; `whoami` gives yours. \
 For parallel work, start every chat before waiting on any: `create_chats` or `send_messages` \
 (or `wait: false`, then `wait_for_turn`).\n\
 \n\

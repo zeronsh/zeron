@@ -544,6 +544,27 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
     assert_eq!(side.device_id, "cloud-s-chat-1");
     assert_eq!(side.cwd.as_deref(), Some("/home/user/app"));
 
+    // An agent naming another of the person's devices starts its chat
+    // there; naming the parent's machine, or none, it shares that machine.
+    use zeron_rpc::RpcService as _;
+    let rpc = core.rpc_service();
+    let agent_creates = |chat_id: &str, device: Option<String>| {
+        let mut op = serde_json::json!({
+            "op": "createChat", "chatId": chat_id, "spaceId": "sp-app", "parentChatId": "chat-1",
+            "config": { "harness": "mock", "sandbox": "workspace-write", "access": "full-access" },
+        });
+        if let Some(device) = device {
+            op["deviceId"] = serde_json::json!(device);
+        }
+        zeron_rpc::with_caller(zeron_rpc::Caller::Agent { chat: None }, rpc.handle(methods::MUTATE, op))
+    };
+    agent_creates("side-here", Some(core.workspace.device_id().to_owned())).await.unwrap();
+    assert_eq!(core.workspace.chat("side-here").unwrap().unwrap().device_id, core.workspace.device_id());
+    agent_creates("side-there", Some("cloud-s-chat-1".into())).await.unwrap();
+    assert_eq!(core.workspace.chat("side-there").unwrap().unwrap().device_id, "cloud-s-chat-1");
+    agent_creates("side-unnamed", None).await.unwrap();
+    assert_eq!(core.workspace.chat("side-unnamed").unwrap().unwrap().device_id, "cloud-s-chat-1");
+
     // Without Cloud picked, the same project runs here.
     create(
         &client,

@@ -100,7 +100,6 @@ import { handleAdminRoute, runCloudCron } from "./cloud/billing";
 import { sandboxProvider } from "./cloud/providers";
 import { FakeProvider } from "./cloud/providers/fake";
 import { handleAttachmentBlob } from "./attachment-blobs";
-import { runnerChatGate, runnerDeviceGate } from "./runner-access";
 import { runnerRefusal } from "./runner-policy";
 import { handleOnboardingRoute } from "./onboarding-routes";
 import { handlePluginKeyRoute } from "./plugin-keys";
@@ -179,10 +178,9 @@ export default {
     if (!auth) return json({ error: "unauthenticated" }, 401);
 
     // Runner bearers (the Cloud device) act as their DEVICE, not the user:
-    // no account management, no vault beyond their own grants, no other
-    // device's room but its liveness, no legacy rooms (runner-policy.ts);
-    // chat2/blobs only for chats they host (runner-access.ts); registry rows
-    // filtered and ownership-checked in RegistryRoom (registry-runner.ts).
+    // no account management, no vault beyond their own grants, another
+    // device's room only as a client, no legacy rooms (runner-policy.ts);
+    // registry writes ownership-checked in RegistryRoom (registry-runner.ts).
     const refused = runnerRefusal(auth, request.method, url);
     if (refused) return json({ error: "forbidden", message: refused }, 403);
 
@@ -249,11 +247,6 @@ export default {
     //    client-minted). The DO handles /ws, /checkpoint (GET Range-resumable
     //    + POST floor-guarded), host-published /tail + /diff sidecars,
     //    /stats, /reset. ──────────────────────────────────────────────────────
-    if (parts[0] === "chat2" && parts[1] && ID_RE.test(parts[1])) {
-      // A Cloud runner reaches only the chats its device hosts.
-      const notHost = await runnerChatGate(env, auth, parts[1]);
-      if (notHost) return notHost;
-    }
     const chatResponse = chatRoute(request, env, auth.userId, auth.orgId);
     if (chatResponse) return chatResponse;
 
@@ -371,12 +364,6 @@ export default {
     // ── device rooms ────────────────────────────────────────────────────────
     if (parts[0] === "device" && parts[1] && ID_RE.test(parts[1])) {
       const deviceId = parts[1];
-      // Another device's link or nudge: only a delegate's machine (the
-      // policy already admitted nothing else but liveness).
-      if (parts[2] === "ws" || parts[2] === "nudge") {
-        const refusedDevice = await runnerDeviceGate(env, auth, deviceId);
-        if (refusedDevice) return refusedDevice;
-      }
       if (parts[2] === "ws") {
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
           return json({ error: "expected websocket" }, 426);
@@ -422,8 +409,6 @@ export default {
       if (partId === undefined || !PART_RE.test(partId)) {
         return json({ error: "bad part id" }, 400);
       }
-      const notHost = await runnerChatGate(env, auth, parts[1]);
-      if (notHost) return notHost;
       const key = `blob/${auth.userId}/${parts[1]}/${partId}`;
       if (request.method === "PUT") {
         const body = await request.arrayBuffer();

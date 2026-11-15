@@ -1266,12 +1266,14 @@ impl EngineRpc {
     /// Where a chat runs when it runs on Cloud: its own new session machine
     /// (minted by the edge, idempotent per chat) cloning the project's GitHub
     /// repository — or, for a side chat whose parent runs on a session
-    /// machine, that same machine (they share files). `None` = not Cloud;
-    /// create normally.
+    /// machine, that same machine (they share files), unless an agent names
+    /// another device for it (a Cloud chat's agent starting a chat on the
+    /// person's computer). `None` = not Cloud; create normally.
     async fn cloud_chat_host(
         &self,
         chat_id: &str,
         space_id: Option<&str>,
+        device_id: Option<&str>,
         parent_chat_id: Option<&str>,
         branch: Option<&str>,
         cloud: bool,
@@ -1279,12 +1281,18 @@ impl EngineRpc {
     ) -> Result<Option<CloudHost>, RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         let on_cloud = |device_id: &str| device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX);
+        // An agent's chat on another of the person's devices runs there.
+        let elsewhere = |parent: &str| {
+            matches!(zeron_rpc::caller(), zeron_rpc::Caller::Agent { .. })
+                && device_id.is_some_and(|device| !device.is_empty() && device != parent)
+        };
         // A side chat of a Cloud chat shares its machine (and files), unless
-        // it asks for a Cloud session of its own.
+        // it asks for a Cloud session of its own or an agent puts it elsewhere.
         if !cloud
             && let Some(parent) = parent_chat_id
             && let Some(parent) = self.workspace.chat(parent).map_err(failed)?
             && on_cloud(&parent.device_id)
+            && !elsewhere(&parent.device_id)
         {
             return Ok(Some(CloudHost {
                 device_id: parent.device_id,
@@ -4364,6 +4372,7 @@ impl RpcService for EngineRpc {
                     && let Some(host) = Box::pin(self.cloud_chat_host(
                         chat_id,
                         space_id.as_deref(),
+                        device_id.as_deref(),
                         parent_chat_id.as_deref(),
                         branch.as_deref().filter(|b| !b.is_empty()),
                         *cloud,

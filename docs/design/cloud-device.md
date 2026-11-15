@@ -130,38 +130,42 @@ next token refresh fails and that engine goes dark within one token lifetime.
 
 The sandbox runs full-access agents on arbitrary repository code, so anything that can read
 `runner-key` can mint runner tokens. A runner token therefore acts as **its session's device**
-(the JWT's verified `dev` claim), never as the whole user — and never as a neighbouring
-session. Enforced at the edge:
+(the JWT's verified `dev` claim), never as the whole user. Like any of the person's devices,
+though, it reaches their other devices and every one of their chats: a Cloud chat's agent
+lists and messages chats on the laptop, starts chats there, and opens terminals on any online
+device, as an agent on the laptop can. Enforced at the edge:
 
 - **Paths** (`edge/src/runner-policy.ts`, 403): no `/auth/*` org routes, no `/cloud/*`, no
-  `/vault/*` except `POST /vault/{org}/grant` for its own device. `/device/{id}/*` only for its
-  own id; for any other device only `GET /device/{id}/status` (read-only liveness) — no
-  client/host sockets, nudges or sidecars. No legacy loro rooms (`/session`, `/tail`,
+  `/vault/*` except `POST /vault/{org}/grant` for its own device. `/device/{id}/*` fully for
+  its own id; for any other device a client socket (`ws`, role client — that device's RPC
+  surface: chats, terminals, files), the command nudge, and `GET /device/{id}/status` — never
+  the host role or that device's sidecars. No legacy loro rooms (`/session`, `/tail`,
   `/stats`, `/diff`, `/snapshot`, `/append`, `/workspace`). On `/registry/{org}` only row sync
   (`ws`, `GET rows`, `POST push`) — no `stats`, `push-target` (APNs titles) or `reset`.
-- **Chat-scoped data** (`edge/src/runner-access.ts`): `/chat2/{chatId}/*` and
-  `/blob/{chatId}/*` only while registry row `chats/{chatId}` is live and its
-  `fields.deviceId` equals the runner's device; otherwise 403 `not_host`. Positive answers are
-  cached per isolate for ≤5 min; refusals are never cached.
+- **Chat-scoped data**: `/chat2/{chatId}/*` and `/blob/{chatId}/*` for any of the user's
+  chats, as for their other devices (the rooms are the user's, by bearer).
 - **Registry** (`edge/src/registry-runner.ts`; the Worker stamps `x-zeron-runner-device`
   on runner forwards and strips any inbound value). Writes: `devices` only its own row;
-  `chats`, `spaces`, `sessions` only when the existing live row is hosted by the runner AND
-  the row after the op still is (no claiming, handing away or ownerless rows); deletes need a
-  live owned row; tombstones are never revived; every other kind (`preferences`,
+  `chats`, `spaces`, `sessions` when the existing live row is hosted by the runner AND the
+  row after the op still is (no claiming, handing away or ownerless rows) — except that a
+  chat hosted elsewhere may be renamed or archived (`title`, `archived`), and a new chat row
+  may be hosted by any device (a chat it starts there); deletes need a live owned row (or a
+  delegate's, below); tombstones are never revived; every other kind (`preferences`,
   `sidebarPins`, anything new) is refused. Refused ops are skipped individually (an
   `{t:"error", code:"not_owner"}` frame each, plus `rejected` in the ack); the rest of the
-  batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): every `devices`
-  row, the hosted rows the runner owns, the projects (spaces) of the chats it hosts, and
-  tombstones of hosted kinds (they carry no fields); laptop chats, other projects and other
-  sessions' chats and session rows — titles, previews, status — never reach it.
+  batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): every
+  `devices`, `chats`, `spaces` and `sessions` row; none of the user's own kinds.
   Presence is unfiltered, but a runner socket's presence/attribution device is pinned to its
   verified id.
+- **Engine** (`crates/engine/src/rpc/agent_gate.rs`): what an agent may do is the same on
+  Cloud as on a computer. Its terminals (`OpenTerminal` … `TerminalStatus`, here or on another
+  device) only from a chat with full access and no sandbox.
 
 User bearers are unaffected by all of the above.
 
 #### Delegation
 
-The one widening: a session's machine may start and manage **delegates** of the chat it runs
+A session's machine may start and manage **delegates** of the chat it runs
 (Zeron MCP `create_chat { cloud: true }`), one level deep. A delegate is a Cloud session of
 its own, on its own machine, recorded with `parentChatId` = the parent's chat.
 
@@ -173,21 +177,20 @@ its own, on its own machine, recorded with `parentChatId` = the parent's chat.
   hold: credits, and `CLOUD_MAX_AWAKE` machines at once. A runner request without
   `parentChatId` is refused (a machine never acts as the user).
 - **Its chat row** is written by the edge, as the user (`chats/{chatId}`: the new machine as
-  host, `parentChatId`, the parent's `spaceId`, `roomGen: 2`, the asked-for `config`): a
-  runner may write only rows it hosts, and only the edge knows which machine it just made.
+  host, `parentChatId`, the parent's `spaceId`, `roomGen: 2`, the asked-for `config`): only
+  the edge knows which machine it just made.
 - **Manage** (`DELETE /cloud/{org}/sessions/{chatId}`, `POST …/{wake|sleep}`): only sessions
   whose `parentChatId` is its chat. Retry, the session list, projects, billing and Cloud
   on/off stay the user's.
-- **See and reach**: the registry shows the runner its delegates' chat and session rows
-  (`RunnerScope.children`), and lets it rename, archive or delete them — never re-home them.
-  `/chat2/{chatId}/*` and `/blob/{chatId}/*` admit it when it hosts the chat's parent
-  (`/chat-host` answers `parentHost`). `/device/{id}/*` admits a client socket (never the host
-  role) and the command nudge for a device hosting one of its delegates
-  (`runnerDeviceGate`, via the registry's `/device-parents`). No other main chat — on the
-  laptop or another session — becomes visible.
+- **Delete**: the registry lets it delete its delegates' chat and session rows
+  (`runnerChildren`) — never re-home them.
 
-A stolen runner key therefore reaches at most: starting machines on the repository its
-session already has (bounded by credits and the awake limit), and its own delegates.
+A stolen runner key therefore reaches what an agent on any of the person's devices reaches:
+their chats (reading them, messaging them, starting chats on their devices) and, through a
+client link, those devices' RPC surface (terminals, files) — plus starting machines on the
+repository its session already has (bounded by credits and the awake limit). It still can't
+manage the account, read the vault, host another device, or change the person's
+preferences.
 
 ### Workflows (Cloudflare Workflows)
 

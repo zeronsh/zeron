@@ -14,7 +14,6 @@ import {
 import type { Env } from "../../src/env";
 import { dialDeviceRoom } from "../../src/device-link";
 import { deviceParam, forward } from "../../src/forward";
-import { runnerChatGate, runnerDeviceGate } from "../../src/runner-access";
 import { previewRoute } from "../../src/preview-route";
 import { releaseRoute } from "../../src/releases";
 import { modelListRoute } from "../../src/model-list";
@@ -120,8 +119,8 @@ const json = (value: unknown, status = 200) =>
  * The production routing seam, in src/index.ts's order, minus the routes
  * that need loro's WASM (which cannot load in this tier): releases, admin + runner
  * pre-bearer routes, the hosted model list, bearer gate, runner policy, /cloud, /vault, preview,
- * /device (with Cloud auto-wake), /registry, /chat2 and /blob (with the
- * runner chat gate) — all through the production `forward`.
+ * /device (with Cloud auto-wake), /registry, /chat2 and /blob — all through
+ * the production `forward`.
  */
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -161,10 +160,6 @@ export default {
     if (parts[0] === "device" && parts[1] && id.test(parts[1])) {
       const deviceId = parts[1];
       const room = `d2/${deviceId}`;
-      if (parts[2] === "ws" || parts[2] === "nudge") {
-        const refusedDevice = await runnerDeviceGate(env, auth, deviceId);
-        if (refusedDevice) return refusedDevice;
-      }
       if (parts[2] === "ws") {
         return dialDeviceRoom(env, auth, request, url, deviceId);
       }
@@ -182,18 +177,12 @@ export default {
         return forward(env.REGISTRY_ROOMS, room, request, auth, `/${parts[2]}`, url.search);
       }
     }
-    if (parts[0] === "chat2" && parts[1] && id.test(parts[1])) {
-      const notHost = await runnerChatGate(env, auth, parts[1]);
-      if (notHost) return notHost;
-    }
     const chat = chatRoute(request, env, auth.userId);
     if (chat) return chat;
     if (parts[0] === "blob" && parts.length === 4 && parts[2] === "attachments" && id.test(parts[1]) && id.test(parts[3])) {
       return handleAttachmentBlob(request, env, auth, parts[1], parts[3]);
     }
     if (parts[0] === "blob" && parts[1] && parts[2] && parts.length === 3) {
-      const notHost = await runnerChatGate(env, auth, parts[1]);
-      if (notHost) return notHost;
       const key = `blob/${auth.userId}/${parts[1]}/${parts[2]}`;
       if (request.method === "PUT") {
         await env.BLOBS.put(key, await request.arrayBuffer());

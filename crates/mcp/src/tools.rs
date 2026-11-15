@@ -23,6 +23,7 @@ use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
 mod plugins;
+mod terminals;
 mod themes;
 pub use plugins::ListedTool;
 pub(crate) use plugins::is_plugin_tool_name;
@@ -32,6 +33,8 @@ const MAX_BATCH: usize = 32;
 /// Cloud runs these agents (Codex and Claude Code): a Cloud chat's harness.
 const CLOUD_HARNESSES: &[HarnessId] = &[HarnessId::ClaudeCode, HarnessId::Codex];
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
+/// A device seen this recently is online (the app's sidebar says the same).
+const ONLINE_SECS: i64 = 70;
 const MAX_WAIT: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, Serialize)]
@@ -50,6 +53,8 @@ pub struct Tools {
     /// Which plugin tools the client was last shown ([`Self::list_all`],
     /// [`Self::watch_plugin_tools`]).
     plugins: plugins::PluginState,
+    /// The terminals this connection follows ([`terminals`]).
+    terminal_state: terminals::TerminalState,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -82,7 +87,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_devices",
-            description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device.",
+            description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device. `online`: seen in the last 70 s (always true for this one); open_terminal reaches any online device.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
@@ -150,7 +155,7 @@ fn catalog() -> Vec<ToolDef> {
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
-                    "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine." },
+                    "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine, unless device or project names another of the person's devices." },
                     "prompt": { "type": "string", "description": "First message to send right away." },
                     "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
@@ -299,6 +304,7 @@ fn catalog() -> Vec<ToolDef> {
     });
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
+    tools.extend(terminals::catalog());
     tools
 }
 
@@ -817,6 +823,7 @@ impl Tools {
             zeron,
             pending_turns: Default::default(),
             plugins: Default::default(),
+            terminal_state: Default::default(),
         }
     }
 
@@ -892,6 +899,9 @@ impl Tools {
             plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
                 return self.template_packages(name, args).await;
             }
+            terminal if terminals::NAMES.contains(&terminal) => {
+                return self.terminals(terminal, args).await;
+            }
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
             }
@@ -966,12 +976,15 @@ impl Tools {
     async fn list_devices(&self) -> anyhow::Result<Value> {
         let (devices, local) =
             tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
+        let now = chrono::Utc::now();
         Ok(json!({
             "devices": devices.iter().map(|d| json!({
                 "id": d.id,
                 "name": d.name,
                 "platform": d.platform,
                 "local": d.id == local,
+                "online": d.id == local
+                    || d.last_seen_at.is_some_and(|at| now - at <= chrono::Duration::seconds(ONLINE_SECS)),
                 "lastSeenAt": d.last_seen_at,
                 "version": d.version,
             })).collect::<Vec<_>>()

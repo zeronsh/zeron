@@ -511,7 +511,7 @@ describe("runner tokens", () => {
     expect((await call("POST", "/runner/token", undefined, { ...u, deviceId, ts: "now", sig: "x" })).status).toBe(400);
   });
 
-  it("is refused on /cloud and vault admin, but grants for itself and reads its project's space", async () => {
+  it("is refused on /cloud and vault admin, but grants for itself and reads the person's projects", async () => {
     const u = newUser();
     const { deviceId, spaceId, accountDeviceId, key } = await readySession(u);
     const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
@@ -536,7 +536,7 @@ describe("runner tokens", () => {
     expect((await call("POST", "/vault/org1/grant", bearer, github)).status).toBe(403);
 
     // The chat it hosts belongs to a laptop's project: the session reads
-    // that project's row, but not the laptop's other projects.
+    // that project's row, and the laptop's other projects too.
     const hlc = (n: number) => `${String(Date.now()).padStart(13, "0")}-${String(n).padStart(6, "0")}-laptop`;
     const pushed = await call("POST", "/registry/org1/push?device=laptop", userBearer(u), {
       batch: `b-${crypto.randomUUID()}`,
@@ -549,7 +549,7 @@ describe("runner tokens", () => {
     expect(pushed.status).toBe(200);
     const seen = ((await (await call("GET", "/registry/org1/rows", bearer)).json()) as { rows: { kind: string; id: string }[] }).rows;
     expect(seen.some((r) => r.kind === "spaces" && r.id === spaceId)).toBe(true);
-    expect(seen.some((r) => r.kind === "spaces" && r.id === "laptop-space")).toBe(false);
+    expect(seen.some((r) => r.kind === "spaces" && r.id === "laptop-space")).toBe(true);
     expect(seen.some((r) => r.kind === "devices" && r.id === accountDeviceId)).toBe(false);
 
     const orgs = await handleAuthRoute(
