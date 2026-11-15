@@ -411,6 +411,24 @@ pub fn install(host: &ScriptHost) {
             a.add_key(id, provider, key, name).await
         }
     });
+    // An API key for Cloud's agents (Settings → Providers with Cloud
+    // shown): kept by the vault, authorized for the account's Cloud device
+    // (`device`), the key every Cloud machine uses from its next turn.
+    // Rejects with the engine's words, which never hold the key.
+    let a = agents.clone();
+    host.async_action("agents.cloud_key", move |args| {
+        let a = a.clone();
+        let provider = args.field("provider").map(text).unwrap_or_default();
+        let key = args.field("key").map(text).unwrap_or_default().trim().to_string();
+        let device = args.field("device").map(text).unwrap_or_default();
+        async move {
+            crate::plugins::preview::refuse("agents.cloud_key")?;
+            let params = cloud_key_params(&provider, &key, &device)?;
+            engine::get().call("VaultPutApiKey", params).await.map_err(|error| engine::outcome(&error).to_string())?;
+            a.load_accounts(true).await;
+            Ok(Value::Nil)
+        }
+    });
     // An API key's name (no secret: on whichever device shows it), rejecting
     // with the engine's words.
     let a = agents.clone();
@@ -1948,6 +1966,20 @@ fn epoch_secs(s: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
+    /// A Cloud API key goes to the vault for the account's Cloud device:
+    /// Anthropic's or OpenAI's only, a real key, Cloud on.
+    #[test]
+    fn a_cloud_key_is_one_cloud_runs_for_its_device() {
+        let ok = cloud_key_params("anthropic-key", "sk-ant-123", "cloud-acct").unwrap();
+        assert_eq!(ok, json!({ "provider": "anthropic-key", "key": "sk-ant-123", "authorizedDevices": ["cloud-acct"] }));
+        assert!(cloud_key_params("openai-key", "sk-1", "d").is_ok());
+        assert!(cloud_key_params("claude", "sk", "d").is_err(), "a login isn't a key");
+        assert!(cloud_key_params("anthropic-key", "", "d").is_err());
+        assert!(cloud_key_params("anthropic-key", "a\nb", "d").is_err());
+        assert!(cloud_key_params("anthropic-key", &"k".repeat(5000), "d").is_err());
+        assert!(cloud_key_params("anthropic-key", "sk", "").is_err(), "Cloud off");
+    }
+
     /// Pi signed in to Claude, or another login put in use: Pi's models are
     /// looked up again. Usage moving, or another agent's, isn't Pi's change.
     #[test]
@@ -2228,6 +2260,22 @@ pub(crate) fn shown_target() -> Option<String> {
 }
 
 /// `params` addressed to the device Providers shows.
+/// `VaultPutApiKey`'s params for a Cloud API key: Anthropic's or OpenAI's
+/// alone, a key that's there and no longer than any key is, for the
+/// account's Cloud device. Else why not.
+pub(crate) fn cloud_key_params(provider: &str, key: &str, device: &str) -> Result<Json, String> {
+    if !matches!(provider, "anthropic-key" | "openai-key") {
+        return Err("Cloud takes Anthropic and OpenAI keys".into());
+    }
+    if key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control) {
+        return Err("That isn't an API key".into());
+    }
+    if device.is_empty() {
+        return Err("Turn Cloud on in Settings → Cloud first".into());
+    }
+    Ok(json!({ "provider": provider, "key": key, "authorizedDevices": [device] }))
+}
+
 pub(crate) fn addressed_to_shown(params: Json) -> Json {
     addressed_to(shown_target().as_deref(), params)
 }

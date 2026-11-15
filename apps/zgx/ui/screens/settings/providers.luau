@@ -23,6 +23,7 @@ local prefs = require("@app/screens/settings/prefs")
 local registry = require("@account/registry")
 local add_agent = require("@app/screens/settings/add_agent")
 local sign_in_terminal = require("@app/screens/settings/sign_in_terminal")
+local cloud = require("@account/cloud")
 
 local M = {}
 
@@ -108,6 +109,20 @@ local function here(): string?
 	end
 	return nil
 end
+-- Cloud, as one choice after the computers (never its machines): the
+-- accounts every Cloud machine uses, kept by the vault, which the engine
+-- answers for (crates/engine cloud_accounts: Claude Code and Codex, their
+-- logins and API keys). Offered while Cloud is on.
+local CLOUD = "cloud"
+local function on_cloud(): boolean
+	return now().target == CLOUD
+end
+local function cloud_choice(): { any }
+	if cloud.on() or on_cloud() then
+		return { { value = CLOUD, label = ui.t("settings.providers.cloud"):get(), icon = "cloud" } }
+	end
+	return {}
+end
 -- The device shown: the engine's target, else this one.
 local function shown_device(): string?
 	return now().target or here()
@@ -115,6 +130,9 @@ end
 -- (In the locale shown: read where it's drawn.)
 local function device_name(): string
 	local id = shown_device()
+	if id == CLOUD then
+		return ui.t("settings.providers.cloud"):get()
+	end
 	for _, d in computers() do
 		if d.id == id then
 			return if d.here then ui.t("settings.providers.this_mac"):get() else d.name
@@ -124,8 +142,11 @@ local function device_name(): string
 end
 local function choose_device(id: string)
 	agents.target(if id == here() then nil else id)
-	-- (The registry as that device sees it: what it has added, its builds.)
-	registry.load()
+	-- (The registry as that device sees it: what it has added, its builds.
+	-- Cloud runs only Zeron's own.)
+	if id ~= CLOUD then
+		registry.load()
+	end
 end
 
 -- Which of the page's views shows: the agents, the registry ("add"), or
@@ -152,7 +173,8 @@ local function kind(): string
 	if s == "looking" or s == "unavailable" then
 		return s
 	end
-	return "found"
+	-- (Cloud's page is another: its accounts, its keys, nothing to add.)
+	return if now().target == "cloud" then "cloud" else "found"
 end
 
 -- Which agent's settings are open (none: "").
@@ -223,6 +245,9 @@ local function card(row: State<agents.Agent>): Node
 	-- no accounts, and signs in its own way. (Its updates come as any
 	-- agent's: the engine's update coordinator, the registry its feed.)
 	local from_registry = (first :: any).registry == true
+	-- Cloud's (made for it: the cards are keyed by the device shown): on
+	-- every Cloud machine, its accounts alone managed here.
+	local cloud_card = on_cloud()
 	-- The switch follows the engine; a flip goes to it, and its answer
 	-- comes back in the row.
 	local on = ui.use_state(first.enabled)
@@ -234,7 +259,7 @@ local function card(row: State<agents.Agent>): Node
 			if flipped ~= said then
 				on:set(said)
 			end
-		elseif flipped ~= said then
+		elseif flipped ~= said and not cloud_card then
 			agents.set_enabled(id, flipped)
 		end
 	end)
@@ -250,6 +275,7 @@ local function card(row: State<agents.Agent>): Node
 			return (row:get() :: any).updating == true
 		end,
 		sign_in_only = from_registry,
+		fixed = cloud_card,
 		login_note = function(): string?
 			return (row:get() :: any).login_note
 		end,
@@ -329,7 +355,7 @@ local function card(row: State<agents.Agent>): Node
 			end
 			return nil
 		end,
-		settings = true,
+		settings = not cloud_card,
 		on_settings = function()
 			load_subagents()
 			open_settings:set(id)
@@ -421,7 +447,13 @@ local function cards(): Node
 			gap = "$space.4",
 			ui.each(ui.computed(installed), function(_a: agents.Agent, _i: number, row: State<agents.Agent>): Node
 				return card(row)
-			end, { key = by_id }),
+			end, {
+				-- (By the device shown too: a card is made for its device,
+				-- Cloud's unlike a computer's.)
+				key = function(a: agents.Agent): string
+					return `{now().target or ""}|{a.id}`
+				end,
+			}),
 		}
 	)
 end
@@ -490,6 +522,85 @@ local function more(): Node
 	)
 end
 
+-- Cloud's API keys: Anthropic's for Claude Code, OpenAI's for Codex, kept
+-- by the vault. A key saved becomes its agent's account in use, every Cloud
+-- machine's from its next turn (as signing in does).
+local CLOUD_KEYS = {
+	{ provider = "anthropic-key", agent = "Claude Code", label = "settings.providers.cloud_keys.anthropic" },
+	{ provider = "openai-key", agent = "Codex", label = "settings.providers.cloud_keys.openai" },
+}
+local function cloud_key_row(k: { provider: string, agent: string, label: string }): Node
+	return ui.component(function(): Node
+		local value = ui.use_state("")
+		local busy = ui.use_state(false)
+		local problem = ui.use_state("")
+		local function save()
+			local key = value:peek()
+			if busy:peek() or key == "" then
+				return
+			end
+			busy:set(true)
+			problem:set("")
+			host.call("agents.cloud_key", { provider = k.provider, key = key, device = cloud.device() or "" }):after(function()
+				busy:set(false)
+				value:set("")
+				toast.show { title = ui.t("settings.providers.cloud_keys.saved", { agent = k.agent }):get(), tone = "success" }
+			end, function(err: any)
+				busy:set(false)
+				problem:set(if type(err) == "table" and err.message then tostring(err.message) else tostring(err))
+			end)
+		end
+		return ds.Settings.Row {
+			label = ui.t(k.label),
+			description = function(): string
+				local p = problem:get()
+				return if p ~= "" then p else ui.t("settings.providers.cloud_keys.description", { agent = k.agent }):get()
+			end,
+			control = ui.row {
+				gap = "$space.2",
+				items = "center",
+				ds.TextField {
+					value = value,
+					password = true,
+					w = 220,
+					size = "sm",
+					name = ui.t(k.label),
+					placeholder = ui.t("settings.providers.cloud_keys.placeholder"),
+					on_commit = function()
+						save()
+					end,
+				},
+				ds.Button {
+					ui.t("settings.providers.cloud_keys.save"),
+					tone = "secondary",
+					size = "sm",
+					busy = function(): boolean
+						return busy:get()
+					end,
+					disabled = function(): boolean
+						return value:get() == ""
+					end,
+					on_click = save,
+				},
+			},
+		}
+	end)({})
+end
+local function cloud_keys(): Node
+	return ds.Settings.Section {
+		title = ui.t("settings.providers.cloud_keys.title"),
+		description = ui.t("settings.providers.cloud_keys.section_description"),
+		ds.Settings.Group {
+			ui.column {
+				w_full = true,
+				cloud_key_row(CLOUD_KEYS[1]),
+				ds.Settings.Rule(),
+				cloud_key_row(CLOUD_KEYS[2]),
+			},
+		},
+	}
+end
+
 local function body(k: string): Node
 	if k == "looking" then
 		return ds.ProviderCard.Loading()
@@ -497,6 +608,9 @@ local function body(k: string): Node
 		return ds.ProviderCard.Unavailable(function()
 			return device_name()
 		end, agents.load)
+	end
+	if k == "cloud" then
+		return ui.column { w_full = true, gap = "$space.6", cards(), cloud_keys() }
 	end
 	return ui.column { w_full = true, gap = "$space.6", cards(), more() }
 end
@@ -767,7 +881,7 @@ local function agents_page(): Node
 		-- Agents are per device: which one's (a choice once there's more
 		-- than this one).
 		-- (The same choice as Plugins': screens/settings/devices.)
-		trail = devices_page.picker(shown_device, choose_device),
+		trail = devices_page.picker(shown_device, choose_device, cloud_choice),
 		-- (At the top right, on the title's line, as Plugins' is.)
 		trail_top = true,
 		ui.presence(kind, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
@@ -792,6 +906,10 @@ function M.view(): Node
 	-- (Once a visit: a hot reload doesn't ask again.) The page opens on the
 	-- agents; the registry is looked at too, for what it has to add.
 	visits.once("providers", function()
+		-- (Whether Cloud is on, for its choice.)
+		if cloud.now:peek().phase == "unknown" then
+			cloud.load()
+		end
 		agents.load()
 		registry.load()
 		if view:peek() ~= "agents" then

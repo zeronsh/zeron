@@ -221,6 +221,9 @@ export type CardProps = {
 	-- back, Claude's when it can't finish in the browser) or "failed".
 	foot: (string | () -> string)?,
 	enabled: State<boolean>,
+	-- An agent nothing here switches or updates (Cloud's: on every Cloud
+	-- machine, its accounts alone managed here): no switch, no Update.
+	fixed: boolean?,
 	-- The account in use, by its email.
 	active: () -> string?,
 	settings: boolean?,
@@ -1468,7 +1471,7 @@ function M.Card(c: CardProps): Node
 			gap = "$space.3",
 			items = "center",
 			ui.show(function()
-				return latest() ~= nil or (c.updating ~= nil and c.updating())
+				return not c.fixed and (latest() ~= nil or (c.updating ~= nil and c.updating()))
 			end, Button {
 				locale.t("ds.provider_card.update"),
 				tone = "secondary",
@@ -1488,7 +1491,7 @@ function M.Card(c: CardProps): Node
 					on_click = c.on_settings,
 				}
 				else nil,
-			Switch { value = c.enabled, label = locale.t("ds.provider_card.enabled", { name = provider.name }) :: any },
+			if c.fixed then nil else Switch { value = c.enabled, label = locale.t("ds.provider_card.enabled", { name = provider.name }) :: any },
 		},
 	}
 	-- Its accounts, a row each, keyed: one arriving or going is that row
