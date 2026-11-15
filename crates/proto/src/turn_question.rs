@@ -1313,6 +1313,83 @@ pub fn review_of(text: &str) -> Option<Review> {
     sentences(&paras).iter().rev().find_map(|s| screens_at(&s.text)).map(Review::Screens)
 }
 
+/// What a compound decision's subjects are said to be: "The A and the B …
+/// are still waiting on you".
+const COMPOUND_VERBS: &[&str] = &[
+    " are still waiting", " are waiting", " are still yours", " are yours", " are still open", " are open",
+    " both need your", " still need your", " need your", " remain open", " are still pending", " are pending",
+];
+
+/// `s` split at top-level `seps` (never inside parentheses).
+fn split_top(s: &str, seps: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut cur = String::new();
+    let mut i = 0;
+    let lower = s.to_lowercase();
+    while i < s.len() {
+        let c = s[i..].chars().next().unwrap_or(' ');
+        match c {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            _ => {}
+        }
+        if depth == 0
+            && let Some(sep) = seps.iter().find(|sep| lower[i..].starts_with(**sep))
+        {
+            out.push(std::mem::take(&mut cur));
+            i += sep.len();
+            continue;
+        }
+        cur.push(c);
+        i += c.len_utf8();
+    }
+    out.push(cur);
+    out.into_iter().map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()).collect()
+}
+
+/// A decision that names several pending choices in one sentence ("The
+/// Topology variation pick and the graph-label decision (accept round 9 or
+/// keep iterating) are still waiting on you"), one decision each: its
+/// subject as the question, its options from its own parenthesis ("accept
+/// round 9 or keep iterating") when it has them. One choice: itself.
+pub fn split_compound(found: &Found) -> Vec<Found> {
+    let q = found.question.trim();
+    let lower = q.to_lowercase();
+    let Some(at) = COMPOUND_VERBS.iter().filter_map(|v| lower.find(v)).min() else {
+        return vec![found.clone()];
+    };
+    let parts = split_top(&q[..at], &[", and ", " and ", ", "]);
+    if parts.len() < 2 || parts.len() > 4 {
+        return vec![found.clone()];
+    }
+    parts
+        .iter()
+        .map(|part| {
+            let aside = part.find('(').and_then(|o| part[o + 1..].find(')').map(|c| &part[o + 1..o + 1 + c]));
+            let options: Vec<String> = aside
+                .map(|a| split_or(a))
+                .filter(|o| (2..=4).contains(&o.len()))
+                .map(|o| o.iter().map(|x| tidy(x)).collect())
+                .unwrap_or_default();
+            let kind = if options.is_empty() { FoundKind::Question } else { FoundKind::Decision };
+            let mut one = Found::new(format!("{} is waiting on your decision.", upper_first(part.trim())), options, kind);
+            one.context = found.context.clone();
+            one.links = found.links.clone();
+            one
+        })
+        .collect()
+}
+
+/// Every decision `text` ends waiting on ([`detect`]'s `Ask`, a compound
+/// one split by [`split_compound`]); none when it waits on nothing.
+pub fn decisions(text: &str) -> Vec<Found> {
+    match detect(text) {
+        Verdict::Ask(found) => split_compound(&found),
+        _ => Vec::new(),
+    }
+}
+
 /// Whether `message` names one of `options` (a choice's own words, not a
 /// bare yes/no): a relayed message that does decides the question without a
 /// model.
@@ -1607,6 +1684,22 @@ mod tests {
         assert_eq!(parse_answers("unsure"), None);
         assert_eq!(parse_answers(""), None);
         assert!(answers_prompt("Which variant?", &[], "They picked (d).").contains("\"message\""));
+    }
+
+    #[test]
+    fn a_compound_decision_is_one_decision_per_choice() {
+        // 9ad131f1, 11:13.
+        let text = "The Timeline legend's events group now always reads Report · Ask · Failed · Done.\n\n**Timing:** this lands after the current rebuild, not in it.\n\nThe Topology variation pick and the graph-label decision (accept round 9 or keep iterating) are still waiting on you.";
+        let parts = decisions(text);
+        assert_eq!(parts.len(), 2, "{parts:#?}");
+        assert_eq!(parts[0].question, "The Topology variation pick is waiting on your decision.");
+        assert!(parts[0].options.is_empty());
+        assert_eq!(parts[1].question, "The graph-label decision (accept round 9 or keep iterating) is waiting on your decision.");
+        assert_eq!(parts[1].options, ["Accept round 9", "Keep iterating"]);
+        // One choice stays one.
+        assert_eq!(decisions("The graph-label decision (accept round 9 or keep iterating) is still waiting on you.").len(), 1);
+        assert_eq!(decisions(CODEX).len(), 1);
+        assert!(decisions("Fixed and committed.").is_empty());
     }
 
     #[test]

@@ -393,6 +393,27 @@ pub(crate) async fn answered_after_asking(
     first_answer(orch, rpc, chat, &found.question, &found.options, &later).await
 }
 
+/// The message id a turn-end ask's turn names: a part of a compound
+/// decision is `<message>#<part>`.
+pub(crate) fn turn_base(turn_id: &str) -> &str {
+    turn_id.split('#').next().unwrap_or(turn_id)
+}
+
+/// What answered `part`, one decision asked by the message at `asked` in
+/// `entries`: the first message after it that answers this very part
+/// ([`reply_answers`]), its words.
+pub(crate) async fn part_answer(
+    orch: &Orchestration,
+    rpc: &EngineRpc,
+    chat: &str,
+    entries: &[SessionMessageEntry],
+    asked: usize,
+    part: &Found,
+) -> Option<String> {
+    let later: Vec<&SessionMessageEntry> = entries[asked + 1..].iter().filter(|e| e.role == MessageRole::User).collect();
+    first_answer(orch, rpc, chat, &part.question, &part.options, &later).await
+}
+
 /// How far back a pending decision is looked for: the transcript's last
 /// this many messages.
 pub(crate) const LOOK_BACK: usize = 50;
@@ -430,7 +451,7 @@ pub(crate) async fn replied(
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for a in open_turn_asks(asks, chat) {
-        let Some(at) = entries.iter().position(|e| Some(e.id.as_str()) == a.turn_id.as_deref()) else { continue };
+        let Some(at) = entries.iter().position(|e| Some(e.id.as_str()) == a.turn_id.as_deref().map(turn_base)) else { continue };
         let later: Vec<&SessionMessageEntry> = entries[at + 1..].iter().filter(|e| e.role == MessageRole::User).collect();
         if let Some(reply) = first_answer(orch, rpc, chat, &a.question, &labels(a), &later).await {
             out.push((a.id.clone(), reply));
@@ -444,7 +465,7 @@ pub(crate) async fn replied(
 pub(crate) fn acted(asks: &[Ask], chat: &str, entries: &[SessionMessageEntry]) -> Vec<(String, String)> {
     open_turn_asks(asks, chat)
         .filter_map(|a| {
-            let at = entries.iter().position(|e| Some(e.id.as_str()) == a.turn_id.as_deref())?;
+            let at = entries.iter().position(|e| Some(e.id.as_str()) == a.turn_id.as_deref().map(turn_base))?;
             let after = &entries[at + 1..];
             if after.iter().any(|e| e.role == MessageRole::User) {
                 return None;
@@ -664,6 +685,14 @@ pub(crate) async fn after_turn(orch: &Orchestration, rpc: &Arc<EngineRpc>, chat:
         if !named {
             found.images.push(image);
         }
+    }
+    // Several choices pending in one sentence: one ask each.
+    let parts = turn_question::split_compound(&found);
+    if parts.len() > 1 {
+        for (i, part) in parts.iter().enumerate() {
+            raise(orch, rpc, chat, Some(&format!("{turn}#{i}")), part, &launch, None, Utc::now());
+        }
+        return;
     }
     raise(orch, rpc, chat, Some(&turn), &found, &launch, None, Utc::now());
 }
