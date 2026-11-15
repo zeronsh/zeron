@@ -1248,10 +1248,11 @@ fn on_cloud() -> bool {
     on_cloud_platform(std::env::var("ZERON_DEVICE_PLATFORM").ok().as_deref())
 }
 
-/// Release files a Cloud machine never runs: the desktop app's background
-/// engine (78 MB). A Cloud machine runs `zeron headless`, which links the
-/// engine, and its disk is copied back in on every wake.
-pub const CLOUD_UNUSED_FILES: &[&str] = &["zeron-engine"];
+/// Release files a Cloud machine never runs: none. (`zeron-engine` was here
+/// until 2026-11-15, when `zeron headless` linked the engine. Since 0.3.0 the
+/// release's `zeron` is the zgx app, whose `zeron headless` runs the
+/// `zeron-engine` beside it: a machine without it never came online.)
+pub const CLOUD_UNUSED_FILES: &[&str] = &[];
 
 /// Remove [`CLOUD_UNUSED_FILES`] from the version folder `dir`.
 pub fn strip_cloud_unused(dir: &Path) {
@@ -3692,9 +3693,11 @@ mod tests {
         assert_eq!(folders(&app_root), ["0.2.10", "0.2.11", "0.2.12", "current"]);
     }
 
+    /// `zeron headless` runs the `zeron-engine` beside it: a Cloud machine
+    /// keeps it in every version (it once left it out, and never came online).
     #[cfg(unix)]
     #[test]
-    fn a_cloud_machine_keeps_no_desktop_engine() {
+    fn a_cloud_machine_keeps_the_engine_its_headless_runs() {
         let tmp = tempfile::tempdir().unwrap();
         let app_root = tmp.path().join("app");
         versions_installed(&app_root, &["0.2.10", "0.2.11"]);
@@ -3708,7 +3711,7 @@ mod tests {
         strip_unused_from_versions(&app_root);
 
         for ver in ["0.2.10", "0.2.11"] {
-            assert!(!app_root.join(ver).join("zeron-engine").exists(), "{ver}");
+            assert!(app_root.join(ver).join("zeron-engine").exists(), "{ver}");
             assert!(app_root.join(ver).join("zeron").exists(), "{ver}");
         }
         assert!(app_root.join("notes").join("zeron-engine").exists());
@@ -4169,11 +4172,11 @@ mod tests {
         assert!(staged.join("zeron").is_file());
     }
 
-    /// The release carries the desktop's background engine; a Cloud machine
-    /// stages the release without it, anywhere else keeps it.
+    /// The release carries `zeron-engine`, which `zeron headless` runs: a
+    /// Cloud machine stages it as anywhere else does.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_cloud_machine_stages_a_release_without_the_desktop_engine() {
+    async fn a_cloud_machine_stages_a_release_with_its_engine() {
         let tmp = tempfile::tempdir().unwrap();
         let pkg = tmp.path().join("pkg");
         std::fs::create_dir_all(pkg.join("zeron-pkg")).unwrap();
@@ -4190,7 +4193,7 @@ mod tests {
             .into(),
             ..Manifest::default()
         };
-        for (cloud, kept) in [(true, false), (false, true)] {
+        for (cloud, kept) in [(true, true), (false, true)] {
             let app_root = tmp.path().join(format!("app-{cloud}"));
             std::fs::create_dir_all(&app_root).unwrap();
             let (base, server) = serve_forever(bytes.clone()).await;

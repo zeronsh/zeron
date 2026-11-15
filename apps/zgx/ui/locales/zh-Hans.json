@@ -871,6 +871,8 @@
       "default": "默认",
       "reasoning": "推理强度",
       "account": "账号",
+      "account_of": "{name} 账户",
+      "no_account": "无",
       "model": "模型",
       "search_starred": "搜索已加星标的模型…",
       "search_agent": "搜索 {agent} 模型…",
@@ -882,7 +884,8 @@
       "not_found": "未找到模型",
       "not_found_hint": "{where}中没有与“{q}”匹配的内容",
       "where_starred": "已加星标的模型",
-      "where_models": "模型"
+      "where_models": "模型",
+      "add_key": "添加 {name} API 密钥"
     },
     "effort_slider": {
       "reasoning": "推理强度"
@@ -969,7 +972,23 @@
       "paste_key_hint": "{name} 以 {var} 读取它。它保存在此设备上，不会再次显示。",
       "key_name": "{var}",
       "get_key": "获取密钥",
-      "save_key": "保存"
+      "save_key": "保存",
+      "add_named_account": "添加 {name} 账户",
+      "add_api_key": "添加 API 密钥",
+      "key_offline": "Zeron 引擎没有响应——请稍后再试。",
+      "key_remote": "API 密钥需在运行 {name} 的电脑上添加。",
+      "key_failed": "无法添加该密钥——请重试。",
+      "key_title": "添加 API 密钥",
+      "key_provider": "提供方",
+      "key_body": "{agent} 会用这个密钥调用 {name} 的模型。",
+      "key_field": "API 密钥",
+      "key_kept": "保存在这台 Mac 上 {agent} 的设置中。",
+      "key_name_label": "名称",
+      "key_name_placeholder": "工作、个人…",
+      "rename": "重命名",
+      "rename_title": "重命名 API 密钥",
+      "rename_hint": "留空则使用默认名称。",
+      "key_name_optional": "名称（可选）"
     },
     "command_palette": {
       "scope": {
@@ -1611,6 +1630,18 @@
           "label": "{name} 的登录"
         },
         "remove_row_description": "使用过它的对话会保留。"
+      },
+      "couldnt_switch": "无法切换账户",
+      "cloud": "云端",
+      "cloud_keys": {
+        "title": "API 密钥",
+        "section_description": "云端也可以使用 API 密钥，而不必登录。在此保存的密钥会成为该代理在每台云端机器上使用的账户，从下一轮开始生效。",
+        "anthropic": "Anthropic API 密钥",
+        "openai": "OpenAI API 密钥",
+        "description": "用于云端的 {agent}。保存在 Zeron 的密钥库中，不会存放在这台电脑上。",
+        "placeholder": "粘贴密钥",
+        "save": "保存",
+        "saved": "云端的 {agent} 现在使用此密钥"
       }
     },
     "devices": {
@@ -3220,7 +3251,8 @@
         "show": "在访达中显示",
         "dismiss": "关闭 {name}",
         "saving": "正在保存…"
-      }
+      },
+      "dismiss_error": "关闭"
     },
     "browser_api": {
       "empty": "输入网站或 localhost 地址。",
@@ -3484,7 +3516,11 @@
         },
         "compose": {
           "title": "在消息输入框中填写文本",
-          "detail": "仍由你来发送。"
+          "detail": "它可以补充或替换你写的内容，仍由你来发送。"
+        },
+        "draft": {
+          "title": "读取你在消息输入框中输入的内容，并可暂存",
+          "detail": "它能在你发送前看到你在任意聊天中输入的文字，也能把草稿暂时取走、稍后放回。它不会替你发送。"
         },
         "network": {
           "title": "连接互联网",

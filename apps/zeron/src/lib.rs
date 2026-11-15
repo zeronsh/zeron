@@ -4,6 +4,8 @@
 //! subcommands that run the engine's code here (`zeron_cli::EngineCommand`).
 //! The command line itself, paths, logging and the rest are `zeron_cli`'s.
 
+#[cfg(target_os = "macos")]
+pub mod allocator;
 pub mod auth_cli;
 pub mod background;
 pub mod engine_commands;
@@ -21,10 +23,11 @@ pub use engine_commands::run_engine_command;
 /// (docs/memory-plan.md §1). Pinned to mimalloc v2 in the workspace manifest —
 /// the crate's default v3 has the same pathology (churn retained as permanent
 /// RSS, ~6x glibc's growth on identical workloads, no idle recovery). Linux
-/// measured flat on glibc, so it keeps the system allocator.
+/// measured flat on glibc, so it keeps the system allocator. Its regions are
+/// tagged as heap, not GPU memory ([`allocator`]).
 #[cfg(target_os = "macos")]
 #[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static ALLOC: allocator::Allocator = allocator::Allocator;
 
 /// The env-resolved engine configuration shared by `headless`, `login`,
 /// `logout`, and `status` — one resolution so the CLI auth commands always

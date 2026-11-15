@@ -270,6 +270,7 @@ impl Harness for MuseHarness {
             default: false,
             id: "muse-spark-1.2".into(),
             label: "Muse Spark 1.2".into(),
+            provider: None,
             description: Some("Muse Code's default coding model".into()),
             reasoning_levels: vec![
                 ReasoningLevel::Low,

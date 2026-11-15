@@ -431,12 +431,12 @@ machine (`ZERON_DEVICE_PLATFORM=cloud`) keeps none of them: going back there is 
 downloads anyway. Other Linux installs keep the newest older one, to go back to by hand. Never
 `current`, the running executable's folder, or a newer version (an update being staged).
 
-A Cloud machine doesn't keep the release's `zeron-engine` either: it's the desktop app's background
-engine (78 MB), and the unit runs `zeron headless`, which links the engine. The installer and the
-updater leave it out, and the tidy and the pre-sleep cleanup remove it from versions installed before.
-Measured on staging (send to first output, n=8 each), a machine on one version went from a median of
-17.5 s to 14.2 s once neither it nor Codex's downloads came back with each wake; its wake downloaded
-225 MB, 205 of them the engine it runs.
+A Cloud machine keeps the release's `zeron-engine` (78 MB). From 2026-11-07 to 2026-11-15 the
+installer, the updater and the tidy left it out, when the unit's `zeron headless` linked the engine;
+since 0.3.0 the release's `zeron` is the zgx app, whose `zeron headless` runs that `zeron-engine`, so
+a machine without it exited at once and never enrolled. The installer keeps it now, and a repair
+(`~/.zeron/repair-engine`, the unit's `ExecStartPre=-`, set up by the installer and every wake) puts
+it back before each start if an older updater left it out (edge/src/cloud/install-script.ts).
 
 A longer wake reads as updating: the engine says so (`POST /runner/wake-stage`), `CloudSession.stage`
 is `updating` while it lasts (a stage nobody clears stops showing after 10 minutes), the desktop's

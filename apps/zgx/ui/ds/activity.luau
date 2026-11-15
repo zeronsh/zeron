@@ -26,6 +26,7 @@ local status = require("@self/status")
 local ToolDetail = require("@self/tool_detail")
 local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
+local ReplyPicture = require("@self/reply_picture")
 local FoldButton = require("@self/fold_button")
 
 -- (`cloud`, `git`: a Cloud machine's own setup steps, the machine and its
@@ -62,6 +63,10 @@ export type Tool = {
 	diff_ref: string?,
 	stats: { ToolDetail.Stat }?,
 	diff: ToolDetail.Diff?,
+	-- The pictures its result carried (a Read of a screenshot), as the
+	-- engine keeps them: copies on the chat's host, which the row opens to
+	-- (Zeron's chip previews, crates/ui tool_images.rs).
+	pictures: { { path: string, name: string? } }?,
 }
 
 export type Writing = { words: (id: string) -> string?, seeded: () -> boolean }
@@ -83,6 +88,9 @@ export type Props = {
 	-- A subagent's spawn row (its tool's `subagent`): what opens it (its
 	-- lane). Without it, the row opens its call as any does.
 	open_subagent: ((sub: any) -> ())?,
+	-- Where a tool's pictures are read from (ds/transcript's
+	-- `shown_pictures`: files on the chat's host). Without it, none show.
+	pictures: ReplyPicture.Pictures?,
 	-- A thought being written: `words`, a thought's words as they arrive, by
 	-- its id (nil for one not being written: the reply's draft holds them,
 	-- so a tick of them doesn't build its rows again); `seeded`, whether what
@@ -229,14 +237,46 @@ end
 -- scrolled back): each tool's call by its id, each group by its key. One
 -- map each, holding only what's open (or, for a group, chosen), not a
 -- state per tool.
--- A row's call and what it did, as it opens (`row`): `now`, its tool.
-local Opened = ui.component(function(props: { now: () -> Tool }): Node
+
+-- A tool's pictures under its opened row: small thumbnails in a row (the
+-- theme's `zeron.prose.picture.thumb`), each opening in the lightbox among
+-- the others, a lightbox group of their own.
+local function tool_pictures(now: () -> Tool, shown: ReplyPicture.Pictures): Node
+	local function entries(): { ReplyPicture.Entry }
+		local out = {}
+		for _, it in now().pictures or {} do
+			table.insert(out, { src = it.path, alt = it.name or "" })
+		end
+		return out
+	end
+	return ReplyPicture.Thumbs { pictures = shown, items = entries, group = `tool:{now().id}`, set = entries }
+end
+
+-- A row's call and what it did, as it opens (`row`): `now`, its tool;
+-- `pictures`, where its result's pictures are read from (without it, they
+-- don't show).
+local Opened = ui.component(function(props: { now: () -> Tool, pictures: ReplyPicture.Pictures? }): Node
 	local now = props.now
+	local pictures = props.pictures
 	return ui.column {
 		w_full = true,
 		ui.show(function(): boolean
 			return now().call ~= nil
 		end, call_block(now)),
+		if pictures
+			then ui.show(
+				function(): boolean
+					local list = now().pictures
+					return list ~= nil and #list > 0
+				end,
+				ui.div {
+					ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
+					mt = "$space.1",
+					mb = "$space.1",
+					tool_pictures(now, pictures),
+				}
+			)
+			else nil,
 		ui.show(
 			function(): boolean
 				return ToolDetail.has(now() :: any)
@@ -555,7 +595,8 @@ local function row(
 	writing: Writing?,
 	group: string?,
 	resized: ((size: { w: number, h: number }) -> ())?,
-	settled: boolean?
+	settled: boolean?,
+	pictures: ReplyPicture.Pictures?
 ): Node
 	local t = now()
 	if t.kind == "thought" then
@@ -573,9 +614,14 @@ local function row(
 	local function has_detail(): boolean
 		return ToolDetail.has(now() :: any)
 	end
+	-- The pictures its result carried, where they can be read.
+	local function has_pictures(): boolean
+		local list = now().pictures
+		return pictures ~= nil and list ~= nil and #list > 0
+	end
 	-- Open as the reader left it (opened or closed), else closed.
 	local function showing(): boolean
-		if not (has_call() or has_detail()) then
+		if not (has_call() or has_detail() or has_pictures()) then
 			return false
 		end
 		return CALLS_OPEN:get()[id] == true
@@ -584,7 +630,7 @@ local function row(
 	local function lane(): any
 		return if open_subagent then (now() :: any).subagent else nil
 	end
-	local opens = t.call ~= nil or lane() ~= nil or OPENS[t.kind] == true
+	local opens = t.call ~= nil or lane() ~= nil or OPENS[t.kind] == true or has_pictures()
 	-- (Only a subagent's spawn says more than its line: one that may open
 	-- its lane follows it.)
 	local label: string | () -> string = if t.target then `{t.verb} {line_of(t)}` else t.verb
@@ -650,7 +696,7 @@ local function row(
 					open_subagent(sub)
 					return
 				end
-				if has_call() or has_detail() then
+				if has_call() or has_detail() or has_pictures() then
 					local all = table.clone(CALLS_OPEN:peek())
 					all[id] = not showing()
 					CALLS_OPEN:set(all)
@@ -749,7 +795,7 @@ local function row(
 		},
 		-- What it opens to, made only once it's opened (a component's body
 		-- runs as it mounts: closed, nothing of it is made).
-		ui.show(showing, Opened { now = now }),
+		ui.show(showing, Opened { now = now, pictures = pictures }),
 	}
 end
 
@@ -907,7 +953,7 @@ return ui.component(function(props: Props): Node
 				return place() < last_branch:get()
 			end, function(): boolean
 				return live() and place() == count:get()
-			end, props.open_subagent, props.thought, props.key, resized, place() < count:peek())
+			end, props.open_subagent, props.thought, props.key, resized, place() < count:peek(), props.pictures)
 		end
 		-- (A call arriving joins as a row joining a `ui.each` does; the rest
 		-- are made as they come into view, as they were.)

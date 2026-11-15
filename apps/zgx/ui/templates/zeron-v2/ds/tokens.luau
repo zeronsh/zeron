@@ -295,7 +295,8 @@ function M.setup()
 				-- one's least tile; how long (as wide as tall, at least) and how
 				-- wide (as tall, at most) before it's cut; a run's tray (its
 				-- inset, so the corner is the picture's plus it, and its tallest
-				-- row); the controls' inset from the corner.
+				-- row); the controls' inset from the corner; a tool's result
+				-- picture's thumbnail (its widest and tallest).
 				picture = {
 					w = 660,
 					h = 420,
@@ -306,6 +307,7 @@ function M.setup()
 					wide = 5,
 					tray = { inset = 4, row = 300 },
 					control = { inset = 6 },
+					thumb = { w = 240, h = 160 },
 				},
 			},
 			-- Reasoning effort, a colour a level, cool to warm as it rises: mid

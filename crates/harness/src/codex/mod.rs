@@ -639,6 +639,7 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
                 default: false,
                 id: id.to_owned(),
                 label,
+                provider: None,
                 description,
                 reasoning_levels,
                 options,

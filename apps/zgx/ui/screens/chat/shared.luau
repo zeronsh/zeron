@@ -16,6 +16,7 @@ local agents = require("@account/agents")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
+local route = require("@app/screens/shell/route")
 
 local M = {}
 
@@ -227,6 +228,11 @@ function M.showing(): string
 	return here:peek()
 end
 
+-- The same, read as it changes.
+function M.showing_now(): string
+	return here:get()
+end
+
 function M.show(key: string)
 	local was = here:peek()
 	if was == key then
@@ -261,6 +267,52 @@ function M.take(): (string, { any })
 		M.quotes:set({})
 	end)
 	return text, cargo
+end
+
+-- The draft shown, lifted out whole to be put back later (a plugin's
+-- `zeron.take_draft`): its words as typed, its chips and the passages
+-- quoted in it, the composer cleared. Nil when there's nothing to lift.
+function M.lift(): { text: string, cargo: { any }, quotes: { [string]: string } }?
+	local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
+	if text == "" and #cargo == 0 then
+		return nil
+	end
+	ui.batch(function()
+		M.text:set("")
+		M.cargo:set({})
+		M.quotes:set({})
+	end)
+	return { text = text, cargo = cargo, quotes = quotes }
+end
+
+-- A lifted draft put back on the draft shown (`zeron.put_draft`). Onto an
+-- empty composer it's as it was; onto words already there, its words follow
+-- them after a blank line and its chips follow theirs, its files numbered
+-- after those there.
+function M.lay(d: { text: string, cargo: { any }, quotes: { [string]: string } })
+	local here_text, here_cargo = M.text:peek(), M.cargo:peek()
+	ui.batch(function()
+		if here_text == "" and #here_cargo == 0 then
+			M.text:set(d.text)
+			M.cargo:set(d.cargo)
+			M.quotes:set(d.quotes)
+			return
+		end
+		local quotes = table.clone(M.quotes:peek())
+		for line, passage in d.quotes do
+			quotes[line] = passage
+		end
+		M.quotes:set(quotes)
+		if d.text ~= "" then
+			M.text:set(if here_text == "" then d.text else `{here_text}\n\n{d.text}`)
+		end
+		for _, item in d.cargo do
+			local moved = table.clone(item)
+			moved.mention = nil
+			M.push_cargo(nil, moved)
+		end
+	end)
+	M.focus:add(1)
 end
 
 -- A passage of the transcript, quoted into the draft (its line marks it)
@@ -892,6 +944,16 @@ function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [str
 	}
 end
 
+-- Chat `key`'s draft's words as they are, read without following them
+-- (`draft_of` follows them): what a plugin's `zeron.compose` adds to.
+function M.peek_text_of(key: string): string
+	if here:peek() == key then
+		return M.text:peek()
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then d.text else ""
+end
+
 -- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
 -- or "chosen"): written wherever it is, as `draft_of` reads it.
 function M.set_draft_of(key: string, field: string, value: any)
@@ -1017,19 +1079,48 @@ local function account_detail(account: any): string
 	return table.concat(parts, " · ")
 end
 
+-- Whether `harness` keeps a login per model provider (Pi, OpenCode,
+-- Hermes): Zeron signs in to its providers one by one, or its accounts say
+-- their provider.
+local function per_provider(harness: string, list: { any }?): boolean
+	if agents.logins:get()[harness] ~= nil then
+		return true
+	end
+	for _, a in list or {} do
+		if a.provider ~= nil then
+			return true
+		end
+	end
+	return false
+end
+
 -- The composer's accounts on `device` (ds.ModelPicker's `accounts`,
--- `on_account`, `on_accounts_open`), whichever computer it is: asked for as
--- it's first seen.
+-- `account_group`, `on_account`, `on_accounts_open`), whichever computer it
+-- is: asked for as it's first seen. An agent that keeps a login per model
+-- provider shows only the model's provider's: switching its ChatGPT
+-- account never touches its Claude one.
 function M.model_accounts(device: () -> string?): any
 	ui.effect(function()
 		agents.watch_device(account_key(device()))
 	end)
+	local function listed(harness: string): { any }?
+		local on = agents.on_device:get()[account_key(device())]
+		return on and on[harness]
+	end
 	return {
-		accounts = function(harness: string, model: string): { any }?
-			local on = agents.on_device:get()[account_key(device())]
-			local list = on and on[harness]
-			if not list then
+		accounts = function(harness: string, model: string, provider: string?): { any }?
+			local all = listed(harness)
+			if not all then
 				return nil
+			end
+			local list = all
+			if provider and per_provider(harness, all) then
+				list = {}
+				for _, a in all do
+					if a.provider == provider then
+						table.insert(list, a)
+					end
+				end
 			end
 			local out = table.create(#list)
 			for i, a in list do
@@ -1044,6 +1135,49 @@ function M.model_accounts(device: () -> string?): any
 				}
 			end
 			return out
+		end,
+		-- The model's provider, named, and adding one of its accounts: Settings
+		-- → Providers, on the composer's device, its sign-in under way there.
+		account_group = function(harness: string, provider: string?): any
+			if not provider or not per_provider(harness, listed(harness)) then
+				return nil
+			end
+			local offer = (agents.logins:get()[harness] or {})[provider]
+			local name = if offer then offer.name else nil
+			for _, a in listed(harness) or {} do
+				if not name and a.provider == provider then
+					name = a.group
+				end
+			end
+			if not name then
+				return nil
+			end
+			local key = account_key(device())
+			-- Another account: a sign-in, on the composer's device; else an
+			-- API key, typed in Settings — on this Mac alone (a key never
+			-- travels to another device).
+			if offer and offer.login then
+				return {
+					name = name,
+					add = locale.s("ds.provider_card.add_named_account", { name = offer.login }),
+					on_add = function()
+						agents.target(if key == "" then nil else key)
+						route.settings("providers")
+						agents.sign_in_to(harness, provider)
+					end,
+				}
+			elseif offer and offer.key and key == "" then
+				return {
+					name = name,
+					add = locale.s("ds.model_picker.add_key", { name = offer.key }),
+					on_add = function()
+						agents.target(nil)
+						route.settings("providers")
+						agents.key_request:set(`{harness}:{provider}`)
+					end,
+				}
+			end
+			return { name = name }
 		end,
 		on_account = function(harness: string, id: string)
 			agents.switch_on(account_key(device()), harness, id):after(function() end, function()

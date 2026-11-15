@@ -625,6 +625,19 @@ impl Pending {
     }
 }
 
+/// The transcript's rows with each id once, the first kept: its list is keyed
+/// by `id`, and a key shown twice is one it can't place (zgx's virtual list
+/// panics, and the transcript stops updating until the chat is opened
+/// again). A prompt pending here comes after the transcript's own rows, so
+/// the engine's copy of it is the one kept.
+fn one_row_per_id(list: &mut Vec<Value>) {
+    let mut ids: std::collections::HashSet<Rc<str>> = std::collections::HashSet::with_capacity(list.len());
+    list.retain(|row| match row.field("id") {
+        Some(Value::Str(id)) => ids.insert(id.clone()),
+        _ => true,
+    });
+}
+
 /// An edit lease on a queued message (the engine's `BeginQueuedMessageEdit`).
 #[derive(Clone)]
 struct Lease {
@@ -1351,6 +1364,36 @@ impl Chats {
         self.publish_views();
     }
 
+    /// `harness`'s logins on `device` ("" or this one: here) changed: its
+    /// models looked up again, as the agent now lists them (Pi signed in to
+    /// Claude lists Claude's models). Here, that agent's alone; another
+    /// device's, only while the composer runs on it.
+    fn accounts_changed(self: &Rc<Self>, device: &str, harness: &str) {
+        let here = self.here.borrow().clone();
+        if device.is_empty() || here.as_deref() == Some(device) {
+            if !self.models.borrow().contains_key(harness) {
+                return;
+            }
+            let (me, id) = (self.clone(), harness.to_owned());
+            engine::get().spawn(async move {
+                match engine::get()
+                    .call("ListModels", json!({ "harness": id, "force": true }))
+                    .await
+                {
+                    Ok(list) => {
+                        me.models
+                            .borrow_mut()
+                            .insert(id, list.as_array().cloned().unwrap_or_default());
+                        me.publish_catalog();
+                    }
+                    Err(error) => eprintln!("zeron-zgx: chat: {id}'s models didn't list again: {error}"),
+                }
+            });
+        } else if self.remote.borrow().as_ref().is_some_and(|r| r.device == device) {
+            self.reload_remote();
+        }
+    }
+
     /// The composer now runs on `device` ("" or this one: here).
     fn catalog_on(self: &Rc<Self>, device: &str) {
         let here = self.here.borrow().clone();
@@ -1622,6 +1665,11 @@ impl Chats {
 /// A chat just made here (`sessions.create`), as the engine's list will
 /// have it: `params` is its `createChat` (`chatId`, `deviceId`, `spaceId`,
 /// `config`, `cwd`, `branch`, `parentChatId`).
+/// An agent's logins on a device changed (src/agents.rs): its models again.
+pub(crate) fn accounts_changed(device: &str, harness: &str) {
+    CHATS.with(|c| c.clone().accounts_changed(device, harness));
+}
+
 pub(crate) fn made(params: &Json) {
     let Some(id) = params["chatId"].as_str() else { return };
     let mut row = json!({ "id": id });
@@ -1748,6 +1796,15 @@ fn model_value(harness: &str, m: &Json) -> Value {
     // The agent's own default (Claude lists best-first, not default-first).
     if m["default"].as_bool() == Some(true) {
         fields.push(("default", Value::Bool(true)));
+    }
+    // Where it's served from, for an agent reaching models through several
+    // providers (Pi signed in to Codex and OpenCode): its id and its name.
+    let provider = &m["provider"];
+    if let (Some(pid), Some(name)) = (provider["id"].as_str(), provider["name"].as_str())
+        && !pid.is_empty()
+        && !name.is_empty()
+    {
+        fields.push(("provider", Value::record([("id", Value::from(pid)), ("name", Value::from(name))])));
     }
     Value::record(fields)
 }
@@ -2033,6 +2090,9 @@ impl View {
                         }
                     }
                     open.heard = true;
+                    // (A prompt sent from here that the tail brought: the
+                    // engine's copy now shows, so this one goes.)
+                    self.drop_arrived_prompts(open);
                     break 'applied Ok(Change::Rows);
                 } else {
                     open.has_whole = false;
@@ -2081,14 +2141,7 @@ impl View {
             }
             if result.is_ok() {
                 open.heard = true;
-                let ids: Vec<&str> = open.entries.iter().map(|e| &*e.id).collect();
-                let mut pending = self.pending.borrow_mut();
-                if let Some(prompts) = pending.get_mut(&open.id) {
-                    prompts.retain(|p| !ids.contains(&p.id.as_str()));
-                    if prompts.is_empty() {
-                        pending.remove(&open.id);
-                    }
-                }
+                self.drop_arrived_prompts(open);
             }
             result
         };
@@ -2104,6 +2157,20 @@ impl View {
                 self.publish_session();
             }
             Err(()) => self.resubscribe(),
+        }
+    }
+
+    /// Prompts sent from here that the transcript now has: the engine's copy
+    /// shows from now on, so this device's own goes (both would be two rows
+    /// with one id, which the transcript's list can't show).
+    fn drop_arrived_prompts(&self, open: &Open) {
+        let ids: std::collections::HashSet<&str> = open.entries.iter().map(|e| &*e.id).collect();
+        let mut pending = self.pending.borrow_mut();
+        if let Some(prompts) = pending.get_mut(&open.id) {
+            prompts.retain(|p| !ids.contains(p.id.as_str()));
+            if prompts.is_empty() {
+                pending.remove(&open.id);
+            }
         }
     }
 
@@ -2340,6 +2407,7 @@ impl View {
             if let Some(pending) = self.pending.borrow().get(&open.id) {
                 list.extend(pending.iter().map(Pending::value));
             }
+            one_row_per_id(&mut list);
             list
         };
         // The list first: a reply that ended takes its words into its row
@@ -4466,6 +4534,56 @@ fn entry_text(entry: &Json) -> String {
     out
 }
 
+/// Whether a user entry is only Claude Code's note on a picture a tool read
+/// (`[Image: original WxH, displayed at WxH. …]`, `[Image: source: …]`), as
+/// zeron-harness's `is_synthetic_user_text` reads it: nothing else in it.
+fn image_note_only(entry: &Json) -> bool {
+    let mut notes = 0;
+    for p in entry["parts"].as_array().into_iter().flatten() {
+        match p["kind"].as_str() {
+            Some("text") => {
+                let text = p["text"].as_str().unwrap_or_default().trim();
+                if text.is_empty() {
+                    continue;
+                }
+                if !is_image_note(text) {
+                    return false;
+                }
+                notes += 1;
+            }
+            _ => return false,
+        }
+    }
+    notes > 0
+}
+
+/// The CLI's image note exactly (zeron-harness's `is_image_note`): one
+/// line, `[Image: source: <path>]` (the path may be followed by `, original
+/// WxH, displayed at WxH. …`), or `[Image: original WxH, displayed at WxH.
+/// …]`. Something a person typed that only starts and ends like one
+/// (`[Image: source: shot.png] why is button [x]`) is not it.
+fn is_image_note(text: &str) -> bool {
+    if text.contains('\n') {
+        return false;
+    }
+    let Some(rest) = text.strip_prefix("[Image: ").and_then(|rest| rest.strip_suffix(']')) else {
+        return false;
+    };
+    if let Some(path) = rest.strip_prefix("source: ") {
+        return !path.trim().is_empty() && !path.contains(['[', ']']);
+    }
+    fn dimensions(text: &str) -> Option<&str> {
+        let (width, rest) = text.split_once('x')?;
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        (!width.is_empty() && width.bytes().all(|b| b.is_ascii_digit()) && digits > 0).then(|| &rest[digits..])
+    }
+    rest.strip_prefix("original ")
+        .and_then(dimensions)
+        .and_then(|rest| rest.strip_prefix(", displayed at "))
+        .and_then(dimensions)
+        .is_some_and(|rest| !rest.contains(['[', ']']))
+}
+
 /// A transcript's subagents: each spawn that names its doc, once, in the order they
 /// were spawned, with when their turn began (a message's `tools` hold all of its).
 fn subagents_in(message: &Value) -> Option<Rc<[Value]>> {
@@ -4516,6 +4634,13 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .filter_map(|p| p["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            // Claude Code's note on a picture a tool read (its size as the
+            // model saw it), which a subagent's transcript kept as a message
+            // before the engine learned it isn't one: not something anyone
+            // said, so no bubble.
+            if image_note_only(entry) {
+                return None;
+            }
             // A message from another chat: its routing header is the agent's to
             // read; the transcript shows who sent it, over its words.
             let sender = zeron_proto::agent_messages::agent_message_sender(&text);
@@ -5687,6 +5812,10 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         // Its folder on that device (a reply's pictures resolve by it).
         ("cwd", s(&chat["cwd"])),
         ("harness", Value::from(harness)),
+        // The agent the chat records (nil until its config is known, where
+        // `harness` stands in as Claude Code): whose `/` commands and skills
+        // its composer lists when its model isn't in the catalog shown.
+        ("agent", s(&config["harness"])),
         ("model", model),
         ("model_label", model_label),
         ("effort", s(&config["reasoning"])),
@@ -5994,8 +6123,19 @@ fn seen_would_change(chat: &Json, session: &Json, now: chrono::DateTime<chrono::
     })
 }
 
-/// "Jul 1, 4:12 PM", in this Mac's time zone (the shipping app's
-/// `format_timestamp`).
+/// "Jul 1, 4:12 PM": a local time's month (0-based), day, hour and minute,
+/// as the shipping app's `format_timestamp` reads.
+fn clock(month0: u32, day: u32, hour: u32, minute: u32) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month = MONTHS.get(month0 as usize).copied().unwrap_or("Jan");
+    let twelve = match hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{month} {day}, {twelve}:{minute:02} {}", if hour < 12 { "AM" } else { "PM" })
+}
+
+/// [`clock`] for `at` (seconds since 1970) in this machine's time zone.
 #[cfg(unix)]
 fn stamp(at: i64) -> Option<String> {
     #[repr(C)]
@@ -6028,21 +6168,47 @@ fn stamp(at: i64) -> Option<String> {
         }
         tm.assume_init()
     };
-    let hour = match tm.hour % 12 {
-        0 => 12,
-        h => h,
+    Some(clock(tm.mon as u32, tm.mday as u32, tm.hour as u32, tm.min as u32))
+}
+
+/// [`clock`] for `at` (seconds since 1970) in this machine's time zone: on
+/// Windows through its own conversion (it has no `localtime_r`). Without
+/// it every message's time was missing there, and with it the hover strip
+/// that holds Copy.
+#[cfg(windows)]
+fn stamp(at: i64) -> Option<String> {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    if at <= 0 {
+        return None;
+    }
+    // FILETIME counts 100 ns from 1601-01-01 (11,644,473,600 s before 1970).
+    let ticks = (at as u64).checked_add(11_644_473_600)?.checked_mul(10_000_000)?;
+    let file = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
     };
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let month = MONTHS.get(tm.mon as usize).copied().unwrap_or("Jan");
-    Some(format!(
-        "{month} {}, {hour}:{:02} {}",
-        tm.mday,
-        tm.min,
-        if tm.hour < 12 { "AM" } else { "PM" }
+    // SAFETY: both calls read only the structs passed in and write only the
+    // caller's SYSTEMTIMEs; a null zone means the machine's current one.
+    let local = unsafe {
+        let mut utc: SYSTEMTIME = std::mem::zeroed();
+        let mut local: SYSTEMTIME = std::mem::zeroed();
+        if FileTimeToSystemTime(&file, &mut utc) == 0
+            || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0
+        {
+            return None;
+        }
+        local
+    };
+    Some(clock(
+        u32::from(local.wMonth).checked_sub(1)?,
+        u32::from(local.wDay),
+        u32::from(local.wHour),
+        u32::from(local.wMinute),
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn stamp(_at: i64) -> Option<String> {
     None
 }
@@ -6106,6 +6272,21 @@ mod stream_tests;
 
 #[cfg(test)]
 mod tests {
+    /// A message's time reads as the shipping app's, on every platform: the
+    /// formatting, and a real local time from `stamp` (Windows included,
+    /// where it once was always missing and hid the message's hover strip).
+    #[test]
+    fn a_messages_time_reads_like_the_shipping_apps_on_every_platform() {
+        assert_eq!(super::clock(6, 1, 16, 12), "Jul 1, 4:12 PM");
+        assert_eq!(super::clock(0, 9, 0, 5), "Jan 9, 12:05 AM");
+        assert_eq!(super::clock(11, 31, 12, 0), "Dec 31, 12:00 PM");
+        let at = super::stamp(1_794_600_000).expect("a time for a real moment");
+        let (month, rest) = at.split_once(' ').unwrap();
+        assert!(["Nov", "Dec"].contains(&month), "{at}");
+        assert!(rest.ends_with(" AM") || rest.ends_with(" PM"), "{at}");
+        assert_eq!(super::stamp(0), None);
+    }
+
     /// Opening a chat marks it seen only while that changes something any
     /// viewport reads (its last message, its terminal's report, the end of
     /// its sleep): a chat looked at already writes nothing, so its devices'
@@ -6629,6 +6810,23 @@ mod tests {
         assert_eq!(model.as_deref(), Some("pi/kimi-k3"));
     }
 
+    /// The composer asks a chat's own agent for its `/` list: the harness its
+    /// config records, also without a model or before its device's catalog;
+    /// none until the config is known (not `harness`'s Claude Code stand-in).
+    #[test]
+    fn a_sessions_agent_is_its_recorded_harness() {
+        let chats = Chats::default();
+        let open = Open { id: "c".into(), ..Open::default() };
+        let agent = |chats: &Chats| session_value(chats, &open, false).field("agent").map(text).filter(|a| !a.is_empty());
+        assert_eq!(agent(&chats), None);
+        chats.chats.borrow_mut().insert(
+            "c".into(),
+            json!({ "id": "c", "deviceId": "laptop", "config": { "harness": "codex" } }),
+        );
+        assert_eq!(agent(&chats).as_deref(), Some("codex"));
+        assert!(matches!(session_value(&chats, &open, false).field("model"), None | Some(Value::Nil)));
+    }
+
     #[test]
     fn back_takes_a_questions_last_page_off_and_gives_its_pick() {
         let mut open = Open { id: "c".into(), ..Open::default() };
@@ -6994,6 +7192,33 @@ mod tests {
     }
 
     #[test]
+    fn claude_codes_image_note_is_no_message() {
+        let user = |text: &str| {
+            json!({ "id": "u", "role": "user", "createdAt": 1_788_900_000_000_i64,
+                "parts": [{ "id": "t", "kind": "text", "text": text }] })
+        };
+        for note in [
+            "[Image: original 1884x2066, displayed at 1824x2000. Multiply coordinates by 1.03 to map to original image.]",
+            "[Image: source: /home/me/scratch/test.png]",
+            "  [Image: source: /a.png, original 10x10, displayed at 10x10.]\n",
+        ] {
+            assert!(message(&user(note), None).is_none(), "{note} showed");
+        }
+        // Words of its own around it, or a note-like line that isn't one, show.
+        assert!(message(&user("Look: [Image: original 10x10, displayed at 10x10.]"), None).is_some());
+        assert!(message(&user("[Image: the logo]"), None).is_some());
+        for typed in [
+            "[Image: source: shot.png] why is button [x]",
+            "[Image: original mockup attached]\nmatch it exactly [urgent]",
+            "[Image: original mockup attached]",
+            "[Image: original 10x10, displayed at big]",
+            "[Image: source: ]",
+        ] {
+            assert!(message(&user(typed), None).is_some(), "{typed} hidden");
+        }
+    }
+
+    #[test]
     fn a_transcript_s_subagents_are_listed_once_each_in_order() {
         let tool = |r: &str, title: &str| {
             Value::record([("id", Value::from(r)), ("subagent", Value::record([("ref", Value::from(r)), ("title", Value::from(title))]))])
@@ -7153,6 +7378,12 @@ mod tests {
         assert!(model_value("claude-code", &claude).field("default").is_none());
         let marked = json!({ "id": "claude-opus-5-5", "default": true });
         assert!(matches!(model_value("claude-code", &marked).field("default"), Some(Value::Bool(true))));
+        // A model's provider rides along when the agent names one, and only then.
+        assert!(model_value("claude-code", &marked).field("provider").is_none());
+        let pi = json!({ "id": "openai-codex/gpt-5.5", "label": "GPT-5.5", "provider": { "id": "openai-codex", "name": "Codex" } });
+        let provider = model_value("pi", &pi).field("provider").cloned().expect("a provider");
+        assert_eq!(provider.field("id").map(text).as_deref(), Some("openai-codex"));
+        assert_eq!(provider.field("name").map(text).as_deref(), Some("Codex"));
     }
 
     #[test]
@@ -7841,6 +8072,74 @@ mod tests {
         view.heard_frame(json!({ "reset": [prompt("u0"), reply("a0"), prompt("u1"), reply("a1")] }));
         assert!(!view.open.borrow().as_ref().unwrap().has_whole);
         assert!(!rows().contains("tail engine.log"), "the whole copy replaces it: {}", rows());
+    }
+
+    /// A prompt sent from here that a reopened chat's opening tail brings
+    /// shows once: the engine's copy, the one pending here let go. Shown twice
+    /// it was two rows with one id, and zgx's virtual list panicked
+    /// ("duplicate virtual list child key"), freezing the transcript.
+    #[test]
+    fn a_prompt_the_opening_tail_brings_shows_once() {
+        use super::{Entry, Open, Pending, View, draft_value};
+        use serde_json::json;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let text = |id: &str, words: &str| json!({ "id": format!("{id}p"), "kind": "text", "text": words });
+        let prompt = |id: &str| json!({ "id": id, "role": "user", "parts": [text(id, "go")], "createdAt": 1_762_000_000_000_i64 });
+        let reply = |id: &str| json!({ "id": id, "role": "assistant", "status": "complete", "parts": [text(id, "done")], "createdAt": 1_762_000_000_000_i64 });
+        let held: Vec<Entry> = [prompt("u0"), reply("a0")].into_iter().map(Entry::new).collect();
+        let view = Rc::new(View {
+            session: app.host.shared("t.session", Value::Nil),
+            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            draft: app.host.shared("t.draft", draft_value("", "")),
+            rpc: RefCell::default(),
+            open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            snapshot: Cell::new(false),
+        });
+        view.pending.borrow_mut().insert(
+            "c".into(),
+            vec![Pending {
+                id: "u1".into(),
+                words: "go".into(),
+                paths: Vec::new(),
+                waiting: "sending",
+                retry: None,
+                at: None,
+                held: false,
+                row: false,
+                transfers: Vec::new(),
+            }],
+        );
+        let ids = || -> Vec<String> {
+            match view.messages.signal().with_untracked(Clone::clone) {
+                Value::List(rows) => rows.iter().filter_map(|r| r.field("id")).map(super::text).collect(),
+                other => panic!("rows: {other:?}"),
+            }
+        };
+        view.publish_messages();
+        assert_eq!(ids(), ["u0", "a0", "u1"], "the prompt shows at once, pending here");
+        // The engine's opening tail, the prompt in it.
+        view.heard_frame(json!({ "reset": [reply("a0"), prompt("u1")], "historyPending": true, "count": 2 }));
+        assert_eq!(ids(), ["u0", "a0", "u1"], "once, the engine's copy");
+        assert!(view.pending.borrow().get("c").is_none(), "the copy pending here is let go");
+    }
+
+    /// Rows that would share an id (the transcript's list is keyed by it)
+    /// show once, the first kept: a pending prompt after the transcript's
+    /// copy of it, or an entry twice over.
+    #[test]
+    fn rows_sharing_an_id_show_once() {
+        use zgx_script::Value;
+        let row = |id: &str, text: &str| Value::record([("id", Value::from(id)), ("text", Value::from(text))]);
+        let mut list = vec![row("u1", "engine"), row("a1", "reply"), Value::record([("text", Value::from("no id"))]), row("u1", "here")];
+        super::one_row_per_id(&mut list);
+        let texts: Vec<String> = list.iter().filter_map(|r| r.field("text")).map(super::text).collect();
+        assert_eq!(texts, ["engine", "reply", "no id"]);
     }
 
     /// A chat opened shows its rows once its transcript has come (this

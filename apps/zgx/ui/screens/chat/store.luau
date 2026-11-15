@@ -57,6 +57,9 @@ export type Session = {
 	-- Its folder on that device.
 	cwd: string?,
 	harness: string?,
+	-- The agent its config records (nil until that's known): whose `/` list
+	-- its composer reads when the catalog doesn't name its model.
+	agent: string?,
 	model: string?,
 	-- Its model's name: its catalog's, else its id (chat.rs `session_value`).
 	model_label: string?,

@@ -489,7 +489,7 @@ mod versioned {
             let mut rig = Rig::new("ok");
             rig.platform = platform;
             rig.install_old(&["0.8.0", "0.9.0"]);
-            // The desktop's background engine, as the release ships it.
+            // The engine `zeron headless` runs, as the release ships it.
             for version in ["1.0.0", "2.0.0"] {
                 std::fs::write(rig.app.join(version).join("zeron-engine"), "desktop").unwrap();
             }
@@ -497,12 +497,9 @@ mod versioned {
             rig.run_until_settled();
             rig.assert_updated(&id);
             rig.app_settles_to(expected);
-            // A Cloud machine never runs it, and copies it back in on every wake.
-            assert_eq!(
-                rig.app.join("2.0.0/zeron-engine").exists(),
-                platform.is_none(),
-                "platform {platform:?}"
-            );
+            // Kept everywhere, Cloud too: `zeron headless` runs it (a Cloud
+            // machine once left it out, and never came online).
+            assert!(rig.app.join("2.0.0/zeron-engine").exists(), "platform {platform:?}");
         }
     }
 
