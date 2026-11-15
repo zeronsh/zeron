@@ -41,7 +41,10 @@ pub fn provider_name(harness: HarnessId) -> &'static str {
 /// Whether the provider reports plan usage. One that doesn't shows no meters
 /// and no "usage unavailable" note — there is nothing missing. Pure.
 pub fn reports_usage(harness: HarnessId) -> bool {
-    !matches!(harness, HarnessId::Antigravity | HarnessId::Fx)
+    !matches!(
+        harness,
+        HarnessId::Antigravity | HarnessId::Fx | HarnessId::Droid
+    )
 }
 
 /// Providers whose agent holds exactly ONE login (Antigravity): once it is
@@ -53,7 +56,10 @@ pub fn keeps_one_login(harness: HarnessId) -> bool {
 /// Whether zeron switches this agent's logins. Hermes rotates through its
 /// own credential pool (listed, never reordered); Antigravity keeps one.
 pub fn switches_accounts(harness: HarnessId) -> bool {
-    !matches!(harness, HarnessId::Hermes | HarnessId::Antigravity | HarnessId::Fx)
+    !matches!(
+        harness,
+        HarnessId::Hermes | HarnessId::Antigravity | HarnessId::Fx | HarnessId::Droid
+    )
 }
 
 /// A standing note under a provider's Accounts label, for an agent whose

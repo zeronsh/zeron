@@ -23,6 +23,10 @@ impl TailReader {
         }
     }
 
+    pub(crate) fn position(&self) -> u64 {
+        self.offset
+    }
+
     /// New complete entries since the last poll; io/parse failures read as
     /// "nothing new" (fail soft — the formats are vendor-private).
     pub(crate) fn read_new(&mut self) -> Vec<Value> {

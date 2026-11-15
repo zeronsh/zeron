@@ -55,6 +55,14 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
         // A registry agent installs from its registry entry
         // (`crate::acp_registry`), never through a vendor script.
         Mock | Registry(_) => vec![],
+        Droid if windows => vec![
+            PowerShell("irm https://app.factory.ai/cli/windows | iex"),
+            Npm("droid", false),
+        ],
+        Droid => vec![
+            Shell("curl -fsSL https://app.factory.ai/cli | sh", "sh"),
+            Npm("droid", false),
+        ],
         Fx if windows => vec![],
         Fx => vec![Shell("curl -fsSL https://fx.sh/setup.sh | bash", "bash")],
         Antigravity => vec![Archive],
@@ -166,6 +174,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         Devin => "curl -fsSL https://cli.devin.ai/install.sh | bash",
         Muse => "curl -fsSL https://dev.meta.ai/install.sh | sh",
         Fx => "curl -fsSL https://fx.sh/setup.sh | bash",
+        Droid => "npm install -g droid",
         Antigravity | Mock | Registry(_) => return None,
     })
 }
@@ -183,6 +192,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Devin => ("devin", "~/.local/bin"),
         Antigravity => ("agy_acp_server", "~/.zeron/adapters"),
         Muse => ("muse", "~/.local/bin"),
+        Droid => ("droid", "~/.local/bin or the npm global bin"),
         Mock => ("mock", "PATH"),
         Fx => ("fx", "~/.local/bin"),
         Registry(agent) => (agent.registry_id(), "~/.zeron/agents"),
@@ -202,6 +212,7 @@ pub fn installed(id: HarnessId) -> bool {
         Devin => crate::AcpHarness::devin().installed(),
         Antigravity => crate::AcpHarness::antigravity().installed(),
         Muse => crate::MuseHarness::new().installed(),
+        Droid => crate::DroidHarness::new().installed(),
         Mock => false,
         Fx => crate::AcpHarness::fx().installed(),
         Registry(agent) => crate::acp_registry::installed(agent),
@@ -405,7 +416,7 @@ async fn run(
 mod tests {
     use super::*;
 
-    const IDS: [HarnessId; 11] = [
+    const IDS: [HarnessId; 12] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
@@ -416,6 +427,7 @@ mod tests {
         HarnessId::Fx,
         HarnessId::Devin,
         HarnessId::Antigravity,
+        HarnessId::Droid,
         HarnessId::Mock,
     ];
 

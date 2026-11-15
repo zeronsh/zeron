@@ -111,6 +111,7 @@ local function card(row: State<agents.Agent>): Node
 			return nil
 		end,
 		settings = false,
+		own_sign_in = (first :: any).own_sign_in == true,
 		on_add = function()
 			agents.sign_in(id)
 		end,

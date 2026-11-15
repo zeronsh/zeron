@@ -17,6 +17,7 @@ pinned Antigravity archive.
 | [Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/installation) | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `irm https://hermes-agent.nousresearch.com/install.ps1 \| iex` |
 | [Devin](https://cli.devin.ai/) | macOS, when brew resolves: `brew install --cask devin-cli`; otherwise `curl -fsSL https://cli.devin.ai/install.sh \| bash` | `irm https://static.devin.ai/cli/setup.ps1 \| iex` |
 | [Muse Code](https://dev.meta.ai/docs/muse-code/) | `curl -fsSL https://dev.meta.ai/install.sh \| sh` | `irm https://dev.meta.ai/install.ps1 \| iex` |
+| [Factory Droid](https://docs.factory.com/droid-cli/quickstart.md) | `curl -fsSL https://app.factory.ai/cli \| sh` | `irm https://app.factory.ai/cli/windows \| iex` |
 | [fx](https://fx.sh/docs) | `curl -fsSL https://fx.sh/setup.sh \| bash` | Manual setup (no native Windows installer) |
 | Antigravity | Existing verified 1.1.1 archive in `acp::antigravity_archive`; no shell command | Same archive path on supported architectures |
 
@@ -67,6 +68,31 @@ drops an inherited `META_API_KEY` and sets `MUSE_NO_AUTO_UPDATE=1`.
 
 `tests/muse.rs` replays sessions recorded from a real Muse Code 1.4.x host
 (`tests/fixtures/muse/*.ndjson`, through `fake-muse.py`).
+
+## Factory Droid
+
+`droid::DroidHarness` drives
+`droid exec --input-format stream-jsonrpc --output-format stream-jsonrpc`
+(never ACP); [src/droid/PROTOCOL.md](src/droid/PROTOCOL.md) is the wire as
+observed on Droid 1.10.0. A runtime is one process with one session
+(`droid.initialize_session`, or `droid.load_session` by id). Before every
+prompt the request's settings are sent and must come back in the
+`settings_updated` notification carrying that request's id; turns end only on
+`agent_turn_completed`. Later prompts are `droid.add_user_message`, stops are
+`droid.interrupt_session`, Plan mode is Droid's Spec mode, and a subagent's
+transcript is read from the history Droid writes under
+`<home>/.factory/sessions`. Supervised, Auto-accept edits and Full access map
+to autonomy Off, Medium and High; Medium also runs medium-risk local commands
+unprompted.
+
+Droid owns its sign-in (`droid`, then `/login`, or `FACTORY_API_KEY`): Zeron
+has no sign-in, account switching or usage meters for it. The ACP registry's
+`factory-droid` is no longer listed; one added earlier stays, as an agent that
+has left the registry.
+
+`tests/droid.rs` drives a synthetic peer (`tests/fixtures/droid_rpc.rs`). The
+ignored `tests/droid_live.rs` runs the real CLI in temporary directories: it
+needs `DROID_LIVE_EXECUTABLE` and `FACTORY_API_KEY`, and spends tokens.
 
 ## Verification
 

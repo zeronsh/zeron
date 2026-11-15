@@ -6757,6 +6757,7 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
         HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
         HarnessId::Muse => (crate::icons::MUSE_MARK, Some(crate::icons::muse_brand())),
+        HarnessId::Droid => (crate::icons::DROID_MARK, None),
         // An agent added from the ACP registry (in another app): no mark of
         // its own here.
         HarnessId::Registry(_) => (crate::icons::BOT, None),

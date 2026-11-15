@@ -181,6 +181,20 @@ local AGENTS: { Agent } = {
 		dy = -8,
 		wob = -2,
 	},
+	{
+		mark = "droid-mark",
+		x = 0.04,
+		y = 0.84,
+		s = 64,
+		rot = 6,
+		fx = 30,
+		fy = 140,
+		d = 0.82,
+		dur = 9.9,
+		dx = 3,
+		dy = -9,
+		wob = 2,
+	},
 }
 
 -- When the agents come, in ms from the start.

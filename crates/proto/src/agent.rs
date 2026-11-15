@@ -92,6 +92,8 @@ pub enum HarnessId {
     /// Meta's Muse Code agent, driven natively over the Muse Session Protocol
     /// (MSP: `muse` speaking JSON-RPC on stdio).
     Muse,
+    /// Factory Droid, driven natively over stream-jsonrpc.
+    Droid,
     /// Test harness; never shown in production pickers.
     Mock,
     /// An agent added from the ACP registry (`acp.<registry id>`), driven by
@@ -124,6 +126,7 @@ impl<'de> Deserialize<'de> for HarnessId {
                     "opencode",
                     "antigravity",
                     "muse",
+                    "droid",
                     "mock",
                     "acp.<registry id>",
                 ],
@@ -135,7 +138,7 @@ impl<'de> Deserialize<'de> for HarnessId {
 impl HarnessId {
     /// Every built-in harness, in declaration order (a registry agent is
     /// one a device added: the engine's registry lists those).
-    pub const ALL: [HarnessId; 12] = [
+    pub const ALL: [HarnessId; 13] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
@@ -147,6 +150,7 @@ impl HarnessId {
         HarnessId::Opencode,
         HarnessId::Antigravity,
         HarnessId::Muse,
+        HarnessId::Droid,
         HarnessId::Mock,
     ];
 
@@ -164,6 +168,7 @@ impl HarnessId {
             HarnessId::Opencode => "opencode",
             HarnessId::Antigravity => "antigravity",
             HarnessId::Muse => "muse",
+            HarnessId::Droid => "droid",
             HarnessId::Mock => "mock",
             HarnessId::Registry(agent) => agent.slug(),
         }

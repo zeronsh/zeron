@@ -250,6 +250,7 @@ local function card(row: State<agents.Agent>): Node
 			return (row:get() :: any).updating == true
 		end,
 		sign_in_only = from_registry,
+		own_sign_in = (first :: any).own_sign_in == true,
 		login_note = function(): string?
 			return (row:get() :: any).login_note
 		end,

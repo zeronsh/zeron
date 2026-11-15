@@ -753,6 +753,8 @@ return {
 	["ds.provider_card.unavailable_hint"] = "Agents already set up keep working. Zeron will look again when it can.",
 	["ds.provider_card.sign_in"] = "Sign in to {name}",
 	["ds.provider_card.sign_in_hint"] = "Opens your browser to sign in.",
+	["ds.provider_card.own_sign_in"] = "Signs in through {name}",
+	["ds.provider_card.own_sign_in_hint"] = "{agent, select, droid {Run droid in a terminal, then /login.} other {Sign in from its own CLI.}} Zeron uses that sign-in.",
 	["ds.provider_card.banked_now_soon"] = "One starts the session and week over now.",
 	["ds.provider_card.reset_using"] = "Using a reset…",
 	["ds.provider_card.reset_failed"] = "Couldn't use the reset",

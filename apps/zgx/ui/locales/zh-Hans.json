@@ -938,6 +938,8 @@
       "unavailable_hint": "已设置的智能体会继续运行。Zeron 会在可以时再次查找。",
       "sign_in": "登录 {name}",
       "sign_in_hint": "在浏览器中打开以登录。",
+      "own_sign_in": "通过 {name} 登录",
+      "own_sign_in_hint": "{agent, select, droid {在终端中运行 droid，然后输入 /login。} other {请在它自己的 CLI 中登录。}}Zeron 会使用该登录。",
       "banked_now_soon": "使用一次可立即重置会话和周限额。",
       "reset_using": "正在使用重置…",
       "reset_failed": "无法使用重置",
@@ -1494,7 +1496,7 @@
     },
     "providers": {
       "title": "提供方",
-      "terms": "提供方 智能体 命令行 安装 启用 停用 账户 登录 harnesses agents cli claude code codex cursor devin grok hermes pi opencode antigravity muse install enable disable accounts sign in login",
+      "terms": "提供方 智能体 命令行 安装 启用 停用 账户 登录 harnesses agents cli claude code codex cursor devin grok hermes pi opencode antigravity muse factory droid install enable disable accounts sign in login",
       "agent_settings": "智能体设置",
       "agents": {
         "label": "你的智能体",

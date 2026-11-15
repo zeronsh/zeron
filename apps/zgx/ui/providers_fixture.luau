@@ -31,6 +31,10 @@ local function agent(id: string, name: string, mark: string, accounts: { Account
 	}
 end
 
+-- Signs in from its own CLI: no accounts, no "Connect an account".
+local droid = agent("droid", "Factory Droid", "droid", {})
+droid.own_sign_in = true
+
 local model: { any } = {
 	agent("claude-code", "Claude Code", "claude", {}),
 	agent("codex", "Codex", "openai", {
@@ -40,6 +44,7 @@ local model: { any } = {
 	agent("grok", "Grok", "grok", {}),
 	agent("devin", "Devin", "devin", {}),
 	agent("pi", "Pi", "pi", {}),
+	droid,
 }
 
 -- What the host would publish: each agent with its accounts and sign-in.
