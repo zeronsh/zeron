@@ -52,6 +52,7 @@ local dock = require("@self/composer_dock")
 local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
+local Tooltip = require("@self/tooltip")
 local VoiceWave = require("@self/voice_wave").VoiceWave
 local context_usage = require("@self/context_usage")
 local TextMetrics = require("@self/composer_metrics")
@@ -1063,6 +1064,15 @@ return ui.component(function(props: Props): Node
 	local function disabled(): boolean
 		return read(props.disabled) == true
 	end
+	-- Auto is chosen on an agent without it ("Auto unavailable"): nothing is
+	-- sent until another mode or agent is picked (the engine would refuse
+	-- the run).
+	local function access_blocked(): boolean
+		return props.access ~= nil
+			and props.access_auto ~= nil
+			and props.access:get() == "auto"
+			and not props.access_auto()
+	end
 	local function dictating(): boolean
 		return props.dictating ~= nil and props.dictating:get()
 	end
@@ -1121,6 +1131,9 @@ return ui.component(function(props: Props): Node
 			return
 		end
 		if not string.find(text, "%S") and not has_cargo() then
+			return
+		end
+		if access_blocked() then
 			return
 		end
 		if props.on_send then
@@ -1465,20 +1478,41 @@ return ui.component(function(props: Props): Node
 		on_click = props.on_dictate,
 		Icon { name = "microphone", size = 18 },
 	})
-	local send_button = Button {
-		shape = "pill",
-		size = "sm",
-		icon = true,
-		label = function()
-			return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
-		end,
-		disabled = function()
-			return disabled() or not (has_text() or has_cargo() or dictating())
-		end,
-		on_press = if spoken then spoken.on_send_press else nil,
-		on_click = send,
-		Icon { name = "arrow-up", size = 14 },
-	}
+	local function send_control(): Node
+		return Button {
+			shape = "pill",
+			size = "sm",
+			icon = true,
+			label = function()
+				return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
+			end,
+			disabled = function()
+				return disabled() or access_blocked() or not (has_text() or has_cargo() or dictating())
+			end,
+			on_press = if spoken then spoken.on_send_press else nil,
+			on_click = send,
+			Icon { name = "arrow-up", size = 14 },
+		}
+	end
+	-- Held by an unavailable Auto, it says why when rested on. (A tooltip is
+	-- set once, not followed, and a disabled button hears no pointer: the
+	-- held one is a button of its own under a box that carries the words.)
+	local send_button = ui.show(
+		access_blocked,
+		ui.div {
+			relative = true,
+			send_control(),
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				tooltip = Tooltip { locale.t("ds.composer.send_auto_unavailable") },
+			},
+		},
+		send_control()
+	)
 	local stop_button = Button {
 		shape = "pill",
 		size = "sm",

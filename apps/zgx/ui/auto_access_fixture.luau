@@ -9,6 +9,7 @@ ds.setup()
 local HARNESSES: { ds.Harness } = { { id = "claude", label = "Claude", mark = "claude" } }
 local MODELS: { ds.Model } = { { value = "sonnet", label = "Sonnet", harness = "claude" } }
 local access_auto = ui.shared("test_composer_auto", true)
+local sent = ui.shared("test_composer_sent", "")
 local PROJECTS: { Composer.Project } = {
 	{ value = "atlas", label = "Atlas", hue = "violet" },
 	{ value = "borealis", label = "Borealis", hue = "blue" },
@@ -21,7 +22,10 @@ return ui.column {
 	p = "$space.4",
 	justify = "end",
 	ds.Composer {
-		value = ui.state("test_composer_draft", ""),
+		value = ui.shared("test_composer_draft", ""),
+		on_send = function(text: string)
+			sent:set(text)
+		end,
 		access = ui.shared("test_composer_access", "auto" :: string?),
 		access_auto = function(): boolean
 			return access_auto:get()

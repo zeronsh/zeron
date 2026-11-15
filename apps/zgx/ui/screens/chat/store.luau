@@ -120,10 +120,13 @@ M.draft = ui.shared("chat.draft", { id = "", text = "" } :: Draft)
 M.catalog = ui.shared("chat.catalog", { state = "looking", harnesses = {}, models = {} } :: Catalog)
 
 -- Whether the agent `model` ("<harness>/<id>") runs on has an auto mode of
--- its own (the catalog's `auto`): the access picker offers Auto.
+-- its own (the catalog's `auto`): the access picker offers Auto, and the
+-- composer sends in it. An agent the catalog doesn't list yet (it's still
+-- loading) counts as having one, so a chat in Auto can send at once; the
+-- engine still refuses Auto where it can't run.
 function M.offers_auto(model: string?): boolean
 	if not model then
-		return false
+		return true
 	end
 	local harness = string.match(model, "^([^/]+)/")
 	for _, h in (M.catalog:get() :: any).harnesses do
@@ -131,7 +134,7 @@ function M.offers_auto(model: string?): boolean
 			return h.auto == true
 		end
 	end
-	return false
+	return true
 end
 -- A call nothing waits on: its failure lands in the session's notice (the
 -- host sets it), so the script needn't hear it.

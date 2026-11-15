@@ -630,6 +630,7 @@
       "dictate": "Dictate",
       "queue_message": "Queue message",
       "send_message": "Send message",
+      "send_auto_unavailable": "Auto isn't available for this agent. Choose another access mode to send.",
       "stop": "Stop",
       "back": "Back",
       "next": "Next",
