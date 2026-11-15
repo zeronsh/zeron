@@ -733,8 +733,6 @@ impl Normalizer {
                 pending[0].2.push(image);
             }
         }
-        // Error text is controlled by the tool (including MCP servers),
-        // not authenticated reviewer metadata. Keep it a tool result.
         pending
             .into_iter()
             .map(|(mut event, _name, images)| {
@@ -1625,7 +1623,6 @@ impl Normalizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use serde_json::json;
 
     #[test]
@@ -1733,11 +1730,17 @@ mod tests {
                 // Both plain strings and text-block arrays are untrusted.
                 for content in [json!(text), json!([{"type": "text", "text": text}])] {
                     let part = folded_tool(name, input.clone(), content, true);
-                    let zeron_doc::MessagePart::Tool { review, is_error, .. } = part else {
+                    let zeron_doc::MessagePart::Tool {
+                        review, is_error, ..
+                    } = part
+                    else {
                         panic!("not a tool");
                     };
                     assert!(is_error, "the tool failure must remain visible");
-                    assert!(review.is_none(), "tool output is not reviewer provenance: {name}: {text}");
+                    assert!(
+                        review.is_none(),
+                        "tool output is not reviewer provenance: {name}: {text}"
+                    );
                 }
             }
         }

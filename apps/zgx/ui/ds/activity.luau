@@ -585,13 +585,6 @@ local OPENS: { [string]: boolean } = { exec = true, read = true, edit = true, wr
 -- Kinds whose row counts lines added and removed (an edit's).
 local COUNTS: { [string]: boolean } = { edit = true, write = true }
 
--- (`below`: a tool with a branch follows, so the trunk runs on under this
--- one; `running`: it is the one in flight, its glyph the working loader;
--- `resized`: told the row's size as it's laid out; `settled`: it is before
--- the group's last, so never the one in flight.)
--- A row is built often (each comes into view, a long group's thousands), so
--- what can't change once a tool has started is read once as it's made (its
--- kind, its verb, its glyph); only what a tool's result changes follows it.
 -- Auto's reviewer on a call: its glyph becomes a shield in the verdict's
 -- hue (let through quiet, stopped in danger's, timed out in warning's), its
 -- risk and why in the tooltip. A call no reviewer looked at keeps its own.
@@ -635,6 +628,13 @@ local function review_glyph(now: () -> Tool, size: number): Node
 	}
 end
 
+-- (`below`: a tool with a branch follows, so the trunk runs on under this
+-- one; `running`: it is the one in flight, its glyph the working loader;
+-- `resized`: told the row's size as it's laid out; `settled`: it is before
+-- the group's last, so never the one in flight.)
+-- A row is built often (each comes into view, a long group's thousands), so
+-- what can't change once a tool has started is read once as it's made (its
+-- kind, its verb, its glyph); only what a tool's result changes follows it.
 local function row(
 	now: () -> Tool,
 	below: () -> boolean,

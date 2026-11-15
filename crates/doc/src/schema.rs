@@ -337,7 +337,9 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 exit_code: p.exit_code,
                 output_truncated: p.output_truncated.unwrap_or(false),
                 output_lines: p.output_lines,
-                review: p.review.and_then(|value| serde_json::from_value(value).ok()),
+                review: p
+                    .review
+                    .and_then(|value| serde_json::from_value(value).ok()),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -3531,7 +3533,12 @@ mod tests {
         let mut folded = Vec::new();
         fold_event_into_parts(
             &mut folded,
-            &AgentEvent::ToolCall { id: "c1".into(), call: ToolCall::Exec { command: "rm -rf ~/x".into() } },
+            &AgentEvent::ToolCall {
+                id: "c1".into(),
+                call: ToolCall::Exec {
+                    command: "rm -rf ~/x".into(),
+                },
+            },
         );
         writer.sync(&folded).unwrap();
         for status in [ToolReviewStatus::Reviewing, ToolReviewStatus::Denied] {
@@ -3539,7 +3546,11 @@ mod tests {
                 &mut folded,
                 &AgentEvent::ToolReviewed {
                     id: "c1".into(),
-                    review: ToolReview { status, risk: Some("high".into()), reason: Some("outside the workspace".into()) },
+                    review: ToolReview {
+                        status,
+                        risk: Some("high".into()),
+                        reason: Some("outside the workspace".into()),
+                    },
                 },
             );
             writer.sync(&folded).unwrap();
@@ -3548,9 +3559,15 @@ mod tests {
         let snapshot = doc.export_snapshot().unwrap();
         let replica = loro::LoroDoc::new();
         replica.import(&snapshot).unwrap();
-        for entries in [doc.read_entries().unwrap(), SessionDoc::from_doc(replica).read_entries().unwrap()] {
+        for entries in [
+            doc.read_entries().unwrap(),
+            SessionDoc::from_doc(replica).read_entries().unwrap(),
+        ] {
             match &entries[0].parts[0] {
-                MessagePart::Tool { review: Some(review), .. } => {
+                MessagePart::Tool {
+                    review: Some(review),
+                    ..
+                } => {
                     assert_eq!(review.status, ToolReviewStatus::Denied);
                     assert_eq!(review.risk.as_deref(), Some("high"));
                     assert_eq!(review.reason.as_deref(), Some("outside the workspace"));

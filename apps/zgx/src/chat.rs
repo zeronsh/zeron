@@ -5544,9 +5544,18 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
         fields.push(("failed", Value::Bool(true)));
     }
     // Auto's reviewer on it: reviewing, approved, denied or timed-out, its
-    // risk and why (as the agent's reviewer said).
-    if let Some(status) = part["review"]["status"].as_str() {
-        let text = |key: &str| part["review"][key].as_str().filter(|t| !t.trim().is_empty()).map_or(Value::Nil, Value::from);
+    // risk and why (as the agent's reviewer said). A status this build
+    // doesn't know (a newer peer's) shows nothing rather than a bare key.
+    if let Some(status) = part["review"]["status"]
+        .as_str()
+        .filter(|s| matches!(*s, "reviewing" | "approved" | "denied" | "timed-out"))
+    {
+        let text = |key: &str| {
+            part["review"][key]
+                .as_str()
+                .filter(|t| !t.trim().is_empty())
+                .map_or(Value::Nil, Value::from)
+        };
         fields.push((
             "review",
             Value::record([("status", Value::from(status)), ("risk", text("risk")), ("reason", text("reason"))]),

@@ -1070,6 +1070,7 @@ pub struct ToolReview {
     pub reason: Option<String>,
 }
 
+/// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1191,7 +1192,10 @@ pub enum AgentEvent {
     /// The agent's own reviewer on tool call `id` (Auto): reviewing it,
     /// or its verdict. Folds onto the call's part; a later one replaces it.
     #[serde(rename_all = "camelCase")]
-    ToolReviewed { id: String, review: ToolReview },
+    ToolReviewed {
+        id: String,
+        review: ToolReview,
+    },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.
     #[serde(rename_all = "camelCase")]
@@ -1290,17 +1294,30 @@ mod tests {
         let ws = SandboxLevel::WorkspaceWrite;
         // A supervised or auto-accept-edits chat can't hand work to Auto.
         for max in [AccessMode::Supervised, AccessMode::AutoAcceptEdits] {
-            assert_eq!(cap_access((ws, AccessMode::Auto), (ws, max)), (ws, max, true));
+            assert_eq!(
+                cap_access((ws, AccessMode::Auto), (ws, max)),
+                (ws, max, true)
+            );
         }
         // Auto caps full access, and lets Auto and what's below it through.
         assert_eq!(
             cap_access((ws, AccessMode::FullAccess), (ws, AccessMode::Auto)),
             (ws, AccessMode::Auto, true)
         );
-        for asked in [AccessMode::Supervised, AccessMode::AutoAcceptEdits, AccessMode::Auto] {
-            assert_eq!(cap_access((ws, asked), (ws, AccessMode::Auto)), (ws, asked, false));
+        for asked in [
+            AccessMode::Supervised,
+            AccessMode::AutoAcceptEdits,
+            AccessMode::Auto,
+        ] {
+            assert_eq!(
+                cap_access((ws, asked), (ws, AccessMode::Auto)),
+                (ws, asked, false)
+            );
         }
-        assert_eq!(serde_json::to_string(&AccessMode::Auto).unwrap(), "\"auto\"");
+        assert_eq!(
+            serde_json::to_string(&AccessMode::Auto).unwrap(),
+            "\"auto\""
+        );
     }
 
     #[test]
@@ -1314,7 +1331,10 @@ mod tests {
         assert_eq!(Auto.honored_by(&[]), None);
         // The other modes fall back as before.
         assert_eq!(Supervised.honored_by(&[FullAccess]), Some(FullAccess));
-        assert_eq!(AutoAcceptEdits.honored_by(&AccessMode::ALL), Some(AutoAcceptEdits));
+        assert_eq!(
+            AutoAcceptEdits.honored_by(&AccessMode::ALL),
+            Some(AutoAcceptEdits)
+        );
     }
 
     #[test]

@@ -6,7 +6,9 @@
 //! types) are accepted, and unknown item types map to nothing.
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, DoneStatus, TodoItem, TodoStatus, ToolCall, ToolReview, ToolReviewStatus};
+use zeron_proto::{
+    AgentEvent, DoneStatus, TodoItem, TodoStatus, ToolCall, ToolReview, ToolReviewStatus,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -966,10 +968,11 @@ pub(crate) fn route_child_notification(method: &str) -> ChildRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn auto_review_notifications_become_reviews_on_their_call() {
-        let completed = serde_json::json!({
+        let completed = json!({
             "threadId": "t", "turnId": "u", "reviewId": "r", "targetItemId": "call_1",
             "review": { "status": "denied", "riskLevel": "high", "rationale": "Deletes files outside the workspace." },
             "action": { "type": "command", "command": "rm -rf ~/x", "cwd": "/w", "source": "shell" }
@@ -985,16 +988,28 @@ mod tests {
                 },
             })
         );
-        let started = serde_json::json!({ "targetItemId": "call_1", "review": { "status": "inProgress" } });
+        let started = json!({ "targetItemId": "call_1", "review": { "status": "inProgress" } });
         assert!(matches!(
             auto_review_event(&started),
-            Some(AgentEvent::ToolReviewed { review: ToolReview { status: ToolReviewStatus::Reviewing, risk: None, reason: None }, .. })
+            Some(AgentEvent::ToolReviewed {
+                review: ToolReview {
+                    status: ToolReviewStatus::Reviewing,
+                    risk: None,
+                    reason: None
+                },
+                ..
+            })
         ));
         // A network check names no call; an aborted review is no verdict.
-        assert_eq!(auto_review_event(&serde_json::json!({ "targetItemId": null, "review": { "status": "approved" } })), None);
-        assert_eq!(auto_review_event(&serde_json::json!({ "targetItemId": "c", "review": { "status": "aborted" } })), None);
+        assert_eq!(
+            auto_review_event(&json!({ "targetItemId": null, "review": { "status": "approved" } })),
+            None
+        );
+        assert_eq!(
+            auto_review_event(&json!({ "targetItemId": "c", "review": { "status": "aborted" } })),
+            None
+        );
     }
-    use serde_json::json;
 
     #[test]
     fn reasoning_parts_preserve_chunking_and_existing_paragraph_breaks() {

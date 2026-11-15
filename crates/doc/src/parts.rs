@@ -5,8 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{ToolReview, 
-    AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputAnswer, UserInputQuestion,
+use zeron_proto::{
+    AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, ToolReview, UserInputAnswer,
+    UserInputQuestion,
 };
 
 use crate::constants::MSG_INLINE_MAX;
@@ -966,20 +967,43 @@ mod tests {
     fn a_review_folds_onto_its_call_and_a_later_one_replaces_it() {
         use zeron_proto::ToolReviewStatus;
         let mut parts = Vec::new();
-        fold_event_into_parts(&mut parts, &AgentEvent::ToolCall { id: "c1".into(), call: ToolCall::Exec { command: "rm -rf x".into() } });
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "c1".into(),
+                call: ToolCall::Exec {
+                    command: "rm -rf x".into(),
+                },
+            },
+        );
         let review = |status| AgentEvent::ToolReviewed {
             id: "c1".into(),
-            review: ToolReview { status, risk: Some("high".into()), reason: Some("outside the workspace".into()) },
+            review: ToolReview {
+                status,
+                risk: Some("high".into()),
+                reason: Some("outside the workspace".into()),
+            },
         };
         fold_event_into_parts(&mut parts, &review(ToolReviewStatus::Reviewing));
         fold_event_into_parts(&mut parts, &review(ToolReviewStatus::Denied));
         // One for a call that isn't shown changes nothing.
-        fold_event_into_parts(&mut parts, &AgentEvent::ToolReviewed {
-            id: "elsewhere".into(),
-            review: ToolReview { status: ToolReviewStatus::Approved, risk: None, reason: None },
-        });
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolReviewed {
+                id: "elsewhere".into(),
+                review: ToolReview {
+                    status: ToolReviewStatus::Approved,
+                    risk: None,
+                    reason: None,
+                },
+            },
+        );
         match &parts[..] {
-            [MessagePart::Tool { review: Some(r), .. }] => {
+            [
+                MessagePart::Tool {
+                    review: Some(r), ..
+                },
+            ] => {
                 assert_eq!(r.status, ToolReviewStatus::Denied);
                 assert_eq!(r.reason.as_deref(), Some("outside the workspace"));
             }
