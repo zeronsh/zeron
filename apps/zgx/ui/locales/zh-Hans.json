@@ -2,7 +2,8 @@
   "language": {
     "system": "跟随系统",
     "en": "English",
-    "zh_hans": "简体中文"
+    "zh_hans": "简体中文",
+    "fr": "Français"
   },
   "time": {
     "now": "现在",
@@ -1157,7 +1158,7 @@
     "general": {
       "language": {
         "label": "语言",
-        "terms": "语言 区域 翻译 中文 简体 英文 language locale translation chinese english",
+        "terms": "语言 区域 翻译 中文 简体 英文 法语 language locale translation chinese english french français",
         "system": "跟随 电脑的首选语言。",
         "chosen": "菜单栏将在下次打开 Zeron 时更改。"
       },
