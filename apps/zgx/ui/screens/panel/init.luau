@@ -1501,9 +1501,23 @@ M.Panel = ui.component(function(props: Props): Node
 			return "none"
 		end
 		local a = active()
-		return if a then `{k}\0{a}` else `{k}\0empty`
+		if a then
+			return `{k}\0{a}`
+		end
+		-- The home (no tab) is made only while the panel shows: shut, each
+		-- chat switched to would make another one nobody sees (about 2 ms
+		-- of every switch, and what it holds). It's quick to make as the
+		-- panel opens, and has nothing fetched to keep. (A tab stays made
+		-- shut, as above.)
+		if closed() then
+			return "shut"
+		end
+		return `{k}\0empty`
 	end, function(which: string): Node
 		local k = key:peek()
+		if which == "shut" then
+			return ui.div {}
+		end
 		if which == "none" or not k then
 			return ds.EmptyState {
 				icon = "split-columns",
