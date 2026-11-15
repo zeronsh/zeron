@@ -18,9 +18,9 @@
   "scope": {
     "label": "Ce qui a changé",
     "working": "Copie de travail",
-    "working_about": "Depuis le dernier commit, indexé ou non",
+    "working_about": "Tout depuis le dernier commit, indexé ou non",
     "branch": "Branche",
-    "branch_about": "Tout depuis que cette branche a quitté sa base",
+    "branch_about": "Tout depuis que la branche a divergé de sa base",
     "turn": "Dernier tour",
     "turn_about": "Ce qu’a changé le dernier tour de cette conversation",
     "against": "par rapport à",
@@ -35,11 +35,11 @@
     "rebase": "Rebase en cours",
     "cherry_pick": "Cherry-pick en cours",
     "revert": "Revert en cours",
-    "commit_to_finish": "Créez un commit pour terminer, une fois chaque fichier comme il doit être."
+    "commit_to_finish": "Quand tous les fichiers sont prêts, créez un commit pour terminer."
   },
   "conflicts": {
     "title": "{n, plural, =0 {# fichier en conflit} one {# fichier en conflit} other {# fichiers en conflit}}",
-    "body": "Résolvez chacun dans votre éditeur, indexez-le, puis créez un commit."
+    "body": "Résolvez chaque conflit dans votre éditeur, indexez le fichier, puis créez un commit."
   },
   "stage_all": "Tout indexer",
   "file": {
@@ -49,19 +49,19 @@
   },
   "diff": {
     "loading": "Chargement du diff…",
-    "binary": "Un fichier binaire : aucune ligne à afficher.",
-    "cut": "Ce diff est long : la suite n’est pas affichée.",
-    "pick_title": "Aucun fichier choisi",
-    "pick_body": "Choisissez un fichier pour voir ce qui y a changé."
+    "binary": "Fichier binaire : aucune ligne à afficher.",
+    "cut": "Diff trop long : la suite n’est pas affichée.",
+    "pick_title": "Aucun fichier sélectionné",
+    "pick_body": "Sélectionnez un fichier pour voir ses modifications."
   },
   "empty": {
     "working_title": "Rien à committer",
-    "working_body": "Tout est commité sur {branch}.",
-    "working_ahead": "Tout est commité sur {branch}. {n, plural, =0 {# commit n’a pas été poussé} one {# commit n’a pas été poussé} other {# commits n’ont pas été poussés}}.",
+    "working_body": "Tout est committé sur {branch}.",
+    "working_ahead": "Tout est committé sur {branch}. {n, plural, =0 {# commit n’a pas été poussé} one {# commit n’a pas été poussé} other {# commits n’ont pas été poussés}}.",
     "branch_title": "Aucune modification sur cette branche",
-    "branch_body": "Elle n’a rien que {base} n’ait déjà.",
-    "turn_title": "Rien n’a changé à ce tour",
-    "turn_body": "Le dernier tour de la conversation a laissé chaque fichier tel quel."
+    "branch_body": "Elle ne contient rien de plus que {base}.",
+    "turn_title": "Rien n’a changé pendant ce tour",
+    "turn_body": "Le dernier tour n’a modifié aucun fichier."
   },
   "pull": {
     "button": "Tirer {n}"
@@ -85,26 +85,26 @@
     "and_push": "Committer et pousser",
     "amend": "Modifier le dernier commit",
     "you": "Vous",
-    "placeholder": "Ce qui a changé, et pourquoi",
+    "placeholder": "Ce qui a changé et pourquoi",
     "message": "Message de commit"
   },
   "discard": {
     "title_one": "Abandonner les modifications de {name} ?",
     "title_many": "Abandonner les modifications de {n, plural, =0 {# fichier} one {# fichier} other {# fichiers}} ?",
-    "body": "Les fichiers reviennent au dernier commit, et un nouveau fichier est supprimé. Cette action est irréversible.",
+    "body": "Les fichiers reviennent à leur état du dernier commit ; les fichiers ajoutés depuis sont supprimés. Cette action est irréversible.",
     "confirm": "Abandonner"
   },
   "branches": {
     "label": "Branche",
     "none": "Aucune branche",
-    "search": "Trouver une branche…",
+    "search": "Rechercher une branche…",
     "new": "Nouvelle branche",
     "new_title": "Nouvelle branche",
-    "new_body": "Depuis {from}, avec vos modifications reportées.",
+    "new_body": "À partir de {from}, en conservant vos modifications.",
     "create": "Créer et basculer",
     "name": "Nom de la branche",
     "name_placeholder": "feature/name",
-    "on_remote": "Sur {remote}, pas encore ici",
+    "on_remote": "Sur {remote}, pas encore en local",
     "ahead_behind": "{ahead} en avance, {behind} en retard",
     "no_match": "Aucune branche ne correspond à « {query} »",
     "current": "actuelle"
@@ -117,26 +117,26 @@
     "back": "Retour à l’historique",
     "empty_title": "Aucun commit pour l’instant",
     "empty_body": "Le premier commit de cette branche apparaîtra ici.",
-    "pick_title": "Aucun commit choisi",
-    "pick_body": "Choisissez un commit pour voir ce qu’il a changé.",
+    "pick_title": "Aucun commit sélectionné",
+    "pick_body": "Sélectionnez un commit pour voir ses modifications.",
     "no_files_title": "Aucun fichier modifié",
     "no_files_body": "Ce commit ne change rien à son parent.",
-    "ref_head": "{name} : la branche où vous êtes",
+    "ref_head": "{name} : votre branche actuelle",
     "ref_branch": "Branche {name}",
     "ref_remote": "{name}, sur le dépôt distant",
     "ref_tag": "Tag {name}",
-    "no_subject": "(sans objet)",
+    "no_subject": "(sans titre)",
     "copy_sha": "Copier l’identifiant du commit",
     "copied": "Copié",
     "open_parent": "Ouvrir le parent {sha}",
     "body_more": "Afficher tout le message",
     "body_less": "Afficher moins",
-    "committed_by": "commité par {name}",
+    "committed_by": "committé par {name}",
     "parents": "{n, plural, =0 {Parent} one {Parent} other {Parents}}",
     "files": "{n, plural, =0 {# fichier} one {# fichier} other {# fichiers}}",
     "menu": {
-      "copy_sha": "Copier l’id du commit",
-      "copy_subject": "Copier l’objet",
+      "copy_sha": "Copier l’identifiant du commit",
+      "copy_subject": "Copier le titre",
       "branch_here": "Nouvelle branche à partir d’ici"
     },
     "found": "{n, plural, =0 {# commit trouvé} one {# commit trouvé} other {# commits trouvés}}",
@@ -149,7 +149,7 @@
     "fetch_failed": "Impossible de récupérer",
     "none_found_title": "Aucun commit trouvé",
     "none_found_body": "Aucun message de commit ne contient « {query} ».",
-    "branch_from": "Depuis le commit {sha}. Vous y basculez, avec vos modifications.",
+    "branch_from": "À partir du commit {sha}. Vous basculez dessus en gardant vos modifications.",
     "parents_n": "{n, plural, =0 {# parent} one {# parent} other {# parents}}",
     "ref_line": {
       "branch": "Branche : {name}",
@@ -165,11 +165,11 @@
     },
     "timeout": {
       "title": "Pas de réponse de {device}",
-      "body": "Il a mis trop de temps. Il est peut-être occupé, ou sa connexion lente."
+      "body": "Il a mis trop de temps à répondre. Il est peut-être occupé ou sa connexion est lente."
     },
     "not_installed": {
-      "title": "Git n’est pas sur {device}",
-      "body": "Mettez Zeron à jour sur cet appareil : Git est fourni avec."
+      "title": "Git n’est pas installé sur {device}",
+      "body": "Mettez Zeron à jour sur cet appareil : Git est inclus."
     },
     "off": {
       "title": "Git est désactivé sur {device}",
@@ -180,28 +180,28 @@
       "body": "Autorisez-le sur cet appareil, dans Réglages → Plugins."
     },
     "version_mismatch": {
-      "title": "Une autre version de Git est sur {device}",
+      "title": "Version de Git différente sur {device}",
       "body": "Mettez Zeron à jour sur les deux appareils pour qu’ils correspondent."
     },
     "other_author": {
-      "title": "Un autre plugin Git est sur {device}",
-      "body": "Le plugin de quelqu’un d’autre y porte le même nom. Retirez-le pour utiliser celui de Zeron."
+      "title": "Un autre plugin Git est installé sur {device}",
+      "body": "Un plugin d’un autre auteur porte le même nom sur cet appareil. Retirez-le pour utiliser celui de Zeron."
     },
     "no_service": {
       "title": "Git ne peut pas fonctionner sur {device}",
-      "body": "Sa version n’a pas de service. Mettez Zeron à jour sur cet appareil."
+      "body": "Cette version n’a pas de service. Mettez Zeron à jour sur cet appareil."
     },
     "not_loaded": {
       "title": "Git n’a pas démarré sur {device}",
-      "body": "Son service n’a pas pu se charger. Réglages → Plugins, sur cet appareil, en donne la raison."
+      "body": "Son service n’a pas pu se charger. Consultez Réglages → Plugins sur cet appareil pour en savoir plus."
     },
     "old_engine": {
-      "title": "Une version plus récente de Zeron est requise sur {device}",
+      "title": "Zeron doit être mis à jour sur {device}",
       "body": "Mettez Zeron à jour sur cet appareil pour utiliser Git avec cette conversation."
     },
     "interrupted": {
       "title": "Git s’est arrêté sur {device}",
-      "body": "Il s’est arrêté pendant l’appel. Réessayez."
+      "body": "Il s’est arrêté en cours d’opération. Réessayez."
     },
     "other": {
       "title": "Une erreur est survenue"
@@ -209,12 +209,12 @@
   },
   "code": {
     "not_a_repo": {
-      "title": "Pas un dépôt git",
-      "body": "Le dossier de cette conversation n’est pas dans un dépôt git, il n’y a donc rien à comparer."
+      "title": "Aucun dépôt git",
+      "body": "Le dossier de cette conversation n’est pas dans un dépôt git : il n’y a rien à comparer."
     },
     "no_checkout": {
       "title": "Aucun dossier",
-      "body": "Cette conversation ne travaille pas dans un dossier."
+      "body": "Cette conversation n’est liée à aucun dossier."
     },
     "rejected": {
       "title": "La branche a avancé sur {remote}",
@@ -237,20 +237,20 @@
       "body": "Définissez votre nom et votre e-mail pour git sur {device} (git config user.name, user.email)."
     },
     "dirty": {
-      "title": "Vos modifications gênent",
+      "title": "Des modifications seraient écrasées",
       "body": "Changer de branche les écraserait. Committez-les ou abandonnez-les d’abord."
     },
     "pull_conflicts": {
-      "title": "Tirer créerait des conflits",
-      "body": "Vos commits et les leurs modifient les mêmes lignes. Rien n’a été changé : fusionnez-les dans votre éditeur ou un terminal."
+      "title": "Tirer ces commits créerait des conflits",
+      "body": "Vos commits et les leurs modifient les mêmes lignes. Rien n’a été modifié : fusionnez-les dans votre éditeur ou un terminal."
     },
     "no_base": {
       "title": "Aucune branche de base",
-      "body": "Il n’y a ni main ni master à quoi comparer cette branche."
+      "body": "Ce dépôt n’a ni main ni master : impossible de comparer cette branche."
     },
     "no_turn": {
-      "title": "Aucun tour vu pour l’instant",
-      "body": "Les modifications depuis un tour s’afficheront dès que cette conversation en commencera un nouveau."
+      "title": "Aucun tour pour l’instant",
+      "body": "Les modifications par tour s’afficheront dès le prochain tour de cette conversation."
     },
     "detached": {
       "title": "Aucune branche à pousser",
@@ -269,7 +269,7 @@
       "body": "Un nom de branche ne peut pas contenir d’espaces ni « .. », ni finir par « / » ou « .lock »."
     },
     "exists": {
-      "title": "Cette branche existe",
+      "title": "Cette branche existe déjà",
       "body": "Une branche porte déjà ce nom : basculez plutôt dessus."
     },
     "timeout": {
@@ -278,15 +278,15 @@
     },
     "no_message": {
       "title": "Aucun message",
-      "body": "Dites ce qui a changé, et pourquoi."
+      "body": "Dites ce qui a changé et pourquoi."
     },
     "git": {
-      "title": "git n’a pas pu le faire",
-      "body": "Git s’est arrêté dans le dossier de cette conversation sur {device}. Réessayez ; si cela se reproduit, lancez la même commande dans un terminal sur cet appareil pour tout voir."
+      "title": "La commande git a échoué",
+      "body": "Git s’est arrêté dans le dossier de cette conversation sur {device}. Réessayez ; si cela se reproduit, lancez la même commande dans un terminal sur cet appareil pour voir le détail."
     },
     "no_ref": {
       "title": "Aucune branche nommée {words} ici",
-      "body": "Choisissez une autre branche à comparer, ou récupérez-la depuis {remote}."
+      "body": "Choisissez une autre branche de comparaison, ou récupérez-la depuis {remote}."
     },
     "unsafe_dir": {
       "title": "Git refuse de travailler dans ce dossier",
@@ -302,11 +302,11 @@
     "branch_changes": "Modifications de la branche"
   },
   "changes": {
-    "partial": "{n} sur {total} affichés"
+    "partial": "{n} affichés sur {total}"
   },
   "comment": {
     "placeholder": "Dites ce qu’il faut changer ici…",
     "add": "Ajouter à la conversation",
-    "where_old": "{where} (ancien)"
+    "where_old": "{where} (avant)"
   }
 }

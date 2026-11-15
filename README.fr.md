@@ -1,6 +1,6 @@
 # Zeron
 
-Pilotez vos agents de code (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) en local par défaut, avec une synchronisation facultative entre plusieurs appareils.
+Pilotez vos agents de codage (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) en local par défaut, avec une synchronisation facultative entre plusieurs appareils.
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [Español](README.es.md) | Français*
 
@@ -12,20 +12,20 @@ Téléchargez la dernière version pour votre plateforme depuis [GitHub Releases
 
 - **macOS** — `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
-- **Linux** — `zeron-<version>-linux-<arch>.tar.gz`, puis lancez le `install.sh` qu’il contient
+- **Linux** — `zeron-<version>-linux-<arch>.tar.gz`, puis lancez le script `install.sh` de l’archive
 
-Aucun compte ni aucune connexion réseau n’est nécessaire ; les sessions restent sur votre appareil. L’application se met à jour toute seule.
+Aucun compte ni aucune connexion réseau n’est nécessaire ; les sessions restent sur votre appareil. L’application se met à jour automatiquement.
 
 ## Mode headless (CLI)
 
-Pour les serveurs et les autres machines sans écran, comme un VPS qui garde vos agents en marche une fois votre portable fermé. Linux uniquement :
+Pour les serveurs et les autres machines sans écran, comme un VPS qui continue de faire tourner vos agents une fois votre portable fermé. Linux uniquement :
 
 ```bash
 curl -fsSL https://zeron.sh/install.sh | sh
 zeron status
 ```
 
-L’installateur lance le moteur comme un service en arrière-plan, qui survit aux redémarrages.
+L’installateur lance le moteur en tant que service d’arrière-plan, relancé à chaque redémarrage.
 
 ```bash
 zeron status      # mode local/synchronisé et état du moteur
@@ -43,7 +43,7 @@ zeron login        # ou zeron logout pour revenir au mode local seul
 zeron daemon start
 ```
 
-Les appareils connectés au même compte peuvent lire et écrire les fichiers des espaces de travail les uns des autres : ne connectez donc que des appareils de confiance. Les sessions locales existantes ne sont jamais envoyées.
+Les appareils connectés au même compte peuvent lire et modifier les fichiers de leurs espaces de travail respectifs : ne connectez donc que des appareils de confiance. Les sessions locales existantes ne sont jamais envoyées en ligne.
 
 ## Sponsors
 
@@ -51,6 +51,6 @@ Merci à [The Context Company](https://www.thecontextcompany.com/) de sponsorise
 
 ---
 
-Vous développez, ou vous êtes curieux de savoir comment ça marche ? [Demandez à DeepWiki](https://deepwiki.com/zeronsh/zeron) ou consultez [ARCHITECTURE.md](ARCHITECTURE.md).
+Envie de contribuer, ou simplement de savoir comment ça marche ? [Demandez à DeepWiki](https://deepwiki.com/zeronsh/zeron) ou consultez [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Publié sous [licence MIT](LICENSE).
