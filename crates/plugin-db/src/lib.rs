@@ -17,13 +17,19 @@
 //!
 //! Parameters are always bound (`?`, `?1`), never put in the SQL. A
 //! database holds at most [`MAX_BYTES`], attaches no other file, and loads
-//! no extension.
+//! no extension. A call runs for [`CALL_TIME`] at most, and what a query
+//! returns (and any one text or blob) is [`MAX_RESULT_BYTES`] at most: a
+//! runaway `WITH RECURSIVE` or a `randomblob(1e9)` stops with an error,
+//! not holding the file or the process's memory.
 
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
-    time::Duration,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use rusqlite::{
@@ -39,6 +45,11 @@ pub const MAX_BYTES: u64 = 100 * 1024 * 1024;
 const PAGE: u64 = 4096;
 /// How long a write waits for the other process's write to finish.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long one call may take, its wait on the other process included.
+pub const CALL_TIME: Duration = Duration::from_secs(10);
+/// What a query returns at most (its values' bytes, and a little for each
+/// value), and any one text or blob: what the plugin's VM is handed whole.
+pub const MAX_RESULT_BYTES: usize = 64 << 20;
 
 /// Where plugin `id`'s database is under `dir` (the plugins' storage).
 pub fn path_in(dir: &Path, id: &str) -> Option<PathBuf> {
@@ -48,7 +59,24 @@ pub fn path_in(dir: &Path, id: &str) -> Option<PathBuf> {
 
 /// Each database open, by its file: one connection per process, its calls
 /// one at a time.
-static OPEN: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<Connection>>>>> = OnceLock::new();
+static OPEN: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<Db>>>>> = OnceLock::new();
+
+/// A connection, and when its call in flight is to stop.
+struct Db {
+    conn: Connection,
+    /// Milliseconds past [`epoch`] (0: no call running), read by the
+    /// connection's progress handler.
+    deadline: Arc<AtomicU64>,
+}
+
+fn epoch() -> Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+fn millis(at: Instant) -> u64 {
+    at.saturating_duration_since(epoch()).as_millis() as u64 + 1
+}
 
 /// Closes this process's connection to the database at `path` (once a call
 /// in flight on it ends), so its files can be deleted: a plugin removed takes
@@ -62,7 +90,7 @@ pub fn close(path: &Path) {
     }
 }
 
-fn open(path: &Path, max_bytes: u64) -> Result<Arc<Mutex<Connection>>, String> {
+fn open(path: &Path, max_bytes: u64) -> Result<Arc<Mutex<Db>>, String> {
     let mut open = OPEN.get_or_init(Default::default).lock().map_err(|_| "the database is stuck")?;
     if let Some(conn) = open.get(path) {
         return Ok(conn.clone());
@@ -75,6 +103,7 @@ fn open(path: &Path, max_bytes: u64) -> Result<Arc<Mutex<Connection>>, String> {
     conn.busy_timeout(BUSY_TIMEOUT).map_err(|e| e.to_string())?;
     // No other file reached through it, and room for `max_bytes` at most.
     conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0);
+    conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, MAX_RESULT_BYTES as i32);
     conn.execute_batch(&format!(
         "PRAGMA page_size = {PAGE}; PRAGMA journal_mode = WAL; PRAGMA max_page_count = {};",
         max_bytes / PAGE
@@ -82,9 +111,19 @@ fn open(path: &Path, max_bytes: u64) -> Result<Arc<Mutex<Connection>>, String> {
     .map_err(|e| e.to_string())?;
     // From here, what the plugin's SQL may do: never lift those limits.
     conn.authorizer(Some(authorize));
-    let conn = Arc::new(Mutex::new(conn));
-    open.insert(path.to_path_buf(), conn.clone());
-    Ok(conn)
+    // Every thousand steps of its SQL, a call past its time stops.
+    let deadline = Arc::new(AtomicU64::new(0));
+    let until = deadline.clone();
+    conn.progress_handler(
+        1000,
+        Some(move || {
+            let at = until.load(Ordering::Relaxed);
+            at != 0 && millis(Instant::now()) > at
+        }),
+    );
+    let db = Arc::new(Mutex::new(Db { conn, deadline }));
+    open.insert(path.to_path_buf(), db.clone());
+    Ok(db)
 }
 
 /// Pragmas a plugin may set (how its own tables behave); any other pragma
@@ -161,28 +200,79 @@ pub fn call(path: &Path, asked: &Json) -> Result<Json, String> {
 /// set when the file is first opened in a process).
 #[doc(hidden)]
 pub fn call_within(path: &Path, asked: &Json, max_bytes: u64) -> Result<Json, String> {
+    call_for(path, asked, max_bytes, CALL_TIME)
+}
+
+/// [`call_within`], stopped after `time` (for tests: a shorter one).
+#[doc(hidden)]
+pub fn call_for(path: &Path, asked: &Json, max_bytes: u64, time: Duration) -> Result<Json, String> {
     let sql = asked["sql"].as_str().ok_or("Which SQL: `sql`")?;
     let params = bind(&asked["params"])?;
-    let conn = open(path, max_bytes)?;
-    let conn = conn.lock().map_err(|_| "the database is stuck")?;
+    let db = open(path, max_bytes)?;
+    let db = db.lock().map_err(|_| "the database is stuck")?;
+    db.deadline.store(millis(Instant::now() + time), Ordering::Relaxed);
+    let done = run(&db.conn, asked, sql, params).map_err(|e| match e {
+        Error::Sql(rusqlite::Error::SqliteFailure(f, _)) if f.code == rusqlite::ErrorCode::OperationInterrupted => {
+            format!("The SQL ran past {} s and was stopped", time.as_secs_f64())
+        }
+        Error::Sql(e) => e.to_string(),
+        Error::Said(why) => why,
+    });
+    db.deadline.store(0, Ordering::Relaxed);
+    done
+}
+
+enum Error {
+    Sql(rusqlite::Error),
+    Said(String),
+}
+
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Self {
+        Error::Sql(e)
+    }
+}
+
+impl From<&str> for Error {
+    fn from(why: &str) -> Self {
+        Error::Said(why.into())
+    }
+}
+
+fn run(conn: &Connection, asked: &Json, sql: &str, params: Vec<Sql>) -> Result<Json, Error> {
     match asked["op"].as_str() {
         Some("exec") if params.is_empty() => {
-            conn.execute_batch(sql).map_err(|e| e.to_string())?;
+            conn.execute_batch(sql)?;
             Ok(json!({ "changes": conn.changes(), "last_id": conn.last_insert_rowid() }))
         }
         Some("exec") => {
-            let changes = conn.execute(sql, rusqlite::params_from_iter(params)).map_err(|e| e.to_string())?;
+            let changes = conn.execute(sql, rusqlite::params_from_iter(params))?;
             Ok(json!({ "changes": changes, "last_id": conn.last_insert_rowid() }))
         }
         Some("query") => {
-            let mut statement = conn.prepare(sql).map_err(|e| e.to_string())?;
+            let mut statement = conn.prepare(sql)?;
             let names: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
-            let mut rows = statement.query(rusqlite::params_from_iter(params)).map_err(|e| e.to_string())?;
+            let mut rows = statement.query(rusqlite::params_from_iter(params))?;
             let mut out = Vec::new();
-            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let mut bytes = 0;
+            while let Some(row) = rows.next()? {
                 let mut record = Map::new();
                 for (i, name) in names.iter().enumerate() {
-                    record.insert(name.clone(), value(row.get::<_, Sql>(i).map_err(|e| e.to_string())?));
+                    let v = row.get::<_, Sql>(i)?;
+                    bytes += name.len()
+                        + 16
+                        + match &v {
+                            Sql::Text(s) => s.len(),
+                            Sql::Blob(b) => b.len(),
+                            _ => 0,
+                        };
+                    if bytes > MAX_RESULT_BYTES {
+                        return Err(Error::Said(format!(
+                            "The rows come to more than {} MB: ask for fewer at a time (LIMIT and OFFSET)",
+                            MAX_RESULT_BYTES >> 20
+                        )));
+                    }
+                    record.insert(name.clone(), value(v));
                 }
                 out.push(Json::Object(record));
             }
@@ -258,6 +348,36 @@ mod tests {
         let out = db.with_file_name("copied.sqlite3");
         assert!(call(&db, &json!({ "op": "exec", "sql": format!("VACUUM INTO '{}'", out.display()) })).is_err());
         assert!(!out.exists());
+    }
+
+    /// A runaway statement stops at its time, and the file is usable after.
+    #[test]
+    fn sql_that_never_ends_stops_at_its_time() {
+        let db = temp("runaway");
+        let started = Instant::now();
+        let spun = call_for(
+            &db,
+            &json!({ "op": "query", "sql": "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r) SELECT count(*) FROM r" }),
+            MAX_BYTES,
+            Duration::from_millis(200),
+        );
+        assert!(spun.as_ref().is_err_and(|e| e.contains("ran past")), "{spun:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let after = call(&db, &json!({ "op": "query", "sql": "SELECT 1 AS one" })).unwrap();
+        assert_eq!(after, json!([{ "one": 1 }]));
+    }
+
+    /// A value, or the rows together, past what a reply holds: an error.
+    #[test]
+    fn a_reply_is_bounded() {
+        let db = temp("bounded");
+        let blob = call(&db, &json!({ "op": "query", "sql": "SELECT randomblob(1000000000) AS b" }));
+        assert!(blob.is_err(), "a 1 GB blob");
+        let rows = call(
+            &db,
+            &json!({ "op": "query", "sql": "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r LIMIT 100) SELECT zeroblob(1000000) AS b FROM r" }),
+        );
+        assert!(rows.as_ref().is_err_and(|e| e.contains("LIMIT and OFFSET")), "{rows:?}");
     }
 
     /// Closed, its files can go (a plugin removed), and the next call starts afresh.
