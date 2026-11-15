@@ -1076,7 +1076,10 @@ impl LinkCache {
             dial_locks: Mutex::new(HashMap::new()),
         });
         if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(Self::close_idle_links(Arc::downgrade(&cache), cache.linked.clone()));
+            tokio::spawn(Self::close_idle_links(
+                Arc::downgrade(&cache),
+                cache.linked.clone(),
+            ));
         }
         // Wake = every cached link is half-open and every cooldown is moot
         // (the failures belonged to the pre-suspend network). Drop them so the

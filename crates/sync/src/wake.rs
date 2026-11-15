@@ -220,8 +220,13 @@ mod tests {
         for period in [Duration::from_secs(10), Duration::from_secs(15)] {
             let at = next_beat(period);
             let wait = at - tokio::time::Instant::now();
-            assert!(wait >= Duration::from_millis(99) && wait <= period + Duration::from_millis(100));
-            let wall = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap() + wait;
+            assert!(
+                wait >= Duration::from_millis(99) && wait <= period + Duration::from_millis(100)
+            );
+            let wall = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                + wait;
             let off = (wall.as_millis() % period.as_millis()) as i64;
             let off = off.min(period.as_millis() as i64 - off);
             assert!(off < 20, "{period:?} beat {off} ms off the grid");
