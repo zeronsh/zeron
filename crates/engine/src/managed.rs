@@ -238,6 +238,12 @@ pub(crate) fn mcp_executable() -> Option<PathBuf> {
 /// stop — an engine left running from a deleted app would keep the Trash
 /// from emptying ("in use") with no app left to quit it. Updates keep the
 /// installed path, so they never trigger this.
+///
+/// Told by file-system events on the installation (its folder and the one
+/// holding it), not by looking every half minute: they also tell the updater
+/// a newer version may be installed (`Updater::follow_installs`), so neither
+/// wakes the engine while nothing changes. Should the folders not be
+/// watched, it looks every half minute, as before.
 fn stop_when_uninstalled(
     runtime: &crate::EngineRuntime,
     stop: tokio::sync::mpsc::UnboundedSender<()>,
@@ -246,14 +252,64 @@ fn stop_when_uninstalled(
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let installed = installed_executable(&exe, &zeron_update::detect_install());
+    let install = zeron_update::detect_install();
+    let installed = installed_executable(&exe, &install);
     let sessions = runtime.core().sessions.clone();
     let terminals = runtime.core().terminals.clone();
+    let updater = runtime.core().updater();
+    let root = install_root(&install, &installed);
     tokio::spawn(async move {
+        let (tx, mut changed) = tokio::sync::mpsc::unbounded_channel::<()>();
+        // (Held here: with no watch at all, waiting on `changed` still waits.)
+        let _keep = tx.clone();
+        let watched = match root.clone() {
+            Some(root) => tokio::task::spawn_blocking(move || {
+                let hub = crate::fs_watch::FsWatchHub::global();
+                let mut watches = Vec::new();
+                for dir in std::iter::once(root.as_path()).chain(root.parent()) {
+                    let tx = tx.clone();
+                    watches.push(
+                        hub.watch(dir, notify::RecursiveMode::NonRecursive, move |_| {
+                            let _ = tx.send(());
+                        }),
+                    );
+                }
+                watches
+            })
+            .await
+            .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let live = || !watched.is_empty() && watched.iter().all(crate::fs_watch::FsWatch::is_live);
+        let mut told_updater = false;
         loop {
-            // On the beat grid (`zeron_sync::wake`): it wakes with the pings.
-            tokio::time::sleep_until(zeron_sync::wake::next_beat(CHECK)).await;
             if installed.exists() || sessions.any_active() || terminals.any_open() {
+                if !told_updater && live() {
+                    told_updater = true;
+                    if let Some(updater) = &updater {
+                        updater.follow_installs();
+                    }
+                }
+                let gone = !installed.exists();
+                // Gone but busy, or unwatched: look again in a while (on the
+                // beat grid, with the sockets' pings: `zeron_sync::wake`).
+                // Watched and there: until the installation changes.
+                if gone || !live() {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(zeron_sync::wake::next_beat(CHECK)) => {}
+                        event = changed.recv() => if event.is_none() { return },
+                    }
+                } else if changed.recv().await.is_none() {
+                    return;
+                }
+                // A burst (a bundle replaced) is one look.
+                while let Ok(Some(())) =
+                    tokio::time::timeout(Duration::from_millis(500), changed.recv()).await
+                {
+                }
+                if let Some(updater) = &updater {
+                    updater.poke();
+                }
                 continue;
             }
             tracing::info!(path = %installed.display(), "the app is gone; stopping the background engine");
@@ -261,6 +317,17 @@ fn stop_when_uninstalled(
             return;
         }
     });
+}
+
+/// The folder an installation lives in (a macOS app's bundle, a managed
+/// install's root), whose changes (and its own going) say it was updated or
+/// removed.
+fn install_root(install: &zeron_update::InstallKind, installed: &Path) -> Option<PathBuf> {
+    match install {
+        zeron_update::InstallKind::Managed { app_root } => Some(app_root.clone()),
+        zeron_update::InstallKind::MacApp { bundle } => Some(bundle.clone()),
+        _ => installed.parent().map(Path::to_path_buf),
+    }
 }
 
 /// Whether the app that starts this engine runs now. On macOS an engine

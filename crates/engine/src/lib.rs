@@ -1251,6 +1251,9 @@ impl Engine {
         // dir (update-channel.json), so this report follows the app's choice.
         zeron_update::channel::set_data_dir(&config.data_dir);
         let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+        // A check that came due while the machine slept runs as it wakes,
+        // so the loop needn't look at the clock each minute.
+        updater.follow_wakes(zeron_sync::wake::subscribe());
         // Whatever restarts this engine into another version (an update, a
         // newer install, a channel switch's update), the store it leaves is
         // one every version reads.
