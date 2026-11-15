@@ -258,6 +258,13 @@ struct Revival {
 struct Inner {
     voice: crate::voice::VoiceManager,
     device_id: String,
+    /// Per chat: the background processes its runtime runs (as it last
+    /// said), and the background commands its agent started with Zeron's
+    /// `run_command`, here or on another device. Its session row shows both.
+    runtime_tasks: Mutex<HashMap<String, Vec<zeron_proto::BackgroundTask>>>,
+    command_tasks: Mutex<HashMap<String, Vec<crate::run_command::CommandTask>>>,
+    /// A task follows the tracked commands (see [`SessionsEngine::track_command`]).
+    command_tracker: std::sync::atomic::AtomicBool,
     /// The engine is shutting down: dying runs re-dispatch nothing.
     shutting_down: std::sync::atomic::AtomicBool,
     /// A shutdown marks the turns it cuts off for pick-up on the next boot
@@ -478,6 +485,9 @@ impl SessionsEngine {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
                 device_id,
+                runtime_tasks: Mutex::new(HashMap::new()),
+                command_tasks: Mutex::new(HashMap::new()),
+                command_tracker: std::sync::atomic::AtomicBool::new(false),
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
                 revive_after_shutdown: std::sync::atomic::AtomicBool::new(true),
                 revivals: Mutex::new(HashMap::new()),
@@ -725,6 +735,12 @@ impl SessionsEngine {
             .subscribe()
     }
 
+    /// A status row for `chat_id`, as a run would leave (tests).
+    #[cfg(test)]
+    pub(crate) fn seed_status(&self, chat_id: &str, status: SessionStatus) {
+        self.inner.set_status(chat_id, status, true);
+    }
+
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
@@ -799,6 +815,68 @@ impl SessionsEngine {
 
     /// Ask the chat's runtime to stop one of its background processes. False
     /// when no live runtime lists it (it ended meanwhile).
+    /// A background command `chat_id`'s agent started with `run_command`
+    /// (here or on another device): shown on its session row with its
+    /// runtime's processes until it ends. True when nothing follows the
+    /// tracked commands yet: the caller starts [`Self::follow_commands`]'s
+    /// loop.
+    pub fn track_command(&self, chat_id: &str, command: crate::run_command::CommandTask) -> bool {
+        lock(&self.inner.command_tasks)
+            .entry(chat_id.to_owned())
+            .or_default()
+            .push(command);
+        self.inner.publish_background_tasks(chat_id);
+        !self
+            .inner
+            .command_tracker
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// Every chat's tracked commands.
+    pub fn tracked_commands(&self) -> HashMap<String, Vec<crate::run_command::CommandTask>> {
+        lock(&self.inner.command_tasks).clone()
+    }
+
+    /// The tracked commands of `chat_id` still running, as just checked:
+    /// shown, and the row kept fresh while there are any.
+    pub fn set_tracked_commands(&self, chat_id: &str, commands: Vec<crate::run_command::CommandTask>) {
+        let changed = {
+            let mut tracked = lock(&self.inner.command_tasks);
+            let before = tracked.get(chat_id).map_or(0, Vec::len);
+            let after = commands.len();
+            if commands.is_empty() {
+                tracked.remove(chat_id);
+            } else {
+                tracked.insert(chat_id.to_owned(), commands);
+            }
+            before != after
+        };
+        if changed {
+            self.inner.publish_background_tasks(chat_id);
+        }
+        self.inner.touch_session(chat_id);
+    }
+
+    /// One tracked command no longer shown (it was stopped).
+    pub fn untrack_command(&self, chat_id: &str, task_id: &str) {
+        let mut commands = lock(&self.inner.command_tasks).get(chat_id).cloned().unwrap_or_default();
+        commands.retain(|c| c.task.id != task_id);
+        self.set_tracked_commands(chat_id, commands);
+    }
+
+    /// Nothing is tracked any more: the loop following them ends (false), or
+    /// something was tracked meanwhile and it goes on (true).
+    pub fn commands_followed(&self) -> bool {
+        let tracked = lock(&self.inner.command_tasks);
+        if tracked.is_empty() {
+            self.inner
+                .command_tracker
+                .store(false, std::sync::atomic::Ordering::Release);
+            return false;
+        }
+        true
+    }
+
     pub fn stop_background_task(&self, chat_id: &str, task_id: &str) -> bool {
         lock(&self.inner.runs)
             .get(chat_id)
@@ -2848,6 +2926,24 @@ impl Inner {
     /// like [`Self::set_running_subagents`]. The live heartbeat keeps the row
     /// fresh while they run; an engine that stops beating took them with it.
     fn set_background_tasks(&self, chat_id: &str, tasks: Vec<zeron_proto::BackgroundTask>) {
+        {
+            let mut runtime = lock(&self.runtime_tasks);
+            if tasks.is_empty() {
+                runtime.remove(chat_id);
+            } else {
+                runtime.insert(chat_id.to_owned(), tasks);
+            }
+        }
+        self.publish_background_tasks(chat_id);
+    }
+
+    /// The session row's background processes: its runtime's, then the
+    /// commands its agent left running with `run_command`.
+    fn publish_background_tasks(&self, chat_id: &str) {
+        let mut tasks = lock(&self.runtime_tasks).get(chat_id).cloned().unwrap_or_default();
+        if let Some(commands) = lock(&self.command_tasks).get(chat_id) {
+            tasks.extend(commands.iter().map(|c| c.task.clone()));
+        }
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {

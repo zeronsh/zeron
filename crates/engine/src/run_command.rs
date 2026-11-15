@@ -321,6 +321,47 @@ pub(crate) fn start_with_shell(
     Ok(status)
 }
 
+/// A background command its agent's chat shows with its runtime's own
+/// background processes (`Session::background_tasks`), tracked by the chat's
+/// host wherever the command runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandTask {
+    /// Where it runs; `None`: the chat's host itself.
+    pub device: Option<String>,
+    /// Its id there (`cmd-…`).
+    pub id: String,
+    /// As shown: its id is `cmd-…@device` for one elsewhere, the `id` its
+    /// agent was given.
+    pub task: zeron_proto::BackgroundTask,
+}
+
+impl CommandTask {
+    /// A task id that names a command (`cmd-…`, `cmd-…@device`): its id and
+    /// device. `None` for a runtime's own task.
+    pub fn parse(task_id: &str) -> Option<(String, Option<String>)> {
+        if !task_id.starts_with("cmd-") {
+            return None;
+        }
+        Some(match task_id.rsplit_once('@') {
+            Some((id, device)) => (id.to_owned(), Some(device.to_owned())),
+            None => (task_id.to_owned(), None),
+        })
+    }
+}
+
+/// The newest [`MAX_READ`] bytes a background command printed, for a person
+/// looking (it doesn't move what its agent reads next).
+pub fn tail(id: &str) -> Result<zeron_proto::BackgroundTaskOutput, String> {
+    let command = lock(&BACKGROUND).get(id).cloned().ok_or_else(|| unknown(id))?;
+    let ring = lock(&command.output);
+    let start = ring.bytes.len().saturating_sub(MAX_READ);
+    let newest: Vec<u8> = ring.bytes.range(start..).copied().collect();
+    Ok(zeron_proto::BackgroundTaskOutput {
+        text: String::from_utf8_lossy(&newest).into_owned(),
+        truncated: ring.written > newest.len() as u64,
+    })
+}
+
 /// A background command's output since it was last read, and how it stands.
 pub fn read(id: &str) -> Result<CommandStatus, String> {
     let command = lock(&BACKGROUND).get(id).cloned().ok_or_else(|| unknown(id))?;

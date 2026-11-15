@@ -352,6 +352,82 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
+    /// A command an agent leaves running shows on its chat's row with its
+    /// runtime's background processes: the person reads it (without taking
+    /// what the agent reads next) and stops it there; one that ends goes.
+    #[tokio::test]
+    async fn a_chat_shows_the_commands_its_agent_left_running() {
+        let (_temp, core) = core().await;
+        chat(&core, "free", "Free", "danger-full-access", "full-access").await;
+        core.sessions.seed_status("free", zeron_proto::SessionStatus::Working);
+        let rpc = core.rpc_service();
+        let dir = tempfile::tempdir().unwrap();
+        let value = |reply: zeron_rpc::RpcReply| match reply {
+            zeron_rpc::RpcReply::Value(value) => value,
+            zeron_rpc::RpcReply::Stream(_) => panic!("a stream"),
+        };
+        let start = |command: &str| {
+            with_caller(
+                agent("free"),
+                rpc.handle(
+                    methods::RUN_COMMAND,
+                    json!({"command": command, "cwd": dir.path(), "chatId": "free", "background": true}),
+                ),
+            )
+        };
+        let server = value(start("echo listening; while true; do sleep 0.05; done").await.unwrap());
+        let quick = value(start("echo done").await.unwrap());
+        let shown = |core: &crate::EngineCore| -> Vec<String> {
+            core.sessions
+                .session_status("free")
+                .map(|s| s.background_tasks.into_iter().map(|t| t.id).collect())
+                .unwrap_or_default()
+        };
+        let server_id = server["id"].as_str().unwrap().to_owned();
+        let quick_id = quick["id"].as_str().unwrap().to_owned();
+        assert_eq!(shown(&core), vec![server_id.clone(), quick_id.clone()]);
+
+        // The person reads it; the agent still reads it all after.
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let tail = value(
+                rpc.handle(methods::READ_BACKGROUND_TASK_OUTPUT, json!({"chatId": "free", "taskId": server_id}))
+                    .await
+                    .unwrap(),
+            );
+            if tail["text"].as_str().is_some_and(|t| t.contains("listening")) {
+                break;
+            }
+            assert!(std::time::Instant::now() < give_up, "{tail}");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let read = value(
+            with_caller(agent("free"), rpc.handle(methods::READ_COMMAND_OUTPUT, json!({"id": server_id})))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(read["output"], "listening\n");
+
+        // One that ended goes from the row on the next look.
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        while shown(&core).contains(&quick_id) {
+            assert!(std::time::Instant::now() < give_up, "{:?}", shown(&core));
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(shown(&core), vec![server_id.clone()]);
+
+        // Stopped from the row, the person's call: gone, and it ended.
+        let stopped = value(
+            rpc.handle(methods::STOP_BACKGROUND_TASK, json!({"chatId": "free", "taskId": server_id}))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(stopped["stopping"], true);
+        assert!(shown(&core).is_empty());
+        assert_eq!(crate::run_command::read(&server_id).unwrap().status, "stopped");
+        core.sessions.shutdown().await;
+    }
+
     /// An agent can't raise a chat's access after the fact, nor delete.
     #[tokio::test]
     async fn an_agent_cannot_change_a_chats_config() {
