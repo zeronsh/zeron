@@ -3220,7 +3220,8 @@
         "show": "Show in Finder",
         "dismiss": "Dismiss {name}",
         "saving": "Saving…"
-      }
+      },
+      "dismiss_error": "Dismiss"
     },
     "browser_api": {
       "empty": "Enter a website or localhost address.",

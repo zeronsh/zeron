@@ -3220,7 +3220,8 @@
         "show": "在访达中显示",
         "dismiss": "关闭 {name}",
         "saving": "正在保存…"
-      }
+      },
+      "dismiss_error": "关闭"
     },
     "browser_api": {
       "empty": "输入网站或 localhost 地址。",
