@@ -137,6 +137,17 @@ struct Inner {
     /// need many indexes but no updates (each watcher is an inotify instance).
     watch: bool,
     reaper_started: std::sync::Once,
+    /// Wakes a reaper parked with nothing to evict: set as something is
+    /// used (and so held), and as this goes.
+    reaper_wake: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let (woken, wake) = &*self.reaper_wake;
+        *lock(woken) = true;
+        wake.notify_all();
+    }
 }
 
 struct Entry {
@@ -183,6 +194,7 @@ impl WorkspaceSearch {
                 clock,
                 watch,
                 reaper_started: std::sync::Once::new(),
+                reaper_wake: Arc::default(),
             }),
         }
     }
@@ -578,6 +590,10 @@ impl WorkspaceSearch {
     }
 
     fn start_reaper(&self) {
+        // (Something is about to be held: a parked reaper looks again.)
+        let (woken, wake) = &*self.inner.reaper_wake;
+        *lock(woken) = true;
+        wake.notify_all();
         let weak = Arc::downgrade(&self.inner);
         self.inner.reaper_started.call_once(move || {
             let spawned = std::thread::Builder::new()
@@ -627,8 +643,31 @@ fn build_home(
     crate::heap::trim();
 }
 
+/// Evicts idle indexes each [`REAPER_INTERVAL`] while any is held; with
+/// none (all evicted, or released), parks until one is used again.
 fn reap(inner: Weak<Inner>) {
     loop {
+        let Some(strong) = inner.upgrade() else {
+            return;
+        };
+        let held = !lock(&strong.entries).is_empty() || {
+            let home = lock(&strong.home_index);
+            home.index.is_some() || home.building.is_some()
+        };
+        let park = strong.reaper_wake.clone();
+        drop(strong);
+        if !held {
+            let (woken, wake) = &*park;
+            let mut woken = lock(woken);
+            while !*woken {
+                woken = wake
+                    .wait(woken)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            *woken = false;
+            // (Woken as something is used: it is held by now, or will be
+            // within the interval, which runs from here.)
+        }
         std::thread::sleep(REAPER_INTERVAL);
         let Some(inner) = inner.upgrade() else {
             return;

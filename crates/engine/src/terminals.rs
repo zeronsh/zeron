@@ -967,9 +967,27 @@ async fn pump_output(
 /// process. Only EXITED sessions are swept after [`EXITED_TTL`]: they're inert
 /// replay buffers held so a returning viewer can show the tail + exit status.
 async fn reaper_task(inner: Weak<TerminalsInner>) {
+    let Some(mut opened) = inner.upgrade().map(|inner| inner.opened_tx.subscribe()) else {
+        return;
+    };
     // On the beat grid (`zeron_sync::wake`): it wakes with the sockets' pings.
     let mut tick = zeron_sync::wake::beat_interval(REAPER_INTERVAL);
     loop {
+        // With no terminal, open or exited, there is nothing to sweep and
+        // nothing to report: sleep until one opens.
+        opened.borrow_and_update();
+        let Some(none) = inner
+            .upgrade()
+            .map(|inner| lock(&inner.sessions).is_empty())
+        else {
+            break;
+        };
+        if none {
+            if opened.changed().await.is_err() {
+                break;
+            }
+            continue;
+        }
         tick.tick().await;
         let Some(inner) = inner.upgrade() else { break };
         let mut sessions = lock(&inner.sessions);
