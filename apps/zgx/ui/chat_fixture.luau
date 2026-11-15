@@ -1616,6 +1616,29 @@ ui.effect(function()
 	table.sort(keys)
 	plugin_comments:set(table.concat(keys, ","))
 end)
+-- The draft lifted out whole and laid back (a plugin's `zeron.take_draft`
+-- and `put_draft`; screens/plugins keeps it between the two, as this
+-- does). `test_lifted` says what was lifted: its words and how many chips.
+local lifted: any = nil
+local lifted_said = ui.state("test_lifted", "")
+ui.command {
+	id = "draft_lift",
+	title = "A plugin takes the draft",
+	run = function()
+		lifted = require("@app/screens/chat/shared").lift()
+		lifted_said:set(if lifted then `{lifted.text}|{#lifted.cargo}` else "nothing")
+	end,
+}
+ui.command {
+	id = "draft_lay",
+	title = "A plugin puts the draft back",
+	run = function()
+		if lifted then
+			require("@app/screens/chat/shared").lay(lifted)
+			lifted = nil
+		end
+	end,
+}
 ui.command {
 	id = "comment_moves",
 	title = "The comment is carried two lines down",

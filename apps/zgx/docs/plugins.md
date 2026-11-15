@@ -53,6 +53,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `links.open` | open http(s) links (`zeron.open_url`), where you open links (Settings → Links) |
 | `notifications` | send you notifications (`zeron.notify`), as Zeron's own: Settings → Notifications decides whether they show, a few a minute at most |
 | `compose` | put text in the message box (`zeron.compose`), or a review comment on it (`zeron.compose_comment`); you still send it |
+| `draft` | read the message box's draft as you type it (`zeron.draft`), and take it whole, put it back, swap it or let it go (`zeron.take_draft`, `put_draft`, `swap_draft`, `drop_draft`). See [The composer's draft](#the-composers-draft) |
 | `github`, `github.write` | read (and write) GitHub through Zeron's engine (older calls; prefer `commands` with `gh`) |
 | `network` | the internet: `ui.fetch`, and remote images (`ui.image { src = "https://…" }`). See [Reaching the network](#reaching-the-network) |
 | `clipboard`, `files`, `web`, `windows` | zgx's clipboard, file dialogs, web views, windows |
@@ -216,6 +217,9 @@ Zeron draws that row on your settings page: "Use as wallpaper", and while it's o
 | `zeron.compose(text)` | text into the message box | `compose` |
 | `zeron.compose_comment { file, line, note, to?, side?, snippet?, key?, session? }` | a review comment on a file or a diff, as a chip on a chat's draft (below) | `compose` |
 | `zeron.composed()` | in a build: your comments still on a draft, by `key`: `{ session, hovered }` | `compose` |
+| `zeron.draft()` | in a build: the message box's draft, `{ session?, text, attachments = { { kind, name } } }` (below) | `draft` |
+| `zeron.take_draft(key)`, `zeron.put_draft(key)`, `zeron.swap_draft(key)`, `zeron.drop_draft(key)` | the draft taken whole and kept by Zeron under your key; put back; traded with what the key keeps; let go (below) | `draft` |
+| `zeron.drafts()` | in a build: what Zeron keeps for you, by key: `{ session?, text, attachments, at }` | `draft` |
 | `zeron.toast(text)` | a short note at the window's foot | (always) |
 | `zeron.need("panel").open_tab { kind, title, icon?, data? }` | a tab of yours in the chat's panel; asked again, the one there is brought forward (found by `data.key` when you give one, else by its title) | `panel.tabs` |
 | `zeron.tab(kind, function(tab) return node end)` | how a kind of your tabs draws (`tab` = `{ kind, title, data }`) | `panel.tabs` |
@@ -273,6 +277,33 @@ Comments on the diff (each cites the file and line it belongs to; L = line numbe
 `file` is the project's path; `line` (and a range's last, `to`) the line numbers; `side` `"L"` for the original file's lines (a line taken out), `"R"` for the changed file's; `snippet` the code (at most 40 lines go); `note` what the person said. Without a `side`, it's a comment on a file (`- src/app.rs:12: …`, under "Review comments").
 
 Give each a `key` of your own: `zeron.composed()` lists yours still on a draft by it (taken off or sent, gone), and says which one's chip is under the pointer (`hovered`), so the lines it was left on can keep a mark and light up as its chip is pointed at. Zeron's Git plugin does all of this in its Changes (`plugins-builtin/git/changes.luau`): the diff's + (or a drag from it over lines) opens `ds/comment`'s composer under them, using `ds/git_changes`'s `on_comment`, `ranges` and `marks`.
+
+### The composer's draft
+
+With `draft`, a plugin reads what you're typing and can set it aside and bring it back: a stash for a prompt written in the wrong chat, a counter of its length, a bar that says what it carries.
+
+- **`zeron.draft()`**, read in a build or an effect, is the draft shown as it changes: `session` (the chat it's for; nil on a new chat), `text` (the words as typed) and `attachments`, each chip's `kind` (`"file"`, `"image"`, `"chat"`, `"comment"`, …) and `name`. A file's path is never in it.
+- **`zeron.take_draft(key)`** takes the draft shown whole (its words, its chips, the passages quoted in it) and clears the composer. Zeron keeps it, under your `key` (1 to 64 characters), so your plugin never holds a file's path. An empty draft isn't taken; taking under a key that's kept replaces what it kept. Up to 16 at once.
+- **`zeron.put_draft(key)`** puts what `key` kept back on the draft shown, in whichever chat is open, and lets it go. Onto an empty composer it's as it was taken; onto words already there, its words follow after a blank line and its chips after theirs.
+- **`zeron.swap_draft(key)`** trades the draft shown with what `key` keeps. Either may be empty, so one call sets the draft aside (nothing kept), brings it back (an empty composer), or swaps the two.
+- **`zeron.drop_draft(key)`** lets what `key` kept go.
+- **`zeron.drafts()`**, read in a build, is what Zeron keeps for you, by key: `{ session?, text, attachments, at }` (`at` as `os.time()`). Drafts are kept while Zeron runs, as chats' own drafts are.
+
+Each is done in the order you ask. A prompt stash is one shortcut and one chip:
+
+```lua
+-- ⌘⇧S (Ctrl+Shift+S): set the draft aside, bring it back, or swap the two.
+ui.command { id = "stash", title = "Stash prompt", key = "cmd+shift+s", run = function()
+	zeron.swap_draft("stash")
+end }
+
+-- While one is kept, a chip over the composer: click to bring it back.
+zeron.place { at = "#chat-composer", before = function(): Node
+	return ui.show(function(): boolean
+		return zeron.drafts().stash ~= nil
+	end, ui.button { "Stashed", on_click = function() zeron.swap_draft("stash") end })
+end }
+```
 
 ## Programs and a database
 

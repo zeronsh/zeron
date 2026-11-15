@@ -17,6 +17,8 @@
 --     zeron.device   { id, name } where you're working
 --     zeron.devices  { { id, name, here } } your devices
 --     zeron.appearance  "light" | "dark"
+--     zeron.draft    { session?, text, attachments = { { kind, name } } }
+--                    the composer's draft ("draft")
 -- - **What records are made from**, for the host alone (no plugin reads
 --   these; each reads its own `plugin.<id>.records`, holding only what it
 --   was allowed, src/plugins/records.rs):
@@ -166,6 +168,112 @@ ui.effect(function()
 	put(out.appearance, if kind == "light" or kind == "high-contrast-light" then "light" else "dark")
 end)
 
+-- What a draft carries, as plugins are told it: each chip's kind and name
+-- alone, never a file's path.
+local function attachments_of(cargo: { any }): { any }
+	local list = {}
+	for _, item in cargo do
+		table.insert(list, { kind = tostring(item.kind or "file"), name = tostring(item.name or "") })
+	end
+	return list
+end
+
+-- The composer's draft, for plugins allowed "draft" (`zeron.draft()`): the
+-- chat it's for (nil, a new chat), its words, and what it carries.
+local draft_out = ui.shared("zeron.draft", nil :: any)
+ui.effect(function()
+	local key = ChatShared.showing_now()
+	put(draft_out, {
+		session = if key ~= "" then key else ui.null,
+		text = ChatShared.text:get(),
+		attachments = attachments_of(ChatShared.cargo:get()),
+	})
+end)
+
+-- The drafts plugins took (`zeron.take_draft`), each plugin's by its own
+-- keys, kept whole here so a plugin never holds its files' paths. Kept for
+-- the run, as chats' drafts are; a reload of the scripts keeps them.
+-- Each plugin is told what it keeps (`plugin.<id>.drafts`): by key, the
+-- chat it was taken from, its words, what it carries and when.
+local DRAFTS_KEPT = 16
+local shelves = ui.shared("plugins.drafts", {} :: { [string]: { [string]: any } })
+local shelves_told: { [string]: boolean } = {}
+ui.effect(function()
+	local all = shelves:get()
+	for plugin in all do
+		shelves_told[plugin] = true
+	end
+	for plugin in shelves_told do
+		local told: { [string]: any } = {}
+		for key, d in all[plugin] or {} do
+			told[key] = {
+				session = d.session or ui.null,
+				text = d.text,
+				attachments = attachments_of(d.cargo),
+				at = d.at,
+			}
+		end
+		ui.shared(`plugin.{plugin}.drafts`, {} :: any):set(told)
+	end
+end)
+
+-- A plugin's ask of the draft (the host checked "draft" and that it's
+-- take, put, swap or drop with a key).
+local function draft_asked(plugin: string, op: string, key: string)
+	local all = table.clone(shelves:peek())
+	local mine = table.clone(all[plugin] or {})
+	-- (Room for one more, unless it goes where that key kept one.)
+	local count = 0
+	for _ in mine do
+		count += 1
+	end
+	local full = mine[key] == nil and count >= DRAFTS_KEPT
+	local function kept_now(d: any, from: string): any
+		return { text = d.text, cargo = d.cargo, quotes = d.quotes, session = if from ~= "" then from else nil, at = os.time() }
+	end
+	if op == "take" then
+		if full then
+			return
+		end
+		local from = ChatShared.showing()
+		local d = ChatShared.lift()
+		if d == nil then
+			return
+		end
+		mine[key] = kept_now(d, from)
+	elseif op == "swap" then
+		-- The draft shown and what `key` kept, traded: either may be
+		-- nothing, so one call sets a draft aside, brings it back, or both.
+		local was = mine[key]
+		local from = ChatShared.showing()
+		if full then
+			return
+		end
+		local d = ChatShared.lift()
+		if d == nil and was == nil then
+			return
+		end
+		if was ~= nil then
+			ChatShared.lay(was)
+		end
+		mine[key] = if d ~= nil then kept_now(d, from) else nil
+	elseif op == "put" then
+		local d = mine[key]
+		if d == nil then
+			return
+		end
+		mine[key] = nil
+		ChatShared.lay(d)
+	elseif op == "drop" then
+		if mine[key] == nil then
+			return
+		end
+		mine[key] = nil
+	end
+	all[plugin] = if next(mine) ~= nil then mine else nil
+	shelves:set(all)
+end
+
 -- What a failed plugin's notice offers (a toast's action: `ds/toast`).
 ds.toast.action("plugins.open_folder", function(id: string)
 	state.open_folder(id)
@@ -206,6 +314,13 @@ local function run(r: any)
 				key = if type(c.key) == "string" then c.key else nil,
 				session = if type(c.session) == "string" then c.session else nil,
 			}
+		end
+	elseif r.kind == "draft" and type(r.value) == "table" and type(r.title) == "string" and r.title ~= "" then
+		-- A plugin taking the draft, putting one back, swapping the two, or
+		-- letting one go.
+		local op, key = r.value.op, r.value.key
+		if type(op) == "string" and type(key) == "string" then
+			draft_asked(r.title, op, key)
 		end
 	elseif r.kind == "panel_tab" and type(r.value) == "table" then
 		-- A plugin's tab in a chat's panel (the host checked "panel.tabs").
