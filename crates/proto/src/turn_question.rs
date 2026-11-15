@@ -1326,16 +1326,17 @@ fn split_top(s: &str, seps: &[&str]) -> Vec<String> {
     let mut depth = 0usize;
     let mut cur = String::new();
     let mut i = 0;
-    let lower = s.to_lowercase();
+    // (ASCII lowercase: the same bytes at the same offsets as `s`.)
+    let lower = s.to_ascii_lowercase();
     while i < s.len() {
-        let c = s[i..].chars().next().unwrap_or(' ');
+        let Some(c) = s.get(i..).and_then(|rest| rest.chars().next()) else { break };
         match c {
             '(' => depth += 1,
             ')' if depth > 0 => depth -= 1,
             _ => {}
         }
         if depth == 0
-            && let Some(sep) = seps.iter().find(|sep| lower[i..].starts_with(**sep))
+            && let Some(sep) = seps.iter().find(|sep| lower.get(i..).is_some_and(|rest| rest.starts_with(**sep)))
         {
             out.push(std::mem::take(&mut cur));
             i += sep.len();
@@ -1355,11 +1356,13 @@ fn split_top(s: &str, seps: &[&str]) -> Vec<String> {
 /// round 9 or keep iterating") when it has them. One choice: itself.
 pub fn split_compound(found: &Found) -> Vec<Found> {
     let q = found.question.trim();
-    let lower = q.to_lowercase();
+    // (ASCII lowercase keeps every byte where it was: its offsets slice `q`.)
+    let lower = q.to_ascii_lowercase();
     let Some(at) = COMPOUND_VERBS.iter().filter_map(|v| lower.find(v)).min() else {
         return vec![found.clone()];
     };
-    let parts = split_top(&q[..at], &[", and ", " and ", ", "]);
+    let Some(subjects) = q.get(..at) else { return vec![found.clone()] };
+    let parts = split_top(subjects, &[", and ", " and ", ", "]);
     if parts.len() < 2 || parts.len() > 4 {
         return vec![found.clone()];
     }
@@ -1700,6 +1703,11 @@ mod tests {
         assert_eq!(decisions("The graph-label decision (accept round 9 or keep iterating) is still waiting on you.").len(), 1);
         assert_eq!(decisions(CODEX).len(), 1);
         assert!(decisions("Fixed and committed.").is_empty());
+        // Letters whose lowercase is longer ("İ" → "i̇") never shift the
+        // slicing (they once could panic it).
+        let tricky = decisions("The İstanbul İnstance pick and the ŞİMDİ decision (accept İt or keep İterating) are still waiting on you.");
+        assert_eq!(tricky.len(), 2, "{tricky:#?}");
+        assert!(tricky[0].question.starts_with("The İstanbul İnstance pick"));
     }
 
     #[test]
