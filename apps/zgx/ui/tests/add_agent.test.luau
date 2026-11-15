@@ -232,6 +232,9 @@ test("Add an agent: an added agent's environment, in its settings, kept on the d
 	expect(app:has(`role:dialog >> "Remove from this computer"`)).to_be(true)
 	-- Its updates as any agent's: the policy, the registry their feed.
 	expect(app:has(`role:dialog >> "Updates"`)).to_be(true)
+	-- (The dialog holds one height, so its last rows scroll into view.)
+	app:scroll("role:dialog", 2000)
+	app:frames(10)
 	app:fill(`role:dialog >> role:textbox "Environment"`, "GEMINI_API_KEY=sk-1")
 	-- Kept a moment after typing stops.
 	local kept = false

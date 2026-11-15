@@ -30,6 +30,23 @@ local M = {}
 M.ID = "providers"
 M.TITLE = "Providers"
 
+-- The window's height in points, followed as it changes: `ui.window.size`,
+-- 0 where a host gives none (a headless test, a host that doesn't feed it).
+local function window_height(): number
+	local window = (ui :: any).window
+	local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
+	if state == nil then
+		return 0
+	end
+	local ok, v = pcall(function(): any
+		return state:get()
+	end)
+	if ok and type(v) == "table" and type(v.height) == "number" then
+		return v.height
+	end
+	return 0
+end
+
 search.index(M.ID, ui.t("settings.providers.title"), ui.t("settings.providers.terms"), {
 	{ key = "agents", title = ui.t("settings.providers.agents.label"), terms = ui.t("settings.providers.agents.terms") },
 	{
@@ -921,10 +938,19 @@ local function settings_dialog(): Node
 		size = "md",
 		cancel = false,
 		confirm = { label = ui.t("settings.providers.done") :: any },
+		-- (One height, whichever tab shows: its title and its tabs stay where
+		-- they are instead of moving with each switch. What doesn't fit — a
+		-- remote's fields, a window too short for it — scrolls under them, its
+		-- foot in place.)
+		h = function(): number
+			local held = ui.theme.get("zeron.dialog.height") :: number
+			local room = window_height()
+			return if room > 0 then math.min(held, room - 32) else held
+		end,
 		-- (OpenCode's settings, on three tabs of their own: the agent's own
-		-- switches, what shows here, and where chats run. Each is short
-		-- enough for the window, so the dialog never runs past its foot.)
-		ui.show(opencode, ds.Tabs {
+		-- switches, what shows here, and where chats run. The tabs stay put
+		-- over the body, which scrolls under them.)
+		head = ui.show(opencode, ds.Tabs {
 			value = oc_tab,
 			label = ui.t("settings.providers.opencode.tabs.label"),
 			options = {
