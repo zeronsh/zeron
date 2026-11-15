@@ -830,13 +830,20 @@ end)
 test("graph: a pulse travels its line as drawn, from mark edge to mark edge, every frame on it", function()
 	local app = open(1440, 1400)
 	view(app, "graph")
+	app:set_state("control_map_graph_trace", true)
 	app:frames(120)
 	app:command("fixture.report")
 	local seen, bowed, last_a = 0, 0, -1
 	local first, final = nil, nil
-	for _ = 1, 70 do
+	-- (Frame by frame till it's in: its clock is the app's, not the
+	-- frames', so however quick a frame is drawn.)
+	local start = os.clock()
+	while os.clock() - start < 10 do
 		app:frames(1)
 		local p = (app:state("control_map_graph_pulse") or {})[1]
+		if not p and seen > 0 then
+			break
+		end
 		if p then
 			seen += 1
 			first = first or p
