@@ -45,6 +45,10 @@ struct Ledger {
     process: Mutex<Option<u32>>,
     /// Starts a wake turn (one nobody sent) with this prompt.
     wake: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    /// Warm starts parked (a new chat's agent before its first message), by
+    /// key, and those ended.
+    warm: Mutex<Vec<String>>,
+    warm_ended: Mutex<Vec<String>>,
 }
 
 /// `bg` in a prompt starts background work (the test ends it); `wake`
@@ -111,6 +115,20 @@ impl Harness for Agent {
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
+    }
+    fn prewarms(&self) -> bool {
+        true
+    }
+    async fn prewarm(&self, key: &str, _request: RunRequest) -> Result<(), HarnessError> {
+        self.ledger.warm.lock().unwrap().push(key.to_owned());
+        Ok(())
+    }
+    async fn discard_warm(&self, key: &str) {
+        let mut warm = self.ledger.warm.lock().unwrap();
+        if let Some(at) = warm.iter().position(|k| k == key) {
+            warm.remove(at);
+            self.ledger.warm_ended.lock().unwrap().push(key.to_owned());
+        }
     }
     async fn run(
         &self,
@@ -858,5 +876,56 @@ async fn a_malformed_user_config_holds() {
     );
     assert_eq!(rig.kills(), 0);
     drop(agent);
+    rig.core.sessions.shutdown().await;
+}
+
+/// A new chat's warm start beside the idle stop. The person writing its
+/// first message (a keystroke reported every 10 s, as the composer does)
+/// keeps it however long that takes, while the idle stop ends another chat's
+/// parked agent as usual; once the keystrokes stop, it ends after the idle
+/// window, and one opened and never typed into after a minute.
+#[tokio::test(start_paused = true)]
+async fn the_idle_stop_never_ends_a_new_chat_being_written_and_always_ends_one_left() {
+    let rig = rig(true);
+    rig.send("hello").await;
+    let service = rig.core.rpc_service();
+    let warm = |chat: &'static str, typed: bool| {
+        let client = zeron_rpc::memory_client(service.clone());
+        async move {
+            let answer = client
+                .call(
+                    "WarmStart",
+                    serde_json::json!({ "chatId": chat, "typed": typed, "request": serde_json::to_value(request("")).unwrap() }),
+                )
+                .await
+                .unwrap();
+            answer["outcome"].as_str().unwrap().to_owned()
+        }
+    };
+    const WRITTEN: &str = "0f3b2a1c-9d4e-4c5b-8a7f-123456789abc";
+    const OPENED: &str = "1f3b2a1c-9d4e-4c5b-8a7f-123456789abc";
+    assert_eq!(warm(WRITTEN, true).await, "started");
+    assert_eq!(warm(OPENED, false).await, "started");
+    // Five minutes of writing: renewed every 10 s.
+    for step in 1..=30 {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(warm(WRITTEN, true).await, "renewed", "at {}s", step * 10);
+        let parked = rig.ledger.warm.lock().unwrap().clone();
+        assert!(parked.iter().any(|k| k.starts_with(WRITTEN)), "at {}s: {parked:?}", step * 10);
+        if step == 5 {
+            assert!(parked.iter().any(|k| k.starts_with(OPENED)), "an open lasts a minute");
+        }
+        if step == 7 {
+            assert!(!parked.iter().any(|k| k.starts_with(OPENED)), "never typed into: gone after a minute");
+        }
+    }
+    // Meanwhile the other chat's parked agent was stopped idle, as ever.
+    rig.stopped().await;
+    // Left: gone once the idle window after its last keystroke runs out.
+    tokio::time::sleep(AGENT_IDLE_STOP - Duration::from_secs(5)).await;
+    assert_eq!(rig.ledger.warm.lock().unwrap().len(), 1, "kept until its window runs out");
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    wait_for(|| rig.ledger.warm.lock().unwrap().is_empty(), "the left one to end").await;
+    assert_eq!(rig.ledger.warm_ended.lock().unwrap().len(), 2);
     rig.core.sessions.shutdown().await;
 }

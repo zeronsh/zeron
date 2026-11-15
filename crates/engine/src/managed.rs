@@ -143,6 +143,12 @@ impl RpcService for ManagedRpc {
                         }
                     }
                 }
+                // A new chat's warm start is never work: it goes with the app
+                // (ended in the background: one waits out a login refresh in
+                // flight, which the app's quit must not).
+                if let Some(sessions) = self.sessions().await {
+                    tokio::spawn(async move { sessions.warm_stop_all().await });
+                }
                 tracing::info!(stop_work, stopped, "the app quit: stopping once nothing is pending");
                 self.quit.arm();
                 RpcReply::value(&serde_json::json!({ "ok": true, "stopped": stopped }))

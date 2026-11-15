@@ -3472,6 +3472,41 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
+            methods::WARM_START => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct WarmStartParams {
+                    chat_id: String,
+                    request: zeron_proto::RunRequest,
+                    #[serde(default)]
+                    typed: bool,
+                }
+                let p: WarmStartParams = parse_params(params.clone())?;
+                let Some(harness) = p.request.harness else {
+                    return Err(RpcError::BadParams("a warm start names its harness".into()));
+                };
+                // Only for a chat on this device: one elsewhere would outlive
+                // this app's quit (only this engine hears it), so nothing
+                // starts early there.
+                if params
+                    .get("targetDeviceId")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|target| target != self.doc_host.device_id())
+                {
+                    return RpcReply::value(&serde_json::json!({ "outcome": crate::sessions::WarmOutcome::Unsupported }));
+                }
+                let outcome = self
+                    .sessions
+                    .warm_start(&p.chat_id, harness, p.request, p.typed)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "outcome": outcome }))
+            }
+            methods::WARM_STOP => {
+                let p: ChatParams = parse_params(params)?;
+                self.sessions.warm_stop(&p.chat_id).await;
+                RpcReply::value(&serde_json::json!({}))
+            }
             methods::TAKE_PROJECT_ACTION_SETUP => {
                 let p: TakeProjectActionSetupParams = parse_params(params)?;
                 let outcome = self
