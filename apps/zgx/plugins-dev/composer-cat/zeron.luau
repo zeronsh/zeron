@@ -69,7 +69,11 @@
 --   zeron.on_message(function(message) end)
 --       what arrives: { from = { id, name }, data, at }      ("devices")
 --   zeron.open(route)    "home", { session = id }, { settings = page } ("navigate")
---   zeron.compose(text)  text into the message box, for you to send   ("compose")
+--   zeron.compose(text, { replace?, session? })
+--                        text into the message box, for you to send: after
+--                        what's there, or in place of its words (`replace =
+--                        true`, its chips kept); the chat shown's draft, or
+--                        `session`'s                                ("compose")
 --   zeron.compose_comment { file, line, note, to?, side?, snippet?, key?, session? }
 --                        a review comment chip on a session's draft, sent as
 --                        Zeron's review comments block (file:line, the note,
@@ -87,6 +91,9 @@
 --                        traded; let go                           ("draft")
 --   zeron.drafts()       what Zeron keeps for you, by key: { session?, text,
 --                        attachments, at }, reactive              ("draft")
+--   zeron.draft_of(session)
+--                        a promise of another chat's draft, as `draft()`
+--                        says it, read once ("" a new chat's)     ("draft")
 --   zeron.toast(text)    a short note at the window's foot   (always)
 --   zeron.notify { title, body?, session? }  a notification, as Zeron's
 --                        own (Settings → Notifications)     ("notifications")
@@ -1354,8 +1361,16 @@ return function(id: string): any
 		ui.invoke(`{prefix}.open_url`, url)
 	end
 
-	function M.compose(text: string)
-		ui.invoke("zeron.compose.insert", text)
+	-- `text` into a chat's draft, for the person to send ("compose"): after
+	-- what's there, on a line of its own; with `replace = true`, in place of
+	-- its words (what it carries stays). The chat shown's draft, or
+	-- `session`'s ("" a new chat's).
+	function M.compose(text: string, opts: { replace: boolean?, session: string? }?)
+		if opts and (opts.replace or opts.session) then
+			ui.invoke("zeron.compose.insert", { text = text, replace = opts.replace == true, session = opts.session or ui.null })
+		else
+			ui.invoke("zeron.compose.insert", text)
+		end
 	end
 
 	-- A review comment on a file or a diff, as a chip on a session's draft
@@ -1427,6 +1442,13 @@ return function(id: string): any
 	local drafts = ui.shared(`{prefix}.drafts`, {} :: { [string]: any })
 	function M.drafts(): { [string]: { session: string?, text: string, attachments: { { kind: string, name: string } }, at: number } }
 		return drafts:get() or {}
+	end
+
+	-- Chat `session`'s draft as it is now, unsent: shown or not (`draft()`
+	-- follows the one shown). A promise of { session?, text, attachments }
+	-- as `draft()` says it ("" a new chat's draft, with no session).
+	function M.draft_of(session: string): any
+		return ui.call(`{prefix}.draft_of`, session)
 	end
 
 	function M.toast(text: string)

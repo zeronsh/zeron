@@ -944,6 +944,16 @@ function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [str
 	}
 end
 
+-- Chat `key`'s draft's words as they are, read without following them
+-- (`draft_of` follows them): what a plugin's `zeron.compose` adds to.
+function M.peek_text_of(key: string): string
+	if here:peek() == key then
+		return M.text:peek()
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then d.text else ""
+end
+
 -- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
 -- or "chosen"): written wherever it is, as `draft_of` reads it.
 function M.set_draft_of(key: string, field: string, value: any)

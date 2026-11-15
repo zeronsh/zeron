@@ -3485,11 +3485,11 @@
         },
         "compose": {
           "title": "Put text in the message box",
-          "detail": "You still send it."
+          "detail": "It can add to what you've written or replace it. You still send it."
         },
         "draft": {
           "title": "Read what you type in the message box, and set it aside",
-          "detail": "It sees your words before you send them, and can take the draft away and put it back later. It never sends it."
+          "detail": "It sees your words in any chat before you send them, and can take the draft away and put it back later. It never sends it."
         },
         "network": {
           "title": "Connect to the internet",

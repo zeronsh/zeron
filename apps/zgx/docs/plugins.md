@@ -52,8 +52,8 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `navigate` | open chats and pages (`zeron.open`) |
 | `links.open` | open http(s) links (`zeron.open_url`), where you open links (Settings → Links) |
 | `notifications` | send you notifications (`zeron.notify`), as Zeron's own: Settings → Notifications decides whether they show, a few a minute at most |
-| `compose` | put text in the message box (`zeron.compose`), or a review comment on it (`zeron.compose_comment`); you still send it |
-| `draft` | read the message box's draft as you type it (`zeron.draft`), and take it whole, put it back, swap it or let it go (`zeron.take_draft`, `put_draft`, `swap_draft`, `drop_draft`). See [The composer's draft](#the-composers-draft) |
+| `compose` | put text in the message box, after what's there or in place of its words (`zeron.compose`), or a review comment on it (`zeron.compose_comment`); you still send it |
+| `draft` | read the message box's draft as you type it (`zeron.draft`), or any chat's (`zeron.draft_of`), and take it whole, put it back, swap it or let it go (`zeron.take_draft`, `put_draft`, `swap_draft`, `drop_draft`). See [The composer's draft](#the-composers-draft) |
 | `github`, `github.write` | read (and write) GitHub through Zeron's engine (older calls; prefer `commands` with `gh`) |
 | `network` | the internet: `ui.fetch`, and remote images (`ui.image { src = "https://…" }`). See [Reaching the network](#reaching-the-network) |
 | `clipboard`, `files`, `web`, `windows` | zgx's clipboard, file dialogs, web views, windows |
@@ -214,12 +214,13 @@ Zeron draws that row on your settings page: "Use as wallpaper", and while it's o
 | call | what | needs |
 |---|---|---|
 | `zeron.open("home" \| { session = id } \| { settings = page })` | open a page | `navigate` |
-| `zeron.compose(text)` | text into the message box | `compose` |
+| `zeron.compose(text, { replace?, session? })` | text into a chat's draft: after what's there (on a line of its own), or in place of its words (`replace = true`, its chips kept); the chat shown's draft, or `session`'s ([below](#the-composers-draft)) | `compose` |
 | `zeron.compose_comment { file, line, note, to?, side?, snippet?, key?, session? }` | a review comment on a file or a diff, as a chip on a chat's draft (below) | `compose` |
 | `zeron.composed()` | in a build: your comments still on a draft, by `key`: `{ session, hovered }` | `compose` |
 | `zeron.draft()` | in a build: the message box's draft, `{ session?, text, attachments = { { kind, name } } }` (below) | `draft` |
 | `zeron.take_draft(key)`, `zeron.put_draft(key)`, `zeron.swap_draft(key)`, `zeron.drop_draft(key)` | the draft taken whole and kept by Zeron under your key; put back; traded with what the key keeps; let go (below) | `draft` |
 | `zeron.drafts()` | in a build: what Zeron keeps for you, by key: `{ session?, text, attachments, at }` | `draft` |
+| `zeron.draft_of(session)` | a promise of chat `session`'s draft as it is now, as `zeron.draft()` says it (`""`: a new chat's) | `draft` |
 | `zeron.toast(text)` | a short note at the window's foot | (always) |
 | `zeron.need("panel").open_tab { kind, title, icon?, data? }` | a tab of yours in the chat's panel; asked again, the one there is brought forward (found by `data.key` when you give one, else by its title) | `panel.tabs` |
 | `zeron.tab(kind, function(tab) return node end)` | how a kind of your tabs draws (`tab` = `{ kind, title, data }`) | `panel.tabs` |
@@ -288,6 +289,21 @@ With `draft`, a plugin reads what you're typing and can set it aside and bring i
 - **`zeron.swap_draft(key)`** trades the draft shown with what `key` keeps. Either may be empty, so one call sets the draft aside (nothing kept), brings it back (an empty composer), or swaps the two.
 - **`zeron.drop_draft(key)`** lets what `key` kept go.
 - **`zeron.drafts()`**, read in a build, is what Zeron keeps for you, by key: `{ session?, text, attachments, at }` (`at` as `os.time()`). Drafts are kept while Zeron runs, as chats' own drafts are.
+- **`zeron.draft_of(session)`** reads another chat's draft once, shown or not: a promise of `{ session?, text, attachments }`, as `zeron.draft()` says it (`""` for a new chat's, with no session).
+
+With `compose` too, a plugin can change the words in place: **`zeron.compose(text, { replace = true })`** puts `text` in place of the draft's words, leaving its chips where they are, and `session` names another chat's draft. A rewrite or a snippet that expands is a read and a replace:
+
+```lua
+-- ("ui.add", "draft", "compose"): /bug alone in the box becomes the template.
+ui.effect(function()
+	local d = zeron.draft()
+	if d and d.text == "/bug" then
+		zeron.compose("## What happened\n\n## What I expected\n\n## Steps\n", { replace = true, session = d.session })
+	end
+end)
+```
+
+Nothing is sent: the person sees the new words in the composer, and sends or edits them. `zeron.compose` takes 20,000 characters at most.
 
 Each is done in the order you ask. A prompt stash is one shortcut and one chip:
 
