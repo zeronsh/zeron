@@ -1,10 +1,10 @@
--- Providers → OpenCode settings: its own tabs (the sessions that show
--- here, where its chats run, and the rest), each one short enough for the
--- window; where chats run is one choice (the background service, a server
--- per chat, a remote server), never two at once; and a remote waits for
--- Connect and, connected, folds to one row with a way to change it. On the
--- shell in ui/shell_fixture.luau, the engine's answers in
--- ui/settings_stub.luau.
+-- Providers → OpenCode settings: its own tabs (the agent's own switches
+-- first, then the sessions that show here and where its chats run), each one
+-- short enough for the window and none of them moving the title or the tabs;
+-- where chats run is one choice (the background service, a server per chat,
+-- a remote server), never two at once; and a remote waits for Connect and,
+-- connected, folds to one row with a way to change it. On the shell in
+-- ui/shell_fixture.luau, the engine's answers in ui/settings_stub.luau.
 
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
@@ -67,22 +67,57 @@ local function bottom(app: any, node: string): number?
 	return tonumber(y) + tonumber(h)
 end
 
-test("OpenCode settings: its own tabs, opened on the sessions, and no switch for the service or a remote", function()
+-- Where `node` stands: its top left.
+local function place(app: any, node: string): { number }?
+	local line = app:tree(node):match("[^\n]+")
+	local x, y = string.match(line or "", " (%d+),(%d+) %d+x%d+")
+	if not x then
+		return nil
+	end
+	return { tonumber(x), tonumber(y) }
+end
+
+test("OpenCode settings: its own tabs, opened on the agent's, and no switch for the service or a remote", function()
 	local app = open()
+	expect(app:has('role:tab "Agent"')).to_be(true)
 	expect(app:has('role:tab "Sessions"')).to_be(true)
 	expect(app:has('role:tab "Server"')).to_be(true)
-	expect(app:has('role:tab "Advanced"')).to_be(true)
-	expect(app:has('role:switch "Sync sessions"')).to_be(true)
-	-- (Where chats run is a tab of its own.)
+	-- (The agent's own switches, first: what this Mac's agent does.)
+	expect(app:has('role:switch "Native subagents"')).to_be(true)
+	expect(app:has('role:switch "Sync sessions"')).to_be(false)
 	expect(app:has('role:button "Chats run on"')).to_be(false)
+	tab(app, "Sessions")
+	expect(app:has('role:switch "Sync sessions"')).to_be(true)
+	expect(app:has('role:switch "Native subagents"')).to_be(false)
+	-- (Where chats run is a tab of its own.)
 	tab(app, "Server")
 	expect(app:has('role:switch "Sync sessions"')).to_be(false)
 	expect(app:has('role:button "Chats run on"')).to_be(true)
 	expect(app:has('role:switch "Use the background service"')).to_be(false)
 	expect(app:has('role:switch "Remote server"')).to_be(false)
-	tab(app, "Advanced")
-	expect(app:has('role:switch "Native subagents"')).to_be(true)
-	expect(app:has('role:button "Chats run on"')).to_be(false)
+end)
+
+test("OpenCode settings: the title and its tabs stay where they are, whichever tab shows", function()
+	local app = open()
+	local strip = place(app, 'role:tablist "OpenCode settings"')
+	local title = place(app, 'role:heading "OpenCode settings"')
+	expect(strip ~= nil and title ~= nil).to_be(true)
+	for _, name in { "Sessions", "Server", "Agent" } do
+		tab(app, name)
+		expect(place(app, 'role:tablist "OpenCode settings"')).to_equal(strip)
+		expect(place(app, 'role:heading "OpenCode settings"')).to_equal(title)
+	end
+	-- (In a short window too, where the tabs differ most in height.)
+	app:resize(1200, 560)
+	app:frames(20)
+	local short = place(app, 'role:tablist "OpenCode settings"')
+	local short_title = place(app, 'role:heading "OpenCode settings"')
+	expect(short ~= nil and short_title ~= nil).to_be(true)
+	for _, name in { "Server", "Sessions", "Agent" } do
+		tab(app, name)
+		expect(place(app, 'role:tablist "OpenCode settings"')).to_equal(short)
+		expect(place(app, 'role:heading "OpenCode settings"')).to_equal(short_title)
+	end
 end)
 
 test("OpenCode settings: one choice of where chats run, kept across a reopen", function()
@@ -138,9 +173,23 @@ test("OpenCode settings in a short window: every tab fits, its last row above Do
 	app:frames(20)
 	local foot = bottom(app, 'role:button "Done"')
 	expect(foot ~= nil and foot <= 560).to_be(true)
+	expect(bottom(app, 'role:button "Update policy"') <= foot).to_be(true)
+	tab(app, "Sessions")
 	expect(bottom(app, 'role:switch "Add projects"') <= foot).to_be(true)
 	tab(app, "Server")
 	expect(bottom(app, 'role:button "Chats run on"') <= foot).to_be(true)
-	tab(app, "Advanced")
-	expect(bottom(app, 'role:button "Update policy"') <= foot).to_be(true)
+end)
+
+test("OpenCode settings: a remote's fields fit the window it is opened in", function()
+	local app = open()
+	app:resize(1240, 820)
+	app:frames(20)
+	tab(app, "Server")
+	run_on(app, "Remote server")
+	-- (Its tallest: a name, an address and a password, each under its
+	-- label, then Connect.)
+	local foot = bottom(app, 'role:button "Done"')
+	expect(foot ~= nil and foot <= 820).to_be(true)
+	expect(bottom(app, 'role:textbox "Password"') <= foot).to_be(true)
+	expect(bottom(app, 'role:button "Connect"') <= foot).to_be(true)
 end)

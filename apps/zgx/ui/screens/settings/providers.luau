@@ -788,9 +788,9 @@ local function settings_dialog(): Node
 	-- connected). (`oc_remote`: whether one is saved.)
 	local oc_where = ui.state("settings_agent_oc_where", "service")
 	local oc_editing = ui.state("settings_agent_oc_editing", false)
-	-- The dialog's tabs: how its chats behave, which of OpenCode's sessions
-	-- show here, and where they run.
-	local oc_tab = ui.state("settings_agent_oc_tab", "sessions")
+	-- The dialog's tabs: the agent's own switches, which of OpenCode's
+	-- sessions show here, and where they run.
+	local oc_tab = ui.state("settings_agent_oc_tab", "agent")
 	-- `fresh`: the dialog opened — a remote chosen and never connected is
 	-- let go (until then, another setting saved keeps it chosen).
 	local function oc_show(v: any, fresh: boolean?)
@@ -816,7 +816,7 @@ local function settings_dialog(): Node
 			oc_error:set(if refused then v.remoteError else "")
 			oc_editing:set(refused or v.remote ~= true)
 			if fresh then
-				oc_tab:set(if refused then "server" else "sessions")
+				oc_tab:set(if refused then "server" else "agent")
 			end
 		end
 	end
@@ -916,16 +916,21 @@ local function settings_dialog(): Node
 		size = "md",
 		cancel = false,
 		confirm = { label = ui.t("settings.providers.done") :: any },
-		-- (OpenCode's settings, on three tabs of their own: what shows here,
-		-- where chats run, and the rest. Each is short enough for the
-		-- window, so the dialog never runs past its foot.)
+		-- (Its tabs change its height, so it hangs from the same place
+		-- whichever shows: the title and the tabs stay where they are, and
+		-- it grows downward. Centred, it would jump by a tab's worth each
+		-- switch.)
+		placement = { y = "start", inset = 16 },
+		-- (OpenCode's settings, on three tabs of their own: the agent's own
+		-- switches, what shows here, and where chats run. Each is short
+		-- enough for the window, so the dialog never runs past its foot.)
 		ui.show(opencode, ds.Tabs {
 			value = oc_tab,
 			label = ui.t("settings.providers.opencode.tabs.label"),
 			options = {
+				{ value = "agent", label = ui.t("settings.providers.opencode.tabs.agent") },
 				{ value = "sessions", label = ui.t("settings.providers.opencode.tabs.sessions") },
 				{ value = "server", label = ui.t("settings.providers.opencode.tabs.server") },
-				{ value = "advanced", label = ui.t("settings.providers.opencode.tabs.advanced") },
 			} :: any,
 		}),
 		ui.show(function(): boolean
@@ -1118,7 +1123,7 @@ local function settings_dialog(): Node
 		-- (Its own: the agent's switches and, for one added from the
 		-- registry, its environment and a way to remove it.)
 		ui.show(function(): boolean
-			return not opencode() or oc_tab:get() == "advanced"
+			return not opencode() or oc_tab:get() == "agent"
 		end, ds.Settings.Group {
 			ui.div {
 				w_full = true,

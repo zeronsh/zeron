@@ -66,6 +66,10 @@ export type DialogProps = {
 	-- What stands in it built as it opens, after its children: choices
 	-- made from the data as it is then (its focus starts on their first).
 	build: (() -> Node)?,
+	-- Where it sits in the window: centred, unless it says (`{ y = "start",
+	-- inset = 24 }` — a dialog whose height changes by what it shows keeps
+	-- its title and its tabs where they are, growing downward).
+	placement: { x: string?, y: string?, inset: (number | { number })? }?,
 	[number]: Child,
 }
 
@@ -317,6 +321,7 @@ M.Dialog = ui.component(function(props: DialogProps): Node
 		dismissable = props.dismissable ~= false,
 		hold = props.hold,
 		w = `$zeron.dialog.{props.size or "sm"}`,
+		placement = props.placement,
 		panel = function(phase: State<number>): Node
 			return DialogBody { props = props, close = close, phase = phase }
 		end,

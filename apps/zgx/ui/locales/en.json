@@ -1537,9 +1537,9 @@
         },
         "tabs": {
           "label": "OpenCode settings",
+          "agent": "Agent",
           "sessions": "Sessions",
-          "server": "Server",
-          "advanced": "Advanced"
+          "server": "Server"
         },
         "runs_on": {
           "label": "Chats run on",
@@ -1554,7 +1554,7 @@
           },
           "remote": {
             "label": "Remote server",
-            "description": "An OpenCode server on another computer, in place of this one's service: chats, synced sessions and sign-ins go to it, and its tools work on that computer's files."
+            "description": "An OpenCode server on another computer, in place of this one's service: chats, sessions and sign-ins go to it."
           }
         },
         "remote": {
@@ -1587,7 +1587,7 @@
           },
           "connect": {
             "label": "Connect",
-            "description": "Saves these and checks that the server answers.",
+            "description": "Saves these and checks the server answers.",
             "button": "Connect"
           },
           "folded": {

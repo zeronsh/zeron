@@ -1537,9 +1537,9 @@
         },
         "tabs": {
           "label": "OpenCode 设置",
+          "agent": "智能体",
           "sessions": "会话",
-          "server": "服务器",
-          "advanced": "高级"
+          "server": "服务器"
         },
         "runs_on": {
           "label": "聊天运行于",
@@ -1554,7 +1554,7 @@
           },
           "remote": {
             "label": "远程服务器",
-            "description": "使用另一台电脑上的 OpenCode 服务器代替本机服务：聊天、同步的会话和登录都会转到它，它的工具作用于那台电脑上的文件。"
+            "description": "使用另一台电脑上的 OpenCode 服务器代替本机服务：聊天、会话和登录都会转到它。"
           }
         },
         "remote": {
