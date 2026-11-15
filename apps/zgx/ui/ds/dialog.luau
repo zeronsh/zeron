@@ -66,6 +66,13 @@ export type DialogProps = {
 	-- What stands in it built as it opens, after its children: choices
 	-- made from the data as it is then (its focus starts on their first).
 	build: (() -> Node)?,
+	-- Its height: given, it holds it — its title, its tabs and its foot
+	-- where they are — and what it holds scrolls past it. Without one it is
+	-- as tall as what it shows.
+	h: (number | (() -> number))?,
+	-- What stays over the body, under the title (a dialog's tabs): the body
+	-- scrolls under it.
+	head: Node?,
 	[number]: Child,
 }
 
@@ -191,8 +198,23 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 		table.insert(children, props.build())
 	end
 	local has_field = #children > 0 or props.confirm_text ~= nil
+	-- (Held to a height, what it holds scrolls under its title and its foot:
+	-- a form taller than the dialog, or a window too short for it.)
+	local body: any = children
+	if props.h then
+		body = ui.scroll {
+			w_full = true,
+			grow = 1,
+			shrink = 1,
+			min_h = 0,
+			ui.column { w_full = true, gap = "$space.3", table.unpack(children) },
+		}
+	end
 	return ui.column(panel {
 		w_full = true,
+		-- (Held to a height, the panel is that height: its edge is the
+		-- dialog's, and its body takes what its title and its foot leave.)
+		h_full = props.h ~= nil,
 		p = "$space.5",
 		gap = "$space.5",
 		opacity = function()
@@ -221,7 +243,8 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 				then ui.text { props.body, text_size = "$font.size.md", line_height = 20, color = "$text.secondary", wrap = true }
 				else nil,
 		},
-		if #children > 0 then ui.column { gap = "$space.3", table.unpack(children) } else nil,
+		props.head,
+		if #children > 0 then body else nil,
 		if props.confirm_text
 			then ui.column {
 				gap = "$space.2",
@@ -317,6 +340,7 @@ M.Dialog = ui.component(function(props: DialogProps): Node
 		dismissable = props.dismissable ~= false,
 		hold = props.hold,
 		w = `$zeron.dialog.{props.size or "sm"}`,
+		h = props.h,
 		panel = function(phase: State<number>): Node
 			return DialogBody { props = props, close = close, phase = phase }
 		end,

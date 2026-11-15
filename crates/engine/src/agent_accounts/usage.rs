@@ -22,13 +22,17 @@
 //! it to refresh" / "refreshes next time" instead.
 
 use super::stores::{
-    DEVIN_SERVERS, GROK_ISSUERS, NOUS_PORTALS, Upstream, copilot_api_base, devin_api_key,
-    trusted_base, upstream_of,
+    DEVIN_SERVERS, GROK_ISSUERS, NOUS_PORTALS, OPENCODE_CREDENTIAL, Upstream, copilot_api_base,
+    devin_api_key, trusted_base, upstream_of,
 };
 use super::*;
 
 pub(super) const GROK_USAGE_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 pub(super) const NOUS_PORTAL: &str = "https://portal.nousresearch.com";
+pub(super) const MISTRAL_API: &str = "https://api.mistral.ai";
+/// How old Claude Code's own meters may be for OpenCode's Claude Agent (the
+/// same login) to show them rather than ask Anthropic again.
+const CLAUDE_AGENT_REUSE: Duration = Duration::from_secs(5 * 60);
 const DEVIN_STATUS_RPC: &str = "exa.seat_management_pb.SeatManagementService/GetUserStatus";
 const DEVIN_DEFAULT_API_SERVER: &str = "https://server.codeium.com";
 /// The CLI version the status call identifies as (the server wants one).
@@ -224,6 +228,11 @@ impl AgentAccounts {
         };
         let key = slot.store_key.as_deref().ok_or(missing.clone())?;
         let creds = &slot.credentials;
+        if harness == HarnessId::Opencode
+            && let Some(id) = slot.account_key.strip_prefix(OPENCODE_CREDENTIAL)
+        {
+            return self.opencode_credential_usage(key, id).await;
+        }
         if harness == HarnessId::Hermes {
             if str_field(creds, "auth_type").as_deref() == Some("api_key") {
                 return Err(ProbeError::NoCredentials {
@@ -294,6 +303,104 @@ impl AgentAccounts {
                 why: NoCredentials::Unsupported,
             }),
         }
+    }
+
+    /// An OpenCode 2.x sign-in, its secret on the service: the vendor
+    /// behind it probed as that vendor's own logins are. Claude Agent signs
+    /// in with Claude Code's login, so its meters are that login's.
+    async fn opencode_credential_usage(
+        &self,
+        integration: &str,
+        id: &str,
+    ) -> Result<UsageSnapshot, ProbeError> {
+        let missing = ProbeError::NoCredentials {
+            why: NoCredentials::Missing,
+        };
+        if integration == "claude-agent" {
+            return self.claude_agent_usage().await;
+        }
+        let value = zeron_harness::OpencodeHarness::new()
+            .native_credential_value(id)
+            .await
+            .map_err(|_| ProbeError::Network { timeout: false })?
+            .ok_or(missing.clone())?;
+        match (integration, str_field(&value, "type").as_deref()) {
+            ("mistral", Some("key")) => {
+                let key = str_field(&value, "key").ok_or(missing)?;
+                self.mistral_usage(&key).await
+            }
+            (_, Some("key")) => Err(ProbeError::NoCredentials {
+                why: NoCredentials::ApiKey,
+            }),
+            ("openai", Some("oauth")) => {
+                let access = str_field(&value, "access").ok_or(missing)?;
+                let account = value
+                    .get("metadata")
+                    .and_then(|m| str_field(m, "accountId"))
+                    .unwrap_or_default();
+                self.openai_usage("opencode", &access, &account).await
+            }
+            ("anthropic", Some("oauth")) => {
+                let access = str_field(&value, "access").ok_or(missing)?;
+                self.claude_usage_request(&access).await
+            }
+            ("github-copilot", Some("oauth")) => {
+                let token = str_field(&value, "refresh").ok_or(missing)?;
+                let api = copilot_api_base(
+                    &value,
+                    &self.inner.endpoints.github_api,
+                    self.inner.endpoints.allow_loopback_http,
+                )
+                .ok_or(ProbeError::UntrustedEndpoint)?;
+                self.copilot_usage(&api, &token).await
+            }
+            _ => Err(ProbeError::NoCredentials {
+                why: NoCredentials::Unsupported,
+            }),
+        }
+    }
+
+    /// The Claude Code login in use: the meters its own row last read, while
+    /// fresh (one probe for both rows), else Anthropic asked with its token.
+    async fn claude_agent_usage(&self) -> Result<UsageSnapshot, ProbeError> {
+        let missing = ProbeError::NoCredentials {
+            why: NoCredentials::Missing,
+        };
+        let (detected, _) = self.detect_claude().await;
+        let detected = detected.ok_or(missing.clone())?;
+        if let Some(entry) = lock(&self.inner.usage).get(&usage_key(HarnessId::ClaudeCode, &detected.account_key))
+            && let (Some(usage), Some(at)) = (&entry.usage, entry.fetched_at)
+            && now_ms() - at < CLAUDE_AGENT_REUSE.as_millis() as i64
+        {
+            return Ok(usage.clone());
+        }
+        let access = detected
+            .credentials
+            .as_ref()
+            .and_then(|c| c.get("claudeAiOauth"))
+            .and_then(|oauth| str_field(oauth, "accessToken"))
+            .ok_or(missing)?;
+        self.claude_usage_request(&access).await
+    }
+
+    /// A Mistral key's budgets (`/v1/billing/budget`: the API's and Vibe's,
+    /// each a percentage used and its reset) and its plan.
+    async fn mistral_usage(&self, key: &str) -> Result<UsageSnapshot, ProbeError> {
+        let base = self.inner.endpoints.mistral_api.trim_end_matches('/');
+        let get = |path: &str| {
+            self.inner
+                .http
+                .get(format!("{base}{path}"))
+                .bearer_auth(key)
+                .header("Accept", "application/json")
+        };
+        let budget = probe_json("mistral", "usage", get("/v1/billing/budget")).await?;
+        // (The plan's name only; its meters stand without it.)
+        let subscription = probe_json("mistral", "plan", get("/v1/billing/subscription"))
+            .await
+            .ok();
+        mistral_usage_snapshot(&budget, subscription.as_ref())
+            .ok_or_else(|| schema_error("mistral", &budget))
     }
 
     async fn openai_usage(
@@ -557,6 +664,48 @@ pub(super) fn copilot_usage_snapshot(body: &serde_json::Value) -> Option<UsageSn
 }
 
 /// The Nous portal's account: the subscription's monthly credits.
+/// Mistral's `/v1/billing/budget`: `api_budget` and `vibe_budget`, each
+/// `{usage_percentage, initial_budget, reset_at}`. A budget of nothing (no
+/// allowance, or none set) has no meter: it is never "0% used". The plan's
+/// name (`/v1/billing/subscription`'s `plan_name`) labels it.
+pub(super) fn mistral_usage_snapshot(
+    budget: &serde_json::Value,
+    subscription: Option<&serde_json::Value>,
+) -> Option<UsageSnapshot> {
+    let windows: Vec<AgentUsageWindow> = [("api_budget", "API"), ("vibe_budget", "Vibe")]
+        .into_iter()
+        .filter_map(|(field, label)| {
+            let window = budget.get(field)?;
+            if window.get("initial_budget").and_then(json_f64).is_some_and(|b| b <= 0.0) {
+                return None;
+            }
+            let used = window.get("usage_percentage").and_then(json_f64)?;
+            Some(AgentUsageWindow {
+                label: label.into(),
+                used_fraction: (used / 100.0).clamp(0.0, 1.0) as f32,
+                resets_at: parse_when(window.get("reset_at")),
+            })
+        })
+        .collect();
+    if windows.is_empty() {
+        return None;
+    }
+    let plan_label = subscription
+        .and_then(|s| str_field(s, "plan_name"))
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            let mut chars = lower.chars();
+            let first = chars.next().map(|c| c.to_ascii_uppercase()).into_iter();
+            format!("Mistral {}", first.chain(chars).collect::<String>())
+        });
+    Some(UsageSnapshot {
+        windows,
+        plan_label,
+        codex_reset_credits: None,
+    })
+}
+
 pub(super) fn nous_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
     let subscription = body.get("subscription").filter(|s| s.is_object());
     let plan_label = subscription.and_then(|s| str_field(s, "plan")).map(|plan| {

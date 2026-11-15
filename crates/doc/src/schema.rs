@@ -26,6 +26,10 @@ use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
 /// The plugins' sends a chat keeps a record of (`SessionDoc::sent_by`).
 pub const SENT_BY_KEPT: usize = 200;
 
+/// The part id a compaction's summary rides (its note's text part), so a
+/// summary still being written can be appended into it word by word.
+pub const COMPACTION_SUMMARY_PART: &str = "s0";
+
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
     #[error("loro: {0}")]
@@ -159,6 +163,18 @@ struct DocPartJson {
     /// `outputTruncated`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output_lines: Option<u64>,
+    /// Compaction (`kind: "compaction"`, additive; its status rides
+    /// `message`): the tokens the summary read and wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tokens_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tokens_out: Option<u64>,
+    /// Revert (`kind: "revert"`, additive): how many of the person's
+    /// messages it took back, and the files it put back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reverted: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reverted_files: Option<serde_json::Value>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -290,6 +306,26 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             to_harness: to_harness.clone(),
             ..Default::default()
         },
+        MessagePart::Compaction {
+            id,
+            status,
+            tokens_in,
+            tokens_out,
+        } => DocPartJson {
+            id: id.clone(),
+            kind: "compaction".into(),
+            message: Some(status.clone()),
+            tokens_in: *tokens_in,
+            tokens_out: *tokens_out,
+            ..Default::default()
+        },
+        MessagePart::Revert { id, messages, files } => DocPartJson {
+            id: id.clone(),
+            kind: "revert".into(),
+            reverted: Some(*messages),
+            reverted_files: (!files.is_empty()).then(|| serde_json::to_value(files).unwrap_or_default()),
+            ..Default::default()
+        },
     })
 }
 
@@ -367,6 +403,20 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             to: p.to_provider.unwrap_or_default(),
             from_harness: p.from_harness,
             to_harness: p.to_harness,
+        },
+        "compaction" => MessagePart::Compaction {
+            id: p.id,
+            status: p.message.unwrap_or_default(),
+            tokens_in: p.tokens_in,
+            tokens_out: p.tokens_out,
+        },
+        "revert" => MessagePart::Revert {
+            id: p.id,
+            messages: p.reverted.unwrap_or_default(),
+            files: p
+                .reverted_files
+                .and_then(|files| serde_json::from_value(files).ok())
+                .unwrap_or_default(),
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -847,6 +897,44 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Replace the entry at `index` whole, in place (appended when `index` is
+    /// past the end). For entries kept in step with another source — an
+    /// OpenCode session's message read again as it grows — never for one a
+    /// [`SegmentWriter`] is streaming into.
+    pub fn replace_message(&self, index: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        if index < messages.len() {
+            messages.delete(index, 1)?;
+        }
+        self.insert_message(index, entry)
+    }
+
+    /// Insert `entry` at `index` (appended past the end): an entry an undo
+    /// took out, put back where it was by a redo.
+    pub fn insert_message(&self, index: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        let map = messages.insert_container(index.min(messages.len()), LoroMap::new())?;
+        write_entry_scalar_fields(&map, entry)?;
+        let parts = map.insert_container("parts", LoroList::new())?;
+        for part in &entry.parts {
+            push_part(&parts, part)?;
+        }
+        self.commit();
+        Ok(())
+    }
+
+    /// Remove the entry at `index` (nothing past the end). For entries kept
+    /// in step with another source whose message is gone — an OpenCode
+    /// session's message undone there.
+    pub fn remove_message(&self, index: usize) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        if index < messages.len() {
+            messages.delete(index, 1)?;
+            self.commit();
+        }
+        Ok(())
+    }
+
     /// [`push_message`](Self::push_message), but inserted before the last
     /// `from_end` entries of the messages list (clamped to its start).
     pub fn insert_message_before_last(&self, from_end: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
@@ -1286,6 +1374,135 @@ impl SessionDoc {
         Ok(false)
     }
 
+    /// Append `more` to the text of part `part_id` in entry `message_id` —
+    /// the words of a summary being written into a note, arriving as they
+    /// come, as a reply's do. `false` when the entry isn't there, or has no
+    /// such text part yet.
+    pub fn append_message_part_text(
+        &self,
+        message_id: &str,
+        part_id: &str,
+        more: &str,
+    ) -> Result<bool, DocError> {
+        if more.is_empty() {
+            return Ok(true);
+        }
+        let Some(parts) = self.parts_of(message_id)? else {
+            return Ok(false);
+        };
+        for j in 0..parts.len() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) = parts.get(j)
+            else {
+                continue;
+            };
+            let matches = matches!(
+                part.get("id"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == part_id
+            );
+            if !matches {
+                continue;
+            }
+            let Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) =
+                part.get("text")
+            else {
+                return Ok(false);
+            };
+            text.insert(text.len_unicode(), more)?;
+            self.commit();
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Append `more` to the summary of the compaction the transcript shows
+    /// running — the words of it as they arrive, so the note streams them in
+    /// as a reply's are streamed. `false` when the newest compaction there
+    /// isn't running, or there is none yet (they are kept, and written with
+    /// the note when it comes).
+    pub fn append_running_compaction_summary(&self, more: &str) -> Result<bool, DocError> {
+        if more.is_empty() {
+            return Ok(true);
+        }
+        let messages = self.doc.get_list("messages");
+        for i in (0..messages.len()).rev() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
+                entry.get("parts")
+            else {
+                continue;
+            };
+            // (Its status rides `message`: `to_doc_part`.)
+            let mut running = None;
+            let mut summary = None;
+            for j in 0..parts.len() {
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
+                    parts.get(j)
+                else {
+                    continue;
+                };
+                let is = |key: &str, want: &str| {
+                    matches!(
+                        part.get(key),
+                        Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == want
+                    )
+                };
+                if is("kind", "compaction") {
+                    running = Some(is("message", "running"));
+                } else if is("id", COMPACTION_SUMMARY_PART)
+                    && let Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) =
+                        part.get("text")
+                {
+                    summary = Some(text);
+                }
+            }
+            match running {
+                None => continue,
+                Some(false) => return Ok(false),
+                Some(true) => {}
+            }
+            // Its summary's text part, made here if the note has none yet.
+            match summary {
+                Some(text) => text.insert(text.len_unicode(), more)?,
+                None => {
+                    let map = parts.push_container(LoroMap::new())?;
+                    map.insert("id", COMPACTION_SUMMARY_PART)?;
+                    map.insert("kind", "text")?;
+                    map.insert_container("text", LoroText::new())?.insert(0, more)?;
+                }
+            }
+            self.commit();
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// The parts list of the entry `message_id`, if it is there.
+    fn parts_of(&self, message_id: &str) -> Result<Option<LoroList>, DocError> {
+        let messages = self.doc.get_list("messages");
+        for i in 0..messages.len() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            let matches = matches!(
+                entry.get("id"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == message_id
+            );
+            if matches
+                && let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
+                    entry.get("parts")
+            {
+                return Ok(Some(parts));
+            }
+        }
+        Ok(None)
+    }
+
     /// Append an error part to an existing entry (crash recovery: the aborted
     /// entry must SAY why it ended — "Run interrupted by engine restart…" —
     /// not just truncate silently). Returns `false` when no entry matches.
@@ -1625,6 +1842,18 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(lines) = doc_part.output_lines {
         map.insert("outputLines", lines as i64)?;
+    }
+    for (key, value) in [
+        ("tokensIn", doc_part.tokens_in),
+        ("tokensOut", doc_part.tokens_out),
+        ("reverted", doc_part.reverted),
+    ] {
+        if let Some(value) = value {
+            map.insert(key, value as i64)?;
+        }
+    }
+    if let Some(files) = &doc_part.reverted_files {
+        map.insert("revertedFiles", loro_value_from_json(files))?;
     }
     Ok(())
 }
@@ -2687,6 +2916,49 @@ mod tests {
     }
 
     #[test]
+    fn replace_message_rewrites_one_entry_in_place() {
+        let doc = SessionDoc::init("replace").unwrap();
+        let entry = |id: &str, text: &str| SessionMessageEntry {
+            duration_ms: None,
+            id: id.into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: text.into(),
+            }],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        for id in ["a", "b", "c"] {
+            doc.push_message(&entry(id, "first")).unwrap();
+        }
+        doc.replace_message(1, &entry("b", "grown")).unwrap();
+        let entries = doc.read_entries().unwrap();
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+        assert_eq!(
+            entries[1].parts,
+            vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "grown".into()
+            }]
+        );
+        // (Past the end appends.)
+        doc.replace_message(9, &entry("d", "new")).unwrap();
+        assert_eq!(doc.read_entries().unwrap().len(), 4);
+        doc.remove_message(1).unwrap();
+        doc.remove_message(9).unwrap();
+        let ids: Vec<String> = doc.read_entries().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["a", "c", "d"]);
+        doc.insert_message(1, &entry("b", "back")).unwrap();
+        doc.insert_message(9, &entry("e", "last")).unwrap();
+        let ids: Vec<String> = doc.read_entries().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
     fn provider_switch_seam_round_trips_and_flags_the_doc() {
         let doc = SessionDoc::init("switch").unwrap();
         assert!(!doc.provider_switched());
@@ -2711,6 +2983,69 @@ mod tests {
         doc.mark_provider_switched().unwrap();
         assert_eq!(doc.read_entries().unwrap()[0].parts, vec![seam]);
         assert!(doc.provider_switched());
+    }
+
+    #[test]
+    fn a_compaction_round_trips_with_its_tokens() {
+        let doc = SessionDoc::init("compaction").unwrap();
+        let entry = |status: &str, tokens: Option<(u64, u64)>| SessionMessageEntry {
+            duration_ms: None,
+            id: "oc:msg_c".into(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Compaction {
+                id: "c".into(),
+                status: status.into(),
+                tokens_in: tokens.map(|t| t.0),
+                tokens_out: tokens.map(|t| t.1),
+            }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        doc.push_message(&entry("running", None)).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0], entry("running", None));
+        // Its summary's words, as they come: a part of its own, then into it.
+        assert!(doc.append_running_compaction_summary("## Go").unwrap());
+        assert!(doc.append_running_compaction_summary("al").unwrap());
+        assert_eq!(
+            doc.read_entries().unwrap()[0].parts[1],
+            MessagePart::Text {
+                id: COMPACTION_SUMMARY_PART.into(),
+                text: "## Goal".into()
+            }
+        );
+        let done = entry("completed", Some((648_371, 2_812)));
+        doc.replace_message(0, &done).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0], done);
+        // (Done: no more words are its.)
+        assert!(!doc.append_running_compaction_summary("late").unwrap());
+    }
+
+    #[test]
+    fn a_revert_round_trips_with_its_files() {
+        let doc = SessionDoc::init("revert").unwrap();
+        let entry = SessionMessageEntry {
+            duration_ms: None,
+            id: "oc:revert".into(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Revert {
+                id: "r".into(),
+                messages: 2,
+                files: vec![crate::RevertedFile {
+                    path: "src/a.rs".into(),
+                    status: "modified".into(),
+                    additions: 3,
+                    deletions: 1,
+                }],
+            }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        doc.push_message(&entry).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0], entry);
     }
     use zeron_proto::{AgentEvent, ToolCall};
 

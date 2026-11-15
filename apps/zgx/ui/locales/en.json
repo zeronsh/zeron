@@ -591,7 +591,11 @@
         "edits": "Auto-accept edits",
         "edits_hint": "Apply edits, ask before other actions.",
         "full": "Full access",
-        "full_hint": "Run commands and edits without asking."
+        "full_hint": "Run commands and edits without asking.",
+        "prompt": "Prompt",
+        "prompt_hint": "Ask about what OpenCode's permissions ask about.",
+        "auto_accept": "Auto accept",
+        "auto_accept_hint": "Accept every request OpenCode's permissions don't deny."
       },
       "plan": {
         "mode": "Plan mode",
@@ -1518,6 +1522,77 @@
         "label": "Separate / commands",
         "terms": "completion composer slash skills menu",
         "description": "Keep skills out of the / menu."
+      },
+      "opencode": {
+        "title": "OpenCode settings",
+        "sync": {
+          "label": "Sync sessions",
+          "description": "Show the sessions you start in OpenCode's TUI and desktop app as chats here, kept live. Chats you start in Zeron always stay in step with OpenCode."
+        },
+        "projects": {
+          "label": "Add projects",
+          "description": "A synced session in a folder that isn't a project yet adds it as one. Off, only sessions in your projects show."
+        },
+        "tabs": {
+          "label": "OpenCode settings",
+          "agent": "Agent",
+          "sessions": "Sessions",
+          "server": "Server"
+        },
+        "runs_on": {
+          "label": "Chats run on",
+          "service": {
+            "label": "Background service",
+            "description": "The service OpenCode's TUI and desktop app share on this computer, so a session moves between them live."
+          },
+          "private": {
+            "label": "A server per chat",
+            "description": "Each chat starts a server of its own on this computer: nothing is shared with OpenCode's TUI or desktop app."
+          },
+          "remote": {
+            "label": "Remote server",
+            "description": "An OpenCode server on another computer, in place of this one's service: chats, sessions and sign-ins go to it."
+          }
+        },
+        "remote": {
+          "connected": "Connected to the OpenCode server",
+          "mode": {
+            "label": "Connect with",
+            "address": "Address and password",
+            "pairing": "Pairing link",
+            "ssh": "SSH"
+          },
+          "name": {
+            "label": "Name",
+            "placeholder": "Optional"
+          },
+          "url": {
+            "label": "Server address"
+          },
+          "password": {
+            "label": "Password",
+            "description": "On the server's computer, run opencode service get password."
+          },
+          "link": {
+            "label": "Pairing link",
+            "description": "From opencode pair, or Settings → Pairing on the server's computer. It's used once.",
+            "paired": "Paired with {url}. Paste a new link to pair again."
+          },
+          "ssh": {
+            "label": "SSH host",
+            "description": "A host SSH reaches with a key or agent (user@host, an alias from ~/.ssh/config), or an ssh command. OpenCode is installed there if it's missing."
+          },
+          "connect": {
+            "label": "Connect",
+            "description": "Saves these and checks the server answers.",
+            "button": "Connect"
+          },
+          "folded": {
+            "description": "Connected. Chats, synced sessions and sign-ins go to this server.",
+            "named": "{target}. Chats, synced sessions and sign-ins go to this server.",
+            "change": "Change"
+          }
+        }
       },
       "more": {
         "label": "More agents",

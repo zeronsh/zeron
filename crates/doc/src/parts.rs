@@ -372,9 +372,63 @@ pub enum MessagePart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_harness: Option<String>,
     },
+    /// Where the agent's session was compacted (OpenCode's `/compact`, or
+    /// its own when the context filled): `running` while the summary is
+    /// written, then `completed` (with the tokens it read and wrote) or
+    /// `failed`. Old builds' unknown-kind fallback yields an invisible empty
+    /// text part.
+    #[serde(rename_all = "camelCase")]
+    Compaction {
+        id: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_in: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_out: Option<u64>,
+    },
+    /// An undo staged in the agent's session (OpenCode's `/undo`, from any
+    /// client): the turns it took back are gone from the transcript until a
+    /// redo, and this stands where they were — how many of the person's
+    /// messages went, and the files put back. Old builds' unknown-kind
+    /// fallback yields an invisible empty text part.
+    #[serde(rename_all = "camelCase")]
+    Revert {
+        id: String,
+        messages: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<RevertedFile>,
+    },
+}
+
+/// A file an undo put back ([`MessagePart::Revert`]): what the undone turns
+/// did to it (`added`, `modified`, `deleted`) and the lines they added and
+/// removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevertedFile {
+    pub path: String,
+    pub status: String,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
 }
 
 impl MessagePart {
+    /// What a note of the agent's session says (a compaction, an undo), in
+    /// OpenCode's own words; `None` for every other part.
+    pub fn session_note(&self) -> Option<String> {
+        match self {
+            MessagePart::Compaction {
+                status,
+                tokens_in,
+                tokens_out,
+                ..
+            } => Some(compaction_note(status, *tokens_in, *tokens_out)),
+            MessagePart::Revert { messages, .. } => Some(revert_note(*messages)),
+            _ => None,
+        }
+    }
+
     pub fn id(&self) -> &str {
         match self {
             MessagePart::Text { id, .. }
@@ -385,7 +439,9 @@ impl MessagePart {
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
             | MessagePart::Fork { id, .. }
-            | MessagePart::Switch { id, .. } => id,
+            | MessagePart::Switch { id, .. }
+            | MessagePart::Compaction { id, .. }
+            | MessagePart::Revert { id, .. } => id,
         }
     }
 
@@ -432,7 +488,43 @@ impl MessagePart {
                 ..
             } => source_chat_id.len() + source_title.len(),
             MessagePart::Switch { from, to, .. } => from.len() + to.len(),
+            MessagePart::Compaction { status, .. } => status.len(),
+            MessagePart::Revert { files, .. } => files.iter().map(|file| file.path.len() + file.status.len()).sum(),
         }
+    }
+}
+
+/// What a [`MessagePart::Compaction`] says, as OpenCode's own clients say
+/// it: `Compacting session…` while it runs, then `Session compacted ·
+/// 648.4K in · 2.8K out`.
+pub fn compaction_note(status: &str, tokens_in: Option<u64>, tokens_out: Option<u64>) -> String {
+    match status {
+        "running" | "pending" => "Compacting session…".to_owned(),
+        "failed" => "Compaction failed".to_owned(),
+        _ => match (tokens_in, tokens_out) {
+            (Some(tokens_in), Some(tokens_out)) if tokens_in + tokens_out > 0 => format!(
+                "Session compacted · {} in · {} out",
+                short_count(tokens_in),
+                short_count(tokens_out)
+            ),
+            _ => "Session compacted".to_owned(),
+        },
+    }
+}
+
+/// What a [`MessagePart::Revert`] says, as OpenCode's TUI says it: `1
+/// message reverted`, `3 messages reverted`.
+pub fn revert_note(messages: u64) -> String {
+    let s = if messages == 1 { "" } else { "s" };
+    format!("{messages} message{s} reverted")
+}
+
+/// `648371` as `648.4K`, `2812` as `2.8K`, `1234567` as `1.2M`.
+fn short_count(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}K", n as f64 / 1_000.0),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
     }
 }
 

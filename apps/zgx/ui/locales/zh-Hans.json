@@ -591,7 +591,11 @@
         "edits": "自动接受编辑",
         "edits_hint": "应用编辑，执行其他操作前先询问。",
         "full": "完全访问",
-        "full_hint": "运行命令和编辑时不询问。"
+        "full_hint": "运行命令和编辑时不询问。",
+        "prompt": "询问",
+        "prompt_hint": "按 OpenCode 的权限设置询问。",
+        "auto_accept": "自动接受",
+        "auto_accept_hint": "接受 OpenCode 权限未拒绝的所有请求。"
       },
       "plan": {
         "mode": "计划模式",
@@ -1518,6 +1522,77 @@
         "label": "分开 / 命令",
         "terms": "补全 输入框 斜杠 技能 菜单 completion composer slash skills menu",
         "description": "不在 / 菜单中显示技能。"
+      },
+      "opencode": {
+        "title": "OpenCode 设置",
+        "sync": {
+          "label": "同步会话",
+          "description": "将你在 OpenCode 终端界面和桌面应用中开始的会话显示为此处的聊天，并实时保持同步。在 Zeron 中开始的聊天始终与 OpenCode 保持一致。"
+        },
+        "projects": {
+          "label": "添加项目",
+          "description": "同步的会话所在文件夹尚不是项目时，将其添加为项目。关闭后，只显示你的项目中的会话。"
+        },
+        "tabs": {
+          "label": "OpenCode 设置",
+          "agent": "智能体",
+          "sessions": "会话",
+          "server": "服务器"
+        },
+        "runs_on": {
+          "label": "聊天运行于",
+          "service": {
+            "label": "后台服务",
+            "description": "本机上 OpenCode 终端界面和桌面应用共享的服务，会话可在它们之间实时切换。"
+          },
+          "private": {
+            "label": "每个聊天一个服务器",
+            "description": "每个聊天在本机启动自己的服务器，不与 OpenCode 终端界面或桌面应用共享。"
+          },
+          "remote": {
+            "label": "远程服务器",
+            "description": "使用另一台电脑上的 OpenCode 服务器代替本机服务：聊天、会话和登录都会转到它。"
+          }
+        },
+        "remote": {
+          "connected": "已连接到 OpenCode 服务器",
+          "mode": {
+            "label": "连接方式",
+            "address": "地址和密码",
+            "pairing": "配对链接",
+            "ssh": "SSH"
+          },
+          "name": {
+            "label": "名称",
+            "placeholder": "可选"
+          },
+          "url": {
+            "label": "服务器地址"
+          },
+          "password": {
+            "label": "密码",
+            "description": "在服务器所在的电脑上运行 opencode service get password。"
+          },
+          "link": {
+            "label": "配对链接",
+            "description": "来自 opencode pair，或服务器电脑上的设置 → 配对。只能使用一次。",
+            "paired": "已与 {url} 配对。粘贴新链接可重新配对。"
+          },
+          "ssh": {
+            "label": "SSH 主机",
+            "description": "SSH 可通过密钥或代理访问的主机（user@host、~/.ssh/config 中的别名），或一条 ssh 命令。如果那里没有 OpenCode，会自动安装。"
+          },
+          "connect": {
+            "label": "连接",
+            "description": "保存这些设置并检查服务器是否响应。",
+            "button": "连接"
+          },
+          "folded": {
+            "description": "已连接。聊天、同步的会话和登录都会转到这台服务器。",
+            "named": "{target}。聊天、同步的会话和登录都会转到这台服务器。",
+            "change": "更改"
+          }
+        }
       },
       "more": {
         "label": "更多智能体",

@@ -230,6 +230,9 @@ pub struct AgentAccountsConfig {
     /// The user's real config root (`$XDG_CONFIG_HOME` or `~/.config`): what
     /// each zeron-kept Muse account's root mirrors (see [`muse`]).
     pub muse_config_root: PathBuf,
+    /// Read OpenCode 2.x's sign-ins off this machine's OpenCode background
+    /// service. Off in [`Self::isolated`]: a test never reaches a real one.
+    pub opencode_service: bool,
 }
 
 impl AgentAccountsConfig {
@@ -270,6 +273,7 @@ impl AgentAccountsConfig {
                 .filter(|dir| !dir.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir().join(".config")),
+            opencode_service: !crate::runner::is_cloud_platform(),
         }
     }
 
@@ -292,6 +296,7 @@ impl AgentAccountsConfig {
             pi_agent_dir: root.join("pi"),
             hermes_home: root.join("hermes"),
             muse_config_root: root.join("xdg-config"),
+            opencode_service: false,
         }
     }
 
@@ -746,6 +751,8 @@ struct ProbeEndpoints {
     openai_port: u16,
     /// The Nous portal (`/api/oauth/account`).
     nous_portal: String,
+    /// Mistral's API (an OpenCode 2.x Mistral key's budget).
+    mistral_api: String,
     allow_slot_refresh: bool,
     /// Test seam: admit `http://127.0.0.1` for credential-DEFINED endpoints
     /// (Grok issuer, Devin server, …) so mock servers can stand in. Always
@@ -771,6 +778,7 @@ impl Default for ProbeEndpoints {
             openai_auth: oauth::OPENAI_AUTH.into(),
             openai_port: oauth::OPENAI_LOOPBACK_PORT,
             nous_portal: usage::NOUS_PORTAL.into(),
+            mistral_api: usage::MISTRAL_API.into(),
             allow_slot_refresh: true,
             allow_loopback_http: false,
         }
@@ -1097,12 +1105,30 @@ impl AgentAccounts {
         let (hermes, hermes_active) = self.hermes_slots();
         active_keys.insert(HarnessId::Hermes, hermes_active);
         providers.push((HarnessId::Hermes, hermes));
+        // OpenCode 2.x keeps its sign-ins on its background service, not in
+        // `auth.json`: its rows are those, read live.
+        if let Some((slots, active)) = self.opencode_credential_slots().await {
+            if let Some((_, rows)) = providers
+                .iter_mut()
+                .find(|(harness, _)| *harness == HarnessId::Opencode)
+            {
+                *rows = slots;
+            }
+            active_keys.insert(HarnessId::Opencode, active);
+        }
         if force_usage {
             let targets: Vec<(HarnessId, &Slot, bool)> = providers
                 .iter()
                 .flat_map(|(harness, slots)| {
                     let active = active_keys.get(harness);
-                    slots.iter().map(move |slot| {
+                    // (A live OpenCode 2.x row carries no tokens: its probe
+                    // asks the service for the sign-in's own.)
+                    let probed = |slot: &&Slot| {
+                        !slot.credentials.is_null()
+                            || (slot.harness == HarnessId::Opencode
+                                && slot.account_key.starts_with(stores::OPENCODE_CREDENTIAL))
+                    };
+                    slots.iter().filter(probed).map(move |slot| {
                         (
                             *harness,
                             slot,
@@ -1162,7 +1188,9 @@ impl AgentAccounts {
                     auth_kind: Some(slot.profile.auth_kind),
                     // Hermes' pool is Hermes' to order (see module docs).
                     switchable: harness != HarnessId::Hermes,
-                    saved_at: (harness != HarnessId::Hermes).then_some(slot.saved_at),
+                    // (Nor is a live OpenCode 2.x row ever saved by zeron.)
+                    saved_at: (harness != HarnessId::Hermes && !slot.credentials.is_null())
+                        .then_some(slot.saved_at),
                     provider: provider_group(harness, slot.store_key.as_deref()),
                 });
             }
@@ -1229,6 +1257,17 @@ impl AgentAccounts {
                  `hermes auth` to manage it."
                     .into(),
             ));
+        }
+        // OpenCode 2.x: the service makes the credential its integration's
+        // active one, for every client at once.
+        if harness == HarnessId::Opencode
+            && let Some(credential) = self.opencode_credential(account_id).await?
+        {
+            zeron_harness::OpencodeHarness::new()
+                .activate_native_credential(&credential)
+                .await
+                .map_err(|e| EngineError::Other(e.to_string()))?;
+            return self.list(false).await;
         }
         let _ops = self.inner.ops.lock().await;
         // Claude: no CLI may be mid-refresh from here until the swap is
@@ -1616,6 +1655,16 @@ impl AgentAccounts {
                  `hermes auth remove`."
                     .into(),
             ));
+        }
+        // OpenCode 2.x: signed out on the service, for every client at once.
+        if harness == HarnessId::Opencode
+            && let Some(credential) = self.opencode_credential(account_id).await?
+        {
+            zeron_harness::OpencodeHarness::new()
+                .remove_native_credential(&credential)
+                .await
+                .map_err(|e| EngineError::Other(e.to_string()))?;
+            return self.list(false).await;
         }
         let _ops = self.inner.ops.lock().await;
         if harness == HarnessId::Muse {
@@ -5897,6 +5946,32 @@ mod probe_tests {
 mod login_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Live, read-only: OpenCode 2.x's sign-ins on this machine's background
+    /// service, as Settings → Providers lists them (everything else isolated).
+    #[tokio::test]
+    #[ignore = "reads the machine's real OpenCode background service"]
+    async fn live_opencode_credentials_list_without_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(AgentAccountsConfig {
+            opencode_service: true,
+            ..config(dir.path())
+        });
+        let snapshot = accounts.list(false).await.unwrap();
+        let rows: Vec<_> = snapshot
+            .accounts
+            .iter()
+            .filter(|account| account.harness == HarnessId::Opencode)
+            .collect();
+        for row in &rows {
+            println!(
+                "opencode row: {:?} / {:?} provider={:?} active={} switchable={} kind={:?}",
+                row.email, row.plan_label, row.provider, row.active, row.switchable, row.auth_kind
+            );
+        }
+        assert!(!rows.is_empty(), "a machine with OpenCode 2.x signed in lists its credentials");
+        assert!(rows.iter().all(|row| row.saved_at.is_none()));
+    }
 
     /// Temp homes for every provider; never the real logins or Keychain.
     fn config(root: &Path) -> AgentAccountsConfig {

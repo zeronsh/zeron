@@ -42,6 +42,9 @@ M.shown = ui.shared("chat.transcript.session", nil :: string?)
 -- Where in it the reader was (ds/transcript's `keep`), for a page made
 -- again; nil at the end.
 M.anchor = ui.shared("chat.transcript.anchor", nil :: any)
+-- The prompt an undo asked from the composer is taking back (its id), its
+-- turn fading in the transcript until it's gone.
+M.undoing = ui.shared("chat.transcript.undoing", nil :: string?)
 -- The two pills over a composer, a centred pair: its transcript's "Jump to
 -- latest" (`"jump"`) and the composer's folded trays' pill (`"waiting"`),
 -- each's width while it shows, nil while it doesn't. Every pane has its
@@ -1186,6 +1189,10 @@ function M.model_accounts(device: () -> string?): any
 		end,
 		on_accounts_open = function()
 			agents.refresh_device(account_key(device()))
+			-- (An agent's models, where they follow it live, asked again.)
+			if account_key(device()) == "" then
+				pcall(ui.invoke, "chat.catalog_fresh")
+			end
 		end,
 	}
 end

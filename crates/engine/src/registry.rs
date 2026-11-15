@@ -111,6 +111,7 @@ struct HarnessPrefsFile {
     /// Harnesses the user turned native subagents off for: their runs
     /// delegate through side chats only.
     native_subagents_off: Vec<HarnessId>,
+    opencode: OpencodeSettings,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -125,6 +126,79 @@ pub struct TitleSettings {
     pub harness: Option<HarnessId>,
     /// None selects the cheapest model offered by the selected harness.
     pub model: Option<String>,
+}
+
+/// This device's OpenCode settings (Settings → Providers → OpenCode
+/// settings). A chat Zeron runs on OpenCode's background service is kept in
+/// step with the session whatever these say: they are about the rest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OpencodeSettings {
+    /// Show the sessions made in OpenCode's own clients as chats, live.
+    pub sync_sessions: bool,
+    /// With sync on: a session in a folder that is no project yet makes it
+    /// one. Off, only sessions in Zeron's projects are shown.
+    pub add_projects: bool,
+    /// Runs use OpenCode's background service, which its TUI and desktop app
+    /// share; off, each run has a private server of its own.
+    pub background_service: bool,
+    /// An OpenCode server on another computer in place of this one's
+    /// service: runs, the session sync, catalogs and sign-ins go to it.
+    pub remote: bool,
+    /// How it's reached: `address` (its address and password), `pairing` (a
+    /// pairing link, redeemed once for its address and a session token) or
+    /// `ssh`.
+    pub remote_mode: String,
+    /// What to call it (optional).
+    pub remote_name: String,
+    pub remote_url: String,
+    pub remote_password: String,
+    /// A pairing link to redeem when these are set; never kept.
+    #[serde(skip_serializing)]
+    pub remote_link: String,
+    /// A host SSH reaches, or an `ssh …` command naming one.
+    pub remote_ssh: String,
+}
+
+impl Default for OpencodeSettings {
+    fn default() -> Self {
+        Self {
+            sync_sessions: false,
+            add_projects: false,
+            background_service: true,
+            remote: false,
+            remote_mode: "address".into(),
+            remote_name: String::new(),
+            remote_url: String::new(),
+            remote_password: String::new(),
+            remote_link: String::new(),
+            remote_ssh: String::new(),
+        }
+    }
+}
+
+impl OpencodeSettings {
+    /// The remote server these name, if one is on and says where it is.
+    pub fn remote_server(&self) -> Option<zeron_harness::OpencodeRemote> {
+        if !self.remote {
+            return None;
+        }
+        match self.remote_mode.as_str() {
+            "ssh" => (!self.remote_ssh.trim().is_empty()).then(|| zeron_harness::OpencodeRemote::Ssh {
+                target: self.remote_ssh.trim().to_owned(),
+            }),
+            _ => (!self.remote_url.trim().is_empty()).then(|| zeron_harness::OpencodeRemote::Address {
+                url: self.remote_url.trim().to_owned(),
+                password: self.remote_password.clone(),
+            }),
+        }
+    }
+
+    /// Hand these to the OpenCode harness: runs from now on follow them.
+    fn apply(&self) {
+        zeron_harness::set_opencode_runs_on_service(self.background_service);
+        zeron_harness::set_opencode_remote(self.remote_server());
+    }
 }
 
 /// Per-device native subagent preferences (Settings → Providers).
@@ -526,6 +600,7 @@ impl HarnessRegistry {
             .ok()
             .and_then(|text| serde_json::from_str::<HarnessPrefsFile>(&text).ok())
             .unwrap_or_default();
+        loaded.opencode.apply();
         *self.prefs() = loaded;
         *self
             .prefs_path
@@ -626,10 +701,22 @@ impl HarnessRegistry {
                 return;
             }
         };
-        let tmp = path.with_extension("json.tmp");
-        if let Err(err) = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)) {
+        // (Private: a remote OpenCode server's password is among them.)
+        if let Err(err) = crate::runner::write_private_atomic(&path, json.as_bytes()) {
             tracing::warn!(error = %err, "harness-prefs save failed");
         }
+    }
+
+    pub fn opencode_settings(&self) -> OpencodeSettings {
+        self.prefs().opencode.clone()
+    }
+
+    /// Keep `settings` and apply them: runs from now on use the background
+    /// service or not; the session sync reads the rest as it goes.
+    pub fn set_opencode_settings(&self, settings: OpencodeSettings) {
+        settings.apply();
+        self.prefs().opencode = settings;
+        self.persist_prefs();
     }
 
     pub fn title_settings(&self) -> TitleSettings {
@@ -1097,7 +1184,7 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
-            access_modes: AccessMode::ALL.to_vec(),
+            access_modes: zeron_harness::OPENCODE_ACCESS_MODES.to_vec(),
             supports_plan: true,
         },
         Box::new(|| zeron_harness::OpencodeHarness::new().installed()),

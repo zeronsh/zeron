@@ -78,6 +78,10 @@ export type Account = {
 	-- for a face (`provider`, the agent's id for it).
 	key: boolean?,
 	provider: string?,
+	-- A key with budgets of its own (Mistral's): its meters after all, each
+	-- by the provider's name for it ("API", "Vibe").
+	session_label: string?,
+	week_label: string?,
 }
 
 -- One model provider's accounts of an agent that keeps a login per
@@ -128,15 +132,16 @@ end
 -- message's key.)
 local METER = { label = 52, bar = 88, percent = 34 }
 
-local function meter(label: string, fraction: () -> number): Node
+local function meter(label: string, fraction: () -> number, named: string?): Node
 	local function tone(): string
 		return level(fraction())
 	end
+	local said = named or locale.s(label)
 	return ui.row {
 		gap = "$space.2",
 		items = "center",
 		shrink = 0,
-		ui.text { locale.t(label), w = METER.label, shrink = 0, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary" },
+		ui.text { if named then named else locale.t(label), w = METER.label, shrink = 0, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary" },
 		ui.div {
 			w = METER.bar,
 			shrink = 0,
@@ -145,7 +150,7 @@ local function meter(label: string, fraction: () -> number): Node
 				tone = tone :: any,
 				size = "thin",
 				w_full = true,
-				label = locale.s("ds.provider_card.usage", { label = locale.s(label) }),
+				label = locale.s("ds.provider_card.usage", { label = said }),
 			},
 		},
 		ui.text {
@@ -453,13 +458,22 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 	local function resets(): string?
 		local a = row:get()
 		local parts: { string } = {}
-		for _, w in { { "ds.provider_card.session", a.session_resets }, { "ds.provider_card.week", a.week_resets } } do
+		-- (A key's windows by the provider's names for them.)
+		local session = a.session_label or locale.s("ds.provider_card.session")
+		local week = a.week_label or locale.s("ds.provider_card.week")
+		for _, w in { { session, a.session_resets }, { week, a.week_resets } } do
 			local words = M.reset_words(w[2] :: number?)
 			if words then
-				table.insert(parts, locale.s("ds.provider_card.window_resets", { window = locale.s(w[1] :: string), words = words }))
+				table.insert(parts, locale.s("ds.provider_card.window_resets", { window = w[1] :: string, words = words }))
 			end
 		end
-		return if #parts > 0 then table.concat(parts, " · ") else nil
+		if #parts > 0 then
+			return table.concat(parts, " · ")
+		end
+		if a.session_label then
+			return if a.week_label then `{a.session_label} · {a.week_label}` else a.session_label
+		end
+		return nil
 	end
 	local function email(): string
 		return row:get().email
@@ -490,9 +504,10 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 		control = ui.row {
 			gap = "$space.3",
 			items = "center",
-			-- (An API key has no plan, so no windows: no meters for it.)
+			-- (An API key has no plan, so no windows: no meters for it — unless
+			-- it has budgets of its own.)
 			ui.show(function(): boolean
-				return row:get().key ~= true
+				return row:get().key ~= true or row:get().session_label ~= nil
 			end, ui.column {
 				gap = "$zeron.space.hair",
 				-- (Labels alone where no reset is known, as the shipping app.)
@@ -501,8 +516,10 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 						return resets() or locale.s("ds.provider_card.windows")
 					end,
 				},
-				meter("ds.provider_card.session", session),
-				meter("ds.provider_card.week", week),
+				meter("ds.provider_card.session", session, row:peek().session_label),
+				ui.show(function(): boolean
+					return row:get().key ~= true or row:get().week_label ~= nil
+				end, meter("ds.provider_card.week", week, row:peek().week_label)),
 			}),
 			-- (The agent's own to choose, Hermes' pool: nothing to do here —
 			-- its place kept, so the meters line up with every other card's.)

@@ -474,6 +474,10 @@ function M.setup()
 				md = 460,
 				lg = 560,
 				sheet = 400,
+				-- One that holds its height (the agents' settings): as tall as
+				-- the most it shows, so its tabs don't move it, and what it
+				-- can't show scrolls under them.
+				height = 480,
 			},
 			-- A toast: its card (as a menu's panel), and its width.
 			toast = { width = 340 },

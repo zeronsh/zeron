@@ -94,6 +94,8 @@ const ENGINE_METHODS: &[&str] = &[
     "SetTitleSettings",
     "GetNativeSubagents",
     "SetNativeSubagents",
+    "GetOpencodeSettings",
+    "SetOpencodeSettings",
     // Whether this window has the keys: banners set to "only when in the
     // background" hold while it does.
     "SetViewportFocus",

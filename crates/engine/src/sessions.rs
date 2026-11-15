@@ -758,6 +758,20 @@ impl SessionsEngine {
         live.is_some_and(|(harness, routable)| routable && !self.steers_mid_turn(harness))
     }
 
+    /// The harness of the chat's run on this device, between turns too.
+    pub(crate) fn run_harness(&self, chat_id: &str) -> Option<HarnessId> {
+        lock(&self.inner.runs).get(chat_id).map(|h| h.runtime_config.harness_id)
+    }
+
+    /// Whether `prompt` to `harness` is a message of the person's: not one
+    /// of OpenCode's TUI actions (2.x's), whose transcript shows what they
+    /// did.
+    fn is_message(harness: HarnessId, prompt: &str) -> bool {
+        harness != HarnessId::Opencode
+            || !zeron_harness::opencode_has_tui_actions()
+            || !crate::opencode_sync::is_tui_action(prompt)
+    }
+
     /// The harness of the chat's live run, while one is in flight.
     pub fn live_harness(&self, chat_id: &str) -> Option<HarnessId> {
         if !self.turn_in_flight(chat_id) {
@@ -1090,7 +1104,9 @@ impl SessionsEngine {
                     lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
                 }
                 let handle = self.doc_handle(chat_id)?;
-                handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                if Self::is_message(harness_id, &request.prompt) {
+                    handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                }
                 self.note_turn_start(chat_id, &request.cwd);
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
@@ -1165,7 +1181,9 @@ impl SessionsEngine {
             // the resume lookup below turns the foreign session id away.
             self.inner
                 .note_provider_switch(chat_id, harness_id, &handle);
-            handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+            if Self::is_message(harness_id, &request.prompt) {
+                handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+            }
         }
         let credential = self.inner.registry.run_credential(harness_id, Some(chat_id)).await;
         let binary = {
@@ -1596,7 +1614,12 @@ impl SessionsEngine {
             return Ok(SteerOutcome::DeferredByUpdate);
         }
         let handle = self.doc_handle(chat_id)?;
-        handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
+        if self
+            .run_harness(chat_id)
+            .is_none_or(|harness| Self::is_message(harness, prompt))
+        {
+            handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
+        }
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
         if let Some(request) = self.last_request(chat_id) {
@@ -1883,6 +1906,24 @@ impl SessionsEngine {
     /// Whether the chat has a run on this device (one `inject_event` can reach).
     pub fn has_run(&self, chat_id: &str) -> bool {
         lock(&self.inner.runs).contains_key(chat_id)
+    }
+
+    /// A turn running in another client of the chat's agent (an OpenCode
+    /// session continued in its TUI): shown as the chat working, through the
+    /// same status every view and device reads, with no run here. Called
+    /// again while it runs, it keeps the status fresh; `false` settles it. A
+    /// run of Zeron's on the chat owns its status instead.
+    pub fn set_external_turn(&self, chat_id: &str, running: bool) {
+        if self.has_run(chat_id) {
+            return;
+        }
+        let status = if running {
+            SessionStatus::Working
+        } else {
+            SessionStatus::Idle
+        };
+        self.inner
+            .set_status_with_completion(chat_id, status, false, None, None);
     }
 
     /// Boot recovery means to bring this chat's killed turn back, and hasn't got

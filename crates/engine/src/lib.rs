@@ -58,6 +58,7 @@ pub(crate) mod home_index;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
+mod opencode_sync;
 pub mod managed;
 mod hosted_models;
 mod model_catalogs;
@@ -209,6 +210,9 @@ pub struct EngineCore {
     updater: std::sync::Mutex<Option<zeron_update::Updater>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// OpenCode's mirror — owned so shutdown can end it: it holds the doc
+    /// host (and the sessions), and a graph it still held could not be freed.
+    opencode_sync: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Cloud runner only: credential broker + heartbeat (dropped on shutdown).
     cloud: std::sync::Mutex<Option<runner::CloudRunner>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
@@ -502,6 +506,7 @@ impl EngineCore {
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
+            opencode_sync: std::sync::Mutex::new(None),
             cloud: std::sync::Mutex::new(None),
             viewport_focus,
             _instance_lock: lock,
@@ -576,6 +581,14 @@ impl EngineCore {
     pub fn set_updater_wake(&self, handle: tokio::task::JoinHandle<()>) {
         *self
             .updater_wake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    }
+
+    /// Keep OpenCode's mirror, so shutdown ends it.
+    pub fn set_opencode_sync(&self, handle: tokio::task::JoinHandle<()>) {
+        *self
+            .opencode_sync
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
     }
@@ -728,6 +741,18 @@ impl EngineCore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         self.plugins.shutdown();
+        // (OpenCode's mirror reads the doc host and the sessions: ended
+        // before either is torn down, and so that what it held of the graph
+        // can be freed.)
+        let mirror = self
+            .opencode_sync
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(mirror) = mirror {
+            mirror.abort();
+            let _ = mirror.await;
+        }
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
@@ -1172,6 +1197,15 @@ impl Engine {
                 });
             }
             core.set_cloud(runner::CloudRunner::new(broker, activity, heartbeat));
+        }
+        // OpenCode's sessions, from any of its clients, as chats here.
+        if let Some(mirror) = opencode_sync::spawn(
+            core.workspace.clone(),
+            core.doc_host.clone(),
+            core.sessions.clone(),
+            core.registry.clone(),
+        ) {
+            core.set_opencode_sync(mirror);
         }
         // The chats as last published (the list every view watches), not a
         // fresh parse of every chat row on each scan.

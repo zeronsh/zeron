@@ -67,6 +67,34 @@ use std::collections::HashSet;
 
 use super::*;
 
+/// Account keys of OpenCode 2.x's credentials: `credential:<id>`.
+pub(super) const OPENCODE_CREDENTIAL: &str = "credential:";
+
+/// An OpenCode 1.x `auth.json` OAuth entry as the 2.x credential the service
+/// takes, under the sign-in method it names for the provider (listed live,
+/// 2.3.0: ChatGPT's browser flow, Copilot's device flow).
+fn opencode_credential_value(
+    store_key: &str,
+    entry: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let method = match store_key {
+        "openai" => "chatgpt-browser",
+        "github-copilot" => "device",
+        _ => return None,
+    };
+    let mut value = serde_json::json!({
+        "type": "oauth",
+        "methodID": method,
+        "access": entry.get("access")?.as_str()?,
+        "refresh": entry.get("refresh")?.as_str()?,
+        "expires": entry.get("expires").and_then(|e| e.as_i64()).unwrap_or(0).max(0),
+    });
+    if let Some(account) = entry.get("accountId").and_then(|a| a.as_str()) {
+        value["metadata"] = serde_json::json!({ "accountId": account });
+    }
+    Some(value)
+}
+
 // ── paths ───────────────────────────────────────────────────────────────────
 
 fn env_dir(name: &str) -> Option<PathBuf> {
@@ -1147,6 +1175,10 @@ impl AgentAccounts {
         harness: HarnessId,
         detected: &Detected,
     ) -> Result<(), EngineError> {
+        // OpenCode 2.x reads no `auth.json`: the sign-in goes to its service.
+        if harness == HarnessId::Opencode && self.save_to_opencode_service(detected).await? {
+            return Ok(());
+        }
         let _ops = self.inner.ops.lock().await;
         self.snapshot_detected(harness, detected)?;
         let id = slot_id_for(harness, &detected.account_key);
@@ -1213,6 +1245,104 @@ impl AgentAccounts {
             }
         }
         (slots, active)
+    }
+
+    // ── OpenCode 2.x ────────────────────────────────────────────────────────
+
+    /// OpenCode 2.x's sign-ins as rows, read live off its background service
+    /// (never saved as slots: they are OpenCode's, and every client of it
+    /// sees a switch or a sign-out at once), plus the active one of each
+    /// integration. `None` where OpenCode keeps `auth.json` instead (1.x, or
+    /// no service), and in tests.
+    pub(super) async fn opencode_credential_slots(&self) -> Option<(Vec<Slot>, HashSet<String>)> {
+        if !self.inner.config.opencode_service {
+            return None;
+        }
+        let harness = zeron_harness::OpencodeHarness::new();
+        if !harness.has_native_credentials().await {
+            return None;
+        }
+        let credentials = harness.native_credentials().await.ok()?;
+        let mut active = HashSet::new();
+        let slots = credentials
+            .into_iter()
+            .map(|credential| {
+                let account_key = format!("{OPENCODE_CREDENTIAL}{}", credential.id);
+                if credential.active {
+                    active.insert(account_key.clone());
+                }
+                let integration = credential
+                    .integration_name
+                    .clone()
+                    .unwrap_or_else(|| credential.integration.clone());
+                Slot {
+                    id: slot_id_for(HarnessId::Opencode, &account_key),
+                    harness: HarnessId::Opencode,
+                    account_key,
+                    profile: SlotProfile {
+                        email: credential.label.clone().unwrap_or_else(|| integration.clone()),
+                        display_name: None,
+                        organization: None,
+                        plan: Some(integration),
+                        auth_kind: if credential.kind == "key" {
+                            AgentAuthKind::ApiKey
+                        } else {
+                            AgentAuthKind::Oauth
+                        },
+                    },
+                    // (Its secret stays on the service.)
+                    credentials: serde_json::Value::Null,
+                    claude_config: None,
+                    saved_at: 0,
+                    created_at: None,
+                    store_key: Some(credential.integration),
+                }
+            })
+            .collect();
+        Some((slots, active))
+    }
+
+    /// A fresh OpenCode login (ChatGPT, GitHub Copilot) stored as a 2.x
+    /// credential, made its integration's active one. `false` where OpenCode
+    /// keeps `auth.json` instead, or for a provider whose sign-in method the
+    /// service names differently: the login is saved the 1.x way then.
+    async fn save_to_opencode_service(&self, detected: &Detected) -> Result<bool, EngineError> {
+        if !self.inner.config.opencode_service {
+            return Ok(false);
+        }
+        let (Some(store_key), Some(entry)) = (&detected.store_key, &detected.credentials) else {
+            return Ok(false);
+        };
+        let Some(value) = opencode_credential_value(store_key, entry) else {
+            return Ok(false);
+        };
+        let harness = zeron_harness::OpencodeHarness::new();
+        if !harness.has_native_credentials().await {
+            return Ok(false);
+        }
+        harness
+            .add_native_credential(store_key, &detected.profile.email, value)
+            .await
+            .map_err(|e| EngineError::Other(e.to_string()))?;
+        Ok(true)
+    }
+
+    /// The OpenCode 2.x credential a row is, by the row's id.
+    pub(super) async fn opencode_credential(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<String>, EngineError> {
+        let Some((slots, _)) = self.opencode_credential_slots().await else {
+            return Ok(None);
+        };
+        Ok(slots
+            .into_iter()
+            .find(|slot| slot.id == account_id)
+            .and_then(|slot| {
+                slot.account_key
+                    .strip_prefix(OPENCODE_CREDENTIAL)
+                    .map(str::to_owned)
+            }))
     }
 
     // ── sign-ins through the CLI ────────────────────────────────────────────
@@ -1671,4 +1801,30 @@ pub(super) fn recorded_devin_url(url_file: &Path, logs: &Path) -> Option<String>
         }
     }
     None
+}
+
+#[cfg(test)]
+mod opencode_service_tests {
+    use super::*;
+
+    #[test]
+    fn a_login_becomes_the_credential_opencode_2_takes() {
+        let chatgpt = serde_json::json!({
+            "type": "oauth", "access": "a", "refresh": "r", "expires": 5, "accountId": "acct"
+        });
+        assert_eq!(
+            opencode_credential_value("openai", &chatgpt),
+            Some(serde_json::json!({
+                "type": "oauth", "methodID": "chatgpt-browser", "access": "a", "refresh": "r",
+                "expires": 5, "metadata": {"accountId": "acct"}
+            }))
+        );
+        let copilot = serde_json::json!({"type": "oauth", "access": "t", "refresh": "t", "expires": 0});
+        assert_eq!(
+            opencode_credential_value("github-copilot", &copilot).unwrap()["methodID"],
+            "device"
+        );
+        // (A provider whose method the service names otherwise stays 1.x.)
+        assert_eq!(opencode_credential_value("anthropic", &copilot), None);
+    }
 }

@@ -94,6 +94,28 @@ use crate::{Harness, HarnessError, RunControls};
 /// discovery (same boot either way).
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
 const STARTUP_TIMEOUT_ENV: &str = "ZERON_OPENCODE_STARTUP_TIMEOUT_SECS";
+/// Set to `1` to keep every run and probe on a private `opencode serve`
+/// instead of OpenCode's background service ([`service`]).
+const PRIVATE_SERVER_ENV: &str = "ZERON_OPENCODE_PRIVATE_SERVER";
+
+/// What the TUI offers: prompt for what OpenCode's rules ask, or accept it.
+pub const OPENCODE_ACCESS_MODES: [AccessMode; 2] = [AccessMode::Supervised, AccessMode::FullAccess];
+
+mod actions;
+mod client_mcp;
+mod credentials;
+mod remote;
+mod service;
+mod sync;
+
+use actions::TuiAction;
+
+pub use credentials::NativeCredential;
+pub use remote::{Remote as OpencodeRemote, redeem_pairing_link, set_remote};
+pub use sync::{
+    CompactionStatus, NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession,
+    RevertedFile,
+};
 
 /// Health-poll cadence while the server boots.
 const HEALTH_POLL: Duration = Duration::from_millis(150);
@@ -369,15 +391,56 @@ pub struct OpencodeHarness {
     bus_timeouts: BusTimeouts,
     startup_timeout: Duration,
     models_cache: crate::catalog::Catalog,
-    commands_cache: tokio::sync::OnceCell<Vec<SlashCommand>>,
+    /// The global commands, as of the catalog generation they were read at.
+    commands_cache: tokio::sync::Mutex<Option<(u64, Vec<SlashCommand>)>>,
+    /// Bumped whenever the background service says its agents, commands,
+    /// skills, models, providers or configuration changed: a catalog read at
+    /// an older generation is read again ([`Self::watch_catalog`]).
+    catalog_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// The watcher behind [`Self::catalog_generation`], started once.
+    catalog_watch: std::sync::OnceLock<()>,
     /// Coalesce concurrent picker/title probes: several cold opencode boots
     /// at once are slower than one.
     probe_lock: tokio::sync::Mutex<()>,
+    /// The background service last attached to ([`service`]), re-checked
+    /// before each use.
+    service: tokio::sync::Mutex<Option<service::ServiceInfo>>,
+    /// Never attach to the background service: every run and probe boots a
+    /// private server, as before (`ZERON_OPENCODE_PRIVATE_SERVER=1`).
+    private_only: bool,
+    /// Zeron's MCP servers, offered to the service per directory and routed
+    /// to the chat that owns the calling session ([`client_mcp`]).
+    mcp_routes: client_mcp::Routes,
+}
+
+/// Whether runs use OpenCode's background service (2.x), as Settings →
+/// Providers → OpenCode settings says; off, each run boots a private
+/// server. The session feed reads the service either way.
+static RUNS_ON_SERVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Set from the person's OpenCode settings, for runs that start from now.
+pub fn set_runs_on_service(on: bool) {
+    RUNS_ON_SERVICE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether an OpenCode 2.x server has answered here: only it takes the TUI's
+/// actions ([`actions`]). To 1.x, `/undo` and `!command` are a message's
+/// words as any other.
+static TUI_ACTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn has_tui_actions() -> bool {
+    TUI_ACTIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Default for OpencodeHarness {
     fn default() -> Self {
         Self {
+            service: tokio::sync::Mutex::new(None),
+            // (Unit tests never reach the machine's real service.)
+            private_only: cfg!(test)
+                || std::env::var(PRIVATE_SERVER_ENV)
+                    .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")),
+            mcp_routes: client_mcp::Routes::default(),
             executable: None,
             base_url: None,
             interrupt_grace: Duration::from_secs(2),
@@ -385,7 +448,9 @@ impl Default for OpencodeHarness {
             bus_timeouts: BusTimeouts::default(),
             startup_timeout: startup_timeout(),
             models_cache: crate::catalog::Catalog::default(),
-            commands_cache: tokio::sync::OnceCell::new(),
+            commands_cache: tokio::sync::Mutex::new(None),
+            catalog_generation: Arc::default(),
+            catalog_watch: std::sync::OnceLock::new(),
             probe_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -396,9 +461,12 @@ impl OpencodeHarness {
         Self::default()
     }
 
-    /// Use a fixed binary instead of PATH/known-location resolution.
+    /// Use a fixed binary instead of PATH/known-location resolution. It gets
+    /// private servers only: a fixed binary is a fixture or a probe, never one
+    /// to hand the machine's background service to.
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable = Some(path.into());
+        self.private_only = true;
         self
     }
 
@@ -470,6 +538,27 @@ impl OpencodeHarness {
             }
             return Ok(Server::attached(base.clone()));
         }
+        // The background service, shared with the TUI and desktop app. A run
+        // carrying host secrets (a Cloud device's credential broker) keeps
+        // its private server: they must never reach a server other clients
+        // use. (The chat marker every run carries is no secret; on the
+        // service, which outlives any run, it can't ride along — preview
+        // discovery counts the dev servers started there as the person's.)
+        // The access mode needs no server of its own there — it is
+        // answered here, as the TUI's auto-accept is — and Zeron's MCP
+        // servers are offered over client MCP ([`client_mcp`]).
+        // A remote server set in place of the service takes every run that
+        // could have had the service; none falls back to this computer.
+        let shareable = run_env.keys().all(|key| key == zeron_proto::ORIGIN_ENV);
+        if shareable && !self.private_only && remote::current().is_some() {
+            return self.remote_server().await;
+        }
+        if shareable
+            && RUNS_ON_SERVICE.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(server) = self.service_server().await
+        {
+            return Ok(server);
+        }
         let exe = self.resolve_executable()?;
         Server::spawn_with_extras(
             &exe,
@@ -483,6 +572,71 @@ impl OpencodeHarness {
         .await
     }
 
+    /// The background service, started if it isn't running. `None` where
+    /// there is none to have: switched off, a 1.x install (no service), or
+    /// one that won't start — the caller boots a private server.
+    async fn service_server(&self) -> Option<Server> {
+        if self.private_only {
+            return None;
+        }
+        if remote::current().is_some() {
+            return match self.remote_server().await {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    tracing::warn!(target: "zeron_harness::opencode", %error, "opencode remote server unreachable");
+                    None
+                }
+            };
+        }
+        let exe = self.resolve_executable().ok()?;
+        if opencode_version(&exe).await?.major < 2 {
+            return None;
+        }
+        let client = http_client();
+        let mut cached = self.service.lock().await;
+        if let Some(info) = cached.as_ref()
+            && service::healthy(&client, info).await
+        {
+            return Some(Server::service(info, client));
+        }
+        let info = service::ensure(&exe, &client, self.startup_timeout).await?;
+        tracing::debug!(
+            target: "zeron_harness::opencode",
+            url = %info.url,
+            version = info.version.as_deref().unwrap_or("unknown"),
+            "attached to the opencode background service"
+        );
+        *cached = Some(info.clone());
+        Some(Server::service(&info, client))
+    }
+
+    /// [`Self::service_server`], or an error saying there is none (1.x, or a
+    /// private server only).
+    async fn require_service(&self) -> Result<Server, HarnessError> {
+        self.service_server().await.ok_or_else(|| {
+            HarnessError::Protocol("OpenCode's background service isn't available".into())
+        })
+    }
+
+    /// The remote server Settings name in place of this computer's service
+    /// ([`remote`]), connected (over SSH, through a forward kept open).
+    async fn remote_server(&self) -> Result<Server, HarnessError> {
+        let remote = remote::current()
+            .ok_or_else(|| HarnessError::Protocol("no remote OpenCode server is set".into()))?;
+        let local = match self.resolve_executable() {
+            Ok(exe) => opencode_version(&exe).await,
+            Err(_) => None,
+        };
+        let client = http_client();
+        let info = remote::connect(&remote, &client, local.as_ref()).await?;
+        Ok(Server::service(&info, client))
+    }
+
+    /// Whether the remote server Settings name answers: `Err` says why not.
+    pub async fn check_remote(&self) -> Result<(), String> {
+        self.remote_server().await.map(drop).map_err(|e| e.to_string())
+    }
+
     /// One short-lived server answers both discovery calls. Also primes the
     /// commands cache so concurrent picker/composer fetches share one boot.
     async fn probe_models(&self) -> Result<Vec<Model>, HarnessError> {
@@ -493,7 +647,13 @@ impl OpencodeHarness {
             let mut models = models_from_providers(&providers);
             if server.protocol().await == Protocol::V2 {
                 let agents = server.get_json("/api/agent", None).await?;
-                let option = agent_option(&agents);
+                let mut option = agent_option(&agents);
+                // On the service, every project OpenCode knows adds the
+                // agents its own configuration defines, as its TUI lists
+                // them there.
+                if server.shared {
+                    add_project_agents(&server, &agents, &mut option).await;
+                }
                 for model in &mut models {
                     model.options.push(option.clone());
                 }
@@ -504,8 +664,8 @@ impl OpencodeHarness {
                         .into(),
                 ));
             }
-            if let Ok(commands) = server.commands_wire(None).await {
-                let _ = self.commands_cache.set(commands_from_wire(&commands));
+            if let Ok(commands) = server.slash_commands(None).await {
+                *self.commands_cache.lock().await = Some((self.generation(), commands));
             }
             Ok(models)
         }
@@ -516,16 +676,122 @@ impl OpencodeHarness {
 
     async fn probe_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         let _guard = self.probe_lock.lock().await;
-        if let Some(commands) = self.commands_cache.get() {
+        let generation = self.generation();
+        if let Some((read_at, commands)) = self.commands_cache.lock().await.as_ref()
+            && *read_at == generation
+        {
             return Ok(commands.clone());
         }
         let mut server = self.server(None, None).await?;
-        let result = server
-            .commands_wire(None)
-            .await
-            .map(|v| commands_from_wire(&v));
+        let result = server.slash_commands(None).await;
         server.shutdown(self.kill_grace).await;
+        if let Ok(commands) = &result {
+            *self.commands_cache.lock().await = Some((generation, commands.clone()));
+        }
         result
+    }
+
+    /// The catalog generation now, after making sure something bumps it.
+    fn generation(&self) -> u64 {
+        self.watch_catalog();
+        // (A remote server set or unset is another catalog altogether.)
+        self.catalog_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            + remote::generation()
+    }
+
+    /// Follow the background service for catalog changes (an agent or
+    /// command added, a provider signed into, the configuration reloaded),
+    /// bumping [`Self::catalog_generation`] on each. Once per harness, and
+    /// only where there is a service to follow.
+    fn watch_catalog(&self) {
+        if self.private_only || self.base_url.is_some() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if self.catalog_watch.set(()).is_err() {
+            return;
+        }
+        // (Held weakly: the watcher ends with its harness.)
+        let generation = Arc::downgrade(&self.catalog_generation);
+        let executable = self.executable.clone();
+        runtime.spawn(async move {
+            let mut follower = OpencodeHarness::new();
+            follower.executable = executable;
+            // (The first connection is the start, not a change: bumping on it
+            // would void a catalog being read. Any after it — the service
+            // restarted, perhaps with other agents — is one.)
+            let mut connected = false;
+            loop {
+                match follower.follow_native().await {
+                    Ok(mut feed) => {
+                        while let Some(change) = feed.recv().await {
+                            let changed = match change {
+                                NativeChange::Catalog => true,
+                                // A reconnect may have missed one.
+                                NativeChange::Resync => std::mem::replace(&mut connected, true),
+                                _ => false,
+                            };
+                            let Some(generation) = generation.upgrade() else {
+                                return;
+                            };
+                            if changed {
+                                generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            }
+                        }
+                    }
+                    Err(_) if generation.strong_count() == 0 => return,
+                    Err(_) => tokio::time::sleep(Duration::from_secs(30)).await,
+                }
+            }
+        });
+    }
+}
+
+/// Add the agents each project OpenCode knows defines of its own to the
+/// Agent option, named with their project. Best effort: a project folder
+/// that no longer exists (or answers with an error) adds nothing.
+async fn add_project_agents(server: &Server, global: &Value, option: &mut ModelOption) {
+    let known: std::collections::HashSet<String> = unwrap_data(global.clone())
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|agent| agent.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    let Ok(projects) = server.get_json("/api/project", None).await else {
+        return;
+    };
+    let directories: Vec<String> = unwrap_data(projects)
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|project| project.get("canonical").and_then(Value::as_str))
+        .filter(|directory| *directory != "/" && std::path::Path::new(directory).is_dir())
+        .map(str::to_owned)
+        .collect();
+    for directory in directories {
+        let Ok(agents) = server.get_json("/api/agent", Some(&directory)).await else {
+            continue;
+        };
+        let project = std::path::Path::new(&directory)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&directory)
+            .to_owned();
+        for choice in agent_option(&agents).choices {
+            if choice.id.is_empty()
+                || known.contains(&choice.id)
+                || option.choices.iter().any(|existing| existing.id == choice.id)
+            {
+                continue;
+            }
+            option.choices.push(ModelOptionChoice {
+                label: format!("{} ({project})", choice.label),
+                id: choice.id,
+            });
+        }
     }
 }
 
@@ -581,12 +847,13 @@ impl Harness for OpencodeHarness {
             && (next.reasoning.is_some() || live.reasoning.is_none())
             && access(live) == access(next)
     }
-    /// Full access approves every permission request, as every run did
-    /// before modes; the others add `ask` rules to the server's config so
-    /// opencode raises what they ask about (its defaults allow everything),
-    /// and put each of those to the person.
+    /// OpenCode's own two: its rules decide what is asked (config and saved
+    /// permissions, shared with its TUI and desktop app), and each ask is put
+    /// to the person (supervised) or approved (full access, the TUI's auto
+    /// accept). A private server, which no other client shares, still adds
+    /// supervised's `ask` rules to its inline config, as before.
     fn access_modes(&self) -> &[AccessMode] {
-        &AccessMode::ALL
+        &OPENCODE_ACCESS_MODES
     }
     fn supports_plan(&self) -> bool {
         true
@@ -605,14 +872,39 @@ impl Harness for OpencodeHarness {
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.model_context()?.unwrap().log();
-        self.models_cache
-            .get_with_timeout(
-                force,
-                self.startup_timeout * 3 + Duration::from_secs(1),
-                || self.model_context().map(|c| c.unwrap().key()),
-                || self.probe_models(),
-            )
-            .await
+        let mut attempt = 0;
+        loop {
+            let result = self
+                .models_cache
+                .get_with_timeout(
+                    force,
+                    self.startup_timeout * 3 + Duration::from_secs(1),
+                    // (A catalog change on the service — an agent or provider
+                    // added in the TUI — reads it again on the next ask.)
+                    || {
+                        let generation = self.generation();
+                        self.model_context().map(|c| {
+                            let mut key = c.unwrap().key();
+                            for (byte, salt) in key.iter_mut().zip(generation.to_le_bytes()) {
+                                *byte ^= salt;
+                            }
+                            key
+                        })
+                    },
+                    || self.probe_models(),
+                )
+                .await;
+            // A change that landed mid-read voids the read; the catalog is
+            // simply read again, as of the change.
+            match result {
+                Err(HarnessError::Protocol(message))
+                    if attempt < 2 && message.contains("changed during model discovery") =>
+                {
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.model_catalog(true).await.map(|c| c.models)
@@ -636,10 +928,7 @@ impl Harness for OpencodeHarness {
     }
 
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        self.commands_cache
-            .get_or_try_init(|| self.probe_commands())
-            .await
-            .cloned()
+        self.probe_commands().await
     }
 
     async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {
@@ -648,10 +937,7 @@ impl Harness for OpencodeHarness {
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
         let mut server = self.server(Some(directory), None).await?;
-        let result = server
-            .commands_wire(Some(directory))
-            .await
-            .map(|v| commands_from_wire(&v));
+        let result = server.slash_commands(Some(directory)).await;
         server.shutdown(self.kill_grace).await;
         result
     }
@@ -676,6 +962,7 @@ impl Harness for OpencodeHarness {
                 access(&request),
             )
             .await?;
+        let shared = server.shared;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -687,6 +974,7 @@ impl Harness for OpencodeHarness {
             bus_timeouts: self.bus_timeouts,
             known_commands: None, // Resolve the live session directory, never a global probe cache.
             initial_native_command_selected,
+            mcp_routes: shared.then(|| self.mcp_routes.clone()),
         }));
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|ev| (ev, rx))
@@ -711,6 +999,9 @@ struct Server {
     version: tokio::sync::OnceCell<ServerVersion>,
     /// Keeps preview discovery off our own server's port while it lives.
     _port: Option<crate::agent_ports::Reservation>,
+    /// OpenCode's background service, which other clients share: nothing
+    /// per-run may be configured into it, and it outlives every run.
+    shared: bool,
 }
 
 /// The attached server's wire generation: the 1.x "v1" global namespace
@@ -815,6 +1106,29 @@ impl Server {
             protocol: tokio::sync::OnceCell::new(),
             version: tokio::sync::OnceCell::new(),
             _port: None,
+            shared: false,
+        }
+    }
+
+    /// OpenCode's background service ([`service`]): its own address and
+    /// password, no process of ours. Always the 2.x wire.
+    fn service(info: &service::ServiceInfo, client: reqwest::Client) -> Self {
+        let protocol = tokio::sync::OnceCell::new();
+        let _ = protocol.set(Protocol::V2);
+        let version = tokio::sync::OnceCell::new();
+        if let Some(raw) = info.version.as_deref() {
+            let _ = version.set(ServerVersion::parse(raw));
+        }
+        Self {
+            child: None,
+            base: info.url.trim_end_matches('/').to_owned(),
+            auth: Some(info.auth()),
+            client,
+            stderr_tail: crate::StderrTail::default(),
+            protocol,
+            version,
+            _port: None,
+            shared: true,
         }
     }
 
@@ -1075,6 +1389,7 @@ impl Server {
             protocol: tokio::sync::OnceCell::new(),
             version: tokio::sync::OnceCell::new(),
             _port: Some(crate::agent_ports::reserve(port)),
+            shared: false,
         };
 
         // Readiness: the server binds a few seconds into the process's life
@@ -1213,6 +1528,22 @@ impl Server {
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
+    /// DELETE, bounded as a POST is: what the service forgets (a sign-in, a
+    /// staged undo, a question's form).
+    async fn delete(&self, path: &str, directory: Option<&str>) -> Result<(), HarnessError> {
+        let req = self.request(reqwest::Method::DELETE, path).timeout(CALL_TIMEOUT);
+        let resp = self
+            .scoped(req, directory)
+            .await
+            .send()
+            .await
+            .map_err(|e| HarnessError::Protocol(format!("opencode DELETE {path}: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(HarnessError::Protocol(format!("opencode DELETE {path}: {}", resp.status())));
+        }
+        Ok(())
+    }
+
     /// POST returning `(status, raw body)`; only transport failures error.
     /// HTTP status handling is the caller's (the lazy-migration retry in
     /// [`create_session`] needs to see 5xx, not a preformatted message).
@@ -1313,6 +1644,21 @@ impl Server {
         Ok(unwrap_data(raw))
     }
 
+    /// The slash commands the composer offers: the server's own, then (2.x)
+    /// OpenCode's TUI actions it has no command of the same name for.
+    async fn slash_commands(&self, directory: Option<&str>) -> Result<Vec<SlashCommand>, HarnessError> {
+        let mut commands = commands_from_wire(&self.commands_wire(directory).await?);
+        if self.protocol().await == Protocol::V2 {
+            TUI_ACTIONS.store(true, std::sync::atomic::Ordering::Relaxed);
+            for action in TuiAction::ALL {
+                if !commands.iter().any(|command| command.name == action.name()) {
+                    commands.push(action.command());
+                }
+            }
+        }
+        Ok(commands)
+    }
+
     /// Is the session mid-turn? V1 keeps a status map on `/session/status`;
     /// V2 lists running sessions on `/api/session/active`. `Err` = can't
     /// tell — the caller treats that as still running.
@@ -1375,6 +1721,7 @@ impl Server {
             protocol: self.protocol.clone(),
             version: self.version.clone(),
             _port: None,
+            shared: self.shared,
         }
     }
 
@@ -1679,39 +2026,63 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
 }
 
 /// Stored with the models so overlapping discovery calls share the same probe.
+/// The agents a prompt can be given (2.x's primary ones, as its TUI lists
+/// them). The service lists its default first — the configuration's
+/// `default_agent`, else `build`, else the first — and it is the option's
+/// default: OpenCode has no agent called "default".
 fn agent_option(agents: &Value) -> ModelOption {
-    let mut choices = vec![ModelOptionChoice {
-        id: String::new(),
-        label: "Server default".into(),
-    }];
-    for agent in agents
+    let choices: Vec<ModelOptionChoice> = primary_agents(agents)
+        .map(|(id, name)| ModelOptionChoice {
+            id: id.into(),
+            label: capitalised(name),
+        })
+        .collect();
+    ModelOption {
+        id: "agent".into(),
+        label: "Agent".into(),
+        default_choice: choices.first().map(|c| c.id.clone()).unwrap_or_default(),
+        choices,
+    }
+}
+
+/// `lead` as `Lead`: the service spells some of its agents' names in lower
+/// case, and a list of them reads as names.
+fn capitalised(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        _ => String::new(),
+    }
+}
+
+/// `/api/agent`'s primary agents (shown, not subagents), as `(id, name)`,
+/// in its order: its default first.
+fn primary_agents(agents: &Value) -> impl Iterator<Item = (&str, &str)> {
+    agents
         .get("data")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-    {
-        if agent.get("hidden").and_then(Value::as_bool) == Some(true)
-            || agent.get("mode").and_then(Value::as_str) == Some("subagent")
-        {
-            continue;
-        }
-        if let (Some(id), Some(name)) = (
-            agent.get("id").and_then(Value::as_str),
-            agent.get("name").and_then(Value::as_str),
-        ) && !id.is_empty()
-        {
-            choices.push(ModelOptionChoice {
-                id: id.into(),
-                label: name.into(),
-            });
-        }
-    }
-    ModelOption {
-        id: "agent".into(),
-        label: "Agent".into(),
-        choices,
-        default_choice: String::new(),
-    }
+        .filter(|agent| {
+            agent.get("hidden").and_then(Value::as_bool) != Some(true)
+                && agent.get("mode").and_then(Value::as_str) != Some("subagent")
+        })
+        .filter_map(|agent| {
+            let id = agent.get("id").and_then(Value::as_str)?;
+            let name = agent.get("name").and_then(Value::as_str)?;
+            (!id.is_empty()).then_some((id, name))
+        })
+}
+
+/// The agent the service gives a prompt that names none (2.x): its
+/// default, read now (its configuration may have changed it).
+async fn service_default_agent(server: &Server, dir: Option<&str>) -> String {
+    server
+        .get_json("/api/agent", dir)
+        .await
+        .ok()
+        .and_then(|agents| primary_agents(&agents).next().map(|(id, _)| id.to_owned()))
+        .unwrap_or_else(|| DEFAULT_AGENT.to_owned())
 }
 
 /// OpenCode exposes plugin/configured skills in its native command catalog.
@@ -1869,6 +2240,9 @@ struct Session {
     /// True only when the composer supplied a canonical leading command or
     /// provider-backed skill. Raw slash text deliberately stays false.
     initial_native_command_selected: bool,
+    /// Where Zeron's MCP servers are offered on the background service; on
+    /// a private server they ride its inline config instead.
+    mcp_routes: Option<client_mcp::Routes>,
 }
 
 fn new_message_id() -> String {
@@ -1994,6 +2368,9 @@ enum TurnSignal {
     /// A permission or question answer could not be delivered: the agent is
     /// blocked on a reply it will never get.
     ReplyFailed(String),
+    /// A TUI action or `!command` finished ([`actions`]): the turn is over —
+    /// no turn of the agent's own follows, and the session shows what it did.
+    ActionDone,
 }
 
 /// A canonical leading command or provider-backed skill was selected in the
@@ -2061,6 +2438,7 @@ async fn run_session(session: Session) {
         bus_timeouts,
         known_commands,
         initial_native_command_selected,
+        mcp_routes,
     } = session;
     let RunControls {
         realtime: _,
@@ -2075,6 +2453,14 @@ async fn run_session(session: Session) {
     let dir = directory.as_deref();
 
     let access = access(&request);
+    // The chat this run is for, as the host stamped Zeron's MCP server with
+    // it: recorded on a session this run creates.
+    let chat_id = request
+        .mcp
+        .as_ref()
+        .and_then(|mcp| mcp.env.get("ZERON_CHAT_ID"))
+        .filter(|chat| !chat.is_empty())
+        .cloned();
     // Plan mode as of the live prompt: 1.x names the plan agent on each
     // prompt, 2.x holds it on the session (and keeps it there across runs).
     let mut plan = request.plan;
@@ -2098,10 +2484,13 @@ async fn run_session(session: Session) {
                             .to_owned();
                         // A session a plan-mode run left on the plan agent
                         // goes back to the default one.
-                        let agent = agent.or_else(|| {
-                            (info.get("agent").and_then(Value::as_str) == Some(PLAN_AGENT))
-                                .then_some(DEFAULT_AGENT)
-                        });
+                        let agent = match agent {
+                            Some(agent) => Some(agent.to_owned()),
+                            None if info.get("agent").and_then(Value::as_str) == Some(PLAN_AGENT) => {
+                                Some(service_default_agent(&server, dir).await)
+                            }
+                            None => None,
+                        };
                         if server.protocol().await == Protocol::V2
                             && let Some(agent) = agent
                         {
@@ -2120,11 +2509,11 @@ async fn run_session(session: Session) {
                             target: "zeron_harness::opencode",
                             "session resume failed (starting fresh): {e}"
                         );
-                        create_session(&server, dir, agent).await?
+                        create_session(&server, dir, agent, chat_id.as_deref()).await?
                     }
                 }
             }
-            None => create_session(&server, dir, agent).await?,
+            None => create_session(&server, dir, agent, chat_id.as_deref()).await?,
         };
 
         // Provider catalog: resolves the model's advertised reasoning
@@ -2173,6 +2562,29 @@ async fn run_session(session: Session) {
         }
     };
 
+    // On the background service, Zeron's MCP servers are offered per
+    // directory and each call routed back to this chat by its session; the
+    // lease stops this run's MCP processes when the run ends.
+    let _mcp_lease = match (&mcp_routes, dir) {
+        (Some(routes), Some(directory)) => {
+            let servers: Vec<zeron_proto::McpServer> = request
+                .mcp
+                .iter()
+                .chain(&request.extra_mcp)
+                .cloned()
+                .collect();
+            let service = client_mcp::Service {
+                base: server.base.clone(),
+                auth: server.auth.clone(),
+            };
+            routes
+                .offer(&service, directory, &session_id, &servers)
+                .await;
+            Some(routes.lease(&session_id))
+        }
+        _ => None,
+    };
+
     let (mut model, mut variant) = model_selection(&providers, &request);
     let context_windows: HashMap<String, u64> = providers
         .all
@@ -2214,11 +2626,7 @@ async fn run_session(session: Session) {
     // Advertise slash commands (composer popup); a warm cache skips the call.
     let commands = match known_commands {
         Some(commands) => commands,
-        None => server
-            .commands_wire(dir)
-            .await
-            .map(|v| commands_from_wire(&v))
-            .unwrap_or_default(),
+        None => server.slash_commands(dir).await.unwrap_or_default(),
     };
     if !commands.is_empty()
         && !send(
@@ -2748,6 +3156,11 @@ async fn run_session(session: Session) {
                         continue 'main;
                     }
                     TurnSignal::PromptFailed(message) | TurnSignal::CommandFailed(message) => message,
+                    TurnSignal::ActionDone => {
+                        turn.prompt_in_flight = false;
+                        turn.saw_content = true;
+                        settle_idle!('main);
+                    }
                     TurnSignal::ReplyFailed(message) => {
                         // Whatever waits on the reply would never resume.
                         let _ = tokio::time::timeout(
@@ -3056,6 +3469,7 @@ async fn create_session(
     server: &Server,
     dir: Option<&str>,
     agent: Option<&str>,
+    chat: Option<&str>,
 ) -> Result<String, HarnessError> {
     if server.protocol().await == Protocol::V2 {
         // 2.x takes the run directory in the BODY (`location.directory`) —
@@ -3068,6 +3482,11 @@ async fn create_session(
         };
         if let Some(agent) = agent {
             body["agent"] = json!(agent);
+        }
+        // The chat it belongs to, so the engine's session sync knows it for
+        // Zeron's own and never imports it as a chat of its own.
+        if let Some(chat) = chat {
+            body["metadata"] = json!({ "zeron": { "chatId": chat } });
         }
         let created = server.post_json("/api/session", dir, &body).await?;
         return created
@@ -3193,9 +3612,12 @@ async fn adopt_config(
     }
     if v2 && next.plan != *plan {
         let agent = if next.plan {
-            PLAN_AGENT
+            PLAN_AGENT.to_owned()
         } else {
-            chosen_agent(next).unwrap_or(DEFAULT_AGENT)
+            match chosen_agent(next) {
+                Some(agent) => agent.to_owned(),
+                None => service_default_agent(server, dir).await,
+            }
         };
         server
             .post_json(
@@ -3209,7 +3631,8 @@ async fn adopt_config(
     Ok((model, variant))
 }
 
-/// opencode's read-only planning agent, and the agent it hands back to.
+/// opencode's read-only planning agent, and the agent it hands back to when
+/// the service names no default ([`service_default_agent`]).
 const PLAN_AGENT: &str = "plan";
 const DEFAULT_AGENT: &str = "build";
 
@@ -3413,6 +3836,43 @@ async fn post_prompt(
     let protocol = server.protocol().await;
     // A prompt or command naming no agent runs the default one.
     let agent = (plan && protocol == Protocol::V1).then_some(PLAN_AGENT);
+    // OpenCode's TUI actions and `!command` (2.x): routes of their own, no
+    // turn of the agent's.
+    if protocol == Protocol::V2 {
+        let action = native_command_request(prompt, commands, native_command_selected)?
+            .and_then(|(name, _)| actions::TuiAction::of(name, commands));
+        let shell = actions::shell_command(prompt).map(str::to_owned);
+        if action.is_some() || shell.is_some() {
+            if !attachments.is_empty() {
+                return Err(HarnessError::Protocol(
+                    "OpenCode actions cannot include attachments; send them in a separate prompt"
+                        .into(),
+                ));
+            }
+            let server = server.handle();
+            let session_id = session_id.to_owned();
+            let dir = dir.map(str::to_owned);
+            let updates = updates.clone();
+            tokio::spawn(async move {
+                let done = match (action, shell) {
+                    (Some(action), _) => action.run(&server, &session_id, dir.as_deref()).await,
+                    (None, Some(command)) => {
+                        actions::run_shell(&server, &session_id, dir.as_deref(), &command).await
+                    }
+                    (None, None) => unreachable!("one of them was asked for"),
+                };
+                let signal = match done {
+                    Ok(()) => TurnSignal::ActionDone,
+                    Err(error) => TurnSignal::CommandFailed(error.to_string()),
+                };
+                let _ = updates.send(TurnUpdate {
+                    generation: turn_generation,
+                    signal,
+                });
+            });
+            return Ok(false);
+        }
+    }
     if let Some((name, arguments)) =
         native_command_request(prompt, commands, native_command_selected)?
     {
@@ -4126,11 +4586,11 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             } else {
                 "reply"
             };
-            // Full access approves each owned request, as every run did
-            // before modes; what a restricted mode does not cover is put to
-            // the person, and only a yes approves. Never "always": that
-            // would write a durable permission rule. Genuine agent questions
-            // use the separate question.asked path.
+            // Full access approves each owned request, as the TUI's auto
+            // accept does; otherwise each is put to the person, and only a
+            // yes approves. 2.x also offers "always": OpenCode saves the rule
+            // itself, and its TUI and desktop app keep to it too. Genuine
+            // agent questions use the separate question.asked path.
             let permission = props
                 .get("permission")
                 .or_else(|| props.get("action"))
@@ -4142,7 +4602,10 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 crate::approval::Action::Other
             };
             let ask = (!crate::approval::allowed_without_asking(access, action)).then(|| {
-                let question = permission_question(props, dir);
+                let mut question = permission_question(props, dir);
+                if protocol == Protocol::V2 {
+                    question = crate::approval::with_always(question);
+                }
                 (question.clone(), (request_input)(vec![question]))
             });
             tokio::spawn(async move {
@@ -4150,7 +4613,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     None => "once",
                     Some((question, answers)) => {
                         let answers = answers.await.unwrap_or_default();
-                        if crate::approval::approved(&question, &answers) {
+                        if crate::approval::approved_always(&question, &answers) {
+                            "always"
+                        } else if crate::approval::approved(&question, &answers) {
                             "once"
                         } else {
                             "reject"
@@ -4167,7 +4632,11 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         signal: TurnSignal::ReplyFailed(format!(
                             "Could not {} an opencode permission request, so the \
                              agent cannot continue: {error}",
-                            if reply == "once" { "approve" } else { "refuse" }
+                            if reply == "reject" {
+                                "refuse"
+                            } else {
+                                "approve"
+                            }
                         )),
                     });
                 }
@@ -4825,7 +5294,8 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
             .map(str::to_owned)
     };
     match name {
-        "bash" => ToolCall::Exec {
+        // (2.x names its shell tool `shell`.)
+        "bash" | "shell" => ToolCall::Exec {
             command: s(&["command"]).unwrap_or_default(),
         },
         "read" => ToolCall::ReadFile {

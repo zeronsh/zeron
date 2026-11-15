@@ -1789,6 +1789,15 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
             Value::Bool(account["authKind"].as_str() == Some("api-key") && account["displayName"].as_str().is_some()),
         ),
     ];
+    // A key with a budget of its own (Mistral's, through OpenCode): its
+    // meters, named as the provider names them.
+    if account["authKind"].as_str() == Some("api-key") {
+        for (name, window) in [("session_label", windows.first()), ("week_label", week.and_then(|i| windows.get(i)))] {
+            if let Some(label) = window.and_then(|w| w["label"].as_str()) {
+                fields.push((name, Value::from(label)));
+            }
+        }
+    }
     if account["codexResetCredits"].is_object() {
         let (count, list) = banked(&account["codexResetCredits"], spent);
         fields.push(("banked", Value::from(count as f64)));

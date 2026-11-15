@@ -61,12 +61,23 @@ local motion = require("@self/motion")
 local locale = require("@self/locale")
 
 export type Tool = Activity.Tool
+export type NoteFile = { path: string, status: string, additions: number, deletions: number }
 export type Message = {
 	id: string,
-	-- A person's, a reply, or the seam where the chat moved to another
-	-- agent (`[mark] From → [mark] To` over the prompt that moved it).
-	role: "user" | "assistant" | "switch",
+	-- A person's, a reply, the seam where the chat moved to another
+	-- agent (`[mark] From → [mark] To` over the prompt that moved it), or a
+	-- note of the agent's session ("Session compacted · 648.4K in · 2.8K
+	-- out"; `live` while it's still under way).
+	role: "user" | "assistant" | "switch" | "note",
+	live: boolean?,
 	text: string,
+	-- A note's kind ("compaction", "revert"), the line over it and the line
+	-- under it (nil while a compaction still runs), and the files an undo
+	-- put back.
+	kind: string?,
+	open: string?,
+	close: string?,
+	files: { NoteFile }?,
 	-- A person's: what came with it.
 	attachments: { UserMessage.Attachment }?,
 	-- When it was sent, or a reply settled ("Jul 1, 4:12 PM"), and the
@@ -108,6 +119,9 @@ export type Message = {
 export type Props = {
 	messages: State<{ Message }>,
 	offset: State<number>?,
+	-- The prompt an undo asked here is taking back: it and what came after
+	-- it fade out until they're gone (or the undo fails).
+	undoing: State<string?>?,
 	-- Its name, for a transcript shown beside the chat page's (a side
 	-- chat's): its kept states are its own, and `send` and `latest` reach
 	-- it by name. None: the chat page's.
@@ -619,6 +633,152 @@ local function turn_line(line: () -> TurnLine?): Node
 	}
 end
 
+-- A rule across the column with its words at the middle, in the working
+-- word's quiet ink (a ring before them while it's under way).
+local function rule(line: () -> TurnLine?): Node
+	local function edge(): Node
+		return ui.div { h = 1, grow = 1, bg = "$border.subtle", aria_hidden = true }
+	end
+	return ui.row {
+		w_full = true,
+		items = "center",
+		gap = "$space.3",
+		edge(),
+		turn_line(line),
+		edge(),
+	}
+end
+
+-- Notes already shown once, by id and words: one made again as it scrolls
+-- back into view stands still; one that comes (an undo just made) fades in.
+local NOTES_SEEN: { [string]: boolean } = {}
+-- How long a row takes to fade as an undo takes it back or a redo brings it
+-- again; how many of the newest rows are watched for it.
+local UNDO_FADE_MS, TAIL_IDS = 200, 64
+local NOTE_ENTER: any = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" }
+
+-- A note of the agent's session, as OpenCode's own clients show it. Its
+-- compaction: "Session compaction started", the summary as it's written,
+-- then "Session compacted · 648.4K in · 2.8K out". An undo staged in it:
+-- how many messages it took back and the files it put back, greyed, with
+-- "/redo to restore". Anything else: its line, a ring while under way.
+local function note(state: State<Message>): Node
+	local m = state:peek()
+	if m.kind == "compaction" then
+		return ui.column {
+			w_full = true,
+			gap = "$space.3",
+			rule(function(): TurnLine?
+				local n = state:get()
+				return { text = n.open or "", spinner = n.live == true }
+			end),
+			ui.show(function(): boolean
+				return (state:get().text or "") ~= ""
+			end, Markdown {
+				text = function(): string
+					return state:get().text
+				end,
+				key = if m.live then `compaction:{m.id}` else nil,
+				veil = m.live == true,
+				veil_seed = ui.now() - opened_at < 300,
+				group = `note:{m.id}`,
+			}),
+			ui.show(function(): boolean
+				return state:get().close ~= nil
+			end, rule(function(): TurnLine?
+				return { text = state:get().close or "" }
+			end)),
+		}
+	end
+	if m.kind == "revert" then
+		local seen = `{m.id}\u{1}{m.text}`
+		local first = not NOTES_SEEN[seen] and ui.now() - opened_at >= 300
+		NOTES_SEEN[seen] = true
+		local function body(): Node
+			return ui.column {
+				w_full = true,
+				gap = "$space.1",
+				px = "$space.4",
+				py = "$space.2",
+				border = 0,
+				border_sides = { 0, 0, 0, 2 },
+				border_color = "$border.subtle",
+				role = "status",
+				ui.text {
+					function(): string
+						return state:get().text
+					end,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+				},
+				ui.each(ui.computed(function(): { NoteFile }
+					return state:get().files or {}
+				end), function(f: NoteFile): Node
+					return ui.row {
+						gap = "$space.2",
+						items = "center",
+						ui.text {
+							f.path,
+							grow = 1,
+							shrink = 1,
+							truncate = true,
+							font = "$font.mono",
+							text_size = "$font.size.xs",
+							color = "$text.tertiary",
+						},
+						if f.additions > 0
+							then ui.text {
+								`+{f.additions}`,
+								shrink = 0,
+								tabular = true,
+								font = "$font.mono",
+								text_size = "$font.size.xs",
+								color = "$zeron.diff.added",
+							}
+							else nil,
+						if f.deletions > 0
+							then ui.text {
+								`-{f.deletions}`,
+								shrink = 0,
+								tabular = true,
+								font = "$font.mono",
+								text_size = "$font.size.xs",
+								color = "$zeron.diff.removed",
+							}
+							else nil,
+					}
+				end, {
+					key = function(f: NoteFile): string
+						return f.path
+					end,
+				}),
+				ui.text {
+					function(): string
+						return state:get().close or ""
+					end,
+					text_size = "$font.size.xs",
+					line_height = "$font.line.xs",
+					color = "$text.tertiary",
+				},
+			}
+		end
+		if not first then
+			return body()
+		end
+		return ui.presence(function(): string
+			return "note"
+		end, body, { enter = motion.transition(NOTE_ENTER), initial = true, w_full = true })
+	end
+	return ui.row {
+		w_full = true,
+		turn_line(function(): TurnLine?
+			local n = state:get()
+			return { text = n.text, spinner = n.live == true }
+		end),
+	}
+end
+
 type View = {
 	turn_state: ((m: Message, sending: boolean) -> TurnLine?)?,
 	view: Ref,
@@ -1008,6 +1168,42 @@ local function Transcript(props: Props): Node
 	end)
 	local count = ui.computed(function(): number
 		return messages:len()
+	end)
+
+	-- Rows an undo took back from the conversation's end (from here or any
+	-- of the agent's other clients), by id: brought back by a redo, they
+	-- fade in. (Read a frame on, untracked: a reply's words don't run it.)
+	local tail: { string } = {}
+	local restored: { [string]: boolean } = {}
+	ui.effect(function()
+		count:get()
+		ui.after(0, function()
+			local n = count:peek()
+			local now: { string } = {}
+			local here: { [string]: boolean } = {}
+			-- (Gone under an undo's note: rows a sync drops and writes again
+			-- are no undo's.)
+			local reverted = false
+			for i = math.max(1, n - TAIL_IDS + 1), n do
+				local m = messages:at(i)
+				if m then
+					table.insert(now, m.id)
+					here[m.id] = true
+					reverted = reverted or m.kind == "revert"
+				end
+			end
+			for _, id in if reverted then tail else {} do
+				if not here[id] and not messages:index_of("id", id) then
+					restored[id] = true
+				end
+			end
+			tail = now
+			local undoing = props.undoing
+			local undone = if undoing then undoing:peek() else nil
+			if undoing and undone and not messages:index_of("id", undone) then
+				undoing:set(nil)
+			end
+		end)
 	end)
 
 	-- How long the conversation is, for its scrollbar: the rail over the
@@ -1786,6 +1982,27 @@ local function Transcript(props: Props): Node
 		local inner = ui.ref()
 		local outer = ui.ref()
 		local row_w: number? = nil
+		-- Shown, it fades: out as an undo takes it back, in as a redo brings
+		-- it again.
+		local back = restored[m.id] == true
+		restored[m.id] = nil
+		local arrived = ui.use_state(not back)
+		if back then
+			ui.after(0, function()
+				arrived:set(true)
+			end)
+		end
+		local shown = ui.computed(function(): number
+			local undoing = props.undoing
+			local undone = if undoing then undoing:get() else nil
+			if undone then
+				local from = messages:index_of("id", undone)
+				if from and index:get() >= from then
+					return 0
+				end
+			end
+			return if arrived:get() then 1 else 0
+		end)
 		-- (`state`: the message as it is now; `m`, as the row was made.)
 		rows[m.id] = { outer = outer, inner = inner, index = index, m = m, state = state }
 		ui.on_cleanup(function()
@@ -1853,6 +2070,7 @@ local function Transcript(props: Props): Node
 			min_h = need,
 			ui.column {
 				ref = inner,
+				opacity = ui.tween(shown, { duration = if motion.reduced_now() then motion.FADE else UNDO_FADE_MS, ease = motion.EASE }),
 				-- A prompt's own height (its words, and the room above it, not
 				-- the runway it may hold): what its reply's runway leaves it.
 				-- Last, or its reply under it: a prompt sent alone (its reply
@@ -1868,7 +2086,7 @@ local function Transcript(props: Props): Node
 				max_w = measure,
 				min_w = 0,
 				-- Anywhere on a message shows its lane (Zeron's entry hover).
-				on_hover = if m.role == "switch"
+				on_hover = if m.role == "switch" or m.role == "note"
 					then nil
 					else function(inside: boolean)
 						if inside then
@@ -1878,6 +2096,7 @@ local function Transcript(props: Props): Node
 						end
 					end,
 				if m.role == "switch" then seam(m)
+					elseif m.role == "note" then note(state)
 					elseif mine then ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the

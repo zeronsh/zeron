@@ -6318,6 +6318,21 @@ impl DocHost {
         }
     }
 
+    /// `prompt` to an OpenCode chat is one of OpenCode 2.x's TUI actions
+    /// (`/compact`, `/undo`, `/redo`, `/fork`, `!command`, typed or picked):
+    /// no message of the person's, so none is written — the session shows
+    /// what it did ([`crate::opencode_sync`]).
+    fn apply_opencode_action(
+        &self,
+        chat_id: &str,
+        harness: zeron_proto::HarnessId,
+        prompt: &str,
+    ) -> bool {
+        harness == zeron_proto::HarnessId::Opencode
+            && zeron_harness::opencode_has_tui_actions()
+            && crate::opencode_sync::note_prompt(chat_id, prompt)
+    }
+
     /// `entry` is a prompt sent before the Stop that has already acted on
     /// this chat: the Stop cancelled it. Returns its message id.
     fn cancelled_by_stop(
@@ -6488,11 +6503,16 @@ impl DocHost {
                 // id, so the dispatch path's own execution-time write dedupes
                 // to a no-op. A provider switch's seam lands with it, above.
                 sessions.note_provider_switch(chat_id, harness, handle);
-                if let Err(err) = handle.write_user_message(
-                    message_id,
-                    &request.prompt,
-                    entry.issued_at.min(now_ms()),
-                ) {
+                // OpenCode's TUI actions are no message of the person's: the
+                // transcript shows what they did (and an undo takes its turn
+                // out of it, as OpenCode's session does).
+                if !self.apply_opencode_action(chat_id, harness, &request.prompt)
+                    && let Err(err) = handle.write_user_message(
+                        message_id,
+                        &request.prompt,
+                        entry.issued_at.min(now_ms()),
+                    )
+                {
                     tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
                 }
                 self.dispatch_with_source_context(
@@ -6582,6 +6602,24 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                // An OpenCode session's question (asked in its TUI or desktop
+                // app, or by a run that has ended): the answer goes back to the
+                // session, which is waiting on it, not into a new turn.
+                if request_id.starts_with(crate::opencode_sync::FORM_REQUEST_PREFIX)
+                    && let Some(workspace) = self.workspace()
+                {
+                    return match crate::opencode_sync::answer(
+                        workspace, chat_id, request_id, &questions, answers,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            handle.doc.resolve_input(request_id, answers)?;
+                            Ok((SessionCommandStatus::Applied, None))
+                        }
+                        Err(error) => Ok((SessionCommandStatus::Rejected, Some(error))),
+                    };
+                }
                 // Closed without an answer: there is nothing to deliver, and
                 // a resumed turn would only say so. Record it and stop.
                 if answers.is_empty() {
@@ -6736,7 +6774,11 @@ impl DocHost {
         // The transcript shows the send while mailbox backpressure holds it.
         // A pending agent update instead holds it in the queue below, where a
         // transcript copy would duplicate it until the update finishes.
-        if !sessions.live_run_update_pending(chat_id)
+        let action = sessions
+            .run_harness(chat_id)
+            .is_some_and(|harness| self.apply_opencode_action(chat_id, harness, &prompt));
+        if !action
+            && !sessions.live_run_update_pending(chat_id)
             && let Some(message_id) = message_id.as_deref()
             && let Err(err) =
                 handle.write_user_message(message_id, &prompt, issued_at.min(now_ms()))
@@ -6754,7 +6796,7 @@ impl DocHost {
                 Ok((SessionCommandStatus::Applied, None))
             }
             SteerOutcome::NotSteerable => {
-                if let Some(message_id) = message_id.as_deref() {
+                if !action && let Some(message_id) = message_id.as_deref() {
                     handle.write_user_message(message_id, &prompt, issued_at.min(now_ms()))?;
                 }
                 let request = sessions

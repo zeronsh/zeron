@@ -81,6 +81,8 @@ pub const BLOCKED: &[&str] = &[
     "agents.set_key",
     // (An API key, and what an agent's keys are called.)
     "agents.add_key",
+    // (Cloud's: the vault's key for the account's Cloud device.)
+    "agents.cloud_key",
     "agents.rename",
     "agents.sign_in",
     "agents.sign_out",

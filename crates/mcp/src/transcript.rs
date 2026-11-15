@@ -162,6 +162,10 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
             // The fork seam is a transcript marker, not agent content: an
             // orchestrator reads the copied history as ordinary turns.
             MessagePart::Fork { .. } | MessagePart::Switch { .. } => {}
+            // What the agent's context holds changed: worth knowing.
+            MessagePart::Compaction { .. } | MessagePart::Revert { .. } => {
+                tools.extend(part.session_note());
+            }
         }
     }
     RenderedMessage {

@@ -280,6 +280,7 @@ local function Session(id: Id?): Node
 							side = 20,
 							fade_lead = 12,
 							messages = store.messages,
+							undoing = shared.undoing,
 							offset = offset,
 							-- Made again (a reload, a template saved), it comes
 							-- back where it was.

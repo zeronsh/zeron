@@ -377,6 +377,7 @@ impl TurnWire {
                 input_hint: None,
             }]),
             initial_native_command_selected: native_command_reply.is_some(),
+            mcp_routes: None,
         }));
         Self {
             bus,
@@ -2190,7 +2191,7 @@ async fn plan_mode_sets_the_v2_session_agent() {
 #[test]
 fn access_changes_restart_the_server_and_plan_changes_do_not() {
     let harness = OpencodeHarness::new();
-    assert_eq!(harness.access_modes(), AccessMode::ALL);
+    assert_eq!(harness.access_modes(), OPENCODE_ACCESS_MODES);
     assert!(harness.supports_plan());
     let request = |access: &str, auto_approve: bool, plan: bool| -> RunRequest {
         serde_json::from_value(json!({
@@ -2705,25 +2706,23 @@ async fn command_http_failure_errors_turn_without_watchdog() {
 fn agent_model_option_filters_and_preserves_ids() {
     let option = agent_option(&json!({"data":[
         {"id":"build-id","name":"Build","mode":"primary","hidden":false},
-        {"id":"all-id","name":"All","mode":"all"},
+        {"id":"all-id","name":"all","mode":"all"},
         {"id":"hidden","name":"Hidden","mode":"primary","hidden":true},
         {"id":"sub","name":"Sub","mode":"subagent"}
     ]}));
     assert_eq!(option.id, "agent");
     assert_eq!(option.label, "Agent");
-    assert_eq!(option.default_choice, "");
+    // (The service lists its default first; there is no "default" agent.)
+    assert_eq!(option.default_choice, "build-id");
     assert_eq!(
         option
             .choices
             .iter()
             .map(|c| (c.id.as_str(), c.label.as_str()))
             .collect::<Vec<_>>(),
-        vec![
-            ("", "Server default"),
-            ("build-id", "Build"),
-            ("all-id", "All")
-        ]
+        vec![("build-id", "Build"), ("all-id", "All")]
     );
+    assert_eq!(agent_option(&json!({"data":[]})).default_choice, "");
 }
 
 #[tokio::test]
@@ -2870,7 +2869,8 @@ async fn v2_discovery_settles_and_caches_agents_with_overlapping_models() {
     for model in &first {
         assert_eq!(model.options.len(), 1);
         assert_eq!(model.options[0].id, "agent");
-        assert_eq!(model.options[0].choices[1].id, "agent-id");
+        assert_eq!(model.options[0].choices[0].id, "agent-id");
+        assert_eq!(model.options[0].default_choice, "agent-id");
     }
     assert_eq!(
         calls
@@ -4024,6 +4024,7 @@ async fn wedged_run(base: String, timeouts: BusTimeouts) -> (Option<String>, Don
         bus_timeouts: timeouts,
         known_commands: Some(Vec::new()),
         initial_native_command_selected: false,
+        mcp_routes: None,
     }));
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut chip = None;

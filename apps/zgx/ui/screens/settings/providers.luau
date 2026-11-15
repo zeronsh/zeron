@@ -30,6 +30,23 @@ local M = {}
 M.ID = "providers"
 M.TITLE = "Providers"
 
+-- The window's height in points, followed as it changes: `ui.window.size`,
+-- 0 where a host gives none (a headless test, a host that doesn't feed it).
+local function window_height(): number
+	local window = (ui :: any).window
+	local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
+	if state == nil then
+		return 0
+	end
+	local ok, v = pcall(function(): any
+		return state:get()
+	end)
+	if ok and type(v) == "table" and type(v.height) == "number" then
+		return v.height
+	end
+	return 0
+end
+
 search.index(M.ID, ui.t("settings.providers.title"), ui.t("settings.providers.terms"), {
 	{ key = "agents", title = ui.t("settings.providers.agents.label"), terms = ui.t("settings.providers.agents.terms") },
 	{
@@ -177,8 +194,12 @@ local function kind(): string
 	return if now().target == "cloud" then "cloud" else "found"
 end
 
--- Which agent's settings are open (none: "").
+-- Which agent's settings are open (none: ""), and which one the dialog is
+-- showing: kept after the open one is let go, so the panel that is leaving
+-- still says whose settings it is (its title, its tabs) rather than turning
+-- into the plain agent settings' form as it fades.
 local open_settings = ui.state("settings_agent_open", "")
+local shown_settings = ui.state("settings_agent_shown", "")
 -- The engine's native subagent settings: those it can switch, and those off.
 local subagents = ui.state("settings_subagents", nil :: { switchable: { string }, off: { string } }?)
 
@@ -358,6 +379,7 @@ local function card(row: State<agents.Agent>): Node
 		settings = not cloud_card,
 		on_settings = function()
 			load_subagents()
+			shown_settings:set(id)
 			open_settings:set(id)
 		end,
 		on_add = function()
@@ -637,7 +659,7 @@ local dialog_open = ui.computed(function(): boolean
 	return open_settings:get() ~= ""
 end)
 local function agent(): agents.Agent?
-	local id = open_settings:get()
+	local id = shown_settings:get()
 	for _, a in now().list do
 		if a.id == id then
 			return a
@@ -761,16 +783,374 @@ local function settings_dialog(): Node
 			end)
 		end)
 	end)
+	-- OpenCode's own (this Mac's engine: GetOpencodeSettings): whether its
+	-- sessions show here, whether their folders become projects, and where
+	-- chats run — its background service, a server of each chat's own, or a
+	-- remote server in the service's place: one of the three.
+	local function opencode(): boolean
+		local a = agent()
+		return a ~= nil and a.id == "opencode"
+	end
+	local oc_sync = ui.state("settings_agent_oc_sync", false)
+	local oc_projects = ui.state("settings_agent_oc_projects", false)
+	local oc_service = ui.state("settings_agent_oc_service", true)
+	-- A remote server in this computer's service's place: how it's reached
+	-- (address and password, a pairing link, SSH), and whether it answered.
+	local oc_remote = ui.state("settings_agent_oc_remote", false)
+	local oc_mode = ui.state("settings_agent_oc_mode", "address")
+	local oc_name = ui.state("settings_agent_oc_name", "")
+	local oc_url = ui.state("settings_agent_oc_url", "")
+	local oc_password = ui.state("settings_agent_oc_password", "")
+	local oc_link = ui.state("settings_agent_oc_link", "")
+	local oc_ssh = ui.state("settings_agent_oc_ssh", "")
+	local oc_error = ui.state("settings_agent_oc_error", "")
+	local oc_connecting = ui.state("settings_agent_oc_connecting", false)
+	-- Where chats run, as chosen ("service", "private", "remote"), and
+	-- whether the remote's fields are open (folded to one row once it's
+	-- connected). (`oc_remote`: whether one is saved.)
+	local oc_where = ui.state("settings_agent_oc_where", "service")
+	local oc_editing = ui.state("settings_agent_oc_editing", false)
+	-- The dialog's tabs: the agent's own switches, which of OpenCode's
+	-- sessions show here, and where they run.
+	local oc_tab = ui.state("settings_agent_oc_tab", "agent")
+	-- `fresh`: the dialog opened — a remote chosen and never connected is
+	-- let go (until then, another setting saved keeps it chosen).
+	local function oc_show(v: any, fresh: boolean?)
+		if type(v) == "table" then
+			oc_sync:set(v.syncSessions == true)
+			oc_projects:set(v.addProjects == true)
+			oc_service:set(v.backgroundService ~= false)
+			oc_remote:set(v.remote == true)
+			local pending = not fresh and oc_where:peek() == "remote" and v.remote ~= true
+			if not pending then
+				oc_where:set(if v.remote == true then "remote" elseif v.backgroundService ~= false then "service" else "private")
+			end
+			oc_mode:set(if type(v.remoteMode) == "string" and v.remoteMode ~= "" then v.remoteMode else "address")
+			oc_name:set(v.remoteName or "")
+			oc_url:set(v.remoteUrl or "")
+			oc_password:set(v.remotePassword or "")
+			oc_ssh:set(v.remoteSsh or "")
+			-- (A link refused stays, to see what was pasted.)
+			local refused = type(v.remoteError) == "string"
+			if not refused then
+				oc_link:set("")
+			end
+			oc_error:set(if refused then v.remoteError else "")
+			oc_editing:set(refused or v.remote ~= true)
+			if fresh then
+				oc_tab:set(if refused then "server" else "agent")
+			end
+		end
+	end
+	-- Every field, each save: one missing reads as its default.
+	local function oc_params(): { [string]: any }
+		return {
+			syncSessions = oc_sync:peek(),
+			addProjects = oc_projects:peek(),
+			backgroundService = oc_service:peek(),
+			remote = oc_remote:peek(),
+			remoteMode = oc_mode:peek(),
+			remoteName = oc_name:peek(),
+			remoteUrl = oc_url:peek(),
+			remotePassword = oc_password:peek(),
+			remoteLink = oc_link:peek(),
+			remoteSsh = oc_ssh:peek(),
+		}
+	end
+	local function oc_connect()
+		if oc_connecting:peek() then
+			return
+		end
+		oc_connecting:set(true)
+		oc_error:set("")
+		local params = oc_params()
+		params.remote = true
+		host.call("settings.engine", { method = "SetOpencodeSettings", params = params }):after(function(v: any)
+			oc_connecting:set(false)
+			oc_show(v)
+			if type(v) == "table" and v.remoteError == nil then
+				toast.show { title = ui.t("settings.providers.opencode.remote.connected"):get(), tone = "success" }
+			end
+		end, function(err: any)
+			oc_connecting:set(false)
+			oc_error:set(if type(err) == "table" and type(err.message) == "string" and err.message ~= "offline" then err.message else ui.t("settings.engine.couldnt_save"):get())
+		end)
+	end
+	local function oc_remote_on(): boolean
+		return oc_where:get() == "remote" and oc_editing:get()
+	end
+	-- A remote connected: one row says which, with a way to change it.
+	local function oc_remote_folded(): boolean
+		return oc_where:get() == "remote" and not oc_editing:get()
+	end
+	local function oc_in(mode: string): () -> boolean
+		return function()
+			return oc_remote_on() and oc_mode:get() == mode
+		end
+	end
+	local function oc_reload(fresh: boolean?)
+		host.call("settings.engine", { method = "GetOpencodeSettings", params = {} }):after(function(v: any)
+			oc_show(v, fresh)
+		end, function() end)
+	end
+	-- Chosen where chats run: this computer's service or a server of each
+	-- chat's own is saved at once (a remote set is let go); a remote waits
+	-- for Connect.
+	local function oc_run_on(where: string)
+		oc_error:set("")
+		if where == "remote" then
+			oc_editing:set(not oc_remote:peek())
+			return
+		end
+		local params = oc_params()
+		params.remote = false
+		params.backgroundService = where == "service"
+		host.call("settings.engine", { method = "SetOpencodeSettings", params = params }):after(oc_show, function()
+			oc_reload()
+			toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+		end)
+	end
+	ui.effect(function()
+		if dialog_open:get() and opencode() then
+			oc_reload(true)
+		end
+	end)
+	local function oc_set(key: string, state: State<boolean>): (on: boolean) -> ()
+		return function(on: boolean)
+			local params = oc_params()
+			params[key] = on
+			host.call("settings.engine", { method = "SetOpencodeSettings", params = params }):after(oc_show, function()
+				state:set(not on)
+				toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+			end)
+		end
+	end
 	return ds.Dialog {
 		open = open,
-		title = ui.t("settings.providers.agent_settings"),
+		title = (function(): string
+			return if opencode()
+				then ui.t("settings.providers.opencode.title"):get()
+				else ui.t("settings.providers.agent_settings"):get()
+		end) :: any,
 		body = (function(): string
 			return ui.t("settings.providers.dialog_body", { device = device_name() }):get()
 		end) :: any,
 		size = "md",
 		cancel = false,
 		confirm = { label = ui.t("settings.providers.done") :: any },
-		ds.Settings.Group {
+		-- (One height, whichever tab shows: its title and its tabs stay where
+		-- they are instead of moving with each switch. What doesn't fit — a
+		-- remote's fields, a window too short for it — scrolls under them, its
+		-- foot in place.)
+		h = function(): number
+			local held = ui.theme.get("zeron.dialog.height") :: number
+			local room = window_height()
+			return if room > 0 then math.min(held, room - 32) else held
+		end,
+		-- (OpenCode's settings, on three tabs of their own: the agent's own
+		-- switches, what shows here, and where chats run. The tabs stay put
+		-- over the body, which scrolls under them.)
+		head = ui.show(opencode, ds.Tabs {
+			value = oc_tab,
+			label = ui.t("settings.providers.opencode.tabs.label"),
+			options = {
+				{ value = "agent", label = ui.t("settings.providers.opencode.tabs.agent") },
+				{ value = "sessions", label = ui.t("settings.providers.opencode.tabs.sessions") },
+				{ value = "server", label = ui.t("settings.providers.opencode.tabs.server") },
+			} :: any,
+		}),
+		ui.show(function(): boolean
+			return opencode() and oc_tab:get() == "sessions"
+		end, ds.Settings.Group {
+			ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.sync.label"),
+				description = ui.t("settings.providers.opencode.sync.description"),
+				control = ds.Switch {
+					value = oc_sync,
+					label = ui.t("settings.providers.opencode.sync.label"),
+					on_change = oc_set("syncSessions", oc_sync),
+				},
+			},
+			ui.div {
+				w_full = true,
+				opacity = function()
+					return if oc_sync:get() then 1 else "$zeron.disabled"
+				end,
+				disabled = function()
+					return not oc_sync:get()
+				end,
+				ds.Settings.Row {
+					label = ui.t("settings.providers.opencode.projects.label"),
+					description = ui.t("settings.providers.opencode.projects.description"),
+					control = ds.Switch {
+						value = oc_projects,
+						label = ui.t("settings.providers.opencode.projects.label"),
+						on_change = oc_set("addProjects", oc_projects),
+					},
+				},
+			},
+		}),
+		ui.show(function(): boolean
+			return opencode() and oc_tab:get() == "server"
+		end, ds.Settings.Group {
+			ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.runs_on.label"),
+				description = function()
+					return ui.t(`settings.providers.opencode.runs_on.{oc_where:get()}.description`):get()
+				end,
+				control = ds.Select {
+					value = oc_where,
+					name = ui.t("settings.providers.opencode.runs_on.label"),
+					size = "sm",
+					w = 200,
+					options = {
+						{ value = "service", label = ui.t("settings.providers.opencode.runs_on.service.label") },
+						{ value = "private", label = ui.t("settings.providers.opencode.runs_on.private.label") },
+						{ value = "remote", label = ui.t("settings.providers.opencode.runs_on.remote.label") },
+					} :: any,
+					on_change = oc_run_on,
+				},
+			},
+			ui.show(oc_remote_folded, ds.Settings.Row {
+				label = function()
+					local name = oc_name:get()
+					if name ~= "" then
+						return name
+					end
+					return if oc_mode:get() == "ssh" then oc_ssh:get() else oc_url:get()
+				end,
+				description = function()
+					local target = if oc_mode:get() == "ssh" then oc_ssh:get() else oc_url:get()
+					return if oc_name:get() ~= "" and target ~= ""
+						then ui.t("settings.providers.opencode.remote.folded.named", { target = target }):get()
+						else ui.t("settings.providers.opencode.remote.folded.description"):get()
+				end,
+				control = ds.Button {
+					ui.t("settings.providers.opencode.remote.folded.change"),
+					tone = "secondary",
+					size = "sm",
+					on_click = function()
+						oc_editing:set(true)
+					end,
+				},
+			}),
+			ui.show(oc_remote_on, ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.mode.label"),
+				control = ds.Select {
+					value = oc_mode,
+					name = ui.t("settings.providers.opencode.remote.mode.label"),
+					size = "sm",
+					w = 180,
+					options = {
+						{ value = "address", label = ui.t("settings.providers.opencode.remote.mode.address") },
+						{ value = "pairing", label = ui.t("settings.providers.opencode.remote.mode.pairing") },
+						{ value = "ssh", label = ui.t("settings.providers.opencode.remote.mode.ssh") },
+					} :: any,
+					on_change = function()
+						oc_error:set("")
+					end,
+				},
+			}),
+			ui.show(oc_remote_on, ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.name.label"),
+				stacked = true,
+				control = ds.TextField {
+					value = oc_name,
+					name = ui.t("settings.providers.opencode.remote.name.label"),
+					placeholder = ui.t("settings.providers.opencode.remote.name.placeholder"),
+					w_full = true,
+				},
+			}),
+			ui.show(oc_in("address"), ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.url.label"),
+				stacked = true,
+				control = ds.TextField {
+					value = oc_url,
+					name = ui.t("settings.providers.opencode.remote.url.label"),
+					placeholder = "http://192.168.1.10:4096",
+					inputmode = "url",
+					w_full = true,
+				},
+			}),
+			ui.show(oc_in("address"), ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.password.label"),
+				description = ui.t("settings.providers.opencode.remote.password.description"),
+				stacked = true,
+				control = ds.TextField {
+					value = oc_password,
+					name = ui.t("settings.providers.opencode.remote.password.label"),
+					password = true,
+					w_full = true,
+					on_commit = oc_connect,
+				},
+			}),
+			ui.show(oc_in("pairing"), ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.link.label"),
+				description = function()
+					local url = oc_url:get()
+					return if url ~= ""
+						then ui.t("settings.providers.opencode.remote.link.paired", { url = url }):get()
+						else ui.t("settings.providers.opencode.remote.link.description"):get()
+				end,
+				stacked = true,
+				control = ds.TextField {
+					value = oc_link,
+					name = ui.t("settings.providers.opencode.remote.link.label"),
+					placeholder = "http://192.168.1.10:4096/auth/connect/…",
+					inputmode = "url",
+					w_full = true,
+					on_commit = oc_connect,
+				},
+			}),
+			ui.show(oc_in("ssh"), ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.ssh.label"),
+				description = ui.t("settings.providers.opencode.remote.ssh.description"),
+				stacked = true,
+				control = ds.TextField {
+					value = oc_ssh,
+					name = ui.t("settings.providers.opencode.remote.ssh.label"),
+					placeholder = "me@box  ·  ssh -p 2222 me@box",
+					w_full = true,
+					on_commit = oc_connect,
+				},
+			}),
+			ui.show(oc_remote_on, ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.remote.connect.label"),
+				description = function()
+					local err = oc_error:get()
+					return if err ~= "" then err else ui.t("settings.providers.opencode.remote.connect.description"):get()
+				end,
+				control = ui.row {
+					gap = "$space.2",
+					items = "center",
+					-- (A remote connected already: its fields folded again,
+					-- unchanged.)
+					ui.show(function(): boolean
+						return oc_remote:get()
+					end, ds.Button {
+						ui.t("common.cancel"),
+						tone = "ghost",
+						size = "sm",
+						on_click = function()
+							oc_error:set("")
+							oc_reload()
+						end,
+					}),
+					ds.Button {
+						ui.t("settings.providers.opencode.remote.connect.button"),
+						tone = "secondary",
+						size = "sm",
+						busy = oc_connecting,
+						on_click = oc_connect,
+					},
+				},
+			}),
+		}),
+		-- (Its own: the agent's switches and, for one added from the
+		-- registry, its environment and a way to remove it.)
+		ui.show(function(): boolean
+			return not opencode() or oc_tab:get() == "agent"
+		end, ds.Settings.Group {
 			ui.div {
 				w_full = true,
 				opacity = function()
@@ -869,7 +1249,7 @@ local function settings_dialog(): Node
 					on_click = remove,
 				},
 			}),
-		},
+		}),
 	}
 end
 

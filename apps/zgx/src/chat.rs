@@ -66,6 +66,10 @@ const STALE_SECONDS: i64 = 45;
 /// How much of an upload goes in one chunk, in base64 characters (the
 /// shipping app's).
 const CHUNK: usize = 680_000;
+/// The agents whose catalog follows them live (OpenCode's service: agents
+/// and providers its configuration adds or drops), asked again as the
+/// model picker opens.
+const LIVE_CATALOGS: &[&str] = &["opencode"];
 
 thread_local! {
     static CHATS: Rc<Chats> = Rc::new(Chats::default());
@@ -863,6 +867,11 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let c = c.clone();
         engine::get().spawn(async move { c.load_catalog(true).await });
     });
+    // The model picker opened: the catalogs that follow their agent live
+    // asked again (cheap when nothing changed), so an agent added in
+    // OpenCode's configuration shows without a restart.
+    let c = chats.clone();
+    host.action("chat.catalog_fresh", move |_| c.catalog_fresh());
     // The composer's device: its catalog is `chat.catalog` from now on (nil
     // or this device: this one's).
     let c = chats.clone();
@@ -1364,6 +1373,29 @@ impl Chats {
         self.publish_views();
     }
 
+    /// [`LIVE_CATALOGS`]' models on this device again, unforced: the agent
+    /// answers from its cache unless its catalog changed since. Shown only
+    /// when they differ.
+    fn catalog_fresh(self: &Rc<Self>) {
+        for id in LIVE_CATALOGS {
+            if !self.models.borrow().contains_key(*id) {
+                continue;
+            }
+            let me = self.clone();
+            engine::get().spawn(async move {
+                let Ok(list) = engine::get().call("ListModels", json!({ "harness": id })).await else {
+                    return;
+                };
+                let list = list.as_array().cloned().unwrap_or_default();
+                if me.models.borrow().get(*id) == Some(&list) {
+                    return;
+                }
+                me.models.borrow_mut().insert((*id).to_owned(), list);
+                me.publish_catalog();
+            });
+        }
+    }
+
     /// `harness`'s logins on `device` ("" or this one: here) changed: its
     /// models looked up again, as the agent now lists them (Pi signed in to
     /// Claude lists Claude's models). Here, that agent's alone; another
@@ -1681,6 +1713,34 @@ pub(crate) fn made(params: &Json) {
     CHATS.with(|c| c.made(id, row));
 }
 
+/// Whether `words` are one of OpenCode's TUI actions, as the engine takes
+/// them for an OpenCode chat (`/compact`, `/undo`, `/redo`, `/fork`,
+/// `!command`, typed or picked from the `/` list, whose link the agent gets
+/// as the command): no message.
+fn is_opencode_action(words: &str) -> bool {
+    let words = zeron_proto::invocation::harness_prompt(words, zeron_proto::HarnessId::Opencode);
+    let words = words.trim();
+    matches!(words, "/compact" | "/undo" | "/redo" | "/fork")
+        || words.strip_prefix('!').is_some_and(|command| !command.trim().is_empty())
+}
+
+/// The access modes a listed harness honours (`accessModes`), as the
+/// composer's values: `supervised`, `edits`, `full`.
+fn access_values(harness: &Json) -> Vec<Value> {
+    harness["accessModes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|mode| match mode.as_str()? {
+            "supervised" => Some("supervised"),
+            "auto-accept-edits" => Some("edits"),
+            "full-access" => Some("full"),
+            _ => None,
+        })
+        .map(Value::from)
+        .collect()
+}
+
 /// `chat.catalog`: the agents with models listed, each model as the picker
 /// takes it; ready once any agent's models are in (more may follow), or all
 /// have answered (`done`). (`device`: whose, when it isn't this one.)
@@ -1700,6 +1760,10 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
             ("mark", Value::from(mark(id).as_str())),
             // An agent added from the ACP registry draws its own icon.
             ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),
+            // The access modes it honours, as the composer names them.
+            ("access", Value::List(access_values(h).into())),
+            // OpenCode's own words for its two (its TUI's permission modes).
+            ("access_style", if id == "opencode" { Value::from("opencode") } else { Value::Nil }),
         ]));
         for m in list {
             models.push(model_value(id, m));
@@ -2466,22 +2530,29 @@ impl View {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(new_id);
         // Shown until the transcript has it (the page's own copy kept in
-        // step as the list is published again meanwhile), sending.
+        // step as the list is published again meanwhile), sending. An
+        // OpenCode action (`/compact`, `/undo`, `!command`, …) is no message:
+        // the transcript shows what it did instead.
         let mut pending = self.pending.borrow_mut();
         let prompts = pending.entry(id.clone()).or_default();
         // (Shown already while its chat was being made: `chat.creating`.)
         prompts.retain(|p| p.id != message_id);
-        prompts.push(Pending {
-            id: message_id.clone(),
-            words: words.clone(),
-            paths: local_paths(&req),
-            waiting: "sending",
-            retry: None,
-            at: stamp(now_seconds()),
-            held: false,
-            row: false,
-            transfers: Vec::new(),
-        });
+        if !(chat["config"]["harness"].as_str() == Some("opencode") && is_opencode_action(&words)) {
+            prompts.push(Pending {
+                id: message_id.clone(),
+                words: words.clone(),
+                paths: local_paths(&req),
+                waiting: "sending",
+                retry: None,
+                at: stamp(now_seconds()),
+                held: false,
+                row: false,
+                transfers: Vec::new(),
+            });
+        }
+        if prompts.is_empty() {
+            pending.remove(&id);
+        }
         drop(pending);
         self.publish_messages();
         // To a chat Cloud is still making: after its first message, which
@@ -4405,6 +4476,9 @@ fn apply_counted(entries: &mut Vec<Entry>, frame: &mut Json, counted: bool) -> R
         entry.patched = None;
         let entry = entry.json.as_mut().ok_or(())?;
         let streaming = entry["status"].as_str() == Some("streaming");
+        // (Only a reply's words are drafted as they're written; a note's
+        // summary growing is its row's own text, rebuilt to show it.)
+        let reply = entry["role"].as_str() == Some("assistant");
         let part = entry["parts"]
             .as_array_mut()
             .and_then(|parts| parts.iter_mut().find(|p| p["id"] == add["part"]))
@@ -4431,9 +4505,10 @@ fn apply_counted(entries: &mut Vec<Entry>, frame: &mut Json, counted: bool) -> R
             // Words of the reply being written: the draft; of a finished
             // one, its row. A text part that had none (written empty, or
             // blank) has no block in its row yet (`blocks_of`): its first
-            // words make it, as a thought's do.
-            "text" if streaming && was_empty && !more.trim().is_empty() => rows = true,
-            "text" if streaming => words_changed = true,
+            // words make it, as a thought's do. A note's (a compaction's
+            // summary) is its row's too, growing as the summary is written.
+            "text" if streaming && reply && was_empty && !more.trim().is_empty() => rows = true,
+            "text" if streaming && reply => words_changed = true,
             "text" => rows = true,
             // Thinking shows as a row once it has words; more of them, as
             // it's written, are the draft's, as a reply's are. (More of a
@@ -4728,6 +4803,73 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             }
             Some(Value::record(fields))
         }
+        // Where the agent's session compacted (OpenCode's), as OpenCode's
+        // own clients show it: "Session compaction started", the summary as
+        // it is written, then "Session compacted · 648.4K in · 2.8K out".
+        "system"
+            if let Some(part) = entry["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|p| p["kind"].as_str() == Some("compaction")) =>
+        {
+            let status = part["status"].as_str().unwrap_or_default();
+            let live = matches!(status, "running" | "pending");
+            let summary = entry["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|p| p["kind"].as_str() == Some("text"))
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let close = (!live).then(|| compaction_note(status, part["tokensIn"].as_u64(), part["tokensOut"].as_u64()));
+            Some(Value::record([
+                ("id", Value::from(id)),
+                ("role", Value::from("note")),
+                ("kind", Value::from("compaction")),
+                ("open", Value::from("Session compaction started")),
+                ("text", Value::from(summary.as_str())),
+                ("close", close.map_or(Value::Nil, |close| Value::from(close.as_str()))),
+                ("live", Value::Bool(live)),
+            ]))
+        }
+        // An undo staged in the agent's session (OpenCode's): where the
+        // turns it took back were, as its TUI says it — "2 messages
+        // reverted", the files it put back, "/redo to restore".
+        "system"
+            if let Some(part) = entry["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|p| p["kind"].as_str() == Some("revert")) =>
+        {
+            let count = part["messages"].as_u64().unwrap_or_default();
+            let files: Vec<Value> = part["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|file| {
+                    Value::record([
+                        ("path", Value::from(file["path"].as_str().unwrap_or_default())),
+                        ("status", Value::from(file["status"].as_str().unwrap_or("modified"))),
+                        ("additions", Value::Num(file["additions"].as_f64().unwrap_or_default())),
+                        ("deletions", Value::Num(file["deletions"].as_f64().unwrap_or_default())),
+                    ])
+                })
+                .collect();
+            // (`1 message reverted`, `3 messages reverted` — as the engine's
+            // `revert_note` says it.)
+            let s = if count == 1 { "" } else { "s" };
+            Some(Value::record([
+                ("id", Value::from(id)),
+                ("role", Value::from("note")),
+                ("kind", Value::from("revert")),
+                ("text", Value::from(format!("{count} message{s} reverted").as_str())),
+                ("close", Value::from("/redo to restore")),
+                ("files", Value::List(Rc::from(files))),
+            ]))
+        }
         // The provider-switch seam (the engine's system entry when a chat
         // moves to another agent): `[mark] From → [mark] To` over the prompt
         // that switched, as the shipping app's `switch_marker`.
@@ -4757,6 +4899,23 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             ]))
         }
         _ => None,
+    }
+}
+
+/// What a compaction part says (the engine's `zeron_doc::compaction_note`,
+/// in OpenCode's own words and number format).
+fn compaction_note(status: &str, tokens_in: Option<u64>, tokens_out: Option<u64>) -> String {
+    let short = |n: u64| match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}K", n as f64 / 1_000.0),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    };
+    match (status, tokens_in, tokens_out) {
+        ("failed", ..) => "Compaction failed".to_owned(),
+        (_, Some(tokens_in), Some(tokens_out)) if tokens_in + tokens_out > 0 => {
+            format!("Session compacted · {} in · {} out", short(tokens_in), short(tokens_out))
+        }
+        _ => "Session compacted".to_owned(),
     }
 }
 
@@ -7298,6 +7457,36 @@ mod tests {
         assert!(matches!(card.field("mark"), Some(Value::Str(s)) if s.as_ref() == mark("codex")));
         CHATS.with(|c| c.chats.borrow_mut().remove("c1"));
     }
+    #[test]
+    fn a_compaction_shows_between_its_rules_and_an_undo_says_what_it_took() {
+        let compaction = |status: &str, summary: Option<&str>| {
+            let mut parts = vec![json!({ "id": "c0", "kind": "compaction", "status": status, "tokensIn": 648_371, "tokensOut": 2_812 })];
+            parts.extend(summary.map(|text| json!({ "id": "s0", "kind": "text", "text": text })));
+            message(&json!({ "id": "oc:c", "role": "system", "parts": parts }), None).expect("a compaction shows")
+        };
+        let running = compaction("running", Some("## Goal"));
+        assert!(matches!(running.field("open"), Some(Value::Str(s)) if s.as_ref() == "Session compaction started"));
+        assert!(matches!(running.field("text"), Some(Value::Str(s)) if s.as_ref() == "## Goal"));
+        assert!(matches!(running.field("close"), None | Some(Value::Nil)));
+        assert!(matches!(running.field("live"), Some(Value::Bool(true))));
+        let done = compaction("completed", Some("## Goal\n- tides"));
+        assert!(matches!(done.field("close"), Some(Value::Str(s)) if s.as_ref() == "Session compacted · 648.4K in · 2.8K out"));
+        let undo = |part: serde_json::Value| {
+            message(&json!({ "id": "oc:revert", "role": "system", "parts": [part] }), None)
+                .expect("an undo shows")
+        };
+        // (The part as `MessagePart::Revert` writes it: `messages`, `files`.)
+        let two = undo(json!({ "id": "r0", "kind": "revert", "messages": 2,
+            "files": [{ "path": "a.rs", "status": "modified", "additions": 3, "deletions": 1 }] }));
+        assert!(matches!(two.field("text"), Some(Value::Str(s)) if s.as_ref() == "2 messages reverted"));
+        assert!(matches!(two.field("close"), Some(Value::Str(s)) if s.as_ref() == "/redo to restore"));
+        let Some(Value::List(files)) = two.field("files") else { panic!("no files") };
+        assert!(matches!(files[0].field("path"), Some(Value::Str(s)) if s.as_ref() == "a.rs"));
+        // (One: `message`, not `messages`.)
+        let one = undo(json!({ "id": "r0", "kind": "revert", "messages": 1 }));
+        assert!(matches!(one.field("text"), Some(Value::Str(s)) if s.as_ref() == "1 message reverted"));
+    }
+
     #[test]
     fn a_prompts_attached_passages_show_as_chips_on_the_sent_message() {
         let text = "Why this one?\n\nSelected from this conversation:\n- GPT-5.5, Sep 8, 1:43 PM: Layout dominates.\n  Paint is second.\n- You: the first ask\n\nAttached images (local files — open them to view):\n- /tmp/shot.png";

@@ -133,6 +133,9 @@ end
 -- The tray open behind the composer (its todos, tasks or queue), kept
 -- across a reload.
 local TRAY = ui.state("chat_tray", nil :: ("todos" | "tasks" | "queue")?)
+-- How long an undo's turn may fade before it's let go of, the undo come
+-- to nothing.
+local UNDO_WAIT_MS = 3000
 
 local function Composer(): Node
 	-- The session shown, or nil on a new chat.
@@ -865,6 +868,37 @@ local function Composer(): Node
 		end)
 	end)
 
+	-- One of OpenCode's TUI actions (`/compact`, `/undo`, `/redo`, `/fork`,
+	-- `!command`), typed or picked from the `/` list (its link): no message of
+	-- the person's — the session shows what it did (the engine's
+	-- opencode_sync, src/chat.rs `opencode_action`).
+	local function opencode_action(text: string): string?
+		local t = string.match(text, "^%s*(.-)%s*$") or text
+		t = string.match(t, "^%[(/[%w_%-]+)%]%(zeron%-invoke:%x+%)$") or t
+		if t == "/compact" or t == "/undo" or t == "/redo" or t == "/fork" then
+			return string.sub(t, 2)
+		end
+		if string.sub(t, 1, 1) == "!" and string.match(string.sub(t, 2), "%S") then
+			return "shell"
+		end
+		return nil
+	end
+
+	-- The newest prompt in the transcript: what an undo takes back. (An undo
+	-- staged in the session stands as a note, and the turns it took back are
+	-- gone from the list until a redo: so this is the turn the next undo
+	-- takes back, exactly as the engine stages it.)
+	local function last_prompt(): any
+		local list = store.messages
+		for i = list:len(), 1, -1 do
+			local m = list:at(i)
+			if m and m.role == "user" then
+				return m
+			end
+		end
+		return nil
+	end
+
 	local function send(text: string)
 		-- Editing a queued message: Send saves it.
 		if editing:peek() then
@@ -939,6 +973,35 @@ local function Composer(): Node
 				return
 			end
 			if running:peek() then
+				deliver(nil)
+				return
+			end
+			-- An OpenCode action: no prompt joins the transcript. An undo puts
+			-- the prompt it takes back in the composer, as OpenCode's own
+			-- clients do, to send again as it is or changed.
+			local s = store.session:peek()
+			local action = if s and s.harness == "opencode" then opencode_action(text_out) else nil
+			if action then
+				if action == "undo" then
+					-- Its turn fades as it goes (the transcript lets go once
+					-- it's gone, or the undo comes to nothing).
+					local undone = last_prompt()
+					if undone then
+						shared.undoing:set(undone.id)
+						ui.after(UNDO_WAIT_MS, function()
+							if shared.undoing:peek() == undone.id then
+								shared.undoing:set(nil)
+							end
+						end)
+					end
+					-- (Once the composer has cleared what was sent.)
+					ui.after(0, function()
+						if undone and shared.text:peek() == "" then
+							shared.text:set(undone.text)
+							shared.focus:add(1)
+						end
+					end)
+				end
 				deliver(nil)
 				return
 			end
