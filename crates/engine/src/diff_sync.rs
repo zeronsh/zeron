@@ -159,6 +159,21 @@ struct CheckoutEntry {
     /// walk + FSEvents registration) can block for seconds, so [`add_entry`]
     /// does it off the runtime and attaches the result here once ready.
     watchers: Mutex<Vec<FsWatch>>,
+    /// The watchers cover the whole checkout (its root, within budget, and
+    /// its git dir): with them live, every change is an event.
+    watched_whole: AtomicBool,
+}
+
+impl CheckoutEntry {
+    /// Every change to the checkout arrives as an event: watched whole, and
+    /// each watch installed. (A capture then only repeats the last one, so
+    /// the repair tick needn't run Git for it.)
+    fn watched_live(&self) -> bool {
+        self.watched_whole.load(Ordering::Acquire) && {
+            let watchers = lock(&self.watchers);
+            !watchers.is_empty() && watchers.iter().all(FsWatch::is_live)
+        }
+    }
 }
 
 /// Working-tree snapshot recorded when a chat's turn dispatches — the diff
@@ -803,6 +818,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         cancel: inner.cancel.child_token(),
         kick_tx: kick_tx.clone(),
         watchers: Mutex::new(Vec::new()),
+        watched_whole: AtomicBool::new(false),
     });
     lock(&inner.entries).insert(entry.identity.id.clone(), entry.clone());
     tokio::spawn(entry_task(
@@ -825,8 +841,9 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         let Some(entry) = weak.upgrade() else {
             return; // entry removed before watchers were ready
         };
-        let watchers = build_watchers(&FsWatchHub::global(), &entry.identity, &kick_tx);
+        let (watchers, whole) = build_watchers(&FsWatchHub::global(), &entry.identity, &kick_tx);
         *lock(&entry.watchers) = watchers;
+        entry.watched_whole.store(whole, Ordering::Release);
     });
 }
 
@@ -836,13 +853,17 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
 /// own; the hub's rescan signals (watch went live, events possibly lost) kick
 /// like any change. Failures are fine: the initial + repair sync still keep
 /// the snapshot correct. Blocking (budget walk) — call from the blocking pool.
+/// Also whether they cover the whole checkout (the root and the git dir).
 fn build_watchers(
     hub: &Arc<FsWatchHub>,
     identity: &CheckoutIdentity,
     kick_tx: &mpsc::UnboundedSender<()>,
-) -> Vec<FsWatch> {
+) -> (Vec<FsWatch>, bool) {
     let mut watchers = Vec::new();
-    for target in watch_targets(identity) {
+    let targets = watch_targets(identity);
+    let covers = |path: &Path| targets.iter().any(|target| path.starts_with(target));
+    let whole = covers(&identity.root) && covers(&identity.git_dir);
+    for target in targets {
         let tx = kick_tx.clone();
         watchers.push(
             hub.watch(&target, notify::RecursiveMode::Recursive, move |event| {
@@ -852,7 +873,7 @@ fn build_watchers(
             }),
         );
     }
-    watchers
+    (watchers, whole)
 }
 
 /// Whether a watch event can change the checkout's diff. Opens and reads are
@@ -1087,8 +1108,13 @@ async fn diff_sync_task(
                 let chats = chats_rx.borrow().clone();
                 // Fresh: revalidate every memoized identity against git.
                 reconcile(&inner, chats, true).await;
+                // A checkout watched whole and live has told of every change
+                // already (a lost event comes as the hub's rescan): capturing
+                // it again would only run Git to find the same diff.
                 for entry in lock(&inner.entries).values() {
-                    let _ = entry.kick_tx.send(());
+                    if !entry.watched_live() {
+                        let _ = entry.kick_tx.send(());
+                    }
                 }
             }
         }
@@ -2222,7 +2248,11 @@ mod watch_budget_tests {
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let hub = crate::fs_watch::FsWatchHub::new();
-        let watchers = super::build_watchers(&hub, &identity(&root, &root.join(".git")), &tx);
+        let (watchers, whole) =
+            super::build_watchers(&hub, &identity(&root, &root.join(".git")), &tx);
+        // (Its root holds its git dir: one watch covers the whole checkout,
+        // so the repair tick leaves it to its events.)
+        assert!(whole);
         // Install now (the batch worker would within ~100 ms) and expect the
         // attach rescan's kick; then let registration settle and drop
         // anything it raised.
