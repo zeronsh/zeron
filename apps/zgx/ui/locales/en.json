@@ -1535,15 +1535,29 @@
           "terms": "opencode projects folders import",
           "description": "A synced session in a folder that isn't a project yet adds it as one. Off, only sessions in your projects show."
         },
-        "service": {
-          "label": "Use the background service",
-          "terms": "opencode service server tui desktop shared",
-          "description": "Run on the service OpenCode's TUI and desktop app share, so a session moves between them live. Off, each chat runs on a server of its own."
+        "tabs": {
+          "label": "OpenCode settings",
+          "sessions": "Sessions",
+          "server": "Server",
+          "advanced": "Advanced"
+        },
+        "runs_on": {
+          "label": "Chats run on",
+          "terms": "opencode service server tui desktop shared private remote ssh tailscale pairing",
+          "service": {
+            "label": "Background service",
+            "description": "The service OpenCode's TUI and desktop app share on this computer, so a session moves between them live."
+          },
+          "private": {
+            "label": "A server per chat",
+            "description": "Each chat starts a server of its own on this computer: nothing is shared with OpenCode's TUI or desktop app."
+          },
+          "remote": {
+            "label": "Remote server",
+            "description": "An OpenCode server on another computer, in place of this one's service: chats, synced sessions and sign-ins go to it, and its tools work on that computer's files."
+          }
         },
         "remote": {
-          "label": "Remote server",
-          "terms": "opencode remote server ssh tailscale pairing password address",
-          "description": "Use an OpenCode server on another computer in place of this one's service: chats, synced sessions and sign-ins go to it, and its tools work on that computer's files.",
           "connected": "Connected to the OpenCode server",
           "mode": {
             "label": "Connect with",
@@ -1575,6 +1589,11 @@
             "label": "Connect",
             "description": "Saves these and checks that the server answers.",
             "button": "Connect"
+          },
+          "folded": {
+            "description": "Connected. Chats, synced sessions and sign-ins go to this server.",
+            "named": "{target}. Chats, synced sessions and sign-ins go to this server.",
+            "change": "Change"
           }
         }
       },

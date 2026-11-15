@@ -2026,7 +2026,7 @@ fn primary_agents(agents: &Value) -> impl Iterator<Item = (&str, &str)> {
 }
 
 /// The agent the service gives a prompt that names none (2.x): its
-/// default, read now (a profile or the configuration may have changed it).
+/// default, read now (its configuration may have changed it).
 async fn service_default_agent(server: &Server, dir: Option<&str>) -> String {
     server
         .get_json("/api/agent", dir)

@@ -124,6 +124,7 @@ local engine: { [string]: any } = {
 	},
 	GetTitleSettings = {},
 	GetNativeSubagents = { switchable = { "claude-code" }, off = {} },
+	GetOpencodeSettings = { syncSessions = false, addProjects = false, backgroundService = true, remote = false, remoteMode = "address" },
 }
 local banners = { desktop = true, background_only = true, agent_updates = true }
 
@@ -297,6 +298,11 @@ local answers: { [string]: (arg: any) -> any } = {
 				engine[get] = w
 			elseif m == "SetTitleSettings" then
 				engine[get] = arg.params
+			elseif m == "SetOpencodeSettings" then
+				-- (A pairing link is redeemed, never kept.)
+				local o = table.clone(arg.params)
+				o.remoteLink = nil
+				engine[get] = o
 			end
 			return settled(engine[get])
 		end

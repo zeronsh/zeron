@@ -1535,15 +1535,29 @@
           "terms": "项目 文件夹 opencode projects folders import",
           "description": "同步的会话所在文件夹尚不是项目时，将其添加为项目。关闭后，只显示你的项目中的会话。"
         },
-        "service": {
-          "label": "使用后台服务",
-          "terms": "服务 opencode service server tui desktop shared",
-          "description": "在 OpenCode 终端界面和桌面应用共享的服务上运行，会话可在它们之间实时切换。关闭后，每个聊天都在自己的服务器上运行。"
+        "tabs": {
+          "label": "OpenCode 设置",
+          "sessions": "会话",
+          "server": "服务器",
+          "advanced": "高级"
+        },
+        "runs_on": {
+          "label": "聊天运行于",
+          "terms": "服务 远程 服务器 配对 opencode service server tui desktop shared private remote ssh tailscale pairing",
+          "service": {
+            "label": "后台服务",
+            "description": "本机上 OpenCode 终端界面和桌面应用共享的服务，会话可在它们之间实时切换。"
+          },
+          "private": {
+            "label": "每个聊天一个服务器",
+            "description": "每个聊天在本机启动自己的服务器，不与 OpenCode 终端界面或桌面应用共享。"
+          },
+          "remote": {
+            "label": "远程服务器",
+            "description": "使用另一台电脑上的 OpenCode 服务器代替本机服务：聊天、同步的会话和登录都会转到它，它的工具作用于那台电脑上的文件。"
+          }
         },
         "remote": {
-          "label": "远程服务器",
-          "terms": "opencode remote server ssh tailscale pairing password address 远程 服务器 配对",
-          "description": "使用另一台电脑上的 OpenCode 服务器代替本机服务：聊天、同步的会话和登录都会转到它，它的工具作用于那台电脑上的文件。",
           "connected": "已连接到 OpenCode 服务器",
           "mode": {
             "label": "连接方式",
@@ -1575,6 +1589,11 @@
             "label": "连接",
             "description": "保存这些设置并检查服务器是否响应。",
             "button": "连接"
+          },
+          "folded": {
+            "description": "已连接。聊天、同步的会话和登录都会转到这台服务器。",
+            "named": "{target}。聊天、同步的会话和登录都会转到这台服务器。",
+            "change": "更改"
           }
         }
       },

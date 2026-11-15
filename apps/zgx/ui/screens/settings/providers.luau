@@ -762,8 +762,9 @@ local function settings_dialog(): Node
 		end)
 	end)
 	-- OpenCode's own (this Mac's engine: GetOpencodeSettings): whether its
-	-- sessions show here, whether their folders become projects, and
-	-- whether chats run on its background service.
+	-- sessions show here, whether their folders become projects, and where
+	-- chats run — its background service, a server of each chat's own, or a
+	-- remote server in the service's place: one of the three.
 	local function opencode(): boolean
 		local a = agent()
 		return a ~= nil and a.id == "opencode"
@@ -782,12 +783,26 @@ local function settings_dialog(): Node
 	local oc_ssh = ui.state("settings_agent_oc_ssh", "")
 	local oc_error = ui.state("settings_agent_oc_error", "")
 	local oc_connecting = ui.state("settings_agent_oc_connecting", false)
-	local function oc_show(v: any)
+	-- Where chats run, as chosen ("service", "private", "remote"), and
+	-- whether the remote's fields are open (folded to one row once it's
+	-- connected). (`oc_remote`: whether one is saved.)
+	local oc_where = ui.state("settings_agent_oc_where", "service")
+	local oc_editing = ui.state("settings_agent_oc_editing", false)
+	-- The dialog's tabs: how its chats behave, which of OpenCode's sessions
+	-- show here, and where they run.
+	local oc_tab = ui.state("settings_agent_oc_tab", "sessions")
+	-- `fresh`: the dialog opened — a remote chosen and never connected is
+	-- let go (until then, another setting saved keeps it chosen).
+	local function oc_show(v: any, fresh: boolean?)
 		if type(v) == "table" then
 			oc_sync:set(v.syncSessions == true)
 			oc_projects:set(v.addProjects == true)
 			oc_service:set(v.backgroundService ~= false)
 			oc_remote:set(v.remote == true)
+			local pending = not fresh and oc_where:peek() == "remote" and v.remote ~= true
+			if not pending then
+				oc_where:set(if v.remote == true then "remote" elseif v.backgroundService ~= false then "service" else "private")
+			end
 			oc_mode:set(if type(v.remoteMode) == "string" and v.remoteMode ~= "" then v.remoteMode else "address")
 			oc_name:set(v.remoteName or "")
 			oc_url:set(v.remoteUrl or "")
@@ -799,6 +814,10 @@ local function settings_dialog(): Node
 				oc_link:set("")
 			end
 			oc_error:set(if refused then v.remoteError else "")
+			oc_editing:set(refused or v.remote ~= true)
+			if fresh then
+				oc_tab:set(if refused then "server" else "sessions")
+			end
 		end
 	end
 	-- Every field, each save: one missing reads as its default.
@@ -836,16 +855,42 @@ local function settings_dialog(): Node
 		end)
 	end
 	local function oc_remote_on(): boolean
-		return opencode() and oc_remote:get()
+		return opencode() and oc_where:get() == "remote" and oc_editing:get()
+	end
+	-- A remote connected: one row says which, with a way to change it.
+	local function oc_remote_folded(): boolean
+		return opencode() and oc_where:get() == "remote" and not oc_editing:get()
 	end
 	local function oc_in(mode: string): () -> boolean
 		return function()
 			return oc_remote_on() and oc_mode:get() == mode
 		end
 	end
+	local function oc_reload(fresh: boolean?)
+		host.call("settings.engine", { method = "GetOpencodeSettings", params = {} }):after(function(v: any)
+			oc_show(v, fresh)
+		end, function() end)
+	end
+	-- Chosen where chats run: this computer's service or a server of each
+	-- chat's own is saved at once (a remote set is let go); a remote waits
+	-- for Connect.
+	local function oc_run_on(where: string)
+		oc_error:set("")
+		if where == "remote" then
+			oc_editing:set(not oc_remote:peek())
+			return
+		end
+		local params = oc_params()
+		params.remote = false
+		params.backgroundService = where == "service"
+		host.call("settings.engine", { method = "SetOpencodeSettings", params = params }):after(oc_show, function()
+			oc_reload()
+			toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+		end)
+	end
 	ui.effect(function()
 		if dialog_open:get() and opencode() then
-			host.call("settings.engine", { method = "GetOpencodeSettings", params = {} }):after(oc_show, function() end)
+			oc_reload(true)
 		end
 	end)
 	local function oc_set(key: string, state: State<boolean>): (on: boolean) -> ()
@@ -871,7 +916,21 @@ local function settings_dialog(): Node
 		size = "md",
 		cancel = false,
 		confirm = { label = ui.t("settings.providers.done") :: any },
-		ds.Settings.Group {
+		-- (OpenCode's settings, on three tabs of their own: what shows here,
+		-- where chats run, and the rest. Each is short enough for the
+		-- window, so the dialog never runs past its foot.)
+		ui.show(opencode, ds.Tabs {
+			value = oc_tab,
+			label = ui.t("settings.providers.opencode.tabs.label"),
+			options = {
+				{ value = "sessions", label = ui.t("settings.providers.opencode.tabs.sessions") },
+				{ value = "server", label = ui.t("settings.providers.opencode.tabs.server") },
+				{ value = "advanced", label = ui.t("settings.providers.opencode.tabs.advanced") },
+			} :: any,
+		}),
+		ui.show(function(): boolean
+			return opencode() and oc_tab:get() == "sessions"
+		end, ds.Settings.Group {
 			ui.show(opencode, ds.Settings.Row {
 				label = ui.t("settings.providers.opencode.sync.label"),
 				description = ui.t("settings.providers.opencode.sync.description"),
@@ -899,27 +958,48 @@ local function settings_dialog(): Node
 					},
 				},
 			}),
+		}),
+		ui.show(function(): boolean
+			return opencode() and oc_tab:get() == "server"
+		end, ds.Settings.Group {
 			ui.show(opencode, ds.Settings.Row {
-				label = ui.t("settings.providers.opencode.service.label"),
-				description = ui.t("settings.providers.opencode.service.description"),
-				control = ds.Switch {
-					value = oc_service,
-					label = ui.t("settings.providers.opencode.service.label"),
-					on_change = oc_set("backgroundService", oc_service),
+				label = ui.t("settings.providers.opencode.runs_on.label"),
+				description = function()
+					return ui.t(`settings.providers.opencode.runs_on.{oc_where:get()}.description`):get()
+				end,
+				control = ds.Select {
+					value = oc_where,
+					name = ui.t("settings.providers.opencode.runs_on.label"),
+					size = "sm",
+					w = 200,
+					options = {
+						{ value = "service", label = ui.t("settings.providers.opencode.runs_on.service.label") },
+						{ value = "private", label = ui.t("settings.providers.opencode.runs_on.private.label") },
+						{ value = "remote", label = ui.t("settings.providers.opencode.runs_on.remote.label") },
+					} :: any,
+					on_change = oc_run_on,
 				},
 			}),
-			ui.show(opencode, ds.Settings.Row {
-				label = ui.t("settings.providers.opencode.remote.label"),
-				description = ui.t("settings.providers.opencode.remote.description"),
-				control = ds.Switch {
-					value = oc_remote,
-					label = ui.t("settings.providers.opencode.remote.label"),
-					on_change = function(on: boolean)
-						-- On waits for Connect; off is back to this computer's
-						-- service at once.
-						if not on then
-							oc_set("remote", oc_remote)(false)
-						end
+			ui.show(oc_remote_folded, ds.Settings.Row {
+				label = function()
+					local name = oc_name:get()
+					if name ~= "" then
+						return name
+					end
+					return if oc_mode:get() == "ssh" then oc_ssh:get() else oc_url:get()
+				end,
+				description = function()
+					local target = if oc_mode:get() == "ssh" then oc_ssh:get() else oc_url:get()
+					return if oc_name:get() ~= "" and target ~= ""
+						then ui.t("settings.providers.opencode.remote.folded.named", { target = target }):get()
+						else ui.t("settings.providers.opencode.remote.folded.description"):get()
+				end,
+				control = ds.Button {
+					ui.t("settings.providers.opencode.remote.folded.change"),
+					tone = "secondary",
+					size = "sm",
+					on_click = function()
+						oc_editing:set(true)
 					end,
 				},
 			}),
@@ -1009,14 +1089,37 @@ local function settings_dialog(): Node
 					local err = oc_error:get()
 					return if err ~= "" then err else ui.t("settings.providers.opencode.remote.connect.description"):get()
 				end,
-				control = ds.Button {
-					ui.t("settings.providers.opencode.remote.connect.button"),
-					tone = "secondary",
-					size = "sm",
-					busy = oc_connecting,
-					on_click = oc_connect,
+				control = ui.row {
+					gap = "$space.2",
+					items = "center",
+					-- (A remote connected already: its fields folded again,
+					-- unchanged.)
+					ui.show(function(): boolean
+						return oc_remote:get()
+					end, ds.Button {
+						ui.t("common.cancel"),
+						tone = "ghost",
+						size = "sm",
+						on_click = function()
+							oc_error:set("")
+							oc_reload()
+						end,
+					}),
+					ds.Button {
+						ui.t("settings.providers.opencode.remote.connect.button"),
+						tone = "secondary",
+						size = "sm",
+						busy = oc_connecting,
+						on_click = oc_connect,
+					},
 				},
 			}),
+		}),
+		-- (Its own: the agent's switches and, for one added from the
+		-- registry, its environment and a way to remove it.)
+		ui.show(function(): boolean
+			return not opencode() or oc_tab:get() == "advanced"
+		end, ds.Settings.Group {
 			ui.div {
 				w_full = true,
 				opacity = function()
@@ -1115,7 +1218,7 @@ local function settings_dialog(): Node
 					on_click = remove,
 				},
 			}),
-		},
+		}),
 	}
 end
 

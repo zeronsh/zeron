@@ -67,7 +67,7 @@ const STALE_SECONDS: i64 = 45;
 /// shipping app's).
 const CHUNK: usize = 680_000;
 /// The agents whose catalog follows them live (OpenCode's service: agents
-/// and providers added from its TUI or a profile switch), asked again as the
+/// and providers its configuration adds or drops), asked again as the
 /// model picker opens.
 const LIVE_CATALOGS: &[&str] = &["opencode"];
 
@@ -869,7 +869,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     });
     // The model picker opened: the catalogs that follow their agent live
     // asked again (cheap when nothing changed), so an agent added in
-    // OpenCode, or another profile, shows without a restart.
+    // OpenCode's configuration shows without a restart.
     let c = chats.clone();
     host.action("chat.catalog_fresh", move |_| c.catalog_fresh());
     // The composer's device: its catalog is `chat.catalog` from now on (nil
@@ -4483,6 +4483,9 @@ fn apply_counted(entries: &mut Vec<Entry>, frame: &mut Json, counted: bool) -> R
         entry.patched = None;
         let entry = entry.json.as_mut().ok_or(())?;
         let streaming = entry["status"].as_str() == Some("streaming");
+        // (Only a reply's words are drafted as they're written; a note's
+        // summary growing is its row's own text, rebuilt to show it.)
+        let reply = entry["role"].as_str() == Some("assistant");
         let part = entry["parts"]
             .as_array_mut()
             .and_then(|parts| parts.iter_mut().find(|p| p["id"] == add["part"]))
@@ -4509,9 +4512,10 @@ fn apply_counted(entries: &mut Vec<Entry>, frame: &mut Json, counted: bool) -> R
             // Words of the reply being written: the draft; of a finished
             // one, its row. A text part that had none (written empty, or
             // blank) has no block in its row yet (`blocks_of`): its first
-            // words make it, as a thought's do.
-            "text" if streaming && was_empty && !more.trim().is_empty() => rows = true,
-            "text" if streaming => words_changed = true,
+            // words make it, as a thought's do. A note's (a compaction's
+            // summary) is its row's too, growing as the summary is written.
+            "text" if streaming && reply && was_empty && !more.trim().is_empty() => rows = true,
+            "text" if streaming && reply => words_changed = true,
             "text" => rows = true,
             // Thinking shows as a row once it has words; more of them, as
             // it's written, are the draft's, as a reply's are. (More of a
