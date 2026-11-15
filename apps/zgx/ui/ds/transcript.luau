@@ -82,6 +82,9 @@ export type Message = {
 	-- part), open while it is the tail of a reply being written. Given,
 	-- they are what shows (`text` and `tools` then only say what it holds).
 	blocks: { Block }?,
+	-- A long settled reply's runs, its blocks then the host's (src/chat.rs
+	-- `set_aside`, asked for a run at a time as it's built: `chat.reply_run`).
+	runs: { { key: string, n: number, guess: number, sum: string } }?,
 	-- Being written: the reply grows, its tools open.
 	streaming: boolean?,
 	-- When it began (`ui.now() / 1000`), and how long it worked, once done.
@@ -747,7 +750,21 @@ local function guess_run(blocks: { Block }): number
 	return math.max(0, h - 12)
 end
 
-local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?): Node
+-- A long settled reply's blocks are the host's (src/chat.rs `set_aside`): its
+-- row says its runs (`runs`: each `{ key, n, guess, sum }`) and a run's blocks
+-- are asked for as it's built (`chat.reply_run`), so opening it hands this
+-- script its end's blocks alone, not its thousands.
+local function run_blocks(id: string, key: string): { Block }
+	local ok, list = pcall(ui.call_sync, "chat.reply_run", { id = id, key = key })
+	return if ok and type(list) == "table" then list else {}
+end
+local function aside_blocks(id: string): { Block }
+	local ok, list = pcall(ui.call_sync, "chat.reply_blocks", id)
+	return if ok and type(list) == "table" then list else {}
+end
+
+-- (`aside`: the reply's blocks are the host's, its runs said by its row.)
+local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?, aside: boolean?): Node
 	local function block(b: Block, brow: State<Block>): Node
 		if b.kind == "tools" or b.kind == "work" then
 			return Activity {
@@ -867,7 +884,13 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 	end
 	-- (A reply being written may grow long as it's watched: windowed from
 	-- the start, one run while it's short.)
-	if not view or (#(m.blocks or {}) <= LONG_REPLY and not m.streaming) then
+	if aside and not view then
+		list = function(): { Block }
+			local _ = now().runs
+			return aside_blocks(m.id)
+		end
+	end
+	if not view or (not aside and #(m.blocks or {}) <= LONG_REPLY and not m.streaming) then
 		return ui.each(ui.computed(list), function(b: Block, _i: number, brow: State<Block>): Node
 			return block(b, brow)
 		end, { key = key, w_full = true, gap = "$space.3" })
@@ -893,15 +916,43 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		end
 		return yes
 	end
-	type Run = { key: string, blocks: { Block } }
+	type Run = { key: string, blocks: { Block }?, guess: number?, sum: string?, n: number? }
 	local made: { [string]: Run } = {}
+	-- (Set aside: a run's blocks as asked for, while it's the same run.)
+	local fetched: { [string]: { sum: string?, blocks: { Block } } } = {}
+	local function blocks_in(run: Run): { Block }
+		if run.blocks ~= nil then
+			return run.blocks :: { Block }
+		end
+		local got = fetched[run.key]
+		if got == nil or got.sum ~= run.sum then
+			got = { sum = run.sum, blocks = run_blocks(m.id, run.key) }
+			fetched[run.key] = got
+		end
+		return got.blocks
+	end
+	local function guess_of(run: Run): number
+		return run.guess or guess_run(run.blocks or {})
+	end
 	-- The runs within the opening's reach of its end (by their heights, kept or
 	-- guessed), as they last stood: one made there is built from the start.
 	local reach: { [string]: boolean } = {}
 	local runs = ui.computed(function(): { Run }
-		local all = list()
 		local out: { Run } = {}
 		local now_made: { [string]: Run } = {}
+		if aside then
+			-- As the host cut them: each kept (its very table, its blocks
+			-- if asked for) while it says the same run.
+			for _, r in now().runs or {} do
+				local was = made[r.key]
+				local run = if was and was.sum == r.sum and was.n == r.n
+					then was
+					else { key = r.key, guess = r.guess, sum = r.sum, n = r.n }
+				table.insert(out, run)
+				now_made[r.key] = run
+			end
+		end
+		local all = if aside then {} else list()
 		local function take(from: number, to: number)
 			local first = all[from].id
 			local was = made[first]
@@ -919,13 +970,13 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			now_made[first] = run
 		end
 		local from = 1
-		for i = 2, #all do
+		for i = 2, if aside then 0 else #all do
 			if i - from >= RUN_MOST or starts_run(all[i].id) then
 				take(from, i - 1)
 				from = i
 			end
 		end
-		if #all >= from then
+		if not aside and #all >= from then
 			take(from, #all)
 		end
 		made = now_made
@@ -938,7 +989,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				break
 			end
 			reach[out[i].key] = true
-			h += RUN_HEIGHTS.get(`{m.id}:{out[i].key}`) or guess_run(out[i].blocks)
+			h += RUN_HEIGHTS.get(`{m.id}:{out[i].key}`) or guess_of(out[i])
 		end
 		return out
 	end)
@@ -967,7 +1018,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		-- and where a reply being written grows); else held at its height
 		-- until the view says it's near.
 		local near = ui.use_state(was_near == true or reach[run.key] == true)
-		local held = ui.use_state(RUN_HEIGHTS.get(k) or guess_run(run.blocks))
+		local held = ui.use_state(RUN_HEIGHTS.get(k) or guess_of(run))
 		local r = ui.ref()
 		-- Built again after being held: its first layout makes up the
 		-- difference to the height it was held at, as ds/markdown's runs do.
@@ -985,7 +1036,11 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			local live = now().streaming == true and #all > 0 and all[#all].key == run.key
 			local c = current_key()
 			local holds = false
-			if c then
+			if c and aside and string.sub(c, 1, #m.id + 1) == `{m.id}:` then
+				-- (Its blocks not asked for yet: the host says which run has it.)
+				local ok, at = pcall(ui.call_sync, "chat.reply_run_of", { id = m.id, block = string.sub(c, #m.id + 2) })
+				holds = ok and at == run.key
+			elseif c and not aside then
 				for _, b in row:peek().blocks do
 					if c == `{m.id}:{b.id}` then
 						holds = true
@@ -1058,7 +1113,8 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			end, function(kind: string): Node
 				if kind == "built" then
 					return ui.each(ui.computed(function(): { Block }
-						return row:get().blocks
+						local r = row:get()
+						return if aside then blocks_in(r) else r.blocks
 					end), function(b: Block, _j: number, brow: State<Block>): Node
 						return block(b, brow)
 					end, { key = key, w_full = true, gap = "$space.3" })
@@ -1110,7 +1166,26 @@ local function reply(
 		provide = { message = m.id },
 		w_full = true,
 		gap = "$space.3",
-		if m.blocks ~= nil
+		if m.runs ~= nil or (m.blocks ~= nil and m.streaming)
+			-- Its blocks set aside by the host (a long settled reply), or
+			-- soon may be (one being written, once it settles): as its row
+			-- says, laid out compact, from its runs, or from its blocks.
+			then ui.presence(function(): string
+				local n = now()
+				if compact and compact() and n.compact then
+					return "compact"
+				end
+				return if n.runs ~= nil then "runs" else "blocks"
+			end, function(kind: string): Node
+				return blocks_of(function(): { Block }
+					local n = now()
+					if kind == "compact" then
+						return n.compact or {}
+					end
+					return n.blocks or {}
+				end, m, now, draft, view, kind == "runs")
+			end, { w_full = true, min_w = 0 })
+			elseif m.blocks ~= nil
 			then blocks_of(function(): { Block }
 				local n = now()
 				if compact and compact() and n.compact then
@@ -1139,7 +1214,7 @@ local function reply(
 				end,
 			}
 		),
-		if m.blocks ~= nil then nil else Markdown {
+		if m.blocks ~= nil or m.runs ~= nil then nil else Markdown {
 			text = text,
 			-- Parsed incrementally only while it can grow.
 			key = if m.streaming then `reply:{m.id}` else nil,

@@ -250,7 +250,12 @@ impl zgx_script::Unfold for FoldedEntry {
         let json = lz4_flex::block::decompress_size_prepended(&self.bytes).ok();
         let entry = json.and_then(|bytes| serde_json::from_slice::<Json>(&bytes).ok()).unwrap_or(Json::Null);
         let RowContext { doc, device, model } = &*self.context;
-        built_entry(&entry, doc, device.as_deref(), model.as_deref()).unwrap_or(Value::Nil)
+        // (Opened as it comes into view, after Settings' compact transcript
+        // may have been turned on: laid out compact as well, whichever shows.)
+        COMPACT_ANYWAY.set(true);
+        let row = built_entry(&entry, doc, device.as_deref(), model.as_deref()).unwrap_or(Value::Nil);
+        COMPACT_ANYWAY.set(false);
+        row
     }
 }
 
@@ -275,14 +280,241 @@ struct Built {
     subagents: Option<Rc<[Value]>>,
     /// Folded, its compressed bytes' length (what a chat kept is weighed by).
     folded: usize,
+    /// A long reply's blocks, held here rather than in its row (`set_aside`).
+    aside: Option<Rc<Aside>>,
+}
+
+/// A long settled reply's blocks and tools, kept out of its row. A script is
+/// handed a table for every value of a row it reads, so a reply of a thousand
+/// steps cost its 2,000 blocks' and 1,000 tools' tables each time its chat
+/// opened (about 3 ms of a long thread's open on an M5 Max, more than all it
+/// builds), though its end alone shows. Its row says its runs instead
+/// (ds/transcript's windowed runs: each its first block's id, how many
+/// blocks, a guess at its height, a sum of what it holds), and the
+/// transcript asks for a run's blocks as it builds that run
+/// (`chat.reply_run`), the end's alone as it opens.
+struct Aside {
+    /// Each run: its key (its first block's id) and its blocks.
+    runs: Vec<(Rc<str>, Rc<[Value]>)>,
+    blocks: Rc<[Value]>,
+}
+
+/// More blocks than this, a settled reply's are set aside (ds/transcript's
+/// LONG_REPLY, past which it windows them).
+const LONG_REPLY: usize = 48;
+/// ds/transcript's runs: a block whose id falls on RUN starts one, and none
+/// runs past RUN_MOST.
+const RUN: u64 = 32;
+const RUN_MOST: usize = 64;
+
+thread_local! {
+    /// The long replies set aside, by their entry's id: the latest built of
+    /// each, while a view's rows (or a chat kept) hold it.
+    static ASIDE: RefCell<rustc_hash::FxHashMap<Rc<str>, std::rc::Weak<Aside>>> = RefCell::default();
+}
+
+/// Whether block `id` starts a run (ds/transcript's `starts_run`: the same
+/// sum, so both cut a reply into the same runs).
+fn starts_run(id: &str) -> bool {
+    id.bytes().fold(0u64, |h, b| (h * 31 + u64::from(b)) % 1_000_003) % RUN == 0
+}
+
+/// About how tall a block will be before it's laid out (ds/transcript's
+/// `guess_block`, the same arithmetic).
+fn guess_block(block: &Value) -> f64 {
+    let s = |key: &str| match block.field(key) {
+        Some(Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
+    match s("kind").as_deref() {
+        Some("text") => {
+            let (mut h, mut chars, mut code, mut fenced) = (0f64, 0usize, 0usize, false);
+            let paragraph = |h: &mut f64, chars: &mut usize| {
+                if *chars > 0 {
+                    *h += (*chars as f64 / 85.).ceil() * 24. + 16.;
+                    *chars = 0;
+                }
+            };
+            let text = s("text").unwrap_or_else(|| Rc::from(""));
+            for line in text.split('\n') {
+                if line.trim_start().starts_with("```") {
+                    if fenced {
+                        h += code as f64 * 19. + 56. + 16.;
+                        code = 0;
+                    } else {
+                        paragraph(&mut h, &mut chars);
+                    }
+                    fenced = !fenced;
+                } else if fenced {
+                    code += 1;
+                } else if line.trim().is_empty() {
+                    paragraph(&mut h, &mut chars);
+                } else {
+                    chars += line.len() + 1;
+                }
+            }
+            paragraph(&mut h, &mut chars);
+            (h - 16.).max(24.)
+        }
+        Some("tools" | "work") => {
+            let live = matches!(block.field("live"), Some(Value::Bool(true)));
+            let tools = block.field("tools").map_or(0, |t| t.list().len());
+            if live { 26. * tools.max(1) as f64 } else { 26. }
+        }
+        _ => 240.,
+    }
+}
+
+/// What a block holds, summed: its id, its kind, its words' length, its
+/// tools' count and line (a run built again comes back as the same run, and
+/// isn't asked for again, unless one of these moved).
+fn block_sum(block: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    for key in ["id", "kind", "summary", "live"] {
+        match block.field(key) {
+            Some(Value::Str(s)) => s.hash(&mut h),
+            Some(Value::Bool(b)) => b.hash(&mut h),
+            _ => 0u8.hash(&mut h),
+        }
+    }
+    match block.field("text") {
+        Some(Value::Str(s)) => s.len().hash(&mut h),
+        _ => 0usize.hash(&mut h),
+    }
+    block.field("tools").map_or(0, |t| t.list().len()).hash(&mut h);
+    h.finish()
+}
+
+/// `row` (an entry's, built whole) with its blocks and tools set aside, if
+/// it's a settled reply of more than LONG_REPLY blocks; else as it is.
+fn set_aside(row: Value) -> (Value, Option<Rc<Aside>>) {
+    let Value::Map(fields) = &row else { return (row, None) };
+    let field = |key: &str| fields.iter().find(|(k, _)| &**k == key).map(|(_, v)| v);
+    let settled = matches!(field("role"), Some(Value::Str(r)) if &**r == "assistant")
+        && matches!(field("streaming"), Some(Value::Bool(false)));
+    let (Some(Value::Str(id)), Some(Value::List(blocks))) = (field("id"), field("blocks")) else {
+        return (row, None);
+    };
+    if !settled || blocks.len() <= LONG_REPLY {
+        return (row, None);
+    }
+    let id_of = |b: &Value| match b.field("id") {
+        Some(Value::Str(s)) => s.clone(),
+        _ => Rc::from(""),
+    };
+    // Cut as ds/transcript cuts them: a run ends before a block that starts
+    // one, or once it holds RUN_MOST.
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    let mut from = 0;
+    for i in 1..blocks.len() {
+        if i - from >= RUN_MOST || starts_run(&id_of(&blocks[i])) {
+            cuts.push((from, i));
+            from = i;
+        }
+    }
+    cuts.push((from, blocks.len()));
+    let mut runs = Vec::with_capacity(cuts.len());
+    let mut listed = Vec::with_capacity(cuts.len());
+    for (from, to) in cuts {
+        let slice: Rc<[Value]> = blocks[from..to].iter().cloned().collect();
+        let key = id_of(&slice[0]);
+        let guess = slice.iter().map(|b| guess_block(b) + 12.).sum::<f64>() - 12.;
+        let sum = slice.iter().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(block_sum(b)));
+        listed.push(Value::record([
+            ("key", Value::Str(key.clone())),
+            ("n", Value::Num(slice.len() as f64)),
+            ("guess", Value::Num(guess.max(0.))),
+            ("sum", Value::from(format!("{sum:x}").as_str())),
+        ]));
+        runs.push((key, slice));
+    }
+    let aside = Rc::new(Aside { runs, blocks: blocks.clone() });
+    let mut kept: Vec<(&str, Value)> =
+        fields.iter().filter(|(k, _)| !matches!(&**k, "blocks" | "tools")).map(|(k, v)| (&**k, v.clone())).collect();
+    kept.push(("runs", Value::List(listed.into())));
+    ASIDE.with_borrow_mut(|held| {
+        if held.len() >= 64 {
+            held.retain(|_, a| a.strong_count() > 0);
+        }
+        held.insert(id.clone(), Rc::downgrade(&aside));
+    });
+    (Value::record(kept), Some(aside))
+}
+
+/// The reply set aside as `id`, while something holds it.
+fn aside_of(id: &str) -> Option<Rc<Aside>> {
+    ASIDE.with_borrow(|held| held.get(id).and_then(std::rc::Weak::upgrade))
+}
+
+fn text_field(arg: &Value, key: &str) -> Rc<str> {
+    match arg.field(key) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => Rc::from(""),
+    }
+}
+
+/// A long reply's run (`{ id, key }`), as `chat.reply_run` hands it to the
+/// transcript building it: its blocks; nil once the reply is let go of.
+pub(crate) fn reply_run(arg: &Value) -> Value {
+    let key = text_field(arg, "key");
+    aside_of(&text_field(arg, "id"))
+        .and_then(|aside| aside.runs.iter().find(|(k, _)| *k == key).map(|(_, blocks)| Value::List(blocks.clone())))
+        .unwrap_or(Value::Nil)
+}
+
+/// A long reply's blocks, all of them (`chat.reply_blocks`, given its id):
+/// what a find in the chat reads. Nil once the reply is let go of.
+pub(crate) fn reply_blocks(id: &Value) -> Value {
+    let Value::Str(id) = id else { return Value::Nil };
+    aside_of(id).map_or(Value::Nil, |aside| Value::List(aside.blocks.clone()))
+}
+
+/// The key of the run of a long reply (`{ id, block }`) that holds that
+/// block (`chat.reply_run_of`), nil if none does.
+pub(crate) fn reply_run_of(arg: &Value) -> Value {
+    let block = text_field(arg, "block");
+    aside_of(&text_field(arg, "id"))
+        .and_then(|aside| {
+            let holds = |b: &Value| matches!(b.field("id"), Some(Value::Str(s)) if *s == block);
+            aside.runs.iter().find(|(_, blocks)| blocks.iter().any(holds)).map(|(k, _)| Value::Str(k.clone()))
+        })
+        .unwrap_or(Value::Nil)
+}
+
+/// A long reply's blocks, set aside from its row (`set_aside`), for the
+/// scripts: a run as the transcript builds it, all of them for a find, and
+/// which run holds a block.
+pub(crate) fn reply_functions(host: &ScriptHost) {
+    host.function("chat.reply_run", |arg| reply_run(&arg));
+    host.function("chat.reply_blocks", |id| reply_blocks(&id));
+    host.function("chat.reply_run_of", |arg| reply_run_of(&arg));
+}
+
+/// `entry`'s row as a view builds it whole (a long settled reply's blocks
+/// set aside), and what holds what was set aside, for as long as it's kept.
+#[cfg(test)]
+pub(crate) fn built_as_shown(entry: &Json, model: Option<&str>) -> (Option<Value>, Option<Rc<dyn std::any::Any>>) {
+    let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: model.map(Into::into) });
+    let built = built_for(entry, &context, false);
+    (built.row, built.aside.map(|aside| aside as Rc<dyn std::any::Any>))
 }
 
 /// `entry` built: its row, folded if `fold`, which a row that shows or may
-/// change isn't. What it shows of it is read as the row is, and held in `Built`.
+/// change isn't. What it shows of it is read as the row is, and held in
+/// `Built`. Built whole, a long settled reply's blocks are set aside there
+/// (`set_aside`).
 fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
     let RowContext { doc, device, model } = &**context;
     let row = built_entry(entry, doc, device.as_deref(), model.as_deref());
     let subagents = row.as_ref().and_then(subagents_in);
+    let (row, aside) = match row {
+        Some(row) if !fold => {
+            let (row, aside) = set_aside(row);
+            (Some(row), aside)
+        }
+        row => (row, None),
+    };
     let mut folded = 0;
     let row = match row {
         Some(_) if fold && entry["status"].as_str() != Some("streaming") => match (entry["id"].as_str(), serde_json::to_vec(entry)) {
@@ -301,7 +533,7 @@ fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
         },
         row => row,
     };
-    Built { row, subagents, folded }
+    Built { row, subagents, folded, aside }
 }
 
 /// A long chat's settled entries, as a worker thread makes them: what they fold
@@ -740,6 +972,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         }
     });
 
+    reply_functions(host);
     let v = view.clone();
     host.action("chat.open", move |id| {
         let id = text(&id);
@@ -1321,10 +1554,18 @@ impl Chats {
     }
 
     /// Settings' compact transcript turned on or off (`chat.compact`): the
-    /// replies being written are built again, with or without its layout.
+    /// rows built whole are built again, with or without its layout (one
+    /// folded lays itself out both ways as it opens: `FoldedEntry`). A
+    /// row has it only while it shows: a long reply's compact layout is the
+    /// whole reply again, built and handed to the scripts each time it opens.
     fn compact_shown(&self, on: bool) {
         if COMPACT_SHOWN.replace(on) == on {
             return;
+        }
+        for held in self.let_go.borrow_mut().iter_mut() {
+            for e in held.entries.iter().filter(|e| e.json.is_some()) {
+                held.built.remove(&e.id);
+            }
         }
         for view in self.views() {
             let rebuilt = {
@@ -1332,7 +1573,7 @@ impl Chats {
                 let Some(open) = slot.as_mut() else { continue };
                 let Open { entries, built, .. } = open;
                 let mut any = false;
-                for e in entries.iter().filter(|e| e["status"].as_str() == Some("streaming")) {
+                for e in entries.iter().filter(|e| e.json.is_some()) {
                     any |= built.remove(&e.id).is_some();
                 }
                 any
@@ -4218,7 +4459,7 @@ fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
     let folded = bytes.as_ref().map_or(0, |bytes| bytes.len());
     let row = bytes.map(|bytes| Value::folded(entry.id.clone(), FoldedEntry { bytes, context: context.clone() }));
     let subagents = (!subagents.is_empty()).then(|| subagents.iter().map(SubagentOff::value).collect());
-    built.insert(entry.id.clone(), Built { row, subagents, folded });
+    built.insert(entry.id.clone(), Built { row, subagents, folded, aside: None });
 }
 
 /// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
@@ -4264,6 +4505,9 @@ thread_local! {
     static PATCHED: RefCell<Option<rustc_hash::FxHashSet<String>>> = const { RefCell::new(None) };
     /// Settings' compact transcript is on (`chat.compact`).
     static COMPACT_SHOWN: Cell<bool> = const { Cell::new(false) };
+    /// A folded row opening (`FoldedEntry`): laid out compact too, whether
+    /// or not that shows, as it can't be built again when it turns on.
+    static COMPACT_ANYWAY: Cell<bool> = const { Cell::new(false) };
 }
 
 /// `build`, with `patched` (the parts changed since the entry's row was last
@@ -4763,10 +5007,13 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             if let Some(ms) = entry["durationMs"].as_f64() {
                 fields.push(("worked", Value::Num((ms / 1000.).round().max(1.))));
             }
-            // The same reply laid out for Settings' compact transcript (one
-            // being written, only while that shows: built with each of its
-            // changes, it'd cost each the whole reply again).
-            if (!streaming || COMPACT_SHOWN.get())
+            // The same reply laid out for Settings' compact transcript, only
+            // while that shows (`Chats::compact_shown` builds rows again as it
+            // turns on): it's the whole reply again, which a long reply built
+            // and handed to the scripts as it opened (a 1,000-step reply, a
+            // second copy of its 2,000 blocks and 1,000 tools). A folded row
+            // opening has it either way (`COMPACT_ANYWAY`).
+            if (COMPACT_SHOWN.get() || (COMPACT_ANYWAY.get() && !streaming))
                 && let Some(compact) = compact_blocks(entry)
             {
                 fields.push(("compact", compact));
@@ -6460,7 +6707,11 @@ mod tests {
             ],
         });
         let context = Rc::new(super::RowContext { doc: "chat".into(), device: None, model: Some("Opus".into()) });
+        // (Built whole while compact shows: a folded row opens laid out
+        // compact either way, `COMPACT_ANYWAY`.)
+        super::COMPACT_SHOWN.set(true);
         let whole = super::built_for(&entry, &context, false);
+        super::COMPACT_SHOWN.set(false);
         let folded = super::built_for(&entry, &context, true);
         let Some(Value::Folded(_)) = folded.row else { panic!("folded") };
         let (whole_row, folded_row) = (whole.row.unwrap(), folded.row.unwrap());
@@ -7552,6 +7803,33 @@ mod tests {
         // No work, no group.
         let plain = json!({ "id": "b", "role": "assistant", "status": "complete", "parts": [text("t", "Hi.")] });
         assert!(compact_blocks(&plain).is_none());
+    }
+
+    /// A reply's compact layout is its whole work again (a 1,000-step reply:
+    /// a second copy of its blocks and tools), built and handed to the
+    /// scripts each time it opened: it's there only while Settings' compact
+    /// transcript shows, and in a folded row opening, which can't be built
+    /// again as it turns on.
+    #[test]
+    fn a_reply_is_laid_out_compact_only_while_that_shows() {
+        let reply = json!({ "id": "a", "role": "assistant", "status": "complete", "durationMs": 5_000,
+            "parts": [{ "id": "p1", "kind": "text", "text": "Looking." },
+                { "id": "k1", "kind": "tool", "isError": false, "resolved": true, "call": { "kind": "exec", "command": "ls" } },
+                { "id": "p2", "kind": "text", "text": "Done." }] });
+        let compact = |row: &Value| row.field("compact").is_some_and(|v| !matches!(v, Value::Nil));
+        assert!(!COMPACT_SHOWN.get());
+        let row = built_entry(&reply, "doc", None, None).expect("a row");
+        assert!(!compact(&row), "no compact layout while it doesn't show");
+        assert!(row.field("blocks").is_some());
+        COMPACT_SHOWN.set(true);
+        let shown = built_entry(&reply, "doc", None, None).expect("a row");
+        COMPACT_SHOWN.set(false);
+        assert!(compact(&shown), "laid out compact while that shows");
+        // Folded, it has it as it opens, either way.
+        let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: None });
+        let Built { row: Some(folded), .. } = built_for(&reply, &context, true) else { panic!("a folded row") };
+        assert!(matches!(folded, Value::Folded(_)));
+        assert!(folded.field("compact").is_some_and(|v| !matches!(v, Value::Nil)), "a folded row opens laid out compact too");
     }
 
     #[test]
