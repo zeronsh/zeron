@@ -111,10 +111,28 @@ impl TuiAction {
                 }
             }
             TuiAction::Undo => {
+                // An undo already staged hides its message and everything
+                // after it (every client shows the rest without them), so
+                // the next one takes back the turn before that boundary:
+                // `/undo` twice goes two turns back, as the TUI's does.
+                let info = unwrap_data(
+                    server
+                        .get_json(&format!("/api/session/{session_id}"), dir)
+                        .await?,
+                );
+                let staged = info
+                    .pointer("/revert/messageID")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 let messages = server
                     .get_json(&format!("/api/session/{session_id}/message?limit=200"), dir)
                     .await?;
-                if let Some((id, _)) = last_prompt(&unwrap_data(messages)) {
+                let messages = unwrap_data(messages);
+                let target = match staged {
+                    Some(boundary) => turn_before(&messages, &boundary),
+                    None => last_turn(&messages),
+                };
+                if let Some((id, _)) = target {
                     server
                         .post_json(
                             &format!("/api/session/{session_id}/revert/stage"),
@@ -190,28 +208,54 @@ fn compaction_settled(messages: &Value, since: f64) -> bool {
     })
 }
 
-/// The newest prompt in a session's message list (newest first or not).
-fn last_prompt(messages: &Value) -> Option<(String, String)> {
-    messages
-        .as_array()?
-        .iter()
-        .filter(|message| message.get("type").and_then(Value::as_str) == Some("user"))
-        .max_by_key(|message| {
-            message
-                .pointer("/time/created")
-                .and_then(Value::as_f64)
-                .unwrap_or_default() as i64
+/// The newest turn in a session's message list — a prompt of the person's,
+/// or a `!command` run — which is where an undo starts.
+fn last_turn(messages: &Value) -> Option<(String, String)> {
+    turns(messages).pop()
+}
+
+/// The turn just before the staged revert `boundary`: what a further
+/// `/undo` takes back, the boundary itself and everything after it being
+/// hidden already.
+fn turn_before(messages: &Value, boundary: &str) -> Option<(String, String)> {
+    let turns = turns(messages);
+    let at = turns.iter().position(|(id, _)| id == boundary)?;
+    at.checked_sub(1).and_then(|before| turns.get(before).cloned())
+}
+
+/// The turns in a session's message list, oldest first, each with what it
+/// said: a prompt of the person's, or a `!command` run (which the session
+/// keeps as a `shell` message, no prompt of its own). (The list holds the
+/// turns a staged undo hides, too: one of them is its boundary.)
+fn turns(messages: &Value) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String, f64)> = messages
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|message| {
+            matches!(
+                message.get("type").and_then(Value::as_str),
+                Some("user" | "shell")
+            )
         })
-        .and_then(|message| {
+        .filter_map(|message| {
             Some((
                 message.get("id")?.as_str()?.to_owned(),
                 message
                     .get("text")
                     .and_then(Value::as_str)
+                    .or_else(|| message.get("command").and_then(Value::as_str))
                     .unwrap_or_default()
                     .to_owned(),
+                message
+                    .pointer("/time/created")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default(),
             ))
         })
+        .collect();
+    found.sort_by(|a, b| a.2.total_cmp(&b.2));
+    found.into_iter().map(|(id, text, _)| (id, text)).collect()
 }
 
 /// The shell command a `!command` prompt runs, as the TUI's shell mode.
@@ -362,8 +406,40 @@ mod tests {
             {"id": "m2", "type": "user", "text": "second", "time": {"created": 2}},
             {"id": "m1", "type": "user", "text": "first", "time": {"created": 1}}
         ]);
-        assert_eq!(last_prompt(&messages), Some(("m2".into(), "second".into())));
-        assert_eq!(last_prompt(&json!([])), None);
+        assert_eq!(last_turn(&messages), Some(("m2".into(), "second".into())));
+        assert_eq!(last_turn(&json!([])), None);
+    }
+
+    #[test]
+    fn an_undo_already_staged_takes_the_turn_before_it() {
+        // (Shape captured live from 2.3.0: a staged revert still lists its
+        // own message, and everything after it.)
+        let messages = json!([
+            {"id": "m1", "type": "user", "text": "one", "time": {"created": 1}},
+            {"id": "m2", "type": "assistant", "time": {"created": 2}},
+            {"id": "m3", "type": "user", "text": "two", "time": {"created": 3}},
+            {"id": "m4", "type": "assistant", "time": {"created": 4}},
+            {"id": "m5", "type": "user", "text": "three", "time": {"created": 5}}
+        ]);
+        assert_eq!(turn_before(&messages, "m5"), Some(("m3".into(), "two".into())));
+        assert_eq!(turn_before(&messages, "m3"), Some(("m1".into(), "one".into())));
+        // (The first prompt: nothing left to take back.)
+        assert_eq!(turn_before(&messages, "m1"), None);
+        // (A boundary the list no longer holds takes nothing back.)
+        assert_eq!(turn_before(&messages, "m9"), None);
+    }
+
+    #[test]
+    fn a_shell_run_is_a_turn_an_undo_takes_back() {
+        // (Shape captured live from 2.3.0: `!command` runs as a `shell`
+        // message, with no prompt of the person's.)
+        let messages = json!([
+            {"id": "m1", "type": "user", "text": "one", "time": {"created": 1}},
+            {"id": "m2", "type": "shell", "command": "echo hi", "time": {"created": 2}}
+        ]);
+        assert_eq!(last_turn(&messages), Some(("m2".into(), "echo hi".into())));
+        // (A shell run undone: the turn before it is the next one back.)
+        assert_eq!(turn_before(&messages, "m2"), Some(("m1".into(), "one".into())));
     }
 
     #[test]

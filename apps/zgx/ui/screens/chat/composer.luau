@@ -884,7 +884,10 @@ local function Composer(): Node
 		return nil
 	end
 
-	-- The newest prompt in the transcript: what an undo takes back.
+	-- The newest prompt in the transcript: what an undo takes back. (An undo
+	-- staged in the session stands as a note, and the turns it took back are
+	-- gone from the list until a redo: so this is the turn the next undo
+	-- takes back, exactly as the engine stages it.)
 	local function last_prompt(): any
 		local list = store.messages
 		for i = list:len(), 1, -1 do

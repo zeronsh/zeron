@@ -44,6 +44,9 @@ use crate::workspace_host::WorkspaceHost;
 /// Entry ids of messages read from an OpenCode session.
 const ENTRY_PREFIX: &str = "oc:";
 
+/// The text part carrying a compaction's summary, under its note.
+const SUMMARY_PART_ID: &str = "s0";
+
 /// The entry of an undo staged in the session (one at most).
 const REVERT_ENTRY: &str = "oc:revert";
 
@@ -146,6 +149,13 @@ impl Mirror {
                         }
                         Some(NativeChange::CompactionText { session, text }) => {
                             self.summaries.entry(session.clone()).or_default().push_str(&text);
+                            // Its note takes the words as they come; the
+                            // first one finds no note yet, so the session is
+                            // read now (the tick would be up to a second
+                            // away, and the whole summary with it).
+                            if !self.stream_summary(&session, &text) {
+                                self.read_one(&session, &mut running).await;
+                            }
                             changed.insert(session);
                         }
                         // (The harness's catalogs follow these themselves.)
@@ -305,6 +315,39 @@ impl Mirror {
                 chat.id == derived || chat.harness_session_id.as_deref() == Some(source)
             })
             .cloned()
+    }
+
+    /// The words of a running compaction's summary, into its note's text part
+    /// as they come: the note streams them in, as a reply's words stream in.
+    /// `false` when there is no note of a running compaction to take them
+    /// yet (they are kept in `summaries`, and written with the note then).
+    fn stream_summary(&mut self, session_id: &str, words: &str) -> bool {
+        let Some(chat) = self.chat_for_session_id(session_id) else {
+            return false;
+        };
+        let Ok(doc) = self.doc_host.open(&chat) else {
+            return false;
+        };
+        match doc.doc().append_running_compaction_summary(words) {
+            Ok(appended) => appended,
+            Err(error) => {
+                tracing::debug!(%error, session = %session_id, "opencode sync: summary not appended");
+                false
+            }
+        }
+    }
+
+    /// The chat that shows the session `session_id`: one a run of Zeron's
+    /// made, else the one an earlier import made.
+    fn chat_for_session_id(&self, session_id: &str) -> Option<String> {
+        let chats = self.workspace.watch_chats();
+        let chats = chats.borrow();
+        let derived = imported_chat_id(session_id);
+        chats
+            .iter()
+            .find(|chat| chat.harness_session_id.as_deref() == Some(session_id))
+            .or_else(|| chats.iter().find(|chat| chat.id == derived))
+            .map(|chat| chat.id.clone())
     }
 
     /// The context window of the session's model, read once per model.
@@ -616,6 +659,51 @@ fn zeron_written(entry: &SessionMessageEntry) -> bool {
             .any(|part| matches!(part, MessagePart::Error { .. }))
 }
 
+/// `current` grown into `next` by words appended to one of its text parts:
+/// that part's id and the words — a summary being written, or a reply. `None`
+/// for any other change (a part rewritten, taken out or added).
+fn grown_text(current: &SessionMessageEntry, next: &SessionMessageEntry) -> Option<(String, String)> {
+    if current.parts.len() != next.parts.len() {
+        return None;
+    }
+    let mut grown = None;
+    for (was, now) in current.parts.iter().zip(&next.parts) {
+        if was == now {
+            continue;
+        }
+        let (id, before, after) = match (was, now) {
+            (
+                MessagePart::Text {
+                    id: was_id,
+                    text: before,
+                },
+                MessagePart::Text {
+                    id: now_id,
+                    text: after,
+                },
+            )
+            | (
+                MessagePart::Reasoning {
+                    id: was_id,
+                    text: before,
+                },
+                MessagePart::Reasoning {
+                    id: now_id,
+                    text: after,
+                },
+            ) if was_id == now_id && after.starts_with(before.as_str()) => {
+                (now_id, before, after)
+            }
+            _ => return None,
+        };
+        if grown.is_some() {
+            return None;
+        }
+        grown = Some((id.clone(), after[before.len()..].to_owned()));
+    }
+    grown
+}
+
 /// Make `doc`'s transcript from `start` on the session's `history`: a
 /// message not there yet goes in where it belongs, one that grew is
 /// rewritten in place, one that's the same is left alone; one the session no
@@ -648,7 +736,9 @@ fn write_history(
         .filter(|message| message.created_at_ms >= start.at)
         .collect();
     // The undo itself stands where the turns it took back were, as OpenCode's
-    // own clients show it: how many of the person's messages went.
+    // own clients show it: how many of the person's messages went. A turn
+    // that has none of its own (a `!command` run took back) still reads as
+    // the one message it reverted, never as none.
     let revert = (cut < all.len()).then(|| SessionMessageEntry {
         duration_ms: None,
         id: REVERT_ENTRY.to_owned(),
@@ -659,7 +749,8 @@ fn write_history(
                 .iter()
                 .filter(|message| message.created_at_ms >= start.at)
                 .filter(|message| matches!(message.kind, NativeMessageKind::User { .. }))
-                .count() as u64,
+                .count()
+                .max(1) as u64,
             files: session
                 .reverted_files
                 .iter()
@@ -719,7 +810,20 @@ fn write_history(
                     || current.status != entry.status
                     || current.duration_ms != entry.duration_ms
                 {
-                    doc.replace_message(at, &entry)?;
+                    // A summary (or a reply) still being written: its words
+                    // appended into the part, so a reader streams them in
+                    // rather than re-making the row for each of them. Any
+                    // other change rewrites the entry whole.
+                    let grown = (current.status == entry.status
+                        && current.duration_ms == entry.duration_ms)
+                        .then(|| grown_text(current, &entry))
+                        .flatten();
+                    match grown {
+                        Some((part_id, delta)) => {
+                            doc.append_message_part_text(&entry.id, &part_id, &delta)?;
+                        }
+                        None => doc.replace_message(at, &entry)?,
+                    }
                     written.changed = true;
                 }
             }
@@ -962,7 +1066,8 @@ fn entry_of(message: &NativeMessage, streaming: bool, device_id: &str) -> Sessio
             (MessageRole::Assistant, parts)
         }
         // Its summary under it, as OpenCode's clients show it: written as it
-        // runs, then the session's own.
+        // runs, then the session's own. (Even empty while it runs, so the
+        // words appended into it as they come land in it.)
         NativeMessageKind::Compaction {
             status,
             tokens_in,
@@ -976,10 +1081,14 @@ fn entry_of(message: &NativeMessage, streaming: bool, device_id: &str) -> Sessio
                 tokens_in: *tokens_in,
                 tokens_out: *tokens_out,
             })
-            .chain((!summary.trim().is_empty()).then(|| MessagePart::Text {
-                id: "s0".into(),
-                text: summary.clone(),
-            }))
+            .chain(
+                (!summary.trim().is_empty() || *status == CompactionStatus::Running).then(|| {
+                    MessagePart::Text {
+                        id: SUMMARY_PART_ID.into(),
+                        text: summary.clone(),
+                    }
+                }),
+            )
             .collect(),
         ),
     };
@@ -1272,6 +1381,62 @@ mod tests {
         assert_eq!(context_tokens(&history, &session(false), Start::ALL), Some(2_812));
         let entry = doc.read_entries().unwrap().pop().unwrap();
         assert!(matches!(&entry.parts[1], MessagePart::Text { text, .. } if text == "## Goal\n- tides"));
+    }
+
+    #[test]
+    fn a_running_summary_is_appended_word_by_word() {
+        let doc = zeron_doc::SessionDoc::init("compact-stream").unwrap();
+        let compaction = |summary: &str| NativeMessage {
+            id: "mc".into(),
+            created_at_ms: 30,
+            completed_at_ms: None,
+            kind: NativeMessageKind::Compaction {
+                status: CompactionStatus::Running,
+                tokens_in: None,
+                tokens_out: None,
+                summary: summary.into(),
+            },
+        };
+        let mut history = vec![user("m1", 10, "one"), reply("m2", 11, "1")];
+        // (A running compaction holds its summary's part from the first read,
+        // empty: the words appended into it need it to be there.)
+        history.push(compaction(""));
+        write_history(&doc, &history, &session(true), Start::ALL, "dev").unwrap();
+        let entry = doc.read_entries().unwrap().pop().unwrap();
+        assert!(matches!(&entry.parts[1], MessagePart::Text { text, .. } if text.is_empty()));
+        // Its words arrive: appended into the part, as a reply's do.
+        for so_far in ["## Goal", "## Goal\n- tid", "## Goal\n- tides"] {
+            history[2] = compaction(so_far);
+            write_history(&doc, &history, &session(true), Start::ALL, "dev").unwrap();
+            let entry = doc.read_entries().unwrap().pop().unwrap();
+            assert!(matches!(&entry.parts[1], MessagePart::Text { text, .. } if text == so_far));
+        }
+    }
+
+    #[test]
+    fn an_undo_of_a_shell_turn_counts_the_message_it_took_back() {
+        let doc = zeron_doc::SessionDoc::init("undo-shell").unwrap();
+        // (A `!command` run in the session: a command chip, no prompt of the
+        // person's.)
+        let shell = NativeMessage {
+            id: "m1".into(),
+            created_at_ms: 10,
+            completed_at_ms: Some(11),
+            kind: NativeMessageKind::Assistant {
+                events: Vec::new(),
+                context: None,
+            },
+        };
+        let history = vec![shell];
+        write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
+        let mut undone = session(false);
+        undone.reverted_from = Some("m1".into());
+        write_history(&doc, &history, &undone, Start::ALL, "dev").unwrap();
+        assert_eq!(ids(&doc), [REVERT_ENTRY]);
+        assert!(matches!(
+            &doc.read_entries().unwrap()[0].parts[0],
+            MessagePart::Revert { messages: 1, .. }
+        ));
     }
 
     #[test]

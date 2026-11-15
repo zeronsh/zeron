@@ -26,6 +26,10 @@ use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
 /// The plugins' sends a chat keeps a record of (`SessionDoc::sent_by`).
 pub const SENT_BY_KEPT: usize = 200;
 
+/// The part id a compaction's summary rides (its note's text part), so a
+/// summary still being written can be appended into it word by word.
+pub const COMPACTION_SUMMARY_PART: &str = "s0";
+
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
     #[error("loro: {0}")]
@@ -1377,6 +1381,144 @@ impl SessionDoc {
             }
         }
         Ok(false)
+    }
+
+    /// Append `more` to the text of part `part_id` in entry `message_id` —
+    /// the words of a summary being written into a note, arriving as they
+    /// come, as a reply's do. `false` when the entry isn't there, or has no
+    /// such text part yet.
+    pub fn append_message_part_text(
+        &self,
+        message_id: &str,
+        part_id: &str,
+        more: &str,
+    ) -> Result<bool, DocError> {
+        if more.is_empty() {
+            return Ok(true);
+        }
+        let Some(parts) = self.parts_of(message_id)? else {
+            return Ok(false);
+        };
+        for j in 0..parts.len() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) = parts.get(j)
+            else {
+                continue;
+            };
+            let matches = matches!(
+                part.get("id"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == part_id
+            );
+            if !matches {
+                continue;
+            }
+            let Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) =
+                part.get("text")
+            else {
+                return Ok(false);
+            };
+            text.insert(text.len_unicode(), more)?;
+            self.commit();
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Append `more` to the summary of the compaction the transcript shows
+    /// running — the words of it as they arrive, so the note streams them in
+    /// as a reply's are streamed. `false` when no compaction runs there yet
+    /// (they are kept, and written with the note when it comes).
+    pub fn append_running_compaction_summary(&self, more: &str) -> Result<bool, DocError> {
+        if more.is_empty() {
+            return Ok(true);
+        }
+        let messages = self.doc.get_list("messages");
+        for i in (0..messages.len()).rev() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
+                entry.get("parts")
+            else {
+                continue;
+            };
+            let mut running = false;
+            for j in 0..parts.len() {
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
+                    parts.get(j)
+                else {
+                    continue;
+                };
+                let is = |key: &str, want: &str| {
+                    matches!(
+                        part.get(key),
+                        Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == want
+                    )
+                };
+                if is("kind", "compaction") {
+                    running = is("status", "running");
+                }
+            }
+            if !running {
+                continue;
+            }
+            // Its summary's text part, made here if the note has none yet.
+            for j in 0..parts.len() {
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
+                    parts.get(j)
+                else {
+                    continue;
+                };
+                let is_summary = matches!(
+                    part.get("id"),
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(s)))
+                        if s.as_str() == COMPACTION_SUMMARY_PART
+                );
+                if !is_summary {
+                    continue;
+                }
+                if let Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) =
+                    part.get("text")
+                {
+                    let len = text.len_unicode();
+                    text.insert(len, more)?;
+                    self.commit();
+                    return Ok(true);
+                }
+            }
+            let map = parts.push_container(LoroMap::new())?;
+            map.insert("id", COMPACTION_SUMMARY_PART)?;
+            map.insert("kind", "text")?;
+            let text = map.insert_container("text", LoroText::new())?;
+            text.insert(0, more)?;
+            self.commit();
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// The parts list of the entry `message_id`, if it is there.
+    fn parts_of(&self, message_id: &str) -> Result<Option<LoroList>, DocError> {
+        let messages = self.doc.get_list("messages");
+        for i in 0..messages.len() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            let matches = matches!(
+                entry.get("id"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == message_id
+            );
+            if matches
+                && let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
+                    entry.get("parts")
+            {
+                return Ok(Some(parts));
+            }
+        }
+        Ok(None)
     }
 
     /// Append an error part to an existing entry (crash recovery: the aborted
