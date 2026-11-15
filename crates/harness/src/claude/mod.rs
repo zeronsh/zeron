@@ -1189,6 +1189,8 @@ impl Harness for ClaudeHarness {
         let exe = self.resolve_executable()?;
         let release = std::fs::canonicalize(&exe).ok();
         let mut runtime = Self::launch(&exe, &request, false)?;
+        // In the background until its run takes it (`run_warm`).
+        crate::process::warm_in_background(runtime.child.id());
         // The same handshake a run makes; the CLI then waits on stdin for
         // its first user line, asking no model anything.
         runtime
@@ -1233,6 +1235,7 @@ impl Harness for ClaudeHarness {
                 match why_not {
                     None => {
                         tracing::debug!(target: "first_word", key, "claude warm start taken");
+                        crate::process::warm_taken(warm.runtime.child.id());
                         Some(warm.runtime)
                     }
                     Some(why) => {
