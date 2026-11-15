@@ -86,6 +86,58 @@ pub(crate) fn card_outcome(route: &Route) -> Option<String> {
     }
 }
 
+fn texts_of(e: &zeron_doc::SessionMessageEntry) -> String {
+    e.parts
+        .iter()
+        .filter_map(|p| match p {
+            zeron_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// The words a card or a decision is about, lowercase: "R9" and "round 9"
+/// alike (`round9`).
+fn topic_words(s: &str) -> std::collections::BTreeSet<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "your", "you", "decision", "decide", "waiting", "still", "pick", "choose", "with", "this",
+        "that", "from", "into", "are", "was", "keep",
+    ];
+    let lower = s.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let mut out = std::collections::BTreeSet::new();
+    for (i, w) in words.iter().enumerate() {
+        if let Some(n) = w.strip_prefix('r').filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) {
+            out.insert(format!("round{n}"));
+        } else if *w == "round" && words.get(i + 1).is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())) {
+            out.insert(format!("round{}", words[i + 1]));
+        } else if w.len() >= 3 && !STOP.contains(w) && !w.chars().all(|c| c.is_ascii_digit()) {
+            // (Variant, variants, variation: one word.)
+            let stem: String = w.chars().take(5).collect();
+            out.insert(stem);
+        }
+    }
+    out
+}
+
+/// The card a decision belongs to: the one whose title (and what it was
+/// sent) shares the most words with it, else the first.
+fn best_card<'a>(
+    part: &zeron_proto::turn_question::Found,
+    cards: &[(&'a Dump, &'a Route, &'a zeron_proto::orchestration::WorkItem)],
+) -> (&'a Dump, &'a Route, &'a zeron_proto::orchestration::WorkItem) {
+    let words = topic_words(&format!("{} {}", part.question, part.options.join(" ")));
+    let score = |(_, r, c): &(&Dump, &Route, &zeron_proto::orchestration::WorkItem)| {
+        topic_words(&format!("{} {}", c.title, r.excerpt)).intersection(&words).count()
+    };
+    let best = cards.iter().enumerate().max_by_key(|(i, c)| (score(c), std::cmp::Reverse(*i))).map(|(_, c)| *c);
+    match best {
+        Some(c) if score(&c) > 0 => c,
+        _ => cards[0],
+    }
+}
+
 /// Every route's message to `chat` (what it was sent), across `dumps`.
 fn dump_messages_to(dumps: &[Dump], chat: &str) -> Vec<String> {
     dumps
@@ -432,9 +484,12 @@ impl EngineRpc {
     /// (`done`: cards the Review re-statement just settled, its question
     /// included.)
     pub(crate) async fn ask_for_waiting_cards(&self, done: &[String]) -> Vec<String> {
-        use zeron_proto::turn_question::{Verdict, detect};
+        use zeron_proto::turn_question::{Verdict, detect, split_compound};
         let state = self.orchestration().state();
-        let mut asked = Vec::new();
+        // Each thread's cards in Now (not approved, not failed, not just
+        // settled), with their routes.
+        let mut by_chat: std::collections::BTreeMap<String, Vec<(&Dump, &Route, &zeron_proto::orchestration::WorkItem)>> =
+            Default::default();
         for dump in &state.dumps {
             for route in &dump.routes {
                 let Some(item) = route.item_id.as_deref() else { continue };
@@ -447,33 +502,107 @@ impl EngineRpc {
                     continue;
                 }
                 let Some(chat) = super::watchers::target_chat(&route.target) else { continue };
-                let entries = self
-                    .doc_host_ref()
-                    .open(chat)
-                    .ok()
-                    .and_then(|h| h.doc().read_entries().ok())
-                    .unwrap_or_default();
-                let sent = if route.message.trim().is_empty() { &route.excerpt } else { &route.message };
-                // The decision it waits on: the most recent one its thread
-                // asked since the card's delivery (however much other work
-                // came after), else what its route's or its own outcome says.
-                let found = super::turn_asks::last_decision_since(&entries, Some(sent))
-                    .map(|(_, found)| found)
-                    .or_else(|| {
-                        [route.answer_full.as_deref(), card.outcome.as_deref()].into_iter().flatten().find_map(|t| match detect(t) {
-                            Verdict::Ask(found) => Some(found),
-                            _ => None,
-                        })
-                    });
-                let Some(found) = found else { continue };
-                // (Its open ask: nothing to raise; still checked for an
-                // answer that came since.)
-                if self.ask_or_settle_decision(chat, &entries, sent, &found, &dump.id, &route.id, item).await {
-                    asked.push(item.to_owned());
+                by_chat.entry(chat.to_owned()).or_default().push((dump, route, card));
+            }
+        }
+        let mut asked = Vec::new();
+        for (chat, mut cards) in by_chat {
+            let entries = self
+                .doc_host_ref()
+                .open(&chat)
+                .ok()
+                .and_then(|h| h.doc().read_entries().ok())
+                .unwrap_or_default();
+            let sent_of = |route: &Route| -> String {
+                if route.message.trim().is_empty() { route.excerpt.clone() } else { route.message.clone() }
+            };
+            // Earliest delivered first: the look-back starts at the first.
+            let delivered = |route: &Route| {
+                let sent = sent_of(route);
+                entries
+                    .iter()
+                    .rposition(|e| e.role == zeron_doc::MessageRole::User && texts_of(e).contains(sent.trim()))
+                    .unwrap_or(usize::MAX)
+            };
+            cards.sort_by_key(|(_, r, _)| delivered(r));
+            let first_sent = sent_of(cards[0].1);
+            match super::turn_asks::last_decision_since(&entries, Some(&first_sent)) {
+                // The thread's latest decision since: each choice it names on
+                // its own, on the card it belongs to.
+                Some((at, found)) => {
+                    let message = entries[at].id.clone();
+                    let parts = split_compound(&found);
+                    for (i, part) in parts.iter().enumerate() {
+                        let turn = if parts.len() > 1 { format!("{message}#{i}") } else { message.clone() };
+                        let (dump, route, card) = best_card(part, &cards);
+                        match super::turn_asks::part_answer(self.orchestration(), self, &chat, &entries, at, part).await {
+                            Some(reply) => self.close_asks_for(&chat, part, &super::turn_asks::ask_id(&chat, &turn), &card.id, &reply),
+                            None => {
+                                let mut launch = super::turn_asks::launch_of_chat(self.orchestration(), self, &chat).unwrap_or_default();
+                                launch.item_id = Some(card.id.clone());
+                                let plan = super::turn_asks::raise(
+                                    self.orchestration(),
+                                    self,
+                                    &chat,
+                                    Some(&turn),
+                                    part,
+                                    &launch,
+                                    Some((&dump.id, &route.id)),
+                                    chrono::Utc::now(),
+                                );
+                                if matches!(plan, super::turn_asks::Plan::Create(_)) {
+                                    asked.push(card.id.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                // None in the transcript: what each card's route or own
+                // outcome says.
+                None => {
+                    for (dump, route, card) in &cards {
+                        let found = [route.answer_full.as_deref(), card.outcome.as_deref()].into_iter().flatten().find_map(|t| {
+                            match detect(t) {
+                                Verdict::Ask(found) => Some(found),
+                                _ => None,
+                            }
+                        });
+                        let Some(found) = found else { continue };
+                        let sent = sent_of(route);
+                        if self.ask_or_settle_decision(&chat, &entries, &sent, &found, &dump.id, &route.id, &card.id).await {
+                            asked.push(card.id.clone());
+                        }
+                    }
                 }
             }
         }
         asked
+    }
+
+    /// Open asks of `chat` for `part` (its id, its card, or the same
+    /// question), closed as answered in the thread by `reply`.
+    fn close_asks_for(&self, chat: &str, part: &zeron_proto::turn_question::Found, id: &str, card: &str, reply: &str) {
+        let open: Vec<String> = self
+            .orchestration()
+            .state()
+            .asks
+            .iter()
+            .filter(|a| a.from_chat == chat && a.state == zeron_proto::orchestration::AskState::Open)
+            .filter(|a| {
+                a.id == id
+                    || zeron_proto::turn_question::same_question(
+                        &a.question,
+                        &a.options.iter().map(|o| o.label.clone()).collect::<Vec<_>>(),
+                        &part.question,
+                        &part.options,
+                    )
+                    || (a.item_id.as_deref() == Some(card) && a.question == part.question)
+            })
+            .map(|a| a.id.clone())
+            .collect();
+        for id in open {
+            super::turn_asks::close(self.orchestration(), &id, zeron_proto::orchestration::AnswerVia::Thread, reply, chrono::Utc::now());
+        }
     }
 
     /// The routed cards `chat` works on, brought up to date (it raised or

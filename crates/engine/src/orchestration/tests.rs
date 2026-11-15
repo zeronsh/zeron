@@ -2623,3 +2623,61 @@ async fn a_decision_followed_by_other_work_still_gets_its_ask() {
     assert_eq!(card(&core, &r[0].1), WorkState::Active, "its column as it was");
     core.sessions.shutdown().await;
 }
+
+/// The cheap model for "does this message answer that question?": yes when
+/// the question mentions `yes_for`, else no.
+fn answers_model_for(core: &crate::EngineCore, yes_for: &'static str) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n = calls.clone();
+    core.orchestration.progress().set_note_fn(std::sync::Arc::new(move |_, prompt: String| {
+        let said = if prompt.starts_with(zeron_proto::turn_question::ANSWERS_INSTRUCTIONS) {
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // (The question is the data's first field.)
+            let question = prompt.split("\"question\"").nth(1).and_then(|q| q.split('\n').next()).unwrap_or("").to_owned();
+            Some(if question.contains(yes_for) { "yes".to_owned() } else { "no".to_owned() })
+        } else {
+            None
+        };
+        Box::pin(async move { said })
+    }));
+    calls
+}
+
+/// 9ad131f1, live: at 11:13 its turn ended "The Topology variation pick
+/// and the graph-label decision (accept round 9 or keep iterating) are still
+/// waiting on you."; at 19:40 the person's Topology pick was relayed. One
+/// decision each: Topology answered, R9 not, so R9 alone gets its ask, on
+/// its own card, and a second pass adds nothing.
+#[tokio::test]
+async fn a_compound_decision_is_judged_one_choice_at_a_time() {
+    let (_temp, core) = core().await;
+    let calls = answers_model_for(&core, "Topology");
+    let chat = "9ad131f1-compound";
+    let (dump, brain, r) = routed_thread(&core, chat, &["Map machine headings: decide R9", "Topology lines: pick a variant"]).await;
+    push(&core, chat, "u1", zeron_doc::MessageRole::User, "Map machine headings: decide R9");
+    push(&core, chat, "u2", zeron_doc::MessageRole::User, "Topology lines: pick a variant");
+    let asked = "The Timeline legend's events group now always reads Report · Ask · Failed · Done. It's committed locally on `zeron/orchestrators` as `f2642cfc2`.\n\n**Timing:** this lands after the current rebuild, not in it.\n\nThe Topology variation pick and the graph-label decision (accept round 9 or keep iterating) are still waiting on you.";
+    push(&core, chat, "a1113", zeron_doc::MessageRole::Assistant, asked);
+    push(&core, chat, "u1940", zeron_doc::MessageRole::User, &relayed("The person picked for the Topology variants. They want TWO options, switchable by the user."));
+    push(&core, chat, "a1941", zeron_doc::MessageRole::Assistant, "Building both styles behind a toggle now.");
+    // Both cards in Now (moved there by the Brain dump), no ask yet.
+    for (route, item) in &r {
+        outcome(&core, chat, &dump, route, "Building both styles behind a toggle now.", RouteState::Answered).await;
+        op(&core, agent(&brain), json!({"op":"upsertItem","item":{"id":item,"state":"active"}})).await.unwrap();
+    }
+    assert!(open_asks(&core, chat).is_empty());
+    core.rpc_service().settle_card_states().await;
+    let open = open_asks(&core, chat);
+    assert_eq!(open.len(), 1, "{open:#?}");
+    let r9 = &open[0];
+    assert!(r9.question.contains("graph-label decision"), "{}", r9.question);
+    assert_eq!(r9.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Accept round 9", "Keep iterating"]);
+    assert_eq!(r9.item_id.as_deref(), Some(r[0].1.as_str()), "on the R9 card");
+    assert_eq!(r9.id, super::turn_asks::ask_id(chat, "a1113#1"), "a stable id: chat, message, part");
+    assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 2, "each part judged on its own");
+    // Again: nothing new.
+    core.rpc_service().settle_card_states().await;
+    assert_eq!(open_asks(&core, chat).len(), 1);
+    assert_eq!(asks_from(&core, chat).len(), 1);
+    core.sessions.shutdown().await;
+}
