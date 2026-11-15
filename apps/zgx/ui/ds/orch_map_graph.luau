@@ -477,6 +477,53 @@ M.View = ui.component(function(props: {
 			-- 1. Where everything goes, nothing drawn yet: islands (each name
 			-- in a gap in its rim, at the top or the bottom), lines, names.
 			local islands = sim.islands(graph)
+			-- (Where each mark sits on screen and how far it reaches, worked
+			-- out once; and a grid of cells, so a point or a box looks only at
+			-- the marks, names and points near it. Each is still tested
+			-- exactly: the grid only leaves out what can't be near.)
+			local CELL = 32
+			local function cell(x: number, y: number): number
+				return math.floor(x / CELL) * 100000 + math.floor(y / CELL)
+			end
+			local function file(grid: { [number]: { any } }, x0: number, y0: number, x1: number, y1: number, item: any)
+				for cx = math.floor(x0 / CELL), math.floor(x1 / CELL) do
+					for cy = math.floor(y0 / CELL), math.floor(y1 / CELL) do
+						local k = cx * 100000 + cy
+						local list = grid[k]
+						if not list then
+							list = {}
+							grid[k] = list
+						end
+						table.insert(list, item)
+					end
+				end
+			end
+			-- Every item filed in the cells a box covers, each once.
+			local stamp = 0
+			local function near_box(grid: { [number]: { any } }, x0: number, y0: number, x1: number, y1: number): { any }
+				stamp += 1
+				local out = {}
+				for cx = math.floor(x0 / CELL), math.floor(x1 / CELL) do
+					for cy = math.floor(y0 / CELL), math.floor(y1 / CELL) do
+						for _, item in grid[cx * 100000 + cy] or {} do
+							if item.stamp ~= stamp then
+								item.stamp = stamp
+								table.insert(out, item)
+							end
+						end
+					end
+				end
+				return out
+			end
+			-- Marks: { id, kind, x, y, reach }, filed by their reach and 8px more.
+			local marks: { any } = {}
+			local mark_grid: { [number]: { any } } = {}
+			for _, m in graph.nodes do
+				local mx, my = at(m)
+				local mk = { id = m.id, kind = m.kind, x = mx, y = my, reach = reach(m) }
+				table.insert(marks, mk)
+				file(mark_grid, mx - mk.reach - 8, my - mk.reach - 8, mx + mk.reach + 8, my + mk.reach + 8, mk)
+			end
 			local taken: { { number } } = {}
 			local rims: { any } = {}
 			-- Each machine's heading: a tab on its island's rim (its mark, its
@@ -566,18 +613,18 @@ M.View = ui.component(function(props: {
 				local function hits(k: number): number
 					local qx, qy = mx - (by - ay) * k, my + (bx - ax) * k
 					local n_hit = 0
-					for _, m in graph.nodes do
-						if m.id ~= e.a and m.id ~= e.b then
-							local px, py = at(m)
-							local room = reach(m) + 6
-							for i = 1, 11 do
-								local t = i / 12
-								local u = 1 - t
-								local x = u * u * ax + 2 * u * t * qx + t * t * bx
-								local y = u * u * ay + 2 * u * t * qy + t * t * by
-								if (x - px) ^ 2 + (y - py) ^ 2 < room * room then
+					local hit_ids: { [string]: boolean } = {}
+					for i = 1, 11 do
+						local t = i / 12
+						local u = 1 - t
+						local x = u * u * ax + 2 * u * t * qx + t * t * bx
+						local y = u * u * ay + 2 * u * t * qy + t * t * by
+						for _, m in mark_grid[cell(x, y)] or {} do
+							if not hit_ids[m.id] and m.id ~= e.a and m.id ~= e.b then
+								local room = m.reach + 6
+								if (x - m.x) ^ 2 + (y - m.y) ^ 2 < room * room then
+									hit_ids[m.id] = true
 									n_hit += 1
-									break
 								end
 							end
 						end
@@ -650,9 +697,41 @@ M.View = ui.component(function(props: {
 					table.insert(rim_pts, { rim.x + math.cos(a) * rim.r, rim.y + math.sin(a) * rim.r })
 				end
 			end
+			local pt_grid: { [number]: { any } } = {}
+			for _, p in pts do
+				local k = cell(p[1], p[2])
+				local list = pt_grid[k]
+				if not list then
+					list = {}
+					pt_grid[k] = list
+				end
+				table.insert(list, p)
+			end
+			local rim_grid: { [number]: { any } } = {}
+			for _, p in rim_pts do
+				local k = cell(p[1], p[2])
+				local list = rim_grid[k]
+				if not list then
+					list = {}
+					rim_grid[k] = list
+				end
+				table.insert(list, p)
+			end
+			-- The points filed in the cells a box covers (each in one cell).
+			local function pts_in(grid: { [number]: { any } }, x0: number, y0: number, x1: number, y1: number): { any }
+				local out = {}
+				for cx = math.floor(x0 / CELL), math.floor(x1 / CELL) do
+					for cy = math.floor(y0 / CELL), math.floor(y1 / CELL) do
+						for _, p in grid[cx * 100000 + cy] or {} do
+							table.insert(out, p)
+						end
+					end
+				end
+				return out
+			end
 			local function crowd(x0: number, y0: number, x1: number, y1: number, own: string, rim_w: number?): number
 				local k = 0
-				for _, p in pts do
+				for _, p in pts_in(pt_grid, x0, y0, x1, y1) do
 					-- (Its own lines in are ranked apart (`on_own`), not counted
 					-- against it here.)
 					if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 and (p :: any)[3] ~= own and (p :: any)[4] ~= own then
@@ -661,7 +740,7 @@ M.View = ui.component(function(props: {
 				end
 				k = math.min(k, 1.5)
 				-- (A rim cut reads worse than a line's.)
-				for _, p in rim_pts do
+				for _, p in pts_in(rim_grid, x0, y0, x1, y1) do
 					if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
 						k += rim_w or 0.6
 						break
@@ -673,10 +752,10 @@ M.View = ui.component(function(props: {
 						k += if (bx :: any).rim then 0.5 else 1
 					end
 				end
-				for _, m in graph.nodes do
+				for _, m in near_box(mark_grid, x0, y0, x1, y1) do
 					if m.id ~= own and m.kind ~= "device" then
-						local mx, my = at(m)
-						local mr = reach(m) + 3
+						local mx, my = m.x, m.y
+						local mr = m.reach + 3
 						if mx + mr > x0 and mx - mr < x1 and my + mr > y0 and my - mr < y1 then
 							k += 1
 						end
@@ -734,7 +813,7 @@ M.View = ui.component(function(props: {
 			-- it and at its corners too.
 			-- Whether a box sits on a rim (a name reads broken there).
 			local function on_rim(x0: number, y0: number, x1: number, y1: number): number
-				for _, p in rim_pts do
+				for _, p in pts_in(rim_grid, x0, y0, x1, y1) do
 					if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
 						return 1
 					end
@@ -748,10 +827,10 @@ M.View = ui.component(function(props: {
 						return true
 					end
 				end
-				for _, m in graph.nodes do
+				for _, m in near_box(mark_grid, x0, y0, x1, y1) do
 					if m.id ~= own and m.kind ~= "device" then
-						local mx, my = at(m)
-						local mr = reach(m) + 3
+						local mx, my = m.x, m.y
+						local mr = m.reach + 3
 						if mx + mr > x0 and mx - mr < x1 and my + mr > y0 and my - mr < y1 then
 							return true
 						end
@@ -840,11 +919,11 @@ M.View = ui.component(function(props: {
 							local qx, qy = math.clamp(x, x0, x1), math.clamp(y, y0, y1)
 							local own_gap = math.sqrt((qx - x) ^ 2 + (qy - y) ^ 2) - own_r
 							local wrong = false
-							for _, m in graph.nodes do
+							for _, m in marks do
 								if m.id ~= n.id and m.kind ~= "device" then
-									local mx, my = at(m)
+									local mx, my = m.x, m.y
 									local mq_x, mq_y = math.clamp(mx, x0, x1), math.clamp(my, y0, y1)
-									local mg = math.sqrt((mq_x - mx) ^ 2 + (mq_y - my) ^ 2) - reach(m)
+									local mg = math.sqrt((mq_x - mx) ^ 2 + (mq_y - my) ^ 2) - m.reach
 									if mg < own_gap then
 										wrong = true
 										break
@@ -855,7 +934,7 @@ M.View = ui.component(function(props: {
 										local l2 = math.max(1, dx * dx + dy * dy)
 										local tt = math.clamp(((mx - x) * dx + (my - y) * dy) / l2, 0, 1)
 										local px, py = x + dx * tt, y + dy * tt
-										if math.sqrt((mx - px) ^ 2 + (my - py) ^ 2) < reach(m) + 8 then
+										if math.sqrt((mx - px) ^ 2 + (my - py) ^ 2) < m.reach + 8 then
 											wrong = true
 											break
 										end
@@ -958,10 +1037,10 @@ M.View = ui.component(function(props: {
 									end
 								end
 							end
-							for _, m in graph.nodes do
+							for _, m in marks do
 								if m.kind ~= "device" then
-									local mx, my = at(m)
-									local mr = reach(m) + 4
+									local mx, my = m.x, m.y
+									local mr = m.reach + 4
 									if mx + mr > x0 and mx - mr < x0 + rim.w and my + mr > y0 and my - mr < y0 + rim.h then
 										k += 1
 									end
@@ -1001,6 +1080,11 @@ M.View = ui.component(function(props: {
 
 			-- Lines bowed again, now round the names too, where a bow clears
 			-- more (a name still in the way breaks the line round it).
+			-- (The names, now all placed, filed with 4px round each.)
+			local taken_grid: { [number]: { any } } = {}
+			for _, b in taken do
+				file(taken_grid, b[1] - 4, b[2] - 4, b[3] + 4, b[4] + 4, b)
+			end
 			local function blocked(ln: any, k: number): number
 				local mx, my = (ln.ax + ln.bx) / 2, (ln.ay + ln.by) / 2
 				local qx, qy = mx - (ln.by - ln.ay) * k, my + (ln.bx - ln.ax) * k
@@ -1010,16 +1094,16 @@ M.View = ui.component(function(props: {
 					local u = 1 - t
 					local x = u * u * ln.ax + 2 * u * t * qx + t * t * ln.bx
 					local y = u * u * ln.ay + 2 * u * t * qy + t * t * ln.by
-					for _, b in taken do
+					local at_cell = cell(x, y)
+					for _, b in taken_grid[at_cell] or {} do
 						if x > b[1] and x < b[3] and y > b[2] and y < b[4] then
 							n_hit += 1
 						end
 					end
-					for _, m in graph.nodes do
+					for _, m in mark_grid[at_cell] or {} do
 						if m.id ~= ln.e.a and m.id ~= ln.e.b then
-							local px, py = at(m)
-							local room = reach(m) + 6
-							if (x - px) ^ 2 + (y - py) ^ 2 < room * room then
+							local room = m.reach + 6
+							if (x - m.x) ^ 2 + (y - m.y) ^ 2 < room * room then
 								n_hit += 3
 							end
 						end
@@ -1060,16 +1144,16 @@ M.View = ui.component(function(props: {
 			local function cost(list: { { number } }, ln: any): number
 				local k = 0
 				for _, p in list do
-					for _, b in taken do
+					local at_cell = cell(p[1], p[2])
+					for _, b in taken_grid[at_cell] or {} do
 						if p[1] > b[1] - 4 and p[1] < b[3] + 4 and p[2] > b[2] - 4 and p[2] < b[4] + 4 then
 							k += 1
 						end
 					end
-					for _, m in graph.nodes do
+					for _, m in mark_grid[at_cell] or {} do
 						if m.id ~= ln.e.a and m.id ~= ln.e.b then
-							local px, py = at(m)
-							local room = reach(m) + 6
-							if (p[1] - px) ^ 2 + (p[2] - py) ^ 2 < room * room then
+							local room = m.reach + 6
+							if (p[1] - m.x) ^ 2 + (p[2] - m.y) ^ 2 < room * room then
 								k += 3
 							end
 						end
@@ -1185,7 +1269,7 @@ M.View = ui.component(function(props: {
 					if (px - ex) ^ 2 + (py - ey) ^ 2 < near_a * near_a or (px - fx) ^ 2 + (py - fy) ^ 2 < near_b * near_b then
 						return false
 					end
-					for _, bx in taken do
+					for _, bx in taken_grid[cell(px, py)] or {} do
 						if not (bx :: any).tab and px > bx[1] and px < bx[3] and py > bx[2] and py < bx[4] then
 							return true
 						end
