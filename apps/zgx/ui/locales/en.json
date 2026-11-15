@@ -1527,12 +1527,10 @@
         "title": "OpenCode settings",
         "sync": {
           "label": "Sync sessions",
-          "terms": "opencode tui desktop import sessions live",
           "description": "Show the sessions you start in OpenCode's TUI and desktop app as chats here, kept live. Chats you start in Zeron always stay in step with OpenCode."
         },
         "projects": {
           "label": "Add projects",
-          "terms": "opencode projects folders import",
           "description": "A synced session in a folder that isn't a project yet adds it as one. Off, only sessions in your projects show."
         },
         "tabs": {
@@ -1543,7 +1541,6 @@
         },
         "runs_on": {
           "label": "Chats run on",
-          "terms": "opencode service server tui desktop shared private remote ssh tailscale pairing",
           "service": {
             "label": "Background service",
             "description": "The service OpenCode's TUI and desktop app share on this computer, so a session moves between them live."

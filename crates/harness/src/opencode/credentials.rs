@@ -29,9 +29,7 @@ pub struct NativeCredential {
 impl OpencodeHarness {
     /// Every sign-in the service holds, by integration then label.
     pub async fn native_credentials(&self) -> Result<Vec<NativeCredential>, HarnessError> {
-        let server = self.service_server().await.ok_or_else(|| {
-            HarnessError::Protocol("OpenCode's background service isn't available".into())
-        })?;
+        let server = self.require_service().await?;
         let credentials = unwrap_data(server.get_json("/api/credential", None).await?);
         let names: std::collections::HashMap<String, String> = server
             .get_json("/api/integration", None)
@@ -62,9 +60,7 @@ impl OpencodeHarness {
     /// `{type: "oauth", access, …}`, `{type: "external", methodID}`): for a
     /// usage probe of the vendor behind it, never kept.
     pub async fn native_credential_value(&self, id: &str) -> Result<Option<Value>, HarnessError> {
-        let server = self.service_server().await.ok_or_else(|| {
-            HarnessError::Protocol("OpenCode's background service isn't available".into())
-        })?;
+        let server = self.require_service().await?;
         let credentials = unwrap_data(server.get_json("/api/credential", None).await?);
         Ok(credentials
             .as_array()
@@ -83,9 +79,7 @@ impl OpencodeHarness {
         label: &str,
         value: Value,
     ) -> Result<(), HarnessError> {
-        let server = self.service_server().await.ok_or_else(|| {
-            HarnessError::Protocol("OpenCode's background service isn't available".into())
-        })?;
+        let server = self.require_service().await?;
         server
             .post_json(
                 "/api/credential",
@@ -103,9 +97,7 @@ impl OpencodeHarness {
 
     /// Make `id` the credential its integration signs in with.
     pub async fn activate_native_credential(&self, id: &str) -> Result<(), HarnessError> {
-        let server = self.service_server().await.ok_or_else(|| {
-            HarnessError::Protocol("OpenCode's background service isn't available".into())
-        })?;
+        let server = self.require_service().await?;
         server
             .post_json(
                 &format!("/api/credential/{}/activate", super::encode_directory(id)),
@@ -118,22 +110,9 @@ impl OpencodeHarness {
 
     /// Sign out of `id`: the service forgets it.
     pub async fn remove_native_credential(&self, id: &str) -> Result<(), HarnessError> {
-        let server = self.service_server().await.ok_or_else(|| {
-            HarnessError::Protocol("OpenCode's background service isn't available".into())
-        })?;
+        let server = self.require_service().await?;
         let path = format!("/api/credential/{}", super::encode_directory(id));
-        let response = server
-            .request(reqwest::Method::DELETE, &path)
-            .send()
-            .await
-            .map_err(|e| HarnessError::Protocol(format!("opencode DELETE {path}: {e}")))?;
-        if !response.status().is_success() {
-            return Err(HarnessError::Protocol(format!(
-                "opencode DELETE {path}: {}",
-                response.status()
-            )));
-        }
-        Ok(())
+        server.delete(&path, None).await
     }
 
     /// Whether this machine's OpenCode keeps its sign-ins on a background

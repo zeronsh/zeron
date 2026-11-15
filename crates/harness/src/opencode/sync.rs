@@ -13,9 +13,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
-use zeron_proto::AgentEvent;
-
-use zeron_proto::{UserInputAnswer, UserInputQuestion};
+use zeron_proto::{AgentEvent, UserInputAnswer, UserInputQuestion};
 
 use super::{
     OUTPUT_CAP, OpencodeHarness, Server, cap_text, form_answer_body, map_questions, oc_tool_call,
@@ -166,44 +164,15 @@ pub enum NativeChange {
 }
 
 impl OpencodeHarness {
-    /// The background service, or an error saying there is none (1.x, or a
-    /// private server only).
-    async fn sync_server(&self) -> Result<Server, HarnessError> {
-        self.service_server().await.ok_or_else(|| {
-            HarnessError::Protocol("OpenCode's background service isn't available".into())
-        })
-    }
-
     /// Every top-level session on the service, archived ones included
     /// (subagent sessions belong to their parent's transcript).
     pub async fn native_sessions(&self) -> Result<Vec<NativeSession>, HarnessError> {
-        let server = self.sync_server().await?;
+        let server = self.require_service().await?;
         let mut sessions = Vec::new();
         for archived in [false, true] {
-            let mut cursor: Option<String> = None;
-            for _ in 0..MAX_PAGES {
-                let mut path = format!("/api/session?limit={PAGE}&archived={archived}");
-                if let Some(cursor) = &cursor {
-                    path.push_str(&format!("&cursor={}", super::encode_directory(cursor)));
-                }
-                let page = server.get_json(&path, None).await?;
-                let items = page
-                    .get("data")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                let count = items.len();
-                sessions.extend(items.iter().filter_map(native_session));
-                cursor = page
-                    .pointer("/cursor/next")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                // (The service caps a page below `limit` and still offers a
-                // next cursor; only an empty page ends the list.)
-                if count == 0 || cursor.is_none() {
-                    break;
-                }
-            }
+            let path = format!("/api/session?limit={PAGE}&archived={archived}");
+            let listed = pages(&server, &path, None).await?;
+            sessions.extend(listed.iter().filter_map(native_session));
         }
         sessions.sort_by_key(|session| session.created_at_ms);
         sessions.dedup_by(|a, b| a.id == b.id);
@@ -212,7 +181,7 @@ impl OpencodeHarness {
 
     /// One session, `None` when it no longer exists or is a subagent's.
     pub async fn native_session(&self, id: &str) -> Result<Option<NativeSession>, HarnessError> {
-        let server = self.sync_server().await?;
+        let server = self.require_service().await?;
         match server.get_json(&format!("/api/session/{id}"), None).await {
             Ok(info) => Ok(native_session(&unwrap_data(info))),
             Err(HarnessError::Protocol(message)) if message.contains("404") => Ok(None),
@@ -225,30 +194,10 @@ impl OpencodeHarness {
         &self,
         session: &NativeSession,
     ) -> Result<Vec<NativeMessage>, HarnessError> {
-        let server = self.sync_server().await?;
-        let mut messages = Vec::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..MAX_PAGES {
-            let mut path = format!("/api/session/{}/message?limit={PAGE}", session.id);
-            if let Some(cursor) = &cursor {
-                path.push_str(&format!("&cursor={}", super::encode_directory(cursor)));
-            }
-            let page = server.get_json(&path, Some(&session.directory)).await?;
-            let items = page
-                .get("data")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let count = items.len();
-            messages.extend(items.iter().filter_map(native_message));
-            cursor = page
-                .pointer("/cursor/next")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            if count == 0 || cursor.is_none() {
-                break;
-            }
-        }
+        let server = self.require_service().await?;
+        let path = format!("/api/session/{}/message?limit={PAGE}", session.id);
+        let listed = pages(&server, &path, Some(&session.directory)).await?;
+        let mut messages: Vec<NativeMessage> = listed.iter().filter_map(native_message).collect();
         messages.sort_by_key(|message| message.created_at_ms);
         messages.dedup_by(|a, b| a.id == b.id);
         Ok(messages)
@@ -260,7 +209,7 @@ impl OpencodeHarness {
         let Some((provider_id, model_id)) = model.split_once('/') else {
             return Ok(None);
         };
-        let server = self.sync_server().await?;
+        let server = self.require_service().await?;
         let providers = server.provider_catalog(None).await?;
         Ok(providers
             .all
@@ -277,7 +226,7 @@ impl OpencodeHarness {
         &self,
         session: &NativeSession,
     ) -> Result<Vec<NativeQuestion>, HarnessError> {
-        let server = self.sync_server().await?;
+        let server = self.require_service().await?;
         let forms = server
             .get_json(
                 &format!("/api/session/{}/form", session.id),
@@ -302,23 +251,10 @@ impl OpencodeHarness {
         questions: &[UserInputQuestion],
         answers: &[UserInputAnswer],
     ) -> Result<(), HarnessError> {
-        let server = self.sync_server().await?;
+        let server = self.require_service().await?;
         if answers.is_empty() {
             let path = format!("/api/session/{session_id}/form/{form_id}");
-            let request = server.request(reqwest::Method::DELETE, &path);
-            let response = server
-                .scoped(request, Some(directory))
-                .await
-                .send()
-                .await
-                .map_err(|e| HarnessError::Protocol(format!("opencode DELETE {path}: {e}")))?;
-            if !response.status().is_success() {
-                return Err(HarnessError::Protocol(format!(
-                    "opencode DELETE {path}: {}",
-                    response.status()
-                )));
-            }
-            return Ok(());
+            return server.delete(&path, Some(directory)).await;
         }
         let pairs: Vec<(String, UserInputQuestion)> = questions
             .iter()
@@ -345,15 +281,17 @@ impl OpencodeHarness {
     /// Which sessions change, for as long as the receiver is kept. The feed
     /// redials itself after a drop and says so ([`NativeChange::Resync`]).
     pub async fn follow_native(&self) -> Result<mpsc::Receiver<NativeChange>, HarnessError> {
-        let server = self.sync_server().await?;
+        let server = self.require_service().await?;
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
             let mut backoff = Duration::from_millis(500);
             loop {
-                if tx.is_closed() {
-                    return;
-                }
-                match follow_once(&server, &tx).await {
+                // (Let go of with its receiver, even while nothing changes.)
+                let followed = tokio::select! {
+                    _ = tx.closed() => return,
+                    followed = follow_once(&server, &tx) => followed,
+                };
+                match followed {
                     Ok(()) => backoff = Duration::from_millis(500),
                     Err(error) => {
                         tracing::debug!(
@@ -369,6 +307,35 @@ impl OpencodeHarness {
         });
         Ok(rx)
     }
+}
+
+/// Every item of the list at `path`, page after page by its cursor.
+async fn pages(server: &Server, path: &str, directory: Option<&str>) -> Result<Vec<Value>, HarnessError> {
+    let mut items = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let path = match &cursor {
+            Some(cursor) => format!("{path}&cursor={}", super::encode_directory(cursor)),
+            None => path.to_owned(),
+        };
+        let mut page = server.get_json(&path, directory).await?;
+        let listed = match page.get_mut("data").map(Value::take) {
+            Some(Value::Array(listed)) => listed,
+            _ => Vec::new(),
+        };
+        cursor = page
+            .pointer("/cursor/next")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        // (The service caps a page below `limit` and still offers a next
+        // cursor; only an empty page ends the list.)
+        let done = listed.is_empty() || cursor.is_none();
+        items.extend(listed);
+        if done {
+            break;
+        }
+    }
+    Ok(items)
 }
 
 /// One connection of the session feed: until it ends or the receiver goes.

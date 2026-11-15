@@ -1183,16 +1183,16 @@ local function Transcript(props: Props): Node
 			local here: { [string]: boolean } = {}
 			-- (Gone under an undo's note: rows a sync drops and writes again
 			-- are no undo's.)
-			local undone = false
+			local reverted = false
 			for i = math.max(1, n - TAIL_IDS + 1), n do
 				local m = messages:at(i)
 				if m then
 					table.insert(now, m.id)
 					here[m.id] = true
-					undone = undone or m.kind == "revert"
+					reverted = reverted or m.kind == "revert"
 				end
 			end
-			for _, id in if undone then tail else {} do
+			for _, id in if reverted then tail else {} do
 				if not here[id] and not messages:index_of("id", id) then
 					restored[id] = true
 				end

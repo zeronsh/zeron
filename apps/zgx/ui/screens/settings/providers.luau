@@ -877,11 +877,11 @@ local function settings_dialog(): Node
 		end)
 	end
 	local function oc_remote_on(): boolean
-		return opencode() and oc_where:get() == "remote" and oc_editing:get()
+		return oc_where:get() == "remote" and oc_editing:get()
 	end
 	-- A remote connected: one row says which, with a way to change it.
 	local function oc_remote_folded(): boolean
-		return opencode() and oc_where:get() == "remote" and not oc_editing:get()
+		return oc_where:get() == "remote" and not oc_editing:get()
 	end
 	local function oc_in(mode: string): () -> boolean
 		return function()
@@ -962,7 +962,7 @@ local function settings_dialog(): Node
 		ui.show(function(): boolean
 			return opencode() and oc_tab:get() == "sessions"
 		end, ds.Settings.Group {
-			ui.show(opencode, ds.Settings.Row {
+			ds.Settings.Row {
 				label = ui.t("settings.providers.opencode.sync.label"),
 				description = ui.t("settings.providers.opencode.sync.description"),
 				control = ds.Switch {
@@ -970,8 +970,8 @@ local function settings_dialog(): Node
 					label = ui.t("settings.providers.opencode.sync.label"),
 					on_change = oc_set("syncSessions", oc_sync),
 				},
-			}),
-			ui.show(opencode, ui.div {
+			},
+			ui.div {
 				w_full = true,
 				opacity = function()
 					return if oc_sync:get() then 1 else "$zeron.disabled"
@@ -988,12 +988,12 @@ local function settings_dialog(): Node
 						on_change = oc_set("addProjects", oc_projects),
 					},
 				},
-			}),
+			},
 		}),
 		ui.show(function(): boolean
 			return opencode() and oc_tab:get() == "server"
 		end, ds.Settings.Group {
-			ui.show(opencode, ds.Settings.Row {
+			ds.Settings.Row {
 				label = ui.t("settings.providers.opencode.runs_on.label"),
 				description = function()
 					return ui.t(`settings.providers.opencode.runs_on.{oc_where:get()}.description`):get()
@@ -1010,7 +1010,7 @@ local function settings_dialog(): Node
 					} :: any,
 					on_change = oc_run_on,
 				},
-			}),
+			},
 			ui.show(oc_remote_folded, ds.Settings.Row {
 				label = function()
 					local name = oc_name:get()

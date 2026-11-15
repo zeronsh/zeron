@@ -77,16 +77,11 @@ impl TuiAction {
             .then_some(action)
     }
 
-    /// Do it. It answers with nothing: the transcript shows what it did
-    /// as the session does in every client (the engine's session sync) —
-    /// an undo's turn gone, a compaction's note, a fork's own chat. A
-    /// compaction is waited on, so the chat shows it working until done.
-    pub async fn run(
-        self,
-        server: &Server,
-        session_id: &str,
-        dir: Option<&str>,
-    ) -> Result<Vec<AgentEvent>, HarnessError> {
+    /// Do it. The transcript shows what it did as the session does in every
+    /// client (the engine's session sync) — an undo's turn gone, a
+    /// compaction's note, a fork's own chat. A compaction is waited on, so
+    /// the chat shows it working until done.
+    pub async fn run(self, server: &Server, session_id: &str, dir: Option<&str>) -> Result<(), HarnessError> {
         match self {
             TuiAction::Compact => {
                 let started = now_ms();
@@ -132,7 +127,7 @@ impl TuiAction {
                     Some(boundary) => turn_before(&messages, &boundary),
                     None => last_turn(&messages),
                 };
-                if let Some((id, _)) = target {
+                if let Some(id) = target {
                     server
                         .post_json(
                             &format!("/api/session/{session_id}/revert/stage"),
@@ -149,20 +144,9 @@ impl TuiAction {
                         .await?,
                 );
                 if info.get("revert").is_some_and(|revert| !revert.is_null()) {
-                    let path = format!("/api/session/{session_id}/revert");
-                    let request = server.request(reqwest::Method::DELETE, &path);
-                    let response = server
-                        .scoped(request, dir)
-                        .await
-                        .send()
-                        .await
-                        .map_err(|e| HarnessError::Protocol(format!("opencode DELETE {path}: {e}")))?;
-                    if !response.status().is_success() {
-                        return Err(HarnessError::Protocol(format!(
-                            "opencode DELETE {path}: {}",
-                            response.status()
-                        )));
-                    }
+                    server
+                        .delete(&format!("/api/session/{session_id}/revert"), dir)
+                        .await?;
                 }
             }
             TuiAction::Fork => {
@@ -178,7 +162,7 @@ impl TuiAction {
                 }
             }
         }
-        Ok(Vec::new())
+        Ok(())
     }
 }
 
@@ -210,25 +194,25 @@ fn compaction_settled(messages: &Value, since: f64) -> bool {
 
 /// The newest turn in a session's message list — a prompt of the person's,
 /// or a `!command` run — which is where an undo starts.
-fn last_turn(messages: &Value) -> Option<(String, String)> {
+fn last_turn(messages: &Value) -> Option<String> {
     turns(messages).pop()
 }
 
 /// The turn just before the staged revert `boundary`: what a further
 /// `/undo` takes back, the boundary itself and everything after it being
 /// hidden already.
-fn turn_before(messages: &Value, boundary: &str) -> Option<(String, String)> {
-    let turns = turns(messages);
-    let at = turns.iter().position(|(id, _)| id == boundary)?;
-    at.checked_sub(1).and_then(|before| turns.get(before).cloned())
+fn turn_before(messages: &Value, boundary: &str) -> Option<String> {
+    let mut turns = turns(messages);
+    let at = turns.iter().position(|id| id == boundary)?;
+    at.checked_sub(1).map(|before| turns.swap_remove(before))
 }
 
-/// The turns in a session's message list, oldest first, each with what it
-/// said: a prompt of the person's, or a `!command` run (which the session
-/// keeps as a `shell` message, no prompt of its own). (The list holds the
-/// turns a staged undo hides, too: one of them is its boundary.)
-fn turns(messages: &Value) -> Vec<(String, String)> {
-    let mut found: Vec<(String, String, f64)> = messages
+/// The turns in a session's message list, by id, oldest first: a prompt of
+/// the person's, or a `!command` run (which the session keeps as a `shell`
+/// message, no prompt of its own). (The list holds the turns a staged undo
+/// hides, too: one of them is its boundary.)
+fn turns(messages: &Value) -> Vec<String> {
+    let mut found: Vec<(f64, String)> = messages
         .as_array()
         .into_iter()
         .flatten()
@@ -240,22 +224,16 @@ fn turns(messages: &Value) -> Vec<(String, String)> {
         })
         .filter_map(|message| {
             Some((
-                message.get("id")?.as_str()?.to_owned(),
-                message
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .or_else(|| message.get("command").and_then(Value::as_str))
-                    .unwrap_or_default()
-                    .to_owned(),
                 message
                     .pointer("/time/created")
                     .and_then(Value::as_f64)
                     .unwrap_or_default(),
+                message.get("id")?.as_str()?.to_owned(),
             ))
         })
         .collect();
-    found.sort_by(|a, b| a.2.total_cmp(&b.2));
-    found.into_iter().map(|(id, text, _)| (id, text)).collect()
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    found.into_iter().map(|(_, id)| id).collect()
 }
 
 /// The shell command a `!command` prompt runs, as the TUI's shell mode.
@@ -268,13 +246,14 @@ pub(super) fn shell_command(prompt: &str) -> Option<&str> {
 }
 
 /// Run `command` in the session, and wait for it to exit (or [`SHELL_WAIT`]
-/// to run out); the session's shell message shows it and what it printed.
+/// to run out); the session's shell message shows it and what it printed,
+/// its chip in every client.
 pub(super) async fn run_shell(
     server: &Server,
     session_id: &str,
     dir: Option<&str>,
     command: &str,
-) -> Result<Vec<AgentEvent>, HarnessError> {
+) -> Result<(), HarnessError> {
     let started = now_ms();
     server
         .post_json(
@@ -284,26 +263,20 @@ pub(super) async fn run_shell(
         )
         .await?;
     let deadline = tokio::time::Instant::now() + SHELL_WAIT;
-    let mut seen: Option<Value> = None;
     loop {
         let messages = unwrap_data(
             server
                 .get_json(&format!("/api/session/{session_id}/message?limit=20"), dir)
                 .await?,
         );
-        seen = shell_message(&messages, command, started - 2000.0).or(seen);
-        let exited = seen
-            .as_ref()
-            .and_then(|message| message.get("status").and_then(Value::as_str))
-            .is_some_and(|status| status != "running");
+        let exited = shell_message(&messages, command, started - 2000.0)
+            .and_then(|message| Some(message.get("status")?.as_str()? != "running"))
+            .unwrap_or(false);
         if exited || tokio::time::Instant::now() >= deadline {
-            break;
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    // (The session's shell message is its chip, in every client.)
-    let _ = seen;
-    Ok(Vec::new())
 }
 
 /// This run's `shell` message: the newest for `command` since `since`.
@@ -406,7 +379,7 @@ mod tests {
             {"id": "m2", "type": "user", "text": "second", "time": {"created": 2}},
             {"id": "m1", "type": "user", "text": "first", "time": {"created": 1}}
         ]);
-        assert_eq!(last_turn(&messages), Some(("m2".into(), "second".into())));
+        assert_eq!(last_turn(&messages), Some("m2".into()));
         assert_eq!(last_turn(&json!([])), None);
     }
 
@@ -421,8 +394,8 @@ mod tests {
             {"id": "m4", "type": "assistant", "time": {"created": 4}},
             {"id": "m5", "type": "user", "text": "three", "time": {"created": 5}}
         ]);
-        assert_eq!(turn_before(&messages, "m5"), Some(("m3".into(), "two".into())));
-        assert_eq!(turn_before(&messages, "m3"), Some(("m1".into(), "one".into())));
+        assert_eq!(turn_before(&messages, "m5"), Some("m3".into()));
+        assert_eq!(turn_before(&messages, "m3"), Some("m1".into()));
         // (The first prompt: nothing left to take back.)
         assert_eq!(turn_before(&messages, "m1"), None);
         // (A boundary the list no longer holds takes nothing back.)
@@ -437,9 +410,9 @@ mod tests {
             {"id": "m1", "type": "user", "text": "one", "time": {"created": 1}},
             {"id": "m2", "type": "shell", "command": "echo hi", "time": {"created": 2}}
         ]);
-        assert_eq!(last_turn(&messages), Some(("m2".into(), "echo hi".into())));
+        assert_eq!(last_turn(&messages), Some("m2".into()));
         // (A shell run undone: the turn before it is the next one back.)
-        assert_eq!(turn_before(&messages, "m2"), Some(("m1".into(), "one".into())));
+        assert_eq!(turn_before(&messages, "m2"), Some("m1".into()));
     }
 
     #[test]

@@ -740,11 +740,11 @@ pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
 pub use opencode::{
-    CompactionStatus, NativeChange, NativeCredential, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession,
-    OPENCODE_ACCESS_MODES,
-    RevertedFile as OpencodeRevertedFile,
-    OpencodeHarness, OpencodeRemote, redeem_pairing_link as redeem_opencode_pairing_link,
-    set_remote as set_opencode_remote, set_runs_on_service as set_opencode_runs_on_service,
+    CompactionStatus, NativeChange, NativeCredential, NativeMessage, NativeMessageKind,
+    NativeQuestion, NativeSession, OPENCODE_ACCESS_MODES, OpencodeHarness, OpencodeRemote,
+    RevertedFile as OpencodeRevertedFile, has_tui_actions as opencode_has_tui_actions,
+    redeem_pairing_link as redeem_opencode_pairing_link, set_remote as set_opencode_remote,
+    set_runs_on_service as set_opencode_runs_on_service,
 };
 pub use muse::MuseHarness;
 pub use pi::PiHarness;

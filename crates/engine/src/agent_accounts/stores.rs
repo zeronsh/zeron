@@ -65,6 +65,8 @@
 
 use std::collections::HashSet;
 
+use super::*;
+
 /// Account keys of OpenCode 2.x's credentials: `credential:<id>`.
 pub(super) const OPENCODE_CREDENTIAL: &str = "credential:";
 
@@ -92,8 +94,6 @@ fn opencode_credential_value(
     }
     Some(value)
 }
-
-use super::*;
 
 // ── paths ───────────────────────────────────────────────────────────────────
 

@@ -758,18 +758,21 @@ impl SessionsEngine {
         live.is_some_and(|(harness, routable)| routable && !self.steers_mid_turn(harness))
     }
 
-    /// The harness of the chat's live run, while one is in flight.
     /// The harness of the chat's run on this device, between turns too.
     pub(crate) fn run_harness(&self, chat_id: &str) -> Option<HarnessId> {
         lock(&self.inner.runs).get(chat_id).map(|h| h.runtime_config.harness_id)
     }
 
     /// Whether `prompt` to `harness` is a message of the person's: not one
-    /// of OpenCode's TUI actions, whose transcript shows what they did.
+    /// of OpenCode's TUI actions (2.x's), whose transcript shows what they
+    /// did.
     fn is_message(harness: HarnessId, prompt: &str) -> bool {
-        harness != HarnessId::Opencode || crate::opencode_sync::tui_action(prompt).is_none()
+        harness != HarnessId::Opencode
+            || !zeron_harness::opencode_has_tui_actions()
+            || !crate::opencode_sync::is_tui_action(prompt)
     }
 
+    /// The harness of the chat's live run, while one is in flight.
     pub fn live_harness(&self, chat_id: &str) -> Option<HarnessId> {
         if !self.turn_in_flight(chat_id) {
             return None;

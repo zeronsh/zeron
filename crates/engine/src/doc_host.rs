@@ -6318,7 +6318,7 @@ impl DocHost {
         }
     }
 
-    /// `prompt` to an OpenCode chat is one of OpenCode's TUI actions
+    /// `prompt` to an OpenCode chat is one of OpenCode 2.x's TUI actions
     /// (`/compact`, `/undo`, `/redo`, `/fork`, `!command`, typed or picked):
     /// no message of the person's, so none is written — the session shows
     /// what it did ([`crate::opencode_sync`]).
@@ -6329,6 +6329,7 @@ impl DocHost {
         prompt: &str,
     ) -> bool {
         harness == zeron_proto::HarnessId::Opencode
+            && zeron_harness::opencode_has_tui_actions()
             && crate::opencode_sync::note_prompt(chat_id, prompt)
     }
 

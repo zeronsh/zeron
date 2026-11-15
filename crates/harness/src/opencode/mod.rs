@@ -423,6 +423,15 @@ pub fn set_runs_on_service(on: bool) {
     RUNS_ON_SERVICE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Whether an OpenCode 2.x server has answered here: only it takes the TUI's
+/// actions ([`actions`]). To 1.x, `/undo` and `!command` are a message's
+/// words as any other.
+static TUI_ACTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn has_tui_actions() -> bool {
+    TUI_ACTIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Default for OpencodeHarness {
     fn default() -> Self {
         Self {
@@ -601,6 +610,14 @@ impl OpencodeHarness {
         Some(Server::service(&info, client))
     }
 
+    /// [`Self::service_server`], or an error saying there is none (1.x, or a
+    /// private server only).
+    async fn require_service(&self) -> Result<Server, HarnessError> {
+        self.service_server().await.ok_or_else(|| {
+            HarnessError::Protocol("OpenCode's background service isn't available".into())
+        })
+    }
+
     /// The remote server Settings name in place of this computer's service
     /// ([`remote`]), connected (over SSH, through a forward kept open).
     async fn remote_server(&self) -> Result<Server, HarnessError> {
@@ -697,7 +714,8 @@ impl OpencodeHarness {
         if self.catalog_watch.set(()).is_err() {
             return;
         }
-        let generation = self.catalog_generation.clone();
+        // (Held weakly: the watcher ends with its harness.)
+        let generation = Arc::downgrade(&self.catalog_generation);
         let executable = self.executable.clone();
         runtime.spawn(async move {
             let mut follower = OpencodeHarness::new();
@@ -716,11 +734,15 @@ impl OpencodeHarness {
                                 NativeChange::Resync => std::mem::replace(&mut connected, true),
                                 _ => false,
                             };
+                            let Some(generation) = generation.upgrade() else {
+                                return;
+                            };
                             if changed {
                                 generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                             }
                         }
                     }
+                    Err(_) if generation.strong_count() == 0 => return,
                     Err(_) => tokio::time::sleep(Duration::from_secs(30)).await,
                 }
             }
@@ -1506,6 +1528,22 @@ impl Server {
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
+    /// DELETE, bounded as a POST is: what the service forgets (a sign-in, a
+    /// staged undo, a question's form).
+    async fn delete(&self, path: &str, directory: Option<&str>) -> Result<(), HarnessError> {
+        let req = self.request(reqwest::Method::DELETE, path).timeout(CALL_TIMEOUT);
+        let resp = self
+            .scoped(req, directory)
+            .await
+            .send()
+            .await
+            .map_err(|e| HarnessError::Protocol(format!("opencode DELETE {path}: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(HarnessError::Protocol(format!("opencode DELETE {path}: {}", resp.status())));
+        }
+        Ok(())
+    }
+
     /// POST returning `(status, raw body)`; only transport failures error.
     /// HTTP status handling is the caller's (the lazy-migration retry in
     /// [`create_session`] needs to see 5xx, not a preformatted message).
@@ -1611,6 +1649,7 @@ impl Server {
     async fn slash_commands(&self, directory: Option<&str>) -> Result<Vec<SlashCommand>, HarnessError> {
         let mut commands = commands_from_wire(&self.commands_wire(directory).await?);
         if self.protocol().await == Protocol::V2 {
+            TUI_ACTIONS.store(true, std::sync::atomic::Ordering::Relaxed);
             for action in TuiAction::ALL {
                 if !commands.iter().any(|command| command.name == action.name()) {
                     commands.push(action.command());
@@ -2319,9 +2358,9 @@ enum TurnSignal {
     /// A permission or question answer could not be delivered: the agent is
     /// blocked on a reply it will never get.
     ReplyFailed(String),
-    /// A TUI action or `!command` finished ([`actions`]): what it shows,
-    /// and the turn is over — no turn of the agent's own follows.
-    ActionDone(Vec<AgentEvent>),
+    /// A TUI action or `!command` finished ([`actions`]): the turn is over —
+    /// no turn of the agent's own follows, and the session shows what it did.
+    ActionDone,
 }
 
 /// A canonical leading command or provider-backed skill was selected in the
@@ -3107,13 +3146,8 @@ async fn run_session(session: Session) {
                         continue 'main;
                     }
                     TurnSignal::PromptFailed(message) | TurnSignal::CommandFailed(message) => message,
-                    TurnSignal::ActionDone(events) => {
+                    TurnSignal::ActionDone => {
                         turn.prompt_in_flight = false;
-                        for event in events {
-                            if !send(&event_tx, event).await {
-                                break 'main;
-                            }
-                        }
                         turn.saw_content = true;
                         settle_idle!('main);
                     }
@@ -3818,7 +3852,7 @@ async fn post_prompt(
                     (None, None) => unreachable!("one of them was asked for"),
                 };
                 let signal = match done {
-                    Ok(events) => TurnSignal::ActionDone(events),
+                    Ok(()) => TurnSignal::ActionDone,
                     Err(error) => TurnSignal::CommandFailed(error.to_string()),
                 };
                 let _ = updates.send(TurnUpdate {

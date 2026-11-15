@@ -5947,7 +5947,6 @@ mod login_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// Temp homes for every provider; never the real logins or Keychain.
     /// Live, read-only: OpenCode 2.x's sign-ins on this machine's background
     /// service, as Settings → Providers lists them (everything else isolated).
     #[tokio::test]
@@ -5974,6 +5973,7 @@ mod login_tests {
         assert!(rows.iter().all(|row| row.saved_at.is_none()));
     }
 
+    /// Temp homes for every provider; never the real logins or Keychain.
     fn config(root: &Path) -> AgentAccountsConfig {
         AgentAccountsConfig {
             data_dir: root.join("data"),

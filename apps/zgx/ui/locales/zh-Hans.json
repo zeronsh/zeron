@@ -1527,12 +1527,10 @@
         "title": "OpenCode 设置",
         "sync": {
           "label": "同步会话",
-          "terms": "同步 会话 opencode tui desktop import sessions live",
           "description": "将你在 OpenCode 终端界面和桌面应用中开始的会话显示为此处的聊天，并实时保持同步。在 Zeron 中开始的聊天始终与 OpenCode 保持一致。"
         },
         "projects": {
           "label": "添加项目",
-          "terms": "项目 文件夹 opencode projects folders import",
           "description": "同步的会话所在文件夹尚不是项目时，将其添加为项目。关闭后，只显示你的项目中的会话。"
         },
         "tabs": {
@@ -1543,7 +1541,6 @@
         },
         "runs_on": {
           "label": "聊天运行于",
-          "terms": "服务 远程 服务器 配对 opencode service server tui desktop shared private remote ssh tailscale pairing",
           "service": {
             "label": "后台服务",
             "description": "本机上 OpenCode 终端界面和桌面应用共享的服务，会话可在它们之间实时切换。"

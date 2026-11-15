@@ -1713,25 +1713,15 @@ pub(crate) fn made(params: &Json) {
     CHATS.with(|c| c.made(id, row));
 }
 
-/// `chat.catalog`: the agents with models listed, each model as the picker
-/// takes it; ready once any agent's models are in (more may follow), or all
-/// have answered (`done`). (`device`: whose, when it isn't this one.)
-/// One of OpenCode's TUI actions, as the engine takes them for an OpenCode
-/// chat (`/compact`, `/undo`, `/redo`, `/fork`, `!command`, typed or picked
-/// from the `/` list, whose link the agent gets as the command): no message.
-fn opencode_action(words: &str) -> Option<&'static str> {
+/// Whether `words` are one of OpenCode's TUI actions, as the engine takes
+/// them for an OpenCode chat (`/compact`, `/undo`, `/redo`, `/fork`,
+/// `!command`, typed or picked from the `/` list, whose link the agent gets
+/// as the command): no message.
+fn is_opencode_action(words: &str) -> bool {
     let words = zeron_proto::invocation::harness_prompt(words, zeron_proto::HarnessId::Opencode);
     let words = words.trim();
-    match words {
-        "/compact" => Some("compact"),
-        "/undo" => Some("undo"),
-        "/redo" => Some("redo"),
-        "/fork" => Some("fork"),
-        _ => words
-            .strip_prefix('!')
-            .is_some_and(|command| !command.trim().is_empty())
-            .then_some("shell"),
-    }
+    matches!(words, "/compact" | "/undo" | "/redo" | "/fork")
+        || words.strip_prefix('!').is_some_and(|command| !command.trim().is_empty())
 }
 
 /// The access modes a listed harness honours (`accessModes`), as the
@@ -1751,6 +1741,9 @@ fn access_values(harness: &Json) -> Vec<Value> {
         .collect()
 }
 
+/// `chat.catalog`: the agents with models listed, each model as the picker
+/// takes it; ready once any agent's models are in (more may follow), or all
+/// have answered (`done`). (`device`: whose, when it isn't this one.)
 fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, device: Option<&str>) -> Value {
     let any = by.values().any(|l| !l.is_empty());
     let state = if any || done { "ready" } else { "looking" };
@@ -2544,7 +2537,7 @@ impl View {
         let prompts = pending.entry(id.clone()).or_default();
         // (Shown already while its chat was being made: `chat.creating`.)
         prompts.retain(|p| p.id != message_id);
-        if !(chat["config"]["harness"].as_str() == Some("opencode") && opencode_action(&words).is_some()) {
+        if !(chat["config"]["harness"].as_str() == Some("opencode") && is_opencode_action(&words)) {
             prompts.push(Pending {
                 id: message_id.clone(),
                 words: words.clone(),
@@ -4810,9 +4803,6 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             }
             Some(Value::record(fields))
         }
-        // The provider-switch seam (the engine's system entry when a chat
-        // moves to another agent): `[mark] From → [mark] To` over the prompt
-        // that switched, as the shipping app's `switch_marker`.
         // Where the agent's session compacted (OpenCode's), as OpenCode's
         // own clients show it: "Session compaction started", the summary as
         // it is written, then "Session compacted · 648.4K in · 2.8K out".
@@ -4823,13 +4813,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .flatten()
                 .find(|p| p["kind"].as_str() == Some("compaction")) =>
         {
-            // (The part as `MessagePart::Compaction` reads on the wire: its
-            // `status` — the doc's own part says `message`, which an older
-            // engine's frames may still carry.)
-            let status = part["status"]
-                .as_str()
-                .or_else(|| part["message"].as_str())
-                .unwrap_or_default();
+            let status = part["status"].as_str().unwrap_or_default();
             let live = matches!(status, "running" | "pending");
             let summary = entry["parts"]
                 .as_array()
@@ -4860,15 +4844,9 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .flatten()
                 .find(|p| p["kind"].as_str() == Some("revert")) =>
         {
-            // (The part as `MessagePart::Revert` reads on the wire: its
-            // `messages`, and the `files` the undo put back.)
-            let count = part["messages"]
-                .as_u64()
-                .or_else(|| part["reverted"].as_u64())
-                .unwrap_or_default();
+            let count = part["messages"].as_u64().unwrap_or_default();
             let files: Vec<Value> = part["files"]
                 .as_array()
-                .or_else(|| part["revertedFiles"].as_array())
                 .into_iter()
                 .flatten()
                 .map(|file| {
@@ -4892,6 +4870,9 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("files", Value::List(Rc::from(files))),
             ]))
         }
+        // The provider-switch seam (the engine's system entry when a chat
+        // moves to another agent): `[mark] From → [mark] To` over the prompt
+        // that switched, as the shipping app's `switch_marker`.
         "system" => {
             let part = entry["parts"]
                 .as_array()
@@ -7490,14 +7471,6 @@ mod tests {
         assert!(matches!(running.field("live"), Some(Value::Bool(true))));
         let done = compaction("completed", Some("## Goal\n- tides"));
         assert!(matches!(done.field("close"), Some(Value::Str(s)) if s.as_ref() == "Session compacted · 648.4K in · 2.8K out"));
-        // (A frame from before the part carried `status` still reads: the
-        // doc's own part says `message`.)
-        let older = message(
-            &json!({ "id": "oc:c", "role": "system", "parts": [{ "id": "c0", "kind": "compaction", "message": "running" }] }),
-            None,
-        )
-        .expect("a compaction shows");
-        assert!(matches!(older.field("live"), Some(Value::Bool(true))));
         let undo = |part: serde_json::Value| {
             message(&json!({ "id": "oc:revert", "role": "system", "parts": [part] }), None)
                 .expect("an undo shows")
@@ -7509,12 +7482,9 @@ mod tests {
         assert!(matches!(two.field("close"), Some(Value::Str(s)) if s.as_ref() == "/redo to restore"));
         let Some(Value::List(files)) = two.field("files") else { panic!("no files") };
         assert!(matches!(files[0].field("path"), Some(Value::Str(s)) if s.as_ref() == "a.rs"));
-        // (One: `message`, not `messages` — and a doc written before the
-        // part carried `messages` still reads.)
+        // (One: `message`, not `messages`.)
         let one = undo(json!({ "id": "r0", "kind": "revert", "messages": 1 }));
         assert!(matches!(one.field("text"), Some(Value::Str(s)) if s.as_ref() == "1 message reverted"));
-        let old = undo(json!({ "id": "r0", "kind": "revert", "reverted": 1 }));
-        assert!(matches!(old.field("text"), Some(Value::Str(s)) if s.as_ref() == "1 message reverted"));
     }
 
     #[test]

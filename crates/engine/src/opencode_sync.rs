@@ -34,18 +34,13 @@ use zeron_harness::{
 };
 use zeron_proto::{Chat, ChatConfig, HarnessId};
 
-use crate::registry::OpencodeSettings;
-
 use crate::doc_host::DocHost;
-use crate::registry::HarnessRegistry;
+use crate::registry::{HarnessRegistry, OpencodeSettings};
 use crate::sessions::SessionsEngine;
 use crate::workspace_host::WorkspaceHost;
 
 /// Entry ids of messages read from an OpenCode session.
 const ENTRY_PREFIX: &str = "oc:";
-
-/// The text part carrying a compaction's summary, under its note.
-const SUMMARY_PART_ID: &str = "s0";
 
 /// The entry of an undo staged in the session (one at most).
 const REVERT_ENTRY: &str = "oc:revert";
@@ -893,34 +888,18 @@ fn context_tokens(history: &[NativeMessage], session: &NativeSession, start: Sta
         .find_map(NativeMessage::context_tokens)
 }
 
-/// One of OpenCode's TUI actions, as sent from Zeron's composer for an
-/// OpenCode chat — typed, or picked from its `/` list (a link the agent gets
-/// as the command). The driver does them (`zeron_harness`'s OpenCode
-/// actions); the session shows what they did, never the command as a message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TuiAction {
-    Compact,
-    Undo,
-    Redo,
-    Fork,
-    /// `!command`, the TUI's shell mode.
-    Shell,
-}
-
-/// The action `prompt` is, if it is one.
-pub(crate) fn tui_action(prompt: &str) -> Option<TuiAction> {
+/// Whether `prompt` is one of OpenCode's TUI actions, as sent from Zeron's
+/// composer for an OpenCode chat — typed, or picked from its `/` list (a link
+/// the agent gets as the command) — or `!command`, the TUI's shell mode. The
+/// driver does them (`zeron_harness`'s OpenCode actions); the session shows
+/// what they did, never the command as a message.
+pub(crate) fn is_tui_action(prompt: &str) -> bool {
     let prompt = zeron_proto::invocation::harness_prompt(prompt, HarnessId::Opencode);
     let prompt = prompt.trim();
-    match prompt {
-        "/compact" => Some(TuiAction::Compact),
-        "/undo" => Some(TuiAction::Undo),
-        "/redo" => Some(TuiAction::Redo),
-        "/fork" => Some(TuiAction::Fork),
-        _ => prompt
+    matches!(prompt, "/compact" | "/undo" | "/redo" | "/fork")
+        || prompt
             .strip_prefix('!')
             .is_some_and(|command| !command.trim().is_empty())
-            .then_some(TuiAction::Shell),
-    }
 }
 
 /// Chats whose turn in flight is one of those actions: it writes nothing of
@@ -940,7 +919,7 @@ fn acting(chat_id: &str) -> bool {
 /// A prompt sent to an OpenCode chat: whether it is one of the TUI's
 /// actions (no message of the person's), noted for the sync either way.
 pub(crate) fn note_prompt(chat_id: &str, prompt: &str) -> bool {
-    let action = tui_action(prompt).is_some();
+    let action = is_tui_action(prompt);
     if action {
         acting_set().insert(chat_id.to_owned());
     } else {
@@ -1085,7 +1064,7 @@ fn entry_of(message: &NativeMessage, streaming: bool, device_id: &str) -> Sessio
             .chain(
                 (!summary.trim().is_empty() || *status == CompactionStatus::Running).then(|| {
                     MessagePart::Text {
-                        id: SUMMARY_PART_ID.into(),
+                        id: zeron_doc::COMPACTION_SUMMARY_PART.into(),
                         text: summary.clone(),
                     }
                 }),
@@ -1511,19 +1490,17 @@ mod tests {
 
     #[test]
     fn the_tui_actions_are_known_by_what_is_typed() {
-        assert_eq!(tui_action(" /compact "), Some(TuiAction::Compact));
-        assert_eq!(tui_action("/undo"), Some(TuiAction::Undo));
-        assert_eq!(tui_action("/redo"), Some(TuiAction::Redo));
-        assert_eq!(tui_action("/fork"), Some(TuiAction::Fork));
-        assert_eq!(tui_action("!git status"), Some(TuiAction::Shell));
-        assert_eq!(tui_action("!"), None);
-        assert_eq!(tui_action("/undo this please"), None);
-        assert_eq!(tui_action("please /compact"), None);
+        for action in [" /compact ", "/undo", "/redo", "/fork", "!git status"] {
+            assert!(is_tui_action(action), "{action}");
+        }
+        for message in ["!", "/undo this please", "please /compact"] {
+            assert!(!is_tui_action(message), "{message}");
+        }
         // Picked from the composer's list: a link the agent gets as the command.
         let picked = zeron_proto::invocation::Invocation::Command {
             name: "undo".into(),
         };
-        assert_eq!(tui_action(&picked.link()), Some(TuiAction::Undo));
+        assert!(is_tui_action(&picked.link()));
         assert!(note_prompt("acting-chat", "/compact"));
         assert!(acting("acting-chat"));
         assert!(!note_prompt("acting-chat", "hello"));
