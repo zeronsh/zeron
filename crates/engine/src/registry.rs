@@ -701,8 +701,8 @@ impl HarnessRegistry {
                 return;
             }
         };
-        let tmp = path.with_extension("json.tmp");
-        if let Err(err) = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)) {
+        // (Private: a remote OpenCode server's password is among them.)
+        if let Err(err) = crate::runner::write_private_atomic(&path, json.as_bytes()) {
             tracing::warn!(error = %err, "harness-prefs save failed");
         }
     }
