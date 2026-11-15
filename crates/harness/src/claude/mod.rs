@@ -494,6 +494,18 @@ pub struct ClaudeHarness {
     initialize: discovery::InitializeCache,
     models_cache: crate::catalog::Catalog,
     workspace_commands: crate::skills::CommandDiscovery,
+    /// Runtimes started before their chat's first message ([`Harness::prewarm`]),
+    /// by key: each launched and initialized, its stdin waiting.
+    warm: std::sync::Mutex<std::collections::HashMap<String, Warm>>,
+}
+
+/// A parked warm start: what it launched with, and the process.
+struct Warm {
+    request: RunRequest,
+    /// The binary it runs, resolved to the release (a CLI that updated
+    /// itself since is another runtime).
+    exe: Option<PathBuf>,
+    runtime: Runtime,
 }
 
 impl Default for ClaudeHarness {
@@ -505,6 +517,7 @@ impl Default for ClaudeHarness {
             initialize: discovery::InitializeCache::default(),
             models_cache: crate::catalog::Catalog::default(),
             workspace_commands: crate::skills::CommandDiscovery::default(),
+            warm: Default::default(),
         }
     }
 }
@@ -1161,7 +1174,92 @@ impl Harness for ClaudeHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false).await
+        self.run_with_mode(request, controls, false, None).await
+    }
+
+    /// The CLI in stream-json mode waits on stdin for its first user line
+    /// once it has started: launched and sent `initialize`, it has done its
+    /// startup and asked no model anything.
+    fn prewarms(&self) -> bool {
+        true
+    }
+
+    async fn prewarm(&self, key: &str, request: RunRequest) -> Result<(), HarnessError> {
+        self.discard_warm(key).await;
+        let exe = self.resolve_executable()?;
+        let release = std::fs::canonicalize(&exe).ok();
+        let mut runtime = Self::launch(&exe, &request, false)?;
+        // The same handshake a run makes; the CLI then waits on stdin for
+        // its first user line, asking no model anything.
+        runtime
+            .stdin
+            .line(wire::initialize_request_line("zeron_initialize"));
+        tracing::debug!(target: "first_word", key, pid = runtime.child.id(), "claude warm start");
+        let warm = Warm {
+            request,
+            exe: release,
+            runtime,
+        };
+        let replaced = lock(&self.warm).insert(key.to_owned(), warm);
+        if let Some(old) = replaced {
+            spawn_retire(old, self.kill_grace);
+        }
+        Ok(())
+    }
+
+    async fn run_warm(
+        &self,
+        key: &str,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let warm = lock(&self.warm).remove(key);
+        let runtime = match warm {
+            Some(mut warm) => {
+                let alive = matches!(warm.runtime.child.try_wait(), Ok(None));
+                let release = self
+                    .resolve_executable()
+                    .ok()
+                    .and_then(|exe| std::fs::canonicalize(exe).ok());
+                let why_not = if !alive {
+                    Some("its process exited")
+                } else if release.is_none() || release != warm.exe {
+                    Some("the CLI changed since")
+                } else if !launches_alike(&warm.request, &request) {
+                    Some("launched otherwise")
+                } else {
+                    None
+                };
+                match why_not {
+                    None => {
+                        tracing::debug!(target: "first_word", key, "claude warm start taken");
+                        Some(warm.runtime)
+                    }
+                    Some(why) => {
+                        tracing::info!(
+                            target: "zeron_harness::claude",
+                            key,
+                            why,
+                            "warm start not used; starting afresh"
+                        );
+                        spawn_retire(warm, self.kill_grace);
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        self.run_with_mode(request, controls, false, runtime).await
+    }
+
+    /// Ends once the process has: after any login refresh in flight is
+    /// saved ([`refresh_lock`]), never mid-refresh.
+    async fn discard_warm(&self, key: &str) {
+        let warm = lock(&self.warm).remove(key);
+        if let Some(warm) = warm {
+            tracing::debug!(target: "first_word", key, "claude warm start ended");
+            retire(warm, self.kill_grace).await;
+        }
     }
 
     async fn run_title(
@@ -1179,7 +1277,60 @@ impl Harness for ClaudeHarness {
         // Its tools are off and denied: the chat's modes do not apply.
         request.access = AccessMode::default();
         request.plan = false;
-        self.run_with_mode(request, controls, true).await
+        self.run_with_mode(request, controls, true, None).await
+    }
+}
+
+/// The std mutex, through a poisoning (nothing it guards is left half-made).
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Whether a warm start launched exactly as `request` would launch: the same
+/// arguments (model, effort, modes, settings), folder, environment and MCP
+/// servers (the run's own token among them). Anything else is another
+/// runtime.
+fn launches_alike(warm: &RunRequest, request: &RunRequest) -> bool {
+    warm.cwd == request.cwd
+        && warm.resume == request.resume
+        && warm.env == request.env
+        && caps_context_at_200k(warm) == caps_context_at_200k(request)
+        && ClaudeHarness::launch_args(warm) == ClaudeHarness::launch_args(request)
+        && mcp_servers_config(warm.mcp.as_ref(), &warm.extra_mcp)
+            == mcp_servers_config(request.mcp.as_ref(), &request.extra_mcp)
+        && warm.mcp.as_ref().is_some_and(McpServer::waits_on_background)
+            == request.mcp.as_ref().is_some_and(McpServer::waits_on_background)
+        && warm.mcp.as_ref().is_some_and(|m| m.side_chats_only())
+            == request.mcp.as_ref().is_some_and(|m| m.side_chats_only())
+}
+
+/// End a warm start no message reached: never mid login refresh (stdin
+/// stays open until no refresh is in flight, as for the discovery probe —
+/// see [`refresh_lock`]), then its process group.
+async fn retire(warm: Warm, kill_grace: Duration) {
+    let Warm { request, runtime, .. } = warm;
+    let lock_dir = refresh_lock::config_dir_for(&request.env);
+    let Runtime {
+        mut child,
+        stdin,
+        mcp_config,
+        ..
+    } = runtime;
+    refresh_lock::settle(&lock_dir, refresh_lock::SETTLE_MAX).await;
+    drop(stdin);
+    child.shutdown(kill_grace).await;
+    drop(mcp_config);
+}
+
+/// [`retire`], in the background (a replaced or unused warm start: the run
+/// that replaced it doesn't wait on it).
+fn spawn_retire(warm: Warm, kill_grace: Duration) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(retire(warm, kill_grace));
+        }
+        // (No runtime: a shutdown's drop; the child is killed on drop.)
+        Err(_) => drop(warm),
     }
 }
 
@@ -1189,6 +1340,7 @@ impl ClaudeHarness {
         mut request: RunRequest,
         controls: RunControls,
         title_only: bool,
+        warm: Option<Runtime>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
         // A session whose transcript holds no conversation cannot be
@@ -1214,18 +1366,23 @@ impl ClaudeHarness {
             }
             None => Normalizer::new(),
         };
+        // A warm start (`prewarm`) is launched and initialized already.
+        let warmed = warm.is_some();
         let Runtime {
             child,
             stdout_lines,
             mut stdin,
             stderr_tail,
             mcp_config,
-        } = Self::launch(&exe, &request, title_only)?;
+        } = match warm {
+            Some(runtime) => runtime,
+            None => Self::launch(&exe, &request, title_only)?,
+        };
         // The host looks at what this process runs before stopping it idle.
         controls.turn.set_agent_pid(child.id());
 
         let lock_dir = refresh_lock::config_dir_for(&request.env);
-        if !title_only {
+        if !title_only && !warmed {
             stdin.line(wire::initialize_request_line("zeron_initialize"));
         }
 

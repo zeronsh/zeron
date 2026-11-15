@@ -2629,3 +2629,342 @@ async fn live_unrestorable_session_relaunches_fresh() {
     )));
     assert_eq!(done(&events).0, DoneStatus::Errored);
 }
+
+
+// ---- warm starts (a new chat's agent launched before its first message) ----
+
+/// What a warm-start test's fake CLI wrote: its log, the pid of each launch,
+/// and the first user line each run was handed.
+struct WarmLog {
+    log: tempfile::NamedTempFile,
+}
+
+impl WarmLog {
+    fn new() -> Self {
+        Self { log: tempfile::NamedTempFile::new().unwrap() }
+    }
+    fn path(&self) -> String {
+        self.log.path().to_string_lossy().into_owned()
+    }
+    fn read(&self) -> String {
+        std::fs::read_to_string(self.log.path()).unwrap()
+    }
+    fn pids(&self) -> Vec<i32> {
+        std::fs::read_to_string(format!("{}.pids", self.path()))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect()
+    }
+    /// The first user line the (only) run was handed, parsed.
+    fn first(&self) -> serde_json::Value {
+        let text = std::fs::read_to_string(format!("{}.first", self.path())).unwrap();
+        serde_json::from_str(text.lines().next().unwrap()).unwrap()
+    }
+    fn logged(&self, req: &mut RunRequest) {
+        req.env.insert("FAKE_CLAUDE_LOG".into(), self.path());
+    }
+}
+
+impl Drop for WarmLog {
+    fn drop(&mut self) {
+        for ext in ["pids", "first"] {
+            let _ = std::fs::remove_file(format!("{}.{ext}", self.path()));
+        }
+    }
+}
+
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks the pid.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("never: {what}");
+}
+
+/// The run's request with its prompt cleared: what a warm start launches.
+fn early(req: &RunRequest) -> RunRequest {
+    let mut early = req.clone();
+    early.prompt.clear();
+    early.attachments.clear();
+    early
+}
+
+async fn run_warm_to_end(
+    harness: &ClaudeHarness,
+    key: &str,
+    req: RunRequest,
+    controls: RunControls,
+) -> Vec<AgentEvent> {
+    let stream = harness.run_warm(key, req, controls).await.expect("run starts");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time")
+}
+
+/// The text of a stream-json user line's message (its text block when the
+/// content is a list).
+fn user_text(line: &serde_json::Value) -> String {
+    let content = &line["message"]["content"];
+    match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str())
+            .collect(),
+        _ => String::new(),
+    }
+}
+
+/// A warm start launches the CLI and initializes it, then hands it nothing
+/// until its run: the run's prompt, exactly as typed, goes to that same
+/// process.
+#[tokio::test]
+async fn a_warm_start_waits_for_its_run_and_the_run_uses_it() {
+    let log = WarmLog::new();
+    let harness = harness();
+    let typed = "scenario:happy — fix the \"parser\"\\n, then 日本語 ✓";
+    let mut req = request(typed);
+    log.logged(&mut req);
+    harness.prewarm("chat-w#1", early(&req)).await.expect("prewarms");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(log.read(), "launch\n", "launched, and handed no prompt");
+    let (controls, _steer, _token) = controls("A");
+    let events = run_warm_to_end(&harness, "chat-w#1", req, controls).await;
+    assert!(events.contains(&AgentEvent::TextDelta { text: "Hello".into() }), "{events:?}");
+    assert_eq!(log.read(), "launch\nprompt\n", "the warm process ran it; no second launch");
+    assert_eq!(user_text(&log.first()), typed, "the message is what was typed");
+}
+
+/// Each launch setting a person can change after the warm start (model,
+/// effort, context window, access, plan, folder, MCP servers, environment):
+/// the run ends the warm process and starts its own, never using it stale.
+#[tokio::test]
+async fn a_warm_start_launched_otherwise_is_never_used() {
+    type Change = fn(&mut RunRequest);
+    let changes: [(&str, Change); 9] = [
+        ("model", |r| r.model = Some("claude-other".into())),
+        ("effort", |r| r.reasoning = Some(zeron_proto::ReasoningLevel::High)),
+        ("context window", |r| {
+            r.model_options.insert("contextWindow".into(), "200k".into());
+        }),
+        ("fast", |r| {
+            r.model_options.insert("fastMode".into(), true.into());
+        }),
+        ("access", |r| r.auto_approve = false),
+        ("plan", |r| r.plan = true),
+        ("folder", |r| r.cwd = std::env::temp_dir().to_string_lossy().into_owned()),
+        ("mcp", |r| {
+            r.extra_mcp.push(zeron_proto::McpServer {
+                name: "plugin".into(),
+                command: "/bin/true".into(),
+                ..Default::default()
+            })
+        }),
+        ("environment", |r| {
+            r.env.insert("GH_TOKEN".into(), "another".into());
+        }),
+    ];
+    for (what, change) in changes {
+        let log = WarmLog::new();
+        let harness = harness();
+        let mut req = request("scenario:happy");
+        req.model = Some("claude-sonnet".into());
+        log.logged(&mut req);
+        let mut warm = early(&req);
+        change(&mut warm);
+        harness.prewarm("chat-x#1", warm).await.expect("prewarms");
+        until("the warm launch", || log.pids().len() == 1).await;
+        let (controls, _steer, _token) = controls("A");
+        run_warm_to_end(&harness, "chat-x#1", req, controls).await;
+        assert_eq!(log.read(), "launch\nlaunch\nprompt\n", "{what}: a fresh launch ran it");
+        let warm_pid = log.pids()[0];
+        until(&format!("{what}: the unused warm process ends"), || !alive(warm_pid)).await;
+    }
+}
+
+/// Discarded, the warm process is gone, and a run under its key starts afresh.
+#[tokio::test]
+async fn a_discarded_warm_start_is_ended() {
+    let log = WarmLog::new();
+    let harness = harness();
+    let mut req = request("scenario:happy");
+    log.logged(&mut req);
+    harness.prewarm("chat-y#1", early(&req)).await.expect("prewarms");
+    until("the warm launch", || log.pids().len() == 1).await;
+    harness.discard_warm("chat-y#1").await;
+    // (Returned once it has ended.)
+    assert!(!alive(log.pids()[0]), "ended by the time discard returns");
+    assert_eq!(log.read(), "launch\n");
+    let (controls, _steer, _token) = controls("A");
+    run_warm_to_end(&harness, "chat-y#1", req, controls).await;
+    assert_eq!(log.read(), "launch\nlaunch\nprompt\n");
+}
+
+/// A warm start is never ended mid login refresh: while another Claude
+/// process holds the refresh lock in its config dir, the discard waits, its
+/// process alive with stdin open; once the lock is released it ends.
+#[tokio::test]
+async fn a_discard_waits_out_a_login_refresh() {
+    let log = WarmLog::new();
+    let config = tempfile::tempdir().unwrap();
+    let harness = harness();
+    let mut req = request("");
+    log.logged(&mut req);
+    req.env.insert("CLAUDE_CONFIG_DIR".into(), config.path().to_string_lossy().into_owned());
+    harness.prewarm("chat-r#1", req).await.expect("prewarms");
+    until("the warm launch", || log.pids().len() == 1).await;
+    let pid = log.pids()[0];
+    let lock = config.path().join(".oauth_refresh.lock");
+    std::fs::create_dir(&lock).unwrap();
+    let harness = std::sync::Arc::new(harness);
+    let discard = {
+        let harness = harness.clone();
+        tokio::spawn(async move { harness.discard_warm("chat-r#1").await })
+    };
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(!discard.is_finished(), "waits while the refresh is in flight");
+    assert!(alive(pid), "never signalled mid refresh");
+    std::fs::remove_dir(&lock).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), discard)
+        .await
+        .expect("ends once the refresh is saved")
+        .unwrap();
+    assert!(!alive(pid));
+}
+
+/// The CLI updated between the warm start and the message (its release
+/// moved): the run starts the new one.
+#[tokio::test]
+async fn a_warm_start_of_a_replaced_cli_is_not_used() {
+    let dir = tempfile::tempdir().unwrap();
+    let (v1, v2) = (dir.path().join("v1"), dir.path().join("v2"));
+    std::fs::copy(fixture_path(), &v1).unwrap();
+    std::fs::copy(fixture_path(), &v2).unwrap();
+    let current = dir.path().join("claude");
+    std::os::unix::fs::symlink(&v1, &current).unwrap();
+    let harness = ClaudeHarness::new().with_executable(&current);
+    let log = WarmLog::new();
+    let mut req = request("scenario:happy");
+    log.logged(&mut req);
+    harness.prewarm("chat-u#1", early(&req)).await.expect("prewarms");
+    until("the warm launch", || log.pids().len() == 1).await;
+    std::fs::remove_file(&current).unwrap();
+    std::os::unix::fs::symlink(&v2, &current).unwrap();
+    let (controls, _steer, _token) = controls("A");
+    run_warm_to_end(&harness, "chat-u#1", req, controls).await;
+    assert_eq!(log.read(), "launch\nlaunch\nprompt\n");
+}
+
+/// A warm process that died before its message (killed, crashed): the run
+/// starts afresh and still answers.
+#[tokio::test]
+async fn a_dead_warm_start_is_replaced() {
+    let log = WarmLog::new();
+    let harness = harness();
+    let mut req = request("scenario:happy");
+    log.logged(&mut req);
+    harness.prewarm("chat-d#1", early(&req)).await.expect("prewarms");
+    until("the warm launch", || log.pids().len() == 1).await;
+    let pid = log.pids()[0];
+    // SAFETY: the fixture's own pid.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    // (A zombie until the harness reaps it.)
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (controls, _steer, _token) = controls("A");
+    let events = run_warm_to_end(&harness, "chat-d#1", req, controls).await;
+    assert!(events.contains(&AgentEvent::TextDelta { text: "Hello".into() }), "{events:?}");
+    assert_eq!(log.read(), "launch\nlaunch\nprompt\n");
+}
+
+/// The engine gone (its harness dropped with it): the warm process ends
+/// with it, never left running.
+#[tokio::test]
+async fn a_warm_start_ends_with_its_engine() {
+    let log = WarmLog::new();
+    let harness = harness();
+    let mut req = request("");
+    log.logged(&mut req);
+    harness.prewarm("chat-e#1", req).await.expect("prewarms");
+    until("the warm launch", || log.pids().len() == 1).await;
+    drop(harness);
+    let pid = log.pids()[0];
+    until("the warm process ends with its engine", || !alive(pid)).await;
+}
+
+/// The first message's images and file mentions reach the warm process with
+/// it: image blocks ahead of the text, the paths in the text.
+#[tokio::test]
+async fn a_warm_start_takes_the_first_message_s_attachments() {
+    let log = WarmLog::new();
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("shot.png");
+    // A 1x1 PNG.
+    std::fs::write(
+        &image,
+        [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, 0x49, 0x48, 0x44,
+            0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4, 0x89,
+        ],
+    )
+    .unwrap();
+    let harness = harness();
+    let typed = format!("scenario:happy look at @{} and @src/main.rs", image.display());
+    let mut req = request(&typed);
+    req.attachments = vec![image.to_string_lossy().into_owned()];
+    log.logged(&mut req);
+    harness.prewarm("chat-a#1", early(&req)).await.expect("prewarms");
+    until("the warm launch", || log.pids().len() == 1).await;
+    let (controls, _steer, _token) = controls("A");
+    run_warm_to_end(&harness, "chat-a#1", req, controls).await;
+    assert_eq!(log.read(), "launch\nprompt\n", "the warm process took it");
+    let first = log.first();
+    let blocks = first["message"]["content"].as_array().expect("blocks").clone();
+    assert_eq!(blocks[0]["type"], "image", "{first}");
+    assert_eq!(blocks[0]["source"]["media_type"], "image/png");
+    assert_eq!(user_text(&first), typed);
+}
+
+/// A steer during the first turn goes to the warm process the run took.
+#[tokio::test]
+async fn a_steer_reaches_a_warm_started_run() {
+    let log = WarmLog::new();
+    let harness = harness();
+    let mut req = request("scenario:steer");
+    log.logged(&mut req);
+    harness.prewarm("chat-s#1", early(&req)).await.expect("prewarms");
+    until("the warm launch", || log.pids().len() == 1).await;
+    let (controls, steer, _token) = controls("A");
+    let stream = harness.run_warm("chat-s#1", req, controls).await.expect("run starts");
+    steer
+        .send(SteerMessage {
+            prompt: "and the lexer".into(),
+            message_id: None,
+            attachments: vec![],
+            config: None,
+        })
+        .await
+        .unwrap();
+    let events: Vec<_> = tokio::time::timeout(
+        Duration::from_secs(10),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time");
+    assert!(
+        events.contains(&AgentEvent::TextDelta { text: "steered:and the lexer".into() }),
+        "{events:?}"
+    );
+    assert_eq!(log.read(), "launch\nprompt\n", "one process for both");
+}

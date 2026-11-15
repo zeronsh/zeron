@@ -2618,3 +2618,108 @@ async fn an_app_server_that_keeps_dying_reports_what_it_printed() {
         "one launch + three relaunches"
     );
 }
+
+// ---- warm starts (a new chat's agent launched before its first message) ----
+
+fn launches(log: &std::path::Path) -> Vec<i32> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.strip_prefix("launch ")?.trim().parse().ok())
+        .collect()
+}
+
+fn warm_alive(pid: i32) -> bool {
+    // A zombie (`Z`) has exited; `ps` prints nothing for a reaped pid.
+    std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .map(|o| {
+            let stat = String::from_utf8_lossy(&o.stdout);
+            !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+        })
+        .unwrap_or(false)
+}
+
+async fn warm_until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("never: {what}");
+}
+
+async fn warm_run(harness: &CodexHarness, key: &str, req: RunRequest) -> Vec<AgentEvent> {
+    let (controls, _steer, _token) = controls("Yes");
+    let stream = harness.run_warm(key, req, controls).await.expect("run starts");
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time")
+}
+
+/// A warm start launches the agent before its message, and the run takes
+/// that very process.
+#[tokio::test]
+async fn a_warm_start_is_taken_by_its_run() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let harness = harness();
+    let mut req = request("scenario:happy");
+    req.cwd = "/tmp".into();
+    // (The happy scenario checks every param the turn must carry, and the
+    // warm handshake's notification opt-outs.)
+    req.model_options.insert("serviceTier".into(), serde_json::Value::String("fast".into()));
+    req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+    let mut early = req.clone();
+    early.prompt.clear();
+    harness.prewarm("chat-w#1", early).await.expect("prewarms");
+    warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+    let events = warm_run(&harness, "chat-w#1", req).await;
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Done { status: DoneStatus::Completed, .. })), "{events:?}");
+    assert_eq!(launches(log.path()).len(), 1, "the warm process ran it");
+}
+
+/// Launched in another folder or environment than its run: ended, and the
+/// run starts its own.
+#[tokio::test]
+async fn a_warm_start_launched_otherwise_is_not_used() {
+    for what in ["folder", "environment"] {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let harness = harness();
+        let mut req = request("scenario:happy");
+        req.cwd = "/tmp".into();
+        req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+        let mut early = req.clone();
+        early.prompt.clear();
+        match what {
+            "folder" => early.cwd = "/".into(),
+            _ => {
+                early.env.insert("GH_TOKEN".into(), "another".into());
+            }
+        }
+        harness.prewarm("chat-x#1", early).await.expect("prewarms");
+        warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+        warm_run(&harness, "chat-x#1", req).await;
+        let pids = launches(log.path());
+        assert_eq!(pids.len(), 2, "{what}: a fresh launch ran it");
+        warm_until(&format!("{what}: the unused one ends"), || !warm_alive(pids[0])).await;
+    }
+}
+
+/// Discarded, the warm process has ended by the time the discard returns.
+#[tokio::test]
+async fn a_discarded_warm_start_is_ended() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let harness = harness();
+    let mut req = request("");
+    req.cwd = "/tmp".into();
+    req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+    harness.prewarm("chat-y#1", req).await.expect("prewarms");
+    warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+    harness.discard_warm("chat-y#1").await;
+    assert!(!warm_alive(launches(log.path())[0]));
+}

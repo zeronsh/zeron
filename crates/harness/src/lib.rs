@@ -426,6 +426,40 @@ pub trait Harness: Send + Sync {
         ))
     }
 
+    /// Whether this driver can start a new chat's runtime before its first
+    /// message ([`Harness::prewarm`]): a process that parks with no prompt,
+    /// as a session does between turns, and reaches no model until it gets
+    /// one.
+    fn prewarms(&self) -> bool {
+        false
+    }
+
+    /// A warm start: launch the runtime `request` describes (its prompt is
+    /// ignored) and park it under `key`, asking no model anything, until
+    /// [`Harness::run_warm`] takes it or [`Harness::discard_warm`] ends it.
+    /// A runtime already parked under `key` is ended first. Nothing else
+    /// ever ends it: the caller owns its lifetime (the engine's leases).
+    async fn prewarm(&self, _key: &str, _request: RunRequest) -> Result<(), HarnessError> {
+        Err(HarnessError::Protocol("warm start unsupported".into()))
+    }
+
+    /// [`Harness::run`], in the runtime parked under `key` when it launched
+    /// with this very configuration; otherwise that runtime is ended and a
+    /// fresh one starts, as `run` would.
+    async fn run_warm(
+        &self,
+        key: &str,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.discard_warm(key).await;
+        self.run(request, controls).await
+    }
+
+    /// End the runtime parked under `key`, if any, returning once it has
+    /// (Claude: after any login refresh in flight is saved, never mid-way).
+    async fn discard_warm(&self, _key: &str) {}
+
     /// Bootstrap without a synthetic user prompt; providers opt in explicitly.
     async fn start_idle(
         &self,

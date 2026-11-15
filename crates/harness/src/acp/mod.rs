@@ -1694,6 +1694,44 @@ pub struct AcpHarness {
     models_cache: crate::catalog::Catalog,
     workspace_commands: crate::skills::CommandDiscovery,
     devin_models: std::sync::Arc<devin_models::Catalog>,
+    /// Agents started before their chat's first message ([`Harness::prewarm`]),
+    /// by key: launched, their handshake left to the run.
+    warm: std::sync::Mutex<std::collections::HashMap<String, WarmAgent>>,
+}
+
+/// A parked warm start: the agent process and what it was launched with
+/// (its folder, MCP server and environment: all `spawn_agent` takes).
+struct WarmAgent {
+    cwd: String,
+    mcp: Option<zeron_proto::McpServer>,
+    env: std::collections::BTreeMap<String, String>,
+    spawned: Spawned,
+}
+
+/// What `spawn_agent` hands a run.
+type Spawned = (Option<ScratchDir>, Child, crate::StderrTail, CancellationToken);
+
+fn lock_warm<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// End a warm start no message reached.
+async fn retire_warm(warm: WarmAgent, kill_grace: Duration) {
+    let (scratch, mut child, _, _) = warm.spawned;
+    drop(child.stdin.take());
+    child.shutdown(kill_grace).await;
+    drop(scratch);
+}
+
+/// [`retire_warm`], in the background.
+fn spawn_retire(warm: WarmAgent, kill_grace: Duration) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(retire_warm(warm, kill_grace));
+        }
+        // (No runtime: the child is killed on drop.)
+        Err(_) => drop(warm),
+    }
 }
 
 impl AcpHarness {
@@ -1715,6 +1753,7 @@ impl AcpHarness {
             models_cache: crate::catalog::Catalog::default(),
             workspace_commands: crate::skills::CommandDiscovery::default(),
             devin_models: Default::default(),
+            warm: Default::default(),
         }
     }
 
@@ -3441,15 +3480,87 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let (scratch, mut child, stderr_tail, sign_in_prompted) = self
-            .spawn_agent(
-                Some(&request.cwd),
-                true,
-                &[],
-                request.mcp.as_ref(),
-                &request.env,
-            )
+        self.run_spawned(request, controls, None).await
+    }
+
+    /// An ACP agent asks no model anything until `session/prompt`: launched
+    /// early, its process's own startup is done by the first message (the
+    /// handshake, `initialize` and `session/new`, stays the run's: an agent's
+    /// sign-in prompt belongs to a run the person sees).
+    fn prewarms(&self) -> bool {
+        true
+    }
+
+    async fn prewarm(&self, key: &str, request: RunRequest) -> Result<(), HarnessError> {
+        self.discard_warm(key).await;
+        // (Never an install on the way: a warm start only uses what's there.)
+        let spawned = self
+            .spawn_agent(Some(&request.cwd), false, &[], request.mcp.as_ref(), &request.env)
             .await?;
+        let warm = WarmAgent {
+            cwd: request.cwd.clone(),
+            mcp: request.mcp.clone(),
+            env: request.env.clone(),
+            spawned,
+        };
+        if let Some(old) = lock_warm(&self.warm).insert(key.to_owned(), warm) {
+            spawn_retire(old, self.kill_grace);
+        }
+        Ok(())
+    }
+
+    async fn run_warm(
+        &self,
+        key: &str,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let mut warm = lock_warm(&self.warm).remove(key);
+        let alive = warm
+            .as_mut()
+            .is_some_and(|w| matches!(w.spawned.1.try_wait(), Ok(None)));
+        let spawned = match warm {
+            Some(w) if alive && w.cwd == request.cwd && w.mcp == request.mcp && w.env == request.env => {
+                Some(w.spawned)
+            }
+            Some(w) => {
+                tracing::info!(target: "zeron_harness::acp", key, "warm start not used; starting afresh");
+                spawn_retire(w, self.kill_grace);
+                None
+            }
+            None => None,
+        };
+        self.run_spawned(request, controls, spawned).await
+    }
+
+    async fn discard_warm(&self, key: &str) {
+        let warm = lock_warm(&self.warm).remove(key);
+        if let Some(warm) = warm {
+            retire_warm(warm, self.kill_grace).await;
+        }
+    }
+}
+
+impl AcpHarness {
+    async fn run_spawned(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        spawned: Option<Spawned>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let (scratch, mut child, stderr_tail, sign_in_prompted) = match spawned {
+            Some(spawned) => spawned,
+            None => {
+                self.spawn_agent(
+                    Some(&request.cwd),
+                    true,
+                    &[],
+                    request.mcp.as_ref(),
+                    &request.env,
+                )
+                .await?
+            }
+        };
         let stdin = child
             .stdin
             .take()
