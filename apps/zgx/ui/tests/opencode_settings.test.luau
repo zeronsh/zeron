@@ -97,27 +97,19 @@ test("OpenCode settings: its own tabs, opened on the agent's, and no switch for 
 	expect(app:has('role:switch "Remote server"')).to_be(false)
 end)
 
-test("OpenCode settings: the title and its tabs stay where they are, whichever tab shows", function()
+test("OpenCode settings: closing it keeps its own title and tabs until it is gone", function()
 	local app = open()
-	local strip = place(app, 'role:tablist "OpenCode settings"')
-	local title = place(app, 'role:heading "OpenCode settings"')
-	expect(strip ~= nil and title ~= nil).to_be(true)
-	for _, name in { "Sessions", "Server", "Agent" } do
-		tab(app, name)
-		expect(place(app, 'role:tablist "OpenCode settings"')).to_equal(strip)
-		expect(place(app, 'role:heading "OpenCode settings"')).to_equal(title)
-	end
-	-- (In a short window too, where the tabs differ most in height.)
-	app:resize(1200, 560)
-	app:frames(20)
-	local short = place(app, 'role:tablist "OpenCode settings"')
-	local short_title = place(app, 'role:heading "OpenCode settings"')
-	expect(short ~= nil and short_title ~= nil).to_be(true)
-	for _, name in { "Server", "Sessions", "Agent" } do
-		tab(app, name)
-		expect(place(app, 'role:tablist "OpenCode settings"')).to_equal(short)
-		expect(place(app, 'role:heading "OpenCode settings"')).to_equal(short_title)
-	end
+	app:click('role:button "Done"')
+	app:frames(2)
+	-- (Leaving: still OpenCode's own — never the plain agent settings' form
+	-- flashing as it fades.)
+	expect(app:has('role:dialog >> role:tablist "OpenCode settings"')).to_be(true)
+	expect(app:has('role:dialog >> role:heading "Agent settings"')).to_be(false)
+	app:frames(40)
+	-- (Gone: its panel put away, still its own rather than the plain form's.)
+	expect(app:state("settings_agent_dialog")).to_be(false)
+	expect(app:tree("role:dialog"):find(" hidden", 1, true) ~= nil).to_be(true)
+	expect(app:has('role:dialog >> role:heading "Agent settings"')).to_be(false)
 end)
 
 test("OpenCode settings: one choice of where chats run, kept across a reopen", function()

@@ -177,8 +177,12 @@ local function kind(): string
 	return if now().target == "cloud" then "cloud" else "found"
 end
 
--- Which agent's settings are open (none: "").
+-- Which agent's settings are open (none: ""), and which one the dialog is
+-- showing: kept after the open one is let go, so the panel that is leaving
+-- still says whose settings it is (its title, its tabs) rather than turning
+-- into the plain agent settings' form as it fades.
 local open_settings = ui.state("settings_agent_open", "")
+local shown_settings = ui.state("settings_agent_shown", "")
 -- The engine's native subagent settings: those it can switch, and those off.
 local subagents = ui.state("settings_subagents", nil :: { switchable: { string }, off: { string } }?)
 
@@ -358,6 +362,7 @@ local function card(row: State<agents.Agent>): Node
 		settings = not cloud_card,
 		on_settings = function()
 			load_subagents()
+			shown_settings:set(id)
 			open_settings:set(id)
 		end,
 		on_add = function()
@@ -637,7 +642,7 @@ local dialog_open = ui.computed(function(): boolean
 	return open_settings:get() ~= ""
 end)
 local function agent(): agents.Agent?
-	local id = open_settings:get()
+	local id = shown_settings:get()
 	for _, a in now().list do
 		if a.id == id then
 			return a
@@ -916,11 +921,6 @@ local function settings_dialog(): Node
 		size = "md",
 		cancel = false,
 		confirm = { label = ui.t("settings.providers.done") :: any },
-		-- (Its tabs change its height, so it hangs from the same place
-		-- whichever shows: the title and the tabs stay where they are, and
-		-- it grows downward. Centred, it would jump by a tab's worth each
-		-- switch.)
-		placement = { y = "start", inset = 16 },
 		-- (OpenCode's settings, on three tabs of their own: the agent's own
 		-- switches, what shows here, and where chats run. Each is short
 		-- enough for the window, so the dialog never runs past its foot.)
