@@ -220,3 +220,70 @@ Use `--shape real`, `--shape linear`, `--all` or `--github` to generate the
 other fixture types. Keep the generated JSON fixed across implementations.
 Per-run measurements are in `zgx-git-history-graph-results.csv`; detailed
 logs for this session are `/tmp/zgx-graph-{baseline,step1}-*.log`.
+
+## Implementation, step 2: append geometry in final paint order
+
+Passing lanes are now emitted in descending lane order, followed by the
+commit's incoming/outgoing connections. This exactly preserves the original
+front-insertion sequence, including hit-test precedence, without repeatedly
+shifting the existing line array. Connections use one scratch array per
+layout, cleared and reused between rows; segment records are not copied.
+
+The geometry/topology oracle and all 12 History-related tests pass for both
+steps independently, including compact hover, hidden-lane page continuation,
+responsive widths and GitHub decoration. Graph lint passes. Static Luau type
+checking could not run because `luau-lsp` is not installed; the release build
+and runtime tests passed. No framework source or production budgets changed.
+
+### Final results
+
+Same protocol and three repetitions as step 1; every previously failing
+32 MiB fixture still passes in all three runs.
+
+| 100-commit topology, eight visible lanes | Original layout p50 | Step 1 | Final |
+| --- | ---: | ---: | ---: |
+| Linear | 0.071 ms | 0.062 ms | 0.071 ms |
+| One extra pending parent | 1.915 ms | 0.538 ms | 0.486 ms |
+| Four extra pending parents | 12.358 ms | 3.210 ms | 3.156 ms |
+| Eight extra pending parents | 39.302 ms | 11.032 ms | 11.011 ms |
+
+In the extreme capped workload, the combined changes reduce graph layout
+time by about 72% and retained segments by 97.8% (40,598 → 899). The first
+step accounts for most of that improvement. With only eight lanes emitted,
+removing front insertions has little additional effect in the widest case;
+full-topology lane/parent searches now dominate. Do not attribute the entire
+combined gain to step 2.
+
+To isolate step 2, an additional run sets `GIT_GRAPH_LIMIT=10000`, so all
+800 lanes and 40,598 segments are emitted by every version:
+
+| Same complete graph, all lanes emitted | Layout p50 | Layout p95 |
+| --- | ---: | ---: |
+| Original | 39.293 ms | 41.820 ms |
+| Step 1, limit above full width | 38.264 ms | 40.366 ms |
+| Step 2, limit above full width | 18.043 ms | 20.439 ms |
+
+This demonstrates roughly 53% less layout time from removing repeated shifts
+when many segments are actually emitted. History itself uses the capped
+path; this uncapped result is not a native-window FPS claim.
+
+| UI fixture | Final sampled peak Git VM heap | Final open | Final scroll p95 |
+| --- | ---: | ---: | ---: |
+| Real 100 commits | 13.32 MiB | 27.40 ms | 2.06 ms |
+| Real 100 + mocked GitHub | 13.38 MiB | 44.30 ms | 3.05 ms |
+| Synthetic 100, one extra parent | 13.71 MiB | 28.13 ms | 2.08 ms |
+| Synthetic 100, four extra parents | 13.78 MiB | 30.34 ms | 2.05 ms |
+| Synthetic 100, eight extra parents | 14.10 MiB | 38.83 ms | 2.02 ms |
+| Real 1,000 commits | 18.72 MiB | 47.43 ms | 2.16 ms |
+
+Ordinary-history CPU scroll performance remains effectively unchanged.
+The measured wins are lower graph allocation, faster wide-graph construction
+and elimination of the tested memory failures. Incremental pagination,
+full-history reactive conversion, session-cache lifetime and native GPU
+profiling remain separate work.
+
+`zgx-git-history-graph-results.csv` preserves every repetition. `kind=layout`
+uses eight visible lanes, `layout_full` emits the complete graph, and
+`scroll` measures UI frames. Rows with `exit=101` are expected baseline
+memory failures: their apparent frame times are invalid. Final logs are
+`/tmp/zgx-graph-step2-*.log`.

@@ -37,6 +37,9 @@ function M.layout(commits: { { sha: string, parents: { string } } }, max_lanes: 
 	local colors: { number } = {}
 	local next_color = 0
 	local rows: { Row } = {}
+	-- Reused scratch for connections into/out of the commit. Passing lanes
+	-- precede them in paint order, which is known once parents are assigned.
+	local connections: { Line } = {}
 	local widest = 1
 	local function free_slot(avoid: number?): number
 		for j = 1, #lanes + 1 do
@@ -53,6 +56,7 @@ function M.layout(commits: { { sha: string, parents: { string } } }, max_lanes: 
 	end
 	for _, c in commits do
 		local lines: { Line } = {}
+		table.clear(connections)
 		-- Its lane: the leftmost waiting for it, or a new one (a branch's tip).
 		local col: number? = nil
 		local n = #lanes
@@ -76,7 +80,7 @@ function M.layout(commits: { { sha: string, parents: { string } } }, max_lanes: 
 			local w = lanes[j]
 			if w then
 				if w == c.sha then
-					table.insert(lines, { a = j, b = here, from = 0, to = 0.5, color = colors[j] })
+					table.insert(connections, { a = j, b = here, from = 0, to = 0.5, color = colors[j] })
 				end
 			end
 		end
@@ -97,7 +101,7 @@ function M.layout(commits: { { sha: string, parents: { string } } }, max_lanes: 
 		else
 			lanes[here] = parents[1]
 			if here <= visible then
-				table.insert(lines, { a = here, b = here, from = 0.5, to = 1, color = colors[here] })
+				table.insert(connections, { a = here, b = here, from = 0.5, to = 1, color = colors[here] })
 			end
 			for k = 2, #parents do
 				local p = parents[k]
@@ -116,16 +120,21 @@ function M.layout(commits: { { sha: string, parents: { string } } }, max_lanes: 
 				end
 				width = math.max(width, into :: number)
 				if here <= visible and into :: number <= visible then
-					table.insert(lines, { a = here, b = into :: number, from = 0.5, to = 1, color = colors[into :: number] })
+					table.insert(connections, { a = here, b = into :: number, from = 0.5, to = 1, color = colors[into :: number] })
 				end
 			end
 		end
-		-- Lanes passing by, top to foot.
-		for j = 1, math.min(#lanes, visible) do
+		-- The original front insertions put passing lanes in descending
+		-- order, before connections. Append in that same final order, without
+		-- shifting every preceding segment for each passing lane.
+		for j = math.min(#lanes, visible), 1, -1 do
 			local w = lanes[j]
 			if w and j ~= here and not opened[j] then
-				table.insert(lines, 1, { a = j, b = j, from = 0, to = 1, color = colors[j] })
+				table.insert(lines, { a = j, b = j, from = 0, to = 1, color = colors[j] })
 			end
+		end
+		for _, line in connections do
+			table.insert(lines, line)
 		end
 		-- (Free lanes at the end go.)
 		while #lanes > 0 and not lanes[#lanes] do
