@@ -2468,6 +2468,38 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
+/// Whether `harness` is known to be signed out, so a new chat's agent isn't
+/// started early (`WarmStart`): the agents' last listing (`snapshot`) has no
+/// live login for it and the engine's environment (`set`) holds none of the
+/// variables its CLI signs in with. Unknown (never listed, or an agent whose
+/// logins aren't tracked) is not signed out.
+fn warm_signed_out(
+    snapshot: Option<&zeron_proto::AgentAccountsSnapshot>,
+    harness: zeron_proto::HarnessId,
+    set: impl Fn(&str) -> bool,
+) -> bool {
+    use zeron_proto::HarnessId;
+    let env: &[&str] = match harness {
+        HarnessId::ClaudeCode => &[
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+        ],
+        HarnessId::Codex => &["OPENAI_API_KEY", "CODEX_API_KEY"],
+        _ => return false,
+    };
+    let Some(snapshot) = snapshot else {
+        return false;
+    };
+    !env.iter().any(|name| set(name))
+        && !snapshot
+            .accounts
+            .iter()
+            .any(|account| account.harness == harness && account.active)
+}
+
 fn forwardable(method: &str) -> bool {
     if voice_remote::handles(method) {
         return true;
@@ -3485,6 +3517,18 @@ impl RpcService for EngineRpc {
                 let Some(harness) = p.request.harness else {
                     return Err(RpcError::BadParams("a warm start names its harness".into()));
                 };
+                // An agent known to be signed out: its CLI would only wait for a
+                // sign-in, so nothing starts early (its send says what's wrong).
+                if warm_signed_out(
+                    self.agent_accounts.watch_snapshots().borrow().as_ref(),
+                    harness,
+                    |name| std::env::var_os(name).is_some_and(|v| !v.is_empty()),
+                ) {
+                    self.sessions.warm_stop(&p.chat_id).await;
+                    return RpcReply::value(
+                        &serde_json::json!({ "outcome": crate::sessions::WarmOutcome::Unsupported }),
+                    );
+                }
                 // Only for a chat on this device: one elsewhere would outlive
                 // this app's quit (only this engine hears it), so nothing
                 // starts early there.
@@ -5915,6 +5959,37 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No warm start for an agent known to be signed out; one whose logins
+    /// aren't known yet, or that signs in from the environment, still gets it.
+    #[test]
+    fn a_new_chat_starts_early_only_for_an_agent_not_known_signed_out() {
+        use zeron_proto::HarnessId;
+        let snapshot = |accounts: serde_json::Value| -> zeron_proto::AgentAccountsSnapshot {
+            serde_json::from_value(serde_json::json!({ "accounts": accounts, "warnings": [] }))
+                .unwrap()
+        };
+        let none = |_: &str| false;
+        let signed_out = snapshot(serde_json::json!([]));
+        let claude_in =
+            snapshot(serde_json::json!([{ "id": "a", "harness": "claude-code", "active": true }]));
+        let claude_saved =
+            snapshot(serde_json::json!([{ "id": "a", "harness": "claude-code", "active": false }]));
+        // No login listed, none in the environment: signed out.
+        assert!(warm_signed_out(Some(&signed_out), HarnessId::ClaudeCode, none));
+        assert!(warm_signed_out(Some(&signed_out), HarnessId::Codex, none));
+        // A saved login that isn't the live one doesn't sign the CLI in.
+        assert!(warm_signed_out(Some(&claude_saved), HarnessId::ClaudeCode, none));
+        // A live login, or a key the CLI reads from the environment.
+        assert!(!warm_signed_out(Some(&claude_in), HarnessId::ClaudeCode, none));
+        assert!(!warm_signed_out(Some(&signed_out), HarnessId::ClaudeCode, |n| n
+            == "ANTHROPIC_API_KEY"));
+        assert!(!warm_signed_out(Some(&signed_out), HarnessId::Codex, |n| n == "OPENAI_API_KEY"));
+        // Never listed yet: unknown, not signed out.
+        assert!(!warm_signed_out(None, HarnessId::ClaudeCode, none));
+        // An agent whose logins aren't tracked here.
+        assert!(!warm_signed_out(Some(&signed_out), HarnessId::Opencode, none));
+    }
 
     /// What a viewport does with a keyed list frame: the list it shows after.
     fn apply_frame(list: &[serde_json::Value], frame: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
