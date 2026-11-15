@@ -337,6 +337,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // requires find them compiled. (After the last `set_var` above: it
     // starts a thread.)
     compile_ahead(&screen);
+    // The engine, if none is running, started as the launch begins (on a
+    // thread of its own), not once the first window is up: it's ready about
+    // when the window is.
+    if matches!(screen, Screen::Intro | Screen::Onboarding | Screen::Main) {
+        engine::start_ahead();
+    }
 
     let mut application = Application::new();
     for font in fonts() {
@@ -557,7 +563,9 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
         let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
         carried_settings::carry(from.as_deref(), state.as_deref());
     }
-    let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
+    let live = plugins::prepare_live();
+    zgx::profile::mark("templates laid");
+    let host = script_host_at(cx, live, "app.luau");
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
