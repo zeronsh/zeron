@@ -1,8 +1,8 @@
 {
   "scene": {
     "violet_dusk": "Crépuscule",
-    "aurora": "Aurore",
-    "blossom": "Floraison",
+    "aurora": "Aurore boréale",
+    "blossom": "Cerisiers",
     "lighthouse": "Phare",
     "canyon": "Canyon",
     "lotus": "Lotus",
@@ -11,7 +11,7 @@
     "volcano": "Volcan",
     "terraces": "Rizières",
     "surf": "Surf",
-    "saturnine": "Saturnienne",
+    "saturnine": "Lac gelé",
     "rooftops": "Toits",
     "station": "Gare"
   }

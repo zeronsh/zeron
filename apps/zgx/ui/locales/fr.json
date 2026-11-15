@@ -39,8 +39,8 @@
       "working": "En cours",
       "connecting": "Connexion",
       "waiting": "En attente",
-      "input": "Réponse",
-      "input_long": "Réponse attendue",
+      "input": "Action requise",
+      "input_long": "Action requise",
       "approval": "Validation",
       "approval_long": "Validation en attente",
       "plan": "Plan prêt",
@@ -48,7 +48,7 @@
       "done": "Terminé",
       "done_long": "Terminé",
       "failed": "Échec",
-      "limited": "Limite atteinte",
+      "limited": "Quota atteint",
       "woke": "Réveillé",
       "woke_long": "Sorti de veille"
     },
@@ -115,7 +115,7 @@
       "show_more": "Afficher plus ({n})",
       "side_chats": "Conversations annexes",
       "new_side": "Nouvelle conversation annexe",
-      "fork": "Dupliquer la conversation",
+      "fork": "Créer une branche de la conversation",
       "subagents": "Sous-agents",
       "collapse_finished": "{n, plural, one {Replier # sous-agent terminé} other {Replier # sous-agents terminés}}",
       "expand_finished": "{n, plural, one {Déplier # sous-agent terminé} other {Déplier # sous-agents terminés}}",
@@ -130,7 +130,7 @@
       "sending": "Envoi…",
       "word": "{word}…",
       "words": {
-        "zeroning": "Zéronisation",
+        "zeroning": "Zeronisation",
         "thinking": "Réflexion",
         "pondering": "Cogitation",
         "scheming": "Mijotage",
@@ -143,8 +143,8 @@
         "untangling": "Démêlage",
         "distilling": "Distillation",
         "sketching": "Griffonnage",
-        "plotting": "Plans sur la comète",
-        "riffing": "Impro",
+        "plotting": "Stratagème",
+        "riffing": "Improvisation",
         "combobulating": "Remue-méninges",
         "percolating": "Percolation",
         "marinating": "Marinade",
@@ -157,11 +157,11 @@
       "remove": "Retirer {name}",
       "pr": {
         "open": "Ouverte",
-        "merged": "Fusionnée",
+        "merged": "Mergée",
         "closed": "Fermée",
         "draft": "Brouillon",
         "tooltip": "{state} · {title}",
-        "label": "Pull request {n}, {state, select, open {ouverte} merged {fusionnée} closed {fermée} other {brouillon}}"
+        "label": "Pull request {n}, {state, select, open {ouverte} merged {mergée} closed {fermée} other {brouillon}}"
       },
       "review": {
         "approved": "Approuvé",
@@ -439,12 +439,12 @@
       "unknown_device": "Appareil inconnu",
       "pr": {
         "open": "Ouverte",
-        "merged": "Fusionnée",
+        "merged": "Mergée",
         "closed": "Fermée",
         "draft": "Brouillon",
         "tooltip": "{state} · {title}",
         "tooltip_untitled": "Pull request · {state}",
-        "label": "Pull request {n}, {state, select, open {ouverte} merged {fusionnée} closed {fermée} other {brouillon}}"
+        "label": "Pull request {n}, {state, select, open {ouverte} merged {mergée} closed {fermée} other {brouillon}}"
       },
       "subagents_running": "{n, plural, one {# sous-agent en cours} other {# sous-agents en cours}}",
       "session_name": "Nom de la session",
@@ -521,16 +521,16 @@
       "checks_label": "Vérifications : {summary}",
       "checks_label_called": "Vérifications : {summary}, {called}",
       "someone": "Quelqu’un",
-      "pushed": "a poussé {n} commits",
-      "pushed_to": "a poussé {n} commits sur {branch}",
+      "pushed": "a fait un push de {n} commits",
+      "pushed_to": "a fait un push de {n} commits vers {branch}",
       "commented_on": "a commenté",
       "commented": "a commenté",
       "checks_ran": "Vérifications sur {sha} : {summary}",
       "checks_ran_called": "Vérifications sur {sha} : {summary}, {called}",
       "approved": "a approuvé",
       "asked_for_changes": "a demandé des modifications",
-      "merged": "a fusionné",
-      "merged_into": "a fusionné dans {base}",
+      "merged": "a fait le merge",
+      "merged_into": "a fait le merge dans {base}",
       "split": "Côte à côte",
       "wrap": "Retour à la ligne",
       "check_failed_more": "{name} +{n} en échec",
@@ -600,8 +600,8 @@
         "short": "Plan"
       },
       "checkout": {
-        "label": "Copie de travail",
-        "local": "Copie locale",
+        "label": "Checkout",
+        "local": "Checkout local",
         "local_hint": "Travailler directement dans le dossier du projet.",
         "worktree": "Worktree",
         "worktree_hint": "Une copie isolée, sur sa propre branche."
@@ -897,17 +897,17 @@
       "switch": "Passer à ce compte",
       "use_banked": "Utiliser une réinitialisation en réserve…",
       "remove": "Retirer le compte",
-      "reset_just_now": "{plan} · Limites réinitialisées à l’instant",
-      "limit_reached_at": "{plan} · Limite atteinte, réinitialisation à {at}",
-      "limit_reached_plan": "{plan} · Limite atteinte, {words}",
-      "limit_reached": "Limite atteinte, {words}",
+      "reset_just_now": "{plan} · Quotas réinitialisés à l’instant",
+      "limit_reached_at": "{plan} · Quota atteint, réinitialisation à {at}",
+      "limit_reached_plan": "{plan} · Quota atteint, {words}",
+      "limit_reached": "Quota atteint, {words}",
       "window_resets": "{window} : {words}",
       "windows": "Session · Semaine",
       "account": "Compte",
       "in_use": "Actif",
       "banked": "{n, plural, =0 {Aucune réinitialisation en réserve} one {# réinitialisation en réserve} other {# réinitialisations en réserve}}",
       "banked_now": "En utiliser une remet la session et la semaine à zéro tout de suite, sans attendre {at}.",
-      "banked_kept": "En réserve pour la prochaine fois qu’une limite sera atteinte.",
+      "banked_kept": "En réserve pour la prochaine fois qu’un quota sera atteint.",
       "use_reset": "Utiliser une réinitialisation",
       "connect": "Connecter un compte {name}",
       "add_account": "Ajouter un compte",
@@ -950,8 +950,8 @@
       "reset_gone": "Cette réinitialisation n’était plus disponible.",
       "reset_last": "C’était la dernière en réserve.",
       "resets_title": "Utiliser une réinitialisation Codex ?",
-      "resets_body": "Les limites de session et de semaine de {email} repartent de zéro maintenant. Une réinitialisation n’est consommée que si une fenêtre en avait besoin.",
-      "resets_body_hidden": "Les limites de session et de semaine de ce compte repartent de zéro maintenant. Une réinitialisation n’est consommée que si une fenêtre en avait besoin.",
+      "resets_body": "Les quotas de session et de semaine de {email} repartent de zéro maintenant. Une réinitialisation n’est consommée que si une fenêtre en avait besoin.",
+      "resets_body_hidden": "Les quotas de session et de semaine de ce compte repartent de zéro maintenant. Une réinitialisation n’est consommée que si une fenêtre en avait besoin.",
       "resets_label": "Réinitialisations en réserve",
       "reset_option": "{title} · expire {expires}",
       "reset_option_soonest": "{title} · expire {expires} (la plus proche)",
@@ -980,7 +980,7 @@
         "files": "Fichiers",
         "settings": "Réglages"
       },
-      "pr": "Pull request {n}, {state, select, open {ouverte} merged {fusionnée} closed {fermée} other {brouillon}}",
+      "pr": "Pull request {n}, {state, select, open {ouverte} merged {mergée} closed {fermée} other {brouillon}}",
       "pinned": "Épinglées",
       "recent": "Récentes",
       "loading": "Chargement…",
@@ -1065,7 +1065,7 @@
     },
     "date_picker": {
       "label": "Jours",
-      "month_year": "{m, select, 1 {janvier} 2 {février} 3 {mars} 4 {avril} 5 {mai} 6 {juin} 7 {juillet} 8 {août} 9 {septembre} 10 {octobre} 11 {novembre} 12 {décembre} other {}} {year}",
+      "month_year": "{m, select, 1 {Janvier} 2 {Février} 3 {Mars} 4 {Avril} 5 {Mai} 6 {Juin} 7 {Juillet} 8 {Août} 9 {Septembre} 10 {Octobre} 11 {Novembre} 12 {Décembre} other {}} {year}",
       "previous_month": "Mois précédent",
       "next_month": "Mois suivant",
       "time": "Heure",
@@ -1331,10 +1331,10 @@
     "notifications": {
       "title": "Notifications",
       "terms": "alerts sounds banners alertes sons bannières bannieres notifications",
-      "desktop_section": "Bureau",
+      "desktop_section": "Système",
       "sounds_section": "Sons",
       "desktop": {
-        "label": "Notifications de bureau",
+        "label": "Notifications système",
         "terms": "alerts banners system alertes bannières bannieres système systeme bureau",
         "description": "Quand un agent termine, a besoin de vous ou échoue."
       },
@@ -1358,9 +1358,9 @@
         "name": "Son de tâche terminée"
       },
       "sound_request": {
-        "label": "Réponse requise",
-        "terms": "question waiting approval audio sound attente approbation son réponse reponse requise",
-        "name": "Son de réponse requise"
+        "label": "Action requise",
+        "terms": "question waiting approval audio sound attente approbation son réponse reponse requise action",
+        "name": "Son d’action requise"
       },
       "sound_attention": {
         "label": "Erreurs et déconnexions",
@@ -1438,7 +1438,7 @@
       "enabled": {
         "label": "Capturer des Appshots",
         "terms": "screenshot window capture écran ecran fenêtre fenetre",
-        "description": "Les captures attendent votre relecture et ne sont jamais envoyées automatiquement."
+        "description": "Les captures attendent votre vérification et ne sont jamais envoyées automatiquement."
       },
       "sound": {
         "label": "Son de capture",
@@ -1480,7 +1480,7 @@
       "agent_settings": "Réglages des agents",
       "agents": {
         "label": "Vos agents",
-        "terms": "accounts sign in usage plan switch remove comptes connexion utilisation forfait changer retirer"
+        "terms": "accounts sign in usage plan switch remove comptes connexion utilisation quota forfait changer retirer"
       },
       "native_subagents": {
         "label": "Sous-agents natifs",
@@ -1488,7 +1488,7 @@
         "description": "Sinon, l’agent délègue par des conversations annexes."
       },
       "update_policy": {
-        "label": "Mode de mise à jour",
+        "label": "Politique de mise à jour",
         "terms": "automatic upgrade version cli automatique mise à jour maj politique"
       },
       "skills_dollar": {
@@ -1511,7 +1511,7 @@
       "cant_reach": "Zeron ne parvient pas à joindre {device}.",
       "try_later": "Réessayez dans un instant.",
       "policy": {
-        "notify": "Me prévenir",
+        "notify": "Notifier",
         "auto": "Auto si inactif",
         "off": "Désactivé",
         "notify_note": "Seulement quand vous choisissez Mettre à jour.",
@@ -1644,7 +1644,7 @@
       "remove": "Retirer…",
       "remove_online": "En ligne. Quittez d’abord Zeron sur cet appareil.",
       "remove_title": "Retirer « {name} » ?",
-      "remove_body": "Il disparaît de la liste de vos appareils, partout. Ses sessions et ses projets sont conservés et restent consultables, et rien n’est supprimé sur l’ordinateur. Si Zeron y est rouvert, il réapparaît.",
+      "remove_body": "Il est retiré de la liste de vos appareils, partout. Ses sessions et ses projets sont conservés et restent consultables, et rien n’est supprimé sur l’ordinateur. Si Zeron y est rouvert, il réapparaît.",
       "remove_confirm": "Retirer l’appareil",
       "couldnt_remove": "Impossible de retirer l’appareil",
       "online_now": "Il est en ligne. Quittez Zeron sur cet appareil, puis réessayez.",
@@ -1825,8 +1825,8 @@
         "downloading": "Téléchargement de Zeron {version}…",
         "downloading_line": "Vous pouvez continuer à travailler.",
         "ready": "Zeron {version} est prêt",
-        "ready_line": "Redémarrez pour terminer. Sinon, l’installation se fera quand vous quitterez Zeron.",
-        "restart": "Redémarrer pour mettre à jour",
+        "ready_line": "Relancez Zeron pour terminer l’installation. Sinon, elle se fera quand vous quitterez Zeron.",
+        "restart": "Installer et relancer",
         "download_failed": "Impossible de télécharger Zeron {version}",
         "held": "Zeron {version} ne peut pas encore être installé",
         "available_stable": "Zeron {version} (stable) est disponible",
@@ -1847,7 +1847,7 @@
         "off": "Essayez la prochaine version de Zeron en avant-première. Nécessite macOS {version} ou version ultérieure.",
         "off_any": "Essayez la prochaine version de Zeron en avant-première."
       },
-      "updates_self_description": "Zeron se met à jour automatiquement : la nouvelle version se télécharge en arrière-plan et s’installe au redémarrage.",
+      "updates_self_description": "Zeron se met à jour automatiquement : la nouvelle version se télécharge en arrière-plan et s’installe quand vous relancez Zeron.",
       "version_info": {
         "label": "Infos de version",
         "description": "Pour signaler un bug : les versions et builds ci-dessus.",
@@ -1949,10 +1949,10 @@
       },
       "github": {
         "terms": "connect disconnect account clone push another reconnect organization login connecter déconnecter deconnecter compte cloner pousser autre reconnecter organisation identifiant",
-        "description": "Les conversations Cloud clonent vos dépôts et poussent leurs branches via GitHub.",
+        "description": "Les conversations Cloud passent par GitHub pour cloner vos dépôts et faire le push de leurs branches.",
         "connected": "Connecté",
         "needs_reconnect": "À reconnecter",
-        "needs_reconnect_description": "Les conversations qui l’utilisent ne peuvent pas pousser tant qu’il n’est pas reconnecté.",
+        "needs_reconnect_description": "Les conversations qui l’utilisent ne peuvent pas faire de push tant qu’il n’est pas reconnecté.",
         "reconnect": "Reconnecter",
         "disconnect": "Déconnecter",
         "another": "Autre compte GitHub",
@@ -2044,7 +2044,7 @@
       "extra": {
         "title": "Crédits supplémentaires",
         "terms": "buy purchase packs top up never expire acheter achat recharger recharge n’expirent jamais",
-        "description": "Achetés à l’unité, ils n’expirent jamais et prennent le relais une fois les crédits du forfait épuisés.",
+        "description": "Achetés à l’unité, ils n’expirent jamais et sont utilisés une fois les crédits du forfait épuisés.",
         "packs": "{n, plural, one {# pack} other {# packs}} · {hours}",
         "packs_name": "Packs",
         "buy": "Acheter pour {price}"
@@ -2088,14 +2088,14 @@
         "terms": "display name first last rename nom affiché affiche prénom prenom renommer",
         "description": "Le nom que voient vos coéquipiers. Il figure sur votre carte.",
         "empty": "Vos coéquipiers ont besoin d’un nom pour vous appeler.",
-        "too_long": "C’est un peu long pour un nom."
+        "too_long": "Ce nom est trop long."
       },
       "job_title": {
         "label": "Fonction",
         "terms": "job role position what you do poste rôle role fonction métier metier titre",
         "description": "Sous votre nom, partout où il s’affiche.",
         "placeholder": "Ce que vous faites",
-        "too_long": "C’est un peu long pour une fonction."
+        "too_long": "Cette fonction est trop longue."
       },
       "username": {
         "label": "Nom d’utilisateur",
@@ -2146,7 +2146,7 @@
       "claim": {
         "open": "Réserver un nom d’utilisateur",
         "title": "Réserver un nom d’utilisateur",
-        "body": "L’adresse de votre carte. Elle ne se choisit qu’une fois et vous appartient pour de bon.",
+        "body": "L’adresse de votre carte. Elle ne se choisit qu’une fois et vous appartient définitivement.",
         "confirm": "Réserver",
         "placeholder": "votrenom",
         "invalid": "3 à 20 lettres, chiffres, _ ou -."
@@ -2347,7 +2347,7 @@
         "a_plugin": "Un plugin",
         "state": {
           "working": "en cours",
-          "input": "en attente",
+          "input": "en attente d’action",
           "approval": "à approuver",
           "failed": "en échec",
           "done": "terminées",
@@ -2369,7 +2369,7 @@
         "reconnecting": "Reconnexion…"
       },
       "update_notice": "La notification de mise à jour",
-      "star": "Une étoile sur GitHub",
+      "star": "Mettre une étoile sur GitHub",
       "copied": "{what} copié",
       "menu": {
         "sections": "Sections",
@@ -2646,8 +2646,8 @@
       "plan_chats": "{n, plural, one {Arrête # conversation en cours. Elle reprendra après le redémarrage} other {Arrête # conversations en cours. Elles reprendront après le redémarrage}}",
       "plan_here": "Télécharge Zeron pour cet appareil, puis vous invite à redémarrer",
       "preparing": "Préparation…",
-      "ready": "{version} est prête. Redémarrez pour terminer",
-      "restart": "Redémarrer",
+      "ready": "{version} est prête. Relancez pour terminer",
+      "restart": "Installer et relancer",
       "retry": "Réessayer la mise à jour",
       "stops_chats": "{n, plural, one {Arrête # conversation en cours, qui reprendra ensuite} other {Arrête # conversations en cours, qui reprendront ensuite}}",
       "this_device": "Cet appareil",
@@ -2695,7 +2695,7 @@
     }
   },
   "onboarding": {
-    "skip_for_now": "Passer pour l’instant",
+    "skip_for_now": "Configurer plus tard",
     "not_now": "Plus tard",
     "signin": {
       "title": "Bienvenue\ndans Zeron",
@@ -2742,7 +2742,7 @@
     },
     "github": {
       "title": "Connectez GitHub",
-      "body": "Les agents Cloud travaillent dans vos dépôts, sur leurs propres machines. Connectez GitHub pour qu’ils puissent cloner et pousser leurs modifications."
+      "body": "Les agents Cloud travaillent dans vos dépôts, sur leurs propres machines. Connectez GitHub pour qu’ils puissent cloner vos dépôts et faire des push."
     },
     "org": {
       "creating": "Création…",
@@ -2755,7 +2755,7 @@
     "invite": {
       "one_address": "Une adresse",
       "failed_one": "{why, select, invalid {Zeron ne peut pas envoyer d’invitation à {who}.} exists {{who} est déjà membre ou a déjà une invitation.} other {Impossible d’envoyer l’invitation à {who}.}}",
-      "failed_many": "{why, select, invalid {Zeron ne peut pas envoyer d’invitation à {who}, et {n, plural, one {# autre invitation n’est pas partie} other {# autres invitations ne sont pas parties}}.} exists {{who} est déjà membre ou a déjà une invitation, et {n, plural, one {# autre invitation n’est pas partie} other {# autres invitations ne sont pas parties}}.} other {Impossible d’envoyer l’invitation à {who}, et {n, plural, one {# autre invitation n’est pas partie} other {# autres invitations ne sont pas parties}}.}}",
+      "failed_many": "{why, select, invalid {Zeron ne peut pas envoyer d’invitation à {who}, et {n, plural, one {# autre invitation n’a pas été envoyée} other {# autres invitations n’ont pas été envoyées}}.} exists {{who} est déjà membre ou a déjà une invitation, et {n, plural, one {# autre invitation n’a pas été envoyée} other {# autres invitations n’ont pas été envoyées}}.} other {Impossible d’envoyer l’invitation à {who}, et {n, plural, one {# autre invitation n’a pas été envoyée} other {# autres invitations n’ont pas été envoyées}}.}}",
       "nothing_sent": "Rien n’a été envoyé. {says}",
       "bad_addresses": "{n, plural, one {Une adresse semble incorrecte.} other {# adresses semblent incorrectes.}}",
       "too_many": "Jusqu’à {max} à la fois.",
@@ -2797,7 +2797,7 @@
       "title_install": "Installez un agent",
       "title": "Vos agents",
       "looking": "Recherche d’agents de code sur cet ordinateur…",
-      "unavailable": "Zeron fait tourner les agents de code que vous utilisez déjà.",
+      "unavailable": "Zeron pilote les agents de code que vous utilisez déjà.",
       "none": "Aucun n’est encore installé sur cet ordinateur. Installez-en un pour continuer.",
       "found": "{n, plural, one {# agent trouvé sur cet ordinateur. Connectez-vous pour l’utiliser.} other {# agents trouvés sur cet ordinateur. Connectez-vous à ceux que vous voulez utiliser.}}",
       "this_mac": "cet ordinateur"
@@ -2832,20 +2832,20 @@
       "action": "Ajouter un projet"
     },
     "link_notice": {
-      "offline_intent": "Hors ligne — les messages partiront dès que vous serez de nouveau en ligne.",
+      "offline_intent": "Hors ligne — les messages seront envoyés dès que vous serez de nouveau en ligne.",
       "offline": "Hors ligne",
-      "reconnecting_intent": "Reconnexion — les messages partiront dès que la connexion sera rétablie.",
+      "reconnecting_intent": "Reconnexion — les messages seront envoyés dès que la connexion sera rétablie.",
       "reconnecting": "Reconnexion…",
       "the_host": "l’hôte",
-      "unreachable": "Impossible de joindre {host} — les messages partiront dès qu’il sera joignable."
+      "unreachable": "Impossible de joindre {host} — les messages seront envoyés dès qu’il sera joignable."
     },
     "lane_tab": {
       "subagent": "Sous-agent",
       "side_chat": "Conversation annexe",
       "placeholder": "Demander à la conversation annexe…",
       "didnt_send": "Message non envoyé",
-      "couldnt_fork": "Impossible de dupliquer cette conversation",
-      "forking": "Bifurcation…",
+      "couldnt_fork": "Impossible de créer une branche de cette conversation",
+      "forking": "Création de la branche…",
       "retry": "Réessayer"
     },
     "lanes": {
@@ -2967,7 +2967,7 @@
     "cloud_machine": {
       "specs": "{vcpu} vCPU · {memory} Go de mémoire · {disk} Go de disque",
       "stage_clone": "clonage du dépôt",
-      "stage_branch": "passage sur la branche",
+      "stage_branch": "checkout de la branche",
       "stage_start": "démarrage",
       "asleep": "Machine Cloud en veille — elle se réveillera au prochain message",
       "wake": "Réveiller",
@@ -2988,8 +2988,8 @@
       "wake_failed_body": "La machine ne s’est pas réveillée. Réessayez dans un instant.",
       "expired_title": "Fichiers de la machine supprimés",
       "expired_summary": "La conversation est conservée",
-      "expired_body_on": "La machine de cette conversation est restée trop longtemps en veille et ses fichiers ont été supprimés. La conversation est conservée. Une nouvelle machine repartira de {repo}, sur la même branche, avec tout ce qui a été poussé.",
-      "expired_body": "La machine de cette conversation est restée trop longtemps en veille et ses fichiers ont été supprimés. La conversation est conservée. Une nouvelle machine repartira de son dépôt, sur la même branche, avec tout ce qui a été poussé.",
+      "expired_body_on": "La machine de cette conversation est restée trop longtemps en veille et ses fichiers ont été supprimés. La conversation est conservée. Une nouvelle machine repartira de {repo}, sur la même branche, avec tout ce qui a fait l’objet d’un push.",
+      "expired_body": "La machine de cette conversation est restée trop longtemps en veille et ses fichiers ont été supprimés. La conversation est conservée. Une nouvelle machine repartira de son dépôt, sur la même branche, avec tout ce qui a fait l’objet d’un push.",
       "fresh": "Démarrer une nouvelle machine",
       "blocked_title": "La machine ne peut pas se réveiller",
       "blocked_summary": "Il lui faut {needed} Go de disque",
@@ -3009,7 +3009,7 @@
       "current": "Actuelle",
       "after_turn": "après ce tour",
       "rate": "{rate} crédits",
-      "none_fit": "Aucune machine ne peut contenir les {needs} Go dont cette conversation a besoin. Vous pouvez continuer dans une nouvelle conversation à partir de ce qui a été poussé ; cette conversation et ses fichiers restent tels quels.",
+      "none_fit": "Aucune machine ne peut contenir les {needs} Go dont cette conversation a besoin. Vous pouvez continuer dans une nouvelle conversation à partir de ce qui a fait l’objet d’un push ; cette conversation et ses fichiers restent tels quels.",
       "none_bigger": "C’est la plus grande machine disponible. Pour libérer de la place, il faut supprimer des fichiers.",
       "restart_note": "La machine redémarre à la taille choisie, avec ses fichiers.",
       "blocked_body_none": "La machine de cette conversation ne peut pas se réveiller : il lui faut {needs} Go de disque.",
@@ -3021,14 +3021,14 @@
       "cell_disk": "{n} Go de disque",
       "held_size_short": "En attente d’une taille",
       "held_fresh_short": "En attente d’une nouvelle machine",
-      "held_size": "{n, plural, one {Votre message partira dès que vous aurez choisi une taille} other {Vos # messages partiront dès que vous aurez choisi une taille}}",
-      "held_fresh": "{n, plural, one {Votre message partira dès qu’une nouvelle machine aura démarré} other {Vos # messages partiront dès qu’une nouvelle machine aura démarré}}",
+      "held_size": "{n, plural, one {Votre message sera envoyé dès que vous aurez choisi une taille} other {Vos # messages seront envoyés dès que vous aurez choisi une taille}}",
+      "held_fresh": "{n, plural, one {Votre message sera envoyé dès qu’une nouvelle machine aura démarré} other {Vos # messages seront envoyés dès qu’une nouvelle machine aura démarré}}",
       "ago_minutes": "{n, plural, one {il y a # minute} other {il y a # minutes}}",
       "ago_hours": "{n, plural, one {il y a # heure} other {il y a # heures}}",
       "ago_days": "{n, plural, one {il y a # jour} other {il y a # jours}}",
-      "queued_old_title": "{n, plural, one {Un message en attente partira à son réveil} other {# messages en attente partiront à son réveil}}",
+      "queued_old_title": "{n, plural, one {Un message en attente sera envoyé à son réveil} other {# messages en attente seront envoyés à son réveil}}",
       "queued_old_summary": "Mis en attente {ago}",
-      "queued_old_body": "Mis en attente {ago}, ils partiront dès que la machine de cette conversation se réveillera. Retirez d’abord ceux dont vous ne voulez plus.",
+      "queued_old_body": "Mis en attente {ago}, ils seront envoyés dès que la machine de cette conversation se réveillera. Retirez d’abord ceux dont vous ne voulez plus.",
       "send_failed_title": "Un message n’a pas été envoyé",
       "store_full": "Trop de fichiers attendent d’être récupérés par les machines Cloud. Réessayez quand l’une d’elles l’aura fait.",
       "held_sending": "Envoi…",
@@ -3039,7 +3039,7 @@
       "interrupted": "Interrompu",
       "waking": "Réveil de la machine Cloud…",
       "updating": "Mise à jour de la machine Cloud…",
-      "expired": "Interrompu — les fichiers de sa machine Cloud ont disparu",
+      "expired": "Interrompu — les fichiers de sa machine Cloud ont été supprimés",
       "blocked": "Interrompu — sa machine Cloud ne peut pas se réveiller",
       "failed": "Interrompu — échec de sa machine Cloud",
       "asleep": "Interrompu — sa machine Cloud s’est mise en veille",
@@ -3051,7 +3051,7 @@
       "starting": "Démarrage d’une machine Cloud…",
       "waking_stage": "Réveil de la machine Cloud — {stage}…",
       "stage_clone": "clonage du dépôt",
-      "stage_branch": "passage sur la branche",
+      "stage_branch": "checkout de la branche",
       "setup_summary": "Machine Cloud configurée",
       "woke_summary": "Machine Cloud réveillée",
       "unreachable": "Interrompu — impossible de joindre {host}"
@@ -3083,7 +3083,7 @@
       "terminal": "Terminal",
       "title": "Ouvrir un onglet",
       "side_chat": "Conversation annexe",
-      "fork": "Dupliquer la conversation"
+      "fork": "Créer une branche de la conversation"
     },
     "plugin_off": "Son plugin n’est pas activé pour le moment.",
     "broken": {
@@ -3107,7 +3107,7 @@
     },
     "close_question": {
       "title": "Fermer cet onglet ?",
-      "running": "Un processus tourne encore dans « {title} ». Fermer l’onglet l’arrêtera.",
+      "running": "Un processus est encore en cours dans « {title} ». Fermer l’onglet l’arrêtera.",
       "unsaved": "« {title} » contient des modifications non enregistrées. Fermer l’onglet les abandonnera."
     },
     "terminal": {
@@ -3256,7 +3256,7 @@
         "icon_test": "Tester",
         "icon_lint": "Lint",
         "icon_configure": "Configurer",
-        "icon_build": "Compiler",
+        "icon_build": "Build",
         "icon_debug": "Déboguer"
       },
       "ports": "Ports",
@@ -3316,9 +3316,9 @@
   },
   "engine": {
     "update": {
-      "restart": "Redémarrer pour mettre à jour",
+      "restart": "Installer et relancer",
       "out_of_date": "Le moteur de Zeron n’est pas à jour",
-      "restart_tip": "Zeron s’est mis à jour en arrière-plan. Redémarrer le moteur interrompt tout ce qui y tourne.",
+      "restart_tip": "Zeron s’est mis à jour en arrière-plan. Relancer le moteur interrompt tout ce qui est en cours.",
       "theirs_tip": "Il a été lancé en dehors de cette app : pour le mettre à jour, redémarrez-le de la même manière.",
       "short": "Moteur obsolète",
       "old": "Cette version de Zeron nécessite un moteur plus récent",
@@ -3574,7 +3574,7 @@
       "couldnt_install": "Impossible d’installer le plugin",
       "couldnt_update": "Impossible de mettre à jour {name}",
       "settings_of": "Réglages de {name}",
-      "review": "Examiner",
+      "review": "Vérifier",
       "show_folder": "Afficher le dossier",
       "builtin": "{name} fait partie de Zeron",
       "remove_named": "Retirer {name}",
@@ -3684,7 +3684,7 @@
     },
     "init": {
       "waiting": "{name} attend votre autorisation",
-      "review": "Examiner",
+      "review": "Vérifier",
       "template_waiting_body": "Un modèle d’interface créé par quelqu’un d’autre.",
       "failed": "{name} a cessé de fonctionner",
       "failed_body": "Zeron continue de fonctionner sans lui jusqu’à ce qu’il soit mis à jour ou corrigé.",
@@ -3754,7 +3754,7 @@
       "installed_toast": "{name} installé",
       "waiting": "{name} attend votre décision",
       "waiting_body": "Un modèle créé par quelqu’un d’autre. Vérifiez qui l’a signé avant de l’installer.",
-      "review": "Examiner",
+      "review": "Vérifier",
       "more_for": "Plus d’options pour {name}",
       "show_folder": "Afficher le dossier",
       "duplicate": "Dupliquer",
@@ -3860,7 +3860,7 @@
       "couldnt_rename": "Impossible de renommer le thème",
       "name": "Nom",
       "remove_title": "Retirer ce thème ?",
-      "remove_body": "Il disparaît de vos thèmes. Là où il était actif, le thème par défaut le remplace.",
+      "remove_body": "Il sera retiré de vos thèmes. Là où il était actif, le thème par défaut le remplace.",
       "none_yours": "Vous n’en avez pas encore",
       "none_yours_body": "Importez un thème de couleurs VS Code : son fichier .json, ou le dossier d’une extension. Vous pouvez aussi le déposer sur cette page.",
       "none_templates": "Aucun modèle n’apporte de thème",
