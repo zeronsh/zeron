@@ -369,7 +369,7 @@ end
 -- held back (an open padlock). Auto only where the agent has one (`auto`),
 -- or while it's the mode chosen. (Made as they're read, in the locale's
 -- words.)
-local function ACCESS(auto: boolean): { Dropdown.Item }
+local function ACCESS(auto: boolean, chosen: string?): { Dropdown.Item }
 	local items = {
 		worded({ value = "supervised", icon = "access-supervised" }, {
 			label = "ds.composer.access.supervised",
@@ -380,10 +380,10 @@ local function ACCESS(auto: boolean): { Dropdown.Item }
 			description = "ds.composer.access.edits_hint",
 		}),
 	}
-	if auto then
-		table.insert(items, worded({ value = "auto", icon = "shield-check" }, {
-			label = "ds.composer.access.auto",
-			description = "ds.composer.access.auto_hint",
+	if auto or chosen == "auto" then
+		table.insert(items, worded({ value = "auto", icon = "shield-check", disabled = not auto }, {
+			label = if auto then "ds.composer.access.auto" else "ds.composer.access.auto_unavailable",
+			description = if auto then "ds.composer.access.auto_hint" else "ds.composer.access.auto_unavailable_hint",
 		}))
 	end
 	table.insert(items, worded({ value = "full", icon = "access-full" }, {
@@ -1432,7 +1432,7 @@ return ui.component(function(props: Props): Node
 			value = props.access,
 			items = function(): { Dropdown.Item }
 				local chosen = props.access and props.access:get()
-				return ACCESS(chosen == "auto" or (props.access_auto ~= nil and props.access_auto()))
+				return ACCESS(props.access_auto ~= nil and props.access_auto(), chosen)
 			end,
 			tone = "chip",
 			label = locale.t("ds.composer.access.label") :: any,

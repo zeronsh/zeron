@@ -447,23 +447,19 @@ impl AccessMode {
         *self == AccessMode::FullAccess
     }
 
-    /// The mode an agent offering `modes` runs a request for `self` in:
-    /// `self` when offered. Auto, on an agent without an auto mode, is the
-    /// nearest stricter mode it offers (auto-accept edits, else supervised)
-    /// rather than more trust than asked for. Anything else falls back to
-    /// full access, as it always has.
-    pub fn honored_by(self, modes: &[AccessMode]) -> AccessMode {
+    /// Resolve the requested mode against an agent's capabilities. Auto
+    /// falls back only to a stricter offered mode; None means the run must
+    /// be refused. Other unsupported modes retain their legacy fallback.
+    pub fn honored_by(self, modes: &[AccessMode]) -> Option<AccessMode> {
         if modes.contains(&self) {
-            return self;
+            return Some(self);
         }
         if self == AccessMode::Auto {
-            for stricter in [AccessMode::AutoAcceptEdits, AccessMode::Supervised] {
-                if modes.contains(&stricter) {
-                    return stricter;
-                }
-            }
+            return [AccessMode::AutoAcceptEdits, AccessMode::Supervised]
+                .into_iter()
+                .find(|mode| modes.contains(mode));
         }
-        AccessMode::FullAccess
+        Some(AccessMode::FullAccess)
     }
 
     pub fn label(self) -> &'static str {
@@ -1045,10 +1041,10 @@ pub struct ToolResultImage {
     pub data_base64: String,
 }
 
-/// A file modification carried inline on a tool result (ACP
-/// Where an agent's own reviewer (Codex's auto-review, Claude Code's auto
-/// mode) stands on one of its tool calls, in [`AccessMode::Auto`]. Shown on
-/// the call, so a person can tell what the reviewer let through or stopped.
+/// A verdict from an agent's structured reviewer metadata, such as
+/// Codex's auto-review, in [`AccessMode::Auto`]. Shown on the call so a
+/// person can tell what the reviewer let through or stopped. Tool output
+/// alone is not evidence that a reviewer made a decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolReviewStatus {
@@ -1310,14 +1306,15 @@ mod tests {
     #[test]
     fn auto_falls_back_to_the_nearest_stricter_mode() {
         use AccessMode::*;
-        assert_eq!(Auto.honored_by(&AccessMode::WITH_AUTO), Auto);
-        assert_eq!(Auto.honored_by(&AccessMode::ALL), AutoAcceptEdits);
-        assert_eq!(Auto.honored_by(&[Supervised, FullAccess]), Supervised);
-        // An agent with full access alone has nothing stricter to give.
-        assert_eq!(Auto.honored_by(&[FullAccess]), FullAccess);
+        assert_eq!(Auto.honored_by(&AccessMode::WITH_AUTO), Some(Auto));
+        assert_eq!(Auto.honored_by(&AccessMode::ALL), Some(AutoAcceptEdits));
+        assert_eq!(Auto.honored_by(&[Supervised, FullAccess]), Some(Supervised));
+        // With no safe fallback, the caller must refuse to run.
+        assert_eq!(Auto.honored_by(&[FullAccess]), None);
+        assert_eq!(Auto.honored_by(&[]), None);
         // The other modes fall back as before.
-        assert_eq!(Supervised.honored_by(&[FullAccess]), FullAccess);
-        assert_eq!(AutoAcceptEdits.honored_by(&AccessMode::ALL), AutoAcceptEdits);
+        assert_eq!(Supervised.honored_by(&[FullAccess]), Some(FullAccess));
+        assert_eq!(AutoAcceptEdits.honored_by(&AccessMode::ALL), Some(AutoAcceptEdits));
     }
 
     #[test]

@@ -592,6 +592,8 @@
         "edits_hint": "Apply edits, ask before other actions.",
         "auto": "Auto",
         "auto_hint": "The agent's reviewer approves safe actions; risky ones ask.",
+        "auto_unavailable": "Auto unavailable",
+        "auto_unavailable_hint": "This agent doesn't support Auto. Choose another access mode or agent.",
         "full": "Full access",
         "full_hint": "Run commands and edits without asking."
       },

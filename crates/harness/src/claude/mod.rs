@@ -1625,14 +1625,6 @@ async fn run_session(session: Session) {
                         stdin.replay = None;
                     }
                     for ev in events {
-                        // A refusal is Auto's reviewer's only in Auto; in
-                        // another mode it was a rule's, and the failed call
-                        // says enough.
-                        if matches!(ev, AgentEvent::ToolReviewed { .. })
-                            && access(&config) != AccessMode::Auto
-                        {
-                            continue;
-                        }
                         match &ev {
                             AgentEvent::ToolCall { id, .. } => {
                                 open_tools.insert(id.clone());
