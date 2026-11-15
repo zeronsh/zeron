@@ -103,6 +103,59 @@ pub(crate) fn signal_target(child: &Child) -> Option<std::sync::Arc<crate::windo
     Some(child.job.clone())
 }
 
+/// A warm start's runtime (an agent started while its chat's first message is
+/// still being written) waits in the background until its run takes it
+/// ([`warm_taken`]): its startup is speculative, and it must never take time
+/// from the window being typed into. macOS's background state lowers its CPU,
+/// disk and network priority (and its scheduling to the efficiency cores);
+/// what it starts meanwhile inherits it. Nothing elsewhere: Linux lets no
+/// process raise a priority it lowered, and the run would keep it.
+pub(crate) fn warm_in_background(pid: Option<u32>) {
+    #[cfg(target_os = "macos")]
+    if let Some(pid) = pid {
+        set_background(pid, true);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = pid;
+}
+
+/// Its run took a warm start ([`warm_in_background`]): the runtime back to
+/// normal priority before its first message, and all it started meanwhile
+/// just after (a look at the process table, not waited for).
+pub(crate) fn warm_taken(pid: Option<u32>) {
+    #[cfg(target_os = "macos")]
+    if let Some(pid) = pid {
+        // The runtime first: what it starts from now on is normal already.
+        set_background(pid, false);
+        tokio::spawn(async move {
+            for each in descendants(pid).await {
+                if let Ok(pid) = u32::try_from(each.pid) {
+                    set_background(pid, false);
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = pid;
+}
+
+#[cfg(target_os = "macos")]
+fn set_background(pid: u32, on: bool) {
+    let value = if on { libc::PRIO_DARWIN_BG } else { 0 };
+    // SAFETY: setpriority only reads its arguments; a process that has gone
+    // (or isn't ours) fails with ESRCH or EPERM, which changes nothing.
+    let done = unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, pid, value) };
+    if done != 0 {
+        tracing::debug!(
+            target: "first_word",
+            pid,
+            on,
+            error = %std::io::Error::last_os_error(),
+            "warm start priority not changed"
+        );
+    }
+}
+
 /// One process a descendant snapshot found: its pid and, where the process
 /// table reports it, its start time, which tells it apart from an unrelated
 /// process that later inherits the pid. Each snapshot carries its own
@@ -704,6 +757,83 @@ fn windows_spawn_retries_only_sharing_failures_and_fresh_images() {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A process's scheduling priority as `ps` reports it (macOS: 4 in the
+    /// background state, 31 for a normal user process).
+    #[cfg(target_os = "macos")]
+    fn priority(pid: u32) -> i32 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "pri=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    }
+
+    /// A warm start waits in the background, and so does what it starts
+    /// meanwhile; taken, both are back to normal priority.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_warm_start_waits_in_the_background_until_its_run_takes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let go = dir.path().join("go");
+        let started = dir.path().join("started");
+        // Starts a child only once told to (after it went to the
+        // background), and says so.
+        let script = format!(
+            "while [ ! -f '{go}' ]; do sleep 0.01; done; sleep 60 & echo $! > '{started}'; wait",
+            go = go.display(),
+            started = started.display()
+        );
+        let mut agent = tokio::process::Command::new("sh")
+            .args(["-c", &script])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = agent.id().unwrap();
+        let normal = priority(pid);
+        warm_in_background(Some(pid));
+        assert!(
+            priority(pid) < normal,
+            "the warm start runs in the background"
+        );
+        std::fs::write(&go, "").unwrap();
+        let mut child = None;
+        for _ in 0..250 {
+            if let Some(pid) = std::fs::read_to_string(&started)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                child = Some(pid);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let child = child.expect("the warm start started its child");
+        assert!(
+            priority(child) < normal,
+            "what it starts inherits the background"
+        );
+        warm_taken(Some(pid));
+        assert_eq!(
+            priority(pid),
+            normal,
+            "taken, the runtime is normal again at once"
+        );
+        for _ in 0..250 {
+            if priority(child) == normal {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            priority(child),
+            normal,
+            "and so is what it started meanwhile"
+        );
+        // SAFETY: SIGKILL to the fixture's own child.
+        unsafe { libc::kill(child as i32, libc::SIGKILL) };
+        agent.kill().await.unwrap();
+    }
 
     /// A grandchild in its own process group (how agent CLIs start shells)
     /// survives its parent's death; the descendant snapshot still finds it
