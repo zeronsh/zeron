@@ -3207,7 +3207,7 @@ if [ "${{GRAFF_NO_BROWSER:-}}" != "1" ]; then
 fi
 case "$1:$2" in
   login:kimi)
-    echo "Open https://www.kimi.com/activate"
+    echo "Open https://www.kimi.ai/code/authorize_device?user_code=ABCD-1234"
     echo "Code: ABCD-1234"
     sleep 0.1
     mkdir -p "$HOME/.kimi/credentials"
@@ -3234,7 +3234,10 @@ esac
         .start_login_with(HarnessId::Codegraff, Some("kimi"), None)
         .await
         .unwrap();
-    assert_eq!(kimi_start.url, "https://www.kimi.com/activate");
+    assert_eq!(
+        kimi_start.url,
+        "https://www.kimi.ai/code/authorize_device?user_code=ABCD-1234"
+    );
     assert_eq!(kimi_start.callback_port, None);
     let kimi_polls = settle(&accounts, &kimi_start.login_id).await;
     assert_eq!(kimi_polls.last().unwrap().status, AgentLoginStatus::Done);
@@ -3280,6 +3283,78 @@ esac
     );
 
     // Throwaway login homes cleaned up.
+    let leftovers = std::fs::read_dir(config.data_dir.join("agent-accounts"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".login-"))
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+#[test]
+fn codegraff_url_scanner_accepts_all_provider_domains_and_rejects_untrusted() {
+    for url in [
+        "https://codegraff.com/cli/auth?x=1",
+        "https://auth.openai.com/api/accounts/authorize?x=1",
+        "https://claude.ai/oauth/authorize?x=1",
+        "https://platform.claude.com/oauth?x=1",
+        "https://www.kimi.ai/code/authorize_device?x=1",
+        "https://www.kimi.com/activate",
+        "https://accounts.x.ai/oauth2/device?x=1",
+    ] {
+        assert_eq!(scan_codegraff_url(url).as_deref(), Some(url), "{url}");
+    }
+    assert_eq!(scan_codegraff_url("https://evil.example/auth"), None);
+}
+
+#[tokio::test]
+#[ignore = "spawns the real graff CLI; needs install + network"]
+async fn live_real_codegraff_login_starts_and_cancels_all_providers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    if let Some(exe) = std::env::var_os("GRAFF_EXECUTABLE") {
+        accounts.override_cli(HarnessId::Codegraff, PathBuf::from(exe));
+    }
+
+    for provider in ["codegraff", "chatgpt-new", "anthropic", "kimi", "xai"] {
+        let start = accounts
+            .start_login_with(HarnessId::Codegraff, Some(provider), None)
+            .await
+            .unwrap_or_else(|e| panic!("start login for {provider}: {e}"));
+        assert!(
+            start.url.starts_with("https://"),
+            "expected https url for {provider}, got {}",
+            start.url
+        );
+        if matches!(provider, "chatgpt-new" | "anthropic") {
+            assert!(
+                start.callback_port.is_some(),
+                "expected loopback port for {provider}"
+            );
+        } else {
+            assert_eq!(
+                start.callback_port, None,
+                "unexpected callback port for device flow {provider}"
+            );
+            let mut saw_code = false;
+            for _ in 0..50 {
+                let poll = accounts.poll_login(&start.login_id).await.unwrap();
+                if poll
+                    .message
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("Enter the code "))
+                {
+                    saw_code = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(saw_code, "expected device code message for {provider}");
+        }
+        accounts.cancel_login(&start.login_id);
+    }
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let leftovers = std::fs::read_dir(config.data_dir.join("agent-accounts"))
         .unwrap()
         .flatten()

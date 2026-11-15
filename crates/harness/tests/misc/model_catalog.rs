@@ -10,6 +10,7 @@ fn harnesses(binary: &Path) -> Vec<Arc<dyn Harness>> {
         Arc::new(zeron_harness::PiHarness::new().with_executable(binary)),
         Arc::new(AcpHarness::antigravity().with_executable(binary)),
         Arc::new(AcpHarness::devin().with_executable(binary)),
+        Arc::new(AcpHarness::codegraff().with_executable(binary)),
     ]
 }
 fn binary(root: &Path) -> std::path::PathBuf {
@@ -83,6 +84,13 @@ async fn every_native_catalog_retains_last_good_and_cold_failure_stays_an_error(
             "{:?}",
             harness.id()
         );
+        if cold.fallback_models().is_empty() {
+            assert!(
+                cold.models().await.is_err(),
+                "empty-fallback harnesses must surface cold failure for {:?}",
+                harness.id()
+            );
+        }
         std::fs::write(
             &state,
             r#"{"fail":true,"id":"unused","error":"not logged in"}"#,
@@ -158,6 +166,7 @@ fn auth_context_child() {
         ".pi/agent/auth.json",
         ".gemini/antigravity-acp/oauth_creds.json",
         ".local/share/devin/credentials.toml",
+        ".simple-harness-keys.json",
     ]) {
         let before = harness.model_context().unwrap().unwrap();
         let path = root.join(auth);

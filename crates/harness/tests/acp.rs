@@ -2971,3 +2971,90 @@ async fn codegraff_rejected_model_never_falls_back_to_another_model() {
         })
     )));
 }
+
+#[tokio::test]
+#[ignore = "spawns the real graff CLI; needs install + auth + network"]
+async fn live_real_codegraff_discovery_and_single_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let harness = AcpHarness::codegraff();
+
+    let models = match harness.models().await {
+        Err(err)
+            if err
+                .to_string()
+                .contains("credentials changed during model discovery; retry") =>
+        {
+            harness.models().await.expect("discover models on retry")
+        }
+        other => other.expect("discover models"),
+    };
+    assert!(!models.is_empty(), "expected non-empty Codegraff models");
+    assert!(
+        models
+            .iter()
+            .any(|m| m.id.contains('/') && m.provider.is_some()),
+        "expected provider-prefixed models with parsed provider badges"
+    );
+    assert!(
+        !models[0].reasoning_levels.is_empty(),
+        "expected thought_level reasoning levels on discovered model"
+    );
+
+    let commands = harness
+        .commands_for(tmp.path())
+        .await
+        .expect("discover commands");
+    assert!(!commands.is_empty(), "expected non-empty slash commands");
+    assert!(
+        !commands
+            .iter()
+            .any(|c| c.name == "model" || c.name == "yolo"),
+        "expected model and yolo commands to be filtered by client profile"
+    );
+
+    let mut req = request("Reply with the single word PONG and nothing else.");
+    req.cwd = tmp.path().display().to_string();
+    req.model = Some(models[0].id.clone());
+    req.reasoning = Some(ReasoningLevel::Low);
+    let (control, _sender, _token) = controls();
+    let mut stream = harness.run(req, control).await.expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(90), async {
+        let mut events = Vec::new();
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            let done = matches!(ev, AgentEvent::Done { .. });
+            events.push(ev);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("live turn finished in time");
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. })),
+        "expected SessionStarted event"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.to_ascii_lowercase().contains("pong"),
+        "expected PONG reply in text deltas"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+}

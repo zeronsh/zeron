@@ -551,8 +551,8 @@ fn hermes_spec() -> AcpAgentSpec {
 fn codegraff_install_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(home) = crate::executable::home_dir() {
-        paths.push(home.join("bin").join("graff"));
         paths.push(home.join(".harness").join("bin").join("graff"));
+        paths.push(home.join("bin").join("graff"));
         paths.push(home.join(".local").join("bin").join("graff"));
     }
     if cfg!(windows)
@@ -3452,7 +3452,7 @@ impl Harness for AcpHarness {
         match self.model_catalog(true).await {
             Ok(catalog) => Ok(catalog.models),
             Err(error)
-                if self.id() == HarnessId::Devin
+                if self.fallback_models().is_empty()
                     || !crate::CatalogFailure::classify(&error).allows_stale() =>
             {
                 Err(error)
