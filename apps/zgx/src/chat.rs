@@ -1122,6 +1122,11 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // app's `stop_background_task`): whether it's stopping.
     host.async_action("chat.stop_task", move |args| async move { stop_task(args).await.map_err(String::from) });
     host.async_action("chat.stop_waiting", move |id| async move { stop_waiting(text(&id)).await.map_err(String::from) });
+    // A new chat's agent, started before its first message (screens/chat/warm).
+    host.async_action("chat.warm", move |args| async move { warm(args).await.map_err(String::from) });
+    host.async_action("chat.unwarm", move |args| async move { unwarm(args).await.map_err(String::from) });
+    host.async_action("chat.warm_cleared", move |args| async move { warm_cleared(args).await.map_err(String::from) });
+    host.action("chat.warm_taken", move |id| warm_taken(&text(&id)));
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
@@ -2824,23 +2829,8 @@ impl View {
         let cwd = field("cwd")
             .or_else(|| chat["cwd"].as_str().map(Into::into))
             .unwrap_or_else(|| "~".into());
-        let mut request = json!({
-            "prompt": prompt,
-            "harness": config["harness"],
-            "model": config["model"],
-            "reasoning": config["reasoning"],
-            "modelOptions": config.get("modelOptions").cloned().unwrap_or(json!({})),
-            "cwd": cwd,
-            "sandbox": "workspace-write",
-            "autoApprove": false,
-            "resume": null,
-        });
-        if let Some(access) = config.get("access") {
-            request["access"] = access.clone();
-        }
-        if let Some(plan) = config.get("plan") {
-            request["plan"] = plan.clone();
-        }
+        let mut request = run_request(&config, &cwd);
+        request["prompt"] = json!(prompt);
         if !paths.is_empty() {
             request["attachments"] = json!(paths);
         }
@@ -3390,6 +3380,149 @@ async fn stop_waiting(id: String) -> Result<Value, Outcome> {
         .await
         .map_err(|e| engine::outcome(&e))?;
     Ok(Value::Bool(answer["stopped"].as_bool() == Some(true)))
+}
+
+thread_local! {
+    /// New chats' warm starts asked of this app, by chat id: each ask's
+    /// number (a newer one, a stop or the send taking it makes an older
+    /// one's pending start or stop moot).
+    static WARM: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
+
+/// How long a new chat's start waits after the person opened it, so the
+/// page's first frames are drawn before the agent's startup takes a core.
+const WARM_OPEN_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
+/// A cleared draft keeps its agent this long.
+const WARM_CLEARED: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// This ask's number for `id`.
+fn warm_ask(id: &str) -> u64 {
+    WARM.with(|w| {
+        let mut w = w.borrow_mut();
+        let n = w.entry(id.to_owned()).or_insert(0);
+        *n += 1;
+        *n
+    })
+}
+
+/// Whether ask `n` of `id` is still the latest.
+fn warm_latest(id: &str, n: u64) -> bool {
+    WARM.with(|w| w.borrow().get(id).is_some_and(|at| *at == n))
+}
+
+/// The engine's `WarmStart` request for a new chat's agent: the run its first
+/// send will make (`send`: a just-made chat's config is the composer's
+/// picks), its prompt aside. `req` as the composer sends (`store.Request`:
+/// model, effort, options, access, plan, cwd, device). `None` when it can't
+/// start early: no agent picked, a chat that exists already, or one that
+/// will run on another device (a warm start there would outlive this app's
+/// quit).
+fn warm_request(chats: &Chats, id: &str, req: &Value) -> Option<Json> {
+    if chats.chat(id).is_some() {
+        return None;
+    }
+    let field = |key: &str| req.field(key).map(text).filter(|s| !s.is_empty());
+    let here = chats.here.borrow().clone()?;
+    if field("device").is_some_and(|device| device != here) {
+        return None;
+    }
+    let config = merged_config(&Json::Null, req);
+    if config["harness"].is_null() {
+        return None;
+    }
+    Some(run_request(&config, &field("cwd").unwrap_or_else(|| "~".into())))
+}
+
+/// The run a chat with `config` makes in `cwd`, its prompt empty: what a send
+/// sends (`send`), and what a new chat's warm start launches early.
+fn run_request(config: &Json, cwd: &str) -> Json {
+    let mut request = json!({
+        "prompt": "",
+        "harness": config["harness"],
+        "model": config["model"],
+        "reasoning": config["reasoning"],
+        "modelOptions": config.get("modelOptions").cloned().unwrap_or(json!({})),
+        "cwd": cwd,
+        "sandbox": "workspace-write",
+        "autoApprove": false,
+        "resume": null,
+    });
+    if let Some(access) = config.get("access") {
+        request["access"] = access.clone();
+    }
+    if let Some(plan) = config.get("plan") {
+        request["plan"] = plan.clone();
+    }
+    request
+}
+
+/// A new chat's agent started before its first message (the engine's
+/// `WarmStart`), for the id it will be made with: `{ id, req, typed }`.
+/// Opened and not typed into, it starts [`WARM_OPEN_SETTLE`] later. Its
+/// outcome word, or nil when nothing can warm (see [`warm_request`]) or a
+/// newer ask, a stop or the send took over.
+async fn warm(args: Value) -> Result<Value, Outcome> {
+    if std::env::var("ZERON_WARM_START").is_ok_and(|v| v == "0") {
+        return Ok(Value::Nil);
+    }
+    let id = args.field("id").map(text).filter(|id| plain_id(id)).ok_or("missing")?;
+    let Some(req) = args.field("req") else { return Err("missing") };
+    let typed = args.field("typed").is_some_and(Value::truthy);
+    let chats = CHATS.with(Rc::clone);
+    let Some(request) = warm_request(&chats, &id, &req) else {
+        return Ok(Value::Nil);
+    };
+    let n = warm_ask(&id);
+    if !typed {
+        zgx::timer::sleep(WARM_OPEN_SETTLE).await;
+        if !warm_latest(&id, n) {
+            return Ok(Value::Nil);
+        }
+    }
+    let answer = engine::get()
+        .call("WarmStart", json!({ "chatId": id, "request": request, "typed": typed }))
+        .await
+        .map_err(|e| engine::outcome(&e))?;
+    Ok(answer["outcome"].as_str().map(Value::from).unwrap_or(Value::Nil))
+}
+
+/// Stop a warm start: `{ id }`.
+async fn unwarm(args: Value) -> Result<Value, Outcome> {
+    let id = args.field("id").map(text).filter(|id| plain_id(id)).ok_or("missing")?;
+    WARM.with(|w| w.borrow_mut().remove(&id));
+    engine::get()
+        .call("WarmStop", json!({ "chatId": id }))
+        .await
+        .map_err(|e| engine::outcome(&e))?;
+    Ok(Value::Nil)
+}
+
+/// The send took the warm start of `id`: a start or stop still pending for
+/// it is moot (the engine hands it to the chat's run).
+fn warm_taken(id: &str) {
+    WARM.with(|w| w.borrow_mut().remove(id));
+}
+
+/// A warm start's draft was cleared: stopped [`WARM_CLEARED`] later unless
+/// it's asked for again (typed into) meanwhile. `{ id }`.
+async fn warm_cleared(args: Value) -> Result<Value, Outcome> {
+    let id = args.field("id").map(text).filter(|id| plain_id(id)).ok_or("missing")?;
+    let n = WARM.with(|w| w.borrow().get(&id).copied());
+    let Some(n) = n else { return Ok(Value::Nil) };
+    zgx::timer::sleep(WARM_CLEARED).await;
+    if !warm_latest(&id, n) {
+        return Ok(Value::Nil);
+    }
+    unwarm(json_value(json!({ "id": id }))).await
+}
+
+fn json_value(json: Json) -> Value {
+    Value::from_json(&json.to_string()).unwrap_or(Value::Nil)
+}
+
+/// An id a chat may be made with (`sessions.create`'s).
+fn plain_id(id: &str) -> bool {
+    (8..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
@@ -7044,6 +7177,42 @@ mod tests {
         chats.catalog_on("mac");
         assert!(chats.remote.borrow().is_none());
         assert!(chats.catalog_value().field("device").is_none());
+    }
+
+    /// A new chat's warm start asks the engine for the very run its first
+    /// send will make, the prompt aside; never for a chat that exists, one
+    /// that will run on another device, or with no agent picked.
+    #[test]
+    fn a_warm_start_is_asked_only_for_a_new_chat_here_as_its_send_would_run() {
+        let chats = Chats::default();
+        let req = |fields: Json| Value::from_json(&fields.to_string()).unwrap();
+        let ask = req(json!({
+            "model": "claude-code/opus", "effort": "high", "cwd": "/tmp/atlas",
+            "device": "mac", "access": "edits", "plan": true,
+        }));
+        assert!(warm_request(&chats, "new-chat-1", &ask).is_none(), "this device not known yet");
+        *chats.here.borrow_mut() = Some("mac".into());
+        let request = warm_request(&chats, "new-chat-1", &ask).expect("a new chat here");
+        let mut sent = run_request(&merged_config(&Json::Null, &ask), "/tmp/atlas");
+        sent["prompt"] = json!("");
+        assert_eq!(request, sent, "the run its send makes");
+        assert_eq!(request["harness"], "claude-code");
+        assert_eq!(request["model"], "opus");
+        assert_eq!(request["reasoning"], "high");
+        assert_eq!(request["access"], "auto-accept-edits");
+        assert_eq!(request["plan"], true);
+        assert_eq!(request["prompt"], "");
+        // No project, no device named: here, in its own folder.
+        let projectless = warm_request(&chats, "new-chat-1", &req(json!({ "model": "claude-code/opus" })));
+        assert_eq!(projectless.expect("here")["cwd"], "~");
+        for (why, fields) in [
+            ("another device", json!({ "model": "claude-code/opus", "device": "box" })),
+            ("no agent picked", json!({ "cwd": "/tmp/atlas" })),
+        ] {
+            assert!(warm_request(&chats, "new-chat-1", &req(fields)).is_none(), "{why}");
+        }
+        chats.chats.borrow_mut().insert("s1".into(), json!({ "id": "s1", "deviceId": "mac" }));
+        assert!(warm_request(&chats, "s1", &ask).is_none(), "a chat that exists");
     }
 
     /// A look at another device's catalog answers for itself alone: once the

@@ -263,6 +263,12 @@ function M.showing(): string
 	return here:peek()
 end
 
+-- The chat the draft in `text` is (a new chat's ""), followed: it changes
+-- with `text` as a move puts one draft away and takes out the next.
+function M.owner(): string
+	return here:get()
+end
+
 function M.show(key: string)
 	local was = here:peek()
 	if was == key then

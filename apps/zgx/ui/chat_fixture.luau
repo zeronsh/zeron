@@ -330,6 +330,24 @@ ui.command {
 		SEND_FAILS:set(true)
 	end,
 }
+-- A new chat's agent started early (screens/chat/warm): noted, with whether
+-- it was typed into (`warm:<new|id>:<typed>`; a new chat's id is "new"), and
+-- what it was asked for (`warm_ask:<id>|<model>|<cwd>|<device>`).
+stub.warm = function(id: string, req: any, typed: boolean): any
+	local m = META[id]
+	note(`warm:{if m then id else "new"}:{if typed then "typed" else "open"}`)
+	note(`warm_ask:{id}|{req.model or "-"}|{req.cwd or "-"}|{req.device or "-"}`)
+	return { after = function(_: any, done: (any) -> ()) done("started") end }
+end
+stub.unwarm = function(id: string)
+	note(`unwarm:{if META[id] then id else "new"}`)
+end
+stub.warm_cleared = function(id: string)
+	note(`warm_cleared:{if META[id] then id else "new"}`)
+end
+stub.warm_taken = function(id: string)
+	note(`warm_taken:{id}`)
+end
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
 	-- A send carries no time of its own: the host starts its clock when it
@@ -1127,7 +1145,18 @@ stub.create_failed = function(id: string)
 	TRANSCRIPTS[id] = nil
 	seed()
 end
+local CREATE_FAILS = ui.state("fixture_create_fails", false)
+ui.command { id = "create_fails", title = "The next new chat isn't made", run = function()
+	CREATE_FAILS:set(true)
+end }
 sessions_stub.create = function(req: any)
+	if CREATE_FAILS:peek() and not req.cloud then
+		CREATE_FAILS:set(false)
+		note(`create_failed_for:{req.id or "-"}`)
+		return { after = function(_self: any, _ok: any, bad: (any) -> ())
+			bad("offline")
+		end }
+	end
 	made_chats += 1
 	local id = req.id or `new{made_chats}`
 	note(`create:{req.project or "none"}:{req.config and req.config.model or ""}`)
@@ -2113,6 +2142,15 @@ ui.command {
 	title = "New chat",
 	run = function()
 		route.new_chat()
+	end,
+}
+-- The person's own new chat (⌘N's own path: screens/chat/warm hears it).
+ui.command {
+	id = "go_new_by_hand",
+	title = "New chat, by hand",
+	run = function()
+		require("@app/screens/chat/warm").intend()
+		route.new_chat("atlas")
 	end,
 }
 ui.command {

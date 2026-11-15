@@ -35,6 +35,7 @@ local CloudTray = require("@app/screens/chat/cloud_tray")
 local CloudMachine = require("@app/screens/chat/cloud_machine")
 local files = require("@app/screens/files/api")
 local Where = require("@app/screens/chat/where")
+local Warm = require("@app/screens/chat/warm")
 local DropOverlay = require("@ds/drop_overlay")
 local mentions = require("@ds/composer_mentions")
 local Draft = require("@ds/draft_text")
@@ -482,6 +483,58 @@ local function Composer(): Node
 		checkout = checkout,
 		branch = branch,
 		active = new_chat,
+	}
+	-- A new chat's agent, started as the person opens it or types (see
+	-- screens/chat/warm), with the send's own choices.
+	local warm = Warm.bind {
+		session = function(): string?
+			return session_id:get()
+		end,
+		text = shared.text,
+		owner = shared.owner,
+		request = function(): any?
+			-- (Only a new chat's.)
+			if not new_chat() then
+				return nil
+			end
+			local req = {
+				model = model:get(),
+				effort = effort:get(),
+				fast = fast:get(),
+				options = options:get(),
+				access = access:get(),
+				plan = plan:get(),
+			}
+			-- (Heard when the place changes too.)
+			device:get()
+			project:get()
+			checkout:get()
+			branch:get()
+			if where.blocked:peek() then
+				return nil
+			end
+			local p = where.plan()
+			if p.cloud or p.worktree then
+				return nil
+			end
+			-- (Only for a chat that will run here: one on another device
+			-- would outlive this app's quit.)
+			local here = (sessions.now:peek() :: any).here
+			if p.device ~= nil and p.device ~= here then
+				return nil
+			end
+			for _, m in store.catalog:get().models do
+				if m.value == req.model then
+					(req :: any).harness = m.harness
+				end
+			end
+			if (req :: any).harness == nil then
+				return nil
+			end
+			(req :: any).cwd = p.cwd;
+			(req :: any).device = p.device
+			return req
+		end,
 	}
 
 	local running = ui.computed(function(): boolean
@@ -1023,6 +1076,7 @@ local function Composer(): Node
 		-- steps are); Cloud makes it meanwhile, and the message goes once it
 		-- has. Refused, back to the new chat with the words and why.
 		if plan.cloud then
+			warm.stop()
 			local chat_id = store.new_id()
 			req.project = plan.project
 			req.device = plan.device
@@ -1074,8 +1128,12 @@ local function Composer(): Node
 		req.project = plan.project
 		req.device = plan.device
 		req.branch = plan.branch
+		-- (The id its agent was started early for, if it was: the send goes
+		-- into that agent.)
+		local warmed = warm.take()
 		sessions
 			.create({
+				id = warmed,
 				project = plan.project,
 				device = if plan.project then nil else plan.device,
 				branch = plan.branch,
@@ -1085,6 +1143,9 @@ local function Composer(): Node
 			:after(function(made: any)
 				local id = if plan.cloud and type(made) == "table" then made.id else made
 				if type(id) ~= "string" then
+					if warmed then
+						store.unwarm(warmed)
+					end
 					failed()
 					return
 				end
@@ -1112,6 +1173,10 @@ local function Composer(): Node
 				route.open_session(id)
 				store.send(req):after(function() end, function(_e: any) end)
 			end, function(e: any)
+				-- (Never made: the agent started for it goes.)
+				if warmed then
+					store.unwarm(warmed)
+				end
 				-- (A Cloud chat's reason is said in words; an outcome word isn't.)
 				local why = if plan.cloud and type(e) == "table" and type(e.message) == "string" and string.find(e.message, " ", 1, true)
 					then e.message

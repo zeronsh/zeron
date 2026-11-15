@@ -174,6 +174,27 @@ function M.send(req: Request): any
 	return ui.call("chat.send", req)
 end
 
+-- A new chat's agent, started before its first message (screens/chat/warm),
+-- for the id the chat will be made with. A promise of the engine's word
+-- ("started", "renewed", "unsupported"; nil: none could start).
+function M.warm(id: string, req: Request, typed: boolean): any
+	local p = ui.call("chat.warm", { id = id, req = req, typed = typed })
+	quietly(p)
+	return p
+end
+-- Stop that agent.
+function M.unwarm(id: string)
+	quietly(ui.call("chat.unwarm", { id = id }))
+end
+-- Its draft was cleared: the host stops it if it stays so.
+function M.warm_cleared(id: string)
+	quietly(ui.call("chat.warm_cleared", { id = id }))
+end
+-- Its send took it: a start or stop still on its way for it is moot.
+function M.warm_taken(id: string)
+	ui.invoke("chat.warm_taken", id)
+end
+
 -- A project's branch, as git where it lives has it: whether it's the
 -- folder's current one, and the worktree it's checked out in.
 export type Ref = { name: string, current: boolean, worktree: string? }

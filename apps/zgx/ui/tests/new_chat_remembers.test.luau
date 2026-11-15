@@ -91,7 +91,8 @@ test("a chat made from the new page leaves the new page's settings as they were"
 	app:type('role:textbox "Message"', "Start something")
 	app:key("Enter")
 	settle(app)
-	expect(app:state("calls")).to_contain("send:new1:Start something")
+	-- (Made under its own new id: the one its agent started early for.)
+	expect(string.find(app:state("calls"), "send:[%w%-]+:Start something") ~= nil).to_be(true)
 	-- The chat made: picked differently in it, and another chat seen.
 	app:set_state("chat_model", "opus")
 	app:set_state("chat_access", "full")
@@ -185,6 +186,7 @@ test("a message sent from the new page is no longer its saved draft, at once", f
 	-- (Before the throttle's next turn: a quit now keeps what's saved.)
 	expect(saved_text(app)).to_be_nil()
 	settle(app)
-	expect(app:state("calls")).to_contain("send:new1:Start something")
+	-- (Made under its own new id: the one its agent started early for.)
+	expect(string.find(app:state("calls"), "send:[%w%-]+:Start something") ~= nil).to_be(true)
 	expect(saved_text(app)).to_be_nil()
 end)
