@@ -2119,6 +2119,11 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
 /// and refreshes presence every [`PRESENCE_INTERVAL_MS`]. Holds only a weak
 /// handle so a dropped host tears the task down.
 async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::Receiver<u64>) {
+    // Presence is other devices' and ours to them, through the edge: a
+    // local profile (no edge, this device alone) has none to refresh.
+    let synced = weak
+        .upgrade()
+        .is_some_and(|inner| inner.config.edge.is_some());
     // On the beat grid, with the sockets' pings (`zeron_sync::wake`).
     let mut presence =
         zeron_sync::wake::beat_interval(std::time::Duration::from_millis(PRESENCE_INTERVAL_MS));
@@ -2170,7 +2175,7 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
                     oldest_delta = None;
                 }
             }
-            _ = presence.tick() => {
+            _ = presence.tick(), if synced => {
                 let Some(inner) = weak.upgrade() else { break };
                 inner.presence_tick();
                 // Re-publish on the same cadence: remote heartbeats decay when a
@@ -2334,7 +2339,11 @@ mod tests {
         assert_eq!(relay_probe_every(30 * minute).as_secs(), 120);
         assert_eq!(relay_probe_every(5 * 60 * minute).as_secs(), 300);
         assert_eq!(relay_probe_every(3 * 24 * 60 * minute).as_secs(), 600);
-        assert_eq!(relay_probe_every(i64::MAX).as_secs(), 600, "never heard from");
+        assert_eq!(
+            relay_probe_every(i64::MAX).as_secs(),
+            600,
+            "never heard from"
+        );
     }
     use super::{device_name_on_boot, linked_worktree_root, relay_probe_every};
 
