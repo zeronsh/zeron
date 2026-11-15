@@ -316,7 +316,12 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                 .unwrap_or_else(|| json!({}));
             match tools.call(name, arguments).await {
                 Ok(value) => {
-                    let (content, value) = tool_content(value);
+                    let (content, value) = match crate::tools::is_plugin_tool_name(name) {
+                        true => tool_content(value),
+                        // (Only a plugin's tool shows the agent images: a
+                        // built-in one's result is all text, whatever its keys.)
+                        false => (vec![json!({ "type": "text", "text": pretty(&value) })], value),
+                    };
                     // Given `structuredContent`, Codex shows the model only
                     // that (no images), and Claude Code shows it in place of
                     // the texts, so content beyond the result's text (its
@@ -410,6 +415,10 @@ const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/
 /// The largest image passed on, decoded; the models refuse larger ones.
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
+/// The most images one result passes on: past a request's few dozen, the
+/// models refuse the whole turn, and the result stays in the chat.
+const MAX_IMAGES: usize = 20;
+
 /// A tool result as MCP content: the result as text, then the images its
 /// [`IMAGE_CONTENT`] carries, and the result without them. An image left
 /// out is named in a last text, so the agent knows.
@@ -428,6 +437,10 @@ fn tool_content(mut value: Value) -> (Vec<Value>, Value) {
     let mut room = MAX_REPLY_BYTES.saturating_sub(content[0].to_string().len() + 64 * 1024);
     let mut left_out = Vec::new();
     for (index, image) in images.iter().enumerate() {
+        if index >= MAX_IMAGES {
+            left_out.push(format!("{IMAGE_CONTENT}[{index}] left out: {MAX_IMAGES} images at most"));
+            continue;
+        }
         match image_content(image) {
             Ok(image) => {
                 let size = image["data"].as_str().map_or(0, str::len);
@@ -481,6 +494,18 @@ fn image_content(image: &Value) -> Result<Value, String> {
     }
     if bytes.len() > MAX_IMAGE_BYTES {
         return Err(too_large());
+    }
+    // What its bytes are, not only what it's called: a model refuses an
+    // image that isn't, and the whole turn with it.
+    let is = match mime_type {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        _ => false,
+    };
+    if !is {
+        return Err(format!("data is not {mime_type} data"));
     }
     Ok(json!({ "type": "image", "data": data, "mimeType": mime_type }))
 }
@@ -630,6 +655,8 @@ mod tests {
 
     /// A 1x1 PNG, base64.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    /// A 1x1 lossless WebP, base64.
+    const WEBP: &str = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
 
     #[tokio::test]
     async fn a_plugin_tools_image_content_reaches_the_agent_as_images() {
@@ -637,7 +664,7 @@ mod tests {
             "id": "screen-1",
             "imageContent": [
                 { "type": "image", "data": PNG, "mimeType": "image/png" },
-                { "type": "image", "data": PNG, "mimeType": "image/webp", "label": "extra fields go" },
+                { "type": "image", "data": WEBP, "mimeType": "image/webp", "label": "extra fields go" },
             ],
         }))
         .await;
@@ -656,7 +683,7 @@ mod tests {
         );
         assert_eq!(
             content[2],
-            json!({ "type": "image", "data": PNG, "mimeType": "image/webp" })
+            json!({ "type": "image", "data": WEBP, "mimeType": "image/webp" })
         );
         assert!(
             result.get("structuredContent").is_none(),
@@ -677,6 +704,8 @@ mod tests {
                 { "type": "image", "data": huge, "mimeType": "image/png" },
                 { "type": "image", "data": "A".repeat(2 * MAX_IMAGE_BYTES), "mimeType": "image/png" },
                 { "type": "image", "data": PNG, "mimeType": "image/png" },
+                { "type": "image", "data": PNG, "mimeType": "image/jpeg" },
+                { "type": "image", "data": "AAAAAAAA", "mimeType": "image/gif" },
             ],
         }))
         .await;
@@ -694,14 +723,34 @@ mod tests {
              imageContent[1] left out: data is not base64\n\
              imageContent[2] left out: image/svg+xml is not one of image/png, image/jpeg, image/webp, image/gif\n\
              imageContent[3] left out: larger than 5 MB\n\
-             imageContent[4] left out: larger than 5 MB"
+             imageContent[4] left out: larger than 5 MB\n\
+             imageContent[6] left out: data is not image/jpeg data\n\
+             imageContent[7] left out: data is not image/gif data"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_result_shows_so_many_images_at_most() {
+        let image = json!({ "type": "image", "data": PNG, "mimeType": "image/png" });
+        let result = plugin_call(json!({ "imageContent": vec![image; MAX_IMAGES + 2] })).await;
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1 + MAX_IMAGES + 1, "the text, the images, the note");
+        assert_eq!(
+            content.last().unwrap()["text"],
+            format!(
+                "imageContent[{MAX_IMAGES}] left out: {MAX_IMAGES} images at most\n\
+                 imageContent[{}] left out: {MAX_IMAGES} images at most",
+                MAX_IMAGES + 1
+            )
         );
     }
 
     #[tokio::test]
     async fn images_stop_before_the_reply_would_be_cut() {
         use base64::Engine as _;
-        let big = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 3 * 1024 * 1024]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.resize(3 * 1024 * 1024, 0);
+        let big = base64::engine::general_purpose::STANDARD.encode(png);
         let image = json!({ "type": "image", "data": big, "mimeType": "image/png" });
         let result = plugin_call(json!({ "imageContent": [image, image, image] })).await;
         let content = result["content"].as_array().unwrap();
