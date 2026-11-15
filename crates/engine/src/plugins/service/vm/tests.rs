@@ -274,6 +274,11 @@ zeron.serve("eval", function(args)
 end)
 
 zeron.serve("add", function(args) return args.a + args.b end)
+
+zeron.serve("nan", function()
+	local ok, value = zeron.eval("return 1", { name = "agent", env = api, budget_ms = 0 / 0 })
+	return { ok = ok, value = value }
+end)
 "#;
 
 async fn eval(vm: &Vm, source: &str, budget: Option<u64>) -> Json {
@@ -347,6 +352,17 @@ async fn a_runaway_script_stops_at_its_budget_and_the_service_goes_on() {
         assert!((50.0..500.0).contains(&ms), "{ms}");
     }
     assert_eq!(eval(&vm, "return 1 + 1", None).await["value"], 2);
+    assert_eq!(ask(&vm, "add", json!({ "a": 1, "b": 2 })).await.unwrap().unwrap(), json!(3));
+}
+
+#[tokio::test]
+async fn a_nan_budget_is_refused_and_the_service_goes_on() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let refused = ask(&vm, "nan", json!({})).await.unwrap().unwrap();
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(refused["value"].as_str().unwrap().contains("not NaN"), "{refused}");
     assert_eq!(ask(&vm, "add", json!({ "a": 1, "b": 2 })).await.unwrap().unwrap(), json!(3));
 }
 

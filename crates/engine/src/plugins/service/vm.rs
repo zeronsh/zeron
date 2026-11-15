@@ -899,6 +899,10 @@ fn eval(lua: &Lua, state: &Rc<State>) -> mlua::Result<Function> {
             Ok(chunk) => chunk,
             Err(error) => return failed(lua_message(&error)),
         };
+        // (A NaN stays NaN through `clamp`, and `Duration` panics on it.)
+        if budget_ms.is_nan() {
+            return failed(format!("{name}: budget_ms is a number of milliseconds, not NaN"));
+        }
         let budget = Duration::from_secs_f64(budget_ms.clamp(1.0, 60_000.0) / 1000.0);
         let said = format!("{name}: the script ran past its time budget ({} ms)", budget.as_millis());
         *state.script.borrow_mut() = Some((Instant::now() + budget, said));
