@@ -1,0 +1,37 @@
+    Blocking waiting for file lock on build directory
+   Compiling proc-macro2 v1.0.107
+   Compiling serde_core v1.0.229
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling serde v1.0.229
+   Compiling num-traits v0.2.19
+   Compiling serde_json v1.0.151
+   Compiling bitflags v2.13.1
+   Compiling pulldown-cmark v0.12.2
+   Compiling syn v3.0.3
+   Compiling getrandom v0.4.3
+   Compiling uuid v1.24.0
+   Compiling serde_derive v1.0.229
+   Compiling chrono v0.4.45
+   Compiling zeron-proto v0.3.4 (/tmp/zeron-pr1436/crates/proto)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.96s
+     Running tests/security_review.rs (target/debug/deps/security_review-aa64cde61ebd87b4)
+
+running 1 test
+Requested: FullAccess; parent ceiling: Auto; capped: Auto; effective ACP access: FullAccess
+
+thread 'security_review_auto_ceiling_survives_unsupported_agent' (37624) panicked at crates/proto/tests/security_review.rs:10:5:
+assertion `left != right` failed: Auto must not silently become FullAccess
+  left: FullAccess
+ right: FullAccess
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test security_review_auto_ceiling_survives_unsupported_agent ... FAILED
+
+failures:
+
+failures:
+    security_review_auto_ceiling_survives_unsupported_agent
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p zeron-proto --test security_review`

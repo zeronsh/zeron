@@ -1,0 +1,32 @@
+warning: associated function `connect_with_tuned` is never used
+   --> crates/sync/src/registry.rs:332:25
+    |
+285 | impl RegistryClient {
+    | ------------------- associated function in this implementation
+...
+332 |     pub(crate) async fn connect_with_tuned(
+    |                         ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `zeron-sync` (lib) generated 1 warning
+   Compiling zeron-harness v0.3.4 (/tmp/zeron-pr1436/crates/harness)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.09s
+     Running unittests src/lib.rs (target/debug/deps/zeron_harness-14472d584f582291)
+
+running 1 test
+Ordinary MCP error produced reviewer metadata: Some(ToolReview { status: Denied, risk: None, reason: None })
+
+thread 'claude::normalize::tests::security_review_mcp_error_is_not_a_reviewer_verdict' (37986) panicked at crates/harness/src/claude/normalize.rs:1763:9:
+Tool output is not trusted reviewer provenance
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test claude::normalize::tests::security_review_mcp_error_is_not_a_reviewer_verdict ... FAILED
+
+failures:
+
+failures:
+    claude::normalize::tests::security_review_mcp_error_is_not_a_reviewer_verdict
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 532 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p zeron-harness --lib`
