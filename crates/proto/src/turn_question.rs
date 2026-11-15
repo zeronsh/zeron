@@ -295,6 +295,21 @@ fn plain(s: &str) -> String {
     out.trim().to_owned()
 }
 
+/// Words that point to a question already asked (an ask in Needs you, a
+/// question raised before), not one put to the reader now.
+const POINTS_TO_ASK: &[&str] = &[
+    "needs you", "needs-you", "an ask", "the ask", "my ask", "that ask", "i asked", "already asked", "i've asked",
+    "raised an ask", "asked you", "in the queue",
+];
+
+/// A statement that points to a question already waiting elsewhere ("The
+/// engine-rebuild question is still waiting for you in Needs you."), not a
+/// decision it asks for.
+fn points_to_an_ask(s: &str) -> bool {
+    let l = lower(s);
+    POINTS_TO_ASK.iter().any(|p| l.contains(p))
+}
+
 fn is_closer(s: &str) -> bool {
     let l = lower(s);
     let l = l.trim_start_matches(|c: char| !c.is_alphanumeric());
@@ -363,7 +378,8 @@ pub fn detect(text: &str) -> Verdict {
     // with nothing after it but list items, leans, closers or more questions.
     let mut pick: Option<(usize, bool)> = None;
     for (i, s) in all.iter().enumerate().rev() {
-        let plain_decision = !s.question && DECIDE_PLAIN.iter().any(|d| lower(&s.text).contains(d));
+        let plain_decision =
+            !s.question && DECIDE_PLAIN.iter().any(|d| lower(&s.text).contains(d)) && !points_to_an_ask(&s.text);
         if !(s.question || plain_decision) || s.item && !s.question {
             continue;
         }
@@ -1515,6 +1531,10 @@ mod tests {
         "Opened PR #1403 against `zeron/zgx`. Not merged yet.",
         // A question inside a code block.
         "Here's the prompt I used:\n\n```\nShould I merge it?\n```\n\nIt works as expected now.",
+        // Pointing to a question already waiting (an ask in Needs you).
+        "Rebuilt and restarted the engine.\n\nThe engine-rebuild question is still waiting for you in Needs you.",
+        "Your call on the merge is in Needs you; I'll pick it up from there.",
+        "I raised an ask for the deploy window; it's waiting on you there.",
         // Rhetorical.
         "The new map is so much faster, right?",
         "Hope this helps.",

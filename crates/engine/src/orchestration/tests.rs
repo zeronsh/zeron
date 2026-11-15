@@ -2591,3 +2591,35 @@ async fn a_card_moved_by_hand_into_now_still_gets_its_decision_ask() {
     assert_eq!(asks_from(&core, "r9-open").iter().filter(|a| a.state == AskState::Open).count(), 1);
     core.sessions.shutdown().await;
 }
+
+/// Live, on engine 9e4a5a751: R9's card sat in Now with no ask, because its
+/// thread moved on to other work after asking: its latest reply and the
+/// card's own outcome said nothing of the decision. The start looks back
+/// through the thread since the card's delivery for the decision.
+#[tokio::test]
+async fn a_decision_followed_by_other_work_still_gets_its_ask() {
+    let (_temp, core) = core().await;
+    let calls = answers_model(&core, Some("no"));
+    let chat = "r9-moved-on";
+    let (dump, _, r) = routed_thread(&core, chat, &["Map machine headings: decide R9"]).await;
+    push(&core, chat, "u1", zeron_doc::MessageRole::User, "Map machine headings: decide R9");
+    push(&core, chat, "a1", zeron_doc::MessageRole::Assistant, "Round 9 is merged locally.\n\nThe graph-label decision (accept round 9 or keep iterating) is still waiting on you.");
+    // Other work since: a relayed task about something else, progress, done.
+    push(&core, chat, "u2", zeron_doc::MessageRole::User, &relayed("New graph-map layout direction: size each machine's island by what it holds."));
+    push(&core, chat, "a2", zeron_doc::MessageRole::Assistant, "Working on the packed layout; the sim's data shapes first.");
+    push(&core, chat, "u3", zeron_doc::MessageRole::User, &relayed("Also fix the Timeline legend."));
+    push(&core, chat, "a3", zeron_doc::MessageRole::Assistant, "Timeline legend fixed to Report, Ask, Failed, Done; committed.");
+    // Its card in Now, its route's and its own outcome about the later work.
+    outcome(&core, chat, &dump, &r[0].0, "Timeline legend fixed to Report, Ask, Failed, Done; committed.", RouteState::Answered).await;
+    assert_eq!(card(&core, &r[0].1), WorkState::Active);
+    assert!(open_asks(&core, chat).is_empty());
+    core.rpc_service().settle_card_states().await;
+    let open = open_asks(&core, chat);
+    assert_eq!(open.len(), 1, "{open:#?}");
+    assert_eq!(open[0].item_id.as_deref(), Some(r[0].1.as_str()));
+    assert!(open[0].question.contains("graph-label decision"), "{}", open[0].question);
+    // Each relayed message since was judged once: neither answers it.
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(card(&core, &r[0].1), WorkState::Active, "its column as it was");
+    core.sessions.shutdown().await;
+}
