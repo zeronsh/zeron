@@ -64,17 +64,18 @@ const IDLE_RETRY: Duration = Duration::from_secs(30);
 /// Set to `0` to leave OpenCode's sessions out of Zeron.
 const SYNC_ENV: &str = "ZERON_OPENCODE_SYNC";
 
-/// Start following OpenCode's sessions, for the engine's life.
+/// Start following OpenCode's sessions, for the engine's life: the task, so
+/// the engine can end it (it holds the doc host).
 pub(crate) fn spawn(
     workspace: WorkspaceHost,
     doc_host: DocHost,
     sessions: SessionsEngine,
     registry: Arc<HarnessRegistry>,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     if std::env::var(SYNC_ENV).is_ok_and(|v| matches!(v.trim(), "0" | "false" | "no"))
         || crate::runner::is_cloud_platform()
     {
-        return;
+        return None;
     }
     let mirror = Mirror {
         harness: OpencodeHarness::new(),
@@ -87,7 +88,7 @@ pub(crate) fn spawn(
         windows: HashMap::new(),
         summaries: HashMap::new(),
     };
-    tokio::spawn(mirror.run());
+    Some(tokio::spawn(mirror.run()))
 }
 
 struct Mirror {
