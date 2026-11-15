@@ -222,6 +222,8 @@ struct Inner {
     device_name: Mutex<String>,
     workspace: Mutex<Option<crate::WorkspaceHost>>,
     directory: Mutex<Option<Arc<dyn KeyDirectory>>>,
+    /// Told when a directory is set: key checks wait for one.
+    directory_set: Arc<tokio::sync::Notify>,
     account: Mutex<Option<AccountFn>>,
     links: Mutex<Option<Arc<zeron_rpc::LinkCache>>>,
     state: Mutex<State>,
@@ -509,6 +511,7 @@ impl Plugins {
                 device_name: Mutex::new(crate::local_device_name(device_id)),
                 workspace: Mutex::new(None),
                 directory: Mutex::new(None),
+                directory_set: Arc::new(tokio::sync::Notify::new()),
                 account: Mutex::new(None),
                 links: Mutex::new(None),
                 state: Mutex::new(state),
@@ -594,6 +597,7 @@ impl Plugins {
     /// Where key lookups and registration go (the edge, or a stand-in).
     pub fn set_directory(&self, directory: Arc<dyn KeyDirectory>) {
         *lock(&self.inner.directory) = Some(directory);
+        self.inner.directory_set.notify_one();
     }
 
     /// Who is signed in (`None` = signed out). Key lookups are cached per account.
@@ -734,10 +738,20 @@ impl Plugins {
         });
         let weak = Arc::downgrade(&self.inner);
         // At start (as soon as auth and the edge answer: retried every
-        // half minute until they do), then every 15 minutes.
+        // half minute until they do), then every 15 minutes. With no
+        // directory to ask (signed out: no edge), nothing until one is set:
+        // there are no keys to look for, and no lookups to renew.
+        let directory_set = self.inner.directory_set.clone();
         let new_keys = runtime.spawn(async move {
             loop {
                 let Some(inner) = weak.upgrade() else { return };
+                if lock(&inner.directory).is_none() {
+                    drop(inner);
+                    // (A directory set since the look left a permit: on at
+                    // once.)
+                    directory_set.notified().await;
+                    continue;
+                }
                 let plugins = Plugins { inner };
                 let checked = plugins.check_keys().await;
                 plugins.kick(Kick::Rescan);
