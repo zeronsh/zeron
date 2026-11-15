@@ -110,6 +110,9 @@ impl SessionsEngine {
                         true
                     }
                 });
+                // Only an active terminal report's lease moves with the
+                // clock (`project`); everything else changes by the watches.
+                let leasing = leases_running(&current);
                 previous = current
                     .into_iter()
                     .filter(|row| !unpublished.contains(&row.chat_id))
@@ -119,7 +122,7 @@ impl SessionsEngine {
                     changed = native.changed() => if changed.is_err() { break },
                     changed = terminals.changed() => if changed.is_err() { break },
                     changed = chats.changed() => if changed.is_err() { break },
-                    _ = tick.tick() => {},
+                    _ = tick.tick(), if leasing => {},
                 }
             }
         });
@@ -157,6 +160,18 @@ impl SessionsEngine {
         }
         tx.send_replace(final_rows);
     }
+}
+
+/// Whether a row holds a lease the clock refreshes: a terminal program
+/// reporting itself active ([`project`] stamps it now, and once a heartbeat
+/// old it is stored again). Without one the projection is a function of the
+/// watches alone, and the loop sleeps until they change.
+fn leases_running(rows: &[Session]) -> bool {
+    rows.iter().any(|row| {
+        row.terminal_activity
+            .as_ref()
+            .is_some_and(|activity| activity.report.state.active())
+    })
 }
 
 fn project(
