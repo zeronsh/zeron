@@ -37,6 +37,11 @@ pub fn write(args: &Json, name: &str, folders: &[String], home: &Path) -> Result
     if asked.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(format!("zeron.write_file: \"{path}\" can't go up a folder (..)"));
     }
+    // Windows' `\x` and `C:x` aren't absolute, yet joined to a folder they
+    // leave it (the drive's root, or that drive's current folder).
+    if !asked.is_absolute() && asked.components().any(|c| matches!(c, Component::Prefix(_) | Component::RootDir)) {
+        return Err(format!("zeron.write_file: \"{path}\" is neither a whole path nor one in the plugin's folder"));
+    }
     let (root, target) = if asked.is_absolute() {
         let root = folders
             .iter()
@@ -53,9 +58,20 @@ pub fn write(args: &Json, name: &str, folders: &[String], home: &Path) -> Result
         return Err(format!("zeron.write_file: \"{path}\" names a folder, not a file"));
     }
     let parent = target.parent().ok_or("zeron.write_file: no folder to write in")?;
-    std::fs::create_dir_all(parent).map_err(|e| format!("zeron.write_file: couldn't make {}: {e}", parent.display()))?;
-    // Where the folders really are, links followed: still inside.
+    let made = |folder: &Path| {
+        std::fs::create_dir_all(folder).map_err(|e| format!("zeron.write_file: couldn't make {}: {e}", folder.display()))
+    };
+    made(&root)?;
+    // Where the folders really are, links followed: still inside. The
+    // deepest one there already is checked before any is made, so a link
+    // out doesn't get folders made at its other end.
     let real_root = std::fs::canonicalize(&root).map_err(|e| format!("zeron.write_file: {e}"))?;
+    let there = parent.ancestors().find(|a| std::fs::symlink_metadata(a).is_ok()).unwrap_or(root.as_path());
+    let real_there = std::fs::canonicalize(there).map_err(|e| format!("zeron.write_file: {e}"))?;
+    if !real_there.starts_with(&real_root) {
+        return Err(format!("zeron.write_file: \"{path}\" goes through a link out of {}", root.display()));
+    }
+    made(parent)?;
     let real_parent = std::fs::canonicalize(parent).map_err(|e| format!("zeron.write_file: {e}"))?;
     if !real_parent.starts_with(&real_root) {
         return Err(format!("zeron.write_file: \"{path}\" goes through a link out of {}", root.display()));
@@ -140,6 +156,17 @@ mod tests {
         assert!(w(home.path(), &[], "dir", "x", false).is_err());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_drives_root_or_a_drive_relative_path_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        for path in ["\\zeron-write-test\\x.txt", "C:zeron-write-test\\x.txt"] {
+            let e = w(home.path(), &[], path, "x", false).unwrap_err();
+            assert!(e.contains("neither"), "{path}: {e}");
+        }
+        assert!(!Path::new("C:\\zeron-write-test").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn links_out_are_refused() {
@@ -152,6 +179,10 @@ mod tests {
         let e = w(home.path(), &[], "out/x.txt", "x", false).unwrap_err();
         assert!(e.contains("link"), "{e}");
         assert!(!outside.path().join("x.txt").exists());
+        // Refused before a folder is made at the link's other end.
+        let e = w(home.path(), &[], "out/made/x.txt", "x", false).unwrap_err();
+        assert!(e.contains("link"), "{e}");
+        assert!(!outside.path().join("made").exists());
         let target = outside.path().join("victim.txt");
         std::fs::write(&target, "keep").unwrap();
         std::os::unix::fs::symlink(&target, mine.join("v.txt")).unwrap();
