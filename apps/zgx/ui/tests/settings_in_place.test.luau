@@ -197,6 +197,44 @@ test("an engine switch flips at once, and back if refused", function()
 	expect(app:tree(credit)).never.to_contain("unchecked")
 end)
 
+test("a worktree folder is asked for before the engine is, and a refusal is said in the engine's words", function()
+	local app = open()
+	local switch = `{PAGE} >> role:switch "Custom worktree location"`
+	local field = `{PAGE} >> role:textbox "Worktree folder"`
+	local function sets(): number
+		local n = 0
+		for _, c in calls(app) do
+			n += if c == "settings.engine:SetWorktreeSettings" then 1 else 0
+		end
+		return n
+	end
+	-- (Under General's other rows: brought into view.)
+	app:scroll(PAGE, 600)
+	app:frames(4)
+	expect(app:has(field)).to_be(false)
+	app:click(switch)
+	app:frames(10)
+	expect(app:has(field)).to_be(true)
+	expect(sets()).to_be(0)
+	expect(app:tree(switch)).never.to_contain("unchecked")
+	app:type(field, "~/worktrees")
+	app:key("Enter")
+	app:frames(10)
+	expect(sets()).to_be(1)
+	expect(shows(app, PAGE, "New worktrees go in ~/worktrees.")).to_be(true)
+	app:click(switch)
+	app:frames(10)
+	expect(sets()).to_be(2)
+	expect(app:has(field)).to_be(false)
+	expect(app:tree(switch)).to_contain("unchecked")
+	app:set_state("settings_stub_refuse_word", "Choose a worktree folder")
+	app:command("settings_stub.refuse_next")
+	app:click(switch)
+	app:frames(10)
+	expect(app:has('"Choose a worktree folder"')).to_be(true)
+	expect(app:has('"Something went wrong"')).to_be(false)
+end)
+
 test("opening a page asks once a visit, not again as it builds again", function()
 	local app = open("Members")
 	local n = 0

@@ -53,13 +53,13 @@ local function engine(method: string, params: { [string]: any }?): any
 	return host.call("settings.engine", { method = method, params = params or {} })
 end
 
-local function says(word: string?): Message
+local function says(word: string?): string
 	if word == "outdated" then
-		return ui.t("settings.engine.outdated")
+		return ui.t("settings.engine.outdated"):get()
 	elseif word == "offline" then
-		return ui.t("settings.engine.offline")
+		return ui.t("settings.engine.offline"):get()
 	end
-	return ui.t("common.something_went_wrong")
+	return if word and word ~= "" then word else ui.t("common.something_went_wrong"):get()
 end
 
 local function load(name: string, method: string, into: State<any>)
@@ -87,7 +87,7 @@ local function change(name: string, into: State<any>, next: any, method: string,
 		end
 	end, function(err: any)
 		into:set(before)
-		toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = says(err.message):get(), tone = "danger" }
+		toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = says(err.message), tone = "danger" }
 	end)
 end
 
@@ -180,23 +180,42 @@ end
 -- The worktree folder: off, worktrees go where Zeron puts them; on, under
 -- the folder typed (kept even while it's off).
 local folder = ui.state("settings_worktree_folder", "")
+-- The switch's flag: ahead of the engine's answer while a folder is still to be chosen.
+local enabled = ui.state("settings_worktree_enabled", false)
 local function custom(): boolean
-	local w = worktrees:get()
-	return w ~= nil and w.settings.useCustomDirectory == true
+	return enabled:get()
 end
-local function set_worktrees(on: boolean, dir: string?)
+local function save_worktrees(settings: any)
+	engine("SetWorktreeSettings", settings):after(function(v: any)
+		if v ~= nil then
+			worktrees:set(v)
+		end
+	end, function(err: any)
+		toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = says(err.message), tone = "danger" }
+	end)
+end
+-- A flip goes to the engine once there's a folder for it.
+local function set_worktrees(on: boolean)
 	local w = worktrees:peek()
 	if not w then
 		return
 	end
-	local settings = { useCustomDirectory = on, customDirectory = dir or w.settings.customDirectory }
-	local next = table.clone(w) :: any
-	next.settings = settings
-	change("worktrees", worktrees, next, "SetWorktreeSettings", settings)
+	enabled:set(on)
+	local dir = folder:peek()
+	if dir == "" then
+		dir = w.settings.customDirectory
+	end
+	if on ~= (w.settings.useCustomDirectory == true) and dir and dir ~= "" then
+		save_worktrees({ useCustomDirectory = on, customDirectory = dir })
+	end
 end
 ui.effect(function()
 	local w = worktrees:get()
-	local dir = if w then w.settings.customDirectory else nil
+	if not w then
+		return
+	end
+	enabled:set(w.settings.useCustomDirectory == true)
+	local dir = w.settings.customDirectory
 	if dir and folder:peek() == "" then
 		folder:set(dir)
 	end
@@ -272,7 +291,7 @@ function M.view(): Node
 					label = ui.t("settings.general.thread_naming.label"),
 					description = function()
 						if failed:get().titles then
-							return says(failed:get().titles):get()
+							return says(failed:get().titles)
 						end
 						return if title_value() == AUTO
 							then ui.t("settings.general.thread_naming.auto"):get()
@@ -295,7 +314,7 @@ function M.view(): Node
 					truncate = true,
 					description = function()
 						if failed:get().worktrees then
-							return says(failed:get().worktrees):get()
+							return says(failed:get().worktrees)
 						end
 						local w = worktrees:get()
 						if not w then
@@ -310,9 +329,9 @@ function M.view(): Node
 					end,
 					control = engine_switch(ui.t("settings.general.worktrees.label"), function()
 						local w = worktrees:get()
-						return if w then w.settings.useCustomDirectory == true else nil
+						return if w then enabled:get() else nil
 					end, function(on: boolean)
-						set_worktrees(on, if folder:peek() ~= "" then folder:peek() else nil)
+						set_worktrees(on)
 					end, function()
 						local w = worktrees:get()
 						return w == nil or w.environmentOverride ~= nil
@@ -332,7 +351,7 @@ function M.view(): Node
 						on_commit = function(text: string)
 							local dir = string.match(text, "^%s*(.-)%s*$") or ""
 							if dir ~= "" then
-								set_worktrees(true, dir)
+								save_worktrees({ useCustomDirectory = true, customDirectory = dir })
 							end
 						end,
 					},
@@ -342,7 +361,7 @@ function M.view(): Node
 					label = ui.t("settings.general.commit_credit.label"),
 					description = function()
 						if failed:get().credit then
-							return says(failed:get().credit):get()
+							return says(failed:get().credit)
 						end
 						local c = credit:get()
 						if not c then

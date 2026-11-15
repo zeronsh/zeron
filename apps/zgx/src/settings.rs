@@ -333,7 +333,10 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                     if error.to_ascii_lowercase().contains("unknown method") {
                         "outdated".into()
                     } else {
-                        engine::outcome(&error).into()
+                        match engine::outcome(&error) {
+                            "failed" => error,
+                            word => word.into(),
+                        }
                     }
                 })
         }
