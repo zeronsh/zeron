@@ -1,4 +1,4 @@
-//! The Zeron engine this app works through: its account (src/auth.rs), the
+﻿//! The Zeron engine this app works through: its account (src/auth.rs), the
 //! agents on this Mac (src/agents.rs) and GitHub for Cloud (src/github.rs)
 //! are all the engine's, reached over its local IPC ([`rpc`]). One
 //! connection for every window, kept open: dialled again when it drops,
@@ -96,6 +96,10 @@ pub struct Engine {
     /// the next window's when that window closes.
     tasks: RefCell<Option<TaskSpawner>>,
     supervising: Cell<bool>,
+    /// What starts this app's engine: ahead of the first window
+    /// ([`start_ahead`]), then whenever the supervisor finds none. One, so
+    /// the two never start an engine each.
+    spawner: RefCell<Spawner>,
 }
 
 thread_local! {
@@ -119,6 +123,18 @@ pub fn install(cx: &mut WindowContext) {
     if !engine.supervising.get() {
         engine.supervising.set(true);
         cx.tasks.spawn(engine.clone().supervise());
+    }
+}
+
+/// Starts the engine now if none is running (none holds its data dir), as
+/// the launch begins, rather than once the first window is up and its
+/// supervisor finds none: the engine starts up beside the window's.
+pub fn start_ahead() {
+    let engine = get();
+    if let Ok(config) = &engine.config
+        && !zeron_launch::data_dir_held(&config.data_dir)
+    {
+        engine.spawner.borrow_mut().start_if_due(config);
     }
 }
 
@@ -154,7 +170,13 @@ impl Engine {
             unreachable_listeners: RefCell::default(),
             tasks: RefCell::default(),
             supervising: Cell::new(false),
+            spawner: RefCell::new(Spawner::new()),
         }
+    }
+
+    /// Whether this app started an engine that is likely still coming up.
+    pub fn started_engine(&self) -> bool {
+        self.spawner.borrow().starting()
     }
 
     /// Where the engine's IPC is (its port and data folder, which holds its
@@ -309,7 +331,6 @@ impl Engine {
         let Ok(config) = &self.config else {
             return;
         };
-        let mut spawner = Spawner::new();
         let mut delay = Duration::from_millis(250);
         let mut said = None::<String>;
         let mut said_unreachable = false;
@@ -322,6 +343,12 @@ impl Engine {
             // which that engine replaced as it started again).
             let stale = refused.as_ref() == Some(&token);
             let mut refused_now = false;
+            // No engine holds the data dir (a launch after a restart of the
+            // computer, or after the engine stopped): none is running, so
+            // one is started before dialling, not once a dial is refused.
+            if !zeron_launch::data_dir_held(&config.data_dir) {
+                self.spawner.borrow_mut().start_if_due(config);
+            }
             match rpc::connect(config.port, token.clone()).await {
                 Ok(rpc) => {
                     delay = Duration::from_millis(250);
@@ -353,10 +380,12 @@ impl Engine {
                 }
                 Err(DialError::Refused) => {
                     refused = None;
-                    // (Started one, or an engine is about to let go of the
-                    // data dir: it's a moment away, not worth backing off.)
-                    if spawner.start_if_due(config) || spawner.held() {
-                        delay = Duration::from_millis(500);
+                    // (Started one, one this app started is still coming up,
+                    // or an engine is about to let go of the data dir: it's a
+                    // moment away, not worth backing off.)
+                    let mut spawner = self.spawner.borrow_mut();
+                    if spawner.start_if_due(config) || spawner.held() || spawner.starting() {
+                        delay = Duration::from_millis(100);
                     }
                 }
                 // A new engine is writing its token: try again shortly. The

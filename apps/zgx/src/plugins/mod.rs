@@ -373,6 +373,13 @@ const PRELOAD_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
 /// running (a cold start), or none answering in `PRELOAD_WAIT`, nothing.
 fn preload(b: &Rc<Bridge>) {
     let Some((port, data_dir)) = engine::get().ipc_endpoint() else { return };
+    // No engine was running at launch (none holds its data dir, or the one
+    // that does is the one this launch started, still coming up): there's
+    // none yet to ask, so none is dialled, as on a cold start before (on
+    // Windows, a port nobody listens on takes the whole wait to say so).
+    if engine::get().started_engine() || !zeron_launch::data_dir_held(&data_dir) {
+        return;
+    }
     let Some(list) = crate::engine::rpc::ask_now(port, &data_dir, "WatchPlugins", json!({}), PRELOAD_WAIT) else {
         return;
     };
@@ -738,6 +745,7 @@ pub fn prepare_live() -> PathBuf {
         eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
         return fallback;
     }
+    zgx::profile::mark("Zeron's own interface copied");
     match live::compose(&root, &id, &Default::default(), false) {
         Ok((_, overlay)) => {
             LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);

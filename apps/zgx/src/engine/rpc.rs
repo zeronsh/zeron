@@ -135,15 +135,21 @@ fn dial(port: u16, token: Option<&str>) -> Result<Socket, DialError> {
     dial_within(port, token, DIAL_TIMEOUT)
 }
 
+/// How long connecting to a port on this machine may take before nothing is
+/// taken to listen there. The system completes a listening socket's
+/// handshake itself, however busy the engine is, so an engine that listens
+/// connects in a millisecond or two. Windows doesn't say a port nobody
+/// listens on refused at once: it tries the connection again for 2 s first,
+/// which every launch with no engine running waited out, in full, before
+/// the engine was even started.
+const LOOPBACK_CONNECT: Duration = Duration::from_millis(250);
+
 fn dial_within(port: u16, token: Option<&str>, within: Duration) -> Result<Socket, DialError> {
     use tungstenite::client::IntoClientRequest;
     let address = SocketAddr::from(([127, 0, 0, 1], port));
-    let stream = TcpStream::connect_timeout(&address, within).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::ConnectionRefused {
-            DialError::Refused
-        } else {
-            DialError::Other(error.to_string())
-        }
+    let stream = TcpStream::connect_timeout(&address, within.min(LOOPBACK_CONNECT)).map_err(|error| match error.kind() {
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::TimedOut => DialError::Refused,
+        _ => DialError::Other(error.to_string()),
     })?;
     let _ = stream.set_read_timeout(Some(within));
     let _ = stream.set_nodelay(true);
