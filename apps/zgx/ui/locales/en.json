@@ -1631,7 +1631,18 @@
         },
         "remove_row_description": "Chats that used it stay."
       },
-      "couldnt_switch": "Couldn't switch accounts"
+      "couldnt_switch": "Couldn't switch accounts",
+      "cloud": "Cloud",
+      "cloud_keys": {
+        "title": "API keys",
+        "section_description": "Instead of signing in, Cloud can use an API key. A key saved here becomes the account its agent uses on every Cloud machine, from its next turn.",
+        "anthropic": "Anthropic API key",
+        "openai": "OpenAI API key",
+        "description": "For {agent} on Cloud. Kept in Zeron's vault, never on this computer.",
+        "placeholder": "Paste a key",
+        "save": "Save",
+        "saved": "{agent} on Cloud now uses this key"
+      }
     },
     "devices": {
       "title": "Devices",

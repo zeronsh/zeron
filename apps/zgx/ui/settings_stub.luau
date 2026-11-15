@@ -432,6 +432,21 @@ end
 -- a switch of device shows whose.
 local agents = require("@account/agents")
 local function agents_of(target: string?): any
+	-- Cloud (the engine answers for it from the vault): Claude Code and
+	-- Codex, always installed; Codex with an account, so on.
+	if target == "cloud" then
+		local function one(id: string, name: string, mark: string, accounts: { any }): any
+			return { id = id, name = name, mark = mark, installed = true, can_install = false, enabled = #accounts > 0, version = nil, installing = false, login = "idle", accounts = accounts }
+		end
+		return {
+			state = "ready",
+			target = target,
+			list = {
+				one("claude-code", "Claude Code", "claude", {}),
+				one("codex", "Codex", "openai", { { id = "c1", email = "ada@example.com", plan = "Pro", session = 0.1, week = 0.2, active = true } }),
+			},
+		}
+	end
 	local name = if target then "Codex" else "Claude Code"
 	local id = if target then "codex" else "claude-code"
 	return {
