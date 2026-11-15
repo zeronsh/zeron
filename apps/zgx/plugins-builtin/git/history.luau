@@ -1022,7 +1022,7 @@ return function(zeron: any, Repo: any, words: any)
 			if searching() then
 				return { rows = {}, lanes = 0, commits = commits }
 			end
-			local rows, widest = graph.layout(commits)
+			local rows, widest = graph.layout(commits, MAX_LANES)
 			return { rows = rows, lanes = math.min(widest, MAX_LANES), commits = commits }
 		end)
 		ui.effect(function()
@@ -1064,6 +1064,12 @@ return function(zeron: any, Repo: any, words: any)
 				local sig: { string } = { tostring(l.lanes) }
 				if r then
 					table.insert(sig, tostring(r.col))
+					-- Compact mode uses these even when all this commit's
+					-- lines are outside the visible lanes. Appending a page
+					-- also changes the previous tail's rail continuation.
+					table.insert(sig, tostring(r.color))
+					table.insert(sig, if i > 1 then tostring(l.rows[i - 1].color) else "")
+					table.insert(sig, if l.rows[i + 1] then "below" else "end")
 					for _, line in r.lines do
 						table.insert(sig, `{line.a}{line.b}{line.from}{line.to}{line.color}`)
 					end

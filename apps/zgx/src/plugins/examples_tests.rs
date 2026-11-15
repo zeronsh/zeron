@@ -3123,6 +3123,121 @@ return ui.text {{ id = "out", `{{widest}}|` .. table.concat(out, " ") }}
     assert_eq!(app.text("out"), "2|1:1>1@0.5-1,1>2@0.5-1 1:1>1@0-0.5,1>1@0.5-1,2>2@0-1 2:1>1@0-1,2>2@0-0.5,2>2@0.5-1 1:1>1@0-0.5,2>1@0-0.5");
 }
 
+/// Compare with the frozen pre-optimization layout, including line order
+/// (paint/hit-test precedence), hidden-lane joins, colors and page boundaries.
+#[test]
+fn git_s_graph_keeps_visible_geometry_and_full_topology() {
+    let source = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins-builtin/git/graph.luau")).unwrap();
+    let script = format!("local graph = (function() {source} end)()\nlocal reference = (function() {} end)()\n{}", include_str!("fixtures/git_graph_reference.luau"), r#"
+local checked = 0
+local function check(commits)
+    local expected, width = reference.layout(commits)
+    for _, cap in { 0, 1, 2, 8, 16, math.huge } do
+        local rows, widest = graph.layout(commits, if cap == math.huge then nil else cap)
+        assert(widest == width, `width {widest} != {width}, cap {cap}`)
+        assert(#rows == #expected)
+        for i, r in rows do
+            local e = expected[i]
+            assert(r.col == e.col and r.color == e.color and r.lanes == e.lanes, `topology row {i}, cap {cap}`)
+            local visible = {}
+            for _, line in e.lines do
+                if line.a <= cap and line.b <= cap then table.insert(visible, line) end
+            end
+            assert(#r.lines == #visible, `line count row {i}, cap {cap}`)
+            for j, line in r.lines do
+                for _, field in { "a", "b", "from", "to", "color" } do
+                    assert(line[field] == visible[j][field], `line order/geometry row {i}, line {j}, {field}, cap {cap}`)
+                end
+            end
+            checked += 1
+        end
+    end
+end
+check({})
+-- Grow past the cap, then consume the pending parents: lanes join, empty
+-- and are reused. Check prefixes as well as the full, paginated history.
+local commits = {}
+for i = 1, 100 do
+    table.insert(commits, { sha = `c{i}`, parents = { `c{i + 1}`, `p{i}` } })
+end
+for i = 1, 100 do
+    table.insert(commits, { sha = `p{i}`, parents = { "root" } })
+end
+table.insert(commits, { sha = "c101", parents = { "root" } })
+table.insert(commits, { sha = "root", parents = {} })
+for _, n in { 1, 8, 17, 51, 100, 101, 151, #commits } do
+    local prefix = {}
+    for i = 1, n do prefix[i] = commits[i] end
+    check(prefix)
+end
+-- Deterministic DAGs exercise merges that rejoin occupied lanes, roots,
+-- disconnected tips, octopus merges and parents beyond the loaded page.
+local seed = 19
+local function random(n)
+    seed = (seed * 48271) % 2147483647
+    return seed % n
+end
+for trial = 1, 32 do
+    local dag = {}
+    for i = 1, 60 do
+        local parents, seen = {}, {}
+        for _ = 1, random(5) do
+            local p = `n{i + 1 + random(70 - i)}`
+            if not seen[p] then table.insert(parents, p); seen[p] = true end
+        end
+        table.insert(dag, { sha = `n{i}`, parents = parents })
+    end
+    check(dag)
+end
+return ui.text { id = "out", `checked {checked}` }
+"#);
+    let mut app = TestApp::inline(&script);
+    assert_eq!(app.error(), None);
+    assert_eq!(app.text("out"), "checked 15306");
+}
+
+/// Isolate graph allocation/layout from UI construction and Rust state
+/// conversion. The reference flag runs the frozen old layout on the same VM.
+#[test]
+#[ignore]
+fn git_graph_layout_cost() {
+    let count: usize = std::env::var("GIT_GRAPH_COUNT").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
+    let parents: usize = std::env::var("GIT_GRAPH_PARENTS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+    let cap: usize = std::env::var("GIT_GRAPH_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+    let reference = std::env::var_os("GIT_GRAPH_REFERENCE").is_some();
+    let source = if reference { include_str!("fixtures/git_graph_reference.luau").to_string() } else {
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins-builtin/git/graph.luau")).unwrap()
+    };
+    let script = format!(r#"
+local graph = (function() {source} end)()
+local commits = {{}}
+for i = 1, {count} do
+    local parents = {{}}
+    if i < {count} then table.insert(parents, `c{{i + 1}}`) end
+    for j = 1, {parents} do table.insert(parents, `p{{i}}-{{j}}`) end
+    table.insert(commits, {{ sha = `c{{i}}`, parents = parents }})
+end
+local times, segments, widest = {{}}, 0, 0
+for run = 1, 24 do
+    local start = os.clock()
+    local rows, width = graph.layout(commits, {cap})
+    local elapsed = (os.clock() - start) * 1000
+    if run > 3 then table.insert(times, elapsed) end
+    segments, widest = 0, width
+    for _, row in rows do segments += #row.lines end
+end
+table.sort(times)
+return ui.text {{ id = "out", `segments={{segments}} widest={{widest}} layout_p50_ms={{times[11]}} layout_p95_ms={{times[20]}}` }}
+"#);
+    // Several complete layouts intentionally share one load call. Give the
+    // old wide-graph implementation room to finish its measured iterations.
+    let mut app = TestApp::new(move |runtime| ScriptHost::inline(runtime, "graph-layout-bench", script).limits(zgx_script::Limits {
+        load: std::time::Duration::from_secs(30), call: std::time::Duration::from_secs(30), ..Default::default()
+    }));
+    assert_eq!(app.error(), None);
+    eprintln!("GRAPH reference={reference} commits={count} extra_parents={parents} cap={cap}: {}", app.text("out"));
+}
+
 #[test]
 fn git_s_empty_page_rows_open_its_tab() {
     let (mut app, heard, _) = git_tab(git_world(), None);
@@ -3348,6 +3463,51 @@ fn github_puts_the_branch_s_pull_request_under_it_in_the_panel_home() {
 fn history_of(app: &mut TestApp) {
     git_fixture(app, "view", zgx_script::Value::from("history"));
     assert!(app.wait_until(|app| app.find("role:button \"Merge main into feature/graph\"").is_some()), "{}", app.tree());
+}
+
+#[test]
+fn history_s_hidden_lanes_keep_compact_hover_and_page_continuations() {
+    let mut w = git_world();
+    let mut commits = Vec::new();
+    for i in 0..100 {
+        let mut c = w["history"]["commits"][0].clone();
+        c["sha"] = json!(format!("{i:040x}"));
+        c["parents"] = json!([format!("{:040x}", 1000 + i)]);
+        if i > 0 {
+            c["subject"] = json!(format!("tip {i}"));
+        }
+        c["refs"] = json!([]);
+        commits.push(c);
+    }
+    w["history"] = json!({ "commits": commits, "more": true });
+    let (mut app, heard, world) = git_tab(w, None);
+    history_of(&mut app);
+    app.click("role:checkbox \"Every branch\"");
+    assert!(app.wait_until(|_| asked_service(&heard, "history").iter().any(|c| c["args"]["all"] == true)));
+    git_fixture(&mut app, "width", zgx_script::Value::from(320.0));
+    app.host.set_state("git.s1.history_scroll", zgx_script::Value::from(3000.0)).unwrap();
+    let row = "role:button \"tip 99\"";
+    assert!(app.wait_until(|app| app.find(row).is_some()));
+    let cell = format!("{row} >> .git-graph");
+    assert!((app.bounds(&cell).width - 18.0).abs() < 0.5, "hidden-lane dot uses the compact rail");
+    app.hover(&format!("{row} >> \"tip 99\""));
+    app.frames(30);
+    assert!(app.opacity(&format!("{row} >> .git-graph-lit")) > 0.99);
+    let tail = app.find(row).unwrap();
+    // The previous tail's visible graph segments do not change, but its
+    // compact rail must now continue to the newly appended row.
+    world.borrow_mut()["history"] = json!({ "commits": [{
+        "sha": format!("{:040x}", 1000), "parents": [], "author": "Ada", "email": "ada@example.com",
+        "at": 1790000000, "refs": [], "subject": "older parent",
+    }], "more": false });
+    app.click("role:button \"Show older commits\"");
+    assert!(app.wait_until(|app| app.find("role:button \"older parent\"").is_some()));
+    assert_ne!(app.find(row).unwrap(), tail, "the previous tail must receive its new rail continuation");
+    assert!((app.bounds(&cell).width - 18.0).abs() < 0.5);
+    git_fixture(&mut app, "width", zgx_script::Value::from(900.0));
+    app.frames(10);
+    assert!((app.bounds(&cell).width - 102.0).abs() < 0.5, "the graph returns to eight full-width lanes");
+    assert_eq!(app.error(), None);
 }
 
 #[test]
@@ -3698,12 +3858,28 @@ fn git_scroll_cost() {
     let world: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let only = std::env::var("GIT_PERF").unwrap_or_else(|_| "history,files,diff,split,wrap".into());
     let width: f64 = std::env::var("GIT_PERF_WIDTH").ok().and_then(|w| w.parse().ok()).unwrap_or(0.0);
+    // Compare the same workload under different plugin budgets to identify
+    // collection pressure without changing the application's limits.
+    let memory_mb: usize = std::env::var("GIT_PERF_MEMORY_MB").ok().and_then(|m| m.parse().ok()).unwrap_or(32);
+    let steps: usize = std::env::var("GIT_PERF_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(240);
+    let bounce = std::env::var_os("GIT_PERF_BOUNCE").is_some();
+    let github = world.get("github").cloned();
+    let memory = |app: &TestApp, stage: &str| {
+        let mut report = zgx::memory::Report::default();
+        app.host.memory(&mut report);
+        for line in report.lines.iter().filter(|l| l.area == "luau" || (l.area == "state" && l.name == "all named states")) {
+            eprintln!("MEM {stage}: {} {} {} bytes", line.area, line.name, line.bytes.unwrap_or(0));
+        }
+    };
     let pct = |v: &mut Vec<f64>, p: f64| {
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         v[((v.len() as f64 - 1.0) * p).round() as usize]
     };
     for surface in only.split(',') {
-        let (mut app, _heard, _) = git_tab(world.clone(), None);
+        let limits = zgx_script::Limits { plugin_memory: memory_mb * (1 << 20), ..Default::default() };
+        let (mut app, _heard, _) = git_tab_within(world.clone(), github.clone(), limits);
+        memory(&app, "before-history");
+        let load_started = std::time::Instant::now();
         if width > 0.0 {
             git_fixture(&mut app, "width", zgx_script::Value::from(width));
         }
@@ -3732,6 +3908,8 @@ fn git_scroll_cost() {
             assert_eq!(app.error(), None, "{surface}");
         }
         app.frames(30);
+        eprintln!("PERF {surface}: open and settle {:.2} ms; {} commits; github {}; bounce {bounce}; steps {steps}", load_started.elapsed().as_secs_f64() * 1e3, world["history"]["commits"].as_array().map_or(0, Vec::len), github.is_some());
+        memory(&app, "at-rest");
         if let Ok(out) = std::env::var("GIT_PERF_TREE") {
             std::fs::write(out, app.tree()).unwrap();
         }
@@ -3745,6 +3923,7 @@ fn git_scroll_cost() {
         let mut seen: std::collections::HashSet<String> = app.texts().into_iter().collect();
         let first_seen = seen.len();
         let at_rest = count(&mut app);
+        let heap_at_rest = app.host.script_heap();
         zgx::trace::set_enabled(true);
         let mut times = Vec::new();
         let mut phases: std::collections::BTreeMap<&'static str, Vec<f64>> = Default::default();
@@ -3752,7 +3931,8 @@ fn git_scroll_cost() {
         // (Hovering: the rows in view, one a frame, each lighting its path
         // as the last fades.)
         let subjects: Vec<String> = world["history"]["commits"].as_array().map(|c| c.iter().take(18).filter_map(|c| c["subject"].as_str().map(str::to_string)).collect()).unwrap_or_default();
-        for step in 0..240 {
+        let mut peak_heaps: std::collections::BTreeMap<String, usize> = Default::default();
+        for step in 0..steps {
             let start = std::time::Instant::now();
             if surface == "hover" {
                 let s = &subjects[step % subjects.len().max(1)];
@@ -3761,7 +3941,7 @@ fn git_scroll_cost() {
                     app.hover(&quoted);
                 }
             } else {
-                app.scroll(target, 48.0);
+                app.scroll(target, if bounce && (step / 64) % 2 == 1 { -48.0 } else { 48.0 });
             }
             app.frame();
             times.push(start.elapsed().as_secs_f64() * 1e3);
@@ -3773,9 +3953,23 @@ fn git_scroll_cost() {
             if step % 40 == 0 {
                 most = most.max(count(&mut app));
                 seen.extend(app.texts());
+                // Sample outside the timed frame. These are VM heaps only;
+                // Rust-backed state also counts against each plugin budget.
+                let mut report = zgx::memory::Report::default();
+                app.host.memory(&mut report);
+                for line in report.lines.into_iter().filter(|l| l.area == "luau") {
+                    let peak = peak_heaps.entry(line.name).or_default();
+                    *peak = (*peak).max(line.bytes.unwrap_or(0));
+                }
             }
         }
         zgx::trace::set_enabled(false);
+        let heap_after_scroll = app.host.script_heap();
+        memory(&app, "after-scroll");
+        let live_after_scroll = app.host.script_memory();
+        memory(&app, "collected");
+        eprintln!("MEM sampled peak VM heaps: {peak_heaps:?}");
+        eprintln!("PERF {surface}: plugin budget {memory_mb} MiB; all script heaps at rest {heap_at_rest}, after scroll {heap_after_scroll}, collected {live_after_scroll} bytes");
         let (p50, p95, max) = (pct(&mut times, 0.5), pct(&mut times, 0.95), pct(&mut times, 1.0));
         let split: Vec<String> = phases.iter_mut().map(|(k, v)| format!("{k} {:.2}/{:.2}", pct(v, 0.5), pct(v, 0.95))).collect();
         eprintln!("PERF {surface}: frame p50 {p50:.2} ms, p95 {p95:.2}, max {max:.2}; texts mounted at rest {at_rest}, scrolling ≤{most}, distinct texts passed {} (at rest {first_seen}); phases p50/p95 ms: {}", seen.len(), split.join(", "));
