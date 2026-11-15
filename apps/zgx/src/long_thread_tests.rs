@@ -22,9 +22,13 @@ fn ui() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui")
 }
 
+/// What holds a long reply's blocks while its rows show (src/chat.rs
+/// `set_aside`).
+type Held = Vec<std::rc::Rc<dyn std::any::Any>>;
+
 /// The thread as the engine holds it (`/longthread <steps>`), built into its
-/// rows as src/chat.rs builds them.
-fn long_thread(steps: usize) -> Value {
+/// rows as a chat's view builds them, and what holds what they set aside.
+fn long_thread(steps: usize) -> (Value, Held) {
     let mut parts: Vec<Json> = Vec::with_capacity(steps * 2 + 1);
     for n in 1..=steps {
         let mut text = format!("Step {n} of {steps}. I read src/invoices.ts and noted what step {n} needs from it.");
@@ -44,19 +48,29 @@ fn long_thread(steps: usize) -> Value {
     let at = 1_794_000_000_000_i64;
     let prompt = json!({ "id": "lt-u", "role": "user", "parts": [{ "id": "lt-up", "kind": "text", "text": format!("/longthread {steps}") }], "createdAt": at });
     let reply = json!({ "id": "lt-a", "role": "assistant", "status": "complete", "parts": parts, "createdAt": at + 1000, "durationMs": 28 });
+    let mut held: Held = Vec::new();
     let rows: Vec<Value> = [prompt, reply]
         .iter()
-        .map(|entry| crate::chat::built_entry(entry, "doc", None, Some("Opus")).unwrap())
+        .map(|entry| {
+            let (row, aside) = crate::chat::built_as_shown(entry, Some("Opus"));
+            held.extend(aside);
+            row.unwrap()
+        })
         .collect();
-    Value::List(rows.into())
+    (Value::List(rows.into()), held)
 }
 
 /// The chat page on another chat, then the thread of `steps` opened in it:
-/// the app, the script calls its opening took (until it rests), and the
-/// nodes its window holds then.
-fn opened(steps: usize) -> (TestApp, u64, usize) {
+/// the app, the script calls its opening took (until it rests), the nodes
+/// its window holds then, the values its rows handed the scripts, and what
+/// holds its reply's blocks.
+fn opened(steps: usize) -> (TestApp, u64, usize, u64, Held) {
     let fixture = ui().join("chat_fixture.luau");
-    let mut app = TestApp::with_spare_time(move |runtime| ScriptHost::new(runtime, fixture));
+    let mut app = TestApp::with_spare_time(move |runtime| {
+        let host = ScriptHost::new(runtime, fixture);
+        crate::chat::reply_functions(&host);
+        host
+    });
     app.ui.scene.borrow_mut().resize(960., 700.);
     app.frames(20);
     assert!(app.host.run_command("go_s7"));
@@ -66,23 +80,34 @@ fn opened(steps: usize) -> (TestApp, u64, usize) {
     }
     let messages = app.host.shared("chat.messages", Value::Nil);
     let calls = app.calls();
-    messages.set(long_thread(steps));
+    let converted = zgx_script::values_converted();
+    let (rows, held) = long_thread(steps);
+    messages.set(rows);
     for _ in 0..30 {
         app.spend_spare_time();
         app.frame();
     }
     assert_eq!(app.error(), None);
     let calls = app.calls() - calls;
+    let converted = zgx_script::values_converted() - converted;
     let nodes = app.ui.scene.borrow().len();
     let _ = app.find("transcript");
-    (app, calls, nodes)
+    (app, calls, nodes, converted, held)
 }
 
 #[test]
 fn a_long_threads_open_costs_what_its_end_costs() {
-    let (mut long, calls, nodes) = opened(1000);
-    let (_, short_calls, short_nodes) = opened(100);
-    eprintln!("open: 1000 steps {calls} calls, {nodes} nodes; 100 steps {short_calls} calls, {short_nodes} nodes");
+    let (mut long, calls, nodes, converted, _held) = opened(1000);
+    let (_, short_calls, short_nodes, short_converted, _short_held) = opened(100);
+    eprintln!(
+        "open: 1000 steps {calls} calls, {nodes} nodes, {converted} values; 100 steps {short_calls} calls, {short_nodes} nodes, {short_converted} values"
+    );
+    // What its rows hand the scripts is its end's too: its blocks are the
+    // host's, a run asked for as it's built. (Before, every one of its
+    // blocks and tools, and again laid out compact: 22,117 values for 1000
+    // steps, 4,896 for 100. Now 1,886 and 3,350.)
+    assert!(converted < short_converted * 5 / 4, "1000 steps handed the scripts {converted} values, 100 {short_converted}");
+    assert!(converted < 3_000, "1000 steps handed the scripts {converted} values as it opened");
     // Ten times the steps, not ten times the nodes: a held run is a box.
     // (Before the window, all their blocks built: 1000 steps held 18,340
     // nodes and took 43,091 calls; 100, 2,148 and 4,383. Now 782 and 962;
@@ -102,7 +127,7 @@ fn a_long_threads_open_costs_what_its_end_costs() {
 #[test]
 fn a_long_thread_scrolled_up_passes_through_every_step_to_its_first() {
     let steps = 300;
-    let (mut app, _, _) = opened(steps);
+    let (mut app, _, _, _, _held) = opened(steps);
     let list = app.find("transcript").expect("the transcript");
     let step = 60.;
     let mut skips = Vec::new();

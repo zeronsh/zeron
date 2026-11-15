@@ -280,14 +280,241 @@ struct Built {
     subagents: Option<Rc<[Value]>>,
     /// Folded, its compressed bytes' length (what a chat kept is weighed by).
     folded: usize,
+    /// A long reply's blocks, held here rather than in its row (`set_aside`).
+    aside: Option<Rc<Aside>>,
+}
+
+/// A long settled reply's blocks and tools, kept out of its row. A script is
+/// handed a table for every value of a row it reads, so a reply of a thousand
+/// steps cost its 2,000 blocks' and 1,000 tools' tables each time its chat
+/// opened (about 3 ms of a long thread's open on an M5 Max, more than all it
+/// builds), though its end alone shows. Its row says its runs instead
+/// (ds/transcript's windowed runs: each its first block's id, how many
+/// blocks, a guess at its height, a sum of what it holds), and the
+/// transcript asks for a run's blocks as it builds that run
+/// (`chat.reply_run`), the end's alone as it opens.
+struct Aside {
+    /// Each run: its key (its first block's id) and its blocks.
+    runs: Vec<(Rc<str>, Rc<[Value]>)>,
+    blocks: Rc<[Value]>,
+}
+
+/// More blocks than this, a settled reply's are set aside (ds/transcript's
+/// LONG_REPLY, past which it windows them).
+const LONG_REPLY: usize = 48;
+/// ds/transcript's runs: a block whose id falls on RUN starts one, and none
+/// runs past RUN_MOST.
+const RUN: u64 = 32;
+const RUN_MOST: usize = 64;
+
+thread_local! {
+    /// The long replies set aside, by their entry's id: the latest built of
+    /// each, while a view's rows (or a chat kept) hold it.
+    static ASIDE: RefCell<rustc_hash::FxHashMap<Rc<str>, std::rc::Weak<Aside>>> = RefCell::default();
+}
+
+/// Whether block `id` starts a run (ds/transcript's `starts_run`: the same
+/// sum, so both cut a reply into the same runs).
+fn starts_run(id: &str) -> bool {
+    id.bytes().fold(0u64, |h, b| (h * 31 + u64::from(b)) % 1_000_003) % RUN == 0
+}
+
+/// About how tall a block will be before it's laid out (ds/transcript's
+/// `guess_block`, the same arithmetic).
+fn guess_block(block: &Value) -> f64 {
+    let s = |key: &str| match block.field(key) {
+        Some(Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
+    match s("kind").as_deref() {
+        Some("text") => {
+            let (mut h, mut chars, mut code, mut fenced) = (0f64, 0usize, 0usize, false);
+            let paragraph = |h: &mut f64, chars: &mut usize| {
+                if *chars > 0 {
+                    *h += (*chars as f64 / 85.).ceil() * 24. + 16.;
+                    *chars = 0;
+                }
+            };
+            let text = s("text").unwrap_or_else(|| Rc::from(""));
+            for line in text.split('\n') {
+                if line.trim_start().starts_with("```") {
+                    if fenced {
+                        h += code as f64 * 19. + 56. + 16.;
+                        code = 0;
+                    } else {
+                        paragraph(&mut h, &mut chars);
+                    }
+                    fenced = !fenced;
+                } else if fenced {
+                    code += 1;
+                } else if line.trim().is_empty() {
+                    paragraph(&mut h, &mut chars);
+                } else {
+                    chars += line.len() + 1;
+                }
+            }
+            paragraph(&mut h, &mut chars);
+            (h - 16.).max(24.)
+        }
+        Some("tools" | "work") => {
+            let live = matches!(block.field("live"), Some(Value::Bool(true)));
+            let tools = block.field("tools").map_or(0, |t| t.list().len());
+            if live { 26. * tools.max(1) as f64 } else { 26. }
+        }
+        _ => 240.,
+    }
+}
+
+/// What a block holds, summed: its id, its kind, its words' length, its
+/// tools' count and line (a run built again comes back as the same run, and
+/// isn't asked for again, unless one of these moved).
+fn block_sum(block: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    for key in ["id", "kind", "summary", "live"] {
+        match block.field(key) {
+            Some(Value::Str(s)) => s.hash(&mut h),
+            Some(Value::Bool(b)) => b.hash(&mut h),
+            _ => 0u8.hash(&mut h),
+        }
+    }
+    match block.field("text") {
+        Some(Value::Str(s)) => s.len().hash(&mut h),
+        _ => 0usize.hash(&mut h),
+    }
+    block.field("tools").map_or(0, |t| t.list().len()).hash(&mut h);
+    h.finish()
+}
+
+/// `row` (an entry's, built whole) with its blocks and tools set aside, if
+/// it's a settled reply of more than LONG_REPLY blocks; else as it is.
+fn set_aside(row: Value) -> (Value, Option<Rc<Aside>>) {
+    let Value::Map(fields) = &row else { return (row, None) };
+    let field = |key: &str| fields.iter().find(|(k, _)| &**k == key).map(|(_, v)| v);
+    let settled = matches!(field("role"), Some(Value::Str(r)) if &**r == "assistant")
+        && matches!(field("streaming"), Some(Value::Bool(false)));
+    let (Some(Value::Str(id)), Some(Value::List(blocks))) = (field("id"), field("blocks")) else {
+        return (row, None);
+    };
+    if !settled || blocks.len() <= LONG_REPLY {
+        return (row, None);
+    }
+    let id_of = |b: &Value| match b.field("id") {
+        Some(Value::Str(s)) => s.clone(),
+        _ => Rc::from(""),
+    };
+    // Cut as ds/transcript cuts them: a run ends before a block that starts
+    // one, or once it holds RUN_MOST.
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    let mut from = 0;
+    for i in 1..blocks.len() {
+        if i - from >= RUN_MOST || starts_run(&id_of(&blocks[i])) {
+            cuts.push((from, i));
+            from = i;
+        }
+    }
+    cuts.push((from, blocks.len()));
+    let mut runs = Vec::with_capacity(cuts.len());
+    let mut listed = Vec::with_capacity(cuts.len());
+    for (from, to) in cuts {
+        let slice: Rc<[Value]> = blocks[from..to].iter().cloned().collect();
+        let key = id_of(&slice[0]);
+        let guess = slice.iter().map(|b| guess_block(b) + 12.).sum::<f64>() - 12.;
+        let sum = slice.iter().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(block_sum(b)));
+        listed.push(Value::record([
+            ("key", Value::Str(key.clone())),
+            ("n", Value::Num(slice.len() as f64)),
+            ("guess", Value::Num(guess.max(0.))),
+            ("sum", Value::from(format!("{sum:x}").as_str())),
+        ]));
+        runs.push((key, slice));
+    }
+    let aside = Rc::new(Aside { runs, blocks: blocks.clone() });
+    let mut kept: Vec<(&str, Value)> =
+        fields.iter().filter(|(k, _)| !matches!(&**k, "blocks" | "tools")).map(|(k, v)| (&**k, v.clone())).collect();
+    kept.push(("runs", Value::List(listed.into())));
+    ASIDE.with_borrow_mut(|held| {
+        if held.len() >= 64 {
+            held.retain(|_, a| a.strong_count() > 0);
+        }
+        held.insert(id.clone(), Rc::downgrade(&aside));
+    });
+    (Value::record(kept), Some(aside))
+}
+
+/// The reply set aside as `id`, while something holds it.
+fn aside_of(id: &str) -> Option<Rc<Aside>> {
+    ASIDE.with_borrow(|held| held.get(id).and_then(std::rc::Weak::upgrade))
+}
+
+fn text_field(arg: &Value, key: &str) -> Rc<str> {
+    match arg.field(key) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => Rc::from(""),
+    }
+}
+
+/// A long reply's run (`{ id, key }`), as `chat.reply_run` hands it to the
+/// transcript building it: its blocks; nil once the reply is let go of.
+pub(crate) fn reply_run(arg: &Value) -> Value {
+    let key = text_field(arg, "key");
+    aside_of(&text_field(arg, "id"))
+        .and_then(|aside| aside.runs.iter().find(|(k, _)| *k == key).map(|(_, blocks)| Value::List(blocks.clone())))
+        .unwrap_or(Value::Nil)
+}
+
+/// A long reply's blocks, all of them (`chat.reply_blocks`, given its id):
+/// what a find in the chat reads. Nil once the reply is let go of.
+pub(crate) fn reply_blocks(id: &Value) -> Value {
+    let Value::Str(id) = id else { return Value::Nil };
+    aside_of(id).map_or(Value::Nil, |aside| Value::List(aside.blocks.clone()))
+}
+
+/// The key of the run of a long reply (`{ id, block }`) that holds that
+/// block (`chat.reply_run_of`), nil if none does.
+pub(crate) fn reply_run_of(arg: &Value) -> Value {
+    let block = text_field(arg, "block");
+    aside_of(&text_field(arg, "id"))
+        .and_then(|aside| {
+            let holds = |b: &Value| matches!(b.field("id"), Some(Value::Str(s)) if *s == block);
+            aside.runs.iter().find(|(_, blocks)| blocks.iter().any(holds)).map(|(k, _)| Value::Str(k.clone()))
+        })
+        .unwrap_or(Value::Nil)
+}
+
+/// A long reply's blocks, set aside from its row (`set_aside`), for the
+/// scripts: a run as the transcript builds it, all of them for a find, and
+/// which run holds a block.
+pub(crate) fn reply_functions(host: &ScriptHost) {
+    host.function("chat.reply_run", |arg| reply_run(&arg));
+    host.function("chat.reply_blocks", |id| reply_blocks(&id));
+    host.function("chat.reply_run_of", |arg| reply_run_of(&arg));
+}
+
+/// `entry`'s row as a view builds it whole (a long settled reply's blocks
+/// set aside), and what holds what was set aside, for as long as it's kept.
+#[cfg(test)]
+pub(crate) fn built_as_shown(entry: &Json, model: Option<&str>) -> (Option<Value>, Option<Rc<dyn std::any::Any>>) {
+    let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: model.map(Into::into) });
+    let built = built_for(entry, &context, false);
+    (built.row, built.aside.map(|aside| aside as Rc<dyn std::any::Any>))
 }
 
 /// `entry` built: its row, folded if `fold`, which a row that shows or may
-/// change isn't. What it shows of it is read as the row is, and held in `Built`.
+/// change isn't. What it shows of it is read as the row is, and held in
+/// `Built`. Built whole, a long settled reply's blocks are set aside there
+/// (`set_aside`).
 fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
     let RowContext { doc, device, model } = &**context;
     let row = built_entry(entry, doc, device.as_deref(), model.as_deref());
     let subagents = row.as_ref().and_then(subagents_in);
+    let (row, aside) = match row {
+        Some(row) if !fold => {
+            let (row, aside) = set_aside(row);
+            (Some(row), aside)
+        }
+        row => (row, None),
+    };
     let mut folded = 0;
     let row = match row {
         Some(_) if fold && entry["status"].as_str() != Some("streaming") => match (entry["id"].as_str(), serde_json::to_vec(entry)) {
@@ -306,7 +533,7 @@ fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
         },
         row => row,
     };
-    Built { row, subagents, folded }
+    Built { row, subagents, folded, aside }
 }
 
 /// A long chat's settled entries, as a worker thread makes them: what they fold
@@ -745,6 +972,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         }
     });
 
+    reply_functions(host);
     let v = view.clone();
     host.action("chat.open", move |id| {
         let id = text(&id);
@@ -4231,7 +4459,7 @@ fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
     let folded = bytes.as_ref().map_or(0, |bytes| bytes.len());
     let row = bytes.map(|bytes| Value::folded(entry.id.clone(), FoldedEntry { bytes, context: context.clone() }));
     let subagents = (!subagents.is_empty()).then(|| subagents.iter().map(SubagentOff::value).collect());
-    built.insert(entry.id.clone(), Built { row, subagents, folded });
+    built.insert(entry.id.clone(), Built { row, subagents, folded, aside: None });
 }
 
 /// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
