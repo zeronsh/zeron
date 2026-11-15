@@ -337,6 +337,9 @@ struct DocHostInner {
     /// publishes the edge posture on change (see `watch_connectivity`).
     connectivity: OnceLock<watch::Sender<zeron_proto::Connectivity>>,
     connectivity_started: AtomicBool,
+    /// Told as the workspace is wired (`set_workspace`): a connectivity
+    /// monitor started before then learns whether there is an edge to watch.
+    workspace_wired: tokio::sync::Notify,
     /// In-flight queued-attachment transfers, published per landed chunk
     /// (see `watch_transfers`). Entries live exactly as long as bytes are
     /// moving: added when a file's push starts, removed on commit or failure
@@ -1317,6 +1320,7 @@ impl DocHost {
                 uploads: OnceLock::new(),
                 connectivity: OnceLock::new(),
                 connectivity_started: AtomicBool::new(false),
+                workspace_wired: tokio::sync::Notify::new(),
                 transfers: watch::channel(Vec::new()).0,
                 held_active: Mutex::new(HashSet::new()),
                 held_gate: Mutex::new(()),
@@ -1723,6 +1727,7 @@ impl DocHost {
     pub fn set_workspace(&self, workspace: WorkspaceHost) {
         let chats = workspace.watch_chats();
         if self.inner.workspace.set(workspace).is_ok() {
+            self.inner.workspace_wired.notify_one();
             self.spawn_cutover_watcher(chats);
             self.spawn_migration_sweep();
             self.kick_sync();
@@ -3476,7 +3481,25 @@ impl DocHost {
                 }
             }
             let mut after = String::new();
+            let mut jobs_changed = host.inner.store.watch_sync_jobs();
             loop {
+                // With no recovery owed, nothing to retry: sleep until a
+                // job is scheduled (a salvage failed) rather than looking
+                // every half minute. One owed is tried a half minute apart.
+                if after.is_empty() {
+                    jobs_changed.borrow_and_update();
+                    let owed = host
+                        .inner
+                        .store
+                        .pending_sync_jobs("recovery", "", 1)
+                        .map_or(true, |jobs| !jobs.is_empty());
+                    if !owed {
+                        if jobs_changed.changed().await.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 let jobs = host
                     .inner
@@ -4058,12 +4081,25 @@ impl DocHost {
             self.spawn_worker(async move {
                 let mut held = 0u32;
                 loop {
-                    let wait = if held >= CONNECTIVITY_SETTLE_TICKS {
-                        CONNECTIVITY_STEADY
+                    // A local profile's posture is the default for good
+                    // (`compute_connectivity`): nothing to look at, once its
+                    // workspace (no edge either) is wired.
+                    if !host.edge_expected() {
+                        if host.inner.workspace.get().is_some() {
+                            std::future::pending::<()>().await;
+                        }
+                        host.inner.workspace_wired.notified().await;
+                        continue;
+                    }
+                    if held >= CONNECTIVITY_SETTLE_TICKS {
+                        // Settled: on the beat grid, with the sockets' pings
+                        // (`zeron_sync::wake`), so it wakes the engine with
+                        // them rather than between.
+                        tokio::time::sleep_until(zeron_sync::wake::next_beat(CONNECTIVITY_STEADY))
+                            .await;
                     } else {
-                        std::time::Duration::from_secs(1)
-                    };
-                    tokio::time::sleep(wait).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
                     let next = host.compute_connectivity();
                     let healthy = connectivity_healthy(&next);
                     let changed = host.inner.connectivity.get().is_some_and(|tx| {
@@ -4093,12 +4129,16 @@ impl DocHost {
     /// those flashed amber warnings and "Queued" badges at every chat
     /// switch. Raw degradation must persist [`DEGRADE_GRACE`] before it is
     /// reported; recovery reports instantly.
+    /// Whether this engine syncs through an edge (signed in): otherwise its
+    /// connectivity is the local profile's, always the default.
+    fn edge_expected(&self) -> bool {
+        self.inner.config.edge.is_some() || self.workspace().is_some_and(|w| w.edge_expected())
+    }
+
     fn compute_connectivity(&self) -> zeron_proto::Connectivity {
         use zeron_proto::{ChatConnectivity, Connectivity, ConnectivityState};
         let workspace = self.workspace();
-        let edge_expected = self.inner.config.edge.is_some()
-            || workspace.as_ref().is_some_and(|w| w.edge_expected());
-        if !edge_expected {
+        if !self.edge_expected() {
             return Connectivity::default();
         }
         let now = std::time::Instant::now();
