@@ -903,26 +903,17 @@ impl SessionDoc {
     /// [`SegmentWriter`] is streaming into.
     pub fn replace_message(&self, index: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
         let messages = self.doc.get_list("messages");
-        if index >= messages.len() {
-            return self.push_message(entry);
+        if index < messages.len() {
+            messages.delete(index, 1)?;
         }
-        messages.delete(index, 1)?;
-        let map = messages.insert_container(index, LoroMap::new())?;
-        write_entry_scalar_fields(&map, entry)?;
-        let parts = map.insert_container("parts", LoroList::new())?;
-        for part in &entry.parts {
-            push_part(&parts, part)?;
-        }
-        self.commit();
-        Ok(())
+        self.insert_message(index, entry)
     }
 
     /// Insert `entry` at `index` (appended past the end): an entry an undo
     /// took out, put back where it was by a redo.
     pub fn insert_message(&self, index: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
         let messages = self.doc.get_list("messages");
-        let at = index.min(messages.len());
-        let map = messages.insert_container(at, LoroMap::new())?;
+        let map = messages.insert_container(index.min(messages.len()), LoroMap::new())?;
         write_entry_scalar_fields(&map, entry)?;
         let parts = map.insert_container("parts", LoroList::new())?;
         for part in &entry.parts {
@@ -1425,8 +1416,9 @@ impl SessionDoc {
 
     /// Append `more` to the summary of the compaction the transcript shows
     /// running — the words of it as they arrive, so the note streams them in
-    /// as a reply's are streamed. `false` when no compaction runs there yet
-    /// (they are kept, and written with the note when it comes).
+    /// as a reply's are streamed. `false` when the newest compaction there
+    /// isn't running, or there is none yet (they are kept, and written with
+    /// the note when it comes).
     pub fn append_running_compaction_summary(&self, more: &str) -> Result<bool, DocError> {
         if more.is_empty() {
             return Ok(true);
@@ -1443,7 +1435,9 @@ impl SessionDoc {
             else {
                 continue;
             };
-            let mut running = false;
+            // (Its status rides `message`: `to_doc_part`.)
+            let mut running = None;
+            let mut summary = None;
             for j in 0..parts.len() {
                 let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
                     parts.get(j)
@@ -1457,41 +1451,29 @@ impl SessionDoc {
                     )
                 };
                 if is("kind", "compaction") {
-                    running = is("status", "running");
+                    running = Some(is("message", "running"));
+                } else if is("id", COMPACTION_SUMMARY_PART)
+                    && let Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) =
+                        part.get("text")
+                {
+                    summary = Some(text);
                 }
             }
-            if !running {
-                continue;
+            match running {
+                None => continue,
+                Some(false) => return Ok(false),
+                Some(true) => {}
             }
             // Its summary's text part, made here if the note has none yet.
-            for j in 0..parts.len() {
-                let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
-                    parts.get(j)
-                else {
-                    continue;
-                };
-                let is_summary = matches!(
-                    part.get("id"),
-                    Some(loro::ValueOrContainer::Value(LoroValue::String(s)))
-                        if s.as_str() == COMPACTION_SUMMARY_PART
-                );
-                if !is_summary {
-                    continue;
-                }
-                if let Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) =
-                    part.get("text")
-                {
-                    let len = text.len_unicode();
-                    text.insert(len, more)?;
-                    self.commit();
-                    return Ok(true);
+            match summary {
+                Some(text) => text.insert(text.len_unicode(), more)?,
+                None => {
+                    let map = parts.push_container(LoroMap::new())?;
+                    map.insert("id", COMPACTION_SUMMARY_PART)?;
+                    map.insert("kind", "text")?;
+                    map.insert_container("text", LoroText::new())?.insert(0, more)?;
                 }
             }
-            let map = parts.push_container(LoroMap::new())?;
-            map.insert("id", COMPACTION_SUMMARY_PART)?;
-            map.insert("kind", "text")?;
-            let text = map.insert_container("text", LoroText::new())?;
-            text.insert(0, more)?;
             self.commit();
             return Ok(true);
         }
@@ -3023,9 +3005,21 @@ mod tests {
         };
         doc.push_message(&entry("running", None)).unwrap();
         assert_eq!(doc.read_entries().unwrap()[0], entry("running", None));
+        // Its summary's words, as they come: a part of its own, then into it.
+        assert!(doc.append_running_compaction_summary("## Go").unwrap());
+        assert!(doc.append_running_compaction_summary("al").unwrap());
+        assert_eq!(
+            doc.read_entries().unwrap()[0].parts[1],
+            MessagePart::Text {
+                id: COMPACTION_SUMMARY_PART.into(),
+                text: "## Goal".into()
+            }
+        );
         let done = entry("completed", Some((648_371, 2_812)));
         doc.replace_message(0, &done).unwrap();
         assert_eq!(doc.read_entries().unwrap()[0], done);
+        // (Done: no more words are its.)
+        assert!(!doc.append_running_compaction_summary("late").unwrap());
     }
 
     #[test]
