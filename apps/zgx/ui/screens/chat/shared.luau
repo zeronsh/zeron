@@ -13,6 +13,7 @@ local Quote = require("@ds/quote")
 local Annotation = require("@ds/annotation")
 local sessions = require("@account/sessions")
 local agents = require("@account/agents")
+local cloud = require("@account/cloud")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
@@ -1031,9 +1032,19 @@ local here_device = ui.computed(function(): string?
 end)
 
 -- The accounts' key for a device: "" for this one, whose engine answers
--- for itself.
+-- for itself; "cloud" for any of Cloud's (a chat's machine, or the
+-- account's Cloud device), whose accounts are the vault's, every Cloud
+-- machine's alike, as Settings → Providers shows them (this engine answers
+-- for "cloud": crates/engine cloud_accounts). A machine can't be asked:
+-- its accounts aren't its own, and asking would wake it.
 local function account_key(device: string?): string
-	return if device == nil or device == here_device:get() then "" else device
+	if device == nil or device == here_device:get() then
+		return ""
+	end
+	if cloud.on_device(device) or device == cloud.device() then
+		return "cloud"
+	end
+	return device
 end
 
 -- Models of Cursor's own pool (Composer, Grok), not the third-party one.
