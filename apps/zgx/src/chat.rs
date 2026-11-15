@@ -6707,7 +6707,11 @@ mod tests {
             ],
         });
         let context = Rc::new(super::RowContext { doc: "chat".into(), device: None, model: Some("Opus".into()) });
+        // (Built whole while compact shows: a folded row opens laid out
+        // compact either way, `COMPACT_ANYWAY`.)
+        super::COMPACT_SHOWN.set(true);
         let whole = super::built_for(&entry, &context, false);
+        super::COMPACT_SHOWN.set(false);
         let folded = super::built_for(&entry, &context, true);
         let Some(Value::Folded(_)) = folded.row else { panic!("folded") };
         let (whole_row, folded_row) = (whole.row.unwrap(), folded.row.unwrap());
