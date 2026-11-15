@@ -104,6 +104,8 @@ struct Walk {
     found: Mutex<Paths>,
     /// Folders skipped as stalled by an earlier walk.
     skip: HashSet<PathBuf>,
+    /// The protected folders are read too (`PROTECTED_ROOTS`).
+    protected: bool,
     /// Times an idle worker woke (tests: idle workers must not poll).
     #[cfg(test)]
     wakes: std::sync::atomic::AtomicUsize,
@@ -214,7 +216,7 @@ impl Walk {
                 }
                 let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
                 let depth = unit.depth + 1;
-                if is_dir && skipped(&name, depth, || entry.metadata().ok()) {
+                if is_dir && skipped(&name, depth, self.protected, || entry.metadata().ok()) {
                     continue;
                 }
                 let path = entry.path();
@@ -227,6 +229,7 @@ impl Walk {
             return;
         }
         let base = unit.depth;
+        let protected = self.protected;
         let walk = ignore::WalkBuilder::new(&unit.dir)
             .hidden(true)
             .follow_links(false)
@@ -241,6 +244,7 @@ impl Walk {
                     || !skipped(
                         &entry.file_name().to_string_lossy().to_lowercase(),
                         base + entry.depth(),
+                        protected,
                         || entry.metadata().ok(),
                     )
             })
@@ -289,12 +293,26 @@ const CLOUD_ROOT_PREFIXES: &[&str] = &[
 /// Provider clients (`CloudStorage`).
 const MACHINE_ROOTS: &[&str] = &["library", "appdata", "applications"];
 
+/// Folders directly under a Mac's home that hold media libraries (Photos',
+/// Music's, TV's), never projects: never walked. Reading them asks the person
+/// for access to their photos and music, for a folder search.
+#[cfg(target_os = "macos")]
+const MEDIA_ROOTS: &[&str] = &["pictures", "music", "movies"];
+
+/// Folders directly under a Mac's home that its privacy protection guards:
+/// read only for a walk that asks for them (`protected`), as someone searches
+/// (`WorkspaceSearch`), so that opening New project asks nobody for access.
+#[cfg(target_os = "macos")]
+const PROTECTED_ROOTS: &[&str] = &["desktop", "documents", "downloads"];
+
 /// Dependency and cache folders, at any depth.
 const SKIPPED_DIRS: &[&str] = &["node_modules", "__pycache__", "venv", "site-packages"];
 
 pub struct HomeIndex {
     entries: Paths,
     pub built: Instant,
+    /// The protected folders were read (`PROTECTED_ROOTS`; always, off macOS).
+    pub protected: bool,
 }
 
 /// Home-relative, `/`-separated paths, packed: all of them in `text`, and
@@ -397,10 +415,16 @@ impl HomeIndex {
     /// Walk `home` (canonical), for at most [`WALK_DEADLINE`]. `cancel`
     /// stops the walk early.
     pub fn build(home: &Path, cancel: &WalkCancel) -> Self {
-        Self::build_within(home, cancel, WALK_DEADLINE)
+        Self::build_within(home, cancel, WALK_DEADLINE, true)
     }
 
-    fn build_within(home: &Path, cancel: &WalkCancel, deadline: Duration) -> Self {
+    /// [`Self::build`], the protected folders read only if `protected`.
+    pub fn build_for(home: &Path, cancel: &WalkCancel, protected: bool) -> Self {
+        Self::build_within(home, cancel, WALK_DEADLINE, protected)
+    }
+
+    fn build_within(home: &Path, cancel: &WalkCancel, deadline: Duration, protected: bool) -> Self {
+        let protected = protected || !cfg!(target_os = "macos");
         let threads = std::thread::available_parallelism()
             .map(|n| n.get().min(8))
             .unwrap_or(4);
@@ -411,6 +435,7 @@ impl HomeIndex {
             stop: AtomicBool::new(false),
             found: Mutex::new(Paths::default()),
             skip: stalled().clone().unwrap_or_default(),
+            protected,
             #[cfg(test)]
             wakes: Default::default(),
         });
@@ -421,6 +446,7 @@ impl HomeIndex {
             return Self {
                 entries: Paths::default(),
                 built: Instant::now(),
+                protected,
             };
         }
         walk.push(Unit {
@@ -474,6 +500,7 @@ impl HomeIndex {
         Self {
             entries,
             built: Instant::now(),
+            protected,
         }
     }
 
@@ -563,11 +590,25 @@ fn depth(path: &str) -> usize {
 /// Folders the walk never enters (`name` a folder's, `depth` below home).
 /// Only folders are checked: listing a cloud-only file's name downloads
 /// nothing, while listing a cloud-only folder fetches its contents.
-fn skipped(name: &str, depth: usize, metadata: impl FnOnce() -> Option<std::fs::Metadata>) -> bool {
+fn skipped(
+    name: &str,
+    depth: usize,
+    protected: bool,
+    metadata: impl FnOnce() -> Option<std::fs::Metadata>,
+) -> bool {
     let name = name.to_lowercase();
     if name == ".git" || SKIPPED_DIRS.contains(&name.as_str()) {
         return true;
     }
+    #[cfg(target_os = "macos")]
+    if depth == 1
+        && (MEDIA_ROOTS.contains(&name.as_str())
+            || (!protected && PROTECTED_ROOTS.contains(&name.as_str())))
+    {
+        return true;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = protected;
     if depth == 1
         && (MACHINE_ROOTS.contains(&name.as_str())
             || CLOUD_ROOT_PREFIXES.iter().any(|prefix| {
@@ -760,6 +801,36 @@ mod tests {
         );
     }
 
+    /// A Mac's media libraries are never walked; its protected folders only
+    /// by a walk that asks for them (someone searching).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn media_folders_are_never_read_and_protected_ones_only_when_asked() {
+        let (_dir, root) = home(&[
+            "Documents/proj/plan.md",
+            "Desktop/plan.md",
+            "Downloads/plan.md",
+            "Pictures/Photos Library.photoslibrary/plan.md",
+            "Music/plan.md",
+            "Movies/plan.md",
+            "dev/plan.md",
+        ]);
+        let opened = HomeIndex::build_for(&root, &WalkCancel::default(), false);
+        assert!(!opened.protected);
+        assert_eq!(paths(&opened, "plan", NameKinds::Files), ["dev/plan.md"]);
+        let searched = HomeIndex::build_for(&root, &WalkCancel::default(), true);
+        assert!(searched.protected);
+        assert_eq!(
+            paths(&searched, "plan", NameKinds::Files),
+            [
+                "dev/plan.md",
+                "Desktop/plan.md",
+                "Downloads/plan.md",
+                "Documents/proj/plan.md"
+            ]
+        );
+    }
+
     /// One folder never answers: the walk answers at its deadline with the
     /// rest, its idle workers sleep instead of polling, and later walks skip
     /// that folder (no second thread stuck in it) until its read returns.
@@ -769,14 +840,18 @@ mod tests {
             "Documents/proj/plan.md",
             "dev/app/src/main.rs",
             "dev/notes/plan.md",
-            "Music/song.txt",
+            "Work/song.txt",
         ]);
         let stuck = root.join("Documents");
         let (gate, entered) = hold(&stuck);
 
         let started = Instant::now();
-        let index =
-            HomeIndex::build_within(&root, &WalkCancel::default(), Duration::from_millis(300));
+        let index = HomeIndex::build_within(
+            &root,
+            &WalkCancel::default(),
+            Duration::from_millis(300),
+            true,
+        );
         let walk = LAST_WALK
             .with(|last| last.borrow().upgrade())
             .expect("the stuck worker holds the walk");
@@ -788,7 +863,7 @@ mod tests {
             paths(&index, "plan", NameKinds::Files),
             ["dev/notes/plan.md"]
         );
-        assert_eq!(paths(&index, "song", NameKinds::Files), ["Music/song.txt"]);
+        assert_eq!(paths(&index, "song", NameKinds::Files), ["Work/song.txt"]);
         assert!(stalled().as_ref().is_some_and(|s| s.contains(&stuck)));
         // While it waited out the stuck folder, idle workers slept (a
         // polling worker wakes ~300 times in 300 ms).
@@ -820,7 +895,8 @@ mod tests {
         drop(walk);
 
         // A second walk doesn't send another thread into it.
-        let index = HomeIndex::build_within(&root, &WalkCancel::default(), Duration::from_secs(5));
+        let index =
+            HomeIndex::build_within(&root, &WalkCancel::default(), Duration::from_secs(5), true);
         assert_eq!(
             entered.load(Ordering::SeqCst),
             1,
@@ -841,7 +917,8 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        let index = HomeIndex::build_within(&root, &WalkCancel::default(), Duration::from_secs(5));
+        let index =
+            HomeIndex::build_within(&root, &WalkCancel::default(), Duration::from_secs(5), true);
         assert_eq!(
             paths(&index, "plan", NameKinds::Files),
             ["dev/notes/plan.md", "Documents/proj/plan.md"]
@@ -861,7 +938,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
             canceller.cancel();
         });
-        let _ = HomeIndex::build_within(&root, &cancel, Duration::from_secs(30));
+        let _ = HomeIndex::build_within(&root, &cancel, Duration::from_secs(30), true);
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "cancel ended the walk"
