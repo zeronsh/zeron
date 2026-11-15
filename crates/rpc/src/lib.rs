@@ -314,6 +314,11 @@ pub mod methods {
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
     /// Whether closing a terminal would end a program running in it.
     pub const TERMINAL_STATUS: &str = "TerminalStatus";
+    /// `{command, cwd?, chatId?, timeoutMs?}` → `RunOutcome`: one shell
+    /// command run to its end on the target device (no PTY, no session),
+    /// its output capped and its process group killed at the timeout.
+    /// Relay-forwardable (Zeron MCP's `run_command`).
+    pub const RUN_COMMAND: &str = "RunCommand";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
@@ -800,11 +805,11 @@ pub fn app_forward_only(method: &str, params: &serde_json::Value) -> bool {
 /// `Review*`), signing (`SignPlugin`, `PluginSigningKey`), updating
 /// (`UpdatePlugin`, `UpdateTemplate`, the engine's and harnesses'),
 /// credentials (`AccessToken`, sign-in, `StepUp`, `DeleteAccount`),
-/// files, vault and agent logins, and a command's whole output
+/// terminals, files, vault and agent logins, and a command's whole output
 /// (`ReadToolOutput`: an agent reads a chat as its doc keeps it).
-/// Terminals are here (on any of the person's devices), and the engine
-/// opens them only to an agent whose chat runs with full access and no
-/// sandbox (its agent gate).
+/// Running a command (`RunCommand`, on any of the person's devices) is
+/// here, and the engine allows it only to an agent whose chat runs with
+/// full access and no sandbox (its agent gate).
 pub fn agent_allowed(method: &str) -> bool {
     matches!(
         method,
@@ -829,14 +834,9 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::PUBLISH_IMAGE
             // Saying what the calling chat's agent waits on.
             | methods::AWAIT_BACKGROUND
-            // Terminals on any of the person's devices (Zeron MCP's
-            // open_terminal …): full access only (the engine's agent gate).
-            | methods::OPEN_TERMINAL
-            | methods::SUBSCRIBE_TERMINAL
-            | methods::WRITE_TERMINAL
-            | methods::RESIZE_TERMINAL
-            | methods::CLOSE_TERMINAL
-            | methods::TERMINAL_STATUS
+            // A command on any of the person's devices (Zeron MCP's
+            // run_command): full access only (the engine's agent gate).
+            | methods::RUN_COMMAND
             // Plugins: authoring, installing (lands waiting for the person),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their
@@ -1466,6 +1466,8 @@ mod tests {
             methods::SET_PLUGIN_OFF,
             methods::REMOVE_PLUGIN,
             methods::SET_BUILTIN_PLUGINS,
+            methods::OPEN_TERMINAL,
+            methods::WRITE_TERMINAL,
             methods::WRITE_WORKSPACE_FILE,
             // The window's own watch of the theme files.
             methods::WATCH_THEMES,
@@ -1483,13 +1485,10 @@ mod tests {
         // it to Zeron's plugin-exports folder (R29).
         let asked = agent.call(methods::EXPORT_PLUGIN, serde_json::json!({})).await.unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
-        // Terminals reach the engine as the agent's, which opens them only
-        // to a chat with full access and no sandbox.
-        for method in [methods::OPEN_TERMINAL, methods::SUBSCRIBE_TERMINAL, methods::WRITE_TERMINAL, methods::CLOSE_TERMINAL, methods::TERMINAL_STATUS] {
-            assert!(agent_allowed(method), "{method}");
-            let asked = agent.call(method, serde_json::json!({})).await.unwrap();
-            assert!(asked.as_str().unwrap().starts_with("Agent"), "{method}: {asked}");
-        }
+        // A command reaches the engine as the agent's, which runs it only
+        // for a chat with full access and no sandbox.
+        let asked = agent.call(methods::RUN_COMMAND, serde_json::json!({})).await.unwrap();
+        assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
         // The theme tools' methods, exactly: data only.
         for method in [methods::LIST_THEMES, methods::GET_THEME, methods::CREATE_THEME, methods::UPDATE_THEME, methods::DELETE_THEME, methods::USE_THEME] {
             assert!(agent_allowed(method), "{method}");

@@ -483,6 +483,19 @@ fn resolve_open_terminal_cwd(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RunCommandParams {
+    command: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    /// The calling chat: its folder is the default, when it runs here.
+    #[serde(default)]
+    chat_id: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TerminalIdParams {
     terminal_id: String,
 }
@@ -2463,6 +2476,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // update, verification, and the relayed response itself.
         methods::APPLY_HARNESS_UPDATE => crate::harness_updates::APPLY_REPLY_DEADLINE,
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // The longest a command may run there, and the reply's way back.
+        methods::RUN_COMMAND => crate::run_command::MAX_TIMEOUT + Duration::from_secs(30),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         _ => Duration::from_secs(30),
@@ -2617,6 +2632,8 @@ fn forwardable(method: &str) -> bool {
             | methods::RESIZE_TERMINAL
             | methods::CLOSE_TERMINAL
             | methods::TERMINAL_STATUS
+            // A command runs on the device it names.
+            | methods::RUN_COMMAND
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
@@ -5625,6 +5642,26 @@ impl RpcService for EngineRpc {
                     .close(&p.terminal_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::RUN_COMMAND => {
+                let p: RunCommandParams = parse_params(params)?;
+                // Its chat's folder by default, when the chat runs here.
+                let chat_cwd = p
+                    .chat_id
+                    .as_deref()
+                    .and_then(|chat| self.workspace.chat(chat).ok().flatten())
+                    .filter(|chat| chat.device_id == self.doc_host.device_id())
+                    .and_then(|chat| chat.cwd);
+                let cwd = resolve_open_terminal_cwd(p.cwd, chat_cwd, None, &self.repos.scratch_root())
+                    .map_err(RpcError::Failed)?;
+                let timeout = p
+                    .timeout_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or(crate::run_command::DEFAULT_TIMEOUT);
+                let outcome = crate::run_command::run(&cwd, &p.command, timeout)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&outcome)
             }
             methods::TERMINAL_STATUS => {
                 let p: TerminalIdParams = parse_params(params)?;

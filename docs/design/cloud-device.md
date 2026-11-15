@@ -132,8 +132,8 @@ The sandbox runs full-access agents on arbitrary repository code, so anything th
 `runner-key` can mint runner tokens. A runner token therefore acts as **its session's device**
 (the JWT's verified `dev` claim), never as the whole user. Like any of the person's devices,
 though, it reaches their other devices and every one of their chats: a Cloud chat's agent
-lists and messages chats on the laptop, starts chats there, and opens terminals on any online
-device, as an agent on the laptop can. Enforced at the edge:
+lists and messages chats on the laptop, starts chats there, and runs commands on any online
+device (`run_command`), as an agent on the laptop can. Enforced at the edge:
 
 - **Paths** (`edge/src/runner-policy.ts`, 403): no `/auth/*` org routes, no `/cloud/*`, no
   `/vault/*` except `POST /vault/{org}/grant` for its own device. `/device/{id}/*` fully for
@@ -158,8 +158,8 @@ device, as an agent on the laptop can. Enforced at the edge:
   Presence is unfiltered, but a runner socket's presence/attribution device is pinned to its
   verified id.
 - **Engine** (`crates/engine/src/rpc/agent_gate.rs`): what an agent may do is the same on
-  Cloud as on a computer. Its terminals (`OpenTerminal` … `TerminalStatus`, here or on another
-  device) only from a chat with full access and no sandbox.
+  Cloud as on a computer. It runs commands (`RunCommand`, here or on another device) only
+  from a chat with full access and no sandbox.
 
 User bearers are unaffected by all of the above.
 

@@ -22,8 +22,8 @@ use zeron_proto::{
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
+mod commands;
 mod plugins;
-mod terminals;
 mod themes;
 pub use plugins::ListedTool;
 pub(crate) use plugins::is_plugin_tool_name;
@@ -53,8 +53,6 @@ pub struct Tools {
     /// Which plugin tools the client was last shown ([`Self::list_all`],
     /// [`Self::watch_plugin_tools`]).
     plugins: plugins::PluginState,
-    /// The terminals this connection follows ([`terminals`]).
-    terminal_state: terminals::TerminalState,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -87,7 +85,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_devices",
-            description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device. `online`: seen in the last 70 s (always true for this one); open_terminal reaches any online device.",
+            description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device. `online`: seen in the last 70 s (always true for this one); run_command reaches any online device.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
@@ -304,7 +302,7 @@ fn catalog() -> Vec<ToolDef> {
     });
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
-    tools.extend(terminals::catalog());
+    tools.push(commands::tool());
     tools
 }
 
@@ -823,7 +821,6 @@ impl Tools {
             zeron,
             pending_turns: Default::default(),
             plugins: Default::default(),
-            terminal_state: Default::default(),
         }
     }
 
@@ -899,9 +896,7 @@ impl Tools {
             plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
                 return self.template_packages(name, args).await;
             }
-            terminal if terminals::NAMES.contains(&terminal) => {
-                return self.terminals(terminal, args).await;
-            }
+            commands::RUN_COMMAND => self.run_command(parse(args)?).await,
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
             }

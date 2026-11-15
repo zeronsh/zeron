@@ -71,6 +71,7 @@ pub mod registry;
 pub mod remote_terminals;
 pub mod repos;
 pub mod rpc;
+pub mod run_command;
 pub mod run_journal;
 pub mod runner;
 pub mod wake_trace;

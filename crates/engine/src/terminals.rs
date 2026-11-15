@@ -227,7 +227,7 @@ fn clamp_size(cols: u16, rows: u16) -> PtySize {
 }
 
 /// The user's interactive shell: `$SHELL`, else the platform default.
-fn selected_shell() -> String {
+pub(crate) fn selected_shell() -> String {
     if cfg!(windows) {
         return windows_shell(|name| std::env::var_os(name), |path| path.is_file());
     }
@@ -275,7 +275,7 @@ fn windows_shell(
 /// prints a banner as it starts unless told `-NoLogo`. Its last part, split
 /// at either slash: a Windows path reads the same wherever it's asked
 /// (`std::path` splits at `\` only on Windows, and the tests run on all).
-fn is_powershell(shell: &str) -> bool {
+pub(crate) fn is_powershell(shell: &str) -> bool {
     let file = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
     let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
     matches!(stem.to_ascii_lowercase().as_str(), "pwsh" | "powershell")

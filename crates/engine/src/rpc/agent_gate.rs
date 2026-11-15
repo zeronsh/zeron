@@ -14,11 +14,11 @@
 //!   a chat it made, what it would itself have to ask the person for.
 //! - What it writes into a chat carries Zeron's header naming the sending
 //!   chat, built here; a header in the text can't claim another chat.
-//! - A terminal (on this device or any other of the person's) is a shell
-//!   as the person, with no sandbox: only an agent whose own chat runs with
-//!   full access and no sandbox opens, types into or reads one. Anything
-//!   less would let a supervised or sandboxed agent do through a shell what
-//!   it would itself have to ask for.
+//! - A command it runs (`RunCommand`, on this device or any other of the
+//!   person's) runs as the person, with no sandbox: only an agent whose own
+//!   chat runs with full access and no sandbox may. Anything less would let
+//!   a supervised or sandboxed agent do through it what it would itself
+//!   have to ask for.
 //!
 //! The calling chat is the one its MCP server names (`x-zeron-chat`): the
 //! engine sets that server's environment, so a sandboxed agent can't change
@@ -87,16 +87,8 @@ impl EngineRpc {
             params["chatId"] = json!(chat);
             return Ok(params);
         }
-        let terminal = matches!(
-            method,
-            methods::OPEN_TERMINAL
-                | methods::SUBSCRIBE_TERMINAL
-                | methods::WRITE_TERMINAL
-                | methods::RESIZE_TERMINAL
-                | methods::CLOSE_TERMINAL
-                | methods::TERMINAL_STATUS
-        );
-        if !terminal && !matches!(method, methods::MUTATE | methods::QUEUE_MESSAGE | methods::QUEUE_COMMAND) {
+        let command = method == methods::RUN_COMMAND;
+        if !command && !matches!(method, methods::MUTATE | methods::QUEUE_MESSAGE | methods::QUEUE_COMMAND) {
             return Ok(params);
         }
         let chats = self.workspace.read_chats().unwrap_or_default();
@@ -108,7 +100,7 @@ impl EngineRpc {
                 text,
             )
         };
-        if terminal {
+        if command {
             let unconfined = calling.as_ref().is_none_or(|c| {
                 c.ceiling.is_none_or(|(sandbox, access)| {
                     sandbox == SandboxLevel::DangerFullAccess && access == AccessMode::FullAccess
@@ -118,7 +110,7 @@ impl EngineRpc {
                 Ok(params)
             } else {
                 Err(refused(
-                    "A terminal is a shell with no sandbox: only a chat with full access and no sandbox uses one. Ask the person to give this chat full access, or to run it themselves",
+                    "A command runs as the person with no sandbox: only a chat with full access and no sandbox runs one. Ask the person to give this chat full access, or to run it themselves",
                 ))
             };
         }
@@ -318,17 +310,17 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
-    /// A terminal, here or on another device, only for an agent whose chat
+    /// A command, here or on another device, only for an agent whose chat
     /// runs with full access and no sandbox; the person's own calls pass.
     #[tokio::test]
-    async fn only_an_unconfined_agent_uses_a_terminal() {
+    async fn only_an_unconfined_agent_runs_a_command() {
         let (_temp, core) = core().await;
         chat(&core, "careful", "Careful", "read-only", "supervised").await;
         chat(&core, "sandboxed", "Sandboxed", "workspace-write", "full-access").await;
         chat(&core, "free", "Free", "danger-full-access", "full-access").await;
         let rpc = core.rpc_service();
-        let open = json!({"chatId":"x", "cols":80, "rows":24, "targetDeviceId":"laptop"});
-        for method in [methods::OPEN_TERMINAL, methods::WRITE_TERMINAL, methods::SUBSCRIBE_TERMINAL, methods::TERMINAL_STATUS] {
+        let open = json!({"command":"ls", "targetDeviceId":"laptop"});
+        for method in [methods::RUN_COMMAND] {
             for who in ["careful", "sandboxed", "nowhere"] {
                 let refused = with_caller(agent(who), async { rpc.agent_gate(method, open.clone()) }).await;
                 assert!(
@@ -342,6 +334,18 @@ mod tests {
             with_caller(Caller::Agent { chat: None }, async { rpc.agent_gate(method, open.clone()) }).await.unwrap();
             assert_eq!(rpc.agent_gate(method, open.clone()).unwrap(), open);
         }
+        // Through the engine, it runs here and says how it went.
+        let dir = tempfile::tempdir().unwrap();
+        let ran = with_caller(
+            agent("free"),
+            rpc.handle(methods::RUN_COMMAND, json!({"command":"echo hi; exit 2", "cwd": dir.path()})),
+        )
+        .await
+        .unwrap();
+        let zeron_rpc::RpcReply::Value(ran) = ran else { panic!("a stream") };
+        assert_eq!((ran["exitCode"].clone(), ran["output"].as_str().unwrap().ends_with("hi\n")), (json!(2), true), "{ran}");
+        let refused = with_caller(agent("careful"), rpc.handle(methods::RUN_COMMAND, json!({"command":"echo hi"}))).await;
+        assert!(refused.is_err());
         core.sessions.shutdown().await;
     }
 
