@@ -250,7 +250,12 @@ impl zgx_script::Unfold for FoldedEntry {
         let json = lz4_flex::block::decompress_size_prepended(&self.bytes).ok();
         let entry = json.and_then(|bytes| serde_json::from_slice::<Json>(&bytes).ok()).unwrap_or(Json::Null);
         let RowContext { doc, device, model } = &*self.context;
-        built_entry(&entry, doc, device.as_deref(), model.as_deref()).unwrap_or(Value::Nil)
+        // (Opened as it comes into view, after Settings' compact transcript
+        // may have been turned on: laid out compact as well, whichever shows.)
+        COMPACT_ANYWAY.set(true);
+        let row = built_entry(&entry, doc, device.as_deref(), model.as_deref()).unwrap_or(Value::Nil);
+        COMPACT_ANYWAY.set(false);
+        row
     }
 }
 
@@ -1321,10 +1326,18 @@ impl Chats {
     }
 
     /// Settings' compact transcript turned on or off (`chat.compact`): the
-    /// replies being written are built again, with or without its layout.
+    /// rows built whole are built again, with or without its layout (one
+    /// folded lays itself out both ways as it opens: `FoldedEntry`). A
+    /// row has it only while it shows: a long reply's compact layout is the
+    /// whole reply again, built and handed to the scripts each time it opens.
     fn compact_shown(&self, on: bool) {
         if COMPACT_SHOWN.replace(on) == on {
             return;
+        }
+        for held in self.let_go.borrow_mut().iter_mut() {
+            for e in held.entries.iter().filter(|e| e.json.is_some()) {
+                held.built.remove(&e.id);
+            }
         }
         for view in self.views() {
             let rebuilt = {
@@ -1332,7 +1345,7 @@ impl Chats {
                 let Some(open) = slot.as_mut() else { continue };
                 let Open { entries, built, .. } = open;
                 let mut any = false;
-                for e in entries.iter().filter(|e| e["status"].as_str() == Some("streaming")) {
+                for e in entries.iter().filter(|e| e.json.is_some()) {
                     any |= built.remove(&e.id).is_some();
                 }
                 any
@@ -4264,6 +4277,9 @@ thread_local! {
     static PATCHED: RefCell<Option<rustc_hash::FxHashSet<String>>> = const { RefCell::new(None) };
     /// Settings' compact transcript is on (`chat.compact`).
     static COMPACT_SHOWN: Cell<bool> = const { Cell::new(false) };
+    /// A folded row opening (`FoldedEntry`): laid out compact too, whether
+    /// or not that shows, as it can't be built again when it turns on.
+    static COMPACT_ANYWAY: Cell<bool> = const { Cell::new(false) };
 }
 
 /// `build`, with `patched` (the parts changed since the entry's row was last
@@ -4763,10 +4779,13 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             if let Some(ms) = entry["durationMs"].as_f64() {
                 fields.push(("worked", Value::Num((ms / 1000.).round().max(1.))));
             }
-            // The same reply laid out for Settings' compact transcript (one
-            // being written, only while that shows: built with each of its
-            // changes, it'd cost each the whole reply again).
-            if (!streaming || COMPACT_SHOWN.get())
+            // The same reply laid out for Settings' compact transcript, only
+            // while that shows (`Chats::compact_shown` builds rows again as it
+            // turns on): it's the whole reply again, which a long reply built
+            // and handed to the scripts as it opened (a 1,000-step reply, a
+            // second copy of its 2,000 blocks and 1,000 tools). A folded row
+            // opening has it either way (`COMPACT_ANYWAY`).
+            if (COMPACT_SHOWN.get() || (COMPACT_ANYWAY.get() && !streaming))
                 && let Some(compact) = compact_blocks(entry)
             {
                 fields.push(("compact", compact));
@@ -7552,6 +7571,33 @@ mod tests {
         // No work, no group.
         let plain = json!({ "id": "b", "role": "assistant", "status": "complete", "parts": [text("t", "Hi.")] });
         assert!(compact_blocks(&plain).is_none());
+    }
+
+    /// A reply's compact layout is its whole work again (a 1,000-step reply:
+    /// a second copy of its blocks and tools), built and handed to the
+    /// scripts each time it opened: it's there only while Settings' compact
+    /// transcript shows, and in a folded row opening, which can't be built
+    /// again as it turns on.
+    #[test]
+    fn a_reply_is_laid_out_compact_only_while_that_shows() {
+        let reply = json!({ "id": "a", "role": "assistant", "status": "complete", "durationMs": 5_000,
+            "parts": [{ "id": "p1", "kind": "text", "text": "Looking." },
+                { "id": "k1", "kind": "tool", "isError": false, "resolved": true, "call": { "kind": "exec", "command": "ls" } },
+                { "id": "p2", "kind": "text", "text": "Done." }] });
+        let compact = |row: &Value| row.field("compact").is_some_and(|v| !matches!(v, Value::Nil));
+        assert!(!COMPACT_SHOWN.get());
+        let row = built_entry(&reply, "doc", None, None).expect("a row");
+        assert!(!compact(&row), "no compact layout while it doesn't show");
+        assert!(row.field("blocks").is_some());
+        COMPACT_SHOWN.set(true);
+        let shown = built_entry(&reply, "doc", None, None).expect("a row");
+        COMPACT_SHOWN.set(false);
+        assert!(compact(&shown), "laid out compact while that shows");
+        // Folded, it has it as it opens, either way.
+        let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: None });
+        let Built { row: Some(folded), .. } = built_for(&reply, &context, true) else { panic!("a folded row") };
+        assert!(matches!(folded, Value::Folded(_)));
+        assert!(folded.field("compact").is_some_and(|v| !matches!(v, Value::Nil)), "a folded row opens laid out compact too");
     }
 
     #[test]
