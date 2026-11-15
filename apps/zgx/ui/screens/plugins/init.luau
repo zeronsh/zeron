@@ -45,7 +45,6 @@ local store = require("@app/screens/settings/store")
 local PrivateText = require("@ds/private_text")
 local state = require("@app/screens/plugins/state")
 local page = require("@app/screens/plugins/page")
-local chat = require("@app/screens/chat")
 local ChatShared = require("@app/screens/chat/shared")
 local Cargo = require("@ds/composer_cargo")
 
@@ -309,8 +308,26 @@ local function run(r: any)
 		elseif type(to) == "table" and type(to.settings) == "string" and to.settings ~= "account" then
 			route.settings(to.settings)
 		end
-	elseif r.kind == "compose" and type(r.value) == "string" then
-		chat.store.insert(string.sub(r.value, 1, 20000))
+	elseif r.kind == "compose" and (type(r.value) == "string" or (type(r.value) == "table" and type(r.value.text) == "string")) then
+		-- `zeron.compose(text, { replace, session })` (the host checked
+		-- "compose"; its words alone come as a string): the words put in a
+		-- chat's draft, the one shown unless it names another ("" a new
+		-- chat's), in place of its words (its chips stay) or after them, on
+		-- a line of their own. Unsent: the person sends it. Shown, the
+		-- composer takes the keys.
+		local v = if type(r.value) == "string" then { text = r.value } else r.value
+		local words = string.sub(v.text, 1, 20000)
+		local shown = ChatShared.showing()
+		local key = if type(v.session) == "string" and #v.session <= 200 then v.session else shown
+		if v.replace ~= true then
+			local now = ChatShared.peek_text_of(key)
+			local sep = if now == "" or string.sub(now, -1) == "\n" then "" else "\n"
+			words = now .. sep .. words
+		end
+		ChatShared.set_draft_of(key, "text", words)
+		if key == shown then
+			ChatShared.focus:add(1)
+		end
 	elseif r.kind == "compose_comment" and type(r.value) == "table" and type(r.title) == "string" then
 		-- A plugin's review comment on a file or a diff (the host checked
 		-- "compose"): a comment chip on the session's draft, as the files
