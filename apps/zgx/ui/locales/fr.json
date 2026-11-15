@@ -32,7 +32,7 @@
     "date": "{day} {m, select, 1 {janv.} 2 {févr.} 3 {mars} 4 {avr.} 5 {mai} 6 {juin} 7 {juil.} 8 {août} 9 {sept.} 10 {oct.} 11 {nov.} 12 {déc.} other {}} {year}",
     "month_day": "{day} {m, select, 1 {janv.} 2 {févr.} 3 {mars} 4 {avr.} 5 {mai} 6 {juin} 7 {juil.} 8 {août} 9 {sept.} 10 {oct.} 11 {nov.} 12 {déc.} other {}}",
     "date_time": "{date} à {time}",
-    "clock_12": "{h}:{mm} {half, select, am {AM} other {PM}}"
+    "clock_12": "{half, select, am {{h, select, 1 {01} 2 {02} 3 {03} 4 {04} 5 {05} 6 {06} 7 {07} 8 {08} 9 {09} 10 {10} 11 {11} 12 {00} other {{h}}}} other {{h, select, 1 {13} 2 {14} 3 {15} 4 {16} 5 {17} 6 {18} 7 {19} 8 {20} 9 {21} 10 {22} 11 {23} 12 {12} other {{h}}}}}:{mm}"
   },
   "ds": {
     "status": {
@@ -48,7 +48,7 @@
       "done": "Terminé",
       "done_long": "Terminé",
       "failed": "Échec",
-      "limited": "Limité",
+      "limited": "Limite atteinte",
       "woke": "Réveillé",
       "woke_long": "Sorti de veille"
     },
@@ -69,12 +69,12 @@
         "deleted": "Contient des fichiers supprimés",
         "conflict": "Contient des fichiers en conflit"
       },
-      "name_needed": "Un nom est requis",
-      "name_slash": "Un nom ne peut pas contenir de barre oblique",
-      "name_reserved": "« {name} » est réservé",
+      "name_needed": "Saisissez un nom",
+      "name_slash": "Le nom ne peut pas contenir de barre oblique",
+      "name_reserved": "« {name} » est un nom réservé",
       "name_taken_folder": "Ce dossier contient déjà un dossier nommé « {name} »",
       "name_taken_file": "Ce dossier contient déjà un fichier nommé « {name} »",
-      "into_itself": "Un dossier ne peut pas aller dans lui-même",
+      "into_itself": "Impossible de placer un dossier dans lui-même",
       "open_new_tab": "Ouvrir dans un nouvel onglet",
       "reveal": "Afficher dans le Finder",
       "new_file": "Nouveau fichier…",
@@ -112,10 +112,10 @@
     "session_lanes": {
       "open_side": "Ouvrir la conversation annexe {title}",
       "open_subagent": "Ouvrir le sous-agent {title}",
-      "show_more": "Afficher {n} de plus",
+      "show_more": "Afficher plus ({n})",
       "side_chats": "Conversations annexes",
       "new_side": "Nouvelle conversation annexe",
-      "fork": "Bifurquer la conversation",
+      "fork": "Dupliquer la conversation",
       "subagents": "Sous-agents",
       "collapse_finished": "{n, plural, one {Replier # sous-agent terminé} other {Replier # sous-agents terminés}}",
       "expand_finished": "{n, plural, one {Déplier # sous-agent terminé} other {Déplier # sous-agents terminés}}",
@@ -133,24 +133,24 @@
         "zeroning": "Zéronisation",
         "thinking": "Réflexion",
         "pondering": "Cogitation",
-        "scheming": "Manigances",
+        "scheming": "Mijotage",
         "brewing": "Infusion",
         "weaving": "Tissage",
-        "tinkering": "Bricolage",
+        "tinkering": "Bidouillage",
         "musing": "Rêverie",
         "composing": "Composition",
         "sifting": "Tamisage",
         "untangling": "Démêlage",
         "distilling": "Distillation",
-        "sketching": "Esquisse",
-        "plotting": "Conspiration",
-        "riffing": "Improvisation",
-        "combobulating": "Combobulation",
+        "sketching": "Griffonnage",
+        "plotting": "Plans sur la comète",
+        "riffing": "Impro",
+        "combobulating": "Remue-méninges",
         "percolating": "Percolation",
         "marinating": "Marinade",
-        "noodling": "Gamberge",
+        "noodling": "Pianotage",
         "puzzling": "Casse-tête",
-        "conjuring": "Incantation"
+        "conjuring": "Sorcellerie"
       }
     },
     "badge": {
@@ -182,7 +182,7 @@
         "untracked": "Non suivi",
         "conflict": "Conflit"
       },
-      "diff": "{added} ajouts, {removed} suppressions"
+      "diff": "Ajouts : {added}, suppressions : {removed}"
     },
     "kbd": {
       "space": "Espace",
@@ -198,8 +198,8 @@
         "tab": "Tab",
         "up": "Flèche vers le haut",
         "down": "Flèche vers le bas",
-        "left": "Flèche gauche",
-        "right": "Flèche droite"
+        "left": "Flèche vers la gauche",
+        "right": "Flèche vers la droite"
       }
     },
     "account_row": {
@@ -250,14 +250,14 @@
       "keep_mine": "Garder ma version",
       "choose": "Choisissez un fichier pour l’afficher ici",
       "binary": {
-        "title": "{name} n’est pas du texte",
+        "title": "{name} n’est pas un fichier texte",
         "body_size": "C’est un fichier binaire de {size} : il n’y a rien à lire ici.",
         "body": "C’est un fichier binaire : il n’y a rien à lire ici.",
-        "open_default": "Ouvrir dans l’app par défaut"
+        "open_default": "Ouvrir avec l’app par défaut"
       },
       "large": {
         "title": "{name} est trop volumineux pour s’afficher ici",
-        "body": "Il fait {size}. Seuls les fichiers jusqu’à {limit} s’ouvrent ici ; ouvrez-le plutôt dans un éditeur."
+        "body": "Il fait {size}, et seuls les fichiers de {limit} maximum s’ouvrent ici. Ouvrez-le plutôt dans un éditeur."
       },
       "gone": {
         "title": "{name} a été supprimé",
@@ -269,10 +269,10 @@
       },
       "empty": {
         "title": "{name} est vide",
-        "body": "Il n’y a encore rien dedans."
+        "body": "Il ne contient encore rien."
       },
       "lines": "{n, plural, one {# ligne} other {# lignes}}",
-      "toggle_fit": "Double-cliquez pour ajuster ou non"
+      "toggle_fit": "Double-clic : ajuster ou taille réelle"
     },
     "dropdown": {
       "placeholder": "Choisir…",
@@ -300,7 +300,7 @@
       },
       "catalog": {
         "nothing_matches": "Aucun résultat pour « {query} »",
-        "try_another": "Essayez un autre mot, ou regardez dans l’autre onglet.",
+        "try_another": "Essayez un autre mot ou regardez dans l’autre onglet.",
         "clear_search": "Effacer la recherche"
       }
     },
@@ -468,7 +468,7 @@
       "delete": "Supprimer",
       "section_name": "Nom de la section",
       "project_actions": "Actions du projet",
-      "show_more": "Afficher {n} de plus",
+      "show_more": "Afficher plus ({n})",
       "new_section": "Nouvelle section",
       "settings": "Réglages",
       "view": {
@@ -476,7 +476,7 @@
         "by_device": "Par appareil",
         "none": "Aucun",
         "last_updated": "Dernière mise à jour",
-        "created": "Création",
+        "created": "Date de création",
         "branch": "Branche",
         "pr": "Pull request",
         "harness": "Agent",
@@ -525,8 +525,8 @@
       "pushed_to": "a poussé {n} commits sur {branch}",
       "commented_on": "a commenté",
       "commented": "a commenté",
-      "checks_ran": "Vérifications lancées sur {sha} : {summary}",
-      "checks_ran_called": "Vérifications lancées sur {sha} : {summary}, {called}",
+      "checks_ran": "Vérifications sur {sha} : {summary}",
+      "checks_ran_called": "Vérifications sur {sha} : {summary}, {called}",
       "approved": "a approuvé",
       "asked_for_changes": "a demandé des modifications",
       "merged": "a fusionné",
@@ -552,11 +552,11 @@
       "disconnect": "Déconnecter",
       "copy_code": "Copier le code GitHub {code}",
       "enter_code": "Saisissez ce code sur GitHub",
-      "approve": "Autorisez Zeron sur GitHub. Cette page continuera d’elle-même.",
+      "approve": "Autorisez Zeron sur GitHub. Cette page se mettra à jour d’elle-même.",
       "open_github": "Ouvrir GitHub",
       "repositories": "{n, plural, one {# dépôt} other {# dépôts}}",
       "no_repositories": "Aucun dépôt sélectionné pour l’instant",
-      "and_more": "{first} et {n} de plus",
+      "and_more": "{first} et {n} autres",
       "choose": "Choisir sur GitHub"
     },
     "lightbox": {
@@ -570,7 +570,7 @@
       "next": "Image suivante",
       "zoom_out": "Zoom arrière",
       "zoom_in": "Zoom avant",
-      "fit_or_own": "Ajuster, ou taille réelle",
+      "fit_or_own": "Ajuster ou taille réelle",
       "fit_tip": "Ajuster  {fit}  ·  Taille réelle  {actual}",
       "copy_image": "Copier l’image",
       "copy_image_menu": "Copier l’image",
@@ -578,7 +578,7 @@
       "show_in_finder": "Afficher dans le Finder",
       "not_shown_named": "Impossible d’afficher {name}",
       "not_shown": "Impossible d’afficher l’image",
-      "gone": "Son fichier n’existe plus.",
+      "gone": "Le fichier n’existe plus.",
       "viewer": "Visionneuse d’images",
       "open_named": "Ouvrir {name}",
       "open": "Ouvrir l’image",
@@ -588,11 +588,11 @@
       "access": {
         "label": "Accès",
         "supervised": "Supervisé",
-        "supervised_hint": "Demander avant les commandes et les modifications de fichiers.",
+        "supervised_hint": "Demander avant chaque commande ou modification de fichier.",
         "edits": "Accepter les modifications",
         "edits_hint": "Appliquer les modifications, demander pour le reste.",
         "full": "Accès complet",
-        "full_hint": "Exécuter commandes et modifications sans demander."
+        "full_hint": "Exécuter les commandes et appliquer les modifications sans demander."
       },
       "plan": {
         "mode": "Mode plan",
@@ -636,9 +636,9 @@
       "allow": "Autoriser",
       "listening": "À l’écoute",
       "placeholder": {
-        "answer_picked": "Saisissez votre réponse, ou laissez vide pour garder l’option choisie",
-        "answer": "Saisissez votre réponse, ou choisissez une option ci-dessus",
-        "instead": "Ou dites quoi faire à la place…",
+        "answer_picked": "Saisissez votre réponse ou laissez vide pour garder l’option choisie",
+        "answer": "Saisissez votre réponse ou choisissez une option ci-dessus",
+        "instead": "Ou dites ce qu’il faut faire à la place…",
         "default": "Demandez ce que vous voulez…"
       },
       "message": "Message",
@@ -656,7 +656,7 @@
         "used_only": "{n} tokens utilisés",
         "no_limit": "Limite de contexte non communiquée",
         "capacity": "Capacité : {n} tokens",
-        "waiting": "En attente de l’utilisation du contexte",
+        "waiting": "En attente des données de contexte",
         "unreported": "Cet agent n’a pas encore communiqué son utilisation du contexte"
       }
     },
@@ -679,7 +679,7 @@
         "fira": "Sans empattement",
         "stix": "Façon Times",
         "computer_modern": "Police de LaTeX",
-        "libertinus": "Serif d’édition",
+        "libertinus": "Façon livre",
         "pagella": "Façon Palatino",
         "euler": "Droite, calligraphique"
       }
@@ -692,10 +692,10 @@
       "show_full_size": "{what, select, diff {Afficher tout le diff ({size})} other {Afficher toute la sortie ({size})}}",
       "loading_full": "{what, select, diff {Chargement du diff complet…} other {Chargement de la sortie complète…}}",
       "failed_full": "{what, select, diff {Impossible de charger le diff complet — appuyez pour réessayer} other {Impossible de charger la sortie complète — appuyez pour réessayer}}",
-      "earlier_trimmed": "… sortie antérieure tronquée",
+      "earlier_trimmed": "… début de la sortie tronqué",
       "exit_code": "Code de sortie {code}",
       "loading_all_lines": "Chargement des {n} lignes…",
-      "whole_offline": "L’appareil qui a exécuté cette commande est hors ligne. Réessayez quand il sera de retour.",
+      "whole_offline": "L’appareil qui a exécuté cette commande est hors ligne. Réessayez quand il sera de nouveau en ligne.",
       "whole_update": "Mettez à jour Zeron sur l’appareil qui a exécuté cette commande pour voir toute sa sortie.",
       "whole_unavailable": "Le reste de cette sortie n’a pas été conservé.",
       "whole_running": "Cette commande n’est pas encore terminée.",
@@ -719,13 +719,13 @@
       "show_all_lines": "Afficher les {n} lignes",
       "open_subagent": "Ouvrir le sous-agent {title}",
       "subagent": "Sous-agent",
-      "worked_for": "A travaillé {secs} s · {summary}"
+      "worked_for": "{secs} s de travail · {summary}"
     },
     "transcript": {
       "copy_message": "Copier le message",
       "switched": "Passage de {from} à {to}",
       "message_from": "Message de",
-      "not_delivered": "Non distribué — renvoyer",
+      "not_delivered": "Non envoyé — renvoyer",
       "reply": "Répondre",
       "you": "Vous",
       "agent": "Agent",
@@ -755,10 +755,10 @@
     },
     "reply_picture": {
       "not_a_picture": "Image impossible à afficher",
-      "gone": "Son fichier n’existe plus",
+      "gone": "Le fichier n’existe plus",
       "not_shown": "Impossible d’afficher {name}",
       "open_named": "Ouvrir {name}",
-      "loading_named": "{name}, chargement",
+      "loading_named": "Chargement de {name}",
       "unavailable": "Image indisponible",
       "copy_image": "Copier l’image",
       "copy_image_menu": "Copier l’image",
@@ -821,8 +821,8 @@
       "send_now": "Envoyer maintenant",
       "steer": "Orienter",
       "send_next": "Envoyer ensuite",
-      "send_now_hint": "Envoyer maintenant, en interrompant le tour",
-      "steer_hint": "Orienter : un mot à l’agent en cours de tour",
+      "send_now_hint": "Envoyer maintenant et interrompre le tour",
+      "steer_hint": "Orienter : glisser un mot à l’agent pendant son tour",
       "send_next_hint": "Envoyer au prochain tour",
       "hint_last": "{what} · {key}",
       "save_to_queue": "Mettre en file d’attente",
@@ -877,7 +877,7 @@
       "search_agent": "Rechercher un modèle {agent}…",
       "search_all": "Rechercher un modèle…",
       "no_starred": "Aucun modèle favori",
-      "no_starred_hint": "Ajoutez un modèle aux favoris pour le garder ici",
+      "no_starred_hint": "Ajoutez un modèle aux favoris pour le retrouver ici",
       "no_models": "Aucun modèle",
       "none_to_offer": "{agent} n’en propose aucun",
       "not_found": "Aucun modèle trouvé",
@@ -912,16 +912,16 @@
       "connect": "Connecter un compte {name}",
       "add_account": "Ajouter un compte",
       "signing_in_to": "Connexion à {name}",
-      "signing_in_hint": "En attente de la fin de la connexion dans le navigateur. Rien ne change tant que vous ne basculez pas.",
+      "signing_in_hint": "Terminez la connexion dans le navigateur. Rien ne change tant que vous ne passez pas à ce compte.",
       "signing_in": "Connexion en cours",
       "cancel": "Annuler",
       "paste_code": "Coller le code d’autorisation",
-      "paste_code_hint": "Une fois la connexion faite, la page affiche un code. Collez-le pour terminer la connexion à {name}.",
+      "paste_code_hint": "Une fois connecté, vous verrez un code sur la page. Collez-le pour finaliser la connexion à {name}.",
       "code_name": "Code d’autorisation",
       "code": "Code",
       "finish": "Terminer",
       "failed": "Impossible de se connecter à {name}",
-      "failed_hint": "Le navigateur n’a pas terminé. Rien n’a été modifié.",
+      "failed_hint": "La connexion n’a pas abouti dans le navigateur. Rien n’a été modifié.",
       "dismiss": "Fermer",
       "try_again": "Réessayer",
       "version_available": "v{v} · v{latest} disponible",
@@ -935,7 +935,7 @@
       "unavailable": "Impossible de chercher des agents sur {where}",
       "unavailable_hint": "Les agents déjà configurés continuent de fonctionner. Zeron réessaiera dès que possible.",
       "sign_in": "Se connecter à {name}",
-      "sign_in_hint": "Ouvre votre navigateur pour vous connecter.",
+      "sign_in_hint": "Ouvre le navigateur pour vous connecter.",
       "banked_now_soon": "En utiliser une remet la session et la semaine à zéro tout de suite.",
       "reset_using": "Utilisation d’une réinitialisation…",
       "reset_failed": "Impossible d’utiliser la réinitialisation",
@@ -955,7 +955,7 @@
       "resets_label": "Réinitialisations en réserve",
       "reset_option": "{title} · expire {expires}",
       "reset_option_soonest": "{title} · expire {expires} (la plus proche)",
-      "resets_unlisted": "Zeron n’a pas pu les lister pour l’instant. Fermez et réessayez dans un instant.",
+      "resets_unlisted": "Zeron n’a pas pu les afficher. Fermez cette fenêtre et réessayez dans un moment.",
       "use_reset_confirm": "Utiliser la réinitialisation",
       "open_terminal": "Ouvrir un terminal",
       "open_page": "Rouvrir la page",
@@ -984,7 +984,7 @@
       "pinned": "Épinglées",
       "recent": "Récentes",
       "loading": "Chargement…",
-      "back_from": "Retour depuis {title}",
+      "back_from": "Quitter {title}",
       "back_tip": "Retour  ⌫",
       "search": "Rechercher",
       "placeholder": "Rechercher des sessions, commandes, réglages…",
@@ -994,7 +994,7 @@
       "empty": {
         "nothing_yet": "Rien pour l’instant",
         "nothing_in_scope": "Rien dans cette catégorie",
-        "elsewhere": "{n} ailleurs. Appuyez sur ⌫ pour tout chercher.",
+        "elsewhere": "{n} ailleurs. Appuyez sur ⌫ pour chercher partout.",
         "no_matches": "Aucun résultat",
         "nothing_in_page": "Aucun résultat pour « {q} » dans {title}. Appuyez sur ⌫ pour revenir.",
         "nothing_matches": "Aucun résultat pour « {q} ». Essayez un titre, un projet, une branche ou un appareil."
@@ -1041,7 +1041,7 @@
         "smileys": "Smileys et émotions",
         "people": "Personnes et corps",
         "nature": "Animaux et nature",
-        "food": "Nourriture et boissons",
+        "food": "Aliments et boissons",
         "travel": "Voyages et lieux",
         "activities": "Activités",
         "objects": "Objets",
@@ -1049,7 +1049,7 @@
         "flags": "Drapeaux"
       },
       "tone": {
-        "title": "Teinte de peau",
+        "title": "Couleur de peau",
         "default": "Par défaut",
         "light": "Claire",
         "medium_light": "Moyennement claire",
@@ -1065,7 +1065,7 @@
     },
     "date_picker": {
       "label": "Jours",
-      "month_year": "{m, select, 1 {Janvier} 2 {Février} 3 {Mars} 4 {Avril} 5 {Mai} 6 {Juin} 7 {Juillet} 8 {Août} 9 {Septembre} 10 {Octobre} 11 {Novembre} 12 {Décembre} other {}} {year}",
+      "month_year": "{m, select, 1 {janvier} 2 {février} 3 {mars} 4 {avril} 5 {mai} 6 {juin} 7 {juillet} 8 {août} 9 {septembre} 10 {octobre} 11 {novembre} 12 {décembre} other {}} {year}",
       "previous_month": "Mois précédent",
       "next_month": "Mois suivant",
       "time": "Heure",
@@ -1084,7 +1084,7 @@
         "all": "Rien à mentionner pour l’instant",
         "files": "Aucun fichier",
         "chats": "Aucune autre conversation",
-        "attachments": "Rien n’est joint à ce message"
+        "attachments": "Aucune pièce jointe dans ce message"
       },
       "none": {
         "all": "Aucun résultat pour « {q} »",
@@ -1100,16 +1100,16 @@
       "language": {
         "label": "Langue",
         "terms": "language locale translation chinese english 中文 简体 语言 langue traduction chinois anglais français francais french",
-        "system": "Suit la langue préférée de votre ordinateur.",
-        "chosen": "La barre des menus change au prochain lancement de Zeron."
+        "system": "Suit la langue du système.",
+        "chosen": "La barre des menus changera au prochain lancement de Zeron."
       },
       "title": "Général",
       "terms": "preferences composer conversations behavior préférences saisie comportement général general",
       "send_with": {
         "label": "Envoyer les messages avec",
         "terms": "enter return submit modifier keyboard composer entrée entree retour envoyer modificateur clavier saisie",
-        "enter": "Maj Entrée insère un saut de ligne.",
-        "mod_enter": "Entrée insère un saut de ligne."
+        "enter": "Maj + Entrée pour aller à la ligne.",
+        "mod_enter": "Entrée pour aller à la ligne."
       },
       "compact_mode": {
         "label": "Mode compact",
@@ -1118,7 +1118,7 @@
       },
       "escape_stops": {
         "label": "Arrêter l’agent avec Échap",
-        "description": "Si aucun dialogue ni menu n’est ouvert.",
+        "description": "Si aucune zone de dialogue ni aucun menu n’est ouvert.",
         "terms": "esc interrupt cancel halt run keyboard échap echap interrompre annuler arrêter arreter clavier"
       },
       "close_panel": {
@@ -1129,11 +1129,11 @@
       "privacy": "Confidentialité",
       "hide_emails": {
         "label": "Masquer les adresses e-mail",
-        "description": "Floutées partout, pour partager votre écran. Cliquez sur une adresse pour la voir.",
+        "description": "Floutées partout, pour le partage d’écran. Cliquez sur une adresse pour l’afficher.",
         "terms": "screen sharing recording blur blurred mosaic private censor redact partage écran ecran enregistrement flou flouter mosaïque mosaique privé prive masquer censurer email e-mail"
       },
       "links_in": {
-        "external": "Votre navigateur par défaut.",
+        "external": "Le navigateur par défaut.",
         "tab": "Un onglet de navigateur à côté de la conversation."
       },
       "open_links": {
@@ -1144,8 +1144,8 @@
         "label": "Nommage des fils",
         "terms": "titles rename sessions model titres titre renommer modèle modele nommage fils nom",
         "session_agent": "Agent de la session",
-        "auto": "Chaque fil est nommé par son propre agent.",
-        "model": "Un petit modèle produit les titres vite et à moindre coût."
+        "auto": "L’agent de chaque fil lui donne son titre.",
+        "model": "Un petit modèle, pour des titres rapides et peu coûteux."
       },
       "git": "Git",
       "git_description": "Sur cet ordinateur.",
@@ -1163,7 +1163,7 @@
         "label": "Créditer Zeron dans les commits",
         "terms": "co-author coauthor attribution bot commit message co-auteur coauteur commits créditer crediter",
         "cloud": "Toujours activé pour Cloud",
-        "on": "Les commits des agents ajoutent zeronsh[bot] comme co-auteur"
+        "on": "zeronsh[bot] figure comme coauteur des commits des agents"
       }
     },
     "engine": {
@@ -1218,18 +1218,18 @@
       "reduce_motion": {
         "label": "Réduire les animations",
         "terms": "animation accessibility movement fade spring accessibilité accessibilite mouvement fondu ressort réduire reduire animations",
-        "system_on": "Activé tant que Réduire les animations l’est sur votre ordinateur : les mouvements sont instantanés et les fondus restent brefs.",
-        "description": "Les mouvements sont instantanés et les fondus restent brefs. Activé dès que Réduire les animations l’est sur votre ordinateur."
+        "system_on": "Activé tant que l’ordinateur réduit les animations : les mouvements sont instantanés et les fondus restent brefs.",
+        "description": "Les mouvements sont instantanés et les fondus restent brefs. Toujours activé si l’ordinateur réduit les animations."
       },
       "accented": {
         "label": "Couleur d’accentuation partout",
         "terms": "accent colour color links dots highlights colorful tint couleur accentuation liens points surbrillance coloré colore teinte",
-        "description": "Liens, point d’activité, résultats de recherche, @fichiers, puces, citations et code en ligne prennent votre couleur d’accentuation."
+        "description": "Liens, point d’activité, résultats de recherche, @fichiers, puces, citations et code inline prennent la couleur d’accentuation."
       },
       "glass": {
         "label": "Verre dépoli",
         "terms": "glass translucent opaque transparency blur vibrancy material verre dépoli depoli translucide transparence flou matière matiere",
-        "description": "Le bureau transparaît à travers la fenêtre. Désactivé, elle est opaque."
+        "description": "Le bureau transparaît à travers la fenêtre. Sinon, elle est opaque."
       },
       "font_default": "Par défaut ({name})",
       "font_search": "Rechercher une police",
@@ -1247,7 +1247,7 @@
       "text_size": {
         "label": "Taille du texte de l’interface",
         "terms": "interface font typeface text size menus conversations bigger smaller police texte taille plus grand petit",
-        "description": "Menus et conversations. Le code a la sienne, plus bas."
+        "description": "Menus et conversations. Le code a son propre réglage, plus bas."
       },
       "code_font_size": {
         "label": "Taille du code et des diffs",
@@ -1262,7 +1262,7 @@
       "render_math": {
         "label": "Afficher les formules",
         "terms": "latex tex formula equation markdown katex formule formules équation maths mathématiques mathematiques",
-        "description": "Le LaTeX des réponses s’affiche en formules. Désactivé, il s’affiche en code."
+        "description": "Affiche le LaTeX des réponses sous forme de formules. Sinon, il apparaît en code."
       },
       "math_font": {
         "label": "Police des formules",
@@ -1277,8 +1277,8 @@
         "label": "Fond d’écran",
         "terms": "background image picture new thread plugin scene fond écran ecran arrière-plan arriere-plan photo nouveau fil scène",
         "none": "Aucun",
-        "none_description": "Une nouvelle conversation s’ouvre sur la fenêtre elle-même.",
-        "image_description": "Une image à vous.",
+        "none_description": "Une nouvelle conversation s’ouvre sur la fenêtre, sans image.",
+        "image_description": "Une image de votre choix.",
         "choose_title": "Choisir une image d’arrière-plan",
         "images": "Images",
         "unsupported": "Impossible d’afficher cette image. Choisissez un PNG ou un JPEG.",
@@ -1341,7 +1341,7 @@
       "agent_updates": {
         "label": "Mises à jour des agents",
         "terms": "cli banner new version bannière banniere nouvelle mise à jour maj",
-        "description": "Afficher une bannière quand les CLI d’agents suivies ont des mises à jour."
+        "description": "Afficher une bannière quand une CLI d’agent suivie a une mise à jour."
       },
       "background_only": {
         "label": "Seulement en arrière-plan",
@@ -1365,38 +1365,38 @@
       "sound_attention": {
         "label": "Erreurs et déconnexions",
         "terms": "failure offline audio sound échec echec hors ligne son erreur erreurs déconnexion deconnexion",
-        "name": "Son des erreurs et déconnexions"
+        "name": "Son des erreurs et des déconnexions"
       },
       "unread": {
         "title": "Impossible de lire les réglages de notification de cet ordinateur",
-        "body": "Les bannières suivent le dernier enregistrement de Zeron. Réessayez dans un instant."
+        "body": "Les bannières suivent les derniers réglages enregistrés par Zeron. Réessayez dans un instant."
       }
     },
     "files": {
       "title": "Fichiers",
       "terms": "editor autosave wrap hidden fichiers éditeur editeur enregistrement automatique retour ligne masqués masques",
-      "description": "Comment les fichiers d’une session sont modifiés et listés.",
+      "description": "Modification et affichage des fichiers d’une session.",
       "editor": "Éditeur",
       "tree": "Arborescence",
       "autosave": {
         "label": "Enregistrement automatique",
         "terms": "save automatically enregistrer enregistrement automatiquement automatique",
-        "description": "Enregistrer un fichier peu après la dernière frappe."
+        "description": "Enregistre le fichier peu après la dernière frappe."
       },
       "autosave_delay": {
         "label": "Délai d’enregistrement automatique",
         "terms": "debounce wait délai delai attente",
-        "description": "Combien de temps après la dernière frappe."
+        "description": "Temps d’attente après la dernière frappe."
       },
       "word_wrap": {
         "label": "Retour à la ligne",
         "terms": "soft wrap long lines editor retour ligne lignes longues éditeur editeur",
-        "description": "Renvoyer les longues lignes à la largeur de l’éditeur. {key} l’active ou le désactive pour un seul fichier."
+        "description": "Coupe les longues lignes à la largeur de l’éditeur. {key} l’active ou le désactive pour un seul fichier."
       },
       "show_all": {
         "label": "Afficher les fichiers masqués et ignorés",
         "terms": "dotfiles gitignore tree masqués masques ignorés ignores cachés caches arborescence",
-        "description": "Les dotfiles, et ce que le .gitignore du projet exclut."
+        "description": "Les dotfiles et ce que le .gitignore du projet exclut."
       }
     },
     "shortcuts": {
@@ -1405,7 +1405,7 @@
       "row_terms": "shortcut keybinding hotkey keys raccourci clavier touches",
       "description": "Les touches de vos actions les plus courantes.",
       "empty_title": "Aucun raccourci pour l’instant",
-      "empty_body": "Les raccourcis de Zeron s’afficheront ici à mesure de leur ajout.",
+      "empty_body": "Les raccourcis de Zeron apparaîtront ici au fur et à mesure.",
       "reset": "Réinitialiser",
       "reset_label": "Rétablir {keys} pour {name}",
       "restore": "Rétablir les valeurs par défaut",
@@ -1415,14 +1415,14 @@
         "section": "Appshots",
         "label": "Capturer un Appshot",
         "terms": "shortcut hotkey screenshot capture raccourci écran ecran",
-        "description": "Fonctionne quand une autre app est au premier plan. Modifiable dans Appshots.",
+        "description": "Fonctionne même si une autre app est au premier plan. Modifiable dans Appshots.",
         "change": "Modifier"
       }
     },
     "appshots": {
       "title": "Appshots",
       "terms": "capture screenshot window app shortcut écran ecran fenêtre fenetre application raccourci",
-      "description": "À configurer une fois, une autorisation à la fois. Enregistrement de l’écran capture la fenêtre ; Accessibilité ajoute, en option, le texte hors écran de l’application.",
+      "description": "Une configuration unique, une autorisation à la fois. « Enregistrement de l’écran » capture la fenêtre ; « Accessibilité » ajoute en option le texte hors écran de l’application.",
       "capture_section": "Capture",
       "permissions": "Autorisations",
       "permissions_description": "macOS les demande pour l’app qui a ouvert Zeron : Zeron lui-même ou, s’il est lancé depuis un terminal ou un éditeur, cette app. Accordez-les-lui dans Réglages Système → Confidentialité et sécurité, puis quittez-la et rouvrez-la une fois.",
@@ -1433,7 +1433,7 @@
       "press_now": "Appuyez sur un raccourci…",
       "change_shortcut": "Modifier le raccourci, actuellement {keys}",
       "open_system_settings": "Ouvrir Réglages Système",
-      "changed": "Une autorisation a changé ? Revérifiez à votre retour dans Zeron.",
+      "changed": "Vous avez modifié une autorisation ? Vérifiez à nouveau en revenant dans Zeron.",
       "check_again": "Vérifier à nouveau",
       "enabled": {
         "label": "Capturer des Appshots",
@@ -1454,9 +1454,9 @@
       "destination": {
         "label": "Destination",
         "terms": "session composer saisie",
-        "last_description": "Utiliser la session ouverte, ou revenir à la dernière session utilisée pour un Appshot.",
+        "last_description": "Utiliser la session ouverte ou revenir à la dernière session utilisée pour un Appshot.",
         "new_description": "Placer les captures dans la zone de saisie d’une nouvelle session, sans toucher aux brouillons existants.",
-        "automatic_description": "Utiliser la session ouverte, ou la zone de saisie d’une nouvelle session si aucune n’est ouverte.",
+        "automatic_description": "Utiliser la session ouverte ou la zone de saisie d’une nouvelle session si aucune n’est ouverte.",
         "automatic": "Automatique",
         "last": "Dernière session",
         "new": "Nouvelle session"
@@ -1464,13 +1464,13 @@
       "capture": {
         "label": "Capture de fenêtre",
         "terms": "screen recording permission enregistrement écran ecran autorisation",
-        "description": "Enregistrement de l’écran permet à Zeron de capturer la fenêtre au premier plan. macOS peut demander un redémarrage.",
+        "description": "L’autorisation « Enregistrement de l’écran » permet à Zeron de capturer la fenêtre au premier plan. macOS peut demander un redémarrage.",
         "allow": "Autoriser la capture de fenêtre"
       },
       "text": {
         "label": "Texte des applications",
         "terms": "accessibility permission accessibilité accessibilite autorisation texte",
-        "description": "Accessibilité ajoute le texte visible et hors écran des applications. Les captures d’écran fonctionnent sans.",
+        "description": "L’autorisation « Accessibilité » ajoute le texte visible et hors écran des applications. Les captures d’écran fonctionnent sans.",
         "allow": "Activer la capture du texte"
       }
     },
@@ -1485,10 +1485,10 @@
       "native_subagents": {
         "label": "Sous-agents natifs",
         "terms": "subagent delegate side chats tasks spawn sous-agent sous-agents déléguer deleguer conversations annexes tâches taches lancer",
-        "description": "Désactivé, l’agent délègue via des conversations annexes."
+        "description": "Sinon, l’agent délègue par des conversations annexes."
       },
       "update_policy": {
-        "label": "Politique de mise à jour",
+        "label": "Mode de mise à jour",
         "terms": "automatic upgrade version cli automatique mise à jour maj politique"
       },
       "skills_dollar": {
@@ -1497,31 +1497,31 @@
         "description": "Tapez $ dans la zone de saisie pour choisir un skill."
       },
       "skills_separate": {
-        "label": "Commandes / séparées",
+        "label": "Séparer les commandes /",
         "terms": "completion composer slash skills menu complétion saisie barre oblique commandes",
-        "description": "Garder les skills hors du menu /."
+        "description": "Les skills n’apparaissent pas dans le menu /."
       },
       "more": {
         "label": "Autres agents",
         "terms": "install add new installer ajouter nouveau",
-        "description": "Installez-en un et il apparaît ci-dessus, prêt pour la connexion."
+        "description": "Installez-en un : il apparaît ci-dessus, prêt pour la connexion."
       },
       "this_mac": "cet ordinateur",
       "couldnt_update": "Impossible de mettre à jour {name}",
       "cant_reach": "Zeron ne parvient pas à joindre {device}.",
       "try_later": "Réessayez dans un instant.",
       "policy": {
-        "notify": "Notifier",
+        "notify": "Me prévenir",
         "auto": "Auto si inactif",
         "off": "Désactivé",
         "notify_note": "Seulement quand vous choisissez Mettre à jour.",
-        "auto_note": "Automatiquement, quand aucune conversation n’y tourne.",
-        "off_note": "Aucune recherche de nouvelle version."
+        "auto_note": "Automatiquement, dès qu’aucune conversation ne l’utilise.",
+        "off_note": "Zeron ne cherche pas de nouvelle version."
       },
       "dialog_body": "Sur {device}. Les modifications s’appliquent immédiatement.",
       "done": "Terminé",
       "updates": "Mises à jour",
-      "description": "Les agents de code d’un appareil, et les comptes avec lesquels ils se connectent.",
+      "description": "Les agents de code d’un appareil et les comptes qu’ils utilisent.",
       "device": "Appareil",
       "add": {
         "row_label": "Ajouter un autre agent",
@@ -1529,16 +1529,16 @@
         "row_description_none": "Tous les agents du registre ACP.",
         "back": "Retour à {page}",
         "title": "Ajouter un agent",
-        "description": "Tous les agents compatibles avec l’Agent Client Protocol : {n, plural, one {# aujourd’hui} other {# aujourd’hui}}.",
+        "description": "Tous les agents compatibles avec l’Agent Client Protocol : {n, plural, one {# à ce jour} other {# à ce jour}}.",
         "description_none": "Tous les agents compatibles avec l’Agent Client Protocol.",
         "search": "Rechercher des agents",
         "built_in": "Intégré",
         "added": "Ajouté",
         "update_badge": "Mise à jour",
         "no_match_title": "Aucun résultat pour « {q} »",
-        "no_match_body": "Essayez le nom de son créateur, ou ce qu’il fait.",
+        "no_match_body": "Essayez le nom de son éditeur ou ce qu’il fait.",
         "clear": "Effacer la recherche",
-        "offline": "Zeron ne parvient pas à joindre le registre pour l’instant : voici la liste précédente.",
+        "offline": "Zeron ne parvient pas à joindre le registre pour l’instant : voici la dernière liste chargée.",
         "unavailable": "Impossible de charger le registre sur {device}",
         "unavailable_hint": "Zeron ne parvient pas à le joindre. Réessayez dans un instant.",
         "try_again": "Réessayer",
@@ -1563,10 +1563,10 @@
           "none": "Aucun build pour {device}."
         },
         "checked": {
-          "sha": "Avec la somme de contrôle publiée par le registre.",
+          "sha": "D’après la somme de contrôle publiée par le registre.",
           "none": "Le registre ne publie aucune somme de contrôle pour ce build.",
-          "npm": "Version {version} exactement, depuis npm, sans ses scripts d’installation.",
-          "pypi": "Version {version} exactement, depuis PyPI."
+          "npm": "Version {version} exacte, depuis npm, sans ses scripts d’installation.",
+          "pypi": "Version {version} exacte, depuis PyPI."
         },
         "models": "Ceux de {name}, une fois ajouté.",
         "sign_in": "Dans votre navigateur, avec votre compte pour cet agent.",
@@ -1586,13 +1586,13 @@
         "remove": "Retirer",
         "remove_row": "Retirer de {device}",
         "remove_title": "Retirer {name} de {device} ?",
-        "remove_body": "Son installation est supprimée. Les conversations qui l’utilisaient restent, et reprennent dès qu’il est de nouveau ajouté.",
+        "remove_body": "L’agent est désinstallé. Les conversations qui l’utilisaient sont conservées et reprendront dès qu’il sera réinstallé.",
         "couldnt_remove": "Impossible de retirer {name}",
         "own_row": "Lancer votre propre agent",
-        "own_row_description": "Un agent que vous avez créé, ou qui n’est pas encore dans le registre.",
+        "own_row_description": "Un agent que vous avez créé ou qui n’est pas encore dans le registre.",
         "own": {
           "title": "Lancer votre propre agent",
-          "description": "Un agent que vous avez créé, ou qui n’est pas encore dans le registre. Il s’exécute sur {device}, via l’Agent Client Protocol.",
+          "description": "Un agent que vous avez créé ou qui n’est pas encore dans le registre. Il s’exécute sur {device} et utilise l’Agent Client Protocol.",
           "name": "Nom",
           "name_hint": "Son nom dans vos fournisseurs et dans la zone de saisie.",
           "name_placeholder": "Agent Halcyon",
@@ -1608,7 +1608,7 @@
         },
         "terminal": {
           "title": "Se connecter à {name}",
-          "body": "Sa connexion s’exécute sur {device}. Répondez à ses questions, puis choisissez Terminé.",
+          "body": "La connexion se fait sur {device}. Répondez à ses questions, puis cliquez sur Terminé.",
           "label": "Connexion à {name}"
         },
         "remove_row_description": "Les conversations qui l’utilisaient restent."
@@ -1644,7 +1644,7 @@
       "remove": "Retirer…",
       "remove_online": "En ligne. Quittez d’abord Zeron sur cet appareil.",
       "remove_title": "Retirer « {name} » ?",
-      "remove_body": "Il disparaît de vos appareils, partout. Ses sessions et ses projets restent, vous pouvez toujours les lire, et rien n’est supprimé sur l’ordinateur lui-même. Si Zeron s’y ouvre à nouveau, il réapparaît.",
+      "remove_body": "Il disparaît de la liste de vos appareils, partout. Ses sessions et ses projets sont conservés et restent consultables, et rien n’est supprimé sur l’ordinateur. Si Zeron y est rouvert, il réapparaît.",
       "remove_confirm": "Retirer l’appareil",
       "couldnt_remove": "Impossible de retirer l’appareil",
       "online_now": "Il est en ligne. Quittez Zeron sur cet appareil, puis réessayez.",
@@ -1652,7 +1652,7 @@
     },
     "projects": {
       "title": "Projets",
-      "description": "Les dossiers dans lesquels travaillent vos sessions, sur chacun de vos appareils.",
+      "description": "Les dossiers où travaillent vos sessions, sur chacun de vos appareils.",
       "terms": "projects folders repositories repos rename remove delete forget finder icon emoji color picture projets dossiers dépôts depots renommer retirer supprimer oublier icône icone couleur image",
       "yours": {
         "label": "Vos projets",
@@ -1686,8 +1686,8 @@
       "remove_none": "Il n’a aucune session.",
       "remove_running": "{n, plural, one {L’une d’elles est en cours et sera d’abord arrêtée.} other {# d’entre elles sont en cours et seront d’abord arrêtées.}}",
       "remove_running_only": "Elle est en cours et sera d’abord arrêtée.",
-      "remove_keeps_folder": "Le dossier {path} reste sur {device} avec tous ses fichiers. Zeron l’oublie, simplement.",
-      "remove_keeps_repo": "Son dépôt sur GitHub n’est pas touché.",
+      "remove_keeps_folder": "Le dossier {path} reste sur {device} avec tous ses fichiers. Zeron cesse simplement de le suivre.",
+      "remove_keeps_repo": "Son dépôt GitHub reste intact.",
       "remove_confirm": "Retirer le projet",
       "couldnt_remove": "Impossible de retirer le projet",
       "couldnt_rename": "Impossible de renommer le projet",
@@ -1717,7 +1717,7 @@
       "invitations": {
         "label": "Invitations",
         "terms": "pending resend revoke invites attente renvoyer révoquer revoquer invitations",
-        "description": "Chacune reste valable jusqu’à ce qu’elle soit acceptée ou qu’elle expire."
+        "description": "Chacune reste valable jusqu’à son acceptation ou son expiration."
       },
       "admin": "Admin",
       "member": "Membre",
@@ -1734,13 +1734,13 @@
       "couldnt_load": "Impossible de charger les membres",
       "couldnt_load_body": "Les accès de votre équipe n’ont pas changé.",
       "nobody": "Personne ne porte ce nom",
-      "nobody_admin": "Vérifiez l’orthographe, ou invitez cette personne.",
+      "nobody_admin": "Vérifiez l’orthographe ou invitez cette personne.",
       "nobody_member": "Vérifiez l’orthographe.",
       "invite_someone": "Inviter quelqu’un",
       "bad_address": "Une adresse semble incorrecte.",
       "sent": "{n, plural, one {# invitation envoyée} other {# invitations envoyées}}",
       "sent_body": "Chaque personne invitée recevra un e-mail de Zeron.",
-      "exists_one": "Déjà membre ou déjà invité.",
+      "exists_one": "Cette personne est déjà membre ou invitée.",
       "exists_many": "Ces personnes sont déjà membres ou invitées.",
       "some_failed": "Certaines n’ont pas pu être envoyées. Vérifiez-les et réessayez.",
       "remove_name": "Retirer {name} ?",
@@ -1752,15 +1752,15 @@
       "invite_body": "Ils rejoignent l’organisation en tant que membres. Chacun reçoit un e-mail de Zeron.",
       "send_invites": "Envoyer les invitations",
       "addresses": "Adresses e-mail",
-      "addresses_hint": "Entrée ou une virgule pour en ajouter une autre.",
+      "addresses_hint": "Séparez-les par Entrée ou une virgule.",
       "couldnt_load_org": "Impossible de charger votre organisation",
       "couldnt_load_org_body": "Vérifiez votre connexion et réessayez.",
       "no_org": "Aucune organisation pour l’instant",
       "no_org_body": "Reconnectez-vous pour en créer ou en rejoindre une.",
       "name": "Nom",
-      "name_admin": "Tel qu’il apparaît à tous ses membres.",
+      "name_admin": "Le nom visible par tous ses membres.",
       "name_member": "Seul un admin peut le renommer.",
-      "everyone_in": "Tous les membres de {org}, et ce qu’ils peuvent faire ici.",
+      "everyone_in": "Tous les membres de {org} et ce qu’ils peuvent faire ici.",
       "everyone": "Tous les membres de votre organisation.",
       "find": "Rechercher quelqu’un"
     },
@@ -1772,7 +1772,7 @@
       "version": {
         "label": "Version",
         "terms": "zeron engine version build about moteur à propos a propos",
-        "description": "Le moteur de cet ordinateur."
+        "description": "Le moteur installé sur cet ordinateur."
       },
       "updates": {
         "label": "Rechercher les mises à jour",
@@ -1800,13 +1800,13 @@
       },
       "state": {
         "checking": "Recherche de mises à jour…",
-        "checking_line": "Interrogation de la dernière version publiée.",
+        "checking_line": "Recherche de la dernière version.",
         "updating": "Mise à jour du moteur…",
         "updating_line": "Téléchargement et installation de Zeron {version}.",
-        "updated": "Zeron mis à jour en {version}",
-        "updated_running": "Le moteur tourne sur la nouvelle version.",
-        "updated_starting": "Le moteur redémarre sur la nouvelle version.",
-        "unmanaged": "Mettez à jour depuis l’app Zeron",
+        "updated": "Zeron {version} est installé",
+        "updated_running": "Le moteur utilise désormais la nouvelle version.",
+        "updated_starting": "Le moteur redémarre avec la nouvelle version.",
+        "unmanaged": "Mise à jour via l’app Zeron",
         "unmanaged_line": "Le moteur de cet ordinateur est fourni avec l’app Zeron, qui le met à jour : ouvrez Zeron et choisissez « Rechercher les mises à jour ».",
         "check_again": "Vérifier à nouveau",
         "couldnt_check": "Impossible de rechercher les mises à jour",
@@ -1814,14 +1814,14 @@
         "couldnt_update": "Impossible de mettre à jour",
         "failed_line": "Un problème est survenu. Réessayez dans un instant.",
         "not_connected": "Non connecté au moteur",
-        "not_connected_line": "La version de Zeron s’affiche dès que le moteur tourne.",
+        "not_connected_line": "La version de Zeron s’affiche dès que le moteur est lancé.",
         "check": "Rechercher les mises à jour",
         "available": "Zeron {version} est disponible",
-        "you_have": "Vous avez la version {version}.",
+        "you_have": "Vous utilisez la version {version}.",
         "update_engine": "Mettre à jour le moteur",
-        "unreachable_line": "Le moteur n’a pas pu joindre le flux des versions.",
+        "unreachable_line": "Le moteur n’a pas pu accéder au flux des versions.",
         "up_to_date": "Zeron est à jour",
-        "newest_checked": "{version} est la plus récente · vérifié {ago}",
+        "newest_checked": "{version} est la dernière version · vérifié {ago}",
         "downloading": "Téléchargement de Zeron {version}…",
         "downloading_line": "Vous pouvez continuer à travailler.",
         "ready": "Zeron {version} est prêt",
@@ -1831,9 +1831,9 @@
         "held": "Zeron {version} ne peut pas encore être installé",
         "available_stable": "Zeron {version} (stable) est disponible",
         "update": "Mettre à jour",
-        "newest": "{version} est la plus récente que nous connaissions."
+        "newest": "{version} est la dernière version connue."
       },
-      "description": "Votre version de Zeron, et comment la garder à jour.",
+      "description": "Votre version de Zeron et ses mises à jour.",
       "app": {
         "label": "Cette app",
         "built": "Pas encore empaquetée · build {built}",
@@ -1844,10 +1844,10 @@
         "label": "Recevoir les versions bêta",
         "terms": "beta early test channel stable preview next bêta avant-première avant premiere canal aperçu apercu prochaine",
         "on": "Vous recevez les versions bêta. Désactivez cette option pour revenir à la version stable.",
-        "off": "Essayez la prochaine version de Zeron en avant-première. Nécessite macOS {version} ou une version ultérieure.",
+        "off": "Essayez la prochaine version de Zeron en avant-première. Nécessite macOS {version} ou version ultérieure.",
         "off_any": "Essayez la prochaine version de Zeron en avant-première."
       },
-      "updates_self_description": "Zeron se met à jour tout seul : la nouvelle version se télécharge en arrière-plan et s’installe au redémarrage.",
+      "updates_self_description": "Zeron se met à jour automatiquement : la nouvelle version se télécharge en arrière-plan et s’installe au redémarrage.",
       "version_info": {
         "label": "Infos de version",
         "description": "Pour signaler un bug : les versions et builds ci-dessus.",
@@ -1857,8 +1857,8 @@
     },
     "archived": {
       "title": "Archives",
-      "description": "{n, plural, one {# session, masquée de la barre latérale jusqu’à sa restauration.} other {# sessions, masquées de la barre latérale jusqu’à leur restauration.}}",
-      "description_none": "Masquées de la barre latérale jusqu’à leur restauration.",
+      "description": "{n, plural, one {# session, retirée de la barre latérale jusqu’à sa restauration.} other {# sessions, retirées de la barre latérale jusqu’à leur restauration.}}",
+      "description_none": "Retirées de la barre latérale jusqu’à leur restauration.",
       "empty_title": "Aucune archive",
       "empty_body": "Archivez une session depuis son menu dans la barre latérale.",
       "search": "Rechercher dans les archives",
@@ -1897,15 +1897,15 @@
     },
     "store": {
       "says": {
-        "refused": "Seul un administrateur de l’organisation peut faire cela.",
+        "refused": "Action réservée aux administrateurs de l’organisation.",
         "self": "Vous ne pouvez pas modifier votre propre statut de membre ici.",
         "not_found": "Cet élément n’existe déjà plus.",
         "invalid": "Cela ne semble pas valide.",
         "too_large": "Cette image est trop lourde. Essayez-en une plus petite.",
         "last_admin": "Vous êtes le seul administrateur de votre organisation. Nommez d’abord quelqu’un d’autre administrateur.",
         "busy": "Quelqu’un de votre organisation modifie des rôles en ce moment. Réessayez dans un instant.",
-        "try_again": "Impossible de supprimer votre compte pour l’instant. Rien n’a été retiré. Réessayez dans un instant.",
-        "timed_out": "La reconnexion a pris trop de temps, rien n’a donc été supprimé. Réessayez."
+        "try_again": "Impossible de supprimer votre compte pour l’instant. Rien n’a été supprimé. Réessayez dans un instant.",
+        "timed_out": "La reconnexion a pris trop de temps : rien n’a été supprimé. Réessayez."
       },
       "couldnt_save_name": "Impossible d’enregistrer votre nom",
       "couldnt_rename_org": "Impossible de renommer l’organisation",
@@ -1914,7 +1914,7 @@
       "couldnt_change_role": "Impossible de modifier son rôle",
       "couldnt_revoke": "Impossible de révoquer l’invitation",
       "invitation_resent": "Invitation renvoyée",
-      "couldnt_resend": "Impossible de la renvoyer",
+      "couldnt_resend": "Impossible de renvoyer l’invitation",
       "couldnt_save_title": "Impossible d’enregistrer votre fonction",
       "couldnt_change_photo": "Impossible de changer votre photo",
       "couldnt_remove_photo": "Impossible de retirer votre photo"
@@ -1922,7 +1922,7 @@
     "cloud": {
       "title": "Cloud",
       "terms": "cloud sandboxes remote machines run agents github repositories usage credits bacs à sable bacs a sable distant distantes lancer agents dépôts depots utilisation crédits credits",
-      "description": "Faites travailler des agents sur leurs propres machines, dans vos dépôts GitHub.",
+      "description": "Lancez des agents sur des machines dédiées, dans vos dépôts GitHub.",
       "credit": "{number} crédit",
       "credits": "{number} crédits",
       "range": {
@@ -1939,11 +1939,11 @@
       "usage": {
         "title": "Utilisation",
         "terms": "credits used spent minutes chart days range crédits utilisés utilises consommés consommes graphique jours période periode",
-        "description": "Crédits utilisés par les conversations Cloud. Un crédit correspond à une minute de petite machine.",
+        "description": "Crédits utilisés par les conversations Cloud. Un crédit correspond à une minute sur une petite machine.",
         "used": "Utilisation : {credits}",
-        "reading": "Lecture de l’utilisation…",
-        "failed": "Impossible de lire l’utilisation. Elle s’affichera dès que Zeron pourra joindre Cloud.",
-        "out": "Plus de crédits. Ajoutez-en dans Facturation.",
+        "reading": "Chargement de l’utilisation…",
+        "failed": "Impossible de charger l’utilisation. Elle s’affichera dès que Zeron pourra joindre Cloud.",
+        "out": "Crédits épuisés. Ajoutez-en dans Facturation.",
         "left": "Il reste {credits}",
         "range_name": "Période d’utilisation"
       },
@@ -1952,24 +1952,24 @@
         "description": "Les conversations Cloud clonent vos dépôts et poussent leurs branches via GitHub.",
         "connected": "Connecté",
         "needs_reconnect": "À reconnecter",
-        "needs_reconnect_description": "Les conversations qui l’utilisent ne peuvent rien pousser d’ici là.",
+        "needs_reconnect_description": "Les conversations qui l’utilisent ne peuvent pas pousser tant qu’il n’est pas reconnecté.",
         "reconnect": "Reconnecter",
         "disconnect": "Déconnecter",
         "another": "Autre compte GitHub",
-        "another_description": "Un compte pro et un compte perso, par exemple. Chacun apporte les dépôts auxquels il a accès.",
+        "another_description": "Par exemple, un compte pro et un compte perso. Chacun donne accès à ses propres dépôts.",
         "another_action": "Connecter un autre compte",
-        "another_hint": "GitHub connecte le compte ouvert dans votre navigateur. Pour en connecter un autre, changez d’abord de compte sur github.com.",
+        "another_hint": "GitHub connecte le compte actif dans votre navigateur. Pour en connecter un autre, changez d’abord de compte sur github.com.",
         "already_title": "{login} est déjà connecté",
-        "already_body": "GitHub a connecté le compte ouvert dans votre navigateur. Changez de compte sur github.com, puis connectez-le à nouveau.",
+        "already_body": "GitHub a connecté le compte actif dans votre navigateur. Changez de compte sur github.com, puis réessayez.",
         "install": "Autre compte ou organisation",
-        "install_description": "Installez-y l’app Zeron, ou changez les dépôts qu’elle couvre. GitHub propose les emplacements où le compte de votre navigateur peut l’installer.",
+        "install_description": "Installez-y l’app Zeron ou modifiez les dépôts auxquels elle a accès. GitHub propose les comptes et organisations où le compte de votre navigateur peut l’installer.",
         "forget_title": "Déconnecter {login} ?",
-        "forget_body": "Les conversations qui utilisent ce compte s’arrêtent avec un message jusqu’à ce que vous le reconnectiez. Les autres gardent leurs comptes. Les nouvelles conversations utilisent les comptes restants."
+        "forget_body": "Les conversations qui utilisent ce compte s’arrêtent en affichant un message jusqu’à ce que vous le reconnectiez. Les autres conservent leur compte. Les nouvelles conversations utilisent les comptes restants."
       },
       "repos": {
         "title": "Dépôts",
         "terms": "repos choose github app install private dépôts depots choisir installer privé prive",
-        "description": "Les projets de ces dépôts peuvent tourner sur Cloud. Choisissez lesquels sur GitHub.",
+        "description": "Les projets de ces dépôts peuvent s’exécuter sur Cloud. Faites votre choix sur GitHub.",
         "refresh": "Vérifier à nouveau les dépôts",
         "checking": "Vérification des dépôts…",
         "none": "Aucun pour l’instant",
@@ -1990,39 +1990,39 @@
       "machine": {
         "title": "Machine par défaut",
         "terms": "machine size vcpu memory disk credits rate xlarge large small standard taille mémoire memoire disque crédits tarif grande petite",
-        "description": "La taille sur laquelle démarrent les nouvelles conversations Cloud. Plus la machine est grande, plus elle consomme de crédits.",
+        "description": "La taille de machine des nouvelles conversations Cloud. Plus elle est grande, plus elle consomme de crédits.",
         "failed": "Impossible de changer la machine par défaut. Réessayez dans un instant."
       }
     },
     "billing": {
       "title": "Facturation",
       "terms": "billing payment stripe credits plan subscription purchase invoice facturation paiement crédits forfait abonnement achat acheter facture",
-      "description": "Les crédits font tourner vos conversations Cloud.",
-      "hours": "environ {n} h de petite machine",
+      "description": "Les crédits alimentent vos conversations Cloud.",
+      "hours": "environ {n} h sur une petite machine",
       "try_later": "Réessayez dans un instant.",
       "changed": {
-        "plan": "Vous avez le forfait {plan} : {credits} par mois",
+        "plan": "Forfait {plan} : {credits} par mois",
         "ended": "Votre forfait a pris fin",
         "wont_renew": "Votre forfait ne sera pas renouvelé",
         "will_renew": "Votre forfait sera renouvelé",
         "added": "Crédits ajoutés : {credits}"
       },
       "plan_line": {
-        "past_due": "Votre dernier paiement n’est pas passé. Mettez à jour votre carte pour garder votre forfait.",
+        "past_due": "Votre dernier paiement a échoué. Mettez à jour votre carte pour conserver votre forfait.",
         "ends": "Prend fin le {date}. Vous gardez ses crédits jusque-là.",
-        "renews": "Renouvelé le {date}."
+        "renews": "Renouvellement le {date}."
       },
       "stripe_failed": "La page Stripe ne s’est pas ouverte",
       "credits": {
         "title": "Crédits",
         "terms": "balance left remaining monthly extra hours solde restant restants mensuel supplémentaires supplementaires heures",
-        "description": "Ce que les conversations Cloud peuvent dépenser. Un crédit correspond à une minute de petite machine.",
+        "description": "Le solde disponible pour vos conversations Cloud. Un crédit correspond à une minute sur une petite machine.",
         "none": "Choisissez un forfait ou achetez des crédits pour lancer des conversations Cloud.",
         "unit": "{n, plural, one {crédit} other {crédits}}",
         "split": "{plan} du forfait, {extra} en plus",
         "plan_label": "Crédits du forfait",
         "no_plan": "Pas encore de forfait. Choisissez-en un ci-dessous.",
-        "of_resets": "Sur {total} · renouvelés le {date}",
+        "of_resets": "Sur {total} · renouvellement le {date}",
         "of": "Sur {total}",
         "extra_label": "Crédits supplémentaires",
         "extra_description": "N’expirent jamais. Utilisés une fois les crédits du forfait épuisés."
@@ -2030,7 +2030,7 @@
       "plan": {
         "title": "Forfait",
         "terms": "subscription subscribe base pro max monthly price manage cancel renew abonnement abonner forfait mensuel prix tarif gérer gerer annuler renouveler",
-        "description": "Les crédits d’un forfait arrivent chaque mois et expirent à la fin du mois.",
+        "description": "Les crédits du forfait sont versés chaque mois et expirent à la fin du mois.",
         "current_plan": "Forfait actuel",
         "switch": "Changer",
         "choose": "Choisir {plan}",
@@ -2044,7 +2044,7 @@
       "extra": {
         "title": "Crédits supplémentaires",
         "terms": "buy purchase packs top up never expire acheter achat recharger recharge n’expirent jamais",
-        "description": "Achetés une fois, ils n’expirent jamais et servent une fois les crédits du forfait épuisés.",
+        "description": "Achetés à l’unité, ils n’expirent jamais et prennent le relais une fois les crédits du forfait épuisés.",
         "packs": "{n, plural, one {# pack} other {# packs}} · {hours}",
         "packs_name": "Packs",
         "buy": "Acheter pour {price}"
@@ -2056,25 +2056,25 @@
       },
       "pending": {
         "title": "Terminez dans votre navigateur",
-        "body": "Cette page se met à jour une fois que c’est fait."
+        "body": "Cette page se mettra à jour une fois l’opération terminée."
       }
     },
     "profile": {
       "title": "Compte",
       "terms": "account profile you me card member sign in compte profil vous moi carte membre connexion se connecter",
-      "description_org": "Comment tout le monde vous voit dans {org}.",
-      "description_team": "Comment votre équipe vous voit.",
+      "description_org": "Comment vous apparaissez aux membres de {org}.",
+      "description_team": "Comment vous apparaissez à votre équipe.",
       "photo": {
         "label": "Photo",
         "terms": "avatar picture image photo",
         "own": "S’affiche à côté de votre nom dans Zeron.",
-        "from_sign_in": "Celle du compte avec lequel vous vous êtes connecté.",
+        "from_sign_in": "Celle du compte utilisé pour vous connecter.",
         "avatar": "Votre photo",
         "change": "Changer",
         "choose": "Choisir une photo",
         "images": "Images",
         "open_failed": "Impossible d’ouvrir cette image",
-        "open_failed_body": "Zeron n’a pas pu la lire comme PNG ou JPEG.",
+        "open_failed_body": "Zeron n’a pas pu la lire : elle doit être au format PNG ou JPEG.",
         "preview": "Votre photo, telle qu’elle s’affichera",
         "zoom": "Zoom"
       },
@@ -2125,9 +2125,9 @@
         "label": "Se déconnecter",
         "terms": "log out logout leave account session déconnexion deconnexion se déconnecter se deconnecter quitter compte",
         "busy": "Déconnexion…",
-        "description": "Cet ordinateur cesse de se synchroniser jusqu’à votre reconnexion.",
+        "description": "La synchronisation s’arrête sur cet ordinateur jusqu’à votre prochaine connexion.",
         "confirm_title": "Se déconnecter de Zeron ?",
-        "confirm_body": "Vos sessions restent dans votre compte. Sur cet ordinateur, la configuration se rouvrira."
+        "confirm_body": "Vos sessions restent dans votre compte. Sur cet ordinateur, l’assistant de configuration s’ouvrira de nouveau."
       },
       "delete": {
         "label": "Supprimer le compte",
@@ -2146,7 +2146,7 @@
       "claim": {
         "open": "Réserver un nom d’utilisateur",
         "title": "Réserver un nom d’utilisateur",
-        "body": "L’adresse de votre carte. Elle se choisit une seule fois, et elle est à vous pour de bon.",
+        "body": "L’adresse de votre carte. Elle ne se choisit qu’une fois et vous appartient pour de bon.",
         "confirm": "Réserver",
         "placeholder": "votrenom",
         "invalid": "3 à 20 lettres, chiffres, _ ou -."
@@ -2166,7 +2166,7 @@
       "keys": {
         "label": "Clés de signature",
         "terms": "keys signing plugins templates security revoke fingerprint devices clés cles signature modèles modeles sécurité securite révoquer revoquer empreinte appareils",
-        "description": "Vos appareils signent avec elles les plugins et modèles que vous créez. Si vous ne reconnaissez pas une clé, révoquez-la.",
+        "description": "Vos appareils s’en servent pour signer les plugins et modèles que vous créez. Si vous ne reconnaissez pas une clé, révoquez-la.",
         "this_mac": "Cet ordinateur",
         "another_device": "Autre appareil",
         "new": "Nouvelle",
@@ -2184,11 +2184,11 @@
     },
     "browser": {
       "title": "Navigateur",
-      "description": "Les sites où vous vous connectez le restent sur cet ordinateur, séparément pour chaque compte.",
+      "description": "Vous restez connecté aux sites sur cet ordinateur, séparément pour chaque compte.",
       "terms": "browser web page website links search engine home page zoom history cookies sign in inspector navigateur site liens moteur de recherche page d’accueil historique connexion inspecteur",
       "search_engine": {
         "label": "Moteur de recherche",
-        "description": "Les mots tapés dans la barre d’adresse sont recherchés ici.",
+        "description": "Utilisé pour les recherches saisies dans la barre d’adresse.",
         "terms": "search google duckduckgo bing brave kagi ecosia address bar omnibox recherche rechercher barre d’adresse adresse",
         "custom": "Personnalisé",
         "custom_label": "Adresse de recherche",
@@ -2196,7 +2196,7 @@
         "custom_invalid": "Utilisez une adresse web avec %s après le site, comme https://example.com/search?q=%s. D’ici là, la recherche passe par Google."
       },
       "home_page": {
-        "label": "Un nouvel onglet ouvre",
+        "label": "Nouveaux onglets",
         "terms": "home page start page new tab page d’accueil accueil page de démarrage page de demarrage nouvel onglet",
         "start": "La page de démarrage : les aperçus de votre projet.",
         "custom": "Cette page, à chaque fois.",
@@ -2218,12 +2218,12 @@
       "history_description": "Les pages que vous avez visitées, conservées sur cet ordinateur pour votre compte.",
       "keep_history": {
         "label": "Conserver l’historique",
-        "description": "Pour retrouver une page. Désactivé, rien de nouveau n’est conservé.",
+        "description": "Pour retrouver une page plus tard. Désactivé, plus rien n’est conservé.",
         "terms": "history private record remember historique privé prive navigation privée privee enregistrer mémoriser memoriser"
       },
       "clear_history": {
         "label": "Effacer l’historique",
-        "description": "{n, plural, =0 {Rien de conservé pour l’instant.} one {# page conservée.} other {# pages conservées.}}",
+        "description": "{n, plural, =0 {Aucune page conservée pour l’instant.} one {# page conservée.} other {# pages conservées.}}",
         "terms": "clear delete remove history browsing data effacer supprimer historique données donnees de navigation",
         "span": "Période",
         "button": "Effacer"
@@ -2233,7 +2233,7 @@
         "day": "24 dernières heures",
         "week": "7 derniers jours",
         "month": "4 dernières semaines",
-        "all": "Depuis toujours"
+        "all": "Tout l’historique"
       },
       "cleared": "Historique effacé",
       "history_search": "Rechercher dans l’historique",
@@ -2262,10 +2262,10 @@
     "activity": {
       "title": "Activité",
       "terms": "activity inbox sidebar working sleep asleep snooze archive auto-archive idle activité activite boîte de réception boite de reception barre latérale barre laterale en cours veille en veille archiver archivage inactif inactives",
-      "description": "Une seule liste des conversations qui ont besoin de vous, les plus récentes en haut. Les conversations en cours, en veille et archivées se replient à la fin.",
+      "description": "Une seule liste réunit les conversations qui ont besoin de vous, les plus récentes en haut. Les conversations en cours, en veille et archivées sont repliées à la fin.",
       "view": {
         "label": "Barre latérale Activité",
-        "description": "Afficher la barre latérale en mode Activité plutôt que groupée par projet ou par appareil. Aussi dans le menu … de la barre latérale.",
+        "description": "Présente la barre latérale en mode Activité plutôt que par projet ou par appareil. Également accessible depuis le menu … de la barre latérale.",
         "terms": "inbox view sidebar mode boîte de réception boite de reception vue affichage barre latérale barre laterale"
       },
       "list_section": "Activité",
@@ -2276,13 +2276,13 @@
       },
       "sleep": {
         "label": "Mise en veille",
-        "description": "Faites un clic droit sur une conversation et choisissez « Mettre en veille » pour la placer « En veille » jusqu’à l’heure choisie, sur tous vos appareils. Elle se réveille plus tôt si elle vous pose une question, demande une approbation ou échoue, et revient alors en haut.",
+        "description": "Faites un clic droit sur une conversation et choisissez « Mettre en veille » pour la placer dans « En veille » jusqu’à l’heure choisie, sur tous vos appareils. Elle se réveille plus tôt si elle vous pose une question, demande une approbation ou échoue, et revient alors en haut.",
         "terms": "snooze later remind wake veille mettre en veille plus tard rappel rappeler réveiller reveiller"
       },
       "archive_section": "Archivage",
       "archive_after": {
         "label": "Archiver les conversations inactives",
-        "description": "Les conversations sans nouveauté depuis ce délai passent dans « Archives ». Les conversations épinglées, en cours et en veille restent, tout comme celles qui vous attendent.",
+        "description": "Les conversations sans nouveauté depuis ce délai passent dans « Archivées ». Les conversations épinglées, en cours ou en veille restent en place, tout comme celles qui attendent une action de votre part.",
         "terms": "auto archive idle old clean up archivage automatique archiver inactives anciennes nettoyer ranger",
         "never": "Jamais",
         "days": "{n, plural, one {Après # jour} other {Après # jours}}"
@@ -2292,14 +2292,14 @@
       "title": "Voix",
       "terms": "speech dictation microphone model parakeet voix parole dictée dictee micro modèle modele",
       "description": "Parlez dans la zone de saisie. La transcription se fait sur cet appareil ; l’audio n’est jamais enregistré ni envoyé.",
-      "couldnt": "La voix n’a pas pu faire cela",
+      "couldnt": "Voix : action impossible",
       "microphone": "Micro",
       "system_default": "Par défaut du système",
       "disconnected": "Micro déconnecté",
       "dictation": {
         "label": "Dictée",
         "description": "Maintenez le micro, parlez, puis relâchez. Vous pouvez modifier le texte avant l’envoi.",
-        "needs_download": "L’activer télécharge un modèle vocal de {total} Mo.",
+        "needs_download": "L’activation télécharge un modèle vocal de {total} Mo.",
         "downloading": "Téléchargement · {done} sur {total} Mo. Désactivez pour annuler."
       },
       "shortcut": {
@@ -2376,9 +2376,9 @@
         "new_section": "Nouvelle section",
         "path": "Chemin",
         "no_folder": "Aucun dossier pour l’instant",
-        "zeron_link": "Lien de conversation Zeron",
-        "link_not_ready": "Le lien de conversation n’est pas encore prêt",
-        "codex_link": "Lien de conversation Codex",
+        "zeron_link": "Lien Zeron de la conversation",
+        "link_not_ready": "Le lien de la conversation n’est pas encore prêt",
+        "codex_link": "Lien Codex de la conversation",
         "harness_session_id": "ID de session de l’agent",
         "session_id": "ID de session",
         "pin": "Épingler",
@@ -2418,7 +2418,7 @@
             "blue": "Bleu",
             "sky": "Ciel",
             "cyan": "Cyan",
-            "teal": "Sarcelle",
+            "teal": "Bleu canard",
             "emerald": "Émeraude",
             "lime": "Citron vert",
             "amber": "Ambre",
@@ -2431,7 +2431,7 @@
           "drop": "Déposez une image ici",
           "drop_release": "Relâchez pour utiliser cette image",
           "choose": "Choisir une image",
-          "formats": "PNG ou JPEG, recadrée en carré",
+          "formats": "PNG ou JPEG, recadrage carré",
           "replace": "Remplacer",
           "zoom": "Zoom",
           "crop": "L’image, placée dans sa vignette. Faites-la glisser pour la déplacer.",
@@ -2444,8 +2444,8 @@
             "too_large": "Cette image est trop lourde.",
             "open": "Impossible d’ouvrir cette image. Choisissez un PNG ou un JPEG.",
             "save": "Impossible d’enregistrer le projet. Réessayez.",
-            "save_outdated": "Zeron doit être mis à jour sur cet ordinateur pour enregistrer les icônes de projet. Mettez-le à jour, puis enregistrez à nouveau.",
-            "save_gone": "Ce projet a été retiré sur un autre appareil.",
+            "save_outdated": "Mettez à jour Zeron sur cet ordinateur pour enregistrer les icônes de projet, puis réessayez.",
+            "save_gone": "Ce projet a été retiré depuis un autre appareil.",
             "save_offline": "Zeron ne répond pas sur cet ordinateur. Réessayez dans un instant.",
             "unavailable": "Les icônes en image ne sont pas encore disponibles pour votre compte. Choisissez plutôt un emoji ou une couleur."
           }
@@ -2468,12 +2468,12 @@
     "boundary": {
       "failed": {
         "title": "Impossible de charger {name}",
-        "body": "Enregistrez à nouveau le fichier une fois corrigé, et tout reviendra ici."
+        "body": "Une fois le fichier corrigé, enregistrez-le : tout reviendra ici."
       },
       "screen": {
         "update_notice": "la notification de mise à jour",
         "session_page": "la page de session",
-        "new_chat_page": "la page de nouvelle conversation",
+        "new_chat_page": "la nouvelle conversation",
         "composer": "la zone de saisie",
         "panel": "le panneau",
         "files": "les fichiers",
@@ -2496,7 +2496,7 @@
     "page": {
       "plugin": "Plugin",
       "plugin_off": "Son plugin n’est pas activé pour le moment.",
-      "resize_files": "Redimensionner les fichiers"
+      "resize_files": "Redimensionner le panneau"
     },
     "keys": {
       "title": {
@@ -2511,13 +2511,13 @@
         "shell_toggle_terminal": "Afficher/masquer le terminal",
         "panel_annotate": "Annoter un élément",
         "panel_new_browser_tab": "Nouvel onglet de navigateur",
-        "panel_focus_address": "Ouvrir l’adresse",
+        "panel_focus_address": "Ouvrir l’emplacement",
         "panel_reload_page": "Recharger la page",
         "shell_next_session": "Session suivante",
         "shell_previous_session": "Session précédente",
         "session_n": "Session {i}",
         "shell_palette": "Rechercher",
-        "shell_check_updates": "Rechercher des mises à jour…",
+        "shell_check_updates": "Rechercher les mises à jour…",
         "shell_settings": "Réglages",
         "shell_find": "Rechercher",
         "shell_close": "Fermer",
@@ -2548,14 +2548,14 @@
         "dark": "Sombre"
       },
       "theme": "Mode",
-      "use_template": "Utiliser le modèle : {name}",
+      "use_template": "Utiliser le modèle d’interface : {name}",
       "templates": "Modèles d’interface",
       "use_theme": "Utiliser le thème : {name}",
       "themes": "Thèmes",
       "use": "Utiliser",
       "recent_files": "Fichiers récents",
       "files": "Fichiers",
-      "in_files": "Dans Fichiers",
+      "in_files": "Dans les fichiers",
       "new_chat": "Nouvelle conversation",
       "actions": "Actions",
       "new_project": "Nouveau projet",
@@ -2565,7 +2565,7 @@
       "settings_page": "Réglages : {title}",
       "go_to": "Aller à",
       "frosted_glass": "Verre dépoli",
-      "search": "Rechercher sessions, commandes et fichiers…",
+      "search": "Rechercher des sessions, commandes et fichiers…",
       "app": "Application",
       "reload_zeron": "Relancer Zeron",
       "reload_interface": "Recharger l’interface",
@@ -2576,7 +2576,7 @@
     "add_project": {
       "something_went_wrong": "Une erreur s’est produite",
       "not_connected": "L’appareil n’est pas connecté",
-      "no_folder_at": "Aucun dossier à {path}",
+      "no_folder_at": "Le dossier {path} n’existe pas",
       "not_a_folder": "{path} n’est pas un dossier",
       "couldnt_add": "Impossible d’ajouter le projet",
       "go_to": "Aller à",
@@ -2587,9 +2587,9 @@
       "add_this_folder": "Ajouter ce dossier",
       "add": "Ajouter",
       "folders": "Dossiers",
-      "folder_failed_hint": "Revenez en arrière avec ←, ou essayez un autre dossier.",
+      "folder_failed_hint": "Revenez en arrière avec ← ou essayez un autre dossier.",
       "no_folders_match": "Aucun dossier correspondant",
-      "no_folders_hint": "Saisissez un chemin comme ~/code ou /mnt pour y aller.",
+      "no_folders_hint": "Saisissez un chemin, comme ~/code ou /mnt, pour y accéder.",
       "in_home": "Dans le dossier personnel",
       "clone_here": "Cloner {repo} ici",
       "clone_section": "Cloner",
@@ -2614,7 +2614,7 @@
       "search_repos": "Rechercher des dépôts…",
       "loading_repos": "Chargement de vos dépôts…",
       "no_repos": "Aucun dépôt trouvé",
-      "no_repos_hint": "Cloud liste les dépôts auxquels l’app GitHub Zeron a accès. Ajoutez-en d’autres dans Réglages → Cloud.",
+      "no_repos_hint": "Cloud affiche les dépôts auxquels l’app GitHub de Zeron a accès. Ajoutez-en d’autres dans Réglages → Cloud.",
       "no_repos_yet": "Aucun dépôt pour l’instant",
       "choose_repos": "Choisissez des dépôts dans Réglages → Cloud",
       "github_not_connected": "GitHub n’est pas connecté",
@@ -2639,10 +2639,10 @@
       "installing": "Installation…",
       "manual": "à faire manuellement",
       "not_applied": "Zeron n’a pas été mis à jour",
-      "not_applied_body": "Il a redémarré sur la même version. Vous pouvez réessayer avec le bouton de mise à jour.",
+      "not_applied_body": "Il a redémarré avec la même version. Vous pouvez réessayer depuis le bouton de mise à jour.",
       "offline": "Hors ligne",
       "on_that_device": "à mettre à jour depuis cet appareil",
-      "plan_agents": "Les agents attendent la fin de ce qui est en cours",
+      "plan_agents": "Les agents attendent la fin des tâches en cours",
       "plan_chats": "{n, plural, one {Arrête # conversation en cours. Elle reprendra après le redémarrage} other {Arrête # conversations en cours. Elles reprendront après le redémarrage}}",
       "plan_here": "Télécharge Zeron pour cet appareil, puis vous invite à redémarrer",
       "preparing": "Préparation…",
@@ -2657,11 +2657,11 @@
       "update_anyway": "Mettre à jour quand même",
       "update_there": "{versions} · à mettre à jour depuis cet appareil",
       "updated": "Mis à jour",
-      "updated_to": "Mis à jour vers {version}",
+      "updated_to": "Version {version} installée",
       "verifying": "Vérification…",
       "version": "Version {version} disponible",
       "view_steps": "Voir les étapes",
-      "waiting": "En attente de la fin de l’exécution en cours",
+      "waiting": "En attente de la tâche en cours",
       "all_title": "Tout mettre à jour ?",
       "all_count": "{n, plural, one {# mise à jour} other {# mises à jour}}",
       "all_count_devices": "{n, plural, one {# mise à jour} other {# mises à jour}} sur {devices} appareils",
@@ -2686,7 +2686,7 @@
         "custom": "Personnaliser…",
         "custom_title": "Mettre en veille jusqu’à",
         "failed": "Impossible de mettre cette conversation en veille",
-        "needs_update": "Zeron doit être mis à jour sur l’appareil de cette conversation pour la mise en veille.",
+        "needs_update": "Mettez à jour Zeron sur l’appareil de cette conversation pour utiliser la mise en veille.",
         "until_when": "{day} {date} à {time}"
       },
       "stop_waiting": "Arrêter d’attendre",
@@ -2698,7 +2698,7 @@
     "skip_for_now": "Passer pour l’instant",
     "not_now": "Plus tard",
     "signin": {
-      "title": "Bienvenue\nsur Zeron",
+      "title": "Bienvenue\ndans Zeron",
       "lines": {
         "phone": "Reprenez vos conversations sur votre téléphone.",
         "machines": "Lancez vos agents sur toutes vos machines.",
@@ -2713,7 +2713,7 @@
     "appearance": {
       "sign_out": "Se déconnecter",
       "title": "À votre image",
-      "body": "Choisissez un style. Vous pourrez le changer à tout moment dans Réglages."
+      "body": "Choisissez un style. Vous pourrez le modifier à tout moment dans Réglages."
     },
     "done": {
       "owner": "Propriétaire",
@@ -2723,7 +2723,7 @@
         "more": "{a}, {b} et {n, plural, one {# autre} other {# autres}}"
       },
       "invites_sent": "{n, plural, one {# invitation envoyée} other {# invitations envoyées}}",
-      "invites_join": "{n, plural, one {{who} deviendra membre une fois l’invitation acceptée.} other {{who} deviendront membres une fois l’invitation acceptée.}}",
+      "invites_join": "{n, plural, one {{who} deviendra membre une fois l’invitation acceptée.} other {{who} deviendront membres une fois leur invitation acceptée.}}",
       "synced": {
         "label": "Vos conversations vous suivent",
         "description": "Vos conversations et vos agents se synchronisent sur tous vos appareils."
@@ -2736,12 +2736,12 @@
       "open_zeron": "Ouvrir Zeron",
       "title_org": "Tout est prêt pour {org}",
       "title": "Tout est prêt",
-      "body": "Voici ce qui a été configuré.",
-      "body_owner": "Vous en êtes propriétaire. Voici ce qui a été configuré.",
-      "body_member": "Vous en êtes membre. Voici ce qui a été configuré."
+      "body": "Voici ce qui est en place.",
+      "body_owner": "Vous en êtes propriétaire. Voici ce qui est en place.",
+      "body_member": "Vous en êtes membre. Voici ce qui est en place."
     },
     "github": {
-      "title": "Connecter GitHub",
+      "title": "Connectez GitHub",
       "body": "Les agents Cloud travaillent dans vos dépôts, sur leurs propres machines. Connectez GitHub pour qu’ils puissent cloner et pousser leurs modifications."
     },
     "org": {
@@ -2750,7 +2750,7 @@
       "failed": "Impossible de créer {name}. Rien n’a été enregistré.",
       "body": "C’est le nom que verra votre équipe en vous rejoignant.",
       "field": "Nom de l’organisation",
-      "placeholder": "Votre entreprise ou équipe"
+      "placeholder": "Votre entreprise ou votre équipe"
     },
     "invite": {
       "one_address": "Une adresse",
@@ -2768,7 +2768,7 @@
       "sent": "{n, plural, one {# invitation envoyée. La personne recevra un e-mail de Zeron.} other {# invitations envoyées. Chacun recevra un e-mail de Zeron.}}",
       "body": "Les conversations et les agents que vous partagez restent synchronisés pour tout le monde.",
       "field": "Adresses e-mail",
-      "hint": "Entrée ou une virgule pour en ajouter une autre. Les personnes invitées deviennent membres."
+      "hint": "Ajoutez-en d’autres avec Entrée ou une virgule. Les personnes invitées deviennent membres."
     },
     "username": {
       "checking_label": "Vérification du nom d’utilisateur",
@@ -2784,7 +2784,7 @@
       "saving": "Enregistrement…",
       "title": "Réservez votre nom d’utilisateur",
       "failed": "Impossible d’enregistrer @{name}. {says} Rien n’a été modifié.",
-      "body": "C’est l’adresse de votre carte, et il est à vous pour toujours.",
+      "body": "Il sert d’adresse à votre carte, et il vous appartient pour de bon.",
       "field": "Nom d’utilisateur",
       "placeholder": "pseudo"
     },
@@ -2794,7 +2794,7 @@
       "failed_body": "{says} Réessayez dans un instant."
     },
     "providers": {
-      "title_install": "Installer un agent",
+      "title_install": "Installez un agent",
       "title": "Vos agents",
       "looking": "Recherche d’agents de code sur cet ordinateur…",
       "unavailable": "Zeron fait tourner les agents de code que vous utilisez déjà.",
@@ -2821,7 +2821,7 @@
     },
     "session": {
       "missing_title": "Cette conversation est introuvable",
-      "missing_body": "Elle a peut-être été archivée, ou elle se trouve sur un appareil qui n’est pas encore synchronisé.",
+      "missing_body": "Elle a peut-être été archivée, ou se trouve sur un appareil pas encore synchronisé.",
       "new_chat": "Nouvelle conversation",
       "offline_title": "Impossible de charger cette conversation pour l’instant",
       "offline_body": "Zeron l’affichera dès qu’il pourra de nouveau joindre vos agents."
@@ -2843,8 +2843,8 @@
       "subagent": "Sous-agent",
       "side_chat": "Conversation annexe",
       "placeholder": "Demander à la conversation annexe…",
-      "didnt_send": "Votre message n’a pas été envoyé",
-      "couldnt_fork": "Impossible de bifurquer cette conversation",
+      "didnt_send": "Message non envoyé",
+      "couldnt_fork": "Impossible de dupliquer cette conversation",
       "forking": "Bifurcation…",
       "retry": "Réessayer"
     },
@@ -2881,7 +2881,7 @@
       "untitled": "Conversation sans titre"
     },
     "invocations": {
-      "couldnt_list": "Impossible de lister les commandes"
+      "couldnt_list": "Impossible d’obtenir la liste des commandes"
     },
     "reply_images": {
       "couldnt_read": "Lecture impossible"
@@ -2912,25 +2912,25 @@
         "no_matches_hint": "Aucune branche ne correspond à « {query} »",
         "loading": "Chargement des branches…",
         "offline": "Appareil hors ligne",
-        "offline_hint": "Ses branches s’afficheront à son retour.",
+        "offline_hint": "Ses branches s’afficheront à son retour en ligne.",
         "error": "Impossible de lire les branches",
-        "error_cloud_hint": "GitHub n’a pas répondu. La branche par défaut du dépôt est utilisée.",
+        "error_cloud_hint": "GitHub n’a pas répondu. Zeron utilise la branche par défaut du dépôt.",
         "error_hint": "Git n’a pas répondu pour ce projet.",
         "none": "Aucune branche",
         "none_hint": "Le dossier de ce projet n’en a pas encore."
       },
       "blocked": {
         "project_gone": "Ce projet n’existe plus. Choisissez-en un autre, ou aucun.",
-        "cloud_needs_project": "Les conversations Cloud fonctionnent dans un projet. Choisissez-en un que Cloud peut ouvrir."
+        "cloud_needs_project": "Les conversations Cloud ont besoin d’un projet. Choisissez-en un accessible à Cloud."
       }
     },
     "composer": {
       "account_not_switched": "Impossible de changer de compte",
       "placeholder": "Posez une question, @ pour mentionner…",
       "comments": "{n, plural, one {# commentaire} other {# commentaires}}",
-      "edit_conflict": "Le message en file a changé entre-temps : votre modification n’a pas été enregistrée",
-      "edit_not_saved": "Votre modification n’a pas été enregistrée",
-      "didnt_send": "Votre message n’a pas été envoyé",
+      "edit_conflict": "Le message en attente a changé entre-temps : modification non enregistrée",
+      "edit_not_saved": "Modification non enregistrée",
+      "didnt_send": "Message non envoyé",
       "didnt_remove": "Impossible de retirer ce message",
       "starting_cloud": "Démarrage d’une machine Cloud…",
       "starting": "Démarrage de la conversation…",
@@ -2957,10 +2957,10 @@
       }
     },
     "dictation": {
-      "failed": "Dictée arrêtée",
+      "failed": "Dictée interrompue",
       "hold": "Maintenir pour dicter",
       "hold_hint": "Maintenez le micro ou le raccourci pendant que vous parlez.",
-      "no_speech": "Aucune parole reconnue. Votre brouillon n’a pas changé.",
+      "no_speech": "Aucune parole détectée. Le brouillon reste inchangé.",
       "transcribing": "Transcription…",
       "starting": "Démarrage…"
     },
@@ -2969,27 +2969,27 @@
       "stage_clone": "clonage du dépôt",
       "stage_branch": "passage sur la branche",
       "stage_start": "démarrage",
-      "asleep": "Machine Cloud en veille — elle se réveillera à votre prochain envoi",
+      "asleep": "Machine Cloud en veille — elle se réveillera au prochain message",
       "wake": "Réveiller",
       "waking_stage": "Réveil de la machine Cloud — {stage}…",
       "provisioning": "Démarrage d’une machine Cloud…",
       "waking": "Réveil de la machine Cloud…",
       "updating": "Mise à jour de la machine Cloud…",
       "slow": "Le réveil de la machine Cloud prend plus de temps que d’habitude…",
-      "restored_title": "Cette conversation a été restaurée depuis sa copie sur le serveur",
+      "restored_title": "Cette conversation a été restaurée à partir de la copie du serveur",
       "restored_summary": "Sa machine a reconstruit sa copie de la conversation",
-      "restored_body": "La machine de cette conversation a trouvé sa propre copie de la conversation endommagée et l’a reconstruite à partir de la copie du serveur.",
+      "restored_body": "La copie de la conversation sur sa machine était endommagée : la machine l’a reconstruite à partir de la copie du serveur.",
       "stopping": "La machine Cloud se met en veille…",
       "deleting": "Suppression de la machine Cloud…",
-      "too_small": "Cette taille ne peut pas contenir les fichiers de cette conversation. Choisissez-en une plus grande.",
+      "too_small": "Cette taille est trop petite pour les fichiers de cette conversation. Choisissez-en une plus grande.",
       "offline": "Vous êtes hors ligne. Réessayez une fois la connexion rétablie.",
       "outdated": "Cette version de Zeron ne peut pas réveiller les machines Cloud. Mettez-la à jour dans À propos.",
       "wake_failed_title": "La machine ne s’est pas réveillée",
       "wake_failed_body": "La machine ne s’est pas réveillée. Réessayez dans un instant.",
-      "expired_title": "Les fichiers de la machine ont disparu",
+      "expired_title": "Fichiers de la machine supprimés",
       "expired_summary": "La conversation est conservée",
-      "expired_body_on": "La machine de cette conversation est restée trop longtemps en veille et ses fichiers ont été supprimés. La conversation est conservée. Une nouvelle machine repart de {repo}, sur la même branche ; tout ce qui a été poussé revient avec elle.",
-      "expired_body": "La machine de cette conversation est restée trop longtemps en veille et ses fichiers ont été supprimés. La conversation est conservée. Une nouvelle machine repart de son dépôt, sur la même branche ; tout ce qui a été poussé revient avec elle.",
+      "expired_body_on": "La machine de cette conversation est restée trop longtemps en veille et ses fichiers ont été supprimés. La conversation est conservée. Une nouvelle machine repartira de {repo}, sur la même branche, avec tout ce qui a été poussé.",
+      "expired_body": "La machine de cette conversation est restée trop longtemps en veille et ses fichiers ont été supprimés. La conversation est conservée. Une nouvelle machine repartira de son dépôt, sur la même branche, avec tout ce qui a été poussé.",
       "fresh": "Démarrer une nouvelle machine",
       "blocked_title": "La machine ne peut pas se réveiller",
       "blocked_summary": "Il lui faut {needed} Go de disque",
@@ -2998,20 +2998,20 @@
       "failed_unknown": "Un problème est survenu sur sa machine.",
       "retry": "Réessayer",
       "disk_title": "Disque plein à {percent} %",
-      "disk_summary": "{used} sur {capacity} Go utilisés sur la machine de cette conversation",
-      "disk_body": "La machine de cette conversation a utilisé {used} de ses {capacity} Go. Une taille supérieure lui laisse de la marge avant d’être à court.",
-      "disk_body_critical": "La machine de cette conversation a utilisé {used} de ses {capacity} Go et risque d’échouer une fois le disque plein. Une taille supérieure lui laisse de la marge.",
+      "disk_summary": "{used} sur {capacity} Go utilisés par la machine de cette conversation",
+      "disk_body": "La machine de cette conversation occupe {used} de ses {capacity} Go. Une taille supérieure lui laissera de la marge avant qu’elle ne manque de place.",
+      "disk_body_critical": "La machine de cette conversation occupe {used} de ses {capacity} Go et risque de tomber en panne une fois le disque plein. Une taille supérieure lui laissera de la marge.",
       "expiring_title": "Machine en veille",
       "expiring_summary": "Ses fichiers seront supprimés dans {days, plural, one {# jour} other {# jours}}",
-      "expiring_body": "La machine de cette conversation est en veille depuis un moment. Ses fichiers seront supprimés dans {days, plural, one {# jour} other {# jours}} si elle n’est pas réveillée ; la conversation est conservée dans tous les cas.",
+      "expiring_body": "La machine de cette conversation est en veille depuis un moment. Ses fichiers seront supprimés dans {days, plural, one {# jour} other {# jours}} si elle n’est pas réveillée d’ici là ; la conversation est conservée dans tous les cas.",
       "wake_now": "Réveiller maintenant",
-      "holds": "capacité {gb} Go",
+      "holds": "{gb} Go maximum",
       "current": "Actuelle",
       "after_turn": "après ce tour",
       "rate": "{rate} crédits",
       "none_fit": "Aucune machine ne peut contenir les {needs} Go dont cette conversation a besoin. Vous pouvez continuer dans une nouvelle conversation à partir de ce qui a été poussé ; cette conversation et ses fichiers restent tels quels.",
       "none_bigger": "C’est la plus grande machine disponible. Pour libérer de la place, il faut supprimer des fichiers.",
-      "restart_note": "Choisir une taille redémarre la machine sur celle-ci, avec ses fichiers.",
+      "restart_note": "La machine redémarre à la taille choisie, avec ses fichiers.",
       "blocked_body_none": "La machine de cette conversation ne peut pas se réveiller : il lui faut {needs} Go de disque.",
       "new_chat": "Démarrer une nouvelle conversation",
       "wake_here": "Réveiller ici",
@@ -3026,9 +3026,9 @@
       "ago_minutes": "{n, plural, one {il y a # minute} other {il y a # minutes}}",
       "ago_hours": "{n, plural, one {il y a # heure} other {il y a # heures}}",
       "ago_days": "{n, plural, one {il y a # jour} other {il y a # jours}}",
-      "queued_old_title": "{n, plural, one {Un message en file partira à son réveil} other {# messages en file partiront à son réveil}}",
-      "queued_old_summary": "Mis en file {ago}",
-      "queued_old_body": "Mis en file {ago}, ils partiront dès que la machine de cette conversation se réveillera. Retirez d’abord de la file ceux dont vous ne voulez plus.",
+      "queued_old_title": "{n, plural, one {Un message en attente partira à son réveil} other {# messages en attente partiront à son réveil}}",
+      "queued_old_summary": "Mis en attente {ago}",
+      "queued_old_body": "Mis en attente {ago}, ils partiront dès que la machine de cette conversation se réveillera. Retirez d’abord ceux dont vous ne voulez plus.",
       "send_failed_title": "Un message n’a pas été envoyé",
       "store_full": "Trop de fichiers attendent d’être récupérés par les machines Cloud. Réessayez quand l’une d’elles l’aura fait.",
       "held_sending": "Envoi…",
@@ -3083,21 +3083,21 @@
       "terminal": "Terminal",
       "title": "Ouvrir un onglet",
       "side_chat": "Conversation annexe",
-      "fork": "Bifurquer la conversation"
+      "fork": "Dupliquer la conversation"
     },
     "plugin_off": "Son plugin n’est pas activé pour le moment.",
     "broken": {
       "browser": {
         "title": "Le navigateur n’a pas pu se charger",
-        "body": "Enregistrez à nouveau le fichier une fois corrigé, et il reviendra ici."
+        "body": "Une fois le fichier corrigé, enregistrez-le : le navigateur reviendra ici."
       },
       "terminals": {
         "title": "Les terminaux n’ont pas pu se charger",
-        "body": "Enregistrez à nouveau le fichier une fois corrigé, et ils reviendront ici."
+        "body": "Une fois le fichier corrigé, enregistrez-le : les terminaux reviendront ici."
       },
       "tab": {
         "title": "Cet onglet n’a pas pu se charger",
-        "body": "Enregistrez à nouveau le fichier une fois corrigé, et il reviendra ici tel quel."
+        "body": "Une fois le fichier corrigé, enregistrez-le : l’onglet reviendra ici tel qu’il était."
       }
     },
     "escape_hint": "Échap ramène à l’onglet du fichier",
@@ -3111,7 +3111,7 @@
       "unsaved": "« {title} » contient des modifications non enregistrées. Fermer l’onglet les abandonnera."
     },
     "terminal": {
-      "no_session": "Cet onglet n’a aucune session où s’exécuter.",
+      "no_session": "Cet onglet n’est rattaché à aucune session.",
       "offline": "Zeron ne peut pas joindre l’appareil de cette session pour le moment.",
       "update": "Mettez à jour Zeron pour utiliser les terminaux ici.",
       "failed": "Impossible d’ouvrir le terminal",
@@ -3121,7 +3121,7 @@
       "command": {
         "annotate": "Annoter un élément",
         "new_tab": "Nouvel onglet de navigateur",
-        "open_location": "Ouvrir l’adresse",
+        "open_location": "Ouvrir l’emplacement",
         "reload": "Recharger la page",
         "zoom_in": "Zoom avant",
         "zoom_out": "Zoom arrière",
@@ -3129,7 +3129,7 @@
       },
       "bar": "Navigateur",
       "history": "Historique",
-      "forward": "Avancer",
+      "forward": "Suivant",
       "address": "Adresse",
       "address_placeholder": "Site web ou localhost:3000",
       "page_controls": "Page",
@@ -3151,7 +3151,7 @@
         "browse_title": "Naviguez à côté de la conversation",
         "preview_body": "Un serveur de développement lancé dans ce projet, ou tout site web ou adresse localhost saisi ci-dessus.",
         "looking": "Recherche de serveurs de développement dans ce projet…",
-        "body": "Saisissez un site web ou une adresse localhost. Pointez des parties d’une page pour les joindre à votre message."
+        "body": "Saisissez un site web ou une adresse localhost. Désignez des éléments d’une page pour les joindre à votre message."
       },
       "web_page": "Page web",
       "offline_title": "Vous êtes hors ligne",
@@ -3185,7 +3185,7 @@
       },
       "navigation": "Navigation",
       "annotate_page": {
-        "hint": "Pointez un élément, ou tracez une zone",
+        "hint": "Pointez sur un élément ou tracez une zone",
         "keys": "Maj-clic pour ajouter · Échap pour terminer",
         "selected": "Sélection : {n}",
         "region": "zone"
@@ -3209,13 +3209,13 @@
       "local_file": "Les fichiers locaux ne s’ouvrent pas dans le navigateur. Ouvrez-les depuis Fichiers ou depuis un lien de fichier dans la conversation.",
       "invalid": "Saisissez un site web ou une adresse localhost valide.",
       "scheme": "Seules les adresses http et https sont prises en charge.",
-      "credentials": "Utilisez une adresse sans nom d’utilisateur ni mot de passe intégré."
+      "credentials": "Utilisez une adresse sans nom d’utilisateur ni mot de passe intégrés."
     },
     "home": {
       "label": "Accueil de la session",
       "open": "Ouvrir",
       "unknown_device": "Appareil inconnu",
-      "away": "Absent : injoignable pour le moment",
+      "away": "Injoignable pour le moment",
       "no_project": "Aucun projet",
       "actions": "Actions",
       "actions_loading": "Chargement des actions…",
@@ -3231,7 +3231,7 @@
       "subagents": "Sous-agents",
       "open_side": "Ouvrir la conversation annexe {title}",
       "open_subagent": "Ouvrir le sous-agent {title}",
-      "working_first": "En cours d’abord",
+      "working_first": "En cours en premier",
       "mark_all_read": "Marquer les terminés comme lus",
       "new_side_in": "Nouvelle conversation annexe dans {name}",
       "new_side_on": "Nouvelle conversation annexe sur {name}",
@@ -3248,10 +3248,10 @@
         "delete_title": "Supprimer l’action ?",
         "delete_body": "L’action « {name} » sera définitivement supprimée.",
         "delete_confirm": "Supprimer",
-        "err_name": "Le nom de l’action est requis",
+        "err_name": "Le nom de l’action est obligatoire",
         "err_name_long": "Le nom de l’action ne doit pas dépasser 80 caractères",
-        "err_command": "La commande de l’action est requise",
-        "err_command_long": "La commande de l’action ne doit pas dépasser 16384 octets",
+        "err_command": "La commande de l’action est obligatoire",
+        "err_command_long": "La commande de l’action ne doit pas dépasser 16 384 octets",
         "icon_play": "Lancer",
         "icon_test": "Tester",
         "icon_lint": "Lint",
@@ -3275,7 +3275,7 @@
       "many": "{n, plural, one {# élément sera supprimé du disque, sans passer par la Corbeille. Cette action est irréversible.} other {# éléments seront supprimés du disque, sans passer par la Corbeille. Cette action est irréversible.}}"
     },
     "comment": {
-      "placeholder": "Laisser un commentaire",
+      "placeholder": "Ajouter un commentaire",
       "submit": "Commenter",
       "you": "Vous"
     },
@@ -3285,11 +3285,11 @@
     },
     "unreadable": {
       "title": "Impossible de lire ces fichiers",
-      "body": "Zeron n’a pas pu lister le contenu de ce dossier."
+      "body": "Zeron n’a pas pu lire le contenu de ce dossier."
     },
     "none": {
       "title": "Aucun fichier ici",
-      "body": "Ouvrez une session dans un projet pour voir ses fichiers."
+      "body": "Ouvrez une session dans un projet pour en voir les fichiers."
     },
     "broken": {
       "title": "Impossible de charger les fichiers",
@@ -3297,10 +3297,10 @@
     },
     "workspace": {
       "offline": "Zeron ne parvient pas à joindre l’appareil de cette session pour le moment.",
-      "unreadable_text": "Ce n’est pas du texte que Zeron sait lire.",
+      "unreadable_text": "Ce n’est pas du texte lisible par Zeron.",
       "not_remade": "Impossible de recréer {name}",
       "not_saved": "Impossible d’enregistrer {name}",
-      "not_read_yet": "Il n’a pas encore été lu sur le disque.",
+      "not_read_yet": "Le fichier n’a pas encore été chargé depuis le disque.",
       "cant_save_here": "Impossible d’enregistrer {name} ici",
       "read_only": "Zeron peut afficher ce fichier, mais pas le modifier.",
       "not_moved": "Impossible de déplacer {name}",
@@ -3318,11 +3318,11 @@
     "update": {
       "restart": "Redémarrer pour mettre à jour",
       "out_of_date": "Le moteur de Zeron n’est pas à jour",
-      "restart_tip": "Zeron s’est mis à jour en arrière-plan. Redémarrer son moteur arrête tout ce qui y tourne.",
-      "theirs_tip": "Il a été lancé en dehors de cette app : redémarrez-le là-bas pour le mettre à jour.",
-      "short": "Moteur pas à jour",
-      "old": "Cette version de Zeron demande un moteur plus récent",
-      "old_tip": "Son moteur est plus ancien que ne l’exige cette version. Ouvrez « À propos et mises à jour » pour revenir à la version Stable.",
+      "restart_tip": "Zeron s’est mis à jour en arrière-plan. Redémarrer le moteur interrompt tout ce qui y tourne.",
+      "theirs_tip": "Il a été lancé en dehors de cette app : pour le mettre à jour, redémarrez-le de la même manière.",
+      "short": "Moteur obsolète",
+      "old": "Cette version de Zeron nécessite un moteur plus récent",
+      "old_tip": "Le moteur est trop ancien pour cette version. Ouvrez « À propos et mises à jour » pour revenir à la version Stable.",
       "short_old": "Moteur plus récent requis"
     }
   },
@@ -3374,7 +3374,7 @@
         "side_panel": "le panneau latéral",
         "chats": "les conversations",
         "main_window": "la fenêtre principale",
-        "page_area": "la zone de page",
+        "page_area": "la zone de contenu",
         "chat_page": "la page de conversation",
         "new_chat_page": "la page de nouvelle conversation",
         "zeron": "une partie de Zeron",
@@ -3390,11 +3390,11 @@
         },
         "ui_change": {
           "title": "Modifier l’affichage dans {places}",
-          "detail": "Il peut masquer, réordonner, renommer ou redessiner ce qui s’y trouve."
+          "detail": "Il peut masquer, réorganiser, renommer ou redessiner ce qui s’y trouve."
         },
         "ui_replace": {
           "title": "Remplacer {places} par sa propre interface",
-          "detail": "Son code s’exécute au sein de Zeron : il peut faire tout ce que vous pouvez faire."
+          "detail": "Son code s’exécute dans Zeron : il peut faire tout ce que vous pouvez faire."
         },
         "profile_read": {
           "title": "Voir votre nom, votre nom d’utilisateur et votre photo"
@@ -3438,11 +3438,11 @@
         },
         "accounts_switch": {
           "title": "Changer le compte qu’utilisent vos agents",
-          "detail": "Il peut rendre actif un autre compte enregistré. Il ne peut pas se connecter à un compte ni en supprimer un."
+          "detail": "Il peut rendre actif un autre compte enregistré. Il ne peut ni se connecter à un compte ni en supprimer un."
         },
         "accounts_pin": {
-          "title": "Faire tourner des conversations sur d’autres comptes enregistrés",
-          "detail": "Il peut faire tourner une conversation sur un compte enregistré autre que le compte actif, et choisir le compte sur lequel démarre une nouvelle conversation. Le compte actif reste inchangé. Il ne peut pas se connecter à un compte ni en supprimer un."
+          "title": "Lancer des conversations sur d’autres comptes enregistrés",
+          "detail": "Il peut utiliser pour une conversation un compte enregistré autre que le compte actif, et choisir le compte avec lequel démarre une nouvelle conversation. Le compte actif reste inchangé. Il ne peut ni se connecter à un compte ni en supprimer un."
         },
         "models_read": {
           "title": "Voir les modèles de vos agents",
@@ -3450,21 +3450,21 @@
         },
         "models_set": {
           "title": "Changer le modèle de vos conversations",
-          "detail": "Le modèle, l’effort et les options d’une conversation pour son prochain tour, et les choix de départ des nouvelles conversations."
+          "detail": "Le modèle, l’effort et les options d’une conversation pour son prochain tour, et les réglages de départ des nouvelles conversations."
         },
         "messages_send": {
           "title": "Envoyer des messages à vos agents en votre nom",
-          "detail": "Il peut envoyer un message dans n’importe quelle conversation, en démarrer de nouvelles et répondre à leurs questions, comme si vous l’aviez tapé. Vos agents font alors ce qu’il dit."
+          "detail": "Il peut envoyer un message dans n’importe quelle conversation, en démarrer de nouvelles et répondre à leurs questions, comme si vous l’aviez écrit vous-même. Vos agents exécutent alors ce qu’il demande."
         },
         "links_open": {
           "title": "Ouvrir des liens",
-          "detail": "Là où vous ouvrez vos liens : Réglages → Liens."
+          "detail": "À l’endroit choisi dans Réglages → Liens."
         },
         "navigate": {
           "title": "Ouvrir des conversations et des pages"
         },
         "compose": {
-          "title": "Mettre du texte dans la zone de saisie",
+          "title": "Insérer du texte dans la zone de saisie",
           "detail": "C’est toujours vous qui l’envoyez."
         },
         "network": {
@@ -3517,8 +3517,8 @@
       },
       "about": {
         "failed": "A cessé de fonctionner : {reason}",
-        "broken": "Il ne peut pas se charger.",
-        "tampered": "Modifié depuis que vous l’avez autorisé.",
+        "broken": "Impossible de le charger.",
+        "tampered": "Modifié depuis votre autorisation.",
         "asks_more": "Demande plus que ce que vous avez autorisé.",
         "waiting": "En attente de votre autorisation.",
         "no_description": "Aucune description."
@@ -3526,15 +3526,15 @@
       "grants": "Il peut {list}.",
       "update": {
         "refused": "La version {version} n’a pas été installée : {reason}.",
-        "refused_unversioned": "La version n’a pas été installée : {reason}.",
+        "refused_unversioned": "La nouvelle version n’a pas été installée : {reason}.",
         "available": "Mise à jour disponible : {version}.",
         "available_unversioned": "Mise à jour disponible.",
-        "added": "Il demande aussi à {list} ; votre accord vous sera d’abord demandé.",
+        "added": "Il demande aussi à {list} ; vous devrez d’abord l’autoriser.",
         "removed": "Il ne demande plus à {list}."
       },
       "unverified": "Non vérifié",
-      "from": "Depuis {where}",
-      "from_file": "Depuis un fichier",
+      "from": "Provient de {where}",
+      "from_file": "Provient d’un fichier",
       "more": "{n, plural, one {et # autre} other {et # autres}}",
       "diff": {
         "commands": "Exécuter d’autres programmes en votre nom",
@@ -3555,12 +3555,12 @@
       "details": {
         "changes": "Parties de Zeron qu’il modifie",
         "replaces": "Écrans qu’il remplace",
-        "changes_since": "Modifie aussi, depuis votre autorisation"
+        "changes_since": "Nouvelles modifications depuis votre autorisation"
       }
     },
     "page": {
       "title": "Plugins",
-      "description": "Ce que les plugins ajoutent à Zeron sur chacun de vos ordinateurs, et les outils qu’ils donnent à vos agents.",
+      "description": "Ce que les plugins ajoutent à Zeron sur chacun de vos ordinateurs, et les outils qu’ils fournissent à vos agents.",
       "search": "Rechercher des plugins",
       "tabs": "Plugins",
       "installed": "Installés",
@@ -3570,7 +3570,7 @@
       "installed_toast": "{name} installé",
       "installed_toast_version": "{name} {version} installé",
       "updated_toast": "{name} mis à jour",
-      "updated_toast_version": "{name} mis à jour en {version}",
+      "updated_toast_version": "{name} mis à jour ({version})",
       "couldnt_install": "Impossible d’installer le plugin",
       "couldnt_update": "Impossible de mettre à jour {name}",
       "settings_of": "Réglages de {name}",
@@ -3601,7 +3601,7 @@
       "cant_reach": "Impossible de joindre {device} pour l’instant. Réessayez quand il sera en ligne.",
       "couldnt_switch": "Impossible d’activer ou de désactiver {name}",
       "couldnt_remove": "Impossible de retirer le plugin",
-      "none_body_device": "Installez-en un depuis un lien, ou ajoutez-le sur cet ordinateur-là.",
+      "none_body_device": "Installez-en un depuis un lien, ou ajoutez-en un sur cet ordinateur.",
       "install_link": "Installer depuis un lien",
       "install_more": "Installer",
       "device_offline_title": "{device} est hors ligne",
@@ -3617,32 +3617,32 @@
       "made_by_you": "Créé par vous",
       "made_by": "Créé par @{username}",
       "unknown_author": "Auteur inconnu",
-      "tampered_why": "Il a été modifié après votre autorisation, il ne s’exécutera donc pas. Retirez-le, ou réinstallez-le depuis sa provenance.",
-      "unknown_why": "Zeron ne peut pas savoir qui l’a créé. Ne l’autorisez que si vous faites confiance à sa provenance.",
+      "tampered_why": "Il a été modifié après votre autorisation, il ne s’exécutera donc pas. Retirez-le, ou réinstallez-le depuis sa source.",
+      "unknown_why": "Zeron ne peut pas déterminer qui l’a créé. Ne l’autorisez que si vous faites confiance à sa source.",
       "nothing": "Rien à autoriser",
       "asks_nothing": "Il ne demande rien d’autre que de s’exécuter dans son propre espace.",
       "allow_title": "Autoriser {name} ?",
       "tampered": "Modifié depuis votre autorisation",
       "asks_again": "Il demande désormais aussi l’autorisation de :",
       "asks": "Il demande l’autorisation de :",
-      "mine": "C’est le mien…",
+      "mine": "C’est mon plugin…",
       "not_now": "Plus tard",
       "allow": "Autoriser",
       "on_device": "Sur {device}",
-      "unverified_why": "Zeron ne peut pas confirmer qui l’a créé. Ne l’autorisez que si vous faites confiance à sa provenance.",
-      "unverified_why_from": "Zeron ne peut pas confirmer qui l’a créé. Ne l’autorisez que si vous faites confiance à sa provenance : {where}.",
+      "unverified_why": "Zeron ne peut pas confirmer qui l’a créé. Ne l’autorisez que si vous faites confiance à sa source.",
+      "unverified_why_from": "Zeron ne peut pas confirmer qui l’a créé. Ne l’autorisez que si vous faites confiance à sa source : {where}.",
       "made_on_your_device": "Créé sur l’un de vos appareils",
       "grew": "Nouveau depuis votre autorisation :",
       "allow_there": "Autorisé sur {device} uniquement. Chacun de vos autres ordinateurs vous le demandera.",
       "allow_on": "Autoriser sur {device}",
-      "mine_confirm": "Signer {name} comme le vôtre ? Seulement si vous l’avez écrit vous-même : à partir de maintenant, Zeron le traitera comme le vôtre sur cet ordinateur.",
+      "mine_confirm": "Signer {name} à votre nom ? Uniquement si vous l’avez écrit vous-même : Zeron le considérera désormais comme le vôtre sur cet ordinateur.",
       "mine_cancel": "Annuler",
-      "mine_sign": "Signer comme le mien",
+      "mine_sign": "Signer à mon nom",
       "details": "Détails",
       "details_hide": "Masquer les détails",
       "remove": "Retirer",
       "reinstall": "Réinstaller",
-      "tampered_why_no_source": "Il a été modifié après votre autorisation, il ne s’exécutera donc pas. Retirez-le, puis réinstallez-le si vous en voulez toujours."
+      "tampered_why_no_source": "Il a été modifié après votre autorisation, il ne s’exécutera donc pas. Retirez-le, puis réinstallez-le si vous le souhaitez toujours."
     },
     "permissions": {
       "screen_recording": {
@@ -3655,7 +3655,7 @@
         "description": "Permet à {name} de lire le texte des fenêtres d’autres applications.",
         "grant": "Autoriser l’accessibilité"
       },
-      "note": "macOS les demande pour l’app qui a ouvert Zeron : Zeron lui-même ou, s’il a été lancé depuis un terminal ou un éditeur, cette app. Accordez-les dans Réglages Système → Confidentialité et sécurité, puis quittez-la et rouvrez-la une fois."
+      "note": "macOS les demande pour l’app qui a ouvert Zeron : Zeron lui-même ou, s’il a été lancé depuis un terminal ou un éditeur, cette app. Accordez-les dans Réglages Système → Confidentialité et sécurité, puis quittez-la et rouvrez-la."
     },
     "settings": {
       "granted": "Autorisé",
@@ -3671,14 +3671,14 @@
       "folder_title": "{plugin} : {setting}",
       "couldnt_choose_folder": "Impossible de choisir ce dossier",
       "choose": "Choisir",
-      "description": "Réglages du plugin {name}. Il les lit au fur et à mesure que vous les modifiez.",
+      "description": "Réglages du plugin {name}. Il les prend en compte dès que vous les modifiez.",
       "terms": "plugin extension",
       "permission_terms": "permission privacy macos allow autorisation confidentialité confidentialite autoriser",
       "wallpaper": {
         "label": "Utiliser comme fond d’écran",
-        "on": "Une nouvelle conversation s’ouvre sur ce que dessine {name}, à la place du fond d’écran d’Apparence.",
-        "off": "Ouvrir les nouvelles conversations sur ce que dessine {name}. Le fond d’écran d’Apparence revient quand cette option est désactivée.",
-        "instead_of": "{other} fournit actuellement le fond d’écran. Activer cette option utilise {name} à la place.",
+        "on": "Les nouvelles conversations s’ouvrent sur ce que dessine {name}, à la place du fond d’écran défini dans Apparence.",
+        "off": "Ouvrir les nouvelles conversations sur ce que dessine {name}. Le fond d’écran défini dans Apparence revient quand l’option est désactivée.",
+        "instead_of": "{other} fournit actuellement le fond d’écran. Si vous activez cette option, {name} le remplacera.",
         "terms": "wallpaper background new chat effect fond écran ecran arrière-plan arriere-plan nouvelle conversation effet"
       }
     },
@@ -3705,27 +3705,27 @@
       "git_timeout": "Le dépôt a mis trop de temps à répondre. Réessayez dans un instant.",
       "repo_unreadable": "Impossible de lire ce dépôt. Vérifiez qu’il est public et que la branche est la bonne.",
       "ref_not_found": "Cette branche ou ce tag est introuvable.",
-      "no_manifest": "Il n’y a pas de zeron-plugin.json à cet endroit.",
+      "no_manifest": "Aucun fichier zeron-plugin.json à cet emplacement.",
       "rate_limited": "GitHub refuse pour l’instant les requêtes de cet appareil. Réessayez plus tard, ou connectez-vous avec l’outil en ligne de commande de GitHub (gh auth login) pour que Zeron fasse ses requêtes en votre nom.",
       "github_unreachable": "Impossible de joindre GitHub. Vérifiez votre connexion et réessayez.",
       "release_not_found": "Cette release est introuvable.",
       "no_package": "Cette release ne contient aucun fichier que Zeron puisse installer.",
       "download_failed": "Impossible de le télécharger. Vérifiez votre connexion et réessayez.",
       "not_a_link": "Ce lien ne mène ni à un paquet de plugin ni à un dépôt git.",
-      "https_only": "Les plugins proviennent de liens https.",
+      "https_only": "Les plugins doivent provenir d’un lien https.",
       "other_signer": "Un plugin portant ce nom est déjà installé, signé par quelqu’un d’autre. Retirez-le d’abord pour installer celui-ci.",
       "new_signer": "La nouvelle version est signée par quelqu’un d’autre : elle ne sera donc pas installée.",
       "installed_unsigned": "Un plugin portant ce nom est déjà installé, et il n’est pas signé. Retirez-le d’abord pour installer celui-ci.",
       "not_newer": "Cette version n’est pas plus récente que celle installée : elle ne la remplacera donc pas.",
       "different_plugin": "La nouvelle version est un autre plugin.",
       "up_to_date": "Il est à jour.",
-      "no_source": "Sa provenance n’est plus connue : il ne peut donc pas être réinstallé depuis celle-ci. Retirez-le, puis réinstallez-le."
+      "no_source": "Sa source n’est plus connue : impossible de le réinstaller depuis celle-ci. Retirez-le, puis réinstallez-le."
     }
   },
   "templates": {
     "page": {
       "title": "Modèles d’interface",
-      "description": "Des interfaces complètes pour Zeron. Ce qu’un modèle laisse de côté vient de l’interface par défaut.",
+      "description": "Des interfaces complètes pour Zeron. Ce qu’un modèle ne prévoit pas est repris de l’interface par défaut.",
       "search": "Rechercher des modèles",
       "tabs": "Modèles",
       "installed": "Installés",
@@ -3734,11 +3734,11 @@
         "zeron": "par Zeron",
         "you": "par vous",
         "verified": "par @{username}",
-        "unknown": "d’un auteur inconnu",
+        "unknown": "par un auteur inconnu",
         "named": "par {name}"
       },
       "about": {
-        "broken": "Impossible de l’exécuter, l’interface par défaut s’affiche à sa place : {error}",
+        "broken": "Exécution impossible, l’interface par défaut s’affiche à la place : {error}",
         "errors": "Certaines parties affichent l’interface par défaut : {error}",
         "out_of_date": "Conçu pour Zeron {version}. Zeron a été mis à jour depuis.",
         "out_of_date_unversioned": "Conçu pour une version antérieure de Zeron. Zeron a été mis à jour depuis.",
@@ -3762,15 +3762,15 @@
       "export": "Exporter…",
       "use": "Utiliser",
       "couldnt_use": "Impossible d’utiliser {name}",
-      "in_use": "Utilisé",
+      "in_use": "Actif",
       "none_yours": "Vous n’en avez pas encore",
       "none_body": "Demandez à un agent d’en créer un, ou partez d’une copie de l’interface par défaut.",
       "show_templates_folder": "Afficher le dossier des modèles",
       "delete_title": "Supprimer ce modèle ?",
-      "delete_body": "Il est mis de côté dans le dossier des modèles : vous pourrez le récupérer. S’il est utilisé, Zeron revient à l’interface par défaut.",
+      "delete_body": "Il est mis de côté dans le dossier des modèles : vous pourrez le récupérer. S’il est actif, Zeron revient à l’interface par défaut.",
       "couldnt_delete": "Impossible de supprimer le modèle",
       "new_title": "Nouveau modèle",
-      "new_body": "Une copie de l’interface par défaut, à modifier à votre guise. Demandez à un agent de la changer, ou modifiez ses fichiers vous-même.",
+      "new_body": "Une copie de l’interface par défaut, à modifier à votre guise. Demandez à un agent de s’en charger, ou modifiez ses fichiers vous-même.",
       "make_it": "Créer",
       "couldnt_make": "Impossible de créer le modèle",
       "name": "Nom",
@@ -3778,7 +3778,7 @@
       "install_more": "Installer",
       "install_title": "Installer un modèle",
       "install_dialog_title": "Installer un modèle",
-      "install_dialog_body": "Collez un lien vers un fichier .zeron-template, une release GitHub ou un dépôt, ou choisissez un fichier. Zeron vérifie qui l’a signé, et vous l’autorisez avant qu’il soit utilisé.",
+      "install_dialog_body": "Collez un lien vers un fichier .zeron-template, une release GitHub ou un dépôt, ou choisissez un fichier. Zeron vérifie qui l’a signé, et rien n’est utilisé sans votre accord.",
       "link": "Lien",
       "install": "Installer",
       "choose_file": "Choisir un fichier",
@@ -3786,7 +3786,7 @@
       "update": "Mettre à jour",
       "updating": "Mise à jour…",
       "updated_toast": "{name} mis à jour",
-      "updated_toast_version": "{name} mis à jour en {version}",
+      "updated_toast_version": "{name} mis à jour ({version})",
       "couldnt_update": "Impossible de mettre à jour {name}"
     },
     "consent": {
@@ -3798,7 +3798,7 @@
       "whom_unknown": "la personne qui vous l’a envoyé",
       "checking": "Vérification du modèle…",
       "nothing": "Rien en attente",
-      "nothing_body": "Ce modèle a déjà reçu une réponse.",
+      "nothing_body": "Ce modèle a déjà été traité.",
       "install_title": "Installer {name} ?",
       "keep_title": "Conserver {name} ?",
       "keep_trust": "Ne le conservez que si vous faites confiance à son origine",
@@ -3824,7 +3824,7 @@
   "themes": {
     "page": {
       "title": "Thèmes",
-      "description": "Les couleurs de Zeron. Votre thème s’accorde avec n’importe quel modèle.",
+      "description": "Les couleurs de Zeron. Votre thème s’applique à tous les modèles.",
       "search": "Rechercher des thèmes",
       "tabs": "Thèmes",
       "all": "Tous",
@@ -3841,11 +3841,11 @@
       },
       "byline": {
         "builtin": "Intégré",
-        "template": "De {name}",
+        "template": "Issu de {name}",
         "imported": "Importé"
       },
-      "needs_fixing": "Quelque chose doit être corrigé dans ce thème.",
-      "in_use": "Utilisé",
+      "needs_fixing": "Ce thème contient une erreur à corriger.",
+      "in_use": "Actif",
       "for_light": "Clair",
       "for_dark": "Sombre",
       "use": "Utiliser",
@@ -3860,7 +3860,7 @@
       "couldnt_rename": "Impossible de renommer le thème",
       "name": "Nom",
       "remove_title": "Retirer ce thème ?",
-      "remove_body": "Il disparaît de vos thèmes. Partout où il était utilisé, le thème par défaut revient.",
+      "remove_body": "Il disparaît de vos thèmes. Là où il était actif, le thème par défaut le remplace.",
       "none_yours": "Vous n’en avez pas encore",
       "none_yours_body": "Importez un thème de couleurs VS Code : son fichier .json, ou le dossier d’une extension. Vous pouvez aussi le déposer sur cette page.",
       "none_templates": "Aucun modèle n’apporte de thème",
