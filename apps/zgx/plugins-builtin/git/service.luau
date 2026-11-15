@@ -126,8 +126,16 @@ end
 -- The folders git may work in: this device's chats' and projects'
 -- (`zeron.folders`), asked again when one isn't among those last heard.
 local folders: { string } = {}
+
+-- Drive paths use either separator; a POSIX name may contain a backslash.
+local function path_key(path: string): string
+	return if string.match(path, "^%a:[/\\]") then (string.gsub(path, "\\", "/")) else path
+end
+
 local function among(cwd: string): boolean
+	cwd = path_key(cwd)
 	for _, f in folders do
+		f = path_key(f)
 		local root = if string.sub(f, -1) == "/" then string.sub(f, 1, -2) else f
 		if cwd == root or string.sub(cwd, 1, #root + 1) == root .. "/" then
 			return true
@@ -140,15 +148,19 @@ end
 -- folder or a project's. Never anywhere a caller names (a planted
 -- repository's config would be git's to run).
 local function check_cwd(cwd: any): string
-	if type(cwd) ~= "string" or cwd == "" or string.sub(cwd, 1, 1) ~= "/" then
+	if type(cwd) ~= "string" or cwd == "" then
 		error("no_checkout: This chat has no folder to look in", 0)
 	end
-	for part in string.gmatch(cwd, "[^/]+") do
+	local key = path_key(cwd)
+	if string.sub(key, 1, 1) ~= "/" and not string.match(key, "^%a:/") then
+		error("no_checkout: This chat has no folder to look in", 0)
+	end
+	for part in string.gmatch(key, "[^/]+") do
 		if part == "." or part == ".." then
 			error("no_checkout: This chat has no folder to look in", 0)
 		end
 	end
-	cwd = if #cwd > 1 and string.sub(cwd, -1) == "/" then string.sub(cwd, 1, -2) else cwd
+	cwd = if string.sub(cwd, 1, 1) == "/" and #cwd > 1 and string.sub(cwd, -1) == "/" then string.sub(cwd, 1, -2) else cwd
 	if not among(cwd) then
 		folders = zeron.folders():await() or {}
 	end
