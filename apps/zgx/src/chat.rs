@@ -135,6 +135,9 @@ struct Chats {
     /// Moves with each chat let go of: only the last one's look at the
     /// footprint, once the app has rested, counts.
     let_go_turn: Cell<u64>,
+    /// What the log last said is kept (how many, in tenths of a MB): said
+    /// again only when it changes, not at every switch.
+    let_go_said: Cell<(usize, u64)>,
 }
 
 /// A transcript's entry. A settled one, built into its row and older than
@@ -1204,11 +1207,10 @@ impl Chats {
         }
         kept.push(LetGo { at: std::time::Instant::now(), bytes, id, entries, older_todo, built, built_model, context, context_usage });
         prune_let_go(&mut kept);
-        eprintln!(
-            "zeron-zgx: chat: kept chats let go of: {}, {:.1} MB",
-            kept.len(),
-            kept.iter().map(|held| held.bytes).sum::<usize>() as f64 / 1e6
-        );
+        let said = (kept.len(), (kept.iter().map(|held| held.bytes).sum::<usize>() as f64 / 1e5).round() as u64);
+        if self.let_go_said.replace(said) != said {
+            eprintln!("zeron-zgx: chat: kept chats let go of: {}, {:.1} MB", said.0, said.1 as f64 / 10.0);
+        }
         drop(kept);
         // The app's footprint once it has come to rest after the switch (as
         // it lets a chat go it's opening the next, drawing it, its GPU
@@ -1221,6 +1223,7 @@ impl Chats {
             zgx::timer::sleep(LET_GO_SETTLE).await;
             if me.let_go_turn.get() == turn && !room_to_keep() && !me.let_go.borrow().is_empty() {
                 me.let_go.borrow_mut().clear();
+                me.let_go_said.set((0, 0));
                 eprintln!("zeron-zgx: chat: kept chats let go of: none (the app's footprint at rest is past its mark)");
             }
         });
