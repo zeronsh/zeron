@@ -485,6 +485,32 @@ struct PersistedDelta {
     pending: Vec<PendingBatch>,
 }
 
+/// A save [`RegistryDoc::begin_save`] started: a copy of what it records,
+/// encoded without the doc.
+pub struct PendingSave {
+    body: SaveBody,
+    /// What was unsaved when it started (put back if it isn't stored).
+    unsaved: Option<HashSet<(String, String)>>,
+}
+
+enum SaveBody {
+    Whole(PersistedState),
+    Delta(PersistedDelta),
+}
+
+impl PendingSave {
+    pub fn is_delta(&self) -> bool {
+        matches!(self.body, SaveBody::Delta(_))
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, DocError> {
+        Ok(match &self.body {
+            SaveBody::Whole(state) => serde_json::to_vec(state)?,
+            SaveBody::Delta(delta) => serde_json::to_vec(delta)?,
+        })
+    }
+}
+
 /// The local registry replica. Pure data — no I/O, no async; the transport
 /// (`zeron_sync::RegistryClient`) and the engine host drive it under a lock.
 pub struct RegistryDoc {
@@ -574,6 +600,14 @@ impl RegistryDoc {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .version(kind)
+    }
+
+    /// How many rows of each kind the replica holds (introspection).
+    pub fn row_counts(&self) -> Vec<(String, usize)> {
+        let mut counts: Vec<(String, usize)> =
+            self.authoritative.iter().map(|(kind, rows)| (kind.clone(), rows.len())).collect();
+        counts.sort();
+        counts
     }
 
     /// Rows parsed by typed reads so far (each read re-parses only rows that
@@ -708,6 +742,56 @@ impl RegistryDoc {
     /// A save (whole or delta) recorded everything up to now.
     pub fn mark_saved(&mut self) {
         self.unsaved = Some(HashSet::new());
+    }
+
+    /// Start a save without holding the doc while it encodes and writes: the
+    /// rows it records are copied now and counted as saved. Encode and store
+    /// the result outside the registry lock, then [`Self::abort_save`] if the
+    /// write failed. A delta when `delta` and one can record the changes,
+    /// else whole. Writes made after this go to the next save.
+    pub fn begin_save(&mut self, delta: bool) -> PendingSave {
+        let unsaved = self.unsaved.replace(HashSet::new());
+        let body = match (&unsaved, delta) {
+            (Some(keys), true) => SaveBody::Delta(PersistedDelta {
+                v: 1,
+                resync_epoch: CURRENT_RESYNC_EPOCH,
+                server_seq: self.server_seq,
+                gc_floor: self.gc_floor,
+                clock: self.clock.clone(),
+                local_writes: self.local_writes,
+                rows: keys
+                    .iter()
+                    .filter_map(|(kind, id)| self.authoritative.get(kind)?.get(id).cloned())
+                    .collect(),
+                pending: self.pending.clone(),
+            }),
+            _ => SaveBody::Whole(PersistedState {
+                v: 1,
+                resync_epoch: CURRENT_RESYNC_EPOCH,
+                device_id: self.device_id.clone(),
+                server_seq: self.server_seq,
+                gc_floor: self.gc_floor,
+                clock: self.clock.clone(),
+                local_writes: self.local_writes,
+                rows: self
+                    .authoritative
+                    .values()
+                    .flat_map(|m| m.values().cloned())
+                    .collect(),
+                pending: self.pending.clone(),
+            }),
+        };
+        PendingSave { body, unsaved }
+    }
+
+    /// `save` was not stored: what it recorded is unsaved again.
+    pub fn abort_save(&mut self, save: PendingSave) {
+        match (save.unsaved, &mut self.unsaved) {
+            // (A full replace can only be recorded by a whole save.)
+            (None, now) => *now = None,
+            (Some(before), Some(now)) => now.extend(before),
+            (Some(_), None) => {}
+        }
     }
 
     /// The replica a whole snapshot plus its saved deltas hold. `chain` is
@@ -1290,6 +1374,32 @@ impl RegistryDoc {
     /// whose overlay changed since the previous read of this list are parsed
     /// again (`row_cache`); the first read, and one after a full replace,
     /// parse them all.
+    /// [`Self::read_cached`]'s parsed rows, of which `pick` takes what it
+    /// needs (no copy of every row).
+    pub(crate) fn read_cached_with<R, T, O>(
+        &self,
+        kind: &str,
+        convert: fn(R) -> T,
+        pick: impl FnOnce(&HashMap<String, T>) -> O,
+    ) -> O
+    where
+        R: serde::de::DeserializeOwned + 'static,
+        T: Clone + Send + std::fmt::Debug + 'static,
+    {
+        self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).read_with(
+            kind,
+            std::any::TypeId::of::<(R, T)>(),
+            || {
+                self.overlay_rows(kind)
+                    .iter()
+                    .filter_map(|row| self.parse_row(kind, row, convert).map(|v| (row.id.clone(), v)))
+                    .collect()
+            },
+            |id| self.overlay_row(kind, id).and_then(|row| self.parse_row(kind, &row, convert)),
+            pick,
+        )
+    }
+
     fn read_cached<R, T>(&self, kind: &str, convert: fn(R) -> T) -> Vec<T>
     where
         R: serde::de::DeserializeOwned + 'static,
