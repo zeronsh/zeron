@@ -2524,6 +2524,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		return { from = v, to = v, at = 0, dur = 0, delay = 0 }
 	end
 	local moving: { Anim } = {}
+	-- (The longest any of its motions runs, delay and all, in ms.)
+	local MOTION_MAX = 5000
 	local ticking: any = nil
 	-- Each frame: what has arrived is done (its `on_done` run); with nothing
 	-- left moving, the clock stops.
@@ -2532,7 +2534,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local left: { Anim } = {}
 		local arrived: { Anim } = {}
 		for _, a in moving do
-			if t >= a.at + a.delay + a.dur then
+			-- (Its end not a number (a place measured as NaN or inf), or long
+			-- past any motion's: done, so the clock can stop: left in, it
+			-- ran every frame for good, every row's height and ink again.)
+			local ends = a.at + a.delay + a.dur
+			if t >= ends or ends ~= ends or ends - a.at > MOTION_MAX or t - a.at > MOTION_MAX then
 				table.insert(arrived, a)
 			else
 				table.insert(left, a)
