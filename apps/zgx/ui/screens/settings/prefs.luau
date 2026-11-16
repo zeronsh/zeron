@@ -20,6 +20,8 @@
 --                                   (not terminals); the gallery's 13 by default
 --   prefs.conversation_width:get()  the transcript's and composer's widest, in points
 --                                   (560–1200; the gallery's 660 by default)
+--   prefs.conversation_fill:get()   the conversation fills the window, the width ignored
+--   prefs.conversation_max()        what they cap at: the width, or the window's, filling
 --   prefs.sound(kind):get()         whether a session's chime plays ("done",
 --                                   "request", "attention"; and `sounds`, all of them)
 --
@@ -85,6 +87,22 @@ M.CODE_FONT_SIZES = { 11, 12, 13, 14, 15, 16 }
 -- `zeron.prose.measure`).
 M.CONVERSATION_WIDTH = { min = 560, max = 1200, step = 20 }
 M.conversation_width = ui.persist("settings_conversation_width", 660)
+-- "Fill window": the conversation and its composer as wide as the room they
+-- have (their page's side padding still kept), whatever the width above.
+M.conversation_fill = ui.persist("settings_conversation_fill", false)
+-- What the transcript and composer cap at: the width set, or, filling, the
+-- window's own width, which nothing in it is wider than (a real width, so
+-- the composer's spring moves between two widths it can show). The window
+-- not laid out yet (a fixture without the shell): wider than any screen.
+local FILL_FALLBACK = 8192
+function M.conversation_max(): number
+	if M.conversation_fill:get() then
+		local fit: any = require("@app/screens/shell/fit")
+		local w = fit.viewport:get()
+		return if w > 0 then math.max(w, M.conversation_width:get()) else FILL_FALLBACK
+	end
+	return M.conversation_width:get()
+end
 
 -- The chimes: all of them, then each (each counts only while all are on).
 M.sounds = ui.persist("settings_sounds", true)

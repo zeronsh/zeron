@@ -1137,7 +1137,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		-- (A split's pane reads as the chat page: a little wider than its
 		-- composer, running under its head and past its foot, faded.)
 		measure = function(): number
-			return prefs.conversation_width:get() + (if split then 24 else 0)
+			return prefs.conversation_max() + (if split then 24 else 0)
 		end,
 		side = if split then 20 else nil,
 		fade_lead = if split then 12 else nil,

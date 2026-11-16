@@ -83,7 +83,7 @@ local function loading(): Node
 		ui.column {
 			w_full = true,
 			max_w = function(): number
-				return prefs.conversation_width:get()
+				return prefs.conversation_max()
 			end,
 			gap = "$space.3",
 			ui.row { w_full = true, justify = "end", ds.Skeleton { w = 220, h = 36, rounded = "$zeron.prose.bubble.radius" } },
@@ -275,7 +275,7 @@ local function Session(id: Id?): Node
 							-- (A little wider than the composer each side, so it's
 							-- seen fading as it passes behind.)
 							measure = function(): number
-								return prefs.conversation_width:get() + 24
+								return prefs.conversation_max() + 24
 							end,
 							side = 20,
 							fade_lead = 12,

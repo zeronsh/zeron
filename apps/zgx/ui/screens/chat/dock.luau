@@ -81,7 +81,7 @@ function M.Dock(props: DockProps): Node
 				w_full = true,
 				pointer_events = "auto",
 				max_w = function(): number
-					return prefs.conversation_width:get()
+					return prefs.conversation_max()
 				end,
 				on_resize = function(size: { w: number, h: number })
 					if math.abs(props.height:peek() - size.h) > 0.01 then
