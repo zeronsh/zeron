@@ -1110,7 +1110,22 @@ end
 
 -- Gives `slot`'s page composer the keys (its first placement's).
 function M.focus(slot: string)
+	M.wake(slot)
 	focus_of(slot):add(1)
+end
+
+-- A `lazy` page composer's slot whose chat is watched: only once it's
+-- used (the pointer over it, the keys in it, its model asked for). Till
+-- then its chat's transcript isn't taken in at all (the Control room's
+-- Capture never shows it: the Brain dump's, hundreds of messages).
+local woken = ui.state("chat_lane_woken", {} :: { [string]: boolean })
+function M.wake(slot: string)
+	if not woken:peek()[slot] then
+		woken:set_key({ slot }, true)
+	end
+end
+function M.woken(slot: string): boolean
+	return woken:peek()[slot] == true
 end
 
 -- A chat's composer on a page of its own, outside the panel's tabs: the
@@ -1149,10 +1164,76 @@ M.Composer = ui.component(function(props: {
 	on_escape: (() -> boolean)?,
 	on_open_model: (() -> ())?,
 	on_focus: ((focused: boolean) -> ())?,
+	lazy: boolean?,
 }): Node
 	local slot = props.slot
 	local mirror = props.mirror == true
+	local lazy = props.lazy == true
 	local view = lanes.view(slot)
+	-- Lazy, till it's used: its session as the chats list has it (its
+	-- agent and model, at rest), so its picker shows the chat's model and
+	-- a pick is the chat's at once; the host's whole session (its effort,
+	-- its queue) once it's woken.
+	if lazy then
+		local host_view = view
+		local at_rest = ui.computed(function(): any
+			local id = props.chat()
+			if not id then
+				return nil
+			end
+			local row: any = nil
+			local now = sessions.now:get()
+			for _, list in { now.chats or {}, now.archived or {} } do
+				for _, c in list do
+					if c.id == id then
+						row = c
+					end
+				end
+			end
+			if not row then
+				return nil
+			end
+			local model: string? = row.model
+			local harness: string? = row.harness
+			if model and not string.find(model, "/", 1, true) then
+				if harness then
+					model = `{harness}/{model}`
+				else
+					-- (A row naming its model alone: the catalog's entry for it.)
+					for _, m in store.catalog:get().models or {} do
+						if string.sub(m.value, -(#model + 1)) == `/{model}` then
+							model, harness = m.value, m.harness
+							break
+						end
+					end
+				end
+			end
+			return { id = id, state = "ready", device = row.device, harness = harness, model = model, running = false }
+		end)
+		view = {
+			session = ui.computed(function(): any
+				if woken:get()[slot] then
+					return host_view.session:get()
+				end
+				return at_rest:get()
+			end),
+			messages = host_view.messages,
+			draft = host_view.draft,
+		}
+	end
+	-- (Lazy: its chat watched once it's used, `M.wake`.)
+	local on_focus = props.on_focus
+	if lazy then
+		local told = props.on_focus
+		on_focus = function(focused: boolean)
+			if focused then
+				M.wake(slot)
+			end
+			if told then
+				told(focused)
+			end
+		end
+	end
 	-- (Its focus, by its slot: a drop zone of its, around it or anywhere on
 	-- its page, gives it the keys as something lands. A mirror's, its own.)
 	local focus = props.focus or focus_of(slot)
@@ -1163,6 +1244,9 @@ M.Composer = ui.component(function(props: {
 	end
 	ui.effect(function()
 		local id = props.chat()
+		if lazy and not woken:get()[slot] then
+			return
+		end
 		lanes.watch(slot, id)
 	end)
 	-- (Its picker, for `open_model`; one asked for before it came, opened
@@ -1209,6 +1293,7 @@ M.Composer = ui.component(function(props: {
 	local opened_at = -math.huge
 	ui.effect(function()
 		if model_wanted:get() == slot and props.chat() then
+			M.wake(slot)
 			ui.after(0, function()
 				ui.after(0, function()
 					-- (A mirror showing takes it: it's the one in view.)
@@ -1238,7 +1323,13 @@ M.Composer = ui.component(function(props: {
 			mirrors[slot] = if m > 0 then m else nil
 		end
 		if left <= 0 then
-			lanes.watch(slot, nil)
+			-- (A lazy one never used watched nothing.)
+			if not lazy or woken:peek()[slot] then
+				lanes.watch(slot, nil)
+			end
+			if woken:peek()[slot] then
+				woken:set_key({ slot }, nil)
+			end
 		end
 		if not mirror then
 			local list = live_pickers[slot] or {}
@@ -1274,18 +1365,25 @@ M.Composer = ui.component(function(props: {
 		end
 		local form: Form? = nil
 		if id and how then
-			local f: Form = { mirror = true, bare = how == "bare", expanded = how == "open", on_escape = props.on_escape, on_focus = props.on_focus }
+			local f: Form = { mirror = true, bare = how == "bare", expanded = how == "open", on_escape = props.on_escape, on_focus = on_focus }
 			form = f
 		else
 			id = key
-			if mirror or props.on_focus then
-				local f: Form = { mirror = mirror, on_escape = props.on_escape, on_focus = props.on_focus }
+			if mirror or on_focus then
+				local f: Form = { mirror = mirror, on_escape = props.on_escape, on_focus = on_focus }
 				form = f
 			end
 		end
 		-- (Its `id` is the component's node's: zgx gives it there.)
+		-- (Lazy: the pointer coming over it wakes its chat, so its picks are
+		-- the chat's by the time one is pressed.)
 		return ui.column {
 			w_full = true,
+			on_hover = if lazy then function(inside: boolean)
+				if inside then
+					M.wake(slot)
+				end
+			end else nil,
 			build(id :: string, form),
 		}
 	end, { w_full = true })

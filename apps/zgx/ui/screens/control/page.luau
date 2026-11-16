@@ -127,6 +127,31 @@ local history_refs: { [string]: any } = {}
 local history_open = ui.state("control_history_open", false)
 -- The earlier dumps opened in the history, by id.
 local history_opened = ui.state("control_history_opened", {} :: { [string]: boolean })
+-- How many earlier dumps the history shows: the latest few, more on
+-- "n more" (rows past these aren't built).
+M.HISTORY_STEP = 10
+local history_shown = ui.state("control_history_shown", M.HISTORY_STEP)
+
+-- Two plain values (tables field by field) the same.
+local function same(a: any, b: any): boolean
+	if a == b then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return false
+	end
+	for k, v in a do
+		if not same(v, b[k]) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
 
 -- The chats by id, and the Q&A's entries: computeds the page makes again
 -- each time it is built (`fresh`, from M.Page). The shell requires this
@@ -281,6 +306,9 @@ local function history_row(_d: any, _i: number, row: State<any>): Node
 	local function open(): boolean
 		return history_opened:get()[row:get().id] == true
 	end
+	-- (The same table while its hues are: a push that changes no target of
+	-- this row's wakes none of its dots.)
+	local last_hues: any = nil
 	local hues = ui.computed(function(): { { key: string, hue: number? } }
 		local out = {}
 		local seen: { [string]: boolean } = {}
@@ -294,6 +322,10 @@ local function history_row(_d: any, _i: number, row: State<any>): Node
 				table.insert(out, { key = key, hue = t.hue })
 			end
 		end
+		if last_hues and same(out, last_hues) then
+			return last_hues
+		end
+		last_hues = out
 		return out
 	end)
 	return ui.column {
@@ -489,9 +521,18 @@ local function capture(): Node
 	local newest = ui.computed(function(): any
 		return orchestration.dumps:get()[1]
 	end)
+	-- The earlier ones: how many, and the latest `history_shown` of them,
+	-- the rows the history builds.
+	local older_n = ui.computed(function(): number
+		return math.max(0, #orchestration.dumps:get() - 1)
+	end)
 	local older = ui.computed(function(): { any }
 		local out = {}
+		local n = history_shown:get()
 		for i, d in orchestration.dumps:get() do
+			if i > n + 1 then
+				break
+			end
 			if i > 1 then
 				table.insert(out, d)
 			end
@@ -521,6 +562,9 @@ local function capture(): Node
 				slot = SLOT,
 				chat = brain_dump,
 				take = M.take,
+				-- (The Brain dump's chat watched only once it's used: its
+				-- transcript, hundreds of routing turns, is never shown here.)
+				lazy = true,
 				placeholder = locale.s("control.capture.placeholder"),
 				-- (The Brain dump's model and agent; no access mode, no place:
 				-- it routes, it works nowhere.)
@@ -530,81 +574,113 @@ local function capture(): Node
 				end,
 			},
 		},
-		ui.show(function(): boolean
-			return newest:get() ~= nil
-		end, ui.column {
-			ref = newest_ref,
-			w_full = true,
-			gap = "$space.3",
-			ui.text {
-				function(): string
-					local d = newest:get()
-					return if d then status.ago(status.since(d.created or 0)) else ""
-				end,
-				tabular = true,
-				text_size = "$font.size.xs",
-				color = "$text.tertiary",
-			},
-			receipt(function(): any
-				return newest:get()
-			end),
-		}),
-		-- Earlier dumps, folded: a disclosure row, then a row each.
-		ui.show(function(): boolean
-			return #older:get() > 0
-		end, ui.column {
-			w_full = true,
-			gap = "$space.1",
-			ui.button {
-				id = "control-history-toggle",
-				label = function(): string
-					return locale.s("control.capture.earlier", { n = #older:get() })
-				end,
-				expanded = function(): boolean
-					return history_open:get()
-				end,
-				h = 28,
-				px = "$space.2",
-				mx = ui.raw(-8, "its words over the rows' words, its wash out past them"),
-				gap = "$space.2",
-				items = "center",
-				rounded = "$radius.md",
-				bg = "#00000000",
-				hover = { bg = "$hover" },
-				self = "start",
-				on_click = function()
-					history_open:set(not history_open:peek())
-				end,
-				ui.div {
-					color = "$text.tertiary",
-					Icon {
-						name = function(): any
-							return if history_open:get() then "alt-arrow-down" else "alt-arrow-right"
-						end,
-						size = 12,
-					},
-				},
-				ui.text { locale.t("control.capture.history"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" },
+		-- (Under the composer, a frame after it: the newest's receipt, then
+		-- the history, each a frame of its own, ds/stage.)
+		stage.Later(1, function(): Node
+			return ui.show(function(): boolean
+				return newest:get() ~= nil
+			end, ui.column {
+				ref = newest_ref,
+				w_full = true,
+				gap = "$space.3",
 				ui.text {
 					function(): string
-						return tostring(#older:get())
+						local d = newest:get()
+						return if d then status.ago(status.since(d.created or 0)) else ""
 					end,
 					tabular = true,
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
-					y = Block.baseline("$font.size.sm", "$font.size.xs"),
 				},
-			},
-			ui.show(function(): boolean
-				return history_open:get()
+				receipt(function(): any
+					return newest:get()
+				end),
+			})
+		end, if orchestration.dumps:peek()[1] then 120 else 0),
+		-- Earlier dumps, folded: a disclosure row, then a row each.
+		stage.Later(2, function(): Node
+			return ui.show(function(): boolean
+				return older_n:get() > 0
 			end, ui.column {
 				w_full = true,
-				mx = ui.raw(-8, "the rows' wash out past the block's words, their words in line"),
-				ui.each(older, history_row, { key = function(d: any): string
-					return d.id
-				end, w_full = true, gap = "$zeron.space.hair" }),
-			}),
-		}),
+				gap = "$space.1",
+				ui.button {
+					id = "control-history-toggle",
+					label = function(): string
+						return locale.s("control.capture.earlier", { n = older_n:get() })
+					end,
+					expanded = function(): boolean
+						return history_open:get()
+					end,
+					h = 28,
+					px = "$space.2",
+					mx = ui.raw(-8, "its words over the rows' words, its wash out past them"),
+					gap = "$space.2",
+					items = "center",
+					rounded = "$radius.md",
+					bg = "#00000000",
+					hover = { bg = "$hover" },
+					self = "start",
+					on_click = function()
+						history_open:set(not history_open:peek())
+					end,
+					ui.div {
+						color = "$text.tertiary",
+						Icon {
+							name = function(): any
+								return if history_open:get() then "alt-arrow-down" else "alt-arrow-right"
+							end,
+							size = 12,
+						},
+					},
+					ui.text { locale.t("control.capture.history"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" },
+					ui.text {
+						function(): string
+							return tostring(older_n:get())
+						end,
+						tabular = true,
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
+						y = Block.baseline("$font.size.sm", "$font.size.xs"),
+					},
+				},
+				ui.show(function(): boolean
+					return history_open:get()
+				end, ui.column {
+					w_full = true,
+					mx = ui.raw(-8, "the rows' wash out past the block's words, their words in line"),
+					ui.each(older, history_row, { key = function(d: any): string
+						return d.id
+					end, w_full = true, gap = "$zeron.space.hair" }),
+					-- Past the latest few: more of them, on a click.
+					ui.show(function(): boolean
+						return older_n:get() > history_shown:get()
+					end, ui.button {
+						id = "control-history-more",
+						label = function(): string
+							return locale.s("ds.orch.more", { n = older_n:get() - history_shown:get() })
+						end,
+						h = 28,
+						px = "$space.2",
+						items = "center",
+						rounded = "$radius.md",
+						bg = "#00000000",
+						hover = { bg = "$hover" },
+						self = "start",
+						on_click = function()
+							history_shown:set(history_shown:peek() + M.HISTORY_STEP)
+						end,
+						ui.text {
+							function(): string
+								return locale.s("ds.orch.more", { n = older_n:get() - history_shown:get() })
+							end,
+							text_size = "$font.size.sm",
+							color = "$text.secondary",
+						},
+					}),
+				}),
+			})
+		end, if orchestration.dumps:peek()[2] then 28 else 0),
 	} }
 end
 
@@ -621,17 +697,42 @@ function M.show_dump(id: string?)
 		local el = if r then r:peek() else nil
 		return el ~= nil and el:focus() == true
 	end
+	-- (Built a frame or more after the page, ds/stage: tried again till
+	-- it's there, a second at most.)
+	local function focus_soon(get: () -> any, tries: number)
+		if focus(get()) or tries <= 0 then
+			return
+		end
+		ui.after(50, function()
+			focus_soon(get, tries - 1)
+		end)
+	end
 	if first and first.id == id then
-		focus(newest_ref)
+		focus_soon(function(): any
+			return newest_ref
+		end, 20)
 		return
+	end
+	-- (Past the rows shown: as many more as reach it.)
+	local at = 0
+	for i, d in dumps do
+		if d.id == id then
+			at = i - 1
+			break
+		end
 	end
 	ui.batch(function()
 		history_open:set(true)
 		history_opened:set_key({ id }, true)
+		if at > history_shown:peek() then
+			history_shown:set(math.ceil(at / M.HISTORY_STEP) * M.HISTORY_STEP)
+		end
 	end)
 	-- (Once the history's row is there.)
 	ui.after(0, function()
-		focus(history_refs[id])
+		focus_soon(function(): any
+			return history_refs[id]
+		end, 20)
 	end)
 end
 
@@ -1530,6 +1631,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 							slot = SLOT,
 							chat = brain_dump,
 							take = M.take,
+							lazy = true,
 							placeholder = locale.s("control.capture.placeholder"),
 							footer = FOOTER,
 							mirror = true,
