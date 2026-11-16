@@ -36,7 +36,7 @@ use zeron_proto::orchestration::{Progress, ProgressState};
 use zgx_desktop::WindowContext;
 use zgx_script::{ScriptHost, Shared, Value};
 
-use crate::engine::{self, rpc::Watch};
+use crate::engine::{self, lists};
 
 /// One open window's state.
 struct Window {
@@ -52,7 +52,7 @@ struct Tracker {
     rows: RefCell<Rows>,
     /// Whether something the engine sent couldn't be read, said once.
     complained: Cell<bool>,
-    watch: RefCell<Option<Watch>>,
+    watch: RefCell<Option<lists::Listening>>,
 }
 
 thread_local! {
@@ -75,9 +75,11 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         engine::get().on_connect(move |rpc| {
             let Some(t) = weak.upgrade() else { return };
             let heard = Rc::downgrade(&t);
-            let watch = rpc.watch("WatchProgress", json!({}), move |item| {
+            // (As changes: the whole list once, then the rows that moved;
+            // an engine from before sends the whole list each time.)
+            let watch = lists::listen(rpc, "WatchProgress", move |frame| {
                 if let Some(t) = heard.upgrade() {
-                    t.heard(&item);
+                    t.heard(frame.list);
                 }
             });
             *t.watch.borrow_mut() = Some(watch);
@@ -164,10 +166,12 @@ impl From<Progress> for Heard {
     }
 }
 
-/// Every chat's row, by chat id.
+/// Every chat's row, by chat id, and each as scripts were given it (a row
+/// that didn't change keeps its value, so what reads it does nothing).
 #[derive(Default)]
 struct Rows {
     by_chat: BTreeMap<String, Heard>,
+    values: BTreeMap<String, Value>,
 }
 
 impl Rows {
@@ -178,6 +182,15 @@ impl Rows {
         if by_chat == self.by_chat {
             return false;
         }
+        let old = std::mem::take(&mut self.by_chat);
+        let mut values = std::mem::take(&mut self.values);
+        self.values = by_chat
+            .iter()
+            .map(|(id, row)| {
+                let kept = (old.get(id) == Some(row)).then(|| values.remove(id)).flatten();
+                (id.clone(), kept.unwrap_or_else(|| row.value()))
+            })
+            .collect();
         self.by_chat = by_chat;
         true
     }
@@ -189,12 +202,13 @@ impl Rows {
                 return false;
             }
         }
+        self.values.insert(row.row.chat_id.clone(), row.value());
         self.by_chat.insert(row.row.chat_id.clone(), row);
         true
     }
 
     fn value(&self) -> Value {
-        Value::record(self.by_chat.iter().map(|(id, r)| (id.as_str(), r.value())))
+        Value::record(self.values.iter().map(|(id, v)| (id.as_str(), v.clone())))
     }
 }
 
@@ -354,6 +368,27 @@ mod tests {
         // Not a list: told once, kept.
         t.heard(&json!({ "nope": 1 }));
         assert!(t.rows.borrow().value().field("th-engine-state").is_some());
+    }
+
+    /// A frame where one chat's row moved: that row's value is made again,
+    /// every other chat's is the very value scripts already have.
+    #[test]
+    fn a_frame_keeps_the_rows_it_does_not_change() {
+        let t = Tracker::default();
+        let other = json!({ "chatId": "th-b", "deviceId": "dev-mac", "state": "done", "updatedAt": iso(NOW - 600) });
+        t.heard(&json!([working(), other.clone()]));
+        let before = t.rows.borrow().value();
+        let mut moved = working();
+        moved["note"] = json!("further along");
+        t.heard(&json!([moved, other]));
+        let after = t.rows.borrow().value();
+        let same = |id: &str| match (before.field(id), after.field(id)) {
+            (Some(Value::Map(a)), Some(Value::Map(b))) => Rc::ptr_eq(a, b),
+            _ => false,
+        };
+        assert!(same("th-b"));
+        assert!(!same("th-engine-state"));
+        assert_eq!(text(after.field("th-engine-state").unwrap().field("note")).as_deref(), Some("further along"));
     }
 
     #[test]

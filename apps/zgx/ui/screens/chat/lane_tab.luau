@@ -1169,6 +1169,9 @@ M.Composer = ui.component(function(props: {
 	on_open_model: (() -> ())?,
 	on_focus: ((focused: boolean) -> ())?,
 	lazy: boolean?,
+	-- Its chat's row and send path alone, no transcript watched (Capture's:
+	-- it never shows one). Every placement of a slot passes the same.
+	session_only: boolean?,
 }): Node
 	local slot = props.slot
 	local mirror = props.mirror == true
@@ -1251,7 +1254,7 @@ M.Composer = ui.component(function(props: {
 		if lazy and not woken:get()[slot] then
 			return
 		end
-		lanes.watch(slot, id)
+		lanes.watch(slot, id, nil, nil, props.session_only)
 	end)
 	-- (Its picker, for `open_model`; one asked for before it came, opened
 	-- once its chat is known. The first placement's: a mirror's picker is

@@ -87,6 +87,11 @@ use crate::engine::{self, lists, rpc::Watch};
 /// A live state older than this belongs to an engine that has gone (the
 /// shipping app's `SESSION_STALE_MS`).
 const STALE_SECS: i64 = 45;
+/// How long what the engine sends is gathered before the scripts are given
+/// it: a turn starting changes a chat's live state and its entry, which
+/// come as two frames, and each publish runs every script reading
+/// `sessions` (and the Timeline after it). One frame's time.
+const GATHER: Duration = Duration::from_millis(16);
 /// A device whose presence beat is older than this is offline (the shipping
 /// app's `device_online`).
 pub(crate) const ONLINE_SECS: i64 = 70;
@@ -165,6 +170,8 @@ struct Sessions {
     /// When `shown_live` was judged (Unix seconds).
     shown_at: Cell<Option<i64>>,
     shown_devices: RefCell<Option<Value>>,
+    /// Whether a publish is on its way ([`Sessions::publish_soon`]).
+    publish_pending: Cell<bool>,
     /// Publishes so far (for tests).
     #[cfg(test)]
     published: Cell<u32>,
@@ -1077,7 +1084,7 @@ impl Sessions {
             }
             Slot::Spaces | Slot::Places | Slot::Connectivity => return self.heard(slot, frame.list.clone()),
         }
-        self.publish();
+        self.publish_soon();
     }
 
     fn heard(&self, slot: Slot, item: Json) {
@@ -1134,10 +1141,32 @@ impl Sessions {
                 *self.confirmed.borrow_mut() = places;
             }
         }
-        self.publish();
+        self.publish_soon();
+    }
+
+    /// What the engine sent, given to the scripts [`GATHER`] from now with
+    /// whatever else comes by then. (At once in tests, and before a
+    /// connection's tasks are there.)
+    fn publish_soon(&self) {
+        if cfg!(test) || !engine::get().can_spawn() {
+            return self.publish();
+        }
+        if self.publish_pending.replace(true) {
+            return;
+        }
+        engine::get().spawn(async {
+            zgx::timer::sleep(GATHER).await;
+            SESSIONS.with(|s| {
+                if s.publish_pending.get() {
+                    s.publish();
+                }
+            });
+        });
     }
 
     fn publish(&self) {
+        // (Whatever was on its way goes now.)
+        self.publish_pending.set(false);
         #[cfg(test)]
         self.published.set(self.published.get() + 1);
         let value = self.value();

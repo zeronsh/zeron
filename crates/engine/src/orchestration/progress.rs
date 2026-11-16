@@ -1182,7 +1182,29 @@ fn frame(rpc: &EngineRpc, viewer: Option<&Who>) -> Value {
 /// `WatchProgress`: the rows now, then on every change (≤ 4/s). `viewer`
 /// is an agent's caller; `None` is the person. While anyone watches, this
 /// engine works out the progress of chats on older hosts (by proxy).
-pub(crate) fn stream(rpc: EngineRpc, viewer: Option<Who>) -> futures::stream::BoxStream<'static, Value> {
+/// `changes` (`{"changes": true}`): after the whole list, only the rows that
+/// moved, as the keyed lists send them (`rpc::keyed_frame`, by `chatId`).
+pub(crate) fn stream(rpc: EngineRpc, viewer: Option<Who>, changes: bool) -> futures::stream::BoxStream<'static, Value> {
+    let whole = stream_whole(rpc, viewer);
+    if !changes {
+        return whole;
+    }
+    use futures::StreamExt;
+    whole
+        .scan(None::<crate::rpc::SentRows>, |sent, list| {
+            let rows = match list {
+                Value::Array(rows) => rows,
+                other => return futures::future::ready(Some(Some(other))),
+            };
+            let (frame, now) = crate::rpc::keyed_frame(rows, "chatId", sent.take());
+            *sent = Some(now);
+            futures::future::ready(Some(frame))
+        })
+        .filter_map(futures::future::ready)
+        .boxed()
+}
+
+fn stream_whole(rpc: EngineRpc, viewer: Option<Who>) -> futures::stream::BoxStream<'static, Value> {
     use futures::StreamExt;
     let orch = rpc.orchestration().clone();
     let watching = proxy::Watching::new(&orch);

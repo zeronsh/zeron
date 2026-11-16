@@ -588,6 +588,8 @@ local function capture(): Node
 				-- (The Brain dump's chat watched only once it's used: its
 				-- transcript, hundreds of routing turns, is never shown here.)
 				lazy = true,
+				-- (And then its row alone: never its transcript.)
+				session_only = true,
 				placeholder = locale.s("control.capture.placeholder"),
 				-- (The Brain dump's model and agent; no access mode, no place:
 				-- it routes, it works nowhere.)
@@ -1683,6 +1685,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 							chat = brain_dump,
 							take = M.take,
 							lazy = true,
+							session_only = true,
 							placeholder = locale.s("control.capture.placeholder"),
 							footer = FOOTER,
 							mirror = true,
