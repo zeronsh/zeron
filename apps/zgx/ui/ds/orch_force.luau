@@ -56,7 +56,7 @@ local PULSE_MS = 900
 local PLACES_MAX = 4000
 local TILE_H = kit.TILE_H
 -- Names show from this zoom up (the important ones; others on hover).
-local NAMES_ZOOM = 0.55
+local NAMES_ZOOM = 0.3
 -- Machine hues (colour by machine), in the machines' order.
 local MACHINE_HUES = { 38, 212, 282, 150, 330, 95, 190, 20, 250, 120 }
 local R_BRAIN, R_HUB, R_CHAT = 19, 15, 9.5
@@ -493,11 +493,16 @@ M.View = ui.component(function(props: {
 				shapes[i] = M.cookie(x, y, R_HUB, sides(i))
 				names[i] = fit_name(c, n.title, 170, M_HUB)
 				local w = c:measure_text(names[i], M_HUB)
+				-- (Off its own link: beside the mark when the link comes in
+				-- from above or below, under it when from the side.)
 				local p = n.parent
 				local dx, dy = (if p > 0 then s.x[p] else x) - x, (if p > 0 then s.y[p] else y + 1) - y
-				local d = math.max(1, math.sqrt(dx * dx + dy * dy))
-				local off = R_HUB + 12 + math.abs(dx / d) * w / 2 + math.abs(dy / d) * 6
-				label_x[i], label_y[i] = x + dx / d * off, y + dy / d * off - 8
+				if math.abs(dy) >= math.abs(dx) then
+					-- (Beside it, clear of the link.)
+					label_x[i], label_y[i] = x + R_HUB + 10 + w / 2, y - 8
+				else
+					label_x[i], label_y[i] = x, y + R_HUB + 10
+				end
 				table.insert(boxes, { label_x[i] - w / 2 - 3, label_y[i], label_x[i] + w / 2 + 3, label_y[i] + 17 })
 			else
 				glyphs[i], glyph_fill[i] = Graph2.glyph(n.provider, x, y)

@@ -35,6 +35,8 @@ M.FAN_LEN, M.FAN_ROW, M.FAN_GAP = 74, 38, 34
 M.FAN_WIDE = math.rad(150)
 -- The pull towards a node's slot.
 M.SLOT_K = 0.05
+-- The middle's own chats keep this far (radians) from a hub's way out.
+M.HUB_CLEAR = math.rad(22)
 -- Weak links: soft and long.
 M.WEAK_LEN, M.WEAK_K = 240, 0.004
 M.REPEL = 1500
@@ -194,13 +196,42 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
 			s.slot_a[c] = (k - 1) / #hubs * math.pi * 2
 			s.slot_r[c] = math.max(M.HUB_LEN, s.depth[c] + 110)
 		end
-		local step = math.pi * 2 / math.max(1, #hubs)
-		for k, c in own do
-			-- (In the gaps between hubs, a gap each in turn, then round.)
-			local gap = (k - 1) % math.max(1, #hubs)
-			local lap = (k - 1) // math.max(1, #hubs)
-			s.slot_a[c] = (gap + 0.5) * step + (lap % 2) * step * 0.25
-			s.slot_r[c] = M.FAN_LEN * 1.15 + lap * M.FAN_ROW
+		-- (The middle's own chats: rings round it, as many a ring as fit
+		-- a gap apart, none within HUB_CLEAR of a hub's way out.)
+		local hub_a: { number } = {}
+		for _, c in hubs do
+			table.insert(hub_a, s.slot_a[c])
+		end
+		local function clear_of_hubs(a: number): boolean
+			for _, h in hub_a do
+				local d = math.abs((a - h + math.pi) % (2 * math.pi) - math.pi)
+				if d < M.HUB_CLEAR then
+					return false
+				end
+			end
+			return true
+		end
+		local k, ring = 1, 0
+		while k <= #own do
+			local r = M.FAN_LEN * 1.15 + ring * M.FAN_ROW
+			local cap = math.max(3, math.floor(2 * math.pi * r / M.FAN_GAP))
+			local spots: { number } = {}
+			for j = 0, cap - 1 do
+				local a = (j + (ring % 2) * 0.5) / cap * math.pi * 2 + math.pi / cap
+				if clear_of_hubs(a) then
+					table.insert(spots, a)
+				end
+			end
+			-- (Spread over the spots this ring has, not bunched at its start.)
+			local here = math.min(#spots, #own - k + 1)
+			for j = 1, here do
+				local spot = spots[math.max(1, math.floor((j - 0.5) * #spots / here + 0.5))]
+				local c = own[k]
+				s.slot_a[c] = spot
+				s.slot_r[c] = r
+				k += 1
+			end
+			ring += 1
 		end
 	end
 	-- (A hub's mass grows with its crew: many stiff springs on one light
