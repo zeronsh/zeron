@@ -29,6 +29,7 @@ pub(crate) mod incoming;
 pub mod comms;
 pub(crate) mod loads;
 pub(crate) mod ops;
+pub(crate) mod one_shots;
 pub(crate) mod queue;
 pub(crate) mod progress;
 pub mod report;
@@ -154,6 +155,13 @@ impl Orchestration {
         self.inner.workspace.orchestration_state()
     }
 
+    /// `f` of the rows without waiting on the registry lock or copying them
+    /// ([`WorkspaceHost::scan_orchestration`]): for the timers' scans, whose
+    /// writes read their rows again under the lock. `f` must be quick.
+    pub(crate) fn scan<R>(&self, f: impl FnOnce(&OrchestrationState) -> R) -> R {
+        self.inner.workspace.scan_orchestration(f)
+    }
+
     /// Everything, now and on every change, at most [`PUBLISH_EVERY`].
     pub fn subscribe(&self) -> watch::Receiver<OrchestrationState> {
         self.inner.state_rx.clone()
@@ -169,7 +177,9 @@ impl Orchestration {
         futures::stream::iter(first)
             .chain(futures::stream::unfold(rx, |mut rx| async move {
                 rx.changed().await.ok()?;
+                let perf_t = std::time::Instant::now();
                 let value = serde_json::to_value(&*rx.borrow_and_update()).ok()?;
+                tracing::debug!(target: "perf", what = "orch_push", bytes = value.to_string().len() as u64, us = perf_t.elapsed().as_micros() as u64);
                 Some((value, rx))
             }))
             .boxed()
@@ -268,12 +278,49 @@ impl Orchestration {
             watchers::start(self.clone());
             progress::start(self.clone());
             queue::start(self.clone());
+            start_stats(self.clone());
         }
     }
 
     pub(crate) fn rpc(&self) -> Option<Arc<crate::rpc::EngineRpc>> {
         lock(&self.inner.rpc).upgrade()
     }
+}
+
+/// Once a minute, when the `perf` target logs at debug: what the engine
+/// holds (registry rows per kind, unsent ops, warm chat docs, tracked
+/// progress, one-shot runs) and its RSS, to tell what grows.
+fn start_stats(orch: Orchestration) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            if !tracing::enabled!(target: "perf", tracing::Level::DEBUG) {
+                continue;
+            }
+            let Some(rpc) = orch.rpc() else { continue };
+            let (rows, pending_ops) = orch.workspace().registry_stats();
+            let (warm_docs, warm_bytes) = rpc.doc_host_ref().warm_stats();
+            let rss_kb = std::fs::read_to_string("/proc/self/statm")
+                .ok()
+                .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+                .map_or(0, |pages| pages * 4);
+            let rows: Vec<String> = rows.into_iter().map(|(kind, n)| format!("{kind}={n}")).collect();
+            let shots = orch.progress().one_shot_stats();
+            tracing::debug!(
+                target: "perf",
+                what = "engine_stats",
+                rss_kb,
+                rows = %rows.join(","),
+                pending_ops,
+                warm_docs,
+                warm_bytes,
+                progress_chats = orch.progress().tracked(),
+                %shots,
+            );
+        }
+    });
 }
 
 /// `patch` applied to the board (under the registry lock).

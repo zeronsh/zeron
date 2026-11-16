@@ -3903,6 +3903,12 @@ impl DocHost {
                 > zeron_doc::DOC_LRU_BYTE_BUDGET
     }
 
+    /// Warm docs and their resident estimate in bytes (introspection).
+    pub(crate) fn warm_stats(&self) -> (usize, usize) {
+        let handles = lock(&self.inner.handles);
+        (handles.len(), handles.values().map(|h| h.resident_estimate()).sum())
+    }
+
     /// Seed-specific activity gate: a live WRITER (a run's doc ref) or
     /// pending host commands block a seed — watchers do NOT. Pure readers
     /// cannot lose writes, and the flip drops the handle so their streams

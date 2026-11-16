@@ -244,7 +244,9 @@ pub(crate) fn start(orchestration: Orchestration) {
         loop {
             tick.tick().await;
             if let Some(rpc) = orchestration.rpc() {
+                let perf_t = std::time::Instant::now();
                 let archived = sweep(&orchestration, &rpc);
+                tracing::debug!(target: "perf", what = "archive_sweep", us = perf_t.elapsed().as_micros() as u64);
                 if archived > 0 {
                     tracing::info!(archived, "crew auto-archive: sweep done");
                 }

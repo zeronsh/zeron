@@ -13,7 +13,7 @@
 
 use chrono::{Duration as TimeDelta, Utc};
 use zeron_proto::orchestration::{
-    Ask, AskKind, AskOption, AskState, CommKind, Dump, RouteIntent, RouteState, prompt_text::one_line,
+    Ask, AskKind, AskOption, AskState, CommKind, Dump, Route, RouteIntent, RouteState, prompt_text::one_line,
 };
 use zeron_rpc::RpcError;
 
@@ -267,69 +267,109 @@ pub(crate) fn consume(orchestration: &Orchestration, receiver: &str, prompt: &st
 /// The asks raised.
 pub(crate) fn chase_unanswered(orchestration: &Orchestration, rpc: &EngineRpc, now: chrono::DateTime<Utc>) -> Vec<String> {
     let here = orchestration.device_id().to_owned();
-    let state = orchestration.state();
+    // Scanned without the registry lock; each chase is decided again under
+    // it before it's written.
+    let due: Vec<Chase> = orchestration.scan(|state| {
+        let mut due = Vec::new();
+        for dump in state.dumps.iter().filter(|d| d.device_id == here) {
+            for route in &dump.routes {
+                let Some(since) = chase_due(dump, route, now) else { continue };
+                if chased(&state.asks, &route.id, since) {
+                    continue;
+                }
+                let Some(target) = super::watchers::target_chat(&route.target) else { continue };
+                due.push(Chase {
+                    dump_id: dump.id.clone(),
+                    route_id: route.id.clone(),
+                    target: target.to_owned(),
+                    item_id: route.item_id.clone(),
+                    excerpt: route.excerpt.clone(),
+                });
+            }
+        }
+        due
+    });
     let mut raised = Vec::new();
-    for dump in state.dumps.iter().filter(|d| d.device_id == here) {
-        for route in &dump.routes {
-            if route.intent != RouteIntent::Question || route.state != RouteState::Delivered || route.answer.is_some() {
-                continue;
+    for chase in due {
+        let title = rpc
+            .workspace_host()
+            .chat(&chase.target)
+            .ok()
+            .flatten()
+            .and_then(|c| c.title)
+            .unwrap_or_else(|| "The thread".into());
+        let ask = Ask {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            from_chat: chase.target.clone(),
+            orchestrator_id: None,
+            item_id: chase.item_id.clone(),
+            kind: AskKind::Decision,
+            question: format!("{} hasn't answered: {}", one_line(&title, 60), one_line(&chase.excerpt, 200)),
+            options: vec![
+                AskOption::new(ASK_AGAIN),
+                AskOption::new(DISMISS),
+            ],
+            urgent: false,
+            state: AskState::Open,
+            answer: None,
+            created_at: now,
+            answered_at: None,
+            dump_id: Some(chase.dump_id.clone()),
+            route_id: Some(chase.route_id.clone()),
+            quiet: true,
+            origin: Default::default(),
+            turn_id: None,
+            updated_at: None,
+            escalated_at: None,
+            answered_via: None,
+            images: Vec::new(),
+            recommendation: None,
+            links: Vec::new(),
+            context: None,
+            deferred_until: None,
+        };
+        let written = orchestration.workspace().write_orchestration(|doc| {
+            let Some(dump) = doc.dump(&chase.dump_id) else { return false };
+            let Some(route) = dump.routes.iter().find(|r| r.id == chase.route_id) else { return false };
+            let Some(since) = chase_due(&dump, route, now) else { return false };
+            if chased(&doc.read_asks(), &chase.route_id, since) {
+                return false;
             }
-            let since = route.delivered_at.unwrap_or(dump.created_at);
-            if now - since < UNANSWERED_AFTER {
-                continue;
-            }
-            // One at a time, and not again for the same delivery.
-            let chased = state.asks.iter().any(|a| {
-                a.route_id.as_deref() == Some(route.id.as_str())
-                    && is_chase(a)
-                    && (a.state == AskState::Open || a.created_at >= since)
-            });
-            let Some(target) = super::watchers::target_chat(&route.target) else { continue };
-            if chased {
-                continue;
-            }
-            let title = rpc
-                .workspace_host()
-                .chat(target)
-                .ok()
-                .flatten()
-                .and_then(|c| c.title)
-                .unwrap_or_else(|| "The thread".into());
-            let ask = Ask {
-                id: uuid::Uuid::new_v4().simple().to_string(),
-                from_chat: target.to_owned(),
-                orchestrator_id: None,
-                item_id: route.item_id.clone(),
-                kind: AskKind::Decision,
-                question: format!("{} hasn't answered: {}", one_line(&title, 60), one_line(&route.excerpt, 200)),
-                options: vec![
-                    AskOption::new(ASK_AGAIN),
-                    AskOption::new(DISMISS),
-                ],
-                urgent: false,
-                state: AskState::Open,
-                answer: None,
-                created_at: now,
-                answered_at: None,
-                dump_id: Some(dump.id.clone()),
-                route_id: Some(route.id.clone()),
-                quiet: true,
-                origin: Default::default(),
-                turn_id: None,
-                updated_at: None,
-                escalated_at: None,
-                answered_via: None,
-                images: Vec::new(),
-                recommendation: None,
-                links: Vec::new(),
-                context: None,
-                deferred_until: None,
-            };
-            orchestration.workspace().write_orchestration(|doc| doc.upsert_ask(&ask));
+            doc.upsert_ask(&ask);
+            true
+        });
+        if written {
             raised.push(ask.id);
         }
     }
     raised
+}
+
+/// A question route [`chase_unanswered`] may chase.
+struct Chase {
+    dump_id: String,
+    route_id: String,
+    target: String,
+    item_id: Option<String>,
+    excerpt: String,
+}
+
+/// When `route` was delivered, if it's a question still waiting on its
+/// answer after [`UNANSWERED_AFTER`].
+fn chase_due(dump: &Dump, route: &Route, now: chrono::DateTime<Utc>) -> Option<chrono::DateTime<Utc>> {
+    if route.intent != RouteIntent::Question || route.state != RouteState::Delivered || route.answer.is_some() {
+        return None;
+    }
+    let since = route.delivered_at.unwrap_or(dump.created_at);
+    (now - since >= UNANSWERED_AFTER).then_some(since)
+}
+
+/// Whether route `route_id` was chased already: one at a time, and not
+/// again for the same delivery (`since`).
+fn chased(asks: &[Ask], route_id: &str, since: chrono::DateTime<Utc>) -> bool {
+    asks.iter().any(|a| {
+        a.route_id.as_deref() == Some(route_id) && is_chase(a) && (a.state == AskState::Open || a.created_at >= since)
+    })
 }
 
 #[cfg(test)]
