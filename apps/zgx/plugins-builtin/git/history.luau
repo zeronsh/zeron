@@ -1016,13 +1016,17 @@ return function(zeron: any, Repo: any, words: any)
 		end
 		-- The graph, worked out as the commits change (none while searching:
 		-- the commits found aren't a line), and the lanes it needs at most.
+		-- Keep pending lanes across pages. The old tail already has its outgoing
+		-- edges; keys below refresh its compact rail when a next row arrives.
+		local graph_cache = graph.new(MAX_LANES)
 		local laid = ui.computed(function(): { rows: { graph.Row }, lanes: number, commits: { any } }
 			local h = model.history:get()
 			local commits = if h then h.commits else {}
 			if searching() then
+				graph_cache = graph.new(MAX_LANES)
 				return { rows = {}, lanes = 0, commits = commits }
 			end
-			local rows, widest = graph.layout(commits, MAX_LANES)
+			local rows, widest = graph_cache.update(commits)
 			return { rows = rows, lanes = math.min(widest, MAX_LANES), commits = commits }
 		end)
 		ui.effect(function()

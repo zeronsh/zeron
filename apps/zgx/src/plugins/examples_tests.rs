@@ -3196,6 +3196,80 @@ return ui.text { id = "out", `checked {checked}` }
     assert_eq!(app.text("out"), "checked 15306");
 }
 
+/// Appending must preserve old row objects as well as matching the frozen
+/// full layout. Reloads and changes to any prefix topology invalidate the cache.
+#[test]
+fn git_s_graph_extends_pages_without_rebuilding_old_rows() {
+    let source = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins-builtin/git/graph.luau")).unwrap();
+    let script = format!("local graph = (function() {source} end)()\nlocal reference = (function() {} end)()\n{}", include_str!("fixtures/git_graph_reference.luau"), r#"
+local function same(commits, rows, widest, cap)
+    local expected, width = reference.layout(commits)
+    assert(widest == width and #rows == #expected)
+    for i, r in rows do
+        local e = expected[i]
+        assert(r.col == e.col and r.color == e.color and r.lanes == e.lanes, `topology {i}`)
+        local lines = {}
+        for _, line in e.lines do
+            if line.a <= cap and line.b <= cap then table.insert(lines, line) end
+        end
+        assert(#lines == #r.lines, `segments {i}`)
+        for j, line in lines do
+            for _, field in { "a", "b", "from", "to", "color" } do
+                assert(line[field] == r.lines[j][field], `geometry {i}/{j}/{field}`)
+            end
+        end
+    end
+end
+local commits = {}
+for i = 1, 40 do
+    table.insert(commits, { sha = `c{i}`, parents = { `c{i + 1}`, `p{i}`, "root" } })
+end
+for i = 1, 40 do
+    table.insert(commits, { sha = `p{i}`, parents = { "root" } })
+end
+table.insert(commits, { sha = "c41", parents = { "root" } })
+table.insert(commits, { sha = "root", parents = {} })
+for _, cap in { 0, 1, 2, 8, math.huge } do
+    -- A page boundary at every row exercises hidden joins and lane reuse.
+    local cache = graph.new(cap)
+    local prior = {}
+    local prefix = {}
+    for _, c in commits do
+        table.insert(prefix, c)
+        local rows, width = cache.update(prefix)
+        for i, old in prior do assert(rows[i] == old, `rebuilt row {i}`) end
+        same(prefix, rows, width, cap)
+        prior = table.clone(rows)
+    end
+    -- Freshly decoded metadata and an empty page must reuse all geometry.
+    local decoded = {}
+    for i, c in prefix do decoded[i] = { sha = c.sha, parents = table.clone(c.parents), subject = "updated" } end
+    local rows, width = cache.update(decoded)
+    for i, old in prior do assert(rows[i] == old) end
+    same(decoded, rows, width, cap)
+    -- Parent changes (including in-place edits) must not reuse stale state.
+    decoded[2].parents[1] = "root"
+    rows, width = cache.update(decoded)
+    assert(rows[1] ~= prior[1])
+    same(decoded, rows, width, cap)
+    decoded[1], decoded[2] = decoded[2], decoded[1]
+    rows, width = cache.update(decoded)
+    same(decoded, rows, width, cap)
+    -- Refresh to a shorter history, clear, then reload the original history.
+    rows, width = cache.update({ decoded[1] })
+    same({ decoded[1] }, rows, width, cap)
+    rows, width = cache.update({})
+    same({}, rows, width, cap)
+    rows, width = cache.update(commits)
+    same(commits, rows, width, cap)
+end
+return ui.text { id = "out", "incremental graph matches" }
+"#);
+    let mut app = TestApp::inline(&script);
+    assert_eq!(app.error(), None);
+    assert_eq!(app.text("out"), "incremental graph matches");
+}
+
 /// Isolate graph allocation/layout from UI construction and Rust state
 /// conversion. The reference flag runs the frozen old layout on the same VM.
 #[test]
