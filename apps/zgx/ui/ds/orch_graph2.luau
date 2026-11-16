@@ -195,7 +195,7 @@ M.View = ui.component(function(props: {
 	-- (Counts for tests, published once after the draws of a frame. Timers
 	-- belong to the effect run that starts them, so each runs from an
 	-- effect of its own: publishing, the ease, the dots.)
-	local counts = { layouts = 0, draws = 0, overlay = 0, drawn = 0, w = 0, h = 0, layout_ms = 0, draw_kb = 0, overlay_kb = 0, faded = 0, glyphs = 0 }
+	local counts = { layouts = 0, draws = 0, overlay = 0, drawn = 0, w = 0, h = 0, layout_ms = 0, draw_kb = 0, overlay_kb = 0, faded = 0, glyphs = 0, relayout_runs = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string)
 		(counts :: any)[key] += 1
@@ -411,13 +411,63 @@ M.View = ui.component(function(props: {
 	-- shows is the world's, its "Show chats" and its clock, which moves on
 	-- each minute; the same layout, a fading chat fainter, is taken in
 	-- place.)
+	--
+	-- (The world's shape: what it holds but the machines' loads, each by
+	-- identity. The loads change every few seconds; that reaches the
+	-- headings' figures and rings alone, never the layout.)
+	local shape_world: any = nil
+	local shape_n = 0
+	local SHAPE_KEYS = { "now", "chats", "devices", "projects", "here", "show", "clock" }
+	-- (Lists, the projects and devices, by what's in them: a list read
+	-- again may be a fresh table holding the same.)
+	local LISTS: { [string]: boolean } = { projects = true, devices = true }
+	local function same(k: string, a: any, b: any): boolean
+		if a == b then
+			return true
+		end
+		if not LISTS[k] or type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then
+			return false
+		end
+		for i = 1, #a do
+			local x, y = a[i], b[i]
+			if x ~= y and (type(x) ~= "table" or type(y) ~= "table" or x.id ~= y.id or x.name ~= y.name or x.online ~= y.online or x.platform ~= y.platform) then
+				return false
+			end
+		end
+		return true
+	end
+	local shape = ui.computed(function(): number
+		if not on_screen() then
+			return shape_n
+		end
+		local world = props.world()
+		local changed = shape_world == nil
+		if not changed then
+			for _, k in SHAPE_KEYS do
+				if not same(k, world[k], shape_world[k]) then
+					changed = true
+					break
+				end
+			end
+		end
+		if changed then
+			shape_n += 1
+			shape_world = world
+		end
+		return shape_n
+	end)
 	ui.effect(function()
 		if not on_screen() then
 			return
 		end
-		local world = props.world()
+		shape:get()
+		local world = shape_world
+		if not world then
+			return
+		end
 		chats_now = world.chats or {}
 		local w = width:get()
+		count("relayout_runs")
 		relayout(world, w)
 	end)
 

@@ -417,3 +417,22 @@ test("graph2: off screen, nothing lays out, draws or follows; back, it shows the
 	expect(c.draws > b.draws).to_be(true)
 	expect(app:count("#control-widget-map >> .orch-graph2-node")).to_be(107)
 end)
+
+test("graph2: the loads tick reaches the headings' figures alone: nothing laid out or drawn", function()
+	local app = open(1440)
+	app:frames(10)
+	local a = app:state("control_map_graph2_stats")
+	local worst = 0
+	for _ = 1, 10 do
+		local t0 = os.clock()
+		app:command("map_big_loads")
+		app:frames(1)
+		worst = math.max(worst, (os.clock() - t0) * 1000)
+	end
+	local b = app:state("control_map_graph2_stats")
+	print(`GRAPH2PERF loads tick worst frame={string.format("%.2f", worst)}ms relayout_runs={b.relayout_runs - a.relayout_runs} draws={b.draws - a.draws}`)
+	expect(b.relayout_runs).to_be(a.relayout_runs)
+	expect(b.layouts).to_be(a.layouts)
+	expect(b.draws).to_be(a.draws)
+	expect(worst < 16).to_be(true)
+end)

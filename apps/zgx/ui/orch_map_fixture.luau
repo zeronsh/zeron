@@ -376,6 +376,20 @@ for _, mode in { "active", "recent", "all" } do
 		require("@ds/orch_map_visibility").mode:set(mode)
 	end }
 end
+-- The machines' loads, moved on (the engine's tick, every few seconds).
+local big_tick = 0
+ui.command { id = "map_big_loads", title = "Map: a big fleet's loads tick", run = function()
+	big_tick += 1
+	local t = os.time()
+	local out = {}
+	for id, l in orchestration.loads:peek() or {} do
+		local l2 = table.clone(l)
+		l2.cpu = ((l.cpu or 0) + 0.07 * big_tick) % 1
+		l2.at = t + big_tick
+		out[id] = l2
+	end
+	orchestration.loads:set(out)
+end }
 -- One more Engine crew thread on the big fleet (a change of what's shown).
 ui.command { id = "map_big_more", title = "Map: a big fleet, one more thread", run = function()
 	big_extra += 1
