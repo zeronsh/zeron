@@ -6,7 +6,11 @@
 -- chat is its transcript and a composer of its own (its draft its own, not
 -- the chat page's); a subagent's is its transcript alone, to read.
 --
---   LaneTab { tab = { id, kind = "side_chat" | "subagent", chat, title } }
+--   LaneTab { tab = { id, kind = "side_chat" | "subagent" | "read", chat, title } }
+--
+-- `read`: a live chat's transcript alone, to read (the Control room's Chat
+-- tab: the Brain dump's), its working row its own, `data.foot` the room
+-- kept clear at its foot (what floats over it there).
 
 local ds = require("@ds")
 local Dictation = require("@app/screens/chat/dictation")
@@ -1438,6 +1442,8 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	local tab = props.tab
 	local slot, chat = tab.id, tab.chat
 	local data = tab.data or {}
+	-- (Its transcript alone, no composer of its own.)
+	local reading = tab.kind == "subagent" or tab.kind == "read"
 	local view = lanes.view(slot)
 	-- What the tab is now: a fork under way or failed, or its chat (a new
 	-- side chat's not yet made, until its first message).
@@ -1638,11 +1644,11 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		draft = reply,
 		offset = offset,
 		keep = anchor,
-		foot = if tab.kind == "subagent" then nil else room.foot,
+		foot = if tab.kind == "read" then data.foot elseif tab.kind == "subagent" then nil else room.foot,
 		-- Its "Jump to latest" and the pill of the composer at its foot, a
 		-- centred pair: its own composer's, or, a split's focused pane, the
 		-- window's (screens/chat/shared's `pill_width_of`).
-		beside = if tab.kind == "subagent"
+		beside = if reading
 			then nil
 			else function(): number?
 				return Shared.pill_width_of("waiting", if split and focused_now() then "window" else `lane.{slot}`):get()
@@ -1720,8 +1726,8 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			return make_transcript()
 		end, { w_full = true, grow = 1, min_h = 0 })
 		else make_transcript()
-	if tab.kind == "subagent" then
-		return ui.column { id = `lane-{slot}`, class = "lane-tab subagent-tab", provide = { session = chat }, grow = 1, w_full = true, min_h = 0, relative = true, transcript, find.Bar() }
+	if reading then
+		return ui.column { id = `lane-{slot}`, class = if tab.kind == "read" then "lane-tab read-tab" else "lane-tab subagent-tab", provide = { session = chat }, grow = 1, w_full = true, min_h = 0, relative = true, transcript, find.Bar() }
 	end
 	return ui.column {
 		id = `lane-{slot}`,

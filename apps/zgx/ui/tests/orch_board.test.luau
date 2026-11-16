@@ -339,6 +339,8 @@ test("orch board: in the Control room, a card's dump is brought into view", func
 	-- (Tall enough for the Board under both columns, Q&A's in the right.)
 	app:resize(1440, 3000)
 	app:frames(30)
+	app:set_state("control_tab", "board")
+	app:frames(30)
 	-- The loose item the newest dump made, in Queued's Later (opened): its
 	-- menu's Show dump.
 	app:click("#control-board-queued >> .orch-later-head")
@@ -346,7 +348,9 @@ test("orch board: in the Control room, a card's dump is brought into view", func
 	app:right_click('#control-board-queued >> role:button "Rerun omarchy-update (needs sudo)"')
 	app:frames(10)
 	app:click('role:menuitem "Show dump"')
-	app:frames(10)
+	app:frames(30)
+	-- (On Overview, where Capture's history is.)
+	expect(app:state("control_tab")).to_be("overview")
 	expect(app:error()).to_be_nil()
 end)
 
@@ -367,7 +371,7 @@ test("orch board: done today is since midnight, on the board and in the Control 
 	app:frames(20)
 	expect(app:has('#control-board-done >> role:button "Done this morning"')).to_be(true)
 	expect(app:has('#control-board-done >> role:button "Done last night"')).to_be(false)
-	expect(app:has('#control-widget-board >> "1 done today"')).to_be(true)
+	expect(app:has('#control-board-figures >> "1 done today"')).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -562,6 +566,8 @@ test("orch board: in the Control room, a Later card carried into Now starts", fu
 	-- (Tall enough for the Board under both columns, Q&A's in the right.)
 	app:resize(1440, 3000)
 	app:frames(30)
+	app:set_state("control_tab", "board")
+	app:frames(30)
 	-- (Later is folded at first; opened, the Control room keeps it so.)
 	expect(app:state("control_board_later")).to_be(false)
 	app:click("#control-board-queued >> .orch-later-head")
@@ -582,18 +588,25 @@ test("orch board: a card whose thread asked the person says Waiting on you, unti
 	local app = mount("control_page_fixture.luau")
 	app:resize(1440, 2400)
 	app:frames(30)
+	app:set_state("control_tab", "board")
+	app:frames(30)
 	app:command("fixture.turn_end_ask")
 	app:frames(20)
 	local card = '#control-board-now >> role:button "Codex slash commands missing"'
 	expect(app:has(`{card} >> .orch-card-word >> "Waiting on you"`)).to_be(true)
 	-- (Waiting since it asked.)
 	expect(app:has(`{card} >> .orch-card-clock >> "2m"`)).to_be(true)
-	-- Answered: its thread is at it again, or at rest; no word for the person.
+	-- Answered (in Needs you, on Overview): its thread is at it again, or
+	-- at rest; no word for the person.
+	app:set_state("control_tab", "overview")
+	app:frames(30)
 	app:click('#control-widget-needs >> role:button "Merge into zeron/orchestrators"')
 	-- (Sent once its Undo has passed: the option 1-based.)
 	expect(app:wait('#control-widget-needs >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
 	app:frames(5)
 	expect(app:state("calls")).to_contain("answer:ak-turn:2:")
+	app:set_state("control_tab", "board")
+	app:frames(30)
 	expect(app:wait(`{card} >> .orch-card-word`, { gone = true, timeout_ms = 3000 })).to_be(true)
 	expect(app:has(`{card} >> "Waiting on you"`)).to_be(false)
 	expect(app:error()).to_be_nil()

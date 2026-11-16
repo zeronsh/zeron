@@ -2800,7 +2800,10 @@
         "shell_reload": "重新启动 Zeron",
         "shell_reload_interface": "重新加载界面",
         "shell_dictate": "按住听写",
-        "control_focus_capture": "聚焦捕获"
+        "control_focus_capture": "聚焦捕获",
+        "control_tab_overview": "控制室：概览",
+        "control_tab_board": "控制室：看板",
+        "control_tab_chat": "控制室：聊天"
       },
       "group": {
         "sessions": "会话",
@@ -4376,6 +4379,15 @@
       "orchestrators": "{n} 个编排者",
       "working": "{n} 个在运行",
       "needs": "{n} 项需要你"
+    },
+    "tabs": {
+      "label": "控制室标签页",
+      "overview": "概览",
+      "board": "看板",
+      "chat": "聊天"
+    },
+    "chat": {
+      "none": "还没有 Brain dump"
     }
   }
 }

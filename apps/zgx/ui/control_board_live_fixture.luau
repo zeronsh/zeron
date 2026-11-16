@@ -1,7 +1,7 @@
 -- The Control room as a first real run leaves it (ui/control_page_fixture.luau,
 -- its board's work replaced): one orchestrator, Tally, and the two things
 -- it finished today, the rest of the board empty. For the board's audit
--- pictures (`control_board_live@1440x2600|#control-widget-board`) and
+-- pictures (`control_board_live@1440x2600|#control-board-tab`) and
 -- tests/orch_board.test.luau.
 
 local built = require("./control_page_fixture")
@@ -54,5 +54,7 @@ table.insert(s.projects, { id = "p-tally", name = "tally", device = "dev-cloud",
 s.chats = table.clone(s.chats or {})
 table.insert(s.chats, { id = "orc-tally", title = "Tally", device = "dev-cloud", project = "p-tally", updated = now - 300, created = now - 9000, agent = "claude", model = "claude-opus-5-5" })
 sessions.now:set(s)
+-- (On the Board's own tab.)
+require("@app/screens/control/page").tab:set("board")
 
 return built

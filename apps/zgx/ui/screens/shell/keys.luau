@@ -52,6 +52,10 @@ M.LIST = {
 	-- (The Control room's composer, wherever it shows: screens/control/page.
 	-- ⌘K is Search's.)
 	{ id = "control.focus_capture", title = "Focus Capture", key = "cmd+shift+k", group = "Go", menu = "Go", reserved = true },
+	-- (Its tabs: Overview, Board, Chat.)
+	{ id = "control.tab_overview", title = "Control room: Overview", key = "cmd+alt+1", group = "Go", menu = "Go", reserved = true },
+	{ id = "control.tab_board", title = "Control room: Board", key = "cmd+alt+2", group = "Go", menu = "Go", reserved = true },
+	{ id = "control.tab_chat", title = "Control room: Chat", key = "cmd+alt+3", group = "Go", menu = "Go", reserved = true },
 	{ id = "shell.next_session", title = "Next session", key = "ctrl+tab", group = "Go", menu = "Go", reserved = true },
 	{ id = "shell.previous_session", title = "Previous session", key = "ctrl+shift+tab", group = "Go", menu = "Go", reserved = true },
 } :: { Key }

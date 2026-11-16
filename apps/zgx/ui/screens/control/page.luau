@@ -1,13 +1,24 @@
 -- The Control room (`/control`): the Brain dump's home, and the one place
--- that shows everything orchestration is doing. Its widgets, in order:
--- Capture (dump anything; the newest dump's receipt under it, older ones
--- folded), Needs you, Q&A (the person's questions and their answers), the
--- Map, the Scratchpad (the person's notes and drawings, opened to a page
--- of its own in place), the Board, Machines and Comms. Two columns
--- from 1100 points (Capture and the Map on the left; Needs you, Machines and
--- Comms on the right; the Board across both, under them), one below that. Each widget can be
--- hidden and moved; that's this device's (`control_widgets`). Plugins add
--- widgets of their own at `slot:zeron.orchestration.widgets`.
+-- that shows everything orchestration is doing. Three tabs (`control_tab`,
+-- kept on this device; ⌘⌥1–3):
+--
+-- Overview: its widgets, in order: Capture (dump anything; the newest
+-- dump's receipt under it, older ones folded), Needs you, Q&A (the
+-- person's questions and their answers), Progress, the Map, the Scratchpad
+-- (the person's notes and drawings, opened to a page of its own in place),
+-- Machines and Comms. Two columns from 1100 points (Capture, the Map and
+-- the Scratchpad on the left; the rest on the right), one below that. Each
+-- widget can be hidden and moved; that's this device's (`control_widgets`).
+-- Plugins add widgets of their own at `slot:zeron.orchestration.widgets`.
+--
+-- Board: the Board, the page's whole width.
+--
+-- Chat: the Brain dump's chat as a chat reads (its transcript, the chat
+-- view's own), watched only while the tab shows.
+--
+-- Only the tab shown is built. Capture's composer floats at the page's
+-- foot on Board and Chat, and on Overview once Capture is scrolled away:
+-- one composer, the same draft, chips and model everywhere.
 --
 --   Page()    the page, as the shell mounts it
 
@@ -41,6 +52,7 @@ local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local LaneTab = require("@app/screens/chat/lane_tab")
+local lanes = require("@app/screens/chat/lanes")
 local KeptScroll = require("@ds/kept_scroll")
 local Scratch = require("@ds/orch_scratchpad")
 local scratchpad = require("@account/scratchpad")
@@ -63,9 +75,18 @@ local SIDE_W = 420
 local GAP = "$space.4"
 
 -- The widgets: each one's column when wide.
-M.WIDGETS = { "capture", "needs", "qa", "progress", "map", "scratchpad", "board", "machines", "comms" }
--- (The Board spans both, under them: its columns want the room.)
-local COLUMN: { [string]: string } = { capture = "left", map = "left", scratchpad = "left", board = "full", needs = "right", qa = "right", progress = "right", machines = "right", comms = "right" }
+M.WIDGETS = { "capture", "needs", "qa", "progress", "map", "scratchpad", "machines", "comms" }
+-- (The Board is a tab of its own: its columns want the page.)
+local COLUMN: { [string]: string } = { capture = "left", map = "left", scratchpad = "left", needs = "right", qa = "right", progress = "right", machines = "right", comms = "right" }
+
+-- The tabs, and the one shown, kept on this device.
+M.TABS = { "overview", "board", "chat" }
+M.tab = ui.persist("control_tab", "overview")
+function M.show_tab(id: string)
+	if table.find(M.TABS, id) and M.tab:peek() ~= id then
+		M.tab:set(id)
+	end
+end
 
 -- Shown and in what order, on this device.
 export type Widgets = { order: { string }, hidden: { [string]: boolean } }
@@ -455,6 +476,8 @@ M.float_open = ui.state("control_capture_float_open", false)
 -- (Whether either placement holds the keys, followed as focus moves.)
 local inline_focused = false
 local float_focused = false
+-- The floating one's height as laid out (the Chat tab keeps its foot clear).
+M.float_h = ui.state("control_capture_float_h", 0)
 -- Asked for the keys: bumped, the floating one takes them.
 local float_wanted = ui.state("control_capture_float_wanted", 0)
 -- The scroll's own element, to tell above from below.
@@ -503,7 +526,7 @@ end
 
 -- The composer takes the keys where it shows: floating, else in Capture.
 function M.focus_composer(): boolean
-	if M.floating:peek() then
+	if M.floating:peek() or M.tab:peek() ~= "overview" then
 		float_wanted:add(1)
 	else
 		LaneTab.focus(SLOT)
@@ -801,8 +824,16 @@ local function board(): Node
 			orchestration.set_priority(id, p):after(function() end, said("control.board.failed"))
 		end,
 		on_open_thread = M.open_chat,
+		-- (Its dump in Capture's history, on Overview.)
 		on_source = function(src: any)
-			M.show_dump(src.dump_id)
+			if M.tab:peek() == "overview" then
+				M.show_dump(src.dump_id)
+				return
+			end
+			M.show_tab("overview")
+			ui.after(0, function()
+				M.show_dump(src.dump_id)
+			end)
 		end,
 		on_remove = orchestration.remove_item,
 		on_restore = orchestration.restore_item,
@@ -1023,7 +1054,7 @@ local function scratchpad_widget(): Node
 	return Scratch.Widget(scratchpad_props())
 end
 
-local BUILD: { [string]: () -> Node } = { scratchpad = scratchpad_widget, capture = capture, needs = needs, qa = qa, progress = Progress.Widget, map = map, board = board, machines = machines, comms = comms }
+local BUILD: { [string]: () -> Node } = { scratchpad = scratchpad_widget, capture = capture, needs = needs, qa = qa, progress = Progress.Widget, map = map, machines = machines, comms = comms }
 
 -- How many of the crew work now.
 local function working_now(): number
@@ -1317,7 +1348,6 @@ local function layout(kind: string): Node
 				ui.column { id = "control-left", grow = 1, basis = 0, min_w = 0, gap = GAP, list("left") },
 				ui.column { id = "control-right", w = SIDE_W, shrink = 0, gap = GAP, list("right"), slot() },
 			},
-			ui.column { id = "control-full", w_full = true, gap = GAP, list("full") },
 		}
 	end
 	return ui.column {
@@ -1357,7 +1387,10 @@ end
 local function head(): Node
 	local hook, seen, open = opens_under()
 	return ContextMenu {
-		items = M.widget_entries,
+		-- (Overview's widgets: the other tabs have none.)
+		items = function(): { any }
+			return if M.tab:peek() == "overview" then M.widget_entries() else {}
+		end,
 		hook = hook,
 		label = locale.t("control.widgets.title"),
 		w_full = true,
@@ -1406,8 +1439,23 @@ local function head(): Node
 				},
 			},
 			ui.div { grow = 1 },
+			-- The tabs.
+			ds.Segmented {
+				id = "control-tabs",
+				value = M.tab,
+				label = locale.t("control.tabs.label"),
+				options = {
+					{ value = "overview", label = locale.t("control.tabs.overview") },
+					{ value = "board", label = locale.t("control.tabs.board") },
+					{ value = "chat", label = locale.t("control.tabs.chat") },
+				},
+			},
+			-- (The widgets' menu: Overview's alone.)
 			ui.div {
 				on_visible = seen,
+				hidden = function(): boolean
+					return M.tab:get() ~= "overview"
+				end,
 				IconButton {
 					id = "control-widgets-menu",
 					icon = "tuning",
@@ -1566,7 +1614,10 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 			ref = float_ref,
 			w = motion.tween(w, { duration = 220, ease = "out(3)" }),
 			pointer_events = "auto",
-			on_resize = function(_size: { w: number, h: number }, el: Element)
+			on_resize = function(size: { w: number, h: number }, el: Element)
+				if math.abs(size.h - M.float_h:peek()) >= 1 then
+					M.float_h:set(size.h)
+				end
 				local x, bw = el.x, el.width
 				if x and bw then
 					local b = box:peek()
@@ -1667,27 +1718,160 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 	}
 end)
 
+-- The page's frame: as wide as the widgets go, centred, off its sides.
+local MAX_W = 1480
+-- (Clear of the floating composer, at a transcript's foot.)
+local FLOAT_CLEAR = 12
+
+-- A tab's scroll, its place kept (KeptScroll), its content centred.
+local function scrolled(props: { id: string, place: any, ref: any?, pb: any?, [number]: Node }): Node
+	local kept = KeptScroll.use(props.place)
+	local body: { [any]: any } = {
+		w_full = true,
+		max_w = MAX_W,
+		on_resize = function(size: { w: number, h: number })
+			kept.on_resize(size, nil)
+		end,
+	}
+	for _, child in ipairs(props :: any) do
+		table.insert(body, child)
+	end
+	return ui.scroll {
+		ref = props.ref,
+		id = props.id,
+		w_full = true,
+		grow = 1,
+		min_h = 0,
+		fade = { 12, 12 },
+		fade_overflow = true,
+		offset = kept.offset,
+		on_wheel = kept.on_wheel,
+		on_press = kept.on_press,
+		on_key = kept.on_key,
+		ui.column {
+			w_full = true,
+			items = "center",
+			px = "$space.6",
+			pt = "$space.2",
+			pb = props.pb or "$space.8",
+			ui.column(body :: any),
+		},
+	}
+end
+
+-- Overview: Capture and the widgets (or the Scratchpad opened to its page).
+local Overview = ui.component(function(props: { width: State<number> }): Node
+	-- Loads are sampled only while the widgets show (Machines, the Map's lanes).
+	orchestration.loads_wanted(true)
+	ui.on_cleanup(function()
+		orchestration.loads_wanted(false)
+	end)
+	return scrolled {
+		id = "control-scroll",
+		place = M.place,
+		ref = scroll_ref,
+		-- (A real swap: the widgets, or the Scratchpad opened to its page.)
+		ui.presence(function(): string
+			return if M.scratchpad_open:get() then "scratchpad" else "widgets"
+		end, function(kind: string): Node
+			if kind == "scratchpad" then
+				return ui.column {
+					w_full = true,
+					Scratch.Page(scratchpad_props()),
+				}
+			end
+			return ui.presence(function(): string
+				-- (A real swap: two columns or one, the widgets laid out again.)
+				return if props.width:get() >= M.WIDE then "wide" else "narrow"
+			end, layout, { w_full = true })
+		end, { w_full = true }),
+	}
+end)
+
+-- Where the Board tab is scrolled, kept as Overview's is.
+M.board_place = ui.state("control_board_scroll", 0)
+
+-- Board: its figures, then the board across the page (a frame after the
+-- tab's first, ds/stage).
+local BoardTab = ui.component(function(): Node
+	return scrolled {
+		id = "control-board-scroll",
+		place = M.board_place,
+		-- (Its last cards scroll clear of the floating composer.)
+		pb = function(): any
+			return ui.raw(math.max(32, M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR), "the floating composer's height, measured")
+		end,
+		ui.column {
+			id = "control-board-tab",
+			w_full = true,
+			gap = "$space.3",
+			ui.row { id = "control-board-figures", w_full = true, min_h = 20, items = "center", figures_of("board") },
+			stage.Later(1, board, 480),
+		},
+	}
+end)
+
+-- Chat: the Brain dump's chat, read as any chat is (screens/chat/lane_tab's
+-- transcript, the chat view's), in a lane of its own watched while the tab
+-- shows and let go as it goes. Its foot kept clear of the floating composer.
+M.CHAT_SLOT = "control-chat"
+local ChatTab = ui.component(function(): Node
+	ui.on_cleanup(function()
+		lanes.watch(M.CHAT_SLOT, nil)
+	end)
+	return ui.column {
+		id = "control-chat",
+		w_full = true,
+		grow = 1,
+		min_h = 0,
+		ui.presence(function(): string
+			return brain_dump() or ""
+		end, function(id: string): Node
+			if id == "" then
+				return ds.EmptyState {
+					icon = "chat-round-line",
+					title = locale.t("control.chat.none") :: any,
+					fill = true,
+				}
+			end
+			return stage.Later(1, function(): Node
+				return LaneTab.Tab {
+					tab = {
+						id = M.CHAT_SLOT,
+						kind = "read",
+						chat = id,
+						title = locale.s("control.tabs.chat"),
+						data = {
+							foot = function(): number
+								return M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR
+							end,
+						},
+					},
+				}
+			end)
+		end, { w_full = true, grow = 1, min_h = 0 }),
+	}
+end)
+
 M.Page = ui.component(function(): Node
 	fresh()
 	local width = ui.use_state(0)
-	-- A dump asked to be shown from another page (a board card's source).
+	-- A dump asked to be shown from another page (a board card's source):
+	-- on Overview, where Capture's history is.
 	ui.effect(function()
 		local id = orchestration.reveal_dump:get()
 		if id then
 			ui.after(0, function()
 				orchestration.reveal_dump:set(nil)
-				M.show_dump(id)
+				M.show_tab("overview")
+				ui.after(0, function()
+					M.show_dump(id)
+				end)
 			end)
 		end
 	end)
-	-- Loads are sampled only while the page shows (Machines, the Map's lanes).
-	orchestration.loads_wanted(true)
 	ui.on_cleanup(function()
-		orchestration.loads_wanted(false)
 		decide.hide()
-	end)
-	local kept = KeptScroll.use(M.place)
-	ui.on_cleanup(function()
 		if M.floating:peek() then
 			M.floating:set(false)
 		end
@@ -1695,63 +1879,47 @@ M.Page = ui.component(function(): Node
 			M.float_open:set(false)
 		end
 	end)
+	-- The floating composer: on Board and Chat, and on Overview with
+	-- Capture scrolled away.
+	local float_shown = ui.computed(function(): boolean
+		return M.tab:get() ~= "overview" or M.floating:get()
+	end)
 	return ui.column {
 		id = "control-room",
 		w_full = true,
 		h_full = true,
 		min_h = 0,
 		relative = true,
-		ui.scroll {
-			ref = scroll_ref,
-			id = "control-scroll",
+		-- The head (the tabs in it), over every tab.
+		ui.column {
 			w_full = true,
-			grow = 1,
-			min_h = 0,
-			fade = { 12, 12 },
-			fade_overflow = true,
-			offset = kept.offset,
-			on_wheel = kept.on_wheel,
-			on_press = kept.on_press,
-			on_key = kept.on_key,
-			ui.column {
-				w_full = true,
-				items = "center",
-				px = "$space.6",
-				pt = "$space.4",
-				pb = "$space.8",
-				on_resize = function(size: { w: number, h: number })
-					if math.abs(size.w - width:peek()) >= 1 then
-						width:set(size.w)
-					end
-					kept.on_resize(size, nil)
-				end,
-				-- (A real swap: the widgets, or the Scratchpad opened to its page.)
-				ui.presence(function(): string
-					return if M.scratchpad_open:get() then "scratchpad" else "widgets"
-				end, function(kind: string): Node
-					if kind == "scratchpad" then
-						return ui.column {
-							w_full = true,
-							max_w = 1480,
-							Scratch.Page(scratchpad_props()),
-						}
-					end
-					return ui.column {
-						w_full = true,
-						max_w = 1480,
-						gap = "$space.6",
-						head(),
-						ui.presence(function(): string
-							-- (A real swap: two columns or one, the widgets laid out again.)
-							return if width:get() >= M.WIDE then "wide" else "narrow"
-						end, layout, { w_full = true }),
-					}
-				end, { w_full = true, items = "center" }),
-			},
+			items = "center",
+			px = "$space.6",
+			pt = "$space.4",
+			pb = "$space.4",
+			-- (The page's width, as every tab lays it out: one column or two,
+			-- the floating composer's room.)
+			on_resize = function(size: { w: number, h: number })
+				if math.abs(size.w - width:peek()) >= 1 then
+					width:set(size.w)
+				end
+			end,
+			ui.column { w_full = true, max_w = MAX_W, head() },
 		},
-		-- Capture's composer, floating while Capture is out of view.
+		-- (A real swap: only the tab shown is built.)
+		ui.presence(function(): string
+			return M.tab:get()
+		end, function(tab: string): Node
+			if tab == "board" then
+				return BoardTab {}
+			elseif tab == "chat" then
+				return ChatTab {}
+			end
+			return Overview { width = width }
+		end, { w_full = true, grow = 1, min_h = 0 }),
+		-- Capture's composer, floating.
 		ui.presence(function(): string?
-			return if M.floating:get() then "float" else nil
+			return if float_shown:get() then "float" else nil
 		end, function(): Node
 			local keys = float_takes_keys
 			float_takes_keys = false

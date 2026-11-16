@@ -330,6 +330,17 @@ return function(): Node
 			end
 		end
 	end
+	-- ⌘⌥1–3 on the Control room: its tabs.
+	for _, tab in { "overview", "board", "chat" } do
+		runs[`control.tab_{tab}`] = function()
+			if route.current:peek().name == "control" then
+				local control: any = boundary.load("@app/screens/control/page")
+				if control and control.show_tab then
+					(control.show_tab :: any)(tab)
+				end
+			end
+		end
+	end
 	runs["shell.pin"] = function()
 		local s = route.current:peek().session
 		local sidebar = boundary.load("@app/screens/shell/sidebar")

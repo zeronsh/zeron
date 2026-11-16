@@ -21,17 +21,26 @@ local function pause(app: any)
 	end
 end
 
--- Where the page's head is drawn: its top, in the window.
+-- Where the tab's content is drawn (Overview's widgets, the Board's
+-- figures): its top, in the window. (The head, the tabs in it, stays.)
+local MARK = "#control-columns"
 local function top(app: any): number
-	local line = string.match(app:tree("#control-widgets-menu"), "[^\n]+") or ""
+	local line = string.match(app:tree(MARK), "[^\n]+") or ""
 	return tonumber(string.match(line, " %-?[%d%.]+,(%-?[%d%.]+) ")) or 0
 end
 
--- Scrolled down `by`, then `change`: the head as far up after as before.
-local function holds(fixture: string, by: number, change: (any) -> ())
-	local app = open(fixture)
+-- Scrolled down `by`, then `change`: the content as far up after as
+-- before. (`board`: on the Board's tab.)
+local function holds(fixture: string, by: number, change: (any) -> (), board: boolean?)
+	-- (The Board's tab is short: a short window, for it to scroll.)
+	local app = open(fixture, if board then 360 else nil)
+	MARK = if board then "#control-board-figures" else "#control-columns"
+	if board then
+		app:set_state("control_tab", "board")
+		app:frames(30)
+	end
 	local start = top(app)
-	app:scroll("#control-scroll", by)
+	app:scroll(if board then "#control-board-scroll" else "#control-scroll", by)
 	app:frames(30)
 	pause(app)
 	local scrolled = top(app)
@@ -61,11 +70,11 @@ test("control scroll: a thread showing in Progress keeps the place", function()
 end)
 
 test("control scroll: a Board card deleted keeps the place", function()
-	holds("control_fixture.luau", 2000, function(app)
-		app:right_click('#control-widget-board >> role:button "Phase 2 migration"')
+	holds("control_fixture.luau", 250, function(app)
+		app:right_click('#control-board-tab >> role:button "Phase 2 migration"')
 		app:frames(10)
 		app:click('role:menuitem "Delete"')
-	end)
+	end, true)
 end)
 
 -- Every widget but Capture gone for a frame (as when they are built
@@ -75,7 +84,7 @@ test("control scroll: content short for a moment, the place comes back", functio
 		local all = app:state("control_widgets")
 		app:set_state("control_widgets", {
 			order = all.order,
-			hidden = { needs = true, progress = true, map = true, board = true, machines = true, comms = true },
+			hidden = { needs = true, progress = true, map = true, machines = true, comms = true },
 		})
 		app:frames(2)
 		app:set_state("control_widgets", all)
@@ -95,6 +104,7 @@ end)
 
 -- Scrolled back to the top, it opens at the top.
 test("control scroll: scrolled back up, the top is kept", function()
+	MARK = "#control-columns"
 	local app = open("control_fixture.luau")
 	local start = top(app)
 	app:scroll("#control-scroll", 600)
@@ -137,7 +147,11 @@ end)
 -- The board's columns past ten (ds/orch_board): Show more and Show less,
 -- every column at once, the page where it was.
 test("control scroll: a board's columns shown in full, and back, keep the place", function()
-	local app = open(nil, 900)
+	-- (Short, for the Board's tab to scroll.)
+	local app = open(nil, 500)
+	MARK = "#control-board-figures"
+	app:set_state("control_tab", "board")
+	app:frames(30)
 	local n = table.clone(app:state("orchestration") :: any)
 	local items = table.clone(n.items or {})
 	local now = os.time()
@@ -155,7 +169,7 @@ test("control scroll: a board's columns shown in full, and back, keep the place"
 	-- (Scrolled down until the button is in the middle of the view.)
 	local line = string.match(app:tree("#control-board-done >> .orch-column-more"), "[^\n]+") or ""
 	local y = tonumber(string.match(line, " %-?[%d%.]+,(%-?[%d%.]+) ")) or 0
-	app:scroll("#control-scroll", math.max(300, y - 450))
+	app:scroll("#control-board-scroll", math.max(300, y - 250))
 	app:frames(30)
 	pause(app)
 	local scrolled = top(app)
@@ -166,7 +180,7 @@ test("control scroll: a board's columns shown in full, and back, keep the place"
 	expect(top(app)).to_be(scrolled)
 	-- (Show less is further down now: the person scrolls to it.)
 	pause(app)
-	app:scroll("#control-scroll", 400)
+	app:scroll("#control-board-scroll", 400)
 	app:frames(30)
 	pause(app)
 	scrolled = top(app)
@@ -180,6 +194,6 @@ test("control scroll: a board's columns shown in full, and back, keep the place"
 	expect(after < start - 200).to_be(true)
 	local more = string.match(app:tree("#control-board-done >> .orch-column-more"), "[^\n]+") or ""
 	local my = tonumber(string.match(more, " %-?[%d%.]+,(%-?[%d%.]+) ")) or -1
-	expect(my >= 0 and my <= 900).to_be(true)
+	expect(my >= 0 and my <= 500).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
