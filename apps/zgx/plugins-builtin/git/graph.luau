@@ -30,7 +30,8 @@ local M = {}
 
 -- A layout cache for one History view. update accepts the accumulated history.
 -- Existing rows keep their identity on append; changed/reordered/truncated
--- topology starts over. Inputs may be freshly decoded tables on every update.
+-- topology starts over. update returns rows, full width and a generation that
+-- changes only on a rebuild. Inputs may be freshly decoded tables each time.
 -- `max_lanes` bounds line geometry only. Keep every lane, parent and color
 -- in the topology: a hidden lane can join a visible one later, and compact
 -- mode still needs every commit's own column/color and the full width.
@@ -45,6 +46,8 @@ function M.new(max_lanes: number?)
 	-- precede them in paint order, which is known once parents are assigned.
 	local connections: { Line } = {}
 	local widest = 1
+	-- A generation identifies all rows until a prefix change rebuilds them.
+	local version = 0
 	local topology: { Commit } = {}
 	local function free_slot(avoid: number?): number
 		for j = 1, #lanes + 1 do
@@ -59,7 +62,7 @@ function M.new(max_lanes: number?)
 		next_color += 1
 		return c
 	end
-	local function update(commits: { Commit }): ({ Row }, number)
+	local function update(commits: { Commit }): ({ Row }, number, number)
 		-- Validate the prefix in O(commits + parents); only the appended suffix
 		-- runs the lane algorithm and allocates row geometry.
 		local append = #commits >= #topology
@@ -82,6 +85,7 @@ function M.new(max_lanes: number?)
 			end
 		end
 		if not append then
+			version += 1
 			lanes = {}
 			colors = {}
 			next_color = 0
@@ -181,14 +185,15 @@ function M.new(max_lanes: number?)
 			-- Snapshot only topology, not subjects, authors or other row metadata.
 			topology[i] = { sha = c.sha, parents = table.clone(c.parents) }
 		end
-		return rows, widest
+		return rows, widest, version
 	end
 	return { update = update }
 end
 
 -- One-shot callers use exactly the same algorithm as paginated History.
 function M.layout(commits: { Commit }, max_lanes: number?): ({ Row }, number)
-	return M.new(max_lanes).update(commits)
+	local rows, widest = M.new(max_lanes).update(commits)
+	return rows, widest
 end
 
 return M

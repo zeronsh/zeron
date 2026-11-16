@@ -287,3 +287,33 @@ uses eight visible lanes, `layout_full` emits the complete graph, and
 `scroll` measures UI frames. Rows with `exit=101` are expected baseline
 memory failures: their apparent frame times are invalid. Final logs are
 `/tmp/zgx-graph-step2-*.log`.
+
+
+## Follow-up: compact History keys (2026-11-16)
+
+History now uses a graph generation and row position instead of serializing
+all visible segments into a retained key for every commit. The generation
+stays constant on append and metadata-only updates; changed, reordered or
+truncated topology increments it. Keys also include visible width and tail
+continuation, so pagination still refreshes the previous tail. Search keys
+use position and SHA, with a separate prefix from graph keys.
+
+Keys are generated on demand. Their position resolves the commit directly,
+removing both the key array and reverse index map. Fixed `height`/`count`
+also replace the array of identical heights. Commit metadata stays in the
+model's existing collection; graph geometry and topology validation remain.
+
+A single headless smoke comparison against `cec0fc6d`, using the same 1,000
+real commits, 32 MiB plugin budget and 240 scroll steps, measured Git VM heap:
+
+| Stage | Before | Compact keys |
+| --- | ---: | ---: |
+| At rest | 13,610,626 bytes | 12,956,046 bytes |
+| After scroll and collection | 14,201,210 bytes | 13,988,222 bytes |
+
+Both runs mounted 124 texts at rest and at most 150 while scrolling. This
+is a memory smoke comparison, not evidence of a native scrolling speedup.
+The existing `git_scroll_cost` benchmark reproduces it using a fixture from
+`scripts/zgx-git-history-fixture.py --count 1000`. Regression tests cover
+stable generations on append, invalidation on topology changes with unchanged
+commit count and width, commit opening, search and compact tail continuation.

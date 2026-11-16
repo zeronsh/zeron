@@ -3233,10 +3233,13 @@ for _, cap in { 0, 1, 2, 8, math.huge } do
     -- A page boundary at every row exercises hidden joins and lane reuse.
     local cache = graph.new(cap)
     local prior = {}
+    local generation = nil
     local prefix = {}
     for _, c in commits do
         table.insert(prefix, c)
-        local rows, width = cache.update(prefix)
+        local rows, width, version = cache.update(prefix)
+        if generation ~= nil then assert(version == generation, "append changed generation") end
+        generation = version
         for i, old in prior do assert(rows[i] == old, `rebuilt row {i}`) end
         same(prefix, rows, width, cap)
         prior = table.clone(rows)
@@ -3244,12 +3247,14 @@ for _, cap in { 0, 1, 2, 8, math.huge } do
     -- Freshly decoded metadata and an empty page must reuse all geometry.
     local decoded = {}
     for i, c in prefix do decoded[i] = { sha = c.sha, parents = table.clone(c.parents), subject = "updated" } end
-    local rows, width = cache.update(decoded)
+    local rows, width, version = cache.update(decoded)
+    assert(version == generation, "metadata changed generation")
     for i, old in prior do assert(rows[i] == old) end
     same(decoded, rows, width, cap)
     -- Parent changes (including in-place edits) must not reuse stale state.
     decoded[2].parents[1] = "root"
-    rows, width = cache.update(decoded)
+    rows, width, version = cache.update(decoded)
+    assert(version > generation, "changed prefix kept generation")
     assert(rows[1] ~= prior[1])
     same(decoded, rows, width, cap)
     decoded[1], decoded[2] = decoded[2], decoded[1]
@@ -3581,6 +3586,35 @@ fn history_s_hidden_lanes_keep_compact_hover_and_page_continuations() {
     git_fixture(&mut app, "width", zgx_script::Value::from(900.0));
     app.frames(10);
     assert!((app.bounds(&cell).width - 102.0).abs() < 0.5, "the graph returns to eight full-width lanes");
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn history_s_compact_keys_reuse_rows_and_invalidate_same_size_graph_changes() {
+    let (mut app, heard, world) = git_tab(git_world(), None);
+    history_of(&mut app);
+    let row = "role:button \"Draw the lanes\"";
+    let original = app.find(row).unwrap();
+    let graph_width = app.bounds(&format!("{row} >> .git-graph")).width;
+    // Decoded tables with identical topology keep their mounted rows.
+    app.click("role:checkbox \"Every branch\"");
+    assert!(app.wait_until(|_| asked_service(&heard, "history").iter().any(|c| c["args"]["all"] == true)));
+    app.frames(10);
+    assert_eq!(app.find(row), Some(original));
+    // Same commits, positions and width, but the merge's parent order now
+    // changes their lanes/colors. A generation change must rebuild the rows.
+    world.borrow_mut()["history"]["commits"][0]["parents"] = json!(["4".repeat(40), "2".repeat(40)]);
+    let before = asked_service(&heard, "history").len();
+    app.click("role:checkbox \"Every branch\"");
+    assert!(app.wait_until(|_| asked_service(&heard, "history").len() > before));
+    assert!(app.wait_until(|app| app.find(row).is_some_and(|node| node != original)));
+    assert_eq!(app.bounds(&format!("{row} >> .git-graph")).width, graph_width);
+    // Index-bearing keys still open the commit at the intended position.
+    app.click(row);
+    app.frames(5);
+    let opened = heard.borrow().iter().filter(|(kind, _)| kind == "plugin.git.open_tab")
+        .map(|(_, value)| serde_json::from_str::<serde_json::Value>(value).unwrap()).last().unwrap();
+    assert_eq!(opened["data"]["commit"]["sha"], "2".repeat(40));
     assert_eq!(app.error(), None);
 }
 

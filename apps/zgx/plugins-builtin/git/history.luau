@@ -18,8 +18,8 @@
 -- `git.commit.head` in an opened commit's head (View on GitHub). With no
 -- plugin there, History is git alone.
 --
--- The rows are a virtualized list keyed by commit and how its lines run:
--- more history, or a refresh, builds only the rows that came or changed.
+-- The rows are virtualized with compact position/generation keys. Appending
+-- history keeps existing rows; topology changes invalidate the generation.
 
 local Changes = require("@ds/git_changes")
 local git = require("@ds/git")
@@ -1017,17 +1017,17 @@ return function(zeron: any, Repo: any, words: any)
 		-- The graph, worked out as the commits change (none while searching:
 		-- the commits found aren't a line), and the lanes it needs at most.
 		-- Keep pending lanes across pages. The old tail already has its outgoing
-		-- edges; keys below refresh its compact rail when a next row arrives.
+		-- edges; row_key below refreshes its compact rail when a next row arrives.
 		local graph_cache = graph.new(MAX_LANES)
-		local laid = ui.computed(function(): { rows: { graph.Row }, lanes: number, commits: { any } }
+		local laid = ui.computed(function(): { rows: { graph.Row }, lanes: number, commits: { any }, version: number }
 			local h = model.history:get()
 			local commits = if h then h.commits else {}
 			if searching() then
-				graph_cache = graph.new(MAX_LANES)
-				return { rows = {}, lanes = 0, commits = commits }
+				graph_cache.update({})
+				return { rows = {}, lanes = 0, commits = commits, version = -1 }
 			end
-			local rows, widest = graph_cache.update(commits)
-			return { rows = rows, lanes = math.min(widest, MAX_LANES), commits = commits }
+			local rows, widest, version = graph_cache.update(commits)
+			return { rows = rows, lanes = math.min(widest, MAX_LANES), commits = commits, version = version }
 		end)
 		ui.effect(function()
 			local w = width:get()
@@ -1058,41 +1058,26 @@ return function(zeron: any, Repo: any, words: any)
 				geom:set(now)
 			end
 		end)
-		-- Rows keyed by commit and how its lines run (a row whose lines
-		-- moved is drawn again), then "older commits" when there are more.
-		local keys = ui.computed(function(): { string }
+		-- Generate compact keys only for rows the list asks for. Within a
+		-- graph generation each position's geometry is immutable; a rebuild
+		-- changes the version. Width and the old tail's continuation can still
+		-- change on append. No serialized segments, key array or reverse index.
+		local function row_count(): number
 			local l = laid:get()
-			local out: { string } = {}
-			for i, c in l.commits do
-				local r = l.rows[i]
-				local sig: { string } = { tostring(l.lanes) }
-				if r then
-					table.insert(sig, tostring(r.col))
-					-- Compact mode uses these even when all this commit's
-					-- lines are outside the visible lanes. Appending a page
-					-- also changes the previous tail's rail continuation.
-					table.insert(sig, tostring(r.color))
-					table.insert(sig, if i > 1 then tostring(l.rows[i - 1].color) else "")
-					table.insert(sig, if l.rows[i + 1] then "below" else "end")
-					for _, line in r.lines do
-						table.insert(sig, `{line.a}{line.b}{line.from}{line.to}{line.color}`)
-					end
-				end
-				out[i] = `{c.sha}:{table.concat(sig, ",")}`
-			end
 			local h = model.history:get()
-			if h and h.more then
-				table.insert(out, "more")
+			return #l.commits + (if h and h.more then 1 else 0)
+		end
+		local function row_key(i: number): string
+			local l = laid:peek()
+			local c = l.commits[i]
+			if not c then
+				return "more"
 			end
-			return out
-		end)
-		local index = ui.computed(function(): { [string]: number }
-			local map: { [string]: number } = {}
-			for i, k in keys:get() do
-				map[k] = i
+			if l.version < 0 then
+				return `s:{i}:{c.sha}`
 			end
-			return map
-		end)
+			return `g:{i}:{l.version}:{l.lanes}:{if i < #l.rows then 1 else 0}`
+		end
 		local function find(sha: string): any?
 			for _, x in laid:peek().commits do
 				if x.sha == sha then
@@ -1164,16 +1149,9 @@ return function(zeron: any, Repo: any, words: any)
 					h_full = true,
 					offset = offset,
 					overscan = 8,
-					heights = function(): { number }
-						local hs: { number } = {}
-						for i = 1, #keys:get() do
-							hs[i] = ROW
-						end
-						return hs
-					end,
-					key = function(i: number): string
-						return keys:peek()[i] or `none:{i}`
-					end,
+					height = ROW,
+					count = row_count,
+					key = row_key,
 					row = function(key: string): Node
 						if key == "more" then
 							return ui.row {
@@ -1193,7 +1171,8 @@ return function(zeron: any, Repo: any, words: any)
 								},
 							}
 						end
-						local i = index:peek()[key]
+						local position = string.match(key, "^[gs]:(%d+):")
+						local i = if position then tonumber(position) else nil
 						local l = laid:peek()
 						local c = if i then l.commits[i] else nil
 						if not c then
@@ -1230,7 +1209,7 @@ return function(zeron: any, Repo: any, words: any)
 					id = "git-history-rail",
 					offset = offset,
 					extent = function(): number
-						return #keys:get() * ROW
+						return row_count() * ROW
 					end,
 					view = seen,
 				},
