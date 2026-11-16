@@ -10,6 +10,8 @@
 --              (ds/orch_map_timeline)
 --   Machines   a block a machine: its load, and the threads it runs, by
 --              project and orchestrator (ds/orch_map_machines)
+--   Graph (new) the same, laid out once per change rather than settled:
+--              machines a treemap, crews in grids (ds/orch_graph2)
 --   Graph      all of it as a web: machines, orchestrators, the Brain dump
 --              and threads as nodes, what runs where, leads what, started
 --              what as lines (ds/orch_map_graph)
@@ -36,6 +38,7 @@ local Topology = require("@self/orch_map_topology")
 local Timeline = require("@self/orch_map_timeline")
 local Machines = require("@self/orch_map_machines")
 local Graph = require("@self/orch_map_graph")
+local Graph2 = require("@self/orch_graph2")
 local Layout = require("@self/orch_map_layout")
 
 export type View = { variant: string, window: number }
@@ -72,7 +75,9 @@ function M.open_menu(id: string): boolean
 	return false
 end
 
-M.VARIANTS = { "topology", "timeline", "machines", "graph" }
+-- ("graph2": the Graph laid out rather than settled, beside the first
+-- until it takes its place.)
+M.VARIANTS = { "topology", "timeline", "machines", "graph", "graph2" }
 M.WINDOWS = { 15, 60 }
 M.DEFAULT = { variant = "topology", window = 15 } :: View
 
@@ -97,7 +102,7 @@ function M.menu(view: State<View>): { any }
 	for _, id in M.VARIANTS do
 		table.insert(out, {
 			label = locale.s(`ds.orch.map.variant.{id}`),
-			icon = if id == "topology" then "git-branch" elseif id == "timeline" then "list" elseif id == "graph" then "global" else "widget",
+			icon = if id == "topology" then "git-branch" elseif id == "timeline" then "list" elseif id == "graph" or id == "graph2" then "global" else "widget",
 			checked = function(): boolean
 				return valid(view:get()).variant == id
 			end,
@@ -115,6 +120,20 @@ function M.menu(view: State<View>): { any }
 			end,
 			on_select = function()
 				M.set(view, { variant = "timeline", window = mins })
+			end,
+		})
+	end
+	table.insert(out, { separator = true })
+	-- How the new Graph draws a thread: a dot, or its provider's glyph.
+	table.insert(out, { heading = locale.s("ds.orch.map.node_style") })
+	for _, style in Graph2.STYLES do
+		table.insert(out, {
+			label = locale.s(`ds.orch.map.node_style_{style}`),
+			checked = function(): boolean
+				return Graph2.node_style:get() == style
+			end,
+			on_select = function()
+				Graph2.node_style:set(style)
 			end,
 		})
 	end
@@ -158,6 +177,64 @@ end
 -- it stays.)
 M.left_graph = ui.persist("control_map_left_graph", false)
 
+-- `world` (the page's) as a shape-stable function: see the Map's use.
+local SHAPE_KEYS = { "now", "chats", "devices", "projects", "here", "show", "clock" }
+local LISTS: { [string]: boolean } = { projects = true, devices = true }
+local function same(k: string, a: any, b: any): boolean
+	if a == b then
+		return true
+	end
+	if not LISTS[k] or type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then
+		return false
+	end
+	for i = 1, #a do
+		local x, y = a[i], b[i]
+		if x ~= y and (type(x) ~= "table" or type(y) ~= "table" or x.id ~= y.id or x.name ~= y.name or x.online ~= y.online or x.platform ~= y.platform) then
+			return false
+		end
+	end
+	return true
+end
+function M.shaped(world_fn: () -> any): () -> any
+	local raw: any = nil
+	local kept: any = nil
+	local n = 0
+	local function loads(): any
+		return world_fn().loads
+	end
+	local shape = ui.computed(function(): number
+		local w = world_fn()
+		local changed = raw == nil
+		if not changed then
+			for _, k in SHAPE_KEYS do
+				if not same(k, w[k], raw[k]) then
+					changed = true
+					break
+				end
+			end
+		end
+		if changed then
+			n += 1
+			raw = w
+			local t = table.clone(w)
+			t.loads = nil
+			kept = setmetatable(t, {
+				__index = function(_self: any, key: any): any
+					if key == "loads" then
+						return loads()
+					end
+					return nil
+				end,
+			})
+		end
+		return n
+	end)
+	return function(): any
+		shape:get()
+		return kept
+	end
+end
+
 M.Map = ui.component(function(props: Props): Node
 	local view = props.view or ui.use_state(M.DEFAULT)
 	if not M.left_graph:peek() then
@@ -167,8 +244,16 @@ M.Map = ui.component(function(props: Props): Node
 		end
 	end
 
+	-- The world as the views read it: the same table until what it holds
+	-- but the machines' loads changes (by identity; the projects and
+	-- devices by what's in them). Its `loads` is read through to the
+	-- page's at the moment: only what reads them (a machine's heading,
+	-- its figure and ring) follows their tick, every few seconds; no
+	-- view's layout does.
+	local world = M.shaped(props.world)
+
 	local function chat(id: string): any
-		return (props.world().chats or {})[id]
+		return (world().chats or {})[id]
 	end
 	local function timeline(): { [string]: { any } }
 		return if props.timeline then props.timeline() or {} else {}
@@ -183,7 +268,7 @@ M.Map = ui.component(function(props: Props): Node
 			showing = variant
 			if variant == "timeline" then
 				return Timeline.View {
-					world = props.world,
+					world = world,
 					chat = chat,
 					comms = props.comms,
 					timeline = timeline,
@@ -200,7 +285,17 @@ M.Map = ui.component(function(props: Props): Node
 				}
 			elseif variant == "graph" then
 				return Graph.View {
-					world = props.world,
+					world = world,
+					chat = chat,
+					comms = props.comms,
+					on_open_chat = props.on_open_chat,
+					on_open_orchestrator = props.on_open_orchestrator,
+					menu = props.menu,
+					register = register,
+				}
+			elseif variant == "graph2" then
+				return Graph2.View {
+					world = world,
 					chat = chat,
 					comms = props.comms,
 					on_open_chat = props.on_open_chat,
@@ -210,7 +305,7 @@ M.Map = ui.component(function(props: Props): Node
 				}
 			elseif variant == "machines" then
 				return Machines.View {
-					world = props.world,
+					world = world,
 					chat = chat,
 					on_open_chat = props.on_open_chat,
 					on_open_orchestrator = props.on_open_orchestrator,
@@ -219,7 +314,7 @@ M.Map = ui.component(function(props: Props): Node
 				}
 			end
 			return Topology {
-				world = props.world,
+				world = world,
 				chat = chat,
 				comms = props.comms,
 				on_open_chat = props.on_open_chat,

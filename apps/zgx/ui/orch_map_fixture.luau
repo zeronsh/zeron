@@ -264,6 +264,167 @@ ui.command { id = "sign_review", title = "Signing: in Review", run = function()
 	now.items = items
 	orchestration.now:set(now)
 end }
+-- A big fleet (the new Graph's perf and shots): four machines, 104
+-- agents (4 orchestrators, 100 threads), the VPN orchestrator with 51 crew (46 on the desk, 5 on the
+-- MacBook), the Brain dump's on the cloud box. Deterministic.
+local BIG_WORDS = { "Exporter image", "WireGuard keys", "Peer sync", "Admin app login", "Moscow relay", "DE node health", "Backup nightly", "Route table", "DNS split", "Metrics push", "Cert rotate", "Mesh join", "Firewall rules", "Client config", "UI polish", "Throughput test" }
+local BIG_STATES = { "working", "idle", "working", "waiting", "idle", "done", "working", "failed", "idle", "input" }
+local BIG_AGENTS = { { "claude", "claude-opus-5-5" }, { "openai", "gpt-5.5-codex" }, { "claude", "claude-sonnet-5-5" }, { "gemini", "gemini-3-pro" }, { "cursor", "composer-2" } }
+local big_extra = 0
+local big_stale = false
+local function map_big()
+	local t = os.time()
+	local devices = {
+		{ id = "dev-desk", name = "dev-desk", platform = "linux", here = true, online = true },
+		{ id = "dev-mac", name = "macbook", platform = "macos", online = true },
+		{ id = "dev-win", name = "winbox", platform = "windows", online = true },
+		{ id = "dev-cloud", name = "Cloud", platform = "cloud", cloud = true, online = true },
+	}
+	local chats, crew = {}, {}
+	local k = 0
+	local function chat(id: string, title: string, device: string): any
+		k += 1
+		local agent = BIG_AGENTS[(k - 1) % #BIG_AGENTS + 1]
+		local c = { id = id, title = title, device = device, status = BIG_STATES[(k - 1) % #BIG_STATES + 1], updated = t - k, created = t - 9000,
+			agent = agent[1], model = agent[2] }
+		-- (Stale: some finished ones last moved an hour or more ago, some
+		-- forty minutes ago.)
+		if big_stale and (c.status == "idle" or c.status == "done") then
+			(c :: any).status = nil
+			c.updated = if k % 2 == 0 then t - 2 * 3600 else t - 45 * 60
+		end
+		table.insert(chats, c)
+		return c
+	end
+	local function orch(id: string, name: string, hue: number, device: string, kind: string?): any
+		local c = chat(id, name, device)
+		c.status = "working"
+		return { id = id, kind = kind or "standard", name = name, goal = "", rules = "", crew_rules = "", notes = "", hue = hue,
+			crew = { devices = {} }, paused = false, archived = false, created = t - 9000, updated = t - 60 }
+	end
+	local function members(o: string, prefix: string, n: number, device: string)
+		for i = 1, n do
+			local id = `{prefix}{i}`
+			chat(id, BIG_WORDS[(i - 1) % #BIG_WORDS + 1] .. (if i > #BIG_WORDS then ` {i // #BIG_WORDS + 1}` else ""), device)
+			table.insert(crew, { orchestrator_id = o, chat_id = id, released = false })
+		end
+	end
+	local os_ = {
+		orch("orc-vpn", "Exnomic VPN", 200, "dev-desk"),
+		orch("orc-ui", "Control room UI", 320, "dev-mac"),
+		orch("orc-eng", "Engine", 40, "dev-win"),
+		orch("orc-brain", "Brain dump", 140, "dev-cloud", "brain_dump"),
+	}
+	members("orc-vpn", "vpn", 46, "dev-desk")
+	members("orc-vpn", "vpnm", 5, "dev-mac")
+	members("orc-ui", "ui", 16, "dev-mac")
+	members("orc-eng", "eng", 12, "dev-win")
+	members("orc-brain", "bd", 6, "dev-cloud")
+	members("orc-eng", "engx", big_extra, "dev-win")
+	for i = 1, 12 do
+		chat(`own{i}`, `Own thread {i}`, "dev-desk").status = if i % 3 == 0 then "done" else "working"
+	end
+	for i = 1, 3 do
+		chat(`ownw{i}`, `Side quest {i}`, "dev-win").status = "waiting"
+	end
+	sessions.now:set({
+		state = "ready", here = "dev-desk", devices = devices, projects = {}, chats = chats, archived = {}, children = {},
+		places = { pinned = {}, sections = {} }, places_ready = true,
+	} :: any)
+	orchestration.now:set({ state = "ready", orchestrators = os_, crew = crew, items = {}, asks = {},
+		dumps = { { id = "d1", routes = { { target = { kind = "orchestrator", id = "orc-eng" } } } } } })
+	orchestration.loads:set({
+		["dev-desk"] = { cpu = 0.38, mem_used = 17e9, mem_total = 67e9, online = true, at = t },
+		["dev-mac"] = { cpu = 0.83, mem_used = 7e9, mem_total = 32e9, online = true, at = t },
+		["dev-win"] = { cpu = 0.77, mem_used = 7e9, mem_total = 32e9, online = true, at = t },
+		["dev-cloud"] = { cpu = 0.24, mem_used = 7e9, mem_total = 32e9, online = true, at = t },
+	})
+end
+ui.command { id = "map_big", title = "Map: a big fleet", run = function()
+	big_extra = 0
+	big_stale = false
+	map_big()
+end }
+-- The big fleet with its finished threads gone quiet: half last moved two
+-- hours ago, half forty-five minutes ago (fading).
+ui.command { id = "map_big_stale", title = "Map: a big fleet, gone quiet", run = function()
+	big_stale = true
+	map_big()
+end }
+-- A quiet thread of the big fleet (gone from the Map) at work again.
+ui.command { id = "map_big_wake", title = "Map: a big fleet, a quiet one wakes", run = function()
+	local n: any = table.clone(sessions.now:peek())
+	local list = {}
+	for _, c in n.chats do
+		local c2 = table.clone(c)
+		if c2.id == "vpn2" then
+			c2.status = "working"
+			c2.updated = os.time()
+		end
+		table.insert(list, c2)
+	end
+	n.chats = list
+	sessions.now:set(n)
+end }
+for _, style in { "dots", "provider" } do
+	ui.command { id = `map_graph2_{style}`, title = `Map: the new graph's nodes as {style}`, run = function()
+		require("@ds/orch_graph2").node_style:set(style)
+	end }
+end
+for _, mode in { "active", "recent", "all" } do
+	ui.command { id = `map_show_{mode}`, title = `Map: show chats {mode}`, run = function()
+		require("@ds/orch_map_visibility").mode:set(mode)
+	end }
+end
+-- The machines' loads, moved on (the engine's tick, every few seconds).
+local big_tick = 0
+ui.command { id = "map_big_loads", title = "Map: a big fleet's loads tick", run = function()
+	big_tick += 1
+	local t = os.time()
+	local out = {}
+	for id, l in orchestration.loads:peek() or {} do
+		local l2 = table.clone(l)
+		l2.cpu = ((l.cpu or 0) + 0.07 * big_tick) % 1
+		l2.at = t + big_tick
+		out[id] = l2
+	end
+	orchestration.loads:set(out)
+end }
+-- One more Engine crew thread on the big fleet (a change of what's shown).
+ui.command { id = "map_big_more", title = "Map: a big fleet, one more thread", run = function()
+	big_extra += 1
+	map_big()
+end }
+-- A crew report on the big fleet: a dot runs the VPN's comb.
+ui.command { id = "map_big_report", title = "Map: a big fleet report", run = function()
+	local n = #orchestration.comms:peek()
+	orchestration.comms:push({ id = `big-x{n}`, kind = "report", from = "vpn12", to = "orc-vpn", summary = "done", at = os.time() })
+end }
+-- A copy of the live data, where one was put beside this fixture as
+-- orch_live_snapshot.luau (`{ sessions, orchestration }` as the host had
+-- them; never kept in the repository): the Graphs' bench on the real
+-- shape.
+ui.command { id = "map_snapshot", title = "Map: the live data's copy", run = function()
+	local ok, snap = pcall(require, "@app/orch_live_snapshot")
+	if not ok or type(snap) ~= "table" then
+		return
+	end
+	sessions.now:set(snap.sessions)
+	orchestration.now:set(snap.orchestration)
+end }
+-- The new Graph's view moved, as a drag or a ⌘/Ctrl-scroll would.
+ui.command { id = "map_graph2_zoom_in", title = "Map: zoom the new graph in", run = function()
+	require("@ds/orch_graph2").zoom_by(1.25)
+end }
+ui.command { id = "map_graph2_zoom_out", title = "Map: zoom the new graph out", run = function()
+	require("@ds/orch_graph2").zoom_by(0.8)
+end }
+ui.command { id = "map_graph_zoom_out", title = "Map: zoom the graph out", run = function()
+	require("@ds/orch_map_graph").zoom_by(0.8)
+end }
+ui.command { id = "map_graph2_pan", title = "Map: pan the new graph", run = function()
+	require("@ds/orch_graph2").pan_by(-40, -25)
+end }
 -- Zeron fixes and its crew as the Map once showed them blank: one named
 -- and done, one just created (its title given, its first turn still
 -- running), one whose chat isn't heard yet (its role names it), one with
