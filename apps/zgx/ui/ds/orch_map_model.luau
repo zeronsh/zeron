@@ -67,6 +67,64 @@ function M.device_order(devices: { any }, here: string?): { any }
 	return list
 end
 
+-- One machine per real one. A machine's engine registered again (a
+-- reinstall, a new data dir) leaves its old device rows behind under the
+-- same name: rows with the same name and platform are one machine, under
+-- the row in use (this device, else one online, else the one seen last),
+-- online if any is, seen when last any was. Cloud sessions are each their
+-- own, as are differently named engines on one host (honeypot-1 beside
+-- honeypot). Nothing is dropped: `alias` maps every row's id to its
+-- machine's.
+--   M.machines_of(devices, here) -> ({ device }, alias: { [id]: id })
+function M.machines_of(devices: { any }, here: string?): ({ any }, { [string]: string })
+	local alias: { [string]: string } = {}
+	local groups: { [string]: { any } } = {}
+	local order: { string } = {}
+	for _, d in devices or {} do
+		local cloud = d.cloud == true or d.platform == "cloud"
+		local key = if cloud or d.name == nil or d.name == "" then `id:{d.id}` else `{string.lower(d.name)}/{d.platform or ""}`
+		if not groups[key] then
+			groups[key] = {}
+			table.insert(order, key)
+		end
+		table.insert(groups[key], d)
+	end
+	local function rank(d: any): number
+		if d.id == here or d.here == true then
+			return 3
+		end
+		return if d.online ~= false then 2 else 1
+	end
+	local out: { any } = {}
+	for _, key in order do
+		local g = groups[key]
+		local best = g[1]
+		for i = 2, #g do
+			local d = g[i]
+			local rb, rd = rank(best), rank(d)
+			if rd > rb or (rd == rb and (tonumber(d.seen) or 0) > (tonumber(best.seen) or 0)) then
+				best = d
+			end
+		end
+		local merged = best
+		if #g > 1 then
+			merged = table.clone(best)
+			for _, d in g do
+				alias[d.id] = best.id
+				if d.online ~= false then
+					merged.online = true
+				end
+				if tonumber(d.seen) and (tonumber(merged.seen) or 0) < d.seen then
+					merged.seen = d.seen
+				end
+			end
+		end
+		alias[best.id] = best.id
+		table.insert(out, merged)
+	end
+	return out, alias
+end
+
 -- Whether a thread of the person's own may show at all: never one
 -- archived, nor a chat's subagent (whether it does is the Map's "Show
 -- chats", ds/orch_map_visibility).
@@ -196,11 +254,11 @@ function M.fleet(world: any): Fleet
 		end
 	end
 
-	-- Machines: those online, and any other a thread is on.
-	local used: { [string]: boolean } = {}
+	-- Each thread on its machine (a device row of one, M.machines_of).
+	local devices, alias = M.machines_of(world.devices or {}, here)
 	for _, t in threads do
-		if t.device then
-			used[t.device] = true
+		if t.device and alias[t.device] then
+			t.device = alias[t.device]
 		end
 	end
 	-- The Map's "Show chats": a thread hidden by it leaves the Map (an
@@ -220,8 +278,17 @@ function M.fleet(world: any): Fleet
 			end
 		end
 	end
+	-- Machines: those online, and any other a thread still shown is on (one
+	-- whose threads are all hidden leaves with them: no empty "Nothing
+	-- running" for a machine gone quiet weeks ago).
+	local used: { [string]: boolean } = {}
+	for _, t in threads do
+		if t.device then
+			used[t.device] = true
+		end
+	end
 	local machines: { Machine } = {}
-	for _, d in M.device_order(world.devices or {}, here) do
+	for _, d in M.device_order(devices, here) do
 		local is_here = d.id == here or d.here == true
 		local online = d.online ~= false or is_here
 		if online or used[d.id] then
