@@ -344,6 +344,18 @@ ui.command { id = "map_big_report", title = "Map: a big fleet report", run = fun
 	local n = #orchestration.comms:peek()
 	orchestration.comms:push({ id = `big-x{n}`, kind = "report", from = "vpn12", to = "orc-vpn", summary = "done", at = os.time() })
 end }
+-- A copy of the live data, where one was put beside this fixture as
+-- orch_live_snapshot.luau (`{ sessions, orchestration }` as the host had
+-- them; never kept in the repository): the Graphs' bench on the real
+-- shape.
+ui.command { id = "map_snapshot", title = "Map: the live data's copy", run = function()
+	local ok, snap = pcall(require, "@app/orch_live_snapshot")
+	if not ok or type(snap) ~= "table" then
+		return
+	end
+	sessions.now:set(snap.sessions)
+	orchestration.now:set(snap.orchestration)
+end }
 -- The new Graph's view moved, as a drag or a ⌘/Ctrl-scroll would.
 ui.command { id = "map_graph2_zoom_in", title = "Map: zoom the new graph in", run = function()
 	require("@ds/orch_graph2").zoom_by(1.25)

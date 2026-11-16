@@ -9,11 +9,11 @@ local function pct(list: { number }, p: number): number
 	return s[math.clamp(math.ceil(#s * p), 1, #s)]
 end
 
-local function open(variant: string): any
+local function open(variant: string, world: string?): any
 	local app = mount("orch_map_fixture.luau")
 	app:resize(1440, 1400)
 	app:command("map_only")
-	app:command("map_big")
+	app:command(world or "map_big")
 	app:command(`map_{variant}`)
 	-- (The first Graph settles: let it.)
 	app:frames(if variant == "graph" then 240 else 20)
@@ -35,9 +35,10 @@ local function report(name: string, list: { number })
 	print(`GRAPHBENCH {name} p50={string.format("%.2f", pct(list, 0.5))}ms p95={string.format("%.2f", pct(list, 0.95))}ms max={string.format("%.2f", pct(list, 1))}ms n={#list}`)
 end
 
-test("graph2 bench: pan and zoom frames, old and new", function()
+local function bench(world: string?)
 	for _, v in { "graph", "graph2" } do
-		local app = open(v)
+		local app = open(v, world)
+		print(`GRAPHBENCH world={world or "map_big"} nodes={app:count("#control-widget-map >> .orch-graph2-node")}`)
 		local idle = timed(app, 120, function() end)
 		report(`{v} idle-frame`, idle)
 		local zoom = timed(app, 120, function(i: number)
@@ -73,4 +74,13 @@ test("graph2 bench: pan and zoom frames, old and new", function()
 			print(`GRAPHBENCH graph2 layout_ms={string.format("%.3f", app:state("control_map_graph2_stats").layout_ms)}`)
 		end
 	end
+end
+
+test("graph2 bench: pan and zoom frames, old and new", function()
+	bench()
+end)
+
+-- (On a copy of the live data, where one was put beside the fixture.)
+test("graph2 bench: the live data's copy", function()
+	bench("map_snapshot")
 end)

@@ -127,15 +127,13 @@ M.View = ui.component(function(props: {
 	-- The drawing's reach (world): what lies outside isn't drawn until the
 	-- view comes near it.
 	local cull = ui.use_state({ x0 = -1e9, y0 = -1e9, x1 = 1e9, y1 = 1e9 })
-	-- Each node's state as shown (held 300 ms at least), by id.
-	local shown: { [string]: () -> string } = {}
 	local pulses: { any } = {}
 	local ptick = ui.use_state(0)
 
 	-- (Counts for tests, published once after the draws of a frame. Timers
 	-- belong to the effect run that starts them, so each runs from an
 	-- effect of its own: publishing, the ease, the dots.)
-	local counts = { layouts = 0, draws = 0, overlay = 0, drawn = 0, w = 0, h = 0, layout_ms = 0 }
+	local counts = { layouts = 0, draws = 0, overlay = 0, drawn = 0, w = 0, h = 0, layout_ms = 0, draw_kb = 0, overlay_kb = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string)
 		(counts :: any)[key] += 1
@@ -152,12 +150,16 @@ M.View = ui.component(function(props: {
 		end
 	end)
 
+	-- The chats as of the last world (taken when it changes, so drawing
+	-- never builds one).
+	local chats_now: { [string]: any } = {}
+	-- Each thread's state as shown, put here by its marker as it changes
+	-- (`status_ver` says one did): the drawing reads one state, not one
+	-- a thread.
+	local status_by: { [string]: string } = {}
+	local status_ver = ui.use_state(0)
 	local function state_of(id: string): string
-		local f = shown[id]
-		if f then
-			return f()
-		end
-		return model.status_of(props.chat(id))
+		return status_by[id] or model.status_of(chats_now[id])
 	end
 
 	-- The palette, made once per theme: no string built while drawing.
@@ -318,6 +320,7 @@ M.View = ui.component(function(props: {
 
 	ui.effect(function()
 		local world = props.world()
+		chats_now = world.chats or {}
 		local w = width:get()
 		relayout(world, w)
 	end)
@@ -334,7 +337,9 @@ M.View = ui.component(function(props: {
 		return fx + (n.x - fx) * e, from_y[n.id] + (n.y - from_y[n.id]) * e
 	end
 
-	-- Text options, made once and set before each use.
+	-- Text options, made once and set before each use. (zgx reads a text's
+	-- options into a table of its own each call, ~0.75 KB: names are drawn
+	-- once the ease is done, never in its frames.)
 	local T_NAME: any = { size = FONT, baseline = "middle" }
 	local T_LEAD: any = { size = LEAD_FONT, weight = 600, baseline = "middle" }
 	local M_NAME = { size = FONT }
@@ -367,13 +372,17 @@ M.View = ui.component(function(props: {
 	-- layout, a state shown changing, a theme, the ease, or the view
 	-- nearing what wasn't drawn: never for a pan or a zoom alone.
 	local function draw(c: any, _w: number, _h: number)
+		local kb0 = gcinfo()
 		version:get()
 		local p = palette()
 		local e = ease(anim:get())
 		local box = cull:get()
 		local show_names = names_shown:get()
+		status_ver:get()
 		fit_names(c)
 		count("draws")
+		-- (Measured from here: the count above is the tests' own.)
+		kb0 = gcinfo()
 		local x0, y0, x1, y1 = box.x0, box.y0, box.x1, box.y1
 		-- 1. Regions.
 		for i, m in layout.machines do
@@ -433,7 +442,7 @@ M.View = ui.component(function(props: {
 				else
 					c:circle(x, y, 6.5, ink)
 				end
-				if show_names and names[i] ~= "" then
+				if show_names and e >= 1 and names[i] ~= "" then
 					T_LEAD.color = if n.ghost then p.quiet else p.name
 					c:text(names[i], x + 13, y, T_LEAD)
 				end
@@ -458,12 +467,14 @@ M.View = ui.component(function(props: {
 			else
 				c:circle(x, y, rr, paint)
 			end
-			if show_names and names[i] ~= "" then
+			if show_names and e >= 1 and names[i] ~= "" then
 				T_NAME.color = if bright then p.name elseif n.kind == "thread" then p.plain else p.quiet
 				c:text(names[i], x + 8, y, T_NAME)
 			end
 		end
 		counts.drawn = drawn
+		-- (What this draw allocated, for the tests' guard.)
+		counts.draw_kb = math.max(0, gcinfo() - kb0)
 	end
 
 	-- What's lit (the node under the pointer, its line) and the dots
@@ -472,10 +483,12 @@ M.View = ui.component(function(props: {
 	local lit_path: any = nil
 	local lit_for: string? = nil
 	local function overlay(c: any, _w: number, _h: number)
+		local kb0 = gcinfo()
 		version:get()
 		ptick:get()
 		local p = palette()
 		count("overlay")
+		kb0 = gcinfo()
 		local over = M.hover:get()
 		if anim:get() < 1 then
 			return
@@ -523,6 +536,7 @@ M.View = ui.component(function(props: {
 			c:circle(x, y, 5.5, q.soft)
 			c:circle(x, y, 3, q.ink)
 		end
+		counts.overlay_kb = math.max(0, gcinfo() - kb0)
 	end
 
 	-- Pulses: a message between two agents runs the line between them
@@ -1082,11 +1096,16 @@ M.View = ui.component(function(props: {
 			end)
 			else nil
 		if st then
-			shown[item.id] = st
-			ui.on_cleanup(function()
-				if shown[item.id] == st then
-					shown[item.id] = nil
+			local held = st
+			ui.effect(function()
+				local now = held()
+				if status_by[item.id] ~= now then
+					status_by[item.id] = now
+					status_ver:set(status_ver:peek() + 1)
 				end
+			end)
+			ui.on_cleanup(function()
+				status_by[item.id] = nil
 			end)
 		end
 		local function n(): L.Node?

@@ -304,3 +304,26 @@ test("graph2: crew are named as every view names them (ds/orch_name)", function(
 	end
 	expect(f ~= nil).to_be(true)
 end)
+
+test("graph2: a dot's frames and the ease's frames allocate nothing", function()
+	local app = open(1440)
+	app:frames(10)
+	app:command("map_big_report")
+	local most = 0
+	for _ = 1, 30 do
+		app:frames(2)
+		most = math.max(most, app:state("control_map_graph2_stats").overlay_kb)
+	end
+	expect(most < 1).to_be(true)
+	-- (A change: the ease's frames draw marks and lines only, the names
+	-- once it's done.)
+	app:command("map_big_more")
+	app:frames(2)
+	local ease = 0
+	for _ = 1, 10 do
+		app:frames(1)
+		ease = math.max(ease, app:state("control_map_graph2_stats").draw_kb)
+	end
+	print("GRAPH2ALLOC overlay_kb", most, "ease draw_kb", ease)
+	expect(ease < 2).to_be(true)
+end)
