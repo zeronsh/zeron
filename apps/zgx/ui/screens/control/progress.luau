@@ -106,6 +106,26 @@ local function derived<T>(sources: () -> ...any, f: (...any) -> T): { get: (any)
 	}
 end
 
+-- A script-owned computed of `f`, handing its readers the very table it
+-- gave before while what it says is the same: a push of sessions or the
+-- timeline that changes no row wakes none of the rows' readers.
+local function stable<T>(f: () -> T): { get: (any) -> T }
+	local prev: any = nil
+	return ui.computed(function(): T
+		local v = f()
+		if prev ~= nil and same(v, prev, { n = 8192 }) then
+			return prev
+		end
+		prev = v
+		return v
+	end) :: any
+end
+-- The minute, as state: what a row counts as fresh moves on with it.
+local minute = ui.state("progress_minute", os.time() // 60)
+ui.every(60000, function()
+	minute:set(os.time() // 60)
+end)
+
 local chats_now = derived(function(): any
 	return sessions.now:get()
 end, function(s: any): { [string]: any }
@@ -165,7 +185,7 @@ end
 -- (Worked out again each minute too: a chat made lately stops counting as
 -- made for its task as it ages.)
 local stood_in = derived(function(): ...any
-	return sessions.now:get(), timeline:get(), os.time() // 60
+	return sessions.now:get(), timeline:get(), minute:get()
 end, function(now: any, lines: any): { [string]: any }
 	local out: { [string]: any } = {}
 	local function take(c: any)
@@ -201,7 +221,7 @@ end)
 -- it has none for; a thread that ended its turn asking the person (an
 -- open ask raised from its turn's end) and is at rest since (idle or done;
 -- not an orchestrator's own chat) waits on them, from when it asked.
-M.rows = derived(function(): ...any
+local rows_now = derived(function(): ...any
 	return orchestration.progress:get(), stood_in:get(), orchestration.now:get(), chats_now:get(), leads_now:get()
 end, function(progress: any, stood: any, now: any, chats: any, leads: any): { [string]: any }
 	local out = table.clone(progress or {})
@@ -224,6 +244,10 @@ end, function(progress: any, stood: any, now: any, chats: any, leads: any): { [s
 		end
 	end
 	return out
+end)
+
+M.rows = stable(function(): { [string]: any }
+	return rows_now:get()
 end)
 
 local function with(map: State<{ [string]: boolean }>, id: string, on: boolean)
@@ -373,7 +397,7 @@ end
 
 -- The widget's threads: those pinned first (in their order), then every
 -- one working now, the latest started first.
-M.listed = derived(function(): ...any
+local listed_now = derived(function(): ...any
 	return M.rows:get(), M.pins:get()
 end, function(rows: any, pins: { string }): { { id: string } }
 	local out, seen = {}, {}
@@ -400,6 +424,10 @@ end, function(rows: any, pins: { string }): { { id: string } }
 		table.insert(out, { id = r.chat_id })
 	end
 	return out
+end)
+
+M.listed = stable(function(): { { id: string } }
+	return listed_now:get()
 end)
 
 -- How many work now, and how many of those are stalled: the widget's
