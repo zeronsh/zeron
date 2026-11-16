@@ -441,10 +441,21 @@ test("machines: a block a machine, in as many columns as fit", function()
 	app:frames(20)
 	expect(app:count("#control-widget-map >> .orch-mc-block")).to_be(4)
 	local _ = columns
+	-- (One column at this width: the Map, at its bound, scrolls to them.)
+	local function into_view(target: string)
+		local _, sy, _, sh = box(app, "#control-widget-map >> .orch-map-scroll")
+		local _, y = box(app, target)
+		if y < sy or y > sy + sh - 30 then
+			app:scroll("#control-widget-map >> .orch-map-scroll", y - sy - sh / 2)
+			app:frames(10)
+		end
+	end
 	-- Crew rows open their thread; an orchestrator's row, its page.
+	into_view('#control-widget-map >> .orch-pill "Exporter image, Building"')
 	app:click('#control-widget-map >> .orch-pill "Exporter image, Building"')
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/session/th-vpn-exporter")
+	into_view('#control-widget-map >> .orch-node "Reins release"')
 	app:click('#control-widget-map >> .orch-node "Reins release"')
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/orchestrator/orc-reins")
