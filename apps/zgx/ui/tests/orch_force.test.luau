@@ -304,7 +304,6 @@ test("force graph: hover, card, grip, click, menu", function()
 	app:frames(3)
 	app:hover(".orch-force-anchor-box")
 	expect(app:wait(".orch-force-card", { timeout_ms = 1500 })).to_be(true)
-	expect(app:has("#orch-force-grip")).to_be(true)
 	app:click(".orch-force-anchor-box")
 	app:frames(5)
 	expect(app:state("shell_route_path")).to_be("/session/vpn19")
@@ -318,4 +317,44 @@ test("force graph: hover, card, grip, click, menu", function()
 	m:command("map_menu")
 	m:frames(10)
 	expect(m:has('"Pause"')).to_be(true)
+end)
+
+test("force graph: a node's menu mentions it in Capture's composer; no grip, no hover chip", function()
+	local app = open()
+	settle(app, 240)
+	app:set_state("map_menu_id", "vpn3")
+	app:command("map_menu")
+	app:frames(10)
+	expect(app:has('"Mention in composer"')).to_be(true)
+	app:key("Escape")
+	app:frames(3)
+	app:set_state("map_menu_pick", "Mention in composer")
+	app:command("map_menu_choose")
+	app:frames(3)
+	app:command("map_read_cargo")
+	local cargo = app:state("brain_cargo")
+	local found = false
+	for _, item in cargo do
+		if item.kind == "ref" and item.id == "vpn3" then
+			found = true
+		end
+	end
+	expect(found).to_be(true)
+	-- An orchestrator too.
+	app:set_state("map_menu_id", "orc-ui")
+	app:set_state("map_menu_pick", "Mention in composer")
+	app:command("map_menu_choose")
+	app:frames(3)
+	app:command("map_read_cargo")
+	local ids = {}
+	for _, item in app:state("brain_cargo") do
+		ids[item.id or ""] = true
+	end
+	expect(ids["orc-ui"]).to_be(true)
+	-- Hover: the card alone.
+	app:set_state("control_map_force_hover", "vpn19")
+	app:frames(3)
+	app:hover(".orch-force-anchor-box")
+	expect(app:wait(".orch-force-card", { timeout_ms = 1500 })).to_be(true)
+	expect(app:has("#orch-force-grip")).to_be(false)
 end)

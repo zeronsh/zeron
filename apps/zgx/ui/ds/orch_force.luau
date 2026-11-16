@@ -27,7 +27,6 @@ local hue = require("@self/orch_hue")
 local kit = require("@self/orch_map_kit")
 local model = require("@self/orch_map_model")
 local Cells = require("@self/orch_cells")
-local Ref = require("@self/orch_ref")
 local sim = require("@self/orch_force_sim")
 local fm = require("@self/orch_force_model")
 local Graph2 = require("@self/orch_graph2")
@@ -739,11 +738,7 @@ M.View = ui.component(function(props: {
 			local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_CHAT + 3.5
 			c:circle(x[i], y[i], r + 4, p.lit)
 			c:circle(x[i], y[i], r + 2.5, p.bg)
-			if n.kind == "chat" and not label_x[i] and names[i] and names[i] ~= "" then
-				T_NAME.color = p.fg
-				c:rect(x[i] - 80, y[i] + R_CHAT + 5, 160, 16, p.label_bg, 4)
-				c:text(names[i], x[i], y[i] + R_CHAT + 6, T_NAME)
-			end
+
 		end
 		local now = ui.now()
 		for _, q in pulses do
@@ -1100,72 +1095,6 @@ M.View = ui.component(function(props: {
 		local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_CHAT
 		return s.x[i] * v.zoom + v.x, s.y[i] * v.zoom + v.y, r * v.zoom
 	end
-	local function ref_of(id: string): any
-		local i = fmodel.index[id]
-		return kit.ref_of(props.world, id, if i then fmodel.nodes[i].title else nil)
-	end
-
-	-- The grip beside the node under the pointer: dragged, a reference.
-	local grip_for = ui.use_state(nil :: string?)
-	ui.effect(function()
-		local id = M.hover:get()
-		if id and id ~= grip_for:peek() then
-			grip_for:set(id)
-		end
-	end)
-	local function grip_at(): (number, number)
-		view:get()
-		ptick:get()
-		geo:get()
-		local id = grip_for:get()
-		if not id then
-			return -1000, -1000
-		end
-		local x, y, r = screen_of(id)
-		return x + r + 6, y
-	end
-	local grip = ui.div {
-		id = "orch-force-grip",
-		class = "orch-force-grip",
-		label = locale.t("ds.orch.map.reference"),
-		absolute = true,
-		left = function(): number
-			local x = grip_at()
-			return x
-		end,
-		top = function(): number
-			local _, y = grip_at()
-			return y - 10
-		end,
-		w = 20,
-		h = 20,
-		rounded = "$radius.sm",
-		items = "center",
-		justify = "center",
-		color = "$text.secondary",
-		bg = "$surface.raised",
-		border = 1,
-		border_color = "$border",
-		hover = { bg = "$hover" },
-		on_hover = function(inside: boolean)
-			grip_hot:set(inside)
-			if not inside then
-				leave_later()
-			end
-		end,
-		on_drag = function(): any
-			local id = grip_for:peek()
-			local r = if id then ref_of(id) else nil
-			return if r then { ref = r } else nil
-		end,
-		drag_preview = function(payload: any): Node
-			local r = Ref.of(payload)
-			return if r then Ref.Pill(r) else ui.div {}
-		end,
-		drag_preview_anchor = { 0, 0.5 },
-		drag_preview_offset = { 12, 0 },
-		Icon { name = "drag-handle", size = 12 },
-	}
 
 	-- The card of what the pointer rests on (ds/hover_card's anchored).
 	local function card(): Node
@@ -1610,9 +1539,8 @@ M.View = ui.component(function(props: {
 				},
 			},
 		},
-		ui.show(function(): boolean
-			return M.hover:get() ~= nil or grip_hot:get()
-		end, grip),
+		-- (No grip: a node is referenced from its menu, Mention in
+		-- composer; the hover card alone shows what it is.)
 	}
 end)
 

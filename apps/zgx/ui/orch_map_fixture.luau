@@ -407,6 +407,16 @@ ui.command { id = "map_force_push", title = "Map: a live push, one chat's state"
 	n.chats = list
 	sessions.now:set(n)
 end }
+-- Capture's composer's chips (the Brain dump's, "orc-brain"), into
+-- `brain_cargo` (tests read them).
+local brain_cargo = ui.state("brain_cargo", {} :: any)
+ui.command { id = "map_read_cargo", title = "Map: read Capture's chips", run = function()
+	local out = {}
+	for _, item in require("@app/screens/chat/shared").peek_cargo("orc-brain") do
+		table.insert(out, { kind = item.kind, name = item.name, id = item.ref and item.ref.id })
+	end
+	brain_cargo:set(out)
+end }
 ui.command { id = "map_force_pan", title = "Map: pan the force graph", run = function()
 	require("@ds/orch_force").pan_by(-40, -25)
 end }

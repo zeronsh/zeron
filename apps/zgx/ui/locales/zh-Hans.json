@@ -4364,7 +4364,8 @@
       "release": "Release from crew",
       "rename_device": "Rename device",
       "no_section": "No section",
-      "failed": "Couldn't do that"
+      "failed": "Couldn't do that",
+      "mention": "Mention in composer"
     },
     "figures": {
       "urgent": "{n} 项紧急",
