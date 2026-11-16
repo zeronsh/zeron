@@ -81,6 +81,50 @@ M.VARIANTS = { "topology", "timeline", "machines", "graph", "graph2" }
 M.WINDOWS = { 15, 60 }
 M.DEFAULT = { variant = "topology", window = 15 } :: View
 
+-- How tall the Map stands at most: about the window (three quarters of
+-- it, 360 to 900 points; 640 where the host gives no size). A view with
+-- more (a Timeline or Topology of hundreds of lanes, the Machines of a big
+-- fleet) scrolls inside it; the Graphs size themselves within it.
+M.MIN_H, M.MAX_H, M.FALLBACK_H = 360, 900, 640
+function M.max_h(): number
+	local window = (ui :: any).window
+	local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
+	local ok, v = pcall(function(): any
+		return if state ~= nil then state:get() else nil
+	end)
+	local h = if ok and type(v) == "table" and type(v.height) == "number" and v.height > 1 then v.height else nil
+	return if h then math.clamp(math.floor(h * 0.75), M.MIN_H, M.MAX_H) else M.FALLBACK_H
+end
+
+-- A view in the Map's bounds: as tall as it is up to them, scrolled inside
+-- them when taller. (A scroll sized by nothing around it takes a height of
+-- its own: it's given its content's, up to the bound.)
+local Bounded = ui.component(function(p: { child: Node }): Node
+	local content = ui.use_state(0)
+	return ui.scroll {
+		class = "orch-map-scroll",
+		w_full = true,
+		shrink = 0,
+		h = function(): number
+			return math.max(1, math.min(content:get(), M.max_h()))
+		end,
+		fade = { 12, 12 },
+		fade_overflow = true,
+		ui.column {
+			w_full = true,
+			on_resize = function(size: { w: number, h: number })
+				if math.abs(size.h - content:peek()) >= 1 then
+					content:set(size.h)
+				end
+			end,
+			p.child,
+		},
+	}
+end)
+local function bounded(child: Node): Node
+	return Bounded { child = child }
+end
+
 -- (Kept for what reads the Topology's layout through the Map.)
 M.layout = Layout.layout
 
@@ -267,7 +311,7 @@ M.Map = ui.component(function(props: Props): Node
 		end, function(variant: string): Node
 			showing = variant
 			if variant == "timeline" then
-				return Timeline.View {
+				return bounded(Timeline.View {
 					world = world,
 					chat = chat,
 					comms = props.comms,
@@ -282,9 +326,9 @@ M.Map = ui.component(function(props: Props): Node
 					on_open_orchestrator = props.on_open_orchestrator,
 					menu = props.menu,
 					register = register,
-				}
+				})
 			elseif variant == "graph" then
-				return Graph.View {
+				return bounded(Graph.View {
 					world = world,
 					chat = chat,
 					comms = props.comms,
@@ -292,9 +336,9 @@ M.Map = ui.component(function(props: Props): Node
 					on_open_orchestrator = props.on_open_orchestrator,
 					menu = props.menu,
 					register = register,
-				}
+				})
 			elseif variant == "graph2" then
-				return Graph2.View {
+				return bounded(Graph2.View {
 					world = world,
 					chat = chat,
 					comms = props.comms,
@@ -302,18 +346,18 @@ M.Map = ui.component(function(props: Props): Node
 					on_open_orchestrator = props.on_open_orchestrator,
 					menu = props.menu,
 					register = register,
-				}
+				})
 			elseif variant == "machines" then
-				return Machines.View {
+				return bounded(Machines.View {
 					world = world,
 					chat = chat,
 					on_open_chat = props.on_open_chat,
 					on_open_orchestrator = props.on_open_orchestrator,
 					menu = props.menu,
 					register = register,
-				}
+				})
 			end
-			return Topology {
+			return bounded(Topology {
 				world = world,
 				chat = chat,
 				comms = props.comms,
@@ -321,7 +365,7 @@ M.Map = ui.component(function(props: Props): Node
 				on_open_orchestrator = props.on_open_orchestrator,
 				menu = props.menu,
 				register = register,
-			}
+			})
 		end, { w_full = true }),
 	}
 end)

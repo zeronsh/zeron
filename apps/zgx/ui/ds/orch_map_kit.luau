@@ -18,6 +18,9 @@
 --                            a row's drag source props: a reference to the
 --                            thread or orchestrator `id()` is (ds/orch_ref),
 --                            for Capture's composer to take
+--   kit.Tiled { class, h, draw }   a tall drawing as canvases a band high
+--                            (each under zgx's 32 MiB raster limit)
+--   kit.path()               `ui.path()` that moves with a band
 
 local status = require("@self/status")
 local ContextMenu = require("@self/context_menu")
@@ -163,6 +166,120 @@ function M.ref_drag(world: () -> any, id: () -> string, title: (() -> string?)?)
 	return Ref.source(function(): any
 		return M.ref_of(world, id(), if title then title() else nil)
 	end)
+end
+
+-- A tall drawing as canvases one band high each, stacked: zgx rasterizes a
+-- canvas whole, at the display's scale, up to 32 MiB a canvas, so one canvas
+-- the height of a long Timeline or Topology (hundreds of lanes) would be
+-- refused, and with it the window's frame. A band stays well under that at
+-- any width and scale the Map has.
+--
+--   kit.Tiled { class, h = function() field height end,
+--               draw = function(c, w, h, top, bottom) end }
+--
+-- `draw` draws in the field's own coordinates; `c` is the band's canvas
+-- moved up by `top` (text only in the band it starts in, as a canvas's
+-- text isn't clipped). `top`/`bottom` are the band's, to skip what's out.
+-- Paths go through `kit.path()` (as `ui.path()`) so they move with it.
+M.TILE_H = 512
+
+local Rec = {}
+Rec.__index = Rec
+function M.path(): any
+	return setmetatable({ ops = {} }, Rec)
+end
+for _, op in { "move", "line", "quad", "cubic", "arc", "rect", "ellipse", "close" } do
+	Rec[op] = function(self: any, ...: any): any
+		table.insert(self.ops, { op, table.pack(...) })
+		return self
+	end
+end
+-- Which arguments of each are a y.
+local YS: { [string]: { number } } = { move = { 2 }, line = { 2 }, quad = { 2, 4 }, cubic = { 2, 4, 6 }, arc = { 2 }, rect = { 2 }, ellipse = { 2 }, close = {} }
+local function built(p: any, dy: number): any
+	if getmetatable(p) ~= Rec then
+		return p
+	end
+	local out = ui.path()
+	for _, o in p.ops do
+		local name, a = o[1], table.clone(o[2])
+		for _, i in YS[name] do
+			a[i] -= dy
+		end
+		out = (out :: any)[name](out, table.unpack(a, 1, a.n))
+	end
+	return out
+end
+M.built = built
+
+local function shifted(c: any, top: number, bottom: number): any
+	local s = {}
+	function s:text(t: string, x: number, y: number, o: any?)
+		if y >= top and y < bottom then
+			c:text(t, x, y - top, o)
+		end
+	end
+	function s:measure_text(t: string, o: any?): (number, number)
+		return c:measure_text(t, o)
+	end
+	function s:rect(x: number, y: number, w: number, h: number, paint: any, r: number?)
+		if y < bottom and y + h > top then
+			c:rect(x, y - top, w, h, paint, r)
+		end
+	end
+	function s:circle(x: number, y: number, r: number, paint: any)
+		if y - r < bottom and y + r > top then
+			c:circle(x, y - top, r, paint)
+		end
+	end
+	function s:line(x1: number, y1: number, x2: number, y2: number, paint: any, w: number?, o: any?)
+		if math.min(y1, y2) <= bottom and math.max(y1, y2) >= top then
+			c:line(x1, y1 - top, x2, y2 - top, paint, w, o)
+		end
+	end
+	function s:fill(p: any, paint: any, rule: string?)
+		c:fill(built(p, top), paint, rule)
+	end
+	function s:stroke(p: any, paint: any, w: number?, o: any?)
+		c:stroke(built(p, top), paint, w, o)
+	end
+	function s:clip(p: any)
+		c:clip(built(p, top))
+	end
+	function s:restore()
+		c:restore()
+	end
+	return s
+end
+M.shifted = shifted
+
+function M.Tiled(p: { class: string?, h: () -> number, draw: (c: any, w: number, h: number, top: number, bottom: number) -> () }): Node
+	local tiles = ui.computed(function(): { number }
+		local out = {}
+		for i = 0, math.max(0, math.ceil(p.h() / M.TILE_H) - 1) do
+			table.insert(out, i)
+		end
+		return out
+	end)
+	return ui.each(tiles, function(i: number): Node
+		local top = i * M.TILE_H
+		return ui.canvas {
+			class = p.class,
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = top,
+			h = function(): number
+				return math.max(1, math.min(M.TILE_H, p.h() - top))
+			end,
+			pointer_events = "none",
+			draw = function(c: any, w: number, _h: number)
+				p.draw(shifted(c, top, top + M.TILE_H), w, p.h(), top, top + M.TILE_H)
+			end,
+		}
+	end, { key = function(i: number): string
+		return tostring(i)
+	end, absolute = true, left = 0, top = 0, right = 0, bottom = 0, pointer_events = "none" })
 end
 
 return M

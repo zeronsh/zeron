@@ -161,8 +161,10 @@ M.View = ui.component(function(props: {
 		return g.x0 + (t - b.t0) / math.max(1, b.t1 - b.t0) * (g.x1 - g.x0)
 	end
 
-	local function draw(c: any, _w: number, _h: number)
+	local function draw(c: any, _w: number, _h: number, top: number?, bottom: number?)
 		local b, g = built:get(), geom:get()
+		-- (The band this canvas holds, kit.Tiled: lanes outside it are skipped.)
+		local band_top, band_bottom = top or -math.huge, bottom or math.huge
 		local x0, x1 = g.x0, g.x1
 		local faint = kit.ink("text.primary", 0.05)
 		-- (Down the lanes, under the machines' heads: their lines stay clear.)
@@ -205,7 +207,7 @@ M.View = ui.component(function(props: {
 		end
 
 		for _, row in b.rows do
-			if row.kind ~= "lane" then
+			if row.kind ~= "lane" or row.y + row.h < band_top - 12 or row.y > band_bottom + 12 then
 				continue
 			end
 			local mid = row.y + row.h / 2
@@ -222,7 +224,7 @@ M.View = ui.component(function(props: {
 					bar(c, a, z, mid, TEXTURE[s.kind or ""] or "mid")
 				elseif WAITING[s.status] then
 					local ink = kit.ink(`zeron.status.{s.status}`, 0.9)
-					local path = ui.path():rect(a + 0.5, mid - BAR / 2 + 0.5, math.max(1, z - a - 1), BAR - 1, 2.5)
+					local path = kit.path():rect(a + 0.5, mid - BAR / 2 + 0.5, math.max(1, z - a - 1), BAR - 1, 2.5)
 					c:stroke(path, ink, 1)
 				elseif s.status == "failed" then
 					c:line(a, mid, z, mid, kit.ink("zeron.status.failed", 0.45), 1.5)
@@ -614,14 +616,13 @@ M.View = ui.component(function(props: {
 			ui.each(rows, any_row, { key = function(r: Row): string
 				return r.id
 			end, absolute = true, left = 0, top = 0, right = 0, bottom = 0 }),
-			ui.canvas {
+			-- (In bands: one canvas the field's height, hundreds of lanes,
+			-- would pass zgx's raster limit and lose the window its frame.)
+			kit.Tiled {
 				class = "orch-tl-chart",
-				absolute = true,
-				left = 0,
-				right = 0,
-				top = 0,
-				bottom = 0,
-				pointer_events = "none",
+				h = function(): number
+					return built:get().h + AXIS_H
+				end,
 				draw = draw,
 			},
 		},
