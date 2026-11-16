@@ -20,6 +20,10 @@
 --                                still with motion reduced)
 
 local motion = require("@self/motion")
+-- (ds/status, asked for as it's needed: a cycle at load.)
+local function status(): any
+	return require("@self/status")
+end
 
 local M = {}
 
@@ -138,6 +142,10 @@ function M.Dot(props: { hue: any, size: number?, pulse: (() -> boolean)?, label:
 	local el_ref: Element? = nil
 	local playing = false
 	local seen = false
+	local step_key = {}
+	ui.on_cleanup(function()
+		status().unstep(step_key)
+	end)
 	local function want(): boolean
 		return props.pulse ~= nil and (props.pulse :: () -> boolean)()
 	end
@@ -147,6 +155,20 @@ function M.Dot(props: { hue: any, size: number?, pulse: (() -> boolean)?, label:
 			return
 		end
 		local should = seen and want() and not motion.reduced_now()
+		if status().stepped() then
+			-- (Off macOS, stepped on the status clock: ds/status `step`.)
+			if should and not playing then
+				playing = true
+				status().step(step_key, el, function(e: Element, now: number)
+					anime.utils.set(e, { opacity = status().sine_at(now, 1, 0.45, 900) })
+				end)
+			elseif not should and playing then
+				playing = false
+				status().unstep(step_key)
+				anime.utils.set(el, { opacity = 1 })
+			end
+			return
+		end
 		if should and not playing then
 			playing = true
 			local anim = anime.animate(el, {

@@ -209,60 +209,105 @@ local function stepped(): boolean
 	return platform ~= "macos"
 end
 M.stepped = stepped
--- The steps' clock (ui.now() at the last step); the rings showing (their
--- elements, each set to its run's time at a step), and how many steppers
--- show.
+-- The steps' clock (ui.now() at the last step); what steps (each an
+-- element and what sets it at a step, by a key of its own), and how many
+-- steppers show (a dot steps by reading `step_clock`, nothing set).
 local step_clock = ui.state("ds_status_step", 0)
-local rings: { [any]: Element } = {}
+type Step = { el: Element, set: (el: Element, now: number) -> () }
+local steps: { [any]: Step } = {}
 local showing = 0
 local stepping = false
+local step_timer: any = nil
 local function ring_time(now: number): number
 	return math.min((now % (RUN * 1000 + REST)) / 1000, RUN)
 end
+local ticked = 0
 local function step_start()
-	if stepping then
+	-- (Its timer is owned as an effect's is: started from one's run, it goes
+	-- when that runs again. Not stepped for three steps: started again.)
+	if stepping and ui.now() - ticked < 3 * STEP then
 		return
 	end
 	stepping = true
+	ticked = ui.now()
+	local mine = {}
+	step_timer = mine
 	ui.every(STEP, function(): boolean?
+		if step_timer ~= mine then
+			return false
+		end
 		if showing <= 0 then
 			showing = 0
 			stepping = false
 			return false
 		end
 		local now = ui.now()
+		ticked = now
 		step_clock:set(now)
-		local t = ring_time(now)
-		for _, el in rings do
-			pcall(anime.utils.set, el, { shaderTime = t })
+		for key, st in steps do
+			-- (An element gone without a word: it steps no more.)
+			if not pcall(st.set, st.el, now) then
+				M.unstep(key)
+			end
 		end
 		return nil
 	end)
 end
--- A node that steps while it can be seen (a ring: `ring` set, its element
--- set at each step; a dot: its bound values read `step_clock`), and stops
--- counting as it goes. Still when motion is reduced.
-local Stepper = ui.component(function(props: { node: ContainerProps, ring: boolean? }): Node
+-- (A second's look, the script's own: steppers showing and the clock
+-- stopped, as when what started its timer went, it starts again.)
+ui.every(1000, function()
+	if showing > 0 then
+		step_start()
+	end
+end)
+-- Steps `el` (under `key`) on the shared clock, `set(el, now)` at each step
+-- (and at once), until `M.unstep(key)`: for a loop off macOS that a script
+-- starts and stops itself. Nothing when motion is reduced.
+function M.step(key: any, el: Element, set: (el: Element, now: number) -> ())
+	if motion.reduced_now() then
+		return
+	end
+	if not steps[key] then
+		showing += 1
+	end
+	steps[key] = { el = el, set = set }
+	pcall(set, el, ui.now())
+	step_start()
+end
+function M.unstep(key: any)
+	if steps[key] then
+		steps[key] = nil
+		showing -= 1
+	end
+end
+-- A node that steps while it can be seen (`set`: its element set at each
+-- step; else its bound values read `step_clock`), and stops as it goes.
+-- Still when motion is reduced.
+local Stepper = ui.component(function(props: { node: ContainerProps, set: ((el: Element, now: number) -> ())? }): Node
 	local key = {}
 	local shown = false
 	local function hide()
 		if shown then
 			shown = false
-			showing -= 1
-			rings[key] = nil
+			if props.set then
+				M.unstep(key)
+			else
+				showing -= 1
+			end
 		end
 	end
 	ui.on_cleanup(hide)
 	local node = props.node
 	node.on_visible = function(visible: boolean, el: Element)
 		if visible and not shown then
-			shown = true
-			showing += 1
-			if props.ring then
-				rings[key] = el
-				pcall(anime.utils.set, el, { shaderTime = ring_time(ui.now()) })
+			if motion.reduced_now() then
+				return
 			end
-			if not motion.reduced_now() then
+			shown = true
+			if props.set then
+				M.step(key, el, props.set)
+			else
+				showing += 1
 				step_start()
 			end
 		elseif not visible then
@@ -271,8 +316,24 @@ local Stepper = ui.component(function(props: { node: ContainerProps, ring: boole
 	end
 	return ui.div(node)
 end)
+-- `node`, stepped while it shows: `set(el, now)` at each step.
+function M.Stepped(node: ContainerProps, set: ((el: Element, now: number) -> ())?): Node
+	return Stepper { node = node, set = set }
+end
+local function set_ring(el: Element, now: number)
+	anime.utils.set(el, { shaderTime = ring_time(now) })
+end
 local function stepper(node: ContainerProps, is_ring: boolean?): Node
-	return Stepper { node = node, ring = is_ring }
+	return Stepper { node = node, set = if is_ring then set_ring else nil }
+end
+-- A sine pulse between `from` and `to`, there and back every `2 * half` ms
+-- (anime's inOutSine, alternating), at `now`.
+function M.sine_at(now: number, from: number, to: number, half: number): number
+	local p = (now % (2 * half)) / half
+	if p > 1 then
+		p = 2 - p
+	end
+	return from + (to - from) * (0.5 - 0.5 * math.cos(math.pi * p))
 end
 -- The time (ms) into a `period` ms cycle, by the steps' clock.
 local function step_at(period: number): number
