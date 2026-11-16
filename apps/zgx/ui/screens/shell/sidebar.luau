@@ -1562,7 +1562,7 @@ local function project_dialogs(): Node
 				return if #acting_checkouts() > 1 then "several" else "one"
 			end, function(kind: string): Node
 				if kind == "one" then
-					return ui.text { removing, w_full = true, wrap = true, text_size = "$font.size.md", line_height = 20, color = "$text.secondary" }
+					return ui.text { removing, w_full = true, wrap = true, text_size = "$font.size.md", line_height = "$zeron.paragraph.line.md", color = "$text.secondary" }
 				end
 				return ui.column {
 					w_full = true,
@@ -1575,7 +1575,7 @@ local function project_dialogs(): Node
 						w_full = true,
 						wrap = true,
 						text_size = "$font.size.md",
-						line_height = 20,
+						line_height = "$zeron.paragraph.line.md",
 						color = "$text.secondary",
 					},
 					ui.each(ui.computed(acting_checkouts), function(q: any): Node
@@ -1654,7 +1654,7 @@ local function delete_dialog(): Node
 			end,
 		},
 		-- (As its own body line, but following the session.)
-		ui.text { says, w_full = true, wrap = true, text_size = "$font.size.md", line_height = 20, color = "$text.secondary" },
+		ui.text { says, w_full = true, wrap = true, text_size = "$font.size.md", line_height = "$zeron.paragraph.line.md", color = "$text.secondary" },
 	}
 end
 

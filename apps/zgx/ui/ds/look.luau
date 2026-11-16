@@ -82,15 +82,26 @@ local SIZED = {
 	"zeron.prose.h2.size", "zeron.prose.h2.line",
 	"zeron.prose.h3.size", "zeron.prose.h3.line",
 	"zeron.prose.small.size", "zeron.prose.small.line",
+	"zeron.paragraph.line.md", "zeron.paragraph.line.lg",
 }
+
+-- The system's text size as a factor (GNOME's text scaling, Windows' Text
+-- size), 1 unless the platform sets one: `zeron.text.scale` is 1, named
+-- with the text it scales (ds/tokens `M.TEXT`).
+function M.system_scale(): number
+	return (ui.theme.get("zeron.text.scale") :: number?) or 1
+end
 
 -- The text tokens a window overrides for `size` (the chosen one by
 -- default): each scaled from the theme's own by size / 13, sizes to half
 -- a point, line heights to whole points. Nothing at the theme's own size.
+-- Each is read as drawn, the system's text size in, and written before it
+-- (the window applies it after): `font.size.md` drawn is the theme's 13
+-- times the system's factor.
 function M.text_theme(size: number?): { [string]: any }?
 	local body = size or M.text_size:get()
 	local base = (ui.theme.get("font.size.md") :: number?) or 13
-	if body == base then
+	if body == base / M.system_scale() then
 		return nil
 	end
 	local scale = body / base

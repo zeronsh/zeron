@@ -971,7 +971,7 @@ function M.view(): Node
 						ui.text {
 							ui.t("settings.profile.delete.step_up.title"),
 							text_size = "$font.size.md",
-							line_height = 20,
+							line_height = "$zeron.paragraph.line.md",
 							weight = "$font.weight.medium",
 							color = "$text.primary",
 							wrap = true,
