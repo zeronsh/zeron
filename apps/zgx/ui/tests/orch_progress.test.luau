@@ -197,6 +197,33 @@ test("orch progress: a fresh note on its way shows its roller", function()
 	expect(app:has(`#fx-full-th-engine-flow >> ~"Report tool wired; tests next."`)).to_be(true)
 end)
 
+test("orch progress: a note that never comes back stops rolling: a still mark after SPIN_MAX", function()
+	local app = open()
+	local U = "#fx-full-th-engine-flow >> .orch-progress-refreshing"
+	expect(app:has(`{U} >> .orch-progress-refresh-still`)).to_be(false)
+	-- (Twenty seconds of frames: the roller's longest.)
+	app:frames(20 * 60 + 10)
+	expect(app:has(U)).to_be(true)
+	expect(app:has(`{U} >> .orch-progress-refresh-still`)).to_be(true)
+	-- Written at last: neither.
+	local rows = table.clone(app:state("rows") :: any)
+	local r = table.clone(rows["th-engine-flow"])
+	r.refreshing = false
+	rows["th-engine-flow"] = r
+	app:set_state("rows", rows)
+	app:frames(5)
+	expect(app:has(U)).to_be(false)
+	-- Asked again: it rolls again.
+	r = table.clone(r)
+	r.refreshing = true
+	rows = table.clone(rows)
+	rows["th-engine-flow"] = r
+	app:set_state("rows", rows)
+	app:frames(5)
+	expect(app:has(U)).to_be(true)
+	expect(app:has(`{U} >> .orch-progress-refresh-still`)).to_be(false)
+end)
+
 test("orch progress: What's up? asks once, then rests 15 s", function()
 	local app = open()
 	app:click(`{ENGINE} >> .orch-progress-check`)

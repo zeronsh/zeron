@@ -123,6 +123,7 @@ local toast = require("@self/toast")
 local Button = require("@self/button")
 local TextField = require("@self/text_field")
 local Ref = require("@self/orch_ref")
+local trace = require("@self/orch_perf_trace")
 
 export type Link = { kind: string, label: string, target: string }
 export type Item = {
@@ -1265,11 +1266,18 @@ local OrchBoard = ui.component(function(props: Props): Node
 		}
 
 		-- Its one quiet line, each part only where it adds something.
-		local function owner(): Orchestrator?
+		-- (What it reads of the board's live sources, each through a
+		-- selector of the card's own: a write anywhere (another thread's
+		-- status, the orchestration's state pushed whole) runs these few
+		-- again, and nothing it shows unless its own value changed.)
+		local own = ui.computed(function(): any
 			local o = context_of(item())
-			return o
+			return if o then { id = o.id, name = o.name, hue = o.hue } else nil
+		end)
+		local function owner(): Orchestrator?
+			return own:get()
 		end
-		local function where(): { kind: string, name: string }?
+		local place = ui.computed(function(): any
 			local it = item()
 			if not WAITING[it.state] or #(it.threads or {}) > 0 then
 				return nil
@@ -1283,19 +1291,41 @@ local OrchBoard = ui.component(function(props: Props): Node
 				return { kind = "device", name = device }
 			end
 			return nil
+		end)
+		local function where(): { kind: string, name: string }?
+			return place:get()
 		end
 		local function urgency(): string?
 			local p = item().priority
 			return if PRIORITY_INK[p] then p else nil
 		end
-		local function progress_row(): { [string]: any }?
+		-- Its lead thread's progress row (memoized: the row alone, not the
+		-- table of every row it's looked up in).
+		local lead_row = ui.computed(function(): any
 			local chat = (item().threads or {})[1]
 			return if chat and props.progress_of then props.progress_of(chat) else nil
+		end)
+		local function progress_row(): { [string]: any }?
+			return lead_row:get()
 		end
-		local function stalled(): boolean
+		local lead_status = ui.computed(function(): string?
+			return thread_status(item(), props.thread_of)
+		end)
+		local todo = ui.computed(function(): any
+			local d, t = todo_of_item(item(), props.todo_of)
+			return if d and t then { d = d, t = t } else nil
+		end)
+		local ask = ui.computed(function(): any
+			return waits:get()[id]
+		end)
+		local is_stalled = ui.computed(function(): boolean
 			return item().state ~= "done" and Progress.stalled(progress_row())
+		end)
+		local function stalled(): boolean
+			return is_stalled:get()
 		end
-		local function word(): { key: string, ink: string }?
+		local the_word = ui.computed(function(): any
+			trace.hit("board.word")
 			local it = item()
 			if starting:get()[id] and #(it.threads or {}) == 0 then
 				return STARTING
@@ -1304,7 +1334,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 			elseif WAITING[it.state] and (it.waiting or "") ~= "" then
 				return QUEUED
 			end
-			local a = waits:get()[it.id]
+			local a = ask:get()
 			if a then
 				if data.deferred(a, clock_now()) then
 					return DEFERRED
@@ -1313,36 +1343,46 @@ local OrchBoard = ui.component(function(props: Props): Node
 			elseif stalled() then
 				return STALLED
 			end
-			local st = thread_status(it, props.thread_of)
+			local st = lead_status:get()
 			return if st then WORD[st] else nil
+		end)
+		local function word(): { key: string, ink: string }?
+			return the_word:get()
 		end
 		-- How far along: its threads' todo once a step of it is done, else
 		-- its own share once there is some (nil: nothing to show yet).
-		local function steps(): (number?, number?)
+		local the_steps = ui.computed(function(): any
 			if item().state == "done" then
-				return nil, nil
+				return nil
 			end
-			local d, t = todo_of_item(item(), props.todo_of)
-			if d and t then
-				return if d > 0 then d else nil, t
+			local td = todo:get()
+			if td then
+				return { d = if td.d > 0 then td.d else nil, t = td.t }
 			end
 			local p = item().progress
 			if p and p > 0 then
-				return math.floor(math.clamp(p, 0, 1) * 10 + 0.5), 10
+				return { d = math.floor(math.clamp(p, 0, 1) * 10 + 0.5), t = 10 }
 			end
-			return nil, nil
+			return nil
+		end)
+		local function steps(): (number?, number?)
+			local s = the_steps:get()
+			if not s then
+				return nil, nil
+			end
+			return s.d, s.t
 		end
 		local function steps_text(): string
-			local d, t = todo_of_item(item(), props.todo_of)
-			if d and t then
-				return `{d}/{t}`
+			local td = todo:get()
+			if td then
+				return `{td.d}/{td.t}`
 			end
 			local p = item().progress
 			return if p then `{math.floor(math.clamp(p, 0, 1) * 100 + 0.5)}%` else ""
 		end
 		-- One clock: how long it's been stalled, else how long it has worked,
 		-- else (waiting on someone) how long since it last moved.
-		local function clock(): string
+		local the_clock = ui.computed(function(): string
 			local it = item()
 			if it.state == "done" or it.state == "planned" or it.state == "inbox" then
 				return ""
@@ -1357,6 +1397,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 				return Progress.short(at - it.updated)
 			end
 			return ""
+		end)
+		local function clock(): string
+			return the_clock:get()
 		end
 		local function has_word(): boolean
 			return urgency() ~= nil or word() ~= nil
@@ -1482,7 +1525,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 						return t or 0
 					end,
 					current = function(): boolean
-						return not stalled() and thread_status(item(), props.thread_of) == "working"
+						return not stalled() and lead_status:get() == "working"
 					end,
 					cell = 3,
 					h = 6,
@@ -1582,7 +1625,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 		-- The decision it waits on, compact: the question in a line, its
 		-- options as chips (not while it's put off).
 		local function asked(): { [string]: any }?
-			local a = waits:get()[id]
+			local a = ask:get()
 			if not a or not props.on_answer or data.deferred(a, clock_now()) then
 				return nil
 			end

@@ -12,6 +12,7 @@
 --   Page()    the page, as the shell mounts it
 
 local ds = require("@ds")
+local stage = require("@ds/stage")
 local Icon = require("@ds/icon")
 local IconButton = require("@ds/icon_button").IconButton
 local ContextMenu = require("@ds/context_menu")
@@ -1106,6 +1107,16 @@ local function opens_under(): (((x: number, y: number) -> boolean) -> (), (_v: b
 	end
 end
 
+-- Opening the page, the first STAGE_NOW widgets (in its order) build with
+-- it and the rest one a frame after (ds/stage), each holding a block's room
+-- till then: built all at once, the Map, the Scratchpad, the Board and the
+-- rest took 0.4 to 1.4 s in one frame (the window not answering meanwhile).
+local STAGE_NOW = 2
+local function staged(id: string): Node
+	local rank = table.find(full_order(M.widgets:peek()), id) or #M.WIDGETS
+	return stage.Later(rank - STAGE_NOW, BUILD[id])
+end
+
 -- One widget, a block of its own: its title, its live figures beside it,
 -- its menu at its end; it over them.
 local function widget(id: string, wide: boolean): Node
@@ -1154,7 +1165,7 @@ local function widget(id: string, wide: boolean): Node
 				row,
 			}
 		end,
-		BUILD[id](),
+		staged(id),
 	}
 end
 

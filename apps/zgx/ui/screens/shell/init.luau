@@ -66,6 +66,16 @@ for _, module in {
 } do
 	boundary.load(module)
 end
+-- The Control room's and an orchestrator's pages, loaded once the window
+-- has come up and settled, one a frame: loaded on the first click instead,
+-- inside the page's build (and the sidebar's view menu's), they cost the
+-- open a quarter of a second more.
+ui.after(2000, function()
+	boundary.load("@app/screens/control/page")
+	ui.after(0, function()
+		boundary.load("@app/screens/orchestrator/page")
+	end)
+end)
 
 -- The finished session last marked seen (kept across the shell being made
 -- again).
