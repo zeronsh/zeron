@@ -154,7 +154,7 @@ function M.Page(props: PageProps): Node
 				gap = "$space.1",
 				ui.text { props.title, heading = 1, text_size = "$font.size.xl", line_height = "$font.line.xl", weight = "$font.weight.semibold", color = "$text.primary" },
 				if props.description
-					then ui.text { props.description, text_size = "$font.size.md", line_height = 20, color = "$text.secondary", wrap = true }
+					then ui.text { props.description, text_size = "$font.size.md", line_height = "$zeron.paragraph.line.md", color = "$text.secondary", wrap = true }
 					else nil,
 			},
 			if props.trail and props.trail_top
@@ -376,11 +376,17 @@ end
 -- How tall a `truncate`d Row with a line under its name stands (each one line,
 -- so its height is known; a line with nothing to say still takes its height):
 -- its padding round its words or its `lead`, at the row's least. In the
--- window's text size, which scales the lines.
+-- window's text size, which scales the lines, and the system's (its
+-- overrides are written before it, the window applying it after).
 function M.truncated_row_h(lead: number?): number
 	local scaled = look.text_theme() or {}
+	local system = look.system_scale()
 	local function token(name: string, default: number): number
-		return scaled[name] or (ui.theme.get(name) :: number?) or default
+		local own = scaled[name]
+		if own then
+			return own * system
+		end
+		return (ui.theme.get(name) :: number?) or default
 	end
 	local words = token("font.line.md", 18) + token("zeron.space.hair", 2) + token("font.line.sm", 16)
 	return math.max(token("zeron.settings.row", 52), 2 * token("space.3", 12) + math.max(words, lead or 0))

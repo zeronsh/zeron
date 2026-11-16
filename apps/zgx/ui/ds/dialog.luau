@@ -218,7 +218,7 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 				else nil,
 			ui.text { props.title, heading = 2, text_size = "$font.size.lg", line_height = "$font.line.lg", weight = "$font.weight.semibold", color = "$text.primary", wrap = true },
 			if props.body
-				then ui.text { props.body, text_size = "$font.size.md", line_height = 20, color = "$text.secondary", wrap = true }
+				then ui.text { props.body, text_size = "$font.size.md", line_height = "$zeron.paragraph.line.md", color = "$text.secondary", wrap = true }
 				else nil,
 		},
 		if #children > 0 then ui.column { gap = "$space.3", table.unpack(children) } else nil,
@@ -227,7 +227,7 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 				gap = "$space.2",
 				ui.rich {
 					text_size = "$font.size.md",
-					line_height = 20,
+					line_height = "$zeron.paragraph.line.md",
 					color = "$text.secondary",
 					ui.span { locale.t("ds.dialog.type_confirm.before") },
 					ui.span { props.confirm_text, font = "$font.mono", color = "$text.primary" },
@@ -415,7 +415,7 @@ M.Sheet = ui.component(function(props: SheetProps): Node
 						gap = "$zeron.space.tight",
 						ui.text { props.title, heading = 2, text_size = "$font.size.lg", line_height = "$font.line.lg", weight = "$font.weight.semibold", color = "$text.primary" },
 						if props.description
-							then ui.text { props.description, text_size = "$font.size.md", line_height = 20, color = "$text.secondary", wrap = true }
+							then ui.text { props.description, text_size = "$font.size.md", line_height = "$zeron.paragraph.line.md", color = "$text.secondary", wrap = true }
 							else nil,
 					},
 					if props.foot
