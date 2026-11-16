@@ -387,3 +387,33 @@ test("graph2 node style: provider glyphs where there's room, dots zoomed out", f
 	app:command("map_graph2_dots")
 	app:frames(2)
 end)
+
+test("graph2: off screen, nothing lays out, draws or follows; back, it shows the world as it is", function()
+	local app = open(1440)
+	app:frames(10)
+	-- (The window too short to show the Map: it's scrolled out of view.)
+	app:resize(1440, 120)
+	app:frames(30)
+	local a = app:state("control_map_graph2_stats")
+	local t0 = os.clock()
+	for i = 1, 600 do
+		if i % 150 == 0 then
+			app:command(if i % 300 == 0 then "map_big_more" else "map_big_report")
+		end
+		app:frames(1)
+	end
+	local ms = (os.clock() - t0) * 1000
+	local b = app:state("control_map_graph2_stats")
+	print(`GRAPH2PERF off-screen 600 frames, 2 changes + 2 reports: total={math.floor(ms)}ms layouts={b.layouts - a.layouts} draws={b.draws - a.draws} overlay={b.overlay - a.overlay}`)
+	expect(b.layouts).to_be(a.layouts)
+	expect(b.draws).to_be(a.draws)
+	expect(b.overlay).to_be(a.overlay)
+	expect(app:count(".orch-graph2-node")).to_be(0)
+	-- Back: laid out once for the world now, drawn, every thread there.
+	app:resize(1440, 2400)
+	app:wait("#never-there", { timeout_ms = 500 })
+	local c = app:state("control_map_graph2_stats")
+	expect(c.layouts).to_be(b.layouts + 1)
+	expect(c.draws > b.draws).to_be(true)
+	expect(app:count("#control-widget-map >> .orch-graph2-node")).to_be(107)
+end)

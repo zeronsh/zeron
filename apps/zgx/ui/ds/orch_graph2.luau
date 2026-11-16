@@ -140,6 +140,29 @@ M.View = ui.component(function(props: {
 	-- changed in place).
 	local layout: L.Layout = L.layout({ machines = {} }, 1)
 	local version = ui.use_state(0)
+	-- Whether it's on screen: in view (the field's `on_visible`) in a
+	-- window that shows. Off screen nothing of it runs: no layout, no
+	-- drawing, no dot, no ease, no marker following a thread; back, it
+	-- takes the world as it is then.
+	local in_view = ui.use_state(false)
+	local function window_shown(): boolean
+		local ok, shown = pcall(function()
+			return ui.window.shown:get()
+		end)
+		return not ok or shown ~= false
+	end
+	local function window_shown_now(): boolean
+		local ok, shown = pcall(function()
+			return ui.window.shown:peek()
+		end)
+		return not ok or shown ~= false
+	end
+	local function on_screen(): boolean
+		return in_view:get() and window_shown()
+	end
+	local function on_screen_now(): boolean
+		return in_view:peek() and window_shown_now()
+	end
 	-- Where each node and machine was before a change, for the ease.
 	local from_x: { [string]: number } = {}
 	local from_y: { [string]: number } = {}
@@ -152,7 +175,7 @@ M.View = ui.component(function(props: {
 		end
 		ui.every(16, function(): boolean?
 			local t = (ui.now() - anim_t0) / EASE_MS
-			if t >= 1 then
+			if t >= 1 or not on_screen_now() then
 				anim:set(1)
 				return false
 			end
@@ -389,6 +412,9 @@ M.View = ui.component(function(props: {
 	-- each minute; the same layout, a fading chat fainter, is taken in
 	-- place.)
 	ui.effect(function()
+		if not on_screen() then
+			return
+		end
 		local world = props.world()
 		chats_now = world.chats or {}
 		local w = width:get()
@@ -446,6 +472,9 @@ M.View = ui.component(function(props: {
 	-- layout, a state shown changing, a theme, the ease, or the view
 	-- nearing what wasn't drawn: never for a pan or a zoom alone.
 	local function draw(c: any, _w: number, _h: number)
+		if not on_screen() then
+			return
+		end
 		local kb0 = gcinfo()
 		version:get()
 		local p = palette()
@@ -575,6 +604,9 @@ M.View = ui.component(function(props: {
 	local lit_path: any = nil
 	local lit_for: string? = nil
 	local function overlay(c: any, _w: number, _h: number)
+		if not on_screen() then
+			return
+		end
 		local kb0 = gcinfo()
 		version:get()
 		ptick:get()
@@ -704,6 +736,11 @@ M.View = ui.component(function(props: {
 			return
 		end
 		ui.every(33, function(): boolean?
+			if not on_screen_now() then
+				table.clear(pulses)
+				ptick:set(ptick:peek() + 1)
+				return false
+			end
 			if not prune() then
 				return false
 			end
@@ -718,6 +755,13 @@ M.View = ui.component(function(props: {
 		local list = props.comms() or {}
 		if seen == nil then
 			seen = {}
+			for _, e in list do
+				(seen :: any)[e.id] = true
+			end
+			return
+		end
+		-- (Off screen: what passes is let go, never run later.)
+		if not on_screen_now() then
 			for _, e in list do
 				(seen :: any)[e.id] = true
 			end
@@ -1195,6 +1239,9 @@ M.View = ui.component(function(props: {
 		if st then
 			local held = st
 			ui.effect(function()
+				if not on_screen() then
+					return
+				end
 				local now = held()
 				if status_by[item.id] ~= now then
 					status_by[item.id] = now
@@ -1339,6 +1386,11 @@ M.View = ui.component(function(props: {
 				end,
 				overflow = "hidden",
 				rounded = "$radius.lg",
+				on_visible = function(visible: boolean)
+					if visible ~= in_view:peek() then
+						in_view:set(visible)
+					end
+				end,
 				on_press = function(e: any)
 					on_press(e.local_x, e.local_y)
 				end,
@@ -1390,8 +1442,9 @@ M.View = ui.component(function(props: {
 					view = canvas_view,
 					draw = overlay,
 				},
-				-- (Markers and headings in a layer the pan moves whole.)
-				ui.div {
+				-- (Markers and headings in a layer the pan moves whole; only on
+				-- screen.)
+				ui.show(on_screen, ui.div {
 					class = "orch-graph2-layer",
 					absolute = true,
 					pointer_events = "none",
@@ -1409,7 +1462,7 @@ M.View = ui.component(function(props: {
 					ui.each(machines, heading, { key = function(item: any): string
 						return item.id
 					end, absolute = true, left = 0, top = 0, pointer_events = "none" }),
-				},
+				}),
 				ui.div {
 					class = "orch-graph2-anchor-at",
 					absolute = true,
