@@ -149,16 +149,53 @@ struct Entry {
     /// by a part patch): the rest are as they were built. None: not known
     /// (it came whole, or grew a text).
     patched: Option<std::collections::HashSet<String>>,
+    /// Its json's sum and its size as JSON, each worked out once and kept
+    /// until it changes (`json_mut`): a chat opened again says what it holds
+    /// by its sums, and one let go of is weighed (`let_go_weight`), on every
+    /// switch, and a long reply's json is hundreds of kilobytes.
+    kept_sum: std::cell::Cell<Option<u64>>,
+    kept_bytes: std::cell::Cell<Option<usize>>,
 }
 
 impl Entry {
     fn new(json: Json) -> Self {
-        Self { id: json["id"].as_str().unwrap_or_default().into(), json: Some(json), sum: 0, patched: None }
+        Self {
+            id: json["id"].as_str().unwrap_or_default().into(),
+            json: Some(json),
+            sum: 0,
+            patched: None,
+            kept_sum: std::cell::Cell::new(None),
+            kept_bytes: std::cell::Cell::new(None),
+        }
     }
 
     /// What it is now, to tell it from another copy of it.
     fn sum(&self) -> u64 {
-        self.json.as_ref().map_or(self.sum, sum_of)
+        let Some(json) = &self.json else { return self.sum };
+        if let Some(sum) = self.kept_sum.get() {
+            return sum;
+        }
+        let sum = sum_of(json);
+        self.kept_sum.set(Some(sum));
+        sum
+    }
+
+    /// How many bytes its json takes as JSON (none, settled).
+    fn json_bytes(&self) -> usize {
+        let Some(json) = &self.json else { return 0 };
+        if let Some(bytes) = self.kept_bytes.get() {
+            return bytes;
+        }
+        let bytes = serde_json::to_vec(json).map_or(0, |b| b.len());
+        self.kept_bytes.set(Some(bytes));
+        bytes
+    }
+
+    /// Its json, to change: what was worked out from it goes.
+    fn json_mut(&mut self) -> Option<&mut Json> {
+        self.kept_sum.set(None);
+        self.kept_bytes.set(None);
+        self.json.as_mut()
     }
 }
 
@@ -716,11 +753,7 @@ const LET_GO_PER_ENTRY: usize = 512;
 /// from it.
 fn let_go_weight(entries: &[Entry], built: &HashMap<Rc<str>, Built>) -> usize {
     let folded: usize = built.values().map(|b| b.folded).sum();
-    let whole: usize = entries
-        .iter()
-        .filter_map(|e| e.json.as_ref())
-        .map(|json| serde_json::to_vec(json).map_or(0, |b| b.len()))
-        .sum();
+    let whole: usize = entries.iter().map(Entry::json_bytes).sum();
     folded + entries.len() * LET_GO_PER_ENTRY + 2 * whole
 }
 
@@ -4597,8 +4630,11 @@ fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
 
 /// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
 fn settle(entry: &mut Entry, at: usize, older_todo: &mut Option<(usize, Json)>) {
+    if entry.json.is_none() {
+        return;
+    }
+    entry.sum = entry.sum();
     let Some(json) = entry.json.take() else { return };
-    entry.sum = sum_of(&json);
     if older_todo.as_ref().is_none_or(|(place, _)| *place < at)
         && let Some(part) = latest_todo(std::iter::once(&json))
     {
@@ -4825,7 +4861,7 @@ fn apply_counted(entries: &mut Vec<Entry>, frame: &mut Json, counted: bool) -> R
             .ok_or(())?;
         // (A settled entry growing again: its whole copy is the engine's.)
         entry.patched = None;
-        let entry = entry.json.as_mut().ok_or(())?;
+        let entry = entry.json_mut().ok_or(())?;
         let streaming = entry["status"].as_str() == Some("streaming");
         let part = entry["parts"]
             .as_array_mut()
@@ -4872,7 +4908,7 @@ fn apply_counted(entries: &mut Vec<Entry>, frame: &mut Json, counted: bool) -> R
         let at = patch["at"].as_u64().ok_or(())? as usize;
         let part = &patch["part"];
         let id = part["id"].as_str().ok_or(())?.to_owned();
-        let json = entry.json.as_mut().ok_or(())?;
+        let json = entry.json_mut().ok_or(())?;
         let parts = json["parts"].as_array_mut().ok_or(())?;
         if at < parts.len() && parts[at]["id"].as_str() == Some(&id) {
             parts[at] = part.clone();
@@ -6774,6 +6810,45 @@ mod tests {
         let mut entries = open.entries;
         let mut words = serde_json::json!({ "append": [{ "entry": "first", "part": "p", "text": "x", "len": 1 }] });
         assert!(super::apply(&mut entries, &mut words).is_err());
+    }
+
+    /// An entry's sum and size are kept between switches (a long reply's
+    /// json is hashed and weighed once, not on every open and let-go), and
+    /// what changes it (words appended, a part patched) changes them too:
+    /// a reopen that said the old sum would be sent nothing new.
+    #[test]
+    fn an_entrys_kept_sum_and_size_follow_its_changes() {
+        let entry = serde_json::json!({ "id": "a", "role": "assistant", "status": "streaming", "parts": [
+            { "id": "t", "kind": "text", "text": "Hel" },
+            { "id": "k", "kind": "tool", "call": { "kind": "read", "path": "x" } },
+        ] });
+        let mut entries = vec![super::Entry::new(entry)];
+        let fresh = |e: &super::Entry| {
+            let json = e.json.as_ref().unwrap();
+            (super::sum_of(json), serde_json::to_vec(json).unwrap().len())
+        };
+        let first = (entries[0].sum(), entries[0].json_bytes());
+        assert_eq!(first, fresh(&entries[0]));
+        assert_eq!(entries[0].kept_sum.get(), Some(first.0), "kept once worked out");
+        assert_eq!(entries[0].kept_bytes.get(), Some(first.1), "kept once worked out");
+        // Words appended.
+        let mut words = serde_json::json!({ "append": [{ "entry": "a", "part": "t", "text": "lo", "len": 5 }] });
+        super::apply(&mut entries, &mut words).unwrap();
+        let grown = (entries[0].sum(), entries[0].json_bytes());
+        assert_eq!(grown, fresh(&entries[0]));
+        assert_ne!(grown, first);
+        // A part patched.
+        let mut patch = serde_json::json!({ "parts": [{ "entry": "a", "at": 1, "part":
+            { "id": "k", "kind": "tool", "call": { "kind": "read", "path": "y" } }, "len": 2 }] });
+        super::apply(&mut entries, &mut patch).unwrap();
+        let patched = (entries[0].sum(), entries[0].json_bytes());
+        assert_eq!(patched, fresh(&entries[0]));
+        assert_ne!(patched.0, grown.0);
+        // Settled: its sum as it was, its json gone and weighing nothing.
+        let mut older = None;
+        let mut settled = entries.pop().unwrap();
+        super::settle(&mut settled, 0, &mut older);
+        assert_eq!((settled.sum(), settled.json_bytes()), (patched.0, 0));
     }
 
     /// The worker's fold, kept, is what folding here keeps.
