@@ -43,6 +43,11 @@ local M = {}
 local PULSE_MS = 900
 -- Where nodes were dropped, on this device: { [id] = { x, y } }.
 M.pins = ui.persist("control_map_graph_pins", {} :: { [string]: { number } })
+-- Where each node last settled, on this device: { [id] = { x, y } }. A
+-- fresh open starts from them (a new node where the web would put it), so
+-- one whose nodes were all seen opens settled, without a settling to watch.
+M.places = ui.persist("control_map_graph_places", {} :: { [string]: { number } })
+local PLACES_MAX = 4000
 -- The node the pointer is on (its id), for what lights up.
 M.hover = ui.state("control_map_graph_hover", nil :: string?)
 M.trace = ui.state("control_map_graph_settle", {} :: any)
@@ -247,6 +252,19 @@ M.View = ui.component(function(props: {
 			settled:set(true)
 			redraw()
 			M.trace:set({ frames = settle_frames, runs = M.trace:peek().runs or 1, done = true })
+			-- Kept, for the next open.
+			local kept: any = table.clone(M.places:peek() or {})
+			local count = 0
+			for _ in kept do
+				count += 1
+			end
+			if count > PLACES_MAX then
+				kept = {}
+			end
+			for _, n in graph.nodes do
+				kept[n.id] = { math.floor(n.x * 10 + 0.5) / 10, math.floor(n.y * 10 + 0.5) / 10 }
+			end
+			M.places:set(kept)
 		end
 		schedule(0, frame)
 	end
@@ -330,8 +348,39 @@ M.View = ui.component(function(props: {
 		end
 		local fresh = #graph.nodes == 0
 		g.alpha = if fresh then 1 else 0.35
+		-- (A node new to the web where it last settled, if it ever did. All
+		-- of them where they were or kept: as good as still; most kept, on
+		-- a fresh open: a short settling.)
+		local kept: any = M.places:peek() or {}
+		local known, unknown = 0, 0
+		for _, n in g.nodes do
+			if n.fixed then
+				known += 1
+			elseif graph.index[n.id] then
+				known += 1
+			else
+				local at = kept[n.id]
+				if type(at) == "table" and type(at[1]) == "number" then
+					n.x, n.y = at[1], at[2]
+					known += 1
+				else
+					unknown += 1
+				end
+			end
+		end
+		if #g.nodes > 0 and unknown == 0 then
+			g.alpha = sim.ALPHA_MIN * 1.5
+			;(g :: any).warm = true
+		elseif fresh and known >= #g.nodes * 0.6 then
+			g.alpha = 0.3
+		end
 		graph = g
 		graph_gen += 1
+		-- (Warm: fitted now, so its tabs are first measured at the zoom it
+		-- keeps, and nothing settles again for them.)
+		if (g :: any).warm and not moved_view then
+			fit()
+		end
 		version:set(version:peek() + 1)
 		-- (Settled out of sight either way, and drawn once still: with
 		-- motion reduced too.)
@@ -682,7 +731,9 @@ M.View = ui.component(function(props: {
 				local was = ((n :: any).tab_w or 0) + ((n :: any).idle_w or 0)
 				;(n :: any).idle_w = if next(isl.members) == nil then c:measure_text(locale.s("ds.orch.map.idle"), { size = 11 }) / layout_z else 0
 				;(n :: any).tab_w = tw / layout_z
-				if math.abs(was - tw / layout_z - (n :: any).idle_w) > 4 and not retab then
+				-- (A web opened where it settled had room for its tabs then:
+				-- their first measure moves nothing.)
+				if math.abs(was - tw / layout_z - (n :: any).idle_w) > 4 and not retab and not ((graph :: any).warm and not (graph :: any).tabbed) then
 					retab = true
 					ui.after(0, function()
 						graph.alpha = math.max(graph.alpha, 0.3)
@@ -691,6 +742,7 @@ M.View = ui.component(function(props: {
 				end
 				table.insert(rims, { n = n, d = d, title = title, empty = next(isl.members) == nil, x = x, y = y, r = r, angle = -90, w = tw, h = TAB_H, name_w = name_w, load = load, nx = 0, ny = 0, from = -90, sweep = 360 })
 			end
+			;(graph :: any).tabbed = true
 			-- (Centred on its rim at `angle`.)
 			local function name_box(rim: any, angle: number): (number, number)
 				local px, py = rim.x + math.cos(math.rad(angle)) * rim.r, rim.y + math.sin(math.rad(angle)) * rim.r
