@@ -659,6 +659,8 @@ pub(crate) struct ProgressBook {
     chats: Mutex<HashMap<String, Entry>>,
     auto_notes: std::sync::atomic::AtomicBool,
     note_fn: Mutex<Option<NoteFn>>,
+    /// Every one-shot run goes through it (cap, shared runs, memory).
+    one_shots: Arc<super::one_shots::OneShots>,
     proxies: proxy::Proxies,
 }
 
@@ -670,6 +672,7 @@ impl Default for ProgressBook {
             chats: Mutex::new(HashMap::new()),
             auto_notes: std::sync::atomic::AtomicBool::new(!off),
             note_fn: Mutex::new(None),
+            one_shots: Arc::default(),
             proxies: proxy::Proxies::default(),
         }
     }
@@ -841,9 +844,26 @@ impl ProgressBook {
     }
 
     /// The cheap one-shot run (a chat's harness and a whole prompt → its
-    /// raw reply): the title path, or what a test put in its place.
+    /// raw reply): the title path, or what a test put in its place, through
+    /// the engine's one limiter ([`super::one_shots`]).
     pub(crate) fn one_shot(&self, rpc: &EngineRpc) -> NoteFn {
-        lock(&self.note_fn).clone().unwrap_or_else(|| title_path(rpc.registry_ref().clone()))
+        let run = lock(&self.note_fn).clone().unwrap_or_else(|| title_path(rpc.registry_ref().clone()));
+        self.one_shots.wrap(run)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn one_shot_counts(&self) -> &super::one_shots::Counts {
+        &self.one_shots.counts
+    }
+
+    /// The one-shot limiter's counters, for the `perf` stats line.
+    pub(crate) fn one_shot_stats(&self) -> String {
+        format!("{:?}", self.one_shots.counts)
+    }
+
+    /// Chats followed.
+    pub(crate) fn tracked(&self) -> usize {
+        lock(&self.chats).len()
     }
 
     fn last_fingerprint(&self, chat_id: &str) -> Option<String> {
@@ -872,10 +892,13 @@ impl ProgressBook {
     /// when the model gave nothing or the transcript hasn't changed since
     /// the last note.
     async fn make_note(&self, orch: &Orchestration, chat_id: &str, why: Why) -> Option<(Option<String>, String)> {
+        let _perf = crate::PerfGuard::new("make_note");
         let rpc = orch.rpc()?;
         let entries = rpc.doc_host_ref().open(chat_id).ok()?.doc().read_entries().ok()?;
         let fp = fingerprint(&entries);
-        if matches!(why, Why::Periodic | Why::OnDemand) && self.last_fingerprint(chat_id).as_deref() == Some(fp.as_str()) {
+        // Nothing new in the transcript since the last note: nothing new to
+        // say, whatever asked for it (a model run is seconds).
+        if self.last_fingerprint(chat_id).as_deref() == Some(fp.as_str()) {
             return Some((None, fp));
         }
         let now = Utc::now();
@@ -978,19 +1001,36 @@ pub(crate) fn start(orch: Orchestration) {
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let device = orch.device_id().to_owned();
+        // Each local session row as last taken in: only the rows that changed
+        // since are observed (an event used to observe every session, each
+        // unfollowed one with a registry read).
+        let mut last: HashMap<String, Session> = HashMap::new();
         loop {
             tokio::select! {
                 changed = sessions_rx.changed() => {
                     if changed.is_err() {
                         break;
                     }
-                    let sessions: Vec<Session> = sessions_rx.borrow_and_update().clone();
+                    let perf_t = std::time::Instant::now();
+                    let changed: Vec<Session> = {
+                        let sessions = sessions_rx.borrow_and_update();
+                        let local: Vec<&Session> = sessions.iter().filter(|s| s.device_id == device).collect();
+                        let ids: HashSet<&str> = local.iter().map(|s| s.chat_id.as_str()).collect();
+                        last.retain(|id, _| ids.contains(id.as_str()));
+                        local
+                            .into_iter()
+                            .filter(|s| last.get(&s.chat_id) != Some(*s))
+                            .cloned()
+                            .collect()
+                    };
                     let now = Utc::now();
-                    for session in sessions.iter().filter(|s| s.device_id == device) {
+                    for session in &changed {
                         if let Some(why) = orch.progress().observe(&orch, session, now) {
                             spawn_note(orch.clone(), session.chat_id.clone(), why);
                         }
+                        last.insert(session.chat_id.clone(), session.clone());
                     }
+                    tracing::debug!(target: "perf", what = "progress_observe_all", n = changed.len() as u64, us = perf_t.elapsed().as_micros() as u64);
                 }
                 _ = tick.tick() => {
                     for (chat, why) in orch.progress().tick(&orch, Utc::now()) {

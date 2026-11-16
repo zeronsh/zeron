@@ -379,7 +379,7 @@ impl EngineRpc {
             .unwrap_or_default();
         let sent = if route.message.trim().is_empty() { &route.excerpt } else { &route.message };
         let latest = chat.as_deref().and_then(|c| {
-            let others: Vec<String> = dump_messages_to(&self.orchestration().state().dumps, c);
+            let others: Vec<String> = self.orchestration().scan(|s| dump_messages_to(&s.dumps, c));
             super::watchers::latest_reply_until(&entries, sent, &others)
         });
         let marked = card
@@ -608,6 +608,7 @@ impl EngineRpc {
     /// The routed cards `chat` works on, brought up to date (it raised or
     /// answered an ask).
     pub(crate) fn sync_cards_of(&self, chat: &str) {
+        let _perf = crate::PerfGuard::new("sync_cards_of");
         let state = self.orchestration().state();
         for dump in &state.dumps {
             for route in &dump.routes {

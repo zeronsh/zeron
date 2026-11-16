@@ -206,6 +206,7 @@ pub(crate) async fn one_shot(
     prompt: String,
     accept: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
+    let _perf = crate::PerfGuard::new("one_shot");
     if !zeron_harness::supports_titles(harness_id) {
         return None;
     }

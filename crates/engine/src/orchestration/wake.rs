@@ -77,7 +77,9 @@ pub(crate) fn start(orchestration: Orchestration) {
                 }
                 continue;
             };
+            let perf_t = std::time::Instant::now();
             wake_due(&orchestration, &rpc, Utc::now());
+            tracing::debug!(target: "perf", what = "wake_tick", us = perf_t.elapsed().as_micros() as u64);
         }
     });
 }
@@ -89,31 +91,42 @@ pub(crate) fn wake_due(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let device = orchestration.device_id().to_owned();
-    let chats = orchestration.workspace().read_chats().unwrap_or_default();
-    let mut woken = Vec::new();
-    for o in orchestration.state().orchestrators {
-        let Some(wake) = o.wake.clone() else { continue };
-        if o.paused || o.archived || o.kind != OrchestratorKind::Standard {
-            continue;
-        }
-        if !chats
+    // The ones due, from the rows without the registry lock; each one's chat
+    // row is looked up alone (not every chat), and the wake is read again
+    // under the lock before it's marked.
+    let due_now: Vec<(String, WakeSchedule)> = orchestration.scan(|s| {
+        s.orchestrators
             .iter()
-            .any(|c| c.id == o.id && c.device_id == device && !c.archived)
-        {
+            .filter(|o| !o.paused && !o.archived && o.kind == OrchestratorKind::Standard)
+            .filter_map(|o| Some((o.id.clone(), o.wake.clone()?)))
+            .filter(|(_, wake)| due(wake, now, &Local))
+            .collect()
+    });
+    let mut woken = Vec::new();
+    for (id, wake) in due_now {
+        let here = orchestration
+            .workspace()
+            .chat(&id)
+            .ok()
+            .flatten()
+            .is_some_and(|c| c.device_id == device && !c.archived);
+        if !here {
             continue;
         }
-        if !due(&wake, now, &Local) {
-            continue;
-        }
-        orchestration.workspace().write_orchestration(|doc| {
-            if let Some(mut row) = doc.orchestrator(&o.id)
-                && let Some(wake) = row.wake.as_mut()
-            {
-                wake.last_woke_at = Some(now);
-                doc.upsert_orchestrator(&row);
+        let marked = orchestration.workspace().write_orchestration(|doc| {
+            let Some(mut row) = doc.orchestrator(&id) else { return false };
+            let Some(wake) = row.wake.as_mut() else { return false };
+            if !due(wake, now, &Local) {
+                return false;
             }
+            wake.last_woke_at = Some(now);
+            doc.upsert_orchestrator(&row);
+            true
         });
-        if chat_status(rpc, &o.id) != SessionStatus::Idle {
+        if !marked {
+            continue;
+        }
+        if chat_status(rpc, &id) != SessionStatus::Idle {
             continue;
         }
         let prompt = if wake.prompt.trim().is_empty() {
@@ -121,9 +134,9 @@ pub(crate) fn wake_due(
         } else {
             wake.prompt.as_str()
         };
-        match deliver(rpc, &o.id, prompt, None, When::Next) {
-            Ok(_) => woken.push(o.id.clone()),
-            Err(error) => tracing::warn!(orchestrator = %o.id, %error, "scheduled wake not sent"),
+        match deliver(rpc, &id, prompt, None, When::Next) {
+            Ok(_) => woken.push(id),
+            Err(error) => tracing::warn!(orchestrator = %id, %error, "scheduled wake not sent"),
         }
     }
     woken

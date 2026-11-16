@@ -3276,3 +3276,56 @@ fn a_broken_delta_chain_keeps_its_pending_writes() {
     let ids: Vec<String> = loaded.read_chats().unwrap().into_iter().map(|c| c.id).collect();
     assert_eq!(ids, ["after", "kept"], "the pending write after the break was lost");
 }
+
+/// A save started with `begin_save` and stored after (outside the lock): a
+/// write made in between goes to the next save, and the chain loads back
+/// the same replica.
+#[test]
+fn a_write_during_a_save_goes_to_the_next_one() {
+    let mut doc = RegistryDoc::new("host");
+    doc.set_local_only(true);
+    for i in 0..20 {
+        doc.upsert_chat(&chat(&format!("c{i}"), "host")).unwrap();
+    }
+    let base = doc.begin_save(false);
+    assert!(!base.is_delta());
+    let base = base.encode().unwrap();
+    doc.upsert_chat(&chat("during", "host")).unwrap();
+    let first = doc.begin_save(true);
+    assert!(first.is_delta());
+    // Written while the first delta is being encoded and stored.
+    doc.rename_chat("c3", "renamed meanwhile").unwrap();
+    let first = first.encode().unwrap();
+    let second = doc.begin_save(true).encode().unwrap();
+    let (loaded, clean) = RegistryDoc::from_saved(&base, &[first.clone()], &[], "host").unwrap();
+    assert!(clean);
+    assert!(loaded.chat("during").unwrap().is_some(), "the first delta has the write before it");
+    assert_ne!(loaded.chat("c3").unwrap().unwrap().title.as_deref(), Some("renamed meanwhile"));
+    let (loaded, clean) = RegistryDoc::from_saved(&base, &[first, second], &[], "host").unwrap();
+    assert!(clean);
+    same_replica(&doc, &loaded);
+}
+
+/// A save that wasn't stored: what it copied is unsaved again, with what
+/// was written since.
+#[test]
+fn an_aborted_save_leaves_its_rows_unsaved() {
+    let mut doc = RegistryDoc::new("host");
+    doc.set_local_only(true);
+    doc.upsert_chat(&chat("c1", "host")).unwrap();
+    let base = doc.begin_save(false).encode().unwrap();
+    doc.upsert_chat(&chat("lost", "host")).unwrap();
+    let failed = doc.begin_save(true);
+    doc.upsert_chat(&chat("later", "host")).unwrap();
+    doc.abort_save(failed);
+    let retry = doc.begin_save(true).encode().unwrap();
+    let (loaded, _) = RegistryDoc::from_saved(&base, &[retry], &[], "host").unwrap();
+    assert!(loaded.chat("lost").unwrap().is_some(), "an aborted save's rows were dropped");
+    assert!(loaded.chat("later").unwrap().is_some());
+    // A full replace stays whole-only through an aborted whole save.
+    let _ = doc.apply_state(5, true, 0, Vec::new());
+    let whole = doc.begin_save(true);
+    assert!(!whole.is_delta(), "a full replace saved as a delta");
+    doc.abort_save(whole);
+    assert!(!doc.begin_save(true).is_delta(), "an aborted whole save forgot the full replace");
+}

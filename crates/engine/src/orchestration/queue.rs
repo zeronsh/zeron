@@ -314,7 +314,9 @@ pub(crate) fn start(orchestration: Orchestration) {
             rows.mark_unchanged();
             state.mark_unchanged();
             let Some(rpc) = orchestration.rpc() else { continue };
+            let perf_t = std::time::Instant::now();
             start_due(&orchestration, &rpc);
+            tracing::debug!(target: "perf", what = "queue_start_due", us = perf_t.elapsed().as_micros() as u64);
         }
     });
 }
@@ -322,21 +324,24 @@ pub(crate) fn start(orchestration: Orchestration) {
 /// Start what has room, for every orchestrator with a crew limit hosted on
 /// this device. The threads started.
 pub(crate) fn start_due(orchestration: &Orchestration, rpc: &EngineRpc) -> Vec<String> {
-    let state = orchestration.state();
-    let due: Vec<&str> = state
-        .orchestrators
-        .iter()
-        .filter(|o| o.crew.max_running.is_some() && !next_up(&state.items, &o.id).is_empty())
-        .map(|o| o.id.as_str())
-        .collect();
+    // (Runs on every sessions, crew or board change: scanned without the
+    // registry lock; `start_queued` reads what it starts again.)
+    let due: Vec<String> = orchestration.scan(|state| {
+        state
+            .orchestrators
+            .iter()
+            .filter(|o| o.crew.max_running.is_some() && !next_up(&state.items, &o.id).is_empty())
+            .map(|o| o.id.clone())
+            .collect()
+    });
     if due.is_empty() {
         return Vec::new();
     }
     let device = orchestration.device_id();
-    let chats = orchestration.workspace().read_chats().unwrap_or_default();
+    let host = orchestration.workspace();
     due.into_iter()
-        .filter(|o| chats.iter().any(|c| c.id == *o && c.device_id == device))
-        .flat_map(|o| rpc.start_queued(o))
+        .filter(|o| host.chat(o).ok().flatten().is_some_and(|c| c.device_id == device))
+        .flat_map(|o| rpc.start_queued(&o))
         .collect()
 }
 

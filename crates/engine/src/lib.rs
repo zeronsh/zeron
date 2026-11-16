@@ -2080,3 +2080,16 @@ mod revival_tests {
         }
     }
 }
+
+/// Logs a scope's duration at target `perf` (debug) when dropped.
+pub(crate) struct PerfGuard(&'static str, std::time::Instant);
+impl PerfGuard {
+    pub(crate) fn new(what: &'static str) -> Self {
+        Self(what, std::time::Instant::now())
+    }
+}
+impl Drop for PerfGuard {
+    fn drop(&mut self) {
+        tracing::debug!(target: "perf", what = self.0, us = self.1.elapsed().as_micros() as u64);
+    }
+}

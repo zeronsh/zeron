@@ -1476,6 +1476,39 @@ async fn a_stale_ask_is_raised_once() {
     core.sessions.shutdown().await;
 }
 
+/// The timers scan the rows without the registry lock: a save or publish
+/// holding it (seconds, before) doesn't hold them up, and nothing they do
+/// keeps it held.
+#[tokio::test]
+async fn the_timers_do_not_wait_on_a_busy_registry() {
+    let (_temp, core) = core().await;
+    codex_thread(&core).await;
+    turn_ended(&core, CODEX_THREAD).await;
+    let rpc = core.rpc_service();
+    // Settle what the turn wrote, so nothing is due.
+    super::turn_asks::escalate(&core.orchestration, &rpc, chrono::Utc::now());
+    let host = core.orchestration.workspace().clone();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        host.write_orchestration(|_| {
+            held_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        })
+    });
+    held_rx.recv().unwrap();
+    let started = std::time::Instant::now();
+    let now = chrono::Utc::now();
+    super::turn_asks::escalate(&core.orchestration, &rpc, now);
+    super::incoming::chase_unanswered(&core.orchestration, &rpc, now);
+    super::wake::wake_due(&core.orchestration, &rpc, now);
+    super::queue::start_due(&core.orchestration, &rpc);
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_millis(700), "the timers waited {took:?} on the registry");
+    assert_eq!(crate::workspace_host::registry_locks_held(), 0);
+    holder.join().unwrap();
+    core.sessions.shutdown().await;
+}
+
 #[tokio::test]
 async fn only_launched_threads_and_only_real_questions_raise_asks() {
     let (_temp, core) = core().await;

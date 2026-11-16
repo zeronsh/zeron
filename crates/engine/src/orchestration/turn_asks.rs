@@ -646,6 +646,7 @@ pub(crate) fn launch_of_chat(orch: &Orchestration, rpc: &EngineRpc, chat: &str) 
 /// `chat`'s turn ended (`session` now): close what it settled, then raise
 /// what it asks.
 pub(crate) async fn after_turn(orch: &Orchestration, rpc: &Arc<EngineRpc>, chat: &str, session: &Session) {
+    let _perf = crate::PerfGuard::new("after_turn");
     mark_tool_asks(orch, rpc, chat);
     if matches!(session.status, SessionStatus::AwaitingInput | SessionStatus::Errored) {
         return;
@@ -770,7 +771,7 @@ fn mark_tool_asks(orch: &Orchestration, rpc: &EngineRpc, chat: &str) {
 /// A message reached `chat` (its turn started): the turn-end asks it
 /// answers close.
 pub(crate) async fn on_reply(orch: &Orchestration, rpc: &EngineRpc, chat: &str) {
-    if !orch.state().asks.iter().any(|a| a.from_chat == chat && a.origin == AskOrigin::TurnEnd && a.state == AskState::Open) {
+    if !orch.scan(|s| s.asks.iter().any(|a| a.from_chat == chat && a.origin == AskOrigin::TurnEnd && a.state == AskState::Open)) {
         return;
     }
     let Ok(handle) = rpc.doc_host_ref().open(chat) else { return };
@@ -795,7 +796,7 @@ pub(crate) fn bring_back_with(
     now: DateTime<Utc>,
     hosted: &dyn Fn(&str) -> bool,
 ) -> Vec<String> {
-    let due = returning(&orch.state().asks, now, hosted);
+    let due = orch.scan(|s| returning(&s.asks, now, hosted));
     let mut back = Vec::new();
     for id in due {
         let ask = orch.workspace().write_orchestration(|doc| {
@@ -831,7 +832,7 @@ pub(crate) fn escalate_with(
     now: DateTime<Utc>,
     hosted: &dyn Fn(&str) -> bool,
 ) -> Vec<String> {
-    let due = stale(&orch.state().asks, now, hosted);
+    let due = orch.scan(|s| stale(&s.asks, now, hosted));
     let mut raised = Vec::new();
     for id in due {
         let ask = orch.workspace().write_orchestration(|doc| {
@@ -868,7 +869,9 @@ pub(crate) fn start(orch: Orchestration) {
         loop {
             tick.tick().await;
             if let Some(rpc) = orch.rpc() {
+                let perf_t = std::time::Instant::now();
                 escalate(&orch, &rpc, Utc::now());
+                tracing::debug!(target: "perf", what = "escalate_tick", us = perf_t.elapsed().as_micros() as u64);
             }
         }
     });

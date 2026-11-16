@@ -2774,9 +2774,11 @@ where
                 let borrowed = rx.borrow_and_update();
                 borrowed.iter().filter_map(|row| serde_json::to_value(row).ok()).collect()
             };
+            let perf_n = rows.len();
             let (frame, sent) = keyed_frame(rows, key, last.take());
             last = Some(sent);
             if let Some(frame) = frame {
+                tracing::debug!(target: "perf", what = "keyed_push", key, rows = perf_n as u64, bytes = frame.to_string().len() as u64);
                 return Some((frame, (rx, last)));
             }
         }

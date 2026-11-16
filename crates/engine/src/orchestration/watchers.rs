@@ -71,7 +71,9 @@ pub(crate) fn start(orchestration: Orchestration) {
         loop {
             tick.tick().await;
             if let Some(rpc) = chase.rpc() {
+                let perf_t = std::time::Instant::now();
                 super::incoming::chase_unanswered(&chase, &rpc, Utc::now());
+                tracing::debug!(target: "perf", what = "chase_tick", us = perf_t.elapsed().as_micros() as u64);
             }
         }
     });
@@ -89,7 +91,9 @@ pub(crate) fn start(orchestration: Orchestration) {
         loop {
             tick.tick().await;
             if let Some(rpc) = sweep.rpc() {
+                let perf_t = std::time::Instant::now();
                 sweep_questions(&sweep, &rpc).await;
+                tracing::debug!(target: "perf", what = "qa_sweep", us = perf_t.elapsed().as_micros() as u64);
             }
         }
     });
@@ -119,7 +123,8 @@ const SWEEP_QUESTIONS_EVERY: std::time::Duration = std::time::Duration::from_sec
 pub(crate) async fn sweep_questions(orchestration: &Orchestration, rpc: &crate::rpc::EngineRpc) -> usize {
     let here = orchestration.device_id().to_owned();
     let mut by_chat: HashMap<String, Vec<WaitingRoute>> = HashMap::new();
-    for d in orchestration.state().dumps.iter().filter(|d| d.device_id == here) {
+    let dumps = orchestration.scan(|s| s.dumps.iter().filter(|d| d.device_id == here).cloned().collect::<Vec<_>>());
+    for d in &dumps {
         for r in &d.routes {
             if r.intent != RouteIntent::Question || r.state != RouteState::Delivered {
                 continue;
@@ -668,7 +673,7 @@ async fn route_answers(orchestration: Orchestration) {
             .collect();
         let (here, older): (Vec<_>, Vec<_>) =
             idle.into_iter().partition(|(_, s)| s.device_id == orchestration.device_id());
-        let dumps = orchestration.state().dumps;
+        let dumps = orchestration.scan(|s| s.dumps.clone());
         let open = |chats: &[(String, Session)]| -> usize {
             chats.iter().map(|(chat, _)| waiting_on(&dumps, chat).len()).sum()
         };
@@ -748,7 +753,7 @@ fn turns_ended(
     hosted: Hosted,
     just_now: bool,
 ) {
-    let dumps = orchestration.state().dumps;
+    let dumps = orchestration.scan(|s| s.dumps.clone());
     let here = orchestration.device_id().to_owned();
     for (chat, session) in finished {
         if hosted == Hosted::Here && just_now {
@@ -812,6 +817,7 @@ async fn take_outcomes(
     session: Option<&Session>,
     waiting: Vec<WaitingRoute>,
 ) -> Vec<WaitingRoute> {
+    let _perf = crate::PerfGuard::new("take_outcomes");
     let Ok(handle) = rpc.doc_host_ref().open(chat) else { return waiting };
     let Ok(entries) = handle.doc().read_entries() else { return waiting };
     // Every route's message to this chat: a task's outcome ends where the
