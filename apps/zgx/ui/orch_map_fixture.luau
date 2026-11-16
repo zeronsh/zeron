@@ -367,7 +367,7 @@ for _, by in { "orchestrator", "machine" } do
 end
 -- A drag held a frame at a time: a hub (the Engine, 72 crew), a chat;
 -- then let go.
-for _, d in { { "hub", "orc-eng" }, { "chat", "vpn3" }, { "brainhub", "orc-orch" }, { "brain", "orc-brain" } } do
+for _, d in { { "hub", "orc-eng" }, { "chat", "vpn3" }, { "brainhub", "orc-orch" }, { "brain", "orc-brain" }, { "engchat", "eng2" } } do
 	ui.command { id = `map_force_drag_{d[1]}_step`, title = `Map: drag the force graph's {d[1]} a step`, run = function()
 		require("@ds/orch_force").drag_by(d[2], 4, 2)
 	end }
@@ -416,6 +416,12 @@ ui.command { id = "map_read_cargo", title = "Map: read Capture's chips", run = f
 		table.insert(out, { kind = item.kind, name = item.name, id = item.ref and item.ref.id })
 	end
 	brain_cargo:set(out)
+end }
+ui.command { id = "map_force_unpin_children", title = "Map: unpin the Engine's children", run = function()
+	require("@ds/orch_force").unpin_children("orc-eng")
+end }
+ui.command { id = "map_force_unpin_all", title = "Map: unpin all", run = function()
+	require("@ds/orch_force").unpin_all()
 end }
 ui.command { id = "map_force_pan", title = "Map: pan the force graph", run = function()
 	require("@ds/orch_force").pan_by(-40, -25)

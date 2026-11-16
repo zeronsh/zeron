@@ -206,3 +206,69 @@ test("force drag: the Brain drags too, its hubs along; it stays, through a chang
 	expect(fit["orc-brain"][2]).to_be(0)
 	expect(math.abs((fit["orc-eng"][1] - fit["orc-brain"][1]) - (later["orc-eng"][1] - later["orc-brain"][1])) < 0.5).to_be(true)
 end)
+
+-- Pins: what's dropped by hand stays; its parent moving or not.
+local function drag_steps(app: any, what: string, n: number)
+	for _ = 1, n do
+		app:command(`map_force_drag_{what}_step`)
+		app:frames(1)
+	end
+	app:command(`map_force_drag_{what}_end`)
+	app:frames(20)
+end
+
+test("force pins: a dropped child stays when its parent is dragged; the unpinned follow", function()
+	local app = open_big()
+	drag_steps(app, "engchat", 8)
+	expect(app:state("control_map_force_pins")["eng2"]).to_be(true)
+	local before = places(app)
+	drag_steps(app, "hub", 15)
+	local after = places(app)
+	-- The pinned one where it was dropped.
+	expect(math.abs(after["eng2"][1] - before["eng2"][1]) < 0.5).to_be(true)
+	expect(math.abs(after["eng2"][2] - before["eng2"][2]) < 0.5).to_be(true)
+	-- An unpinned sibling followed (its offset from the hub about the same).
+	local function off(p: any, id: string): (number, number)
+		return p[id][1] - p["orc-eng"][1], p[id][2] - p["orc-eng"][2]
+	end
+	local bx, by = off(before, "eng3")
+	local ax, ay = off(after, "eng3")
+	expect(math.sqrt((ax - bx) ^ 2 + (ay - by) ^ 2) < 25).to_be(true)
+	expect(math.abs(after["eng3"][1] - before["eng3"][1]) > 20).to_be(true)
+end)
+
+test("force pins: Unpin all children lets go of that parent's only; Unpin all of every one", function()
+	local app = open_big()
+	drag_steps(app, "engchat", 8)
+	drag_steps(app, "chat", 8)
+	local pins = app:state("control_map_force_pins")
+	expect(pins["eng2"]).to_be(true)
+	expect(pins["vpn3"]).to_be(true)
+	app:command("map_force_unpin_children")
+	app:frames(60)
+	pins = app:state("control_map_force_pins")
+	expect(pins["eng2"]).to_be(nil)
+	expect(pins["vpn3"]).to_be(true)
+	app:command("map_force_unpin_all")
+	app:frames(60)
+	expect((next(app:state("control_map_force_pins")))).to_be(nil)
+end)
+
+test("force pins: kept through a change of what's shown, and a relaunch", function()
+	local app = open_big()
+	drag_steps(app, "engchat", 8)
+	local at = places(app)["eng2"]
+	app:command("map_big_more")
+	app:frames(60)
+	local later = places(app)["eng2"]
+	expect(math.abs(later[1] - at[1]) < 0.5).to_be(true)
+	local again = open_big()
+	expect(again:state("control_map_force_pins")["eng2"]).to_be(true)
+	local relaunched = places(again)["eng2"]
+	expect(math.abs(relaunched[1] - at[1]) < 0.5).to_be(true)
+	expect(math.abs(relaunched[2] - at[2]) < 0.5).to_be(true)
+	-- (Fit is the view's alone: the pin stays.)
+	again:click("#orch-force-fit")
+	again:frames(5)
+	expect(again:state("control_map_force_pins")["eng2"]).to_be(true)
+end)

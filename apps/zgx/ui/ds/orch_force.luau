@@ -37,6 +37,8 @@ M.COLOR_BY = { "orchestrator", "machine" }
 M.color_by = ui.persist("control_map_force_color", "orchestrator")
 -- Where each node last settled, by id: { x, y } (kept on this device).
 M.places = ui.persist("control_map_force_places", {} :: { [string]: { number } })
+-- The nodes pinned by hand (dropped there), by id (kept on this device).
+M.pins = ui.persist("control_map_force_pins", {} :: { [string]: boolean })
 -- The node the pointer is on.
 M.hover = ui.state("control_map_force_hover", nil :: string?)
 -- The node held by the pointer (pressed on, not yet let go), or nil: the
@@ -51,6 +53,8 @@ M.drag_to = function(_id: string, _x: number, _y: number) end
 M.drag_by = function(_id: string, _dx: number, _dy: number) end
 M.drag_end = function(_id: string) end
 M.recentre = function() end
+M.unpin_children = function(_id: string) end
+M.unpin_all = function() end
 M.current = nil :: any
 
 -- A frame's share of the settling (seconds), and how often it's drawn
@@ -63,6 +67,8 @@ local DRAG_STEPS = 8
 local RELEASE_BUDGET = 0.004
 local PULSE_MS = 900
 local PLACES_MAX = 4000
+-- What a secondary click on the space (no node) is, for its menu.
+local BACKGROUND = "force:background"
 local TILE_H = kit.TILE_H
 -- Names show from this zoom up (the important ones; others on hover).
 local NAMES_ZOOM = 0.3
@@ -330,6 +336,15 @@ M.View = ui.component(function(props: {
 		end)
 	end)
 	counts.wake_steps = 0
+	local function wake_down(i: number)
+		sim.wake_down(s, i)
+		counts.wake_steps = s.steps
+		woke_at = os.clock()
+		count("wakes")
+		settled:set(false)
+		tick:set(tick:peek() + 1)
+		run:set(run:peek() + 1)
+	end
 	local function wake(ids: { number }?)
 		sim.wake(s, ids)
 		counts.wake_steps = s.steps
@@ -388,6 +403,27 @@ M.View = ui.component(function(props: {
 			from[s.ids[i]] = { s.x[i], s.y[i] }
 		end
 		local fresh = sim.place(next_s, from)
+		-- (Pinned ones held where they were dropped; a pin of a node gone
+		-- goes with it.)
+		local pins = M.pins:peek() or {}
+		local kept_pins: { [string]: boolean } = {}
+		local pruned = false
+		local chats = world.chats or {}
+		for id in pins do
+			local i = next_s.index[id]
+			if i then
+				sim.pin(next_s, i, true)
+				kept_pins[id] = true
+			elseif fmodel.index[id] and (chats[id] == nil or chats[id].archived) then
+				-- (In the web till now, its chat gone: its pin goes.)
+				pruned = true
+			else
+				kept_pins[id] = true
+			end
+		end
+		if pruned then
+			M.pins:set(kept_pins :: any)
+		end
 		local old_m = fmodel
 		fmodel = next_m
 		s = next_s
@@ -993,13 +1029,17 @@ M.View = ui.component(function(props: {
 		-- (The Brain wakes the whole web: its hubs follow, their crews
 		-- after them.)
 		if not s.awake[i] then
-			wake(if s.fixed[i] then nil else { i })
+			if s.fixed[i] then
+				wake(nil)
+			else
+				wake_down(i)
+			end
 		end
 	end
 	-- Let go: it stays where it was dropped (its slot now), the few round
 	-- it settle in this frame, and the drawing is still again at once.
-	local function let_go(i: number)
-		s.held[i] = s.fixed[i]
+	local function let_go(i: number, dropped: boolean?)
+		s.held[i] = s.fixed[i] or s.pinned[i]
 		if M.held:peek() ~= nil then
 			M.held:set(nil)
 		end
@@ -1008,6 +1048,14 @@ M.View = ui.component(function(props: {
 		end
 		holding = false
 		sim.adopt(s, i)
+		-- (Dropped, moved there: pinned, its parent moving or not; a click
+		-- pins nothing.)
+		if dropped ~= false and not s.fixed[i] then
+			sim.pin(s, i, true)
+			if not (M.pins:peek() or {})[s.ids[i]] then
+				M.pins:set_key({ s.ids[i] }, true)
+			end
+		end
 		if not settled:peek() then
 			local steps0 = s.steps
 			sim.run(s, RELEASE_BUDGET, os.clock)
@@ -1016,6 +1064,38 @@ M.View = ui.component(function(props: {
 			done_settling()
 		end
 	end
+	-- Let go of pins: a parent's children's (the Brain's: its own children,
+	-- orchestrators and its chats, not theirs), or all; they settle back
+	-- into the web round their parents.
+	local function unpin(which: (i: number) -> boolean)
+		local woke: { number } = {}
+		local pins = table.clone(M.pins:peek() or {})
+		for i = 1, s.n do
+			if s.pinned[i] and which(i) then
+				sim.pin(s, i, false)
+				pins[s.ids[i]] = nil
+				table.insert(woke, i)
+			end
+		end
+		if #woke > 0 then
+			M.pins:set(pins :: any)
+			wake(woke)
+		end
+	end
+	M.unpin_children = function(id: string)
+		local p = fmodel.index[id]
+		if p then
+			unpin(function(i: number): boolean
+				return s.parent[i] == p
+			end)
+		end
+	end
+	M.unpin_all = function()
+		unpin(function(_i: number): boolean
+			return true
+		end)
+	end
+
 	-- Fit: the Brain back in the centre (where it was dragged, if it was),
 	-- its hubs following, the rest where they are round them.
 	local function recentre()
@@ -1125,7 +1205,7 @@ M.View = ui.component(function(props: {
 		end
 		local i = p.id and fmodel.index[p.id]
 		if i then
-			let_go(i)
+			let_go(i, p.moved)
 		end
 		if not p.moved then
 			local id = hit(px, py)
@@ -1482,10 +1562,31 @@ M.View = ui.component(function(props: {
 			end
 		end,
 		kit.MenuField {
-			menu = props.menu,
+			-- (The node's menu, and for a parent its children's pins; the
+			-- space's: every pin.)
+			menu = function(id: string): { any }?
+				if id == BACKGROUND then
+					return { { label = locale.s("ds.orch.map.unpin_all"), icon = "pin", on_select = function()
+						M.unpin_all()
+					end } }
+				end
+				local base = if props.menu then props.menu(id) else nil
+				local i = fmodel.index[id]
+				if i and fmodel.nodes[i].kind ~= "chat" then
+					local out = table.clone(base or {})
+					table.insert(out, { separator = true })
+					table.insert(out, { label = locale.s("ds.orch.map.unpin_children"), icon = "pin", on_select = function()
+						M.unpin_children(id)
+					end })
+					return out
+				end
+				return base
+			end,
 			register = props.register,
 			key = "force",
-			hit = hit,
+			hit = function(px: number, py: number): string?
+				return hit(px, py) or BACKGROUND
+			end,
 			center = function(id: string): (number?, number?)
 				local x, y = screen_of(id)
 				if x < -999 then
@@ -1556,7 +1657,7 @@ M.View = ui.component(function(props: {
 					h = 1,
 					ui.each(items, marker, { key = function(item: any): string
 						return item.id
-					end, absolute = true, left = 0, top = 0, pointer_events = "none" }),
+					end, absolute = true, left = 0, top = 0, w = 1, h = 1, pointer_events = "none" }),
 				}),
 				ui.div {
 					class = "orch-force-anchor-at",

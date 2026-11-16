@@ -76,6 +76,10 @@ export type Sim = {
 	awake: { boolean },
 	held: { boolean }, -- placed by the pointer (dragged), or fixed
 	fresh: { boolean }, -- placed new (no place known for it)
+	pinned: { boolean }, -- dropped by hand: held there, its parent moving or not
+	-- Each node's own slot, as a fresh web lays it out (for letting go of a pin).
+	def_r: { number },
+	def_a: { number },
 	fixed: { boolean }, -- the middle, always held
 	-- Each node's slot: how far from its parent, at what angle (from the
 	-- direction its parent faces: away from the grandparent; for the
@@ -156,6 +160,9 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: 
 		awake = table.create(n, true),
 		held = table.create(n, false),
 		fresh = table.create(n, false),
+		pinned = table.create(n, false),
+		def_r = table.create(n, 0),
+		def_a = table.create(n, 0),
 		fixed = table.create(n, false),
 		slot_r = table.create(n, 0),
 		slot_a = table.create(n, 0),
@@ -269,6 +276,9 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: 
 	for _, l in links do
 		l.len = if l.strong then s.slot_r[l.b] else M.WEAK_LEN
 	end
+	for i = 1, n do
+		s.def_r[i], s.def_a[i] = s.slot_r[i], s.slot_a[i]
+	end
 	return s
 end
 
@@ -313,6 +323,21 @@ function M.adopt(s: Sim, i: number)
 	for _, l in s.links do
 		if l.strong and l.b == i then
 			l.len = s.slot_r[i]
+		end
+	end
+end
+
+-- Pin node `i` where it is (held: its parent moving or not), or let go of
+-- its pin: back to its own slot, woken to settle into it.
+function M.pin(s: Sim, i: number, on: boolean)
+	s.pinned[i] = on
+	s.held[i] = on or s.fixed[i]
+	if not on then
+		s.slot_r[i], s.slot_a[i] = s.def_r[i], s.def_a[i]
+		for _, l in s.links do
+			if l.strong and l.b == i then
+				l.len = s.def_r[i]
+			end
 		end
 	end
 end
@@ -391,6 +416,15 @@ function M.wake(s: Sim, ids: { number }?)
 				s.awake[j] = true
 			end
 		end
+	end
+	s.energy = math.huge
+end
+
+-- Wake `i` and its children only (a drag: what it leads follows; its
+-- parent and the rest stay where they are).
+function M.wake_down(s: Sim, i: number)
+	for j = 1, s.n do
+		s.awake[j] = j == i or s.parent[j] == i
 	end
 	s.energy = math.huge
 end
