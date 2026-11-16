@@ -59,3 +59,18 @@ test("perf: one thread's status change, the Board alone", function()
 	-- (a hundred cards on the board; each did, four times over, before).
 	expect((c["board.word"] or 0) / 10 <= 2).to_be(true)
 end)
+
+test("perf: one thread's status change, Progress alone", function()
+	local app = open("progress")
+	-- (Every unit shown, not the first few.)
+	app:click("#control-progress-more")
+	app:frames(30)
+	local t, c = changes(app, "perf_status", 10)
+	report("progress status", t, c, 10)
+	-- Only the unit of the thread that changed draws again (some fifty
+	-- units; each read its clocks five times over, before).
+	expect((c["progress.clocks"] or 0) / 10 <= 8).to_be(true)
+	local t2, c2 = changes(app, "perf_progress", 10)
+	report("progress step", t2, c2, 10)
+	expect((c2["progress.clocks"] or 0) / 10 <= 12).to_be(true)
+end)

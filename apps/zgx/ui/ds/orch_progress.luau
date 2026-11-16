@@ -44,6 +44,7 @@ local Cells = require("@self/orch_cells")
 local hold = require("@self/orch_hold")
 local Tooltip = require("@self/tooltip")
 local pure = require("@self/orch_progress_clocks")
+local trace = require("@self/orch_perf_trace")
 
 local M = {}
 
@@ -166,11 +167,27 @@ M.Progress = ui.component(function(props: Props): Node
 	local function now(): number
 		return at:get()
 	end
-	local function row(): Row?
+	-- What it reads of the live sources, each through a selector of the
+	-- unit's own: a write anywhere (another thread's row or session, the
+	-- rows pushed whole) runs these again, and nothing it shows unless its
+	-- own value changed.
+	local the_row = ui.computed(function(): Row?
+		trace.hit("progress.row")
 		return props.row()
+	end)
+	local function row(): Row?
+		return the_row:get()
 	end
+	-- (Of its session, what it shows: its name, its agent, its activity.)
+	local the_chat = ui.computed(function(): any
+		local c = if props.chat then props.chat() else nil
+		if not c then
+			return nil
+		end
+		return { title = c.title, agent = c.agent, activity = c.activity }
+	end)
 	local function chat(): { [string]: any }?
-		return if props.chat then props.chat() else nil
+		return the_chat:get()
 	end
 	local function title(): string
 		local t = if props.title then props.title() else nil
@@ -180,10 +197,14 @@ M.Progress = ui.component(function(props: Props): Node
 		end
 		return if t and t ~= "" then t else locale.s("ds.orch.crew.thread")
 	end
-	local function context(): string
+	local the_context = ui.computed(function(): string
 		return (if props.context then props.context() else nil) or ""
+	end)
+	local function context(): string
+		return the_context:get()
 	end
 	local function clocks(): Clocks
+		trace.hit("progress.clocks")
 		return M.clocks(row(), now())
 	end
 	-- How it stands, and what it's on, held 300 ms at least.
@@ -216,9 +237,12 @@ M.Progress = ui.component(function(props: Props): Node
 		end
 		return (if props.placeholder then props.placeholder() else nil) or ""
 	end
-	local function refreshing(): boolean
+	local is_refreshing = ui.computed(function(): boolean
 		local r = row()
 		return (r ~= nil and r.refreshing == true) or (props.checking ~= nil and props.checking())
+	end)
+	local function refreshing(): boolean
+		return is_refreshing:get()
 	end
 	local function pinned(): boolean
 		return props.pinned ~= nil and props.pinned()
