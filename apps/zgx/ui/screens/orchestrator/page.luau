@@ -15,6 +15,7 @@ local hue = require("@ds/orch_hue")
 local data = require("@ds/orch_data")
 local OrchBoard = require("@ds/orch_board")
 local OrchCrew = require("@ds/orch_crew")
+local stage = require("@ds/stage")
 local Asks = require("@ds/orch_asks")
 local decide = require("@ds/orch_decide")
 local Links = require("@ds/links")
@@ -364,7 +365,9 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 						route.open_session(chat, if message then { message = message } else nil)
 					end,
 				}, "orch-section-needs"),
-				Section(ui.t("orch.page.board"), nil, OrchBoard {
+				-- (Needs you with the page; the Board, then the crew, each in a
+				-- frame of its own after: ds/stage.)
+				Section(ui.t("orch.page.board"), nil, stage.Later(1, function(): Node return OrchBoard {
 					id = "orch-page-board",
 					items = function(): { any }
 						return orchestration.now:get().items or {}
@@ -431,10 +434,10 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 							Links.open(link.target)
 						end
 					end,
-				}, "orch-section-board"),
+				} end), "orch-section-board"),
 				Section(ui.t("orch.page.crew"), function(): number
 					return #crew:get()
-				end, OrchCrew {
+				end, stage.Later(2, function(): Node return OrchCrew {
 					members = crew,
 					hue = hue_now,
 					device_name = function(device: string): string?
@@ -451,7 +454,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					progress = function(chat: string): Node
 						return Progress.strip(chat, { lean = true })
 					end,
-				}, "orch-section-crew"),
+				} end), "orch-section-crew"),
 			},
 		}
 	end
