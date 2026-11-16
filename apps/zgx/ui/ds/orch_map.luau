@@ -10,6 +10,8 @@
 --              (ds/orch_map_timeline)
 --   Machines   a block a machine: its load, and the threads it runs, by
 --              project and orchestrator (ds/orch_map_machines)
+--   Graph (new) the same, laid out once per change rather than settled:
+--              machines a treemap, crews in grids (ds/orch_graph2)
 --   Graph      all of it as a web: machines, orchestrators, the Brain dump
 --              and threads as nodes, what runs where, leads what, started
 --              what as lines (ds/orch_map_graph)
@@ -36,6 +38,7 @@ local Topology = require("@self/orch_map_topology")
 local Timeline = require("@self/orch_map_timeline")
 local Machines = require("@self/orch_map_machines")
 local Graph = require("@self/orch_map_graph")
+local Graph2 = require("@self/orch_graph2")
 local Layout = require("@self/orch_map_layout")
 
 export type View = { variant: string, window: number }
@@ -72,7 +75,9 @@ function M.open_menu(id: string): boolean
 	return false
 end
 
-M.VARIANTS = { "topology", "timeline", "machines", "graph" }
+-- ("graph2": the Graph laid out rather than settled, beside the first
+-- until it takes its place.)
+M.VARIANTS = { "topology", "timeline", "machines", "graph", "graph2" }
 M.WINDOWS = { 15, 60 }
 M.DEFAULT = { variant = "topology", window = 15 } :: View
 
@@ -97,7 +102,7 @@ function M.menu(view: State<View>): { any }
 	for _, id in M.VARIANTS do
 		table.insert(out, {
 			label = locale.s(`ds.orch.map.variant.{id}`),
-			icon = if id == "topology" then "git-branch" elseif id == "timeline" then "list" elseif id == "graph" then "global" else "widget",
+			icon = if id == "topology" then "git-branch" elseif id == "timeline" then "list" elseif id == "graph" or id == "graph2" then "global" else "widget",
 			checked = function(): boolean
 				return valid(view:get()).variant == id
 			end,
@@ -200,6 +205,16 @@ M.Map = ui.component(function(props: Props): Node
 				}
 			elseif variant == "graph" then
 				return Graph.View {
+					world = props.world,
+					chat = chat,
+					comms = props.comms,
+					on_open_chat = props.on_open_chat,
+					on_open_orchestrator = props.on_open_orchestrator,
+					menu = props.menu,
+					register = register,
+				}
+			elseif variant == "graph2" then
+				return Graph2.View {
 					world = props.world,
 					chat = chat,
 					comms = props.comms,

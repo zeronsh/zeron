@@ -969,6 +969,7 @@ return {
 	["ds.orch.map.variant.timeline"] = "Timeline",
 	["ds.orch.map.variant.machines"] = "Machines",
 	["ds.orch.map.variant.graph"] = "Graph",
+	["ds.orch.map.variant.graph2"] = "Graph (new)",
 	["ds.orch.map.fit"] = "Fit to view",
 	["ds.orch.map.reset"] = "Reset layout",
 	["ds.orch.map.window_15"] = "Last 15 minutes",
