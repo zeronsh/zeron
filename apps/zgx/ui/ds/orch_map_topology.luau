@@ -189,13 +189,13 @@ return ui.component(function(props: Props): Node
 			if rail.edge then
 				-- (An edge grouping its rows here: no line from elsewhere.)
 				local ink = hue.canvas(rail.hue, if hue.dark() then 0.7 else 0.8)
-				local p = ui.path():move(rail.x, rail.top):line(rail.x, rail.bottom)
+				local p = kit.path():move(rail.x, rail.top):line(rail.x, rail.bottom)
 				c:stroke(p, ink, 2, { cap = "round", dash = if rail.dashed then { 3, 3 } else nil })
 				continue
 			end
 			local alpha = if rail.paused then 0.3 else (if hue.dark() then 0.62 else 0.7)
 			local ink = hue.canvas(rail.hue, alpha)
-			local path = ui.path()
+			local path = kit.path()
 			for _, pts in Layout.lines(rail) do
 				path = polyline(path, pts)
 			end
@@ -732,14 +732,13 @@ return ui.component(function(props: Props): Node
 			end,
 			ui.each(lanes, lane_row, { key = by_id, absolute = true, left = 0, right = 0, top = 0, bottom = 0 }),
 			ui.each(labels, label_row, { key = by_id, absolute = true, left = 0, top = 0, w = 0, h = 0 }),
-			ui.canvas {
+			-- (In bands: one canvas the field's height would pass zgx's
+			-- raster limit on a big fleet and lose the window its frame.)
+			kit.Tiled {
 				class = "orch-map-lines",
-				absolute = true,
-				left = 0,
-				right = 0,
-				top = 0,
-				bottom = 0,
-				pointer_events = "none",
+				h = function(): number
+					return layout:get().h
+				end,
 				draw = draw,
 			},
 			ui.each(rows, any_row, { key = by_id, absolute = true, left = 0, top = 0, w = 0, h = 0 }),

@@ -391,6 +391,13 @@ ui.command { id = "map_big_loads", title = "Map: a big fleet's loads tick", run 
 	orchestration.loads:set(out)
 end }
 -- One more Engine crew thread on the big fleet (a change of what's shown).
+-- A huge fleet (165 threads, the Engine with 72 crew): the Map's bounds
+-- and its canvases' bands (tests/orch_map_bounds).
+ui.command { id = "map_huge", title = "Map: a huge fleet", run = function()
+	big_extra = 60
+	big_stale = false
+	map_big()
+end }
 ui.command { id = "map_big_more", title = "Map: a big fleet, one more thread", run = function()
 	big_extra += 1
 	map_big()
