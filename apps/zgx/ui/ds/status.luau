@@ -191,8 +191,116 @@ local function looping(props: ContainerProps, start: (el: Element) -> Animation,
 	return ui.div(props)
 end
 
+-- Off macOS, a 30 fps loop keeps zgx's event loop turning between its
+-- frames (a frame that draws nothing asks for no frame callback, so the
+-- next is handed out at once): one ring on screen held a core at half.
+-- There the rings and dots step instead, all on one clock, STEP ms apart,
+-- a timer that sleeps between steps and stops while none shows. On macOS
+-- a loop is baked and played by Core Animation: no frames, no wakes.
+local STEP = 100
+local platform: string? = nil
+local function stepped(): boolean
+	if platform == nil then
+		local ok, name = pcall(function(): any
+			return ui.shared("platform", ""):peek()
+		end)
+		platform = if ok and type(name) == "string" then name else ""
+	end
+	return platform ~= "macos"
+end
+M.stepped = stepped
+-- The steps' clock (ui.now() at the last step); the rings showing (their
+-- elements, each set to its run's time at a step), and how many steppers
+-- show.
+local step_clock = ui.state("ds_status_step", 0)
+local rings: { [any]: Element } = {}
+local showing = 0
+local stepping = false
+local function ring_time(now: number): number
+	return math.min((now % (RUN * 1000 + REST)) / 1000, RUN)
+end
+local function step_start()
+	if stepping then
+		return
+	end
+	stepping = true
+	ui.every(STEP, function(): boolean?
+		if showing <= 0 then
+			showing = 0
+			stepping = false
+			return false
+		end
+		local now = ui.now()
+		step_clock:set(now)
+		local t = ring_time(now)
+		for _, el in rings do
+			pcall(anime.utils.set, el, { shaderTime = t })
+		end
+		return nil
+	end)
+end
+-- A node that steps while it can be seen (a ring: `ring` set, its element
+-- set at each step; a dot: its bound values read `step_clock`), and stops
+-- counting as it goes. Still when motion is reduced.
+local Stepper = ui.component(function(props: { node: ContainerProps, ring: boolean? }): Node
+	local key = {}
+	local shown = false
+	local function hide()
+		if shown then
+			shown = false
+			showing -= 1
+			rings[key] = nil
+		end
+	end
+	ui.on_cleanup(hide)
+	local node = props.node
+	node.on_visible = function(visible: boolean, el: Element)
+		if visible and not shown then
+			shown = true
+			showing += 1
+			if props.ring then
+				rings[key] = el
+				pcall(anime.utils.set, el, { shaderTime = ring_time(ui.now()) })
+			end
+			if not motion.reduced_now() then
+				step_start()
+			end
+		elseif not visible then
+			hide()
+		end
+	end
+	return ui.div(node)
+end)
+local function stepper(node: ContainerProps, is_ring: boolean?): Node
+	return Stepper { node = node, ring = is_ring }
+end
+-- The time (ms) into a `period` ms cycle, by the steps' clock.
+local function step_at(period: number): number
+	return step_clock:get() % period
+end
+M.test_step = {
+	clock = step_clock,
+	showing = function(): number
+		return showing
+	end,
+	stepping = function(): boolean
+		return stepping
+	end,
+	STEP = STEP,
+}
+
 -- The working ring, `size` points, in `ink` (a token).
 local function ring(ink: string, size: number): Node
+	if stepped() then
+		-- Its run and rest by the steps' clock (`shaderTime` set at each).
+		return stepper({
+			w = size,
+			h = size,
+			shrink = 0,
+			bg_shader = RING,
+			shader_params = { ink, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } },
+		}, true)
+	end
 	return looping({
 		w = size,
 		h = size,
@@ -310,6 +418,22 @@ function M.StatusDot(props: { kind: Kind, size: number? }): Node
 	}
 	if not k.pulse then
 		return ui.div(dot)
+	end
+	if stepped() then
+		-- Dimming to half (200 ms), held (800), brightening (200), held:
+		-- by the steps' clock.
+		dot.opacity = function(): number
+			local p = step_at(2 * (200 + 800))
+			if p < 200 then
+				return 1 - 0.5 * p / 200
+			elseif p < 1000 then
+				return 0.5
+			elseif p < 1200 then
+				return 0.5 + 0.5 * (p - 1000) / 200
+			end
+			return 1
+		end
+		return stepper(dot)
 	end
 	return looping(dot, function(el)
 		-- The dimming and the brightening alone, each held for the loop's
