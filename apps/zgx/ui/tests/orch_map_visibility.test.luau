@@ -143,6 +143,12 @@ test("map visibility: in the default mode, a chat idle past the window hides, an
 	expect(shows(app)).to_be(true)
 end)
 
+test("map visibility: an archived orchestrator's chat isn't kept on the Map", function()
+	local c = ctx("recent", { orchestrators = { { id = "gone", archived = true }, { id = "here" } } })
+	expect((Visibility.visible(chat(nil, 5 * HOUR, "gone"), NOW, c))).to_be("hide")
+	expect((Visibility.visible(chat(nil, 5 * HOUR, "here"), NOW, c))).to_be("show")
+end)
+
 test("map visibility: a turn, unread output, an open ask or a Review card brings it back in Active only", function()
 	for _, cmd in { "sign_turn", "sign_unread", "sign_ask", "sign_review" } do
 		local app = open()

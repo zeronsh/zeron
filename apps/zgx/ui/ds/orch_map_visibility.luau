@@ -18,7 +18,8 @@
 --                              view's own layout cache, so a cached layout
 --                              never keeps a hide (or a show)
 --
--- A chat always shows when it's an orchestrator's or the Brain dump's own;
+-- A chat always shows when it's an orchestrator's or the Brain dump's own
+-- (not archived);
 -- working, waiting on its own work, or asking (input, approval); finished or
 -- failed and not seen since (unread); with an open ask of its, not put off;
 -- or on a card in Review. Otherwise: "all" shows it; "active" hides it;
@@ -95,7 +96,9 @@ function M.context(orch_now: any, mode: any?, window: number?): Ctx
 		review = {},
 	}
 	for _, o in now.orchestrators or {} do
-		ctx.pinned[o.id] = true
+		if not o.archived then
+			ctx.pinned[o.id] = true
+		end
 	end
 	local t = os.time()
 	for _, a in now.asks or {} do
