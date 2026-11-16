@@ -154,3 +154,20 @@ test("force graph: panned part out of view and back, zoomed, a node dragged acro
 	same_bands()
 	expect(app:state("control_map_force_stats").drawn_0 >= 160).to_be(true)
 end)
+
+test("force graph: a live push changing one chat's state repaints its rings alone", function()
+	local app = open_big()
+	local times = {}
+	local a = app:state("control_map_force_stats")
+	for _ = 1, 20 do
+		local t0 = os.clock()
+		app:command("map_force_push")
+		app:frames(1)
+		table.insert(times, (os.clock() - t0) * 1000)
+		app:frames(5)
+	end
+	local b = app:state("control_map_force_stats")
+	table.sort(times)
+	print(`FORCEPUSH 164 agents, one chat's state a push: frame p50={string.format("%.2f", times[10])}ms max={string.format("%.2f", times[20])}ms base_draws={b.draws - a.draws} status_draws={(b.status or 0) - (a.status or 0)} builds={b.builds - a.builds}`)
+	expect(b.builds).to_be(a.builds)
+end)

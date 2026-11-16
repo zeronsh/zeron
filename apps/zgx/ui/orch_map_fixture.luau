@@ -390,6 +390,23 @@ ui.command { id = "map_force_read", title = "Map: read the force graph's places"
 	end
 	force_places:set(out)
 end }
+-- A live push: one crew chat's state changes (input, then working, …).
+local push_n = 0
+ui.command { id = "map_force_push", title = "Map: a live push, one chat's state", run = function()
+	push_n += 1
+	local n: any = table.clone(sessions.now:peek())
+	local list = {}
+	for _, c in n.chats do
+		local c2 = c
+		if c.id == "vpn5" then
+			c2 = table.clone(c)
+			c2.status = if push_n % 2 == 1 then "input" else "working"
+		end
+		table.insert(list, c2)
+	end
+	n.chats = list
+	sessions.now:set(n)
+end }
 ui.command { id = "map_force_pan", title = "Map: pan the force graph", run = function()
 	require("@ds/orch_force").pan_by(-40, -25)
 end }

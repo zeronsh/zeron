@@ -162,7 +162,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -195,6 +195,7 @@ M.View = ui.component(function(props: {
 	-- working rings' steps.
 	local ptick = ui.use_state(0)
 	local ring_tick = ui.use_state(0)
+	local status_tick = ui.use_state(0)
 	local run = ui.use_state(0)
 	local woke_at = 0
 	local holding = false
@@ -319,14 +320,27 @@ M.View = ui.component(function(props: {
 	local function rebuild(world: any, comms: { any })
 		local next_m = fm.build(world, comms, world.clock or os.time())
 		if next_m.sig == fmodel.sig then
+			-- The same web: what changed taken in place. A state alone (a
+			-- live push): the status layer drawn again, nothing else; a
+			-- name, a fade, a colour, a message in flight: the rest too.
+			local marks, colours = #next_m.arcs ~= #fmodel.arcs, false
 			fmodel.arcs = next_m.arcs
 			for i, n in next_m.nodes do
 				local o = fmodel.nodes[i]
-				o.title, o.fade, o.done, o.total, o.hue, o.device = n.title, n.fade, n.done, n.total, n.hue, n.device
+				if o.title ~= n.title or o.fade ~= n.fade or o.provider ~= n.provider then
+					marks = true
+				end
+				if o.hue ~= n.hue or o.device ~= n.device then
+					colours = true
+				end
+				o.title, o.fade, o.done, o.total, o.hue, o.device, o.provider = n.title, n.fade, n.done, n.total, n.hue, n.device, n.provider
 			end
 			fmodel.machines = next_m.machines
-			version:set(version:peek() + 1)
-			tick:set(tick:peek() + 1)
+			if colours or marks then
+				version:set(version:peek() + 1)
+				tick:set(tick:peek() + 1)
+			end
+			status_tick:set(status_tick:peek() + 1)
 			return
 		end
 		count("builds")
@@ -483,6 +497,8 @@ M.View = ui.component(function(props: {
 	local label_x: { [number]: number } = {}
 	local label_y: { [number]: number } = {}
 	local made_for = -1
+	local label_boxes: { { number } } = {}
+	local name_w: { [number]: number } = {}
 	-- (The model the shapes were made for: still right for what isn't
 	-- moving while something is.)
 	local made_version = -1
@@ -513,14 +529,6 @@ M.View = ui.component(function(props: {
 		-- another name (an orchestrator's on the Brain's side, away from
 		-- its fan).
 		local boxes: { { number } } = {}
-		local function free(x0: number, y0: number, x1: number, y1: number): boolean
-			for _, b in boxes do
-				if not (x1 < b[1] or x0 > b[3] or y1 < b[2] or y0 > b[4]) then
-					return false
-				end
-			end
-			return true
-		end
 		for i, n in fmodel.nodes do
 			local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_CHAT + 3
 			table.insert(boxes, { s.x[i] - r, s.y[i] - r, s.x[i] + r, s.y[i] + r })
@@ -554,15 +562,13 @@ M.View = ui.component(function(props: {
 				names[i] = fit_name(c, n.title, 150, M_NAME)
 			end
 		end
-		-- Chats' names: those asking for the person (others on hover).
+		-- (Kept for the status layer: a chat asking for the person is named
+		-- where it's free of these.)
+		label_boxes = boxes
+		table.clear(name_w)
 		for i, n in fmodel.nodes do
-			if n.kind == "chat" and NEED[state_of(n.id)] and names[i] ~= "" then
-				local w = c:measure_text(names[i], M_NAME)
-				local x, y = s.x[i], s.y[i] + R_CHAT + 6
-				if free(x - w / 2 - 3, y, x + w / 2 + 3, y + 15) then
-					label_x[i], label_y[i] = x, y
-					table.insert(boxes, { x - w / 2 - 3, y, x + w / 2 + 3, y + 15 })
-				end
+			if n.kind == "chat" and names[i] ~= "" then
+				name_w[i] = c:measure_text(names[i], M_NAME)
 			end
 		end
 	end
@@ -651,7 +657,8 @@ M.View = ui.component(function(props: {
 				end
 				c:circle(nx, ny, 3.6, p.bg)
 			else
-				local st = state_of(n.id)
+				-- (Its state's ring, badge and name are the status layer's:
+				-- a state changing draws that alone.)
 				local faded = n.fade < 10
 				c:circle(nx, ny, R_CHAT, p.body)
 				if full and glyphs[i] then
@@ -661,34 +668,6 @@ M.View = ui.component(function(props: {
 					else
 						c:stroke(glyphs[i], gi, 1.2, ROUND)
 					end
-				end
-				local R = R_CHAT + 3.5
-				if NEED[st] then
-					c:circle(nx, ny, R + 0.9, p.ask)
-					c:circle(nx, ny, R - 0.9, p.bg)
-					c:circle(nx, ny, R_CHAT, p.body)
-					if full then
-						if glyphs[i] then
-							if glyph_fill[i] then
-								c:fill(glyphs[i], p.glyph)
-							else
-								c:stroke(glyphs[i], p.glyph, 1.2, ROUND)
-							end
-						end
-						c:circle(nx + 9.5, ny - 9.5, 6, p.ask)
-						T_BADGE.color = p.bg
-						c:text("?", nx + 9.5, ny - 9.5, T_BADGE)
-					end
-				elseif st == "working" then
-					-- (Its dashed ring is the overlay's, stepping.)
-					if not full then
-						c:circle(nx, ny, R + 0.8, p.working)
-						c:circle(nx, ny, R - 0.8, p.bg)
-						c:circle(nx, ny, R_CHAT, p.body)
-					end
-				elseif full and rings[i] then
-					local ink = if st == "done" then p.done elseif st == "failed" then p.failed elseif faded then p.fade[n.fade] else p.idle
-					c:stroke(rings[i], ink, if st == "idle" then 1.1 else 1.5)
 				end
 			end
 			if show_names and label_x[i] then
@@ -778,6 +757,58 @@ M.View = ui.component(function(props: {
 			end
 		end
 	end
+	-- The status layer: each chat's ring for its state (but working's, the
+	-- rings' own, stepping), a "?" for one asking for the person, and those
+	-- ones' names, placed free of the rest. Drawn again for a state's change
+	-- alone (a live push), nothing else with it.
+	local function draw_status(c: any)
+		local p = palette()
+		if made_version ~= version:peek() then
+			return
+		end
+		local still = settled:peek()
+		local x, y = s.x, s.y
+		local b = cull:get()
+		local show_names = names_shown:get()
+		local placed = 0
+		for i, n in fmodel.nodes do
+			if n.kind ~= "chat" or not rings[i] or (not still and s.awake[i]) then
+				continue
+			end
+			local nx, ny = x[i], y[i]
+			if nx < b.x0 - 40 or nx > b.x1 + 40 or ny < b.y0 - 40 or ny > b.y1 + 40 then
+				continue
+			end
+			local st = state_of(n.id)
+			if NEED[st] then
+				c:stroke(rings[i], p.ask, 1.8)
+				c:circle(nx + 9.5, ny - 9.5, 6, p.ask)
+				T_BADGE.color = p.bg
+				c:text("?", nx + 9.5, ny - 9.5, T_BADGE)
+				local w = name_w[i]
+				if show_names and w then
+					local ly = ny + R_CHAT + 6
+					local x0, x1 = nx - w / 2 - 3, nx + w / 2 + 3
+					local ok = true
+					for _, bx in label_boxes do
+						if not (x1 < bx[1] or x0 > bx[3] or ly + 15 < bx[2] or ly > bx[4]) then
+							ok = false
+							break
+						end
+					end
+					if ok then
+						T_NAME.color = p.secondary
+						c:text(names[i], nx, ly, T_NAME)
+						placed += 1
+					end
+				end
+			elseif st ~= "working" then
+				local ink = if st == "done" then p.done elseif st == "failed" then p.failed elseif n.fade < 10 then p.fade[n.fade] else p.idle
+				c:stroke(rings[i], ink, if st == "idle" then 1.1 else 1.5)
+			end
+		end
+	end
+
 	-- The working rings (their own canvas: a step a tenth of a second, the
 	-- rest never drawn again for it); those moving are the overlay's.
 	local function draw_rings(c: any)
@@ -1393,6 +1424,26 @@ M.View = ui.component(function(props: {
 						first_pending = false
 						counts.first_ms = (os.clock() - open_t0) * 1000
 					end
+				end,
+			},
+			ui.canvas {
+				class = "orch-force-status",
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+				view = band_view,
+				draw = function(c: any, _w: number, _h: number)
+					if not on_screen() then
+						return
+					end
+					status_tick:get()
+					tick:get()
+					version:get()
+					count("status")
+					draw_status(c)
 				end,
 			},
 			ui.canvas {
