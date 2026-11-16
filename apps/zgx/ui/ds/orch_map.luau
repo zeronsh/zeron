@@ -177,6 +177,64 @@ end
 -- it stays.)
 M.left_graph = ui.persist("control_map_left_graph", false)
 
+-- `world` (the page's) as a shape-stable function: see the Map's use.
+local SHAPE_KEYS = { "now", "chats", "devices", "projects", "here", "show", "clock" }
+local LISTS: { [string]: boolean } = { projects = true, devices = true }
+local function same(k: string, a: any, b: any): boolean
+	if a == b then
+		return true
+	end
+	if not LISTS[k] or type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then
+		return false
+	end
+	for i = 1, #a do
+		local x, y = a[i], b[i]
+		if x ~= y and (type(x) ~= "table" or type(y) ~= "table" or x.id ~= y.id or x.name ~= y.name or x.online ~= y.online or x.platform ~= y.platform) then
+			return false
+		end
+	end
+	return true
+end
+function M.shaped(world_fn: () -> any): () -> any
+	local raw: any = nil
+	local kept: any = nil
+	local n = 0
+	local function loads(): any
+		return world_fn().loads
+	end
+	local shape = ui.computed(function(): number
+		local w = world_fn()
+		local changed = raw == nil
+		if not changed then
+			for _, k in SHAPE_KEYS do
+				if not same(k, w[k], raw[k]) then
+					changed = true
+					break
+				end
+			end
+		end
+		if changed then
+			n += 1
+			raw = w
+			local t = table.clone(w)
+			t.loads = nil
+			kept = setmetatable(t, {
+				__index = function(_self: any, key: any): any
+					if key == "loads" then
+						return loads()
+					end
+					return nil
+				end,
+			})
+		end
+		return n
+	end)
+	return function(): any
+		shape:get()
+		return kept
+	end
+end
+
 M.Map = ui.component(function(props: Props): Node
 	local view = props.view or ui.use_state(M.DEFAULT)
 	if not M.left_graph:peek() then
@@ -186,8 +244,16 @@ M.Map = ui.component(function(props: Props): Node
 		end
 	end
 
+	-- The world as the views read it: the same table until what it holds
+	-- but the machines' loads changes (by identity; the projects and
+	-- devices by what's in them). Its `loads` is read through to the
+	-- page's at the moment: only what reads them (a machine's heading,
+	-- its figure and ring) follows their tick, every few seconds; no
+	-- view's layout does.
+	local world = M.shaped(props.world)
+
 	local function chat(id: string): any
-		return (props.world().chats or {})[id]
+		return (world().chats or {})[id]
 	end
 	local function timeline(): { [string]: { any } }
 		return if props.timeline then props.timeline() or {} else {}
@@ -202,7 +268,7 @@ M.Map = ui.component(function(props: Props): Node
 			showing = variant
 			if variant == "timeline" then
 				return Timeline.View {
-					world = props.world,
+					world = world,
 					chat = chat,
 					comms = props.comms,
 					timeline = timeline,
@@ -219,7 +285,7 @@ M.Map = ui.component(function(props: Props): Node
 				}
 			elseif variant == "graph" then
 				return Graph.View {
-					world = props.world,
+					world = world,
 					chat = chat,
 					comms = props.comms,
 					on_open_chat = props.on_open_chat,
@@ -229,7 +295,7 @@ M.Map = ui.component(function(props: Props): Node
 				}
 			elseif variant == "graph2" then
 				return Graph2.View {
-					world = props.world,
+					world = world,
 					chat = chat,
 					comms = props.comms,
 					on_open_chat = props.on_open_chat,
@@ -239,7 +305,7 @@ M.Map = ui.component(function(props: Props): Node
 				}
 			elseif variant == "machines" then
 				return Machines.View {
-					world = props.world,
+					world = world,
 					chat = chat,
 					on_open_chat = props.on_open_chat,
 					on_open_orchestrator = props.on_open_orchestrator,
@@ -248,7 +314,7 @@ M.Map = ui.component(function(props: Props): Node
 				}
 			end
 			return Topology {
-				world = props.world,
+				world = world,
 				chat = chat,
 				comms = props.comms,
 				on_open_chat = props.on_open_chat,

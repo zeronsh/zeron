@@ -220,6 +220,23 @@ M.View = ui.component(function(props: {
 	-- a thread.
 	local status_by: { [string]: string } = {}
 	local status_ver = ui.use_state(0)
+	-- (Batched: markers say a state changed; the drawing hears it once,
+	-- before the next frame, however many changed: on opening, all of
+	-- them at once.)
+	local status_pending = ui.use_state(false)
+	local function status_changed()
+		if not status_pending:peek() then
+			status_pending:set(true)
+		end
+	end
+	ui.effect(function()
+		if status_pending:get() then
+			ui.after(0, function()
+				status_pending:set(false)
+				status_ver:set(status_ver:peek() + 1)
+			end)
+		end
+	end)
 	local function state_of(id: string): string
 		return status_by[id] or model.status_of(chats_now[id])
 	end
@@ -1295,7 +1312,7 @@ M.View = ui.component(function(props: {
 				local now = held()
 				if status_by[item.id] ~= now then
 					status_by[item.id] = now
-					status_ver:set(status_ver:peek() + 1)
+					status_changed()
 				end
 			end)
 			ui.on_cleanup(function()
