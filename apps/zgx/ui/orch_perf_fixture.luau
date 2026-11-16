@@ -130,6 +130,11 @@ for _, id in page.WIDGETS do
 	end }
 end
 
+-- The Board alone: its own tab.
+ui.command { id = "perf_only_board", title = "Perf: only the Board", run = function()
+	page.tab:set("board")
+end }
+
 local counts = ui.state("perf_counts", {} :: any)
 ui.command { id = "perf_read", title = "Perf: read the run counts", run = function()
 	counts:set(table.clone(require("@ds/orch_perf_trace").counts))

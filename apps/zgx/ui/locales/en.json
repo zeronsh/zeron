@@ -4376,6 +4376,15 @@
       "orchestrators": "{n, plural, one {# orchestrator} other {# orchestrators}}",
       "working": "{n} working",
       "needs": "{n} need you"
+    },
+    "tabs": {
+      "label": "Control room tabs",
+      "overview": "Overview",
+      "board": "Board",
+      "chat": "Chat"
+    },
+    "chat": {
+      "none": "No Brain dump yet"
     }
   }
 }

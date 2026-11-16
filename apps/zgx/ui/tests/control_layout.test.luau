@@ -18,11 +18,11 @@ local function left(app: any, target: string): number?
 	return line and tonumber(line:match(" (%-?%d+),%-?%d+ "))
 end
 
-test("wide, two columns: Capture and the Map left; Needs you, Machines and Comms right; the Board across both", function()
+test("wide, two columns: Capture and the Map left; Needs you, Machines and Comms right; no Board (its own tab)", function()
 	local app = open(1440, 900)
 	expect(app:has("#control-left")).to_be(true)
 	expect(app:has("#control-left >> #control-widget-map")).to_be(true)
-	expect(app:has("#control-full >> #control-widget-board")).to_be(true)
+	expect(app:has("#control-widget-board")).to_be(false)
 	expect(app:has("#control-right >> #control-widget-needs")).to_be(true)
 	expect(app:has("#control-right >> #control-widget-comms")).to_be(true)
 	expect((left(app, "#control-widget-needs") :: number) > (left(app, "#control-widget-capture") :: number)).to_be(true)
@@ -93,11 +93,14 @@ end)
 
 test("each widget is a block of its own, its title and live figures in its head", function()
 	local app = open(1440, 900)
-	for _, id in { "capture", "needs", "map", "board", "machines", "comms" } do
+	for _, id in { "capture", "needs", "map", "machines", "comms" } do
 		expect(app:has(`#control-widget-{id} >> .orch-block-head`)).to_be(true)
 	end
 	expect(app:has('#control-widget-needs >> .orch-block-head >> ~"1 urgent"')).to_be(true)
-	expect(app:has('#control-widget-board >> .orch-block-head >> ~"2 blocked"')).to_be(true)
+	-- The Board's figures, over it on its tab.
+	app:set_state("control_tab", "board")
+	app:frames(30)
+	expect(app:has('#control-board-figures >> ~"2 blocked"')).to_be(true)
 end)
 
 test("comms is a feed: newest first, a burst's time said once", function()

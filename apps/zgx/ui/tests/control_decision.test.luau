@@ -20,7 +20,13 @@ local function calls(app: any): string
 	return tostring(app:state("calls") or "")
 end
 
-local CARD = '#control-widget-board >> .orch-card "Topology lines: pick a variant"'
+local CARD = '#control-board-tab >> .orch-card "Topology lines: pick a variant"'
+
+-- To a tab of the Control room's (the Board's cards on its own).
+local function tab(app: any, id: string)
+	app:set_state("control_tab", id)
+	app:frames(30)
+end
 local QUESTION = "Topology lines: which variant ships, solid lead lines or dashed crew lines?"
 local SOLID = "Solid lead lines"
 local DASHED = "Dashed crew lines"
@@ -53,6 +59,7 @@ end
 
 test("a card waiting on a decision shows it compact: the question in a line, its options as chips", function()
 	local app = open()
+	tab(app, "board")
 	expect(app:has(`{CARD} >> "Waiting on you"`)).to_be(true)
 	expect(app:has(`{CARD} >> .orch-card-question`)).to_be(true)
 	-- The recommended one ringed and starred, named so; the others plain.
@@ -73,6 +80,7 @@ end)
 
 test("a card waiting on a decision opens its thread at the message that asked", function()
 	local app = open()
+	tab(app, "board")
 	app:click(`{CARD} >> .orch-card-title`)
 	app:frames(10)
 	expect(calls(app)).to_contain("open:th-topo:msg-topo-ask")
@@ -87,12 +95,15 @@ end)
 
 test("a chip on the card answers it, after its Undo", function()
 	local app = open()
+	tab(app, "board")
 	app:click(`{CARD} >> role:button "{DASHED}"`)
 	app:frames(4)
 	expect(app:has(`{CARD} >> .orch-sending >> "{DASHED}"`)).to_be(true)
 	-- (Needs you says so too: one pick, wherever it's shown.)
+	tab(app, "overview")
 	expect(app:has('#control-widget-needs >> .orch-sending')).to_be(true)
 	expect(calls(app)).never.to_contain("answer:")
+	tab(app, "board")
 	expect(app:wait(`{CARD} >> role:button "Undo"`, { gone = true, timeout_ms = 8000 })).to_be(true)
 	app:frames(4)
 	expect(calls(app)).to_contain("answer:ak-topo:2:")
@@ -186,6 +197,7 @@ test("Defer puts it off: out of Needs you, its card says Deferred", function()
 	expect(calls(app)).to_contain("defer:ak-topo:")
 	expect(closes(app)).to_be(true)
 	expect(app:has(`#control-widget-needs >> role:button "{QUESTION}"`)).to_be(false)
+	tab(app, "board")
 	expect(app:has(`{CARD} >> "Deferred"`)).to_be(true)
 	expect(app:has(`{CARD} >> .orch-choice`)).to_be(false)
 end)
@@ -251,6 +263,7 @@ end)
 
 test("the overlay stays open after the click that opened it, and through a click inside", function()
 	local app = open()
+	tab(app, "board")
 	app:click(`{CARD} >> .orch-choice-expand`)
 	app:frames(30)
 	expect(shows(app, ".orch-decision")).to_be(true)
@@ -265,6 +278,8 @@ end)
 test("the overlay stays open when a tooltip or hover card was up as it opened", function()
 	for _, from in { `{CARD} >> role:button "{DASHED}"`, `#control-widget-needs >> role:button "{DASHED}"`, `{CARD} >> .orch-card-title` } do
 		local app = open()
+		-- (The tab kept from the last time round: set each time.)
+		tab(app, if string.find(from, "control-board-tab", 1, true) then "board" else "overview")
 		app:hover(from)
 		app:wait('role:dialog "Tooltip"', { timeout_ms = 2000 })
 		app:frames(10)

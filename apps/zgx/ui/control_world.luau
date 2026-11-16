@@ -80,6 +80,18 @@ return function()
 	end
 	lanes.watch = function(slot: string, id: string?)
 		if not id then
+			-- (Let go: no longer noted, and its transcript gone, as the
+			-- host drops it.)
+			if watched:peek()[slot] then
+				watched:set_key({ slot }, nil)
+				-- (A frame on, as the host's answer comes: never under a
+				-- transcript still going.)
+				ui.after(0, function()
+					if not watched:peek()[slot] then
+						lanes.view(slot).messages:set({})
+					end
+				end)
+			end
 			return
 		end
 		watched:set_key({ slot }, id)
@@ -88,6 +100,23 @@ return function()
 			if c.id == id then
 				view.session:set({ id = id, state = "ready", device = c.device, harness = "claude-code", model = `claude-code/{c.model}`, running = false })
 			end
+		end
+		-- The Brain dump's transcript, as the Control room's Chat tab reads
+		-- it: a dump, its routing turn (a tool call each part), a reply.
+		if slot == "control-chat" then
+			view.messages:set({
+				{ id = "bd-u1", role = "user", text = "Moscow node is flaky again, and the board needs a Review column." },
+				{
+					id = "bd-a1",
+					role = "assistant",
+					text = "Routed two parts: the Moscow node to VPN rollout, the Review column to UI.",
+					tools = {
+						{ id = "bd-t1", kind = "tool", verb = "Routed", target = "orc-vpn" },
+						{ id = "bd-t2", kind = "tool", verb = "Routed", target = "th-ui-orch" },
+					},
+				},
+				{ id = "bd-u2", role = "user", text = "Also check the relay window with Wing." },
+			})
 		end
 	end
 	orchestration.loads:set(sample.loads)

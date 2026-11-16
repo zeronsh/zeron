@@ -50,19 +50,39 @@ local function dropped(app: any, source: string): any
 	return refs[1]
 end
 
+-- The floating composer's field (Board and Chat have no Capture of their own).
+local FLOAT_FIELD = "#control-float >> role:textbox"
+local BOARD_CARD = '#control-board-tab >> .orch-card "Reboot Moscow node"'
+
+-- To a tab of the Control room's.
+local function tab(app: any, id: string)
+	app:set_state("control_tab", id)
+	app:frames(30)
+end
+
 local function expect_ref(chip: any, kind: string, id: string, token: string)
 	expect(chip.ref.kind).to_be(kind)
 	expect(chip.ref.id).to_be(id)
 	expect(chip.name).to_be(token)
 end
 
-test("drag refs: a Board card is referenced by its id and title, with its state and thread", function()
+test("drag refs: a Board card, on the Board tab, dragged into the floating composer is referenced by its id and title", function()
 	local app = tall()
-	local chip = dropped(app, '#control-widget-board >> .orch-card "Reboot Moscow node"')
+	tab(app, "board")
+	expect(app:has(FLOAT_FIELD)).to_be(true)
+	app:drag(BOARD_CARD, FLOAT_FIELD)
+	app:frames(10)
+	expect(app:error()).to_be_nil()
+	local refs = refs_of(app)
+	expect(#refs).to_be(1)
+	local chip = refs[1]
 	expect_ref(chip, "card", "it-moscow", '@card:"Reboot Moscow node"')
 	expect(chip.ref.context.state).to_be("review")
 	expect(chip.ref.context.orchestrator).to_be("orc-vpn")
-	-- Its chip on the draft, removable, as a mentioned chat's.
+	-- The same draft back on Overview: its chip in Capture's composer,
+	-- removable, as a mentioned chat's.
+	tab(app, "overview")
+	expect(#refs_of(app)).to_be(1)
 	expect(app:has(`{COMPOSER} >> role:button ~"Remove @card:"`)).to_be(true)
 end)
 
@@ -122,12 +142,13 @@ end)
 
 test("drag refs: the same thing dropped twice is one chip; another is a second", function()
 	local app = tall()
-	local card = '#control-widget-board >> .orch-card "Reboot Moscow node"'
-	app:drag(card, FIELD)
+	tab(app, "board")
+	app:drag(BOARD_CARD, FLOAT_FIELD)
 	app:frames(10)
-	app:drag(card, FIELD)
+	app:drag(BOARD_CARD, FLOAT_FIELD)
 	app:frames(10)
 	expect(#refs_of(app)).to_be(1)
+	tab(app, "overview")
 	app:drag('#orch-map-field >> role:button "Exnomic VPN"', FIELD)
 	app:frames(10)
 	expect(#refs_of(app)).to_be(2)
@@ -141,8 +162,10 @@ end)
 
 test("drag refs: sent, they go with the dump as its refs, never as files", function()
 	local app = tall()
-	app:drag('#control-widget-board >> .orch-card "Reboot Moscow node"', FIELD)
+	tab(app, "board")
+	app:drag(BOARD_CARD, FLOAT_FIELD)
 	app:frames(10)
+	tab(app, "overview")
 	app:drag('#orch-map-field >> role:button "Moscow node reboot plan"', FIELD)
 	app:frames(10)
 	app:type(FIELD, "same as these")
@@ -176,7 +199,8 @@ end)
 
 test("drag refs: a Board card dragged to another column still moves there", function()
 	local app = tall()
-	app:drag('#control-widget-board >> .orch-card "Reboot Moscow node"', "#control-board-blocked")
+	tab(app, "board")
+	app:drag(BOARD_CARD, "#control-board-blocked")
 	app:frames(20)
 	expect(app:error()).to_be_nil()
 	-- Moved (the board's own drop), and no chip made.
