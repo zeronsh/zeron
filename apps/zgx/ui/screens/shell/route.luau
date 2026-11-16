@@ -405,12 +405,28 @@ M.projects = steady(function(): { Choice }
 	return out
 end)
 
+-- What a session opened here is told before the route moves (the chat page's
+-- store sets it: it watches that chat), in one step with the move: what
+-- follows both, the route and the chat shown (the composer, the page), then
+-- sees them change together and runs once, rather than once for the route and
+-- again as the chat follows it. (The page goes on watching what its route
+-- says: opened another way, back or by a link, the chat follows a step later.)
+M.opening = nil :: ((id: string) -> ())?
+
 function M.open_session(id: string)
 	local r = at()
 	if r.name == "session" and r.params.id == id then
 		return
 	end
-	go("session", { id = id })
+	local opening = M.opening
+	if not opening then
+		go("session", { id = id })
+		return
+	end
+	ui.batch(function()
+		opening(id)
+		go("session", { id = id })
+	end)
 end
 
 -- Launched (not the scripts reloaded), it starts where it was left (see

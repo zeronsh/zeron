@@ -137,6 +137,12 @@ function M.open(id: string?)
 	watching:set(key)
 	ui.invoke("chat.open", id)
 end
+-- A session opened by the route: watched in the same step as the route
+-- moves to it (screens/shell/route `opening`), as the page would a moment
+-- later. (Looked up as it's called: what stands in for `open` then is what's told.)
+route.opening = function(id: string)
+	M.open(id)
+end
 
 -- A new chat on Cloud, opened before Cloud has made it (`req`: the send it
 -- will get, its `session` the id it's made with): known to the host as a chat
