@@ -43,6 +43,7 @@ end
 test("force drag: frames of a drag stay cheap", function()
 	run(nil, "brainhub", "sample ~25 agents, an orchestrator")
 	run("map_force_big", "chat", "164 agents, a chat")
+	run("map_force_big", "brain", "164 agents, the Brain (the whole web following)")
 	local p50 = run("map_force_big", "hub", "164 agents, a hub with 72 crew")
 	expect(p50 < 16).to_be(true)
 end)
@@ -170,4 +171,38 @@ test("force graph: a live push changing one chat's state repaints its rings alon
 	table.sort(times)
 	print(`FORCEPUSH 164 agents, one chat's state a push: frame p50={string.format("%.2f", times[10])}ms max={string.format("%.2f", times[20])}ms base_draws={b.draws - a.draws} status_draws={(b.status or 0) - (a.status or 0)} builds={b.builds - a.builds}`)
 	expect(b.builds).to_be(a.builds)
+end)
+
+test("force drag: the Brain drags too, its hubs along; it stays, through a change; Fit puts it back", function()
+	local app = open_big()
+	local before = places(app)
+	for _ = 1, 15 do
+		app:command("map_force_drag_brain_step")
+		app:frames(1)
+	end
+	app:command("map_force_drag_brain_end")
+	app:frames(30)
+	local after = places(app)
+	local bx, by = after["orc-brain"][1], after["orc-brain"][2]
+	expect(math.abs(bx - (before["orc-brain"][1] + 60)) < 1).to_be(true)
+	expect(math.abs(by - (before["orc-brain"][2] + 30)) < 1).to_be(true)
+	-- (Its hubs pulled along: each about as far from it as before.)
+	for _, id in { "orc-ui", "orc-eng", "orc-vpn" } do
+		local d0 = math.sqrt((before[id][1] - before["orc-brain"][1]) ^ 2 + (before[id][2] - before["orc-brain"][2]) ^ 2)
+		local d1 = math.sqrt((after[id][1] - bx) ^ 2 + (after[id][2] - by) ^ 2)
+		expect(math.abs(d1 - d0) < d0 * 0.25).to_be(true)
+	end
+	-- Through a change of what's shown: still there.
+	app:command("map_big_more")
+	app:frames(60)
+	local later = places(app)
+	expect(math.abs(later["orc-brain"][1] - bx) < 0.5).to_be(true)
+	expect(math.abs(later["orc-brain"][2] - by) < 0.5).to_be(true)
+	-- Fit: back in the centre, the web the same shape round it.
+	app:click("#orch-force-fit")
+	app:frames(3)
+	local fit = places(app)
+	expect(fit["orc-brain"][1]).to_be(0)
+	expect(fit["orc-brain"][2]).to_be(0)
+	expect(math.abs((fit["orc-eng"][1] - fit["orc-brain"][1]) - (later["orc-eng"][1] - later["orc-brain"][1])) < 0.5).to_be(true)
 end)

@@ -50,6 +50,7 @@ M.drag_to = function(_id: string, _x: number, _y: number) end
 -- (For tests and numbers: a drag held, moved by dx, dy each call; let go.)
 M.drag_by = function(_id: string, _dx: number, _dy: number) end
 M.drag_end = function(_id: string) end
+M.recentre = function() end
 M.current = nil :: any
 
 -- A frame's share of the settling (seconds), and how often it's drawn
@@ -647,7 +648,8 @@ M.View = ui.component(function(props: {
 				continue
 			end
 			if not l.strong then
-				c:line(ax, ay, bx, byy, p.weak, 0.8)
+				-- (Heavier with its traffic: a hairline, up to a point and a half.)
+				c:line(ax, ay, bx, byy, p.weak, 0.8 + math.min((l :: any).count or 0, 7) * 0.1)
 			end
 		end
 		for _, l in fmodel.links do
@@ -973,9 +975,11 @@ M.View = ui.component(function(props: {
 	end
 	local function drag(id: string, wx: number, wy: number)
 		local i = fmodel.index[id]
-		if not i or s.fixed[i] then
+		if not i then
 			return
 		end
+		-- (The Brain too: it moves, its hubs pulled along; let go, it stays
+		-- there, the web's anchor where it was dropped.)
 		s.held[i] = true
 		dragged_since = true
 		if not holding then
@@ -986,8 +990,10 @@ M.View = ui.component(function(props: {
 		end
 		s.x[i], s.y[i] = wx, wy
 		-- (Woken once: held, it never rests, so nothing wakes it again.)
+		-- (The Brain wakes the whole web: its hubs follow, their crews
+		-- after them.)
 		if not s.awake[i] then
-			wake({ i })
+			wake(if s.fixed[i] then nil else { i })
 		end
 	end
 	-- Let go: it stays where it was dropped (its slot now), the few round
@@ -1010,6 +1016,28 @@ M.View = ui.component(function(props: {
 			done_settling()
 		end
 	end
+	-- Fit: the Brain back in the centre (where it was dragged, if it was),
+	-- its hubs following, the rest where they are round them.
+	local function recentre()
+		local bx, by = 0, 0
+		for i = 1, s.n do
+			if s.fixed[i] then
+				bx, by = s.x[i], s.y[i]
+			end
+		end
+		if bx == 0 and by == 0 then
+			return
+		end
+		-- (The whole web moved with it: nothing else changes shape.)
+		for i = 1, s.n do
+			s.x[i] -= bx
+			s.y[i] -= by
+		end
+		if settled:peek() then
+			done_settling()
+		end
+	end
+	M.recentre = recentre
 	M.drag_by = function(id: string, dx: number, dy: number)
 		local i = fmodel.index[id]
 		if i then
@@ -1038,7 +1066,7 @@ M.View = ui.component(function(props: {
 		local id = hit(px, py)
 		press = { id = id, x = px, y = py, moved = false, view = view:peek() }
 		local i = id and fmodel.index[id]
-		if i and not s.fixed[i] then
+		if i then
 			drag(id :: string, s.x[i], s.y[i])
 		end
 	end
@@ -1560,6 +1588,7 @@ M.View = ui.component(function(props: {
 						tone = "quiet",
 						on_click = function()
 							moved_view = false
+							recentre()
 							fit()
 							recull()
 						end,

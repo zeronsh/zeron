@@ -358,3 +358,78 @@ test("force graph: a node's menu mentions it in Capture's composer; no grip, no 
 	expect(app:wait(".orch-force-card", { timeout_ms = 1500 })).to_be(true)
 	expect(app:has("#orch-force-grip")).to_be(false)
 end)
+
+-- One link a pair (ds/orch_force_model): a strong pair never gets a weak
+-- one; messages either way, or many, make one weak link.
+local fm = require("@ds/orch_force_model")
+local function world(comms_pairs: { { string } }): (any, { any })
+	local t = os.time()
+	local chats = {
+		["b"] = { id = "b", title = "Brain dump", status = "working", device = "d1", updated = t },
+		["o"] = { id = "o", title = "Orch", status = "working", device = "d1", updated = t },
+		["c1"] = { id = "c1", title = "One", status = "working", device = "d1", updated = t },
+		["c2"] = { id = "c2", title = "Two", status = "working", device = "d1", updated = t },
+		["c3"] = { id = "c3", title = "Three", status = "working", device = "d1", updated = t },
+	}
+	local now = {
+		orchestrators = {
+			{ id = "b", kind = "brain_dump", name = "Brain dump", hue = 140 },
+			{ id = "o", kind = "standard", name = "Orch", hue = 200 },
+		},
+		crew = {
+			{ orchestrator_id = "o", chat_id = "c1" },
+			{ orchestrator_id = "o", chat_id = "c2" },
+			{ orchestrator_id = "o", chat_id = "c3" },
+		},
+		items = {},
+		asks = {},
+	}
+	local comms = {}
+	for k, pr in comms_pairs do
+		table.insert(comms, { id = `m{k}`, from = pr[1], to = pr[2], at = t - k })
+	end
+	return { now = now, chats = chats, devices = { { id = "d1", name = "desk", here = true } }, here = "d1", show = "all", clock = t }, comms
+end
+local function links_between(m: any, a: string, b: string): (number, number, number)
+	local ia, ib = m.index[a], m.index[b]
+	local strong, weak, arcs = 0, 0, 0
+	for _, l in m.links do
+		if (l.a == ia and l.b == ib) or (l.a == ib and l.b == ia) then
+			if l.strong then
+				strong += 1
+			else
+				weak += 1
+			end
+		end
+	end
+	for _, arc in m.arcs do
+		if (arc.a == ia and arc.b == ib) or (arc.a == ib and arc.b == ia) then
+			arcs += 1
+		end
+	end
+	return strong, weak, arcs
+end
+
+test("force model: a strong pair with messages either way has its one strong link, no weak one, no arc", function()
+	local w, comms = world({ { "o", "c1" }, { "c1", "o" }, { "c1", "o" } })
+	local m = fm.build(w, comms, w.clock)
+	local strong, weak, arcs = links_between(m, "o", "c1")
+	expect(strong).to_be(1)
+	expect(weak).to_be(0)
+	expect(arcs).to_be(0)
+end)
+
+test("force model: messages both ways, and repeated, make one weak link, counted", function()
+	local w, comms = world({ { "c1", "c2" }, { "c2", "c1" }, { "c1", "c2" }, { "c1", "c2" } })
+	local m = fm.build(w, comms, w.clock)
+	local strong, weak, arcs = links_between(m, "c1", "c2")
+	expect(strong).to_be(0)
+	expect(weak).to_be(1)
+	expect(arcs).to_be(1)
+	for _, l in m.links do
+		if not l.strong then
+			expect(l.count).to_be(4)
+			expect((l.ab :: number) + (l.ba :: number)).to_be(4)
+		end
+	end
+end)

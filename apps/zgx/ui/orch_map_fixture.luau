@@ -367,7 +367,7 @@ for _, by in { "orchestrator", "machine" } do
 end
 -- A drag held a frame at a time: a hub (the Engine, 72 crew), a chat;
 -- then let go.
-for _, d in { { "hub", "orc-eng" }, { "chat", "vpn3" }, { "brainhub", "orc-orch" } } do
+for _, d in { { "hub", "orc-eng" }, { "chat", "vpn3" }, { "brainhub", "orc-orch" }, { "brain", "orc-brain" } } do
 	ui.command { id = `map_force_drag_{d[1]}_step`, title = `Map: drag the force graph's {d[1]} a step`, run = function()
 		require("@ds/orch_force").drag_by(d[2], 4, 2)
 	end }

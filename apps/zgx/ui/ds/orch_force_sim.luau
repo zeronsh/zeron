@@ -326,7 +326,13 @@ function M.place(s: Sim, saved: { [string]: any }?): number
 	for i = 1, s.n do
 		s.fresh[i] = false
 		if s.fixed[i] then
-			s.x[i], s.y[i] = 0, 0
+			-- (The middle: where it was dropped, if it was; else the centre.)
+			local at = saved and saved[s.ids[i]]
+			if type(at) == "table" and type(at[1]) == "number" and type(at[2]) == "number" then
+				s.x[i], s.y[i] = at[1], at[2]
+			else
+				s.x[i], s.y[i] = 0, 0
+			end
 			placed[i] = true
 			continue
 		end

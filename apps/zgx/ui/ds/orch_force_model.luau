@@ -48,7 +48,12 @@ export type Node = {
 	done: number,
 	total: number,
 }
-export type Link = { a: number, b: number, strong: boolean, hub: boolean }
+-- A pair's one link: strong (who leads whom), or weak (who talks to whom:
+-- `count` messages either way lately, the last at `at`; `ab`/`ba` how many
+-- went each way). Never both for a pair, never two of one.
+export type Link = { a: number, b: number, strong: boolean, hub: boolean, count: number?, at: number?, ab: number?, ba: number? }
+-- A message in flight, one a pair (the latest), on its weak link; a pair
+-- with a strong link shows its messages on that line instead (no arc).
 export type Arc = { a: number, b: number, at: number }
 export type Model = {
 	nodes: { Node },
@@ -157,31 +162,62 @@ function M.build(world: any, comms: { any }?, now: number?): Model
 		end
 	end
 	-- Weak: who talked to whom lately (comms), an open ask to its
-	-- orchestrator, a part the Brain dump handed over; once a pair.
-	local seen: { [string]: boolean } = {}
-	local function weak(a: number?, b: number?)
-		if not a or not b or a == b then
-			return
-		end
-		local n_a, n_b = out.nodes[a], out.nodes[b]
-		if n_b.parent == a or n_a.parent == b then
-			return
-		end
-		local key = if a < b then `{a}-{b}` else `{b}-{a}`
-		if seen[key] then
-			return
-		end
-		seen[key] = true
-		table.insert(out.links, { a = a, b = b, strong = false, hub = false })
-		table.insert(sig, `w:{key}`)
+	-- orchestrator, a part the Brain dump handed over. One link a pair,
+	-- whichever way (A to B and B to A the same), its messages counted into
+	-- it; none where the pair has a strong link (what passes between them
+	-- shows on that line).
+	local function pair_key(a: number, b: number): string
+		return if a < b then `{a}-{b}` else `{b}-{a}`
 	end
+	local strong_pairs: { [string]: boolean } = {}
+	for _, l in out.links do
+		strong_pairs[pair_key(l.a, l.b)] = true
+	end
+	local weak_of: { [string]: Link } = {}
+	local function weak(a: number?, b: number?, at: number?): Link?
+		if not a or not b or a == b then
+			return nil
+		end
+		local key = pair_key(a, b)
+		if strong_pairs[key] then
+			return nil
+		end
+		local l = weak_of[key]
+		if not l then
+			l = ({ a = math.min(a, b), b = math.max(a, b), strong = false, hub = false, count = 0, at = 0, ab = 0, ba = 0 } :: any) :: Link
+			weak_of[key] = l
+			table.insert(out.links, l)
+			table.insert(sig, `w:{key}`)
+		end
+		if at then
+			local w = l :: any
+			w.count += 1
+			w.at = math.max(w.at, at)
+			if a < b then
+				w.ab += 1
+			else
+				w.ba += 1
+			end
+		end
+		return l
+	end
+	local arc_of: { [string]: Arc } = {}
 	for _, e in comms or {} do
 		local at = e.at or 0
 		if at >= t - M.TALK_S then
 			local a, b = out.index[e.from or ""], out.index[e.to or ""]
-			weak(a, b)
-			if a and b and at >= t - M.LIVE_S then
-				table.insert(out.arcs, { a = a, b = b, at = at })
+			local l = weak(a, b, at)
+			-- (In flight: one arc a pair, its latest, and only on a weak link.)
+			if l and a and b and at >= t - M.LIVE_S then
+				local key = pair_key(a, b)
+				local cur = arc_of[key]
+				if not cur then
+					cur = { a = a, b = b, at = at }
+					arc_of[key] = cur
+					table.insert(out.arcs, cur)
+				elseif at > cur.at then
+					cur.a, cur.b, cur.at = a, b, at
+				end
 			end
 		end
 	end
