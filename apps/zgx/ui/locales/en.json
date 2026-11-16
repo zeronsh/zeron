@@ -3411,7 +3411,8 @@
           "title": "See file names and paths in your projects"
         },
         "files_write": {
-          "title": "Save files in its Documents folder and your projects"
+          "title": "Save files in its Documents folder and your projects",
+          "detail": "Code and settings included: it can create and replace any file in your chats' and projects' folders."
         },
         "panel_tabs": {
           "title": "Open tabs in your chats' panels"

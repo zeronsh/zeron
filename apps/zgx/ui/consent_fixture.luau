@@ -63,6 +63,19 @@ local PLUGINS: { [string]: any } = {
 		commands_anything = {},
 		commands_full_control = {},
 	},
+	-- A service that writes files in your projects (and its Documents
+	-- folder): code too, so a risky ask.
+	writer = {
+		id = "writer",
+		name = "Exporter",
+		version = "0.1.0",
+		hash = "writer-1",
+		status = "pending",
+		author = { kind = "unknown" },
+		permissions = { "ui.add", "service", "files.write" },
+		allowed = {},
+		ask = { "ui.add", "service", "files.write" },
+	},
 	-- A shell, an interpreter, git and a program nobody knows, as rated.
 	mixed = {
 		id = "mixed",
@@ -220,6 +233,7 @@ ui.command { id = "ping", title = "Show Ping", run = function() show("ping") end
 ui.command { id = "more", title = "Show Notes tool asking more", run = function() show("more") end }
 ui.command { id = "sync", title = "Show Checkout sync, here", run = function() show("sync") end }
 ui.command { id = "mixed", title = "Show Runner", run = function() show("mixed") end }
+ui.command { id = "writer", title = "Show Exporter", run = function() show("writer") end }
 ui.command { id = "hosts", title = "Show Reacher", run = function() show("hosts") end }
 ui.command { id = "wildcard_hosts", title = "Show Wide", run = function() show("wildcard_hosts") end }
 ui.command { id = "unknown_tool", title = "Show Tool", run = function() show("unknown_tool") end }

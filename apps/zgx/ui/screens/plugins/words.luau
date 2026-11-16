@@ -266,7 +266,9 @@ function M.permission(item: any, permission: string): Line
 	elseif permission == "files.read" then
 		return line(false, "folder", "plugins.words.permission.files_read.title")
 	elseif permission == "files.write" then
-		return line(false, "folder", "plugins.words.permission.files_write.title")
+		-- (Any file in your chats' and projects' folders, code included:
+		-- always asked, said so.)
+		return line(true, "folder", "plugins.words.permission.files_write.title", "plugins.words.permission.files_write.detail")
 	elseif permission == "panel.tabs" then
 		return line(false, "split-columns", "plugins.words.permission.panel_tabs.title")
 	elseif permission == "pages.add" then

@@ -57,6 +57,9 @@ pub const OUTSIDE_SANDBOX: &[&str] = &[
     "models.set",
     // Sending messages as you, to your agents: what they then do is theirs.
     "messages.send",
+    // Writing any file in your chats' and projects' folders: code your
+    // agents and tools then run.
+    "files.write",
 ];
 
 /// The hosts of a plugin with "network" that names none: any public one.
@@ -323,6 +326,15 @@ mod tests {
             raw[k] = v.clone();
         }
         Manifest::from_value(raw).unwrap()
+    }
+
+    /// Writing files in your projects' folders (code your agents and tools
+    /// run) is always asked, even of your own plugin.
+    #[test]
+    fn plugins_capability_files_write_stays_outside_the_sandbox() {
+        let m = manifest(json!({ "permissions": ["ui.add", "service", "files.write"], "service": "service.luau" }));
+        assert_eq!(m.problem(), None);
+        assert_eq!(inside_sandbox(&record(&m))["permissions"], json!(["ui.add"]));
     }
 
     #[test]

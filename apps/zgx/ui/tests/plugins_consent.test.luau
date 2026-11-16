@@ -162,6 +162,20 @@ test("a service says it runs in the background, as a calm ask", function()
 	expect(calm > 0 and risky > 0 and calm < risky).to_be(true)
 end)
 
+test("writing files in your projects is a risky ask that says code is included", function()
+	local app = open()
+	app:command("writer")
+	app:frames(20)
+	local tree = app:tree("#consent")
+	expect(tree).to_contain("Save files in its Documents folder and your projects")
+	-- The risk first: a line the sheet cuts short still says it.
+	expect(tree).to_contain('text "Code and settings included')
+	-- Risky: after the calm asks.
+	local calm = tree:find("Run in the background", 1, true) or -1
+	local risky = tree:find("Save files in its Documents", 1, true) or -1
+	expect(calm > 0 and risky > 0 and calm < risky).to_be(true)
+end)
+
 test("another device's plugin is allowed from here, on that device alone, never claimed", function()
 	local app = open()
 	app:command("sync_devbox")
