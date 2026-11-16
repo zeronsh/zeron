@@ -5,7 +5,7 @@
 -- is on now (or the command running, "cargo test · 9m"), how long since its
 -- last step, the time left when the engine knows it, and a one-line note. Stalled, it says so in the warning's ink, not
 -- an alarm's. "What's up?" asks the host for a fresh note (never the
--- agent); while it's written, a spinner. The clocks are plain words to the
+-- agent); while it's written, a spinner (still after SPIN_MAX seconds). The clocks are plain words to the
 -- minute ("<1m", "9m", "1h 12m"), in tabular figures, and move once a
 -- minute, on the minute: nothing ticks by the second.
 --
@@ -85,6 +85,8 @@ local TILE = 28
 local INDENT = 40
 -- How wide a lean strip must be to say its note (else its tooltip does).
 M.LEAN_NOTE = 300
+-- How long (seconds) a note being written rolls before its mark goes still.
+M.SPIN_MAX = 20
 
 -- The agent's mark ("codex" is OpenAI's).
 local MARKS: { [string]: string } = {
@@ -244,6 +246,30 @@ M.Progress = ui.component(function(props: Props): Node
 	local function refreshing(): boolean
 		return is_refreshing:get()
 	end
+	-- A fresh note that takes longer than SPIN_MAX (a host that never
+	-- writes it back): the roller stops, a still mark in its place.
+	local spin_over = ui.use_state(false)
+	ui.effect(function()
+		if is_refreshing:get() then
+			spin_over:set(false)
+			-- (Made in this run: gone when it stops refreshing.)
+			ui.after(M.SPIN_MAX * 1000, function()
+				spin_over:set(true)
+			end)
+		end
+	end)
+	-- Its "being written" mark: the roller (which plays only while it
+	-- shows), still once it has rolled SPIN_MAX.
+	local function refresh_mark(): Node
+		return ui.presence(function(): string
+			return if spin_over:get() then "still" else "spin"
+		end, function(k: string): Node
+			if k == "still" then
+				return ui.div { class = "orch-progress-refresh-still", shrink = 0, color = "$text.tertiary", Icon { name = "refresh", size = 10 } }
+			end
+			return status.Spinner { size = 10 }
+		end, { shrink = 0 })
+	end
 	local function pinned(): boolean
 		return props.pinned ~= nil and props.pinned()
 	end
@@ -375,7 +401,7 @@ M.Progress = ui.component(function(props: Props): Node
 				items = "center",
 				shrink = 0,
 				label = locale.t("ds.orch.progress.refreshing"),
-				status.Spinner { size = 10 },
+				refresh_mark(),
 			}),
 			ui.text {
 				said_text,
@@ -529,7 +555,7 @@ M.Progress = ui.component(function(props: Props): Node
 						class = "orch-progress-refreshing",
 						shrink = 0,
 						label = locale.t("ds.orch.progress.refreshing"),
-						status.Spinner { size = 10 },
+						refresh_mark(),
 					}),
 					},
 				},
