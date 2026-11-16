@@ -266,17 +266,19 @@ impl Commands {
         })?;
         let timeout = timeout.min(MAX_TIMEOUT);
         let started = Instant::now();
-        // Where it ends up, written by the shell as it exits.
+        // Where it ends up, written by the shell as it exits: a closed file
+        // (Windows refuses a second writer while it's open here), removed
+        // when this run is done.
         let ended_in = self
             .inner
             .kind
             .says_folder()
-            .then(|| tempfile::NamedTempFile::new().ok())
+            .then(|| tempfile::NamedTempFile::new().ok().map(|file| file.into_temp_path()))
             .flatten();
         let script = self
             .inner
             .kind
-            .script(command, ended_in.as_ref().map(|file| file.path()));
+            .script(command, ended_in.as_deref());
         let mut child = spawn(&self.inner.shell, self.inner.kind, cwd, &script)?;
         let (sender, mut chunks) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         let readers = pumps(&mut child, sender);
@@ -307,7 +309,7 @@ impl Commands {
 
         let cwd = ended_in
             .filter(|_| !timed_out)
-            .and_then(|file| std::fs::read_to_string(file.path()).ok())
+            .and_then(|path| std::fs::read_to_string(&path).ok())
             .map(|pwd| pwd.trim_end_matches(['\n', '\r']).to_owned())
             .filter(|pwd| !pwd.is_empty());
         let (output, omitted_bytes) = output.finish();

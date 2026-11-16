@@ -372,10 +372,11 @@ mod tests {
         let zeron_rpc::RpcReply::Value(ran) = ran else {
             panic!("a stream")
         };
+        // (`echo` and `exit` mean the same in sh and PowerShell.)
         assert_eq!(
             (
                 ran["exitCode"].clone(),
-                ran["output"].as_str().unwrap().ends_with("hi\n")
+                ran["output"].as_str().unwrap().trim_end() == "hi"
             ),
             (json!(2), true),
             "{ran}"
@@ -413,11 +414,13 @@ mod tests {
                 ),
             )
         };
-        let server = value(
-            start("echo listening; while true; do sleep 0.05; done")
-                .await
-                .unwrap(),
-        );
+        // A server that runs until stopped, in this platform's shell.
+        let server_command = if cfg!(windows) {
+            "Write-Output listening; while ($true) { Start-Sleep -Milliseconds 50 }"
+        } else {
+            "echo listening; while true; do sleep 0.05; done"
+        };
+        let server = value(start(server_command).await.unwrap());
         let quick = value(start("echo done").await.unwrap());
         let shown = |core: &crate::EngineCore| -> Vec<String> {
             core.sessions
@@ -457,7 +460,7 @@ mod tests {
             .await
             .unwrap(),
         );
-        assert_eq!(read["output"], "listening\n");
+        assert_eq!(read["output"].as_str().map(str::trim_end), Some("listening"));
 
         // One that ended goes from the row as it ends (followed, not polled).
         let give_up = std::time::Instant::now() + std::time::Duration::from_secs(2);
