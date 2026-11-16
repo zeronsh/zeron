@@ -1106,6 +1106,70 @@ local function opens_under(): (((x: number, y: number) -> boolean) -> (), (_v: b
 	end
 end
 
+-- Opening the page, the first STAGE_NOW widgets (in its order) build with
+-- it and the rest one a frame after, each holding a block's room till
+-- then: built all at once, the Map, the Scratchpad, the Board and the rest
+-- took 0.4 to 1.4 s in one frame (the window not answering meanwhile).
+local STAGE_NOW = 2
+type Staged = { rank: number, go: () -> () }
+local stage_queue: { Staged } = {}
+local stage_pumping = false
+local function stage_pump()
+	if #stage_queue == 0 then
+		stage_pumping = false
+		return
+	end
+	table.sort(stage_queue, function(a: Staged, b: Staged): boolean
+		return a.rank < b.rank
+	end)
+	local next_one = table.remove(stage_queue, 1) :: Staged
+	next_one.go()
+	ui.after(0, stage_pump)
+end
+local function staged(id: string): Node
+	local rank = table.find(full_order(M.widgets:peek()), id) or #M.WIDGETS
+	if rank <= STAGE_NOW then
+		return BUILD[id]()
+	end
+	local ready = ui.use_state(false)
+	local entry: Staged = {
+		rank = rank,
+		go = function()
+			ready:set(true)
+		end,
+	}
+	table.insert(stage_queue, entry)
+	ui.on_cleanup(function()
+		local at = table.find(stage_queue, entry)
+		if at then
+			table.remove(stage_queue, at)
+		end
+	end)
+	if not stage_pumping then
+		stage_pumping = true
+		ui.after(0, stage_pump)
+	end
+	-- (Its pump's timer is owned by the row that started it: should that row
+	-- go first, it builds on its own a little later.)
+	ui.after(400 + 60 * rank, function()
+		if not ready:peek() then
+			local at = table.find(stage_queue, entry)
+			if at then
+				table.remove(stage_queue, at)
+			end
+			ready:set(true)
+		end
+	end)
+	return ui.presence(function(): string?
+		return if ready:get() then "built" else "waiting"
+	end, function(state: string): Node
+		if state == "built" then
+			return BUILD[id]()
+		end
+		return ui.div { class = "control-widget-staged", w_full = true, h = 120 }
+	end, { w_full = true })
+end
+
 -- One widget, a block of its own: its title, its live figures beside it,
 -- its menu at its end; it over them.
 local function widget(id: string, wide: boolean): Node
@@ -1154,7 +1218,7 @@ local function widget(id: string, wide: boolean): Node
 				row,
 			}
 		end,
-		BUILD[id](),
+		staged(id),
 	}
 end
 
