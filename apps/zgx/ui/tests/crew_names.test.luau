@@ -64,7 +64,7 @@ test("crew names: the model names every crew thread, heard or not", function()
 			orchestrators = { { id = "o", name = "Zeron fixes", hue = 20 } },
 			crew = {
 				{ chat_id = "new", orchestrator_id = "o", role = "end-of-turn asks" },
-				{ chat_id = "gone", orchestrator_id = "o", role = "", item_id = "i" },
+				{ chat_id = "gone", orchestrator_id = "o", role = "", item_id = "i", joined = t },
 			},
 			items = { { id = "i", title = "Hover cards", order = 1 } },
 		},
