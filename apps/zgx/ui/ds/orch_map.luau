@@ -153,8 +153,19 @@ function M.menu(view: State<View>): { any }
 	return out
 end
 
+-- (Until the new Graph takes the first's place: a view kept on the first
+-- Graph, heavy on a big fleet, opens on the Topology, once. Chosen again,
+-- it stays.)
+M.left_graph = ui.persist("control_map_left_graph", false)
+
 M.Map = ui.component(function(props: Props): Node
 	local view = props.view or ui.use_state(M.DEFAULT)
+	if not M.left_graph:peek() then
+		M.left_graph:set(true)
+		if valid(view:peek()).variant == "graph" then
+			M.set(view, { variant = "topology" })
+		end
+	end
 
 	local function chat(id: string): any
 		return (props.world().chats or {})[id]
