@@ -9,6 +9,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod frames;
+
 /// `Option<Option<T>>` that keeps `null` apart from absent: absent = `None`
 /// (unchanged), `null` = `Some(None)` (cleared).
 pub mod double_option {
