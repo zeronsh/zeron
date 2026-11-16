@@ -1174,7 +1174,8 @@ M.View = ui.component(function(props: {
 				h = 8,
 				rounded = "$radius.full",
 				border = if kind == "todo" or kind == "working" or kind == "need" then 1.5 else 0,
-				border_color = if kind == "need" then "$zeron.status.input" else "$text.secondary",
+				-- (A state's own colour, as ds/status names it.)
+				border_color = if kind == "need" then `$zeron.status.{"input"}` else "$text.secondary",
 				bg = if kind == "done" then "$text.tertiary" else "transparent",
 			},
 			ui.text { locale.t(label), text_size = "$font.size.xs", color = "$text.secondary" },

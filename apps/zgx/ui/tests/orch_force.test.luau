@@ -255,7 +255,7 @@ test("force graph: its canvases stay under zgx's raster cap at any width", funct
 			end
 			if cw then
 				-- (At a 3x display: 4 bytes a pixel.)
-				expect(tonumber(cw) * 3 * tonumber(ch) * 3 * 4 < 32 * 1024 * 1024).to_be(true)
+				expect((tonumber(cw) :: number) * 3 * (tonumber(ch) :: number) * 3 * 4 < 32 * 1024 * 1024).to_be(true)
 			end
 		end
 		expect(app:count(".orch-force-canvas") >= 1).to_be(true)
