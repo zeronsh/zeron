@@ -1203,7 +1203,8 @@
           "topology": "Topology",
           "timeline": "Timeline",
           "machines": "Machines",
-          "graph": "Graph"
+          "graph": "Graph",
+          "force": "Graph (force)"
         },
         "fit": "Fit to view",
         "reset": "Reset layout",
@@ -1225,7 +1226,14 @@
         "show": "Show chats",
         "show_active": "Active only",
         "show_recent": "Active + recently finished",
-        "show_all": "All"
+        "show_all": "All",
+        "color_by": "Color by",
+        "color_by_orchestrator": "Orchestrator",
+        "color_by_machine": "Machine",
+        "legend_working": "working",
+        "legend_done": "done",
+        "legend_todo": "to do",
+        "needs_you": "needs you"
       },
       "machines": {
         "running": "{n} running",
