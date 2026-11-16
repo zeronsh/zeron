@@ -458,11 +458,6 @@ ui.command { id = "map_big_wake", title = "Map: a big fleet, a quiet one wakes",
 	n.chats = list
 	sessions.now:set(n)
 end }
-for _, style in { "dots", "provider" } do
-	ui.command { id = `map_graph2_{style}`, title = `Map: the new graph's nodes as {style}`, run = function()
-		require("@ds/orch_graph2").node_style:set(style)
-	end }
-end
 for _, mode in { "active", "recent", "all" } do
 	ui.command { id = `map_show_{mode}`, title = `Map: show chats {mode}`, run = function()
 		require("@ds/orch_map_visibility").mode:set(mode)
@@ -512,17 +507,8 @@ ui.command { id = "map_snapshot", title = "Map: the live data's copy", run = fun
 	orchestration.now:set(snap.orchestration)
 end }
 -- The new Graph's view moved, as a drag or a ⌘/Ctrl-scroll would.
-ui.command { id = "map_graph2_zoom_in", title = "Map: zoom the new graph in", run = function()
-	require("@ds/orch_graph2").zoom_by(1.25)
-end }
-ui.command { id = "map_graph2_zoom_out", title = "Map: zoom the new graph out", run = function()
-	require("@ds/orch_graph2").zoom_by(0.8)
-end }
 ui.command { id = "map_graph_zoom_out", title = "Map: zoom the graph out", run = function()
 	require("@ds/orch_map_graph").zoom_by(0.8)
-end }
-ui.command { id = "map_graph2_pan", title = "Map: pan the new graph", run = function()
-	require("@ds/orch_graph2").pan_by(-40, -25)
 end }
 -- Zeron fixes and its crew as the Map once showed them blank: one named
 -- and done, one just created (its title given, its first turn still

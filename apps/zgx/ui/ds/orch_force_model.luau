@@ -9,9 +9,23 @@
 -- Map's model): a fading one with its strength in tenths (`fade`).
 
 local model = require("@ds/orch_map_model")
-local Scene = require("@ds/orch_graph2_scene")
+
+-- A chat's provider, by its agent: "claude" | "openai" | "gemini" | "other".
+local function provider(chat: any): string
+	local a = string.lower(tostring((chat and (chat.agent or chat.harness)) or ""))
+	if string.find(a, "claude", 1, true) then
+		return "claude"
+	elseif string.find(a, "openai", 1, true) or string.find(a, "codex", 1, true) or string.find(a, "gpt", 1, true) then
+		return "openai"
+	elseif string.find(a, "gemini", 1, true) then
+		return "gemini"
+	end
+	return "other"
+end
 
 local M = {}
+
+M.provider = provider
 
 -- How long a message stays a weak link, and how long it's "live" (in
 -- flight: a dashed arc).
@@ -129,7 +143,7 @@ function M.build(world: any, comms: { any }?, now: number?): Model
 			lead = lead,
 			parent = p,
 			own = lead == nil,
-			provider = Scene.provider(chats[th.id]),
+			provider = provider(chats[th.id]),
 			fade = tenths(th),
 			done = d,
 			total = tot,

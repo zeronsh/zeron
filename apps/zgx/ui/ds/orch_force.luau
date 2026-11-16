@@ -29,7 +29,6 @@ local model = require("@self/orch_map_model")
 local Cells = require("@self/orch_cells")
 local sim = require("@self/orch_force_sim")
 local fm = require("@self/orch_force_model")
-local Graph2 = require("@self/orch_graph2")
 
 local M = {}
 
@@ -103,6 +102,35 @@ function M.cookie(x: number, y: number, r: number, n: number): any
 		p = if k == 0 then p:move(px, py) else p:line(px, py)
 	end
 	return p:close()
+end
+
+-- A provider's glyph at (x, y), about 9 points across, one ink: its path,
+-- and whether it's filled (else stroked).
+function M.glyph(provider: string, x: number, y: number): (any, boolean)
+	if provider == "claude" then
+		-- (A burst: eight rays.)
+		local p = ui.path()
+		for k = 0, 7 do
+			local a = math.rad(k * 45 + 22.5)
+			p = p:move(x + math.cos(a) * 1.3, y + math.sin(a) * 1.3):line(x + math.cos(a) * 4.3, y + math.sin(a) * 4.3)
+		end
+		return p, false
+	elseif provider == "openai" then
+		-- (A hexagon, a point up.)
+		local p = ui.path()
+		for k = 0, 5 do
+			local a = math.rad(k * 60 - 90)
+			local px, py = x + math.cos(a) * 4, y + math.sin(a) * 4
+			p = if k == 0 then p:move(px, py) else p:line(px, py)
+		end
+		return p:close(), false
+	elseif provider == "gemini" then
+		-- (A four-pointed spark.)
+		local k = 4.6
+		return ui.path():move(x, y - k):quad(x, y, x + k, y):quad(x, y, x, y + k):quad(x, y, x - k, y):quad(x, y, x, y - k):close(), true
+	end
+	-- (Any other: a small square.)
+	return ui.path():rect(x - 2.6, y - 2.6, 5.2, 5.2, 1), false
 end
 
 local function fit_name(c: any, s: string, w: number, opts: any): string
@@ -556,7 +584,7 @@ M.View = ui.component(function(props: {
 				end
 				table.insert(boxes, { label_x[i] - w / 2 - 3, label_y[i], label_x[i] + w / 2 + 3, label_y[i] + 17 })
 			else
-				glyphs[i], glyph_fill[i] = Graph2.glyph(n.provider, x, y)
+				glyphs[i], glyph_fill[i] = M.glyph(n.provider, x, y)
 				rings[i] = ui.path():arc(x, y, R_CHAT + 3.5, 0, 360)
 				names[i] = fit_name(c, n.title, 150, M_NAME)
 			end

@@ -5,7 +5,7 @@
 -- 32 MiB raster limit, which would cost the window its frame: the Control
 -- room froze on a 1044 × 6356 Timeline.
 
-local VIEWS = { "timeline", "topology", "machines", "graph", "graph2" }
+local VIEWS = { "timeline", "topology", "machines", "graph", "force" }
 -- 4 bytes a pixel at a display scale of 3, the most the Map meets.
 local LIMIT = 32 * 1024 * 1024
 local SCALE = 3
@@ -51,7 +51,7 @@ for _, view in VIEWS do
 		-- (The bound, three quarters of 900, with the widget's own head and
 		-- padding around it.)
 		expect(map.h <= 675 + 120).to_be(true)
-		for _, class in { ".orch-tl-chart", ".orch-map-lines", ".orch-graph2-canvas", ".orch-graph2-overlay", "canvas" } do
+		for _, class in { ".orch-tl-chart", ".orch-map-lines", ".orch-force-canvas", ".orch-force-overlay", "canvas" } do
 			for _, b in boxes(app, `#control-widget-map >> {class}`) do
 				expect(b.w * b.h * SCALE * SCALE * 4 <= LIMIT).to_be(true)
 			end
