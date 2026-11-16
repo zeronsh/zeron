@@ -143,6 +143,52 @@ test("map visibility: in the default mode, a chat idle past the window hides, an
 	expect(shows(app)).to_be(true)
 end)
 
+test("map visibility: unread shows for UNREAD_FOR after it last moved, then as any finished chat", function()
+	for _, st in { "done", "failed" } do
+		expect((Visibility.visible(chat(st, Visibility.UNREAD_FOR * 0.9), NOW, ctx("recent")))).to_be("show")
+		expect((Visibility.visible(chat(st, Visibility.UNREAD_FOR * 0.9), NOW, ctx("active")))).to_be("show")
+		expect((Visibility.visible(chat(st, Visibility.UNREAD_FOR + 2 * HOUR), NOW, ctx("recent")))).to_be("hide")
+		expect((Visibility.visible(chat(st, Visibility.UNREAD_FOR + 2 * HOUR), NOW, ctx("active")))).to_be("hide")
+		expect((Visibility.visible(chat(st, Visibility.UNREAD_FOR + 2 * HOUR), NOW, ctx("all")))).to_be("show")
+	end
+	-- Working or asking: always, however long.
+	expect((Visibility.visible(chat("working", 100 * HOUR), NOW, ctx("active")))).to_be("show")
+	expect((Visibility.visible(chat("input", 100 * HOUR), NOW, ctx("active")))).to_be("show")
+end)
+
+test("map visibility: an archived orchestrator's chat isn't kept on the Map", function()
+	local c = ctx("recent", { orchestrators = { { id = "gone", archived = true }, { id = "here" } } })
+	expect((Visibility.visible(chat(nil, 5 * HOUR, "gone"), NOW, c))).to_be("hide")
+	expect((Visibility.visible(chat(nil, 5 * HOUR, "here"), NOW, c))).to_be("show")
+end)
+
+test("map visibility: a crew thread with no chat row shows while new, and in All", function()
+	expect(Visibility.missing(NOW - 10 * 60, NOW, ctx("recent"))).to_be("show")
+	expect(Visibility.missing(NOW - 10 * 60, NOW, ctx("active"))).to_be("show")
+	expect(Visibility.missing(NOW - 2 * HOUR, NOW, ctx("recent"))).to_be("hide")
+	expect(Visibility.missing(nil, NOW, ctx("active"))).to_be("hide")
+	expect(Visibility.missing(NOW - 200 * HOUR, NOW, ctx("all"))).to_be("show")
+	-- Through the fleet: an old crew row without a chat is left off; a new one stays.
+	local model = require("@ds/orch_map_model")
+	local world = {
+		here = "d",
+		devices = { { id = "d", name = "d", here = true, online = true } },
+		chats = { o = { id = "o", status = "working", updated = NOW } },
+		show = "recent",
+		clock = NOW,
+		now = {
+			orchestrators = { { id = "o", hue = 1 } },
+			crew = {
+				{ orchestrator_id = "o", chat_id = "old", joined = NOW - 5 * HOUR },
+				{ orchestrator_id = "o", chat_id = "new", joined = NOW - 60 },
+			},
+		},
+	}
+	local f = model.fleet(world)
+	expect(f.threads.old).to_be(nil)
+	expect(f.threads.new ~= nil).to_be(true)
+end)
+
 test("map visibility: a turn, unread output, an open ask or a Review card brings it back in Active only", function()
 	for _, cmd in { "sign_turn", "sign_unread", "sign_ask", "sign_review" } do
 		local app = open()
