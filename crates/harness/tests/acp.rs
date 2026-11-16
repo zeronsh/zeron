@@ -2887,3 +2887,38 @@ async fn fx_permissions_follow_zeron_access_mode() {
         );
     }
 }
+
+/// A driver with no one-shot path of its own still answers an ask: the
+/// trait's default strips a chat's resumption, starts a fresh session, and
+/// puts the instructions ahead of the one message. The fixture exits unless
+/// all of that holds.
+#[tokio::test]
+async fn a_one_shot_ask_rides_the_prompt_on_a_driver_without_its_own_path() {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:oneshot");
+    req.resume = Some("existing-grok-session".into());
+    let mut stream = harness()
+        .run_instructions(req, "Rewrite the prompt.".into(), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("run finished in time");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "A rewritten prompt")),
+        "{events:?}"
+    );
+}

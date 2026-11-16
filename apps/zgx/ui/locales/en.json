@@ -3477,11 +3477,15 @@
         },
         "models_read": {
           "title": "See your agents' models",
-          "detail": "The models, efforts and options each offers, and what a chat uses."
+          "detail": "Which agents you have on, the models, efforts and options each offers, and what a chat uses."
         },
         "models_set": {
           "title": "Change the model your chats use",
           "detail": "A chat's model, effort and options for its next turn, and what new chats start with."
+        },
+        "models_ask": {
+          "title": "Ask a model of its own",
+          "detail": "One turn through your agent's own login, with instructions of its own and no MCP servers, skills or files: what it says comes back to the plugin, not to a chat. It spends the plan that login is on."
         },
         "messages_send": {
           "title": "Send messages to your agents as you",

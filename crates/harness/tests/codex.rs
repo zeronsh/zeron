@@ -1851,6 +1851,39 @@ async fn title_run_preserves_read_only_and_replaces_coding_instructions() {
 }
 
 #[tokio::test]
+async fn instructions_run_keeps_the_title_restrictions_with_its_own_prompt() {
+    let (controls, _steer, token) = controls("Yes");
+    let request = request("scenario:oneshot");
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut stream = harness()
+            .run_instructions(request, "Rewrite the prompt.".into(), controls)
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .unwrap();
+    token.cancel();
+    // The fixture fails the turn unless our instructions, and not the title
+    // ones, are the run's system prompt.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "A rewritten prompt")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn image_generation_fake_lifecycle_reaches_done_without_inline_payload() {
     for scenario in ["success", "failure", "missing-path"] {
         let (controls, _steer, _token) = controls("Yes");

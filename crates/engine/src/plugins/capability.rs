@@ -52,6 +52,8 @@ pub const OUTSIDE_SANDBOX: &[&str] = &[
     // Running one chat on another saved account: what it runs as.
     "accounts.pin",
     "models.set",
+    // A model run of its own, on your login: it spends your plan.
+    "models.ask",
     // Sending messages as you, to your agents: what they then do is theirs.
     "messages.send",
 ];

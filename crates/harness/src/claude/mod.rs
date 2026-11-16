@@ -487,7 +487,11 @@ impl ClaudeHarness {
         args
     }
 
-    fn build_command(exe: &std::path::Path, request: &RunRequest, title_only: bool) -> Command {
+    fn build_command(
+        exe: &std::path::Path,
+        request: &RunRequest,
+        one_shot: Option<&str>,
+    ) -> Command {
         let mut cmd = Command::new(exe);
         // Its own process group, so teardown reaches the MCP servers and
         // tools it started; and no inherited Claude Code session markers.
@@ -517,10 +521,10 @@ impl ClaudeHarness {
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
         }
-        if title_only {
+        if let Some(instructions) = one_shot {
             cmd.args([
                 "--system-prompt",
-                crate::TITLE_INSTRUCTIONS,
+                instructions,
                 "--tools",
                 "",
                 "--mcp-config",
@@ -577,9 +581,9 @@ impl ClaudeHarness {
     fn launch(
         exe: &std::path::Path,
         request: &RunRequest,
-        title_only: bool,
+        one_shot: Option<&str>,
     ) -> Result<Runtime, HarnessError> {
-        let mut child = Self::build_command(exe, request, title_only)
+        let mut child = Self::build_command(exe, request, one_shot)
             .spawn()
             .map_err(|e| {
                 let cwd = (!request.cwd.is_empty()).then(|| std::path::Path::new(&request.cwd));
@@ -982,12 +986,21 @@ impl Harness for ClaudeHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false).await
+        self.run_with_mode(request, controls, None).await
     }
 
     async fn run_title(
         &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_instructions(request, crate::TITLE_INSTRUCTIONS.into(), controls).await
+    }
+
+    async fn run_instructions(
+        &self,
         mut request: RunRequest,
+        instructions: String,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         request.resume = None;
@@ -1000,7 +1013,7 @@ impl Harness for ClaudeHarness {
         // Its tools are off and denied: the chat's modes do not apply.
         request.access = AccessMode::default();
         request.plan = false;
-        self.run_with_mode(request, controls, true).await
+        self.run_with_mode(request, controls, Some(&instructions)).await
     }
 }
 
@@ -1009,7 +1022,7 @@ impl ClaudeHarness {
         &self,
         mut request: RunRequest,
         controls: RunControls,
-        title_only: bool,
+        one_shot: Option<&str>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
         // A session whose transcript holds no conversation cannot be
@@ -1040,10 +1053,10 @@ impl ClaudeHarness {
             stdout_lines,
             mut stdin,
             stderr_tail,
-        } = Self::launch(&exe, &request, title_only)?;
+        } = Self::launch(&exe, &request, one_shot)?;
 
         let lock_dir = refresh_lock::config_dir_for(&request.env);
-        if !title_only {
+        if one_shot.is_none() {
             stdin.line(wire::initialize_request_line("zeron_initialize"));
         }
 
@@ -1068,7 +1081,7 @@ impl ClaudeHarness {
         }
         tokio::spawn(run_session(Session {
             normalizer,
-            title_only,
+            one_shot: one_shot.map(str::to_owned),
             exe,
             launched: request.clone(),
             child,
@@ -1263,7 +1276,9 @@ async fn stdin_writer(
 
 struct Session {
     normalizer: Normalizer,
-    title_only: bool,
+    /// The system prompt of a one-shot run (a title, a plugin's ask), or
+    /// `None` for a chat's run.
+    one_shot: Option<String>,
     /// What the process was launched from, for a fresh relaunch when its
     /// session cannot be restored.
     exe: PathBuf,
@@ -1292,7 +1307,7 @@ struct Session {
 async fn run_session(session: Session) {
     let Session {
         normalizer: mut norm,
-        title_only,
+        one_shot,
         exe,
         launched,
         mut child,
@@ -1415,7 +1430,7 @@ async fn run_session(session: Session) {
             turn.set_background_processes(Vec::new());
             let mut fresh = launched.clone();
             fresh.resume = None;
-            match ClaudeHarness::launch(&exe, &fresh, title_only) {
+            match ClaudeHarness::launch(&exe, &fresh, one_shot.as_deref()) {
                 Ok(runtime) => {
                     child = runtime.child;
                     stdout_lines = runtime.stdout_lines;
@@ -1546,7 +1561,13 @@ async fn run_session(session: Session) {
                         }
                     }
                     if let Frame::ControlRequest(req) = frame {
-                        handle_control_request(req, title_only, &config, &request_input, &stdin.tx);
+                        handle_control_request(
+                            req,
+                            one_shot.is_some(),
+                            &config,
+                            &request_input,
+                            &stdin.tx,
+                        );
                         continue;
                     }
                     // Only the CLI confirms that a prompt joined its
@@ -2092,7 +2113,7 @@ fn handle_control_request(
         let line = control_response_line(
             &req.request_id,
             serde_json::json!({
-                "behavior": "deny", "message": "Tools are disabled for title generation"
+                "behavior": "deny", "message": "Tools are disabled for this run"
             }),
         );
         let _ = stdin_tx.send(StdinMsg::Line(line));
@@ -2325,7 +2346,7 @@ mod tests {
             env: Default::default(),
             extra_mcp: Vec::new(),
         };
-        let mut cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
+        let mut cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, None);
         let value = cmd
             .as_std_mut()
             .get_envs()
@@ -2355,7 +2376,7 @@ mod tests {
                 env: Default::default(),
                 extra_mcp: Vec::new(),
             };
-            let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
+            let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, None);
             let args: Vec<String> = cmd
                 .as_std()
                 .get_args()
@@ -2556,7 +2577,7 @@ mod access_tests {
         assert!(harness.same_runtime(&unset, &with_options("claude-opus-5-5", json!({}))));
         // The command carries it.
         let env_of = |r: &RunRequest| {
-            let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), r, false);
+            let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), r, None);
             cmd.as_std()
                 .get_envs()
                 .find(|(k, _)| *k == "CLAUDE_CODE_DISABLE_1M_CONTEXT")

@@ -104,6 +104,8 @@ pub(crate) struct Host {
     pub(crate) pinned: Mutex<Vec<Pin>>,
     /// Providers whose accounts can be pinned, and how.
     pub(crate) mechanisms: Mutex<HashMap<HarnessId, &'static str>>,
+    /// Each one-shot ask a plugin made.
+    pub(crate) asks: Mutex<Vec<OneShot>>,
 }
 
 impl AgentHost for Host {
@@ -127,6 +129,15 @@ impl AgentHost for Host {
 
     fn models(&self, _harness: HarnessId) -> BoxFuture<'static, Result<Vec<Model>, String>> {
         Box::pin(async { Ok(vec![model("opus"), model("sonnet")]) })
+    }
+
+    fn agents(&self) -> Vec<(HarnessId, String)> {
+        vec![(HarnessId::ClaudeCode, "Claude Code".into()), (HarnessId::Codex, "Codex".into())]
+    }
+
+    fn ask(&self, one: OneShot) -> BoxFuture<'static, Result<String, String>> {
+        lock(&self.asks).push(one);
+        Box::pin(async { Ok("a rewritten prompt".into()) })
     }
 
     fn chats(&self) -> Vec<Chat> {
@@ -309,11 +320,24 @@ async fn agents_each_op_is_refused_without_its_permission_and_answered_with_it()
         (ACCOUNTS_READ, json!({ "op": "accounts" })),
         (ACCOUNTS_SWITCH, json!({ "op": "switch_account", "provider": "claude-code", "account": "a2" })),
         (MODELS_READ, json!({ "op": "models", "harness": "claude-code" })),
+        (MODELS_READ, json!({ "op": "agents" })),
         (MODELS_READ, json!({ "op": "chat_model", "chat": "c1" })),
         (MODELS_SET, json!({ "op": "set_model", "chat": "c1", "model": "sonnet" })),
+        (
+            MODELS_ASK,
+            json!({ "op": "ask", "instructions": "Rewrite it", "input": "make it better" }),
+        ),
     ];
     // Allowed everything else: each op still needs its own permission.
-    let all = [USAGE_READ, ACCOUNTS_READ, ACCOUNTS_SWITCH, MODELS_READ, MODELS_SET, "sessions.read"];
+    let all = [
+        USAGE_READ,
+        ACCOUNTS_READ,
+        ACCOUNTS_SWITCH,
+        MODELS_READ,
+        MODELS_SET,
+        MODELS_ASK,
+        "sessions.read",
+    ];
     for (needed, args) in ops {
         let others: Vec<&str> = all.iter().copied().filter(|p| p != needed).collect();
         f.grant("p", &others);
@@ -1205,4 +1229,50 @@ async fn with_nobody_listening_the_pre_run_hook_reads_nothing_and_waits_for_no_o
     f.hook("p");
     f.answer("p", Ok(json!({ "account": "a2" })), Duration::ZERO);
     assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, "c1").await.as_deref(), Some("a2"));
+}
+
+#[tokio::test]
+async fn agents_lists_the_enabled_agents_in_order() {
+    let f = Fixture::new();
+    f.grant("p", &[MODELS_READ]);
+    let agents = f.op("p", json!({ "op": "agents" })).await.unwrap();
+    assert_eq!(
+        agents,
+        json!([{ "id": "claude-code", "name": "Claude Code" }, { "id": "codex", "name": "Codex" }])
+    );
+}
+
+#[tokio::test]
+async fn agents_an_ask_runs_one_turn_with_its_own_instructions_and_is_bounded() {
+    let f = Fixture::new();
+    f.grant("p", &[MODELS_ASK]);
+    let answer = f
+        .op(
+            "p",
+            json!({
+                "op": "ask",
+                "instructions": "Rewrite it",
+                "input": "make it better",
+                "harness": "codex",
+                "model": "gpt-5.1-codex-mini",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["text"], "a rewritten prompt");
+    let asked = lock(&f.host.asks).clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].instructions, "Rewrite it");
+    assert_eq!(asked[0].input, "make it better");
+    assert_eq!(asked[0].harness, Some(HarnessId::Codex));
+    assert_eq!(asked[0].model.as_deref(), Some("gpt-5.1-codex-mini"));
+    // Both halves are needed, and an ask is a draft, not a file.
+    for args in [
+        json!({ "op": "ask", "instructions": "", "input": "x" }),
+        json!({ "op": "ask", "instructions": "x", "input": "  " }),
+        json!({ "op": "ask", "instructions": "x", "input": "x".repeat(33_000) }),
+    ] {
+        assert_eq!(f.op("p", args).await.unwrap_err().reason, reason::BAD_CALL);
+    }
+    assert_eq!(lock(&f.host.asks).len(), 1, "a refused ask never runs");
 }

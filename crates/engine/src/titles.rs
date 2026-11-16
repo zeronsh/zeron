@@ -5,13 +5,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use futures::StreamExt;
-
-use zeron_harness::{CancellationToken, RunControls, SteerMessage};
-use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    UserInputAnswer, UserInputQuestion,
-};
+use zeron_proto::{HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel};
 
 use crate::EngineError;
 use crate::registry::HarnessRegistry;
@@ -226,7 +220,13 @@ impl TitleGenerator {
                 .ok()?;
             match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                collect_text(harness.as_ref(), request, Some(execution_lease.clone())),
+                crate::oneshot::run_and_collect(
+                    harness.as_ref(),
+                    request,
+                    None,
+                    Some(execution_lease.clone()),
+                    "title generation",
+                ),
             )
             .await
             .unwrap_or_else(|_| Err(EngineError::Other("title generation timed out".into())))
@@ -277,69 +277,12 @@ fn clean_title(raw: &str) -> String {
         .collect()
 }
 
-/// Drive one titling run through the harness: no steering, questions resolved
-/// empty immediately (a titling prompt must never block on input).
-async fn collect_text(
-    harness: &dyn zeron_harness::Harness,
-    request: RunRequest,
-    execution_lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
-) -> Result<String, EngineError> {
-    let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
-    let interrupt = CancellationToken::new();
-    let _cancel_on_drop = interrupt.clone().drop_guard();
-    let controls = RunControls {
-        realtime: None,
-        execution_lease,
-        request_input: Box::new(|_questions: Vec<UserInputQuestion>| {
-            let (tx, rx) = tokio::sync::oneshot::channel::<Vec<UserInputAnswer>>();
-            let _ = tx.send(Vec::new());
-            rx
-        }),
-        steering: steer_rx,
-        interrupt: interrupt.clone(),
-        turn: Default::default(),
-    };
-    let mut stream = harness.run_title(request, controls).await?;
-    let mut text = String::new();
-    let mut completed = false;
-    while let Some(event) = stream.next().await {
-        match event? {
-            AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
-            AgentEvent::ToolCall { .. } => {
-                return Err(EngineError::Other(
-                    "title generation attempted to use a tool".into(),
-                ));
-            }
-            AgentEvent::Error { message } => {
-                return Err(EngineError::Other(format!("titling run error: {message}")));
-            }
-            AgentEvent::Done { status, error, .. } => {
-                if status == DoneStatus::Completed {
-                    completed = true;
-                    break;
-                }
-                return Err(EngineError::Other(format!(
-                    "titling run ended {status:?}: {}",
-                    error.unwrap_or_default()
-                )));
-            }
-            _ => {}
-        }
-    }
-    drop(steer_tx); // keep the mailbox open for the run's whole lifetime
-    if completed {
-        Ok(text)
-    } else {
-        Err(EngineError::Other(
-            "title stream ended without completion".into(),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::Model;
+    use futures::StreamExt;
+    use zeron_harness::RunControls;
+    use zeron_proto::{AgentEvent, DoneStatus, Model};
 
     fn model(id: &str, label: &str) -> Model {
         Model {
@@ -400,7 +343,9 @@ mod tests {
             env: Default::default(),
             extra_mcp: Vec::new(),
         };
-        let result = collect_text(&harness, request, None).await;
+        let result =
+            crate::oneshot::run_and_collect(&harness, request, None, None, "title generation")
+                .await;
         assert!(
             result
                 .unwrap_err()

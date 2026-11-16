@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
 use zeron_proto::{
-    AccessMode, AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -392,6 +392,36 @@ pub trait Harness: Send + Sync {
         Err(HarnessError::Protocol(
             "title generation is not supported by this harness".into(),
         ))
+    }
+
+    /// Run one isolated turn with `instructions` telling it what to do: the
+    /// title path's restrictions (no tools, MCP servers, skills or repository
+    /// context), for work that isn't a chat — a plugin's ask, say.
+    ///
+    /// Claude Code and Codex override this with the real thing: their own
+    /// instructions replaced, their tools and settings switched off. The
+    /// default is the closest a driver without such a switch gets — a
+    /// read-only run in the caller's scratch folder, no MCP servers, and
+    /// `instructions` ahead of the one message. A tool call fails the run
+    /// (`engine::oneshot`), so the agent's own tools cannot do work behind it.
+    async fn run_instructions(
+        &self,
+        mut request: RunRequest,
+        instructions: String,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        request.resume = None;
+        request.worktree = None;
+        request.attachments.clear();
+        request.mcp = None;
+        request.extra_mcp.clear();
+        request.model_options.clear();
+        request.plan = false;
+        request.auto_approve = false;
+        request.sandbox = SandboxLevel::ReadOnly;
+        request.access = AccessMode::Supervised;
+        request.prompt = format!("{instructions}\n\n---\n\n{}", request.prompt);
+        self.run(request, controls).await
     }
 
     /// Bootstrap without a synthetic user prompt; providers opt in explicitly.

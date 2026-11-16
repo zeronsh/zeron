@@ -361,7 +361,14 @@ local function service(id: string): any
 		return agents("pins", opts)
 	end
 
-	-- A harness's models ("models.read"): { { id, label, efforts, options } }.
+	-- The agents enabled on this device, in Zeron's order ("models.read"):
+	-- { { id, name } }.
+	function M.agents(): any
+		return agents("agents", {})
+	end
+
+	-- A harness's models ("models.read"): { { id, label, default, efforts,
+	-- options } }, `default` the one a chat naming none runs.
 	function M.models(harness: string): any
 		return agents("models", { harness = harness })
 	end
@@ -369,6 +376,14 @@ local function service(id: string): any
 	-- A chat's model, effort and options ("models.read").
 	function M.chat_model(chat: string): any
 		return agents("chat_model", { chat = chat })
+	end
+
+	-- One turn through a model of its own ("models.ask"): `instructions` is
+	-- what it's told to do, `input` its only message, and it runs with no
+	-- MCP servers, no skills and none of your files, on the harness's own
+	-- login. A promise of { text }.
+	function M.ask(s: { instructions: string, input: string, harness: string?, model: string? }): any
+		return agents("ask", s)
 	end
 
 	-- Set a chat's model, effort or options ("models.set"): for its next

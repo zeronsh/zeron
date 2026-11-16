@@ -12,8 +12,9 @@
 //! | `accounts.read` | read the saved accounts (and their email); account events |
 //! | `accounts.switch` | make another saved account the active one |
 //! | `accounts.pin` | run one chat on a saved account of its own, and answer the pre-run hook |
-//! | `models.read` | read a harness's models and a chat's model; model events |
+//! | `models.read` | the enabled agents, a harness's models and a chat's model; model events |
 //! | `models.set` | set a chat's model, effort and options |
+//! | `models.ask` | one turn through a model of its own: no MCP servers, skills or files |
 //! | `messages.send` | send a chat a message, start a chat, answer a question, as the composer does |
 //!
 //! Turn and input events need `sessions.read`; a turn's reply rides its
@@ -61,6 +62,7 @@ pub const ACCOUNTS_SWITCH: &str = "accounts.switch";
 pub const ACCOUNTS_PIN: &str = "accounts.pin";
 pub const MODELS_READ: &str = "models.read";
 pub const MODELS_SET: &str = "models.set";
+pub const MODELS_ASK: &str = "models.ask";
 pub const MESSAGES_SEND: &str = "messages.send";
 const FILES_READ: &str = "files.read";
 const SESSIONS_READ: &str = "sessions.read";
@@ -168,6 +170,10 @@ pub trait AgentHost: Send + Sync + 'static {
     fn activate(&self, harness: HarnessId, account: String) -> BoxFuture<'static, Result<AgentAccountsSnapshot, String>>;
     /// `ListModels` on this device.
     fn models(&self, harness: HarnessId) -> BoxFuture<'static, Result<Vec<Model>, String>>;
+    /// The agents enabled on this device, in Zeron's order, with their names.
+    fn agents(&self) -> Vec<(HarnessId, String)> {
+        Vec::new()
+    }
     /// The workspace's chats.
     fn chats(&self) -> Vec<Chat>;
     /// This device's sessions (their status).
@@ -219,6 +225,10 @@ pub trait AgentHost: Send + Sync + 'static {
     fn set_pin(&self, _harness: HarnessId, _chat: &str, _account: Option<&str>) -> Result<(), String> {
         Err("Pinning isn't available on this device".into())
     }
+    /// One isolated turn through a harness (`models.ask`).
+    fn ask(&self, _one: OneShot) -> BoxFuture<'static, Result<String, String>> {
+        Box::pin(async { Err("Asking a model isn't available on this device".into()) })
+    }
 }
 
 /// A chat running on a saved account of its own.
@@ -260,6 +270,17 @@ pub struct NewChat {
     pub project: Option<String>,
     pub config: ChatConfig,
     pub cwd: Option<String>,
+}
+
+/// One isolated turn through a harness, for a plugin's `zeron.ask`: what it's
+/// told to do, its only message, and what runs it (the first enabled harness,
+/// on its default model, without them).
+#[derive(Debug, Clone)]
+pub struct OneShot {
+    pub instructions: String,
+    pub input: String,
+    pub harness: Option<HarnessId>,
+    pub model: Option<String>,
 }
 
 /// What a plugin was allowed on this device, while it's on.
@@ -338,6 +359,8 @@ struct State {
     /// The provider problem a chat's turn reported, until it ends.
     problems: HashMap<String, ProviderProblem>,
     refreshed_at: HashMap<String, Instant>,
+    /// The plugin whose ask is running (one at a time each).
+    asking: HashSet<String>,
     pending: HashMap<(String, String), PendingSwitch>,
     /// A switch or set a plugin is making: told with its `by`.
     switch_by: HashMap<String, (String, By)>,
@@ -544,6 +567,7 @@ fn model_row(m: &Model) -> Json {
         "id": m.id,
         "label": m.label,
         "description": m.description,
+        "default": m.default,
         "efforts": m.reasoning_levels.iter().map(|l| effort_word(*l)).collect::<Vec<_>>(),
         "options": m.options.iter().map(|o| json!({
             "id": o.id,
@@ -713,6 +737,13 @@ impl Agents {
                 need(ACCOUNTS_SWITCH, "switch your agents' accounts")?;
                 self.switch(&by, &args).await
             }
+            "agents" => {
+                need(MODELS_READ, "see your agents' models")?;
+                let host = self.host()?;
+                let agents = host.agents().into_iter();
+                let rows = agents.map(|(id, name)| json!({ "id": id.as_str(), "name": name }));
+                Ok(Json::Array(rows.collect()))
+            }
             "models" => {
                 need(MODELS_READ, "see your agents' models")?;
                 let harness = provider_arg(&args, "harness")?
@@ -732,6 +763,57 @@ impl Agents {
             "set_model" => {
                 need(MODELS_SET, "change your chats' models")?;
                 self.set_model(&by, &args).await
+            }
+            "ask" => {
+                need(MODELS_ASK, "ask a model of its own")?;
+                let instructions = args
+                    .get("instructions")
+                    .and_then(Json::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                let input = args
+                    .get("input")
+                    .and_then(Json::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                if instructions.is_empty() || input.is_empty() {
+                    return Err(Refused::new(
+                        reason::BAD_CALL,
+                        "An ask needs instructions and an input",
+                    ));
+                }
+                if instructions.chars().count() > 8_000 || input.chars().count() > 32_000 {
+                    return Err(Refused::new(
+                        reason::BAD_CALL,
+                        "An ask is at most 32,000 characters of input and 8,000 of instructions",
+                    ));
+                }
+                // One at a time for each plugin: every ask is a whole agent
+                // process of its own. (Everything that can fail is settled
+                // first, so the slot is always given back.)
+                let one = OneShot {
+                    instructions,
+                    input,
+                    harness: provider_arg(&args, "harness")?,
+                    model: args
+                        .get("model")
+                        .and_then(Json::as_str)
+                        .filter(|m| !m.is_empty())
+                        .map(str::to_owned),
+                };
+                let host = self.host()?;
+                if !self.state().asking.insert(plugin.to_owned()) {
+                    return Err(Refused::new(
+                        reason::PACED,
+                        format!("{} is already asking a model", grant.name),
+                    ));
+                }
+                let answer = host.ask(one).await;
+                self.state().asking.remove(plugin);
+                let text = answer.map_err(|e| Refused::new(reason::FAILED, e))?;
+                Ok(json!({ "text": text }))
             }
             "send_message" => {
                 need(MESSAGES_SEND, "send messages in your chats")?;

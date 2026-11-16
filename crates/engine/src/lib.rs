@@ -61,6 +61,7 @@ pub mod local_import;
 pub mod managed;
 mod hosted_models;
 mod model_catalogs;
+mod oneshot;
 mod plugin_agents;
 pub mod plugins;
 pub mod profile;
