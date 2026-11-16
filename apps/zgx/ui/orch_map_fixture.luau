@@ -365,6 +365,31 @@ for _, by in { "orchestrator", "machine" } do
 		require("@ds/orch_force").color_by:set(by)
 	end }
 end
+-- A drag held a frame at a time: a hub (the Engine, 72 crew), a chat;
+-- then let go.
+for _, d in { { "hub", "orc-eng" }, { "chat", "vpn3" }, { "brainhub", "orc-orch" } } do
+	ui.command { id = `map_force_drag_{d[1]}_step`, title = `Map: drag the force graph's {d[1]} a step`, run = function()
+		require("@ds/orch_force").drag_by(d[2], 4, 2)
+	end }
+	ui.command { id = `map_force_drag_{d[1]}_end`, title = `Map: let go of the force graph's {d[1]}`, run = function()
+		require("@ds/orch_force").drag_end(d[2])
+	end }
+end
+ui.command { id = "map_force_drag_hub_hold", title = "Map: press on the force graph's hub", run = function()
+	require("@ds/orch_force").drag_by("orc-eng", 0, 0)
+end }
+-- Every node's place now, into `force_places` (tests read it).
+local force_places = ui.state("force_places", {} :: any)
+ui.command { id = "map_force_read", title = "Map: read the force graph's places", run = function()
+	local cur = require("@ds/orch_force").current
+	local out = {}
+	if cur then
+		for i = 1, cur.sim.n do
+			out[cur.sim.ids[i]] = { cur.sim.x[i], cur.sim.y[i] }
+		end
+	end
+	force_places:set(out)
+end }
 ui.command { id = "map_force_pan", title = "Map: pan the force graph", run = function()
 	require("@ds/orch_force").pan_by(-40, -25)
 end }

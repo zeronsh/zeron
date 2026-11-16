@@ -41,17 +41,27 @@ M.color_by = ui.persist("control_map_force_color", "orchestrator")
 M.places = ui.persist("control_map_force_places", {} :: { [string]: { number } })
 -- The node the pointer is on.
 M.hover = ui.state("control_map_force_hover", nil :: string?)
+-- The node held by the pointer (pressed on, not yet let go), or nil: the
+-- drawing's mode is this alone, never whether anything moves.
+M.held = ui.state("control_map_force_held", nil :: string?)
 -- For tests and numbers: builds, wakes, steps, draws, the settling.
 M.stats = ui.state("control_map_force_stats", {} :: any)
 M.zoom_by = function(_k: number) end
 M.pan_by = function(_dx: number, _dy: number) end
 M.drag_to = function(_id: string, _x: number, _y: number) end
+-- (For tests and numbers: a drag held, moved by dx, dy each call; let go.)
+M.drag_by = function(_id: string, _dx: number, _dy: number) end
+M.drag_end = function(_id: string) end
 M.current = nil :: any
 
 -- A frame's share of the settling (seconds), and how often it's drawn
 -- while settling (frames).
 local STEP_BUDGET = 0.006
-local DRAW_EVERY = 3
+-- While a node is held: a frame's share of the relaxation round it.
+local DRAG_BUDGET = 0.0015
+local DRAG_STEPS = 8
+-- On letting go: what's left of the settling round it, in that frame.
+local RELEASE_BUDGET = 0.004
 local PULSE_MS = 900
 local PLACES_MAX = 4000
 local TILE_H = kit.TILE_H
@@ -152,7 +162,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -178,8 +188,19 @@ M.View = ui.component(function(props: {
 	-- Drawn now (the settling draws every few frames).
 	local tick = ui.use_state(0)
 	local settled = ui.use_state(true)
+	-- Where things rest: bumped when the web settles (its shapes, names and
+	-- markers made again for where they now are).
+	local geo = ui.use_state(0)
+	-- The overlay's frames (what moves, what's lit, the dots), and the
+	-- working rings' steps.
+	local ptick = ui.use_state(0)
+	local ring_tick = ui.use_state(0)
 	local run = ui.use_state(0)
 	local woke_at = 0
+	local holding = false
+	-- (A node dragged since the web was last laid out: the view isn't fitted
+	-- again for its settling.)
+	local dragged_since = false
 	local first_pending = false
 	local open_t0 = os.clock()
 
@@ -218,11 +239,13 @@ M.View = ui.component(function(props: {
 			kept[id] = at
 		end
 		M.places:set(kept :: any)
-		if not moved_view then
+		-- (Fitted after a web's own settling, never after a drag: what's
+		-- shown stays where it is.)
+		if not moved_view and not dragged_since then
 			fit()
 		end
 		settled:set(true)
-		version:set(version:peek() + 1)
+		geo:set(geo:peek() + 1)
 		tick:set(tick:peek() + 1)
 		count("frames", 0)
 	end
@@ -238,18 +261,32 @@ M.View = ui.component(function(props: {
 		end
 		local frames = 0
 		ui.every(16, function(): boolean?
-			if not on_screen_now() then
+			-- (Settled already, by a let go: nothing left.)
+			if not on_screen_now() or settled:peek() then
 				return false
 			end
 			local f0 = os.clock()
 			local steps0 = s.steps
-			local still = sim.run(s, STEP_BUDGET, os.clock)
+			-- (A node held by the pointer: a short relaxation a frame round
+			-- it, and never at rest while it's held.)
+			local still
+			if holding then
+				local t0 = os.clock()
+				local n = 0
+				repeat
+					sim.step(s)
+					n += 1
+				until n >= DRAG_STEPS or os.clock() - t0 >= DRAG_BUDGET
+				still = false
+			else
+				still = sim.run(s, STEP_BUDGET, os.clock)
+			end
 			count("steps", s.steps - steps0)
 			frames += 1
 			count("frames")
 			counts.worst_ms = math.max(counts.worst_ms, (os.clock() - f0) * 1000)
 			-- (A long settling, past MAX_STEPS since waking: held where it is.)
-			if not still and s.steps - counts.wake_steps > sim.MAX_STEPS then
+			if not still and not holding and s.steps - counts.wake_steps > sim.MAX_STEPS then
 				sim.sleep(s)
 				still = true
 			end
@@ -257,9 +294,9 @@ M.View = ui.component(function(props: {
 				done_settling()
 				return false
 			end
-			if frames % DRAW_EVERY == 0 then
-				tick:set(tick:peek() + 1)
-			end
+			-- (What moves is the overlay's: drawn each frame, alone; the
+			-- rest stands drawn.)
+			ptick:set(ptick:peek() + 1)
 			return nil
 		end)
 	end)
@@ -270,6 +307,9 @@ M.View = ui.component(function(props: {
 		woke_at = os.clock()
 		count("wakes")
 		settled:set(false)
+		-- (The rest drawn once without what's awake: that's the overlay's
+		-- while it moves.)
+		tick:set(tick:peek() + 1)
 		run:set(run:peek() + 1)
 	end
 
@@ -443,6 +483,9 @@ M.View = ui.component(function(props: {
 	local label_x: { [number]: number } = {}
 	local label_y: { [number]: number } = {}
 	local made_for = -1
+	-- (The model the shapes were made for: still right for what isn't
+	-- moving while something is.)
+	local made_version = -1
 	local function sides(i: number): number
 		local crew = 0
 		for _, j in s.nbrs[i] do
@@ -453,11 +496,12 @@ M.View = ui.component(function(props: {
 		return if crew <= 3 then 4 elseif crew <= 6 then 6 elseif crew <= 10 then 7 elseif crew <= 18 then 9 else 12
 	end
 	local function make(c: any)
-		local key = version:peek()
+		local key = version:peek() * 100000 + geo:peek()
 		if made_for == key or not settled:peek() then
 			return
 		end
 		made_for = key
+		made_version = version:peek()
 		table.clear(shapes)
 		table.clear(glyphs)
 		table.clear(glyph_fill)
@@ -544,19 +588,27 @@ M.View = ui.component(function(props: {
 
 	-- The drawing (world space; each band of the field a canvas of its own,
 	-- under zgx's raster cap, moved by the view).
-	local function draw_web(c: any, top: number, bottom: number)
+	local function draw_web(c: any)
 		local p = palette()
-		local v = view:peek()
 		local b = cull:get()
 		local still = settled:peek()
 		make(c)
-		local full = still and made_for == version:peek()
-		local by0, by1 = (top - v.y) / v.zoom, (bottom - v.y) / v.zoom
-		local x0, y0, x1, y1 = b.x0, math.max(b.y0, by0 - 60), b.x1, math.min(b.y1, by1 + 60)
+		local full = made_version == version:peek()
+		-- (What's awake moves on the overlay: left out here.)
+		local moving = not still
+		-- (Each band draws all the view reaches, not only its own strip: a
+		-- pan moves the drawing without drawing it again, so what comes into
+		-- a band's strip must be there already. The canvas clips to its
+		-- strip; the view's reach is what culls.)
+		local x0, y0, x1, y1 = b.x0, b.y0, b.x1, b.y1
 		local x, y = s.x, s.y
 		local nodes = fmodel.nodes
+		local awake = s.awake
 		-- Links: weak (hairlines), then strong (a hub's heavier).
 		for _, l in fmodel.links do
+			if moving and (awake[l.a] or awake[l.b]) then
+				continue
+			end
 			local ax, ay, bx, byy = x[l.a], y[l.a], x[l.b], y[l.b]
 			if math.max(ax, bx) < x0 or math.min(ax, bx) > x1 or math.max(ay, byy) < y0 or math.min(ay, byy) > y1 then
 				continue
@@ -566,7 +618,7 @@ M.View = ui.component(function(props: {
 			end
 		end
 		for _, l in fmodel.links do
-			if l.strong then
+			if l.strong and not (moving and (awake[l.a] or awake[l.b])) then
 				local ax, ay, bx, byy = x[l.a], y[l.a], x[l.b], y[l.b]
 				if math.max(ax, bx) < x0 or math.min(ax, bx) > x1 or math.max(ay, byy) < y0 or math.min(ay, byy) > y1 then
 					continue
@@ -579,7 +631,7 @@ M.View = ui.component(function(props: {
 		local drawn = 0
 		for i, n in nodes do
 			local nx, ny = x[i], y[i]
-			if nx < x0 - 40 or nx > x1 + 40 or ny < y0 - 40 or ny > y1 + 40 then
+			if (moving and awake[i]) or nx < x0 - 40 or nx > x1 + 40 or ny < y0 - 40 or ny > y1 + 40 then
 				continue
 			end
 			drawn += 1
@@ -646,7 +698,7 @@ M.View = ui.component(function(props: {
 			end
 		end
 		-- Live: a dashed arc for each message in flight.
-		if full then
+		if full and not moving then
 			for _, a in fmodel.arcs do
 				local ax, ay, bx, byy = x[a.a], y[a.a], x[a.b], y[a.b]
 				local mx, my = (ax + bx) / 2, (ay + byy) / 2
@@ -662,7 +714,6 @@ M.View = ui.component(function(props: {
 	-- (the node under the pointer, its links, its name), the dots running
 	-- lines.
 	local pulses: { any } = {}
-	local ptick = ui.use_state(0)
 	local phase = 0
 	-- (Eight dashes round a ring of radius R_CHAT + 3.5.)
 	local RING_SEG = 2 * math.pi * (R_CHAT + 3.5) / 8
@@ -670,11 +721,30 @@ M.View = ui.component(function(props: {
 	local function draw_over(c: any)
 		local p = palette()
 		local x, y = s.x, s.y
-		if settled:peek() and made_for == version:peek() then
-			RING_DASH.dash_offset = phase
+		-- What moves (awake, settling or dragged): its links and plain
+		-- marks, a frame at a time, nothing else drawn again.
+		if not settled:peek() then
+			local awake = s.awake
+			for _, l in fmodel.links do
+				if awake[l.a] or awake[l.b] then
+					c:line(x[l.a], y[l.a], x[l.b], y[l.b], if l.strong then node_line[l.b] else p.weak, if l.hub then 2.2 elseif l.strong then 1.2 else 0.8)
+				end
+			end
 			for i, n in fmodel.nodes do
-				if rings[i] and state_of(n.id) == "working" then
-					c:stroke(rings[i], p.working, 1.8, RING_DASH)
+				if awake[i] then
+					if n.kind == "brain" then
+						c:circle(x[i], y[i], R_BRAIN, p.brain)
+					elseif n.kind == "orchestrator" then
+						c:circle(x[i], y[i], R_HUB * 1.9, node_halo[i])
+						c:circle(x[i], y[i], R_HUB, node_ink[i])
+						c:circle(x[i], y[i], 3.6, p.bg)
+					else
+						local st = state_of(n.id)
+						local ring = if NEED[st] then p.ask elseif st == "working" then p.working elseif st == "done" then p.done elseif st == "failed" then p.failed else p.idle
+						c:circle(x[i], y[i], R_CHAT + 4.2, ring)
+						c:circle(x[i], y[i], R_CHAT + 2.8, p.bg)
+						c:circle(x[i], y[i], R_CHAT, p.body)
+					end
 				end
 			end
 		end
@@ -708,6 +778,21 @@ M.View = ui.component(function(props: {
 			end
 		end
 	end
+	-- The working rings (their own canvas: a step a tenth of a second, the
+	-- rest never drawn again for it); those moving are the overlay's.
+	local function draw_rings(c: any)
+		local p = palette()
+		if made_version ~= version:peek() then
+			return
+		end
+		local still = settled:peek()
+		RING_DASH.dash_offset = phase
+		for i, n in fmodel.nodes do
+			if rings[i] and (still or not s.awake[i]) and state_of(n.id) == "working" then
+				c:stroke(rings[i], p.working, 1.8, RING_DASH)
+			end
+		end
+	end
 	-- The working rings step while some show, on screen and settled.
 	local field_el: any = nil
 	local step_key = {}
@@ -729,7 +814,7 @@ M.View = ui.component(function(props: {
 			status.step(step_key, field_el, function(_el: any, now: number)
 				-- (Eight even dashes round the ring, a dash's eighth a step.)
 				phase = -(math.floor(now / 100) % 8) * RING_SEG / 8
-				ptick:set(ptick:peek() + 1)
+				ring_tick:set(ring_tick:peek() + 1)
 			end)
 		elseif not any and stepping then
 			stepping = false
@@ -838,24 +923,79 @@ M.View = ui.component(function(props: {
 			return
 		end
 		s.held[i] = true
+		dragged_since = true
+		if not holding then
+			holding = true
+			if M.held:peek() ~= fmodel.nodes[i].id then
+				M.held:set(fmodel.nodes[i].id)
+			end
+		end
 		s.x[i], s.y[i] = wx, wy
-		if sim.still(s) or not s.awake[i] then
+		-- (Woken once: held, it never rests, so nothing wakes it again.)
+		if not s.awake[i] then
 			wake({ i })
 		end
-		tick:set(tick:peek() + 1)
+	end
+	-- Let go: it stays where it was dropped (its slot now), the few round
+	-- it settle in this frame, and the drawing is still again at once.
+	local function let_go(i: number)
+		s.held[i] = s.fixed[i]
+		if M.held:peek() ~= nil then
+			M.held:set(nil)
+		end
+		if not holding then
+			return
+		end
+		holding = false
+		sim.adopt(s, i)
+		if not settled:peek() then
+			local steps0 = s.steps
+			sim.run(s, RELEASE_BUDGET, os.clock)
+			count("steps", s.steps - steps0)
+			sim.sleep(s)
+			done_settling()
+		end
+	end
+	M.drag_by = function(id: string, dx: number, dy: number)
+		local i = fmodel.index[id]
+		if i then
+			drag(id, s.x[i] + dx, s.y[i] + dy)
+		end
+	end
+	M.drag_end = function(id: string)
+		local i = fmodel.index[id]
+		if i then
+			let_go(i)
+		end
 	end
 	M.drag_to = function(id: string, wx: number, wy: number)
 		drag(id, wx, wy)
 		local i = fmodel.index[id]
 		if i then
-			s.held[i] = s.fixed[i]
+			let_go(i)
 		end
 	end
 	local press: any = nil
 	local grip_hot = ui.use_state(false)
 	local in_field = false
+	-- Pressed on a node: held from now (the drawing's dragging mode) till
+	-- let go or cancelled, moved or not.
 	local function on_press(px: number, py: number)
-		press = { id = hit(px, py), x = px, y = py, moved = false, view = view:peek() }
+		local id = hit(px, py)
+		press = { id = id, x = px, y = py, moved = false, view = view:peek() }
+		local i = id and fmodel.index[id]
+		if i and not s.fixed[i] then
+			drag(id :: string, s.x[i], s.y[i])
+		end
+	end
+	-- (Cancelled, the window hidden or covered mid-drag: let go where it is.)
+	local function cancel()
+		local p = press
+		press = nil
+		local i = p and p.id and fmodel.index[p.id]
+		if i then
+			let_go(i)
+		end
 	end
 	local function on_move(px: number, py: number)
 		if press then
@@ -878,6 +1018,11 @@ M.View = ui.component(function(props: {
 			M.hover:set(id)
 		end
 	end
+	ui.effect(function()
+		if not window_shown() and press then
+			cancel()
+		end
+	end)
 	local function open(id: string)
 		local i = fmodel.index[id]
 		local n = i and fmodel.nodes[i]
@@ -896,15 +1041,14 @@ M.View = ui.component(function(props: {
 		if not p then
 			return
 		end
+		local i = p.id and fmodel.index[p.id]
+		if i then
+			let_go(i)
+		end
 		if not p.moved then
 			local id = hit(px, py)
 			if id then
 				open(id)
-			end
-		elseif p.id then
-			local i = fmodel.index[p.id]
-			if i then
-				s.held[i] = s.fixed[i]
 			end
 		end
 	end
@@ -940,7 +1084,8 @@ M.View = ui.component(function(props: {
 	end)
 	local function grip_at(): (number, number)
 		view:get()
-		tick:get()
+		ptick:get()
+		geo:get()
 		local id = grip_for:get()
 		if not id then
 			return -1000, -1000
@@ -1099,7 +1244,8 @@ M.View = ui.component(function(props: {
 	end
 	local function hover_box(): (number, number, number)
 		view:get()
-		tick:get()
+		ptick:get()
+		geo:get()
 		local id = M.hover:get()
 		if not id then
 			return -1000, -1000, 0
@@ -1156,6 +1302,7 @@ M.View = ui.component(function(props: {
 	local function marker(item: any): Node
 		local function at(): (number, number)
 			version:get()
+			geo:get()
 			local i = fmodel.index[item.id]
 			if not i then
 				return -1000, -1000
@@ -1234,15 +1381,37 @@ M.View = ui.component(function(props: {
 					tick:get()
 					version:get()
 					local t0 = os.clock()
-					local n = draw_web(c, top, bottom())
+					local n = draw_web(c)
 					count("draws")
 					counts.drawn = n
+					-- (Each band's own count: every band draws the view's
+					-- whole reach.)
+					counts[`drawn_{k}`] = n
 					local ms = (os.clock() - t0) * 1000
 					counts.draw_ms = ms
 					if first_pending then
 						first_pending = false
 						counts.first_ms = (os.clock() - open_t0) * 1000
 					end
+				end,
+			},
+			ui.canvas {
+				class = "orch-force-rings",
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+				view = band_view,
+				draw = function(c: any, _w: number, _h: number)
+					if not on_screen() then
+						return
+					end
+					ring_tick:get()
+					tick:get()
+					count("rings")
+					draw_rings(c)
 				end,
 			},
 			ui.canvas {
@@ -1259,7 +1428,6 @@ M.View = ui.component(function(props: {
 						return
 					end
 					ptick:get()
-					tick:get()
 					count("overlay")
 					draw_over(c)
 				end,
