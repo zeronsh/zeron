@@ -87,3 +87,36 @@ end)
 test("graph2 bench: the live data's copy", function()
 	bench("map_snapshot")
 end)
+
+-- Every view on the loads tick (the machines' CPU, every few seconds):
+-- only the headings follow it (ds/orch_map's shaped world), each tick
+-- frame a fraction of a millisecond. Prints `VIEWLOADS …`.
+test("graph2 bench: the loads tick in every view", function()
+	for _, v in { "topology", "timeline", "machines", "graph2" } do
+		local app = mount("orch_map_fixture.luau")
+		app:resize(1440, 1400)
+		app:command("map_only")
+		app:command("map_big")
+		app:command(`map_{v}`)
+		app:frames(60)
+		local ticks = {}
+		for _ = 1, 20 do
+			local t0 = os.clock()
+			app:command("map_big_loads")
+			app:frames(1)
+			table.insert(ticks, (os.clock() - t0) * 1000)
+		end
+		local t0 = os.clock()
+		app:command(`map_topology`)
+		app:frames(1)
+		app:command(`map_{v}`)
+		local opens = {}
+		for _ = 1, 30 do
+			local t1 = os.clock()
+			app:frames(1)
+			table.insert(opens, (os.clock() - t1) * 1000)
+		end
+		expect(pct(ticks, 0.5) < 4).to_be(true)
+		print(`VIEWLOADS {v} tick p50={string.format("%.2f", pct(ticks, 0.5))} p95={string.format("%.2f", pct(ticks, 0.95))} max={string.format("%.2f", pct(ticks, 1))} | open worst-frame={string.format("%.1f", pct(opens, 1))} total30={string.format("%.1f", (os.clock() - t0) * 1000)}`)
+	end
+end)
