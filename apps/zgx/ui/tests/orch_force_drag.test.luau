@@ -272,3 +272,28 @@ test("force pins: kept through a change of what's shown, and a relaunch", functi
 	again:frames(5)
 	expect(again:state("control_map_force_pins")["eng2"]).to_be(true)
 end)
+
+test("force pins: a pin shows by a pinned node while it's hovered, never otherwise", function()
+	local app = open_big()
+	drag_steps(app, "engchat", 8)
+	expect(app:state("control_map_force_pins")["eng2"]).to_be(true)
+	local function pins(): number
+		return (app:state("control_map_force_stats") or {}).pins or 0
+	end
+	-- (Not hovered: no pin drawn, whatever's pinned.)
+	app:set_state("control_map_force_hover", nil)
+	app:frames(5)
+	local a = pins()
+	app:frames(20)
+	expect(pins()).to_be(a)
+	-- (An unpinned one hovered: none.)
+	app:set_state("control_map_force_hover", "eng3")
+	app:frames(5)
+	expect(pins()).to_be(a)
+	-- (The pinned one hovered: its pin.)
+	app:set_state("control_map_force_hover", "eng2")
+	app:frames(5)
+	expect(pins() > a).to_be(true)
+	app:set_state("control_map_force_hover", nil)
+	app:frames(5)
+end)

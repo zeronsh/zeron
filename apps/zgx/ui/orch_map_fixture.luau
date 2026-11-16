@@ -360,11 +360,18 @@ for _, z in { { "in", 1.25 }, { "out", 0.8 } } do
 		require("@ds/orch_force").zoom_by(z[2] :: number)
 	end }
 end
-for _, by in { "orchestrator", "machine" } do
-	ui.command { id = `map_force_color_{by}`, title = `Map: the force graph coloured by {by}`, run = function()
-		require("@ds/orch_force").color_by:set(by)
-	end }
-end
+-- This theme's status colours and the machines' (as the force graph fills
+-- them), into `force_palette` (tests read it).
+local force_palette = ui.state("force_palette", {} :: any)
+ui.command { id = "map_force_palette", title = "Map: read the force graph's machine colours", run = function()
+	local pal = require("@ds/orch_force_palette")
+	local status = {}
+	for _, t in pal.STATUS_TOKENS do
+		status[t] = ui.theme.get(t)
+	end
+	local dark = ui.theme.current:peek() ~= "zeron-light"
+	force_palette:set({ theme = ui.theme.current:peek(), dark = dark, status = status, machines = pal.machines(dark), background = ui.theme.get("background") })
+end }
 -- A drag held a frame at a time: a hub (the Engine, 72 crew), a chat;
 -- then let go.
 for _, d in { { "hub", "orc-eng" }, { "chat", "vpn3" }, { "brainhub", "orc-orch" }, { "brain", "orc-brain" }, { "engchat", "eng2" } } do

@@ -10,15 +10,15 @@
 
 local model = require("@ds/orch_map_model")
 
--- A chat's provider, by its agent: "claude" | "openai" | "gemini" | "other".
+-- A chat's provider, by its agent: "claude" | "openai" (Codex, GPT too) |
+-- "gemini" | "cursor" | "grok" | "copilot" | "other".
+local KNOWN = { { "claude", "claude" }, { "codex", "openai" }, { "openai", "openai" }, { "gpt", "openai" }, { "gemini", "gemini" }, { "cursor", "cursor" }, { "grok", "grok" }, { "copilot", "copilot" } }
 local function provider(chat: any): string
 	local a = string.lower(tostring((chat and (chat.agent or chat.harness)) or ""))
-	if string.find(a, "claude", 1, true) then
-		return "claude"
-	elseif string.find(a, "openai", 1, true) or string.find(a, "codex", 1, true) or string.find(a, "gpt", 1, true) then
-		return "openai"
-	elseif string.find(a, "gemini", 1, true) then
-		return "gemini"
+	for _, k in KNOWN do
+		if string.find(a, k[1], 1, true) then
+			return k[2]
+		end
 	end
 	return "other"
 end
@@ -42,7 +42,7 @@ export type Node = {
 	parent: number, -- index of its strong parent (0 for the Brain dump)
 	own: boolean, -- the person's own thread (no lead)
 	fade: number, -- 10 full
-	-- Its provider (a chat's): "claude" | "openai" | "gemini" | "other".
+	-- Its provider (a chat's, an orchestrator's own): see provider() above.
 	provider: string,
 	-- A chat's todo: done of total.
 	done: number,
@@ -129,7 +129,7 @@ function M.build(world: any, comms: { any }?, now: number?): Model
 			lead = if is_brain then nil else brain,
 			parent = if is_brain or not brain then 0 else (out.index[brain :: string] or 0),
 			own = false,
-			provider = "other",
+			provider = if is_brain then "other" else provider(chats[th.id]),
 			fade = 10,
 			done = 0,
 			total = 0,
