@@ -211,12 +211,15 @@ end
 
 -- Watch `id` in `slot` (none: let it go). A finished subagent (`frozen`,
 -- under `chat`) is read from its upload first, as the shipping app does.
-function M.watch(slot: string, id: string?, frozen: boolean?, chat: string?)
+-- `session_only`: its row and send path alone, no transcript watched (a
+-- composer that never shows one: Capture's).
+function M.watch(slot: string, id: string?, frozen: boolean?, chat: string?, session_only: boolean?)
 	ui.invoke("chat.open_lane", {
 		slot = slot,
 		id = if id then id else ui.null,
 		frozen = frozen == true,
 		chat = if chat then chat else ui.null,
+		session_only = session_only == true,
 	})
 end
 
