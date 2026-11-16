@@ -1950,17 +1950,21 @@ end)
 M.board_place = ui.state("control_board_scroll", 0)
 
 -- Board: its figures, then the board across the page (a frame after the
--- tab's first, ds/stage). Built before it's opened (in the background, the
--- Board hidden): a card a frame (ds/stage's `Idle`), out of layout till
--- they're all in, all at once should it be opened first.
+-- tab's first, ds/stage), its cards a few a frame. Built before it's opened
+-- (in the background, the Board hidden): a card a frame (ds/stage's
+-- `Idle`), out of layout till they're all in.
 local BoardTab = ui.component(function(): Node
 	local idle = background("board")
+	-- Its cards a few a frame, the top of each column first, never all in
+	-- one: built in the background one a frame; the Board shown (opened on
+	-- it, or before they're all in), `URGENT_PER_FRAME` a frame.
+	local function shown(): boolean
+		return M.tab:peek() == "board"
+	end
 	local function build(): Node
-		return board(if idle
-			then function(make: () -> Node, i: number): Node
-				return stage.Idle { rank = i, build = make, h = 96, now = live_board, group = "board" }
-			end
-			else nil)
+		return board(function(make: () -> Node, i: number): Node
+			return stage.Idle { rank = i, build = make, h = 96, urgent = shown }
+		end)
 	end
 	return scrolled {
 		id = "control-board-scroll",

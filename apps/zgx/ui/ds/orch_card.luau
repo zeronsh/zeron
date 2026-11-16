@@ -92,10 +92,21 @@ end
 
 -- Its "…": shown where the pointer rests (`shown`) or while open, the
 -- same entries as its right-click.
+-- (Built the first time it shows: a board of cards would otherwise build
+-- one for every card, most never pointed at.)
 function M.Menu(props: { items: () -> { any }, open: any, shown: () -> boolean, label: any }): Node
-	return ui.show(function(): boolean
+	local function on(): boolean
 		return props.shown() or props.open:get()
-	end, ContextMenu {
+	end
+	return ui.show(on, ui.presence(function(): string?
+		return if on() then "on" else nil
+	end, function(): Node
+		return M.MenuButton(props)
+	end))
+end
+
+function M.MenuButton(props: { items: () -> { any }, open: any, shown: () -> boolean, label: any }): Node
+	return (ContextMenu {
 		items = props.items,
 		open = props.open,
 		label = props.label,
@@ -111,7 +122,7 @@ function M.Menu(props: { items: () -> { any }, open: any, shown: () -> boolean, 
 				props.open:set(true)
 			end,
 		},
-	})
+	}) :: Node
 end
 
 return M

@@ -392,6 +392,21 @@ return function()
 	end }
 	-- Everything the room shows changing at once (the board's items, every
 	-- chat's sessions, a report, the progress rows): a push of each.
+	-- The orchestration sent whole again, every item a new table, one of
+	-- them (`it-moscow`) retitled: as a push that changes one card.
+	ui.command { id = "fixture.push_one", title = "Fixture: a push that changes one card", run = function()
+		local n = table.clone(orchestration.now:peek())
+		local items = {}
+		for _, it in n.items or {} do
+			local c = table.clone(it)
+			if c.id == "it-moscow" then
+				c.title = "Reboot Moscow node tonight"
+			end
+			table.insert(items, c)
+		end
+		n.items = items
+		orchestration.now:set(n)
+	end }
 	ui.command { id = "fixture.push_all", title = "Fixture: a push of everything", run = function()
 		local n = table.clone(orchestration.now:peek())
 		local items = {}

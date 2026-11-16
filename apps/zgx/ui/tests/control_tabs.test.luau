@@ -57,7 +57,7 @@ end
 -- Until the page has settled and built the other tabs in the background.
 local function settled(app: any)
 	expect(app:wait("#control-tab-board", { timeout_ms = 5000 })).to_be(true)
-	for _ = 1, 400 do
+	for _ = 1, 4000 do
 		local _, waiting = perf(app)
 		if waiting == 0 and built(app, "chat") then
 			break
@@ -175,7 +175,7 @@ test("control tabs: the background build is one piece a frame, out of layout til
 	local _, last = perf(app)
 	local most = 0
 	local saw_hidden = false
-	for _ = 1, 400 do
+	for _ = 1, 4000 do
 		app:frames(1)
 		local _, waiting = perf(app)
 		-- (A piece built makes the pieces it holds: only ever one fewer.)

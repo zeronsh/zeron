@@ -305,12 +305,48 @@ local LEAD: { [string]: number } = { input = 0, approval = 0, failed = 1, limite
 
 -- An outcome's words as one quiet run (its lines folded): the markdown's
 -- marks left out.
+local plain_of: { [string]: string } = setmetatable({}, { __mode = "k" }) :: any
+local plain_n = 0
 local function plain(md: string): string
+	local hit = plain_of[md]
+	if hit then
+		return hit
+	end
+	-- (Kept for the outcomes it has seen, a few hundred at most.)
+	plain_n += 1
+	if plain_n > 512 then
+		plain_of, plain_n = {}, 0
+	end
 	local s = string.gsub(md, "%*%*", "")
 	s = string.gsub(s, "`", "")
 	s = string.gsub(s, "%[([^%]]*)%]%b()", "%1")
 	s = string.gsub(s, "\n+", " ")
+	plain_of[md] = s
 	return s
+end
+
+-- An outcome's two lines need no more than this many of its characters:
+-- the rest is cut before it's laid out (a long one, shaped whole, cost as
+-- much as the rest of its card), and read whole where the pointer rests.
+local OUTCOME_CHARS = 280
+local function clipped(s: string): string
+	if #s <= OUTCOME_CHARS then
+		return s
+	end
+	-- (On a character's start, not inside one.)
+	local cut = utf8.offset(s, OUTCOME_CHARS) or OUTCOME_CHARS
+	return string.sub(s, 1, cut - 1) .. "…"
+end
+
+-- What shows only now and then (a decision's chips, Review's buttons, the
+-- box for changes): built the first time it shows, not with every card.
+-- (`ui.show` keeps it out of the row's gaps while it doesn't.)
+local function when(shown: () -> boolean, build: () -> Node, box: { [string]: any }?): Node
+	return ui.show(shown, ui.presence(function(): string?
+		return if shown() then "on" else nil
+	end, function(): Node
+		return build()
+	end, box))
 end
 
 -- How its threads stand where that's worth a word on its card: the lead
@@ -1443,20 +1479,23 @@ local OrchBoard = ui.component(function(props: Props): Node
 				},
 			}),
 			-- Its name too, where the line has nothing else to say.
-			ui.show(function(): boolean
+			when(function(): boolean
 				return owner() ~= nil and not (has_word() or has_steps() or has_clock())
-			end, Card.Word {
-				text = function(): string
-					local o = owner()
-					return if o then o.name else ""
-				end,
-				class = "orch-card-owner-name",
-			}),
+			end, function(): Node
+				return Card.Word {
+					text = function(): string
+						local o = owner()
+						return if o then o.name else ""
+					end,
+					class = "orch-card-owner-name",
+				}
+			end, { min_w = 0 }),
 			-- Where it will be worked, while it waits: its project, else its
 			-- machine.
-			ui.show(function(): boolean
+			when(function(): boolean
 				return where() ~= nil
-			end, ui.row {
+			end, function(): Node
+				return ui.row {
 				class = "orch-card-place",
 				min_w = 0,
 				shrink = 1,
@@ -1480,7 +1519,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 					end,
 					class = "orch-card-place-name",
 				},
-			}),
+			}
+			end, { min_w = 0, shrink = 1 }),
 			ui.show(function(): boolean
 				return urgency() ~= nil
 			end, Card.Word {
@@ -1597,7 +1637,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end, function(k: string): Node
 			return ui.text {
 				function(): string
-					return plain(outcome() or "")
+					return clipped(plain(outcome() or ""))
 				end,
 				class = "orch-outcome",
 				w_full = true,
@@ -1615,11 +1655,17 @@ local OrchBoard = ui.component(function(props: Props): Node
 						p = "$space.3",
 						text_size = "$font.size.sm",
 						color = "$text.secondary",
-						Markdown {
-							text = function(): string
-								return item().outcome or ""
-							end,
-						},
+						-- (Its markdown made only while the pointer rests on the
+						-- card: a board of outcomes isn't parsed for nothing.)
+						ui.presence(function(): string?
+							return if hovered:get() then "on" else nil
+						end, function(): Node
+							return Markdown {
+								text = function(): string
+									return item().outcome or ""
+								end,
+							}
+						end, { w_full = true }),
 					}
 					else nil,
 				tooltip_delay = 300,
@@ -1635,9 +1681,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 			return a
 		end
-		local decision = ui.show(function(): boolean
+		local decision = when(function(): boolean
 			return asked() ~= nil
-		end, ui.column {
+		end, function(): Node
+			return ui.column {
 			class = "orch-card-decision",
 			w_full = true,
 			min_w = 0,
@@ -1669,7 +1716,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 				size = "xs",
 				class = "orch-card-choices",
 			},
-		})
+		}
+		end, { w_full = true, min_w = 0 })
 		local body = ui.column {
 			w_full = true,
 			min_w = 0,
@@ -1684,9 +1732,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 				ui.show(has_status, status_line),
 				-- In Review: its end, Approve or Request changes (a box for
 				-- what to change, sent to its thread).
-				ui.show(function(): boolean
+				when(function(): boolean
 					return reviewable(item()) and not changing:get()[id]
-				end, ui.row {
+				end, function(): Node
+					return ui.row {
 					class = "orch-card-review",
 					gap = "$space.1",
 					items = "center",
@@ -1711,10 +1760,12 @@ local OrchBoard = ui.component(function(props: Props): Node
 						end,
 						locale.t("orch.board.request_changes"),
 					}),
-				}),
-				ui.show(function(): boolean
+				}
+				end),
+				when(function(): boolean
 					return changing:get()[id] == true
-				end, TextField {
+				end, function(): Node
+					return TextField {
 					class = "orch-card-changes",
 					value = change_text,
 					size = "sm",
@@ -1745,7 +1796,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 						end
 						return nil
 					end,
-				}),
+				}
+				end, { w_full = true }),
 			},
 			-- Where plugins decorate it (the github plugin: its checks).
 			-- (Outside the steps' gaps: empty, it takes no room.)
