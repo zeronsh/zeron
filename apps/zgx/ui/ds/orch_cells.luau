@@ -102,6 +102,12 @@ end
 
 -- The pulse over the current cell: its hue, brightening and dimming.
 local function pulse(props: ContainerProps): Node
+	if status.stepped() then
+		-- (Off macOS, stepped on the status clock: ds/status `step`.)
+		return status.Stepped(props, function(el: Element, now: number)
+			anime.utils.set(el, { opacity = status.sine_at(now, 0.15, 0.85, 700) })
+		end)
+	end
 	local playing = false
 	props.on_visible = function(visible: boolean, el: Element)
 		if visible then
