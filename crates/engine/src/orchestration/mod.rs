@@ -50,6 +50,73 @@ pub use comms::CommBus;
 /// The most often [`Orchestration::subscribe`] publishes (4/s).
 pub const PUBLISH_EVERY: Duration = Duration::from_millis(250);
 
+/// How long a change waits for the ones right behind it before a watcher on
+/// changes hears it: a burst (a turn ending writes its card, crew row and
+/// report together) goes as one frame.
+pub const COLLECT: Duration = Duration::from_millis(50);
+/// The least time between two frames to one watcher on changes: a change
+/// still arrives within about this, however busy it gets.
+pub const FRAME_SPACING: Duration = Duration::from_millis(100);
+/// How often a watcher on changes is sent the whole state again, whatever
+/// changed (a reader that lost track is set right).
+pub const SNAPSHOT_EVERY: Duration = Duration::from_secs(10 * 60);
+
+/// `rows` as change frames (`first`, when given, the state the first one
+/// shows): a snapshot first and every `snapshot_every`,
+/// else a delta of what changed, each change waiting `collect` for those
+/// right behind it and frames at least `spacing` apart.
+pub(crate) fn frames_stream(
+    rows: watch::Receiver<OrchestrationState>,
+    first: Option<OrchestrationState>,
+    collect: Duration,
+    spacing: Duration,
+    snapshot_every: Duration,
+) -> futures::stream::BoxStream<'static, serde_json::Value> {
+    use futures::StreamExt;
+    use tokio::time::Instant;
+    use zeron_proto::orchestration::frames::Framer;
+    struct Watcher {
+        rows: watch::Receiver<OrchestrationState>,
+        first: Option<OrchestrationState>,
+        framer: Framer,
+        sent: Option<Instant>,
+        snapshot_at: Instant,
+    }
+    let start = Watcher { rows, first, framer: Framer::new(), sent: None, snapshot_at: Instant::now() };
+    futures::stream::unfold(start, move |mut w| async move {
+        loop {
+            let mut whole = w.sent.is_none();
+            if !whole {
+                tokio::select! {
+                    changed = w.rows.changed() => changed.ok()?,
+                    _ = tokio::time::sleep_until(w.snapshot_at + snapshot_every) => whole = true,
+                }
+                if !whole {
+                    tokio::time::sleep(collect).await;
+                    if let Some(sent) = w.sent {
+                        tokio::time::sleep_until(sent + spacing).await;
+                    }
+                }
+            }
+            let frame = if let Some(first) = w.first.take() {
+                Some(w.framer.snapshot(&first))
+            } else {
+                let state = w.rows.borrow_and_update();
+                if whole { Some(w.framer.snapshot(&state)) } else { w.framer.frame(&state) }
+            };
+            let Some(frame) = frame else { continue };
+            let now = Instant::now();
+            w.sent = Some(now);
+            if whole {
+                w.snapshot_at = now;
+            }
+            let value = serde_json::to_value(&frame).ok()?;
+            return Some((value, w));
+        }
+    })
+    .boxed()
+}
+
 /// What a chat is to orchestration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatRole {
@@ -183,6 +250,17 @@ impl Orchestration {
                 Some((value, rx))
             }))
             .boxed()
+    }
+
+    /// `WatchOrchestration {changes: true}`: the state as it is now, then
+    /// only what changed, coalesced ([`COLLECT`], [`FRAME_SPACING`]), and
+    /// the whole state again every [`SNAPSHOT_EVERY`]
+    /// (`zeron_proto::orchestration::frames`).
+    pub(crate) fn changes_stream(&self) -> futures::stream::BoxStream<'static, serde_json::Value> {
+        // (The first frame is read now, so a write just made is in it.)
+        let mut rows = self.inner.workspace.watch_orchestration_rows();
+        rows.mark_unchanged();
+        frames_stream(rows, Some(self.state()), COLLECT, FRAME_SPACING, SNAPSHOT_EVERY)
     }
 
     /// How far the chats hosted here have got.
@@ -479,4 +557,80 @@ pub(crate) fn excerpt(text: &str, max: usize) -> String {
     let mut cut: String = line.chars().take(max.saturating_sub(1)).collect();
     cut.push('…');
     cut
+}
+
+#[cfg(test)]
+mod frames_stream_tests {
+    use std::time::Duration;
+
+    use futures::StreamExt;
+    use tokio::sync::watch;
+    use zeron_proto::orchestration::frames::{Followed, Follower, Heard};
+    use zeron_proto::orchestration::{OrchestrationState, Orchestrator};
+
+    use super::frames_stream;
+
+    fn orchestrator(id: &str, name: &str) -> Orchestrator {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "kind": "standard", "name": name, "hue": 0,
+            "createdAt": "2026-11-15T00:00:00Z", "updatedAt": "2026-11-15T00:00:00Z",
+        }))
+        .unwrap()
+    }
+
+    fn state(names: &[(&str, &str)]) -> OrchestrationState {
+        OrchestrationState {
+            orchestrators: names.iter().map(|(id, name)| orchestrator(id, name)).collect(),
+            ..Default::default()
+        }
+    }
+
+    const COLLECT: Duration = Duration::from_millis(50);
+    const SPACING: Duration = Duration::from_millis(100);
+    const WHOLE: Duration = Duration::from_secs(600);
+
+    /// A burst of writes goes as one delta of what moved, soon after the
+    /// first; a reader applying the frames has the state the engine has.
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_is_one_delta_and_the_reader_keeps_up() {
+        let (tx, rx) = watch::channel(state(&[("o1", "one"), ("o2", "two")]));
+        let mut frames = frames_stream(rx, None, COLLECT, SPACING, WHOLE);
+        let mut reader = Follower::default();
+        let first = frames.next().await.unwrap();
+        assert_eq!(first["frame"], "snapshot");
+        assert_eq!(reader.hear(Heard::read(&first).unwrap()), Followed::Changed);
+
+        let started = tokio::time::Instant::now();
+        tx.send_replace(state(&[("o1", "one!"), ("o2", "two")]));
+        tx.send_replace(state(&[("o1", "one!!"), ("o2", "two")]));
+        tx.send_replace(state(&[("o1", "one!!"), ("o2", "two"), ("o3", "three")]));
+        let delta = frames.next().await.unwrap();
+        // Within the collect window plus the spacing, never sooner than it.
+        let waited = started.elapsed();
+        assert!(waited >= COLLECT && waited <= SPACING + COLLECT, "{waited:?}");
+        assert_eq!(delta["frame"], "delta");
+        assert_eq!(delta["version"], 2);
+        let changed: Vec<&str> =
+            delta["orchestrators"]["changed"].as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap()).collect();
+        assert_eq!(changed, ["o1", "o3"]);
+        assert!(delta.get("items").is_none() && delta.get("dumps").is_none());
+        assert_eq!(reader.hear(Heard::read(&delta).unwrap()), Followed::Changed);
+        assert_eq!(reader.state.as_ref(), Some(&*tx.borrow()));
+    }
+
+    /// A write that changes nothing sends nothing; the whole state is sent
+    /// again on its period.
+    #[tokio::test(start_paused = true)]
+    async fn nothing_changed_sends_nothing_and_the_whole_state_comes_again() {
+        let s = state(&[("o1", "one")]);
+        let (tx, rx) = watch::channel(s.clone());
+        let mut frames = frames_stream(rx, Some(s.clone()), COLLECT, SPACING, WHOLE);
+        assert_eq!(frames.next().await.unwrap()["version"], 1);
+        tx.send_replace(s.clone());
+        let next = tokio::time::timeout(WHOLE - Duration::from_secs(1), frames.next()).await;
+        assert!(next.is_err(), "nothing changed, nothing sent");
+        let again = frames.next().await.unwrap();
+        assert_eq!(again["frame"], "snapshot");
+        assert_eq!(again["version"], 2);
+    }
 }

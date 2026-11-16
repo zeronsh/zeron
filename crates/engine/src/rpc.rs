@@ -2748,7 +2748,7 @@ fn wants_changes(params: &serde_json::Value) -> bool {
 }
 
 /// What a keyed list stream last sent: its keys in order, and each row.
-type SentRows = (Vec<String>, std::collections::HashMap<String, serde_json::Value>);
+pub(crate) type SentRows = (Vec<String>, std::collections::HashMap<String, serde_json::Value>);
 
 /// A list of rows keyed by `key` (`id`, or a session's `chatId`) as change
 /// frames: the whole list first, as [`watch_stream`] sends it; then, per
@@ -2761,14 +2761,38 @@ type SentRows = (Vec<String>, std::collections::HashMap<String, serde_json::Valu
 /// The whole chat list is ~0.4 MB with a few hundred chats, and one field
 /// of one row (a seen mark, a heartbeat) changing sent and parsed it all,
 /// in every window on every device.
+///
+/// Changes are coalesced as orchestration's are: each waits
+/// `orchestration::COLLECT` for those right behind it (a turn starting
+/// writes its status, activity and todo apart), and frames go at least
+/// `orchestration::FRAME_SPACING` apart.
 fn keyed_changes_stream<T>(rx: watch::Receiver<Vec<T>>, key: &'static str) -> BoxStream<'static, serde_json::Value>
 where
     T: serde::Serialize + Send + Sync + 'static,
 {
-    futures::stream::unfold((rx, None::<SentRows>), move |(mut rx, mut last)| async move {
+    keyed_changes_stream_paced(rx, key, crate::orchestration::COLLECT, crate::orchestration::FRAME_SPACING)
+}
+
+/// [`keyed_changes_stream`], each change waiting `collect` and frames at
+/// least `spacing` apart.
+fn keyed_changes_stream_paced<T>(
+    rx: watch::Receiver<Vec<T>>,
+    key: &'static str,
+    collect: std::time::Duration,
+    spacing: std::time::Duration,
+) -> BoxStream<'static, serde_json::Value>
+where
+    T: serde::Serialize + Send + Sync + 'static,
+{
+    let start = (rx, None::<SentRows>, None::<tokio::time::Instant>);
+    futures::stream::unfold(start, move |(mut rx, mut last, mut sent_at)| async move {
         loop {
             if last.is_some() {
                 rx.changed().await.ok()?;
+                tokio::time::sleep(collect).await;
+                if let Some(at) = sent_at {
+                    tokio::time::sleep_until(at + spacing).await;
+                }
             }
             let rows: Vec<serde_json::Value> = {
                 let borrowed = rx.borrow_and_update();
@@ -2779,7 +2803,8 @@ where
             last = Some(sent);
             if let Some(frame) = frame {
                 tracing::debug!(target: "perf", what = "keyed_push", key, rows = perf_n as u64, bytes = frame.to_string().len() as u64);
-                return Some((frame, (rx, last)));
+                sent_at = Some(tokio::time::Instant::now());
+                return Some((frame, (rx, last, sent_at)));
             }
         }
     })
@@ -2788,7 +2813,7 @@ where
 
 /// `rows` as the frame that follows `last` (`None`: nothing changed), and
 /// what's been sent once it is. No `last`: the whole list.
-fn keyed_frame(rows: Vec<serde_json::Value>, key: &str, last: Option<SentRows>) -> (Option<serde_json::Value>, SentRows) {
+pub(crate) fn keyed_frame(rows: Vec<serde_json::Value>, key: &str, last: Option<SentRows>) -> (Option<serde_json::Value>, SentRows) {
     let keys: Vec<String> = rows
         .iter()
         .map(|row| row.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_owned())
@@ -4227,8 +4252,11 @@ impl RpcService for EngineRpc {
                 self.workspace.watch_spaces(),
             ))),
             // An agent sees its own part (orchestration/scope.rs).
+            // A window asks for changes (`{"changes": true}`): frames of
+            // what moved, not the whole state each time.
             methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(match zeron_rpc::caller() {
                 zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_stream(chat),
+                _ if wants_changes(&params) => self.orchestration.changes_stream(),
                 _ => self.orchestration.stream(),
             })),
             methods::ORCHESTRATE => Box::pin(self.orchestrate(params)).await.map(RpcReply::Value),
@@ -4250,7 +4278,8 @@ impl RpcService for EngineRpc {
                     zeron_rpc::Caller::Agent { .. } => Some(self.current_who()?),
                     _ => None,
                 };
-                Ok(RpcReply::Stream(crate::orchestration::progress::stream(self.clone(), viewer)))
+                let changes = wants_changes(&params);
+                Ok(RpcReply::Stream(crate::orchestration::progress::stream(self.clone(), viewer, changes)))
             }
             methods::WATCH_COMMS => Ok(RpcReply::Stream(match zeron_rpc::caller() {
                 zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_comms(chat),
@@ -6015,6 +6044,29 @@ mod tests {
             Some(json!({ "changed": [{ "id": "d", "seen": 0 }], "removed": ["b"], "order": ["c", "a", "d"] }))
         );
         assert_eq!(frames[4], Some(json!({ "changed": [], "removed": ["c", "a", "d"] })));
+    }
+
+    /// A burst of row changes goes as one frame, soon after the first.
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_of_row_changes_is_one_frame() {
+        use futures::StreamExt;
+        use serde_json::json;
+        let (collect, spacing) = (std::time::Duration::from_millis(50), std::time::Duration::from_millis(100));
+        let rows = |seen: &[(&str, i64)]| -> Vec<serde_json::Value> {
+            seen.iter().map(|(id, s)| json!({ "id": id, "seen": s })).collect()
+        };
+        let (tx, rx) = watch::channel(rows(&[("a", 0), ("b", 0)]));
+        let mut frames = keyed_changes_stream_paced(rx, "id", collect, spacing);
+        assert!(frames.next().await.unwrap().is_array());
+        let started = tokio::time::Instant::now();
+        tx.send_replace(rows(&[("a", 1), ("b", 0)]));
+        tx.send_replace(rows(&[("a", 1), ("b", 1)]));
+        tx.send_replace(rows(&[("a", 2), ("b", 1)]));
+        let frame = frames.next().await.unwrap();
+        assert!(started.elapsed() <= collect + spacing);
+        assert_eq!(frame, json!({ "changed": [{ "id": "a", "seen": 2 }, { "id": "b", "seen": 1 }], "removed": [] }));
+        // Nothing more: the burst was one frame.
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(5), frames.next()).await.is_err());
     }
 
     /// Without asking, a watch is the whole list, as older viewports read it.
