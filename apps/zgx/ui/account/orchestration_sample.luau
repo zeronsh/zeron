@@ -141,7 +141,7 @@ local chats = {
 	},
 	{
 		id = "th-ci-cache", title = "sccache on the iOS lane", device = "dev-cloud", status = "failed",
-		parent = "orc-ci", child_kind = "crew", updated = ago(90000), created = ago(100000), agent = "codex", model = "gpt-5.5",
+		parent = "orc-ci", child_kind = "crew", updated = ago(80000), created = ago(100000), agent = "codex", model = "gpt-5.5",
 	},
 	{ id = "th-titlebar", title = "Linux titlebar toggle", device = "dev-desk", status = "done", updated = ago(26000), created = ago(30000), agent = "claude", model = "claude-opus-5-5" },
 }
