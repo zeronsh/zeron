@@ -36,6 +36,7 @@ search.index(M.ID, ui.t("settings.appearance.title"), ui.t("settings.appearance.
 	{ key = "code_font", title = ui.t("settings.appearance.code_font.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.code_font.terms") },
 	{ key = "code_font_size", title = ui.t("settings.appearance.code_font_size.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.code_font_size.terms") },
 	{ key = "conversation_width", title = ui.t("settings.appearance.conversation_width.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.conversation_width.terms") },
+	{ key = "conversation_fill", title = ui.t("settings.appearance.conversation_fill.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.conversation_fill.terms") },
 	{ key = "render_math", title = ui.t("settings.appearance.render_math.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.render_math.terms") },
 	{ key = "math_font", title = ui.t("settings.appearance.math_font.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.math_font.terms") },
 	{ key = "math_size", title = ui.t("settings.appearance.math_size.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.math_size.terms") },
@@ -459,6 +460,15 @@ function M.view(): Node
 						format = function(v: number): string
 							return ui.t("settings.appearance.pt", { n = math.floor(v) }):get()
 						end,
+					},
+				}),
+				-- The width above set aside: as wide as the window allows.
+				row("conversation_fill", {
+					label = ui.t("settings.appearance.conversation_fill.label"),
+					description = ui.t("settings.appearance.conversation_fill.description"),
+					control = ds.Switch {
+						value = prefs.conversation_fill,
+						label = ui.t("settings.appearance.conversation_fill.label"),
 					},
 				}),
 				-- LaTeX in replies (ds/math), as the shipping app's "Render

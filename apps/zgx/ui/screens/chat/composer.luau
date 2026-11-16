@@ -1672,7 +1672,7 @@ local function Composer(): Node
 				pointer_events = "auto",
 				max_w = ui.spring(
 					ui.computed(function(): number
-						return prefs.conversation_width:get()
+						return prefs.conversation_max()
 					end),
 					DOCK
 				),

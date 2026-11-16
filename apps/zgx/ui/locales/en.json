@@ -1277,6 +1277,11 @@
         "terms": "transcript messages composer column maximum wide narrow",
         "description": "Maximum width for messages and the composer."
       },
+      "conversation_fill": {
+        "label": "Fill window",
+        "terms": "conversation width full wide auto size stretch transcript messages composer column",
+        "description": "Messages and the composer as wide as the window allows. The width above is ignored."
+      },
       "render_math": {
         "label": "Render math",
         "terms": "latex tex formula equation markdown katex",

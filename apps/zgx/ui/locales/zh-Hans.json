@@ -1277,6 +1277,11 @@
         "terms": "对话记录 消息 输入框 栏 最大 宽 窄 transcript messages composer column maximum wide narrow",
         "description": "消息和输入框的最大宽度。"
       },
+      "conversation_fill": {
+        "label": "填满窗口",
+        "terms": "对话 宽度 全宽 自动 拉伸 消息 输入框 栏 conversation width full wide auto size stretch transcript messages composer column",
+        "description": "消息和输入框随窗口尽量加宽。忽略上面的宽度。"
+      },
       "render_math": {
         "label": "渲染数学公式",
         "terms": "公式 方程 数学 渲染 latex tex formula equation markdown katex",

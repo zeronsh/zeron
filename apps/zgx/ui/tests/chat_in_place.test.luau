@@ -852,4 +852,16 @@ test("the conversation width setting widens the transcript and the composer", fu
 	expect(width("#chat-composer")).to_be(900)
 	local w = widest_reply()
 	expect(w > 660 + 24 and w <= 900 + 24).to_be(true)
+	-- "Fill window": wider than any width set, as wide as the page lets it.
+	app:set_state("settings_conversation_fill", true)
+	app:wait("#never-shown", { timeout_ms = 900 })
+	settle(app)
+	local filled = width("#chat-composer")
+	expect(filled > 900).to_be(true)
+	expect(filled < 1400).to_be(true)
+	-- And off again: back to the width set.
+	app:set_state("settings_conversation_fill", false)
+	app:wait("#never-shown", { timeout_ms = 900 })
+	settle(app)
+	expect(width("#chat-composer")).to_be(900)
 end)

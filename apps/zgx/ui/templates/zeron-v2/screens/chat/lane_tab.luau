@@ -796,7 +796,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		-- (Its own glide, runway and place: never the chat page's.)
 		name = `lane.{slot}`,
 		measure = function(): number
-			return prefs.conversation_width:get()
+			return prefs.conversation_max()
 		end,
 		messages = view.messages,
 		draft = view.draft,

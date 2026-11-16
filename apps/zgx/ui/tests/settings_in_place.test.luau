@@ -431,6 +431,21 @@ test("Appearance's conversation width is a slider kept as set, within production
 	expect(app:state("settings_conversation_width")).to_be(560)
 end)
 
+test("Appearance's Fill window is a switch, off by default, kept as set", function()
+	local app = open("Appearance")
+	expect(app:state("settings_conversation_fill")).to_be(false)
+	local switch = `{PAGE} >> role:switch "Fill window"`
+	app:scroll(PAGE, 600)
+	app:frames(4)
+	expect(app:has(switch)).to_be(true)
+	app:click(switch)
+	app:frames(10)
+	expect(app:state("settings_conversation_fill")).to_be(true)
+	app:click(switch)
+	app:frames(10)
+	expect(app:state("settings_conversation_fill")).to_be(false)
+end)
+
 test("the interface text size scales the window's text and lines, at once and back", function()
 	local app = open("Appearance")
 	local function height(): number
