@@ -164,8 +164,16 @@ export type Props = {
 	foot: (() -> number)?,
 	-- Whether the view this one is made for rested at its end (a chat
 	-- switched back to: the session page keeps each chat's place); else the
-	-- last transcript's, as a reload's rebuild has it.
-	was_at_end: boolean?,
+	-- last transcript's, as a reload's rebuild has it. (With `session`, asked
+	-- of each chat as it's shown, by its id: nil, as without one.)
+	was_at_end: (boolean | (id: string) -> boolean?)?,
+	-- The chat it shows, for a transcript that stays as one chat after
+	-- another is shown in it (the session page's): another one swaps its
+	-- rows (its list, made for that chat, opening where it was left or at
+	-- its latest), and what stands round them (the scrollbar, the way back
+	-- to the latest, a selection's bar, its lightbox) stays as it is. Its
+	-- reading place, runway, glide and hover start again for each chat.
+	session: State<string?>?,
 	-- What a reply's pictures (`![alt](path)`) are, read as they're asked
 	-- for (screens/chat/reply_images): without it, their alt text.
 	pictures: ReplyPicture.Pictures?,
@@ -1350,10 +1358,22 @@ local function Transcript(props: Props): Node
 			return { key = key, query = f.query, current = f.current, reveal = reveal }
 		end
 	end
+	-- The chat shown (`session`): the one it's made for, then each shown in
+	-- it (`fresh`).
+	local showing: string? = if props.session then props.session:peek() else nil
 	-- Whether the transcript this one replaces rested at its end (kept
 	-- state: a reload's rebuild knows it; `keep` brings a view back only if
-	-- it didn't). Then a new one starts at its end.
-	local was_at_end = if props.was_at_end ~= nil then props.was_at_end else at_end:peek()
+	-- it didn't). Then a new one starts at its end. (Asked again of each
+	-- chat shown, by its id.)
+	local function was_at_end_of(id: string?): boolean
+		local given: any = props.was_at_end
+		if type(given) == "function" then
+			local said = if id ~= nil then given(id) else nil
+			return if said ~= nil then said else at_end:peek()
+		end
+		return if given ~= nil then given else at_end:peek()
+	end
+	local was_at_end = was_at_end_of(showing)
 	-- A new one starts at its end; one made again where the last was
 	-- scrolled up (a reload, `keep` holding its place) stays away from it,
 	-- its way back to the latest still out. (The list writes the state only
@@ -1452,6 +1472,9 @@ local function Transcript(props: Props): Node
 	local glide: any = nil
 	-- (Each send's turn: a later one takes over from one still on its way.)
 	local glides = 0
+	-- (Each chat shown in it, with `session`: a glide or a place being put
+	-- back for one leaves the next alone.)
+	local shown_turn = 0
 	local glide_from: (push: () -> (), from: number, last: Message, r: any, landing: string?) -> ()
 	local function send_here(push: () -> (), landing: string?)
 		waiting = nil
@@ -1474,7 +1497,14 @@ local function Transcript(props: Props): Node
 		if el then
 			el:scroll_to_row(n, { align = "end" })
 		end
+		local view = shown_turn
 		ui.after(16, function()
+			-- (Another chat shown meanwhile (`fresh`): the prompt goes, and
+			-- the view, now that chat's, stays where it opened.)
+			if shown_turn ~= view then
+				push()
+				return
+			end
 			local real = offset:peek()
 			if real >= PAST_END / 2 then
 				push()
@@ -1495,6 +1525,8 @@ local function Transcript(props: Props): Node
 		end
 		glides += 1
 		local turn = glides
+		-- (The chat it's in: another shown meanwhile (`fresh`) leaves it.)
+		local view = shown_turn
 		-- First a step clear of the end (the old last reply holding its
 		-- runway meanwhile, so nothing above moves): the list then no
 		-- longer rests at its end, and doesn't follow the new rows there.
@@ -1510,6 +1542,10 @@ local function Transcript(props: Props): Node
 		-- Nothing to glide to: the old reply lets go of its room, and the
 		-- view goes to the end.
 		local function let_go()
+			-- (Another chat shown meanwhile (`fresh`): its view is its own.)
+			if shown_turn ~= view then
+				return
+			end
 			ui.batch(function()
 				held:set { id = "", h = 0 }
 				gliding:set(false)
@@ -1523,6 +1559,9 @@ local function Transcript(props: Props): Node
 		-- taken meanwhile stays where it went.
 		local function rise(prompt: Message?)
 			ui.after(16, function()
+				if shown_turn ~= view then
+					return
+				end
 				local row_el = prompt and tops[prompt.id] and tops[prompt.id]:peek()
 				local list_el = list:peek()
 				if not row_el or not list_el or row_el.y == nil or list_el.y == nil then
@@ -2285,22 +2324,10 @@ local function Transcript(props: Props): Node
 		}
 	end
 
-	return ui.overlay {
-		w_full = true,
-		h_full = true,
-		-- The lightbox a message's pictures open in (one a window draws).
-		Lightbox.Host(),
-		on_hover = function(inside: boolean)
-			if not inside then
-				hover:set("")
-			end
-		end,
-		ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, SelectionMenu { w_full = true, h_full = true, more = offers, on_release = if props.on_mention or props.on_attach
-			then function()
-				-- (A turn on: the release ends the gesture first.)
-				ui.after(0, settle)
-			end
-			else nil, ui.list {
+	-- Its rows: the chat's messages, virtualized. With `session`, one list
+	-- for each chat shown (`fresh` first), the rest of the transcript staying.
+	local function List(): Node
+		return ui.list {
 			id = "transcript",
 			ref = list,
 			label = locale.t("ds.transcript.conversation"),
@@ -2443,13 +2470,99 @@ local function Transcript(props: Props): Node
 			-- On whole points, so a scroll moves its pixels rather than
 			-- painting them again (a view between device pixels can't).
 			snap = true,
-		} } },
+		}
+	end
+	-- Another chat shown (`session`): its list is made for it, and what was
+	-- the last chat's own here goes, as a transcript made for this one would
+	-- start: where it opens (its place kept, or its latest), its runway and
+	-- glide, the hover and a selection's bar, the reading place and its
+	-- sizes. (The list's own `on_mount` then opens it where it should.)
+	-- (Each chat shown in it, for the scrollbar.)
+	local placed = ui.use_state(0)
+	local function fresh(id: string?)
+		if id == showing then
+			return
+		end
+		showing = id
+		shown_turn += 1
+		opened_at = ui.now()
+		-- (Its own list's: the last list, going, lets go of its own.)
+		if not props.ref then
+			list = ui.ref()
+		end
+		was_at_end = was_at_end_of(id)
+		restoring = props.keep ~= nil and props.keep:peek() ~= nil and not was_at_end
+		if glide then
+			glide:pause()
+			glide = nil
+		end
+		here, waiting, returning, reading = nil, nil, nil, nil
+		sizes, known, seen_n = {}, 0, 0
+		last_w, last_h = nil, nil
+		end_held = not restoring
+		wheeled_at, focused_at, resizing_until = -math.huge, -math.huge, 0
+		ui.batch(function()
+			at_end:set(not restoring)
+			placing:set(restoring)
+			held:set { id = "", h = 0 }
+			gliding:set(false)
+			pin:set { id = "", h = 0 }
+			hover:set("")
+			spot:set(nil)
+			sized:set(sized:peek() + 1)
+		end)
+		-- (Its place told once it has stood 150 ms, as a view just made's.)
+		ui.after(150, rested)
+		-- (The scrollbar too: placing the next chat's rows is no scroll.)
+		placed:set(placed:peek() + 1)
+	end
+
+	return ui.overlay {
+		w_full = true,
+		h_full = true,
+		-- The lightbox a message's pictures open in (one a window draws).
+		Lightbox.Host(),
+		on_hover = function(inside: boolean)
+			if not inside then
+				hover:set("")
+			end
+		end,
+		ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			SelectionMenu {
+				w_full = true,
+				h_full = true,
+				more = offers,
+				on_release = if props.on_mention or props.on_attach
+					then function()
+						-- (A turn on: the release ends the gesture first.)
+						ui.after(0, settle)
+					end
+					else nil,
+				if props.session
+					then ui.presence(function(): string
+						return (props.session :: State<string?>):get() or ""
+					end, function(id: string): Node
+						fresh(if id == "" then nil else id)
+						return List()
+					end, { w_full = true, h_full = true })
+					else List(),
+			},
+		},
 		-- The scrollbar, over the list and never faded, running its whole
 		-- height: at the window's edge, beside the composer rather than
 		-- under it, so scrolled to the end it reaches the page's end.
 		Rail {
 			id = "transcript-rail",
 			offset = offset,
+			-- (Another chat's rows placing themselves: no scroll to show.)
+			settle = function(): number
+				return placed:get()
+			end,
 			extent = extent,
 			view = function(): number
 				return list.height or 0
