@@ -151,6 +151,7 @@ function M.fleet(world: any): Fleet
 				kind = "crew",
 				order = (it and it.order) or 0,
 				paused = o.paused == true,
+				joined = m.joined,
 			}
 		end
 	end
@@ -208,6 +209,10 @@ function M.fleet(world: any): Fleet
 	for id, t in threads do
 		if t.kind ~= "orchestrator" then
 			local verdict, opacity = Visibility.visible(chats[id], clock, ctx)
+			-- (A crew thread with no chat row: only while it's new.)
+			if chats[id] == nil and Visibility.missing(t.joined, clock, ctx) == "hide" then
+				verdict = "hide"
+			end
 			if verdict == "hide" then
 				threads[id] = nil
 			else

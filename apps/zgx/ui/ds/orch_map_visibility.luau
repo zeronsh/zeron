@@ -151,6 +151,19 @@ function M.visible(chat: any, now: number, ctx: Ctx): (Verdict, number)
 	return "fade", 1 - t * (1 - M.FADE_MIN)
 end
 
+-- A crew thread whose chat the Map has no row for (never heard, or gone):
+-- shown while it's new (`joined` within the window: a chat just started,
+-- not heard yet), and in "all"; otherwise left off.
+function M.missing(joined: number?, now: number, ctx: Ctx): Verdict
+	if ctx.mode == "all" then
+		return "show"
+	end
+	if type(joined) == "number" and now - joined < math.max(1, ctx.window) then
+		return "show"
+	end
+	return "hide"
+end
+
 -- Each chat's verdict (its opacity in tenths while it fades), as one
 -- string.
 function M.key(chats: { [string]: any }, now: number, ctx: Ctx): string
