@@ -16,6 +16,7 @@ local data = require("@ds/orch_data")
 local OrchBoard = require("@ds/orch_board")
 local OrchCrew = require("@ds/orch_crew")
 local stage = require("@ds/stage")
+local rows = require("@account/rows")
 local Asks = require("@ds/orch_asks")
 local decide = require("@ds/orch_decide")
 local Links = require("@ds/links")
@@ -377,15 +378,18 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					end,
 					filter = props.of,
 					compact = true,
+					-- (Each card's thread and ask read by themselves,
+					-- account/rows: a push wakes the cards it changed.)
+					orchestrator_of = rows.orchestrator,
 					todo_of = function(chat: string): any
-						local c = chats:get()[chat]
+						local c = rows.chat(chat)
 						return c and c.todo
 					end,
 					thread_of = function(chat: string): any
-						return chats:get()[chat]
+						return rows.chat(chat)
 					end,
 					ask_of = function(chat: string): any
-						return data.open_asks(orchestration.now:get())[chat]
+						return rows.ask(chat)
 					end,
 					on_move = function(id: string, state: string, order: number)
 						orchestration.move_item(id, state, order)
