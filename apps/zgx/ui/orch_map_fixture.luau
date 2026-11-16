@@ -193,6 +193,77 @@ local function map_live()
 	})
 end
 ui.command { id = "map_live", title = "Map: the live shape", run = map_live }
+
+-- The Map's "Show chats" (ds/orch_map_visibility): one idle crew thread
+-- (Code signing, on forge: idle, its card done) moved as the engine would move it.
+local function touch(id: string, change: (any) -> ())
+	local now = table.clone(sessions.now:peek() :: any)
+	local function edit(list: { any }): { any }
+		local out = {}
+		for _, c in list do
+			if c.id == id then
+				c = table.clone(c)
+				change(c)
+			end
+			table.insert(out, c)
+		end
+		return out
+	end
+	now.chats = edit(now.chats)
+	local kids = {}
+	for parent, list in now.children or {} do
+		kids[parent] = edit(list)
+	end
+	now.children = kids
+	sessions.now:set(now)
+end
+-- Its last message two hours ago: past "recent"'s window.
+ui.command { id = "sign_old", title = "Signing: idle two hours", run = function()
+	touch("th-reins-sign", function(c)
+		c.status, c.updated = nil, os.time() - 7200
+	end)
+end }
+-- A message in (or out): moved now.
+ui.command { id = "sign_message", title = "Signing: a message", run = function()
+	touch("th-reins-sign", function(c)
+		c.updated = os.time()
+	end)
+end }
+-- A turn starts.
+ui.command { id = "sign_turn", title = "Signing: a turn", run = function()
+	touch("th-reins-sign", function(c)
+		c.status, c.updated = "working", os.time()
+	end)
+end }
+-- Done, its output not read yet.
+ui.command { id = "sign_unread", title = "Signing: unread", run = function()
+	touch("th-reins-sign", function(c)
+		c.status = "done"
+	end)
+end }
+-- An open ask of its.
+ui.command { id = "sign_ask", title = "Signing: asks", run = function()
+	local now = table.clone(orchestration.now:peek() :: any)
+	local asks = table.clone(now.asks or {})
+	table.insert(asks, { id = "ask-sign", from_chat = "th-reins-sign", kind = "question", question = "Sign with the new key?", state = "open", created = os.time() })
+	now.asks = asks
+	orchestration.now:set(now)
+end }
+-- Its card in Review.
+ui.command { id = "sign_review", title = "Signing: in Review", run = function()
+	local now = table.clone(orchestration.now:peek() :: any)
+	local items = {}
+	for _, it in now.items or {} do
+		if it.id == "it-sign" then
+			it = table.clone(it)
+			it.state = "review"
+			it.threads = { "th-reins-sign" }
+		end
+		table.insert(items, it)
+	end
+	now.items = items
+	orchestration.now:set(now)
+end }
 -- Zeron fixes and its crew as the Map once showed them blank: one named
 -- and done, one just created (its title given, its first turn still
 -- running), one whose chat isn't heard yet (its role names it), one with
@@ -411,6 +482,13 @@ ui.command { id = "theme_dark", title = "Dark theme", run = function()
 	ui.theme.follow_system(false)
 	ui.theme.current:set("zeron-dark")
 end }
+
+-- The Map's "Show chats", for its pictures.
+for _, m in { "active", "recent", "all" } do
+	ui.command { id = `show_{m}`, title = `Show chats: {m}`, run = function()
+		require("@ds/orch_map_visibility").mode:set(m)
+	end }
+end
 
 return ui.column {
 	w_full = true,

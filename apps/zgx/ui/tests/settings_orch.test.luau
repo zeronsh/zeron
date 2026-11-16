@@ -1,6 +1,6 @@
 -- Settings → Orchestration (screens/settings/orchestration) and the
 -- sidebar view menu's quick toggle, on ui/settings_orch_fixture.luau: the
--- auto-archive switch (on by default) and its window (12 hours) render,
+-- auto-archive switch (on by default) and its window (4 hours) render,
 -- each change goes to the engine as `updateSettings`, the menu's row
 -- follows the same setting, and what was set is there on the next launch
 -- (the engine's row, kept).
@@ -26,13 +26,13 @@ local function menu(app: any)
 	app:frames(20)
 end
 
-test("settings orch: the switch and the window render, on and 12 hours by default", function()
+test("settings orch: the switch and the window render, on and 4 hours by default", function()
 	local app = open()
 	local page = app:tree(PAGE) :: string
 	expect(page).to_contain("Orchestration")
 	expect(page).to_contain("Auto-archive orchestrator chats")
 	expect(page).to_contain("Archive after")
-	expect(page).to_contain("12 hours")
+	expect(page).to_contain("4 hours")
 	expect(switched(app)).to_be(true)
 	expect(app:state("orch_ops")).to_be("")
 end)

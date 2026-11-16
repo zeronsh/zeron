@@ -44,7 +44,10 @@ local function world(): any
 	for _, c in f.chats do
 		table.insert(sessions_now.chats, c)
 	end
-	return { now = f.now, chats = data.chats(sessions_now), devices = f.devices, projects = f.projects, loads = f.loads, here = "dev-desk" }
+	-- (Judged by the Map's "Show chats" as the fixture's is: the default, at
+	-- the sample's own time, its chats as old as the fixture's.)
+	return { now = f.now, chats = data.chats(sessions_now), devices = f.devices, projects = f.projects, loads = f.loads, here = "dev-desk",
+		show = "recent", clock = f.NOW }
 end
 
 local function title_of(id: string): string

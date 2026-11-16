@@ -171,6 +171,10 @@ M.View = ui.component(function(props: {
 			relative = true,
 			bg = "#00000000",
 			hover = { bg = "$hover" },
+			-- (Fading out: finished a while ago, ds/orch_map_visibility.)
+			opacity = function(): number
+				return t().opacity or 1
+			end,
 			on_drag = drag.on_drag,
 			drag_preview = drag.drag_preview,
 			drag_preview_anchor = drag.drag_preview_anchor,

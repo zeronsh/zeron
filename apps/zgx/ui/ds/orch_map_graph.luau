@@ -194,8 +194,9 @@ M.View = ui.component(function(props: {
 			for _, n in g.nodes do
 				local i = graph.index[n.id]
 				local old = i and graph.nodes[i]
-				if old and old.title ~= n.title then
+				if old and (old.title ~= n.title or old.opacity ~= n.opacity) then
 					old.title = n.title
+					old.opacity = n.opacity
 					renamed = true
 				end
 			end
@@ -460,6 +461,7 @@ M.View = ui.component(function(props: {
 			table.insert(key_parts, n.title)
 			if n.kind == "thread" then
 				table.insert(key_parts, state_of(n.id))
+				table.insert(key_parts, n.opacity or 1)
 			elseif n.kind == "device" then
 				-- (Its heading's width, as the last layout measured it: what
 				-- its island is sized by.)
@@ -1477,20 +1479,25 @@ M.View = ui.component(function(props: {
 				c:stroke(q, hue.canvas(n.hue, dim(0.9, lit)), 1.5, { join = "round" })
 			else
 				local st = state_of(n.id)
+				-- (Fading out: finished a while ago, ds/orch_map_visibility.)
+				local fo = n.opacity or 1
+				local function fd(a: number): number
+					return dim(a, lit) * fo
+				end
 				if st == "working" or st == "waiting" then
 					-- (A dot inside Zeron's working ring, laid over it.)
-					c:circle(x, y, 3 * zs, ink(0.9, lit))
+					c:circle(x, y, 3 * zs, kit.ink("text.primary", fd(0.9)))
 				else
 					local rr = r
 					local paint
 					if st == "input" or st == "approval" or st == "failed" then
-						paint = kit.ink(`zeron.status.{st}`, dim(1, lit))
-						c:circle(x, y, rr + 3.5 * zs, kit.ink(`zeron.status.{st}`, dim(0.2, lit)))
+						paint = kit.ink(`zeron.status.{st}`, fd(1))
+						c:circle(x, y, rr + 3.5 * zs, kit.ink(`zeron.status.{st}`, fd(0.2)))
 					elseif st == "done" then
-						paint = kit.ink("zeron.status.done", dim(0.75, lit))
+						paint = kit.ink("zeron.status.done", fd(0.75))
 						rr = r * 0.85
 					else
-						paint = ink(0.45, lit)
+						paint = kit.ink("text.primary", fd(0.45))
 						rr = r * 0.85
 					end
 					if n.crew then

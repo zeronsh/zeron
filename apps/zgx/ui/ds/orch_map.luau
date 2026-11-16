@@ -134,6 +134,22 @@ function M.menu(view: State<View>): { any }
 		})
 	end
 	table.insert(out, { separator = true })
+	-- Which chats it shows (ds/orch_map_visibility, kept on this device):
+	-- every view the same.
+	local Visibility = require("@self/orch_map_visibility")
+	table.insert(out, { heading = locale.s("ds.orch.map.show") })
+	for _, mode in Visibility.MODES do
+		table.insert(out, {
+			label = locale.s(`ds.orch.map.show_{mode}`),
+			checked = function(): boolean
+				return Visibility.mode:get() == mode
+			end,
+			on_select = function()
+				Visibility.mode:set(mode)
+			end,
+		})
+	end
+	table.insert(out, { separator = true })
 	return out
 end
 
