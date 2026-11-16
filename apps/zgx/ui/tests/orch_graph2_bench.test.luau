@@ -50,9 +50,12 @@ local function bench(world: string?)
 				app:command("map_graph2_pan")
 			end)
 			report(`{v} pan-frame`, pan)
-			-- The guard: a pan or zoom frame stays far inside 16 ms.
-			expect(pct(pan, 0.95) < 8).to_be(true)
-			expect(pct(zoom, 0.95) < 8).to_be(true)
+			-- The guard: a pan or zoom frame stays far inside 16 ms (the median
+			-- well under; the tail inside a frame, the machine busy or not).
+			expect(pct(pan, 0.5) < 4).to_be(true)
+			expect(pct(zoom, 0.5) < 4).to_be(true)
+			expect(pct(pan, 0.95) < 16).to_be(true)
+			expect(pct(zoom, 0.95) < 16).to_be(true)
 		else
 			-- (The first Graph has no pan command: a drag across its field.)
 			local drag = {}

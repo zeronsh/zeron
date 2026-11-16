@@ -137,23 +137,6 @@ function M.menu(view: State<View>): { any }
 			end,
 		})
 	end
-	-- Which chats show (the Map's shared setting offers this itself, once
-	-- it's there).
-	local Vis = require("@self/orch_graph2_visibility")
-	if Vis.own_setting then
-		table.insert(out, { heading = locale.s("ds.orch.map.show_chats") })
-		for _, mode in Vis.MODES do
-			table.insert(out, {
-				label = locale.s(`ds.orch.map.show_{mode}`),
-				checked = function(): boolean
-					return Vis.mode:get() == mode
-				end,
-				on_select = function()
-					Vis.mode:set(mode)
-				end,
-			})
-		end
-	end
 	table.insert(out, { separator = true })
 	-- How the Topology shows work on other machines (kept on this device).
 	local TopoStyle = require("@self/orch_map_topo_style")

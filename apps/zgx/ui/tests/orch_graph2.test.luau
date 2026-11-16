@@ -297,7 +297,7 @@ test("graph2: crew are named as every view names them (ds/orch_name)", function(
 	local f = (sample :: any).fleet
 	local fleet = model.fleet(world())
 	local l = L.layout(Scene.of(world()), 1200)
-	-- (Those shown: a quiet one may be left out, ds/orch_graph2_visibility.)
+	-- (Those shown: a quiet one may be left out, ds/orch_map_visibility.)
 	local named = 0
 	for _, n in l.nodes do
 		local t = fleet.threads[n.id]
@@ -333,34 +333,8 @@ test("graph2: a dot's frames and the ease's frames allocate nothing", function()
 	expect(ease < 2).to_be(true)
 end)
 
--- Visibility (ds/orch_graph2_visibility, the Map's one rule's shape).
-
-test("graph2 visibility: the rule, by state, age and setting", function()
-	local vis = require("@ds/orch_graph2_visibility")
-	local now = 1_000_000
-	local ctx = { mode = "recent", window = 3600, pinned = { o = true }, asking = { a = true }, review = { r = true } }
-	local function v(chat: any, c: any?): string
-		return (vis.visible(chat, now, c or ctx))
-	end
-	expect(v({ id = "w", status = "working", updated = 0 })).to_be("show")
-	expect(v({ id = "o", updated = 0 })).to_be("show")
-	expect(v({ id = "a", updated = 0 })).to_be("show")
-	expect(v({ id = "r", updated = 0 })).to_be("show")
-	expect(v({ id = "d", status = "done", updated = 0 })).to_be("show")
-	expect(v({ id = "x", updated = now - 600 })).to_be("show")
-	expect(v({ id = "x", updated = now - 2700 })).to_be("fade")
-	expect(v({ id = "x", updated = now - 4000 })).to_be("hide")
-	expect(v({ id = "x", updated = now - 600, archived = true })).to_be("hide")
-	local all = table.clone(ctx)
-	all.mode = "all"
-	expect(v({ id = "x", updated = 0 }, all)).to_be("show")
-	local active = table.clone(ctx)
-	active.mode = "active"
-	expect(v({ id = "x", updated = now - 60 }, active)).to_be("hide")
-	-- (A fading one fades on: its next step comes, then it goes.)
-	local wait = vis.next_change({ id = "x", updated = now - 2700 }, now, ctx) :: number
-	expect(wait > 0 and wait <= 180).to_be(true)
-end)
+-- Visibility: the Map's one rule (ds/orch_map_visibility, its own tests),
+-- as the new Graph follows it.
 
 test("graph2 visibility: quiet threads leave the layout, fading ones show faint, once laid out again", function()
 	local app = open(1440)

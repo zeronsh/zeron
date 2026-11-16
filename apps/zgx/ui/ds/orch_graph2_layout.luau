@@ -60,7 +60,7 @@ export type Node = {
 	lead: boolean,
 	ghost: boolean,
 	-- Its strength in tenths (10 full; less while it fades: finished a
-	-- while ago, ds/orch_graph2_visibility).
+	-- while ago, ds/orch_map_visibility).
 	fade: number,
 	provider: string,
 }

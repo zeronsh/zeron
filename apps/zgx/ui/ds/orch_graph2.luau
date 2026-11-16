@@ -33,7 +33,6 @@ local MachineHead = require("@self/orch_machine_head")
 local Ref = require("@self/orch_ref")
 local L = require("@self/orch_graph2_layout")
 local Scene = require("@self/orch_graph2_scene")
-local vis = require("@self/orch_graph2_visibility")
 
 local M = {}
 
@@ -146,7 +145,6 @@ M.View = ui.component(function(props: {
 	local from_y: { [string]: number } = {}
 	local anim = ui.use_state(1)
 	local anim_t0 = 0
-	local next_change: number? = nil
 	local ease_run = ui.use_state(0)
 	ui.effect(function()
 		if ease_run:get() == 0 then
@@ -323,8 +321,7 @@ M.View = ui.component(function(props: {
 			return
 		end
 		local t0 = os.clock()
-		local scene = Scene.of(world, vis.now())
-		next_change = scene.next_change
+		local scene = Scene.of(world)
 		local next_l = L.layout(scene, w)
 		local ms = (os.clock() - t0) * 1000
 		if next_l.sig == layout.sig then
@@ -387,21 +384,15 @@ M.View = ui.component(function(props: {
 		ease_run:set(ease_run:peek() + 1)
 	end
 
-	-- (Laid out again when the world, the width or what's shown changes:
-	-- a finished chat fading, then going, at its time, by a timer set for
-	-- the soonest; nothing runs between.)
-	local vis_clock = ui.use_state(0)
+	-- (Laid out again when the world or the width changes: what the Map
+	-- shows is the world's, its "Show chats" and its clock, which moves on
+	-- each minute; the same layout, a fading chat fainter, is taken in
+	-- place.)
 	ui.effect(function()
 		local world = props.world()
 		chats_now = world.chats or {}
 		local w = width:get()
-		vis_clock:get()
 		relayout(world, w)
-		if next_change then
-			ui.after(next_change * 1000 + 50, function()
-				vis_clock:set(vis_clock:peek() + 1)
-			end)
-		end
 	end)
 
 	-- A node's place as drawn now (mid-ease, between where it was and is).

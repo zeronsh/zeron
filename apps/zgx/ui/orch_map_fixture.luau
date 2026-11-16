@@ -290,7 +290,7 @@ local function map_big()
 		-- (Stale: some finished ones last moved an hour or more ago, some
 		-- forty minutes ago.)
 		if big_stale and (c.status == "idle" or c.status == "done") then
-			c.status = nil
+			(c :: any).status = nil
 			c.updated = if k % 2 == 0 then t - 2 * 3600 else t - 45 * 60
 		end
 		table.insert(chats, c)
@@ -373,7 +373,7 @@ for _, style in { "dots", "provider" } do
 end
 for _, mode in { "active", "recent", "all" } do
 	ui.command { id = `map_show_{mode}`, title = `Map: show chats {mode}`, run = function()
-		require("@ds/orch_graph2_visibility").mode:set(mode)
+		require("@ds/orch_map_visibility").mode:set(mode)
 	end }
 end
 -- One more Engine crew thread on the big fleet (a change of what's shown).
