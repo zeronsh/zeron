@@ -39,6 +39,7 @@ local Timeline = require("@self/orch_map_timeline")
 local Machines = require("@self/orch_map_machines")
 local Graph = require("@self/orch_map_graph")
 local Graph2 = require("@self/orch_graph2")
+local Force = require("@self/orch_force")
 local Layout = require("@self/orch_map_layout")
 
 export type View = { variant: string, window: number }
@@ -77,7 +78,9 @@ end
 
 -- ("graph2": the Graph laid out rather than settled, beside the first
 -- until it takes its place.)
-M.VARIANTS = { "topology", "timeline", "machines", "graph", "graph2" }
+-- ("force": the Graph as a web that settles once and holds still, the
+-- Brain dump in the middle; beside the others while it's tried.)
+M.VARIANTS = { "topology", "timeline", "machines", "graph", "graph2", "force" }
 M.WINDOWS = { 15, 60 }
 M.DEFAULT = { variant = "topology", window = 15 } :: View
 
@@ -146,7 +149,7 @@ function M.menu(view: State<View>): { any }
 	for _, id in M.VARIANTS do
 		table.insert(out, {
 			label = locale.s(`ds.orch.map.variant.{id}`),
-			icon = if id == "topology" then "git-branch" elseif id == "timeline" then "list" elseif id == "graph" or id == "graph2" then "global" else "widget",
+			icon = if id == "topology" then "git-branch" elseif id == "timeline" then "list" elseif id == "graph" or id == "graph2" or id == "force" then "global" else "widget",
 			checked = function(): boolean
 				return valid(view:get()).variant == id
 			end,
@@ -168,6 +171,20 @@ function M.menu(view: State<View>): { any }
 		})
 	end
 	table.insert(out, { separator = true })
+	-- What Graph (force) colours by: whose a chat is, or where it runs.
+	table.insert(out, { heading = locale.s("ds.orch.map.color_by") })
+	for _, by in Force.COLOR_BY do
+		table.insert(out, {
+			label = locale.s(`ds.orch.map.color_by_{by}`),
+			checked = function(): boolean
+				return Force.color_by:get() == by
+			end,
+			on_select = function()
+				Force.color_by:set(by)
+				M.set(view, { variant = "force" })
+			end,
+		})
+	end
 	-- How the new Graph draws a thread: a dot, or its provider's glyph.
 	table.insert(out, { heading = locale.s("ds.orch.map.node_style") })
 	for _, style in Graph2.STYLES do
@@ -337,6 +354,16 @@ M.Map = ui.component(function(props: Props): Node
 					menu = props.menu,
 					register = register,
 				})
+			elseif variant == "force" then
+				return Force.View {
+					world = world,
+					chat = chat,
+					comms = props.comms,
+					on_open_chat = props.on_open_chat,
+					on_open_orchestrator = props.on_open_orchestrator,
+					menu = props.menu,
+					register = register,
+				}
 			elseif variant == "graph2" then
 				return bounded(Graph2.View {
 					world = world,

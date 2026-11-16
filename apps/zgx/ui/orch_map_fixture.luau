@@ -340,6 +340,46 @@ local function map_big()
 		["dev-cloud"] = { cpu = 0.24, mem_used = 7e9, mem_total = 32e9, online = true, at = t },
 	})
 end
+-- The force Graph's fleet: the big one with 60 more Engine crew (160
+-- threads, 164 agents), and messages between some of its chats lately
+-- (weak links; the last in flight).
+ui.command { id = "map_force_big", title = "Map: a big fleet that talks", run = function()
+	big_extra = 60
+	big_stale = false
+	map_big()
+	local t = os.time()
+	local list = {}
+	local pairs_ = { { "vpn3", "vpn9" }, { "ui4", "vpn12" }, { "eng2", "ui7" }, { "bd1", "eng5" }, { "vpn20", "orc-ui" }, { "engx4", "vpn33" } }
+	for k, pr in pairs_ do
+		table.insert(list, { id = `fc-{k}`, kind = "report", from = pr[1], to = pr[2], summary = "", at = if k == #pairs_ then t else t - 600 })
+	end
+	orchestration.comms:set(list)
+end }
+for _, z in { { "in", 1.25 }, { "out", 0.8 } } do
+	ui.command { id = `map_force_zoom_{z[1]}`, title = `Map: zoom the force graph {z[1]}`, run = function()
+		require("@ds/orch_force").zoom_by(z[2] :: number)
+	end }
+end
+for _, by in { "orchestrator", "machine" } do
+	ui.command { id = `map_force_color_{by}`, title = `Map: the force graph coloured by {by}`, run = function()
+		require("@ds/orch_force").color_by:set(by)
+	end }
+end
+ui.command { id = "map_force_pan", title = "Map: pan the force graph", run = function()
+	require("@ds/orch_force").pan_by(-40, -25)
+end }
+-- A node dragged a little way (an orchestrator: its crew follow).
+ui.command { id = "map_force_drag", title = "Map: drag a hub of the force graph", run = function()
+	local F = require("@ds/orch_force")
+	local cur = F.current
+	if not cur then
+		return
+	end
+	local i = cur.model.index["orc-ui"]
+	if i then
+		F.drag_to("orc-ui", cur.sim.x[i] + 60, cur.sim.y[i] + 40)
+	end
+end }
 ui.command { id = "map_big", title = "Map: a big fleet", run = function()
 	big_extra = 0
 	big_stale = false
