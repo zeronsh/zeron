@@ -380,6 +380,41 @@ return function()
 			{ name = "plan.txt", path = "/Users/dev/plan.txt" },
 		}, "orc-brain")
 	end }
+	-- The Control room's run counts (ds/orch_perf_trace): reset, and read
+	-- into `perf_counts`; and ds/stage's background pieces still waiting,
+	-- into `stage_idle_waiting`.
+	ui.command { id = "fixture.perf_reset", title = "Fixture: reset the run counts", run = function()
+		require("@ds/orch_perf_trace").reset()
+	end }
+	ui.command { id = "fixture.perf_read", title = "Fixture: read the run counts", run = function()
+		ui.state("perf_counts", {} :: any):set(table.clone(require("@ds/orch_perf_trace").counts))
+		ui.state("stage_idle_waiting", 0):set(require("@ds/stage").idle_waiting())
+	end }
+	-- Everything the room shows changing at once (the board's items, every
+	-- chat's sessions, a report, the progress rows): a push of each.
+	ui.command { id = "fixture.push_all", title = "Fixture: a push of everything", run = function()
+		local n = table.clone(orchestration.now:peek())
+		local items = {}
+		for _, it in n.items or {} do
+			local c = table.clone(it)
+			c.updated = (c.updated or 0) + 1
+			table.insert(items, c)
+		end
+		n.items = items
+		orchestration.now:set(n)
+		local s: any = table.clone(sessions.now:peek())
+		local chats = {}
+		for _, c in s.chats or {} do
+			local c2 = table.clone(c)
+			c2.updated = (c2.updated or 0) + 1
+			table.insert(chats, c2)
+		end
+		s.chats = chats
+		sessions.now:set(s)
+		local m = #orchestration.comms:peek()
+		orchestration.comms:push({ id = `cm-p{m}`, kind = "report", from = "th-engine-state", to = "orc-orch", summary = "pushed", at = os.time() })
+		orchestration.progress:set(table.clone(orchestration.progress:peek() or {}))
+	end }
 	-- A report coming in (the Map's pulse, a Comms row).
 	ui.command { id = "fixture.report", title = "Fixture: a crew report", run = function()
 		local n = #orchestration.comms:peek()

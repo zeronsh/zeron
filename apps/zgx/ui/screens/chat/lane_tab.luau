@@ -10,7 +10,8 @@
 --
 -- `read`: a live chat's transcript alone, to read (the Control room's Chat
 -- tab: the Brain dump's), its working row its own, `data.foot` the room
--- kept clear at its foot (what floats over it there).
+-- kept clear at its foot (what floats over it there), `data.live` whether
+-- it shows (kept built while hidden: the reply being written held).
 
 local ds = require("@ds")
 local Dictation = require("@app/screens/chat/dictation")
@@ -43,6 +44,7 @@ local ZeronCommands = require("@app/screens/chat/zeron_commands")
 local look = require("@app/screens/shell/project_look")
 local Appshots = require("@app/screens/chat/appshots")
 local DropOverlay = require("@ds/drop_overlay")
+local Hold = require("@ds/hold")
 
 -- Two places in a transcript (ds/transcript's `keep`), the same.
 local function same(a: any, b: any): boolean
@@ -1153,6 +1155,16 @@ end
 -- The slot's session is watched while either is there.
 local holders: { [string]: number } = {}
 local mirrors: { [string]: number } = {}
+-- Each slot's mirrors' `shown` (one kept built while out of sight).
+local mirror_shown: { [string]: { () -> boolean } } = {}
+local function any_mirror_shown(slot: string): boolean
+	for _, shown in mirror_shown[slot] or {} do
+		if shown() then
+			return true
+		end
+	end
+	return false
+end
 local live_pickers: { [string]: { State<number> } } = {}
 M.Composer = ui.component(function(props: {
 	chat: () -> string?,
@@ -1172,10 +1184,17 @@ M.Composer = ui.component(function(props: {
 	-- Its chat's row and send path alone, no transcript watched (Capture's:
 	-- it never shows one). Every placement of a slot passes the same.
 	session_only: boolean?,
+	-- A mirror kept built while out of sight (the Control room's floating
+	-- composer, hidden on Overview with Capture in view): whether it shows.
+	-- Only one that shows takes the model picker from the first.
+	shown: (() -> boolean)?,
 }): Node
 	local slot = props.slot
 	local mirror = props.mirror == true
 	local lazy = props.lazy == true
+	local mirror_showing = props.shown or function(): boolean
+		return true
+	end
 	local view = lanes.view(slot)
 	-- Lazy, till it's used: its session as the chats list has it (its
 	-- agent and model, at rest), so its picker shows the chat's model and
@@ -1248,6 +1267,9 @@ M.Composer = ui.component(function(props: {
 	holders[slot] = (holders[slot] or 0) + 1
 	if mirror then
 		mirrors[slot] = (mirrors[slot] or 0) + 1
+		local list = mirror_shown[slot] or {}
+		table.insert(list, mirror_showing)
+		mirror_shown[slot] = list
 	end
 	ui.effect(function()
 		local id = props.chat()
@@ -1304,7 +1326,7 @@ M.Composer = ui.component(function(props: {
 			ui.after(0, function()
 				ui.after(0, function()
 					-- (A mirror showing takes it: it's the one in view.)
-					local mine = mirror or (mirrors[slot] or 0) == 0
+					local mine = if mirror then mirror_showing() else not any_mirror_shown(slot)
 					if alive and mine and model_wanted:peek() == slot then
 						model_wanted:set(nil)
 						if ui.now() - wanted_at < WANT_FOR then
@@ -1328,6 +1350,12 @@ M.Composer = ui.component(function(props: {
 		if mirror then
 			local m = (mirrors[slot] or 1) - 1
 			mirrors[slot] = if m > 0 then m else nil
+			local list = mirror_shown[slot] or {}
+			local at = table.find(list, mirror_showing)
+			if at then
+				table.remove(list, at)
+			end
+			mirror_shown[slot] = if #list > 0 then list else nil
 		end
 		if left <= 0 then
 			-- (A lazy one never used watched nothing.)
@@ -1515,6 +1543,13 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	end)
 	local messages: any = view.messages
 	local reply: any = view.draft
+	-- (A `read` tab kept built while hidden, `data.live`: the reply being
+	-- written held meanwhile, ds/hold; its rows not written to.)
+	if tab.kind == "read" and data.live then
+		reply = Hold.computed(data.live, function(): any
+			return view.draft:get()
+		end, "chat")
+	end
 	-- Where the chat was left: as the chat page last showed it (its place
 	-- now, if that's this chat), else its place kept for it.
 	local function place_of(): any

@@ -100,6 +100,9 @@
 --                                -- keeps its view; else the board's own)
 --     later_open = state,        -- whether Queued's Later group is open (a
 --                                -- boolean state, kept as `expanded`)
+--     card_build = fn(build, i) -> Node,  -- how each card is built (a page
+--                                -- building the board in the background:
+--                                -- a card a turn, ds/stage's `Idle`)
 --   }
 
 local Icon = require("@self/icon")
@@ -186,6 +189,7 @@ export type Props = {
 	expanded: any?,
 	later_open: any?,
 	id: string?,
+	card_build: ((build: () -> Node, i: number) -> Node)?,
 }
 
 -- The columns, in order: each its key, the state its cards are in (Queued:
@@ -1840,10 +1844,22 @@ local OrchBoard = ui.component(function(props: Props): Node
 		}
 	end
 
+
 	-- Queued's Later: its head ("Later · 4", folded or open, where a card
 	-- carried below it lands in Later), and its cards while it's open. It
 	-- moves with the cards above it while one is carried, as they do.
-	local function later_group(col: Column, count: () -> number, cards: () -> { Item }): Node
+		-- A card, built as the page asks (`card_build`), else at once.
+	local function built_card(it: Item, i: any, row: any, col: Column): Node
+		local wrap = props.card_build
+		if not wrap then
+			return card(it, i, row, col)
+		end
+		return wrap(function(): Node
+			return card(it, i, row, col)
+		end, if type(i) == "number" then i else 0)
+	end
+
+local function later_group(col: Column, count: () -> number, cards: () -> { Item }): Node
 		local function shift(): number
 			local c = carry:get()
 			if not c then
@@ -1934,7 +1950,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				},
 			},
 			ui.each(ui.computed(cards), function(it: Item, i: any, row: any): Node
-				return card(it, i, row, col)
+				return built_card(it, i, row, col)
 			end, { key = function(it: Item): string
 				return it.id
 			end, w_full = true }),
@@ -2113,7 +2129,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 					end
 					return (groups(l))
 				end), function(it: Item, i: any, row: any): Node
-					return card(it, i, row, col)
+					return built_card(it, i, row, col)
 				end, { key = function(it: Item): string
 					return it.id
 				end, w_full = true }),

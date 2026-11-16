@@ -5,6 +5,16 @@
 -- builds it a little later should the pump's owner go first.
 --
 --   stage.Later(rank, build, h?)   build() now if rank <= 0, else later
+--
+-- Building in the background (a page kept hidden, built before it's
+-- opened): what's given `stage.Idle` builds only once the stages above are
+-- all done, `PER_FRAME` a frame (a piece's build runs as its frame lays it
+-- out, past where a script can time it: so a count, the pieces made small
+-- enough), lowest rank first. `now()` true (the page shown before it was
+-- done) builds it at once.
+--
+--   stage.Idle { rank = 3, build = build, h = 120, now = function() … end,
+--     box = { grow = 1 } }   -- (the room it takes, built or not)
 
 local M = {}
 
@@ -69,6 +79,99 @@ function M.Later(rank: number, build: () -> Node, h: number?): Node
 		return build()
 	end
 	return Later { rank = rank, build = build, h = h }
+end
+
+-- Background pieces built a frame.
+M.PER_FRAME = 1
+-- How many background pieces each `group` (a page) still waits on: a page
+-- can stay out of layout until they're all in.
+M.pending = ui.state("stage_idle_pending", {} :: { [string]: number })
+local function count(group: string?, by: number)
+	if not group then
+		return
+	end
+	local n = (M.pending:peek()[group] or 0) + by
+	M.pending:set_key({ group }, if n > 0 then n else nil)
+end
+type IdleEntry = { rank: number, go: () -> () }
+local idle: { IdleEntry } = {}
+local idle_pumping = false
+
+local function idle_pump()
+	if #idle == 0 then
+		idle_pumping = false
+		return
+	end
+	-- (The page's own stages first.)
+	if #queue > 0 then
+		ui.after(16, idle_pump)
+		return
+	end
+	table.sort(idle, function(a: IdleEntry, b: IdleEntry): boolean
+		return a.rank < b.rank
+	end)
+	for _ = 1, M.PER_FRAME do
+		local entry = table.remove(idle, 1)
+		if not entry then
+			break
+		end
+		entry.go()
+	end
+	-- (A frame's time on: a timer due at once can run in the same frame.)
+	ui.after(16, idle_pump)
+end
+
+local function forget_idle(entry: IdleEntry)
+	local at = table.find(idle, entry)
+	if at then
+		table.remove(idle, at)
+	end
+end
+
+M.Idle = ui.component(function(props: { rank: number?, build: () -> Node, h: number?, now: (() -> boolean)?, box: { [string]: any }?, group: string? }): Node
+	local ready = ui.use_state(false)
+	local counted = true
+	count(props.group, 1)
+	local function done()
+		if counted then
+			counted = false
+			-- (After this frame's build: a frame on.)
+			ui.after(0, function()
+				count(props.group, -1)
+			end)
+		end
+	end
+	local entry: IdleEntry = {
+		rank = props.rank or 0,
+		go = function()
+			ready:set(true)
+		end,
+	}
+	table.insert(idle, entry)
+	ui.on_cleanup(function()
+		forget_idle(entry)
+		done()
+	end)
+	if not idle_pumping then
+		idle_pumping = true
+		ui.after(16, idle_pump)
+	end
+	local now = props.now
+	return ui.presence(function(): string
+		return if ready:get() or (now ~= nil and now()) then "built" else "waiting"
+	end, function(state: string): Node
+		if state == "built" then
+			forget_idle(entry)
+			done()
+			return props.build()
+		end
+		return ui.div { class = "stage-idle", w_full = true, h = props.h or 120 }
+	end, props.box or { w_full = true })
+end)
+
+-- (For tests: how many wait in the background.)
+function M.idle_waiting(): number
+	return #idle
 end
 
 -- (For tests: how many wait.)

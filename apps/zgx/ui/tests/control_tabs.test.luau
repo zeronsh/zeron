@@ -30,19 +30,43 @@ local function watched(app: any): { [string]: string }
 	return app:state("watched") or {}
 end
 
--- What each tab builds: its own content's marks.
-local OWN = {
-	overview = { "#control-columns", "#control-capture-composer", "#control-widget-needs" },
-	board = { "#control-board-tab", "#control-board-done" },
-	chat = { "#control-chat", "#lane-control-chat" },
-}
+-- A kept tab (screens/control/page's `kept`): built, and shown or hidden.
+local function built(app: any, tab: string): boolean
+	return app:has(`#control-tab-{tab}`)
+end
+local function first_line(app: any, target: string): string
+	return string.match(app:tree(target, 0), "[^\n]+") or ""
+end
+local function shown(app: any, tab: string): boolean
+	return built(app, tab) and not string.find(first_line(app, `#control-tab-{tab}`), " hidden", 1, true)
+end
+-- The floating composer shows (kept built, hidden where it doesn't float).
+local function floats(app: any): boolean
+	return not string.find(first_line(app, "#control-float-layer"), " hidden", 1, true)
+end
+-- A node's id in the tree (`@12`): the same while it isn't built again.
+local function node_id(app: any, target: string): string
+	return string.match(first_line(app, target), "^@(%d+)") or ""
+end
 
-local function only(app: any, tab: string)
-	for id, marks in OWN do
-		for _, m in marks do
-			expect(app:has(m)).to_be(id == tab)
+-- ds/stage's background pieces still waiting, and the run counts.
+local function perf(app: any): ({ [string]: number }, number)
+	app:command("fixture.perf_read")
+	return app:state("perf_counts") or {}, app:state("stage_idle_waiting") or 0
+end
+-- Until the page has settled and built the other tabs in the background.
+local function settled(app: any)
+	expect(app:wait("#control-tab-board", { timeout_ms = 5000 })).to_be(true)
+	for _ = 1, 400 do
+		local _, waiting = perf(app)
+		if waiting == 0 and built(app, "chat") then
+			break
 		end
+		app:frames(1)
 	end
+	local _, waiting = perf(app)
+	expect(waiting).to_be(0)
+	app:frames(10)
 end
 
 test("control tabs: Overview first; a click on each shows it, kept as control_tab", function()
@@ -64,7 +88,8 @@ test("control tabs: the tab kept is the one the page opens on", function()
 	local app = open()
 	app:set_state("control_tab", "board")
 	app:frames(30)
-	only(app, "board")
+	expect(shown(app, "board")).to_be(true)
+	expect(shown(app, "overview")).to_be(false)
 	-- (The shell's Control room, made again on coming back to it.)
 	local shell = open("control_fixture.luau")
 	shell:set_state("control_tab", "chat")
@@ -75,20 +100,110 @@ test("control tabs: the tab kept is the one the page opens on", function()
 	shell:command("fixture.control")
 	shell:frames(40)
 	expect(shell:has("#control-room")).to_be(true)
-	expect(shell:has("#control-chat")).to_be(true)
+	expect(shown(shell, "chat")).to_be(true)
 end)
 
-test("control tabs: each tab builds its own content and nothing of the others", function()
+test("control tabs: the tab shown builds first; the others in the background once the page settles, hidden", function()
 	local app = open()
-	only(app, "overview")
-	for _, tab in { "board", "chat", "overview", "chat", "board" } do
-		app:set_state("control_tab", tab)
-		app:frames(30)
-		only(app, tab)
-	end
-	-- (The Board and the widgets' menu: the Board is a tab, never a widget.)
+	-- At first: Overview alone.
+	expect(shown(app, "overview")).to_be(true)
+	expect(built(app, "board")).to_be(false)
+	expect(built(app, "chat")).to_be(false)
+	settled(app)
+	-- Then the others, built and hidden: their content there, not shown.
+	expect(shown(app, "overview")).to_be(true)
+	expect(built(app, "board") and not shown(app, "board")).to_be(true)
+	expect(built(app, "chat") and not shown(app, "chat")).to_be(true)
+	expect(app:has("#control-tab-board >> #control-board-done")).to_be(true)
+	expect(app:has("#control-tab-chat >> #lane-control-chat")).to_be(true)
+	-- (The Board is a tab, never a widget.)
 	expect(app:has("#control-widget-board")).to_be(false)
 	expect(app:error()).to_be_nil()
+end)
+
+test("control tabs: switching shows a kept tab, never builds it again", function()
+	local app = open()
+	settled(app)
+	local ids = {
+		board = node_id(app, "#control-board-tab"),
+		chat = node_id(app, "#lane-control-chat"),
+		overview = node_id(app, "#control-columns"),
+		float = node_id(app, "#control-float"),
+	}
+	for _, tab in { "board", "chat", "overview", "chat", "board", "overview" } do
+		app:set_state("control_tab", tab)
+		app:frames(30)
+		for id, t in { overview = "overview", board = "board", chat = "chat" } do
+			expect(shown(app, t)).to_be(id == tab)
+		end
+	end
+	expect(node_id(app, "#control-board-tab")).to_be(ids.board)
+	expect(node_id(app, "#lane-control-chat")).to_be(ids.chat)
+	expect(node_id(app, "#control-columns")).to_be(ids.overview)
+	expect(node_id(app, "#control-float")).to_be(ids.float)
+	local _, waiting = perf(app)
+	expect(waiting).to_be(0)
+	expect(app:error()).to_be_nil()
+end)
+
+test("control tabs: a hidden tab does no work while what it shows changes; shown, it catches up", function()
+	local app = open()
+	settled(app)
+	app:set_state("control_tab", "chat")
+	app:frames(40)
+	app:command("fixture.perf_reset")
+	for _ = 1, 3 do
+		app:command("fixture.push_all")
+		app:frames(20)
+	end
+	local counts = perf(app)
+	-- Nothing of Overview's or the Board's read again, built or drawn.
+	for _, name in { "hold.overview", "hold.board", "board.word", "board.status", "progress.row", "progress.clocks", "graph.layout", "graph.draw", "hold.progress" } do
+		expect(counts[name] or 0).to_be(0)
+	end
+	-- Shown: it reads what changed.
+	app:set_state("control_tab", "board")
+	app:frames(40)
+	counts = perf(app)
+	expect((counts["hold.board"] or 0) > 0).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("control tabs: the background build is one piece a frame, out of layout till it's done", function()
+	local app = open()
+	expect(app:wait("#control-tab-board", { timeout_ms = 5000 })).to_be(true)
+	local _, last = perf(app)
+	local most = 0
+	local saw_hidden = false
+	for _ = 1, 400 do
+		app:frames(1)
+		local _, waiting = perf(app)
+		-- (A piece built makes the pieces it holds: only ever one fewer.)
+		if waiting < last then
+			most = math.max(most, last - waiting)
+		end
+		if waiting > 0 and app:has("#control-tab-board >> [1]") then
+			saw_hidden = saw_hidden or string.find(first_line(app, "#control-tab-board >> [1]"), " hidden", 1, true) ~= nil
+		end
+		last = waiting
+		if waiting == 0 and built(app, "chat") then
+			break
+		end
+	end
+	expect(last).to_be(0)
+	expect(most).to_be(1)
+	expect(saw_hidden).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("control tabs: a tab opened before its background build is done builds at once", function()
+	local app = open()
+	expect(app:wait("#control-tab-board", { timeout_ms = 5000 })).to_be(true)
+	app:set_state("control_tab", "board")
+	app:frames(30)
+	expect(shown(app, "board")).to_be(true)
+	expect(app:has("#control-board-done >> .orch-card")).to_be(true)
+	expect(app:count("#control-tab-board >> .stage-idle")).to_be(0)
 end)
 
 test("control tabs: ⌘⌥1–3 show Overview, Board and Chat", function()
@@ -109,14 +224,15 @@ end)
 test("control tabs: the full composer on Overview only, the floating one on Board and Chat, one draft", function()
 	local app = open()
 	expect(app:has("#control-capture-composer")).to_be(true)
-	expect(app:has("#control-float")).to_be(false)
+	expect(floats(app)).to_be(false)
 	app:type(CAPTURE_FIELD, "half a thought")
 	app:frames(5)
 	for _, tab in { "board", "chat" } do
 		app:set_state("control_tab", tab)
 		app:frames(30)
-		expect(app:has("#control-capture-composer")).to_be(false)
-		expect(app:has("#control-float")).to_be(true)
+		-- (Overview's Capture kept, hidden with it.)
+		expect(shown(app, "overview")).to_be(false)
+		expect(floats(app)).to_be(true)
 		-- (Bare: one line and its knob.)
 		expect(app:state("control_capture_float_open")).to_be(false)
 		expect(app:text(FLOAT_FIELD)).to_be("half a thought")
@@ -130,7 +246,7 @@ test("control tabs: the full composer on Overview only, the floating one on Boar
 	expect(app:text(CAPTURE_FIELD)).to_be("half a thought and another")
 	-- (Capture in view: nothing floats.)
 	app:frames(30)
-	expect(app:has("#control-float")).to_be(false)
+	expect(floats(app)).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -159,11 +275,12 @@ test("control tabs: Chat sends from the floating composer as Capture does, a dum
 	expect(calls(app)).to_contain("dump:route this please")
 	-- (No composer of the chat's own: the floating one is the only one.)
 	expect(app:has("#lane-composer-control-chat")).to_be(false)
-	expect(app:count("#control-room >> role:textbox")).to_be(1)
+	expect(app:count("#control-tab-chat >> role:textbox")).to_be(0)
 end)
 
-test("control tabs: Chat reads the Brain dump's transcript in the chat view, watched only while it shows", function()
+test("control tabs: Chat reads the Brain dump's transcript in the chat view; hidden, its reply held; let go with the page", function()
 	local app = open()
+	-- (Not watched till the tab is built: shown, or in the background.)
 	expect(watched(app)["control-chat"]).to_be_nil()
 	app:set_state("control_tab", "chat")
 	app:frames(40)
@@ -188,11 +305,20 @@ test("control tabs: Chat reads the Brain dump's transcript in the chat view, wat
 	app:set_state("chat.lane.control-chat.draft", { id = "bd-a2", text = "Asking Wing about the relay" })
 	app:frames(30)
 	expect(reads("Asking Wing about the relay")).to_be(true)
-	-- Left: let go.
+	-- Hidden: still watched (shown again, nothing to load), the reply
+	-- being written held where it was.
 	app:set_state("control_tab", "board")
 	app:frames(30)
-	expect(watched(app)["control-chat"]).to_be_nil()
-	expect(app:has("#lane-control-chat")).to_be(false)
+	expect(watched(app)["control-chat"]).to_be("orc-brain")
+	app:command("fixture.perf_reset")
+	app:set_state("chat.lane.control-chat.draft", { id = "bd-a2", text = "Asking Wing about the relay window now" })
+	app:frames(20)
+	expect(perf(app)["hold.chat"] or 0).to_be(0)
+	expect(reads("relay window now")).to_be(false)
+	-- Shown: caught up.
+	app:set_state("control_tab", "chat")
+	app:frames(30)
+	expect(reads("relay window now")).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -215,4 +341,14 @@ test("control tabs: the Board tab moves a card by drag and by Move to", function
 	expect(#calls(app) > before).to_be(true)
 	expect(string.sub(calls(app), before + 1)).to_contain("upsertItem")
 	expect(app:error()).to_be_nil()
+end)
+
+test("control tabs: the Chat tab's transcript is let go as the Control room is left", function()
+	local app = open("control_fixture.luau")
+	app:set_state("control_tab", "chat")
+	app:frames(40)
+	expect(watched(app)["control-chat"]).to_be("orc-brain")
+	app:command("fixture.leave")
+	app:frames(30)
+	expect(watched(app)["control-chat"]).to_be_nil()
 end)

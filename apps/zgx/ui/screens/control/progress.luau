@@ -26,6 +26,7 @@ local data = require("@ds/orch_data")
 local Ref = require("@ds/orch_ref")
 local locale = require("@ds/locale")
 local orchestration = require("@account/orchestration")
+local hold = require("@ds/hold")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 
@@ -337,24 +338,29 @@ function M.context(id: string): string
 	return table.concat(parts, " · ")
 end
 
-local function unit(id: string, variant: Unit.Variant, lean: boolean?): Node
+-- (`live`: whether what shows it is shown; while not, what it reads is
+-- held at its last value, ds/hold.)
+local function unit(id: string, variant: Unit.Variant, lean: boolean?, live: (() -> boolean)?): Node
 	local fixed = clock:peek()
+	local function held<T>(f: () -> T): () -> T
+		return if live then hold.fn(live, f) else f
+	end
 	return Unit.Progress {
 		id = `progress-{variant}-{id}`,
 		variant = variant,
 		lean = lean,
-		row = function(): any
+		row = held(function(): any
 			return row_of(id)
-		end,
-		placeholder = function(): string?
+		end),
+		placeholder = held(function(): string?
 			return if quiet:get()[id] then locale.s("control.progress.no_details") else nil
-		end,
-		chat = function(): any
+		end),
+		chat = held(function(): any
 			return chats_now:get()[id]
-		end,
-		context = function(): string
+		end),
+		context = held(function(): string
 			return M.context(id)
-		end,
+		end),
 		now = if fixed
 			then function(): number
 				return clock:get() or os.time()
@@ -448,8 +454,11 @@ end
 
 M.counts = counts
 
-function M.figures(): Node
+function M.figures(live: (() -> boolean)?): Node
 	local function figure_if(text: () -> string, tone: string?): Node
+		if live then
+			text = hold.fn(live, text)
+		end
 		return ui.show(function(): boolean
 			return text() ~= ""
 		end, Block.figure(text, tone))
@@ -468,23 +477,31 @@ function M.figures(): Node
 	}
 end
 
-function M.Widget(): Node
+-- (`live`, as `unit`'s.)
+function M.Widget(live: (() -> boolean)?): Node
+	local listed = if live
+		then hold.fn(live, function(): { { id: string } }
+			return M.listed:get()
+		end, "progress")
+		else function(): { { id: string } }
+			return M.listed:get()
+		end
 	local shown = ui.computed(function(): { { id: string } }
-		local list = M.listed:get()
+		local list = listed()
 		if all:get() or #list <= M.FIRST + 1 then
 			return list
 		end
 		return table.move(list, 1, M.FIRST, 1, {})
 	end)
 	local function more(): number
-		return #M.listed:get() - #shown:get()
+		return #listed() - #shown:get()
 	end
 	return ui.column {
 		id = "control-progress",
 		w_full = true,
 		gap = "$space.3",
 		ui.show(function(): boolean
-			return #M.listed:get() == 0
+			return #listed() == 0
 		end, ui.text {
 			locale.t("control.progress.empty"),
 			class = "control-progress-empty",
@@ -511,7 +528,7 @@ function M.Widget(): Node
 					local top = shown:get()[1]
 					return top ~= nil and top.id ~= e.id
 				end, ui.div { w_full = true, h = 1, bg = "$border.subtle" }),
-				unit(e.id, "full"),
+				unit(e.id, "full", nil, live),
 			}
 		end, {
 			key = function(e: { id: string }): string

@@ -54,6 +54,7 @@ local route = require("@app/screens/shell/route")
 local LaneTab = require("@app/screens/chat/lane_tab")
 local lanes = require("@app/screens/chat/lanes")
 local KeptScroll = require("@ds/kept_scroll")
+local hold = require("@ds/hold")
 local Scratch = require("@ds/orch_scratchpad")
 local scratchpad = require("@account/scratchpad")
 local Shared = require("@app/screens/chat/shared")
@@ -174,6 +175,26 @@ local function same(a: any, b: any): boolean
 	return true
 end
 
+-- The tab whose readers are live (ds/hold): the one shown, a frame after
+-- it's shown. The click's frame only shows what was there; what came
+-- while it was hidden is taken in on the next.
+M.awake = ui.state("control_tab_awake", "")
+-- Whether a tab's readers are live.
+function M.live(tab: string): () -> boolean
+	return function(): boolean
+		return M.awake:get() == tab
+	end
+end
+-- Whether a tab is being built in the background (not shown): read once,
+-- as it's built (never followed: that would build it again).
+local function background(tab: string): boolean
+	return M.tab:peek() ~= tab
+end
+local live_overview, live_board = M.live("overview"), M.live("board")
+-- What Overview and the Board read (`readers`, below): live while their tab
+-- shows, held at their last value while it's kept hidden.
+local OV: any, BD: any
+
 -- The chats by id, and the Q&A's entries: computeds the page makes again
 -- each time it is built (`fresh`, from M.Page). The shell requires this
 -- module while it builds the screen (screens/shell/boundary), so one made
@@ -197,16 +218,16 @@ local asks_now = asks_computed()
 
 local function world(): any
 	return {
-		now = orchestration.now:get(),
-		chats = chats_now:get(),
-		devices = sessions.devices:get(),
-		projects = sessions.projects:get(),
-		loads = orchestration.loads:get(),
-		here = sessions.here:get(),
+		now = OV.now(),
+		chats = OV.chats(),
+		devices = OV.devices(),
+		projects = OV.projects(),
+		loads = OV.loads(),
+		here = OV.here(),
 		-- The Map's "Show chats", and the minute it's judged at
 		-- (ds/orch_map_visibility).
-		show = Visibility.mode:get(),
-		clock = Visibility.now(),
+		show = OV.vis(),
+		clock = OV.clock(),
 	}
 end
 
@@ -299,10 +320,10 @@ local function receipt(dump: () -> any, settled: boolean?): Node
 	return Receipt {
 		dump = dump,
 		now = function(): any
-			return orchestration.now:get()
+			return OV.now()
 		end,
 		chats = function(): { [string]: any }
-			return chats_now:get()
+			return OV.chats()
 		end,
 		on_reroute = function(dump_id: string, route_id: string, target: any)
 			orchestration.reroute(dump_id, route_id, target):after(function() end, said("control.capture.move_failed"))
@@ -334,7 +355,7 @@ local function history_row(_d: any, _i: number, row: State<any>): Node
 		local out = {}
 		local seen: { [string]: boolean } = {}
 		for _, r in row:get().routes or {} do
-			local t = data.target(orchestration.now:get(), chats_now:get(), r.target, function(k: string): string
+			local t = data.target(OV.now(), OV.chats(), r.target, function(k: string): string
 				return k
 			end)
 			local key = `{t.kind}:{t.id or ""}`
@@ -542,17 +563,17 @@ local function capture(): Node
 		end
 	end)
 	local newest = ui.computed(function(): any
-		return orchestration.dumps:get()[1]
+		return OV.dumps()[1]
 	end)
 	-- The earlier ones: how many, and the latest `history_shown` of them,
 	-- the rows the history builds.
 	local older_n = ui.computed(function(): number
-		return math.max(0, #orchestration.dumps:get() - 1)
+		return math.max(0, #OV.dumps() - 1)
 	end)
 	local older = ui.computed(function(): { any }
 		local out = {}
 		local n = history_shown:get()
-		for i, d in orchestration.dumps:get() do
+		for i, d in OV.dumps() do
 			if i > n + 1 then
 				break
 			end
@@ -779,34 +800,35 @@ end
 
 -- The board: every orchestrator's work, its filter over it, loose items in
 -- an Inbox first.
-local function board(): Node
+local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 	return OrchBoard {
+		card_build = card_build,
 		id = "control-board",
 		items = function(): { any }
-			return orchestration.now:get().items or {}
+			return BD.now().items or {}
 		end,
 		orchestrators = function(): { any }
-			return orchestration.now:get().orchestrators or {}
+			return BD.now().orchestrators or {}
 		end,
 		show_filter = true,
 		todo_of = function(chat: string): any
-			local c = chats_now:get()[chat]
+			local c = BD.chats()[chat]
 			return c and c.todo
 		end,
 		thread_of = function(chat: string): any
-			return chats_now:get()[chat]
+			return BD.chats()[chat]
 		end,
 		ask_of = function(chat: string): any
-			return asks_now:get()[chat]
+			return BD.asks()[chat]
 		end,
 		-- (Whose a card is: the project its thread or orchestrator works in.)
 		project_of = function(chat: string): string?
-			local c = chats_now:get()[chat]
+			local c = BD.chats()[chat]
 			local id = c and c.project
 			if not id then
 				return nil
 			end
-			for _, p in sessions.projects:get() or {} do
+			for _, p in BD.projects() or {} do
 				if p.id == id then
 					return p.name
 				end
@@ -843,7 +865,7 @@ local function board(): Node
 		later_open = M.board_later,
 		on_start = orchestration.start_item,
 		space_name = function(id: string): string?
-			for _, p in sessions.projects:get() or {} do
+			for _, p in BD.projects() or {} do
 				if p.id == id then
 					return p.name
 				end
@@ -851,7 +873,7 @@ local function board(): Node
 			return nil
 		end,
 		device_name = function(id: string): string?
-			for _, d in sessions.devices:get() or {} do
+			for _, d in BD.devices() or {} do
 				if d.id == id then
 					return d.name
 				end
@@ -859,7 +881,7 @@ local function board(): Node
 			return nil
 		end,
 		-- (Its clocks, from its lead thread's progress row.)
-		progress_of = Progress.row,
+		progress_of = BD.row,
 		on_link = open_link,
 		-- A card waiting on a decision: its options as chips, and the
 		-- whole of it in the overlay.
@@ -873,12 +895,12 @@ end
 local function needs(): Node
 	return Asks {
 		needs = function(): { any }
-			return data.needs(orchestration.now:get(), sessions.now:get())
+			return data.needs(OV.now(), OV.sessions())
 		end,
 		recent = function(): { any }
-			return decide.recent(orchestration.now:get().asks, 5)
+			return decide.recent(OV.now().asks, 5)
 		end,
-		name_of = name_of,
+		name_of = OV.name_of,
 		on_answer = answer,
 		on_dismiss = function(ask: any)
 			orchestration.dismiss(ask.id):after(function() end, said("control.needs.failed"))
@@ -937,10 +959,10 @@ local function map(): Node
 			world = world,
 			view = M.map_view,
 			timeline = function(): { [string]: { any } }
-				return timeline:get()
+				return OV.timeline()
 			end,
 			comms = function(): { any }
-				return orchestration.comms:get()
+				return OV.comms()
 			end,
 			on_open_chat = open_chat,
 			on_open_orchestrator = function(id: string)
@@ -956,21 +978,19 @@ end
 local function machines(): Node
 	return Machines {
 		devices = function(): { any }
-			return sessions.devices:get()
+			return OV.devices()
 		end,
 		loads = function(): { [string]: any }
-			return orchestration.loads:get()
+			return OV.loads()
 		end,
 		chats = function(): { [string]: any }
-			return chats_now:get()
+			return OV.chats()
 		end,
 		here = function(): string?
-			return sessions.here:get()
+			return OV.here()
 		end,
-		hue_of = function(id: string): number?
-			return hue_of(id)
-		end,
-		name_of = thread_name,
+		hue_of = OV.hue_of,
+		name_of = OV.thread_name,
 		on_open_chat = open_chat,
 	}
 end
@@ -978,14 +998,10 @@ end
 local function comms(): Node
 	return Comms {
 		comms = function(): { any }
-			return orchestration.comms:get()
+			return OV.comms()
 		end,
-		name_of = function(id: string): string?
-			return name_of(id)
-		end,
-		hue_of = function(id: string): number?
-			return hue_of(id)
-		end,
+		name_of = OV.name_of,
+		hue_of = OV.hue_of,
 		on_open = open_chat,
 	}
 end
@@ -999,21 +1015,103 @@ local function qa_computed(): any
 end
 local qa_entries = qa_computed()
 
+-- A tab's readers of what the page shows, each held while the tab is
+-- hidden (ds/hold, counted as `hold.<tab>`). (Read through `chats_now` and
+-- the rest at each call: they're made again with each Page.)
+local function readers(live: () -> boolean, name: string): any
+	local function held(read: () -> any): () -> any
+		local c = hold.computed(live, read, name)
+		return function(): any
+			return c:get()
+		end
+	end
+	local R: any = { live = live }
+	R.now = held(function(): any
+		return orchestration.now:get()
+	end)
+	R.dumps = held(function(): any
+		return orchestration.dumps:get()
+	end)
+	R.comms = held(function(): any
+		return orchestration.comms:get()
+	end)
+	R.loads = held(function(): any
+		return orchestration.loads:get()
+	end)
+	R.sessions = held(function(): any
+		return sessions.now:get()
+	end)
+	R.devices = held(function(): any
+		return sessions.devices:get()
+	end)
+	R.projects = held(function(): any
+		return sessions.projects:get()
+	end)
+	R.here = held(function(): any
+		return sessions.here:get()
+	end)
+	R.chats = held(function(): any
+		return chats_now:get()
+	end)
+	R.asks = held(function(): any
+		return asks_now:get()
+	end)
+	R.named = held(function(): any
+		return named:get()
+	end)
+	R.qa = held(function(): any
+		return qa_entries:get()
+	end)
+	R.timeline = held(function(): any
+		return timeline:get()
+	end)
+	R.pad = held(function(): any
+		return scratchpad.now:get()
+	end)
+	R.vis = held(function(): any
+		return Visibility.mode:get()
+	end)
+	R.clock = held(function(): any
+		return Visibility.now()
+	end)
+	local rows = held(function(): any
+		return Progress.rows:get()
+	end)
+	-- A chat's progress row (a board card's clocks).
+	function R.row(id: string): any
+		return rows()[id]
+	end
+	-- A name, a hue: from what's held.
+	function R.name_of(id: string?): string?
+		return data.name_of(R.now(), R.chats(), id)
+	end
+	function R.thread_name(id: string): string
+		return Name.from(R.named(), R.chats(), id)
+	end
+	function R.hue_of(id: string?): number?
+		return data.hue_of(R.now(), R.chats(), id)
+	end
+	return R
+end
+
+
 -- Made again for this build of the page (see `chats_computed`).
 local function fresh()
 	chats_now = chats_computed()
 	asks_now = asks_computed()
 	named = named_computed()
 	qa_entries = qa_computed()
+	OV = readers(live_overview, "overview")
+	BD = readers(live_board, "board")
 end
 
 local function qa(): Node
 	return QA.Section {
 		entries = function(): { QA.Entry }
-			return qa_entries:get()
+			return OV.qa()
 		end,
 		target = function(r: any): any
-			return data.target(orchestration.now:get(), chats_now:get(), r.target, function(k: string): string
+			return data.target(OV.now(), OV.chats(), r.target, function(k: string): string
 				return locale.s(`ds.orch.target.{k}`)
 			end)
 		end,
@@ -1030,7 +1128,7 @@ M.scratchpad_open = ui.state("control_scratchpad_open", false)
 local function scratchpad_props(): any
 	return {
 		pad = function(): any
-			return scratchpad.now:get()
+			return OV.pad()
 		end,
 		on_save_text = function(text: string): any
 			return scratchpad.set_text(text)
@@ -1056,7 +1154,9 @@ local function scratchpad_widget(): Node
 	return Scratch.Widget(scratchpad_props())
 end
 
-local BUILD: { [string]: () -> Node } = { scratchpad = scratchpad_widget, capture = capture, needs = needs, qa = qa, progress = Progress.Widget, map = map, machines = machines, comms = comms }
+local BUILD: { [string]: () -> Node } = { scratchpad = scratchpad_widget, capture = capture, needs = needs, qa = qa, progress = function(): Node
+	return Progress.Widget(live_overview)
+end, map = map, machines = machines, comms = comms }
 
 -- How many of the crew work now.
 local function working_now(): number
@@ -1105,7 +1205,7 @@ end
 M.tally = tally
 
 -- A figure that shows only while it has something to say.
-local function figure_if(text: () -> string, tone: string?): Node
+local function figure_if_live(text: () -> string, tone: string?): Node
 	return ui.show(function(): boolean
 		return text() ~= ""
 	end, Block.figure(text, tone))
@@ -1125,9 +1225,15 @@ local function board_counts(): { [string]: number }
 end
 
 -- What a widget's head says beside its title: its live figures.
-local function figures_of(id: string): Node?
+local function figures_of(id: string, live: () -> boolean): Node?
+	-- (Held while its tab is hidden, as what it counts is: ds/hold.)
+	local function figure_if(text: () -> string, tone: string?): Node
+		return figure_if_live(hold.fn(live, text), tone)
+	end
 	if id == "needs" then
-		local n = tally.needs
+		local n = hold.by(live, function(urgent: boolean): number
+			return tally.needs(urgent)
+		end)
 		return ui.row {
 			gap = "$space.2",
 			items = "center",
@@ -1142,9 +1248,9 @@ local function figures_of(id: string): Node?
 			end, "failed"),
 		}
 	elseif id == "qa" then
-		local function counts(): { unread: number, waiting: number }
+		local counts = hold.fn(live, function(): { unread: number, waiting: number }
 			return QA.counts(qa_entries:get())
-		end
+		end)
 		return ui.row {
 			gap = "$space.3",
 			items = "center",
@@ -1211,12 +1317,12 @@ local function figures_of(id: string): Node?
 			end),
 		}
 	elseif id == "progress" then
-		return Progress.figures()
+		return Progress.figures(live)
 	elseif id == "scratchpad" then
 		return Scratch.Status()
 	elseif id == "comms" then
 		return figure_if(function(): string
-			local list = orchestration.comms:get()
+			local list = OV.comms()
 			local last = list[#list]
 			return if last then status.ago(status.since(last.at or 0)) else ""
 		end)
@@ -1246,8 +1352,13 @@ end
 -- till then: built all at once, the Map, the Scratchpad, the Board and the
 -- rest took 0.4 to 1.4 s in one frame (the window not answering meanwhile).
 local STAGE_NOW = 2
+-- (Built before it's opened, Overview hidden: in the background instead,
+-- ds/stage's `Idle`, all at once should it be opened first.)
 local function staged(id: string): Node
 	local rank = table.find(full_order(M.widgets:peek()), id) or #M.WIDGETS
+	if background("overview") then
+		return stage.Idle { rank = rank, build = BUILD[id], h = 160, now = live_overview, group = "overview" }
+	end
 	return stage.Later(rank - STAGE_NOW, BUILD[id])
 end
 
@@ -1278,7 +1389,7 @@ local function widget(id: string, wide: boolean): Node
 		id = `control-widget-{id}`,
 		class = "control-widget",
 		title = locale.t(`control.widget.{id}`),
-		figures = figures_of(id),
+		figures = figures_of(id, live_overview),
 		menu = ui.div {
 			class = "control-widget-menu",
 			on_visible = seen,
@@ -1487,7 +1598,9 @@ local FLOAT_KNOB = 51
 -- model under it. Escape, or the knob, folds it back. Its own drop zone,
 -- as Capture is one. `take_keys`: it takes them as it comes (they were in
 -- Capture's).
-local FloatingCapture = ui.component(function(props: { width: () -> number, take_keys: boolean }): Node
+-- Kept built while the page is (`shown`: whether it floats now), so going to
+-- a tab where it floats only shows it.
+local FloatingCapture = ui.component(function(props: { width: () -> number, shown: () -> boolean }): Node
 	local open = M.float_open
 	local focus = ui.use_state(0)
 	-- (The keys asked for once its form is laid out: one made again, bare
@@ -1502,9 +1615,38 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 			end)
 		end)
 	end
-	if props.take_keys then
+	-- Shown: the keys, if Capture's had them; hidden: let go of them, folded.
+	local was_shown = props.shown()
+	if was_shown and float_takes_keys then
+		float_takes_keys = false
 		take_keys()
 	end
+	ui.effect(function()
+		local on = props.shown()
+		if on == was_shown then
+			return
+		end
+		was_shown = on
+		if on then
+			if float_takes_keys then
+				float_takes_keys = false
+				take_keys()
+			end
+			return
+		end
+		ui.after(0, function()
+			if float_focused then
+				local f = float_ref:peek()
+				if f then
+					f:blur()
+				end
+				float_focused = false
+			end
+			if open:peek() then
+				open:set(false)
+			end
+		end)
+	end)
 	local wanted = float_wanted:peek()
 	ui.effect(function()
 		local n = float_wanted:get()
@@ -1615,7 +1757,9 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 			id = "control-float",
 			ref = float_ref,
 			w = motion.tween(w, { duration = 220, ease = "out(3)" }),
-			pointer_events = "auto",
+			pointer_events = function(): any
+				return if props.shown() then "auto" else "none"
+			end,
 			on_resize = function(size: { w: number, h: number }, el: Element)
 				if math.abs(size.h - M.float_h:peek()) >= 1 then
 					M.float_h:set(size.h)
@@ -1706,6 +1850,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 							on_focus = function(on: boolean)
 								float_focused = on
 							end,
+							shown = props.shown,
 						},
 					},
 					-- (Beside it, bare: opened out, its panel's head folds it.)
@@ -1764,10 +1909,20 @@ end
 
 -- Overview: Capture and the widgets (or the Scratchpad opened to its page).
 local Overview = ui.component(function(props: { width: State<number> }): Node
-	-- Loads are sampled only while the widgets show (Machines, the Map's lanes).
-	orchestration.loads_wanted(true)
+	-- Loads are sampled only while the widgets show (Machines, the Map's
+	-- lanes): not while the tab is kept hidden.
+	local wanted = false
+	ui.effect(function()
+		local on = live_overview()
+		if on ~= wanted then
+			wanted = on
+			orchestration.loads_wanted(on)
+		end
+	end)
 	ui.on_cleanup(function()
-		orchestration.loads_wanted(false)
+		if wanted then
+			orchestration.loads_wanted(false)
+		end
 	end)
 	return scrolled {
 		id = "control-scroll",
@@ -1795,8 +1950,18 @@ end)
 M.board_place = ui.state("control_board_scroll", 0)
 
 -- Board: its figures, then the board across the page (a frame after the
--- tab's first, ds/stage).
+-- tab's first, ds/stage). Built before it's opened (in the background, the
+-- Board hidden): a card a frame (ds/stage's `Idle`), out of layout till
+-- they're all in, all at once should it be opened first.
 local BoardTab = ui.component(function(): Node
+	local idle = background("board")
+	local function build(): Node
+		return board(if idle
+			then function(make: () -> Node, i: number): Node
+				return stage.Idle { rank = i, build = make, h = 96, now = live_board, group = "board" }
+			end
+			else nil)
+	end
 	return scrolled {
 		id = "control-board-scroll",
 		place = M.board_place,
@@ -1808,8 +1973,8 @@ local BoardTab = ui.component(function(): Node
 			id = "control-board-tab",
 			w_full = true,
 			gap = "$space.3",
-			ui.row { id = "control-board-figures", w_full = true, min_h = 20, items = "center", figures_of("board") },
-			stage.Later(1, board, 480),
+			ui.row { id = "control-board-figures", w_full = true, min_h = 20, items = "center", figures_of("board", live_board) },
+			if idle then stage.Idle { rank = 0, build = build, h = 480, now = live_board, group = "board" } else stage.Later(1, build, 480),
 		},
 	}
 end)
@@ -1837,7 +2002,7 @@ local ChatTab = ui.component(function(): Node
 					fill = true,
 				}
 			end
-			return stage.Later(1, function(): Node
+			local function build(): Node
 				return LaneTab.Tab {
 					tab = {
 						id = M.CHAT_SLOT,
@@ -1848,17 +2013,92 @@ local ChatTab = ui.component(function(): Node
 							foot = function(): number
 								return M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR
 							end,
+							live = M.live("chat"),
 						},
 					},
 				}
-			end)
+			end
+			-- (Built before it's opened: in the background.)
+			if background("chat") then
+				return stage.Idle { rank = 0, build = build, h = 0, now = M.live("chat"), group = "chat" }
+			end
+			return stage.Later(1, build)
 		end, { w_full = true, grow = 1, min_h = 0 }),
 	}
 end)
 
+-- The tabs built so far: each stays once built, hidden while another
+-- shows. The rest are built in the background `PREBUILD_AFTER` ms after the
+-- page opens (ds/stage's `Idle`: a few pieces a frame, while the window is
+-- idle), so even a first click only shows what's there.
+M.built = ui.state("control_tabs_built", {} :: { [string]: boolean })
+M.PREBUILD_AFTER = 1200
+
+-- One tab, kept: built once asked for, hidden while another shows.
+local function kept(tab: string, build: () -> Node): Node
+	return ui.presence(function(): string?
+		return if M.built:get()[tab] then tab else nil
+	end, function(): Node
+		return ui.column {
+			id = `control-tab-{tab}`,
+			w_full = true,
+			h_full = true,
+			min_h = 0,
+			-- (Kept laid out, not drawn: shown again, nothing is laid out anew.
+			-- Its readers are held meanwhile, ds/hold: nothing in it changes.)
+			invisible = function(): boolean
+				return M.tab:get() ~= tab
+			end,
+			pointer_events = function(): any
+				return if M.tab:get() == tab then "auto" else "none"
+			end,
+			-- (While it's still being built in the background, out of layout
+			-- altogether: laid out once, when its last piece is in.)
+			ui.column {
+				w_full = true,
+				h_full = true,
+				min_h = 0,
+				hidden = function(): boolean
+					return M.tab:get() ~= tab and (stage.pending:get()[tab] or 0) > 0
+				end,
+				build(),
+			},
+		}
+	end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0 })
+end
+
 M.Page = ui.component(function(): Node
 	fresh()
 	local width = ui.use_state(0)
+	-- The tab shown is built; the others once the page has settled.
+	M.built:set({ [M.tab:peek()] = true })
+	M.awake:set(M.tab:peek())
+	ui.effect(function()
+		local tab = M.tab:get()
+		if M.awake:peek() ~= tab then
+			-- (A frame's room first: the tab drawn as it was.)
+			ui.after(16, function()
+				if M.tab:peek() == tab then
+					M.awake:set(tab)
+				end
+			end)
+		end
+	end)
+	ui.effect(function()
+		local tab = M.tab:get()
+		if not M.built:peek()[tab] then
+			M.built:set_key({ tab }, true)
+		end
+	end)
+	local alive = true
+	ui.on_cleanup(function()
+		alive = false
+	end)
+	ui.after(M.PREBUILD_AFTER, function()
+		if alive then
+			M.built:set({ overview = true, board = true, chat = true })
+		end
+	end)
 	-- A dump asked to be shown from another page (a board card's source):
 	-- on Overview, where Capture's history is.
 	ui.effect(function()
@@ -1909,38 +2149,48 @@ M.Page = ui.component(function(): Node
 			end,
 			ui.column { w_full = true, max_w = MAX_W, head() },
 		},
-		-- (A real swap: only the tab shown is built.)
-		ui.presence(function(): string
-			return M.tab:get()
-		end, function(tab: string): Node
-			if tab == "board" then
+		-- The tabs: each built the first time it's shown (or in the
+		-- background, once the page has settled) and kept, hidden while
+		-- another shows: going back to one is showing it.
+		ui.column {
+			w_full = true,
+			grow = 1,
+			min_h = 0,
+			relative = true,
+			kept("overview", function(): Node
+				return Overview { width = width }
+			end),
+			kept("board", function(): Node
 				return BoardTab {}
-			elseif tab == "chat" then
+			end),
+			kept("chat", function(): Node
 				return ChatTab {}
-			end
-			return Overview { width = width }
-		end, { w_full = true, grow = 1, min_h = 0 }),
-		-- Capture's composer, floating.
-		ui.presence(function(): string?
-			return if float_shown:get() then "float" else nil
-		end, function(): Node
-			local keys = float_takes_keys
-			float_takes_keys = false
-			return FloatingCapture {
-				width = function(): number
-					return width:get()
-				end,
-				take_keys = keys,
-			}
-		end, {
+			end),
+		},
+		-- Capture's composer, floating: kept built, shown where it floats
+		-- (faded in; gone at once).
+		ui.column {
+			id = "control-float-layer",
 			absolute = true,
 			left = 0,
 			right = 0,
 			bottom = 0,
 			pointer_events = "none",
-			enter = motion.transition({ opacity = { 0, 1 }, y = { 12, 0 }, duration = 220, ease = "out(3)" }),
-			exit = motion.transition({ opacity = { 1, 0 }, y = { 0, 8 }, duration = 140, ease = "in(2)" }),
-		}),
+			invisible = function(): boolean
+				return not float_shown:get()
+			end,
+			opacity = motion.tween(ui.computed(function(): number
+				return if float_shown:get() then 1 else 0
+			end), { duration = 160, ease = "out(3)" }),
+			FloatingCapture {
+				width = function(): number
+					return width:get()
+				end,
+				shown = function(): boolean
+					return float_shown:get()
+				end,
+			},
+		},
 		decision(),
 	}
 end)

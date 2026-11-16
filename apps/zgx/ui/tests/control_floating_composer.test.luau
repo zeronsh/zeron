@@ -34,6 +34,12 @@ local function focused(app: any): string
 	return ""
 end
 
+-- Whether it floats: kept built while the page is, hidden where it doesn't.
+local function floats(app: any): boolean
+	local line = string.match(app:tree("#control-float-layer", 0), "[^\n]+") or ""
+	return not string.find(line, " hidden", 1, true)
+end
+
 local function down(app: any)
 	app:scroll("#control-scroll", 900)
 	app:frames(30)
@@ -50,12 +56,12 @@ end
 
 test("floating composer: Capture scrolled out of view floats it, scrolled back it goes, the draft kept", function()
 	local app = open()
-	expect(app:has("#control-float")).to_be(false)
+	expect(floats(app)).to_be(false)
 	app:type("#control-capture-composer >> role:textbox", "half a thought")
 	app:frames(5)
 	down(app)
 	expect(app:state("control_capture_floating")).to_be(true)
-	expect(app:has("#control-float")).to_be(true)
+	expect(floats(app)).to_be(true)
 	-- (Bare: one line, no model under it.)
 	expect(app:text("#control-float >> role:textbox")).to_be("half a thought")
 	expect(app:state("control_capture_float_open")).to_be(false)
@@ -63,7 +69,7 @@ test("floating composer: Capture scrolled out of view floats it, scrolled back i
 	expect(app:state("control_capture_floating")).to_be(false)
 	-- (Its exit played out.)
 	app:frames(30)
-	expect(app:has("#control-float")).to_be(false)
+	expect(floats(app)).to_be(false)
 	expect(app:text("#control-capture-composer >> role:textbox")).to_be("half a thought")
 	expect(app:error()).to_be_nil()
 end)
@@ -81,7 +87,7 @@ test("floating composer: typed in while floating, sent with Enter, and the same 
 	expect(app:text("#control-float >> role:textbox")).to_be("")
 	expect(app:state(DRAFT)).to_be("")
 	-- Still floating, still bare.
-	expect(app:has("#control-float")).to_be(true)
+	expect(floats(app)).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -134,7 +140,7 @@ test("floating composer: typing in it keeps the keys as Capture comes back", fun
 	app:frames(5)
 	up(app)
 	app:frames(10)
-	expect(app:has("#control-float")).to_be(false)
+	expect(floats(app)).to_be(false)
 	expect(focused(app)).to_be("inline")
 	-- (Where it was: Capture in view.)
 	expect(app:state("control_scroll")).to_be(0)
@@ -142,7 +148,7 @@ test("floating composer: typing in it keeps the keys as Capture comes back", fun
 	-- And Capture's keys go with it as it floats again.
 	down(app)
 	app:frames(10)
-	expect(app:has("#control-float")).to_be(true)
+	expect(floats(app)).to_be(true)
 	expect(focused(app)).to_be("float")
 end)
 
@@ -156,7 +162,7 @@ test("floating composer: ⌘⇧K and / give the composer the keys where it shows
 	-- Out of view: the keys go with it into the floating one; Escape gives
 	-- them back to the window, and ⌘⇧K into the floating one again.
 	down(app)
-	expect(app:has("#control-float")).to_be(true)
+	expect(floats(app)).to_be(true)
 	expect(focused(app)).to_be("float")
 	app:key("Escape")
 	app:frames(5)
