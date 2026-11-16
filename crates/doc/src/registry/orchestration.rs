@@ -19,7 +19,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Map;
 use zeron_proto::orchestration::{
-    Ask, CrewMember, Dump, OrchestrationSettings, OrchestrationState, Orchestrator, Progress, Route,
+    Ask, AskState, CrewMember, Dump, OrchestrationSettings, OrchestrationState, Orchestrator, Progress, Route,
     WorkItem,
 };
 
@@ -51,6 +51,14 @@ pub const ORCHESTRATION_KINDS: [&str; 6] = [
 
 /// `WatchOrchestration` sends at most this many dumps, newest first.
 pub const MAX_DUMPS_IN_STATE: usize = 50;
+
+/// Closed asks (answered or dismissed) stay in the state `WatchOrchestration`
+/// sends this long after they closed. Older ones stay in the registry (synced,
+/// saved, readable by id) but out of the state every reader copies.
+pub const CLOSED_ASKS_IN_STATE_DAYS: i64 = 14;
+/// The newest closed asks the state always keeps, however old (Recent answers
+/// shows the latest few).
+pub const CLOSED_ASKS_IN_STATE_AT_LEAST: usize = 20;
 
 /// A text field is cut to this many bytes before it's written: a row is an
 /// index entry, and the room refuses (for good) an op over
@@ -352,6 +360,10 @@ impl RegistryDoc {
         self.read_cached::<Lenient<T>, T>(T::KIND, unwrap::<T>)
     }
 
+    fn read_entities_with<T: Entity, O>(&self, pick: impl FnOnce(&std::collections::HashMap<String, T>) -> O) -> O {
+        self.read_cached_with::<Lenient<T>, T, O>(T::KIND, unwrap::<T>, pick)
+    }
+
     /// Changes whenever any orchestration row may have changed.
     pub fn orchestration_version(&self) -> u64 {
         ORCHESTRATION_KINDS
@@ -504,18 +516,54 @@ impl RegistryDoc {
         self.kind_version(KIND_PROGRESS)
     }
 
-    /// Everything, as `WatchOrchestration` sends it (the newest
-    /// [`MAX_DUMPS_IN_STATE`] dumps).
+    /// The newest `n` dumps, newest first (only those are copied).
+    pub fn read_newest_dumps(&self, n: usize) -> Vec<Dump> {
+        self.read_entities_with(|rows: &std::collections::HashMap<String, Dump>| {
+            let mut all: Vec<&Dump> = rows.values().collect();
+            let newest_first = |a: &&Dump, b: &&Dump| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id));
+            if all.len() > n {
+                all.select_nth_unstable_by(n, newest_first);
+                all.truncate(n);
+            }
+            all.sort_by(newest_first);
+            all.into_iter().cloned().collect()
+        })
+    }
+
+    /// The asks the state holds as of `now`, oldest first: every open one,
+    /// and the closed ones from the last [`CLOSED_ASKS_IN_STATE_DAYS`] or among
+    /// the newest [`CLOSED_ASKS_IN_STATE_AT_LEAST`] closed.
+    pub fn read_current_asks(&self, now: DateTime<Utc>) -> Vec<Ask> {
+        let since = now - chrono::TimeDelta::days(CLOSED_ASKS_IN_STATE_DAYS);
+        let closed_at = |a: &Ask| a.answered_at.or(a.updated_at).unwrap_or(a.created_at);
+        self.read_entities_with(|rows: &std::collections::HashMap<String, Ask>| {
+            let (open, mut closed): (Vec<&Ask>, Vec<&Ask>) =
+                rows.values().partition(|a| a.state == AskState::Open);
+            closed.sort_by(|a, b| closed_at(b).cmp(&closed_at(a)).then_with(|| a.id.cmp(&b.id)));
+            let kept = closed
+                .into_iter()
+                .enumerate()
+                .filter(|(i, a)| *i < CLOSED_ASKS_IN_STATE_AT_LEAST || closed_at(a) >= since)
+                .map(|(_, a)| a);
+            let mut asks: Vec<Ask> = open.into_iter().chain(kept).cloned().collect();
+            asks.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+            asks
+        })
+    }
+
+    /// Everything, as `WatchOrchestration` sends it: the newest
+    /// [`MAX_DUMPS_IN_STATE`] dumps and the current asks
+    /// ([`Self::read_current_asks`]). What's left out stays in the registry.
     pub fn read_orchestration(&self) -> OrchestrationState {
-        let mut dumps = self.read_dumps();
-        dumps.truncate(MAX_DUMPS_IN_STATE);
+        let perf_t = std::time::Instant::now();
+        let _perf = PerfLog(perf_t);
         OrchestrationState {
             orchestrators: self.read_orchestrators(),
             crew: self.read_crew(),
             // A card taken off the board is gone for every reader.
             items: self.read_work_items().into_iter().filter(|i| !i.removed).collect(),
-            asks: self.read_asks(),
-            dumps,
+            asks: self.read_current_asks(Utc::now()),
+            dumps: self.read_newest_dumps(MAX_DUMPS_IN_STATE),
             settings: self.orchestration_settings(),
         }
     }
@@ -862,5 +910,63 @@ mod tests {
         assert_eq!(state.dumps.len(), MAX_DUMPS_IN_STATE);
         assert_eq!(state.dumps[0].id, "d59");
         assert_eq!(doc.read_dumps().len(), 60, "older dumps stay");
+        // The same fifty, in the same order, as a full read cut to fifty.
+        let mut all = doc.read_dumps();
+        all.truncate(MAX_DUMPS_IN_STATE);
+        assert_eq!(state.dumps, all);
+    }
+
+    #[test]
+    fn state_keeps_open_and_recent_asks_and_the_registry_keeps_them_all() {
+        let now = ts(1_800_000_000_000);
+        let day = 24 * 3600 * 1000;
+        let ask = |id: &str, state: &str, created: i64, answered: Option<i64>| -> Ask {
+            let mut a: Ask = serde_json::from_value(serde_json::json!({
+                "id": id, "fromChat": "c1", "kind": "question", "question": id, "state": state,
+                "createdAt": ts(created),
+            }))
+            .unwrap();
+            a.answered_at = answered.map(ts);
+            a
+        };
+        let mut doc = RegistryDoc::new("dev-a");
+        let old = now.timestamp_millis() - 60 * day;
+        // An open ask stays however old.
+        doc.upsert_ask(&ask("open-old", "open", old, None));
+        // 30 answered two months ago: only the newest 20 stay.
+        for i in 0..30 {
+            doc.upsert_ask(&ask(&format!("old{i:02}"), "answered", old + i, Some(old + i)));
+        }
+        // Answered or dismissed this week: all stay.
+        for i in 0..25 {
+            let at = now.timestamp_millis() - 3 * day + i;
+            doc.upsert_ask(&ask(&format!("new{i:02}"), if i % 2 == 0 { "answered" } else { "dismissed" }, at, Some(at)));
+        }
+        let asks = doc.read_current_asks(now);
+        let ids: std::collections::HashSet<&str> = asks.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains("open-old"));
+        assert!((0..25).all(|i| ids.contains(format!("new{i:02}").as_str())), "a recent closed ask was dropped");
+        assert!(!ids.iter().any(|id| id.starts_with("old")), "25 recent ones are past the floor: old ones go");
+        assert_eq!(asks.len(), 26);
+        assert!(asks.windows(2).all(|w| w[0].created_at <= w[1].created_at), "oldest first");
+        // Out of the state, not out of the registry.
+        assert_eq!(doc.read_asks().len(), 56);
+        assert!(doc.ask("old00").is_some());
+        // With few recent ones, the newest closed stay up to the floor.
+        let mut quiet = RegistryDoc::new("dev-a");
+        for i in 0..30 {
+            quiet.upsert_ask(&ask(&format!("old{i:02}"), "answered", old + i, Some(old + i)));
+        }
+        let kept = quiet.read_current_asks(now);
+        assert_eq!(kept.len(), CLOSED_ASKS_IN_STATE_AT_LEAST);
+        assert!(kept.iter().any(|a| a.id == "old29") && !kept.iter().any(|a| a.id == "old00"));
+    }
+}
+
+/// perf-audit: logs how long a read_orchestration took (dropped at its end).
+struct PerfLog(std::time::Instant);
+impl Drop for PerfLog {
+    fn drop(&mut self) {
+        tracing::debug!(target: "perf", what = "read_orchestration", us = self.0.elapsed().as_micros() as u64);
     }
 }
