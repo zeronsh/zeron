@@ -214,6 +214,13 @@ describe("Cloud delegates", () => {
     await waitForSession(u, child.chatId, "starting");
   });
 
+  it("wakes another of the person's sleeping Cloud chats it sends to, not only its children", async () => {
+    const { u, other, runner } = await world();
+    expect((await session(u, other.chatId))?.state).toBe("sleeping");
+    expect((await call("POST", `/device/${other.deviceId}/nudge`, runner, { chatId: other.chatId })).status).toBe(200);
+    await waitForSession(u, other.chatId, "starting");
+  });
+
   it("wakes its sleeping parent once it stops working: finished, or waiting on an answer", async () => {
     const { u, user, main, runner } = await world();
     const child = await readyChild(u, runner, main.chatId);

@@ -915,6 +915,8 @@ pub struct EngineRpc {
     workspace_files: crate::WorkspaceFiles,
     terminals: Terminals,
     remote_terminals: crate::remote_terminals::RemoteTerminals,
+    /// Agents' shell commands here ([`crate::commands`]).
+    commands: crate::commands::Commands,
     project_actions: ProjectActionsStore,
     previews: Option<zeron_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
@@ -979,6 +981,7 @@ impl EngineRpc {
             workspace_files,
             terminals,
             remote_terminals: Default::default(),
+            commands: Default::default(),
             project_actions,
             previews: None,
             change_requests,
@@ -1010,6 +1013,12 @@ impl EngineRpc {
     }
 
     /// Share the engine-wide routing state for terminals on other devices.
+    /// The engine's agents' commands (one service per engine).
+    pub fn with_commands(mut self, commands: crate::commands::Commands) -> Self {
+        self.commands = commands;
+        self
+    }
+
     pub fn with_remote_terminals(
         mut self,
         remote_terminals: crate::remote_terminals::RemoteTerminals,
@@ -1924,9 +1933,9 @@ impl EngineRpc {
 
     /// A background command the calling agent just started (`device`: where,
     /// `None` here): its chat shows it with its runtime's background
-    /// processes until it ends. Only an agent's own call: a peer forwarding
-    /// one here is running it for a chat hosted there.
-    fn track_command(&self, device: Option<&str>, started: &serde_json::Value) {
+    /// processes until it ends ([`Self::follow_commands`]). Only an agent's
+    /// own call: a peer forwarding one here runs it for a chat hosted there.
+    fn show_command(&self, device: Option<&str>, started: &serde_json::Value) {
         let zeron_rpc::Caller::Agent { chat: Some(chat) } = zeron_rpc::caller() else {
             return;
         };
@@ -1941,88 +1950,92 @@ impl EngineRpc {
                 .find(|d| d.id == device)
                 .map(|d| d.name)
         });
-        let task = zeron_proto::BackgroundTask {
-            id: match device {
-                Some(device) => format!("{id}@{device}"),
-                None => id.to_owned(),
-            },
-            command: started["command"].as_str().unwrap_or_default().to_owned(),
-            description: name.map(|name| format!("on {name}")),
-            started_at: chrono::Utc::now(),
-        };
-        let command = crate::run_command::CommandTask {
+        let task = crate::commands::CommandTask {
             device: device.map(str::to_owned),
             id: id.to_owned(),
-            task,
+            task: zeron_proto::BackgroundTask {
+                id: match device {
+                    Some(device) => format!("{id}@{device}"),
+                    None => id.to_owned(),
+                },
+                command: started["command"].as_str().unwrap_or_default().to_owned(),
+                description: name.map(|name| format!("on {name}")),
+                started_at: chrono::Utc::now(),
+            },
         };
-        if self.sessions.track_command(&chat, command) {
-            let rpc = self.clone();
-            tokio::spawn(async move { rpc.follow_commands().await });
-        }
+        let follower = self.clone();
+        let (chat_id, device) = (chat.clone(), task.device.clone());
+        self.commands.show(&self.sessions, &chat, task, move || {
+            tokio::spawn(follower.follow_commands(chat_id, device))
+        });
     }
 
-    /// While any are tracked: every few seconds, ask each device which of a
-    /// chat's commands still run, and show those. A device out of reach
-    /// keeps its commands shown for [`COMMAND_UNREACHABLE`], then they go.
-    async fn follow_commands(self) {
-        const EVERY: Duration = Duration::from_secs(5);
-        const COMMAND_UNREACHABLE: Duration = Duration::from_secs(120);
-        let mut unreachable: std::collections::HashMap<String, std::time::Instant> = Default::default();
+    /// Follow the commands `chat` shows on `device` (`None`: here) through
+    /// that device's `WatchBackgroundCommands`: each one that ends leaves the
+    /// row as it ends, and the row stays fresh (the live heartbeat's
+    /// cadence) while any run. A device out of reach keeps its commands
+    /// shown for [`COMMANDS_UNREACHABLE`] while it's dialled again, then they
+    /// go. Ends when the chat shows none there.
+    async fn follow_commands(self, chat: String, device: Option<String>) {
+        const COMMANDS_UNREACHABLE: Duration = Duration::from_secs(120);
+        const REDIAL: Duration = Duration::from_secs(3);
+        let heartbeat_every =
+            Duration::from_millis(zeron_proto::view::SESSION_HEARTBEAT_MS as u64 / 2);
+        let mut heartbeat = tokio::time::interval(heartbeat_every);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut lost_since: Option<tokio::time::Instant> = None;
         loop {
-            tokio::time::sleep(EVERY).await;
-            if !self.sessions.commands_followed() {
+            let watched = match &device {
+                None => Ok(self.commands.watch(chat.clone())),
+                Some(target) => match self
+                    .forward(
+                        target,
+                        methods::WATCH_BACKGROUND_COMMANDS,
+                        serde_json::json!({ "chatId": chat }),
+                    )
+                    .await
+                {
+                    Ok(RpcReply::Stream(stream)) => Ok(stream),
+                    Ok(RpcReply::Value(_)) => Err(()),
+                    Err(error) => {
+                        tracing::debug!(%chat, %target, %error, "commands' device not followed yet");
+                        Err(())
+                    }
+                },
+            };
+            if let Ok(mut listed) = watched {
+                lost_since = None;
+                loop {
+                    tokio::select! {
+                        item = listed.next() => {
+                            let Some(item) = item else { break };
+                            let running: HashSet<String> = item
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter(|c| c["status"] == "running")
+                                .filter_map(|c| c["id"].as_str().map(str::to_owned))
+                                .collect();
+                            self.sessions.retain_commands(&chat, &device, |id| running.contains(id));
+                            if !self.commands.followed(&self.sessions, &chat, &device) {
+                                return;
+                            }
+                        }
+                        _ = heartbeat.tick() => self.sessions.heartbeat(&chat),
+                    }
+                }
+            }
+            // Its stream ended or never opened: dial again, a while.
+            let since = *lost_since.get_or_insert_with(tokio::time::Instant::now);
+            if since.elapsed() >= COMMANDS_UNREACHABLE {
+                tracing::info!(%chat, ?device, "commands' device out of reach: no longer shown");
+                self.sessions.retain_commands(&chat, &device, |_| false);
+            }
+            if !self.commands.followed(&self.sessions, &chat, &device) {
                 return;
             }
-            for (chat, commands) in self.sessions.tracked_commands() {
-                let mut devices: Vec<Option<String>> = commands.iter().map(|c| c.device.clone()).collect();
-                devices.sort();
-                devices.dedup();
-                // Per device: the ids still running, or `None` if it couldn't say.
-                let mut running: std::collections::HashMap<Option<String>, Option<HashSet<String>>> = Default::default();
-                for device in devices {
-                    let listed = match &device {
-                        None => Some(serde_json::to_value(crate::run_command::list(Some(&chat))).unwrap_or_default()),
-                        Some(target) => match tokio::time::timeout(
-                            Duration::from_secs(10),
-                            self.forward(target, methods::LIST_BACKGROUND_COMMANDS, serde_json::json!({ "chatId": chat })),
-                        )
-                        .await
-                        {
-                            Ok(Ok(RpcReply::Value(value))) => Some(value),
-                            _ => None,
-                        },
-                    };
-                    let ids = listed.map(|listed| {
-                        listed
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter(|c| c["status"] == "running")
-                            .filter_map(|c| c["id"].as_str().map(str::to_owned))
-                            .collect()
-                    });
-                    if let Some(target) = &device {
-                        if ids.is_some() {
-                            unreachable.remove(target);
-                        } else {
-                            unreachable.entry(target.clone()).or_insert_with(std::time::Instant::now);
-                        }
-                    }
-                    running.insert(device, ids);
-                }
-                let still: Vec<_> = commands
-                    .into_iter()
-                    .filter(|c| match running.get(&c.device) {
-                        Some(Some(ids)) => ids.contains(&c.id),
-                        _ => c
-                            .device
-                            .as_ref()
-                            .and_then(|d| unreachable.get(d))
-                            .is_none_or(|since| since.elapsed() < COMMAND_UNREACHABLE),
-                    })
-                    .collect();
-                self.sessions.set_tracked_commands(&chat, still);
-            }
+            self.sessions.heartbeat(&chat);
+            tokio::time::sleep(REDIAL).await;
         }
     }
 
@@ -2594,7 +2607,7 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::APPLY_HARNESS_UPDATE => crate::harness_updates::APPLY_REPLY_DEADLINE,
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // The longest a command may run there, and the reply's way back.
-        methods::RUN_COMMAND => crate::run_command::MAX_TIMEOUT + Duration::from_secs(30),
+        methods::RUN_COMMAND => crate::commands::MAX_TIMEOUT + Duration::from_secs(30),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         _ => Duration::from_secs(30),
@@ -2754,6 +2767,7 @@ fn forwardable(method: &str) -> bool {
             | methods::READ_COMMAND_OUTPUT
             | methods::STOP_COMMAND
             | methods::LIST_BACKGROUND_COMMANDS
+            | methods::WATCH_BACKGROUND_COMMANDS
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
@@ -2814,6 +2828,7 @@ fn is_stream_method(method: &str) -> bool {
         methods::WATCH_DOC_MESSAGES
             | methods::WATCH_QUEUE
             | methods::SUBSCRIBE_TERMINAL
+            | methods::WATCH_BACKGROUND_COMMANDS
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
@@ -3431,7 +3446,7 @@ impl RpcService for EngineRpc {
             if method == methods::RUN_COMMAND && params["background"] == true {
                 let started = self.forward(&target, method, params).await?;
                 if let RpcReply::Value(started) = &started {
-                    self.track_command(Some(&target), started);
+                    self.show_command(Some(&target), started);
                 }
                 return Ok(started);
             }
@@ -4111,17 +4126,21 @@ impl RpcService for EngineRpc {
             methods::STOP_BACKGROUND_TASK => {
                 let p: BackgroundTaskParams = parse_params(params)?;
                 // A command its agent left running with run_command, wherever.
-                if let Some((id, device)) = crate::run_command::CommandTask::parse(&p.task_id) {
+                if let Some((id, device)) = crate::commands::CommandTask::parse(&p.task_id) {
                     match device.filter(|d| d != self.doc_host.device_id()) {
                         Some(device) => {
-                            self.forward(&device, methods::STOP_COMMAND, serde_json::json!({ "id": id }))
-                                .await?;
+                            self.forward(
+                                &device,
+                                methods::STOP_COMMAND,
+                                serde_json::json!({ "id": id }),
+                            )
+                            .await?;
                         }
                         None => {
-                            crate::run_command::stop(&id).await.map_err(RpcError::Failed)?;
+                            self.commands.stop(&id).await.map_err(RpcError::Failed)?;
                         }
                     }
-                    self.sessions.untrack_command(&p.chat_id, &p.task_id);
+                    self.sessions.hide_command(&p.chat_id, &p.task_id);
                     return RpcReply::value(&serde_json::json!({ "stopping": true }));
                 }
                 let stopping = self.sessions.stop_background_task(&p.chat_id, &p.task_id);
@@ -4158,16 +4177,20 @@ impl RpcService for EngineRpc {
             }
             methods::READ_BACKGROUND_TASK_OUTPUT => {
                 let p: BackgroundTaskParams = parse_params(params)?;
-                if let Some((id, device)) = crate::run_command::CommandTask::parse(&p.task_id) {
+                if let Some((id, device)) = crate::commands::CommandTask::parse(&p.task_id) {
                     let output = match device.filter(|d| d != self.doc_host.device_id()) {
                         Some(device) => match self
-                            .forward(&device, methods::READ_COMMAND_OUTPUT, serde_json::json!({ "id": id, "tail": true }))
+                            .forward(
+                                &device,
+                                methods::READ_COMMAND_OUTPUT,
+                                serde_json::json!({ "id": id, "tail": true }),
+                            )
                             .await
                         {
                             Ok(RpcReply::Value(value)) => serde_json::from_value(value).ok(),
                             _ => None,
                         },
-                        None => crate::run_command::tail(&id).ok(),
+                        None => self.commands.tail(&id).ok(),
                     };
                     let output: Option<zeron_proto::BackgroundTaskOutput> = output;
                     return RpcReply::value(&output);
@@ -5723,13 +5746,17 @@ impl RpcService for EngineRpc {
                 let p: OpenTerminalParams = parse_params(params)?;
                 // Prefer an explicit real path (new-chat canvas has no row
                 // yet). `space-canvas:{spaceId}` names the selected project
-                // so a missing/tilde cwd still lands in that folder.
-                let chat_cwd = self
+                // so a missing/tilde cwd still lands in that folder. Only a
+                // chat this device runs lends its folder and takes the
+                // terminal (its activity rides that chat's session row,
+                // which only its host writes), as for a project action.
+                let hosted = self
                     .workspace
                     .chat(&p.chat_id)
                     .ok()
                     .flatten()
-                    .and_then(|chat| chat.cwd);
+                    .filter(|chat| chat.device_id == self.doc_host.device_id());
+                let chat_cwd = hosted.as_ref().and_then(|chat| chat.cwd.clone());
                 let space_cwd = canvas_space_id(&p.chat_id).and_then(|space_id| {
                     self.workspace
                         .space(space_id)
@@ -5748,7 +5775,7 @@ impl RpcService for EngineRpc {
                     .terminals
                     .open(&cwd, p.cols, p.rows)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                if self.workspace.chat(&p.chat_id).ok().flatten().is_some() {
+                if hosted.is_some() {
                     self.terminals
                         .associate_chat(&session.id, &p.chat_id)
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -5807,21 +5834,26 @@ impl RpcService for EngineRpc {
                     .and_then(|chat| self.workspace.chat(chat).ok().flatten())
                     .filter(|chat| chat.device_id == self.doc_host.device_id())
                     .and_then(|chat| chat.cwd);
-                let cwd = resolve_open_terminal_cwd(p.cwd, chat_cwd, None, &self.repos.scratch_root())
-                    .map_err(RpcError::Failed)?;
+                let cwd =
+                    resolve_open_terminal_cwd(p.cwd, chat_cwd, None, &self.repos.scratch_root())
+                        .map_err(RpcError::Failed)?;
                 if p.background {
-                    let started = crate::run_command::start(&cwd, &p.command, p.chat_id.as_deref())
+                    let started = self
+                        .commands
+                        .start(&cwd, &p.command, p.chat_id.as_deref())
                         .map_err(RpcError::Failed)?;
                     if let Ok(value) = serde_json::to_value(&started) {
-                        self.track_command(None, &value);
+                        self.show_command(None, &value);
                     }
                     return RpcReply::value(&started);
                 }
                 let timeout = p
                     .timeout_ms
                     .map(Duration::from_millis)
-                    .unwrap_or(crate::run_command::DEFAULT_TIMEOUT);
-                let outcome = crate::run_command::run(&cwd, &p.command, timeout)
+                    .unwrap_or(crate::commands::DEFAULT_TIMEOUT);
+                let outcome = self
+                    .commands
+                    .run(&cwd, &p.command, timeout)
                     .await
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&outcome)
@@ -5829,17 +5861,24 @@ impl RpcService for EngineRpc {
             methods::READ_COMMAND_OUTPUT => {
                 let p: CommandIdParams = parse_params(params)?;
                 if p.tail {
-                    return RpcReply::value(&crate::run_command::tail(&p.id).map_err(RpcError::Failed)?);
+                    return RpcReply::value(&self.commands.tail(&p.id).map_err(RpcError::Failed)?);
                 }
-                RpcReply::value(&crate::run_command::read(&p.id).map_err(RpcError::Failed)?)
+                RpcReply::value(&self.commands.read(&p.id).map_err(RpcError::Failed)?)
             }
             methods::STOP_COMMAND => {
                 let p: CommandIdParams = parse_params(params)?;
-                RpcReply::value(&crate::run_command::stop(&p.id).await.map_err(RpcError::Failed)?)
+                RpcReply::value(&self.commands.stop(&p.id).await.map_err(RpcError::Failed)?)
             }
             methods::LIST_BACKGROUND_COMMANDS => {
                 let chat = params.get("chatId").and_then(|c| c.as_str());
-                RpcReply::value(&crate::run_command::list(chat))
+                RpcReply::value(&self.commands.list(chat))
+            }
+            methods::WATCH_BACKGROUND_COMMANDS => {
+                let chat = params
+                    .get("chatId")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or_default();
+                Ok(RpcReply::Stream(self.commands.watch(chat.to_owned())))
             }
             methods::TERMINAL_STATUS => {
                 let p: TerminalIdParams = parse_params(params)?;

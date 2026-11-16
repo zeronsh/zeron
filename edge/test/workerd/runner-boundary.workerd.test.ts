@@ -99,7 +99,7 @@ describe("chat-scoped data", () => {
     const { user, runner, cloud, laptop, laptopChat } = await world();
     const claim = await push(runner, [upsert("chats", laptopChat, { deviceId: cloud }, cloud)], cloud);
     expect(claim.applied).toBe(0);
-    expect(claim.rejected).toEqual([{ kind: "chats", id: laptopChat, error: "a chat on another device may only be renamed or archived" }]);
+    expect(claim.rejected).toEqual([{ kind: "chats", id: laptopChat, error: "a chat on another device stays hosted there" }]);
     expect(find(await rows(user), "chats", laptopChat)?.fields).toMatchObject({ deviceId: laptop, title: "secret plans" });
   });
 });
@@ -135,7 +135,7 @@ describe("registry writes", () => {
     expect(find(all, "chats", laptopChat)?.deleted).toBe(false);
     expect(find(all, "chats", cloudChat)?.fields.deviceId).toBe(cloud);
 
-    // It may rename or archive a laptop chat, and start a chat there.
+    // It may set a laptop chat's fields (not its host), and start a chat there.
     const startedThere = `lc-${rand()}`;
     const allowed = await push(
       runner,
@@ -156,6 +156,30 @@ describe("registry writes", () => {
 });
 
 describe("registry reads", () => {
+  it("sends a Cloud machine that synced before every row it now sees, until it has them", async () => {
+    const { user, runner, laptopChat } = await world();
+    type Pulled = { seq: number; full: boolean; rows: WireRow[] };
+    const pull = async (bearer: string, since: number) =>
+      (await (await call("GET", `/registry/org1/rows?since=${since}`, bearer)).json()) as Pulled;
+    // Caught up as of now, as a machine that synced before the change is
+    // (its cursor past the laptop's rows, which it was never sent).
+    const head = (await pull(user, 0)).seq;
+    const first = await pull(runner, head);
+    expect(first.full).toBe(true);
+    expect(find(first.rows, "chats", laptopChat)).toBeDefined();
+    // At that cursor still: maybe it never got the reply, so again.
+    expect((await pull(runner, head)).full).toBe(true);
+    // Past it (applied, and a row since): incremental from then on.
+    await push(user, [upsert("chats", laptopChat, { title: "renamed" }, "laptop")]);
+    const after = (await pull(user, 0)).seq;
+    const caughtUp = await pull(runner, after);
+    expect(caughtUp.full).toBe(false);
+    await push(user, [upsert("chats", laptopChat, { title: "renamed again" }, "laptop")]);
+    const next = await pull(runner, after);
+    expect(next.full).toBe(false);
+    expect(next.rows.map((r) => r.id)).toEqual([laptopChat]);
+  });
+
   it("delivers every device, chat, project and session, never the user's own kinds", async () => {
     const { user, runner, cloud, laptop, laptopChat, space } = await world();
     const cloudChat = `cc-${rand()}`;
@@ -197,7 +221,7 @@ describe("registry reads", () => {
     socket.send(JSON.stringify({ t: "push", batch: "ws-1", ops: [upsert("chats", laptopChat, { deviceId: cloud }, cloud)] }));
     await expect.poll(() => frames.some((f) => f.t === "ack" && f.batch === "ws-1")).toBe(true);
     expect(frames.find((f) => f.t === "error" && f.code === "not_owner")).toMatchObject({
-      message: `chats/${laptopChat}: a chat on another device may only be renamed or archived`
+      message: `chats/${laptopChat}: a chat on another device stays hosted there`
     });
     expect(frames.find((f) => f.t === "ack" && f.batch === "ws-1")).toMatchObject({ applied: 0, rejected: [expect.objectContaining({ id: laptopChat })] });
     socket.close();

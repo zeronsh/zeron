@@ -556,14 +556,38 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
         if let Some(device) = device {
             op["deviceId"] = serde_json::json!(device);
         }
-        zeron_rpc::with_caller(zeron_rpc::Caller::Agent { chat: None }, rpc.handle(methods::MUTATE, op))
+        zeron_rpc::with_caller(
+            zeron_rpc::Caller::Agent { chat: None },
+            rpc.handle(methods::MUTATE, op),
+        )
     };
-    agent_creates("side-here", Some(core.workspace.device_id().to_owned())).await.unwrap();
-    assert_eq!(core.workspace.chat("side-here").unwrap().unwrap().device_id, core.workspace.device_id());
-    agent_creates("side-there", Some("cloud-s-chat-1".into())).await.unwrap();
-    assert_eq!(core.workspace.chat("side-there").unwrap().unwrap().device_id, "cloud-s-chat-1");
+    agent_creates("side-here", Some(core.workspace.device_id().to_owned()))
+        .await
+        .unwrap();
+    assert_eq!(
+        core.workspace.chat("side-here").unwrap().unwrap().device_id,
+        core.workspace.device_id()
+    );
+    agent_creates("side-there", Some("cloud-s-chat-1".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        core.workspace
+            .chat("side-there")
+            .unwrap()
+            .unwrap()
+            .device_id,
+        "cloud-s-chat-1"
+    );
     agent_creates("side-unnamed", None).await.unwrap();
-    assert_eq!(core.workspace.chat("side-unnamed").unwrap().unwrap().device_id, "cloud-s-chat-1");
+    assert_eq!(
+        core.workspace
+            .chat("side-unnamed")
+            .unwrap()
+            .unwrap()
+            .device_id,
+        "cloud-s-chat-1"
+    );
 
     // Without Cloud picked, the same project runs here.
     create(

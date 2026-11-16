@@ -1702,8 +1702,8 @@ export class CloudAccount extends DurableObject<Env> {
     const chatId = this.byDevice.get(deviceId);
     const s = chatId ? this.sessions.get(chatId) : undefined;
     if (!s || !this.matches(caller) || s.pendingDelete || s.state === "deleting") return false;
-    // A machine wakes only the sessions it started (its delegates).
-    if (caller.deviceId !== undefined && s.parentChatId !== this.byDevice.get(caller.deviceId)) return false;
+    // A Cloud machine's send wakes any of the person's sessions, as their
+    // other devices' do: its agent messages chats wherever they run.
     if (s.state === "ready") {
       // A send to a machine that's up. If it goes dark before its next
       // heartbeat, that heartbeat never reports the turn this started.

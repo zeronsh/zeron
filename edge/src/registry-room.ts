@@ -19,8 +19,9 @@
  * - presence — memory-only by construction (15s client beats, rebroadcast).
  *
  * Cloud runners (the Worker stamps RUNNER_DEVICE_HEADER for runner bearers)
- * act as their device, not the user: every row delivery to them is filtered
- * and every op they push must be on a row they host (registry-runner.ts).
+ * act as their device, not the user: row deliveries to them leave out the
+ * user's own kinds, and every op they push is ownership-checked
+ * (registry-runner.ts).
  *
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
  * auto-response pair; the one alarm does the bookkeeping flush and, daily,
@@ -61,7 +62,7 @@ interface SocketState {
   /** Set once a valid hello established the session. */
   ready?: boolean;
   /** Cloud runner socket: its verified device id. Rows are filtered and
-   * pushes ownership-checked for it. */
+   * pushes ownership-checked for it (registry-runner.ts). */
   runner?: string;
   /** The runner's account (logical Cloud device; JWT `cld`). */
   runnerAccount?: string;
@@ -219,6 +220,26 @@ export class RegistryRoom implements DurableObject {
     return rows.filter((row) => runnerCanSee(runner, row));
   }
 
+  /**
+   * Whether runner `device`, at `cursor`, has yet to be sent every row it now
+   * sees (registry-runner.ts). Before, a runner was sent only its own rows,
+   * so a Cloud machine that synced then holds a cursor past laptop chats,
+   * projects and sessions it never received: its first state since is full.
+   * Recorded as the seq that full state was sent at. Only a cursor PAST it
+   * proves the runner applied it (and a row since): a cursor at it may be
+   * one that never got the reply, so that runner is sent everything again
+   * (a few extra full states at most — its own rows move the head on).
+   * Records the send when true.
+   */
+  private runnerBehind(device: string | undefined, cursor: number | null, seq: number): boolean {
+    if (device === undefined) return false;
+    const key = `runnerSentAll:${device}`;
+    const sentAt = this.getMeta(key);
+    if (sentAt !== undefined && cursor !== null && cursor > Number(sentAt)) return false;
+    this.setMeta(key, String(seq));
+    return true;
+  }
+
   /** The live chats whose parent `device` hosts: delegates it started on
    * other machines, which it may delete. */
   private runnerChildren(device: string): Set<string> {
@@ -367,7 +388,7 @@ export class RegistryRoom implements DurableObject {
       }
       const seq = this.seq();
       const gcFloor = this.gcFloor();
-      const full = cursor === null || cursor < gcFloor || cursor > seq;
+      const full = cursor === null || cursor < gcFloor || cursor > seq || this.runnerBehind(runner, cursor, seq);
       return json({
         seq,
         full,
@@ -497,8 +518,10 @@ export class RegistryRoom implements DurableObject {
     // A cursor from before the tombstone-GC horizon may have missed purged
     // deletes; a cursor AHEAD of the server means the server lost state (a
     // reset/wipe) — both force `full`, and the client reacts by replacing
-    // (former) or re-seeding the server (latter; see registry.rs).
-    const full = cursor === null || cursor < gcFloor || cursor > seq;
+    // (former) or re-seeding the server (latter; see registry.rs). So does a
+    // Cloud machine's cursor from before it saw every row (runnerBehind).
+    const full =
+      cursor === null || cursor < gcFloor || cursor > seq || this.runnerBehind(state.runner, cursor, seq);
     const rows = this.visible(full ? this.rowsSince(0) : this.rowsSince(cursor), state.runner, state.runnerAccount);
     send(ws, {
       t: "state",
@@ -538,8 +561,8 @@ export class RegistryRoom implements DurableObject {
   /** Validate + atomically apply one op batch and broadcast merged rows to
    * every ready socket -- shared by the WS push and the HTTP `POST /push`
    * fallback. The caller delivers the ack/error on its own transport.
-   * `runner` (a Cloud device) may only touch rows it hosts: its other ops
-   * are skipped and reported in `rejected`, the rest of the batch applies. */
+   * `runner` (a Cloud device) is ownership-checked (registry-runner.ts): its
+   * refused ops are skipped and reported in `rejected`, the rest applies. */
   private applyPushBatch(
     device: string,
     frame: Record<string, unknown>,

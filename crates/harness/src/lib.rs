@@ -522,6 +522,16 @@ pub fn compose_login_shell_path(cmd: &mut tokio::process::Command) {
     apply_login_shell_env(cmd.as_std_mut());
 }
 
+/// The user's own PATH (the login shell's, with this process's) and the
+/// login shell's TLS, SSH-agent and locale variables, for a child that runs
+/// whatever the user would type: a shell running an agent's command. Unlike
+/// [`compose_child_path`], no executable's directory goes first (the
+/// shell's own `/bin` must not shadow the user's toolchain).
+pub fn compose_user_path(cmd: &mut process::Command) {
+    compose_path(cmd.as_std_mut(), std::iter::empty());
+    apply_login_shell_env(cmd.as_std_mut());
+}
+
 /// Compose the child's PATH: the resolved executable's directory first, then
 /// the user's own PATH (the login shell's), then this process's — deduped.
 /// npm-shim CLIs are `#!/usr/bin/env node` scripts whose `node` lives beside

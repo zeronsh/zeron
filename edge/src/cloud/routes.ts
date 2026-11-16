@@ -511,10 +511,9 @@ export const handleCloudRoute = async (
  * sends wake a session; dials (viewing a chat) never do. The DO is the
  * caller's own, so another user's device id is simply not found there.
  *
- * A Cloud machine's runner wakes a session too, but only one it started (its
- * delegate): the agent there sent work to a side chat on a machine that went
- * to sleep. The account DO checks the parentage, as it does for every other
- * session action a runner takes.
+ * A Cloud machine's runner wakes a session too: its agent sent work to a
+ * chat (a delegate, or any other of the person's Cloud chats) on a machine
+ * that went to sleep.
  */
 export const autoWakeCloudDevice = (
   env: Pick<Env, "CLOUD_ACCOUNTS" | "CLOUD_ACCESS" | "AUTH_MODE">,

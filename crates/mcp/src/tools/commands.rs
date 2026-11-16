@@ -49,7 +49,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: RUN_COMMAND,
-            description: "Run a shell command on this device or on any other of the person's online devices (see list_devices; a Cloud machine must be awake), exactly as you would with your own shell tool: builds, tests, git, package managers, scripts, servers. It runs in the user's login shell there (PowerShell on Windows), with their PATH, and no input or terminal. The working directory carries over between commands on the same device (`cd` sticks; environment variables don't); the first command on a device starts in `cwd`, or your chat's folder on its own device, or home. Returns `output` (stdout and stderr together; long output keeps its start and end), `exitCode`, and `timedOut`: a command still running at `timeout_secs` (default 120, at most 600) is killed with everything it started. For something that keeps running — a dev server, a watcher, a long build — pass `background: true`: it returns an `id` at once; read what it prints with command_output and stop it with stop_command. Background commands stop on their own when this chat is archived or deleted. Only a chat with full access may use this.",
+            description: "Run a shell command on this device or on any other of the person's online devices (see list_devices; a Cloud machine must be awake), exactly as you would with your own shell tool: builds, tests, git, package managers, scripts, servers. It runs in the user's shell there (PowerShell on Windows) with the PATH and variables their login shell sets, and no input or terminal. The working directory carries over between commands on the same device (`cd` sticks; environment variables don't); the first command on a device starts in `cwd`, or your chat's folder on its own device, or home. Returns `output` (stdout and stderr together; long output keeps its start and end), `exitCode`, and `timedOut`: a command still running at `timeout_secs` (default 120, at most 600) is killed with everything it started, and anything a command leaves running (`server &`) ends with it. For something that keeps running — a dev server, a watcher, a long build — pass `background: true`: it returns an `id` at once; read what it prints with command_output and stop it with stop_command. Background commands stop on their own when this chat is archived or deleted. Only a chat with full access may use this.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -120,7 +120,10 @@ impl Tools {
     pub(super) async fn commands(&self, tool: &str, args: Value) -> Result<Value, String> {
         let result = match tool {
             RUN_COMMAND => self.run_command(parse(args)?).await,
-            COMMAND_OUTPUT => self.command_call(methods::READ_COMMAND_OUTPUT, parse(args)?).await,
+            COMMAND_OUTPUT => {
+                self.command_call(methods::READ_COMMAND_OUTPUT, parse(args)?)
+                    .await
+            }
             STOP_COMMAND => self.command_call(methods::STOP_COMMAND, parse(args)?).await,
             _ => self.list_commands(parse(args)?).await,
         };
@@ -129,7 +132,8 @@ impl Tools {
 
     /// The device to send to (`None`: this engine's), and how a reply names it.
     async fn command_device(&self, key: Option<&str>) -> anyhow::Result<(Option<String>, Value)> {
-        let (devices, local) = tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
+        let (devices, local) =
+            tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
         let id = self.zeron.resolve_device_id(key).await?;
         let name = devices.iter().find(|d| d.id == id).map(|d| d.name.clone());
         let named = json!({ "id": id, "name": name, "local": id == local });
@@ -140,12 +144,20 @@ impl Tools {
         anyhow::ensure!(!args.command.trim().is_empty(), "command is empty");
         let (target, device) = self.command_device(args.device.as_deref()).await?;
         let device_id = device["id"].as_str().unwrap_or_default().to_owned();
-        let asked = args.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_owned);
+        let asked = args
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_owned);
         let remembered = match &asked {
             Some(_) => None,
             None => self.command_state.cwd.lock().await.get(&device_id).cloned(),
         };
-        let timeout = args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, MAX_TIMEOUT_SECS);
+        let timeout = args
+            .timeout_secs
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .clamp(1, MAX_TIMEOUT_SECS);
         let mut params = json!({ "command": args.command, "timeoutMs": timeout * 1000 });
         if args.background {
             params["background"] = json!(true);
@@ -165,7 +177,9 @@ impl Tools {
         };
         let reply = match send(asked.as_ref().or(remembered.as_ref())).await {
             // The folder it was left in is gone: start where a first one would.
-            Err(RpcError::Failed(message)) if remembered.is_some() && message.starts_with("No folder") => {
+            Err(RpcError::Failed(message))
+                if remembered.is_some() && message.starts_with("No folder") =>
+            {
                 self.command_state.cwd.lock().await.remove(&device_id);
                 send(None).await
             }
@@ -177,7 +191,11 @@ impl Tools {
                 outcome["id"] = json!(format!("{id}@{device_id}"));
             }
         } else if let Some(cwd) = outcome["cwd"].as_str() {
-            self.command_state.cwd.lock().await.insert(device_id, cwd.to_owned());
+            self.command_state
+                .cwd
+                .lock()
+                .await
+                .insert(device_id, cwd.to_owned());
         } else if let Some(asked) = asked {
             // A shell that doesn't say where it ended: where it was asked.
             self.command_state.cwd.lock().await.insert(device_id, asked);
@@ -242,14 +260,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl zeron_rpc::RpcService for Engine {
-        async fn handle(&self, method: &str, params: Value) -> Result<zeron_rpc::RpcReply, RpcError> {
+        async fn handle(
+            &self,
+            method: &str,
+            params: Value,
+        ) -> Result<zeron_rpc::RpcReply, RpcError> {
             use futures::StreamExt;
             use zeron_rpc::RpcReply;
             if method.contains("Command") {
                 if self.old_remote && params["targetDeviceId"] == "dev-remote" {
                     return Err(RpcError::UnknownMethod(method.into()));
                 }
-                self.calls.lock().unwrap().push((method.to_owned(), params.clone()));
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((method.to_owned(), params.clone()));
             }
             Ok(match method {
                 methods::LOCAL_DEVICE => RpcReply::Value(json!({ "deviceId": "dev-local" })),
@@ -285,8 +310,14 @@ mod tests {
     }
 
     fn tools(engine: Arc<Engine>) -> Tools {
-        let origin = Origin { chat_id: Some("chat-1".into()), ..Default::default() };
-        Tools::new(Arc::new(Zeron::with_client(zeron_rpc::memory_client(engine), origin)))
+        let origin = Origin {
+            chat_id: Some("chat-1".into()),
+            ..Default::default()
+        };
+        Tools::new(Arc::new(Zeron::with_client(
+            zeron_rpc::memory_client(engine),
+            origin,
+        )))
     }
 
     fn last(engine: &Engine) -> (String, Value) {
@@ -295,62 +326,134 @@ mod tests {
 
     #[tokio::test]
     async fn a_command_runs_on_the_device_it_names_and_cd_carries_over_there() {
-        let engine = Arc::new(Engine { calls: Default::default(), old_remote: false });
+        let engine = Arc::new(Engine {
+            calls: Default::default(),
+            old_remote: false,
+        });
         let tools = tools(engine.clone());
         let ran = tools
             .call(RUN_COMMAND, json!({ "command": "echo hi", "device": "Worker", "cwd": "/srv", "timeout_secs": 5 }))
             .await
             .unwrap();
-        assert_eq!((ran["output"].as_str(), ran["exitCode"].as_i64()), (Some("hi\n"), Some(0)));
-        assert_eq!(ran["device"], json!({ "id": "dev-remote", "name": "Worker", "local": false }));
+        assert_eq!(
+            (ran["output"].as_str(), ran["exitCode"].as_i64()),
+            (Some("hi\n"), Some(0))
+        );
+        assert_eq!(
+            ran["device"],
+            json!({ "id": "dev-remote", "name": "Worker", "local": false })
+        );
         assert_eq!(
             last(&engine).1,
             json!({ "command": "echo hi", "cwd": "/srv", "timeoutMs": 5000, "chatId": "chat-1", "targetDeviceId": "dev-remote" })
         );
         // cd there sticks there, and only there.
-        tools.call(RUN_COMMAND, json!({ "command": "cd /srv/app", "device": "Worker" })).await.unwrap();
-        tools.call(RUN_COMMAND, json!({ "command": "ls", "device": "Worker" })).await.unwrap();
+        tools
+            .call(
+                RUN_COMMAND,
+                json!({ "command": "cd /srv/app", "device": "Worker" }),
+            )
+            .await
+            .unwrap();
+        tools
+            .call(RUN_COMMAND, json!({ "command": "ls", "device": "Worker" }))
+            .await
+            .unwrap();
         assert_eq!(last(&engine).1["cwd"], "/srv/app");
-        tools.call(RUN_COMMAND, json!({ "command": "ls", "timeout_secs": 100000 })).await.unwrap();
+        tools
+            .call(
+                RUN_COMMAND,
+                json!({ "command": "ls", "timeout_secs": 100000 }),
+            )
+            .await
+            .unwrap();
         let (_, here) = last(&engine);
-        assert!(here.get("cwd").is_none() && here.get("targetDeviceId").is_none(), "{here}");
+        assert!(
+            here.get("cwd").is_none() && here.get("targetDeviceId").is_none(),
+            "{here}"
+        );
         assert_eq!(here["timeoutMs"], MAX_TIMEOUT_SECS * 1000);
         // A folder that's gone: back to where a first command starts.
-        tools.call(RUN_COMMAND, json!({ "command": "cd /gone" })).await.unwrap();
-        tools.call(RUN_COMMAND, json!({ "command": "ls" })).await.unwrap();
+        tools
+            .call(RUN_COMMAND, json!({ "command": "cd /gone" }))
+            .await
+            .unwrap();
+        tools
+            .call(RUN_COMMAND, json!({ "command": "ls" }))
+            .await
+            .unwrap();
         assert!(last(&engine).1.get("cwd").is_none());
 
-        assert!(tools.call(RUN_COMMAND, json!({ "command": " " })).await.unwrap_err().contains("empty"));
+        assert!(
+            tools
+                .call(RUN_COMMAND, json!({ "command": " " }))
+                .await
+                .unwrap_err()
+                .contains("empty")
+        );
     }
 
     #[tokio::test]
     async fn a_background_command_is_found_again_by_its_id_wherever_it_runs() {
-        let engine = Arc::new(Engine { calls: Default::default(), old_remote: false });
+        let engine = Arc::new(Engine {
+            calls: Default::default(),
+            old_remote: false,
+        });
         let tools = tools(engine.clone());
         let started = tools
-            .call(RUN_COMMAND, json!({ "command": "npm run dev", "device": "Worker", "background": true }))
+            .call(
+                RUN_COMMAND,
+                json!({ "command": "npm run dev", "device": "Worker", "background": true }),
+            )
             .await
             .unwrap();
         assert_eq!(started["id"], "cmd-1@dev-remote");
         assert_eq!(last(&engine).1["background"], true);
 
-        let read = tools.call(COMMAND_OUTPUT, json!({ "id": "cmd-1@dev-remote" })).await.unwrap();
+        let read = tools
+            .call(COMMAND_OUTPUT, json!({ "id": "cmd-1@dev-remote" }))
+            .await
+            .unwrap();
         assert_eq!(read["output"], "listening\n");
         assert_eq!(read["id"], "cmd-1@dev-remote");
-        assert_eq!(last(&engine), (methods::READ_COMMAND_OUTPUT.to_owned(), json!({ "id": "cmd-1", "targetDeviceId": "dev-remote" })));
+        assert_eq!(
+            last(&engine),
+            (
+                methods::READ_COMMAND_OUTPUT.to_owned(),
+                json!({ "id": "cmd-1", "targetDeviceId": "dev-remote" })
+            )
+        );
 
-        tools.call(STOP_COMMAND, json!({ "id": "cmd-1@dev-remote" })).await.unwrap();
+        tools
+            .call(STOP_COMMAND, json!({ "id": "cmd-1@dev-remote" }))
+            .await
+            .unwrap();
         assert_eq!(last(&engine).0, methods::STOP_COMMAND);
 
-        let listed = tools.call(LIST_COMMANDS, json!({ "device": "Worker" })).await.unwrap();
+        let listed = tools
+            .call(LIST_COMMANDS, json!({ "device": "Worker" }))
+            .await
+            .unwrap();
         assert_eq!(listed["commands"][0]["id"], "cmd-1@dev-remote");
-        assert_eq!(last(&engine).1, json!({ "chatId": "chat-1", "targetDeviceId": "dev-remote" }));
+        assert_eq!(
+            last(&engine).1,
+            json!({ "chatId": "chat-1", "targetDeviceId": "dev-remote" })
+        );
     }
 
     #[tokio::test]
     async fn an_older_device_says_so() {
-        let tools = tools(Arc::new(Engine { calls: Default::default(), old_remote: true }));
-        let error = tools.call(RUN_COMMAND, json!({ "command": "ls", "device": "dev-remote" })).await.unwrap_err();
+        let tools = tools(Arc::new(Engine {
+            calls: Default::default(),
+            old_remote: true,
+        }));
+        let error = tools
+            .call(
+                RUN_COMMAND,
+                json!({ "command": "ls", "device": "dev-remote" }),
+            )
+            .await
+            .unwrap_err();
         assert!(error.contains("too old"), "{error}");
     }
 }

@@ -44,6 +44,7 @@ mod chat_persistence;
 mod cloud_accounts;
 pub mod cloud_client;
 pub mod cloud_disk;
+pub mod commands;
 pub mod commit_credit;
 pub mod credentials;
 pub mod deferred;
@@ -71,7 +72,6 @@ pub mod registry;
 pub mod remote_terminals;
 pub mod repos;
 pub mod rpc;
-pub mod run_command;
 pub mod run_journal;
 pub mod runner;
 pub mod wake_trace;
@@ -186,6 +186,8 @@ pub struct EngineCore {
     pub repos: Repos,
     pub workspace_files: WorkspaceFiles,
     pub terminals: Terminals,
+    /// Agents' shell commands on this device ([`commands`]).
+    pub commands: commands::Commands,
     /// I/O routing for terminals on other devices (direct link or relay).
     pub remote_terminals: remote_terminals::RemoteTerminals,
     pub project_actions: ProjectActionsStore,
@@ -385,14 +387,18 @@ impl EngineCore {
             repos.clone(),
             workspace.clone(),
             device_id.clone(),
-            runner::session()
-                .and_then(|session| session.path.clone())
-                .map(std::path::PathBuf::from),
+            runner::session().and_then(|session| {
+                Some(workspace_files::CloudCheckout {
+                    path: std::path::PathBuf::from(session.path.clone()?),
+                    chat_id: session.chat_id.clone(),
+                })
+            }),
         );
         let terminals = Terminals::new();
         sessions.track_terminal_activity(terminals.clone(), workspace.clone());
+        let commands = commands::Commands::default();
         // An agent's background commands end with its chat.
-        run_command::follow_chats(workspace.watch_chats());
+        commands.follow_chats(workspace.watch_chats());
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = zeron_preview::PreviewService::new(
@@ -499,6 +505,7 @@ impl EngineCore {
             repos,
             workspace_files,
             terminals,
+            commands,
             remote_terminals: Default::default(),
             project_actions,
             previews,
@@ -533,11 +540,12 @@ impl EngineCore {
     pub fn update_quiescence(&self, cloud: bool) -> zeron_update::QuiescentCheck {
         let sessions = self.sessions.clone();
         let terminals = self.terminals.clone();
+        let commands = self.commands.clone();
         let doc_host = cloud.then(|| self.doc_host.clone());
         Arc::new(move || {
             !sessions.any_active()
                 && !terminals.any_open()
-                && run_command::running_count() == 0
+                && commands.running() == 0
                 && !doc_host.as_ref().is_some_and(DocHost::has_waiting_commands)
         })
     }
@@ -677,6 +685,7 @@ impl EngineCore {
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
         .with_remote_terminals(self.remote_terminals.clone())
+        .with_commands(self.commands.clone())
         .with_harness_updates(self.harness_updates.clone())
         .with_viewport_focus(self.viewport_focus.clone())
         .with_plugins(self.plugins.clone());
@@ -762,7 +771,7 @@ impl EngineCore {
         }
         self.sessions.shutdown().await;
         self.terminals.shutdown();
-        run_command::shutdown();
+        self.commands.shutdown().await;
         self.sessions.stop_activity_projection().await;
         self.agent_accounts.shutdown();
         self.change_requests.shutdown();
@@ -1153,11 +1162,18 @@ impl Engine {
             core.registry.set_run_environment(Arc::new(broker.clone()));
             broker.start();
             let sessions = core.sessions.clone();
+            let commands = core.commands.clone();
             let activity = runner::RelayActivity::default();
             let heartbeat = runner::spawn_heartbeat(
                 identity.edge_url(),
                 tokens,
-                Arc::new(move || sessions.run_counts()),
+                // An agent's running commands (a dev server left running)
+                // keep the machine awake as background work does.
+                Arc::new(move || {
+                    let mut counts = sessions.run_counts();
+                    counts.background += commands.running();
+                    counts
+                }),
                 Arc::new(cloud_disk::machine_usage),
                 activity.clone(),
                 runner::HEARTBEAT_INTERVAL,

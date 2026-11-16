@@ -328,6 +328,10 @@ pub mod methods {
     pub const STOP_COMMAND: &str = "StopCommand";
     /// `{chatId?}` → `[CommandStatus]`: the background commands a chat started.
     pub const LIST_BACKGROUND_COMMANDS: &str = "ListBackgroundCommands";
+    /// `{chatId}` → stream of `[CommandStatus]`: [`LIST_BACKGROUND_COMMANDS`]
+    /// now and each time one starts or ends. The chat's host follows its
+    /// agent's commands on other devices with it (its background band).
+    pub const WATCH_BACKGROUND_COMMANDS: &str = "WatchBackgroundCommands";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
@@ -1499,7 +1503,10 @@ mod tests {
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
         // A command reaches the engine as the agent's, which runs it only
         // for a chat with full access and no sandbox.
-        let asked = agent.call(methods::RUN_COMMAND, serde_json::json!({})).await.unwrap();
+        let asked = agent
+            .call(methods::RUN_COMMAND, serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
         // The theme tools' methods, exactly: data only.
         for method in [methods::LIST_THEMES, methods::GET_THEME, methods::CREATE_THEME, methods::UPDATE_THEME, methods::DELETE_THEME, methods::USE_THEME] {

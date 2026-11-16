@@ -148,15 +148,21 @@ device (`run_command`), as an agent on the laptop can. Enforced at the edge:
   on runner forwards and strips any inbound value). Writes: `devices` only its own row;
   `chats`, `spaces`, `sessions` when the existing live row is hosted by the runner AND the
   row after the op still is (no claiming, handing away or ownerless rows) — except that a
-  chat hosted elsewhere may be renamed or archived (`title`, `archived`), and a new chat row
-  may be hosted by any device (a chat it starts there); deletes need a live owned row (or a
-  delegate's, below); tombstones are never revived; every other kind (`preferences`,
+  chat hosted elsewhere may have any field set but its host (`deviceId`: a chat is never
+  re-homed), and a new chat row may be hosted by any device (a chat it starts there);
+  another device's `spaces` and `sessions` rows stay its own; deletes need a live owned row
+  (or a delegate's, below); tombstones are never revived; every other kind (`preferences`,
   `sidebarPins`, anything new) is refused. Refused ops are skipped individually (an
   `{t:"error", code:"not_owner"}` frame each, plus `rejected` in the ack); the rest of the
   batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): every
-  `devices`, `chats`, `spaces` and `sessions` row; none of the user's own kinds.
+  `devices`, `chats`, `spaces` and `sessions` row; none of the user's own kinds. A machine
+  that synced while it saw only its own rows holds a cursor past rows it never got, so its
+  first state since is `full` (`RegistryRoom.runnerBehind`, recorded per device as the seq
+  it was sent at; sent again until the machine's cursor passes that seq).
   Presence is unfiltered, but a runner socket's presence/attribution device is pinned to its
   verified id.
+- **Waking**: a Cloud machine's send (`POST /device/{id}/nudge`) wakes any of the person's
+  sleeping sessions, as their other devices' sends do (`CloudAccount.autoWake`).
 - **Engine** (`crates/engine/src/rpc/agent_gate.rs`): what an agent may do is the same on
   Cloud as on a computer. It runs commands (`RunCommand`, `ReadCommandOutput`, `StopCommand`,
   `ListBackgroundCommands`, here or on another device) only from a chat with full access and no

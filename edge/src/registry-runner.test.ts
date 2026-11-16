@@ -28,17 +28,18 @@ describe("runner registry writes", () => {
     expect(runnerOpRefusal(CLOUD, row("sessions", "c1", { deviceId: CLOUD }), upsert("sessions", "c1", { status: "idle" }))).toBeNull();
   });
 
-  it("renames or archives a chat on another device, and starts chats there", () => {
+  it("sets any field of a chat on another device but its host, and starts chats there", () => {
     const laptopChat = row("chats", "c2", { deviceId: LAPTOP, title: "plans" });
     expect(runnerOpRefusal(CLOUD, laptopChat, upsert("chats", "c2", { title: "x" }))).toBeNull();
     expect(runnerOpRefusal(CLOUD, laptopChat, upsert("chats", "c2", { archived: true }))).toBeNull();
+    expect(runnerOpRefusal(CLOUD, laptopChat, upsert("chats", "c2", { branch: "dev", config: { harness: "codex" } }))).toBeNull();
     expect(runnerOpRefusal(CLOUD, undefined, upsert("chats", "c9", { deviceId: LAPTOP, parentChatId: "c1" }))).toBeNull();
   });
 
-  it("refuses claiming, reconfiguring or deleting another device's rows", () => {
+  it("refuses claiming or deleting another device's rows", () => {
     const laptopChat = row("chats", "c2", { deviceId: LAPTOP, title: "plans" });
-    expect(runnerOpRefusal(CLOUD, laptopChat, upsert("chats", "c2", { deviceId: CLOUD }))).toMatch(/only be renamed or archived/);
-    expect(runnerOpRefusal(CLOUD, laptopChat, upsert("chats", "c2", { config: {} }))).toMatch(/only be renamed or archived/);
+    expect(runnerOpRefusal(CLOUD, laptopChat, upsert("chats", "c2", { deviceId: CLOUD }))).toMatch(/stays hosted there/);
+    expect(runnerOpRefusal(CLOUD, laptopChat, upsert("chats", "c2", { title: "x", deviceId: LAPTOP }))).toMatch(/stays hosted there/);
     expect(runnerOpRefusal(CLOUD, laptopChat, del("chats", "c2"))).toMatch(/another device/);
     expect(runnerOpRefusal(CLOUD, row("spaces", "s1", { deviceId: LAPTOP }), upsert("spaces", "s1", { name: "x" }))).toMatch(/another device/);
     expect(runnerOpRefusal(CLOUD, row("sessions", "c2", { deviceId: LAPTOP }), upsert("sessions", "c2", { status: "idle" }))).toMatch(/another device/);
@@ -94,12 +95,11 @@ describe("delegates (child chats on other machines)", () => {
   const children = new Set(["child"]);
   const child = row("chats", "child", { deviceId: OTHER, parentChatId: "main", title: "t" });
 
-  it("may also delete a child, with its session row, but not re-home or reconfigure it", () => {
+  it("may also delete a child, with its session row, but not re-home it", () => {
     expect(runnerOpRefusal(CLOUD, child, upsert("chats", "child", { title: "x" }), children)).toBeNull();
     expect(runnerOpRefusal(CLOUD, child, del("chats", "child"), children)).toBeNull();
     expect(runnerOpRefusal(CLOUD, row("sessions", "child", { deviceId: OTHER }), del("sessions", "child"), children)).toBeNull();
-    expect(runnerOpRefusal(CLOUD, child, upsert("chats", "child", { deviceId: CLOUD }), children)).toMatch(/only be renamed/);
-    expect(runnerOpRefusal(CLOUD, child, upsert("chats", "child", { parentChatId: null }), children)).toMatch(/only be renamed/);
+    expect(runnerOpRefusal(CLOUD, child, upsert("chats", "child", { deviceId: CLOUD }), children)).toMatch(/stays hosted there/);
     expect(runnerOpRefusal(CLOUD, row("sessions", "child", { deviceId: OTHER }), upsert("sessions", "child", { status: "idle" }), children)).toMatch(/another device/);
     // Not its child: no delete.
     expect(runnerOpRefusal(CLOUD, child, del("chats", "child"))).toMatch(/another device/);

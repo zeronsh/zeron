@@ -319,35 +319,72 @@ mod tests {
     async fn only_an_unconfined_agent_runs_a_command() {
         let (_temp, core) = core().await;
         chat(&core, "careful", "Careful", "read-only", "supervised").await;
-        chat(&core, "sandboxed", "Sandboxed", "workspace-write", "full-access").await;
+        chat(
+            &core,
+            "sandboxed",
+            "Sandboxed",
+            "workspace-write",
+            "full-access",
+        )
+        .await;
         chat(&core, "free", "Free", "danger-full-access", "full-access").await;
         let rpc = core.rpc_service();
         let open = json!({"command":"ls", "targetDeviceId":"laptop"});
-        for method in [methods::RUN_COMMAND, methods::READ_COMMAND_OUTPUT, methods::STOP_COMMAND, methods::LIST_BACKGROUND_COMMANDS] {
+        for method in [
+            methods::RUN_COMMAND,
+            methods::READ_COMMAND_OUTPUT,
+            methods::STOP_COMMAND,
+            methods::LIST_BACKGROUND_COMMANDS,
+        ] {
             for who in ["careful", "sandboxed", "nowhere"] {
-                let refused = with_caller(agent(who), async { rpc.agent_gate(method, open.clone()) }).await;
+                let refused =
+                    with_caller(agent(who), async { rpc.agent_gate(method, open.clone()) }).await;
                 assert!(
                     matches!(&refused, Err(zeron_rpc::RpcError::Failed(m)) if m.contains("full access and no sandbox")),
                     "{who} {method}: {refused:?}"
                 );
             }
-            let allowed = with_caller(agent("free"), async { rpc.agent_gate(method, open.clone()) }).await.unwrap();
+            let allowed = with_caller(agent("free"), async {
+                rpc.agent_gate(method, open.clone())
+            })
+            .await
+            .unwrap();
             assert_eq!(allowed, open, "{method}");
             // A server with no chat (set up by hand) is capped by nothing.
-            with_caller(Caller::Agent { chat: None }, async { rpc.agent_gate(method, open.clone()) }).await.unwrap();
+            with_caller(Caller::Agent { chat: None }, async {
+                rpc.agent_gate(method, open.clone())
+            })
+            .await
+            .unwrap();
             assert_eq!(rpc.agent_gate(method, open.clone()).unwrap(), open);
         }
         // Through the engine, it runs here and says how it went.
         let dir = tempfile::tempdir().unwrap();
         let ran = with_caller(
             agent("free"),
-            rpc.handle(methods::RUN_COMMAND, json!({"command":"echo hi; exit 2", "cwd": dir.path()})),
+            rpc.handle(
+                methods::RUN_COMMAND,
+                json!({"command":"echo hi; exit 2", "cwd": dir.path()}),
+            ),
         )
         .await
         .unwrap();
-        let zeron_rpc::RpcReply::Value(ran) = ran else { panic!("a stream") };
-        assert_eq!((ran["exitCode"].clone(), ran["output"].as_str().unwrap().ends_with("hi\n")), (json!(2), true), "{ran}");
-        let refused = with_caller(agent("careful"), rpc.handle(methods::RUN_COMMAND, json!({"command":"echo hi"}))).await;
+        let zeron_rpc::RpcReply::Value(ran) = ran else {
+            panic!("a stream")
+        };
+        assert_eq!(
+            (
+                ran["exitCode"].clone(),
+                ran["output"].as_str().unwrap().ends_with("hi\n")
+            ),
+            (json!(2), true),
+            "{ran}"
+        );
+        let refused = with_caller(
+            agent("careful"),
+            rpc.handle(methods::RUN_COMMAND, json!({"command":"echo hi"})),
+        )
+        .await;
         assert!(refused.is_err());
         core.sessions.shutdown().await;
     }
@@ -359,7 +396,8 @@ mod tests {
     async fn a_chat_shows_the_commands_its_agent_left_running() {
         let (_temp, core) = core().await;
         chat(&core, "free", "Free", "danger-full-access", "full-access").await;
-        core.sessions.seed_status("free", zeron_proto::SessionStatus::Working);
+        core.sessions
+            .seed_status("free", zeron_proto::SessionStatus::Working);
         let rpc = core.rpc_service();
         let dir = tempfile::tempdir().unwrap();
         let value = |reply: zeron_rpc::RpcReply| match reply {
@@ -375,7 +413,11 @@ mod tests {
                 ),
             )
         };
-        let server = value(start("echo listening; while true; do sleep 0.05; done").await.unwrap());
+        let server = value(
+            start("echo listening; while true; do sleep 0.05; done")
+                .await
+                .unwrap(),
+        );
         let quick = value(start("echo done").await.unwrap());
         let shown = |core: &crate::EngineCore| -> Vec<String> {
             core.sessions
@@ -391,25 +433,34 @@ mod tests {
         let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let tail = value(
-                rpc.handle(methods::READ_BACKGROUND_TASK_OUTPUT, json!({"chatId": "free", "taskId": server_id}))
-                    .await
-                    .unwrap(),
+                rpc.handle(
+                    methods::READ_BACKGROUND_TASK_OUTPUT,
+                    json!({"chatId": "free", "taskId": server_id}),
+                )
+                .await
+                .unwrap(),
             );
-            if tail["text"].as_str().is_some_and(|t| t.contains("listening")) {
+            if tail["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("listening"))
+            {
                 break;
             }
             assert!(std::time::Instant::now() < give_up, "{tail}");
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let read = value(
-            with_caller(agent("free"), rpc.handle(methods::READ_COMMAND_OUTPUT, json!({"id": server_id})))
-                .await
-                .unwrap(),
+            with_caller(
+                agent("free"),
+                rpc.handle(methods::READ_COMMAND_OUTPUT, json!({"id": server_id})),
+            )
+            .await
+            .unwrap(),
         );
         assert_eq!(read["output"], "listening\n");
 
-        // One that ended goes from the row on the next look.
-        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        // One that ended goes from the row as it ends (followed, not polled).
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while shown(&core).contains(&quick_id) {
             assert!(std::time::Instant::now() < give_up, "{:?}", shown(&core));
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -418,13 +469,16 @@ mod tests {
 
         // Stopped from the row, the person's call: gone, and it ended.
         let stopped = value(
-            rpc.handle(methods::STOP_BACKGROUND_TASK, json!({"chatId": "free", "taskId": server_id}))
-                .await
-                .unwrap(),
+            rpc.handle(
+                methods::STOP_BACKGROUND_TASK,
+                json!({"chatId": "free", "taskId": server_id}),
+            )
+            .await
+            .unwrap(),
         );
         assert_eq!(stopped["stopping"], true);
         assert!(shown(&core).is_empty());
-        assert_eq!(crate::run_command::read(&server_id).unwrap().status, "stopped");
+        assert_eq!(core.commands.read(&server_id).unwrap().status, "stopped");
         core.sessions.shutdown().await;
     }
 
