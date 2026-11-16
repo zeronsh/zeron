@@ -6,9 +6,14 @@
 --   model.fleet(world)  { machines = { Machine }, threads = { [id]: Thread },
 --                         orchestrators = { [id]: any } }
 --
--- `world` is the Map's: { now, chats, devices, projects?, loads, here }.
+-- `world` is the Map's: { now, chats, devices, projects?, loads, here,
+-- show?, clock? }: `show` the Map's "Show chats" (ds/orch_map_visibility;
+-- the person's choice when none), `clock` the time it's judged at (now).
+-- A thread hidden by it is left out of its machine (and so out of every
+-- view's lines and dots); one fading carries its `opacity`.
 
 local Name = require("@ds/orch_name")
+local Visibility = require("@ds/orch_map_visibility")
 
 local M = {}
 
@@ -26,6 +31,8 @@ export type Thread = {
 	started: boolean?,
 	order: number,
 	paused: boolean,
+	-- How strongly it shows (1; less while it fades out, ds/orch_map_visibility).
+	opacity: number?,
 }
 export type Group = { key: string, project: string?, threads: { Thread } }
 export type Machine = {
@@ -41,10 +48,6 @@ export type Machine = {
 }
 export type Fleet = { machines: { Machine }, threads: { [string]: Thread }, orchestrators: { [string]: any } }
 
--- The person's own threads shown: those at work or waiting on them, and
--- those that finished lately (in the last half hour).
-local SHOWN: { [string]: boolean } = { working = true, waiting = true, input = true, approval = true }
-local RECENT = 30 * 60
 
 -- Machines in their order: this one first, a Cloud machine last, the rest
 -- by name.
@@ -64,13 +67,16 @@ function M.device_order(devices: { any }, here: string?): { any }
 	return list
 end
 
--- Whether a thread of the person's own shows: at work or waiting on them,
--- or finished lately; never one archived, nor a chat's subagent.
+-- Whether a thread of the person's own may show at all: never one
+-- archived, nor a chat's subagent (whether it does is the Map's "Show
+-- chats", ds/orch_map_visibility).
 function M.shown(c: any): boolean
-	if not c or c.archived or c.child_kind == "subagent" then
-		return false
-	end
-	return SHOWN[c.status or ""] == true or (c.updated or 0) >= os.time() - RECENT
+	return c ~= nil and not c.archived and c.child_kind ~= "subagent"
+end
+
+-- The Map's visibility rule for `world`: its context, and the time.
+function M.visibility(world: any): (Visibility.Ctx, number)
+	return Visibility.context(world.now, world.show), world.clock or os.time()
 end
 
 function M.fleet(world: any): Fleet
@@ -194,6 +200,19 @@ function M.fleet(world: any): Fleet
 	for _, t in threads do
 		if t.device then
 			used[t.device] = true
+		end
+	end
+	-- The Map's "Show chats": a thread hidden by it leaves the Map (an
+	-- orchestrator's own always shows); one fading carries its opacity.
+	local ctx, clock = M.visibility(world)
+	for id, t in threads do
+		if t.kind ~= "orchestrator" then
+			local verdict, opacity = Visibility.visible(chats[id], clock, ctx)
+			if verdict == "hide" then
+				threads[id] = nil
+			else
+				t.opacity = opacity
+			end
 		end
 	end
 	local machines: { Machine } = {}

@@ -25,6 +25,7 @@ local MachineHead = require("@self/orch_machine_head")
 local model = require("@self/orch_map_model")
 local Name = require("@ds/orch_name")
 local Layout = require("@self/orch_map_layout")
+local Visibility = require("@self/orch_map_visibility")
 
 export type Props = {
 	world: () -> any,
@@ -73,6 +74,10 @@ local function signature(world: any, width: number): string
 		end
 	end
 	table.sort(parts_)
+	-- (What the Map's "Show chats" hides or fades now: a cached layout never
+	-- keeps a hide.)
+	local ctx, clock = model.visibility(world)
+	table.insert(parts_, Visibility.key(chats, clock, ctx))
 	return table.concat(parts_, "|")
 end
 
@@ -401,6 +406,10 @@ return ui.component(function(props: Props): Node
 			end,
 			h = function(): number
 				return row:get().h
+			end,
+			-- (Fading out: finished a while ago, ds/orch_map_visibility.)
+			opacity = function(): number
+				return row:get().opacity or 1
 			end,
 			pl = 4,
 			pr = "$space.2",

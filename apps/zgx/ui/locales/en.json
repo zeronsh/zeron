@@ -1221,7 +1221,11 @@
           "failed": "Failed",
           "merged": "Merged"
         },
-        "reference": "Drag to reference"
+        "reference": "Drag to reference",
+        "show": "Show chats",
+        "show_active": "Active only",
+        "show_recent": "Active + recently finished",
+        "show_all": "All"
       },
       "machines": {
         "running": "{n} running",

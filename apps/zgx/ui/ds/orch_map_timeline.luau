@@ -333,6 +333,10 @@ M.View = ui.component(function(props: {
 			h = LANE_H,
 			rounded = "$radius.sm",
 			bg = "#00000000",
+			-- (Fading out: finished a while ago, ds/orch_map_visibility.)
+			opacity = function(): number
+				return t().opacity or 1
+			end,
 			hover = { bg = "$hover" },
 			on_drag = drag.on_drag,
 			drag_preview = drag.drag_preview,

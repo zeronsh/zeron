@@ -26,6 +26,7 @@ local decide = require("@ds/orch_decide")
 local OrchMap = require("@ds/orch_map")
 local MapMenu = require("@app/screens/control/map_menu")
 local Machines = require("@ds/orch_machines")
+local Visibility = require("@ds/orch_map_visibility")
 local Name = require("@ds/orch_name")
 local Comms = require("@ds/orch_comms")
 local OrchBoard = require("@ds/orch_board")
@@ -155,6 +156,10 @@ local function world(): any
 		projects = sessions.projects:get(),
 		loads = orchestration.loads:get(),
 		here = sessions.here:get(),
+		-- The Map's "Show chats", and the minute it's judged at
+		-- (ds/orch_map_visibility).
+		show = Visibility.mode:get(),
+		clock = Visibility.now(),
 	}
 end
 

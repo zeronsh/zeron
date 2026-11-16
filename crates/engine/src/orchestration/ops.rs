@@ -240,6 +240,7 @@ impl EngineRpc {
                     }
                     if let Some(hours) = crew_idle_hours {
                         settings.crew_idle_hours = hours;
+                        settings.crew_idle_hours_set = true;
                     }
                     doc.upsert_orchestration_settings(&settings);
                     settings

@@ -38,7 +38,7 @@
 --   orchestration.settings:get()  the profile's settings, synced and read by
 --                                every engine: { crew_auto_archive,
 --                                crew_idle_hours } (defaults until the
---                                engine says: on, 12)
+--                                engine says: on, 4)
 --   orchestration.auto_archive   a state for a Switch: crew threads left
 --                                idle archived (writes `updateSettings`)
 --   orchestration.idle_hours     a state for a Select: how long idle first
@@ -90,7 +90,7 @@ end
 -- The profile's settings (src/orchestration.rs `settings`). What was just
 -- asked for shows at once, until the engine's state says it (or the ask
 -- fails).
-local DEFAULT_SETTINGS = { crew_auto_archive = true, crew_idle_hours = 12 }
+local DEFAULT_SETTINGS = { crew_auto_archive = true, crew_idle_hours = 4 }
 local asked = ui.state("orchestration_settings_asked", {} :: { [string]: any })
 M.settings = ui.computed(function(): { crew_auto_archive: boolean, crew_idle_hours: number }
 	local s = M.now:get().settings or DEFAULT_SETTINGS
@@ -121,7 +121,7 @@ ui.effect(function()
 	end
 end)
 
-M.IDLE_HOURS = { 1, 6, 12, 24, 72, 168 }
+M.IDLE_HOURS = { 1, 4, 6, 12, 24, 72, 168 }
 
 -- `key` (snake_case) set to `value` through `updateSettings`.
 local function set_setting(key: string, value: any)

@@ -16,6 +16,7 @@
 --     on_open_chat = function(id) end,
 --   }
 
+local Visibility = require("@self/orch_map_visibility")
 local Icon = require("@self/icon")
 local status = require("@self/status")
 local locale = require("@self/locale")
@@ -186,8 +187,12 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 	end
 	local running = ui.computed(function(): { any }
 		local out = {}
+		-- (Running chats only, and those the Map's "Show chats" shows: the
+		-- one rule every view of the fleet keeps, ds/orch_map_visibility.)
+		local ctx = Visibility.context(nil, Visibility.mode:get())
+		local t = Visibility.now()
 		for _, c in props.chats() or {} do
-			if c.device == id() and c.status and LISTED[c.status] and not c.archived then
+			if c.device == id() and c.status and LISTED[c.status] and Visibility.visible(c, t, ctx) ~= "hide" then
 				table.insert(out, c)
 			end
 		end

@@ -496,7 +496,7 @@ impl RegistryDoc {
 
     /// The profile's orchestration settings (the defaults until written).
     pub fn orchestration_settings(&self) -> OrchestrationSettings {
-        self.read_entity::<SettingsRow>(SETTINGS_ROW).map(|row| row.settings).unwrap_or_default()
+        self.read_entity::<SettingsRow>(SETTINGS_ROW).map(|row| row.settings.migrated()).unwrap_or_default()
     }
 
     /// Changes whenever a progress row may have changed.

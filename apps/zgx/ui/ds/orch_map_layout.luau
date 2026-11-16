@@ -55,7 +55,7 @@ export type Lane = { id: string, name: string, y: number, h: number, online: boo
 export type Label = { id: string, lane: string, name: string, y: number, x: number }
 -- A row: an orchestrator's (`kind` "orchestrator"), a crew thread's or a
 -- thread of the person's own. `mid` its middle's y.
-export type Row = { id: string, lane: string, kind: string, x: number, y: number, w: number, h: number, mid: number, orchestrator: string?, hue: number?, paused: boolean, origin: string? }
+export type Row = { id: string, lane: string, kind: string, x: number, y: number, w: number, h: number, mid: number, orchestrator: string?, hue: number?, paused: boolean, origin: string?, opacity: number? }
 -- An elbow into a crew row: the row's middle, and where it ends.
 export type Branch = { y: number, to: number }
 -- An orchestrator's rail: down (or up) from its dot at (`x`, `dot`), from
@@ -223,7 +223,7 @@ function M.layout(world: any, width: number, style: string?): Layout
 			end)
 			for _, t in list do
 				local h = if t.kind == "orchestrator" then NODE_H else ROW_H
-				local row: Row = { id = t.id, lane = m.id, kind = t.kind, x = 0, y = y, w = 0, h = h, mid = y + h / 2, orchestrator = t.orchestrator, hue = t.hue, paused = t.paused }
+				local row: Row = { id = t.id, lane = m.id, kind = t.kind, x = 0, y = y, w = 0, h = h, mid = y + h / 2, orchestrator = t.orchestrator, hue = t.hue, paused = t.paused, opacity = t.opacity }
 				table.insert(out.rows, row)
 				if t.orchestrator then
 					-- (Kept apart, in "tag" and "edge", when on a machine other

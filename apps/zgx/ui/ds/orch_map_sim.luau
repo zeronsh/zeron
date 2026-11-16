@@ -32,6 +32,8 @@ export type Node = {
 	vy: number,
 	-- Held where it was dropped.
 	fixed: boolean,
+	-- How strongly it shows (less while it fades out, ds/orch_map_visibility).
+	opacity: number?,
 }
 export type Edge = {
 	a: string,
@@ -90,6 +92,7 @@ function M.build(world: any): Graph
 		local o = fleet.orchestrators[t.id]
 		local kind = if t.kind == "orchestrator" then (if o and o.kind == "brain_dump" then "brain" else "orchestrator") else "thread"
 		local n = node(t.id, kind, t.title, t.device, t.hue, t.kind == "crew")
+		n.opacity = t.opacity
 		local home = g.nodes[g.index[`dev:{t.device or ""}`] or 0]
 		local a = (hash(t.id) % 628) / 100
 		local dist = if kind == "thread" then 70 else 50

@@ -16,7 +16,7 @@ local Sidebar = require("@app/screens/shell/sidebar")
 local page = require("@app/screens/settings/orchestration")
 
 -- The engine's row, as the next launch finds it.
-local engine = ui.persist("fake_engine_orch_settings", { crew_auto_archive = true, crew_idle_hours = 12 })
+local engine = ui.persist("fake_engine_orch_settings", { crew_auto_archive = true, crew_idle_hours = 4 })
 
 sessions.now:set({
 	state = "ready",

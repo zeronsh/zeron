@@ -440,7 +440,9 @@ do
 		{ id = "th-zgx-mem", title = "zgx memory after tabs", device = "dev-desk", project = "p-zeron-desk", status = "working",
 			updated = ago(10), created = ago(1600), agent = "claude", model = "claude-opus-5-5",
 			activity = { kind = "thinking", label = "", since = ago(120) } },
-		{ id = "th-titlebar", title = "Linux titlebar toggle", device = "dev-desk", project = "p-zeron-desk", status = "done", updated = ago(26000), created = ago(30000), agent = "claude", model = "claude-opus-5-5" },
+		-- Finished hours ago and seen since (no unread output): the Map's
+		-- "Show chats" leaves it off by default (ds/orch_map_visibility).
+		{ id = "th-titlebar", title = "Linux titlebar toggle", device = "dev-desk", project = "p-zeron-desk", updated = ago(26000), created = ago(30000), agent = "claude", model = "claude-opus-5-5" },
 		-- What the Brain dump started from the person's dumps: threads of
 		-- their own, on whichever machine the project lives.
 		{ id = "th-dev-names", title = "Verify unique device names", device = "dev-mac", project = "p-zeron-mac", status = "working",
