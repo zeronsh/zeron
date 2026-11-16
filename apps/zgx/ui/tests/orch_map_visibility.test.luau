@@ -143,6 +143,19 @@ test("map visibility: in the default mode, a chat idle past the window hides, an
 	expect(shows(app)).to_be(true)
 end)
 
+test("map visibility: unread shows for UNREAD_FOR after it last moved, then as any finished chat", function()
+	for _, st in { "done", "failed" } do
+		expect((Visibility.visible(chat(st, Visibility.UNREAD_FOR * 0.9), NOW, ctx("recent")))).to_be("show")
+		expect((Visibility.visible(chat(st, Visibility.UNREAD_FOR * 0.9), NOW, ctx("active")))).to_be("show")
+		expect((Visibility.visible(chat(st, Visibility.UNREAD_FOR + 2 * HOUR), NOW, ctx("recent")))).to_be("hide")
+		expect((Visibility.visible(chat(st, Visibility.UNREAD_FOR + 2 * HOUR), NOW, ctx("active")))).to_be("hide")
+		expect((Visibility.visible(chat(st, Visibility.UNREAD_FOR + 2 * HOUR), NOW, ctx("all")))).to_be("show")
+	end
+	-- Working or asking: always, however long.
+	expect((Visibility.visible(chat("working", 100 * HOUR), NOW, ctx("active")))).to_be("show")
+	expect((Visibility.visible(chat("input", 100 * HOUR), NOW, ctx("active")))).to_be("show")
+end)
+
 test("map visibility: an archived orchestrator's chat isn't kept on the Map", function()
 	local c = ctx("recent", { orchestrators = { { id = "gone", archived = true }, { id = "here" } } })
 	expect((Visibility.visible(chat(nil, 5 * HOUR, "gone"), NOW, c))).to_be("hide")

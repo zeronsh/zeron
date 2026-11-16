@@ -19,9 +19,10 @@
 --                              never keeps a hide (or a show)
 --
 -- A chat always shows when it's an orchestrator's or the Brain dump's own
--- (not archived);
--- working, waiting on its own work, or asking (input, approval); finished or
--- failed and not seen since (unread); with an open ask of its, not put off;
+-- (not archived); working, waiting on its own work, or asking (input,
+-- approval); finished or failed and not seen since (unread), for a day
+-- after it last moved (UNREAD_FOR: crew chats nobody opens stay unread for
+-- good, and kept every one on the Map); with an open ask of its, not put off;
 -- or on a card in Review. Otherwise: "all" shows it; "active" hides it;
 -- "recent" shows it for the window after it last moved (`updated`, else
 -- `created`), fading through the window's last part (opacity from 1 down to
@@ -47,6 +48,9 @@ M.MODES = { "active", "recent", "all" } :: { Mode }
 M.DEFAULT = "recent" :: Mode
 -- How long a finished chat stays in "recent" (seconds).
 M.WINDOW = 60 * 60
+-- How long a finished or failed chat not seen since shows whatever the
+-- mode (seconds since it last moved); past it, the mode's rule applies.
+M.UNREAD_FOR = 24 * 60 * 60
 -- Where in the window it starts to fade (its share), and how faint it gets.
 M.FADE_FROM = 0.5
 M.FADE_MIN = 0.35
@@ -128,7 +132,9 @@ function M.visible(chat: any, now: number, ctx: Ctx): (Verdict, number)
 	end
 	local id = chat.id
 	local status = chat.status or ""
-	if (id and (ctx.pinned[id] or ctx.asking[id] or ctx.review[id])) or LIVE[status] or UNREAD[status] then
+	local at = chat.updated or chat.created or 0
+	local age = math.max(0, now - at)
+	if (id and (ctx.pinned[id] or ctx.asking[id] or ctx.review[id])) or LIVE[status] or (UNREAD[status] and age < M.UNREAD_FOR) then
 		return "show", 1
 	end
 	if ctx.mode == "all" then
@@ -137,8 +143,6 @@ function M.visible(chat: any, now: number, ctx: Ctx): (Verdict, number)
 	if ctx.mode == "active" then
 		return "hide", 0
 	end
-	local at = chat.updated or chat.created or 0
-	local age = math.max(0, now - at)
 	local window = math.max(1, ctx.window)
 	if age >= window then
 		return "hide", 0
