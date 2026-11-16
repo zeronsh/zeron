@@ -2800,7 +2800,10 @@
         "shell_reload": "Reload Zeron",
         "shell_reload_interface": "Reload interface",
         "shell_dictate": "Hold to dictate",
-        "control_focus_capture": "Focus Capture"
+        "control_focus_capture": "Focus Capture",
+        "control_tab_overview": "Control room: Overview",
+        "control_tab_board": "Control room: Board",
+        "control_tab_chat": "Control room: Chat"
       },
       "group": {
         "sessions": "Sessions",

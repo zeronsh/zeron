@@ -1798,8 +1798,8 @@ local BoardTab = ui.component(function(): Node
 		id = "control-board-scroll",
 		place = M.board_place,
 		-- (Its last cards scroll clear of the floating composer.)
-		pb = function(): number
-			return math.max(32, M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR)
+		pb = function(): any
+			return ui.raw(math.max(32, M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR), "the floating composer's height, measured")
 		end,
 		ui.column {
 			id = "control-board-tab",
