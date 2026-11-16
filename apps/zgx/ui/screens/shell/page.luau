@@ -1482,6 +1482,9 @@ return function(props: Props): Node
 		end
 		return out
 	end)
+	-- Each pane's ×: how far in from its top right corner, and its size
+	-- (an `sm` IconButton's).
+	local CLOSE_INSET, CLOSE_SIZE = 6, 22
 	local function pane_item(id: string): Node
 		local lane_slot = `split-{id}`
 		local function focused(): boolean
@@ -1511,6 +1514,14 @@ return function(props: Props): Node
 		-- scrolls); a press anywhere in it (heard as it comes up from what
 		-- took it) focuses it, and a press on its composer gives the
 		-- window's composer, its draft the same, the keys.
+		-- (A press on its × (its top right corner) isn't one to focus it by,
+		-- nor is the keyboard focus the × takes as it's pressed: the focus
+		-- stays where it was.)
+		local closing = false
+		local function on_close(e: any): boolean
+			local corner = CLOSE_INSET + CLOSE_SIZE
+			return (e.local_y or corner) < corner and (e.local_x or 0) > (card_ref.width or 0) - corner
+		end
 		local card = ui.column {
 			ref = card_ref,
 			absolute = true,
@@ -1584,6 +1595,10 @@ return function(props: Props): Node
 				if focused() then
 					return
 				end
+				if on_close(e) then
+					closing = true
+					return
+				end
 				local on_composer = (e.local_y or 0) > (card_ref.height or 0) - COMPOSER_ROOM
 				splits.focus(id)
 				if on_composer then
@@ -1597,7 +1612,7 @@ return function(props: Props): Node
 			-- chat's draft in it, takes the keys. Only the window's composer
 			-- types: one writer for each chat's draft.)
 			on_focus = function()
-				if not focused() then
+				if not focused() and not closing then
 					splits.focus(id)
 					ui.after(0, function()
 						chat_shared.focus:add(1)
@@ -1653,6 +1668,43 @@ return function(props: Props): Node
 					return if hovered:get() then "$zeron.inset.dim_hover" else "$zeron.inset.dim"
 				end,
 			},
+			-- Its ×, at its top right while the pointer is over it: takes it
+			-- out of the split, as ⌘W does the focused one (its chat goes
+			-- on, in the sidebar). Without it, a split had no way out you
+			-- could see. (The focus stays where it was, unless it was this
+			-- one: then its neighbour has it.)
+			ui.show(function(): boolean
+				return hovered:get() and not splits.dragging:get()
+			end, ui.row {
+				absolute = true,
+				top = ui.raw(CLOSE_INSET, "off the card's top, as the grip"),
+				right = ui.raw(CLOSE_INSET, "off the card's right"),
+				pointer_events = "none",
+				rounded = "$radius.md",
+				bg = function(): string
+					return if ds.material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
+				end,
+				backdrop_blur = function(): number
+					return if ds.material.see_through() then 16 else 0
+				end,
+				ds.IconButton {
+					id = `split-close-{id}`,
+					icon = "close",
+					label = ui.t("shell.page.close_pane"),
+					size = "sm",
+					tone = "quiet",
+					pointer_events = "auto",
+					on_click = function()
+						-- (The keys back to the window's composer first: the ×
+						-- gone, they'd land in the next pane's, focusing it.)
+						chat_shared.focus:add(1)
+						ui.after(0, function()
+							closing = false
+							splits.close(id)
+						end)
+					end,
+				},
+			}),
 			-- What's carried over it, while it isn't focused (focused, the
 			-- chat page's overlay stands over it).
 			DropOverlay {

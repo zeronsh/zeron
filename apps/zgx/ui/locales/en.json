@@ -2526,7 +2526,8 @@
     "page": {
       "plugin": "Plugin",
       "plugin_off": "Its plugin isn't on right now.",
-      "resize_files": "Resize files"
+      "resize_files": "Resize files",
+      "close_pane": "Remove from split"
     },
     "keys": {
       "title": {
