@@ -91,6 +91,42 @@ local function plain(text: string): string
 	return (string.gsub(string.gsub(text, "%*%*", ""), "`", ""))
 end
 
+-- Two plain values (tables field by field) the same.
+local function same(a: any, b: any): boolean
+	if a == b then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return false
+	end
+	for k, v in a do
+		if not same(v, b[k]) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+
+-- A need as its row reads it: what it shows, never the whole chat (whose
+-- every change, its activity, its title, would wake the row).
+local function shown_of(n: any): any
+	return {
+		id = n.id,
+		kind = n.kind,
+		urgent = n.urgent,
+		at = n.at,
+		ask = n.ask,
+		input = n.input,
+		from = n.from,
+		hue = n.hue,
+	}
+end
+
 -- Each kind of ask as Zeron's status says it: a question or a decision
 -- waits on input, an approval on approval, a blocker has failed.
 local KIND_STATUS: { [string]: status.Kind } = {
@@ -112,8 +148,22 @@ return ui.component(function(props: Props): Node
 	local recent_open = ui.use_state(false)
 	local limit = props.limit or 6
 
+	-- Each row's need as last handed out, by id: the same table while what
+	-- it shows is, so a new ask (or one answered) touches its own row only.
+	local kept: { [string]: any } = {}
 	local all = ui.computed(function(): { any }
-		local now = props.needs()
+		local now = {}
+		local fresh: { [string]: any } = {}
+		for _, n in props.needs() do
+			local v = shown_of(n)
+			local was = kept[n.id]
+			if was and same(was, v) then
+				v = was
+			end
+			fresh[n.id] = v
+			table.insert(now, v)
+		end
+		kept = fresh
 		local gone = leaving:get()
 		local pending = decide.pending:get()
 		local function phase(n: any): string?
