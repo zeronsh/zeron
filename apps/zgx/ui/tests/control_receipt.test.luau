@@ -332,6 +332,10 @@ local COMPOSER = "#control-capture-composer"
 test("capture is the chat composer: the Brain dump's, its model there", function()
 	local app = open()
 	expect(app:has(`{COMPOSER} >> role:textbox`)).to_be(true)
+	-- (Its chat taken in once it's used: the pointer over it.)
+	expect((app:state("watched") or {})["control-capture"]).to_be_nil()
+	app:hover(`{COMPOSER} >> role:textbox`)
+	app:frames(5)
 	expect((app:state("watched") or {})["control-capture"]).to_be("orc-brain")
 	-- Its model picker, as a chat's (the Brain dump's own model).
 	expect(app:has(`{COMPOSER} >> role:button "Model"`) or app:has(`{COMPOSER} >> ~"Haiku"`)).to_be(true)

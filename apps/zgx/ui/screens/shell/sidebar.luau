@@ -1661,7 +1661,9 @@ local function view_more(more: any): { Node }
 			st:set(not st:peek())
 		end
 	end
-	local page = control_page()
+	-- (The Control room's page, for its widgets and its Map's view, loaded
+	-- as one of those is picked, never while the menu is made: loading it
+	-- then, the menu's first opening missed its time budget.)
 	return {
 		Menu.Group {
 			heading = locale.s("orch.sidebar.view.orchestrators"),
@@ -1713,8 +1715,8 @@ local function view_more(more: any): { Node }
 			Menu.Row {
 				icon = "tuning",
 				label = locale.s("orch.sidebar.view.widgets"),
-				disabled = page == nil,
 				on_click = function()
+					local page = control_page()
 					if page then
 						more.menu(page.widget_entries())
 					end
@@ -1723,8 +1725,8 @@ local function view_more(more: any): { Node }
 			Menu.Row {
 				icon = "git-branch",
 				label = locale.s("orch.sidebar.view.map"),
-				disabled = page == nil,
 				on_click = function()
+					local page = control_page()
 					if not page then
 						return
 					end
