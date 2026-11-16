@@ -449,12 +449,17 @@ local function skip_button(r: any): Node?
 end
 
 local function row(r: any, close: () -> ()): Node
-	return ui.row {
-		id = `update-row-{r.id}`,
+	-- A failure says why in full, under its name and actions, as wide as the
+	-- row, wrapped, in ink that reads on any surface; the mark beside the name
+	-- says it failed. (Red words over frost blur into the backdrop, and a fade
+	-- beside two buttons cuts off the reason.)
+	local failed_here = r.phase == "failed" and r.connected
+	local head = ui.row {
+		id = if failed_here then nil else `update-row-{r.id}`,
 		w_full = true,
-		min_h = ui.raw(ROW_H, "a row of two lines and its room"),
-		px = "$space.3",
-		py = "$space.2",
+		min_h = if failed_here then nil else ui.raw(ROW_H, "a row of two lines and its room"),
+		px = if failed_here then nil else "$space.3",
+		py = if failed_here then nil else "$space.2",
 		gap = "$space.3",
 		items = "center",
 		ui.div { shrink = 0, mark_of(r, MARK) },
@@ -462,20 +467,49 @@ local function row(r: any, close: () -> ()): Node
 			grow = 1,
 			min_w = 0,
 			gap = ui.raw(1, "a name and its line, one thing"),
-			ds.FadeText { name_of(r), literal = true, w_full = true, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary", truncate = true },
-			ds.FadeText {
-				line_of(r),
-				literal = true,
+			ui.row {
 				w_full = true,
-				text_size = "$font.size.xs",
-				color = if r.phase == "failed" and r.connected then "$danger" else "$text.secondary",
-				tabular = true,
+				items = "center",
+				gap = "$space.1",
+				ds.FadeText { name_of(r), literal = true, shrink = 1, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary", truncate = true },
+				if failed_here then ui.div { shrink = 0, color = "$danger", ds.Icon { name = "danger-triangle", size = 12 } } else nil,
 			},
+			if failed_here
+				then nil
+				else ds.FadeText {
+					line_of(r),
+					literal = true,
+					w_full = true,
+					text_size = "$font.size.xs",
+					color = "$text.secondary",
+					tabular = true,
+				},
 		},
 		if r.active then ui.div { shrink = 0, status.StatusIcon { kind = "working", size = 14 } } else nil,
 		if r.phase == "updated" then ui.div { shrink = 0, color = "$success", ds.Icon { name = "check", size = 14 } } else nil,
 		skip_button(r),
 		if r.action then action_button(r, close) else nil,
+	}
+	if not failed_here then
+		return head
+	end
+	return ui.column {
+		id = `update-row-{r.id}`,
+		w_full = true,
+		px = "$space.3",
+		py = "$space.2",
+		gap = "$space.1",
+		head,
+		ui.text {
+			line_of(r),
+			literal = true,
+			wrap = true,
+			-- (Under the name, past its mark and the gap after it.)
+			pl = ui.raw(MARK + 12, "under the name, past its mark"),
+			text_size = "$font.size.xs",
+			color = "$text.secondary",
+			selectable = true,
+		},
 	}
 end
 
