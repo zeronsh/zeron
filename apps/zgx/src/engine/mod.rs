@@ -193,6 +193,11 @@ impl Engine {
         self.config.as_ref().ok().map(|c| c.data_dir.clone())
     }
 
+    /// Whether [`Engine::spawn`] runs what it's given (a window's tasks are there).
+    pub fn can_spawn(&self) -> bool {
+        self.tasks.borrow().is_some()
+    }
+
     /// `work` on the connection's tasks.
     pub fn spawn(&self, work: impl std::future::Future<Output = ()> + 'static) {
         if let Some(tasks) = &*self.tasks.borrow() {

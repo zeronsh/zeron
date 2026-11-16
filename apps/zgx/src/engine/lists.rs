@@ -220,7 +220,7 @@ pub(crate) mod work {
 
 /// The key a list method's rows go by.
 fn key_of(method: &str) -> &'static str {
-    if method == "WatchSessions" { "chatId" } else { "id" }
+    if matches!(method, "WatchSessions" | "WatchProgress") { "chatId" } else { "id" }
 }
 
 type Listener = Box<dyn Fn(&Frame)>;

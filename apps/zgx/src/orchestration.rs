@@ -70,6 +70,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
+use zeron_proto::orchestration::frames::{Followed, Follower, Heard, Keyed, ListDelta, OrchestrationDelta};
 use zeron_proto::orchestration::{
     Ask, ChatActivity, CommEvent, CrewMember, DeviceLoad, Dump, OrchestrationState, Orchestrator, Route, RouteTarget,
     Score, TodoProgress, WorkItem, WorkLink,
@@ -101,9 +102,13 @@ struct Orchestration {
     next_window: Cell<u64>,
     /// The engine watched (once, for every window).
     watching: Cell<bool>,
-    /// The state as the engine last sent it, and as scripts were given it
-    /// (none yet: loading).
-    heard: RefCell<Option<Json>>,
+    /// The state as the engine's frames have made it (none yet: loading),
+    /// each row as scripts are given it, and that state as scripts were
+    /// given it.
+    heard: RefCell<Follower>,
+    rows: RefCell<RowValues>,
+    /// Watching again after a missed frame, until its snapshot comes.
+    resyncing: Cell<bool>,
     now: RefCell<Option<Value>>,
     comms: RefCell<Comms>,
     loads: RefCell<Value>,
@@ -144,12 +149,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let weak = Rc::downgrade(&o);
         engine::get().on_connect(move |rpc| {
             let Some(o) = weak.upgrade() else { return };
-            let heard = Rc::downgrade(&o);
-            let state = rpc.watch("WatchOrchestration", json!({}), move |item| {
-                if let Some(o) = heard.upgrade() {
-                    o.heard_state(item);
-                }
-            });
+            let state = watch_state(rpc, Rc::downgrade(&o));
             let heard = Rc::downgrade(&o);
             let comms = rpc.watch("WatchComms", json!({}), move |item| {
                 if let Some(o) = heard.upgrade() {
@@ -201,6 +201,17 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         }
         a.want_loads(window, on.truthy())
     });
+}
+
+/// `WatchOrchestration` as changes (`frames`: the whole state once, then
+/// what moved; an engine from before them sends the whole state each time,
+/// which reads as a snapshot).
+fn watch_state(rpc: &Rpc, o: std::rc::Weak<Orchestration>) -> Watch {
+    rpc.watch("WatchOrchestration", json!({ "changes": true }), move |item| {
+        if let Some(o) = o.upgrade() {
+            o.heard_state(item);
+        }
+    })
 }
 
 /// A dump's picks (`picks`: the composer's model, effort…) as `config`, and
@@ -322,22 +333,69 @@ impl Orchestration {
         if matches!(*loads, Value::Nil) { loads_value(&[]) } else { loads.clone() }
     }
 
+    /// A frame of `WatchOrchestration`: applied to the state kept, and the
+    /// rows it touched made again for the scripts (the rest are the same
+    /// values, so what reads them does nothing). A frame that doesn't follow
+    /// the last (one was missed) changes nothing: the state is watched again,
+    /// and the new watch starts whole.
     fn heard_state(&self, item: Json) {
+        let heard = match Heard::read(&item) {
+            Ok(heard) => heard,
+            Err(error) => return self.complain("WatchOrchestration", &error),
+        };
+        // What it changes, from the state kept (a snapshot: compared with it).
+        let delta = match &heard {
+            Heard::Delta { delta, .. } => Some(delta.clone()),
+            Heard::Snapshot { state, .. } => self.heard.borrow().state.as_ref().map_or_else(
+                || Some(OrchestrationDelta::default()),
+                |was| OrchestrationDelta::between(was, state),
+            ),
+        };
+        let first = self.heard.borrow().state.is_none();
+        if matches!(heard, Heard::Snapshot { .. }) {
+            self.resyncing.set(false);
+        }
+        if self.heard.borrow_mut().hear(heard) == Followed::Gap {
+            return self.resync();
+        }
         // (The same again: nothing to give.)
-        if self.heard.borrow().as_ref() == Some(&item) {
+        let Some(delta) = delta else { return };
+        let value = {
+            let heard = self.heard.borrow();
+            let Some(state) = heard.state.as_ref() else { return };
+            let mut rows = self.rows.borrow_mut();
+            if first {
+                *rows = RowValues::default();
+            }
+            rows.forget(&delta);
+            rows.value(state)
+        };
+        *self.now.borrow_mut() = Some(value.clone());
+        for shared in self.targets(|w| &w.now) {
+            shared.set(value.clone());
+        }
+    }
+
+    /// Watch the state again: a frame was missed. Until the new watch's
+    /// snapshot comes, no delta applies; the state kept stays, for the
+    /// snapshot to be compared with (rows it doesn't change keep their
+    /// values). (Later, not inside the watch's own callback.)
+    fn resync(&self) {
+        self.heard.borrow_mut().version = None;
+        if self.resyncing.replace(true) {
             return;
         }
-        match OrchestrationState::deserialize(&item) {
-            Ok(state) => {
-                *self.now.borrow_mut() = Some(state_value(&state));
-                *self.heard.borrow_mut() = Some(item);
-                let value = self.now_value();
-                for shared in self.targets(|w| &w.now) {
-                    shared.set(value.clone());
+        #[cfg(test)]
+        RESYNCS.with(|n| n.set(n.get() + 1));
+        engine::get().spawn(async move {
+            let Some(rpc) = engine::get().current() else { return };
+            ORCHESTRATION.with(|o| {
+                let state = watch_state(&rpc, Rc::downgrade(o));
+                if let Some(slot) = o.watches.borrow_mut().first_mut() {
+                    *slot = state;
                 }
-            }
-            Err(error) => self.complain("WatchOrchestration", &error),
-        }
+            });
+        });
     }
 
     fn heard_comms(&self, item: &Json) {
@@ -516,24 +574,110 @@ fn loading_value() -> Value {
     ])
 }
 
-/// The whole state, as scripts see it.
-fn state_value(s: &OrchestrationState) -> Value {
+#[cfg(test)]
+thread_local! {
+    static RESYNCS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// One collection's rows as scripts were given them, by key, and the list
+/// of them (none: made again from the rows).
+struct Collection {
+    rows: std::collections::HashMap<String, Value>,
+    list: Option<Value>,
+}
+
+impl Default for Collection {
+    fn default() -> Self {
+        Self { rows: Default::default(), list: None }
+    }
+}
+
+impl Collection {
+    /// What `delta` touched made again when next asked.
+    fn forget<T: Keyed>(&mut self, delta: Option<&ListDelta<T>>) {
+        let Some(delta) = delta else { return };
+        self.list = None;
+        match delta.touched() {
+            Some(keys) => {
+                for key in keys {
+                    self.rows.remove(key);
+                }
+            }
+            None => self.rows.clear(),
+        }
+    }
+
+    /// `rows` as scripts see them: each row's value kept from before unless
+    /// it was touched. (Rows whose keys repeat are each made again: they
+    /// can't be told apart.)
+    fn value<T: Keyed>(&mut self, rows: &[T], f: impl Fn(&T) -> Value) -> Value {
+        if let Some(list) = &self.list {
+            return list.clone();
+        }
+        let mut keys = std::collections::HashSet::with_capacity(rows.len());
+        let unique = rows.iter().all(|r| keys.insert(r.key()));
+        if !unique {
+            self.rows.clear();
+            let list = list(rows, f);
+            self.list = Some(list.clone());
+            return list;
+        }
+        self.rows.retain(|k, _| keys.contains(k.as_str()));
+        let list = Value::List(
+            rows.iter()
+                .map(|r| self.rows.entry(r.key().to_owned()).or_insert_with(|| f(r)).clone())
+                .collect(),
+        );
+        self.list = Some(list.clone());
+        list
+    }
+}
+
+/// Each collection's rows as scripts were given them.
+#[derive(Default)]
+struct RowValues {
+    orchestrators: Collection,
+    crew: Collection,
+    items: Collection,
+    asks: Collection,
+    dumps: Collection,
+}
+
+impl RowValues {
+    fn forget(&mut self, delta: &OrchestrationDelta) {
+        self.orchestrators.forget(delta.orchestrators.as_ref());
+        self.crew.forget(delta.crew.as_ref());
+        self.items.forget(delta.items.as_ref());
+        self.asks.forget(delta.asks.as_ref());
+        self.dumps.forget(delta.dumps.as_ref());
+    }
+
+    /// The whole state, as scripts see it, from the rows kept.
+    fn value(&mut self, s: &OrchestrationState) -> Value {
+        Value::record([
+            ("state", Value::from("ready")),
+            ("orchestrators", self.orchestrators.value(&s.orchestrators, orchestrator_value)),
+            ("crew", self.crew.value(&s.crew, crew_value)),
+            ("items", self.items.value(&s.items, item_value)),
+            ("asks", self.asks.value(&s.asks, ask_value)),
+            ("dumps", self.dumps.value(&s.dumps, dump_value)),
+            ("settings", settings_value(s)),
+        ])
+    }
+}
+
+fn settings_value(s: &OrchestrationState) -> Value {
+    // The profile's settings: `{ crew_auto_archive, crew_idle_hours }`.
     Value::record([
-        ("state", Value::from("ready")),
-        ("orchestrators", list(&s.orchestrators, orchestrator_value)),
-        ("crew", list(&s.crew, crew_value)),
-        ("items", list(&s.items, item_value)),
-        ("asks", list(&s.asks, ask_value)),
-        ("dumps", list(&s.dumps, dump_value)),
-        // The profile's settings: `{ crew_auto_archive, crew_idle_hours }`.
-        (
-            "settings",
-            Value::record([
-                ("crew_auto_archive", Value::Bool(s.settings.crew_auto_archive)),
-                ("crew_idle_hours", Value::from(f64::from(s.settings.crew_idle_hours))),
-            ]),
-        ),
+        ("crew_auto_archive", Value::Bool(s.settings.crew_auto_archive)),
+        ("crew_idle_hours", Value::from(f64::from(s.settings.crew_idle_hours))),
     ])
+}
+
+/// The whole state, as scripts see it, made afresh.
+#[cfg(test)]
+fn state_value(s: &OrchestrationState) -> Value {
+    RowValues::default().value(s)
 }
 
 fn orchestrator_value(o: &Orchestrator) -> Value {
@@ -1352,6 +1496,184 @@ mod tests {
             history.heard(&round(NOW + i * 5, 0.1));
         }
         assert_eq!(history.by_device["dev-desk"].len(), HISTORY);
+    }
+
+    fn same(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
+            (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    fn row<'a>(v: &'a Value, list: &str, key: &str, id: &str) -> &'a Value {
+        v.field(list).unwrap().list().iter().find(|r| text(r.field(key)).as_deref() == Some(id)).unwrap()
+    }
+
+    /// As the engine's watch on changes sends them: a snapshot, then deltas.
+    fn frames(states: &[OrchestrationState]) -> Vec<Json> {
+        let mut framer = zeron_proto::orchestration::frames::Framer::new();
+        states.iter().filter_map(|s| framer.frame(s)).map(|f| serde_json::to_value(f).unwrap()).collect()
+    }
+
+    /// A delta that moves one card makes that card's row again and nothing
+    /// else: every other row, and every other list, is the value scripts
+    /// already have (the same Luau table, so their selectors don't run).
+    #[test]
+    fn a_delta_keeps_every_row_it_does_not_touch() {
+        let s1 = OrchestrationState::deserialize(&sample()).unwrap();
+        let mut s2 = s1.clone();
+        let live = s2.items.iter_mut().find(|i| i.id == "it-live").unwrap();
+        live.state = zeron_proto::orchestration::WorkState::Active;
+        let wire = frames(&[s1, s2.clone()]);
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[1]["frame"], "delta");
+        assert!(wire[1].get("asks").is_none(), "only what changed goes");
+        let o = Orchestration::default();
+        o.heard_state(wire[0].clone());
+        let before = o.now_value();
+        o.heard_state(wire[1].clone());
+        let after = o.now_value();
+        assert_eq!(after, state_value(&s2), "the delta gives the state the engine has");
+        assert_eq!(text(row(&after, "items", "id", "it-live").field("state")).as_deref(), Some("active"));
+        assert!(!same(row(&before, "items", "id", "it-live"), row(&after, "items", "id", "it-live")));
+        assert!(same(row(&before, "items", "id", "it-titlebar"), row(&after, "items", "id", "it-titlebar")));
+        for list in ["orchestrators", "crew", "asks", "dumps"] {
+            assert!(same(before.field(list).unwrap(), after.field(list).unwrap()), "{list} kept whole");
+        }
+    }
+
+    /// What scripts see of a pushed change: a card's selector (as the
+    /// Board's cards read theirs) runs again only for the card that moved,
+    /// and every other card is the very Luau table it was.
+    #[test]
+    fn a_pushed_delta_runs_only_the_moved_card_s_selector() {
+        use zgx_script::testing::TestApp;
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/orch_push_fixture.luau");
+        let app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+        app.frames(5);
+        let shared = app.host.shared("orchestration", loading_value());
+        let o = Orchestration::default();
+        let push = |item: Json| {
+            o.heard_state(item);
+            shared.set(o.now_value());
+            app.settle();
+            app.frames(3);
+        };
+        let state = |name: &str| app.host.states().into_iter().find(|(n, _)| n == name).map(|(_, v)| v).unwrap();
+        let count = |id: &str| num(state("runs").field(id)).unwrap_or(0.);
+        let kept = |id: &str| matches!(state("kept").field(id), Some(Value::Bool(true)));
+
+        let s1 = OrchestrationState::deserialize(&sample()).unwrap();
+        let mut s2 = s1.clone();
+        s2.items.iter_mut().find(|i| i.id == "it-live").unwrap().state = zeron_proto::orchestration::WorkState::Active;
+        let mut s3 = s2.clone();
+        s3.asks[0].question = "Something else?".into();
+        let mut s4 = s3.clone();
+        let mut fresh = s4.items[1].clone();
+        fresh.id = "it-new".into();
+        s4.items.push(fresh);
+        let wire = frames(&[s1, s2, s3, s4]);
+        assert_eq!(wire.len(), 4);
+
+        push(wire[0].clone());
+        let (titlebar, live, new) = (count("it-titlebar"), count("it-live"), count("it-new"));
+        // A card moved: its selector alone runs again.
+        push(wire[1].clone());
+        assert_eq!(count("it-live"), live + 1.);
+        assert_eq!(count("it-titlebar"), titlebar, "an unchanged card's selector didn't run");
+        assert_eq!(count("it-new"), new);
+        assert!(kept("it-titlebar"), "an unchanged card is the same table");
+        assert!(!kept("it-live"));
+        // An ask changed: no card's selector runs, every card is kept.
+        push(wire[2].clone());
+        assert_eq!((count("it-titlebar"), count("it-live")), (titlebar, live + 1.));
+        assert!(kept("it-titlebar") && kept("it-live"));
+        // A card added: its own selector runs, the others don't.
+        push(wire[3].clone());
+        assert_eq!(count("it-new"), new + 1.);
+        assert_eq!((count("it-titlebar"), count("it-live")), (titlebar, live + 1.));
+        assert!(kept("it-titlebar") && kept("it-live"));
+    }
+
+    /// A row added, one removed and the order changed, by a delta.
+    #[test]
+    fn a_delta_adds_removes_and_reorders_rows() {
+        let s1 = OrchestrationState::deserialize(&sample()).unwrap();
+        let mut s2 = s1.clone();
+        let gone = s2.crew.remove(0);
+        let mut newcomer = gone.clone();
+        newcomer.chat_id = "th-new".into();
+        s2.crew.insert(0, newcomer);
+        s2.items.reverse();
+        let wire = frames(&[s1, s2.clone()]);
+        let o = Orchestration::default();
+        o.heard_state(wire[0].clone());
+        let before = o.now_value();
+        o.heard_state(wire[1].clone());
+        let after = o.now_value();
+        assert_eq!(after, state_value(&s2));
+        // Reordered rows are the same rows.
+        assert!(same(row(&before, "items", "id", "it-live"), row(&after, "items", "id", "it-live")));
+    }
+
+    /// A missed frame: nothing applied, and the state is watched again.
+    #[test]
+    fn a_missed_frame_changes_nothing_and_watches_again() {
+        let s1 = OrchestrationState::deserialize(&sample()).unwrap();
+        let mut s2 = s1.clone();
+        s2.items[0].title = "renamed".into();
+        let mut s3 = s2.clone();
+        s3.items[0].title = "renamed again".into();
+        let wire = frames(&[s1, s2, s3]);
+        let o = Orchestration::default();
+        o.heard_state(wire[0].clone());
+        let before = o.now_value();
+        let resyncs = RESYNCS.with(Cell::get);
+        o.heard_state(wire[2].clone());
+        assert_eq!(RESYNCS.with(Cell::get), resyncs + 1);
+        assert!(same(&before, &o.now_value()));
+        // More of the old watch's deltas: nothing applied, no second watch.
+        o.heard_state(wire[1].clone());
+        assert_eq!(RESYNCS.with(Cell::get), resyncs + 1);
+        assert!(same(&before, &o.now_value()));
+        // The new watch's snapshot: the state as it is, untouched rows kept.
+        let s3 = OrchestrationState::deserialize(&sample()).unwrap();
+        let mut s3 = s3;
+        s3.items[0].title = "renamed again".into();
+        let again = frames(std::slice::from_ref(&s3));
+        o.heard_state(again[0].clone());
+        let after = o.now_value();
+        assert_eq!(after, state_value(&s3));
+        assert!(same(before.field("asks").unwrap(), after.field("asks").unwrap()));
+        let id = s3.items[1].id.clone();
+        assert!(same(row(&before, "items", "id", &id), row(&after, "items", "id", &id)));
+        // And deltas apply again after it.
+        let mut s4 = s3.clone();
+        s4.items[1].title = "fourth".into();
+        let mut framer = zeron_proto::orchestration::frames::Framer::new();
+        framer.frame(&s3);
+        o.heard_state(serde_json::to_value(framer.frame(&s4).unwrap()).unwrap());
+        assert_eq!(o.now_value(), state_value(&s4));
+    }
+
+    /// An engine from before frames sends the whole state each time: each
+    /// is taken as it comes, and rows that didn't change keep their values.
+    #[test]
+    fn an_older_engine_s_whole_states_keep_unchanged_rows() {
+        let s1 = OrchestrationState::deserialize(&sample()).unwrap();
+        let mut s2 = s1.clone();
+        s2.asks[0].question = "Another question?".into();
+        let o = Orchestration::default();
+        o.heard_state(serde_json::to_value(&s1).unwrap());
+        let before = o.now_value();
+        o.heard_state(serde_json::to_value(&s2).unwrap());
+        let after = o.now_value();
+        assert_eq!(after, state_value(&s2));
+        assert!(same(before.field("items").unwrap(), after.field("items").unwrap()));
+        assert!(!same(before.field("asks").unwrap(), after.field("asks").unwrap()));
+        let id = s2.asks[1].id.clone();
+        assert!(same(row(&before, "asks", "id", &id), row(&after, "asks", "id", &id)));
     }
 
     #[test]
