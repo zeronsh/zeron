@@ -297,11 +297,16 @@ test("graph2: crew are named as every view names them (ds/orch_name)", function(
 	local f = (sample :: any).fleet
 	local fleet = model.fleet(world())
 	local l = L.layout(Scene.of(world()), 1200)
-	for id, t in fleet.threads do
-		local i = l.index[id]
-		expect(i ~= nil).to_be(true)
-		expect(l.nodes[i :: number].title).to_be(t.title)
+	-- (Those shown: a quiet one may be left out, ds/orch_graph2_visibility.)
+	local named = 0
+	for _, n in l.nodes do
+		local t = fleet.threads[n.id]
+		if t then
+			expect(n.title).to_be(t.title)
+			named += 1
+		end
 	end
+	expect(named > 0).to_be(true)
 	expect(f ~= nil).to_be(true)
 end)
 
@@ -326,4 +331,85 @@ test("graph2: a dot's frames and the ease's frames allocate nothing", function()
 	end
 	print("GRAPH2ALLOC overlay_kb", most, "ease draw_kb", ease)
 	expect(ease < 2).to_be(true)
+end)
+
+-- Visibility (ds/orch_graph2_visibility, the Map's one rule's shape).
+
+test("graph2 visibility: the rule, by state, age and setting", function()
+	local vis = require("@ds/orch_graph2_visibility")
+	local now = 1_000_000
+	local ctx = { mode = "recent", window = 3600, pinned = { o = true }, asking = { a = true }, review = { r = true } }
+	local function v(chat: any, c: any?): string
+		return (vis.visible(chat, now, c or ctx))
+	end
+	expect(v({ id = "w", status = "working", updated = 0 })).to_be("show")
+	expect(v({ id = "o", updated = 0 })).to_be("show")
+	expect(v({ id = "a", updated = 0 })).to_be("show")
+	expect(v({ id = "r", updated = 0 })).to_be("show")
+	expect(v({ id = "d", status = "done", updated = 0 })).to_be("show")
+	expect(v({ id = "x", updated = now - 600 })).to_be("show")
+	expect(v({ id = "x", updated = now - 2700 })).to_be("fade")
+	expect(v({ id = "x", updated = now - 4000 })).to_be("hide")
+	expect(v({ id = "x", updated = now - 600, archived = true })).to_be("hide")
+	local all = table.clone(ctx)
+	all.mode = "all"
+	expect(v({ id = "x", updated = 0 }, all)).to_be("show")
+	local active = table.clone(ctx)
+	active.mode = "active"
+	expect(v({ id = "x", updated = now - 60 }, active)).to_be("hide")
+	-- (A fading one fades on: its next step comes, then it goes.)
+	local wait = vis.next_change({ id = "x", updated = now - 2700 }, now, ctx) :: number
+	expect(wait > 0 and wait <= 180).to_be(true)
+end)
+
+test("graph2 visibility: quiet threads leave the layout, fading ones show faint, once laid out again", function()
+	local app = open(1440)
+	local a = app:state("control_map_graph2_stats")
+	expect(a.faded).to_be(0)
+	app:command("map_big_stale")
+	app:wait("#never-there", { timeout_ms = 400 })
+	local b = app:state("control_map_graph2_stats")
+	expect(b.layouts).to_be(a.layouts + 1)
+	local shown = app:count("#control-widget-map >> .orch-graph2-node")
+	expect(shown < 105).to_be(true)
+	expect(b.faded > 0).to_be(true)
+	expect(b.drawn).to_be(shown)
+	-- "All": every crew thread back (the person's own quiet ones the Map's
+	-- model leaves out itself); "Active only": the faded ones gone too.
+	app:command("map_show_all")
+	app:wait("#never-there", { timeout_ms = 400 })
+	expect(app:count("#control-widget-map >> .orch-graph2-node") > shown).to_be(true)
+	app:command("map_show_active")
+	app:wait("#never-there", { timeout_ms = 400 })
+	expect(app:count("#control-widget-map >> .orch-graph2-node") < shown).to_be(true)
+	expect(app:state("control_map_graph2_stats").faded).to_be(0)
+	app:command("map_show_recent")
+	app:frames(5)
+end)
+
+test("graph2 visibility: a quiet thread at work again comes back", function()
+	local app = open(1440)
+	app:command("map_big_stale")
+	app:wait("#never-there", { timeout_ms = 400 })
+	expect(app:has('#control-widget-map >> .orch-graph2-thread ~"WireGuard keys"')).to_be(true)
+	local before = app:count("#control-widget-map >> .orch-graph2-node")
+	app:command("map_big_wake")
+	app:wait("#never-there", { timeout_ms = 400 })
+	expect(app:count("#control-widget-map >> .orch-graph2-node")).to_be(before + 1)
+end)
+
+test("graph2 node style: provider glyphs where there's room, dots zoomed out", function()
+	local app = open(1440)
+	expect(app:state("control_map_graph2_stats").glyphs).to_be(0)
+	app:command("map_graph2_provider")
+	app:frames(5)
+	local s = app:state("control_map_graph2_stats")
+	expect(s.glyphs > 80).to_be(true)
+	-- (Zoomed out past the glyphs' zoom: dots, drawn once more for it.)
+	app:command("map_graph2_zoom_out")
+	app:command("map_graph2_zoom_out")
+	app:frames(5)
+	expect(app:state("control_map_graph2_stats").glyphs).to_be(0)
+	app:command("map_graph2_dots")
+	app:frames(2)
 end)

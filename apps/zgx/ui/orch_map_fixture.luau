@@ -269,7 +269,9 @@ end }
 -- MacBook), the Brain dump's on the cloud box. Deterministic.
 local BIG_WORDS = { "Exporter image", "WireGuard keys", "Peer sync", "Admin app login", "Moscow relay", "DE node health", "Backup nightly", "Route table", "DNS split", "Metrics push", "Cert rotate", "Mesh join", "Firewall rules", "Client config", "UI polish", "Throughput test" }
 local BIG_STATES = { "working", "idle", "working", "waiting", "idle", "done", "working", "failed", "idle", "input" }
+local BIG_AGENTS = { { "claude", "claude-opus-5-5" }, { "openai", "gpt-5.5-codex" }, { "claude", "claude-sonnet-5-5" }, { "gemini", "gemini-3-pro" }, { "cursor", "composer-2" } }
 local big_extra = 0
+local big_stale = false
 local function map_big()
 	local t = os.time()
 	local devices = {
@@ -282,7 +284,15 @@ local function map_big()
 	local k = 0
 	local function chat(id: string, title: string, device: string): any
 		k += 1
-		local c = { id = id, title = title, device = device, status = BIG_STATES[(k - 1) % #BIG_STATES + 1], updated = t - k, created = t - 9000, agent = "claude" }
+		local agent = BIG_AGENTS[(k - 1) % #BIG_AGENTS + 1]
+		local c = { id = id, title = title, device = device, status = BIG_STATES[(k - 1) % #BIG_STATES + 1], updated = t - k, created = t - 9000,
+			agent = agent[1], model = agent[2] }
+		-- (Stale: some finished ones last moved an hour or more ago, some
+		-- forty minutes ago.)
+		if big_stale and (c.status == "idle" or c.status == "done") then
+			c.status = nil
+			c.updated = if k % 2 == 0 then t - 2 * 3600 else t - 45 * 60
+		end
 		table.insert(chats, c)
 		return c
 	end
@@ -332,8 +342,40 @@ local function map_big()
 end
 ui.command { id = "map_big", title = "Map: a big fleet", run = function()
 	big_extra = 0
+	big_stale = false
 	map_big()
 end }
+-- The big fleet with its finished threads gone quiet: half last moved two
+-- hours ago, half forty-five minutes ago (fading).
+ui.command { id = "map_big_stale", title = "Map: a big fleet, gone quiet", run = function()
+	big_stale = true
+	map_big()
+end }
+-- A quiet thread of the big fleet (gone from the Map) at work again.
+ui.command { id = "map_big_wake", title = "Map: a big fleet, a quiet one wakes", run = function()
+	local n: any = table.clone(sessions.now:peek())
+	local list = {}
+	for _, c in n.chats do
+		local c2 = table.clone(c)
+		if c2.id == "vpn2" then
+			c2.status = "working"
+			c2.updated = os.time()
+		end
+		table.insert(list, c2)
+	end
+	n.chats = list
+	sessions.now:set(n)
+end }
+for _, style in { "dots", "provider" } do
+	ui.command { id = `map_graph2_{style}`, title = `Map: the new graph's nodes as {style}`, run = function()
+		require("@ds/orch_graph2").node_style:set(style)
+	end }
+end
+for _, mode in { "active", "recent", "all" } do
+	ui.command { id = `map_show_{mode}`, title = `Map: show chats {mode}`, run = function()
+		require("@ds/orch_graph2_visibility").mode:set(mode)
+	end }
+end
 -- One more Engine crew thread on the big fleet (a change of what's shown).
 ui.command { id = "map_big_more", title = "Map: a big fleet, one more thread", run = function()
 	big_extra += 1

@@ -124,6 +124,37 @@ function M.menu(view: State<View>): { any }
 		})
 	end
 	table.insert(out, { separator = true })
+	-- How the new Graph draws a thread: a dot, or its provider's glyph.
+	table.insert(out, { heading = locale.s("ds.orch.map.node_style") })
+	for _, style in Graph2.STYLES do
+		table.insert(out, {
+			label = locale.s(`ds.orch.map.node_style_{style}`),
+			checked = function(): boolean
+				return Graph2.node_style:get() == style
+			end,
+			on_select = function()
+				Graph2.node_style:set(style)
+			end,
+		})
+	end
+	-- Which chats show (the Map's shared setting offers this itself, once
+	-- it's there).
+	local Vis = require("@self/orch_graph2_visibility")
+	if Vis.own_setting then
+		table.insert(out, { heading = locale.s("ds.orch.map.show_chats") })
+		for _, mode in Vis.MODES do
+			table.insert(out, {
+				label = locale.s(`ds.orch.map.show_{mode}`),
+				checked = function(): boolean
+					return Vis.mode:get() == mode
+				end,
+				on_select = function()
+					Vis.mode:set(mode)
+				end,
+			})
+		end
+	end
+	table.insert(out, { separator = true })
 	-- How the Topology shows work on other machines (kept on this device).
 	local TopoStyle = require("@self/orch_map_topo_style")
 	for _, mode in TopoStyle.MODES do

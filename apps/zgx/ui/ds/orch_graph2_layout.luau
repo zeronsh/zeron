@@ -22,7 +22,7 @@
 -- A scene: { machines = { { id, name, groups = { Group } } },
 --            links = { { a, b, kind, hue } } }    (extra lines: "routed")
 -- A group: { id, lead = Thread?, ghost = boolean?, members = { Thread } }
--- A thread: { id, title, kind, hue }   (kind: "orchestrator" | "brain" |
+-- A thread: { id, title, kind, hue, fade?, provider? }   (kind: "orchestrator" | "brain" |
 --                                       "crew" | "thread")
 
 local M = {}
@@ -59,6 +59,10 @@ export type Node = {
 	ch: number,
 	lead: boolean,
 	ghost: boolean,
+	-- Its strength in tenths (10 full; less while it fades: finished a
+	-- while ago, ds/orch_graph2_visibility).
+	fade: number,
+	provider: string,
 }
 export type Group = {
 	id: string,
@@ -329,6 +333,8 @@ function M.layout(scene: any, width: number): Layout
 					ch = M.LEAD_H,
 					lead = true,
 					ghost = g.ghost == true,
+					fade = 10,
+					provider = lead_t.provider or "other",
 				}
 				table.insert(out.nodes, n)
 				out.index[n.id] = #out.nodes
@@ -356,6 +362,8 @@ function M.layout(scene: any, width: number): Layout
 					ch = ch,
 					lead = false,
 					ghost = false,
+					fade = t.fade or 10,
+					provider = t.provider or "other",
 				}
 				table.insert(out.nodes, n)
 				out.index[n.id] = #out.nodes

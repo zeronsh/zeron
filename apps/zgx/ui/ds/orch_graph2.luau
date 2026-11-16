@@ -33,6 +33,7 @@ local MachineHead = require("@self/orch_machine_head")
 local Ref = require("@self/orch_ref")
 local L = require("@self/orch_graph2_layout")
 local Scene = require("@self/orch_graph2_scene")
+local vis = require("@self/orch_graph2_visibility")
 
 local M = {}
 
@@ -43,7 +44,17 @@ local NAMES_ZOOM = 0.6
 local FONT = 12
 local LEAD_FONT = 12.5
 local LINE_DASH = { dash = { 4, 3 } }
+local GLYPH_STROKE = { cap = "round" :: "round", join = "round" :: "round" }
 local LIT_STROKE = { cap = "round" :: "round", join = "round" :: "round" }
+
+-- How a thread's mark is drawn: a dot in its state's colour, or its
+-- provider's glyph (Claude, OpenAI, Gemini; a plain mark for others) in
+-- a ring of that colour, where there's room (a dot when zoomed out or in
+-- a tight grid). Kept on this device.
+M.STYLES = { "dots", "provider" }
+M.node_style = ui.persist("control_map_graph2_node_style", "dots")
+-- Glyphs from this zoom and cell height up.
+local GLYPH_ZOOM, GLYPH_CELL = 0.8, 22
 
 -- The node the pointer is on (its id; a machine's "dev:<id>").
 M.hover = ui.state("control_map_graph2_hover", nil :: string?)
@@ -54,6 +65,35 @@ M.zoom_by = function(_k: number) end
 M.pan_by = function(_dx: number, _dy: number) end
 -- (The layout showing, for tests: positions by id.)
 M.current = nil :: L.Layout?
+
+-- A provider's glyph at (x, y), about 9 points across, monochrome: its
+-- path, and whether it's filled (else stroked).
+function M.glyph(provider: string, x: number, y: number): (any, boolean)
+	if provider == "claude" then
+		-- (A burst: eight rays.)
+		local p = ui.path()
+		for k = 0, 7 do
+			local a = math.rad(k * 45 + 22.5)
+			p = p:move(x + math.cos(a) * 1.3, y + math.sin(a) * 1.3):line(x + math.cos(a) * 4.3, y + math.sin(a) * 4.3)
+		end
+		return p, false
+	elseif provider == "openai" then
+		-- (A hexagon, a point up.)
+		local p = ui.path()
+		for k = 0, 5 do
+			local a = math.rad(k * 60 - 90)
+			local px, py = x + math.cos(a) * 4, y + math.sin(a) * 4
+			p = if k == 0 then p:move(px, py) else p:line(px, py)
+		end
+		return p:close(), false
+	elseif provider == "gemini" then
+		-- (A four-pointed spark.)
+		local k = 4.6
+		return ui.path():move(x, y - k):quad(x, y, x + k, y):quad(x, y, x, y + k):quad(x, y, x - k, y):quad(x, y, x, y - k):close(), true
+	end
+	-- (Any other: a small square.)
+	return ui.path():rect(x - 2.6, y - 2.6, 5.2, 5.2, 1), false
+end
 
 local function ease(t: number): number
 	t = math.clamp(t, 0, 1)
@@ -106,6 +146,7 @@ M.View = ui.component(function(props: {
 	local from_y: { [string]: number } = {}
 	local anim = ui.use_state(1)
 	local anim_t0 = 0
+	local next_change: number? = nil
 	local ease_run = ui.use_state(0)
 	ui.effect(function()
 		if ease_run:get() == 0 then
@@ -133,7 +174,7 @@ M.View = ui.component(function(props: {
 	-- (Counts for tests, published once after the draws of a frame. Timers
 	-- belong to the effect run that starts them, so each runs from an
 	-- effect of its own: publishing, the ease, the dots.)
-	local counts = { layouts = 0, draws = 0, overlay = 0, drawn = 0, w = 0, h = 0, layout_ms = 0, draw_kb = 0, overlay_kb = 0 }
+	local counts = { layouts = 0, draws = 0, overlay = 0, drawn = 0, w = 0, h = 0, layout_ms = 0, draw_kb = 0, overlay_kb = 0, faded = 0, glyphs = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string)
 		(counts :: any)[key] += 1
@@ -199,7 +240,16 @@ M.View = ui.component(function(props: {
 			halo_approval = kit.ink("zeron.status.approval", 0.2),
 			halo_failed = kit.ink("zeron.status.failed", 0.2),
 			lit = kit.ink("text.primary", 0.85),
+			-- (A fading thread's dot and name, by its strength in tenths.)
+			fade_dot = {},
+			fade_name = {},
+			glyph = kit.ink("text.primary", if dark then 0.88 else 0.8),
+			glyph_quiet = kit.ink("text.primary", if dark then 0.45 else 0.42),
 		}
+		for k = 1, 10 do
+			pal.fade_dot[k] = kit.ink("text.primary", (if dark then 0.32 else 0.3) * k / 10)
+			pal.fade_name[k] = kit.ink("text.primary", (if dark then 0.5 else 0.55) * k / 10)
+		end
 		return pal
 	end
 	local function hink(h: number?): string
@@ -234,10 +284,19 @@ M.View = ui.component(function(props: {
 	local region_paths: { any } = {}
 	local line_paths: { any } = {}
 	local brain_paths: { [number]: any } = {}
+	local glyph_paths: { [number]: any } = {}
+	local glyph_fill: { [number]: boolean } = {}
 	local function make_paths()
 		table.clear(region_paths)
 		table.clear(line_paths)
 		table.clear(brain_paths)
+		table.clear(glyph_paths)
+		table.clear(glyph_fill)
+		for i, n in layout.nodes do
+			if not n.lead then
+				glyph_paths[i], glyph_fill[i] = M.glyph(n.provider, n.x, n.y)
+			end
+		end
 		for i, n in layout.nodes do
 			if n.lead and n.kind == "brain" then
 				local k = 6.5
@@ -264,17 +323,27 @@ M.View = ui.component(function(props: {
 			return
 		end
 		local t0 = os.clock()
-		local scene = Scene.of(world)
+		local scene = Scene.of(world, vis.now())
+		next_change = scene.next_change
 		local next_l = L.layout(scene, w)
 		local ms = (os.clock() - t0) * 1000
 		if next_l.sig == layout.sig then
 			local renamed = false
+			local marks = false
 			for i, n in next_l.nodes do
 				local old = layout.nodes[i]
 				if old and old.title ~= n.title then
 					old.title = n.title
 					renamed = true
 				end
+				if old and (old.fade ~= n.fade or old.provider ~= n.provider) then
+					old.fade, old.provider = n.fade, n.provider
+					marks = true
+				end
+			end
+			if marks then
+				make_paths()
+				version:set(version:peek() + 1)
 			end
 			for i, m in next_l.machines do
 				local old = layout.machines[i]
@@ -318,11 +387,21 @@ M.View = ui.component(function(props: {
 		ease_run:set(ease_run:peek() + 1)
 	end
 
+	-- (Laid out again when the world, the width or what's shown changes:
+	-- a finished chat fading, then going, at its time, by a timer set for
+	-- the soonest; nothing runs between.)
+	local vis_clock = ui.use_state(0)
 	ui.effect(function()
 		local world = props.world()
 		chats_now = world.chats or {}
 		local w = width:get()
+		vis_clock:get()
 		relayout(world, w)
+		if next_change then
+			ui.after(next_change * 1000 + 50, function()
+				vis_clock:set(vis_clock:peek() + 1)
+			end)
+		end
 	end)
 
 	-- A node's place as drawn now (mid-ease, between where it was and is).
@@ -345,18 +424,19 @@ M.View = ui.component(function(props: {
 	local M_NAME = { size = FONT }
 	local M_LEAD = { size = LEAD_FONT, weight = 600 }
 
-	local function fit_names(c: any)
-		if names_for == version:peek() then
+	local function fit_names(c: any, glyphs: boolean)
+		local key = version:peek() * 2 + (if glyphs then 1 else 0)
+		if names_for == key then
 			return
 		end
-		names_for = version:peek()
+		names_for = key
 		table.clear(names)
 		for i, n in layout.nodes do
 			if n.lead then
 				local t = if n.ghost then `↗ {n.title}` else n.title
 				names[i] = fit_name(c, t, n.cw, M_LEAD)
 			elseif n.ch >= 14 then
-				names[i] = fit_name(c, n.title, n.cw, M_NAME)
+				names[i] = fit_name(c, n.title, n.cw - (if glyphs and n.ch >= GLYPH_CELL then 4 else 0), M_NAME)
 			else
 				names[i] = ""
 			end
@@ -367,6 +447,9 @@ M.View = ui.component(function(props: {
 		return view:get().zoom >= NAMES_ZOOM
 	end
 	local names_shown = ui.computed(names_on)
+	local glyphs_shown = ui.computed(function(): boolean
+		return M.node_style:get() == "provider" and view:get().zoom >= GLYPH_ZOOM
+	end)
 
 	-- The drawing: regions, combs, lines, marks, names. Run for a new
 	-- layout, a state shown changing, a theme, the ease, or the view
@@ -378,8 +461,9 @@ M.View = ui.component(function(props: {
 		local e = ease(anim:get())
 		local box = cull:get()
 		local show_names = names_shown:get()
+		local glyphs = glyphs_shown:get()
 		status_ver:get()
-		fit_names(c)
+		fit_names(c, glyphs)
 		count("draws")
 		-- (Measured from here: the count above is the tests' own.)
 		kb0 = gcinfo()
@@ -424,7 +508,7 @@ M.View = ui.component(function(props: {
 			c:stroke(line_paths[i], if e >= 1 then hline(ln.hue) else hsoft(ln.hue), 1.2, LINE_DASH)
 		end
 		-- 3. Marks and names.
-		local drawn = 0
+		local drawn, faded_n, glyph_n = 0, 0, 0
 		for i, n in layout.nodes do
 			if n.cx > x1 or n.cy > y1 or n.cx + n.cw < x0 - 20 or n.cy + n.ch < y0 then
 				continue
@@ -456,23 +540,40 @@ M.View = ui.component(function(props: {
 			elseif st == "waiting" then
 				paint, rr, bright = p.waiting, 4, true
 			elseif st == "input" or st == "approval" or st == "failed" then
-				c:circle(x, y, 7.5, if st == "input" then p.halo_input elseif st == "approval" then p.halo_approval else p.halo_failed)
+				c:circle(x, y, 9, if st == "input" then p.halo_input elseif st == "approval" then p.halo_approval else p.halo_failed)
 				paint, rr, bright = (p :: any)[st], 4, true
 			elseif st == "done" then
 				paint, rr = p.done, 3
 			end
-			if n.kind == "thread" then
+			local faded = n.fade < 10 and not bright
+			if faded then
+				paint = p.fade_dot[n.fade]
+				faded_n += 1
+			end
+			-- (A glyph where there's room and the ease is done; else a dot.)
+			local glyph = glyphs and e >= 1 and n.ch >= GLYPH_CELL and glyph_paths[i] ~= nil
+			if glyph then
+				glyph_n += 1
+				c:circle(x, y, 7.5, paint)
+				c:circle(x, y, if bright then 6 else 6.75, p.bg)
+				local ink = if faded then p.fade_dot[n.fade] else (if bright then p.glyph else p.glyph_quiet)
+				if glyph_fill[i] then
+					c:fill(glyph_paths[i], ink)
+				else
+					c:stroke(glyph_paths[i], ink, 1.2, GLYPH_STROKE)
+				end
+			elseif n.kind == "thread" then
 				c:circle(x, y, rr + 0.5, paint)
 				c:circle(x, y, rr - 1, p.bg)
 			else
 				c:circle(x, y, rr, paint)
 			end
 			if show_names and e >= 1 and names[i] ~= "" then
-				T_NAME.color = if bright then p.name elseif n.kind == "thread" then p.plain else p.quiet
-				c:text(names[i], x + 8, y, T_NAME)
+				T_NAME.color = if faded then p.fade_name[n.fade] elseif bright then p.name elseif n.kind == "thread" then p.plain else p.quiet
+				c:text(names[i], x + (if glyph then 12 else 8), y, T_NAME)
 			end
 		end
-		counts.drawn = drawn
+		counts.drawn, counts.faded, counts.glyphs = drawn, faded_n, glyph_n
 		-- (What this draw allocated, for the tests' guard.)
 		counts.draw_kb = math.max(0, gcinfo() - kb0)
 	end
@@ -1001,8 +1102,13 @@ M.View = ui.component(function(props: {
 				ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "monitor", size = 12 } },
 				ui.text { device_name, text_size = "$font.size.xs", color = "$text.tertiary", truncate = true, min_w = 0 },
 				ui.text {
+					-- (Its provider and model.)
 					function(): string
-						return c().model or ""
+						local chat = c()
+						local pv = Scene.provider(chat)
+						local who = if pv == "other" then tostring(chat.agent or chat.harness or "") else locale.s(`ds.orch.map.provider.{pv}`)
+						local model = chat.model or ""
+						return if model ~= "" and who ~= "" then `{who}  {model}` else who .. model
 					end,
 					grow = 1,
 					align = "end",
