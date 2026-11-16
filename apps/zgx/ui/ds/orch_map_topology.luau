@@ -143,8 +143,26 @@ return ui.component(function(props: Props): Node
 	local labels = ui.computed(function(): { Layout.Label }
 		return layout:get().labels
 	end)
+	-- (Its rows made a batch a frame as it opens: all of them at once took
+	-- a quarter to half a second in one frame on a big fleet. They stand
+	-- where the layout puts them, so those still to come move none.)
+	local BATCH = 12
+	local built = ui.use_state(BATCH)
+	local function grow()
+		local n = #layout:peek().rows
+		if built:peek() < n then
+			built:set(built:peek() + BATCH)
+			ui.after(0, grow)
+		end
+	end
+	ui.after(0, grow)
 	local rows = ui.computed(function(): { Layout.Row }
-		return layout:get().rows
+		local all = layout:get().rows
+		local cap = built:get()
+		if #all <= cap then
+			return all
+		end
+		return table.move(all, 1, cap, 1, table.create(cap) :: { Layout.Row })
 	end)
 	-- Each thread's name (ds/orch_name): the crew and items it's looked up in.
 	local named = ui.computed(function(): Name.Index
