@@ -1734,7 +1734,7 @@ async fn idle_crew_threads_are_archived_and_an_unarchive_starts_over() {
 
     // The settings: defaults, changed by the person, refused to an agent.
     let state = core.workspace.orchestration_state();
-    assert_eq!((state.settings.crew_auto_archive, state.settings.crew_idle_hours), (true, 12));
+    assert_eq!((state.settings.crew_auto_archive, state.settings.crew_idle_hours), (true, 4));
     let reply = call(&core, Caller::Local, methods::ORCHESTRATE,
         json!({"op":"updateSettings","crewIdleHours":6})).await.unwrap();
     assert_eq!(reply["crewIdleHours"], 6);
@@ -1742,6 +1742,19 @@ async fn idle_crew_threads_are_archived_and_an_unarchive_starts_over() {
     assert!(op(&core, Caller::Local, json!({"op":"updateSettings","crewIdleHours":0})).await.is_err(), "out of bounds");
     let settings = core.workspace.orchestration_state().settings;
     assert_eq!((settings.crew_auto_archive, settings.crew_idle_hours), (true, 6));
+    assert!(settings.crew_idle_hours_set, "the person's choice, marked");
+
+    // An untouched row from before the 4-hour default (12, never chosen):
+    // read as 4. One the person set to 12: kept.
+    core.workspace.write_orchestration(|doc| {
+        doc.upsert_orchestration_settings(&OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 12, crew_idle_hours_set: false })
+    });
+    assert_eq!(core.workspace.orchestration_state().settings.crew_idle_hours, 4);
+    op(&core, Caller::Local, json!({"op":"updateSettings","crewIdleHours":12})).await.unwrap();
+    assert_eq!(core.workspace.orchestration_state().settings.crew_idle_hours, 12);
+    op(&core, Caller::Local, json!({"op":"updateSettings","crewAutoArchive":true})).await.unwrap();
+    assert_eq!(core.workspace.orchestration_state().settings.crew_idle_hours, 12, "kept through another change");
+    op(&core, Caller::Local, json!({"op":"updateSettings","crewIdleHours":6})).await.unwrap();
 
     // A crew thread on a card in Review (done working, waiting on merge).
     let item = op(&core, agent(&auth), json!({"op":"upsertItem","item":{"title":"Login redirect","state":"review"}}))

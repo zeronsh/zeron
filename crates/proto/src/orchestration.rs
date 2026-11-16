@@ -169,10 +169,18 @@ pub struct OrchestrationSettings {
     /// How long a crew thread is idle before it's archived, in hours.
     #[serde(default = "default_crew_idle_hours")]
     pub crew_idle_hours: u32,
+    /// The person chose [`Self::crew_idle_hours`] (`updateSettings` with a
+    /// window). Unset, a window of [`LEGACY_CREW_IDLE_HOURS`] is the old
+    /// default written along with another setting, and reads as today's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub crew_idle_hours_set: bool,
 }
 
 /// The default idle window before a crew thread is archived.
-pub const DEFAULT_CREW_IDLE_HOURS: u32 = 12;
+pub const DEFAULT_CREW_IDLE_HOURS: u32 = 4;
+/// The default before it was [`DEFAULT_CREW_IDLE_HOURS`]: a row holding it
+/// that the person never set reads as the default.
+pub const LEGACY_CREW_IDLE_HOURS: u32 = 12;
 /// The shortest and longest idle windows a setting may hold.
 pub const CREW_IDLE_HOURS_MIN: u32 = 1;
 pub const CREW_IDLE_HOURS_MAX: u32 = 24 * 30;
@@ -187,11 +195,20 @@ fn default_crew_idle_hours() -> u32 {
 
 impl Default for OrchestrationSettings {
     fn default() -> Self {
-        Self { crew_auto_archive: true, crew_idle_hours: DEFAULT_CREW_IDLE_HOURS }
+        Self { crew_auto_archive: true, crew_idle_hours: DEFAULT_CREW_IDLE_HOURS, crew_idle_hours_set: false }
     }
 }
 
 impl OrchestrationSettings {
+    /// As read: a window the person never set that still holds the old
+    /// default is today's default; any window the person chose stands.
+    pub fn migrated(mut self) -> Self {
+        if !self.crew_idle_hours_set && self.crew_idle_hours == LEGACY_CREW_IDLE_HOURS {
+            self.crew_idle_hours = DEFAULT_CREW_IDLE_HOURS;
+        }
+        self
+    }
+
     /// The idle window, kept inside its bounds.
     pub fn crew_idle(&self) -> chrono::Duration {
         chrono::Duration::hours(i64::from(self.crew_idle_hours.clamp(CREW_IDLE_HOURS_MIN, CREW_IDLE_HOURS_MAX)))

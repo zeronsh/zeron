@@ -292,6 +292,8 @@ mod tests {
         OrchestrationState {
             orchestrators: vec![orchestrator("orc", "standard"), orchestrator("brain", "brainDump")],
             crew,
+            // (A 12-hour window the person chose: what these tests time.)
+            settings: OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 12, crew_idle_hours_set: true },
             ..Default::default()
         }
     }
@@ -414,9 +416,9 @@ mod tests {
     fn the_setting_off_archives_nothing_and_its_window_is_followed() {
         let chats = [chat("c", Some("crew"), false)];
         let mut st = state(vec![member("c")]);
-        st.settings = OrchestrationSettings { crew_auto_archive: false, crew_idle_hours: 12 };
+        st.settings = OrchestrationSettings { crew_auto_archive: false, crew_idle_hours: 12, crew_idle_hours_set: true };
         assert!(plan(hours(1000), HERE, &chats, &st, none).is_empty());
-        st.settings = OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 1 };
+        st.settings = OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 1, crew_idle_hours_set: true };
         assert_eq!(archived_ids(&plan(hours(1), HERE, &chats, &st, none)), ["c"]);
         st.settings.crew_idle_hours = 72;
         assert!(plan(hours(71), HERE, &chats, &st, none).is_empty());
@@ -442,5 +444,34 @@ mod tests {
         revived.revived_at = Some(hours(50));
         assert!(plan(hours(61), HERE, &back, &state(vec![revived.clone()]), none).is_empty());
         assert_eq!(archived_ids(&plan(hours(62), HERE, &back, &state(vec![revived]), none)), ["c"]);
+    }
+
+    #[test]
+    fn the_default_window_is_four_hours() {
+        let chats = [chat("c", Some("crew"), false)];
+        let mut st = state(vec![member("c")]);
+        st.settings = OrchestrationSettings::default();
+        assert_eq!(st.settings.crew_idle_hours, 4);
+        assert!(plan(t0() + TimeDelta::minutes(239), HERE, &chats, &st, none).is_empty());
+        assert_eq!(archived_ids(&plan(hours(4), HERE, &chats, &st, none)), ["c"]);
+    }
+
+    #[test]
+    fn an_untouched_twelve_reads_as_four_and_a_chosen_twelve_stands() {
+        // The old default, written with another setting, never chosen.
+        let untouched: OrchestrationSettings =
+            serde_json::from_value(json!({ "crewAutoArchive": true, "crewIdleHours": 12 })).unwrap();
+        assert_eq!(untouched.migrated().crew_idle_hours, 4);
+        // Chosen by the person: kept.
+        let chosen: OrchestrationSettings =
+            serde_json::from_value(json!({ "crewAutoArchive": true, "crewIdleHours": 12, "crewIdleHoursSet": true })).unwrap();
+        assert_eq!(chosen.migrated().crew_idle_hours, 12);
+        // Another window, set or not: kept.
+        let other: OrchestrationSettings =
+            serde_json::from_value(json!({ "crewAutoArchive": false, "crewIdleHours": 24 })).unwrap();
+        assert_eq!((other.clone().migrated().crew_idle_hours, other.migrated().crew_auto_archive), (24, false));
+        // No row at all: the default.
+        let none_yet: OrchestrationSettings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(none_yet.migrated().crew_idle_hours, 4);
     }
 }
