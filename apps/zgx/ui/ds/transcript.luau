@@ -311,9 +311,11 @@ local function strip(m: Message, row: State<Message>, hovered: () -> boolean): N
 		justify = if mine then "end" else "start",
 		selectable = false,
 		ui.presence(function(): string?
-			-- (Never while a reply is written: it has no time yet.)
+			-- (Never while a reply is written. A settled message shows it
+			-- with or without its time: a time missing, as on a platform
+			-- that couldn't read one, mustn't take Copy with it.)
 			local now = row:get()
-			return if hovered() and now.at and not now.streaming then "shown" else nil
+			return if hovered() and (now.at or now.copy) and not now.streaming then "shown" else nil
 		end, function(): Node
 			return ui.row {
 				class = "message-actions",
@@ -1559,7 +1561,9 @@ local function Transcript(props: Props): Node
 		-- taken meanwhile stays where it went.
 		local function rise(prompt: Message?)
 			ui.after(16, function()
-				if shown_turn ~= view then
+				-- (Another chat shown meanwhile (`fresh`), or scrolled meanwhile:
+				-- the view is that chat's, or the reader's, see `wheeled`.)
+				if shown_turn ~= view or glides ~= turn then
 					return
 				end
 				local row_el = prompt and tops[prompt.id] and tops[prompt.id]:peek()
@@ -1574,6 +1578,9 @@ local function Transcript(props: Props): Node
 					duration = motion.ms(GLIDE_MS),
 					ease = "outQuad",
 					onComplete = function()
+						if glides ~= turn then
+							return
+						end
 						-- Landed: the old reply lets go of the room it held
 						-- (above the view, so nothing seen moves), and the
 						-- offset says where the list now rests, a real place
@@ -1860,6 +1867,18 @@ local function Transcript(props: Props): Node
 		-- (Taken somewhere of their own: a place still to come back to is
 		-- let go.)
 		waiting = nil
+		-- A send's glide under way (or its prompt still to land, a steer's):
+		-- the scroll is theirs, so the glide stops where it is rather than
+		-- pulling the view back to the end. The old reply keeps the room it
+		-- held until it's out of view (`rested`), so nothing shown moves.
+		if gliding:peek() then
+			glides += 1
+			if glide then
+				glide:pause()
+				glide = nil
+			end
+			gliding:set(false)
+		end
 		return nil
 	end
 	-- When focus last came to something in the list (Tab, ⇧Tab to a row's
@@ -1868,6 +1887,8 @@ local function Transcript(props: Props): Node
 	-- While the width is changing (and a moment after): the reading row
 	-- puts the place back as its lines rewrap, the frame they do.
 	local resizing_until = 0
+	-- When the view's size last changed.
+	local resized_at = -math.huge
 	local function find_reading()
 		reading = nil
 		local el = list:peek()
@@ -1949,8 +1970,31 @@ local function Transcript(props: Props): Node
 	local function rested()
 		remember()
 		find_reading()
-		if not at_end:peek() and ui.now() >= resizing_until then
+		-- Resting away from the end: let go of it once no change of size is
+		-- under way, or at once if a person scrolled since the last one (a
+		-- scroll begun just after a resize is theirs; held, the next resize,
+		-- however much later, would pull the view back to the end).
+		if not at_end:peek() and (ui.now() >= resizing_until or wheeled_at >= resized_at) then
 			end_held = false
+		end
+		-- A send's glide a scroll stopped (`wheeled`): the old reply's held
+		-- room goes once that reply is out of view, where it moves nothing.
+		local h = held:peek()
+		if h.id ~= "" and not gliding:peek() then
+			local r = rows[h.id]
+			local row_el = r and r.outer:peek()
+			local el = list:peek()
+			local away_from_view = not row_el
+				or not el
+				or row_el.y == nil
+				or row_el.height == nil
+				or el.y == nil
+				or el.height == nil
+				or (row_el.y :: number) + (row_el.height :: number) <= (el.y :: number)
+				or (row_el.y :: number) >= (el.y :: number) + (el.height :: number)
+			if away_from_view then
+				held:set { id = "", h = 0 }
+			end
 		end
 	end
 	local rest = ui.debounced(offset, 150, { every = true })
@@ -2398,7 +2442,8 @@ local function Transcript(props: Props): Node
 					ui.after(48, settle)
 				end
 				if changed then
-					resizing_until = ui.now() + 300
+					resized_at = ui.now()
+					resizing_until = resized_at + 300
 					-- At the end: on it still, every frame of the change.
 					if end_held and not gliding:peek() then
 						-- (Asked of the list itself, which lands it as it lays
@@ -2500,7 +2545,7 @@ local function Transcript(props: Props): Node
 		sizes, known, seen_n = {}, 0, 0
 		last_w, last_h = nil, nil
 		end_held = not restoring
-		wheeled_at, focused_at, resizing_until = -math.huge, -math.huge, 0
+		wheeled_at, focused_at, resizing_until, resized_at = -math.huge, -math.huge, 0, -math.huge
 		ui.batch(function()
 			at_end:set(not restoring)
 			placing:set(restoring)

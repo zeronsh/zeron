@@ -890,6 +890,19 @@ impl Pending {
     }
 }
 
+/// The transcript's rows with each id once, the first kept: its list is keyed
+/// by `id`, and a key shown twice is one it can't place (zgx's virtual list
+/// panics, and the transcript stops updating until the chat is opened
+/// again). A prompt pending here comes after the transcript's own rows, so
+/// the engine's copy of it is the one kept.
+fn one_row_per_id(list: &mut Vec<Value>) {
+    let mut ids: std::collections::HashSet<Rc<str>> = std::collections::HashSet::with_capacity(list.len());
+    list.retain(|row| match row.field("id") {
+        Some(Value::Str(id)) => ids.insert(id.clone()),
+        _ => true,
+    });
+}
+
 /// An edit lease on a queued message (the engine's `BeginQueuedMessageEdit`).
 #[derive(Clone)]
 struct Lease {
@@ -2356,6 +2369,9 @@ impl View {
                         }
                     }
                     open.heard = true;
+                    // (A prompt sent from here that the tail brought: the
+                    // engine's copy now shows, so this one goes.)
+                    self.drop_arrived_prompts(open);
                     break 'applied Ok(Change::Rows);
                 } else {
                     open.has_whole = false;
@@ -2404,14 +2420,7 @@ impl View {
             }
             if result.is_ok() {
                 open.heard = true;
-                let ids: Vec<&str> = open.entries.iter().map(|e| &*e.id).collect();
-                let mut pending = self.pending.borrow_mut();
-                if let Some(prompts) = pending.get_mut(&open.id) {
-                    prompts.retain(|p| !ids.contains(&p.id.as_str()));
-                    if prompts.is_empty() {
-                        pending.remove(&open.id);
-                    }
-                }
+                self.drop_arrived_prompts(open);
             }
             result
         };
@@ -2427,6 +2436,20 @@ impl View {
                 self.publish_session();
             }
             Err(()) => self.resubscribe(),
+        }
+    }
+
+    /// Prompts sent from here that the transcript now has: the engine's copy
+    /// shows from now on, so this device's own goes (both would be two rows
+    /// with one id, which the transcript's list can't show).
+    fn drop_arrived_prompts(&self, open: &Open) {
+        let ids: std::collections::HashSet<&str> = open.entries.iter().map(|e| &*e.id).collect();
+        let mut pending = self.pending.borrow_mut();
+        if let Some(prompts) = pending.get_mut(&open.id) {
+            prompts.retain(|p| !ids.contains(p.id.as_str()));
+            if prompts.is_empty() {
+                pending.remove(&open.id);
+            }
         }
     }
 
@@ -2663,6 +2686,7 @@ impl View {
             if let Some(pending) = self.pending.borrow().get(&open.id) {
                 list.extend(pending.iter().map(Pending::value));
             }
+            one_row_per_id(&mut list);
             list
         };
         // The list first: a reply that ended takes its words into its row
@@ -6584,8 +6608,19 @@ fn seen_would_change(chat: &Json, session: &Json, now: chrono::DateTime<chrono::
     })
 }
 
-/// "Jul 1, 4:12 PM", in this Mac's time zone (the shipping app's
-/// `format_timestamp`).
+/// "Jul 1, 4:12 PM": a local time's month (0-based), day, hour and minute,
+/// as the shipping app's `format_timestamp` reads.
+fn clock(month0: u32, day: u32, hour: u32, minute: u32) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month = MONTHS.get(month0 as usize).copied().unwrap_or("Jan");
+    let twelve = match hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{month} {day}, {twelve}:{minute:02} {}", if hour < 12 { "AM" } else { "PM" })
+}
+
+/// [`clock`] for `at` (seconds since 1970) in this machine's time zone.
 #[cfg(unix)]
 fn stamp(at: i64) -> Option<String> {
     #[repr(C)]
@@ -6618,21 +6653,47 @@ fn stamp(at: i64) -> Option<String> {
         }
         tm.assume_init()
     };
-    let hour = match tm.hour % 12 {
-        0 => 12,
-        h => h,
+    Some(clock(tm.mon as u32, tm.mday as u32, tm.hour as u32, tm.min as u32))
+}
+
+/// [`clock`] for `at` (seconds since 1970) in this machine's time zone: on
+/// Windows through its own conversion (it has no `localtime_r`). Without
+/// it every message's time was missing there, and with it the hover strip
+/// that holds Copy.
+#[cfg(windows)]
+fn stamp(at: i64) -> Option<String> {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    if at <= 0 {
+        return None;
+    }
+    // FILETIME counts 100 ns from 1601-01-01 (11,644,473,600 s before 1970).
+    let ticks = (at as u64).checked_add(11_644_473_600)?.checked_mul(10_000_000)?;
+    let file = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
     };
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let month = MONTHS.get(tm.mon as usize).copied().unwrap_or("Jan");
-    Some(format!(
-        "{month} {}, {hour}:{:02} {}",
-        tm.mday,
-        tm.min,
-        if tm.hour < 12 { "AM" } else { "PM" }
+    // SAFETY: both calls read only the structs passed in and write only the
+    // caller's SYSTEMTIMEs; a null zone means the machine's current one.
+    let local = unsafe {
+        let mut utc: SYSTEMTIME = std::mem::zeroed();
+        let mut local: SYSTEMTIME = std::mem::zeroed();
+        if FileTimeToSystemTime(&file, &mut utc) == 0
+            || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0
+        {
+            return None;
+        }
+        local
+    };
+    Some(clock(
+        u32::from(local.wMonth).checked_sub(1)?,
+        u32::from(local.wDay),
+        u32::from(local.wHour),
+        u32::from(local.wMinute),
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn stamp(_at: i64) -> Option<String> {
     None
 }
@@ -6696,6 +6757,21 @@ mod stream_tests;
 
 #[cfg(test)]
 mod tests {
+    /// A message's time reads as the shipping app's, on every platform: the
+    /// formatting, and a real local time from `stamp` (Windows included,
+    /// where it once was always missing and hid the message's hover strip).
+    #[test]
+    fn a_messages_time_reads_like_the_shipping_apps_on_every_platform() {
+        assert_eq!(super::clock(6, 1, 16, 12), "Jul 1, 4:12 PM");
+        assert_eq!(super::clock(0, 9, 0, 5), "Jan 9, 12:05 AM");
+        assert_eq!(super::clock(11, 31, 12, 0), "Dec 31, 12:00 PM");
+        let at = super::stamp(1_794_600_000).expect("a time for a real moment");
+        let (month, rest) = at.split_once(' ').unwrap();
+        assert!(["Nov", "Dec"].contains(&month), "{at}");
+        assert!(rest.ends_with(" AM") || rest.ends_with(" PM"), "{at}");
+        assert_eq!(super::stamp(0), None);
+    }
+
     /// Opening a chat marks it seen only while that changes something any
     /// viewport reads (its last message, its terminal's report, the end of
     /// its sleep): a chat looked at already writes nothing, so its devices'
@@ -8675,6 +8751,74 @@ mod tests {
         view.heard_frame(json!({ "reset": [prompt("u0"), reply("a0"), prompt("u1"), reply("a1")] }));
         assert!(!view.open.borrow().as_ref().unwrap().has_whole);
         assert!(!rows().contains("tail engine.log"), "the whole copy replaces it: {}", rows());
+    }
+
+    /// A prompt sent from here that a reopened chat's opening tail brings
+    /// shows once: the engine's copy, the one pending here let go. Shown twice
+    /// it was two rows with one id, and zgx's virtual list panicked
+    /// ("duplicate virtual list child key"), freezing the transcript.
+    #[test]
+    fn a_prompt_the_opening_tail_brings_shows_once() {
+        use super::{Entry, Open, Pending, View, draft_value};
+        use serde_json::json;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let text = |id: &str, words: &str| json!({ "id": format!("{id}p"), "kind": "text", "text": words });
+        let prompt = |id: &str| json!({ "id": id, "role": "user", "parts": [text(id, "go")], "createdAt": 1_762_000_000_000_i64 });
+        let reply = |id: &str| json!({ "id": id, "role": "assistant", "status": "complete", "parts": [text(id, "done")], "createdAt": 1_762_000_000_000_i64 });
+        let held: Vec<Entry> = [prompt("u0"), reply("a0")].into_iter().map(Entry::new).collect();
+        let view = Rc::new(View {
+            session: app.host.shared("t.session", Value::Nil),
+            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            draft: app.host.shared("t.draft", draft_value("", "")),
+            rpc: RefCell::default(),
+            open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            snapshot: Cell::new(false),
+        });
+        view.pending.borrow_mut().insert(
+            "c".into(),
+            vec![Pending {
+                id: "u1".into(),
+                words: "go".into(),
+                paths: Vec::new(),
+                waiting: "sending",
+                retry: None,
+                at: None,
+                held: false,
+                row: false,
+                transfers: Vec::new(),
+            }],
+        );
+        let ids = || -> Vec<String> {
+            match view.messages.signal().with_untracked(Clone::clone) {
+                Value::List(rows) => rows.iter().filter_map(|r| r.field("id")).map(super::text).collect(),
+                other => panic!("rows: {other:?}"),
+            }
+        };
+        view.publish_messages();
+        assert_eq!(ids(), ["u0", "a0", "u1"], "the prompt shows at once, pending here");
+        // The engine's opening tail, the prompt in it.
+        view.heard_frame(json!({ "reset": [reply("a0"), prompt("u1")], "historyPending": true, "count": 2 }));
+        assert_eq!(ids(), ["u0", "a0", "u1"], "once, the engine's copy");
+        assert!(view.pending.borrow().get("c").is_none(), "the copy pending here is let go");
+    }
+
+    /// Rows that would share an id (the transcript's list is keyed by it)
+    /// show once, the first kept: a pending prompt after the transcript's
+    /// copy of it, or an entry twice over.
+    #[test]
+    fn rows_sharing_an_id_show_once() {
+        use zgx_script::Value;
+        let row = |id: &str, text: &str| Value::record([("id", Value::from(id)), ("text", Value::from(text))]);
+        let mut list = vec![row("u1", "engine"), row("a1", "reply"), Value::record([("text", Value::from("no id"))]), row("u1", "here")];
+        super::one_row_per_id(&mut list);
+        let texts: Vec<String> = list.iter().filter_map(|r| r.field("text")).map(super::text).collect();
+        assert_eq!(texts, ["engine", "reply", "no id"]);
     }
 
     /// A chat opened shows its rows once its transcript has come (this

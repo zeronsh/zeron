@@ -498,6 +498,88 @@ pub(crate) fn comment(asked: &Value, shown: &str) -> Option<Value> {
     Some(json_value(&out))
 }
 
+/// The longest key a plugin keeps a taken draft under.
+const DRAFT_KEY: usize = 64;
+
+/// A plugin's ask of the composer's draft (`zeron.take_draft`,
+/// `put_draft`, `swap_draft`, `drop_draft`), held to `{ op, key }`: `op`
+/// one of "take", "put", "swap" or "drop", `key` 1 to 64 characters with
+/// no control characters. Anything else is refused.
+pub(crate) fn draft_ask(asked: &Value) -> Option<Value> {
+    let op = asked.field("op").map(text)?;
+    let key = asked.field("key").map(text)?;
+    let valid_key = !key.is_empty() && key.chars().count() <= DRAFT_KEY && !key.chars().any(char::is_control);
+    if !matches!(op.as_str(), "take" | "put" | "swap" | "drop") || !valid_key {
+        return None;
+    }
+    Some(Value::record([("op", Value::from(op.as_str())), ("key", Value::from(key.as_str()))]))
+}
+
+/// What `zeron.compose` asks of the composer: its words alone (added to
+/// the draft shown, as ever), or with `{ text, replace, session }` (the
+/// draft's words replaced, or a chat named other than the one shown).
+pub(crate) fn compose(asked: &Value) -> Value {
+    let Some(words) = asked.field("text") else {
+        return Value::from(text(asked).as_str());
+    };
+    let words = match words {
+        Value::Str(_) | Value::Text(_) => words.clone(),
+        _ => Value::from(""),
+    };
+    let mut fields = vec![
+        ("text", words),
+        ("replace", Value::from(matches!(asked.field("replace"), Some(Value::Bool(true))))),
+    ];
+    if let Some(session) = asked.field("session").map(text).filter(|s| !s.is_empty()) {
+        fields.push(("session", Value::from(session.as_str())));
+    }
+    Value::record(fields)
+}
+
+/// The app's shared states a chat's draft lives in (screens/chat/shared),
+/// each read with the value the app starts it at: read before the app has
+/// made one, it's made as the app would.
+const DRAFT_HERE: &str = "chat.composer.here";
+const DRAFT_TEXT: &str = "chat.composer.text";
+const DRAFT_CARGO: &str = "chat.composer.cargo";
+const DRAFTS_KEPT: &str = "chat.composer.drafts";
+
+/// What a draft carries, as plugins are told it (as `zeron.draft()` says
+/// it, screens/plugins): each chip's kind and name, never a file's path.
+fn draft_attachments(cargo: &Value) -> Value {
+    let said = |item: &Value, field: &str, or: &str| match item.field(field) {
+        Some(v @ Value::Str(_)) => v.clone(),
+        _ => Value::from(or),
+    };
+    vlist(cargo.items().iter().map(|item| Value::record([("kind", said(item, "kind", "file")), ("name", said(item, "name", ""))])).collect())
+}
+
+/// Chat `session`'s draft, for `zeron.draft_of` ("draft"): out in the
+/// composer (`here` its chat, "" a new chat's; `shown` its words, `cargo`
+/// its chips) or kept for it (`kept`, by chat). Its words as typed, what it
+/// carries, and its chat (none for a new chat's). A chat with no draft has
+/// no words and carries nothing.
+pub(crate) fn draft_of(session: &str, here: &Value, shown: &Value, cargo: &Value, kept: &Value) -> Value {
+    let (words, carried) = if session == text(here) {
+        (shown.clone(), cargo.clone())
+    } else {
+        let d = kept.field(session);
+        (
+            d.and_then(|d| d.field("text")).cloned().unwrap_or_default(),
+            d.and_then(|d| d.field("cargo")).cloned().unwrap_or_default(),
+        )
+    };
+    let words = match words {
+        Value::Str(_) | Value::Text(_) => words,
+        _ => Value::from(""),
+    };
+    let mut fields = vec![("text", words), ("attachments", draft_attachments(&carried))];
+    if !session.is_empty() {
+        fields.push(("session", Value::from(session)));
+    }
+    Value::record(fields)
+}
+
 /// Plugins for the main window `cx` shows `host` in.
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     expose_surface(host);
@@ -2492,6 +2574,49 @@ impl Bridge {
                 }
             }
         });
+        // The composer's draft taken (its words, its chips, the passages
+        // quoted in it), put back or let go, under a key of the plugin's,
+        // for a plugin allowed "draft": screens/plugins keeps what's taken
+        // (the plugin never holds its files' paths) and tells it what it
+        // keeps as `plugin.<id>.drafts`.
+        host.action(format!("plugin.{id}.draft"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                if let Some(b) = me.upgrade()
+                    && b.item(&plugin).is_some_and(|i| i.may("draft"))
+                {
+                    match draft_ask(&asked) {
+                        Some(asked) => b.request("draft", &plugin, asked),
+                        None => eprintln!("zeron-zgx: plugin {plugin}: a draft ask that isn't take, put, swap or drop with a key, refused"),
+                    }
+                }
+            }
+        });
+        // Another chat's draft, as it is (`zeron.draft_of`, "draft"): read
+        // where the app keeps it, once, never followed.
+        host.async_action(format!("plugin.{id}.draft_of"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                async move {
+                    let b = me.upgrade().ok_or("This plugin isn't on")?;
+                    let item = b.item(&plugin).ok_or("This plugin isn't on")?;
+                    if !item.may("draft") {
+                        return Err("This plugin wasn't allowed to read what you type in the message box".to_string());
+                    }
+                    let session = text(&asked);
+                    if session.chars().count() > 200 {
+                        return Err("That isn't a chat".to_string());
+                    }
+                    let read = |name: &str, initial: Value| b.host.shared(name, initial).signal().with_untracked(Value::clone);
+                    let here = read(DRAFT_HERE, Value::from(""));
+                    let shown = read(DRAFT_TEXT, Value::from(""));
+                    let cargo = read(DRAFT_CARGO, vlist(Vec::new()));
+                    let kept = read(DRAFTS_KEPT, Value::record(Vec::<(&str, Value)>::new()));
+                    Ok(draft_of(&session, &here, &shown, &cargo, &kept))
+                }
+            }
+        });
         host.action(format!("plugin.{id}.open_url"), {
             let (me, plugin) = (me.clone(), plugin.clone());
             move |url| {
@@ -3392,9 +3517,9 @@ impl Bridge {
         });
         host.action("zeron.compose.insert", {
             let me = me.clone();
-            move |text_| {
+            move |asked| {
                 if let Some(b) = me.upgrade() {
-                    b.request("compose", "", Value::from(text(&text_).as_str()));
+                    b.request("compose", "", compose(&asked));
                 }
             }
         });
@@ -3536,6 +3661,52 @@ mod tests {
         assert_eq!(gone, vec!["clock".to_string(), "ping".to_string()]);
     }
 
+    /// `zeron.compose(text)` adds its words as ever; with options, it says
+    /// whether they replace the draft and which chat's (none: the shown).
+    #[test]
+    fn compose_takes_words_alone_or_with_replace_and_a_chat() {
+        assert_eq!(compose(&Value::from("hello")), Value::from("hello"));
+        let asked = json_value(&json!({ "text": "clearer", "replace": true, "session": "s2" }));
+        let out = compose(&asked);
+        assert_eq!(text(out.field("text").unwrap()), "clearer");
+        assert_eq!(out.field("replace"), Some(&Value::from(true)));
+        assert_eq!(text(out.field("session").unwrap()), "s2");
+        // (Only `true` replaces; a blank chat is the one shown; words that
+        // aren't text are none.)
+        let loose = json_value(&json!({ "text": 5, "replace": "yes", "session": "" }));
+        let out = compose(&loose);
+        assert_eq!(text(out.field("text").unwrap()), "");
+        assert_eq!(out.field("replace"), Some(&Value::from(false)));
+        assert!(out.field("session").is_none());
+    }
+
+    /// `zeron.draft_of`: the chat shown's draft (from the composer), or
+    /// another chat's (kept), with its chat and its chips by kind and name
+    /// alone; a new chat's has no chat; a chat with none, nothing.
+    #[test]
+    fn a_chats_draft_is_read_where_it_is_kept_without_paths() {
+        let kept = json_value(&json!({
+            "s2": { "text": "kept words", "cargo": [{ "kind": "file", "name": "a.rs", "path": "/Users/me/a.rs" }] },
+            "": { "text": "new chat words", "cargo": [] },
+        }));
+        let (here, shown) = (Value::from("s1"), Value::from("typing now"));
+        let cargo = json_value(&json!([{ "kind": "image", "name": "shot.png", "path": "/tmp/shot.png" }]));
+        let out = draft_of("s1", &here, &shown, &cargo, &kept);
+        assert_eq!(value_json(&out), json!({ "text": "typing now", "session": "s1", "attachments": [{ "kind": "image", "name": "shot.png" }] }));
+        let out = draft_of("s2", &here, &shown, &cargo, &kept);
+        assert_eq!(value_json(&out), json!({ "text": "kept words", "session": "s2", "attachments": [{ "kind": "file", "name": "a.rs" }] }));
+        assert!(!out.to_json().contains("/Users/me"), "never a path");
+        // A chat with no draft: nothing written, nothing carried.
+        let out = draft_of("s9", &here, &shown, &cargo, &kept);
+        assert_eq!(value_json(&out), json!({ "text": "", "session": "s9", "attachments": [] }));
+        // A new chat's draft, kept while a chat shows: no chat.
+        let out = draft_of("", &here, &shown, &cargo, &kept);
+        assert_eq!(value_json(&out), json!({ "text": "new chat words", "attachments": [] }));
+        // Before the app has made its states: nothing, not an error.
+        let out = draft_of("s1", &Value::Nil, &Value::Nil, &Value::Nil, &Value::Nil);
+        assert_eq!(text(out.field("text").unwrap()), "");
+    }
+
     /// R21: a plugin's review comment goes on the chat shown alone, with
     /// at most the 40 lines of code that are sent (a 20,000-character
     /// snippet once rode along unseen, onto any chat's draft).
@@ -3554,6 +3725,23 @@ mod tests {
         assert!(comment(&asked, "").is_none(), "no chat shown");
         let wide = json_value(&json!({ "file": "a.rs", "line": 1, "note": "n", "snippet": "é".repeat(3000) }));
         assert!(text(comment(&wide, "s1").unwrap().field("snippet").unwrap()).len() <= COMMENT_BYTES);
+    }
+
+    /// A plugin's ask of the draft is take, put, swap or drop, under a key
+    /// of 1 to 64 characters; nothing else rides along to the app.
+    #[test]
+    fn a_draft_ask_is_take_put_or_drop_with_a_key() {
+        let ask = |v: Json| draft_ask(&json_value(&v));
+        let took = ask(json!({ "op": "take", "key": "stash", "extra": "dropped" })).expect("a take");
+        assert_eq!(value_json(&took), json!({ "op": "take", "key": "stash" }));
+        assert!(ask(json!({ "op": "put", "key": "k".repeat(64) })).is_some());
+        assert!(ask(json!({ "op": "drop", "key": "é" })).is_some());
+        assert!(ask(json!({ "op": "swap", "key": "stash" })).is_some());
+        assert!(ask(json!({ "op": "send", "key": "stash" })).is_none(), "not an op");
+        assert!(ask(json!({ "op": "take", "key": "" })).is_none(), "no key");
+        assert!(ask(json!({ "op": "take" })).is_none(), "no key");
+        assert!(ask(json!({ "op": "take", "key": "k".repeat(65) })).is_none(), "too long");
+        assert!(ask(json!({ "op": "take", "key": "a\nb" })).is_none(), "a control character");
     }
 
     #[test]

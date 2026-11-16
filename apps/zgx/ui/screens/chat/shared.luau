@@ -13,6 +13,7 @@ local Quote = require("@ds/quote")
 local Annotation = require("@ds/annotation")
 local sessions = require("@account/sessions")
 local agents = require("@account/agents")
+local cloud = require("@account/cloud")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
@@ -269,6 +270,9 @@ function M.owner(): string
 	return here:get()
 end
 
+-- `showing`, read as it changes.
+M.showing_now = M.owner
+
 function M.show(key: string)
 	local was = here:peek()
 	if was == key then
@@ -309,6 +313,52 @@ function M.take(): (string, { any })
 		save_new()
 	end
 	return text, cargo
+end
+
+-- The draft shown, lifted out whole to be put back later (a plugin's
+-- `zeron.take_draft`): its words as typed, its chips and the passages
+-- quoted in it, the composer cleared. Nil when there's nothing to lift.
+function M.lift(): { text: string, cargo: { any }, quotes: { [string]: string } }?
+	local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
+	if text == "" and #cargo == 0 then
+		return nil
+	end
+	ui.batch(function()
+		M.text:set("")
+		M.cargo:set({})
+		M.quotes:set({})
+	end)
+	return { text = text, cargo = cargo, quotes = quotes }
+end
+
+-- A lifted draft put back on the draft shown (`zeron.put_draft`). Onto an
+-- empty composer it's as it was; onto words already there, its words follow
+-- them after a blank line and its chips follow theirs, its files numbered
+-- after those there.
+function M.lay(d: { text: string, cargo: { any }, quotes: { [string]: string } })
+	local here_text, here_cargo = M.text:peek(), M.cargo:peek()
+	ui.batch(function()
+		if here_text == "" and #here_cargo == 0 then
+			M.text:set(d.text)
+			M.cargo:set(d.cargo)
+			M.quotes:set(d.quotes)
+			return
+		end
+		local quotes = table.clone(M.quotes:peek())
+		for line, passage in d.quotes do
+			quotes[line] = passage
+		end
+		M.quotes:set(quotes)
+		if d.text ~= "" then
+			M.text:set(if here_text == "" then d.text else `{here_text}\n\n{d.text}`)
+		end
+		for _, item in d.cargo do
+			local moved = table.clone(item)
+			moved.mention = nil
+			M.push_cargo(nil, moved)
+		end
+	end)
+	M.focus:add(1)
 end
 
 -- A passage of the transcript, quoted into the draft (its line marks it)
@@ -973,6 +1023,16 @@ function M.draft_size_of(key: string): number
 	return if d and type(d.text) == "string" then #d.text else 0
 end
 
+-- Chat `key`'s draft's words as they are, read without following them
+-- (`draft_of` follows them): what a plugin's `zeron.compose` adds to.
+function M.peek_text_of(key: string): string
+	if here:peek() == key then
+		return M.text:peek()
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then d.text else ""
+end
+
 -- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
 -- or "chosen"): written wherever it is, as `draft_of` reads it.
 function M.set_draft_of(key: string, field: string, value: any)
@@ -1050,9 +1110,19 @@ local here_device = ui.computed(function(): string?
 end)
 
 -- The accounts' key for a device: "" for this one, whose engine answers
--- for itself.
+-- for itself; "cloud" for any of Cloud's (a chat's machine, or the
+-- account's Cloud device), whose accounts are the vault's, every Cloud
+-- machine's alike, as Settings → Providers shows them (this engine answers
+-- for "cloud": crates/engine cloud_accounts). A machine can't be asked:
+-- its accounts aren't its own, and asking would wake it.
 local function account_key(device: string?): string
-	return if device == nil or device == here_device:get() then "" else device
+	if device == nil or device == here_device:get() then
+		return ""
+	end
+	if cloud.on_device(device) or device == cloud.device() then
+		return "cloud"
+	end
+	return device
 end
 
 -- Models of Cursor's own pool (Composer, Grok), not the third-party one.

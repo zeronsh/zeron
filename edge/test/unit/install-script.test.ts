@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CLOUD_BOOT_UNIT,
   CLOUD_INSTALL_SCRIPT,
+  REPAIR_ENGINE_SCRIPT,
   START_ENGINE_COMMAND,
   STOP_ENGINE_COMMAND,
   installCommand,
@@ -110,8 +111,15 @@ describe("cloud install script", { timeout: 60_000 }, () => {
     const data = join(home, ".zeron");
     expect(readlinkSync(join(data, "app", "current"))).toBe(join(data, "app", "1.2.3"));
     expect(existsSync(join(data, "app", "1.2.3", "zeron"))).toBe(true);
-    // Never run on Cloud, and copied back in on every wake if kept.
-    expect(existsSync(join(data, "app", "1.2.3", "zeron-engine"))).toBe(false);
+    // Kept: `zeron headless` runs it (without it the unit exits at once and
+    // the machine never enrolls).
+    expect(existsSync(join(data, "app", "1.2.3", "zeron-engine"))).toBe(true);
+    // And put back before each start, should an update leave it out.
+    expect(statSync(join(data, "repair-engine")).mode & 0o777).toBe(0o700);
+    expect(readFileSync(join(data, "repair-engine"), "utf8")).toBe(REPAIR_ENGINE_SCRIPT);
+    expect(readFileSync(join(units, "zeron-cloud.service.d", "repair-engine.conf"), "utf8")).toBe(
+      `[Service]\nExecStartPre=-${join(data, "repair-engine")}\n`
+    );
     const envFile = join(data, "env");
     expect(statSync(envFile).mode & 0o777).toBe(0o600);
     expect(readFileSync(envFile, "utf8")).toBe(
@@ -157,6 +165,45 @@ describe("cloud install script", { timeout: 60_000 }, () => {
     expect(readFileSync(envFile, "utf8")).toContain("ZERON_RUNNER_ENROLL=org.user.cloud-1.codeB\n");
     expect(statSync(envFile).mode & 0o777).toBe(0o600);
     expect(calls()).toContain("systemctl restart zeron-cloud.service");
+  });
+
+  it("downloads again a version installed without its zeron-engine", () => {
+    const { home, run, calls, clearCalls } = setup();
+    run("org.user.cloud-1.codeA");
+    const engine = join(home, ".zeron", "app", "1.2.3", "zeron-engine");
+    rmSync(engine);
+    clearCalls();
+    run("org.user.cloud-1.codeA");
+    expect(existsSync(engine)).toBe(true);
+    expect(calls().filter((c) => c.includes(".tar.gz"))).toHaveLength(1);
+  });
+
+  it("puts back a zeron-engine an update left out, and does nothing once it's there", () => {
+    const { home, run, calls, clearCalls } = setup();
+    run("org.user.cloud-1.codeA");
+    const data = join(home, ".zeron");
+    const engine = join(data, "app", "1.2.3", "zeron-engine");
+    const repair = () =>
+      execFileSync("sh", [join(data, "repair-engine")], {
+        env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, ZERON_CLOUD_HOME: home, ZERON_EDGE_URL: "https://edge.test" },
+        encoding: "utf8"
+      });
+    rmSync(engine);
+    clearCalls();
+    expect(repair()).toContain("put back zeron-engine for 1.2.3");
+    expect(existsSync(engine)).toBe(true);
+    expect(statSync(engine).mode & 0o111).not.toBe(0);
+    expect(calls().filter((c) => c.includes("/releases/zeron-1.2.3-linux-x86_64.tar.gz"))).toHaveLength(1);
+    // There: no download.
+    clearCalls();
+    repair();
+    expect(calls().filter((c) => c.startsWith("curl"))).toHaveLength(0);
+    // A download that fails leaves the start to go on (it never fails it).
+    rmSync(engine);
+    writeFileSync(join(root, "bin", "curl"), "#!/bin/sh\nexit 22\n");
+    chmodSync(join(root, "bin", "curl"), 0o755);
+    expect(() => repair()).not.toThrow();
+    expect(existsSync(engine)).toBe(false);
   });
 
   it("doesn't wait for the network to start the engine, and starts it on boot without being asked", () => {
@@ -237,9 +284,19 @@ describe("cloud install script", { timeout: 60_000 }, () => {
   });
 
   it("starts the engine without waiting on it, and reloads once for a unit systemd hasn't read", () => {
-    const { calls, clearCalls } = setup();
+    const { home, units, calls, clearCalls } = setup();
+    mkdirSync(join(home, ".zeron"), { recursive: true });
     const start = () =>
-      execFileSync("sh", ["-c", START_ENGINE_COMMAND], { env: { PATH: `${join(root, "bin")}:/usr/bin:/bin` }, encoding: "utf8" });
+      execFileSync("sh", ["-c", START_ENGINE_COMMAND], {
+        env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, ZERON_CLOUD_HOME: home, ZERON_CLOUD_UNIT_DIR: units },
+        encoding: "utf8"
+      });
+    // A machine set up before the repair: its first wake writes it, once.
+    clearCalls();
+    start();
+    expect(calls()).toEqual(["systemctl daemon-reload", "systemctl start --no-block zeron-cloud.service"]);
+    expect(readFileSync(join(home, ".zeron", "repair-engine"), "utf8")).toBe(REPAIR_ENGINE_SCRIPT);
+    expect(readFileSync(join(units, "zeron-cloud.service.d", "repair-engine.conf"), "utf8")).toContain("ExecStartPre=-");
     clearCalls();
     start();
     expect(calls()).toEqual(["systemctl start --no-block zeron-cloud.service"]);

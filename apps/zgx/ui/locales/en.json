@@ -1637,7 +1637,18 @@
         },
         "remove_row_description": "Chats that used it stay."
       },
-      "couldnt_switch": "Couldn't switch accounts"
+      "couldnt_switch": "Couldn't switch accounts",
+      "cloud": "Cloud",
+      "cloud_keys": {
+        "title": "API keys",
+        "section_description": "Instead of signing in, Cloud can use an API key. A key saved here becomes the account its agent uses on every Cloud machine, from its next turn.",
+        "anthropic": "Anthropic API key",
+        "openai": "OpenAI API key",
+        "description": "For {agent} on Cloud. Kept in Zeron's vault, never on this computer.",
+        "placeholder": "Paste a key",
+        "save": "Save",
+        "saved": "{agent} on Cloud now uses this key"
+      }
     },
     "devices": {
       "title": "Devices",
@@ -3226,7 +3237,8 @@
         "show": "Show in Finder",
         "dismiss": "Dismiss {name}",
         "saving": "Saving…"
-      }
+      },
+      "dismiss_error": "Dismiss"
     },
     "browser_api": {
       "empty": "Enter a website or localhost address.",
@@ -3496,7 +3508,11 @@
         },
         "compose": {
           "title": "Put text in the message box",
-          "detail": "You still send it."
+          "detail": "It can add to what you've written or replace it. You still send it."
+        },
+        "draft": {
+          "title": "Read what you type in the message box, and set it aside",
+          "detail": "It sees your words in any chat before you send them, and can take the draft away and put it back later. It never sends it."
         },
         "network": {
           "title": "Connect to the internet",

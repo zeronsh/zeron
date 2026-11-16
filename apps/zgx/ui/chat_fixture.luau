@@ -904,6 +904,16 @@ ui.command {
 	end,
 }
 
+-- A settled reply the host gave no time (as Windows did before it could
+-- read one): its Copy shows all the same (tests/chat_in_place).
+ui.command {
+	id = "reply_without_time",
+	title = "A reply with no time",
+	run = function()
+		store.messages:push { id = "notime1", role = "assistant", text = "Answered with no clock.", copy = "Answered with no clock." }
+	end,
+}
+
 -- Messages from other chats, as the host gives them: one from a chat that's
 -- listed, one from a chat that isn't, one with a long title (tests/chat_sender).
 ui.command {
@@ -1635,6 +1645,29 @@ ui.effect(function()
 	table.sort(keys)
 	plugin_comments:set(table.concat(keys, ","))
 end)
+-- The draft lifted out whole and laid back (a plugin's `zeron.take_draft`
+-- and `put_draft`; screens/plugins keeps it between the two, as this
+-- does). `test_lifted` says what was lifted: its words and how many chips.
+local lifted: any = nil
+local lifted_said = ui.state("test_lifted", "")
+ui.command {
+	id = "draft_lift",
+	title = "A plugin takes the draft",
+	run = function()
+		lifted = require("@app/screens/chat/shared").lift()
+		lifted_said:set(if lifted then `{lifted.text}|{#lifted.cargo}` else "nothing")
+	end,
+}
+ui.command {
+	id = "draft_lay",
+	title = "A plugin puts the draft back",
+	run = function()
+		if lifted then
+			require("@app/screens/chat/shared").lay(lifted)
+			lifted = nil
+		end
+	end,
+}
 ui.command {
 	id = "comment_moves",
 	title = "The comment is carried two lines down",
