@@ -3014,3 +3014,351 @@ async fn a_switch_over_a_login_it_cant_identify_is_refused_and_the_login_kept() 
         serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(live["anthropic"], claude);
 }
+
+// ── Codegraff ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn codegraff_detects_all_oauth_stores_and_api_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let home = &config.codegraff_home;
+
+    write(
+        &home.join(".simple-harness-codegraff.json"),
+        &serde_json::json!({ "api_key": "cg_sk_test_1234567890abcd" }).to_string(),
+    );
+    write(
+        &home.join(".graff/credentials/chatgpt-new.json"),
+        &serde_json::json!({
+            "email": "ada@openai.test",
+            "subject": "sub-1",
+            "ext_agent_host_id": "host-1",
+            "access_token": chatgpt_access("ada@openai.test", "acct-1", "plus"),
+            "refresh_token": "rt-chatgpt-1",
+            "expires_at": 4_102_444_800i64,
+        })
+        .to_string(),
+    );
+    write(
+        &home.join(".anthropic/credentials/graff-oauth.json"),
+        &serde_json::json!({
+            "access_token": "sk-ant-oat01-claudeABCD",
+            "refresh_token": "rt-claude-1",
+            "expires_at": 4_102_444_800_000i64,
+        })
+        .to_string(),
+    );
+    write(
+        &home.join(".kimi/credentials/graff-oauth.json"),
+        &serde_json::json!({
+            "access_token": "kimi-at-1111WXYZ",
+            "refresh_token": "rt-kimi-1",
+            "expires_at": 4_102_444_800.0,
+        })
+        .to_string(),
+    );
+    write(
+        &home.join(".xai/credentials/graff-oauth.json"),
+        &serde_json::json!({
+            "access_token": "xai-oat-2222EFGH",
+            "refresh_token": "rt-xai-1",
+            "expires_at": 4_102_444_800i64,
+        })
+        .to_string(),
+    );
+    // OAuth outranks .simple-harness-keys.json for providers with an active
+    // OAuth login ("anthropic"), while standalone API keys still list.
+    write(
+        &home.join(".simple-harness-keys.json"),
+        &serde_json::json!({
+            "anthropic": "sk-ant-api03-ZEROTESTshadow0000",
+            "openrouter": "sk-or-v1-ZEROTESTroute9876",
+            "groq": "gsk_ZEROTESTfast4321",
+        })
+        .to_string(),
+    );
+
+    let snapshot = accounts.list(false).await.unwrap();
+    let cg = rows(&snapshot, HarnessId::Codegraff);
+    let by_provider: std::collections::HashMap<&str, &AgentAccount> = cg
+        .iter()
+        .map(|a| (a.provider.as_deref().unwrap(), a))
+        .collect();
+    assert_eq!(cg.len(), 7, "{cg:?}");
+    assert_eq!(by_provider["codegraff"].plan_label.as_deref(), Some("Codegraff"));
+    assert_eq!(by_provider["codegraff"].auth_kind, Some(AgentAuthKind::Oauth));
+    assert_eq!(by_provider["chatgpt-new"].email.as_deref(), Some("ada@openai.test"));
+    assert_eq!(by_provider["chatgpt-new"].plan_label.as_deref(), Some("ChatGPT Plus"));
+    assert_eq!(by_provider["anthropic"].auth_kind, Some(AgentAuthKind::Oauth));
+    assert_eq!(by_provider["anthropic"].plan_label.as_deref(), Some("Claude"));
+    assert_eq!(by_provider["kimi"].plan_label.as_deref(), Some("Kimi"));
+    assert_eq!(by_provider["xai"].plan_label.as_deref(), Some("xAI"));
+    assert_eq!(by_provider["openrouter"].auth_kind, Some(AgentAuthKind::ApiKey));
+    assert_eq!(by_provider["openrouter"].email.as_deref(), Some("API key ···9876"));
+    assert_eq!(by_provider["groq"].auth_kind, Some(AgentAuthKind::ApiKey));
+    assert!(cg.iter().all(|a| a.active && a.switchable));
+}
+
+#[tokio::test]
+async fn codegraff_switches_oauth_and_api_key_with_precedence_and_permissions() {
+    let server = MockServer::start(|method, path, _| match (method, path) {
+        ("GET", "/v1/models") => (200, r#"{"data":[]}"#.into()),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let home = &config.codegraff_home;
+    let oauth_file = home.join(".anthropic/credentials/graff-oauth.json");
+    let keys_file = home.join(".simple-harness-keys.json");
+
+    let oauth_blob = serde_json::json!({
+        "access_token": "sk-ant-oat01-live9999",
+        "refresh_token": "rt-ant-1",
+        "expires_at": 4_102_444_800_000i64,
+    });
+    write(&oauth_file, &oauth_blob.to_string());
+
+    let api_key = "sk-ant-api03-ZEROTESTcodegraffKEYabcd";
+    let snapshot = accounts
+        .add_api_key(HarnessId::Codegraff, "anthropic", api_key, Some("Work"))
+        .await
+        .unwrap();
+    let ant: Vec<_> = rows(&snapshot, HarnessId::Codegraff)
+        .into_iter()
+        .filter(|a| a.provider.as_deref() == Some("anthropic"))
+        .collect();
+    assert_eq!(ant.len(), 2, "{ant:?}");
+    let oauth_row = ant.iter().find(|a| a.auth_kind == Some(AgentAuthKind::Oauth)).unwrap();
+    let key_row = ant.iter().find(|a| a.auth_kind == Some(AgentAuthKind::ApiKey)).unwrap();
+    assert!(oauth_row.active && !key_row.active);
+    assert_eq!(key_row.email.as_deref(), Some("Work"));
+    assert!(oauth_file.exists(), "existing live OAuth stays active until switched");
+
+    // Switching to the API key removes the overriding OAuth file and writes
+    // .simple-harness-keys.json 0600.
+    let switched = accounts.activate(HarnessId::Codegraff, &key_row.id).await.unwrap();
+    let ant: Vec<_> = rows(&switched, HarnessId::Codegraff)
+        .into_iter()
+        .filter(|a| a.provider.as_deref() == Some("anthropic"))
+        .collect();
+    assert!(ant.iter().find(|a| a.id == key_row.id).unwrap().active);
+    assert!(!ant.iter().find(|a| a.id == oauth_row.id).unwrap().active);
+    assert!(!oauth_file.exists());
+    let live_keys: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&keys_file).unwrap()).unwrap();
+    assert_eq!(live_keys["anthropic"], api_key);
+    #[cfg(unix)]
+    assert_eq!(mode(&keys_file), 0o600);
+
+    // Rename the key slot without re-asking for the secret.
+    let renamed = accounts
+        .rename_account(HarnessId::Codegraff, &key_row.id, "Prod")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&renamed, HarnessId::Codegraff)
+            .into_iter()
+            .find(|a| a.id == key_row.id)
+            .unwrap()
+            .email
+            .as_deref(),
+        Some("Prod")
+    );
+
+    // Switching back to OAuth restores graff-oauth.json and drops the shadow key.
+    let back = accounts.activate(HarnessId::Codegraff, &oauth_row.id).await.unwrap();
+    assert!(
+        rows(&back, HarnessId::Codegraff)
+            .into_iter()
+            .find(|a| a.id == oauth_row.id)
+            .unwrap()
+            .active
+    );
+    let restored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&oauth_file).unwrap()).unwrap();
+    assert_eq!(restored, oauth_blob);
+    #[cfg(unix)]
+    assert_eq!(mode(&oauth_file), 0o600);
+    let live_keys: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&keys_file).unwrap()).unwrap();
+    assert!(live_keys.get("anthropic").is_none());
+
+    // Forgetting the inactive key leaves the live OAuth login untouched.
+    let after_forget = accounts.forget(HarnessId::Codegraff, &key_row.id).await.unwrap();
+    assert_eq!(rows(&after_forget, HarnessId::Codegraff).len(), 1);
+    assert!(oauth_file.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codegraff_login_spawns_cli_for_device_code_and_loopback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let chatgpt_token = chatgpt_access("ada@openai.test", "acct-99", "pro");
+    let cli = script(
+        tmp.path(),
+        "graff",
+        &format!(
+            r#"#!/bin/sh
+if [ "${{GRAFF_NO_BROWSER:-}}" != "1" ]; then
+  echo "expected GRAFF_NO_BROWSER=1" >&2
+  exit 2
+fi
+case "$1:$2" in
+  login:kimi)
+    echo "Open https://www.kimi.ai/code/authorize_device?user_code=ABCD-1234"
+    echo "Code: ABCD-1234"
+    sleep 0.1
+    mkdir -p "$HOME/.kimi/credentials"
+    printf '{{"access_token":"kimi-tok-4321","refresh_token":"kimi-rt-1","expires_at":4102444800}}' > "$HOME/.kimi/credentials/graff-oauth.json"
+    ;;
+  login:chatgpt-new)
+    echo "Authorize at https://chatgpt.com/api/accounts/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"
+    sleep 0.1
+    mkdir -p "$HOME/.graff/credentials"
+    printf 'host-xyz' > "$HOME/.graff/credentials/chatgpt-new-host-id"
+    printf '{{"email":"ada@openai.test","subject":"sub-99","ext_agent_host_id":"host-xyz","access_token":"{chatgpt_token}","refresh_token":"rt-cgpt","expires_at":4102444800}}' > "$HOME/.graff/credentials/chatgpt-new.json"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+"#
+        ),
+    );
+    accounts.override_cli(HarnessId::Codegraff, cli);
+
+    // Device-code provider (`kimi`): URL + device code, no callback port.
+    let kimi_start = accounts
+        .start_login_with(HarnessId::Codegraff, Some("kimi"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        kimi_start.url,
+        "https://www.kimi.ai/code/authorize_device?user_code=ABCD-1234"
+    );
+    assert_eq!(kimi_start.callback_port, None);
+    let kimi_polls = settle(&accounts, &kimi_start.login_id).await;
+    assert_eq!(kimi_polls.last().unwrap().status, AgentLoginStatus::Done);
+    assert!(
+        kimi_polls
+            .iter()
+            .any(|p| p.message.as_deref() == Some("Enter the code ABCD-1234 when asked.")),
+        "{kimi_polls:?}"
+    );
+    assert!(
+        config
+            .codegraff_home
+            .join(".kimi/credentials/graff-oauth.json")
+            .exists()
+    );
+
+    // Loopback provider (`chatgpt-new`): callback port captured, no spurious device code.
+    let gpt_start = accounts
+        .start_login_with(HarnessId::Codegraff, Some("chatgpt-new"), Some("device-r"))
+        .await
+        .unwrap();
+    assert_eq!(gpt_start.callback_port, Some(1455));
+    let gpt_polls = settle(&accounts, &gpt_start.login_id).await;
+    assert_eq!(gpt_polls.last().unwrap().status, AgentLoginStatus::Done);
+    assert!(
+        gpt_polls.iter().all(|p| p.message.is_none()),
+        "loopback URL should never be scanned for a device code: {gpt_polls:?}"
+    );
+    assert!(
+        config
+            .codegraff_home
+            .join(".graff/credentials/chatgpt-new.json")
+            .exists()
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            config
+                .codegraff_home
+                .join(".graff/credentials/chatgpt-new-host-id")
+        )
+        .unwrap(),
+        "host-xyz"
+    );
+
+    // Throwaway login homes cleaned up.
+    let leftovers = std::fs::read_dir(config.data_dir.join("agent-accounts"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".login-"))
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+#[test]
+fn codegraff_url_scanner_accepts_all_provider_domains_and_rejects_untrusted() {
+    for url in [
+        "https://codegraff.com/cli/auth?x=1",
+        "https://auth.openai.com/api/accounts/authorize?x=1",
+        "https://claude.ai/oauth/authorize?x=1",
+        "https://platform.claude.com/oauth?x=1",
+        "https://www.kimi.ai/code/authorize_device?x=1",
+        "https://www.kimi.com/activate",
+        "https://accounts.x.ai/oauth2/device?x=1",
+    ] {
+        assert_eq!(scan_codegraff_url(url).as_deref(), Some(url), "{url}");
+    }
+    assert_eq!(scan_codegraff_url("https://evil.example/auth"), None);
+}
+
+#[tokio::test]
+#[ignore = "spawns the real graff CLI; needs install + network"]
+async fn live_real_codegraff_login_starts_and_cancels_all_providers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    if let Some(exe) = std::env::var_os("GRAFF_EXECUTABLE") {
+        accounts.override_cli(HarnessId::Codegraff, PathBuf::from(exe));
+    }
+
+    for provider in ["codegraff", "chatgpt-new", "anthropic", "kimi", "xai"] {
+        let start = accounts
+            .start_login_with(HarnessId::Codegraff, Some(provider), None)
+            .await
+            .unwrap_or_else(|e| panic!("start login for {provider}: {e}"));
+        assert!(
+            start.url.starts_with("https://"),
+            "expected https url for {provider}, got {}",
+            start.url
+        );
+        if matches!(provider, "chatgpt-new" | "anthropic") {
+            assert!(
+                start.callback_port.is_some(),
+                "expected loopback port for {provider}"
+            );
+        } else {
+            assert_eq!(
+                start.callback_port, None,
+                "unexpected callback port for device flow {provider}"
+            );
+            let mut saw_code = false;
+            for _ in 0..50 {
+                let poll = accounts.poll_login(&start.login_id).await.unwrap();
+                if poll
+                    .message
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("Enter the code "))
+                {
+                    saw_code = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(saw_code, "expected device code message for {provider}");
+        }
+        accounts.cancel_login(&start.login_id);
+    }
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let leftovers = std::fs::read_dir(config.data_dir.join("agent-accounts"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".login-"))
+        .count();
+    assert_eq!(leftovers, 0);
+}

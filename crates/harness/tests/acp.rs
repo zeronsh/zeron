@@ -884,6 +884,13 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
     assert!(pi.supports_steering());
     assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
     assert!(pi.reasoning_levels().is_empty());
+
+    let codegraff = AcpHarness::codegraff();
+    assert_eq!(codegraff.id(), HarnessId::Codegraff);
+    assert_eq!(codegraff.display_name(), "Codegraff");
+    assert!(codegraff.supports_steering());
+    assert_eq!(codegraff.steering_mode(), SteeringMode::TurnBoundary);
+    assert!(codegraff.reasoning_levels().is_empty());
 }
 
 fn antigravity_harness() -> AcpHarness {
@@ -2886,4 +2893,168 @@ async fn fx_permissions_follow_zeron_access_mode() {
                 .any(|event| matches!(event, AgentEvent::TextDelta { text } if text == expected))
         );
     }
+}
+
+#[tokio::test]
+async fn codegraff_discovers_provider_models_and_runs_turn() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codegraff.py");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755));
+    }
+    let harness = AcpHarness::codegraff().with_executable(fixture);
+    let models = harness.models().await.unwrap();
+    assert_eq!(
+        models
+            .iter()
+            .map(|m| (
+                m.id.as_str(),
+                m.label.as_str(),
+                m.provider.as_ref().map(|p| p.name.as_str())
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("chatgpt-new/gpt-5.4", "GPT-5.4", Some("ChatGPT")),
+            (
+                "anthropic/claude-sonnet-4-6",
+                "Claude Sonnet 4.6",
+                Some("Anthropic")
+            ),
+        ]
+    );
+    let mut req = request("hello");
+    req.model = Some("anthropic/claude-sonnet-4-6".into());
+    let (control, sender, _) = controls();
+    drop(sender);
+    let events = run_to_end(&harness, req, control).await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::TextDelta { text } if text == "codegraff:anthropic/claude-sonnet-4-6"
+    )));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn codegraff_rejected_model_never_falls_back_to_another_model() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codegraff.py");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755));
+    }
+    let harness = AcpHarness::codegraff().with_executable(fixture);
+    let mut req = request("hello");
+    req.model = Some("anthropic/rejected-model".into());
+    let (control, sender, _) = controls();
+    drop(sender);
+    let stream = harness.run(req, control).await.unwrap();
+    let events = stream.collect::<Vec<_>>().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Ok(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            ..
+        })
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Ok(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    )));
+}
+
+#[tokio::test]
+#[ignore = "spawns the real graff CLI; needs install + auth + network"]
+async fn live_real_codegraff_discovery_and_single_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let harness = AcpHarness::codegraff();
+
+    let models = match harness.models().await {
+        Err(err)
+            if err
+                .to_string()
+                .contains("credentials changed during model discovery; retry") =>
+        {
+            harness.models().await.expect("discover models on retry")
+        }
+        other => other.expect("discover models"),
+    };
+    assert!(!models.is_empty(), "expected non-empty Codegraff models");
+    assert!(
+        models
+            .iter()
+            .any(|m| m.id.contains('/') && m.provider.is_some()),
+        "expected provider-prefixed models with parsed provider badges"
+    );
+    assert!(
+        !models[0].reasoning_levels.is_empty(),
+        "expected thought_level reasoning levels on discovered model"
+    );
+
+    let commands = harness
+        .commands_for(tmp.path())
+        .await
+        .expect("discover commands");
+    assert!(!commands.is_empty(), "expected non-empty slash commands");
+    assert!(
+        !commands
+            .iter()
+            .any(|c| c.name == "model" || c.name == "yolo"),
+        "expected model and yolo commands to be filtered by client profile"
+    );
+
+    let mut req = request("Reply with the single word PONG and nothing else.");
+    req.cwd = tmp.path().display().to_string();
+    req.model = Some(models[0].id.clone());
+    req.reasoning = Some(ReasoningLevel::Low);
+    let (control, _sender, _token) = controls();
+    let mut stream = harness.run(req, control).await.expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(90), async {
+        let mut events = Vec::new();
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            let done = matches!(ev, AgentEvent::Done { .. });
+            events.push(ev);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("live turn finished in time");
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. })),
+        "expected SessionStarted event"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.to_ascii_lowercase().contains("pong"),
+        "expected PONG reply in text deltas"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
 }

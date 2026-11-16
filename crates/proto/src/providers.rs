@@ -8,7 +8,7 @@ use crate::HarnessId;
 /// command — named in the empty-state copy, zeron settings.agents.tsx
 /// `PROVIDERS`). Every agent with a login of its own is here; what each one
 /// supports is documented engine-side (`agent_accounts` module docs).
-pub const PROVIDERS: [(HarnessId, &str, &str); 10] = [
+pub const PROVIDERS: [(HarnessId, &str, &str); 11] = [
     (HarnessId::ClaudeCode, "Claude Code", "claude"),
     (HarnessId::Codex, "Codex", "codex"),
     (HarnessId::Cursor, "Cursor", "cursor-agent"),
@@ -19,6 +19,7 @@ pub const PROVIDERS: [(HarnessId, &str, &str); 10] = [
     (HarnessId::Pi, "Pi", "pi"),
     (HarnessId::Hermes, "Hermes", "hermes auth add"),
     (HarnessId::Muse, "Muse Code", "muse login"),
+    (HarnessId::Codegraff, "Codegraff", "graff login"),
 ];
 
 /// Whether `harness` has an Accounts section (and sign-in flow). Pure.
@@ -111,6 +112,13 @@ pub fn login_options(harness: HarnessId) -> Vec<LoginOption> {
             option("nous", "Nous Portal"),
             option("xai-oauth", "xAI"),
         ],
+        HarnessId::Codegraff => vec![
+            option("codegraff", "Codegraff"),
+            option("chatgpt-new", "ChatGPT"),
+            option("anthropic", "Claude"),
+            option("kimi", "Kimi"),
+            option("xai", "xAI"),
+        ],
         _ => vec![LoginOption {
             provider: None,
             label: provider_name(harness),
@@ -150,6 +158,16 @@ pub fn api_key_options(harness: HarnessId) -> Vec<ApiKeyOption> {
             key("xai", "xAI"),
             key("deepseek", "DeepSeek"),
         ],
+        HarnessId::Codegraff => vec![
+            key("anthropic", "Anthropic"),
+            key("openai", "OpenAI"),
+            key("openrouter", "OpenRouter"),
+            key("google", "Google Gemini"),
+            key("xai", "xAI"),
+            key("deepseek", "DeepSeek"),
+            key("groq", "Groq"),
+            key("mistral", "Mistral"),
+        ],
         _ => Vec::new(),
     }
 }
@@ -178,7 +196,7 @@ pub fn add_key_label(option: ApiKeyOption, in_group: bool) -> String {
 pub fn groups_by_provider(harness: HarnessId) -> bool {
     matches!(
         harness,
-        HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes
+        HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes | HarnessId::Codegraff
     )
 }
 
@@ -197,7 +215,8 @@ pub fn login_option(harness: HarnessId, provider: &str) -> Option<LoginOption> {
 /// reads as its words. Pure.
 pub fn account_group_label(harness: HarnessId, provider: &str) -> String {
     let known = match provider {
-        "openai-codex" => "ChatGPT",
+        "codegraff" => "Codegraff",
+        "openai-codex" | "chatgpt-new" => "ChatGPT",
         "openai" | "openai-api" => "OpenAI",
         "anthropic" => "Anthropic",
         "github-copilot" | "copilot" => "GitHub Copilot",
@@ -209,7 +228,7 @@ pub fn account_group_label(harness: HarnessId, provider: &str) -> String {
         "groq" => "Groq",
         "deepseek" => "DeepSeek",
         "mistral" => "Mistral",
-        "kimi-coding" => "Kimi",
+        "kimi" | "kimi-coding" => "Kimi",
         "qwen-oauth" => "Qwen",
         "minimax-oauth" => "MiniMax",
         "meta" => "Meta",
@@ -251,6 +270,9 @@ pub fn account_group_hint(harness: HarnessId, provider: &str) -> Option<String> 
         HarnessId::Hermes => Some(format!(
             "To add another {label} account, run `hermes auth add {provider}`."
         )),
+        HarnessId::Codegraff => Some(format!(
+            "To add another {label} account, run `graff login {provider}`."
+        )),
         _ => None,
     }
 }
@@ -280,7 +302,12 @@ mod tests {
 
     #[test]
     fn per_provider_agents_group_and_offer_a_sign_in_per_provider() {
-        for harness in [HarnessId::Opencode, HarnessId::Pi, HarnessId::Hermes] {
+        for harness in [
+            HarnessId::Opencode,
+            HarnessId::Pi,
+            HarnessId::Hermes,
+            HarnessId::Codegraff,
+        ] {
             assert!(groups_by_provider(harness), "{harness:?}");
             assert!(
                 login_options(harness).iter().all(|o| o.provider.is_some()),
@@ -345,6 +372,15 @@ mod tests {
             "Google Gemini"
         );
         assert_eq!(
+            account_group_label(HarnessId::Codegraff, "chatgpt-new"),
+            "ChatGPT"
+        );
+        assert_eq!(account_group_label(HarnessId::Codegraff, "kimi"), "Kimi");
+        assert_eq!(
+            account_group_label(HarnessId::Codegraff, "codegraff"),
+            "Codegraff"
+        );
+        assert_eq!(
             account_group_label(HarnessId::Hermes, "my-local_llm"),
             "My Local Llm"
         );
@@ -360,9 +396,15 @@ mod tests {
             account_group_hint(HarnessId::Hermes, "minimax-oauth").as_deref(),
             Some("To add another MiniMax account, run `hermes auth add minimax-oauth`.")
         );
+        assert_eq!(
+            account_group_hint(HarnessId::Codegraff, "codex").as_deref(),
+            Some("To add another Codex account, run `graff login codex`.")
+        );
         // Zeron adds these itself (a sign-in, a key): no hint.
         assert!(account_group_hint(HarnessId::Pi, "anthropic").is_none());
         assert!(account_group_hint(HarnessId::Hermes, "openrouter").is_none());
+        assert!(account_group_hint(HarnessId::Codegraff, "openrouter").is_none());
+        assert!(account_group_hint(HarnessId::Codegraff, "kimi").is_none());
         assert!(account_group_hint(HarnessId::Opencode, "github-copilot").is_none());
         assert!(account_group_hint(HarnessId::ClaudeCode, "anthropic").is_none());
     }

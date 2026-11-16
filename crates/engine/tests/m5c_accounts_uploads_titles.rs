@@ -701,7 +701,10 @@ async fn grok_devin_opencode_and_pi_logins_swap_round_trip() {
         snapshot
             .accounts
             .iter()
-            .filter(|a| matches!(a.harness, HarnessId::Opencode | HarnessId::Pi))
+            .filter(|a| matches!(
+                a.harness,
+                HarnessId::Opencode | HarnessId::Pi | HarnessId::Codegraff
+            ))
             .all(|a| a.provider.is_some())
     );
 }

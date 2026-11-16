@@ -130,6 +130,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Opencode => "opencode",
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Muse => "muse",
+        HarnessId::Codegraff => "graff",
         HarnessId::Mock => "mock",
         HarnessId::Registry(agent) => agent.registry_id(),
     }
@@ -1868,6 +1869,7 @@ fn install_visibility_and_hint_follow_target_capabilities() {
         HarnessId::Grok,
         HarnessId::Hermes,
         HarnessId::Devin,
+        HarnessId::Codegraff,
         HarnessId::Mock,
     ] {
         for installed in [false, true] {

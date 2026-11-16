@@ -223,6 +223,10 @@ fn login_copy(harness: HarnessId, provider: Option<&str>) -> &'static str {
             "Finish signing in in your browser — enter the code shown below. Hermes adds the \
              login to its own credential pool and rotates through it itself."
         }
+        (HarnessId::Codegraff, _) => {
+            "Finish signing in in your browser — enter the code shown below if prompted. \
+             Codegraff keeps a separate login per provider."
+        }
         _ => "Finish signing in in your browser.",
     }
 }
@@ -2044,6 +2048,7 @@ impl Render for AccountsPage {
             HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
             HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
             HarnessId::Muse => (crate::icons::MUSE_MARK, Some(crate::icons::muse_brand())),
+            HarnessId::Codegraff => (crate::icons::CODEGRAFF_MARK, None),
             _ => (
                 crate::icons::CLAUDE_MARK,
                 Some(crate::icons::claude_brand()),
@@ -2081,6 +2086,7 @@ impl Render for AccountsPage {
                         HarnessId::Opencode => "accounts-skeleton-opencode",
                         HarnessId::Pi => "accounts-skeleton-pi",
                         HarnessId::Hermes => "accounts-skeleton-hermes",
+                        HarnessId::Codegraff => "accounts-skeleton-codegraff",
                         _ => "accounts-skeleton-claude",
                     };
                     div()
@@ -2486,7 +2492,12 @@ mod tests {
             "Connect a Antigravity account"
         );
         // Every agent with a login of its own has an Accounts section.
-        for harness in [HarnessId::Opencode, HarnessId::Pi, HarnessId::Hermes] {
+        for harness in [
+            HarnessId::Opencode,
+            HarnessId::Pi,
+            HarnessId::Hermes,
+            HarnessId::Codegraff,
+        ] {
             assert!(signs_in(harness), "{harness:?}");
             assert!(reports_usage(harness));
             for option in login_options(harness) {

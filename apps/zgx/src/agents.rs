@@ -564,6 +564,7 @@ pub(crate) fn mark(id: &str) -> Option<&'static str> {
         "hermes" => "hermes",
         "antigravity" => "antigravity",
         "muse" => "muse",
+        "codegraff" => "codegraff",
         _ => return None,
     })
 }
@@ -671,6 +672,7 @@ fn login_provider(id: &str) -> Option<&'static str> {
     match id {
         "opencode" => Some("openai"),
         "pi" | "hermes" => Some("openai-codex"),
+        "codegraff" => Some("codegraff"),
         _ => None,
     }
 }

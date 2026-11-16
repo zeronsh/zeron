@@ -173,6 +173,7 @@ pub fn harness_label(id: &str) -> String {
         "opencode" => "OpenCode",
         "antigravity" => "Antigravity",
         "muse" => "Muse Code",
+        "codegraff" => "Codegraff",
         "mock" => "Mock",
         other => return other.to_owned(),
     }
@@ -250,6 +251,7 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
             &["minimal", "low", "medium", "high", "xhigh", "max"],
             vec![],
         )],
+        "codegraff" => Vec::new(),
         "opencode" => vec![
             model(
                 "opencode/big-pickle",

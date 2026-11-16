@@ -100,8 +100,17 @@ propagate instead of silently running a different model. Skills use the existing
 host discovery for `.agents/skills`, `.claude/skills`, and `.fx/skills`.
 
 Zeron writes fx's `ask` policy before every prompt, including resumed sessions:
-some fx releases report ask while retaining a saved automatic policy. Zeron then
-decides permissions: Supervised presents requests to the user; Full access
-approves them. Streaming, tool calls, cancellation and session loading use the
-shared ACP driver. Login and updates remain CLI-managed; native Windows has no
-one-click installer.
+some fx releases report ask while retaining a saved automatic policy. Zeron then decides permissions: Supervised presents requests to the user; Full access approves them. Streaming, tool calls, cancellation and session loading use the shared ACP driver. Login and updates remain CLI-managed; native Windows has no one-click installer.
+
+## Codegraff
+
+Codegraff uses its native `graff acp` server. Install with
+`curl -fsSL https://github.com/justrach/codegraff/releases/latest/download/install.sh | bash`
+(or `irm https://github.com/justrach/codegraff/releases/latest/download/install.ps1 | iex` on
+Windows), and sign in with `graff login` or via per-provider sign-ins and API keys in Settings.
+Zeron detects PATH, `~/bin/graff`, `~/.harness/bin/graff`, `~/.local/bin/graff`, Homebrew dirs,
+and Windows `%LOCALAPPDATA%\Programs\graff\bin\graff.exe`; `GRAFF_EXECUTABLE` overrides the
+executable. Zeron sends `clientInfo.name = "zeron"` so Codegraff keeps Zeron's workspace-owning
+ACP profile active, discovers provider-scoped models and reasoning levels from `configOptions`,
+propagates explicit model selection errors, and shares host skill discovery for `.agents/skills`,
+`.claude/skills`, and `.graff/skills`.

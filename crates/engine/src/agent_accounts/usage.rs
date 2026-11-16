@@ -268,6 +268,25 @@ impl AgentAccounts {
                 why: NoCredentials::ApiKey,
             });
         }
+        if harness == HarnessId::Codegraff {
+            let access = str_field(creds, "access_token").ok_or(missing)?;
+            return match key {
+                "chatgpt-new" => {
+                    let account = jwt_claims(&access)
+                        .and_then(|c| {
+                            c.get("https://api.openai.com/auth")
+                                .and_then(|a| str_field(a, "chatgpt_account_id"))
+                        })
+                        .or_else(|| str_field(creds, "subject"))
+                        .unwrap_or_default();
+                    self.openai_usage("graff", &access, &account).await
+                }
+                "anthropic" => self.claude_usage_request(&access).await,
+                _ => Err(ProbeError::NoCredentials {
+                    why: NoCredentials::Unsupported,
+                }),
+            };
+        }
         match upstream_of(harness, key) {
             Some(Upstream::OpenAi) => {
                 let access = str_field(creds, "access").ok_or(missing)?;

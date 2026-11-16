@@ -128,6 +128,8 @@ pub const BUILT_IN: &[(&str, &str)] = &[
     ("opencode", "opencode"),
     ("pi-acp", "pi"),
     ("antigravity-acp", "antigravity"),
+    ("graff", "codegraff"),
+    ("codegraff", "codegraff"),
 ];
 
 /// The built-in harness slug for a registry id Zeron drives itself.

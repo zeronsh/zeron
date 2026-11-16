@@ -118,6 +118,12 @@ fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
         HarnessId::Grok => &[".agents/skills", ".claude/skills", ".grok/skills"],
         HarnessId::Hermes => &[".agents/skills"],
         HarnessId::Fx => &[".agents/skills", ".claude/skills", ".fx/skills"],
+        HarnessId::Codegraff => &[
+            ".agents/skills",
+            ".claude/skills",
+            ".graff/skills",
+            ".harness/skills",
+        ],
         HarnessId::Pi => &[".agents/skills", ".pi/skills"],
         HarnessId::Devin => &[".agents/skills"],
         HarnessId::Antigravity => &[".agents/skills", ".gemini/skills"],
@@ -157,6 +163,7 @@ fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>
                 .join("skills"),
             String::new(),
         )),
+        HarnessId::Codegraff => roots.push((home.join(".codegraff/skills"), String::new())),
         HarnessId::Muse => roots.push((
             std::env::var_os("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
@@ -960,5 +967,30 @@ mod tests {
         .unwrap();
         assert_eq!(found.len(), 1);
         assert!(found.contains_key("plugin:review"));
+    }
+
+    #[test]
+    fn codegraff_discovers_harness_graff_and_codegraff_skill_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        write(&home, ".codegraff/skills/adopted/SKILL.md", "Adopted skill");
+        write(&home, ".harness/skills/personal/SKILL.md", "Personal skill");
+        write(
+            &repo,
+            ".harness/skills/project-harness/SKILL.md",
+            "Project harness skill",
+        );
+        write(
+            &repo,
+            ".graff/skills/project-graff/SKILL.md",
+            "Project graff skill",
+        );
+        let skills = discover_at(HarnessId::Codegraff, &repo, &home).unwrap();
+        let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
+        for expected in ["adopted", "personal", "project-harness", "project-graff"] {
+            assert!(names.contains(&expected), "missing {expected} in {names:?}");
+        }
     }
 }

@@ -110,6 +110,13 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
             "curl -fsSL https://cli.devin.ai/install.sh | bash",
             "bash",
         )],
+        Codegraff if windows => vec![PowerShell(
+            "irm https://github.com/justrach/codegraff/releases/latest/download/install.ps1 | iex",
+        )],
+        Codegraff => vec![Shell(
+            "curl -fsSL https://github.com/justrach/codegraff/releases/latest/download/install.sh | bash",
+            "bash",
+        )],
     }
 }
 
@@ -166,6 +173,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         Devin => "curl -fsSL https://cli.devin.ai/install.sh | bash",
         Muse => "curl -fsSL https://dev.meta.ai/install.sh | sh",
         Fx => "curl -fsSL https://fx.sh/setup.sh | bash",
+        Codegraff => "curl -fsSL https://github.com/justrach/codegraff/releases/latest/download/install.sh | bash",
         Antigravity | Mock | Registry(_) => return None,
     })
 }
@@ -185,6 +193,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Muse => ("muse", "~/.local/bin"),
         Mock => ("mock", "PATH"),
         Fx => ("fx", "~/.local/bin"),
+        Codegraff => ("graff", "~/bin or ~/.harness/bin"),
         Registry(agent) => (agent.registry_id(), "~/.zeron/agents"),
     }
 }
@@ -204,6 +213,7 @@ pub fn installed(id: HarnessId) -> bool {
         Muse => crate::MuseHarness::new().installed(),
         Mock => false,
         Fx => crate::AcpHarness::fx().installed(),
+        Codegraff => crate::AcpHarness::codegraff().installed(),
         Registry(agent) => crate::acp_registry::installed(agent),
     }
 }
@@ -405,7 +415,7 @@ async fn run(
 mod tests {
     use super::*;
 
-    const IDS: [HarnessId; 11] = [
+    const IDS: [HarnessId; 12] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
@@ -416,6 +426,7 @@ mod tests {
         HarnessId::Fx,
         HarnessId::Devin,
         HarnessId::Antigravity,
+        HarnessId::Codegraff,
         HarnessId::Mock,
     ];
 

@@ -230,6 +230,9 @@ pub struct AgentAccountsConfig {
     /// The user's real config root (`$XDG_CONFIG_HOME` or `~/.config`): what
     /// each zeron-kept Muse account's root mirrors (see [`muse`]).
     pub muse_config_root: PathBuf,
+    /// Home directory holding Codegraff's credential files
+    /// (`.simple-harness-keys.json`, `.graff/credentials/...`, etc.).
+    pub codegraff_home: PathBuf,
 }
 
 impl AgentAccountsConfig {
@@ -266,6 +269,7 @@ impl AgentAccountsConfig {
             opencode_auth_file: stores::default_opencode_auth_file(),
             pi_agent_dir: stores::default_pi_agent_dir(),
             hermes_home: stores::default_hermes_home(),
+            codegraff_home: home_dir(),
             muse_config_root: std::env::var_os("XDG_CONFIG_HOME")
                 .filter(|dir| !dir.is_empty())
                 .map(PathBuf::from)
@@ -291,6 +295,7 @@ impl AgentAccountsConfig {
             opencode_auth_file: root.join("opencode").join("auth.json"),
             pi_agent_dir: root.join("pi"),
             hermes_home: root.join("hermes"),
+            codegraff_home: root.join("codegraff"),
             muse_config_root: root.join("xdg-config"),
         }
     }
@@ -965,6 +970,7 @@ impl AgentAccounts {
             HarnessId::Grok => zeron_harness::AcpHarness::grok(),
             HarnessId::Devin => zeron_harness::AcpHarness::devin(),
             HarnessId::Hermes => zeron_harness::AcpHarness::hermes(),
+            HarnessId::Codegraff => zeron_harness::AcpHarness::codegraff(),
             HarnessId::Antigravity => zeron_harness::AcpHarness::antigravity(),
             _ => return None,
         };
@@ -1050,6 +1056,11 @@ impl AgentAccounts {
                 unreadable.push((harness, detected));
             }
         }
+        detected_more.extend(
+            self.detect_codegraff()
+                .into_iter()
+                .map(|d| (HarnessId::Codegraff, d)),
+        );
         for (harness, detected) in &detected_more {
             live(*harness, detected);
             self.snapshot_detected(*harness, detected)?;
@@ -1083,6 +1094,7 @@ impl AgentAccounts {
             HarnessId::Opencode,
             HarnessId::Pi,
             HarnessId::Muse,
+            HarnessId::Codegraff,
         ]
         .into_iter()
         .map(|harness| (harness, self.read_slots(harness)))
@@ -1269,6 +1281,12 @@ impl AgentAccounts {
                     EngineError::Other("That saved login names no provider.".into())
                 })?;
                 self.swap_keyed(harness, key, &slot).await?;
+            }
+            HarnessId::Codegraff => {
+                let key = slot.store_key.as_deref().ok_or_else(|| {
+                    EngineError::Other("That saved login names no provider.".into())
+                })?;
+                self.swap_codegraff(key, &slot)?;
             }
             other => {
                 return Err(EngineError::Other(format!(
@@ -1457,6 +1475,9 @@ impl AgentAccounts {
                 .await
                 .flatten()
                 .map(|d| d.account_key),
+            HarnessId::Codegraff => self
+                .detect_codegraff_entry(store_key?)
+                .map(|d| d.account_key),
             _ => None,
         }
     }
@@ -1468,6 +1489,9 @@ impl AgentAccounts {
         match harness {
             HarnessId::Opencode | HarnessId::Pi => {
                 store_key.is_none_or(|key| self.live_keyed_entry(harness, key).is_some())
+            }
+            HarnessId::Codegraff => {
+                store_key.is_none_or(|key| self.detect_codegraff_entry(key).is_some())
             }
             _ => false,
         }
@@ -1501,6 +1525,11 @@ impl AgentAccounts {
             HarnessId::Opencode | HarnessId::Pi => {
                 if let Some(key) = store_key {
                     self.write_keyed_entry(slot.harness, key, Some(&slot.credentials))?;
+                }
+            }
+            HarnessId::Codegraff => {
+                if let Some(key) = store_key {
+                    self.write_codegraff_entry(key, Some(&slot.credentials))?;
                 }
             }
             _ => {}
@@ -1573,6 +1602,11 @@ impl AgentAccounts {
                 let key = store_key
                     .ok_or_else(|| EngineError::Other("That login names no provider.".into()))?;
                 self.write_keyed_entry(harness, key, None)?;
+            }
+            HarnessId::Codegraff => {
+                let key = store_key
+                    .ok_or_else(|| EngineError::Other("That login names no provider.".into()))?;
+                self.write_codegraff_entry(key, None)?;
             }
             _ => {
                 return Err(EngineError::Other(
@@ -1731,6 +1765,10 @@ impl AgentAccounts {
                     return Err(stores::unsupported_login(harness, provider));
                 }
                 self.start_hermes_login(provider).await?
+            }
+            HarnessId::Codegraff => {
+                self.start_codegraff_login(provider.unwrap_or("codegraff"), requester)
+                    .await?
             }
             other => {
                 return Err(EngineError::Other(format!(
@@ -2571,12 +2609,18 @@ impl AgentAccounts {
         let exited = *lock(&exit);
         let detected = match completion {
             SpawnedCompletion::CredentialFile => {
-                read_json(&home.join("auth.json")).and_then(|auth| match harness {
-                    HarnessId::Codex => parse_codex_auth(auth),
-                    HarnessId::Cursor => parse_cursor_auth(auth),
-                    HarnessId::Grok => stores::parse_grok_auth(auth),
-                    _ => None,
-                })
+                if harness == HarnessId::Codegraff {
+                    stores::detect_codegraff_in_home(&home, &[])
+                        .into_iter()
+                        .next()
+                } else {
+                    read_json(&home.join("auth.json")).and_then(|auth| match harness {
+                        HarnessId::Codex => parse_codex_auth(auth),
+                        HarnessId::Cursor => parse_cursor_auth(auth),
+                        HarnessId::Grok => stores::parse_grok_auth(auth),
+                        _ => None,
+                    })
+                }
             }
             SpawnedCompletion::ExitSuccess => None,
         };
@@ -2640,12 +2684,15 @@ impl AgentAccounts {
         // code the user has to type in.
         let (url, message) = {
             let output = lock(&output);
+            let url = scan_url(&output);
             // Only the device-code CLIs print a code; a loopback login's
             // output (codex's authorize url) is never scanned for one.
-            let code = matches!(harness, HarnessId::Grok | HarnessId::Hermes)
+            let code = (matches!(harness, HarnessId::Grok | HarnessId::Hermes)
+                || (harness == HarnessId::Codegraff
+                    && url.as_deref().and_then(loopback_port).is_none()))
                 .then(|| scan_device_code(&output))
                 .flatten();
-            (scan_url(&output), code)
+            (url, code)
         };
         let callback_port = url.as_deref().and_then(loopback_port);
         if let (Some(requester), Some(port)) = (&requester, callback_port)
@@ -3256,7 +3303,7 @@ impl AgentAccounts {
             HarnessId::Cursor => self.cursor_usage(slot).await,
             HarnessId::Grok => self.grok_usage(slot, is_active).await,
             HarnessId::Devin => self.devin_usage(slot).await,
-            HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes => {
+            HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes | HarnessId::Codegraff => {
                 self.keyed_usage(harness, slot).await
             }
             _ => Err(ProbeError::NoCredentials {
@@ -3935,7 +3982,7 @@ async fn antigravity_keychain_item(_account: &str) -> bool {
 fn provider_group(harness: HarnessId, store_key: Option<&str>) -> Option<String> {
     matches!(
         harness,
-        HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes
+        HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes | HarnessId::Codegraff
     )
     .then(|| store_key.map(str::to_string))
     .flatten()
@@ -3954,6 +4001,7 @@ fn harness_slug(harness: HarnessId) -> &'static str {
         HarnessId::Opencode => "opencode",
         HarnessId::Antigravity => "antigravity",
         HarnessId::Muse => "muse",
+        HarnessId::Codegraff => "codegraff",
         HarnessId::Mock => "mock",
         HarnessId::Registry(agent) => agent.slug(),
     }
@@ -4444,7 +4492,7 @@ fn usage_error_message(
         ProbeError::Unauthorized { .. }
             if matches!(
                 harness,
-                HarnessId::Codex | HarnessId::Opencode | HarnessId::Pi
+                HarnessId::Codex | HarnessId::Opencode | HarnessId::Pi | HarnessId::Codegraff
             ) =>
         {
             "Session expired — switch to it to refresh".to_string()
@@ -4692,12 +4740,11 @@ fn scan_device_code(output: &str) -> Option<String> {
         {
             return Some(token.to_string());
         }
-        if lower.contains("enter") || lower.trim_end().ends_with("code:") {
-            if let Some(next) = lines[ix + 1..].iter().find(|l| !l.trim().is_empty())
-                && is_code(next)
-            {
-                return Some(next.trim().to_string());
-            }
+        if (lower.contains("enter") || lower.trim_end().ends_with("code:"))
+            && let Some(next) = lines[ix + 1..].iter().find(|l| !l.trim().is_empty())
+            && is_code(next)
+        {
+            return Some(next.trim().to_string());
         }
     }
     None

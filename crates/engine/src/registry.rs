@@ -1057,6 +1057,28 @@ fn full_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::fx().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::fx()) as Arc<dyn Harness>)),
     );
+    registry.register_lazy(
+        HarnessDescriptor {
+            icon: None,
+            id: HarnessId::Codegraff,
+            name: "Codegraff".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::StepBoundary,
+            reasoning_levels: vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::Max,
+            ],
+            installed: true,
+            can_install: zeron_harness::acp::can_install(HarnessId::Codegraff),
+            enabled: None,
+            access_modes: vec![AccessMode::Supervised, AccessMode::FullAccess],
+            supports_plan: false,
+        },
+        Box::new(|| zeron_harness::AcpHarness::codegraff().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::codegraff()) as Arc<dyn Harness>)),
+    );
     // Native Pi RPC. Thinking levels are discovered per model.
     registry.register_lazy(
         HarnessDescriptor {
@@ -1247,6 +1269,7 @@ mod tests {
                 HarnessId::Grok,
                 HarnessId::Hermes,
                 HarnessId::Fx,
+                HarnessId::Codegraff,
                 HarnessId::Pi,
                 HarnessId::Opencode,
                 HarnessId::Antigravity,
@@ -1313,6 +1336,11 @@ mod tests {
         assert_eq!(pi.display_name(), "Pi");
         assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
         assert!(pi.reasoning_levels().is_empty());
+        let codegraff = registry.resolve(HarnessId::Codegraff).unwrap();
+        assert_eq!(codegraff.id(), HarnessId::Codegraff);
+        assert_eq!(codegraff.display_name(), "Codegraff");
+        assert_eq!(codegraff.steering_mode(), SteeringMode::TurnBoundary);
+        assert!(codegraff.reasoning_levels().is_empty());
     }
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`
@@ -1934,6 +1962,7 @@ mod gate_tests {
             HarnessId::Grok,
             HarnessId::Hermes,
             HarnessId::Fx,
+            HarnessId::Codegraff,
             HarnessId::Pi,
             HarnessId::Opencode,
             HarnessId::Antigravity,
