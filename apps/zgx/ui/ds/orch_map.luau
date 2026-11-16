@@ -171,6 +171,20 @@ function M.menu(view: State<View>): { any }
 		})
 	end
 	table.insert(out, { separator = true })
+	-- What Graph (force) colours by: whose a chat is, or where it runs.
+	table.insert(out, { heading = locale.s("ds.orch.map.color_by") })
+	for _, by in Force.COLOR_BY do
+		table.insert(out, {
+			label = locale.s(`ds.orch.map.color_by_{by}`),
+			checked = function(): boolean
+				return Force.color_by:get() == by
+			end,
+			on_select = function()
+				Force.color_by:set(by)
+				M.set(view, { variant = "force" })
+			end,
+		})
+	end
 	-- How the new Graph draws a thread: a dot, or its provider's glyph.
 	table.insert(out, { heading = locale.s("ds.orch.map.node_style") })
 	for _, style in Graph2.STYLES do

@@ -996,6 +996,7 @@ return {
 	["ds.orch.map.legend_done"] = "done",
 	["ds.orch.map.legend_todo"] = "to do",
 	["ds.orch.map.needs_you"] = "needs you",
+	["ds.orch.map.brain"] = "Brain",
 	["ds.orch.machines.running"] = "{n} running",
 	["ds.orch.machines.memory"] = "{used} / {total} GB",
 	["ds.orch.machines.cpu"] = "CPU",

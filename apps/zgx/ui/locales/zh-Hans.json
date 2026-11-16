@@ -1233,7 +1233,8 @@
         "legend_working": "working",
         "legend_done": "done",
         "legend_todo": "to do",
-        "needs_you": "needs you"
+        "needs_you": "needs you",
+        "brain": "Brain"
       },
       "machines": {
         "running": "{n} running",

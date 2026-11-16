@@ -360,6 +360,11 @@ for _, z in { { "in", 1.25 }, { "out", 0.8 } } do
 		require("@ds/orch_force").zoom_by(z[2] :: number)
 	end }
 end
+for _, by in { "orchestrator", "machine" } do
+	ui.command { id = `map_force_color_{by}`, title = `Map: the force graph coloured by {by}`, run = function()
+		require("@ds/orch_force").color_by:set(by)
+	end }
+end
 ui.command { id = "map_force_pan", title = "Map: pan the force graph", run = function()
 	require("@ds/orch_force").pan_by(-40, -25)
 end }

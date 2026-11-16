@@ -9,6 +9,7 @@
 -- Map's model): a fading one with its strength in tenths (`fade`).
 
 local model = require("@ds/orch_map_model")
+local Scene = require("@ds/orch_graph2_scene")
 
 local M = {}
 
@@ -27,6 +28,8 @@ export type Node = {
 	parent: number, -- index of its strong parent (0 for the Brain dump)
 	own: boolean, -- the person's own thread (no lead)
 	fade: number, -- 10 full
+	-- Its provider (a chat's): "claude" | "openai" | "gemini" | "other".
+	provider: string,
 	-- A chat's todo: done of total.
 	done: number,
 	total: number,
@@ -107,6 +110,7 @@ function M.build(world: any, comms: { any }?, now: number?): Model
 			lead = if is_brain then nil else brain,
 			parent = if is_brain or not brain then 0 else (out.index[brain :: string] or 0),
 			own = false,
+			provider = "other",
 			fade = 10,
 			done = 0,
 			total = 0,
@@ -125,6 +129,7 @@ function M.build(world: any, comms: { any }?, now: number?): Model
 			lead = lead,
 			parent = p,
 			own = lead == nil,
+			provider = Scene.provider(chats[th.id]),
 			fade = tenths(th),
 			done = d,
 			total = tot,

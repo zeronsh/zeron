@@ -1,48 +1,54 @@
 --!native
 --!optimize 2
 -- The force Graph's physics (ds/orch_force), pure: no requires, no clock,
--- no randomness but its own seeded one. Obsidian-like: strong links are
--- stiff, short springs; weak links soft, long ones; every node pushes its
--- near neighbours away (a uniform grid, so a step is O(n), never n²) and
--- all drift gently to the middle. A step moves only the nodes awake (all,
--- on a cold start; a changed node and its neighbours, after a change; the
--- one dragged and its neighbours), the rest held where they are.
+-- no randomness but its own seeded one. Like Obsidian's graph: strong
+-- links are stiff, short springs; weak links soft, long ones; every node
+-- pushes its near neighbours away (a uniform grid, so a step is O(n),
+-- never n²). A tree radiates out from the middle: each node has a slot
+-- round its parent (its ring and its angle), facing away from where the
+-- parent's own link comes in, and a soft pull towards it; so a crew fans
+-- out on the far side of its orchestrator, in rows, never wrapped round
+-- it. A step moves only the nodes awake (all, on a cold start; what's new
+-- and its neighbours after a change; one dragged and its neighbours).
 --
---   sim.new(nodes, links, seed?)   Sim: nodes { id, parent?, mass?, r? },
---                                  links { a, b, strong } (indices)
---   sim.place(s, saved)            positions: saved ones where known ({ [id]
---                                  = { x, y } }), else near the parent (or on
---                                  a ring round the middle); returns how many
---                                  were new
+--   sim.new(nodes, links, seed?)   Sim: nodes { id, parent?, mass?, fixed? },
+--                                  links { a, b, strong, hub? } (indices)
+--   sim.place(s, saved)            positions: kept ones ({ [id] = { x, y } })
+--                                  where known, else in their slots; how
+--                                  many were new (`s.fresh[i]`)
 --   sim.wake(s, ids?)              wake these and their neighbours (all, nil)
---   sim.step(s)                    one step; its energy (sum of v²)
---   sim.run(s, budget_s, clock)    steps until still or `budget_s` spent
---                                  (`clock()` in seconds); whether still
+--   sim.step(s)                    one step; its energy (mean v²)
+--   sim.run(s, budget_s, clock)    steps until still or `budget_s` spent;
+--                                  whether still
 --   sim.still(s)                   at rest
 --   sim.positions(s)               { [id] = { x, y } }, to keep
 
 local M = {}
 
--- Strong: an orchestrator to the Brain dump, a chat to its orchestrator.
-M.STRONG_LEN, M.STRONG_K = 64, 0.22
--- (An orchestrator's link to the Brain dump, longer: the hubs spread.)
-M.HUB_LEN = 190
--- Weak: chats that talk or command each other.
-M.WEAK_LEN, M.WEAK_K = 220, 0.006
-M.REPEL = 1800 -- strength of the push between nodes
-M.REPEL_R = 90 -- past this, no push (the grid's cell)
-M.CENTER = 0.004
+-- Strong links: stiff. A hub (an orchestrator to the Brain) further out
+-- than a chat to its orchestrator.
+M.STRONG_K = 0.22
+M.HUB_LEN = 150
+-- A crew's fan: its first row this far out, each next row FAN_ROW more, a
+-- node every FAN_GAP along a row, the fan FAN_WIDE (radians) across.
+M.FAN_LEN, M.FAN_ROW, M.FAN_GAP = 74, 38, 34
+M.FAN_WIDE = math.rad(150)
+-- The pull towards a node's slot.
+M.SLOT_K = 0.05
+-- Weak links: soft and long.
+M.WEAK_LEN, M.WEAK_K = 240, 0.004
+M.REPEL = 1500
+M.REPEL_R = 70 -- past this, no push (the grid's cell)
 M.DAMP = 0.55
 M.MAX_V = 24
--- At rest: the energy per node awake below this.
--- (Under a third of a point a step, on average: still to the eye.)
+-- At rest: the mean v² of those awake below this (under a third of a
+-- point a step: still to the eye).
 M.REST = 0.1
 M.MAX_STEPS = 400
 
--- (`fixed`: held where it is, the middle: the Brain dump.)
+-- (`fixed`: held where it is, the middle: the Brain.)
 export type Node = { id: string, parent: number?, mass: number?, fixed: boolean? }
--- (`len`: its rest length, set from how many share the parent: a crew
--- rests on a ring as wide as it needs.)
+-- (`len`: its rest length; a strong link's is its child's ring.)
 export type Link = { a: number, b: number, strong: boolean, hub: boolean?, len: number? }
 
 export type Sim = {
@@ -59,24 +65,23 @@ export type Sim = {
 	held: { boolean }, -- placed by the pointer (dragged), or fixed
 	fresh: { boolean }, -- placed new (no place known for it)
 	fixed: { boolean }, -- the middle, always held
+	-- Each node's slot: how far from its parent, at what angle (from the
+	-- direction its parent faces: away from the grandparent; for the
+	-- middle's children, from straight up).
+	slot_r: { number },
+	slot_a: { number },
+	-- How deep a node's own fan reaches (its last row), for its hub link.
+	depth: { number },
 	links: { Link },
 	nbrs: { { number } },
 	seed: number,
 	steps: number,
 	energy: number,
-	-- The grid: cell key → first node, then next per node (no tables made
-	-- per step).
 	cells: { [number]: number },
 	next_in: { number },
 }
 
 -- A steady number in [0, 1) from a string and a seed.
--- A ring round a parent wide enough for `count` children (a node's room
--- apart), at least `len`.
-function M.ring(count: number, len: number): number
-	return math.max(len, count * 15 / (2 * math.pi))
-end
-
 local function hash01(s: string, seed: number): number
 	local h = seed % 2147483647
 	for i = 1, #s do
@@ -86,6 +91,33 @@ local function hash01(s: string, seed: number): number
 	return h / 2147483648
 end
 M.hash01 = hash01
+
+-- How `count` children sit in rows on a fan: each one's row radius and
+-- angle (across the fan, centred), and the last row's radius.
+local function fan(count: number): ({ number }, { number }, number)
+	local rs, as = table.create(count, 0), table.create(count, 0)
+	local k, row, last = 1, 0, M.FAN_LEN
+	while k <= count do
+		local r = M.FAN_LEN + row * M.FAN_ROW
+		local cap = math.max(3, math.floor(r * M.FAN_WIDE / M.FAN_GAP))
+		local here = math.min(cap, count - k + 1)
+		-- (A row holding fewer than it could: its nodes closer together,
+		-- centred, never further apart than its gap.)
+		local span = math.min(M.FAN_WIDE, (here - 1) * M.FAN_GAP / r)
+		-- (Every other row shifted half a place: no link runs behind a node
+		-- of the row before.)
+		local shift = if row % 2 == 1 and here > 1 then span / (here - 1) / 2 else 0
+		for j = 0, here - 1 do
+			rs[k] = r
+			as[k] = (if here == 1 then 0 else -span / 2 + j * span / (here - 1)) + (if j == here - 1 then -shift else shift)
+			k += 1
+		end
+		last = r
+		row += 1
+	end
+	return rs, as, last
+end
+M.fan = fan
 
 function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
 	local n = #nodes
@@ -101,8 +133,11 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
 		vy = table.create(n, 0),
 		awake = table.create(n, true),
 		held = table.create(n, false),
-		fixed = {},
 		fresh = table.create(n, false),
+		fixed = table.create(n, false),
+		slot_r = table.create(n, 0),
+		slot_a = table.create(n, 0),
+		depth = table.create(n, 0),
 		links = links,
 		nbrs = table.create(n) :: any,
 		seed = seed or 7,
@@ -117,47 +152,94 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
 		s.parent[i] = nd.parent or 0
 		s.mass[i] = nd.mass or 1
 		s.nbrs[i] = {}
-		s.held[i] = nd.fixed == true
-	end
-	s.fixed = table.create(n, false)
-	for i, nd in nodes do
 		s.fixed[i] = nd.fixed == true
+		s.held[i] = nd.fixed == true
 	end
 	for _, l in links do
 		table.insert(s.nbrs[l.a], l.b)
 		table.insert(s.nbrs[l.b], l.a)
 	end
-	local kids = table.create(n, 0)
+	-- Slots: each parent's children in their order; the middle's spread
+	-- all round it (hubs first, evenly), every other's on its fan.
+	local kids: { [number]: { number } } = {}
 	for i = 1, n do
 		local p = s.parent[i]
 		if p > 0 then
-			kids[p] += 1
+			kids[p] = kids[p] or {}
+			table.insert(kids[p], i)
+		end
+	end
+	for p, list in kids do
+		if s.parent[p] == 0 then
+			continue
+		end
+		local rs, as, last = fan(#list)
+		for k, c in list do
+			s.slot_r[c], s.slot_a[c] = rs[k], as[k]
+		end
+		s.depth[p] = last
+	end
+	for p, list in kids do
+		if s.parent[p] ~= 0 then
+			continue
+		end
+		-- (Round the middle: the hubs evenly all round it, each out past
+		-- its own fan's reach; the middle's own chats on a ring inside,
+		-- between them.)
+		local hubs, own = {}, {}
+		for _, c in list do
+			table.insert(if kids[c] then hubs else own, c)
+		end
+		for k, c in hubs do
+			s.slot_a[c] = (k - 1) / #hubs * math.pi * 2
+			s.slot_r[c] = math.max(M.HUB_LEN, s.depth[c] + 110)
+		end
+		local step = math.pi * 2 / math.max(1, #hubs)
+		for k, c in own do
+			-- (In the gaps between hubs, a gap each in turn, then round.)
+			local gap = (k - 1) % math.max(1, #hubs)
+			local lap = (k - 1) // math.max(1, #hubs)
+			s.slot_a[c] = (gap + 0.5) * step + (lap % 2) * step * 0.25
+			s.slot_r[c] = M.FAN_LEN * 1.15 + lap * M.FAN_ROW
 		end
 	end
 	-- (A hub's mass grows with its crew: many stiff springs on one light
-	-- node would make it ring, never rest.)
+	-- node would ring, never rest.)
 	for i = 1, n do
-		s.mass[i] = math.max(s.mass[i], 1 + kids[i] * M.STRONG_K * 1.5)
+		local k = if kids[i] then #kids[i] else 0
+		s.mass[i] = math.max(s.mass[i], 1 + k * M.STRONG_K * 1.5)
 	end
 	for _, l in links do
-		if l.hub then
-			l.len = M.HUB_LEN + M.ring(kids[l.b], M.STRONG_LEN)
-		elseif l.strong then
-			l.len = M.ring(kids[l.a], M.STRONG_LEN)
-		else
-			l.len = M.WEAK_LEN
-		end
+		l.len = if l.strong then s.slot_r[l.b] else M.WEAK_LEN
 	end
 	return s
 end
 
--- Where everything starts: kept places first; then, in order (a parent
--- before its children), near the parent, at a steady angle; the roots on
--- a ring round the middle.
+-- The direction node `p` faces: away from its parent; the middle, up.
+local function facing(s: Sim, p: number): number
+	local g = s.parent[p]
+	if g == 0 then
+		return -math.pi / 2
+	end
+	return math.atan2(s.y[p] - s.y[g], s.x[p] - s.x[g])
+end
+
+-- Where node `i`'s slot is now: round the middle, from straight up;
+-- round anything else, from the way it faces.
+local function slot(s: Sim, i: number): (number, number)
+	local p = s.parent[i]
+	local a = s.slot_a[i] + (if s.parent[p] == 0 then -math.pi / 2 else facing(s, p))
+	return s.x[p] + math.cos(a) * s.slot_r[i], s.y[p] + math.sin(a) * s.slot_r[i]
+end
+
+-- Where everything starts: kept places first; then each in its slot, a
+-- parent before its children (a little steady jitter: none exactly in
+-- line).
 function M.place(s: Sim, saved: { [string]: any }?): number
 	local placed = table.create(s.n, false)
 	local fresh = 0
 	for i = 1, s.n do
+		s.fresh[i] = false
 		if s.fixed[i] then
 			s.x[i], s.y[i] = 0, 0
 			placed[i] = true
@@ -169,20 +251,6 @@ function M.place(s: Sim, saved: { [string]: any }?): number
 			placed[i] = true
 		end
 	end
-	-- Each parent's children, in order: spread evenly round it, on a ring
-	-- as wide as they need, facing away from its own parent (near where
-	-- they'll rest, so a cold start settles in few steps).
-	local kids: { [number]: { number } } = {}
-	local roots: { number } = {}
-	for i = 1, s.n do
-		local p = s.parent[i]
-		if p > 0 then
-			kids[p] = kids[p] or {}
-			table.insert(kids[p], i)
-		elseif not s.fixed[i] then
-			table.insert(roots, i)
-		end
-	end
 	local function put(i: number)
 		if placed[i] then
 			return
@@ -190,28 +258,11 @@ function M.place(s: Sim, saved: { [string]: any }?): number
 		local p = s.parent[i]
 		if p > 0 then
 			put(p)
-			local sib = kids[p]
-			local k = table.find(sib, i) or 1
-			local gp = s.parent[p]
-			local hub = gp == 0
-			local len = if hub then M.HUB_LEN else M.STRONG_LEN
-			local base, spread
-			if hub and (s.fixed[p] or gp == 0) and s.x[p] == 0 and s.y[p] == 0 then
-				base, spread = -math.pi / 2, math.pi * 2
-			else
-				base = math.atan2(s.y[p] - (if gp > 0 then s.y[gp] else 0), s.x[p] - (if gp > 0 then s.x[gp] else 0))
-				spread = math.pi * 5 / 3
-			end
-			local r = if hub and spread == math.pi * 2 then len + M.ring(#(kids[i] or {}), M.STRONG_LEN) else M.ring(#sib, len)
-			local a = if spread >= math.pi * 2 then base + (k - 1) / #sib * spread else base + ((k - 0.5) / #sib - 0.5) * spread
-			-- (A little steady jitter: never two exactly in line.)
-			a += (hash01(s.ids[i], s.seed) - 0.5) * 0.08
-			s.x[i], s.y[i] = s.x[p] + math.cos(a) * r, s.y[p] + math.sin(a) * r
+			local x, y = slot(s, i)
+			local j = (hash01(s.ids[i], s.seed) - 0.5) * 2
+			s.x[i], s.y[i] = x + j, y - j
 		else
-			local k = table.find(roots, i) or 1
-			local a = (k - 1) / math.max(1, #roots) * math.pi * 2
-			local r = if #roots > 1 then M.HUB_LEN else 0
-			s.x[i], s.y[i] = math.cos(a) * r, math.sin(a) * r
+			s.x[i], s.y[i] = 0, 0
 		end
 		placed[i] = true
 		s.fresh[i] = true
@@ -261,16 +312,7 @@ end
 function M.step(s: Sim): number
 	local n = s.n
 	local x, y, vx, vy, awake, held, mass = s.x, s.y, s.vx, s.vy, s.awake, s.held, s.mass
-	local R = M.REPEL_R
-	-- The grid, built in place.
-	local cells, nxt = s.cells, s.next_in
-	table.clear(cells)
-	for i = 1, n do
-		local key = cell_key(math.floor(x[i] / R), math.floor(y[i] / R))
-		nxt[i] = cells[key] or 0
-		cells[key] = i
-	end
-	-- Springs.
+	-- Springs (strong and weak), into the velocities.
 	for _, l in s.links do
 		local a, b = l.a, l.b
 		if not (awake[a] or awake[b]) then
@@ -278,9 +320,7 @@ function M.step(s: Sim): number
 		end
 		local ex, ey = x[b] - x[a], y[b] - y[a]
 		local d = math.max(0.01, math.sqrt(ex * ex + ey * ey))
-		local len = l.len or M.WEAK_LEN
-		local k = if l.strong then M.STRONG_K else M.WEAK_K
-		local f = (d - len) * k
+		local f = (d - (l.len or M.WEAK_LEN)) * (if l.strong then M.STRONG_K else M.WEAK_K)
 		local ux, uy = ex / d * f, ey / d * f
 		if awake[a] and not held[a] then
 			vx[a] += ux / mass[a]
@@ -291,14 +331,30 @@ function M.step(s: Sim): number
 			vy[b] -= uy / mass[b]
 		end
 	end
-	-- Forces, into the velocities of those awake (with the springs', then
-	-- damped).
+	-- Each towards its slot (the fan facing away from where its parent's
+	-- link comes in).
+	for i = 1, n do
+		if awake[i] and not held[i] and s.parent[i] > 0 then
+			local tx, ty = slot(s, i)
+			vx[i] += (tx - x[i]) * M.SLOT_K
+			vy[i] += (ty - y[i]) * M.SLOT_K
+		end
+	end
+	-- The push apart, through the grid (built in place).
+	local R = M.REPEL_R
+	local cells, nxt = s.cells, s.next_in
+	table.clear(cells)
+	for i = 1, n do
+		local key = cell_key(math.floor(x[i] / R), math.floor(y[i] / R))
+		nxt[i] = cells[key] or 0
+		cells[key] = i
+	end
 	local R2 = R * R
 	for i = 1, n do
 		if not awake[i] or held[i] then
 			continue
 		end
-		local fx, fy = -x[i] * M.CENTER, -y[i] * M.CENTER
+		local fx, fy = 0, 0
 		local cx, cy = math.floor(x[i] / R), math.floor(y[i] / R)
 		for dx = -1, 1 do
 			for dy = -1, 1 do
@@ -309,7 +365,6 @@ function M.step(s: Sim): number
 						local d2 = ex * ex + ey * ey
 						if d2 < R2 then
 							if d2 < 1 then
-								-- (On top of each other: apart at a steady angle.)
 								local a = hash01(s.ids[i], i + j) * math.pi * 2
 								ex, ey, d2 = math.cos(a), math.sin(a), 1
 							end
@@ -352,7 +407,7 @@ function M.still(s: Sim): boolean
 	return s.energy <= M.REST
 end
 
--- Steps until still, `budget_s` spent or MAX_STEPS since waking.
+-- Steps until still or `budget_s` spent.
 function M.run(s: Sim, budget_s: number, clock: () -> number): boolean
 	local t0 = clock()
 	repeat
