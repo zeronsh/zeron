@@ -40,9 +40,51 @@
 
 local M = {}
 
+-- What a join gave for the value it was given (the same table each read
+-- of a state's value), kept while that value lives: every computed that
+-- joins the same sessions or orchestration shares one result instead of
+-- each walking 700-odd chats again. (What's returned is read, never
+-- written.)
+local function memo1(f: (any) -> any): (any) -> any
+	local cache: { [any]: any } = setmetatable({}, { __mode = "k" }) :: any
+	return function(a: any): any
+		if type(a) ~= "table" then
+			return f(a)
+		end
+		local hit = cache[a]
+		if hit == nil then
+			hit = f(a)
+			cache[a] = hit
+		end
+		return hit
+	end
+end
+local function memo2(f: (any, any) -> any): (any, any) -> any
+	local cache: { [any]: any } = setmetatable({}, { __mode = "k" }) :: any
+	local NIL = {}
+	return function(a: any, b: any): any
+		if type(a) ~= "table" and a ~= nil or type(b) ~= "table" and b ~= nil then
+			return f(a, b)
+		end
+		local ka: any = if a == nil then NIL else a
+		local kb: any = if b == nil then NIL else b
+		local inner = cache[ka]
+		if not inner then
+			inner = setmetatable({}, { __mode = "k" })
+			cache[ka] = inner
+		end
+		local hit = inner[kb]
+		if hit == nil then
+			hit = f(a, b)
+			inner[kb] = hit
+		end
+		return hit
+	end
+end
+
 export type Chat = { [string]: any }
 
-function M.chats(sessions_now: any): { [string]: Chat }
+local function chats_now(sessions_now: any): { [string]: Chat }
 	local out: { [string]: Chat } = {}
 	if not sessions_now then
 		return out
@@ -67,16 +109,18 @@ function M.chats(sessions_now: any): { [string]: Chat }
 	end
 	return out
 end
+M.chats = memo1(chats_now) :: typeof(chats_now)
 
-function M.orchestrators(now: any): { [string]: any }
+local function orchestrators_now(now: any): { [string]: any }
 	local out = {}
 	for _, o in (now and now.orchestrators) or {} do
 		out[o.id] = o
 	end
 	return out
 end
+M.orchestrators = memo1(orchestrators_now) :: typeof(orchestrators_now)
 
-function M.crew_by_chat(now: any): { [string]: any }
+local function crew_by_chat_now(now: any): { [string]: any }
 	local out = {}
 	for _, m in (now and now.crew) or {} do
 		if not m.released then
@@ -85,14 +129,16 @@ function M.crew_by_chat(now: any): { [string]: any }
 	end
 	return out
 end
+M.crew_by_chat = memo1(crew_by_chat_now) :: typeof(crew_by_chat_now)
 
-function M.items(now: any): { [string]: any }
+local function items_now(now: any): { [string]: any }
 	local out = {}
 	for _, it in (now and now.items) or {} do
 		out[it.id] = it
 	end
 	return out
 end
+M.items = memo1(items_now) :: typeof(items_now)
 
 function M.hue_of(now: any, chats: { [string]: Chat }?, chat_id: string?): number?
 	if not chat_id then
@@ -228,7 +274,7 @@ export type Need = {
 
 -- What needs the person, newest asks and waiting chats together: urgent
 -- first, then the one waiting longest.
-function M.needs(now: any, sessions_now: any): { Need }
+local function needs_now(now: any, sessions_now: any): { Need }
 	local chats = M.chats(sessions_now)
 	local out: { Need } = {}
 	-- A chat awaiting input with an ask open too is one row: the ask's, with
@@ -284,6 +330,7 @@ function M.needs(now: any, sessions_now: any): { Need }
 	end)
 	return out
 end
+M.needs = memo2(needs_now) :: typeof(needs_now)
 
 -- What waits on the person, counted once for every place that says how
 -- many: the open asks and chats awaiting input (`needs`, as data.needs
@@ -365,7 +412,7 @@ end
 
 -- The open asks by the chat that asked, its latest where it asked more
 -- than one: what a card or a progress row says waits on the person.
-function M.open_asks(now: any): { [string]: any }
+local function open_asks_now(now: any): { [string]: any }
 	local out: { [string]: any } = {}
 	for _, a in (now and now.asks) or {} do
 		-- (A quiet one, a "hasn't answered" chase, waits on no card or row.)
@@ -378,6 +425,7 @@ function M.open_asks(now: any): { [string]: any }
 	end
 	return out
 end
+M.open_asks = memo1(open_asks_now) :: typeof(open_asks_now)
 
 -- Each activity's glyph (ds/icon); its word is `ds.orch.activity.<kind>`.
 M.ACTIVITY = {
