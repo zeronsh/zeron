@@ -9,8 +9,11 @@
 -- for what strays off it); curves say what leads what (an orchestrator to
 -- its crew, in its hue), what the Brain dump started
 -- (dashed) or handed a part to (dotted, thinner); a pulse runs along a line
--- as agents talk. It settles as a web (ds/orch_map_sim) and is still once
--- settled: no work while nothing changes.
+-- as agents talk. It settles as a web (ds/orch_map_sim) out of sight, a
+-- few steps a frame, time-boxed, and is drawn once still: laying its names
+-- out is too dear to do each frame. Nothing of it runs while it isn't on
+-- screen (scrolled away, another view, the window hidden): no settling, no
+-- pulses, no drawing, no new web as the world moves; back, it catches up.
 --
 -- Drag a node to place it (it stays, until Reset); drag the space to
 -- pan; pinch or ⌘/Ctrl-scroll to zoom (a plain scroll is the page's).
@@ -33,6 +36,7 @@ local Cells = require("@self/orch_cells")
 local ContextUsage = require("@self/context_usage")
 local MachineHead = require("@self/orch_machine_head")
 local Ref = require("@self/orch_ref")
+local trace = require("@self/orch_perf_trace")
 
 local M = {}
 
@@ -47,6 +51,49 @@ M.zoom_by = function(_k: number) end
 M.pulse_trace = ui.state("control_map_graph_pulse", {} :: any)
 -- (Kept only while a test asks: `control_map_graph_trace` on.)
 M.tracing = ui.state("control_map_graph_trace", false)
+
+-- The settling's pace: a frame every FRAME_MS, as many steps as fit in
+-- STEP_BUDGET seconds of it (MAX_STEPS at most), and MAX_FRAMES frames a
+-- run at most (near enough still by then: it stops). A script call has
+-- 50 ms; a frame of it stays far inside that.
+local FRAME_MS = 33
+local STEP_BUDGET = 0.006
+local MAX_STEPS = 12
+local MAX_FRAMES = 90
+-- How long a layout of the web may take before it leaves out what can go
+-- (seconds).
+local LAYOUT_BUDGET = 0.015
+-- While a node is dragged, the drawing follows it this often at most (ms).
+local DRAG_DRAW_MS = 120
+
+-- Whether the window shows (not hidden, minimized or covered); true where
+-- a host doesn't say.
+local function window_shown(): boolean
+	local ok, shown = pcall(function()
+		return ui.window.shown:get()
+	end)
+	return not ok or shown ~= false
+end
+local function window_shown_now(): boolean
+	local ok, shown = pcall(function()
+		return ui.window.shown:peek()
+	end)
+	return not ok or shown ~= false
+end
+
+-- Up to `most` steps of `g`'s settling, while `budget` seconds last:
+-- whether it still moves.
+local function steps_within(g: sim.Graph, most: number, budget: number): boolean
+	local t0 = os.clock()
+	local moving = true
+	for _ = 1, most do
+		moving = sim.step(g)
+		if not moving or os.clock() - t0 >= budget then
+			break
+		end
+	end
+	return moving
+end
 
 local function sig_of(g: sim.Graph): string
 	local parts = {}
@@ -98,6 +145,18 @@ M.View = ui.component(function(props: {
 	local version = ui.use_state(0)
 	local settled = ui.use_state(false)
 	local view = ui.use_state({ x = 360, y = 220, zoom = 1 })
+	-- Whether it's on screen: in view (`on_visible`) in a window that
+	-- shows. Off screen nothing of it runs.
+	local in_view = ui.use_state(false)
+	local function live(): boolean
+		return in_view:get() and window_shown()
+	end
+	local function live_now(): boolean
+		return in_view:peek() and window_shown_now()
+	end
+	-- What the markers follow: moved once the web stands still (a settling
+	-- step moves nothing shown).
+	local placed = ui.use_state(0)
 	-- Whether the person moved the view themselves: until then it fits
 	-- the web as it settles and as the Map's width changes.
 	local moved_view = false
@@ -120,12 +179,43 @@ M.View = ui.component(function(props: {
 		layout_z = math.floor(zoom * 20 + 0.5) / 20
 	end
 
-	-- The settling, a frame at a time, until still; then once more for
-	-- what's laid over it (markers, rings). A new web starts a new run.
+	-- The settling, a frame at a time, out of sight, until still; then
+	-- drawn. A new web starts a new run. (Drawn each step, its names laid
+	-- out anew each time, it took more than a script call's 50 ms a frame
+	-- on a big fleet: the app stopped answering.)
 	local run = 0
 	-- (How the settling went, for tests and tuning: frames from a pump's
 	-- start till still, and how many times it was started.)
 	local settle_frames = 0
+	-- The run's next frame, while one is due (scheduled, or waiting for
+	-- the web to be on screen again); `seq` keeps one timer going at most.
+	local pending: (() -> ())? = nil
+	local seq = 0
+	local function schedule(ms: number, f: () -> ())
+		seq += 1
+		local mine = seq
+		pending = f
+		ui.after(ms, function()
+			if mine ~= seq then
+				return
+			end
+			pending = nil
+			f()
+		end)
+	end
+	-- (A timer is owned by what made it, an effect's run among them: what
+	-- was due is started again, wherever one may have gone with it.)
+	local function resume()
+		if pending and live_now() then
+			schedule(0, pending :: () -> ())
+		end
+	end
+	local function redraw()
+		tick:set(tick:peek() + 1)
+		if settled:peek() then
+			placed:set(placed:peek() + 1)
+		end
+	end
 	local function pump()
 		run += 1
 		local mine = run
@@ -136,23 +226,36 @@ M.View = ui.component(function(props: {
 			if mine ~= run then
 				return
 			end
+			if not live_now() then
+				-- (Off screen: it waits, nothing scheduled.)
+				pending = frame
+				return
+			end
 			settle_frames += 1
-			local moving = sim.step(graph)
-			moving = sim.step(graph) or moving
-			moving = sim.step(graph) or moving
-			if not moving and not moved_view then
+			local moving = steps_within(graph, MAX_STEPS, STEP_BUDGET)
+			if moving and settle_frames >= MAX_FRAMES then
+				graph.alpha = 0
+				moving = false
+			end
+			if moving then
+				schedule(FRAME_MS, frame)
+				return
+			end
+			if not moved_view then
 				fit()
 			end
-			tick:set(tick:peek() + 1)
-			if moving then
-				ui.after(16, frame)
-			else
-				settled:set(true)
-				M.trace:set({ frames = settle_frames, runs = M.trace:peek().runs or 1, done = true })
-			end
+			settled:set(true)
+			redraw()
+			M.trace:set({ frames = settle_frames, runs = M.trace:peek().runs or 1, done = true })
 		end
-		ui.after(0, frame)
+		schedule(0, frame)
 	end
+	-- Back on screen: a settling waiting there goes on.
+	ui.effect(function()
+		if live() then
+			resume()
+		end
+	end)
 
 	-- Pulses on their way, a frame at a time, till the last is in: only
 	-- the drawing again (`pulse_tick`), nothing moved, nothing laid out.
@@ -164,6 +267,11 @@ M.View = ui.component(function(props: {
 		end
 		animating = true
 		local function frame()
+			if not live_now() then
+				pulses = {}
+				animating = false
+				return
+			end
 			local now = ui.now()
 			local live = {}
 			for _, p in pulses do
@@ -185,6 +293,10 @@ M.View = ui.component(function(props: {
 	-- A new web when what's in it changes (not when a state does): its
 	-- nodes where they were, dropped ones where dropped.
 	ui.effect(function()
+		-- (Off screen: nothing built; back, the web as it is then.)
+		if not live() then
+			return
+		end
 		local g = sim.build(props.world())
 		local sig = sig_of(g)
 		if sig == last_sig then
@@ -202,8 +314,9 @@ M.View = ui.component(function(props: {
 			end
 			if renamed then
 				version:set(version:peek() + 1)
-				tick:set(tick:peek() + 1)
+				redraw()
 			end
+			resume()
 			return
 		end
 		last_sig = sig
@@ -220,18 +333,8 @@ M.View = ui.component(function(props: {
 		graph = g
 		graph_gen += 1
 		version:set(version:peek() + 1)
-		if motion.reduced_now() then
-			sim.settle(graph, 600)
-			fit()
-			tick:set(tick:peek() + 1)
-			settled:set(true)
-			return
-		end
-		-- (Most of the settling at once, the last of it seen.)
-		if fresh then
-			sim.settle(graph, 160)
-			fit()
-		end
+		-- (Settled out of sight either way, and drawn once still: with
+		-- motion reduced too.)
 		pump()
 	end)
 
@@ -250,7 +353,7 @@ M.View = ui.component(function(props: {
 		for _, e in list do
 			if not (seen :: any)[e.id] then
 				(seen :: any)[e.id] = true
-				if graph.index[e.from] and graph.index[e.to] and not motion.reduced_now() then
+				if graph.index[e.from] and graph.index[e.to] and not motion.reduced_now() and live_now() then
 					local world = props.world()
 					local o = (world.now or {}).orchestrators or {}
 					local h = nil
@@ -319,6 +422,11 @@ M.View = ui.component(function(props: {
 	-- only moves pulses along draws over the same layout.
 	local layout: any = nil
 	local function draw(c: any, w: number, h: number)
+		-- (Off screen: nothing drawn, nothing followed but whether it shows.)
+		if not live() then
+			return
+		end
+		trace.hit("graph.draw")
 		tick:get()
 		pulse_tick:get()
 		local v = view:get()
@@ -476,6 +584,15 @@ M.View = ui.component(function(props: {
 		end
 		local key = table.concat(key_parts, "|")
 		if layout == nil or layout.key ~= key then
+			-- (Time-boxed: past LAYOUT_BUDGET, the threads' names still to
+			-- place (but the one under the pointer) and the lines' second
+			-- bowing are left out, so a big web's layout
+			-- stays well inside a script call's 50 ms.)
+			local laid_from = os.clock()
+			trace.hit("graph.layout")
+			local function late(): boolean
+				return os.clock() - laid_from > LAYOUT_BUDGET
+			end
 			-- 1. Where everything goes, nothing drawn yet: islands (each name
 			-- in a gap in its rim, at the top or the bottom), lines, names.
 			local islands = sim.islands(graph)
@@ -845,6 +962,11 @@ M.View = ui.component(function(props: {
 			-- corners), close in, then a step out with a leader; shortened
 			-- only when nothing else is free. Never on another name or a mark.
 			local function place(n: sim.Node, forms: { { string } }, opts: any, must: boolean, force: boolean)
+				-- (Late: only the names that must show, an orchestrator's
+				-- and the one under the pointer.)
+				if not force and late() then
+					return
+				end
 				local x, y = at(n)
 				-- (Its mark's own radius: a name sits 7px off it, or a clear step
 				-- out with a leader.)
@@ -921,7 +1043,10 @@ M.View = ui.component(function(props: {
 							local qx, qy = math.clamp(x, x0, x1), math.clamp(y, y0, y1)
 							local own_gap = math.sqrt((qx - x) ^ 2 + (qy - y) ^ 2) - own_r
 							local wrong = false
-							for _, m in marks do
+							-- (Only the marks near enough to matter: those within
+							-- its own mark's distance of the box, or by its leader.)
+							local g = math.max(own_gap, 0)
+							for _, m in near_box(mark_grid, math.min(x0 - g, x), math.min(y0 - g, y), math.max(x1 + g, x), math.max(y1 + g, y)) do
 								if m.id ~= n.id and m.kind ~= "device" then
 									local mx, my = m.x, m.y
 									local mq_x, mq_y = math.clamp(mx, x0, x1), math.clamp(my, y0, y1)
@@ -1114,7 +1239,7 @@ M.View = ui.component(function(props: {
 				return n_hit
 			end
 			for _, ln in lines do
-				if ln.e.kind ~= "host" then
+				if ln.e.kind ~= "host" and not late() then
 					local dx, dy = ln.bx - ln.ax, ln.by - ln.ay
 					local len2 = math.max(1, dx * dx + dy * dy)
 					local mx, my = (ln.ax + ln.bx) / 2, (ln.ay + ln.by) / 2
@@ -1164,7 +1289,7 @@ M.View = ui.component(function(props: {
 				return k
 			end
 			for _, ln in lines do
-				if ln.e.kind == "host" then
+				if ln.e.kind == "host" or late() then
 					continue
 				end
 				local here_pts = {}
@@ -1558,6 +1683,7 @@ M.View = ui.component(function(props: {
 	-- put. (The field holds its press from press to release, so no drag of
 	-- zgx's starts in it: the grip sits beside it, over it.)
 	local press: any = nil
+	local drag_drawn = 0
 	local function ref_of(id: string): any
 		local n = graph.nodes[graph.index[id] or 0]
 		if not n then
@@ -1708,7 +1834,7 @@ M.View = ui.component(function(props: {
 		end
 		local function at(): (number, number, number)
 			settled:get()
-			tick:get()
+			placed:get()
 			local n = node()
 			if not n then
 				return -1000, -1000, 0
@@ -1924,6 +2050,11 @@ M.View = ui.component(function(props: {
 		class = "orch-map-graph",
 		w_full = true,
 		relative = true,
+		on_visible = function(visible: boolean)
+			if visible ~= in_view:peek() then
+				in_view:set(visible)
+			end
+		end,
 		on_resize = function(size: { w: number, h: number })
 			if math.abs(size.w - width:peek()) >= 1 then
 				width:set(size.w)
@@ -1984,6 +2115,12 @@ M.View = ui.component(function(props: {
 							n.x, n.y = to_world(e.local_x + press.ox, e.local_y + press.oy)
 							n.fixed = true
 							graph.alpha = math.max(graph.alpha, 0.12)
+							-- (The drawing follows it now and then; the web
+							-- settles round it out of sight.)
+							if ui.now() - drag_drawn >= DRAG_DRAW_MS then
+								drag_drawn = ui.now()
+								tick:set(tick:peek() + 1)
+							end
 							if settled:peek() then
 								pump()
 							end
@@ -2103,13 +2240,7 @@ M.View = ui.component(function(props: {
 						end
 						graph.alpha = 0.8
 						moved_view = false
-						if motion.reduced_now() then
-							sim.settle(graph, 600)
-							fit()
-							tick:set(tick:peek() + 1)
-						else
-							pump()
-						end
+						pump()
 					end,
 				},
 			},
