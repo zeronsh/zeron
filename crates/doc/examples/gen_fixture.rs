@@ -71,7 +71,7 @@ fn main() {
     // A queued command with a host outcome.
     doc.queue_command(&SessionCommandEntry {
         id: "cmd-1".into(),
-        payload: SessionCommandPayload::Steer {
+        payload: SessionCommandPayload::Steer { injected: None,
             prompt: "also run clippy".into(),
             message_id: None,
         },

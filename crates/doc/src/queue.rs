@@ -49,6 +49,10 @@ pub struct QueuedMessage {
     /// `ReviewRequired`; they never silently become sendable again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_gate: Option<QueueDeliveryGate>,
+    /// The engine's message this is (a crew ask, an answer…): its user
+    /// entry carries it once sent ([`crate::MessagePart::Injected`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injected: Option<crate::Injected>,
 }
 
 /// Why a queued row is not currently eligible for automatic or explicit
@@ -96,6 +100,7 @@ impl QueuedMessage {
             issued_at: 0,
             edited_at: None,
             delivery_gate: None,
+            injected: None,
         }
     }
 }
@@ -373,6 +378,12 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
             crate::schema::loro_value_from_json(&serde_json::to_value(gate)?),
         )?;
     }
+    if let Some(injected) = &item.injected {
+        map.insert(
+            "injected",
+            crate::schema::loro_value_from_json(&serde_json::to_value(injected)?),
+        )?;
+    }
     Ok(())
 }
 
@@ -403,6 +414,9 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
             .to_string(),
         issued_at: v.get("issuedAt").and_then(|t| t.as_i64()).unwrap_or(0),
         edited_at: v.get("editedAt").and_then(|t| t.as_i64()),
+        injected: v
+            .get("injected")
+            .and_then(|i| serde_json::from_value(i.clone()).ok()),
         delivery_gate: match v.get("deliveryGate") {
             None | Some(serde_json::Value::Null) => None,
             Some(gate) => serde_json::from_value(gate.clone()).ok().or_else(|| {
@@ -459,7 +473,7 @@ mod tests {
     }
 
     fn item(id: &str, text: &str) -> QueuedMessage {
-        QueuedMessage {
+        QueuedMessage { injected: None,
             id: id.into(),
             text: text.into(),
             attachments: Vec::new(),
@@ -477,6 +491,21 @@ mod tests {
             .into_iter()
             .map(|i| i.text)
             .collect()
+    }
+
+    /// The engine's row (a crew ask, an answer…) keeps what it is through
+    /// the queue: written, read and taken.
+    #[test]
+    fn a_row_keeps_its_injected_kind() {
+        let doc = doc();
+        let mut row = item("q1", "[Crew ask] …");
+        row.injected = Some(crate::Injected::crew_ask("ak-1", "th-a", Some("m-9")));
+        doc.push_queued(&row).unwrap();
+        doc.push_queued(&item("q2", "plain")).unwrap();
+        let read = doc.read_queue().unwrap();
+        assert_eq!(read[0].injected, row.injected);
+        assert_eq!(read[1].injected, None);
+        assert_eq!(doc.take_queued("q1").unwrap().unwrap().injected, row.injected);
     }
 
     /// A send that fails after the row was taken puts it back where it was,

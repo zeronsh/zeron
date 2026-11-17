@@ -238,7 +238,7 @@ impl EngineRpc {
             ..Default::default()
         })
         .map_err(RpcError::Failed)?;
-        deliver(self, &chat, &prompt, owner.as_ref().map(|o| o.id.as_str()), When::Now)?;
+        deliver(self, &chat, &prompt, owner.as_ref().map(|o| o.id.as_str()), When::Now, None)?;
         orch.comms().say(
             CommKind::Spawn,
             owner.as_ref().map_or(super::comms::YOU, |o| o.id.as_str()),

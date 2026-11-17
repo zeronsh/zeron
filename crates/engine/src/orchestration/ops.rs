@@ -132,7 +132,7 @@ impl EngineRpc {
                 }
                 drop(created);
                 if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
-                    deliver(self, &id, &prompt, who.chat(), When::Now)?;
+                    deliver(self, &id, &prompt, who.chat(), When::Now, None)?;
                 }
                 Ok(json!({ "id": id }))
             }
@@ -652,7 +652,13 @@ impl EngineRpc {
             Who::Agent { .. } => text.replacen("[Answer from you]", "[Answer from your orchestrator]", 1),
             _ => text,
         };
-        deliver(self, &ask.from_chat, &text, None, When::Now)?;
+        let said = zeron_doc::Injected::answer(
+            &ask.id,
+            &ask.from_chat,
+            ask.turn_id.as_deref(),
+            matches!(who, Who::Agent { .. }),
+        );
+        deliver(self, &ask.from_chat, &text, None, When::Now, Some(said))?;
         orch.comms()
             .say(CommKind::Answer, answerer, &ask.from_chat, &answer);
         self.sync_cards_of(&ask.from_chat);
@@ -1179,8 +1185,9 @@ pub(crate) fn deliver(
     text: &str,
     from: Option<&str>,
     when: When,
+    injected: Option<zeron_doc::Injected>,
 ) -> Result<Delivered, RpcError> {
-    deliver_with(rpc, chat_id, text, from, when, &[], Vec::new())
+    deliver_with(rpc, chat_id, text, from, when, &[], Vec::new(), injected)
 }
 
 /// [`deliver`] with files: `attachments` as a chat send carries them (paths
@@ -1194,6 +1201,9 @@ pub(crate) fn deliver_with(
     when: When,
     attachments: &[String],
     transfers: Vec<crate::uploads::AttachmentTransfer>,
+    // The engine's message this is (a crew ask, an answer…), for the
+    // transcript: carried beside `text`, which the agent gets unchanged.
+    injected: Option<zeron_doc::Injected>,
 ) -> Result<Delivered, RpcError> {
     let workspace = rpc.workspace_host();
     let chat = workspace
@@ -1229,7 +1239,7 @@ pub(crate) fn deliver_with(
     let with_files = crate::doc_host::queued_message_prompt(&prompt, attachments);
     let queued = |doc_host: &crate::DocHost| {
         doc_host
-            .queue_message_with_transfers(chat_id, &prompt, attachments.to_vec(), true, transfers.clone())
+            .queue_injected(chat_id, &prompt, attachments.to_vec(), true, transfers.clone(), injected.clone())
             .map(|_| Delivered::Queued)
             .map_err(engine_failed)
     };
@@ -1241,6 +1251,7 @@ pub(crate) fn deliver_with(
                 zeron_doc::SessionCommandPayload::Steer {
                     prompt: with_files.clone(),
                     message_id: Some(uuid::Uuid::new_v4().to_string()),
+                    injected: injected.clone(),
                 },
                 transfers.clone(),
             )
@@ -1293,6 +1304,7 @@ pub(crate) fn deliver_with(
                     zeron_doc::SessionCommandPayload::Run {
                         request,
                         message_id: uuid::Uuid::new_v4().to_string(),
+                        injected,
                     },
                     transfers,
                 )

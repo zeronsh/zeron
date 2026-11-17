@@ -8175,7 +8175,7 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         };
-        let row = |id: &str| zeron_doc::QueuedMessage {
+        let row = |id: &str| zeron_doc::QueuedMessage { injected: None,
             id: id.into(),
             text: "held".into(),
             attachments: vec![],

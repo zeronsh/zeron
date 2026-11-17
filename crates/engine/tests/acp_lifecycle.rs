@@ -51,7 +51,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
     };
     queue(
         "first",
-        SessionCommandPayload::Run {
+        SessionCommandPayload::Run { injected: None,
             message_id: "first-user".into(),
             request: RunRequest {
                 mcp: None,
@@ -99,7 +99,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
     }
     queue(
         "followup",
-        SessionCommandPayload::Steer {
+        SessionCommandPayload::Steer { injected: None,
             prompt: "second".into(),
             message_id: Some("second-user".into()),
         },
@@ -159,7 +159,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
     // session/prompt response, so the existing fallback must remain enabled.
     queue(
         "self-continue",
-        SessionCommandPayload::Steer {
+        SessionCommandPayload::Steer { injected: None,
             prompt: "self-continue".into(),
             message_id: Some("third-user".into()),
         },

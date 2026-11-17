@@ -134,7 +134,7 @@ pub(crate) fn wake_due(
         } else {
             wake.prompt.as_str()
         };
-        match deliver(rpc, &id, prompt, None, When::Next) {
+        match deliver(rpc, &id, prompt, None, When::Next, Some(zeron_doc::Injected::scheduled())) {
             Ok(_) => woken.push(id),
             Err(error) => tracing::warn!(orchestrator = %id, %error, "scheduled wake not sent"),
         }

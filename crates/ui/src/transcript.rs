@@ -1855,6 +1855,8 @@ pub fn rows_for_entry(
                     }
                     // Crew updates read as their fallback text part here.
                     MessagePart::CrewReports { .. } => {}
+                    // (This build shows an engine message as its text.)
+                    MessagePart::Injected { .. } => {}
                     // Tools and thoughts are grouped by the outer arms;
                     // nothing reaches here.
                     MessagePart::Tool { .. } | MessagePart::Reasoning { .. } => {}

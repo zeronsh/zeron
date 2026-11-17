@@ -1074,7 +1074,7 @@ async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
     let handle = core.doc_host.open("cloud-chat").unwrap();
     const DAY: i64 = 24 * 60 * 60 * 1000;
     let now = chrono::Utc::now().timestamp_millis();
-    let run = |prompt: &str, message: &str| SessionCommandPayload::Run {
+    let run = |prompt: &str, message: &str| SessionCommandPayload::Run { injected: None,
         request: zeron_proto::RunRequest {
             mcp: None,
             prompt: prompt.into(),

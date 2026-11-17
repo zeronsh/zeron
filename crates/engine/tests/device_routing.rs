@@ -980,7 +980,7 @@ async fn target_device_id_routes_over_the_relay() {
     .expect("quiet remote transcript released its view");
 
     // Unary forward with side effects: QueueCommand lands (and executes) on B.
-    let command = serde_json::to_value(SessionCommandPayload::Run {
+    let command = serde_json::to_value(SessionCommandPayload::Run { injected: None,
         request: RunRequest {
             mcp: None,
             prompt: "run remotely".into(),
@@ -2080,7 +2080,7 @@ async fn a_run_from_another_device_names_the_hosts_copy_of_its_upload() {
     );
     let entry = SessionCommandEntry {
         id: "cmd-foreign-1".into(),
-        payload: SessionCommandPayload::Run {
+        payload: SessionCommandPayload::Run { injected: None,
             request: RunRequest {
                 mcp: None,
                 prompt,

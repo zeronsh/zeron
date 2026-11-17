@@ -653,7 +653,7 @@ impl EngineRpc {
             .or(card.orchestrator_id.clone())
             .ok_or_else(|| RpcError::Failed("That card has no thread to send it to".into()))?;
         let message = zeron_proto::orchestration::prompt_text::changes_requested(&card.title, text);
-        super::ops::deliver(self, &to, &message, None, super::ops::When::Next)?;
+        super::ops::deliver(self, &to, &message, None, super::ops::When::Next, Some(zeron_doc::Injected::changes(&card.id)))?;
         orch.comms().say(zeron_proto::orchestration::CommKind::Message, super::comms::YOU, &to, &one_line(text, 140));
         let route = self.route_of_card(&card);
         match route {

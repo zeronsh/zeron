@@ -287,7 +287,7 @@ impl DocHost {
                 match self.wake_request(&sessions, &chat, prompt) {
                     Some(request) => {
                         if let Err(err) =
-                            self.queue_command(&chat, SessionCommandPayload::Run { request, message_id })
+                            self.queue_command(&chat, SessionCommandPayload::Run { injected: None, request, message_id })
                         {
                             tracing::warn!(chat = %chat, error = %err, "crew reports: wake failed");
                         }

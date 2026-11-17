@@ -100,7 +100,7 @@ impl AgentHost for EngineAgentHost {
                     return Err("A steer carries words only: queue a message with files".into());
                 }
                 let id = crate::new_id();
-                let payload = SessionCommandPayload::Steer { prompt: text.to_owned(), message_id: Some(id.clone()) };
+                let payload = SessionCommandPayload::Steer { injected: None, prompt: text.to_owned(), message_id: Some(id.clone()) };
                 self.doc_host.queue_command_with_transfers(chat, payload, Vec::new()).map_err(failed)?;
                 Ok(id)
             }
@@ -115,7 +115,7 @@ impl AgentHost for EngineAgentHost {
                 }
                 request.attachments = attachments;
                 let id = crate::new_id();
-                let payload = SessionCommandPayload::Run { request, message_id: id.clone() };
+                let payload = SessionCommandPayload::Run { injected: None, request, message_id: id.clone() };
                 self.doc_host.queue_command_with_transfers(chat, payload, Vec::new()).map_err(failed)?;
                 Ok(id)
             }

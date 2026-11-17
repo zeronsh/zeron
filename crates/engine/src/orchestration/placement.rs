@@ -141,10 +141,11 @@ impl EngineRpc {
         message: &str,
         brain: Option<&str>,
         files: &[String],
+        injected: Option<zeron_doc::Injected>,
     ) -> Result<(), RpcError> {
         let host = self.workspace_host().chat(chat).ok().flatten().map(|c| c.device_id);
         let (paths, transfers) = self.forwardable(files, host.as_deref());
-        super::ops::deliver_with(self, chat, message, brain, super::ops::When::Now, &paths, transfers).map(|_| ())
+        super::ops::deliver_with(self, chat, message, brain, super::ops::When::Now, &paths, transfers, injected).map(|_| ())
     }
 
     /// `files` as a chat on device `host` can get them.

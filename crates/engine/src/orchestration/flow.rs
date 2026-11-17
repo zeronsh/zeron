@@ -299,7 +299,7 @@ impl EngineRpc {
                                 doc.upsert_work_item(&item);
                             }
                         });
-                        deliver(self, &thread, &return_prompt(&run, from, said), Some(orchestrator), When::Now)?;
+                        deliver(self, &thread, &return_prompt(&run, from, said), Some(orchestrator), When::Now, None)?;
                         Ok(())
                     }
                     _ => {

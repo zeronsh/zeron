@@ -316,7 +316,7 @@ impl DemoHost {
                 doc.set_command_status(&command.id, SessionCommandStatus::Applied, None)
             });
             match command.payload {
-                SessionCommandPayload::Run {
+                SessionCommandPayload::Run { injected: _,
                     request,
                     message_id,
                 } if request.prompt.contains("pending://") => {
@@ -340,7 +340,7 @@ impl DemoHost {
                         this.spawn_turn(chat, Some((message_id, prompt, issued_by)), steps, None);
                     });
                 }
-                SessionCommandPayload::Run {
+                SessionCommandPayload::Run { injected: _,
                     request,
                     message_id,
                 } => {
@@ -353,7 +353,7 @@ impl DemoHost {
                         None,
                     );
                 }
-                SessionCommandPayload::Steer { prompt, message_id } => {
+                SessionCommandPayload::Steer { injected: _, prompt, message_id } => {
                     let prompt = self.adopt_attachments(&client, &host, &prompt);
                     let steps = self.reply_for(&prompt);
                     let id = message_id.unwrap_or_else(crate::new_id);

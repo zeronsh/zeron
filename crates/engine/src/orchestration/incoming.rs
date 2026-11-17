@@ -185,7 +185,7 @@ impl EngineRpc {
         let Some(target) = super::watchers::target_chat(&route.target) else { return Ok(()) };
         let message = if route.message.trim().is_empty() { route.excerpt.clone() } else { route.message.clone() };
         let brain = self.brain_of(&dump);
-        self.deliver_forwarding(target, &message, brain.as_deref(), &route.attachments)?;
+        self.deliver_forwarding(target, &message, brain.as_deref(), &route.attachments, super::brain::route_injected(route, &message))?;
         orchestration.workspace().write_orchestration(|doc| {
             let Some(mut dump) = doc.dump(dump_id) else { return };
             if let Some(route) = dump.routes.iter_mut().find(|r| r.id == route_id) {

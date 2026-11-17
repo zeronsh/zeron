@@ -244,7 +244,16 @@ impl EngineRpc {
             .into_iter()
             .map(|t| crate::uploads::AttachmentTransfer { upload_id: t.upload_id, file_name: t.file_name })
             .collect();
-        if let Err(error) = super::ops::deliver_with(self, &brain, &message, None, When::Next, &paths, transfers) {
+        if let Err(error) = super::ops::deliver_with(
+            self,
+            &brain,
+            &message,
+            None,
+            When::Next,
+            &paths,
+            transfers,
+            Some(zeron_doc::Injected::dump(&dump.id)),
+        ) {
             self.orchestration().workspace().write_orchestration(|doc| {
                 if let Some(mut d) = doc.dump(&dump.id) {
                     d.state = DumpState::Failed;
@@ -650,7 +659,8 @@ impl EngineRpc {
         let delivered = matches!(route.state, RouteState::Delivered | RouteState::Answered);
         if delivered && let Some(old) = target_chat(&route.target) {
             let retraction = zeron_proto::orchestration::prompt_text::retraction(&route.excerpt);
-            if let Err(error) = deliver(self, old, &retraction, brain.as_deref(), When::Now) {
+            let said = zeron_doc::Injected::retraction(dump_id, route_id);
+            if let Err(error) = deliver(self, old, &retraction, brain.as_deref(), When::Now, Some(said)) {
                 tracing::warn!(chat = %old, %error, "brain dump: retraction not delivered");
             }
         }
@@ -745,11 +755,11 @@ impl EngineRpc {
                 if orch.orchestrator(&id).is_none() {
                     return Err(failed(format!("No orchestrator {id}")));
                 }
-                self.deliver_forwarding(&id, &message, brain, &route.attachments)?;
+                self.deliver_forwarding(&id, &message, brain, &route.attachments, route_injected(route, &message))?;
                 route.state = RouteState::Delivered;
             }
             RouteTarget::Chat { id } => {
-                self.deliver_forwarding(&id, &message, brain, &route.attachments)?;
+                self.deliver_forwarding(&id, &message, brain, &route.attachments, route_injected(route, &message))?;
                 route.state = RouteState::Delivered;
             }
             RouteTarget::NewOrchestrator { id } => {
@@ -775,7 +785,7 @@ impl EngineRpc {
                 if let Some(brain) = brain {
                     self.mark_started_by(&id, brain, Some(&dump.id), Some(&route.id));
                 }
-                self.deliver_forwarding(&id, &message, brain, &route.attachments)?;
+                self.deliver_forwarding(&id, &message, brain, &route.attachments, route_injected(route, &message))?;
                 route.target = RouteTarget::NewOrchestrator { id };
                 route.state = RouteState::Delivered;
             }
@@ -810,7 +820,7 @@ impl EngineRpc {
                     }
                     id
                 };
-                self.deliver_forwarding(&id, &message, brain, &route.attachments)?;
+                self.deliver_forwarding(&id, &message, brain, &route.attachments, route_injected(route, &message))?;
                 route.target = RouteTarget::NewThread { id };
                 route.state = RouteState::Delivered;
             }
@@ -875,4 +885,19 @@ mod tests {
         assert_eq!(span_of(text, "not there"), None);
         assert_eq!(span_of(text, "  "), None);
     }
+}
+
+/// What a route's message is, as the engine wrapped it (`through_owner`, a
+/// direct note on a card): for the transcript of the chat it lands in.
+pub(crate) fn route_injected(route: &Route, message: &str) -> Option<zeron_doc::Injected> {
+    if let Some(rest) = message.strip_prefix("[For your crew thread ") {
+        let header = rest.split_once("] ")?.0;
+        let id = header.rsplit_once(" (")?.1.strip_suffix(')')?;
+        return Some(zeron_doc::Injected::for_thread(id));
+    }
+    if message.starts_with("[On your card \"") {
+        let card = route.reference.as_deref().or(route.item_id.as_deref())?;
+        return Some(zeron_doc::Injected::on_card(card));
+    }
+    None
 }

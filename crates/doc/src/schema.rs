@@ -121,6 +121,9 @@ struct DocPartJson {
     /// Read leniently, one report at a time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reports: Option<serde_json::Value>,
+    /// An engine message's kind and ids (`kind: "injected"`, additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    injected: Option<serde_json::Value>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,6 +298,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             reports: Some(serde_json::to_value(reports)?),
             ..Default::default()
         },
+        MessagePart::Injected { id, injected } => DocPartJson {
+            id: id.clone(),
+            kind: "injected".into(),
+            injected: Some(serde_json::to_value(injected)?),
+            ..Default::default()
+        },
     })
 }
 
@@ -382,6 +391,15 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     .filter_map(|r| serde_json::from_value(r).ok())
                     .collect(),
                 _ => Vec::new(),
+            },
+        },
+        // (One a newer peer wrote that this build can't read: its kind
+        // unknown, the entry shows its text.)
+        "injected" => match p.injected.and_then(|v| serde_json::from_value(v).ok()) {
+            Some(injected) => MessagePart::Injected { id: p.id, injected },
+            None => MessagePart::Text {
+                id: p.id,
+                text: String::new(),
             },
         },
         _ => MessagePart::Text {
@@ -2495,7 +2513,7 @@ mod tests {
         same(&a, "first rows");
 
         // Queue rows come and go; the transcript stays as it was.
-        let row = |id: &str| QueuedMessage {
+        let row = |id: &str| QueuedMessage { injected: None,
             id: id.into(),
             text: "later".into(),
             attachments: Vec::new(),
@@ -2654,7 +2672,7 @@ mod tests {
         for n in 0..3 {
             doc.queue_command(&SessionCommandEntry {
                 id: format!("c{n}"),
-                payload: SessionCommandPayload::Steer { prompt: "focus".into(), message_id: None },
+                payload: SessionCommandPayload::Steer { injected: None, prompt: "focus".into(), message_id: None },
                 issued_by: "dev".into(),
                 issued_at: n,
                 based_on: None,
@@ -2804,6 +2822,43 @@ mod tests {
         let copy = SessionDoc::from_doc(LoroDoc::new());
         copy.import(&doc.export_snapshot().unwrap()).unwrap();
         assert_eq!(copy.read_entries().unwrap()[0].parts, parts(&both));
+    }
+
+    #[test]
+    fn an_injected_part_round_trips_and_degrades() {
+        use crate::{Injected, MessagePart};
+        let doc = SessionDoc::init("injected").unwrap();
+        let said = Injected::answer("ak-1", "th-a", Some("m-9"), true);
+        let entry = SessionMessageEntry {
+            id: "u1".into(),
+            role: MessageRole::User,
+            parts: vec![
+                MessagePart::Text { id: "t0".into(), text: "[Answer from your orchestrator] Ship? \u{2192} Yes".into() },
+                MessagePart::Injected { id: "injected".into(), injected: said.clone() },
+            ],
+            created_at: 1,
+            device_id: "d".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        };
+        doc.push_message(&entry).unwrap();
+        let back = doc.read_entries().unwrap();
+        assert_eq!(back[0].parts, entry.parts, "the text unchanged, the kind beside it");
+        assert_eq!(said.by.as_deref(), Some("orchestrator"));
+        // As JSON: its kind and camelCase ids.
+        let json = serde_json::to_value(to_doc_part(&entry.parts[1]).unwrap()).unwrap();
+        assert_eq!(json["kind"], "injected");
+        assert_eq!(json["injected"]["kind"], "answer");
+        assert_eq!(json["injected"]["askId"], "ak-1");
+        assert_eq!(json["injected"]["turnId"], "m-9");
+        assert!(json["injected"].get("itemIds").is_none(), "empty ids aren't written");
+        // A board check's cards.
+        let check = serde_json::to_value(Injected::board_check(["it-1", "it-2"])).unwrap();
+        assert_eq!(check, serde_json::json!({ "kind": "board_check", "itemIds": ["it-1", "it-2"] }));
+        // One that can't be read is an empty text: the entry shows its words.
+        let bad = from_doc_part(serde_json::from_value(serde_json::json!({ "id": "x", "kind": "injected", "injected": 7 })).unwrap());
+        assert_eq!(bad, MessagePart::Text { id: "x".into(), text: String::new() });
     }
 
     #[test]
@@ -3664,7 +3719,7 @@ mod tests {
         let doc = SessionDoc::init("chat-1").unwrap();
         let entry = SessionCommandEntry {
             id: "c1".into(),
-            payload: SessionCommandPayload::Steer {
+            payload: SessionCommandPayload::Steer { injected: None,
                 prompt: "focus".into(),
                 message_id: None,
             },

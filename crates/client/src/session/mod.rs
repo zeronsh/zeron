@@ -970,11 +970,11 @@ fn derive_pending(
             continue;
         }
         let (message_id, text, kind) = match &command.payload {
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: _,
                 request,
                 message_id,
             } => (message_id, &request.prompt, PendingKind::Run),
-            SessionCommandPayload::Steer {
+            SessionCommandPayload::Steer { injected: _,
                 prompt,
                 message_id: Some(message_id),
             } => (message_id, prompt, PendingKind::Steer),
@@ -1473,7 +1473,7 @@ impl SessionHandle {
                 self.send_command(
                     &client,
                     &device_id,
-                    SessionCommandPayload::Steer {
+                    SessionCommandPayload::Steer { injected: None,
                         prompt: content,
                         message_id: Some(message_id.clone()),
                     },
@@ -1504,7 +1504,7 @@ impl SessionHandle {
                 self.send_command(
                     &client,
                     &device_id,
-                    SessionCommandPayload::Run {
+                    SessionCommandPayload::Run { injected: None,
                         request,
                         message_id: message_id.clone(),
                     },
@@ -2179,7 +2179,7 @@ mod setup_placeholder_tests {
         st.echoes.clear();
         st.commands = vec![zeron_doc::SessionCommandEntry {
             id: "cmd1".into(),
-            payload: SessionCommandPayload::Steer {
+            payload: SessionCommandPayload::Steer { injected: None,
                 prompt: "read the readme".into(),
                 message_id: Some("m1".into()),
             },

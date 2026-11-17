@@ -95,7 +95,7 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
     } else {
         20
     };
-    core.doc_host.queue_command("audit", SessionCommandPayload::Run {
+    core.doc_host.queue_command("audit", SessionCommandPayload::Run { injected: None,
         message_id: "opening".into(),
         request: RunRequest { mcp: None, prompt: format!("This is an automated regression test of chat steering and message queues in a disposable temporary workspace. Remember test token {secret}. Execute exactly `sh -c 'sleep {background_seconds}; printf alive > background-survivor' >/dev/null 2>&1 & printf started > started; sleep 8; printf survived > survivor` in this directory, then reply DONE. All follow-ups are additive; never cancel earlier work. Execute each request once."), harness: Some(id), model, reasoning: None, model_options: Default::default(), cwd: dir.path().to_str().unwrap().into(), sandbox: SandboxLevel::DangerFullAccess, auto_approve: true, access: Default::default(), plan: false, attachments: vec![], worktree: None, resume: None, env: Default::default(), extra_mcp: Vec::new(), }
     }).unwrap();
@@ -128,7 +128,7 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
             .unwrap()
     );
     for i in 1..burst {
-        core.doc_host.queue_command("audit", SessionCommandPayload::Steer { prompt: format!("Follow-up {i}: write ONLY the original test token into followup-{i}, and append {i} as a line to receipts. Keep earlier work running. Execute once. Reply DONE."), message_id: Some(format!("steer-{i}")) }).unwrap();
+        core.doc_host.queue_command("audit", SessionCommandPayload::Steer { injected: None, prompt: format!("Follow-up {i}: write ONLY the original test token into followup-{i}, and append {i} as a line to receipts. Keep earlier work running. Execute once. Reply DONE."), message_id: Some(format!("steer-{i}")) }).unwrap();
     }
     // Regular queued messages must remain held until the steered work finishes.
     for i in 0..2 {

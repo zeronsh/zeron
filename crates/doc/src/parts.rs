@@ -222,6 +222,133 @@ pub enum SubagentStatus {
     Failed,
 }
 
+/// What the engine said into a chat (a crew ask, an answer, a relay, a
+/// board check…), as the transcript shows it: which kind, and the ids it
+/// points at. Rides beside the text the agent was sent, which it never
+/// changes, from the delivery (`Run`/`Steer`/a queued row) to the user entry
+/// ([`MessagePart::Injected`]). Kinds are words so a newer one degrades to
+/// its text on an older client.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Injected {
+    /// One of the [`injected`] kinds.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_id: Option<String>,
+    /// The chat it's about: the thread that asked, the thread a relay is
+    /// for, a quoted message's sender.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    /// The message in `chat_id` it's about (the one that asked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// Several board items (a board check's).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dump_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
+    /// Who: an answer's answerer (`"you"` | `"orchestrator"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+}
+
+/// The kinds of [`Injected`].
+pub mod injected {
+    pub const CREW_ASK: &str = "crew_ask";
+    pub const ANSWER: &str = "answer";
+    pub const FOR_THREAD: &str = "for_thread";
+    pub const ON_CARD: &str = "on_card";
+    pub const CHANGES: &str = "changes";
+    pub const RETRACTION: &str = "retraction";
+    pub const DUMP: &str = "dump";
+    pub const SCHEDULED: &str = "scheduled";
+    pub const BOARD_CHECK: &str = "board_check";
+    pub const RESUMED: &str = "resumed";
+}
+
+impl Injected {
+    pub fn of(kind: &str) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            ..Default::default()
+        }
+    }
+    /// A crew thread's turn-end ask, told to its orchestrator.
+    pub fn crew_ask(ask_id: &str, chat_id: &str, turn_id: Option<&str>) -> Self {
+        Self {
+            ask_id: Some(ask_id.to_owned()),
+            chat_id: Some(chat_id.to_owned()),
+            turn_id: turn_id.map(str::to_owned),
+            ..Self::of(injected::CREW_ASK)
+        }
+    }
+    /// An ask's answer, sent to the chat that asked; `by_orchestrator` when
+    /// its orchestrator answered it.
+    pub fn answer(ask_id: &str, chat_id: &str, turn_id: Option<&str>, by_orchestrator: bool) -> Self {
+        Self {
+            ask_id: Some(ask_id.to_owned()),
+            chat_id: Some(chat_id.to_owned()),
+            turn_id: turn_id.map(str::to_owned),
+            by: Some(if by_orchestrator { "orchestrator" } else { "you" }.to_owned()),
+            ..Self::of(injected::ANSWER)
+        }
+    }
+    /// A message for a crew thread, relayed through its orchestrator.
+    pub fn for_thread(chat_id: &str) -> Self {
+        Self {
+            chat_id: Some(chat_id.to_owned()),
+            ..Self::of(injected::FOR_THREAD)
+        }
+    }
+    pub fn on_card(item_id: &str) -> Self {
+        Self {
+            item_id: Some(item_id.to_owned()),
+            ..Self::of(injected::ON_CARD)
+        }
+    }
+    pub fn changes(item_id: &str) -> Self {
+        Self {
+            item_id: Some(item_id.to_owned()),
+            ..Self::of(injected::CHANGES)
+        }
+    }
+    pub fn retraction(dump_id: &str, route_id: &str) -> Self {
+        Self {
+            dump_id: Some(dump_id.to_owned()),
+            route_id: Some(route_id.to_owned()),
+            ..Self::of(injected::RETRACTION)
+        }
+    }
+    /// The person's words, sent to the Brain dump to route.
+    pub fn dump(dump_id: &str) -> Self {
+        Self {
+            dump_id: Some(dump_id.to_owned()),
+            ..Self::of(injected::DUMP)
+        }
+    }
+    pub fn scheduled() -> Self {
+        Self::of(injected::SCHEDULED)
+    }
+    /// Cards whose column isn't true, told to their orchestrator.
+    pub fn board_check<I: IntoIterator<Item = S>, S: Into<String>>(item_ids: I) -> Self {
+        Self {
+            item_ids: item_ids.into_iter().map(Into::into).collect(),
+            ..Self::of(injected::BOARD_CHECK)
+        }
+    }
+    /// A paused card the person resumed, told to its thread.
+    pub fn resumed(item_id: &str) -> Self {
+        Self {
+            item_id: Some(item_id.to_owned()),
+            ..Self::of(injected::RESUMED)
+        }
+    }
+}
+
 /// One rendered part of an assistant message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -376,6 +503,12 @@ pub enum MessagePart {
         id: String,
         reports: Vec<zeron_proto::orchestration::Report>,
     },
+    /// What kind of engine message the user entry carrying it is, and the
+    /// ids it points at ([`Injected`]); its text parts are what the agent
+    /// was sent. Clients render the entry as that kind's block; old ones
+    /// drop the part (an empty text) and show the text.
+    #[serde(rename_all = "camelCase")]
+    Injected { id: String, injected: Injected },
 }
 
 impl MessagePart {
@@ -390,7 +523,8 @@ impl MessagePart {
             | MessagePart::Error { id, .. }
             | MessagePart::Fork { id, .. }
             | MessagePart::Switch { id, .. }
-            | MessagePart::CrewReports { id, .. } => id,
+            | MessagePart::CrewReports { id, .. }
+            | MessagePart::Injected { id, .. } => id,
         }
     }
 
@@ -437,6 +571,9 @@ impl MessagePart {
             MessagePart::Switch { from, to, .. } => from.len() + to.len(),
             MessagePart::CrewReports { reports, .. } => {
                 serde_json::to_vec(reports).map_or(0, |v| v.len())
+            }
+            MessagePart::Injected { injected, .. } => {
+                serde_json::to_vec(injected).map_or(0, |v| v.len())
             }
         }
     }

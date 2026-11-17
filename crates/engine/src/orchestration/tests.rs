@@ -85,6 +85,17 @@ async fn orchestrator(core: &crate::EngineCore, name: &str) -> String {
 }
 
 /// What was sent to a chat as runs or steers, oldest first.
+/// What the engine said each of `chat`'s sends is (`Injected`), in order.
+fn sent_injected(core: &crate::EngineCore, chat: &str) -> Vec<Option<zeron_doc::Injected>> {
+    let handle = core.doc_host.open(chat).unwrap();
+    let commands = handle.doc().read_commands().unwrap().into_iter().filter_map(|c| match c.payload {
+        SessionCommandPayload::Run { injected, .. } | SessionCommandPayload::Steer { injected, .. } => Some(injected),
+        _ => None,
+    });
+    let rows = handle.doc().read_queue().unwrap().into_iter().map(|r| r.injected);
+    commands.chain(rows).collect()
+}
+
 fn sent(core: &crate::EngineCore, chat: &str) -> Vec<String> {
     let handle = core.doc_host.open(chat).unwrap();
     handle
@@ -452,6 +463,11 @@ async fn an_answer_goes_to_the_chat_that_asked() {
     assert_eq!(
         sent(&core, "asker"),
         vec!["[Answer from you] Merge the auth PR now? → Yes"]
+    );
+    // The asker's transcript shows it as the answer to that ask.
+    assert_eq!(
+        sent_injected(&core, "asker"),
+        vec![Some(zeron_doc::Injected::answer(&id, "asker", None, false))]
     );
     assert!(
         op(
@@ -1327,6 +1343,9 @@ async fn the_codex_question_becomes_one_ask_and_the_quick_reply_closes_it() {
     let told: Vec<_> = sent(&core, &fixes).into_iter().filter(|m| m.starts_with("[Crew ask]")).collect();
     assert_eq!(told.len(), 1, "{told:?}");
     assert!(told[0].contains(&ask.id) && told[0].contains("Merge into zeron/orchestrators"), "{}", told[0]);
+    // And its transcript shows it as that ask, its thread's turn with it.
+    let said: Vec<_> = sent_injected(&core, &fixes).into_iter().flatten().filter(|i| i.kind == zeron_doc::injected::CREW_ASK).collect();
+    assert_eq!(said, vec![zeron_doc::Injected::crew_ask(&ask.id, &ask.from_chat, ask.turn_id.as_deref())]);
 
     // The person picks an option under Needs you.
     op(&core, Caller::Local, json!({"op":"answerAsk","id":ask.id,"answer":CODEX_OPTIONS[0]})).await.unwrap();

@@ -256,7 +256,7 @@ fn host_answers(edge: &MockEdge, host_doc: &LoroDoc) -> Option<String> {
     let session = SessionDoc::from_doc(host_doc.clone());
     let commands = session.read_commands().ok()?;
     let (command_id, message_id, prompt) = commands.iter().find_map(|c| match &c.payload {
-        SessionCommandPayload::Run {
+        SessionCommandPayload::Run { injected: _,
             request,
             message_id,
         } if c.status == SessionCommandStatus::Pending => {
@@ -1189,7 +1189,7 @@ async fn immediate_exit_after_first_send_recovers_new_chat_on_each_host_platform
             "{platform}: recovery duplicated the command"
         );
         assert!(
-            matches!(&commands[0].payload, SessionCommandPayload::Run { request, message_id: id } if id.as_str() == message_id.as_str() && request.harness == Some(harness))
+            matches!(&commands[0].payload, SessionCommandPayload::Run { injected: _, request, message_id: id } if id.as_str() == message_id.as_str() && request.harness == Some(harness))
         );
         restarted.shutdown();
     }

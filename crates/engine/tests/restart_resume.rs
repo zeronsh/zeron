@@ -153,7 +153,7 @@ fn queue_run(core: &EngineCore, prompt: &str, cwd: &str, message_id: &str) {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run_request(prompt, cwd),
                 message_id: message_id.into(),
             },
@@ -1389,7 +1389,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: real_request(
                     "Remember the codeword: PINEAPPLE. Reply with exactly: stored",
                 ),
@@ -1415,7 +1415,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: real_request(
                     "What was the codeword I told you earlier? Reply with just the codeword.",
                 ),
@@ -1472,7 +1472,7 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Steer {
+            SessionCommandPayload::Steer { injected: None,
                 prompt: "actually, also add tests".into(),
                 message_id: Some("msg-user-2".into()),
             },

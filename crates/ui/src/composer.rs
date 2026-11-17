@@ -9953,7 +9953,7 @@ impl Composer {
                     .as_ref()
                     .and_then(|spec| spec.space_id.as_ref())
                     .is_some();
-                let command = SessionCommandPayload::Run {
+                let command = SessionCommandPayload::Run { injected: None,
                     request: RunRequest {
                         mcp: None,
                         prompt: content.clone(),

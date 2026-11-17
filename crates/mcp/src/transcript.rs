@@ -124,6 +124,8 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
         match part {
             MessagePart::Text { .. } if crew.is_some() => {}
             MessagePart::CrewReports { .. } => {}
+            // (What kind of engine message it is: its text says it all.)
+            MessagePart::Injected { .. } => {}
             MessagePart::Text { text, .. } => {
                 if !text.trim().is_empty() {
                     text_parts.push(text.as_str());

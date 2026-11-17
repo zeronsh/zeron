@@ -304,7 +304,7 @@ fn queue_run(core: &EngineCore, prompt: &str, message_id: &str) {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run_request(prompt),
                 message_id: message_id.into(),
             },

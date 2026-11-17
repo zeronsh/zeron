@@ -603,7 +603,8 @@ pub(crate) fn raise(
                     .and_then(|c| c.title)
                     .unwrap_or_else(|| chat.chars().take(8).collect());
                 let text = zeron_proto::orchestration::prompt_text::crew_ask(&title, &ask.id, &ask.question, &labels(ask));
-                if let Err(error) = super::ops::deliver(rpc, to, &text, None, super::ops::When::Next) {
+                let said = zeron_doc::Injected::crew_ask(&ask.id, chat, ask.turn_id.as_deref());
+                if let Err(error) = super::ops::deliver(rpc, to, &text, None, super::ops::When::Next, Some(said)) {
                     tracing::warn!(%error, "turn-end ask: its orchestrator wasn't told");
                 }
             }

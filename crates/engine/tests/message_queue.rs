@@ -565,7 +565,7 @@ async fn a_steer_command_for_a_turn_boundary_agent_waits_in_the_queue_for_the_tu
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Steer {
+            SessionCommandPayload::Steer { injected: None,
                 prompt: "and also this".into(),
                 message_id: Some("m-steer".into()),
             },
@@ -661,7 +661,7 @@ async fn interrupt_bypasses_a_saturated_prompt_command_drain() {
         core.doc_host
             .queue_command(
                 CHAT,
-                SessionCommandPayload::Steer {
+                SessionCommandPayload::Steer { injected: None,
                     prompt: format!("blocked {i}"),
                     message_id: Some(format!("blocked-{i}")),
                 },
@@ -714,7 +714,7 @@ async fn batched_remote_steers_preserve_every_message_in_order_exactly_once() {
             .doc()
             .queue_command(&zeron_doc::SessionCommandEntry {
                 id: format!("remote-command-{i}"),
-                payload: SessionCommandPayload::Steer {
+                payload: SessionCommandPayload::Steer { injected: None,
                     prompt: prompt.clone(),
                     message_id: Some(format!("remote-message-{i}")),
                 },
@@ -1978,7 +1978,7 @@ fn run_like_the_live_turn(core: &EngineCore, message_id: &str, prompt: &str) {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 message_id: message_id.into(),
                 request,
             },
@@ -2060,7 +2060,7 @@ async fn a_send_issued_before_the_running_turn_started_is_the_next_turn_not_a_st
         let issued_at = chrono::Utc::now().timestamp_millis() - ago_ms;
         zeron_doc::SessionCommandEntry {
             id: format!("cmd-{id}"),
-            payload: SessionCommandPayload::Run {
+            payload: SessionCommandPayload::Run { injected: None,
                 message_id: format!("m-{id}"),
                 request,
             },

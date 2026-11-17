@@ -1977,7 +1977,7 @@ impl Tools {
                     .zeron
                     .queue_command(
                         &chat.id,
-                        &SessionCommandPayload::Run {
+                        &SessionCommandPayload::Run { injected: None,
                             request,
                             message_id: new_message_id.clone(),
                         },
@@ -1990,7 +1990,7 @@ impl Tools {
                     .zeron
                     .queue_command(
                         &chat.id,
-                        &SessionCommandPayload::Steer {
+                        &SessionCommandPayload::Steer { injected: None,
                             prompt: text,
                             message_id: Some(new_message_id.clone()),
                         },
