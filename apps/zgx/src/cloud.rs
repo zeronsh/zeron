@@ -452,6 +452,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_stubs_real_sizes_are_the_edges_catalogue() {
+        // The edge's `MACHINES` (edge/src/cloud/policy.ts) and the UI stub's
+        // `REAL_MACHINES` (ui/cloud_stub.luau): what the composer's Machine
+        // menu and Settings → Cloud are tested and pictured against.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let policy = std::fs::read_to_string(root.join("../../edge/src/cloud/policy.ts")).unwrap();
+        let stub = std::fs::read_to_string(root.join("ui/cloud_stub.luau")).unwrap();
+        // Each size's fields in order, from the lines naming one.
+        fn sizes(text: &str, start: &str, keys: [&str; 6]) -> Vec<Vec<String>> {
+            let block = &text[text.find(start).expect(start)..];
+            let block = &block[..block.find("\n]").or_else(|| block.find("\n}")).unwrap()];
+            block
+                .lines()
+                .filter(|l| l.contains(keys[0]) && l.contains(keys[5]))
+                .map(|l| {
+                    keys.iter()
+                        .map(|k| {
+                            let rest = &l[l.find(k).unwrap() + k.len()..];
+                            let end = rest.find([',', '}']).unwrap();
+                            rest[..end].trim().trim_matches('"').to_string()
+                        })
+                        .collect()
+                })
+                .collect()
+        }
+        let edge = sizes(
+            &policy,
+            "export const MACHINES",
+            ["id:", "name:", "vcpu:", "memoryGB:", "diskGiB:", "creditMultiplier:"],
+        );
+        let ui = sizes(&stub, "local REAL_MACHINES", ["id =", "name =", "vcpu =", "memory_gb =", "disk_gb =", "rate ="]);
+        assert_eq!(edge.len(), 4, "{edge:?}");
+        assert_eq!(ui, edge, "ui/cloud_stub.luau's REAL_MACHINES is no longer the edge's MACHINES");
+    }
+
+    #[test]
     fn machines_and_a_session_read_as_the_scripts_expect() {
         let status = json!({ "state": "ready", "available": true, "deviceId": "cloud-1", "machine": "large",
             "machines": [{ "id": "xlarge", "name": "Extra large", "vcpu": 8, "memoryGB": 32, "diskGiB": 400, "creditMultiplier": 5.56 }] });

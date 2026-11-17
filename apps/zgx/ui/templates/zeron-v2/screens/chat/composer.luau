@@ -1183,12 +1183,14 @@ local function Composer(): Node
 			end
 		end
 		-- A Cloud chat: on Cloud, and the size of its machine ("Cloud · Large").
-		if cloud.on_device((s :: any).device) then
+		local on_cloud = cloud.on_device((s :: any).device)
+		if on_cloud then
 			local session = cloud.session_for(s.id, (s :: any).device)
 			on = CloudMachine.on_size("Cloud", CloudMachine.size_name(cloud.machines(), session and session.machine))
 		end
 		return {
 			device = on,
+			cloud = on_cloud,
 			name = name,
 			worktree = path ~= nil and s.cwd ~= nil and s.cwd ~= path,
 			project = project,

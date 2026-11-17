@@ -665,7 +665,12 @@
       },
       "machine": {
         "label": "机器",
-        "on": "{device} · {size}"
+        "on": "{device} · {size}",
+        "column_vcpu": "vCPU",
+        "column_memory": "内存",
+        "column_rate": "额度",
+        "chosen": "{size}机器",
+        "column_disk": "磁盘"
       }
     },
     "markdown": {
@@ -3084,9 +3089,9 @@
       "held_sending": "正在发送…",
       "outbox_uploading": "正在上传…",
       "outbox_failed": "未发送",
-      "size_hint": "{specs} · {rate}",
       "size_default": "你的默认",
-      "on_size": "{where} · {size}"
+      "on_size": "{where} · {size}",
+      "size_gb": "{n} GB"
     },
     "turn_state": {
       "interrupted": "已中断",
