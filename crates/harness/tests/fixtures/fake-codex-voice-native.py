@@ -1,6 +1,9 @@
 #!/usr/bin/python3
 """Offline native app-server with WebRTC signaling and canonical voice events."""
 import json, pathlib, sys, threading, time
+if '--version' in sys.argv:
+    print('codex-cli 0.166.0')
+    sys.exit(0)
 root=pathlib.Path(__file__).resolve().parents[1]
 session=None
 account_initialized=False

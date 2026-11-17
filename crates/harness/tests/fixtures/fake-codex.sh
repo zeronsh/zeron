@@ -5,6 +5,11 @@
 # start/resume, then a scenario picked from the turn/start prompt text. Driven
 # by crates/harness/tests/codex.rs.
 
+if [ "${1:-}" = "--version" ]; then
+  echo 'codex-cli 0.166.0'
+  exit 0
+fi
+
 emit() { printf '%s\n' "$1"; }
 rid() { printf '%s' "$1" | sed 's/.*"id":\([0-9]*\).*/\1/'; }
 has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
@@ -18,7 +23,6 @@ fail_turn() { # $1 = request id, $2 = message
 read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1
 has "$line" '"experimentalApi":true' || exit 1
-has "$line" '"name":"zeron-native"' || exit 1
 if [ -n "$FAKE_CODEX_REJECT_OPT_OUT" ] && has "$line" 'optOutNotificationMethods'; then
   # An app-server that predates notification opt-outs: refuse, then expect
   # the handshake again without them.
@@ -27,6 +31,10 @@ if [ -n "$FAKE_CODEX_REJECT_OPT_OUT" ] && has "$line" 'optOutNotificationMethods
   has "$line" '"method":"initialize"' || exit 1
   has "$line" 'optOutNotificationMethods' && exit 7
 fi
+# Every run and discovery probe must identify as the actual CLI, without a title.
+has "$line" '"name":"codex-tui"' || exit 1
+has "$line" '"version":"0.166.0"' || exit 1
+has "$line" '"title"' && exit 1
 init_line="$line"
 emit "{\"id\":$(rid "$line"),\"result\":{\"userAgent\":\"fake-codex\"}}"
 

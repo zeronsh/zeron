@@ -18,7 +18,8 @@ fn env_dumper(dir: &Path) -> PathBuf {
     let path = dir.join("agent.sh");
     std::fs::write(
         &path,
-        "#!/bin/sh\nprintf 'CODEX_HOME=%s\\nGH_TOKEN=%s\\nANTHROPIC_API_KEY=%s\\n' \
+        "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo 'codex-cli 0.166.0'; exit 0; fi\n\
+         printf 'CODEX_HOME=%s\\nGH_TOKEN=%s\\nANTHROPIC_API_KEY=%s\\n' \
          \"$CODEX_HOME\" \"$GH_TOKEN\" \"$ANTHROPIC_API_KEY\" > env.tmp\n\
          mv env.tmp env.txt\nexit 0\n",
     )

@@ -3,6 +3,9 @@
 import json
 import pathlib
 import sys
+if '--version' in sys.argv:
+    print('codex-cli 0.166.0')
+    sys.exit(0)
 for line in sys.stdin:
     frame = json.loads(line)
     method = frame.get('method')
