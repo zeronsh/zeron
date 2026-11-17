@@ -22,9 +22,29 @@ local route = require("@app/screens/shell/route")
 local mentions = require("@ds/composer_mentions")
 local prefs = require("@app/screens/settings/prefs")
 local Invocations = require("@app/screens/chat/invocations")
+local store = require("@app/screens/chat/store")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 
 local M = {}
+
+-- The agent a composer's `/` and `$` ask: its chosen model's, as the catalog
+-- shown lists it; else the chat's own (`session.agent`), for a chat whose
+-- model the catalog doesn't name (none chosen, so the agent's default; or
+-- one on another device). Without it such a chat listed Zeron's commands
+-- alone.
+function M.agent_of(chosen: string?, session: any): string?
+	if chosen then
+		for _, m in store.catalog:get().models do
+			if m.value == chosen then
+				return m.harness
+			end
+		end
+	end
+	if type(session) == "table" and type(session.agent) == "string" and session.agent ~= "" then
+		return session.agent
+	end
+	return nil
+end
 
 export type Bind = {
 	key: string,

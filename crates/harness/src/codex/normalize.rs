@@ -6,7 +6,9 @@
 //! types) are accepted, and unknown item types map to nothing.
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, DoneStatus, TodoItem, TodoStatus, ToolCall};
+use zeron_proto::{
+    AgentEvent, DoneStatus, TodoItem, TodoStatus, ToolCall, ToolReview, ToolReviewStatus,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -95,6 +97,35 @@ impl ReasoningStream {
         events.push(AgentEvent::ReasoningDelta { text });
         events
     }
+}
+
+/// `item/autoApprovalReview/started` and `/completed` (Auto's reviewer,
+/// codex's auto-review): its verdict on the call it names, for the call's
+/// part. Nothing for a review that names no call (a network check) or that
+/// was aborted with its turn. (Codex marks this payload unstable: read
+/// tolerantly, and an unknown status is no verdict.)
+pub(crate) fn auto_review_event(params: &Value) -> Option<AgentEvent> {
+    let id = str_field(params, &["targetItemId", "target_item_id"]);
+    if id.is_empty() {
+        return None;
+    }
+    let review = params.get("review")?;
+    let status = match str_field(review, &["status"]).as_str() {
+        "inProgress" | "in_progress" => ToolReviewStatus::Reviewing,
+        "approved" => ToolReviewStatus::Approved,
+        "denied" => ToolReviewStatus::Denied,
+        "timedOut" | "timed_out" => ToolReviewStatus::TimedOut,
+        _ => return None,
+    };
+    let text = |keys: &[&str]| Some(str_field(review, keys)).filter(|s| !s.trim().is_empty());
+    Some(AgentEvent::ToolReviewed {
+        id,
+        review: ToolReview {
+            status,
+            risk: text(&["riskLevel", "risk_level"]),
+            reason: text(&["rationale"]),
+        },
+    })
 }
 
 pub(crate) fn item_id(params: &Value) -> String {
@@ -329,6 +360,8 @@ fn tool_lifecycle(phase: Phase, id: String, call: ToolCall, is_error: bool) -> V
                 is_error,
                 output: None,
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             },
         ],
@@ -459,6 +492,8 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                     is_error: error.is_some(),
                     output: None,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 },
             ];
@@ -503,6 +538,8 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                     is_error: status == "failed" || exit_code.is_some_and(|code| code != 0),
                     output,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code,
                 }]
             }
@@ -559,6 +596,8 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                 is_error: status == "failed",
                 output: None,
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             }],
         },
@@ -932,6 +971,47 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn auto_review_notifications_become_reviews_on_their_call() {
+        let completed = json!({
+            "threadId": "t", "turnId": "u", "reviewId": "r", "targetItemId": "call_1",
+            "review": { "status": "denied", "riskLevel": "high", "rationale": "Deletes files outside the workspace." },
+            "action": { "type": "command", "command": "rm -rf ~/x", "cwd": "/w", "source": "shell" }
+        });
+        assert_eq!(
+            auto_review_event(&completed),
+            Some(AgentEvent::ToolReviewed {
+                id: "call_1".into(),
+                review: ToolReview {
+                    status: ToolReviewStatus::Denied,
+                    risk: Some("high".into()),
+                    reason: Some("Deletes files outside the workspace.".into()),
+                },
+            })
+        );
+        let started = json!({ "targetItemId": "call_1", "review": { "status": "inProgress" } });
+        assert!(matches!(
+            auto_review_event(&started),
+            Some(AgentEvent::ToolReviewed {
+                review: ToolReview {
+                    status: ToolReviewStatus::Reviewing,
+                    risk: None,
+                    reason: None
+                },
+                ..
+            })
+        ));
+        // A network check names no call; an aborted review is no verdict.
+        assert_eq!(
+            auto_review_event(&json!({ "targetItemId": null, "review": { "status": "approved" } })),
+            None
+        );
+        assert_eq!(
+            auto_review_event(&json!({ "targetItemId": "c", "review": { "status": "aborted" } })),
+            None
+        );
+    }
+
+    #[test]
     fn reasoning_parts_preserve_chunking_and_existing_paragraph_breaks() {
         let mut stream = ReasoningStream::default();
         let mut text = String::new();
@@ -1038,6 +1118,8 @@ mod tests {
                 },
             },
             AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: "m1".into(),
                 is_error: false,
                 output: Some("secret file contents\n".repeat(10)),
@@ -1086,6 +1168,8 @@ mod tests {
                 is_error: true,
                 output: None,
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: Some(2),
             }]
         );
@@ -1128,6 +1212,8 @@ mod tests {
                     is_error: true,
                     output: None,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 },
             ]
@@ -1173,6 +1259,8 @@ mod tests {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     },
                 ]
@@ -1208,6 +1296,8 @@ mod tests {
                     is_error: false,
                     output: None,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 },
             ]

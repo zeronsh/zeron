@@ -1073,6 +1073,14 @@ fn models_map_provider_catalog_with_variant_ladders() {
         .iter()
         .find(|m| m.id == "anthropic/claude-opus-5")
         .expect("opus");
+    // Its provider rides along typed, so the picker can tell namesakes apart.
+    assert_eq!(
+        opus.provider,
+        Some(zeron_proto::ModelProvider {
+            id: "anthropic".into(),
+            name: "Anthropic".into(),
+        })
+    );
     assert_eq!(opus.label, "Claude Opus 5");
     assert_eq!(opus.description.as_deref(), Some("Anthropic"));
     assert_eq!(

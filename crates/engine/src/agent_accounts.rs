@@ -11,13 +11,20 @@
 //! |----------|--------|--------|--------------------------------|-------|
 //! | Grok     | yes    | yes    | `grok login --device-auth`     | yes   |
 //! | Devin    | yes    | yes    | ACP `authenticate` (loopback)  | yes   |
-//! | OpenCode | yes    | yes    | ChatGPT loopback, Copilot code | yes   |
-//! | Pi       | yes    | yes    | ChatGPT loopback               | yes   |
+//! | OpenCode | yes    | yes²   | ChatGPT loopback, Copilot code | yes   |
+//! | Pi       | yes    | yes²   | ChatGPT loopback, Copilot code | yes   |
 //! | Hermes   | yes    | no¹    | `hermes auth add` (device code) | yes  |
 //!
 //! ¹ Hermes keeps every account in its own credential pool and rotates
 //! through it itself; zeron lists the pool and adds to it through Hermes'
 //! own CLI, but never rewrites it.
+//!
+//! ² Per model provider: these agents keep one login per provider in one
+//! store, and a run reads the entry of its model's provider. Each row
+//! carries its provider (`AgentAccount::provider`); rows sharing one form a
+//! group with at most one in use, and switching (or a new sign-in) rewrites
+//! that provider's entry alone — a ChatGPT switch never touches the Claude
+//! or Copilot login beside it.
 //!
 //! The original four providers each store exactly one live login:
 //!
@@ -105,6 +112,7 @@ pub struct RelayedCallback {
     pub location: Option<String>,
 }
 
+mod api_keys;
 mod muse;
 mod pins;
 mod oauth;
@@ -725,6 +733,12 @@ struct ProbeEndpoints {
     github_api: String,
     /// GitHub's OAuth root (`/login/device/code`, `/login/oauth/access_token`).
     github_login: String,
+    /// A Copilot session's API root (`/models`): `None` in production, where
+    /// it's read from the session token itself.
+    copilot_api: Option<String>,
+    /// Where API keys are checked: `None` in production (each provider's
+    /// own host, `api_keys::key_check`), a mock in tests.
+    api_key_check: Option<String>,
     /// OpenAI's OAuth root (`/oauth/authorize`, `/oauth/token`).
     openai_auth: String,
     /// The ChatGPT sign-in's loopback port — FIXED at 1455 by the client
@@ -752,6 +766,8 @@ impl Default for ProbeEndpoints {
             grok_usage: usage::GROK_USAGE_URL.into(),
             github_api: "https://api.github.com".into(),
             github_login: "https://github.com".into(),
+            copilot_api: None,
+            api_key_check: None,
             openai_auth: oauth::OPENAI_AUTH.into(),
             openai_port: oauth::OPENAI_LOOPBACK_PORT,
             nous_portal: usage::NOUS_PORTAL.into(),
@@ -1038,6 +1054,15 @@ impl AgentAccounts {
             live(*harness, detected);
             self.snapshot_detected(*harness, detected)?;
         }
+        if self.opencode_keeps_its_own_store() {
+            warnings.push(AgentAccountWarning {
+                harness: HarnessId::Opencode,
+                message: "This OpenCode keeps its logins in its own database: switching or adding \
+                          them here doesn't reach it yet — use `opencode auth switch` / \
+                          `opencode auth login`."
+                    .into(),
+            });
+        }
         if let Some(message) = stores::opencode_env_warning() {
             warnings.push(AgentAccountWarning {
                 harness: HarnessId::Opencode,
@@ -1243,7 +1268,7 @@ impl AgentAccounts {
                 let key = slot.store_key.as_deref().ok_or_else(|| {
                     EngineError::Other("That saved login names no provider.".into())
                 })?;
-                self.write_keyed_entry(harness, key, Some(&slot.credentials))?;
+                self.swap_keyed(harness, key, &slot).await?;
             }
             other => {
                 return Err(EngineError::Other(format!(
@@ -1253,6 +1278,41 @@ impl AgentAccounts {
         }
         *lock(&self.inner.claude_credentials) = None;
         self.list_locked(false).await
+    }
+
+    /// Point OpenCode's / Pi's entry for `key` at `slot`'s login, under the
+    /// agent's own lock (Pi's is the one it refreshes under). The login in
+    /// use is identified first and saved into its slot with the tokens it
+    /// has NOW — the agent may have refreshed it since the last list, and
+    /// Claude's and ChatGPT's refresh tokens are single-use. If it can't be
+    /// identified (its profile call rate limited), or it changes between
+    /// that and the lock, the switch is refused rather than overwrite a
+    /// login no slot holds.
+    async fn swap_keyed(&self, harness: HarnessId, key: &str, slot: &Slot) -> Result<(), EngineError> {
+        let live = match self.detect_keyed_entry(harness, key).await {
+            None => None,
+            Some(Some(detected)) => Some(detected),
+            Some(None) => {
+                return Err(EngineError::Other(
+                    "Couldn't confirm the login in use — try again in a moment.".into(),
+                ));
+            }
+        };
+        if let Some(detected) = &live
+            && detected.account_key != slot.account_key
+        {
+            self.snapshot_detected(harness, detected)?;
+        }
+        let saved = live.as_ref().and_then(|d| d.credentials.clone());
+        self.swap_keyed_entry(harness, key, &slot.credentials, &mut |old| {
+            if old.cloned() == saved {
+                Ok(())
+            } else {
+                Err(EngineError::Other(
+                    "The login in use just changed — try again in a moment.".into(),
+                ))
+            }
+        })
     }
 
     /// Claude Code's own refresh lock (see
@@ -1618,8 +1678,12 @@ impl AgentAccounts {
 
     /// [`Self::start_login_for`] for one model provider of an agent that
     /// keeps a login per provider (`provider`: OpenCode's `openai` /
-    /// `github-copilot`, Pi's `openai-codex`, Hermes' `openai-codex` /
-    /// `nous`); `None` picks the agent's default.
+    /// `github-copilot`, Pi's `openai-codex` / `github-copilot`, Hermes'
+    /// `openai-codex` / `nous` / `xai-oauth` —
+    /// `zeron_proto::providers::login_options`); `None` picks the agent's
+    /// default. The new login joins its provider's group only: it takes
+    /// over that provider's live login when there is none (or it re-signs
+    /// that one in), and never touches another provider's.
     pub async fn start_login_with(
         &self,
         harness: HarnessId,
@@ -1657,6 +1721,8 @@ impl AgentAccounts {
                     self.start_openai_login(HarnessId::Pi, "openai-codex")
                         .await?
                 }
+                "github-copilot" => self.start_copilot_login(HarnessId::Pi).await?,
+                "anthropic" => self.start_pi_claude_login().await?,
                 other => return Err(stores::unsupported_login(harness, other)),
             },
             HarnessId::Hermes => {
@@ -6164,7 +6230,11 @@ mod login_tests {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let mut request = vec![0u8; 16 * 1024];
                 let _ = socket.read(&mut request).await;
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // (A preview scan elsewhere in the test process probes every
+                // local listener with `HEAD /`: not counted.)
+                if !request.starts_with(b"HEAD ") {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let _ = socket
                     .write_all(
                         http_response(status, &[("Content-Type", "application/json")], body)

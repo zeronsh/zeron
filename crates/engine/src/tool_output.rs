@@ -115,6 +115,8 @@ mod tests {
             is_error: exit_code.is_some_and(|c| c != 0),
             output: Some(output.into()),
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code,
         }
     }

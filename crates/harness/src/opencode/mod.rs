@@ -81,7 +81,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ModelProvider,
     ReasoningLevel, RunRequest, SlashCommand, SteeringMode, TodoItem, TodoStatus, ToolCall,
     UserInputAnswer, UserInputQuestion,
 };
@@ -1662,6 +1662,10 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
                     default: false,
                     id: format!("{provider_id}/{model_id}"),
                     label,
+                    provider: Some(ModelProvider {
+                        id: provider_id.to_owned(),
+                        name: provider_name.to_owned(),
+                    }),
                     description: Some(provider_name.to_owned()),
                     reasoning_levels: levels,
                     options: Vec::new(),
@@ -4551,6 +4555,8 @@ fn part_snapshot_events(
                     is_error: status == "error",
                     output,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 });
             }
@@ -6233,6 +6239,7 @@ http.createServer((req, res) => {
                     assert_eq!((edit, bash), (&json!("allow"), &json!("ask")))
                 }
                 AccessMode::Supervised => assert_eq!((edit, bash), (&json!("ask"), &json!("ask"))),
+                AccessMode::Auto => unreachable!("OpenCode has no auto mode to offer"),
             }
         }
     }

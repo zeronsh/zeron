@@ -35,7 +35,8 @@
 --                           ({ project }; `take_project()` reads and clears);
 --                           otherwise the composer keeps the one last
 --                           picked on the new-chat page
---   route.settings(page?)   to settings (a page's id; "general" first)
+--   route.settings(page?)   to settings (a page's id; else the one shown
+--                           last, General at first)
 --   route.leave_settings()  back where the chats were
 --   route.plugin_page(plugin, page)  to a plugin's page (`plugin`, `page`:
 --                           ids); the chats stay as they were under it
@@ -506,6 +507,18 @@ ui.effect(function()
 	end
 end)
 
+local settings_page = ui.persist("shell_settings_page", nil :: string?)
+ui.effect(function()
+	local r = here()
+	local page: string = r.params.page
+	if r.name ~= "settings" or page == "profile" then
+		return
+	end
+	if settings_page:peek() ~= page then
+		settings_page:set(page)
+	end
+end)
+
 -- A device asked of the next new chat (a device's "+" in the sidebar):
 -- held until its composer takes it (`take_device`), so it lands whether
 -- the composer is there already or arrives with the move home. (A named
@@ -645,12 +658,18 @@ function M.choose_project(id: string?)
 	chosen:set(id)
 end
 
--- To settings (a page's id; the one open, else General). Its pages take
--- one step of the history between them (one replaces another), so a step
--- back from any of them is back to the chats.
+local function reopened(): string
+	local list: any = (require :: any)("@app/screens/shell/settings")
+	local shown = settings_page:peek()
+	return if shown and list.page(shown) then shown else "general"
+end
+
+-- To settings (a page's id; the one open, else the one shown last, else
+-- General). Its pages take one step of the history between them (one
+-- replaces another), so a step back from any of them is back to the chats.
 function M.settings(page: string?)
 	local r = at()
-	local to = page or (if r.name == "settings" then r.params.page else nil) or "general"
+	local to = page or (if r.name == "settings" then r.params.page else nil) or reopened()
 	if r.name == "settings" then
 		if r.params.page ~= to then
 			go("settings", { page = to }, true)

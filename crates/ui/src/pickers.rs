@@ -185,7 +185,7 @@ pub fn resolve_access(wanted: AccessMode, offered: &[AccessMode]) -> AccessMode 
     if offered.contains(&wanted) {
         return wanted;
     }
-    let rank = |mode: AccessMode| AccessMode::ALL.iter().position(|m| *m == mode);
+    let rank = |mode: AccessMode| AccessMode::WITH_AUTO.iter().position(|m| *m == mode);
     offered
         .iter()
         .copied()
@@ -2820,6 +2820,7 @@ impl Pickers {
                             default: false,
                             id: id.into(),
                             label,
+                            provider: None,
                             description: Some(
                                 "Selected in this chat; absent from the current model list".into(),
                             ),
@@ -8944,6 +8945,7 @@ mod tests {
             default: false,
             id: id.into(),
             label: label.into(),
+            provider: None,
             description: None,
             reasoning_levels: Vec::new(),
             options: Vec::new(),
@@ -11138,6 +11140,7 @@ mod tests {
                 default: false,
                 id: "flagship".into(),
                 label: "Flagship".into(),
+                provider: None,
                 description: None,
                 reasoning_levels: vec![],
                 options: vec![],
@@ -11146,6 +11149,7 @@ mod tests {
                 default: false,
                 id: "fast".into(),
                 label: "Fast".into(),
+                provider: None,
                 description: None,
                 reasoning_levels: vec![],
                 options: vec![],

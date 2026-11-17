@@ -145,6 +145,9 @@ struct DocPartJson {
     /// One-line live tail of the subagent's output (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subagent_tail: Option<String>,
+    /// Uploads copies of images embedded in a tool result (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview_paths: Option<Vec<String>>,
     /// A command's exit status (additive; command tools only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exit_code: Option<i32>,
@@ -156,6 +159,9 @@ struct DocPartJson {
     /// `outputTruncated`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output_lines: Option<u64>,
+    /// The agent's own reviewer's verdict on the call (additive; Auto).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review: Option<serde_json::Value>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -208,9 +214,11 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_ref,
             subagent_status,
             subagent_tail,
+            preview_paths,
             exit_code,
             output_truncated,
             output_lines,
+            review,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -234,9 +242,11 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                 .to_owned()
             }),
             subagent_tail: subagent_tail.clone(),
+            preview_paths: (!preview_paths.is_empty()).then(|| preview_paths.clone()),
             exit_code: *exit_code,
             output_truncated: output_truncated.then_some(true),
             output_lines: *output_lines,
+            review: review.as_ref().map(serde_json::to_value).transpose()?,
             ..Default::default()
         },
         MessagePart::Input {
@@ -323,9 +333,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     _ => None,
                 }),
                 subagent_tail: p.subagent_tail,
+                preview_paths: p.preview_paths.unwrap_or_default(),
                 exit_code: p.exit_code,
                 output_truncated: p.output_truncated.unwrap_or(false),
                 output_lines: p.output_lines,
+                review: p
+                    .review
+                    .and_then(|value| serde_json::from_value(value).ok()),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -1599,6 +1613,18 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(preview_paths) = &doc_part.preview_paths {
+        map.insert(
+            "previewPaths",
+            loro_value_from_json(&serde_json::Value::Array(
+                preview_paths
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            )),
+        )?;
+    }
     if let Some(exit_code) = doc_part.exit_code {
         map.insert("exitCode", exit_code as i64)?;
     }
@@ -1607,6 +1633,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(lines) = doc_part.output_lines {
         map.insert("outputLines", lines as i64)?;
+    }
+    if let Some(review) = &doc_part.review {
+        map.insert("review", loro_value_from_json(review))?;
     }
     Ok(())
 }
@@ -1772,6 +1801,10 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: obj
+                .get("previewPaths")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
             exit_code: obj
                 .get("exitCode")
                 .and_then(|x| x.as_i64())
@@ -1781,6 +1814,9 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
                 .and_then(|x| x.as_bool())
                 .unwrap_or(false),
             output_lines: obj.get("outputLines").and_then(|x| x.as_u64()),
+            review: obj
+                .get("review")
+                .and_then(|value| serde_json::from_value(value.clone()).ok()),
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -2120,6 +2156,18 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(preview_paths) = &doc_part.preview_paths {
+        map.insert(
+            "previewPaths",
+            loro_value_from_json(&serde_json::Value::Array(
+                preview_paths
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            )),
+        )?;
+    }
     if let Some(exit_code) = doc_part.exit_code {
         map.insert("exitCode", exit_code as i64)?;
     }
@@ -2128,6 +2176,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(lines) = doc_part.output_lines {
         map.insert("outputLines", lines as i64)?;
+    }
+    if let Some(review) = &doc_part.review {
+        map.insert("review", loro_value_from_json(review))?;
     }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
@@ -2866,9 +2917,11 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            review: None,
         };
         let doc = SessionDoc::init("c1").unwrap();
         let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
@@ -2933,9 +2986,11 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            review: None,
         };
         w.sync(std::slice::from_ref(&part)).unwrap();
         if let MessagePart::Tool {
@@ -2988,9 +3043,11 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            review: None,
         };
         let parts = vec![
             tool(
@@ -3173,6 +3230,43 @@ mod tests {
     }
 
     #[test]
+    fn tool_preview_paths_round_trip_through_the_doc() {
+        let doc = SessionDoc::init("previews").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev", 1).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "t".into(),
+                call: ToolCall::ReadFile {
+                    path: "/tmp/shots/1.png".into(),
+                },
+            },
+        );
+        writer.sync(&folded).unwrap();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolResult {
+                exit_code: None,
+                id: "t".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+                preview_paths: vec!["/uploads/abc-image.png".into()],
+                image_payloads: Vec::new(),
+            },
+        );
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        let entries = doc.read_entries().unwrap();
+        match &entries[0].parts[0] {
+            MessagePart::Tool { preview_paths, .. } => {
+                assert_eq!(preview_paths, &vec!["/uploads/abc-image.png".to_string()]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn segment_writer_streams_text_incrementally() {
         let doc = SessionDoc::init("chat-1").unwrap();
         let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
@@ -3199,6 +3293,8 @@ mod tests {
                 is_error: false,
                 output: None,
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             },
         );
@@ -3319,6 +3415,8 @@ mod tests {
                     old_text: Some("old\n".into()),
                     new_text: "new\n".into(),
                 }),
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             },
         );
@@ -3377,6 +3475,8 @@ mod tests {
         fold_event_into_parts(
             &mut folded,
             &AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: "c1".into(),
                 is_error: true,
                 output: Some(full.clone()),
@@ -3423,6 +3523,60 @@ mod tests {
         ));
     }
 
+    /// A reviewer's verdict lands after its call was written: the call's
+    /// entry takes it in place, and a later verdict replaces the first.
+    #[test]
+    fn a_review_round_trips_through_the_doc() {
+        use zeron_proto::{ToolReview, ToolReviewStatus};
+        let doc = SessionDoc::init("chat-5").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "c1".into(),
+                call: ToolCall::Exec {
+                    command: "rm -rf ~/x".into(),
+                },
+            },
+        );
+        writer.sync(&folded).unwrap();
+        for status in [ToolReviewStatus::Reviewing, ToolReviewStatus::Denied] {
+            fold_event_into_parts(
+                &mut folded,
+                &AgentEvent::ToolReviewed {
+                    id: "c1".into(),
+                    review: ToolReview {
+                        status,
+                        risk: Some("high".into()),
+                        reason: Some("outside the workspace".into()),
+                    },
+                },
+            );
+            writer.sync(&folded).unwrap();
+        }
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        let snapshot = doc.export_snapshot().unwrap();
+        let replica = loro::LoroDoc::new();
+        replica.import(&snapshot).unwrap();
+        for entries in [
+            doc.read_entries().unwrap(),
+            SessionDoc::from_doc(replica).read_entries().unwrap(),
+        ] {
+            match &entries[0].parts[0] {
+                MessagePart::Tool {
+                    review: Some(review),
+                    ..
+                } => {
+                    assert_eq!(review.status, ToolReviewStatus::Denied);
+                    assert_eq!(review.risk.as_deref(), Some("high"));
+                    assert_eq!(review.reason.as_deref(), Some("outside the workspace"));
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
     /// Old pre-strip docs carry inline `output`/`diff` — they must still read
     /// back (schema changes are serde-additive ONLY; old readers, old docs).
     #[test]
@@ -3451,9 +3605,11 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                preview_paths: Vec::new(),
                 exit_code: None,
                 output_truncated: false,
                 output_lines: None,
+                review: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),

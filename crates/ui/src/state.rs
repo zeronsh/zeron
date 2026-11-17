@@ -2211,9 +2211,11 @@ impl AppState {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    preview_paths: Vec::new(),
                     exit_code: None,
                     output_truncated: false,
                     output_lines: None,
+                    review: None,
                 }],
                 created_at: created_at + 1,
                 device_id: "local".into(),
@@ -5984,7 +5986,7 @@ mod tests {
             assert_eq!(state.transcript[0].id, "new-authoritative-row");
             // An authoritative empty reset must still be honored.
             state
-                .apply_transcript_frame(TranscriptFrame::reset(&[]))
+                .apply_transcript_frame(TranscriptFrame::reset::<SessionMessageEntry>(&[]))
                 .unwrap();
             assert!(state.transcript.is_empty());
         });

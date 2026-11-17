@@ -68,6 +68,7 @@ impl Harness for SmokeHarness {
             default: false,
             id: "smoke-1".into(),
             label: "Smoke 1".into(),
+            provider: None,
             description: None,
             reasoning_levels: vec![],
             options: vec![],

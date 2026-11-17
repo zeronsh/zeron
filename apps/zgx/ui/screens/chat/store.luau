@@ -57,6 +57,9 @@ export type Session = {
 	-- Its folder on that device.
 	cwd: string?,
 	harness: string?,
+	-- The agent its config records (nil until that's known): whose `/` list
+	-- its composer reads when the catalog doesn't name its model.
+	agent: string?,
 	model: string?,
 	-- Its model's name: its catalog's, else its id (chat.rs `session_value`).
 	model_label: string?,
@@ -115,6 +118,24 @@ M.session = ui.shared("chat.session", nil :: Session?)
 M.messages = ui.shared("chat.messages", {} :: { Message })
 M.draft = ui.shared("chat.draft", { id = "", text = "" } :: Draft)
 M.catalog = ui.shared("chat.catalog", { state = "looking", harnesses = {}, models = {} } :: Catalog)
+
+-- Whether the agent `model` ("<harness>/<id>") runs on has an auto mode of
+-- its own (the catalog's `auto`): the access picker offers Auto, and the
+-- composer sends in it. An agent the catalog doesn't list yet (it's still
+-- loading) counts as having one, so a chat in Auto can send at once; the
+-- engine still refuses Auto where it can't run.
+function M.offers_auto(model: string?): boolean
+	if not model then
+		return true
+	end
+	local harness = string.match(model, "^([^/]+)/")
+	for _, h in (M.catalog:get() :: any).harnesses do
+		if h.id == harness then
+			return h.auto == true
+		end
+	end
+	return true
+end
 -- A call nothing waits on: its failure lands in the session's notice (the
 -- host sets it), so the script needn't hear it.
 local function quietly(p: any)

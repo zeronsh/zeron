@@ -660,6 +660,12 @@ mod tests {
     fn worktree_inputs_follow_its_head() {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
+        // (Windows' canonical path is `\\?\`-verbatim, which `git worktree add` refuses.)
+        let root = std::path::PathBuf::from(
+            root.to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_string(),
+        );
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
