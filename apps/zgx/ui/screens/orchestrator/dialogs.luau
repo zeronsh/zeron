@@ -12,6 +12,8 @@ local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local store = require("@app/screens/chat/store")
 local actions = require("@app/screens/orchestrator/actions")
+local flows = require("@app/screens/orchestrator/flows")
+local Flow = require("@ds/orch_flow")
 
 local M = {}
 
@@ -96,6 +98,11 @@ local function NewDialog(): Node
 	local device = ui.state("orch_new_device", NONE :: string)
 	local model = ui.state("orch_new_model", NONE :: string)
 	local busy = ui.state("orch_new_busy", false)
+	-- What its flow starts from (screens/orchestrator/flows' starters), and
+	-- a flow read from a file, when that's the one.
+	local start = ui.state("orch_new_start", flows.BLANK :: string)
+	local imported = ui.state("orch_new_imported", nil :: any)
+	local import_error = ui.state("orch_new_import_error", "")
 	-- This opening's request: set as it opens, cleared once it's sent.
 	local request = ui.state("orch_new_request", "")
 	-- Opened: on the project and device it was asked from, the draft kept.
@@ -136,6 +143,7 @@ local function NewDialog(): Node
 			request:set("")
 		end)
 		local harness, m = split_model(model:peek())
+		local chosen = if start:peek() == flows.IMPORTED then imported:peek() else flows.starter(start:peek())
 		actions
 			.create({
 				name = string.sub(n, 1, 80),
@@ -146,13 +154,30 @@ local function NewDialog(): Node
 				model = m,
 				request_id = req,
 			})
-			:after(function()
+			:after(function(reply: any)
+				-- Its flow, kept for it by its id.
+				local id = if type(reply) == "table" then reply.id elseif type(reply) == "string" then reply else nil
+				if chosen and type(id) == "string" then
+					flows.set(id, chosen)
+					-- And its plan in its notes, to follow until the engine
+					-- routes it: under any notes it has, never over them.
+					local had: string? = nil
+					for _, o in orchestration.now:peek().orchestrators or {} do
+						if o.id == id then
+							had = o.notes
+						end
+					end
+					actions.update(id, { notes = Flow.with_plan(had, chosen) })
+				end
 				ui.batch(function()
 					name:set("")
 					goal:set("")
 					project:set(NONE)
 					device:set(NONE)
 					model:set(NONE)
+					start:set(flows.BLANK)
+					imported:set(nil)
+					import_error:set("")
 					busy:set(false)
 					actions.new_open:set(false)
 				end)
@@ -213,6 +238,58 @@ local function NewDialog(): Node
 				end } },
 				ui.column { grow = 1, basis = 0, min_w = 0, ds.Select { value = model, name = ui.t("orch.dialog.model") :: any, options = model_options, size = "sm", w_full = true } },
 			},
+			-- What its flow starts from: nothing, Plan → Build → Review, a
+			-- saved template, or a team's JSON file.
+			ui.row {
+				id = "orch-new-start",
+				w_full = true,
+				gap = "$space.2",
+				items = "center",
+				ui.column { grow = 1, min_w = 0, ds.Select {
+					value = start,
+					name = ui.t("orch.dialog.start_from") :: any,
+					options = function(): { any }
+						local out = flows.starters()
+						local f = imported:get()
+						if f then
+							table.insert(out, { value = flows.IMPORTED, label = f.name })
+						end
+						return out
+					end,
+					size = "sm",
+					w_full = true,
+				} },
+				ds.Button {
+					ui.t("orch.dialog.import_flow") :: any,
+					id = "orch-new-import",
+					tone = "ghost",
+					size = "sm",
+					on_click = function()
+						import_error:set("")
+						flows.import_file(function(f: any, err: string?)
+							ui.batch(function()
+								if f then
+									imported:set(f)
+									start:set(flows.IMPORTED)
+								elseif err then
+									import_error:set(err)
+								end
+							end)
+						end)
+					end,
+				},
+			},
+			ui.show(function(): boolean
+				return import_error:get() ~= ""
+			end, ds.Text {
+				function(): string
+					local key = import_error:get()
+					return if key ~= "" then locale.s(key) else ""
+				end,
+				style = "caption",
+				tone = "danger",
+				wrap = true,
+			}),
 		},
 	}
 end

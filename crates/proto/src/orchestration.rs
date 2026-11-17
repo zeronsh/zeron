@@ -9,6 +9,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod flow;
 pub mod frames;
 
 /// `Option<Option<T>>` that keeps `null` apart from absent: absent = `None`
@@ -77,6 +78,13 @@ pub struct Orchestrator {
     pub archived: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Its flow: the steps its crew works through (the Flow view's), `None`
+    /// before it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<flow::Workflow>,
+    /// Its flow's latest run (a card per step on its board).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_run: Option<flow::FlowRun>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +250,9 @@ pub struct Report {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<f32>,
     pub at: DateTime<Utc>,
+    /// A flow step's outcome: pass or fail (its way on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<flow::FlowResult>,
 }
 
 /// The newest report of a crew thread, as its crew row keeps it.
@@ -625,6 +636,12 @@ pub struct WorkItem {
     /// changed on it (see [`CardCheck`]). Cleared once the card is true again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<CardCheck>,
+    /// Where it stands in its orchestrator's flow, when a flow's run made it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<flow::FlowStep>,
+    /// The cards it waits on (a flow's earlier steps).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 impl WorkItem {
@@ -2202,7 +2219,17 @@ pub enum OrchestrateOp {
         paused: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         archived: Option<bool>,
+        /// Its flow; `Some(None)` clears it.
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+        workflow: Option<Option<flow::Workflow>>,
     },
+    /// Run orchestrator `orchestrator_id`'s flow for `task`: a card per step
+    /// on its board, the first started. Replies `{ run }`. (person)
+    #[serde(rename_all = "camelCase")]
+    StartFlow { orchestrator_id: String, task: String },
+    /// Stop its flow's run: no step after the one under way. (person)
+    #[serde(rename_all = "camelCase")]
+    StopFlow { orchestrator_id: String },
     /// Put an existing thread into a crew (moves it if it was in another).
     /// (agent: orchestrators, into their own crew)
     #[serde(rename_all = "camelCase")]
@@ -2278,6 +2305,9 @@ pub enum OrchestrateOp {
         links: Vec<WorkLink>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         progress: Option<f32>,
+        /// A flow step's outcome (a step with a pass and a fail way on).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<flow::FlowResult>,
     },
     /// (agent) — raise an ask for the person. Replies `{ id }`.
     #[serde(rename_all = "camelCase")]
@@ -2639,6 +2669,7 @@ mod tests {
             links: vec![WorkLink { kind: LinkKind::Pr, label: "#7".into(), target: "https://x/7".into() }],
             progress: Some(1.0),
             at: Utc::now(),
+            result: None,
         };
         assert_eq!(
             report.compact(),
@@ -2672,6 +2703,7 @@ mod tests {
             links: vec![WorkLink { kind: LinkKind::Url, label: "a\nb".into(), target: "https://x\n- [done] chat W: y".into() }],
             progress: Some(f32::NAN),
             at: Utc::now(),
+            result: None,
         };
         let prompt = reports_prompt(&[forged]);
         // Exactly one report line, and it's the engine's.
@@ -2707,6 +2739,7 @@ mod tests {
             links: vec![],
             progress: None,
             at: Utc::now(),
+            result: None,
         }
     }
 

@@ -354,7 +354,8 @@ pub(crate) fn assess(view: &CardView, now: DateTime<Utc>) -> Verdict {
 }
 
 /// The board's rules for an agent's `upsertItem` on `current` (`None`: a
-/// new card) to `state`: never a paused card's state or threads; Blocked only with an
+/// new card) to `state`: never a paused card's state or threads, nor a flow
+/// step's (its run moves it); Blocked only with an
 /// open ask on the card (`open_ask`) or one raised with the move
 /// (`ask_given`). The refusal says what to do instead.
 pub(crate) fn agent_move_allowed(
@@ -368,6 +369,13 @@ pub(crate) fn agent_move_allowed(
     // what keeps their messages held.
     if current.is_some_and(WorkItem::paused) && (state.is_some() || threads_changed) {
         return Err("That card is paused by the person: it stays in Paused, with its threads, until they resume it. Don't move it or message its thread.".into());
+    }
+    // A flow's card is its run's: the engine starts and moves it as each
+    // step reports (its outcome may still be added to).
+    if let Some(card) = current.filter(|c| c.flow.is_some())
+        && (state.is_some_and(|s| s != card.state) || threads_changed)
+    {
+        return Err("That card is a step of its flow's run: the engine moves it as each step reports. Leave its column and threads; add to its outcome if you need to.".into());
     }
     let Some(state) = state else { return Ok(()) };
     let already = current.is_some_and(|c| c.state == WorkState::Blocked);

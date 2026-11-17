@@ -172,6 +172,8 @@ impl EngineRpc {
                     archived: false,
                     created_at: now,
                     updated_at: now,
+                    workflow: None,
+                    flow_run: None,
                 };
                 orch.workspace()
                     .write_orchestration(|doc| doc.upsert_orchestrator(&row));
@@ -188,6 +190,7 @@ impl EngineRpc {
                 wake,
                 paused,
                 archived,
+                workflow,
             } => {
                 orch.workspace().write_orchestration(|doc| {
                     let mut row = doc
@@ -220,6 +223,9 @@ impl EngineRpc {
                     }
                     if let Some(archived) = archived {
                         row.archived = archived;
+                    }
+                    if let Some(workflow) = workflow {
+                        row.workflow = workflow;
                     }
                     row.updated_at = now;
                     doc.upsert_orchestrator(&row);
@@ -381,6 +387,8 @@ impl EngineRpc {
             OrchestrateOp::PauseItem { id } => self.pause_item(&id, now),
             OrchestrateOp::ResumeItem { id, state } => self.resume_item(&id, state, now).await,
             OrchestrateOp::StartItem { id } => self.start_item(&id, *who == Who::Person),
+            OrchestrateOp::StartFlow { orchestrator_id, task } => self.start_flow(&orchestrator_id, &task),
+            OrchestrateOp::StopFlow { orchestrator_id } => self.stop_flow(&orchestrator_id),
             OrchestrateOp::Report {
                 state,
                 summary,
@@ -388,6 +396,7 @@ impl EngineRpc {
                 item_id,
                 links,
                 progress,
+                result,
             } => {
                 let Some(chat) = who.chat() else {
                     return Err(failed("Only a crew thread reports"));
@@ -402,6 +411,7 @@ impl EngineRpc {
                         item_id,
                         links,
                         progress,
+                        result,
                     },
                 )
                 .await
@@ -626,6 +636,11 @@ impl EngineRpc {
         // answered" asks again or lets it be. A thread's own question
         // on a route goes back to it, below.
         let route_answer = picked.unwrap_or_else(|| answer.clone());
+        // A flow's ask (a gate, a step's pass or fail, a return limit): the
+        // answer leads its run on.
+        if ask.item_id.as_deref().and_then(|i| orch.item(i)).is_some_and(|c| c.flow.is_some()) {
+            zeron_rpc::with_caller(zeron_rpc::Caller::Local, async { self.flow_on_answer(&ask, &route_answer) }).await;
+        }
         if self.answer_route_ask(&ask, &route_answer).await? {
             orch.comms().say(CommKind::Answer, YOU, &ask.from_chat, &answer);
             return Ok(json!({ "id": id }));
@@ -789,6 +804,8 @@ impl EngineRpc {
             archived: false,
             created_at: now,
             updated_at: now,
+            workflow: None,
+            flow_run: None,
         };
         self.orchestration()
             .workspace()
@@ -883,6 +900,7 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             _ => refuse("Only the Brain dump creates orchestrators: ask the person"),
         },
         OrchestrateOp::PromoteChat { .. } => refuse("Only the person makes a chat an orchestrator"),
+        OrchestrateOp::StartFlow { .. } | OrchestrateOp::StopFlow { .. } => refuse("Only the person runs or stops a flow"),
         OrchestrateOp::AddToBoard { .. } => refuse("Only the person puts a chat on the board"),
         OrchestrateOp::RemoveItem { .. } => refuse("Only the person takes a card off the board"),
         OrchestrateOp::UpdateSettings { .. } => refuse("Only the person changes orchestration settings"),
@@ -900,6 +918,7 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             paused,
             archived,
             notes: _,
+            workflow,
         } => {
             let own = matches!(role, ChatRole::Orchestrator { id: mine } | ChatRole::BrainDump { id: mine } if mine == id);
             let only_notes = name.is_none()
@@ -909,7 +928,8 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
                 && crew.is_none()
                 && wake.is_none()
                 && paused.is_none()
-                && archived.is_none();
+                && archived.is_none()
+                && workflow.is_none();
             if own && only_notes {
                 Ok(())
             } else {
@@ -938,6 +958,9 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             refuse("Only the person pauses or resumes a card")
         }
         OrchestrateOp::StartItem { id } => match (role, orch.item(id)) {
+            (ChatRole::Orchestrator { .. }, Some(card)) if card.flow.is_some() => {
+                refuse("That card is a step of its flow's run: the engine starts it when its turn comes")
+            }
             (ChatRole::Orchestrator { id: mine }, Some(card)) if card.orchestrator_id.as_deref() == Some(mine.as_str()) => Ok(()),
             _ => refuse("An orchestrator starts only its own cards: the person starts the rest"),
         },

@@ -25,6 +25,7 @@ use crate::workspace_host::WorkspaceHost;
 pub(crate) mod ask_images;
 pub(crate) mod brain;
 pub(crate) mod crew_archive;
+pub(crate) mod flow;
 pub(crate) mod incoming;
 pub mod comms;
 pub(crate) mod loads;
@@ -45,6 +46,8 @@ pub(crate) mod wake;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod flow_tests;
 
 pub use comms::CommBus;
 
@@ -537,6 +540,8 @@ pub(crate) fn apply_item_patch(
                 approved_at: None,
                 paused_at: None,
                 check: None,
+                flow: None,
+                depends_on: Vec::new(),
             }
         }
     };

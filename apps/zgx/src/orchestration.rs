@@ -14,13 +14,16 @@
 //!       orchestrators = { { id, kind, name, goal, rules, crew_rules, notes, hue,
 //!                           crew = { devices, max_running?, harness?, model? },
 //!                           wake? = { every_minutes?, at, weekdays_only, prompt, last_woke? },
-//!                           paused, archived, created, updated } },
+//!                           paused, archived, created, updated,
+//!                           workflow? (ds/orch_flow's shape), flow_run? = { id, flow, task,
+//!                           state, cards, returns, at?, reason?, started, ended? } } },
 //!       crew = { { chat_id, orchestrator_id, item_id?, role,
 //!                  last_report? = { id, state, summary, at }, released, joined } },
 //!       items = { { id, orchestrator_id?, title, detail, state, priority, progress?,
 //!                   threads, links = { { kind, label, target } }, outcome?,
 //!                   source? = { dump_id, route_id }, order, created, updated, done?,
-//!                   space_id?, device_id?, waiting? } },
+//!                   space_id?, device_id?, waiting?,
+//!                   flow? = { run, node, kind, flow, step, index, of }, depends_on } },
 //!       asks = { { id, from_chat, orchestrator_id?, item_id?, kind, question,
 //!                  options = { { label, detail?, images = { path_or_url },
 //!                                scores = { { name, value } } } },
@@ -71,6 +74,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use zeron_proto::orchestration::frames::{Followed, Follower, Heard, Keyed, ListDelta, OrchestrationDelta};
+use zeron_proto::orchestration::flow::{FlowEdge, FlowNode, FlowRun, Workflow};
 use zeron_proto::orchestration::{
     Ask, ChatActivity, CommEvent, CrewMember, DeviceLoad, Dump, OrchestrationState, Orchestrator, Route, RouteTarget,
     Score, TodoProgress, WorkItem, WorkLink,
@@ -291,6 +295,9 @@ const PERSON_OPS: &[&str] = &[
     "createOrchestrator",
     "promoteChat",
     "updateOrchestrator",
+    // (An orchestrator's flow run for a task, or its run stopped.)
+    "startFlow",
+    "stopFlow",
     "addToCrew",
     "releaseFromCrew",
     // (A chat put on the board: its card, made if it has none open.)
@@ -711,6 +718,57 @@ fn orchestrator_value(o: &Orchestrator) -> Value {
         ("archived", Value::Bool(o.archived)),
         ("created", secs(&o.created_at)),
         ("updated", secs(&o.updated_at)),
+        // (Its flow, in the Flow view's own shape, and its latest run.)
+        ("workflow", o.workflow.as_ref().map_or(Value::Nil, workflow_value)),
+        ("flow_run", o.flow_run.as_ref().map_or(Value::Nil, run_value)),
+    ])
+}
+
+/// A flow as ds/orch_flow has it (the version 2 team shape).
+fn workflow_value(w: &Workflow) -> Value {
+    let node = |n: &FlowNode| {
+        Value::record([
+            ("id", Value::from(n.id.as_str())),
+            ("kind", word(&n.kind)),
+            ("name", Value::from(n.name.as_str())),
+            ("x", Value::from(n.x)),
+            ("y", Value::from(n.y)),
+            ("instructions", Value::from(n.instructions.as_str())),
+            ("harness", Value::from(n.harness.as_str())),
+            ("model", Value::from(n.model.as_str())),
+        ])
+    };
+    let edge = |e: &FlowEdge| {
+        Value::record([
+            ("from", Value::from(e.from.as_str())),
+            ("to", Value::from(e.to.as_str())),
+            ("condition", word(&e.condition)),
+            ("max_retries", opt(e.max_retries, |n| Value::from(f64::from(n)))),
+        ])
+    };
+    Value::record([
+        ("version", Value::from(f64::from(w.version))),
+        ("name", Value::from(w.name.as_str())),
+        ("next_id", Value::from(w.next_id as f64)),
+        ("nodes", list(&w.nodes, node)),
+        ("edges", list(&w.edges, edge)),
+    ])
+}
+
+/// A flow's run: `{ id, flow, task, state, cards = { [step] = card },
+/// returns = { ["from>to"] = n }, at?, reason?, started, ended? }`.
+fn run_value(r: &FlowRun) -> Value {
+    Value::record([
+        ("id", Value::from(r.id.as_str())),
+        ("flow", workflow_value(&r.flow)),
+        ("task", Value::from(r.task.as_str())),
+        ("state", word(&r.state)),
+        ("cards", Value::record(r.cards.iter().map(|(k, v)| (k.as_str(), Value::from(v.as_str()))))),
+        ("returns", Value::record(r.returns.iter().map(|(k, v)| (k.as_str(), Value::from(f64::from(*v)))))),
+        ("at", opt_str(r.at.as_deref())),
+        ("reason", opt_str(r.reason.as_deref())),
+        ("started", secs(&r.started_at)),
+        ("ended", opt(r.ended_at.as_ref(), secs)),
     ])
 }
 
@@ -769,6 +827,19 @@ fn item_value(i: &WorkItem) -> Value {
         // (Paused by the person; the board check's note on it.)
         ("paused_at", opt(i.paused_at.as_ref(), secs)),
         ("check", i.check.as_ref().map_or(Value::Nil, check_value)),
+        // (Where it stands in its orchestrator's flow; the cards it waits on.)
+        ("flow", i.flow.as_ref().map_or(Value::Nil, |f| {
+            Value::record([
+                ("run", Value::from(f.run.as_str())),
+                ("node", Value::from(f.node.as_str())),
+                ("kind", word(&f.kind)),
+                ("flow", Value::from(f.flow.as_str())),
+                ("step", Value::from(f.step.as_str())),
+                ("index", Value::from(f64::from(f.index))),
+                ("of", Value::from(f64::from(f.of))),
+            ])
+        })),
+        ("depends_on", strings(&i.depends_on)),
     ])
 }
 
@@ -1031,6 +1102,38 @@ mod tests {
         assert_eq!(person_op(&json!({ "text": "no op" })), Err("invalid".to_string()));
         // (The person starts an Inbox or Next card from the board.)
         assert!(person_op(&json!({ "op": "startItem", "id": "it-1" })).is_ok());
+    }
+
+    #[test]
+    fn a_flow_step_s_card_and_its_orchestrator_s_run_read_for_the_scripts() {
+        let item: WorkItem = serde_json::from_value(json!({
+            "id": "c", "title": "QA: t", "state": "active", "priority": "normal", "createdAt": iso(NOW), "updatedAt": iso(NOW),
+            "flow": { "run": "r1", "node": "6", "kind": "qa", "flow": "Plan", "step": "QA", "index": 4, "of": 4 },
+            "dependsOn": ["v"],
+        }))
+        .unwrap();
+        let v = item_value(&item);
+        let f = v.field("flow").unwrap();
+        assert_eq!(text(f.field("step")).as_deref(), Some("QA"));
+        assert_eq!(text(f.field("kind")).as_deref(), Some("qa"));
+        assert_eq!(text(v.field("depends_on").unwrap().list().first()).as_deref(), Some("v"));
+        let o: Orchestrator = serde_json::from_value(json!({
+            "id": "o", "kind": "standard", "name": "O", "hue": 1, "createdAt": iso(NOW), "updatedAt": iso(NOW),
+            "workflow": { "version": 2, "name": "Plan", "next_id": 3, "nodes": [
+                { "id": "1", "kind": "chief", "name": "Entry" }, { "id": "2", "kind": "finish", "name": "Finish" }],
+                "edges": [{ "from": "1", "to": "2", "condition": "always" }] },
+            "flowRun": { "id": "r1", "flow": { "version": 2, "name": "Plan", "nodes": [], "edges": [] }, "task": "T",
+                "state": "blocked", "cards": { "6": "c" }, "returns": { "6>4": 2 }, "at": "6", "startedAt": iso(NOW) },
+        }))
+        .unwrap();
+        let v = orchestrator_value(&o);
+        let w = v.field("workflow").unwrap();
+        // (The Flow view's own shape: its entry is "chief".)
+        assert_eq!(text(w.field("nodes").unwrap().list().first().unwrap().field("kind")).as_deref(), Some("chief"));
+        let run = v.field("flow_run").unwrap();
+        assert_eq!(text(run.field("state")).as_deref(), Some("blocked"));
+        assert_eq!(text(run.field("cards").unwrap().field("6")).as_deref(), Some("c"));
+        assert_eq!(text(run.field("at")).as_deref(), Some("6"));
     }
 
     #[test]

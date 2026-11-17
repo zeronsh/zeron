@@ -30,12 +30,36 @@ local actions = require("@app/screens/orchestrator/actions")
 local Progress = require("@app/screens/control/progress")
 local NeedsYou = require("@app/screens/control/needs")
 local KeptScroll = require("@ds/kept_scroll")
+local Flow = require("@ds/orch_flow")
+local FlowEditor = require("@ds/orch_flow_editor")
+local flows = require("@app/screens/orchestrator/flows")
+local store = require("@app/screens/chat/store")
+local toast = require("@ds/toast")
 
 local M = {}
 
 -- Narrow: which half shows, the conversation or the live state (one for
 -- the window, kept across a reload).
 local half = ui.state("orch_page_half", "chat")
+
+-- What the page shows: its work (the conversation and live state) or its
+-- flow, to edit (ds/orch_flow_editor).
+M.view = ui.state("orch_page_view", "work")
+
+-- The models the composer's device offers, as `harness/model`, grouped by
+-- agent: a flow block's choices.
+local function model_options(): { any }
+	local cat = store.catalog:get()
+	local labels: { [string]: string } = {}
+	for _, h in cat.harnesses or {} do
+		labels[h.id] = h.label
+	end
+	local out: { any } = {}
+	for _, m in cat.models or {} do
+		table.insert(out, { value = m.value, label = m.label, group = labels[m.harness] or m.harness })
+	end
+	return out
+end
 
 -- Where its live state is scrolled: kept as the page is made again (a
 -- thread opened from it and back, the orchestrator a moment unknown while
@@ -263,10 +287,24 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					color = "$text.secondary",
 				},
 			},
+			-- Its work or its flow.
+			ui.div {
+				shrink = 0,
+				ds.Segmented {
+					id = "orch-view",
+					value = M.view,
+					options = {
+						{ value = "work", label = ui.t("orch.page.work") :: any },
+						{ value = "flow", label = ui.t("orch.page.flow") :: any },
+					},
+				},
+			},
 			-- Narrow: the conversation or the live state.
 			ui.div {
 				shrink = 0,
-				hidden = split,
+				hidden = function(): boolean
+					return split() or M.view:get() == "flow"
+				end,
 				ds.Segmented {
 					value = half,
 					options = {
@@ -508,6 +546,113 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 		}
 	end
 
+	-- Its flow's run as the editor shows it: its state, the step it's at
+	-- and its name, and the steps whose cards are done.
+	local function flow_run(): any
+		local o = orchestrator()
+		local r = o and o.flow_run
+		if type(r) ~= "table" then
+			return nil
+		end
+		local done: { [string]: boolean } = {}
+		for node, card in r.cards or {} do
+			local it = rows.item(card)
+			if it and it.state == "done" then
+				done[node] = true
+			end
+		end
+		local step: string? = nil
+		if r.at and type(r.flow) == "table" then
+			for _, n in r.flow.nodes or {} do
+				if n.id == r.at then
+					step = n.name
+				end
+			end
+		end
+		return { state = r.state, at = r.at, step = step, done = done }
+	end
+
+	-- Its flow, to edit: the engine's (screens/orchestrator/flows), else as
+	-- kept on this device from before.
+	local function flow_view(): Node
+		local function set(f: any)
+			local id = props.of()
+			if id then
+				flows.set(id, f)
+			end
+		end
+		local function said(key: string, tone: string)
+			toast.show { title = locale.s(key), tone = tone :: any }
+		end
+		return ui.column {
+			id = "orch-flow-view",
+			w_full = true,
+			grow = 1,
+			min_h = 0,
+			FlowEditor.FlowEditor {
+				flow = function(): any
+					return flows.of(props.of())
+				end,
+				on_change = set,
+				hue = hue_now,
+				scope = props.of,
+				models = model_options,
+				on_start = function(kind: string)
+					set(if kind == "default" then Flow.initial() else Flow.blank())
+				end,
+				run = flow_run,
+				on_run = function(task: string)
+					local id = props.of()
+					if not id then
+						return
+					end
+					-- (Its last edit there first: the run follows the flow as shown.)
+					flows.flush(id)
+					orchestration.op({ op = "startFlow", orchestratorId = id, task = task }):after(function() end, function()
+						said("orch.flow.run.failed", "danger")
+					end)
+				end,
+				on_stop = function()
+					local id = props.of()
+					if id then
+						orchestration.op({ op = "stopFlow", orchestratorId = id }):after(function() end, function()
+							said("orch.flow.run.stop_failed", "danger")
+						end)
+					end
+				end,
+				on_import = function()
+					flows.import_file(function(f: any, err: string?)
+						if f then
+							set(f)
+							said("orch.flow.imported", "success")
+						elseif err then
+							said(err, "danger")
+						end
+					end)
+				end,
+				on_export = function()
+					local f = flows.of(props.of())
+					if f then
+						flows.export_file(f, function(saved: boolean, err: string?)
+							if saved then
+								said("orch.flow.exported", "success")
+							elseif err then
+								said(err, "danger")
+							end
+						end)
+					end
+				end,
+				on_save_template = function()
+					local f = flows.of(props.of())
+					if f then
+						flows.save_template(f)
+						said("orch.flow.template_saved", "success")
+					end
+				end,
+			},
+		}
+	end
+
 	return ui.column {
 		id = "orchestrator-page",
 		w_full = true,
@@ -539,7 +684,26 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					},
 				}
 			end
-			return ui.column { w_full = true, h_full = true, head(), body() }
+			return ui.column {
+				w_full = true,
+				h_full = true,
+				head(),
+				ui.div { w_full = true, h = 1, shrink = 0, bg = "$border", hidden = function(): boolean
+					return M.view:get() ~= "flow"
+				end },
+				ui.column {
+					w_full = true,
+					grow = 1,
+					min_h = 0,
+					hidden = function(): boolean
+						return M.view:get() == "flow"
+					end,
+					body(),
+				},
+				ui.show(function(): boolean
+					return M.view:get() == "flow"
+				end, flow_view()),
+			}
 		end, { w_full = true, h_full = true }),
 		-- An ask expanded from Needs you, whole (as on the Control room).
 		NeedsYou.Decision { name_of = name_of, hue_of = hue_of, on_link = open_link },

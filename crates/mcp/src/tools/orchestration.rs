@@ -161,7 +161,8 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "detail": s("Optional markdown: what changed, what you need, what's next."),
                     "item": s("Board item id, when not the one you were given."),
                     "links": links_schema(),
-                    "progress": { "type": "number", "minimum": 0, "maximum": 1, "description": "How far your item is, 0 to 1." }
+                    "progress": { "type": "number", "minimum": 0, "maximum": 1, "description": "How far your item is, 0 to 1." },
+                    "result": { "type": "string", "enum": ["pass", "fail"], "description": "A flow step's outcome, with done, when your step says to give one: pass if the work holds, fail to send it back (say what to fix in detail)." }
                 },
                 "required": ["state", "summary"]
             }),
@@ -392,6 +393,7 @@ struct ReportArgs {
     #[serde(default)]
     links: Vec<WorkLink>,
     progress: Option<f64>,
+    result: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -575,10 +577,19 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
                 return Err("summary is one line: put the rest in detail".into());
             }
             let progress = a.progress.map(|p| fraction("progress", p)).transpose()?;
-            Ok(json!({
+            let result = match a.result.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+                None => None,
+                Some(r @ ("pass" | "fail")) => Some(r.to_owned()),
+                Some(other) => return Err(format!("result is pass or fail, not {other:?}")),
+            };
+            let mut op = json!({
                 "op": "report", "state": state, "summary": summary, "detail": a.detail,
                 "itemId": a.item, "links": a.links, "progress": progress,
-            }))
+            });
+            if let Some(result) = result {
+                op["result"] = json!(result);
+            }
+            Ok(op)
         }
         ASK => {
             let a: AskArgs = parse(args)?;
@@ -1129,6 +1140,12 @@ impl Tools {
                     "outcome": i.outcome, "detail": i.detail,
                     "paused": i.paused().then_some("paused by the person: theirs to resume, leave it"),
                     "check": i.check.as_ref().map(|c| json!({ "kind": c.kind, "note": c.note, "since": c.since })),
+                    // (A step of its flow's run: the engine moves it as the run goes.)
+                    "flowStep": i.flow.as_ref().map(|f| json!({
+                        "flow": f.flow, "step": f.step, "kind": f.kind, "index": f.index, "of": f.of,
+                        "note": "a step of the flow's run: the engine starts and moves it as each step reports",
+                    })),
+                    "dependsOn": (!i.depends_on.is_empty()).then_some(&i.depends_on),
                 })
             })
             .collect();
@@ -1330,6 +1347,8 @@ mod tests {
             crew: CrewPolicy::default(),
             wake: None,
             paused: false,
+            workflow: None,
+            flow_run: None,
             archived: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -1405,6 +1424,8 @@ mod tests {
             approved_at: None,
             paused_at: None,
             check: None,
+            flow: None,
+            depends_on: Vec::new(),
         };
         let state = OrchestrationState {
             orchestrators: vec![o, orchestrator("b1", OrchestratorKind::BrainDump)],
