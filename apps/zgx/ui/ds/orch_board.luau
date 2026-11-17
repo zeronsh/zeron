@@ -221,15 +221,15 @@ local UP_NEXT, LATER = "planned", "inbox"
 local RANK: { [string]: number } = { urgent = 0, high = 1, normal = 2, low = 3 }
 local PRIORITIES = { "urgent", "high", "normal", "low" }
 
--- The least a column takes side by side: narrower than that for them all,
--- they stand in rows of `PER_ROW`; narrower than that for those, one under
--- another.
-local COLUMN_MIN = 160
+-- The least a column takes (a card as narrow fits all its rows,
+-- tests/orch_board_fit): narrower than that for them all side by side,
+-- they stand in rows of equal columns, as many a row as fit, the rows
+-- balanced (four: two and two); room for one alone, one under another.
+local COLUMN_MIN = 220
 -- The most cards a column shows until its cards are all shown.
 local CAP = 10
 -- The columns that stand only while they hold a card.
 local ONLY_HELD: { [string]: boolean } = { blocked = true }
-local PER_ROW = 3
 -- Each column's glyph at its head: how its cards stand.
 local COLUMN_GLYPH: { [string]: Icon.Name } = {
 	queued = "clock-circle",
@@ -308,12 +308,48 @@ local LEAD: { [string]: number } = { input = 0, approval = 0, failed = 1, limite
 
 -- An outcome's words as one quiet run (its lines folded): the markdown's
 -- marks left out.
+local plain_of: { [string]: string } = setmetatable({}, { __mode = "k" }) :: any
+local plain_n = 0
 local function plain(md: string): string
+	local hit = plain_of[md]
+	if hit then
+		return hit
+	end
+	-- (Kept for the outcomes it has seen, a few hundred at most.)
+	plain_n += 1
+	if plain_n > 512 then
+		plain_of, plain_n = {}, 0
+	end
 	local s = string.gsub(md, "%*%*", "")
 	s = string.gsub(s, "`", "")
 	s = string.gsub(s, "%[([^%]]*)%]%b()", "%1")
 	s = string.gsub(s, "\n+", " ")
+	plain_of[md] = s
 	return s
+end
+
+-- An outcome's two lines need no more than this many of its characters:
+-- the rest is cut before it's laid out (a long one, shaped whole, cost as
+-- much as the rest of its card), and read whole where the pointer rests.
+local OUTCOME_CHARS = 280
+local function clipped(s: string): string
+	if #s <= OUTCOME_CHARS then
+		return s
+	end
+	-- (On a character's start, not inside one.)
+	local cut = utf8.offset(s, OUTCOME_CHARS) or OUTCOME_CHARS
+	return string.sub(s, 1, cut - 1) .. "…"
+end
+
+-- What shows only now and then (a decision's chips, Review's buttons, the
+-- box for changes): built the first time it shows, not with every card.
+-- (`ui.show` keeps it out of the row's gaps while it doesn't.)
+local function when(shown: () -> boolean, build: () -> Node, box: { [string]: any }?): Node
+	return ui.show(shown, ui.presence(function(): string?
+		return if shown() then "on" else nil
+	end, function(): Node
+		return build()
+	end, box))
 end
 
 -- How its threads stand where that's worth a word on its card: the lead
@@ -1450,7 +1486,24 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end
 		local sep = Card.Sep
 		local menu_open = ui.use_state(false)
-		local status_line = Card.Line {
+		local line_h = (ui.theme.get("font.line.sm") :: number?) or 16
+		-- Its quiet line, in two parts that wrap: what it says (shrinking,
+		-- its words truncated), and its PRs and menu at the end, on a line
+		-- of their own where the column has no room for both.
+		local status_line = ui.row {
+			class = "orch-card-status",
+			w_full = true,
+			min_w = 0,
+			flex_wrap = true,
+			gap = "$space.1",
+			items = "center",
+			ui.row {
+			class = "orch-card-meta",
+			min_w = 0,
+			shrink = 1,
+			h = line_h,
+			gap = "$space.1",
+			items = "center",
 			-- Whose it is: its orchestrator's hue, named where the pointer rests.
 			ui.show(function(): boolean
 				return owner() ~= nil
@@ -1477,20 +1530,23 @@ local OrchBoard = ui.component(function(props: Props): Node
 				},
 			}),
 			-- Its name too, where the line has nothing else to say.
-			ui.show(function(): boolean
+			when(function(): boolean
 				return owner() ~= nil and not (has_word() or has_steps() or has_clock())
-			end, Card.Word {
-				text = function(): string
-					local o = owner()
-					return if o then o.name else ""
-				end,
-				class = "orch-card-owner-name",
-			}),
+			end, function(): Node
+				return Card.Word {
+					text = function(): string
+						local o = owner()
+						return if o then o.name else ""
+					end,
+					class = "orch-card-owner-name",
+				}
+			end, { min_w = 0 }),
 			-- Where it will be worked, while it waits: its project, else its
 			-- machine.
-			ui.show(function(): boolean
+			when(function(): boolean
 				return where() ~= nil
-			end, ui.row {
+			end, function(): Node
+				return ui.row {
 				class = "orch-card-place",
 				min_w = 0,
 				shrink = 1,
@@ -1514,7 +1570,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 					end,
 					class = "orch-card-place-name",
 				},
-			}),
+			}
+			end, { min_w = 0, shrink = 1 }),
 			ui.show(function(): boolean
 				return urgency() ~= nil
 			end, Card.Word {
@@ -1582,7 +1639,13 @@ local OrchBoard = ui.component(function(props: Props): Node
 					return if stalled() then "$zeron.tone.warning.ink" else "$text.tertiary"
 				end,
 			}),
-			ui.div { grow = 1 },
+			},
+			ui.row {
+			class = "orch-card-chips",
+			grow = 1,
+			justify = "end",
+			gap = "$space.1",
+			items = "center",
 			ui.each(ui.computed(prs), function(l: Link): Node
 				local n = tonumber(string.match(l.label, "%d+"))
 				return ui.button {
@@ -1616,6 +1679,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				end,
 				label = locale.t("orch.board.card_actions"),
 			},
+			},
 		}
 		local function has_status(): boolean
 			return owner() ~= nil or where() ~= nil or has_word() or has_steps() or has_clock() or #prs() > 0
@@ -1631,7 +1695,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end, function(k: string): Node
 			return ui.text {
 				function(): string
-					return plain(outcome() or "")
+					return clipped(plain(outcome() or ""))
 				end,
 				class = "orch-outcome",
 				w_full = true,
@@ -1649,11 +1713,17 @@ local OrchBoard = ui.component(function(props: Props): Node
 						p = "$space.3",
 						text_size = "$font.size.sm",
 						color = "$text.secondary",
-						Markdown {
-							text = function(): string
-								return item().outcome or ""
-							end,
-						},
+						-- (Its markdown made only while the pointer rests on the
+						-- card: a board of outcomes isn't parsed for nothing.)
+						ui.presence(function(): string?
+							return if hovered:get() then "on" else nil
+						end, function(): Node
+							return Markdown {
+								text = function(): string
+									return item().outcome or ""
+								end,
+							}
+						end, { w_full = true }),
 					}
 					else nil,
 				tooltip_delay = 300,
@@ -1669,9 +1739,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 			return a
 		end
-		local decision = ui.show(function(): boolean
+		local decision = when(function(): boolean
 			return asked() ~= nil
-		end, ui.column {
+		end, function(): Node
+			return ui.column {
 			class = "orch-card-decision",
 			w_full = true,
 			min_w = 0,
@@ -1703,7 +1774,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 				size = "xs",
 				class = "orch-card-choices",
 			},
-		})
+		}
+		end, { w_full = true, min_w = 0 })
 		local body = ui.column {
 			w_full = true,
 			min_w = 0,
@@ -1718,10 +1790,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 				ui.show(has_status, status_line),
 				-- In Review: its end, Approve or Request changes (a box for
 				-- what to change, sent to its thread).
-				ui.show(function(): boolean
+				when(function(): boolean
 					return reviewable(item()) and not changing:get()[id]
-				end, ui.row {
+				end, function(): Node
+					return ui.row {
 					class = "orch-card-review",
+					-- (A narrow column: Request changes under Approve.)
+					w_full = true,
+					min_w = 0,
+					flex_wrap = true,
 					gap = "$space.1",
 					items = "center",
 					pt = "$zeron.space.hair",
@@ -1745,10 +1822,12 @@ local OrchBoard = ui.component(function(props: Props): Node
 						end,
 						locale.t("orch.board.request_changes"),
 					}),
-				}),
-				ui.show(function(): boolean
+				}
+				end),
+				when(function(): boolean
 					return changing:get()[id] == true
-				end, TextField {
+				end, function(): Node
+					return TextField {
 					class = "orch-card-changes",
 					value = change_text,
 					size = "sm",
@@ -1779,7 +1858,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 						end
 						return nil
 					end,
-				}),
+				}
+				end, { w_full = true }),
 			},
 			-- Where plugins decorate it (the github plugin: its checks).
 			-- (Outside the steps' gaps: empty, it takes no room.)
@@ -2301,8 +2381,9 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 		}
 	end
 
-	-- Side by side where there's room; in rows of three where there's
-	-- less; one under another where there's little.
+	-- Side by side where there's room; in balanced rows of equal columns
+	-- where there's less (only those standing: an empty Blocked holds no
+	-- place); one under another where there's room for one.
 	local width = ui.use_state(0)
 	local function need(n: number): number
 		return n * COLUMN_MIN + (n - 1) * space("space.2", 8)
@@ -2323,10 +2404,26 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 	end
 	local mode = ui.computed(function(): string
 		local w = width:get()
-		if w <= 0 or w >= need(standing()) then
+		local n = standing()
+		if w <= 0 or w >= need(n) then
 			return "side"
 		end
-		return if w >= need(PER_ROW) then "rows" else "stacked"
+		local gap = space("space.2", 8)
+		local fit = math.floor((w + gap) / (COLUMN_MIN + gap))
+		if fit <= 1 then
+			return "stacked"
+		end
+		local rows = math.ceil(n / fit)
+		local per = math.ceil(n / rows)
+		-- (Which stand, in the key: one coming or going lays them out anew.)
+		local keys = {}
+		local lists = shown:get()
+		for _, c in columns do
+			if not ONLY_HELD[c.key] or #(lists[c.key] or {}) > 0 then
+				table.insert(keys, c.key)
+			end
+		end
+		return `rows:{per}:{table.concat(keys, ",")}`
 	end)
 	local function lanes(k: string): Node
 		if k == "stacked" then
@@ -2338,9 +2435,24 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 		end
 		-- (In rows, the last one's columns as wide as the rest: room kept
 		-- where it has fewer.)
-		local per = if k == "rows" then PER_ROW else #columns
+		local per, list = #columns, columns
+		local per_s, keys = string.match(k, "^rows:(%d+):(.*)$")
+		if per_s then
+			per = tonumber(per_s) :: number
+			local standing_keys: { [string]: boolean } = {}
+			for key in string.gmatch(keys, "[^,]+") do
+				standing_keys[key] = true
+			end
+			list = {}
+			for _, c in columns do
+				if standing_keys[c.key] then
+					table.insert(list, c)
+				end
+			end
+			k = "rows"
+		end
 		local rows: { Node } = {}
-		for from = 1, #columns, per do
+		for from = 1, #list, per do
 			local cells: { [any]: any } = {
 				class = "orch-board-side",
 				w_full = true,
@@ -2348,7 +2460,7 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 				items = "stretch",
 			}
 			for i = from, from + per - 1 do
-				local c = columns[i]
+				local c = list[i]
 				table.insert(cells, if c then column(c, k) else ui.div { grow = 1, basis = 0, min_w = COLUMN_MIN })
 			end
 			table.insert(rows, ui.row(cells))

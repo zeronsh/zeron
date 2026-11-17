@@ -71,7 +71,20 @@ end)
 
 test("control scroll: a Board card deleted keeps the place", function()
 	holds("control_fixture.luau", 250, function(app)
-		app:right_click('#control-board-tab >> role:button "Phase 2 migration"')
+		-- (A card in view where the Board is scrolled to.)
+		local view = string.match(app:tree("#control-board-scroll", 0), "[^\n]+") or ""
+		local _, vy, _, vh = string.match(view, " (%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+		local top, bottom = tonumber(vy) or 0, (tonumber(vy) or 0) + (tonumber(vh) or 0)
+		local pick = 1
+		for i = 1, app:count("#control-board-tab >> .orch-card") do
+			local line = string.match(app:tree(`#control-board-tab >> .orch-card [{i}]`, 0), "[^\n]+") or ""
+			local _, y, _, h = string.match(line, " (%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+			if tonumber(y) and tonumber(y) >= top and tonumber(y) + tonumber(h) <= bottom then
+				pick = i
+				break
+			end
+		end
+		app:right_click(`#control-board-tab >> .orch-card [{pick}]`)
 		app:frames(10)
 		app:click('role:menuitem "Delete"')
 	end, true)
