@@ -610,6 +610,13 @@
         "worktree_hint": "An isolated copy, on a branch of its own."
       },
       "work_in": "Work in",
+      "reach": {
+        "label": "Reaches",
+        "devices": "All devices",
+        "devices_hint": "Works with your other devices: their chats, and commands on them.",
+        "isolated": "Isolated",
+        "isolated_hint": "Only its own machine and the chats it starts."
+      },
       "project": {
         "label": "Project",
         "search": "Search projects…",
@@ -2044,6 +2051,12 @@
         "terms": "machine size vcpu memory disk credits rate xlarge large small standard",
         "description": "The size new Cloud chats start on. Bigger machines use credits faster.",
         "failed": "Couldn't change the default machine. Try again in a moment."
+      },
+      "reach": {
+        "title": "New chats reach",
+        "terms": "reach access devices isolated isolate remote commands security",
+        "description": "Whether new Cloud chats work with your other devices — their chats, and commands on them — or stay on their own machine. You can change it for each chat from its composer.",
+        "failed": "Couldn't change what new Cloud chats reach. Try again in a moment."
       }
     },
     "billing": {
@@ -3409,6 +3422,9 @@
         "expired": "You were signed out. Sign in again to carry on.",
         "failed": "Sign-in didn't finish. Try again."
       }
+    },
+    "cloud": {
+      "reach_not_changed": "Couldn't change what this Cloud chat reaches."
     }
   },
   "plugins": {

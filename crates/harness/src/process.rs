@@ -967,7 +967,7 @@ mod tests {
     }
 }
 
-pub(crate) mod owned;
+pub mod owned;
 pub mod registry;
 pub use registry::spawn as spawn_agent;
 

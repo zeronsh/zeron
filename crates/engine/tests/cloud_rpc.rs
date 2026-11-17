@@ -544,6 +544,86 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
     assert_eq!(side.device_id, "cloud-s-chat-1");
     assert_eq!(side.cwd.as_deref(), Some("/home/user/app"));
 
+    // An agent naming another of the person's devices starts its chat
+    // there; naming the parent's machine, or none, it shares that machine.
+    use zeron_rpc::RpcService as _;
+    let rpc = core.rpc_service();
+    let agent_creates = |chat_id: &str, device: Option<String>| {
+        let mut op = serde_json::json!({
+            "op": "createChat", "chatId": chat_id, "spaceId": "sp-app", "parentChatId": "chat-1",
+            "config": { "harness": "mock", "sandbox": "workspace-write", "access": "full-access" },
+        });
+        if let Some(device) = device {
+            op["deviceId"] = serde_json::json!(device);
+        }
+        zeron_rpc::with_caller(
+            zeron_rpc::Caller::Agent { chat: None },
+            rpc.handle(methods::MUTATE, op),
+        )
+    };
+    agent_creates("side-here", Some(core.workspace.device_id().to_owned()))
+        .await
+        .unwrap();
+    assert_eq!(
+        core.workspace.chat("side-here").unwrap().unwrap().device_id,
+        core.workspace.device_id()
+    );
+    agent_creates("side-there", Some("cloud-s-chat-1".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        core.workspace
+            .chat("side-there")
+            .unwrap()
+            .unwrap()
+            .device_id,
+        "cloud-s-chat-1"
+    );
+    agent_creates("side-unnamed", None).await.unwrap();
+    assert_eq!(
+        core.workspace
+            .chat("side-unnamed")
+            .unwrap()
+            .unwrap()
+            .device_id,
+        "cloud-s-chat-1"
+    );
+
+    // What a new machine reaches: the person's pick goes to the edge; an
+    // agent's is never taken (the account's default applies).
+    let session_bodies = |chat_id: &str| -> Vec<serde_json::Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(request, _)| request.starts_with("POST ") && request.ends_with("/sessions"))
+            .filter_map(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+            .filter(|body| body["chatId"] == chat_id)
+            .collect()
+    };
+    assert!(session_bodies("chat-1")[0].get("reach").is_none());
+    create(
+        &client,
+        serde_json::json!({
+        "chatId": "chat-isolated", "spaceId": "sp-app", "cloud": true, "cloudReach": "isolated" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(session_bodies("chat-isolated")[0]["reach"], "isolated");
+    zeron_rpc::with_caller(
+        zeron_rpc::Caller::Agent { chat: None },
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "chat-by-agent", "spaceId": "sp-app",
+                "cloud": true, "cloudReach": "devices",
+                "config": { "harness": "mock", "sandbox": "workspace-write", "access": "full-access" },
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(session_bodies("chat-by-agent")[0].get("reach").is_none());
+
     // Without Cloud picked, the same project runs here.
     create(
         &client,
@@ -609,6 +689,18 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
                 "sp-app",
                 "https://github.com/acme/app.git",
                 Some("dev")
+            ),
+            (
+                "chat-isolated",
+                "sp-app",
+                "https://github.com/acme/app.git",
+                None
+            ),
+            (
+                "chat-by-agent",
+                "sp-app",
+                "https://github.com/acme/app.git",
+                None
             ),
             (
                 "chat-fail",

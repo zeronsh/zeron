@@ -35,6 +35,8 @@
 //!                                  without one, `device` hosts it; `parent`:
 //!                                  a side chat of that chat, where it is;
 //!                                  `cloud`: on a Cloud machine of its own,
+//!                                  reaching `reach` (`devices` | `isolated`;
+//!                                  none: the account's default),
 //!                                  `{ id, cwd }`, or why not in words)
 //!   sessions.fork({ source, parent?, id? })  a side chat starting as a copy of
 //!                                  `source` (`ForkSideChat`): its id, or the
@@ -1551,6 +1553,9 @@ impl Sessions {
         let mut params = json!({ "op": "createChat", "chatId": id, "spaceId": project, "cloud": true });
         if let Some(branch) = field("branch") {
             params["branch"] = Json::from(branch);
+        }
+        if let Some(reach) = field("reach").filter(|r| matches!(r.as_str(), "devices" | "isolated")) {
+            params["cloudReach"] = Json::from(reach);
         }
         if let Some(config) = args
             .field("config")

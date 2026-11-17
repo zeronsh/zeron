@@ -21,6 +21,7 @@ import { ensureNudges, enqueueNudge, pendingNudges, acknowledgeNudge, NUDGE_PAGE
 import { BytesReader, BytesWriter } from "loro-protocol";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
 import { AUTH_USER_HEADER, CALLER_DEVICE_HEADER, type Env } from "./env";
+import { RUNNER_DROP_PATH, admittedRunner, applyDrop, parseDrop, revoked, runnerDroppedKey, type RunnerDrop } from "./runner-revocation";
 
 export interface DeviceFrameHeader {
   /** Stream id, unique per (connId, logical stream). */
@@ -58,6 +59,9 @@ interface SocketState {
   connId: string;
   /** Clients: the device the Worker verified at dial time, if any. */
   callerDevice?: string;
+  /** A Cloud runner's client its session's reach admitted, revocably
+   * (runner-revocation.ts). */
+  runner?: RunnerDrop;
   /** Accept time — the liveness floor until the socket's first auto-pong. */
   joinedAt?: number;
   nudgeAck?: boolean;
@@ -166,6 +170,11 @@ export class DeviceRoom implements DurableObject {
       } else {
         if (!owner || owner !== userId) return new Response("forbidden", { status: 403 });
       }
+      // Admitted before its session was isolated, arriving after: refused.
+      const runner = role === "client" ? admittedRunner(request) : undefined;
+      if (runner && revoked(runner, this.getMeta(runnerDroppedKey(runner.device)))) {
+        return new Response("forbidden", { status: 403 });
+      }
       const connId = url.searchParams.get("connId") ?? crypto.randomUUID();
       const pair = new WebSocketPair();
       if (role === "host") {
@@ -188,6 +197,7 @@ export class DeviceRoom implements DurableObject {
         role,
         connId,
         ...(callerDevice ? { callerDevice } : {}),
+        ...(runner ? { runner } : {}),
         joinedAt: Date.now(),
         nudgeAck: url.searchParams.get("nudgeAck") === "1",
         nudgeInflight: []
@@ -197,6 +207,21 @@ export class DeviceRoom implements DurableObject {
       // Tells the dialer its device was stamped (device-link.ts).
       const headers = callerDevice ? { [CALLER_DEVICE_HEADER]: callerDevice } : undefined;
       return new Response(null, { status: 101, webSocket: pair[0], headers });
+    }
+
+    // A Cloud runner isolated: close its clients its reach admitted
+    // (internal: the registry sends it; the Worker never routes here).
+    if (url.pathname === RUNNER_DROP_PATH && request.method === "POST") {
+      if (owner && owner !== userId) return new Response("forbidden", { status: 403 });
+      const drop = parseDrop(await request.json().catch(() => null));
+      if (!drop) return json({ error: "bad_request" }, 400);
+      const closed = applyDrop(
+        drop,
+        { get: (key) => this.getMeta(key), set: (key, value) => this.setMeta(key, value) },
+        this.ctx.getWebSockets(),
+        (socket) => (socket.deserializeAttachment() as SocketState | null)?.runner
+      );
+      return json({ closed });
     }
 
     // Sidecar slots (host-published JSON, e.g. repos snapshot §8.1).

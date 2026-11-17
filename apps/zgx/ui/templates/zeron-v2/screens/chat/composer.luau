@@ -30,6 +30,7 @@ local route = require("@app/screens/shell/route")
 local art = require("@app/screens/shell/art")
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
+local cloud = require("@account/cloud")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local CloudTray = require("@app/screens/chat/cloud_tray")
 local CloudMachine = require("@app/screens/chat/cloud_machine")
@@ -191,6 +192,9 @@ local function Composer(): Node
 	local checkout = ui.state("chat_checkout", "worktree" :: string?)
 	local branch = ui.state("chat_branch", nil :: string?)
 	local project = ui.state("chat_project", nil :: string?)
+	-- On Cloud, what a new chat's machine reaches (nil: the account's
+	-- default, Settings → Cloud). Each new chat starts from the default.
+	local reach = ui.state("chat_reach", nil :: string?)
 	local locals: { [string]: State<any> } =
 		{ model = model, effort = effort, fast = fast, options = options, access = access, plan = plan }
 
@@ -1093,10 +1097,12 @@ local function Composer(): Node
 			slide_to = chat_id
 			route.open_session(chat_id)
 			sessions
-				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true })
+				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true, reach = reach:peek() })
 				:after(function(made: any)
 					local cwd = if type(made) == "table" then made.cwd else nil
 					req.cwd = if type(cwd) == "string" and cwd ~= "" then cwd else nil
+					-- (The next new chat starts from the default again.)
+					reach:set(nil)
 					store.created(chat_id)
 					store.send(req):after(function() end, function(_e: any) end)
 				end, function(e: any)
@@ -1239,9 +1245,13 @@ local function Composer(): Node
 				on = d.name
 			end
 		end
+		-- On Cloud: its machine's session (a side chat shares its parent's).
+		local machine = if cloud.on_device((s :: any).device) then cloud.session_for(s.id, (s :: any).device) else nil
 		return {
 			device = on,
 			name = name,
+			cloud = cloud.on_device((s :: any).device),
+			reach = if machine then machine.reach else nil,
 			worktree = path ~= nil and s.cwd ~= nil and s.cwd ~= path,
 			project = project,
 			hue = if project and s.project then (route.look(s.project) or { hue = route.hue(s.project) }).hue else nil,
@@ -1363,6 +1373,16 @@ local function Composer(): Node
 			branches = where.branches,
 			branches_empty = where.branches_empty,
 			branch_fixed = branch_fixed,
+			-- (Only ever the person's: the engine takes it from this app alone.)
+			on_reach = function(r: string)
+				local s = open()
+				local machine = if s then cloud.session_for(s.id, (s :: any).device) else nil
+				if machine then
+					cloud.set_session_reach(machine.chat, r)
+				end
+			end,
+			reach = reach,
+			reach_default = cloud.reach,
 			cargo = shared.cargo,
 			on_remove_cargo = shared.remove_cargo,
 			on_attach = function()

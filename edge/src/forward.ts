@@ -5,7 +5,7 @@
  * is cleared from the inbound request before the verified values are set.
  */
 import type { Verified } from "./auth";
-import { AUTH_USER_HEADER, CALLER_DEVICE_HEADER, ROOM_KIND_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVICE_HEADER } from "./env";
+import { AUTH_USER_HEADER, CALLER_DEVICE_HEADER, ROOM_KIND_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVICE_HEADER, RUNNER_EPOCH_HEADER } from "./env";
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -18,7 +18,8 @@ export const forward = (
   path: string,
   search?: string,
   roomKind?: "workspace",
-  callerDevice?: string
+  callerDevice?: string,
+  runnerEpoch?: number
 ): Promise<Response> => {
   const stub = ns.get(ns.idFromName(name));
   const url = new URL(request.url);
@@ -35,6 +36,7 @@ export const forward = (
   // it (RegistryRoom narrows such callers to the rows their device hosts).
   headers.delete(RUNNER_DEVICE_HEADER);
   headers.delete(RUNNER_ACCOUNT_HEADER);
+  headers.delete(RUNNER_EPOCH_HEADER);
   // And the calling device: only a dial the Worker verified (device-link.ts).
   headers.delete(CALLER_DEVICE_HEADER);
   headers.set(AUTH_USER_HEADER, auth.userId);
@@ -44,6 +46,8 @@ export const forward = (
   if (auth.kind === "runner") {
     headers.set(RUNNER_DEVICE_HEADER, auth.deviceId ?? "-");
     if (auth.accountDeviceId) headers.set(RUNNER_ACCOUNT_HEADER, auth.accountDeviceId);
+    // Admitted by its reach alone: revocable (runner-revocation.ts).
+    if (runnerEpoch !== undefined) headers.set(RUNNER_EPOCH_HEADER, String(runnerEpoch));
   }
   return stub.fetch(new Request(url.toString(), { method: request.method, body: request.body, headers }));
 };

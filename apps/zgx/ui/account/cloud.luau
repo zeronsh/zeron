@@ -33,6 +33,15 @@
 --                               that predates choosing one
 --   cloud.machine()             the size new chats start on (tracked)
 --   cloud.set_machine(id)       choose it, shown at once, put back if refused
+--   cloud.reach()               what new chats' machines reach (tracked):
+--                               "devices" (your other devices) or "isolated";
+--                               nil from an edge that predates choosing
+--   cloud.set_reach(reach)      choose it, as set_machine does
+--   cloud.set_session_reach(chat, reach)
+--                               what one chat's machine reaches: shown at
+--                               once, put back if refused (a toast says why).
+--                               Only ever this app's: the engine takes it from
+--                               nowhere else
 --   cloud.wake(chat, machine?)  wake a chat's machine (on that size)
 --   cloud.resize(chat, machine) a machine that's up: to sleep, and back on it
 --   cloud.fresh(chat, machine?) files expired: a fresh machine, same repository
@@ -41,7 +50,7 @@
 --   cloud.clear_failure(chat)   that failure read
 --
 -- A status: { state, available, device?, credits?, error?, failed_action?,
--- awake?, max_awake?, machines?, machine? }. A repository: { name, private,
+-- awake?, max_awake?, machines?, machine?, reach? }. A repository: { name, private,
 -- branch?, pushed, account?, accounts?, installation? }: `account`, the GitHub
 -- login a new chat on it would use; `accounts`, every one that reaches it;
 -- `installation`, the GitHub App's installation that gives the access. (None
@@ -50,6 +59,8 @@
 -- answers staying as it is here).
 
 local auth = require("@account/auth")
+local locale = require("@ds/locale")
+local toast = require("@ds/toast")
 
 local M = {}
 
@@ -64,6 +75,8 @@ export type Status = {
 	max_awake: number?,
 	machines: { Machine }?,
 	machine: string?,
+	-- "devices" | "isolated"; nil from an edge that predates choosing.
+	reach: string?,
 }
 -- A size of machine, as the edge offers it. `rate`: its credits relative to
 -- the standard machine's (xlarge 5.56).
@@ -80,6 +93,8 @@ export type Session = {
 	error: string?,
 	failed_action: string?,
 	machine: string?,
+	-- What its machine reaches: "devices" | "isolated" (nil from an older edge).
+	reach: string?,
 	stage: string?,
 	disk: Disk?,
 	wake_blocked: { reason: string?, needed: number? }?,
@@ -108,6 +123,8 @@ export type Now = {
 	failure: string?,
 	-- Why the size chosen for new chats didn't take.
 	machine_failure: string?,
+	-- Why the reach chosen for new chats didn't take.
+	reach_failure: string?,
 }
 
 M.now = ui.state("account_cloud", { phase = "unknown", repos_loading = false } :: Now)
@@ -242,6 +259,17 @@ function M.ask_retry(args: { [string]: any }): any
 end
 function M.ask_set_machine(machine: string): any
 	return ui.call("cloud.set_machine", { machine = machine })
+end
+function M.ask_set_reach(reach: string): any
+	return ui.call("cloud.set_reach", { reach = reach })
+end
+function M.ask_set_session_reach(chat: string, reach: string): any
+	return ui.call("cloud.set_session_reach", { chat = chat, reach = reach })
+end
+
+function M.reach(): string?
+	local s = M.now:get().status
+	return s and s.reach
 end
 
 function M.machines(): { Machine }
@@ -498,6 +526,57 @@ function M.set_machine(id: string)
 		local back = table.clone(M.now:peek().status or status) :: any
 		back.machine = was
 		patch { status = back, machine_failure = word_of(e) }
+	end)
+end
+
+function M.set_reach(reach: string)
+	local status = M.now:peek().status
+	if not status or status.reach == nil or status.reach == reach then
+		return
+	end
+	local was = status.reach
+	local shown = table.clone(status) :: any
+	shown.reach = reach
+	patch { status = shown, reach_failure = nil :: any }
+	M.ask_set_reach(reach):after(function(s: any)
+		if s then
+			M.take(s)
+		end
+	end, function(e: any)
+		local back = table.clone(M.now:peek().status or status) :: any
+		back.reach = was
+		patch { status = back, reach_failure = word_of(e) }
+	end)
+end
+
+-- One chat's machine reaches `reach`: said at once, its session's answer
+-- taken, or put back with why (the edge's words, else a word).
+function M.set_session_reach(chat: string, reach: string)
+	local s = M.session_for(chat, nil)
+	if not s or s.reach == reach then
+		return
+	end
+	local was = s.reach
+	local shown = table.clone(s) :: any
+	shown.reach = reach
+	take_session(shown)
+	M.ask_set_session_reach(chat, reach):after(function(answer: any)
+		if answer then
+			take_session(answer)
+		end
+	end, function(e: any)
+		local now = M.session_for(chat, nil)
+		if now then
+			local back = table.clone(now) :: any
+			back.reach = was
+			take_session(back)
+		end
+		toast.show {
+			title = locale.s("account.cloud.reach_not_changed"),
+			body = if word_of(e) ~= "failed" then word_of(e) else nil,
+			tone = "danger",
+		}
+		M.load_sessions(true)
 	end)
 end
 

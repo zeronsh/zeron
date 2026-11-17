@@ -258,6 +258,11 @@ struct Revival {
 struct Inner {
     voice: crate::voice::VoiceManager,
     device_id: String,
+    /// Per chat: the background processes its runtime runs (as it last
+    /// said), and the background commands its agent started with Zeron's
+    /// `run_command`, here or on another device. Its session row shows both.
+    runtime_tasks: Mutex<HashMap<String, Vec<zeron_proto::BackgroundTask>>>,
+    command_tasks: Mutex<HashMap<String, Vec<crate::commands::CommandTask>>>,
     /// The engine is shutting down: dying runs re-dispatch nothing.
     shutting_down: std::sync::atomic::AtomicBool,
     /// A shutdown marks the turns it cuts off for pick-up on the next boot
@@ -478,6 +483,8 @@ impl SessionsEngine {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
                 device_id,
+                runtime_tasks: Mutex::new(HashMap::new()),
+                command_tasks: Mutex::new(HashMap::new()),
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
                 revive_after_shutdown: std::sync::atomic::AtomicBool::new(true),
                 revivals: Mutex::new(HashMap::new()),
@@ -725,6 +732,12 @@ impl SessionsEngine {
             .subscribe()
     }
 
+    /// A status row for `chat_id`, as a run would leave (tests).
+    #[cfg(test)]
+    pub(crate) fn seed_status(&self, chat_id: &str, status: SessionStatus) {
+        self.inner.set_status(chat_id, status, true);
+    }
+
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
@@ -799,6 +812,69 @@ impl SessionsEngine {
 
     /// Ask the chat's runtime to stop one of its background processes. False
     /// when no live runtime lists it (it ended meanwhile).
+    /// Show a background command `chat_id`'s agent started with
+    /// `run_command` (here or on another device) on its session row, with
+    /// its runtime's own background processes ([`crate::commands::Commands::show`]).
+    pub fn show_command(&self, chat_id: &str, command: crate::commands::CommandTask) {
+        lock(&self.inner.command_tasks)
+            .entry(chat_id.to_owned())
+            .or_default()
+            .push(command);
+        self.inner.publish_background_tasks(chat_id);
+    }
+
+    /// Keep showing those of `chat_id`'s commands on `device` that `keep`
+    /// says still run (and every command elsewhere).
+    pub fn retain_commands(
+        &self,
+        chat_id: &str,
+        device: &Option<String>,
+        keep: impl Fn(&str) -> bool,
+    ) {
+        let changed = {
+            let mut shown = lock(&self.inner.command_tasks);
+            let Some(commands) = shown.get_mut(chat_id) else {
+                return;
+            };
+            let before = commands.len();
+            commands.retain(|c| &c.device != device || keep(&c.id));
+            let changed = commands.len() != before;
+            if commands.is_empty() {
+                shown.remove(chat_id);
+            }
+            changed
+        };
+        if changed {
+            self.inner.publish_background_tasks(chat_id);
+        }
+    }
+
+    /// No longer show one of `chat_id`'s commands (the person stopped it).
+    pub fn hide_command(&self, chat_id: &str, task_id: &str) {
+        let device = lock(&self.inner.command_tasks)
+            .get(chat_id)
+            .and_then(|commands| commands.iter().find(|c| c.task.id == task_id))
+            .map(|c| (c.device.clone(), c.id.clone()));
+        if let Some((device, id)) = device {
+            self.retain_commands(chat_id, &device, |shown| shown != id);
+        }
+    }
+
+    /// How many of `chat_id`'s commands on `device` are shown.
+    pub fn shown_commands_on(&self, chat_id: &str, device: &Option<String>) -> usize {
+        lock(&self.inner.command_tasks)
+            .get(chat_id)
+            .map_or(0, |commands| {
+                commands.iter().filter(|c| &c.device == device).count()
+            })
+    }
+
+    /// Keep `chat_id`'s row fresh while it shows running commands, as a live
+    /// run's heartbeat does.
+    pub fn heartbeat(&self, chat_id: &str) {
+        self.inner.touch_session(chat_id);
+    }
+
     pub fn stop_background_task(&self, chat_id: &str, task_id: &str) -> bool {
         lock(&self.inner.runs)
             .get(chat_id)
@@ -2846,6 +2922,27 @@ impl Inner {
     /// like [`Self::set_running_subagents`]. The live heartbeat keeps the row
     /// fresh while they run; an engine that stops beating took them with it.
     fn set_background_tasks(&self, chat_id: &str, tasks: Vec<zeron_proto::BackgroundTask>) {
+        {
+            let mut runtime = lock(&self.runtime_tasks);
+            if tasks.is_empty() {
+                runtime.remove(chat_id);
+            } else {
+                runtime.insert(chat_id.to_owned(), tasks);
+            }
+        }
+        self.publish_background_tasks(chat_id);
+    }
+
+    /// The session row's background processes: its runtime's, then the
+    /// commands its agent left running with `run_command`.
+    fn publish_background_tasks(&self, chat_id: &str) {
+        let mut tasks = lock(&self.runtime_tasks)
+            .get(chat_id)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(commands) = lock(&self.command_tasks).get(chat_id) {
+            tasks.extend(commands.iter().map(|c| c.task.clone()));
+        }
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {

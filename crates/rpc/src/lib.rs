@@ -314,6 +314,24 @@ pub mod methods {
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
     /// Whether closing a terminal would end a program running in it.
     pub const TERMINAL_STATUS: &str = "TerminalStatus";
+    /// `{command, cwd?, chatId?, timeoutMs?, background?}` → `RunOutcome`:
+    /// one shell command run to its end on the target device (no PTY, no
+    /// session), its output capped and its process group killed at the
+    /// timeout; with `background`, → `CommandStatus` of one left running.
+    /// Relay-forwardable, as are the three below (Zeron MCP's `run_command`,
+    /// `command_output`, `stop_command`, `list_commands`).
+    pub const RUN_COMMAND: &str = "RunCommand";
+    /// `{id}` → `CommandStatus`: a background command's output since it was
+    /// last read, and whether it still runs.
+    pub const READ_COMMAND_OUTPUT: &str = "ReadCommandOutput";
+    /// `{id}` → `CommandStatus`: stop a background command and all it started.
+    pub const STOP_COMMAND: &str = "StopCommand";
+    /// `{chatId?}` → `[CommandStatus]`: the background commands a chat started.
+    pub const LIST_BACKGROUND_COMMANDS: &str = "ListBackgroundCommands";
+    /// `{chatId}` → stream of `[CommandStatus]`: [`LIST_BACKGROUND_COMMANDS`]
+    /// now and each time one starts or ends. The chat's host follows its
+    /// agent's commands on other devices with it (its background band).
+    pub const WATCH_BACKGROUND_COMMANDS: &str = "WatchBackgroundCommands";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
@@ -412,6 +430,13 @@ pub mod methods {
     pub const CLOUD_SESSIONS: &str = "CloudSessions";
     /// `{machine}` → `CloudStatus`. The size new sessions start on.
     pub const CLOUD_SET_MACHINE: &str = "CloudSetMachine";
+    /// `{reach: "devices" | "isolated"}` → `CloudStatus`. The reach new
+    /// sessions start with. The person's alone ([`local_only`]).
+    pub const CLOUD_SET_REACH: &str = "CloudSetReach";
+    /// `{chatId, reach}` → `CloudSession`. Whether that session reaches the
+    /// person's other devices; isolating closes it out of what it reached.
+    /// The person's alone ([`local_only`]).
+    pub const CLOUD_SESSION_SET_REACH: &str = "CloudSessionSetReach";
     /// `{chatId, machine?, wake?}` → `CloudSession`. Wake one session's sandbox
     /// (on `machine`, when given; `wake: false` only records the size for its
     /// next wake); sending to a sleeping session wakes it on its own (the host
@@ -757,6 +782,10 @@ pub fn local_only(method: &str) -> bool {
             | methods::SET_BUILTIN_PLUGINS
             | methods::POST_NOTIFICATION
             | methods::EXPORT_PLUGIN
+            // What a Cloud chat reaches: this device's app sets it, never
+            // another device (a Cloud machine among them) and never an agent.
+            | methods::CLOUD_SET_REACH
+            | methods::CLOUD_SESSION_SET_REACH
     )
 }
 
@@ -802,6 +831,9 @@ pub fn app_forward_only(method: &str, params: &serde_json::Value) -> bool {
 /// credentials (`AccessToken`, sign-in, `StepUp`, `DeleteAccount`),
 /// terminals, files, vault and agent logins, and a command's whole output
 /// (`ReadToolOutput`: an agent reads a chat as its doc keeps it).
+/// Running a command (`RunCommand`, on any of the person's devices) is
+/// here, and the engine allows it only to an agent whose chat runs with
+/// full access (its agent gate).
 pub fn agent_allowed(method: &str) -> bool {
     matches!(
         method,
@@ -826,6 +858,12 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::PUBLISH_IMAGE
             // Saying what the calling chat's agent waits on.
             | methods::AWAIT_BACKGROUND
+            // Commands on any of the person's devices (Zeron MCP's
+            // run_command & co.): full access only (the engine's agent gate).
+            | methods::RUN_COMMAND
+            | methods::READ_COMMAND_OUTPUT
+            | methods::STOP_COMMAND
+            | methods::LIST_BACKGROUND_COMMANDS
             // Plugins: authoring, installing (lands waiting for the person),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their
@@ -1050,6 +1088,15 @@ mod tests {
                 )),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
+        }
+    }
+
+    #[test]
+    fn what_a_cloud_chat_reaches_is_set_by_this_devices_app_alone() {
+        for method in [methods::CLOUD_SET_REACH, methods::CLOUD_SESSION_SET_REACH] {
+            assert!(local_only(method), "{method}");
+            assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
+            assert!(!agent_allowed(method), "{method}");
         }
     }
 
@@ -1473,6 +1520,13 @@ mod tests {
         // Exporting a plugin reaches the engine as the agent's, which keeps
         // it to Zeron's plugin-exports folder (R29).
         let asked = agent.call(methods::EXPORT_PLUGIN, serde_json::json!({})).await.unwrap();
+        assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
+        // A command reaches the engine as the agent's, which runs it only
+        // for a chat with full access.
+        let asked = agent
+            .call(methods::RUN_COMMAND, serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
         // The theme tools' methods, exactly: data only.
         for method in [methods::LIST_THEMES, methods::GET_THEME, methods::CREATE_THEME, methods::UPDATE_THEME, methods::DELETE_THEME, methods::USE_THEME] {
