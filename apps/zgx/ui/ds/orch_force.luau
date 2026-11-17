@@ -34,6 +34,7 @@ local model = require("@self/orch_map_model")
 local Cells = require("@self/orch_cells")
 local sim = require("@self/orch_force_sim")
 local fm = require("@self/orch_force_model")
+local Visibility = require("@self/orch_map_visibility")
 local labels = require("@self/orch_force_labels")
 local draw = require("@self/orch_force_draw")
 local fpal = require("@self/orch_force_palette")
@@ -73,6 +74,9 @@ M.drag_end = function(_id: string) end
 M.recentre = function() end
 M.unpin_children = function(_id: string) end
 M.unpin_all = function() end
+M.done_unread_ids = function(): { string }
+	return {}
+end
 M.current = nil :: any
 
 -- The sidebar's glyph over a chat at `zoom`, in points: its working ring
@@ -204,6 +208,8 @@ M.View = ui.component(function(props: {
 	on_open_orchestrator: (id: string) -> (),
 	menu: ((id: string) -> { any }?)?,
 	register: ((key: string, open: ((id: string) -> boolean)?) -> ())?,
+	-- Marks these chats done as read (the space's menu), with its Undo.
+	mark_read: ((ids: { string }) -> ())?,
 }): Node
 	local width = ui.use_state(0)
 	local function field_h(): number
@@ -1364,6 +1370,18 @@ M.View = ui.component(function(props: {
 			end)
 		end
 	end
+	-- The chats on it finished and not yet read, the Map may mark read.
+	M.done_unread_ids = function(): { string }
+		local world = props.world()
+		local ctx = model.visibility(world)
+		local ids = {}
+		for _, n in fmodel.nodes do
+			if n.kind == "chat" or n.kind == "orchestrator" then
+				table.insert(ids, n.id)
+			end
+		end
+		return Visibility.done_unread(ids, world.chats or {}, ctx)
+	end
 	M.unpin_all = function()
 		unpin(function(_i: number): boolean
 			return true
@@ -1938,9 +1956,26 @@ M.View = ui.component(function(props: {
 			-- space's: every pin.)
 			menu = function(id: string): { any }?
 				if id == BACKGROUND then
-					return { { label = locale.s("ds.orch.map.unpin_all"), icon = "pin", on_select = function()
-						M.unpin_all()
-					end } }
+					-- (Every chat on it finished and not yet read: marked read at
+					-- once, gone from it, an Undo for a moment; none at work,
+					-- asking or in Review.)
+					local ids = M.done_unread_ids()
+					local n = #ids
+					return {
+						{ label = locale.s("ds.orch.map.unpin_all"), icon = "pin", on_select = function()
+							M.unpin_all()
+						end },
+						{
+							label = if n > 0 then locale.s("ds.orch.map.mark_done_read", { count = n }) else locale.s("ds.orch.map.mark_done_read_none"),
+							icon = "check-circle",
+							disabled = n == 0 or props.mark_read == nil,
+							on_select = function()
+								if props.mark_read and n > 0 then
+									props.mark_read(ids)
+								end
+							end,
+						},
+					}
 				end
 				local i = fmodel.index[id]
 				-- (A machine's hub has no menu of its own: its pins.)

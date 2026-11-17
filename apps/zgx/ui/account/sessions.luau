@@ -233,8 +233,21 @@ function M.collapse(id: string, folded: boolean)
 	ui.invoke("sessions.collapse", { id = id, collapsed = folded })
 end
 
+-- When this device last read each chat (Unix seconds), for the Map: a chat
+-- read stays its window from then (ds/orch_map_visibility). Only lately
+-- read ones kept.
+M.read_at = ui.persist("sessions_read_at", {} :: { [string]: number })
 function M.seen(id: string)
 	ui.invoke("sessions.seen", id)
+	local now = os.time()
+	local kept = {}
+	for k, t in M.read_at:peek() or {} do
+		if now - t < 24 * 60 * 60 then
+			kept[k] = t
+		end
+	end
+	kept[id] = now
+	M.read_at:set(kept :: any)
 end
 
 function M.sleep(id: string, until_at: number?): any

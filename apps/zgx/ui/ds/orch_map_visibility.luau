@@ -44,6 +44,12 @@ export type Ctx = {
 	asking: { [string]: boolean },
 	-- Chats on a card in Review, by id.
 	review: { [string]: boolean },
+	-- When this device last read each chat (Unix seconds): a chat read
+	-- stays its window from then, never gone the moment it's opened.
+	read_at: { [string]: number },
+	-- Chats put away from the Map (marked done as read, all at once), by
+	-- when: gone until they move again (or are being marked, `pending`).
+	dismissed: { [string]: number },
 }
 
 M.MODES = { "active", "recent", "all" } :: { Mode }
@@ -60,6 +66,8 @@ M.FADE_MIN = 0.35
 -- The person's choice (Control room view settings, this device's).
 -- (Without an app, a pure rule's tests: no state, the default.)
 local has_ui = type(ui) == "table" or type(ui) == "userdata"
+-- Chats put away from the Map by hand (Mark all done as read), by id: when.
+M.dismissed = if has_ui then ui.persist("control_map_dismissed", {} :: { [string]: number }) else ({ get = function() return {} end, peek = function() return {} end } :: any)
 M.mode = if has_ui then ui.persist("control_map_show", M.DEFAULT) else ({ get = function() return M.DEFAULT end, peek = function() return M.DEFAULT end } :: any)
 
 -- The Map's clock: Unix seconds, on to the next minute each minute.
@@ -92,7 +100,7 @@ end
 
 -- What `visible` needs beyond the chat, from orchestration's state (its
 -- orchestrators, asks and items) and the mode (else the person's).
-function M.context(orch_now: any, mode: any?, window: number?): Ctx
+function M.context(orch_now: any, mode: any?, window: number?, read_at: { [string]: number }?, dismissed: { [string]: number }?): Ctx
 	local now = orch_now or {}
 	local ctx: Ctx = {
 		mode = valid(if mode ~= nil then mode else M.mode:peek()),
@@ -100,6 +108,8 @@ function M.context(orch_now: any, mode: any?, window: number?): Ctx
 		pinned = {},
 		asking = {},
 		review = {},
+		read_at = read_at or {},
+		dismissed = dismissed or {},
 	}
 	for _, o in now.orchestrators or {} do
 		if not o.archived then
@@ -134,13 +144,25 @@ function M.visible(chat: any, now: number, ctx: Ctx): (Verdict, number)
 	end
 	local id = chat.id
 	local status = chat.status or ""
-	local at = chat.updated or chat.created or 0
+	local moved = chat.updated or chat.created or 0
+	-- (Put away by hand since it last moved: read, whatever the engine has
+	-- said yet.)
+	local put_away = id ~= nil and ctx.dismissed[id] ~= nil and moved <= ctx.dismissed[id]
+	if put_away and UNREAD[status] then
+		status = ""
+	end
+	-- (Its window from its last move, or from when it was read here, the
+	-- later: reading a chat never makes it go at once.)
+	local at = math.max(moved, (id and ctx.read_at[id]) or 0)
 	local age = math.max(0, now - at)
 	if (id and (ctx.pinned[id] or ctx.asking[id] or ctx.review[id])) or LIVE[status] or (UNREAD[status] and age < M.UNREAD_FOR) then
 		return "show", 1
 	end
 	if ctx.mode == "all" then
 		return "show", 1
+	end
+	if put_away then
+		return "hide", 0
 	end
 	if ctx.mode == "active" then
 		return "hide", 0
@@ -173,6 +195,24 @@ end
 -- belonged to is archived.
 function M.live(chat: any, ctx: Ctx): boolean
 	return chat ~= nil and not chat.archived and (LIVE[chat.status or ""] == true or (chat.id ~= nil and ctx.asking[chat.id] == true))
+end
+
+-- The chats finished and not yet read (done or failed) among `ids`, that
+-- the Map may mark read at once: never one at work, asking for the person,
+-- or on a card in Review.
+function M.done_unread(ids: { string }, chats: { [string]: any }, ctx: Ctx): { string }
+	local out = {}
+	for _, id in ids do
+		local c = chats[id]
+		local st = c and c.status or ""
+		local moved = c and (c.updated or c.created) or 0
+		local put_away = ctx.dismissed[id] ~= nil and moved <= ctx.dismissed[id]
+		if c and UNREAD[st] and not put_away and not ctx.asking[id] and not ctx.review[id] and not ctx.pinned[id] then
+			table.insert(out, id)
+		end
+	end
+	table.sort(out)
+	return out
 end
 
 -- Each chat's verdict (its opacity in tenths while it fades), as one

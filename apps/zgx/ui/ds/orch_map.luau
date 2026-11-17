@@ -57,6 +57,9 @@ export type Props = {
 	-- A secondary click's menu for an id (a chat's, an orchestrator's, a
 	-- machine's as "dev:<id>"): its entries, or nil for none.
 	menu: ((id: string) -> { any }?)?,
+	-- Marks these chats done as read (the space's menu: Mark all done as
+	-- read), with its Undo.
+	mark_read: ((ids: { string }) -> ())?,
 }
 
 local M = {}
@@ -216,7 +219,7 @@ end
 M.left_graph = ui.persist("control_map_left_graph", false)
 
 -- `world` (the page's) as a shape-stable function: see the Map's use.
-local SHAPE_KEYS = { "now", "chats", "devices", "projects", "here", "show", "clock" }
+local SHAPE_KEYS = { "now", "chats", "devices", "projects", "here", "show", "clock", "loaded", "read_at", "dismissed" }
 local LISTS: { [string]: boolean } = { projects = true, devices = true }
 local function same(k: string, a: any, b: any): boolean
 	if a == b then
@@ -341,6 +344,7 @@ M.Map = ui.component(function(props: Props): Node
 					on_open_chat = props.on_open_chat,
 					on_open_orchestrator = props.on_open_orchestrator,
 					menu = props.menu,
+					mark_read = props.mark_read,
 					register = register,
 				}
 			elseif variant == "machines" then

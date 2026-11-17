@@ -249,7 +249,67 @@ local function world(): any
 		-- (ds/orch_map_visibility).
 		show = OV.vis(),
 		clock = OV.clock(),
+		-- (When this device read each chat, and what's been put away from
+		-- the Map by hand: ds/orch_map_visibility.)
+		read_at = sessions.read_at:get(),
+		dismissed = Visibility.dismissed:get(),
 	}
+end
+
+-- Mark done as read, from the Map's menu: put away at once, an Undo for a
+-- few seconds, then read on every device (sessions.seen, as opening each
+-- would; a read can't be taken back, so it waits for the Undo to pass).
+local READ_UNDO_MS = 6000
+local read_batch = 0
+local read_waiting: { [number]: { string } } = {}
+local function put_back(ids: { string })
+	local d = table.clone(Visibility.dismissed:peek() or {})
+	for _, id in ids do
+		d[id] = nil
+	end
+	Visibility.dismissed:set(d :: any)
+end
+-- Undo (the toast's): back on the Map, nothing read.
+function M.undo_read(batch: number?)
+	local b = batch or read_batch
+	local ids = read_waiting[b]
+	if ids then
+		read_waiting[b] = nil
+		put_back(ids)
+	end
+end
+ds.toast.action("control.unread", function(batch: any)
+	M.undo_read(batch)
+end)
+function M.mark_done_read(ids: { string })
+	if #ids == 0 then
+		return
+	end
+	read_batch += 1
+	local batch = read_batch
+	local now = os.time()
+	local d = table.clone(Visibility.dismissed:peek() or {})
+	for _, id in ids do
+		d[id] = now
+	end
+	Visibility.dismissed:set(d :: any)
+	read_waiting[batch] = ids
+	ds.toast.show {
+		key = `control.read.{batch}`,
+		title = locale.s("control.map_menu.marked_read", { count = #ids }),
+		tone = "neutral",
+		duration = READ_UNDO_MS,
+		action = { label = locale.s("control.map_menu.undo"), run = "control.unread", value = batch },
+	}
+	ui.after(READ_UNDO_MS, function()
+		local waiting = read_waiting[batch]
+		if waiting then
+			read_waiting[batch] = nil
+			for _, id in waiting do
+				sessions.seen(id)
+			end
+		end
+	end)
 end
 
 local function name_of(id: string?): string?
@@ -1009,6 +1069,7 @@ local function map(): Node
 			end,
 			-- A secondary click on anything on it (screens/control/map_menu).
 			menu = MapMenu().entries,
+			mark_read = M.mark_done_read,
 		},
 		MapMenu().Dialogs(),
 	}

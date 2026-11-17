@@ -4550,5 +4550,9 @@
   },
   "ds.orch.map.pivot": "Hubs",
   "ds.orch.map.pivot_orchestrators": "Orchestrator hubs",
-  "ds.orch.map.pivot_machines": "Machine hubs"
+  "ds.orch.map.pivot_machines": "Machine hubs",
+  "control.map_menu.marked_read": "Marked {count} done as read",
+  "control.map_menu.undo": "Undo",
+  "ds.orch.map.mark_done_read": "Mark {count} done as read",
+  "ds.orch.map.mark_done_read_none": "Mark done as read"
 }

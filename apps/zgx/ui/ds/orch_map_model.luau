@@ -134,7 +134,7 @@ end
 
 -- The Map's visibility rule for `world`: its context, and the time.
 function M.visibility(world: any): (Visibility.Ctx, number)
-	return Visibility.context(world.now, world.show), world.clock or os.time()
+	return Visibility.context(world.now, world.show, nil, world.read_at, world.dismissed), world.clock or os.time()
 end
 
 function M.fleet(world: any): Fleet
