@@ -325,11 +325,13 @@ if (process.argv[2] === "models") {
   try {
     const listed = await Cursor.models.list();
     const catalog = Array.isArray(listed) ? listed : (listed?.items ?? []);
-    // The picker consumes parameter definitions and the default variant only,
-    // not the combinatorial list of every purchasable variant.
+    // Every variant goes along (without its display text): a run's implicit
+    // parameters are completed to one of them, since the backend refuses a
+    // combination it doesn't list, and the default can be a Max Mode one
+    // the account can't run.
     const items = catalog.map(({id, displayName, description, parameters, variants}) => ({
       id, displayName, description, parameters,
-      variants: (variants ?? []).filter((variant) => variant.isDefault).slice(0, 1),
+      variants: (variants ?? []).map(({displayName, description, ...variant}) => variant),
     }));
     out({ ev: "models", items });
     await exitAfterFlush(0);
