@@ -31,7 +31,7 @@ local locale = require("@self/locale")
 -- An agent: a tab of its own.
 -- (`icon`: an agent from the ACP registry's one-ink SVG, in its mark's
 -- place.)
-export type Harness = { id: string, label: string, mark: Mark.Name, icon: string? }
+export type Harness = { id: string, label: string, mark: Mark.Name, icon: string?, auto: boolean? }
 -- One of a model option's choices.
 export type Choice = { id: string, label: string }
 -- An option of a model (Devin Fusion's lead and sidekick): its choices and

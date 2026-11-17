@@ -4202,6 +4202,28 @@ fn subagent_chip_update(event: &AgentEvent) -> Option<&'static str> {
     }
 }
 
+/// Auto asked of an agent with no auto mode and no stricter mode to fall
+/// back to (Cursor, Pi: they ignore the access mode, so they'd run it with
+/// full access). Refused before launch, whatever the client sent.
+fn auto_unavailable(
+    request: &RunRequest,
+    offered: &[zeron_proto::AccessMode],
+) -> Option<zeron_harness::HarnessError> {
+    (!request.auto_approve && request.access.honored_by(offered).is_none()).then(|| {
+        zeron_harness::HarnessError::Protocol(
+            "This agent can't run in Auto. Choose another access mode or agent.".into(),
+        )
+    })
+}
+
+/// A reviewer's words as the doc keeps them: their first `max` characters.
+fn cap_review_text(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", text[..at].trim_end()),
+        None => text.to_owned(),
+    }
+}
+
 /// Apply the render-parts privacy policy: strip heavy/sensitive tool inputs before doc
 /// entry. Full inputs live only in the local run journal.
 fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
@@ -4226,6 +4248,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 exit_code,
                 output_truncated,
                 output_lines,
+                review,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -4248,6 +4271,13 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 exit_code: *exit_code,
                 output_truncated: *output_truncated,
                 output_lines: *output_lines,
+                // The reviewer's verdict stays: it's what the person needs to
+                // see. Its words are bounded, as an output summary is.
+                review: review.as_ref().map(|r| zeron_proto::ToolReview {
+                    risk: r.risk.as_deref().map(|risk| cap_review_text(risk, 32)),
+                    reason: r.reason.as_deref().map(|why| cap_review_text(why, 600)),
+                    ..r.clone()
+                }),
             },
             other => other.clone(),
         })
@@ -4665,7 +4695,9 @@ async fn drive_run(
         }
         crate::runner::mark_setup_shown();
     }
-    let prepared = if harness_id == HarnessId::Cursor {
+    let prepared = if let Some(refused) = auto_unavailable(&request, harness.access_modes()) {
+        Err(refused)
+    } else if harness_id == HarnessId::Cursor {
         cursor_unstarted_history(
             &doc,
             &resume_state.user_message_id,
@@ -6996,6 +7028,25 @@ mod tests {
             sessions.inner.journal_harness_session("started-only"),
             Some(("s1".into(), "/a".into(), Some(zeron_proto::HarnessId::ClaudeCode)))
         );
+    }
+
+    /// Auto on an agent that ignores the access mode (Cursor, Pi) would run
+    /// with full access: refused. Where a stricter mode exists, or Auto is
+    /// offered, or full access was asked for outright, the run goes ahead.
+    #[test]
+    fn auto_is_refused_where_it_would_become_full_access() {
+        use zeron_proto::AccessMode::{self, *};
+        let asking = |access: AccessMode, auto_approve: bool| RunRequest {
+            access,
+            auto_approve,
+            ..request()
+        };
+        assert!(auto_unavailable(&asking(Auto, false), &[FullAccess]).is_some());
+        assert!(auto_unavailable(&asking(Auto, true), &[FullAccess]).is_none());
+        assert!(auto_unavailable(&asking(Auto, false), &AccessMode::ALL).is_none());
+        assert!(auto_unavailable(&asking(Auto, false), &AccessMode::WITH_AUTO).is_none());
+        // The other modes keep their old fallback.
+        assert!(auto_unavailable(&asking(Supervised, false), &[FullAccess]).is_none());
     }
 
     fn request() -> RunRequest {

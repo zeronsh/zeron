@@ -1294,6 +1294,9 @@ local function Composer(): Node
 			menus_below = shown_new,
 			running = running,
 			access = access,
+			access_auto = function(): boolean
+				return store.offers_auto(model:get())
+			end,
 			plan = plan,
 			model = model,
 			effort = effort,

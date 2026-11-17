@@ -2990,3 +2990,55 @@ async fn a_discarded_warm_start_is_ended() {
     harness.discard_warm("chat-y#1").await;
     assert!(!warm_alive(launches(log.path())[0]));
 }
+
+/// A capped Auto request must fail before executable resolution or spawn,
+/// even when the selected agent only advertises full access.
+#[tokio::test]
+async fn auto_without_a_safe_fallback_refuses_before_launch() {
+    let (_, capped, _) = zeron_proto::cap_access(
+        (SandboxLevel::WorkspaceWrite, AccessMode::FullAccess),
+        (SandboxLevel::WorkspaceWrite, AccessMode::Auto),
+    );
+    let req = RunRequest {
+        auto_approve: false,
+        access: capped,
+        ..request("must not run")
+    };
+    for agent in [
+        AcpHarness::grok(),
+        AcpHarness::devin(),
+        AcpHarness::hermes(),
+    ] {
+        let agent = agent.with_executable(PathBuf::from("/nonexistent/auto-must-not-launch"));
+        assert!(!agent.reconfigures_in_place(&req, &req));
+        let (controls, _sender, _token) = controls();
+        match agent.run(req.clone(), controls).await {
+            Err(HarnessError::Protocol(message)) => {
+                assert!(message.contains("cannot run in Auto"), "{message}");
+                assert!(
+                    message.contains("explicitly select Full access"),
+                    "{message}"
+                );
+            }
+            Err(error) => panic!("access must be checked before launch: {error}"),
+            Ok(_) => panic!("unsupported Auto started a run"),
+        }
+    }
+    // Supported stricter fallbacks remain usable, and explicit full access
+    // retains the legacy auto_approve behavior.
+    let edits = RunRequest {
+        access: AccessMode::AutoAcceptEdits,
+        ..req.clone()
+    };
+    assert!(AcpHarness::antigravity().reconfigures_in_place(&req, &edits));
+    let explicit = RunRequest {
+        auto_approve: true,
+        ..req
+    };
+    let full = RunRequest {
+        auto_approve: false,
+        access: AccessMode::FullAccess,
+        ..explicit.clone()
+    };
+    assert!(AcpHarness::devin().reconfigures_in_place(&full, &explicit));
+}

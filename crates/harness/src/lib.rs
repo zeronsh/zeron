@@ -371,7 +371,9 @@ pub trait Harness: Send + Sync {
     }
     /// The [`AccessMode`]s this driver honors, least to most trusting. A
     /// request for any other runs with full access (the composer offers
-    /// only these).
+    /// only these), except Auto: it falls back only to a stricter mode
+    /// listed here, and the engine refuses it when there is none
+    /// ([`AccessMode::honored_by`]).
     fn access_modes(&self) -> &[AccessMode] {
         &[AccessMode::FullAccess]
     }
