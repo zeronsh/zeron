@@ -32,8 +32,6 @@ local status = require("@ds/status")
 local hue = require("@ds/orch_hue")
 local data = require("@ds/orch_data")
 local Receipt = require("@ds/orch_receipt")
-local Asks = require("@ds/orch_asks")
-local Decision = require("@ds/orch_decision")
 local decide = require("@ds/orch_decide")
 local OrchMap = require("@ds/orch_map")
 local rows = require("@account/rows")
@@ -49,6 +47,7 @@ local Block = require("@ds/orch_block")
 local HoverCard = require("@ds/hover_card")
 local Counter = require("@ds/orch_counter")
 local Progress = require("@app/screens/control/progress")
+local NeedsYou = require("@app/screens/control/needs")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
@@ -258,20 +257,8 @@ local function hue_of(id: string?): number?
 end
 
 -- A chat opened: an orchestrator's on its own page, any other as a session;
--- at `message` (an entry's id: the message an ask came from) when given.
-function M.open_chat(id: string, message: string?)
-	for _, o in orchestration.now:peek().orchestrators or {} do
-		if o.id == id then
-			route.orchestrator(id)
-			return
-		end
-	end
-	if message and message ~= "" then
-		route.open_session(id, { message = message })
-	else
-		route.open_session(id)
-	end
-end
+-- at `message` when given (screens/control/needs).
+M.open_chat = NeedsYou.open_chat
 
 -- (Where only a chat's id is given.)
 local function open_chat(id: string)
@@ -793,9 +780,7 @@ end
 -- An ask answered (its option 1-based, or words, or both): from Needs you,
 -- a card, or the overlay, past its Undo. The engine's reply: a failure is
 -- said on the ask (ds/orch_decide), with Retry.
-local function answer(ask: any, choice: any): any
-	return orchestration.answer(ask.id, choice, ask)
-end
+local answer = NeedsYou.answer
 
 -- A link of a card's or an ask's: a chat opened here, a web one outside.
 local function open_link(link: any)
@@ -906,53 +891,20 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 	}
 end
 
+-- Needs you, every orchestrator's (screens/control/needs, as an
+-- orchestrator's page has its own).
 local function needs(): Node
-	return Asks {
-		needs = function(): { any }
-			return data.needs(OV.now(), OV.sessions())
-		end,
-		recent = function(): { any }
-			return decide.recent(OV.now().asks, 5)
-		end,
+	return NeedsYou.Asks {
+		now = OV.now,
+		sessions = OV.sessions,
 		name_of = OV.name_of,
-		on_answer = answer,
-		on_dismiss = function(ask: any)
-			orchestration.dismiss(ask.id):after(function() end, said("control.needs.failed"))
-		end,
-		on_open = M.open_chat,
-		on_expand = function(ask: any)
-			decide.show(ask.id)
-		end,
 	}
 end
 
 -- The decision overlay (ds/orch_decision): the ask Needs you or a card
 -- opened, whole.
 local function decision(): Node
-	return Decision {
-		ask = function(): any
-			local id = decide.shown:get()
-			if not id then
-				return nil
-			end
-			for _, a in orchestration.now:get().asks or {} do
-				if a.id == id then
-					return a
-				end
-			end
-			return nil
-		end,
-		name_of = name_of,
-		hue_of = hue_of,
-		on_answer = answer,
-		on_defer = function(ask: any, until_ms: number)
-			decide.defer(ask, until_ms, function(a: any, ms: number): any
-				return orchestration.defer(a.id, ms)
-			end)
-		end,
-		on_open = M.open_chat,
-		on_link = open_link,
-	}
+	return NeedsYou.Decision { name_of = name_of, hue_of = hue_of, on_link = open_link }
 end
 
 -- The Map's view (Topology, Timeline or Machines, and the Timeline's
@@ -2161,22 +2113,13 @@ local NeedsFloat = ui.component(function(props: { bottom: () -> number }): Node
 						content_h:set(size.h)
 					end
 				end,
-			Asks {
-				needs = function(): { any }
-					return data.needs(NF.now(), NF.sessions())
-				end,
-				recent = function(): { any }
-					return {}
-				end,
+			-- (Needs you's own rows: screens/control/needs. The top ask
+			-- alone, no recent answers: the widget on Overview has them.)
+			NeedsYou.Asks {
+				now = NF.now,
+				sessions = NF.sessions,
 				name_of = NF.name_of,
-				on_answer = answer,
-				on_dismiss = function(ask: any)
-					orchestration.dismiss(ask.id):after(function() end, said("control.needs.failed"))
-				end,
-				on_open = M.open_chat,
-				on_expand = function(ask: any)
-					decide.show(ask.id)
-				end,
+				recent = false,
 				limit = 1,
 			},
 			},
