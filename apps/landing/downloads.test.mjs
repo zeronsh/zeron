@@ -4,10 +4,10 @@ import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 const source = readFileSync(new URL('./public/downloads.js', import.meta.url), 'utf8');
 const html = readFileSync(new URL('./public/index.html', import.meta.url), 'utf8');
-async function load(navigator, version = '0.2.98', fail = false) {
-  const links = Object.fromEntries(['nav-download', 'hero-download', 'closing-download'].map(id => [id, { href: '#downloads', setAttribute() {} }]));
+async function load(navigator, version = '0.2.98', fail = false, beta = '0.2.139-beta.7') {
+  const links = Object.fromEntries(['nav-download', 'hero-download', 'closing-download', 'beta-download'].map(id => [id, { href: '#downloads', setAttribute() {} }]));
   const choices = ['macos', 'windows', 'windows-portable', 'linux', 'linux-arm'].map(platformDownload => ({ dataset: { platformDownload } }));
-  runInNewContext(source, { navigator, document: { getElementById: id => links[id], querySelectorAll: () => choices }, fetch: () => fail ? Promise.reject() : Promise.resolve({ ok: true, text: () => Promise.resolve(version) }) });
+  runInNewContext(source, { navigator, document: { getElementById: id => links[id], querySelectorAll: () => choices }, fetch: url => fail ? Promise.reject() : url.endsWith('/beta/manifest.json') ? Promise.resolve({ ok: true, json: () => Promise.resolve(typeof beta === 'string' ? { version: beta } : beta) }) : Promise.resolve({ ok: true, text: () => Promise.resolve(version) }) });
   await new Promise(resolve => setImmediate(resolve));
   return { links, choices };
 }
@@ -39,4 +39,18 @@ test('HTML retains all five explicit downloads without JavaScript', () => {
   assert.ok(html.includes('id="downloads"'));
   assert.ok(html.includes('href="https://zeron.sh/releases/zeron-android-arm64.apk"'));
   assert.ok(html.includes('href="#downloads">All downloads'));
+});
+
+test('the beta link opens the newest beta\'s GitHub release', async () => {
+  const { links } = await load({ platform: 'MacIntel' });
+  assert.equal(links['beta-download'].href, 'https://github.com/zeronsh/zeron/releases/tag/beta-v0.2.139-beta.7');
+  // The desktop buttons stay on stable.
+  assert.equal(links['hero-download'].href, 'https://zeron.sh/releases/zeron-0.2.98-macos-arm64.dmg');
+});
+for (const [beta, fail] of [['0.2.140', false], ['<b>', false], [{}, false], [null, false], ['', true]]) test(`the beta link keeps all releases: ${JSON.stringify(beta)}`, async () => {
+  const { links } = await load({ platform: 'MacIntel' }, '0.2.98', fail, beta);
+  assert.equal(links['beta-download'].href, '#downloads');
+});
+test('HTML has the beta link without JavaScript', () => {
+  assert.ok(html.includes('id="beta-download" href="https://github.com/zeronsh/zeron/releases"'));
 });
