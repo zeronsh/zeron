@@ -626,6 +626,11 @@ M.View = ui.component(function(props: {
 			body = kit.ink("text.primary", if dark then 0.2 else 0.14),
 			idle = kit.ink("text.primary", 0.25),
 			weak = kit.ink("text.primary", 0.14),
+			-- (A weak link's dashed curve, idle; with a message in flight, `live`.)
+			weak_curve = kit.ink("text.primary", 0.3),
+			-- (A strong link to a thread no orchestrator leads: structural,
+			-- solid, never as faint as the dashed talk.)
+			own_line = kit.ink("text.primary", 0.32),
 			live = kit.ink("text.primary", 0.78),
 			ask = kit.ink("zeron.status.input"),
 			approval = kit.ink("zeron.status.approval"),
@@ -661,7 +666,7 @@ M.View = ui.component(function(props: {
 				node_fill[i] = pal.body
 				node_mark[i] = alpha(pal.fg, a)
 			end
-			node_line[i] = if n.hue then hue.canvas(n.hue, if n.kind == "orchestrator" then 0.55 else 0.5) elseif n.kind == "machine" and f then alpha(f, 0.6) else pal.weak
+			node_line[i] = if n.hue then hue.canvas(n.hue, if n.kind == "orchestrator" then 0.55 else 0.5) elseif n.kind == "machine" and f then alpha(f, 0.6) else pal.own_line
 			if n.kind == "orchestrator" then
 				node_edge[i] = if n.hue then hue.canvas(n.hue, 1) else pal.secondary
 			elseif n.kind == "machine" then
@@ -762,7 +767,7 @@ M.View = ui.component(function(props: {
 		local list = {}
 		for i, lab in job.out do
 			labs_by_id[fmodel.nodes[i].id] = lab
-			table.insert(list, { id = fmodel.nodes[i].id, kind = fmodel.nodes[i].kind, x0 = lab.x0, y0 = lab.y0, x1 = lab.x1, y1 = lab.y1, lines = lab.lines })
+			table.insert(list, { id = fmodel.nodes[i].id, kind = fmodel.nodes[i].kind, x0 = lab.x0, y0 = lab.y0, x1 = lab.x1, y1 = lab.y1, lines = lab.lines, leader = lab.leader })
 		end
 		if M.current then
 			M.current.labels = list
@@ -927,9 +932,12 @@ M.View = ui.component(function(props: {
 		end
 		return nil
 	end
-	local function arc_path(arc: any): any
+	-- A weak link's line: the dashed curve, always the same way round for
+	-- the pair (idle or with a message in flight: one line, restyled).
+	local function curve(a: number, b: number): any
 		local x, y = s.x, s.y
-		local ax, ay, bx, byy = x[arc.a], y[arc.a], x[arc.b], y[arc.b]
+		local lo, hi = math.min(a, b), math.max(a, b)
+		local ax, ay, bx, byy = x[lo], y[lo], x[hi], y[hi]
 		local mx, my = (ax + bx) / 2, (ay + byy) / 2
 		local dx, dy = bx - ax, byy - ay
 		return ui.path():move(ax, ay):quad(mx - dy * 0.18, my + dx * 0.18, bx, byy)
@@ -981,11 +989,17 @@ M.View = ui.component(function(props: {
 			if math.max(ax, bx) < x0 or math.min(ax, bx) > x1 or math.max(ay, byy) < y0 or math.min(ay, byy) > y1 then
 				continue
 			end
-			-- (Heavier with its traffic: a hairline, up to a point and a half;
-			-- one with a message in flight is its arc's, below.)
-			if not l.strong and not (full and not moving and arc_of(l.a, l.b)) then
-				c:line(ax, ay, bx, byy, p.weak, 0.8 + math.min((l :: any).count or 0, 7) * 0.1)
-				edge_style[pair_of(l.a, l.b)] = "line"
+			-- (Who talks to whom: the dashed curve, never a straight line;
+			-- quiet idle, a little heavier with its traffic; bright with a
+			-- message in flight.)
+			if not l.strong then
+				local live = full and not moving and arc_of(l.a, l.b) ~= nil
+				if live then
+					c:stroke(curve(l.a, l.b), p.live, 1.4, DASH)
+				else
+					c:stroke(curve(l.a, l.b), p.weak_curve, 0.9 + math.min((l :: any).count or 0, 7) * 0.08, DASH)
+				end
+				edge_style[pair_of(l.a, l.b)] = if live then "live" else "curve"
 			end
 		end
 		for _, l in fmodel.links do
@@ -1045,13 +1059,6 @@ M.View = ui.component(function(props: {
 				end
 			end
 		end
-		-- Live: a dashed arc for each message in flight.
-		if full and not moving then
-			for _, a in fmodel.arcs do
-				c:stroke(arc_path(a), p.live, 1.4, DASH)
-				edge_style[pair_of(a.a, a.b)] = "arc"
-			end
-		end
 		return drawn
 	end
 
@@ -1068,7 +1075,11 @@ M.View = ui.component(function(props: {
 			local awake = s.awake
 			for _, l in fmodel.links do
 				if awake[l.a] or awake[l.b] then
-					c:line(x[l.a], y[l.a], x[l.b], y[l.b], if l.strong then node_line[l.b] else p.weak, if l.hub then 2.4 elseif l.strong then 1.3 else 0.8)
+					if l.strong then
+						c:line(x[l.a], y[l.a], x[l.b], y[l.b], node_line[l.b], if l.hub then 2.4 else 1.3)
+					else
+						c:stroke(curve(l.a, l.b), p.weak_curve, 0.9, DASH)
+					end
 				end
 			end
 			for i, n in fmodel.nodes do
@@ -1103,12 +1114,11 @@ M.View = ui.component(function(props: {
 				if l.a == i or l.b == i then
 					-- (Lit as it's drawn: a pair's arc restyled, not a second,
 					-- straight line.)
-					local arc = if l.strong or not settled:peek() then nil else arc_of(l.a, l.b)
-					if arc then
-						c:stroke(arc_path(arc), p.lit, 1.6, DASH)
-						lit_style[pair_of(l.a, l.b)] = "arc"
+					if not l.strong then
+						c:stroke(curve(l.a, l.b), p.lit, 1.6, DASH)
+						lit_style[pair_of(l.a, l.b)] = "curve"
 					else
-						c:line(x[l.a], y[l.a], x[l.b], y[l.b], p.lit, if l.strong then 1.8 else 1)
+						c:line(x[l.a], y[l.a], x[l.b], y[l.b], p.lit, 1.8)
 						lit_style[pair_of(l.a, l.b)] = "line"
 					end
 				end

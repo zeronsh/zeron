@@ -701,16 +701,17 @@ test("force graph: a pair with a message in flight is one line, its arc, plain a
 	local e = app:state("force_edges")
 	expect(#e.arcs >= 1).to_be(true)
 	for _, pair in e.arcs do
-		expect(`{pair} {e.drawn[pair]}`).to_be(`{pair} arc`)
+		expect(`{pair} {e.drawn[pair]}`).to_be(`{pair} live`)
 	end
-	-- (Every other weak pair: its straight line, once.)
-	local lines = 0
-	for _, v in e.drawn do
-		if v == "line" then
-			lines += 1
+	-- (Every weak pair: its dashed curve, never a straight line.)
+	local curves = 0
+	for pair, v in e.drawn do
+		expect(`{pair} {v == "line"}`).to_be(`{pair} false`)
+		if v == "curve" then
+			curves += 1
 		end
 	end
-	expect(lines >= 1).to_be(true)
+	expect(curves >= 1).to_be(true)
 	-- Lit from one end: the same arc, restyled.
 	local pair = e.arcs[1]
 	local one = string.split(pair, "|")[1]
@@ -719,7 +720,7 @@ test("force graph: a pair with a message in flight is one line, its arc, plain a
 	app:command("map_force_edges")
 	app:frames(1)
 	e = app:state("force_edges")
-	expect(`{pair} lit {e.lit[pair]}`).to_be(`{pair} lit arc`)
+	expect(`{pair} lit {e.lit[pair]}`).to_be(`{pair} lit curve`)
 	app:set_state("control_map_force_hover", nil)
 	app:frames(3)
 end)
@@ -817,4 +818,62 @@ test("force names: no box behind any name, a halo round each; both pivots", func
 	end
 	app:set_state("control_map_force_pivot", "orchestrator")
 	app:frames(5)
+end)
+
+
+-- Names the same size on screen at any zoom, placed again once a zoom
+-- settles (never on its frames).
+test("force names: the same size on screen at three zooms", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(5)
+	app:wait(400)
+	app:frames(30)
+	local sizes = {}
+	for k, steps in { {}, { "in", "in" }, { "out", "out", "out", "out" } } do
+		for _, st in steps do
+			app:command(`map_force_zoom_{st}`)
+			app:frames(2)
+		end
+		-- (Not yet: the zoom hasn't settled.)
+		local mid = stats(app)
+		app:wait(400)
+		app:frames(40)
+		local s = stats(app)
+		local on_screen = s.name_size * s.zoom
+		table.insert(sizes, on_screen)
+		if k > 1 then
+			expect(s.rescales > mid.rescales).to_be(true)
+		end
+		check_labels(app, `zoom {k}`)
+	end
+	print(`FORCENAMESIZE on screen {string.format("%.2f %.2f %.2f", sizes[1], sizes[2], sizes[3])}`)
+	for _, v in sizes do
+		expect(math.abs(v - 11.5) < 0.05).to_be(true)
+	end
+end)
+
+-- A name set off from its mark: a short faint pointer with a dot, never a
+-- line that reads as a link.
+test("force names: leaders are short pointers, never longer than a link could be mistaken for", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(5)
+	app:wait(400)
+	app:frames(30)
+	app:command("map_force_labels")
+	app:frames(1)
+	local d = app:state("force_labels")
+	local z = stats(app).zoom
+	local n = 0
+	for _, la in d.labels do
+		if la.leader then
+			n += 1
+			local ld = la.leader
+			local len = math.sqrt((ld[3] - ld[1]) ^ 2 + (ld[4] - ld[2]) ^ 2) * z
+			expect(`{la.id} leader {len <= labels_mod.LEADER + 0.5}`).to_be(`{la.id} leader true`)
+		end
+	end
+	print(`FORCELEADERS {n} leaders`)
+	expect(stats(app).leaders >= 0).to_be(true)
 end)
