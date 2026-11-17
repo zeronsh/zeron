@@ -635,7 +635,9 @@ impl RowBuilder {
                 Some((mention.index, image.path.clone()))
             })
             .collect();
-        let text = prepare_user_text(ctx, parsed.text.trim(), style, lh, &previews);
+        // URLs take a reply link's weight (see `markdown::prepare_runs`).
+        let link_style = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
+        let text = prepare_user_text(ctx, parsed.text.trim(), style, link_style, lh, &previews);
         // Copied text reads attachment chips as their plain label.
         let body = zeron_proto::attachment_mentions::attachment_mention_prompt(&parsed.text);
         let (msize, mlh) = TYPE.small;
@@ -748,13 +750,34 @@ fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
     chips
 }
 
-/// User prompt text with its canonical links shown as atomic chips: the
-/// desktop's soft pill with an icon well, the label in the body font.
-fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, lh: f32, previews: &[(u32, String)]) -> PText {
+/// A linked piece of a sent prompt: a chip, or a bare `http(s)://` URL
+/// linked as in agent replies.
+enum UserLink {
+    Chip(UserChip),
+    Url(std::ops::Range<usize>),
+}
+
+impl UserLink {
+    fn range(&self) -> std::ops::Range<usize> {
+        match self {
+            UserLink::Chip(chip) => chip.range.clone(),
+            UserLink::Url(range) => range.clone(),
+        }
+    }
+}
+
+/// User prompt text with its canonical links shown as atomic chips (the
+/// desktop's soft pill with an icon well, the label in the body font), and its
+/// bare URLs styled and tapped like links in an agent reply.
+fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, link_style: super::style::Resolved, lh: f32, previews: &[(u32, String)]) -> PText {
     let chips = user_chips(body, previews);
-    if chips.is_empty() {
+    let urls = zeron_markdown::bare_urls(body).into_iter().filter(|url| !chips.iter().any(|chip| chip.range.start < url.end && url.start < chip.range.end));
+    let mut pieces: Vec<UserLink> = urls.map(UserLink::Url).collect();
+    if chips.is_empty() && pieces.is_empty() {
         return prepare_plain(ctx, body, style, lh, ColorRole::Text, WhiteSpace::PreWrap);
     }
+    pieces.extend(chips.into_iter().map(UserLink::Chip));
+    pieces.sort_by_key(|piece| piece.range().start);
     // The pill sits two points inside the line box, centered like the
     // desktop's; its icon well is the pill's height less a point each side.
     let chip_h = lh - ctx.typo.px(4.0);
@@ -766,7 +789,7 @@ fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, l
     let mut links = Vec::new();
     let mut at = 0;
     // Returns the index of the span pushed for a non-empty piece.
-    let mut push = |text: &mut String, piece: &str, pad: (f32, f32), atomic: bool, link: Option<u16>| {
+    let mut push = |text: &mut String, piece: &str, url: bool, pad: (f32, f32), atomic: bool, link: Option<u16>| {
         if piece.is_empty() {
             return None;
         }
@@ -774,32 +797,42 @@ fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, l
         text.push_str(piece);
         spans.push(zeron_text::Span {
             range: start..text.len(),
-            style: style.id,
+            style: if url { link_style.id } else { style.id },
             pad_start: pad.0,
             pad_end: pad.1,
             atomic,
             inline_box: None,
         });
         paints.push(super::markdown::SpanPaint {
-            color: ColorRole::Text,
+            color: if url { ColorRole::Link } else { ColorRole::Text },
             decoration: super::display::Decoration::None,
             link,
             chip: false,
         });
         Some(spans.len() - 1)
     };
-    for chip in chips {
-        push(&mut text, &body[at..chip.range.start], (0.0, 0.0), false, None);
-        let link = chip.open.map(|url| {
-            links.push(url);
-            (links.len() - 1) as u16
-        });
-        if let Some(span) = push(&mut text, &chip.label, chip_pad, true, link) {
-            badges.push((span, chip.icon));
+    let mut link = |url: String| {
+        links.push(url);
+        (links.len() - 1) as u16
+    };
+    for piece in pieces {
+        let range = piece.range();
+        push(&mut text, &body[at..range.start], false, (0.0, 0.0), false, None);
+        match piece {
+            UserLink::Chip(chip) => {
+                let open = chip.open.map(&mut link);
+                if let Some(span) = push(&mut text, &chip.label, false, chip_pad, true, open) {
+                    badges.push((span, chip.icon));
+                }
+            }
+            UserLink::Url(url) => {
+                let open = link(body[url.clone()].to_owned());
+                push(&mut text, &body[url], true, (0.0, 0.0), false, Some(open));
+            }
         }
-        at = chip.range.end;
+        at = range.end;
     }
-    push(&mut text, &body[at..], (0.0, 0.0), false, None);
+    push(&mut text, &body[at..], false, (0.0, 0.0), false, None);
     let p = zeron_text::prepare(
         &ctx.typo.book,
         ctx.cache,

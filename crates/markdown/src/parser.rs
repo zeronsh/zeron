@@ -1898,9 +1898,26 @@ fn push_text_autolinked(runs: &mut Vec<InlineRun>, text: &str, style: &InlineSty
             });
         }
     };
-    let mut rest = text;
-    while let Some(at) = find_url_start(rest) {
-        let from = &rest[at..];
+    let mut at = 0;
+    for url in bare_urls(text) {
+        push(runs, &text[at..url.start], style.clone());
+        let mut linked = style.clone();
+        linked.link = Some(text[url.clone()].to_string());
+        push(runs, &text[url.clone()], linked);
+        at = url.end;
+    }
+    push(runs, &text[at..], style.clone());
+}
+
+/// Byte ranges of the bare `http(s)://` URLs in `text`, by the rule markdown
+/// paragraphs autolink with. Shared with surfaces that show text verbatim
+/// (sent prompts) so their URLs are clickable too.
+pub fn bare_urls(text: &str) -> Vec<Range<usize>> {
+    let mut urls = Vec::new();
+    let mut offset = 0;
+    while let Some(rel) = find_url_start(&text[offset..]) {
+        let start = offset + rel;
+        let from = &text[start..];
         let scheme = if from.starts_with("https://") {
             "https://".len()
         } else {
@@ -1909,17 +1926,13 @@ fn push_text_autolinked(runs: &mut Vec<InlineRun>, text: &str, style: &InlineSty
         let len = bare_url_len(from);
         if len <= scheme {
             // A scheme with nothing after it stays text (don't re-find it).
-            push(runs, &rest[..at + scheme], style.clone());
-            rest = &from[scheme..];
+            offset = start + scheme;
             continue;
         }
-        push(runs, &rest[..at], style.clone());
-        let mut linked = style.clone();
-        linked.link = Some(from[..len].to_string());
-        push(runs, &from[..len], linked);
-        rest = &from[len..];
+        urls.push(start..start + len);
+        offset = start + len;
     }
-    push(runs, rest, style.clone());
+    urls
 }
 
 /// First viable `http(s)://` occurrence: not glued to a preceding
@@ -2696,6 +2709,19 @@ mod tests {
             only_link("[https://shown.dev](https://real.dev)\n"),
             Some(("https://shown.dev".into(), "https://real.dev".into()))
         );
+    }
+
+    /// Plain-text URL ranges follow the autolink rule: trailing punctuation
+    /// sheds, glued and bare schemes stay text, multibyte text keeps offsets.
+    #[test]
+    fn bare_urls_finds_plain_text_urls() {
+        let text = "see https://x.dev/a, then (http://y.dev/b) — https:// foohttps://z.dev é https://w.dev/é.";
+        let urls: Vec<&str> = bare_urls(text).into_iter().map(|r| &text[r]).collect();
+        assert_eq!(
+            urls,
+            ["https://x.dev/a", "http://y.dev/b", "https://w.dev/é"]
+        );
+        assert!(bare_urls("no links here").is_empty());
     }
 
     #[test]
