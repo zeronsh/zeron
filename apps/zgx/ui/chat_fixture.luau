@@ -1142,6 +1142,10 @@ sessions_stub.create = function(req: any)
 	local id = req.id or `new{made_chats}`
 	note(`create:{req.project or "none"}:{req.config and req.config.model or ""}`)
 	note(`made:{req.project or "-"}|{req.device or "-"}|{req.branch or "-"}|{req.cwd or "-"}{if req.cloud then "|cloud" else ""}`)
+	-- (On Cloud, the size its machine starts on.)
+	if req.cloud then
+		note(`machine:{req.machine or "-"}`)
+	end
 	META[id] = { title = "New chat", project = req.project, model = req.config and req.config.model }
 	-- (On Cloud, its machine's device, as the engine's list will say.)
 	if req.cloud then

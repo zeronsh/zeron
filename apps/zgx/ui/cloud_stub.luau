@@ -22,6 +22,7 @@
 --   cloud_stub.old_host        an engine from before several logins: no list
 --   cloud_stub.purchase_lands  a Stripe page's purchase lands: 12,000 extra
 --   cloud_stub.fail_next       the next Cloud or Billing call fails ("failed")
+--   cloud_stub.default.<id>    the size new chats start on (Settings → Cloud's)
 --   cloud_stub.old_edge        an edge from before machines: no sizes, plain
 --                              sessions
 --   cloud_stub.session.<case>  the chat's Cloud session, as `cloud_stub_sessions`
@@ -545,6 +546,7 @@ local CASES: { [string]: () -> any } = {
 	staged = function() return session_of { state = "starting", stage = "clone" } end,
 	provisioning = function() return session_of { state = "provisioning" } end,
 	ready = function() return session_of { state = "ready", disk = { used = 10, capacity = 50, level = "ok" } } end,
+	ready_large = function() return session_of { state = "ready", machine = "large", disk = { used = 10, capacity = 111, level = "ok" } } end,
 	updating = function() return session_of { state = "ready", stage = "updating", disk = { used = 10, capacity = 50, level = "ok" } } end,
 	slow = function() return session_of { state = "starting", stage = "slow" } end,
 	restored = function() return session_of { state = "ready", restored = RESTORED_AT, disk = { used = 10, capacity = 50, level = "ok" } } end,
@@ -569,6 +571,16 @@ for name, make in CASES do
 		run = function()
 			session_now:set(make())
 			cloud.load_sessions(true)
+		end,
+	}
+end
+-- The size new chats start on, chosen as Settings → Cloud does.
+for _, m in MACHINES do
+	ui.command {
+		id = `cloud_stub.default.{m.id}`,
+		title = `New Cloud chats start on {m.name}`,
+		run = function()
+			cloud.set_machine(m.id)
 		end,
 	}
 end

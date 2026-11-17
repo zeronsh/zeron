@@ -662,6 +662,10 @@
         "capacity": "{n} token capacity",
         "waiting": "Waiting for context usage",
         "unreported": "Context usage not reported by this agent yet"
+      },
+      "machine": {
+        "label": "Machine",
+        "on": "{device} · {size}"
       }
     },
     "markdown": {
@@ -3079,7 +3083,10 @@
       "store_full": "Too many files are waiting for Cloud machines to collect them. Try again once one has.",
       "held_sending": "Sending…",
       "outbox_uploading": "Uploading…",
-      "outbox_failed": "Didn't send"
+      "outbox_failed": "Didn't send",
+      "size_hint": "{specs} · {rate}",
+      "size_default": "Your default",
+      "on_size": "{where} · {size}"
     },
     "turn_state": {
       "interrupted": "Interrupted",
