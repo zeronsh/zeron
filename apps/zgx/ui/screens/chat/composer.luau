@@ -32,6 +32,7 @@ local CloudTray = require("@app/screens/chat/cloud_tray")
 local Held = require("@app/screens/chat/held")
 local CloudMachine = require("@app/screens/chat/cloud_machine")
 local Where = require("@app/screens/chat/where")
+local cloud = require("@account/cloud")
 local DropOverlay = require("@ds/drop_overlay")
 local Asks = require("@app/screens/chat/asks")
 local Invocations = require("@app/screens/chat/invocations")
@@ -173,6 +174,8 @@ local function Composer(): Node
 	local checkout = ui.state("chat_checkout", "worktree" :: string?)
 	local branch = ui.state("chat_branch", nil :: string?)
 	local project = ui.state("chat_project", nil :: string?)
+	-- On Cloud: the size of machine a new chat starts on (Work in's Machine).
+	local machine_size = ui.state("chat_machine", nil :: string?)
 	local locals: { [string]: State<any> } =
 		{ model = model, effort = effort, fast = fast, options = options, access = access, plan = plan }
 
@@ -466,6 +469,22 @@ local function Composer(): Node
 		branch = branch,
 		active = new_chat,
 	}
+	-- The sizes a new Cloud chat can start on, as Settings → Cloud lists them,
+	-- the account's default tagged. It starts on the default: as that changes
+	-- (Settings → Cloud), or the size picked is no longer offered, the pick
+	-- goes back to it.
+	local function machine_choices(): { CloudMachine.SizeChoice }
+		return CloudMachine.size_choices(cloud.machines(), cloud.machine())
+	end
+	local seen_default: string? = nil
+	ui.effect(function()
+		local default = cloud.machine()
+		local size = CloudMachine.size_for(cloud.machines(), if default == seen_default then machine_size:peek() else nil, default)
+		seen_default = default
+		if machine_size:peek() ~= size then
+			machine_size:set(size)
+		end
+	end)
 	-- (A new chat's project, for what follows the route: its panel.)
 	ui.effect(function()
 		if new_chat() then
@@ -1015,8 +1034,12 @@ local function Composer(): Node
 			-- (Down with its prompt: the dock's one slide.)
 			slide_next = true
 			route.open_session(chat_id)
+			-- On the size picked (Work in's Machine), the account's default
+			-- until another is; the next new chat starts on the default again.
+			local size = CloudMachine.size_for(cloud.machines(), machine_size:peek(), cloud.machine())
+			machine_size:set(CloudMachine.size_for(cloud.machines(), nil, cloud.machine()))
 			sessions
-				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true })
+				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true, machine = size })
 				:after(function(made: any)
 					local cwd = if type(made) == "table" then made.cwd else nil
 					req.cwd = if type(cwd) == "string" and cwd ~= "" then cwd else nil
@@ -1151,6 +1174,11 @@ local function Composer(): Node
 				on = d.name
 			end
 		end
+		-- A Cloud chat: on Cloud, and the size of its machine ("Cloud · Large").
+		if cloud.on_device((s :: any).device) then
+			local session = cloud.session_for(s.id, (s :: any).device)
+			on = CloudMachine.on_size("Cloud", CloudMachine.size_name(cloud.machines(), session and session.machine))
+		end
 		return {
 			device = on,
 			name = name,
@@ -1258,6 +1286,8 @@ local function Composer(): Node
 			device = device,
 			devices = where.devices,
 			checkout = checkout,
+			machine = machine_size,
+			machines = machine_choices,
 			branch = branch,
 			branches = where.branches,
 			branches_empty = where.branches_empty,

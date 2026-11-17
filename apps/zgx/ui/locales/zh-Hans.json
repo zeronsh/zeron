@@ -665,6 +665,10 @@
         "capacity": "容量 {n} tokens",
         "waiting": "正在等待上下文用量",
         "unreported": "此智能体尚未报告上下文用量"
+      },
+      "machine": {
+        "label": "机器",
+        "on": "{device} · {size}"
       }
     },
     "markdown": {
@@ -3330,7 +3334,10 @@
       "store_full": "等待 Cloud 机器取走的文件太多。等其中一台取走后再试。",
       "held_sending": "正在发送…",
       "outbox_uploading": "正在上传…",
-      "outbox_failed": "未发送"
+      "outbox_failed": "未发送",
+      "size_hint": "{specs} · {rate}",
+      "size_default": "你的默认",
+      "on_size": "{where} · {size}"
     },
     "turn_state": {
       "interrupted": "已中断",

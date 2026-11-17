@@ -162,6 +162,11 @@ export type Props = {
 	device: State<string?>?,
 	devices: ({ Device } | State<{ Device }> | () -> { Device })?,
 	checkout: State<string?>?,
+	-- On Cloud, the size of machine it starts on (an id of `machines`), in
+	-- Work in's Machine row where the checkout's would be, and named on the
+	-- chip after Cloud. With no sizes, no row.
+	machine: State<string?>?,
+	machines: ({ Dropdown.Item } | State<{ Dropdown.Item }> | () -> { Dropdown.Item })?,
 	branch: State<string?>?,
 	branches: ({ Dropdown.Item } | State<{ Dropdown.Item }> | () -> { Dropdown.Item })?,
 	-- What the branches' list says with none to show (still loading, none
@@ -657,7 +662,9 @@ local function work_in(
 	on_new_project: (() -> ())?,
 	checkout: State<string?>?,
 	device: State<string?>?,
-	devices: ({ Device } | State<{ Device }> | () -> { Device })?
+	devices: ({ Device } | State<{ Device }> | () -> { Device })?,
+	machine: State<string?>?,
+	machines: ({ Choice } | State<{ Choice }> | () -> { Choice })?
 ): Node
 	local siblings: { State<boolean> } = {}
 	local rows: { Node } = {
@@ -751,6 +758,16 @@ local function work_in(
 			ui.show(function(): boolean
 				return (project == nil or project:get() ~= NO_PROJECT) and not plain() and not on_cloud(device, devices)
 			end, submenu(siblings, locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
+		)
+	end
+	if machine and machines then
+		-- On Cloud, in the checkout's place: the size of its machine, each
+		-- with its specs and credit rate.
+		table.insert(
+			rows,
+			ui.show(function(): boolean
+				return on_cloud(device, devices) and #(list_of(machines) :: { Choice }) > 0
+			end, submenu(siblings, locale.t("ds.composer.machine.label"), machine, machines :: any, 1))
 		)
 	end
 	return ui.column { w_full = true, table.unpack(rows) }
@@ -2138,7 +2155,16 @@ return ui.component(function(props: Props): Node
 			-- Built for each chip it heads (a node lives in one place).
 			local function head_node(): Node?
 				return if checkout or props.device or props.project
-					then work_in(props.project, props.projects :: any, props.on_new_project, checkout, props.device, props.devices :: any)
+					then work_in(
+						props.project,
+						props.projects :: any,
+						props.on_new_project,
+						checkout,
+						props.device,
+						props.devices :: any,
+						props.machine,
+						props.machines :: any
+					)
 					else nil
 			end
 			-- In a project, its refs: the branch chip, its search and its
@@ -2198,7 +2224,17 @@ return ui.component(function(props: Props): Node
 				local v = props.device:get()
 				for _, d in list_of(props.devices) :: { Device } do
 					if d.value == v then
-						return d.label
+						-- On Cloud, with the size it starts on: "Cloud · Large".
+						local size: string? = nil
+						if d.cloud and props.machine and props.machines then
+							local m = props.machine:get()
+							for _, item in list_of(props.machines) :: { Dropdown.Item } do
+								if item.value == m then
+									size = item.label
+								end
+							end
+						end
+						return if size then locale.s("ds.composer.machine.on", { device = d.label, size = size }) else d.label
 					end
 				end
 				return nil
