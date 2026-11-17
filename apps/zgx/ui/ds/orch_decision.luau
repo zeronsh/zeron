@@ -51,6 +51,7 @@ local TextArea = require("@self/text_area")
 local Markdown = require("@self/markdown")
 local Lightbox = require("@self/lightbox")
 local ContextMenu = require("@self/context_menu")
+local SelectionMenu = require("@self/selection_menu")
 local Kbd = require("@self/kbd")
 local badge = require("@self/badge")
 local status = require("@self/status")
@@ -274,6 +275,10 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 			end,
 			focus = control.ring,
 			cursor = "pointer",
+			-- Its words select on their own: a button that is its own
+			-- selectable region clicks, and a drag from it selects its words
+			-- and doesn't click (zgx). So only a click chooses.
+			selectable = true,
 			on_click = function()
 				choose(o.index)
 			end,
@@ -300,6 +305,7 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 				}
 				else nil,
 			ui.column {
+				class = "orch-decision-option-words",
 				w_full = true,
 				p = "$space.3",
 				gap = "$space.2",
@@ -319,7 +325,7 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 						weight = "$font.weight.semibold",
 						color = "$text.primary",
 					},
-					ui.show(on, ui.div { color = "$accent", shrink = 0, Icon { name = "check-circle", size = 16 } }),
+					ui.show(on, ui.div { class = "orch-decision-chosen", color = "$accent", shrink = 0, Icon { name = "check-circle", size = 16 } }),
 				},
 				if o.detail
 					then ui.text { o.detail, literal = true, wrap = true, w_full = true, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.secondary" }
@@ -611,6 +617,7 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 							end,
 							small = true,
 							ink = "$text.secondary",
+							copy_quotes = true,
 						},
 					}),
 				}),
@@ -628,6 +635,9 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 				ui.div {
 					class = "orch-decision-options",
 					w_full = true,
+					-- (Out of the overlay's own region: each option is its own,
+					-- the outer one would keep a press on a button its button's.)
+					selectable = false,
 					on_resize = function(size: any)
 						if math.abs((size.w or 0) - grid_w:peek()) >= 1 then
 							grid_w:set(size.w or 0)
@@ -798,7 +808,10 @@ local Overlay = ui.component(function(args: OverlayArgs): Node
 		build = function()
 			return ui.column {
 				w_full = true,
-				args.body(phase),
+				-- Its words select and copy as a transcript's do: a drag, a
+				-- double click, Ctrl/Cmd+C, and the selection's own menu
+				-- (Copy) on a secondary click (ds/selection_menu).
+				SelectionMenu { w_full = true, args.body(phase) },
 				Lightbox.Host(),
 			}
 		end,
@@ -1120,6 +1133,7 @@ local AnswerBody = ui.component(function(args: { props: AnswerProps, entry: () -
 							local e = entry()
 							return (e and e.answer) or ""
 						end,
+						copy_quotes = true,
 					},
 				}),
 				ui.show(function(): boolean

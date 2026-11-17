@@ -682,7 +682,8 @@
       "copy_code": "Copy code",
       "copied": "Copied",
       "view_named": "View {name}",
-      "done": "Done"
+      "done": "Done",
+      "copy_quote": "Copy quote"
     },
     "mermaid": {
       "show_source": "Show source",

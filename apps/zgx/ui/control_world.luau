@@ -732,6 +732,46 @@ return function()
 			o.asks = asks
 		end)
 	end }
+	-- A question whose context carries an email to send, quoted, and a
+	-- command (`fixture.decision_email`): what the person copies out.
+	ui.command { id = "fixture.decision_email", title = "Fixture: a question with an email to send", run = function()
+		for _, a in orchestration.now:peek().asks or {} do
+			if a.id == "ak-mail" then
+				return
+			end
+		end
+		local t = os.time()
+		republish(function(o)
+			local asks = table.clone(o.asks)
+			table.insert(asks, {
+				id = "ak-mail", from_chat = "orc-vpn", orchestrator_id = "orc-vpn", kind = "question",
+				question = "Could you send this support request to mhost.ee about the German server's outbound connections dropping every 20–30 minutes?",
+				context = table.concat({
+					"**Root cause of tonight's outages:** de-mhost loses the ability to open new **outbound** TCP connections for about 3 minutes, every 20–30 minutes. Text to send (from your mhost account):",
+					"",
+					"> Hello. Our VPS 103.227.84.140 periodically loses the ability to open **new outbound TCP connections** for about 2–3 minutes, roughly every 20–30 minutes.",
+					">",
+					"> 1. Do you apply any rate limit or anti-abuse rule to outbound TCP connections from VMs?",
+					"> 2. If so, what are the thresholds, and can it be raised for this VM?",
+					">",
+					"> Thank you.",
+					"",
+					"To check from the server:",
+					"",
+					"```sh",
+					"ss -s | head -3",
+					"```",
+				}, "\n"),
+				options = {
+					{ label = "Sent", detail = "I'll paste their answer here when it comes" },
+					{ label = "Later", detail = "Keep it parked; failover work continues regardless" },
+				},
+				links = {}, images = {},
+				urgent = false, state = "open", created = t - 30, origin = "tool", turn_id = "msg-mail-ask",
+			})
+			o.asks = asks
+		end)
+	end }
 	ui.command { id = "theme_light", title = "Light theme", run = function()
 		ui.theme.follow_system(false)
 		ui.theme.current:set("zeron-light")
