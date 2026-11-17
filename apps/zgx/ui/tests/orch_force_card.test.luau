@@ -105,3 +105,60 @@ test("force card: Open chat, Open card, Pin and Unpin", function()
 	app:frames(5)
 	expect(app:state("shell_route_path")).to_be("/session/th-reins-win")
 end)
+
+-- Hover intent: the card (and the node it hangs off) stays while the
+-- pointer crosses from the node to it and while it's on it; off all of
+-- them, it goes after a moment. Both pivots.
+for _, pv in { "orchestrator", "machine" } do
+	test(`force card ({pv}): node, gap, card: the card stays; off everything it goes after a moment`, function()
+		local app = open(pv)
+		hover(app, "th-reins-win")
+		-- The gap (an empty place on the field): still there a moment on.
+		app:hover(".orch-force-legend")
+		app:frames(3)
+		expect(app:state("control_map_force_hover")).to_be("th-reins-win")
+		-- On the card: kept, however long.
+		app:hover(".orch-force-card")
+		app:wait(700)
+		app:frames(5)
+		expect(app:state("control_map_force_hover")).to_be("th-reins-win")
+		expect(app:has(".orch-force-card")).to_be(true)
+		-- Its buttons fire: Pin.
+		app:click("#orch-force-card-pin")
+		app:frames(5)
+		expect((app:state(if pv == "machine" then "control_map_force_pins_machine" else "control_map_force_pins") or {})["th-reins-win"]).to_be(true)
+		-- Off everything: gone after a moment.
+		app:hover(".orch-force-legend")
+		app:frames(2)
+		app:wait(450)
+		app:frames(5)
+		expect(app:state("control_map_force_hover")).to_be(nil)
+		app:set_state("control_map_force_pivot", "orchestrator")
+		app:frames(5)
+	end)
+end
+
+test("force card: the pin over a lit pinned node is a button: on the way, kept; clicked, unpinned; no drag, no pan", function()
+	local app = open()
+	hover(app, "th-reins-win")
+	app:click("#orch-force-card-pin")
+	app:frames(5)
+	expect((app:state("control_map_force_pins") or {})["th-reins-win"]).to_be(true)
+	hover(app, "th-reins-win")
+	expect(app:has("#orch-force-pin")).to_be(true)
+	-- On the pin: kept.
+	app:hover("#orch-force-pin")
+	app:wait(500)
+	app:frames(3)
+	expect(app:state("control_map_force_hover")).to_be("th-reins-win")
+	local views = app:state("control_map_force_views")
+	app:click("#orch-force-pin")
+	app:frames(10)
+	expect((app:state("control_map_force_pins") or {})["th-reins-win"]).to_be(nil)
+	-- (A press on the card or the pin pans nothing.)
+	hover(app, "th-reins-win")
+	app:click(".orch-force-card-state")
+	app:frames(5)
+	local after = app:state("control_map_force_views")
+	expect(((after or {}).orchestrator or {}).x).to_be(((views or {}).orchestrator or {}).x)
+end)

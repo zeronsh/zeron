@@ -156,6 +156,9 @@ local PLACES_MAX = 4000
 local PRUNE_MS = 3000
 -- A frame's share of placing the threads' names (seconds).
 local NAME_SLICE = 0.003
+-- How long the node lit (and its card) stays once the pointer has left it,
+-- its card and its pin (ms): time to cross to the card.
+local CLOSE_MS = 250
 -- How long a zoom rests before the names are placed again at its scale (ms).
 local ZOOM_SETTLE_MS = 250
 -- A machine's hub on the machines pivot: Material's Clover (four leaves),
@@ -250,7 +253,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { rescales = 0, leaders = 0, name_size = 0, label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { pin_clicks = 0, rescales = 0, leaders = 0, name_size = 0, label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -1157,23 +1160,16 @@ M.View = ui.component(function(props: {
 				end
 			end
 			local nx, ny = x[i], y[i]
-			local r
 			if n.kind == "brain" then
 				c:stroke(draw.shape("ghostish", nx, ny, draw.BRAIN_D + 9), p.lit, 1.6)
-				r = R_BRAIN
 			elseif n.kind == "orchestrator" or n.kind == "machine" then
 				c:stroke(draw.shape(hub_shape[i] or draw.cookie_of(crew_of(i)), nx, ny, draw.HUB_D + 8), p.lit, 1.6)
-				r = R_HUB
 			else
 				c:stroke(ui.path():arc(nx, ny, R_RING + 3.5, 0, 360), p.lit, 1.6)
-				r = R_RING
 			end
 			-- (Pinned by hand: a pin at its top left, while it's lit.)
 			if s.pinned[i] and not s.fixed[i] then
-				local d = r * 0.72 + 10
-				local pin, w = draw.pin(nx - d, ny - d, 16)
-				c:circle(nx - d, ny - d, 10, p.bg)
-				c:stroke(pin, p.fg, w, ROUND)
+				-- (Drawn as a button over the canvas, that unpins it.)
 				count("pins")
 			end
 		end
@@ -1463,9 +1459,56 @@ M.View = ui.component(function(props: {
 	local press: any = nil
 	local grip_hot = ui.use_state(false)
 	local in_field = false
+	-- Hover intent: the node lit stays while the pointer goes from it to its
+	-- card (or its pin) and while it's on them; off all of them, it goes
+	-- after CLOSE_MS. The card's own grace (ds/hover_card) holds the card
+	-- across the gap; this holds the node it hangs off.
+	local card_hot = false
+	local close_token = 0
+	-- Where a lit, pinned node's pin is (screen): its middle and reach.
+	local function pin_at(id: string?): (number?, number?, number?)
+		local i = id and fmodel.index[id]
+		if not i or not s.pinned[i] or s.fixed[i] then
+			return nil, nil, nil
+		end
+		local n = fmodel.nodes[i]
+		local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "chat" then R_RING else R_HUB
+		local v = view:peek()
+		local d = r * 0.72 + 10
+		return (s.x[i] - d) * v.zoom + v.x, (s.y[i] - d) * v.zoom + v.y, 12 * math.max(0.6, v.zoom)
+	end
+	local function on_pin(id: string?, px: number, py: number): boolean
+		local x, y, r = pin_at(id)
+		return x ~= nil and (px - (x :: number)) ^ 2 + (py - (y :: number)) ^ 2 <= (r :: number) ^ 2
+	end
+	local function keep()
+		close_token += 1
+	end
+	local function close_later()
+		close_token += 1
+		local token = close_token
+		ui.after(CLOSE_MS, function()
+			if token == close_token and not card_hot and not press and not grip_hot:peek() then
+				M.hover:set(nil)
+			end
+		end)
+	end
 	-- Pressed on a node: held from now (the drawing's dragging mode) till
 	-- let go or cancelled, moved or not.
 	local function on_press(px: number, py: number)
+		-- (On the lit node's pin: let go of its pin, nothing dragged.)
+		local lit = M.hover:peek()
+		if lit and on_pin(lit, px, py) then
+			press = nil
+			local i = fmodel.index[lit]
+			if i then
+				unpin(function(j: number): boolean
+					return j == i
+				end)
+				count("pin_clicks")
+			end
+			return
+		end
 		local id = hit(px, py)
 		press = { id = id, x = px, y = py, moved = false, view = view:peek() }
 		local i = id and fmodel.index[id]
@@ -1498,9 +1541,25 @@ M.View = ui.component(function(props: {
 			end
 			return
 		end
+		-- (On the lit node's pin: it, not whatever's under the pin.)
+		if M.hover:peek() ~= nil and on_pin(M.hover:peek(), px, py) then
+			keep()
+			return
+		end
 		local id = hit(px, py)
-		if id ~= M.hover:peek() then
-			M.hover:set(id)
+		if id then
+			keep()
+			if id ~= M.hover:peek() then
+				M.hover:set(id)
+			end
+		elseif M.hover:peek() ~= nil then
+			-- (Off it: on its pin, kept; else it goes after a moment, unless
+			-- the pointer reaches its card.)
+			if on_pin(M.hover:peek(), px, py) then
+				keep()
+			else
+				close_later()
+			end
 		end
 	end
 	ui.effect(function()
@@ -1538,11 +1597,9 @@ M.View = ui.component(function(props: {
 		end
 	end
 	local function leave_later()
-		ui.after(0, function()
-			if not grip_hot:peek() and not in_field and not press then
-				M.hover:set(nil)
-			end
-		end)
+		if not in_field and not press then
+			close_later()
+		end
 	end
 	local function screen_of(id: string): (number, number, number)
 		local i = fmodel.index[id]
@@ -1625,6 +1682,15 @@ M.View = ui.component(function(props: {
 		w = 300,
 		delay = 350,
 		placement = { side = "bottom", align = "start", offset = 6 },
+		-- (The pointer on the card: the node it's of stays lit.)
+		on_card_hover = function(inside: boolean)
+			card_hot = inside
+			if inside then
+				keep()
+			else
+				close_later()
+			end
+		end,
 		anchor = ui.div {
 			class = "orch-force-anchor-box",
 			w = function(): number
@@ -2066,6 +2132,50 @@ M.View = ui.component(function(props: {
 					ui.each(items, marker, { key = function(item: any): string
 						return item.id
 					end, absolute = true, left = 0, top = 0, w = 1, h = 1, pointer_events = "none" }),
+				}),
+				-- The lit node's pin, while it's pinned: a button (Unpin), on the
+				-- way to the card as much as the node is.
+				ui.show(function(): boolean
+					local x = M.hover:get()
+					geo:get()
+					M.pins_of():get()
+					return x ~= nil and (pin_at(x)) ~= nil
+				end, ui.div {
+					absolute = true,
+					left = function(): number
+						view:get()
+						local x = pin_at(M.hover:get())
+						return (x or -1000) - 11
+					end,
+					top = function(): number
+						view:get()
+						local _, y = pin_at(M.hover:get())
+						return (y or -1000) - 11
+					end,
+					on_hover = function(inside: boolean)
+						if inside then
+							keep()
+						elseif not card_hot then
+							close_later()
+						end
+					end,
+					IconButton {
+						id = "orch-force-pin",
+						icon = "pin",
+						label = locale.t("ds.orch.map.card.unpin"),
+						size = "sm",
+						tone = "quiet",
+						on_click = function()
+							local lit = M.hover:peek()
+							local i = lit and fmodel.index[lit]
+							if i then
+								unpin(function(j: number): boolean
+									return j == i
+								end)
+								count("pin_clicks")
+							end
+						end,
+					},
 				}),
 				ui.div {
 					class = "orch-force-anchor-at",
