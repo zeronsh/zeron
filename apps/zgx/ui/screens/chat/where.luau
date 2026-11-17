@@ -225,29 +225,49 @@ function M.bind(c: Choices)
 		local out = {}
 		local chosen = c.project:get()
 		local list = on_device(c.device:get())
-		-- On Cloud, Cloud's machines' copies of a repository once (each Cloud
-		-- chat's machine has its own): where the first stands, reading as
-		-- screens/shell/cloud_projects says, the one chosen kept chosen.
+		-- On Cloud, a repository once, whichever devices have it: Cloud
+		-- clones the repository whichever copy is picked (each Cloud chat's
+		-- machine has its own, your computers theirs). Where the first
+		-- stands, reading as Cloud's copies do (screens/shell/cloud_projects),
+		-- else as a computer's named like the repository, else the first;
+		-- the one chosen kept chosen.
 		local copies: { [string]: { sessions.Project } } = {}
-		if c.device:get() == M.CLOUD then
+		local cloud_view = c.device:get() == M.CLOUD
+		if cloud_view then
 			for _, p in list do
-				if lives_on_cloud(p) then
-					local key = cloud_projects.key(p)
-					copies[key] = copies[key] or {}
-					table.insert(copies[key], p)
+				local key = cloud_projects.key(p)
+				copies[key] = copies[key] or {}
+				table.insert(copies[key], p)
+			end
+		end
+		local function lead_of(group: { sessions.Project }): sessions.Project
+			local on_cloud_copies = {}
+			for _, q in group do
+				if lives_on_cloud(q) then
+					table.insert(on_cloud_copies, q)
 				end
 			end
+			if #on_cloud_copies > 0 then
+				return cloud_projects.lead(on_cloud_copies)
+			end
+			for _, q in group do
+				local repo = string.match(q.github or "", "([^/]+)$")
+				if repo and string.lower(repo) == string.lower(q.name) then
+					return q
+				end
+			end
+			return group[1]
 		end
 		local listed: { [string]: boolean } = {}
 		for _, p in list do
-			local key = if lives_on_cloud(p) then cloud_projects.key(p) else nil
+			local key = if cloud_view then cloud_projects.key(p) else nil
 			local group = if key then copies[key] else nil
 			if group then
 				if listed[key :: string] then
 					continue
 				end
 				listed[key :: string] = true
-				local lead = cloud_projects.lead(group)
+				local lead = lead_of(group)
 				local value = lead.id
 				for _, q in group do
 					if q.id == chosen then

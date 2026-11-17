@@ -4,9 +4,9 @@
 -- for each repository with every copy's sessions counted, and what that
 -- row's ⋯ does (rename, change icon, remove) reaches every copy. Your
 -- computers' groups and rows are as they were. A new chat's project, on
--- Cloud, lists the repository once too. On ui/shell_fixture.luau
--- (`fixture.cloud_projects`) and ui/chat_fixture.luau
--- (`fixture.cloud_copies`).
+-- Cloud, lists the repository once too, whichever devices have it. On
+-- ui/shell_fixture.luau (`fixture.cloud_projects`) and ui/chat_fixture.luau
+-- (`fixture.cloud_copies`, `fixture.atlas_elsewhere`).
 
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
@@ -164,13 +164,13 @@ end)
 
 -- A new chat's project, on Cloud ────────────────────────────────────────────
 
-test("a new chat on Cloud lists Cloud's copies of a repository once", function()
+local function cloud_project_options(fixture: string): (any, { string })
 	local app = mount("chat_fixture.luau")
 	app:resize(960, 760)
 	app:command("go_home")
 	app:frames(30)
 	app:command("cloud_stub.offer")
-	app:command("fixture.cloud_copies")
+	app:command(fixture)
 	app:frames(30)
 	app:click('role:button "Branch"')
 	app:frames(30)
@@ -180,12 +180,26 @@ test("a new chat on Cloud lists Cloud's copies of a repository once", function()
 	app:frames(30)
 	app:click('role:menuitem "Project"')
 	app:frames(30)
-	local options = 0
+	local options = {}
 	for line in app:tree():gmatch("[^\n]+") do
 		if line:find("option", 1, true) and line:lower():find("atlas", 1, true) then
-			options += 1
+			table.insert(options, line)
 		end
 	end
-	-- This Mac's Atlas, and Cloud's three copies as one.
-	expect(options).to_be(2)
+	return app, options
+end
+
+test("a new chat on Cloud lists a repository once, Cloud's copies and this Mac's together", function()
+	local _, options = cloud_project_options("fixture.cloud_copies")
+	-- This Mac's Atlas and Cloud's three copies: one repository, one row.
+	expect(#options).to_be(1)
+end)
+
+test("a new chat on Cloud lists a repository once across computers, named like the repository", function()
+	local app, options = cloud_project_options("fixture.atlas_elsewhere")
+	-- This Mac's Atlas and the build box's checkout under another name.
+	expect(#options).to_be(1)
+	expect(app:has('role:option ~"atlas-old"')).to_be(false)
+	-- This Mac's, chosen before Cloud was, stays chosen.
+	expect(app:state("chat_project")).to_be("atlas")
 end)
