@@ -35,14 +35,23 @@ local Receipt = require("@ds/orch_receipt")
 local Asks = require("@ds/orch_asks")
 local Decision = require("@ds/orch_decision")
 local decide = require("@ds/orch_decide")
-local OrchMap = require("@ds/orch_map")
+-- (Loaded at their first use, not with the page: each takes a few
+-- milliseconds to load, and the page is required inside the build that
+-- opens it, whose time budget all of them together nearly spent.)
+local function OrchMap(): any
+	return require("@ds/orch_map")
+end
 local rows = require("@account/rows")
-local MapMenu = require("@app/screens/control/map_menu")
+local function MapMenu(): any
+	return require("@app/screens/control/map_menu")
+end
 local Machines = require("@ds/orch_machines")
 local Visibility = require("@ds/orch_map_visibility")
 local Name = require("@ds/orch_name")
 local Comms = require("@ds/orch_comms")
-local OrchBoard = require("@ds/orch_board")
+local function OrchBoard(): any
+	return require("@ds/orch_board")
+end
 local QA = require("@ds/orch_qa")
 local Links = require("@ds/links")
 local Block = require("@ds/orch_block")
@@ -52,12 +61,16 @@ local Progress = require("@app/screens/control/progress")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
-local LaneTab = require("@app/screens/chat/lane_tab")
+local function LaneTab(): any
+	return require("@app/screens/chat/lane_tab")
+end
 local lanes = require("@app/screens/chat/lanes")
 local KeptScroll = require("@ds/kept_scroll")
 local hold = require("@ds/hold")
 local prefs = require("@app/screens/settings/prefs")
-local Scratch = require("@ds/orch_scratchpad")
+local function Scratch(): any
+	return require("@ds/orch_scratchpad")
+end
 local scratchpad = require("@account/scratchpad")
 local Shared = require("@app/screens/chat/shared")
 local motion = require("@ds/motion")
@@ -497,7 +510,7 @@ end
 -- One composer: the same draft, chips and model in both (LaneTab's
 -- `mirror`), the keys going with it as it changes places.
 local SLOT = "control-capture"
-local FOOTER: LaneTab.Footer = { access = false, place = false }
+local FOOTER: any = { access = false, place = false }
 -- Capture's composer is out of the page's view, above it: it floats.
 M.floating = ui.state("control_capture_floating", false)
 -- The floating one opened out.
@@ -548,7 +561,7 @@ local function inline_seen(visible: boolean, el: Element)
 	end)
 	if had then
 		ui.after(0, function()
-			LaneTab.focus(SLOT)
+			LaneTab().focus(SLOT)
 		end)
 	end
 end
@@ -558,7 +571,7 @@ function M.focus_composer(): boolean
 	if M.floating:peek() or M.tab:peek() ~= "overview" then
 		float_wanted:add(1)
 	else
-		LaneTab.focus(SLOT)
+		LaneTab().focus(SLOT)
 	end
 	return true
 end
@@ -595,7 +608,7 @@ local function capture(): Node
 	-- dropped is an @-mention, files are carried with the dump.)
 	-- (And a card, thread, machine, ask… dragged from the room's widgets: a
 	-- reference, ds/orch_ref.)
-	return LaneTab.DropZone { slot = "control-capture", chat = brain_dump, refs = true, ui.column {
+	return LaneTab().DropZone { slot = "control-capture", chat = brain_dump, refs = true, ui.column {
 		id = "control-capture",
 		w_full = true,
 		gap = "$space.5",
@@ -609,7 +622,7 @@ local function capture(): Node
 			id = "control-capture-inline",
 			w_full = true,
 			on_visible = inline_seen,
-			LaneTab.Composer {
+			LaneTab().Composer {
 				id = "control-capture-composer",
 				slot = SLOT,
 				chat = brain_dump,
@@ -809,7 +822,7 @@ end
 -- The board: every orchestrator's work, its filter over it, loose items in
 -- an Inbox first.
 local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
-	return OrchBoard {
+	return OrchBoard() {
 		card_build = card_build,
 		id = "control-board",
 		items = function(): { any }
@@ -958,7 +971,9 @@ end
 -- The Map's view (Topology, Timeline or Machines, and the Timeline's
 -- span), on this device; what each thread did lately, as the host keeps it
 -- (src/orchestration_timeline.rs).
-M.map_view = ui.persist("control_map", OrchMap.DEFAULT)
+-- (ds/orch_map's DEFAULT, written out: the Map loads with its widget.)
+M.MAP_DEFAULT = { variant = "topology", window = 15 }
+M.map_view = ui.persist("control_map", M.MAP_DEFAULT)
 -- Whether the board's columns show all their cards (past ten): kept, as
 -- the map's view is.
 M.board_expanded = ui.persist("control_board_expanded", false)
@@ -969,7 +984,7 @@ local timeline = ui.shared("orchestration.timeline", {} :: { [string]: { any } }
 local function map(): Node
 	return ui.column {
 		w_full = true,
-		OrchMap.Map {
+		OrchMap().Map {
 			world = world,
 			-- (Each thread's chat and name by itself, account/rows through
 			-- the Overview's held readers: a push wakes the Map rows of the
@@ -992,9 +1007,9 @@ local function map(): Node
 				route.orchestrator(id)
 			end,
 			-- A secondary click on anything on it (screens/control/map_menu).
-			menu = MapMenu.entries,
+			menu = MapMenu().entries,
 		},
-		MapMenu.Dialogs(),
+		MapMenu().Dialogs(),
 	}
 end
 
@@ -1186,7 +1201,7 @@ local function scratchpad_props(): any
 	}
 end
 local function scratchpad_widget(): Node
-	return Scratch.Widget(scratchpad_props())
+	return Scratch().Widget(scratchpad_props())
 end
 
 local BUILD: { [string]: () -> Node } = { scratchpad = scratchpad_widget, capture = capture, needs = needs, qa = qa, progress = function(): Node
@@ -1354,7 +1369,7 @@ local function figures_of(id: string, live: () -> boolean): Node?
 	elseif id == "progress" then
 		return Progress.figures(live)
 	elseif id == "scratchpad" then
-		return Scratch.Status()
+		return Scratch().Status()
 	elseif id == "comms" then
 		return figure_if(function(): string
 			local list = OV.comms()
@@ -1403,7 +1418,7 @@ local function widget(id: string, wide: boolean): Node
 	local hook, seen, open = opens_under()
 	local function entries(): { any }
 		-- (The Map's own first: which view.)
-		local out = if id == "map" then OrchMap.menu(M.map_view) else {}
+		local out = if id == "map" then OrchMap().menu(M.map_view) else {}
 		for _, e in {
 			{ label = locale.s("control.widgets.up"), icon = "arrow-up", on_select = function()
 				M.move(id, -1, wide)
@@ -1812,7 +1827,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 					end
 				end
 			end,
-			LaneTab.DropZone {
+			LaneTab().DropZone {
 				slot = SLOT,
 				chat = brain_dump,
 				focus = focus,
@@ -1863,7 +1878,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 								end,
 							},
 						}),
-						LaneTab.Composer {
+						LaneTab().Composer {
 							id = "control-float-composer",
 							slot = SLOT,
 							chat = brain_dump,
@@ -1975,7 +1990,7 @@ local Overview = ui.component(function(props: { width: State<number> }): Node
 			if kind == "scratchpad" then
 				return ui.column {
 					w_full = true,
-					Scratch.Page(scratchpad_props()),
+					Scratch().Page(scratchpad_props()),
 				}
 			end
 			return ui.presence(function(): string
@@ -2049,7 +2064,7 @@ local ChatTab = ui.component(function(): Node
 				}
 			end
 			local function build(): Node
-				return LaneTab.Tab {
+				return LaneTab().Tab {
 					tab = {
 						id = M.CHAT_SLOT,
 						kind = "read",
