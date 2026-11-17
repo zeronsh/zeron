@@ -1552,18 +1552,8 @@ local function head(): Node
 				},
 			},
 			ui.div { grow = 1 },
-			-- The tabs.
-			ds.Segmented {
-				id = "control-tabs",
-				value = M.tab,
-				label = locale.t("control.tabs.label"),
-				options = {
-					{ value = "overview", label = locale.t("control.tabs.overview") },
-					{ value = "board", label = locale.t("control.tabs.board") },
-					{ value = "chat", label = locale.t("control.tabs.chat") },
-				},
-			},
-			-- (The widgets' menu: Overview's alone.)
+			-- The widgets' menu: Overview's alone, to the tabs' left, so the
+			-- tabs stand at the head's end, in the same place on every tab.
 			ui.div {
 				on_visible = seen,
 				hidden = function(): boolean
@@ -1576,6 +1566,17 @@ local function head(): Node
 					size = "md",
 					tone = "quiet",
 					on_click = open,
+				},
+			},
+			-- The tabs.
+			ds.Segmented {
+				id = "control-tabs",
+				value = M.tab,
+				label = locale.t("control.tabs.label"),
+				options = {
+					{ value = "overview", label = locale.t("control.tabs.overview") },
+					{ value = "board", label = locale.t("control.tabs.board") },
+					{ value = "chat", label = locale.t("control.tabs.chat") },
 				},
 			},
 		},

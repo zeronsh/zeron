@@ -352,3 +352,23 @@ test("control tabs: the Chat tab's transcript is let go as the Control room is l
 	app:frames(30)
 	expect(watched(app)["control-chat"]).to_be_nil()
 end)
+
+test("control tabs: the tab buttons stand in the same place on every tab", function()
+	local app = open()
+	local function at(label: string): string
+		local line = string.match(app:tree(`#control-tabs >> "{label}"`, 0), "[^\n]+") or ""
+		return string.match(line, " (%-?[%d%.]+,%-?[%d%.]+) ") or ""
+	end
+	local function all(): string
+		return `{at("Overview")} {at("Board")} {at("Chat")}`
+	end
+	local overview = all()
+	expect(overview ~= "  ").to_be(true)
+	for _, tab in { "board", "chat", "overview", "chat" } do
+		app:set_state("control_tab", tab)
+		app:frames(30)
+		expect(all()).to_be(overview)
+	end
+	-- (The widgets' menu, Overview's alone, to their left.)
+	expect(app:has("#control-widgets-menu")).to_be(true)
+end)
