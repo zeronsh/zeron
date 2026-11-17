@@ -2909,6 +2909,7 @@ async fn pausing_stops_the_thread_and_holds_it_for_the_person() {
         &core.orchestration.state(),
         &core.orchestration.workspace().read_chats().unwrap().into_iter().map(|c| (c.id.clone(), c)).collect(),
         &Default::default(),
+        &Default::default(),
         &[],
         None,
         chrono::Utc::now(),
@@ -3085,7 +3086,7 @@ async fn board_check_dry_run_on_copied_data() {
         let now_cards: Vec<_> = open.iter().filter(|i| i.state == WorkState::Active).collect();
         let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
         for c in &now_cards {
-            let of: Vec<_> = c.threads.iter().map(|t| super::board_checks::Thread::of(chats.get(t), rows.get(t), now)).collect();
+            let of: Vec<_> = c.threads.iter().map(|t| super::board_checks::Thread::of(chats.get(t), rows.get(t), None, false, now)).collect();
             let kind = if of.iter().any(|t| matches!(t, super::board_checks::Thread::Live { .. })) {
                 "a thread at work"
             } else if of.is_empty() {
@@ -3111,7 +3112,7 @@ async fn board_check_dry_run_on_copied_data() {
                     format!(
                         "{}={:?}{}",
                         &t[..t.len().min(8)],
-                        super::board_checks::Thread::of(chats.get(t), row, now),
+                        super::board_checks::Thread::of(chats.get(t), row, None, false, now),
                         row.map(|r| format!(
                             " (row {:?}, updated {}{}{}{})",
                             r.status,
@@ -3144,6 +3145,31 @@ async fn board_check_dry_run_on_copied_data() {
                 "== card {} {:?} removed={} threads={:?} check={:?} moved_at={:?} title={:?}",
                 c.id, c.state, c.removed, c.threads, c.check, c.moved_at, c.title
             );
+        }
+        for c in state.items.iter().filter(|i| i.id.starts_with(prefix)) {
+            let chats = core.orchestration.workspace().read_chats().unwrap_or_default();
+            let rows = core.orchestration.workspace().read_sessions().unwrap_or_default();
+            let progress = core.orchestration.workspace().read_orchestration_with(|doc| doc.read_progress());
+            for t in &c.threads {
+                let chat = chats.iter().find(|x| &x.id == t);
+                println!(
+                    "   thread {t}: chat archived={:?} device={:?}",
+                    chat.map(|x| x.archived),
+                    chat.map(|x| x.device_id.clone())
+                );
+                if let Some(r) = rows.iter().find(|r| &r.chat_id == t) {
+                    println!(
+                        "     row {:?} updated {} started {:?} waiting={} subagents={} outcome={:?}",
+                        r.status, r.updated_at, r.started_at, r.waiting.is_some(), r.running_subagents, r.last_turn_outcome
+                    );
+                }
+                if let Some(p) = progress.iter().find(|p| &p.chat_id == t) {
+                    println!(
+                        "     progress {:?} updated {} step {:?} tool {:?} device {}",
+                        p.state, p.updated_at, p.last_step_at, p.tool_since, p.device_id
+                    );
+                }
+            }
         }
         for m in state.crew.iter().filter(|m| m.item_id.as_deref().is_some_and(|i| i.starts_with(prefix))) {
             println!("   crew {} item {:?} released={}", m.chat_id, m.item_id, m.released);
@@ -3287,4 +3313,82 @@ async fn after_a_crash_a_chat_picked_back_up_gets_no_error_ask() {
         core.orchestration.state().asks.iter().all(|a| a.item_id.as_deref() != Some(card.as_str())),
         "no 'stopped on an error' ask"
     );
+}
+
+
+#[tokio::test]
+async fn a_send_the_stop_cut_off_mid_execute_resumes_its_chat_once() {
+    // 0467f76b: a message to the VPN Orchestrator was consumed and the engine
+    // stopped before it resolved. On start the drain's sweep rejects it, so
+    // nothing would ever pick the chat back up.
+    let temp = tempfile::tempdir().unwrap();
+    let profile = crate::EngineProfile::local(temp.path()).unwrap();
+    {
+        let store = zeron_sync::DocsStore::open(profile.store_root()).unwrap();
+        assert!(store.mark_processed("cmd-cut").unwrap());
+    }
+    let core = crate::EngineCore::assemble_with_profile(profile, std::sync::Arc::new(HarnessRegistry::new()), HarnessId::Codex, None)
+        .unwrap();
+    let here = core.orchestration.device_id().to_owned();
+    call(
+        &core,
+        Caller::Local,
+        methods::MUTATE,
+        json!({"op":"createChat","chatId":"cut-chat","deviceId":here,"config":{"harness":"codex","sandbox":"workspace-write"}}),
+    )
+    .await
+    .unwrap();
+    let handle = core.doc_host.open("cut-chat").unwrap();
+    handle
+        .doc()
+        .queue_command(&zeron_doc::SessionCommandEntry {
+            id: "cmd-cut".into(),
+            payload: SessionCommandPayload::Run {
+                injected: None,
+                request: serde_json::from_value(json!({
+                    "prompt": "Deploy the lane from main.", "cwd": "~", "sandbox": "workspace-write",
+                }))
+                .unwrap(),
+                message_id: "m-cut".into(),
+            },
+            issued_by: "person".into(),
+            issued_at: chrono::Utc::now().timestamp_millis(),
+            based_on: None,
+            expires_at: None,
+            status: zeron_doc::SessionCommandStatus::Pending,
+            resolution: None,
+        })
+        .unwrap();
+    // The sweep rejects it, as start-up does.
+    for _ in 0..300 {
+        let rejected = handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .iter()
+            .any(|c| c.id == "cmd-cut" && c.status == zeron_doc::SessionCommandStatus::Rejected);
+        if rejected {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let rpc = core.rpc_service();
+    let (resumed, _) = rpc.start_up_pass(true).await;
+    assert_eq!(resumed, ["cut-chat"]);
+    // Once: a later pass resumes nothing.
+    assert!(rpc.resume_cut_off_sends().is_empty());
+    let mut said = sent(&core, "cut-chat");
+    said.extend(handle.doc().read_queue().unwrap().into_iter().map(|q| q.text));
+    let resumes: Vec<&String> = said.iter().filter(|p| p.contains("[Resumed] The engine restarted")).collect();
+    assert_eq!(resumes.len(), 1, "{said:?}");
+    assert!(resumes[0].contains("> Deploy the lane from main."), "quoted, not sent again: {}", resumes[0]);
+    let again = handle
+        .doc()
+        .read_commands()
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.id != "cmd-cut")
+        .filter(|c| matches!(&c.payload, SessionCommandPayload::Run { request, .. } if request.prompt == "Deploy the lane from main."))
+        .count();
+    assert_eq!(again, 0, "never re-sent blind");
 }

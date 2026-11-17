@@ -37,6 +37,7 @@ use chrono::{DateTime, Duration as TimeDelta, Utc};
 use serde_json::{Value, json};
 use zeron_proto::orchestration::{
     AnswerVia, Ask, AskKind, AskOption, AskOrigin, AskState, CardCheck, CheckKind, CommKind, ItemAsk, LinkKind, NO_THREAD_GRACE_SECS,
+    PROGRESS_LIVE_SECS, STALE_GRACE_SECS,
     STALE_TO_REVIEW_SECS, WorkItem, WorkItemPatch, WorkState, prompt_text::one_line,
 };
 use zeron_proto::{Chat, DoneStatus, Session, SessionStatus};
@@ -80,23 +81,63 @@ pub(crate) enum Thread {
 }
 
 impl Thread {
-    /// How `chat`'s thread stands at `now` from its session (`None`: never
-    /// ran). Live: working or waiting on input (its host's heartbeat fresh),
-    /// or its turn ended into a wait it will be woken from, or subagents
-    /// still running ([`zeron_proto::view`], which drops what a gone engine
-    /// left). A process merely left running in the background (a dev
-    /// server, a watcher) isn't work on the card.
-    pub(crate) fn of(chat: Option<&Chat>, session: Option<&Session>, now: DateTime<Utc>) -> Thread {
+    /// How `chat`'s thread stands at `now`: from its session (`None`: never
+    /// ran) and its progress row, the same truth `progress` reads.
+    ///
+    /// Live:
+    /// - working or waiting on input: by this engine's own run when it hosts
+    ///   the chat (`local`: no heartbeat gate, its run is the truth, a long
+    ///   silent tool call included), else by its host's row while that
+    ///   host's heartbeat is fresh;
+    /// - its turn ended into a wait it will be woken from, or subagents still
+    ///   running ([`zeron_proto::view`], which drops what a gone engine left);
+    /// - its progress row says it's on it (working, waiting, asking) with a
+    ///   tool running or a step in the last [`PROGRESS_LIVE_SECS`]: a host
+    ///   whose row reached here late still counts.
+    ///
+    /// A process merely left running in the background (a dev server, a
+    /// watcher) isn't work on the card.
+    pub(crate) fn of(
+        chat: Option<&Chat>,
+        session: Option<&Session>,
+        progress: Option<&zeron_proto::orchestration::Progress>,
+        local: bool,
+        now: DateTime<Utc>,
+    ) -> Thread {
         use zeron_proto::view;
-        if chat.is_none_or(|c| c.archived) {
+        if chat.is_none() {
+            return Thread::Gone;
+        }
+        let progressing = progress.filter(|p| {
+            p.state.active()
+                && (p.tool_since.is_some()
+                    || [p.last_step_at, Some(p.updated_at)]
+                        .into_iter()
+                        .flatten()
+                        .any(|at| now - at < TimeDelta::seconds(PROGRESS_LIVE_SECS)))
+        });
+        let fresh = |s: &Session| local || !view::session_stale(s, now);
+        let held = |s: &Session| {
+            if local {
+                s.waiting.is_some() || s.running_subagents > 0
+            } else {
+                view::waiting(Some(s), now).is_some() || view::running_subagents(Some(s), now) > 0
+            }
+        };
+        let live = session
+            .filter(|s| (matches!(s.status, SessionStatus::Working | SessionStatus::AwaitingInput) && fresh(s)) || held(s))
+            .map(|s| s.started_at)
+            .or(progressing.map(|p| p.started_at.or(session.and_then(|s| s.started_at))));
+        if let Some(started_at) = live {
+            // (Archived or not: a crew thread messaged out of the archive
+            // works before its row says it's back.)
+            return Thread::Live { started_at };
+        }
+        if chat.is_some_and(|c| c.archived) {
             return Thread::Gone;
         }
         let Some(s) = session else { return Thread::Idle };
-        let fresh = !view::session_stale(s, now);
-        let held = view::waiting(Some(s), now).is_some() || view::running_subagents(Some(s), now) > 0;
-        if (matches!(s.status, SessionStatus::Working | SessionStatus::AwaitingInput) && fresh) || held {
-            return Thread::Live { started_at: s.started_at };
-        }
+        let fresh = fresh(s);
         if s.status == SessionStatus::Errored {
             return Thread::Errored { at: s.last_turn_outcome.map(|o| o.finished_at).or(Some(s.updated_at)) };
         }
@@ -106,6 +147,19 @@ impl Thread {
             None if s.last_completed_turn.is_none() && fresh && s.status == SessionStatus::Idle => Thread::Idle,
             _ => Thread::Finished,
         }
+    }
+
+    /// When `chat`'s thread last did anything, as its session and progress
+    /// row say: a turn started or ended, a wait began, a step, a tool.
+    pub(crate) fn active_at(
+        session: Option<&Session>,
+        progress: Option<&zeron_proto::orchestration::Progress>,
+    ) -> Option<DateTime<Utc>> {
+        let s = session.into_iter().flat_map(|s| {
+            [s.started_at, s.last_turn_outcome.map(|o| o.finished_at), s.waiting.as_ref().map(|w| w.since)]
+        });
+        let p = progress.into_iter().flat_map(|p| [p.started_at, p.last_step_at, p.tool_since]);
+        s.chain(p).flatten().max()
     }
 
     fn live(&self) -> bool {
@@ -134,6 +188,8 @@ pub(crate) struct CardView<'a> {
     pub route_review: bool,
     /// Its PR links, as the app last saw each (unknown: not looked up here).
     pub prs: Vec<Pr>,
+    /// When any of its threads last did anything ([`Thread::active_at`]).
+    pub active_at: Option<DateTime<Utc>>,
 }
 
 /// A card's PR link as the app last saw it.
@@ -218,6 +274,18 @@ fn clear_unless(card: &WorkItem, keep: &[CheckKind]) -> Verdict {
     }
 }
 
+/// When `view`'s card last came to be as it is, or its threads last did
+/// anything: made, moved, given a thread, a turn, a step, a wait. (A turn
+/// that just ended is often a moment from its wait, or the next turn.)
+fn grace_from(view: &CardView) -> DateTime<Utc> {
+    let card = view.card;
+    [Some(card.created_at), card.moved_at, card.threads_at, view.active_at]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(card.created_at)
+}
+
 /// What the board check changes on `view`'s card at `now`. Pure.
 pub(crate) fn assess(view: &CardView, now: DateTime<Utc>) -> Verdict {
     let card = view.card;
@@ -292,12 +360,20 @@ pub(crate) fn assess(view: &CardView, now: DateTime<Utc>) -> Verdict {
                 // Its work ended and nothing moved it.
                 match &card.check {
                     Some(c) if c.kind == CheckKind::Stale => {
-                        if now - c.since >= TimeDelta::seconds(STALE_TO_REVIEW_SECS) {
+                        // Checked again as it falls due: a thread that did
+                        // anything since the flag (a turn, a step, a wait)
+                        // is at work on it after all: the flag goes, no move.
+                        if view.active_at.is_some_and(|at| at > c.since) {
+                            Verdict { check: Some(None), ..Default::default() }
+                        } else if now - c.since >= TimeDelta::seconds(STALE_TO_REVIEW_SECS) {
                             Verdict::moved(WorkState::Review, "In Review: its thread finished and nothing moved it", now)
                         } else {
                             Verdict::default()
                         }
                     }
+                    // Just made, moved here, or given a thread (its thread is
+                    // about to start), or its thread was at it a moment ago.
+                    _ if now - grace_from(view) < TimeDelta::seconds(STALE_GRACE_SECS) => Verdict::default(),
                     _ => Verdict::flag(CheckKind::Stale, "Its thread finished; still in Now", now),
                 }
             } else if now - since >= TimeDelta::seconds(NO_THREAD_GRACE_SECS) {
@@ -306,7 +382,11 @@ pub(crate) fn assess(view: &CardView, now: DateTime<Utc>) -> Verdict {
             } else {
                 Verdict::default()
             };
-            v.drop_threads = gone;
+            // (A thread just put on it may still be archived: the message
+            // that starts it brings it back. Not dropped within the grace.)
+            if now - grace_from(view) >= TimeDelta::seconds(STALE_GRACE_SECS) {
+                v.drop_threads = gone;
+            }
             v
         }
         WorkState::Planned | WorkState::Inbox => {
@@ -648,6 +728,15 @@ impl std::fmt::Display for Change {
     }
 }
 
+/// What says a thread is at work besides its session row: the chats this
+/// engine runs itself (its own runs are the truth for them), and each
+/// chat's progress row (what `progress` reads, synced from its host).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Live {
+    pub local: std::collections::HashSet<String>,
+    pub progress: HashMap<String, zeron_proto::orchestration::Progress>,
+}
+
 /// What the check would change on the boards in `state`, card by card,
 /// reading each thread's `chats` row and `sessions` status. Only the cards
 /// `keeper` keeps (hosted on that device: its orchestrator, else its first
@@ -656,6 +745,7 @@ pub(crate) fn plan_from(
     state: &zeron_proto::orchestration::OrchestrationState,
     chats: &HashMap<String, Chat>,
     sessions: &HashMap<String, Session>,
+    live: &Live,
     known_prs: &[zeron_proto::ChangeRequestSummary],
     keeper: Option<&str>,
     now: DateTime<Utc>,
@@ -682,17 +772,31 @@ pub(crate) fn plan_from(
                 continue;
             }
         }
-        let threads: Vec<(String, Thread)> = card
+        // A Now card's threads; with none left, the chats it links (a thread
+        // the crew archive unlinked, messaged back to work on it).
+        let linked: Vec<String> = if card.state == WorkState::Active && card.threads.is_empty() {
+            card.links.iter().filter(|l| l.kind == LinkKind::Chat).map(|l| l.target.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        let mut threads: Vec<(String, Thread)> = card
             .threads
             .iter()
             .map(|t| {
-                let mut thread = Thread::of(chats.get(t), sessions.get(t), now);
+                let mut thread =
+                    Thread::of(chats.get(t), sessions.get(t), live.progress.get(t), live.local.contains(t), now);
                 if thread.live() && card.state != WorkState::Active && uses.get(t.as_str()).is_some_and(|n| *n > 1) {
                     thread = Thread::Finished;
                 }
                 (t.clone(), thread)
             })
             .collect();
+        for t in &linked {
+            let thread = Thread::of(chats.get(t), sessions.get(t), live.progress.get(t), live.local.contains(t), now);
+            if thread.live() {
+                threads.push((t.clone(), thread));
+            }
+        }
         let asks: Vec<&Ask> = state
             .asks
             .iter()
@@ -712,12 +816,18 @@ pub(crate) fn plan_from(
         });
         let view = CardView {
             card,
-            threads,
+            threads: threads.clone(),
             open_ask,
             last_closed,
             routed: card.source.is_some(),
             route_review: route.is_some_and(|r| r.review.is_some()),
             prs: prs_of(card, known_prs),
+            active_at: card
+                .threads
+                .iter()
+                .chain(linked.iter())
+                .filter_map(|t| Thread::active_at(sessions.get(t), live.progress.get(t)))
+                .max(),
         };
         let mut verdict = assess(&view, now);
         verdict.resolve = resolved_asks(card, &view.threads, &state.asks);
@@ -749,10 +859,18 @@ impl EngineRpc {
             .iter()
             .map(|s| (s.chat_id.clone(), s.clone()))
             .collect();
+        let mut live = Live::default();
         for s in self.sessions_ref().watch_sessions().borrow().iter() {
+            live.local.insert(s.chat_id.clone());
             sessions.insert(s.chat_id.clone(), s.clone());
         }
-        plan_from(&state, &chats, &sessions, &self.known_change_requests(), (!all).then(|| orch.device_id()), now)
+        live.progress = orch
+            .workspace()
+            .read_orchestration_with(|doc| doc.read_progress())
+            .into_iter()
+            .map(|p| (p.chat_id.clone(), p))
+            .collect();
+        plan_from(&state, &chats, &sessions, &live, &self.known_change_requests(), (!all).then(|| orch.device_id()), now)
     }
 
     /// The chats the stop left at work (`before`: this device's rows when the
@@ -802,7 +920,9 @@ impl EngineRpc {
             .filter(|b| b.status == SessionStatus::Working || b.waiting.is_some() || b.running_subagents > 0)
             .map(|b| b.chat_id.clone())
             .collect();
-        let resumed = self.resume_after_restart(before);
+        let mut resumed = self.resume_after_restart(before);
+        orch.note_resumed(&resumed, Utc::now());
+        resumed.extend(self.resume_cut_off_sends());
         at_work.extend(resumed.iter().cloned());
         at_work.sort();
         at_work.dedup();
@@ -811,8 +931,56 @@ impl EngineRpc {
         (resumed, changed)
     }
 
+    /// The chats a message was being sent to when the engine stopped (the
+    /// send consumed, never resolved: the drain's dead-command sweep rejects
+    /// it), each resumed once with that message quoted
+    /// ([`resumed_after_cut_off_send`]), crew, orchestrator or standalone
+    /// alike. Not sent again as it was: it may have started its turn and done
+    /// part of its work before the stop. Skipped: a chat resumed after this
+    /// restart already, one at work now, a thread of a paused card, the Brain
+    /// dump, one gone. The ones resumed.
+    ///
+    /// [`resumed_after_cut_off_send`]: zeron_proto::orchestration::prompt_text::resumed_after_cut_off_send
+    pub(crate) fn resume_cut_off_sends(&self) -> Vec<String> {
+        let cut = self.doc_host_ref().take_cut_off_sends();
+        if cut.is_empty() {
+            return Vec::new();
+        }
+        let orch = self.orchestration();
+        let state = orch.state();
+        let now = Utc::now();
+        let already = orch.resumed_since(now, TimeDelta::seconds(RESUMED_GRACE_SECS));
+        // One per chat: the last message cut off.
+        let by_chat: std::collections::BTreeMap<String, String> = cut.into_iter().collect();
+        let mut resumed = Vec::new();
+        for (chat, sent) in by_chat {
+            let paused = state.items.iter().any(|i| !i.removed && i.paused() && i.threads.iter().any(|t| *t == chat));
+            let brain = state.orchestrators.iter().any(|o| {
+                o.id == chat && o.kind != zeron_proto::orchestration::OrchestratorKind::Standard
+            });
+            let gone = self.workspace_host().chat(&chat).ok().flatten().is_none();
+            if already.contains(&chat) || paused || brain || gone || self.sessions_ref().turn_in_flight(&chat) {
+                continue;
+            }
+            let text = zeron_proto::orchestration::prompt_text::resumed_after_cut_off_send(&sent);
+            let injected = zeron_doc::Injected { chat_id: Some(chat.clone()), ..zeron_doc::Injected::of(zeron_doc::injected::RESUMED) };
+            match super::ops::deliver(self, &chat, &text, None, super::ops::When::Next, Some(injected)) {
+                Ok(_) => resumed.push(chat),
+                Err(error) => tracing::warn!(%error, %chat, "board: a chat whose send the stop cut off wasn't resumed"),
+            }
+        }
+        orch.note_resumed(&resumed, now);
+        if !resumed.is_empty() {
+            tracing::info!(?resumed, "board: chats whose send the stop cut off resumed");
+        }
+        resumed
+    }
+
     /// The board check, applied. The cards it changed.
     pub(crate) async fn check_boards(&self, now: DateTime<Utc>) -> Vec<Change> {
+        // (A send the stop cut off is found when its chat's commands are next
+        // drained: its chat is resumed then.)
+        self.resume_cut_off_sends();
         self.check_boards_on(now, false).await
     }
 
