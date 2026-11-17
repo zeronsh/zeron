@@ -26,11 +26,10 @@ mlua = { version = "0.12", features = ["luau"] }
 # `zeron.measure_text` in services (plugins/service/vm/text.rs): zgx's own
 # shaper and font lookup, as a plugin window's canvas measures, with no
 # window. zgx-text is that alone, without zgx-gpu's renderer (no wgpu or
-# winit). Pinned, as apps/zgx is, to the combined zgx pull request that
-# makes it a crate (zeronsh/zgx#2110, on the author's fork until it merges),
-# so the service and its windows measure alike.
-zgx = { git = "https://github.com/hoangvu12/zgx", rev = "24b3587265f02cf3a161bc680d1f3a13767c4b94", default-features = false }
-zgx-text = { git = "https://github.com/hoangvu12/zgx", rev = "24b3587265f02cf3a161bc680d1f3a13767c4b94" }
+# winit). Pinned, as apps/zgx is, to the zgx that makes it a crate
+# (zeronsh/zgx#2110), so the service and its windows measure alike.
+zgx = { git = "https://github.com/zeronsh/zgx", rev = "e35626b88be755b9672dafa3d844c5a4c5dee8ad", default-features = false }
+zgx-text = { git = "https://github.com/zeronsh/zgx", rev = "e35626b88be755b9672dafa3d844c5a4c5dee8ad" }
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true
