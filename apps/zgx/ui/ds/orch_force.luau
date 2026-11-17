@@ -60,6 +60,13 @@ M.unpin_children = function(_id: string) end
 M.unpin_all = function() end
 M.current = nil :: any
 
+-- The sidebar's glyph over a chat at `zoom`, in points: its working ring
+-- (the ring's radius is 10 of its 24 units) round the chat exactly where its
+-- status ring is (R_RING), or the glyph by it.
+function M.ring_size(ring: boolean, zoom: number): number
+	return if ring then draw.R_RING * 24 / 10 * zoom else 13 * zoom
+end
+
 -- What's gone for good from a world loaded whole: an id whose chat is
 -- archived, or that's in none of its chats nor its orchestrators (an
 -- archived orchestrator too); never one in `keep` (the web shown: a crew
@@ -254,6 +261,8 @@ M.View = ui.component(function(props: {
 		local pad = 70
 		local z = math.clamp(math.min((w - pad * 2) / math.max(1, x1 - x0), (h - pad * 2 - 30) / math.max(1, y1 - y0)), MIN_FIT, 1.4)
 		view:set({ x = w / 2 - (x0 + x1) / 2 * z, y = (h - 30) / 2 - (y0 + y1) / 2 * z, zoom = z })
+		counts.zoom = z
+		count("frames", 0)
 	end
 
 	-- Settled: kept (by node), drawn, the markers to their places.
@@ -1049,6 +1058,8 @@ M.View = ui.component(function(props: {
 	-- The view.
 	local function set_view(x: number, y: number, zoom: number)
 		view:set({ x = x, y = y, zoom = zoom })
+		counts.zoom = zoom
+		count("frames", 0)
 		recull()
 	end
 	local function zoom_at(px: number, py: number, k: number)
@@ -1544,10 +1555,12 @@ M.View = ui.component(function(props: {
 		end
 		return out
 	end)
+	local ring_size = M.ring_size
 	local function glyph_el(item: any): Node
 		-- (The ring's radius is 10 of its 24: sized to the chat's ring.)
+		-- (Followed as the zoom moves, never the size it was made at.)
 		local function size(): number
-			return if item.ring then R_RING * 2.4 * zoom:get() else 13 * zoom:get()
+			return ring_size(item.ring, zoom:get())
 		end
 		local function at(): (number, number)
 			version:get()
@@ -1583,7 +1596,7 @@ M.View = ui.component(function(props: {
 					status_tick:get()
 					return state_of(item.id)
 				end,
-				size = size(),
+				size = size,
 			},
 		}
 	end

@@ -350,8 +350,12 @@ M.test_step = {
 	STEP = STEP,
 }
 
+-- A glyph's size: points, or a function the glyph follows as it changes
+-- (a map's zoom), drawn at the size it is each frame.
+export type Size = number | () -> number
+
 -- The working ring, `size` points, in `ink` (a token).
-local function ring(ink: string, size: number): Node
+local function ring(ink: string, size: Size): Node
 	if stepped() then
 		-- Its run and rest by the steps' clock (`shaderTime` set at each).
 		return stepper({
@@ -390,7 +394,7 @@ end
 
 -- A state's glyph, `size` points: working, waiting and connecting their
 -- ring.
-local function glyph(kind: Kind, size: number): Node?
+local function glyph(kind: Kind, size: Size): Node?
 	local k = KINDS[kind]
 	if kind == "working" or kind == "connecting" or kind == "waiting" then
 		return ring(`$zeron.status.{hue(kind)}`, size)
@@ -401,8 +405,8 @@ end
 -- A state's glyph alone, in its hue. `kind` may be a function: the glyph
 -- and its hue follow it in place, and only a move between the working ring
 -- and a glyph (or between the ring's two kinds) swaps what's drawn.
-function M.StatusIcon(props: { kind: Kind | () -> Kind, size: number? }): Node
-	local size = props.size or 16
+function M.StatusIcon(props: { kind: Kind | () -> Kind, size: Size? }): Node
+	local size: Size = props.size or 16
 	local given = props.kind
 	if type(given) ~= "function" then
 		local kind = given :: Kind

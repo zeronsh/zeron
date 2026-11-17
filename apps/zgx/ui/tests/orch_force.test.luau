@@ -453,3 +453,63 @@ test("force model: messages both ways, and repeated, make one weak link, counted
 		end
 	end
 end)
+
+-- The working ring (the sidebar's, over the canvas) round each working chat
+-- exactly where its status ring is: R_RING across at the zoom, never the
+-- size it was made at, whatever the zoom, through a zoom, a drag and a
+-- settle, for every working chat (hubs carry no ring).
+local draw = require("@ds/orch_force_draw")
+local function ring_boxes(app: any): { { number } }
+	local ok, err = pcall(function()
+		return app:tree(".orch-force-ring")
+	end)
+	local out = {}
+	local text = if ok then "" else tostring(err)
+	for x, y, w, h in string.gmatch(text, "@%d+ (%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)") do
+		table.insert(out, { tonumber(x) :: number, tonumber(y) :: number, tonumber(w) :: number, tonumber(h) :: number })
+	end
+	return out
+end
+local function rings_match(app: any, label: string)
+	local z = stats(app).zoom
+	expect(type(z) == "number").to_be(true)
+	local want = draw.R_RING * 24 / 10 * z
+	local boxes = ring_boxes(app)
+	expect(`{label}: {#boxes > 0}`).to_be(`{label}: true`)
+	for _, b in boxes do
+		-- (Its drawn ring, 10 of its 24: the status ring's R_RING, to half
+		-- a point.)
+		local r = b[3] * 10 / 24
+		expect(`{label}: ring {string.format("%.1f", r)} status {string.format("%.1f", draw.R_RING * z)} {math.abs(r - draw.R_RING * z) <= 0.5 and math.abs(b[3] - b[4]) <= 0.5}`).to_be(`{label}: ring {string.format("%.1f", r)} status {string.format("%.1f", draw.R_RING * z)} true`)
+		expect(math.abs(b[3] - want) <= 0.75).to_be(true)
+	end
+end
+
+test("force graph: every working ring hugs its chat as the status rings do, at any zoom, through a zoom, a drag and a settle", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(10)
+	rings_match(app, "fitted")
+	for k, step in { "in", "in", "out", "out", "out", "out" } do
+		app:command(`map_force_zoom_{step}`)
+		app:frames(6)
+		rings_match(app, `zoom {k} {step}`)
+	end
+	-- (A chat starting work after the zooms: made at this zoom, the same.)
+	app:command("map_force_push")
+	app:frames(6)
+	app:command("map_force_push")
+	app:frames(6)
+	rings_match(app, "a chat back at work")
+	-- A drag held, then let go and settled.
+	app:command("map_force_drag_hub_step")
+	app:frames(3)
+	app:command("map_force_drag_hub_step")
+	app:frames(3)
+	app:command("map_force_drag_hub_end")
+	app:frames(30)
+	rings_match(app, "after a drag")
+	app:command("map_force_zoom_in")
+	app:frames(6)
+	rings_match(app, "zoomed after the drag")
+end)
