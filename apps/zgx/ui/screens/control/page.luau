@@ -971,7 +971,7 @@ end
 -- span), on this device; what each thread did lately, as the host keeps it
 -- (src/orchestration_timeline.rs).
 -- (ds/orch_map's DEFAULT, written out: the Map loads with its widget.)
-M.MAP_DEFAULT = { variant = "topology", window = 15 }
+M.MAP_DEFAULT = { variant = "force", window = 15 }
 M.map_view = ui.persist("control_map", M.MAP_DEFAULT)
 -- Whether the board's columns show all their cards (past ten): kept, as
 -- the map's view is.
