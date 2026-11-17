@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hero rig</title>
+<style>
+  html, body { margin: 0; background: #000; }
+  #hero { width: 1176px; }
+  #hero canvas { display: block; width: 100%; height: auto; }
+</style>
+</head>
+<body>
+<div id="hero"></div>
+<script type="module">
+  // The hero alone at the window's size, for captures: ?pose=x,y (the
+  // pointer over the page, 0 to 1), ?effect=none, ?still=1.
+  import { mountHero } from "/hero/app.js";
+  const q = new URLSearchParams(location.search);
+  const pose = (q.get("pose") || "0.5,0.5").split(",").map(Number);
+  window.__hero = await mountHero(document.getElementById("hero"), {
+    capture: true, pose, lights: q.get("lights") !== "0", effect: q.get("effect") || "ascii", still: q.get("still") === "1",
+  });
+  window.__heroReady = true;
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "zeron-landing-hero-tools",
+  "private": true,
+  "type": "module",
+  "description": "The hero's comparison rig: a local server, headless captures of the web hero, and pixel diffs against the Zeron app's own render.",
+  "devDependencies": {
+    "fontkit": "^2.0.4",
+    "pngjs": "7.0.0",
+    "puppeteer-core": "25.16.0",
+    "subset-font": "2.9.0"
+  }
+}

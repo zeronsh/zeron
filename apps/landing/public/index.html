@@ -7,7 +7,7 @@
 <meta name="description" content="Zeron runs Claude Code, Codex, Grok, Hermes and Pi on your machines. Control them from any device, live." />
 <meta property="og:title" content="Zeron" />
 <meta property="og:description" content="Control your coding agents from any of your devices." />
-<meta property="og:image" content="/assets/app-screenshot.jpg" />
+<meta property="og:image" content="/assets/hero/new-chat.jpg" />
 <link rel="icon" href="/assets/zeron-favicon-light.png" type="image/png" sizes="128x128" media="(prefers-color-scheme: light)" />
 <link rel="icon" href="/assets/zeron-favicon-dark.png" type="image/png" sizes="128x128" media="(prefers-color-scheme: dark)" />
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any" />
@@ -332,22 +332,18 @@
   /* ── shot ────────────────────────────────────────────── */
   .shot { padding: 48px 0 0; position: relative; }
   .shot .wrap { max-width: 1240px; position: relative; }
-  /* the capture's panes are baked translucent at the app's own glass
-     alphas (shell .80, panels .88) over a real backdrop blur, so the
-     section's glyph field — and the pointer's afterglow — frost through
-     like vibrancy on a Mac desktop. The capture is a plain rectangle
-     (hairline and corners trimmed) so the browser rounds it with
-     anti-aliasing at display resolution; the radius is the capture's
-     30px corner as a fraction of its 2342×1532 size, and the rim is
-     redrawn on the same curve. Outer box-shadows never paint under the
-     box, so the see-through panes stay clean (a filter here would also
-     cut the backdrop blur off from the page) */
+  /* The Zeron app's new chat, redrawn from the app's own numbers
+     (public/hero: a canvas, the window 1176×768 points, which is this
+     wrap's width at full size). The window is opaque, as the app's
+     opaque look is; the page rounds and shadows it as macOS frames a
+     window. Until the canvas has drawn (or without WebGL2) the still,
+     rendered from the same code, stands in its place. */
   .showcase-window {
     position: relative;
     overflow: hidden;
-    border-radius: 1.281% / 1.958%;
-    -webkit-backdrop-filter: blur(10px) saturate(2) brightness(2.4);
-    backdrop-filter: blur(10px) saturate(2) brightness(2.4);
+    aspect-ratio: 1176 / 768;
+    background: #0e0e10;
+    border-radius: 1.36% / 2.083%;
     box-shadow:
       0 0 0 .5px rgba(0,0,0,0.9),
       0 24px 48px rgba(0,0,0,0.7);
@@ -360,7 +356,19 @@
     box-shadow: inset 0 0 0 1px rgba(255,255,255,0.1);
     pointer-events: none;
   }
-  .showcase-window img { display: block; width: 100%; height: auto; }
+  .showcase-window img,
+  .showcase-window canvas {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .showcase-window canvas { opacity: 0; transition: opacity .3s ease-out; }
+  .showcase-window.is-live canvas { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) {
+    .showcase-window canvas { transition: none; }
+  }
 
   /* ── agents ──────────────────────────────────────────── */
   .agents {
@@ -408,12 +416,29 @@
      above and below); columns separate with gaps instead of inner padding */
   .p-gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0 22px; }
   .p-gallery figure { margin: 0; padding: 22px 0 18px; }
-  .p-gallery img {
-    display: block;
-    width: 100%;
-    height: auto;
+  /* each card a cut-out of the Zeron app, live (public/hero/cards.js):
+     its still (rendered from the same code) until the canvas has drawn,
+     and in its place without WebGL2 */
+  .p-card {
+    position: relative;
+    overflow: hidden;
+    aspect-ratio: 560 / 388;
+    background: #0e0e10;
     border: 1px solid var(--line-soft);
     border-radius: 6px;
+  }
+  .p-card img,
+  .p-card canvas {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .p-card canvas { opacity: 0; transition: opacity .3s ease-out; }
+  .p-card.is-live canvas { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) {
+    .p-card canvas { transition: none; }
   }
   .p-gallery figcaption {
     margin-top: 13px;
@@ -862,7 +887,7 @@
           <span>Sponsor Zeron</span><span class="ui-icon" data-icon="arrow-up-right" aria-hidden="true"></span>
         </a>
         <h1>
-          <b>The open source workspace for your coding agents.</b> Zeron runs
+          <b>The agent workspace that can become anything</b> Zeron runs
           <span class="hero-agent"><span class="brand-icon" aria-hidden="true" style="--icon: url('/assets/icons/brand/claude-mark.svg')"></span>Claude Code,</span>
           <span class="hero-agent"><span class="brand-icon" data-mono aria-hidden="true" style="--icon: url('/assets/icons/brand/openai-mark.svg')"></span>Codex,</span>
           <span class="hero-agent"><span class="brand-icon" aria-hidden="true" style="--icon: url('/assets/icons/brand/opencode-mark-dark.svg')"></span>OpenCode,</span>
@@ -887,8 +912,8 @@
 
   <section class="shot">
     <div class="wrap">
-      <div class="showcase-window">
-        <img src="/assets/shots/showcase.webp" alt="Zeron running a Claude Code session beside an open Rust file, the project tree, and a list of subagents" width="2342" height="1532" decoding="async" />
+      <div class="showcase-window" id="hero-app" data-label="The Zeron app on a new chat: a composer set to Opus 5.5 floating over a cherry blossom scene drawn in characters">
+        <img src="/assets/hero/new-chat.webp" alt="The Zeron app on a new chat: a composer set to Opus 5.5 floating over a cherry blossom scene drawn in characters" width="2352" height="1536" decoding="async" />
       </div>
     </div>
   </section>
@@ -961,16 +986,22 @@
       </div>
       <div class="panel-row p-gallery">
         <figure>
-          <img src="/assets/shots/sessions.png" alt="Zeron session list showing agent sessions running on another machine" loading="lazy" width="907" height="627" />
-          <figcaption>Every machine's sessions, one list</figcaption>
+          <div class="p-card" data-card="visuals" data-label="A Zeron chat reply with a grouped bar chart the app drew itself: compile, link and test time over six months">
+            <img src="/assets/hero/card-visuals.webp" alt="A Zeron chat reply with a grouped bar chart the app drew itself: compile, link and test time over six months" width="1120" height="776" loading="lazy" decoding="async" />
+          </div>
+          <figcaption>Replies with charts the app draws itself</figcaption>
         </figure>
         <figure>
-          <img src="/assets/shots/diff.png" alt="Zeron branch diff view with added and removed lines across 299 changed files" loading="lazy" width="907" height="627" />
-          <figcaption>Branch diffs, live as agents work</figcaption>
+          <div class="p-card" data-card="cat" data-label="A pixel-art cat sitting on the Zeron message box, put there by a plugin">
+            <img src="/assets/hero/card-cat.webp" alt="A pixel-art cat sitting on the Zeron message box, put there by a plugin" width="1120" height="776" loading="lazy" decoding="async" />
+          </div>
+          <figcaption>Plugins can change anything, even add a cat</figcaption>
         </figure>
         <figure>
-          <img src="/assets/shots/history.png" alt="Zeron commit history view with a branching commit graph" loading="lazy" width="907" height="627" />
-          <figcaption>Commit history for every workspace</figcaption>
+          <div class="p-card" data-card="machines" data-label="The Zeron composer's Work in menu open on a list of machines: this MacBook Pro, a Linux devbox, a Mac mini that's offline, and Cloud">
+            <img src="/assets/hero/card-machines.webp" alt="The Zeron composer's Work in menu open on a list of machines: this MacBook Pro, a Linux devbox, a Mac mini that's offline, and Cloud" width="1120" height="776" loading="lazy" decoding="async" />
+          </div>
+          <figcaption>Pick any of your machines, or Cloud</figcaption>
         </figure>
       </div>
       <div class="panel-row p-devices">
@@ -1484,6 +1515,56 @@
   // frosts the field and the pointer's afterglow as it passes under it.
   // No parallax this far down the page (it would outrun the overscan).
   mountGlyphField(document.querySelector(".shot"), { ...field, parallax: 1, beam: null });
+</script>
+<script type="module">
+  // The app window: the Zeron app's new chat, live (public/hero). Mounted
+  // as it nears the viewport; its still stays without WebGL2, and comes
+  // back if the GPU context is lost. It draws only while its layers move.
+  const win = document.getElementById("hero-app");
+  const still = win?.querySelector("img");
+  const gl2 = (() => {
+    try { return !!document.createElement("canvas").getContext("webgl2"); } catch { return false; }
+  })();
+  if (win && gl2 && "IntersectionObserver" in window) {
+    const io = new IntersectionObserver(async ([entry]) => {
+      if (!entry.isIntersecting) return;
+      io.disconnect();
+      try {
+        const { mountHero } = await import("/hero/app.js");
+        const hero = await mountHero(win, { label: win.dataset.label });
+        if (!hero) return;
+        requestAnimationFrame(() => win.classList.add("is-live"));
+        win.addEventListener("herofailed", () => {
+          win.classList.remove("is-live");
+          hero.canvas.remove();
+        });
+        if (still) still.setAttribute("aria-hidden", "true");
+      } catch (err) {
+        console.warn("hero:", err);
+      }
+    }, { rootMargin: "400px 0px" });
+    io.observe(win);
+  }
+  // The gallery's cards: each a cut-out of the app over its own scene,
+  // mounted as it nears the viewport, its still kept without WebGL2.
+  const cards = [...document.querySelectorAll(".p-card[data-card]")];
+  if (cards.length && gl2 && "IntersectionObserver" in window) {
+    const io = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const card = entry.target;
+        io.unobserve(card);
+        import("/hero/cards.js").then(async ({ mountCard }) => {
+          const live = await mountCard(card, card.dataset.card, { label: card.dataset.label });
+          if (!live) return;
+          requestAnimationFrame(() => card.classList.add("is-live"));
+          card.querySelector("img")?.setAttribute("aria-hidden", "true");
+          card.addEventListener("herofailed", () => { card.classList.remove("is-live"); live.canvas.remove(); });
+        }).catch((err) => console.warn("card:", err));
+      }
+    }, { rootMargin: "400px 0px" });
+    for (const card of cards) io.observe(card);
+  }
 </script>
 <script>
   // Tweet wall: each column holds its cards twice so the drift loops;
