@@ -479,6 +479,18 @@ a reply to an @ask answers it, a comment on an @card goes to its thread):\n",
     /// once the engine is back (board_checks::to_resume).
     pub const RESUMED_AFTER_RESTART: &str = "[Resumed] The engine restarted; continue where you left off.";
 
+    /// [`RESUMED_AFTER_RESTART`] for a chat a message was being sent to when
+    /// the engine stopped (`sent`: that message, as sent): it may or may not
+    /// have reached it, so it is quoted, for the agent to see what it
+    /// already did of it rather than doing it twice.
+    pub fn resumed_after_cut_off_send(sent: &str) -> String {
+        let quoted: String = sent.trim().chars().take(4000).collect::<String>().lines().map(|l| format!("> {l}\n")).collect();
+        format!(
+            "{RESUMED_AFTER_RESTART} A message was being sent to you as it stopped and may not have reached you; check what you already did of it before acting on it. As sent:\n{}",
+            quoted.trim_end()
+        )
+    }
+
     /// [`RESUMED_AFTER_RESTART`] for a chat whose turn had ended into a wait
     /// on its own background work (`waited_on`: what it waited on), which
     /// the restart stopped: run it again.
@@ -636,6 +648,11 @@ pub struct WorkItem {
     /// changed on it (see [`CardCheck`]). Cleared once the card is true again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<CardCheck>,
+    /// When a thread was last added to it: its thread may not have started
+    /// yet, so the board check gives it [`STALE_GRACE_SECS`] before calling
+    /// its work finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads_at: Option<DateTime<Utc>>,
     /// Where it stands in its orchestrator's flow, when a flow's run made it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<flow::FlowStep>,
@@ -688,6 +705,13 @@ pub enum CheckKind {
 /// How long a Now card whose threads finished stays flagged before the
 /// engine moves it to Review.
 pub const STALE_TO_REVIEW_SECS: i64 = 600;
+/// How long a card just made, moved, or given a thread waits before the
+/// board check may call its thread's work finished (the thread is about to
+/// start).
+pub const STALE_GRACE_SECS: i64 = 120;
+/// How recent a synced progress row's last step must be for a thread hosted
+/// elsewhere to count as at work by it alone.
+pub const PROGRESS_LIVE_SECS: i64 = 600;
 /// How long a Now card may have no thread at all (an orchestrator usually
 /// starts one right after) before it goes back to Up next.
 pub const NO_THREAD_GRACE_SECS: i64 = 120;

@@ -106,6 +106,7 @@ pub async fn file_report(
             super::merge_links(&mut item.links, links);
             if !item.threads.contains(&chat) {
                 item.threads.push(chat);
+                item.threads_at = Some(Utc::now());
             }
             item.updated_at = Utc::now();
             doc.upsert_work_item(&item);

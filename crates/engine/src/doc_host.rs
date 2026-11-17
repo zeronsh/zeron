@@ -360,6 +360,10 @@ struct DocHostInner {
     /// terminalizes the latter as Rejected instead of leaving a forever-
     /// Pending entry no retry could ever reach (2026-08-19 swallowed-send).
     executing: Mutex<HashSet<String>>,
+    /// Prompts the dead-command sweep rejected (consumed, never resolved:
+    /// the engine stopped mid-execute), by chat, until the board's resume
+    /// takes them ([`DocHost::take_cut_off_sends`]).
+    cut_off_sends: Mutex<Vec<(String, String)>>,
     /// Peer links (engine assembly, edge runtimes only) — the transport that
     /// pushes queued attachment bytes to a remote host.
     links: OnceLock<Arc<zeron_rpc::LinkCache>>,
@@ -1351,6 +1355,7 @@ impl DocHost {
                 crew_inbox: Default::default(),
                 connectivity_grace: Mutex::new(DegradeGrace::default()),
                 executing: Mutex::new(HashSet::new()),
+                cut_off_sends: Mutex::new(Vec::new()),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
                     .pool_max_idle_per_host(2)
@@ -1659,6 +1664,13 @@ impl DocHost {
         for handle in handles {
             handle.queue_paused.store(true, Ordering::Release);
         }
+    }
+
+    /// The messages whose sends the engine's stop cut off (consumed but never
+    /// resolved, found and rejected by the drain's dead-command sweep), by
+    /// chat, taken.
+    pub fn take_cut_off_sends(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *lock(&self.inner.cut_off_sends))
     }
 
     /// Hold `chat_id`'s queue (its card is paused on the board): queued rows
@@ -6195,6 +6207,17 @@ impl DocHost {
                 {
                     tracing::warn!(chat = %handle.chat_id, command = %c.id,
                         "command consumed but never resolved (crash mid-execute?); rejecting");
+                    // A message cut off with it: its chat is resumed with it
+                    // quoted (orchestration::board_checks), never sent again
+                    // blind (it may have started its turn already).
+                    let prompt = match &c.payload {
+                        SessionCommandPayload::Run { request, .. } => Some(request.prompt.clone()),
+                        SessionCommandPayload::Steer { prompt, .. } => Some(prompt.clone()),
+                        _ => None,
+                    };
+                    if let Some(prompt) = prompt {
+                        lock(&self.inner.cut_off_sends).push((handle.chat_id.clone(), prompt));
+                    }
                     self.resolve_command(
                         handle,
                         &c.id,

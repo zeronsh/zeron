@@ -627,6 +627,7 @@ mod tests {
             approved_at: None,
             paused_at: None,
             check: None,
+            threads_at: None,
             flow: None,
             depends_on: Vec::new(),
         }

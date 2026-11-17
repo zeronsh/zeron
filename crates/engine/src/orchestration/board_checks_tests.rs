@@ -46,6 +46,7 @@ fn card(state: WorkState) -> WorkItem {
         approved_at: None,
         paused_at: None,
         check: None,
+        threads_at: None,
         flow: None,
         depends_on: Vec::new(),
     }
@@ -60,6 +61,7 @@ fn view<'a>(card: &'a WorkItem, thread: Thread) -> CardView<'a> {
         routed: false,
         route_review: false,
         prs: vec![],
+        active_at: None,
     }
 }
 
@@ -197,7 +199,7 @@ fn now_with_a_live_thread_is_true() {
 #[test]
 fn now_whose_thread_finished_is_flagged_then_reviewed_after_ten_minutes() {
     let c = card(WorkState::Active);
-    let first = assess(&view(&c, Thread::Finished), mins(1));
+    let first = assess(&view(&c, Thread::Finished), mins(3));
     assert_eq!(first.state, None);
     assert_eq!(first.check.as_ref().unwrap().as_ref().unwrap().kind, CheckKind::Stale);
     assert!(first.nudge, "its orchestrator is told");
@@ -227,7 +229,7 @@ fn now_whose_thread_errored_is_blocked_with_an_ask() {
     // An error from before it came into Now is old news: just finished.
     let mut c = card(WorkState::Active);
     c.moved_at = Some(mins(5));
-    let v = assess(&view(&c, Thread::Errored { at: Some(mins(2)) }), mins(6));
+    let v = assess(&view(&c, Thread::Errored { at: Some(mins(2)) }), mins(8));
     assert_eq!(v.state, None);
     assert_eq!(v.check.unwrap().unwrap().kind, CheckKind::Stale);
 }
@@ -243,14 +245,14 @@ fn now_whose_thread_was_stopped_is_paused() {
 #[test]
 fn now_whose_thread_was_archived_after_its_work_is_stale() {
     let c = card(WorkState::Active);
-    let v = assess(&view(&c, Thread::Gone), mins(1));
+    let v = assess(&view(&c, Thread::Gone), mins(3));
     assert_eq!(v.drop_threads, ["t1"], "off the card, kept as a link");
     assert_eq!(v.check.unwrap().unwrap().kind, CheckKind::Stale);
     // Already unlinked by the crew archive (a chat link left).
     let mut c = card(WorkState::Active);
     c.threads.clear();
     c.links.push(WorkLink { kind: LinkKind::Chat, label: "x".into(), target: "t1".into() });
-    assert_eq!(assess(&view(&c, Thread::Gone), mins(1)).check.unwrap().unwrap().kind, CheckKind::Stale);
+    assert_eq!(assess(&view(&c, Thread::Gone), mins(3)).check.unwrap().unwrap().kind, CheckKind::Stale);
 }
 
 #[test]
@@ -420,28 +422,28 @@ fn session(chat: &str, status: SessionStatus) -> Session {
 #[test]
 fn a_thread_reads_from_its_session() {
     let c = chat("t1", "d1");
-    assert_eq!(Thread::of(None, None, mins(1)), Thread::Gone);
+    assert_eq!(Thread::of(None, None, None, false, mins(1)), Thread::Gone);
     let mut archived = c.clone();
     archived.archived = true;
-    assert_eq!(Thread::of(Some(&archived), None, mins(1)), Thread::Gone);
-    assert_eq!(Thread::of(Some(&c), None, mins(1)), Thread::Idle);
-    assert!(Thread::of(Some(&c), Some(&session("t1", SessionStatus::Working)), mins(1)).live());
-    assert!(Thread::of(Some(&c), Some(&session("t1", SessionStatus::AwaitingInput)), mins(1)).live());
+    assert_eq!(Thread::of(Some(&archived), None, None, false, mins(1)), Thread::Gone);
+    assert_eq!(Thread::of(Some(&c), None, None, false, mins(1)), Thread::Idle);
+    assert!(Thread::of(Some(&c), Some(&session("t1", SessionStatus::Working)), None, false, mins(1)).live());
+    assert!(Thread::of(Some(&c), Some(&session("t1", SessionStatus::AwaitingInput)), None, false, mins(1)).live());
     let mut bg = session("t1", SessionStatus::Idle);
     bg.running_subagents = 1;
-    assert!(Thread::of(Some(&c), Some(&bg), mins(1)).live(), "held on its subagents");
-    assert!(!Thread::of(Some(&c), Some(&bg), mins(5)).live(), "its engine gone (no heartbeat)");
+    assert!(Thread::of(Some(&c), Some(&bg), None, false, mins(1)).live(), "held on its subagents");
+    assert!(!Thread::of(Some(&c), Some(&bg), None, false, mins(5)).live(), "its engine gone (no heartbeat)");
     let mut shell = session("t1", SessionStatus::Idle);
     shell.background_tasks =
         vec![serde_json::from_value(serde_json::json!({"id": "b1", "command": "npm run dev", "startedAt": mins(1)})).unwrap()];
-    assert_eq!(Thread::of(Some(&c), Some(&shell), mins(1)), Thread::Finished, "a dev server left running isn't work");
+    assert_eq!(Thread::of(Some(&c), Some(&shell), None, false, mins(1)), Thread::Finished, "a dev server left running isn't work");
     let working = session("t1", SessionStatus::Working);
-    assert!(!Thread::of(Some(&c), Some(&working), mins(5)).live(), "a Working row nobody refreshed");
-    assert_eq!(Thread::of(Some(&c), Some(&session("t1", SessionStatus::Idle)), mins(1)), Thread::Finished);
-    assert!(matches!(Thread::of(Some(&c), Some(&session("t1", SessionStatus::Errored)), mins(1)), Thread::Errored { .. }));
+    assert!(!Thread::of(Some(&c), Some(&working), None, false, mins(5)).live(), "a Working row nobody refreshed");
+    assert_eq!(Thread::of(Some(&c), Some(&session("t1", SessionStatus::Idle)), None, false, mins(1)), Thread::Finished);
+    assert!(matches!(Thread::of(Some(&c), Some(&session("t1", SessionStatus::Errored)), None, false, mins(1)), Thread::Errored { .. }));
     let mut stopped = session("t1", SessionStatus::Idle);
     stopped.last_turn_outcome = Some(NativeTurnOutcome { status: DoneStatus::Interrupted, finished_at: mins(2) });
-    assert_eq!(Thread::of(Some(&c), Some(&stopped), mins(3)), Thread::Stopped { at: mins(2) });
+    assert_eq!(Thread::of(Some(&c), Some(&stopped), None, false, mins(3)), Thread::Stopped { at: mins(2) });
 }
 
 // ── A whole board ───────────────────────────────────────────────────────────
@@ -471,14 +473,14 @@ fn the_plan_covers_the_boards_this_device_keeps() {
     let chats: HashMap<String, Chat> =
         [chat("o1", "here"), chat("o2", "elsewhere"), chat("t1", "here")].into_iter().map(|c| (c.id.clone(), c)).collect();
     let sessions: HashMap<String, Session> = [("t1".to_owned(), session("t1", SessionStatus::Idle))].into();
-    let plan = plan_from(&state, &chats, &sessions, &[], Some("here"), mins(2));
+    let plan = plan_from(&state, &chats, &sessions, &Live::default(), &[], Some("here"), mins(3));
     let by: HashMap<&str, &Change> = plan.iter().map(|c| (c.item.as_str(), c)).collect();
     assert_eq!(by["blocked"].verdict.raise, Some(Raise::Blocked));
     assert!(!by.contains_key("asked"), "its ask is open");
     assert_eq!(by["stale"].verdict.check.as_ref().unwrap().as_ref().unwrap().kind, CheckKind::Stale);
     assert!(!by.contains_key("theirs"), "kept by the device hosting o2");
     // A dry run over every board.
-    let all = plan_from(&state, &chats, &sessions, &[], None, mins(2));
+    let all = plan_from(&state, &chats, &sessions, &Live::default(), &[], None, mins(3));
     assert!(all.iter().any(|c| c.item == "theirs"));
     // Shown as a person reads it.
     assert!(by["blocked"].to_string().contains("ask raised"));
@@ -499,16 +501,16 @@ fn a_thread_on_two_open_cards_pulls_neither_out_of_up_next() {
     working.started_at = Some(mins(3));
     working.updated_at = mins(4);
     let sessions: HashMap<String, Session> = [("t1".to_owned(), working)].into();
-    let plan = plan_from(&state, &chats, &sessions, &[], Some("here"), mins(4));
+    let plan = plan_from(&state, &chats, &sessions, &Live::default(), &[], Some("here"), mins(4));
     assert!(plan.is_empty(), "{plan:?}");
     // Nor flags a Done card it worked on before.
     let mut done = card(WorkState::Done);
     done.id = "done".into();
     state.items = vec![done.clone(), card(WorkState::Active)];
-    assert!(plan_from(&state, &chats, &sessions, &[], Some("here"), mins(4)).is_empty());
+    assert!(plan_from(&state, &chats, &sessions, &Live::default(), &[], Some("here"), mins(4)).is_empty());
     // Alone on its Done card, it is flagged.
     state.items = vec![done];
-    let plan = plan_from(&state, &chats, &sessions, &[], Some("here"), mins(4));
+    let plan = plan_from(&state, &chats, &sessions, &Live::default(), &[], Some("here"), mins(4));
     assert_eq!(plan[0].verdict.check.as_ref().unwrap().as_ref().unwrap().kind, CheckKind::StillWorking);
 }
 
@@ -678,7 +680,7 @@ fn the_plan_closes_a_board_ask_whose_card_was_moved_back_to_now() {
     let mut working = session("t1", SessionStatus::Working);
     working.updated_at = mins(4);
     let sessions: HashMap<String, Session> = [("t1".to_owned(), working)].into();
-    let plan = plan_from(&state, &chats, &sessions, &[], Some("here"), mins(4));
+    let plan = plan_from(&state, &chats, &sessions, &Live::default(), &[], Some("here"), mins(4));
     assert_eq!(plan.len(), 1, "{plan:?}");
     assert_eq!(plan[0].verdict.resolve, [("b1".to_owned(), "the card left Blocked".to_owned())]);
     assert_eq!(plan[0].verdict.state, None, "the card itself is fine");
@@ -701,14 +703,168 @@ fn a_thread_on_a_follow_up_card_is_that_cards_not_its_done_ones() {
     working.started_at = Some(mins(3));
     working.updated_at = mins(4);
     let sessions: HashMap<String, Session> = [("t1".to_owned(), working)].into();
-    let plan = plan_from(&state, &chats, &sessions, &[], Some("here"), mins(4));
+    let plan = plan_from(&state, &chats, &sessions, &Live::default(), &[], Some("here"), mins(4));
     assert!(plan.is_empty(), "no 'Done, but its thread is still working': {plan:?}");
     // A flag set before the follow-up listed it is cleared.
     let mut flagged = done;
     flagged.check = check(CheckKind::StillWorking, mins(2));
     state.items[0] = flagged;
-    let plan = plan_from(&state, &chats, &sessions, &[], Some("here"), mins(4));
+    let plan = plan_from(&state, &chats, &sessions, &Live::default(), &[], Some("here"), mins(4));
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].item, "61253a3d");
     assert_eq!(plan[0].verdict.check, Some(None));
+}
+
+
+// ── Stale: checked again as it falls due; a thread about to start ──────────
+
+fn progress_row(chat: &str, state: zeron_proto::orchestration::ProgressState, step: DateTime<Utc>) -> zeron_proto::orchestration::Progress {
+    serde_json::from_value(serde_json::json!({
+        "chatId": chat, "deviceId": "elsewhere", "state": state, "startedAt": mins(12), "lastStepAt": step,
+        "updatedAt": step,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_long_tool_call_mid_turn_is_work() {
+    use zeron_proto::orchestration::ProgressState;
+    let c = chat("t1", "here");
+    // Mid-turn on this engine, a tool silent for minutes: its own run is the
+    // truth, whatever the row's stamp.
+    let mut quiet = session("t1", SessionStatus::Working);
+    quiet.updated_at = mins(20);
+    assert!(Thread::of(Some(&c), Some(&quiet), None, true, mins(30)).live(), "this engine runs it");
+    assert!(!Thread::of(Some(&c), Some(&quiet), None, false, mins(30)).live(), "another's row, no heartbeat");
+    // Hosted elsewhere, its row late or idle: its progress row (what
+    // `progress` reads) says working, a tool running, last step 26 s ago.
+    let mut tool = progress_row("t1", ProgressState::Working, mins(22));
+    tool.tool_since = Some(mins(22));
+    let idle_row = session("t1", SessionStatus::Idle);
+    assert!(Thread::of(Some(&c), Some(&idle_row), Some(&tool), false, mins(30)).live(), "a tool running");
+    assert!(Thread::of(Some(&c), Some(&quiet), Some(&tool), false, mins(30)).live());
+    assert!(Thread::of(Some(&c), None, Some(&tool), false, mins(30)).live(), "no row yet");
+    // A step within ten minutes counts; an old one, or a finished state, doesn't.
+    let recent = progress_row("t1", ProgressState::Working, mins(25));
+    assert!(Thread::of(Some(&c), Some(&idle_row), Some(&recent), false, mins(30)).live());
+    let old = progress_row("t1", ProgressState::Working, mins(1));
+    assert!(!Thread::of(Some(&c), Some(&idle_row), Some(&old), false, mins(30)).live());
+    let done = progress_row("t1", ProgressState::Done, mins(29));
+    assert!(!Thread::of(Some(&c), Some(&idle_row), Some(&done), false, mins(30)).live());
+}
+
+#[test]
+fn a_stale_flag_whose_thread_worked_since_is_cleared_not_moved() {
+    // Flagged at 11:22 (thread idle); it worked from 11:22:15. At the
+    // ten-minute mark it is idle again in this reading, yet it did work
+    // since the flag: the flag goes, the card stays.
+    let mut c = card(WorkState::Active);
+    c.check = check(CheckKind::Stale, mins(1));
+    let mut v = view(&c, Thread::Finished);
+    v.active_at = Some(mins(2));
+    assert_eq!(assess(&v, mins(12)), Verdict { check: Some(None), ..Default::default() });
+    // Nothing since the flag: Review at ten minutes, as before.
+    v.active_at = Some(mins(0));
+    assert_eq!(assess(&v, mins(12)).state, Some(WorkState::Review));
+}
+
+#[test]
+fn a_card_just_made_or_given_a_thread_is_not_flagged_yet() {
+    // Made at t0 with its thread not started yet.
+    let c = card(WorkState::Active);
+    assert!(assess(&view(&c, Thread::Finished), mins(1)).is_empty(), "its thread is about to start");
+    assert_eq!(assess(&view(&c, Thread::Finished), mins(3)).check.unwrap().unwrap().kind, CheckKind::Stale);
+    // An older card given a thread just now.
+    let mut given = card(WorkState::Active);
+    given.threads_at = Some(mins(10));
+    assert!(assess(&view(&given, Thread::Finished), mins(11)).is_empty());
+    assert_eq!(assess(&view(&given, Thread::Finished), mins(13)).check.unwrap().unwrap().kind, CheckKind::Stale);
+}
+
+#[test]
+fn the_plan_reads_a_thread_at_work_by_its_progress_row() {
+    use zeron_proto::orchestration::ProgressState;
+    // 5fd8f707: flagged stale while its thread was idle; its thread (hosted
+    // elsewhere, its row late) has worked since, by `progress`.
+    let mut flagged = card(WorkState::Active);
+    flagged.check = check(CheckKind::Stale, mins(1));
+    let mut state = OrchestrationState::default();
+    state.items = vec![flagged];
+    let chats: HashMap<String, Chat> = [chat("o1", "here"), chat("t1", "elsewhere")].into_iter().map(|c| (c.id.clone(), c)).collect();
+    let mut late = session("t1", SessionStatus::Idle);
+    late.updated_at = mins(1);
+    let sessions: HashMap<String, Session> = [("t1".to_owned(), late)].into();
+    let mut live = Live::default();
+    let mut tool = progress_row("t1", ProgressState::Working, mins(11));
+    tool.tool_since = Some(mins(11));
+    live.progress.insert("t1".into(), tool);
+    let plan = plan_from(&state, &chats, &sessions, &live, &[], Some("here"), mins(12));
+    assert_eq!(plan.len(), 1, "{plan:?}");
+    assert_eq!(plan[0].verdict.state, None, "no move to Review");
+    assert_eq!(plan[0].verdict.check, Some(None), "the flag cleared");
+}
+
+
+// ── An archived crew thread put back to work; a turn's gap ──────────────────
+
+#[test]
+fn an_archived_thread_at_work_is_live_and_one_just_given_stays_on_its_card() {
+    use zeron_proto::orchestration::ProgressState;
+    let mut archived = chat("t1", "here");
+    archived.archived = true;
+    // Messaged out of the archive: at work before its chat row says it's back.
+    let mut working = session("t1", SessionStatus::Working);
+    working.updated_at = mins(30);
+    assert!(Thread::of(Some(&archived), Some(&working), None, true, mins(30)).live());
+    let busy = progress_row("t1", ProgressState::Working, mins(29));
+    assert!(Thread::of(Some(&archived), None, Some(&busy), false, mins(30)).live());
+    assert_eq!(Thread::of(Some(&archived), Some(&session("t1", SessionStatus::Idle)), None, true, mins(30)), Thread::Gone);
+    // 5fd8f707: given an archived thread at 11:22; not dropped, not flagged
+    // while the message that brings it back is on its way.
+    let mut c = card(WorkState::Active);
+    c.threads_at = Some(mins(20));
+    let v = assess(&view(&c, Thread::Gone), mins(21));
+    assert!(v.is_empty(), "{v:?}");
+    let v = assess(&view(&c, Thread::Gone), mins(23));
+    assert_eq!(v.drop_threads, ["t1"], "archived and idle past the grace: gone");
+}
+
+#[test]
+fn a_now_card_whose_unlinked_thread_works_again_is_true() {
+    // Its thread was taken off it (archived), then messaged back to work on
+    // it: the chat it links is at work.
+    let mut c = card(WorkState::Active);
+    c.threads.clear();
+    c.links.push(WorkLink { kind: LinkKind::Chat, label: "x".into(), target: "t1".into() });
+    c.check = check(CheckKind::Stale, mins(1));
+    let mut state = OrchestrationState::default();
+    state.items = vec![c];
+    let chats: HashMap<String, Chat> = [chat("o1", "here"), chat("t1", "here")].into_iter().map(|c| (c.id.clone(), c)).collect();
+    let mut working = session("t1", SessionStatus::Working);
+    working.started_at = Some(mins(5));
+    let sessions: HashMap<String, Session> = [("t1".to_owned(), working)].into();
+    let live = Live { local: ["t1".to_owned()].into(), ..Default::default() };
+    let plan = plan_from(&state, &chats, &sessions, &live, &[], Some("here"), mins(12));
+    assert_eq!(plan.len(), 1, "{plan:?}");
+    assert_eq!(plan[0].verdict.state, None, "no move to Review");
+    assert_eq!(plan[0].verdict.check, Some(None), "its stale flag cleared");
+}
+
+#[test]
+fn a_thread_waiting_on_its_own_work_or_between_turns_is_not_flagged() {
+    let c = chat("t1", "here");
+    // 2d358590: its turn ended into a wait on its own watcher; this engine
+    // runs it, its stamp minutes old.
+    let mut waiting = session("t1", SessionStatus::Idle);
+    waiting.waiting = Some(serde_json::from_value(serde_json::json!({"since": mins(20), "on": []})).unwrap());
+    waiting.updated_at = mins(20);
+    assert!(Thread::of(Some(&c), Some(&waiting), None, true, mins(30)).live(), "its own wait");
+    // A turn that ended a moment ago (its wait, or its next turn, about to
+    // start): not flagged yet.
+    let card = card(WorkState::Active);
+    let mut v = view(&card, Thread::Finished);
+    v.active_at = Some(mins(29));
+    assert!(assess(&v, mins(30)).is_empty());
+    v.active_at = Some(mins(27));
+    assert_eq!(assess(&v, mins(30)).check.unwrap().unwrap().kind, CheckKind::Stale);
 }

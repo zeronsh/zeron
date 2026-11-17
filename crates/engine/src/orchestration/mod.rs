@@ -540,6 +540,7 @@ pub(crate) fn apply_item_patch(
                 approved_at: None,
                 paused_at: None,
                 check: None,
+                threads_at: None,
                 flow: None,
                 depends_on: Vec::new(),
             }
@@ -577,10 +578,15 @@ pub(crate) fn apply_item_patch(
     }
     if let Some(threads) = patch.threads {
         let mut seen = std::collections::HashSet::new();
-        item.threads = threads
+        let threads: Vec<String> = threads
             .into_iter()
             .filter(|t| seen.insert(t.clone()))
             .collect();
+        // A thread new to it: about to start (the board check's grace).
+        if threads.iter().any(|t| !item.threads.contains(t)) {
+            item.threads_at = Some(now);
+        }
+        item.threads = threads;
     }
     if let Some(links) = patch.links {
         item.links = links;
