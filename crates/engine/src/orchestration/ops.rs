@@ -958,6 +958,9 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             refuse("Only the person pauses or resumes a card")
         }
         OrchestrateOp::StartItem { id } => match (role, orch.item(id)) {
+            (ChatRole::Orchestrator { .. }, Some(card)) if card.flow.is_some() => {
+                refuse("That card is a step of its flow's run: the engine starts it when its turn comes")
+            }
             (ChatRole::Orchestrator { id: mine }, Some(card)) if card.orchestrator_id.as_deref() == Some(mine.as_str()) => Ok(()),
             _ => refuse("An orchestrator starts only its own cards: the person starts the rest"),
         },

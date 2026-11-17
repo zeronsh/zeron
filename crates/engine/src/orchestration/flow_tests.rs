@@ -328,3 +328,21 @@ async fn only_the_ask_the_run_waits_on_leads_it_on() {
     op(&core, Caller::Local, json!({"op":"answerAsk","id":own,"answer":"","option":0})).await.unwrap();
     assert_eq!(run(&core, &o).state, RunState::Finished);
 }
+
+#[tokio::test]
+async fn an_orchestrator_doesnt_move_or_start_its_flows_cards() {
+    let (_temp, core) = core().await;
+    let o = with_flow(&core).await;
+    op(&core, Caller::Local, json!({"op":"startFlow","orchestratorId":o,"task":"T"})).await.unwrap();
+    let worker = card(&core, &o, "2");
+    report(&core, &worker.threads[0], None, "built").await;
+    // Done by the run: the orchestrator can't put it in Review.
+    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":worker.id,"state":"review"}})).await.unwrap_err();
+    assert!(refused.contains("flow's run"), "{refused}");
+    assert_eq!(card(&core, &o, "2").state, WorkState::Done);
+    // Its outcome it may add to.
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":worker.id,"outcome":"Checked the build"}})).await.unwrap();
+    // Nor start the gate's card itself.
+    let gate = card(&core, &o, "4");
+    assert!(op(&core, agent(&o), json!({"op":"startItem","id":gate.id})).await.is_err());
+}
