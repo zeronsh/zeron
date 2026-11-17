@@ -4459,6 +4459,32 @@
         "stop_failed": "Couldn't stop the run"
       },
       "sync_failed": "Couldn't save the flow to the engine"
+    },
+    "injected": {
+      "needs_you": "Needs you",
+      "ask": {
+        "open": "Open",
+        "by_orchestrator": "Answered by orchestrator",
+        "by_you": "Answered by you",
+        "in_thread": "Answered in thread",
+        "acted": "Acted on",
+        "dismissed": "Dismissed",
+        "open_label": "Open {title}'s question",
+        "deferred_until": "Deferred until {time}"
+      },
+      "for_thread": "For a crew thread",
+      "on_card": "On your card",
+      "changes": "Changes requested",
+      "retraction": "Brain dump",
+      "retracted": "Meant elsewhere",
+      "board_check": "Board check",
+      "check": "Check",
+      "resumed": "Resumed",
+      "resumed_text": "Carry on where it stopped",
+      "scheduled": "Scheduled check-in",
+      "crew_rules": "Crew rules from {name}",
+      "quoted": "Quoted from {name}",
+      "decision": "Decision"
     }
   },
   "control": {

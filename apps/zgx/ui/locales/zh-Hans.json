@@ -4459,6 +4459,32 @@
         "stop_failed": "Couldn't stop the run"
       },
       "sync_failed": "Couldn't save the flow to the engine"
+    },
+    "injected": {
+      "needs_you": "需要你",
+      "ask": {
+        "open": "待定",
+        "by_orchestrator": "编排者已回答",
+        "by_you": "你已回答",
+        "in_thread": "已在对话中回答",
+        "acted": "已执行",
+        "dismissed": "已忽略",
+        "open_label": "打开 {title} 的问题",
+        "deferred_until": "推迟到 {time}"
+      },
+      "for_thread": "给团队对话",
+      "on_card": "关于你的卡片",
+      "changes": "要求修改",
+      "retraction": "随手记",
+      "retracted": "另有所指",
+      "board_check": "看板检查",
+      "check": "检查",
+      "resumed": "已恢复",
+      "resumed_text": "从停下的地方继续",
+      "scheduled": "定时检查",
+      "crew_rules": "来自 {name} 的团队规则",
+      "quoted": "引用自 {name}",
+      "decision": "决定"
     }
   },
   "control": {

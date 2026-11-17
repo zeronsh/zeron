@@ -45,6 +45,8 @@ local look = require("@app/screens/shell/project_look")
 local Appshots = require("@app/screens/chat/appshots")
 local DropOverlay = require("@ds/drop_overlay")
 local Hold = require("@ds/hold")
+local orchestration = require("@account/orchestration")
+local decide = require("@ds/orch_decide")
 
 -- Two places in a transcript (ds/transcript's `keep`), the same.
 local function same(a: any, b: any): boolean
@@ -1723,6 +1725,32 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		end,
 		open_link = open_link,
 		chat_of = Shared.chat_of,
+		-- (A crew ask said into an orchestrator's conversation: its ask as it
+		-- stands, the decision overlay, and the thread at its question.)
+		ask_of = function(id: string): any?
+			for _, a in orchestration.asks:get() do
+				if a.id == id then
+					return a
+				end
+			end
+			return nil
+		end,
+		-- (An answer an older engine sent names no ask: its question, as
+		-- the engine cut it to one line, finds it.)
+		ask_by_question = function(question: string): any?
+			local want = (string.gsub((string.gsub(question, "\u{2026}$", "")), "%s+", " "))
+			for _, a in orchestration.asks:get() do
+				local q = (string.gsub(a.question or "", "%s+", " "))
+				if want ~= "" and string.sub(q, 1, #want) == want then
+					return a
+				end
+			end
+			return nil
+		end,
+		open_ask = decide.show,
+		open_at = function(chat: string, message: string?)
+			route.open_session(chat, { message = message })
+		end,
 		-- (The chat this lane is beside is already on show: to it, as ever.)
 		open_sender = function(chat: string, title: string)
 			local home = home_session()
