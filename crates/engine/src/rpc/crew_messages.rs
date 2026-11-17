@@ -113,6 +113,36 @@ impl EngineRpc {
         *slot = json!(format!("{rules}{body}"));
     }
 
+    /// `Some(reply)` when this call is an agent's run or steer of a thread
+    /// whose card the person paused: queued instead, its queue held until
+    /// they resume the card. A queued message only has its queue held.
+    pub(super) fn held_for_paused_card(&self, method: &str, params: &Value) -> Result<Option<RpcReply>, RpcError> {
+        if !matches!(method, methods::QUEUE_MESSAGE | methods::QUEUE_COMMAND) {
+            return Ok(None);
+        }
+        let Caller::Agent { chat: Some(_) } = zeron_rpc::caller() else {
+            return Ok(None);
+        };
+        let Some(target) = params["chatId"].as_str() else {
+            return Ok(None);
+        };
+        if !crate::orchestration::board_checks::paused_thread(self.orchestration(), target) {
+            return Ok(None);
+        }
+        self.doc_host_ref().hold_queue(target);
+        if method == methods::QUEUE_MESSAGE {
+            return Ok(None);
+        }
+        let Some(text) = text_slot(method, &mut params.clone()).and_then(|v| v.as_str().map(str::to_owned)) else {
+            return Ok(None);
+        };
+        let id = self
+            .doc_host_ref()
+            .queue_message(target, &text, Vec::new())
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        Ok(Some(RpcReply::value(&json!({ "commandId": id, "held": "its card is paused by the person" }))?))
+    }
+
     /// `Some(reply)` when this call is a crew thread messaging its own
     /// orchestrator: filed as a report instead, replying as the send would.
     pub(super) async fn crew_message_as_report(
