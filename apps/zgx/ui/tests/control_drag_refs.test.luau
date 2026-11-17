@@ -33,6 +33,8 @@ end
 -- (Tall: every widget on the page at once, nothing scrolled to.)
 local function tall(): any
 	local app = mount("control_page_fixture.luau")
+	-- (These read the Topology's rows: the Map opens on Graph (force) now.)
+	app:set_state("control_map", { variant = "topology", window = 15 })
 	app:resize(1440, 4000)
 	app:frames(30)
 	return app
@@ -240,6 +242,8 @@ end)
 
 test("drag refs: dropped on the floating composer, the chip is on the same draft", function()
 	local app = mount("control_float_fixture.luau")
+	-- (These read the Topology's rows: the Map opens on Graph (force) now.)
+	app:set_state("control_map", { variant = "topology", window = 15 })
 	app:resize(1440, 900)
 	app:frames(30)
 	app:command("fixture.float")

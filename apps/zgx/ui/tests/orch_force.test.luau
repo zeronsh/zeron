@@ -139,6 +139,18 @@ test("force graph: a cold open settles a frame at a time, no frame long, then no
 	expect((s.settled or 0) >= 1).to_be(true)
 	expect(f <= 60).to_be(true)
 	expect(app:error() == nil or not string.find(app:error(), "orch_force", 1, true)).to_be(true)
+	-- (The names, placed a slice a frame once it rests: a few frames.)
+	for _ = 1, 30 do
+		if (stats(app).names or 0) >= 1 then
+			break
+		end
+		app:frames(1)
+	end
+	expect((stats(app).names or 0) >= 1).to_be(true)
+	-- (The Map open from the start now: the fleet's messages, landing after
+	-- it, run their dots once; let them.)
+	app:wait(1200)
+	app:frames(2)
 	-- Idle: nothing drawn, no step; the working rings' overlay steps ten
 	-- times a second at most.
 	local a = stats(app)
@@ -146,6 +158,7 @@ test("force graph: a cold open settles a frame at a time, no frame long, then no
 	local b = stats(app)
 	expect(b.draws).to_be(a.draws)
 	expect(b.steps).to_be(a.steps)
+	print(`FORCEIDLE draws {b.draws - a.draws} overlay {b.overlay - a.overlay} status {(b.status or 0) - (a.status or 0)}`)
 	expect(b.overlay - a.overlay <= 2 * 21).to_be(true)
 end)
 
@@ -512,4 +525,264 @@ test("force graph: every working ring hugs its chat as the status rings do, at a
 	app:command("map_force_zoom_in")
 	app:frames(6)
 	rings_match(app, "zoomed after the drag")
+end)
+
+-- Names: every thread's shown, none on another name, a mark or a line; the
+-- Brain's and each orchestrator's fixed under their marks.
+local labels_mod = require("@ds/orch_force_labels")
+local function read_labels(app: any): any
+	app:command("map_force_labels")
+	app:frames(1)
+	return app:state("force_labels") or {}
+end
+local function seg_hits(ax: number, ay: number, bx: number, by: number, x0: number, y0: number, x1: number, y1: number): boolean
+	-- (Liang–Barsky: whether the segment enters the box.)
+	local t0, t1 = 0, 1
+	local dx, dy = bx - ax, by - ay
+	for _, pq in { { -dx, ax - x0 }, { dx, x1 - ax }, { -dy, ay - y0 }, { dy, y1 - ay } } do
+		local p, q = pq[1], pq[2]
+		if p == 0 then
+			if q < 0 then
+				return false
+			end
+		else
+			local r = q / p
+			if p < 0 then
+				t0 = math.max(t0, r)
+			else
+				t1 = math.min(t1, r)
+			end
+			if t0 > t1 then
+				return false
+			end
+		end
+	end
+	return true
+end
+local function check_labels(app: any, label: string): (number, number)
+	-- (The names, placed a slice a frame: all placed first.)
+	app:frames(20)
+	local d = read_labels(app)
+	local labs, nodes, links = d.labels or {}, d.nodes or {}, d.links or {}
+	local by_id = {}
+	for _, n in nodes do
+		by_id[n.id] = n
+	end
+	local radius = { brain = draw.BRAIN_D / 2, orchestrator = draw.HUB_D / 2, machine = draw.HUB_D / 2, chat = draw.R_RING }
+	-- (A hair's tolerance: the line sampling's.)
+	local e = 1.5
+	local chats, named = 0, 0
+	for _, n in nodes do
+		if n.kind == "chat" then
+			chats += 1
+		end
+	end
+	for _, la in labs do
+		if la.kind == "chat" then
+			named += 1
+		end
+	end
+	print(`FORCENAMES {label}: {named} of {chats} threads named`)
+	for a, la in labs do
+		for b, lb in labs do
+			if a < b then
+				local hit = la.x0 + e < lb.x1 and la.x1 - e > lb.x0 and la.y0 + e < lb.y1 and la.y1 - e > lb.y0
+				expect(`{label}: {la.id} over {lb.id} {hit}`).to_be(`{label}: {la.id} over {lb.id} false`)
+			end
+		end
+		if la.kind == "chat" then
+			for _, n in nodes do
+				if n.id ~= la.id then
+					local r = radius[n.kind]
+					local hit = la.x0 + e < n.x + r and la.x1 - e > n.x - r and la.y0 + e < n.y + r and la.y1 - e > n.y - r
+					expect(`{label}: {la.id} over mark {n.id} {hit}`).to_be(`{label}: {la.id} over mark {n.id} false`)
+				end
+			end
+			local own = by_id[la.id]
+			for _, l in links do
+				if l.a ~= la.id and l.b ~= la.id then
+					local hit = seg_hits(l.ax, l.ay, l.bx, l.by, la.x0 + e, la.y0 + e, la.x1 - e, la.y1 - e)
+					expect(`{label}: {la.id} over line {l.a}-{l.b} {hit}`).to_be(`{label}: {la.id} over line {l.a}-{l.b} false`)
+				end
+			end
+			expect(own ~= nil).to_be(true)
+		else
+			-- (Fixed: centred, just under its mark.)
+			local n = by_id[la.id]
+			local r = radius[la.kind]
+			local cx = (la.x0 + la.x1) / 2
+			local top = la.y0 + labels_mod.PAD_Y
+			expect(`{label}: {la.id} at {math.abs(cx - n.x) < 0.5 and math.abs(top - (n.y + r + 3)) < 0.5}`).to_be(`{label}: {la.id} at true`)
+		end
+	end
+	return named, chats
+end
+
+test("force names: every thread named, none on another name, a mark or a line; the fixed ones under their marks", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(5)
+	local named, chats = check_labels(app, "big")
+	print(`FORCENAMES 164 agents: {named} of {chats} threads named, placed in {string.format("%.1f", stats(app).names_ms or -1)}ms`)
+	-- (A crowd of 160 can't all have room at this scale: those that do,
+	-- the pressing first; the rest on hover.)
+	expect(named >= chats * 0.45).to_be(true)
+	-- The sample fleet, every chat shown.
+	local small = mount("orch_map_fixture.luau")
+	small:resize(1440, 2400)
+	small:command("map_only")
+	small:command("map_force")
+	small:set_state("ds/orch_map_visibility.luau::control_map_show", "all")
+	small:frames(90)
+	local n2, c2 = check_labels(small, "sample")
+	expect(n2).to_be(c2)
+end)
+
+test("force names: the orchestrators' and the Brain's stay at their place under their marks at any zoom, through a drag", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(5)
+	check_labels(app, "fitted")
+	for _, step in { "in", "in", "out", "out", "out" } do
+		app:command(`map_force_zoom_{step}`)
+		app:frames(5)
+		check_labels(app, `zoom {step}`)
+	end
+	app:command("map_force_drag_hub_step")
+	app:frames(3)
+	app:command("map_force_drag_hub_step")
+	app:frames(3)
+	app:command("map_force_drag_hub_end")
+	app:frames(40)
+	check_labels(app, "after a drag")
+	app:command("map_force_drag_brain_step")
+	app:frames(3)
+	app:command("map_force_drag_brain_end")
+	app:frames(40)
+	check_labels(app, "after the Brain's drag")
+end)
+
+test("force names: wrapped and shortened only as they must be", function()
+	local function m(t: string): number
+		return #t * 7
+	end
+	local two = labels_mod.wrap("VPN Orchestrator (exnomic) with a long tail", 170, 2, m)
+	expect(#two).to_be(2)
+	expect(string.find(two[1], "VPN Orchestrator", 1, true) ~= nil).to_be(true)
+	for _, l in two do
+		expect(m(l) <= 170).to_be(true)
+	end
+	local one = labels_mod.wrap("Zeron fixes", 170, 2, m)
+	expect(#one == 1 and one[1] == "Zeron fixes").to_be(true)
+end)
+
+-- One line a pair: a pair with a message in flight is its dashed arc alone,
+-- never its straight weak line too; lit (its end hovered), the arc is
+-- restyled, not a second straight line drawn.
+test("force graph: a pair with a message in flight is one line, its arc, plain and lit", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(5)
+	app:command("map_force_edges")
+	app:frames(1)
+	local e = app:state("force_edges")
+	expect(#e.arcs >= 1).to_be(true)
+	for _, pair in e.arcs do
+		expect(`{pair} {e.drawn[pair]}`).to_be(`{pair} arc`)
+	end
+	-- (Every other weak pair: its straight line, once.)
+	local lines = 0
+	for _, v in e.drawn do
+		if v == "line" then
+			lines += 1
+		end
+	end
+	expect(lines >= 1).to_be(true)
+	-- Lit from one end: the same arc, restyled.
+	local pair = e.arcs[1]
+	local one = string.split(pair, "|")[1]
+	app:set_state("control_map_force_hover", one)
+	app:frames(3)
+	app:command("map_force_edges")
+	app:frames(1)
+	e = app:state("force_edges")
+	expect(`{pair} lit {e.lit[pair]}`).to_be(`{pair} lit arc`)
+	app:set_state("control_map_force_hover", nil)
+	app:frames(3)
+end)
+
+
+-- The pivot: machines as the hubs, orchestrators as the colour. Kept; its
+-- own places and pins; switching lays it out once, then nothing runs.
+local function pivot(app: any, to: string)
+	app:set_state("control_map_force_pivot", to)
+	settle(app, 240)
+	app:frames(25)
+end
+test("force pivot: machines as hubs, every thread off its machine, the legend the orchestrators; then still", function()
+	local app = open()
+	settle(app, 240)
+	pivot(app, "machine")
+	local d = read_labels(app)
+	local kinds, machines = {}, {}
+	for _, n in d.nodes do
+		kinds[n.kind] = (kinds[n.kind] or 0) + 1
+		if n.kind == "machine" then
+			machines[n.id] = true
+		end
+	end
+	expect((kinds.machine or 0) >= 2).to_be(true)
+	expect(kinds.orchestrator).to_be(nil)
+	-- (Each thread hangs off a machine, or the Brain.)
+	local parent_of = {}
+	for _, l in d.links do
+		if machines[l.a] or l.a == "orc-brain" then
+			parent_of[l.b] = true
+		end
+	end
+	for _, n in d.nodes do
+		if n.kind == "chat" then
+			expect(`{n.id} {parent_of[n.id] == true}`).to_be(`{n.id} true`)
+		end
+	end
+	check_labels(app, "machines pivot")
+	-- (The legend: the orchestrators.)
+	expect(app:count("#control-widget-map >> .orch-force-legend-item") >= 3).to_be(true)
+	-- Still once laid out.
+	app:wait(1200)
+	app:frames(2)
+	local a = stats(app)
+	app:frames(60)
+	local b = stats(app)
+	expect(b.steps).to_be(a.steps)
+	expect(b.draws).to_be(a.draws)
+	pivot(app, "orchestrator")
+end)
+
+test("force pivot: kept; each pivot its own places and pins", function()
+	local app = open()
+	settle(app, 240)
+	-- A pin on the orchestrators pivot.
+	for _ = 1, 8 do
+		app:command("map_force_drag_engchat_step")
+		app:frames(1)
+	end
+	app:command("map_force_drag_engchat_end")
+	app:frames(20)
+	app:command("map_force_read")
+	local at = app:state("force_places")["eng2"]
+	expect(app:state("control_map_force_pins")["eng2"]).to_be(true)
+	pivot(app, "machine")
+	expect(app:state("control_map_force_pivot")).to_be("machine")
+	expect((app:state("control_map_force_pins_machine") or {})["eng2"]).to_be(nil)
+	-- (A relaunch keeps the pivot.)
+	local again = mount("orch_map_fixture.luau")
+	again:frames(5)
+	expect(again:state("control_map_force_pivot")).to_be("machine")
+	-- Back: the orchestrators pivot's pin and place as they were.
+	pivot(app, "orchestrator")
+	app:command("map_force_read")
+	local back = app:state("force_places")["eng2"]
+	expect(app:state("control_map_force_pins")["eng2"]).to_be(true)
+	expect(math.abs(back[1] - at[1]) < 0.5 and math.abs(back[2] - at[2]) < 0.5).to_be(true)
 end)

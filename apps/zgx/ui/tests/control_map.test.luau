@@ -5,6 +5,8 @@
 
 local function open(): any
 	local app = mount("control_page_fixture.luau")
+	-- (These read the Topology's rows: the Map opens on Graph (force) now.)
+	app:set_state("control_map", { variant = "topology", window = 15 })
 	app:resize(1440, 900)
 	app:frames(30)
 	return app

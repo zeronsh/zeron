@@ -24,6 +24,7 @@
 local Icon = require("@self/icon")
 local IconButton = require("@self/icon_button").IconButton
 local HoverCard = require("@self/hover_card")
+local Segmented = require("@self/segmented")
 local status = require("@self/status")
 local locale = require("@self/locale")
 local motion = require("@self/motion")
@@ -33,6 +34,7 @@ local model = require("@self/orch_map_model")
 local Cells = require("@self/orch_cells")
 local sim = require("@self/orch_force_sim")
 local fm = require("@self/orch_force_model")
+local labels = require("@self/orch_force_labels")
 local draw = require("@self/orch_force_draw")
 local fpal = require("@self/orch_force_palette")
 
@@ -40,6 +42,19 @@ local M = {}
 
 -- Where each node last settled, by id: { x, y } (kept on this device).
 M.places = ui.persist("control_map_force_places", {} :: { [string]: { number } })
+-- The pivot: "orchestrator" (orchestrators the hubs, machines the colour)
+-- or "machine" (machines the hubs, orchestrators the colour). Kept; each
+-- its own places and pins.
+M.PIVOTS = { "orchestrator", "machine" }
+M.pivot = ui.persist("control_map_force_pivot", "orchestrator")
+M.places_m = ui.persist("control_map_force_places_machine", {} :: { [string]: { number } })
+M.pins_m = ui.persist("control_map_force_pins_machine", {} :: { [string]: boolean })
+function M.places_of(): any
+	return if M.pivot:peek() == "machine" then M.places_m else M.places
+end
+function M.pins_of(): any
+	return if M.pivot:peek() == "machine" then M.pins_m else M.pins
+end
 -- The nodes pinned by hand (dropped there), by id (kept on this device).
 M.pins = ui.persist("control_map_force_pins", {} :: { [string]: boolean })
 -- The node the pointer is on.
@@ -73,6 +88,10 @@ end
 -- chat not heard yet shows while it's new).
 function M.gone(world: any, keep: { [string]: any }?): (id: string) -> boolean
 	local chats = world.chats or {}
+	local devices: { [string]: boolean } = {}
+	for _, d in world.devices or {} do
+		devices[d.id] = true
+	end
 	local leads: { [string]: boolean } = {}
 	for _, o in (world.now or {}).orchestrators or {} do
 		leads[o.id] = not o.archived
@@ -80,6 +99,10 @@ function M.gone(world: any, keep: { [string]: any }?): (id: string) -> boolean
 	return function(id: string): boolean
 		if keep and keep[id] then
 			return false
+		end
+		-- (A machine's hub: gone with its machine.)
+		if string.sub(id, 1, #fm.MACHINE) == fm.MACHINE then
+			return not devices[string.sub(id, #fm.MACHINE + 1)]
 		end
 		local c = chats[id]
 		if c then
@@ -94,7 +117,7 @@ end
 function M.prune(world: any, model: any?): number
 	local gone = M.gone(world, model and model.index)
 	local dropped = 0
-	for _, st in { M.places :: any, M.pins :: any } do
+	for _, st in { M.places :: any, M.pins :: any, M.places_m :: any, M.pins_m :: any } do
 		local cur = st:peek() or {}
 		local out, n = {}, 0
 		for id, v in cur do
@@ -125,6 +148,11 @@ local PLACES_MAX = 4000
 -- How long the web keeps its shape on data loaded whole before what's gone
 -- from it is swept from the places and pins (ms).
 local PRUNE_MS = 3000
+-- A frame's share of placing the threads' names (seconds).
+local NAME_SLICE = 0.003
+-- A machine's hub on the machines pivot: Material's Clover (four leaves),
+-- never a cookie (an orchestrator's).
+local MACHINE_SHAPE = "clover4"
 -- What a secondary click on the space (no node) is, for its menu.
 local BACKGROUND = "force:background"
 local TILE_H = kit.TILE_H
@@ -149,23 +177,6 @@ local M_HUB = { size = 12.5, weight = 600 }
 local DASH = { dash = { 4, 4 } }
 local ROUND = { cap = "round" :: "round", join = "round" :: "round" }
 
-local function fit_name(c: any, s: string, w: number, opts: any): string
-	if c:measure_text(s, opts) <= w then
-		return s
-	end
-	local n = utf8.len(s) or #s
-	local lo, hi = 0, n
-	while lo < hi do
-		local mid = (lo + hi + 1) // 2
-		local cut = string.sub(s, 1, (utf8.offset(s, mid + 1) or (#s + 1)) - 1) .. "…"
-		if c:measure_text(cut, opts) <= w then
-			lo = mid
-		else
-			hi = mid - 1
-		end
-	end
-	return if lo == 0 then "" else string.sub(s, 1, (utf8.offset(s, lo + 1) or (#s + 1)) - 1) .. "…"
-end
 
 M.View = ui.component(function(props: {
 	world: () -> any,
@@ -205,7 +216,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -255,10 +266,19 @@ M.View = ui.component(function(props: {
 	end
 
 	-- Fitting the view to the web: its box in the field, at most 1.4x.
+	-- (The names too, once placed: none cut by the field's edge.)
+	local fit_names: { [number]: labels.Label } = {}
 	local function fit()
-		local x0, y0, x1, y1 = sim.bounds(s)
+		local bx0, by0, bx1, by1 = sim.bounds(s)
+		local x0: number, y0: number, x1: number, y1: number = bx0, by0, bx1, by1
+		local any_name = false
+		for _, lab in fit_names do
+			any_name = true
+			local l: labels.Label = lab
+			x0, y0, x1, y1 = math.min(x0, l.x0), math.min(y0, l.y0), math.max(x1, l.x1), math.max(y1, l.y1)
+		end
 		local w, h = math.max(1, width:peek()), field_h()
-		local pad = 70
+		local pad = if any_name then 24 else 70
 		local z = math.clamp(math.min((w - pad * 2) / math.max(1, x1 - x0), (h - pad * 2 - 30) / math.max(1, y1 - y0)), MIN_FIT, 1.4)
 		view:set({ x = w / 2 - (x0 + x1) / 2 * z, y = (h - 30) / 2 - (y0 + y1) / 2 * z, zoom = z })
 		counts.zoom = z
@@ -272,7 +292,7 @@ M.View = ui.component(function(props: {
 		-- (Kept for every node seen, so a node shown again, or another
 		-- world's, opens where it was; at most PLACES_MAX, the web's own
 		-- first.)
-		local kept = table.clone(M.places:peek() or {})
+		local kept = table.clone(M.places_of():peek() or {})
 		local n_kept = 0
 		for _ in kept do
 			n_kept += 1
@@ -283,7 +303,7 @@ M.View = ui.component(function(props: {
 		for id, at in sim.positions(s) do
 			kept[id] = at
 		end
-		M.places:set(kept :: any)
+		M.places_of():set(kept :: any)
 		-- (Fitted after a web's own settling, never after a drag: what's
 		-- shown stays where it is.)
 		if not moved_view and not dragged_since then
@@ -389,8 +409,10 @@ M.View = ui.component(function(props: {
 			end
 		end)
 	end)
+	local built_pivot: string? = nil
 	local function rebuild(world: any, comms: { any })
-		local next_m = fm.build(world, comms, world.clock or os.time())
+		local pivot = M.pivot:peek()
+		local next_m = fm.build(world, comms, world.clock or os.time(), pivot)
 		if next_m.sig == fmodel.sig then
 			-- The same web: what changed taken in place. A state alone (a
 			-- live push): the status layer drawn again, nothing else; a
@@ -419,7 +441,7 @@ M.View = ui.component(function(props: {
 		local t0 = os.clock()
 		local nodes: { sim.Node } = table.create(#next_m.nodes) :: any
 		for i, n in next_m.nodes do
-			nodes[i] = { id = n.id, parent = if n.parent > 0 then n.parent else nil, mass = if n.kind == "brain" then 4 elseif n.kind == "orchestrator" then 2.5 else 1, fixed = n.kind == "brain" }
+			nodes[i] = { id = n.id, parent = if n.parent > 0 then n.parent else nil, mass = if n.kind == "brain" then 4 elseif n.kind == "orchestrator" or n.kind == "machine" then 2.5 else 1, fixed = n.kind == "brain" }
 		end
 		local links: { sim.Link } = table.create(#next_m.links) :: any
 		for i, l in next_m.links do
@@ -431,14 +453,19 @@ M.View = ui.component(function(props: {
 		local dense = math.clamp(1 - (#nodes - 60) / 400, 0.7, 1)
 		local next_s = sim.new(nodes, links, 7, { aspect = aspect, dense = dense })
 		-- (Where they were: this web, else kept from before.)
-		local from: { [string]: any } = table.clone(M.places:peek() or {})
-		for i = 1, s.n do
-			from[s.ids[i]] = { s.x[i], s.y[i] }
+		local from: { [string]: any } = table.clone(M.places_of():peek() or {})
+		-- (The web as it stands, on the same pivot: a pivot's own places
+		-- are never the other's.)
+		if pivot == built_pivot then
+			for i = 1, s.n do
+				from[s.ids[i]] = { s.x[i], s.y[i] }
+			end
 		end
+		built_pivot = pivot
 		local fresh = sim.place(next_s, from)
 		-- (Pinned ones held where they were dropped; a pin of a node not
 		-- shown kept for when it is, till the data says it's gone.)
-		for id in M.pins:peek() or {} do
+		for id in M.pins_of():peek() or {} do
 			local i = next_s.index[id]
 			if i then
 				sim.pin(next_s, i, true)
@@ -515,6 +542,7 @@ M.View = ui.component(function(props: {
 		local comms = props.comms() or {}
 		chats_now = world.chats or {}
 		width:get()
+		M.pivot:get()
 		rebuild(world, comms)
 	end)
 
@@ -545,6 +573,19 @@ M.View = ui.component(function(props: {
 	end
 	local function alpha(hex: string, a: number): string
 		return string.sub(hex, 1, 7) .. string.format("%02x", math.clamp(math.floor(a * 255 + 0.5), 0, 255))
+	end
+	-- An orchestrator's hue as a soft fill (the machines' tone), by theme.
+	local soft_made: { [string]: string } = {}
+	local function soft_hue(h: number): string
+		local key = `{ui.theme.current:peek()}/{h}`
+		local kept = soft_made[key]
+		if not kept then
+			local _, _, deg = fpal.hue_of(string.sub(hue.canvas(h, 1), 1, 7))
+			local tone = if is_dark() then fpal.TONE.dark else fpal.TONE.light
+			kept = fpal.oklch(tone.l, tone.c, deg)
+			soft_made[key] = kept
+		end
+		return kept
 	end
 	local function palette(): any
 		local theme = ui.theme.current:get()
@@ -582,9 +623,12 @@ M.View = ui.component(function(props: {
 		table.clear(node_line)
 		table.clear(node_edge)
 		local fills = machine_fills()
+		local by_machine = M.pivot:peek() ~= "machine"
 		for i, n in fmodel.nodes do
 			local a = if n.kind == "chat" then n.fade / 10 else 1
-			local f = fills[n.device or ""]
+			-- (Its machine's colour; on the machines pivot, a thread's its
+			-- orchestrator's hue, soft, and a machine hub its own colour.)
+			local f = if by_machine or n.kind == "machine" then fills[n.device or ""] else (if n.hue then soft_hue(n.hue) else nil)
 			if f then
 				node_fill[i] = alpha(f, a)
 				node_mark[i] = alpha(fpal.mark_ink(f), a)
@@ -592,9 +636,11 @@ M.View = ui.component(function(props: {
 				node_fill[i] = pal.body
 				node_mark[i] = alpha(pal.fg, a)
 			end
-			node_line[i] = if n.hue then hue.canvas(n.hue, if n.kind == "orchestrator" then 0.55 else 0.5) else pal.weak
+			node_line[i] = if n.hue then hue.canvas(n.hue, if n.kind == "orchestrator" then 0.55 else 0.5) elseif n.kind == "machine" and f then alpha(f, 0.6) else pal.weak
 			if n.kind == "orchestrator" then
 				node_edge[i] = if n.hue then hue.canvas(n.hue, 1) else pal.secondary
+			elseif n.kind == "machine" then
+				node_edge[i] = pal.secondary
 			end
 		end
 		return pal
@@ -607,13 +653,10 @@ M.View = ui.component(function(props: {
 	local marks: { [number]: { { any } } } = {}
 	local hub_shape: { [number]: string } = {}
 	local rings: { [number]: any } = {}
-	local names: { string } = {}
-	local label_x: { [number]: number } = {}
-	local label_y: { [number]: number } = {}
-	local label_w: { [number]: number } = {}
+	-- (Each node's name, where it goes: ds/orch_force_labels.)
+	local labs: { [number]: labels.Label } = {}
+	local labs_by_id: { [string]: labels.Label } = {}
 	local made_for = -1
-	local label_boxes: { { number } } = {}
-	local name_w: { [number]: number } = {}
 	-- (The model the shapes were made for: still right for what isn't
 	-- moving while something is.)
 	local made_version = -1
@@ -626,13 +669,96 @@ M.View = ui.component(function(props: {
 		end
 		return crew
 	end
-	local function free(boxes: { { number } }, x0: number, y0: number, x1: number, y1: number): boolean
-		for _, bx in boxes do
-			if not (x1 < bx[1] or x0 > bx[3] or y1 < bx[2] or y0 > bx[4]) then
-				return false
-			end
+	-- Every name, placed (ds/orch_force_labels): the Brain's and the
+	-- orchestrators' fixed under their marks, the threads' round theirs, the
+	-- ones whose node didn't move where they were while still free.
+	local NAME_RANK: { [string]: number } = { input = 0, approval = 0, failed = 1, working = 2, waiting = 2, done = 3 }
+	local names_job: any = nil
+	local names_ms = 0
+	-- (Each text's width, kept: measured once.)
+	local name_widths: { [string]: number } = {}
+	-- A slice of the threads' names (NAME_SLICE seconds); another frame for
+	-- the rest, till all are placed.
+	-- (Defined with the view, below.)
+	local recull: () -> () = function() end
+	local names_tick = -1
+	local function names_ran_this_tick(): boolean
+		return names_tick == tick:peek()
+	end
+	local function run_names(c: any)
+		local job = names_job
+		if not job then
+			return
 		end
-		return true
+		names_tick = tick:peek()
+		local t0 = os.clock()
+		local done = labels.run(job, NAME_SLICE, function(t: string, hub: boolean): number
+			return (c:measure_text(t, if hub then M_HUB else M_NAME))
+		end)
+		names_ms += (os.clock() - t0) * 1000
+		if not done then
+			ui.after(0, function()
+				if names_job == job then
+					tick:set(tick:peek() + 1)
+				end
+			end)
+			return
+		end
+		names_job = nil
+		counts.names_ms = names_ms
+		count("names")
+		fit_names = job.out
+		-- (Fitted again round the names, as after its own settling: never
+		-- once the view's been moved or a node dragged.)
+		if not moved_view and not dragged_since then
+			fit()
+			recull()
+		end
+		table.clear(labs_by_id)
+		local list = {}
+		for i, lab in job.out do
+			labs_by_id[fmodel.nodes[i].id] = lab
+			table.insert(list, { id = fmodel.nodes[i].id, kind = fmodel.nodes[i].kind, x0 = lab.x0, y0 = lab.y0, x1 = lab.x1, y1 = lab.y1, lines = lab.lines })
+		end
+		if M.current then
+			M.current.labels = list
+		end
+	end
+	local function place_names(c: any)
+		local nodes = {}
+		for i, n in fmodel.nodes do
+			local p = n.parent
+			table.insert(nodes, {
+				id = n.id,
+				kind = n.kind,
+				x = s.x[i],
+				y = s.y[i],
+				r = if n.kind == "brain" then R_BRAIN elseif n.kind == "chat" then R_RING else R_HUB,
+				title = if n.kind == "brain" then locale.s("ds.orch.map.brain") else (n.title or ""),
+				hx = if p > 0 then s.x[p] else nil,
+				hy = if p > 0 then s.y[p] else nil,
+				rank = if n.kind == "chat" then (NAME_RANK[state_of(n.id)] or 4) else 0,
+			})
+		end
+		local links = {}
+		for _, l in fmodel.links do
+			table.insert(links, { a = l.a, b = l.b, ax = s.x[l.a], ay = s.y[l.a], bx = s.x[l.b], by = s.y[l.b] })
+		end
+		local ts = os.clock()
+		names_job = labels.start({
+			nodes = nodes,
+			links = links,
+			prev = labs_by_id,
+			widths = name_widths,
+			measure = function(t: string, hub: boolean): number
+				return (c:measure_text(t, if hub then M_HUB else M_NAME))
+			end,
+		})
+		names_ms = 0
+		counts.names_start_ms = (os.clock() - ts) * 1000
+		-- (The fixed ones at once; the threads' a slice a frame, from here.)
+		labs = names_job.out
+		run_names(c)
 	end
 	local function make(c: any)
 		local key = version:peek() * 100000 + geo:peek()
@@ -641,36 +767,18 @@ M.View = ui.component(function(props: {
 		end
 		made_for = key
 		made_version = version:peek()
+		local tm = os.clock()
 		table.clear(shapes)
 		table.clear(marks)
 		table.clear(hub_shape)
 		table.clear(rings)
-		table.clear(names)
-		table.clear(label_x)
-		table.clear(label_y)
-		table.clear(label_w)
-		-- Names placed greedily, the important first, none over a mark or
-		-- another name: an orchestrator's beside it, off its own link and
-		-- its fan, else above or below it, else left out (its card names it).
-		local boxes: { { number } } = {}
-		-- (The names alone, and the Brain's and orchestrators' marks.)
-		local names_at: { { number } } = {}
-		for i, n in fmodel.nodes do
-			local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING
-			table.insert(boxes, { s.x[i] - r, s.y[i] - r, s.x[i] + r, s.y[i] + r })
-			if n.kind ~= "chat" then
-				table.insert(names_at, { s.x[i] - r, s.y[i] - r, s.x[i] + r, s.y[i] + r })
-			end
-		end
 		for i, n in fmodel.nodes do
 			local x, y = s.x[i], s.y[i]
 			if n.kind == "brain" then
 				shapes[i] = draw.shape("ghostish", x, y, draw.BRAIN_D)
-				names[i] = locale.s("ds.orch.map.brain")
-				local w = c:measure_text(names[i], M_HUB)
-				label_x[i], label_y[i], label_w[i] = x, y + R_BRAIN + 6, w
-				table.insert(boxes, { x - w / 2 - 4, y + R_BRAIN + 5, x + w / 2 + 4, y + R_BRAIN + 23 })
-				table.insert(names_at, { x - w / 2 - 4, y + R_BRAIN + 5, x + w / 2 + 4, y + R_BRAIN + 23 })
+			elseif n.kind == "machine" then
+				hub_shape[i] = MACHINE_SHAPE
+				shapes[i] = { draw.shape(MACHINE_SHAPE, x, y, draw.HUB_D), draw.shape(MACHINE_SHAPE, x, y, draw.HUB_GAP_D), draw.shape(MACHINE_SHAPE, x, y, draw.HUB_FILL_D) }
 			elseif n.kind == "orchestrator" then
 				local shape = draw.cookie_of(crew_of(i))
 				hub_shape[i] = shape
@@ -679,76 +787,18 @@ M.View = ui.component(function(props: {
 				if mk then
 					marks[i] = draw.mark(mk, x, y, draw.mark_hub(shape))
 				end
-				names[i] = fit_name(c, n.title, 170, M_HUB)
-				local w = c:measure_text(names[i], M_HUB)
-				-- (Its fan faces away from its parent: the sides across its
-				-- link first, then toward its parent, then away.)
-				local p = n.parent
-				local ax, ay = x - (if p > 0 then s.x[p] else x), y - (if p > 0 then s.y[p] else y - 1)
-				local al = math.max(1e-6, math.sqrt(ax * ax + ay * ay))
-				ax, ay = ax / al, ay / al
-				-- (Next to it first; a crowded one's a little further out, its
-				-- name's ground over the lines between.)
-				local tries = {}
-				for _, gap in { R_HUB + 6, R_HUB + 24, R_HUB + 48 } do
-					local far = gap - R_HUB - 6
-					local function at(dx: number, dy: number, lx: number, ly: number)
-						table.insert(tries, { dx, dy, lx, ly, far })
-					end
-					at(1, 0, x + gap + w / 2, y - 8)
-					at(-1, 0, x - gap - w / 2, y - 8)
-					at(0, 1, x, y + gap)
-					at(0, -1, x, y - gap - 17)
-					at(0.7, 0.7, x + gap * 0.7 + w / 2, y + gap * 0.7 - 4)
-					at(-0.7, 0.7, x - gap * 0.7 - w / 2, y + gap * 0.7 - 4)
-					at(0.7, -0.7, x + gap * 0.7 + w / 2, y - gap * 0.7 - 13)
-					at(-0.7, -0.7, x - gap * 0.7 - w / 2, y - gap * 0.7 - 13)
-				end
-				table.sort(tries, function(a: any, b: any): boolean
-					if a[5] ~= b[5] then
-						return a[5] < b[5]
-					end
-					local da, db = a[1] * ax + a[2] * ay, b[1] * ax + b[2] * ay
-					if math.abs(math.abs(da) - math.abs(db)) > 0.05 then
-						return math.abs(da) < math.abs(db)
-					end
-					return da < db
-				end)
-				-- (None clear of every mark, in a crowd: over chats' marks, its
-				-- ground under it, but never over another name or its own.)
-				for pass = 1, 2 do
-					for _, t in tries do
-						local lx, ly = t[3], t[4]
-						local x0, y0, x1, y1 = lx - w / 2 - 4, ly - 1, lx + w / 2 + 4, ly + 17
-						if free(if pass == 1 then boxes else names_at, x0, y0, x1, y1) and (pass == 1 or free({ { x - R_HUB, y - R_HUB, x + R_HUB, y + R_HUB } }, x0, y0, x1, y1)) then
-							label_x[i], label_y[i], label_w[i] = lx, ly, w
-							table.insert(boxes, { x0, y0, x1, y1 })
-							table.insert(names_at, { x0, y0, x1, y1 })
-							break
-						end
-					end
-					if label_x[i] then
-						break
-					end
-				end
 			else
 				local mk = draw.mark_of(n.provider)
 				if mk then
 					marks[i] = draw.mark(mk, x, y, draw.MARK_CHAT)
 				end
 				rings[i] = ui.path():arc(x, y, R_RING, 0, 360)
-				names[i] = fit_name(c, n.title, 150, M_NAME)
 			end
 		end
-		-- (Kept for the status layer: a chat asking for the person is named
-		-- where it's free of these.)
-		label_boxes = boxes
-		table.clear(name_w)
-		for i, n in fmodel.nodes do
-			if n.kind == "chat" and names[i] ~= "" then
-				name_w[i] = c:measure_text(names[i], M_NAME)
-			end
-		end
+		counts.make_ms = (os.clock() - tm) * 1000
+		local tp = os.clock()
+		place_names(c)
+		counts.place_ms = (os.clock() - tp) * 1000
 	end
 	local names_shown = ui.computed(function(): boolean
 		return view:get().zoom >= NAMES_ZOOM
@@ -757,7 +807,7 @@ M.View = ui.component(function(props: {
 	-- What's drawn: the view's reach (world), a field past it each way;
 	-- drawn again only when the view nears its edge.
 	local cull = ui.use_state({ x0 = -1e9, y0 = -1e9, x1 = 1e9, y1 = 1e9 })
-	local function recull()
+	recull = function()
 		local v = view:peek()
 		local w, h = math.max(1, width:peek()), field_h()
 		local wx0, wy0 = -v.x / v.zoom, -v.y / v.zoom
@@ -773,10 +823,40 @@ M.View = ui.component(function(props: {
 	-- The drawing (world space; each band of the field a canvas of its own,
 	-- under zgx's raster cap, moved by the view).
 	local function label(c: any, i: number, t: any, ink: string, p: any)
-		local w = label_w[i] or 0
-		c:rect(label_x[i] - w / 2 - 4, label_y[i] - 1, w + 8, 18, p.label_bg, 4)
+		local lab = labs[i]
+		local ld = lab.leader
+		if ld then
+			c:line(ld[1], ld[2], ld[3], ld[4], p.weak, 0.8)
+		end
+		c:rect(lab.x0, lab.y0, lab.x1 - lab.x0, lab.y1 - lab.y0, p.label_bg, 4)
 		t.color = ink
-		c:text(names[i], label_x[i], label_y[i], t)
+		t.align = lab.align
+		local lh = lab.h / #lab.lines
+		for k, line in lab.lines do
+			c:text(line, lab.x, lab.y + (k - 1) * lh, t)
+		end
+	end
+	-- One line a pair: a pair with a message in flight is drawn by its arc
+	-- alone (dashed, curved), never its straight weak line as well; lit, the
+	-- same arc is restyled. (By the pair, either way round.)
+	local function pair_of(a: number, b: number): number
+		return if a < b then a * 65536 + b else b * 65536 + a
+	end
+	local function arc_of(a: number, b: number): any
+		local key = pair_of(a, b)
+		for _, arc in fmodel.arcs do
+			if pair_of(arc.a, arc.b) == key then
+				return arc
+			end
+		end
+		return nil
+	end
+	local function arc_path(arc: any): any
+		local x, y = s.x, s.y
+		local ax, ay, bx, byy = x[arc.a], y[arc.a], x[arc.b], y[arc.b]
+		local mx, my = (ax + bx) / 2, (ay + byy) / 2
+		local dx, dy = bx - ax, byy - ay
+		return ui.path():move(ax, ay):quad(mx - dy * 0.18, my + dx * 0.18, bx, byy)
 	end
 	local function fill_mark(c: any, i: number)
 		local m = marks[i]
@@ -787,11 +867,21 @@ M.View = ui.component(function(props: {
 			end
 		end
 	end
+	-- (For tests: how each weak pair was drawn last, and lit.)
+	local edge_style: { [number]: string } = {}
+	local lit_style: { [number]: string } = {}
 	local function draw_web(c: any)
 		local p = palette()
+		table.clear(edge_style)
+		if M.current then
+			M.current.edge_style, M.current.lit_style = edge_style, lit_style
+		end
 		local b = cull:get()
 		local still = settled:peek()
 		make(c)
+		if names_job and made_version == version:peek() and not names_ran_this_tick() then
+			run_names(c)
+		end
 		local full = made_version == version:peek()
 		-- (What's awake moves on the overlay: left out here.)
 		local moving = not still
@@ -813,9 +903,11 @@ M.View = ui.component(function(props: {
 			if math.max(ax, bx) < x0 or math.min(ax, bx) > x1 or math.max(ay, byy) < y0 or math.min(ay, byy) > y1 then
 				continue
 			end
-			if not l.strong then
-				-- (Heavier with its traffic: a hairline, up to a point and a half.)
+			-- (Heavier with its traffic: a hairline, up to a point and a half;
+			-- one with a message in flight is its arc's, below.)
+			if not l.strong and not (full and not moving and arc_of(l.a, l.b)) then
 				c:line(ax, ay, bx, byy, p.weak, 0.8 + math.min((l :: any).count or 0, 7) * 0.1)
+				edge_style[pair_of(l.a, l.b)] = "line"
 			end
 		end
 		for _, l in fmodel.links do
@@ -842,7 +934,7 @@ M.View = ui.component(function(props: {
 				else
 					c:circle(nx, ny, R_BRAIN, p.brain)
 				end
-			elseif n.kind == "orchestrator" then
+			elseif n.kind == "orchestrator" or n.kind == "machine" then
 				-- (Its outline in its hue, following its shape; a gap; its
 				-- machine's fill.)
 				if full then
@@ -869,8 +961,8 @@ M.View = ui.component(function(props: {
 		-- crowd, a name sits over chats).
 		if show_names then
 			for i, n in nodes do
-				local lx, ly = label_x[i], label_y[i]
-				if lx and lx >= x0 - 200 and lx <= x1 + 200 and ly >= y0 - 40 and ly <= y1 + 40 and not (moving and awake[i]) then
+				local lab = labs[i]
+				if lab and lab.x1 >= x0 and lab.x0 <= x1 and lab.y1 >= y0 and lab.y0 <= y1 and not (moving and awake[i]) then
 					label(c, i, if n.kind == "chat" then T_NAME else T_HUB, if n.kind == "chat" then p.secondary else p.fg, p)
 				end
 			end
@@ -878,10 +970,8 @@ M.View = ui.component(function(props: {
 		-- Live: a dashed arc for each message in flight.
 		if full and not moving then
 			for _, a in fmodel.arcs do
-				local ax, ay, bx, byy = x[a.a], y[a.a], x[a.b], y[a.b]
-				local mx, my = (ax + bx) / 2, (ay + byy) / 2
-				local dx, dy = bx - ax, byy - ay
-				c:stroke(ui.path():move(ax, ay):quad(mx - dy * 0.18, my + dx * 0.18, bx, byy), p.live, 1.4, DASH)
+				c:stroke(arc_path(a), p.live, 1.4, DASH)
+				edge_style[pair_of(a.a, a.b)] = "arc"
 			end
 		end
 		return drawn
@@ -908,7 +998,7 @@ M.View = ui.component(function(props: {
 					moving_drawn += 1
 					if n.kind == "brain" then
 						c:circle(x[i], y[i], R_BRAIN, p.brain)
-					elseif n.kind == "orchestrator" then
+					elseif n.kind == "orchestrator" or n.kind == "machine" then
 						c:circle(x[i], y[i], R_HUB, node_edge[i])
 						c:circle(x[i], y[i], draw.HUB_GAP_D / 2, p.bg)
 						c:circle(x[i], y[i], draw.HUB_FILL_D / 2, node_fill[i])
@@ -926,13 +1016,23 @@ M.View = ui.component(function(props: {
 			counts.over_moving = moving_drawn
 			count("overlay", 0)
 		end
+		table.clear(lit_style)
 		local over = M.hover:get()
 		local i = over and fmodel.index[over]
 		if i then
 			local n = fmodel.nodes[i]
 			for _, l in fmodel.links do
 				if l.a == i or l.b == i then
-					c:line(x[l.a], y[l.a], x[l.b], y[l.b], p.lit, if l.strong then 1.8 else 1)
+					-- (Lit as it's drawn: a pair's arc restyled, not a second,
+					-- straight line.)
+					local arc = if l.strong or not settled:peek() then nil else arc_of(l.a, l.b)
+					if arc then
+						c:stroke(arc_path(arc), p.lit, 1.6, DASH)
+						lit_style[pair_of(l.a, l.b)] = "arc"
+					else
+						c:line(x[l.a], y[l.a], x[l.b], y[l.b], p.lit, if l.strong then 1.8 else 1)
+						lit_style[pair_of(l.a, l.b)] = "line"
+					end
 				end
 			end
 			local nx, ny = x[i], y[i]
@@ -940,7 +1040,7 @@ M.View = ui.component(function(props: {
 			if n.kind == "brain" then
 				c:stroke(draw.shape("ghostish", nx, ny, draw.BRAIN_D + 9), p.lit, 1.6)
 				r = R_BRAIN
-			elseif n.kind == "orchestrator" then
+			elseif n.kind == "orchestrator" or n.kind == "machine" then
 				c:stroke(draw.shape(hub_shape[i] or draw.cookie_of(crew_of(i)), nx, ny, draw.HUB_D + 8), p.lit, 1.6)
 				r = R_HUB
 			else
@@ -979,7 +1079,6 @@ M.View = ui.component(function(props: {
 		local still = settled:peek()
 		local x, y = s.x, s.y
 		local b = cull:get()
-		local show_names = names_shown:get()
 		for i, n in fmodel.nodes do
 			if n.kind ~= "chat" or not rings[i] or (not still and s.awake[i]) then
 				continue
@@ -996,16 +1095,6 @@ M.View = ui.component(function(props: {
 			c:stroke(rings[i], ink, if st == "idle" then 1.1 else 1.6)
 			if GLYPHED[st] then
 				c:circle(nx + BADGE_AT, ny - BADGE_AT, 7.2, p.bg)
-			end
-			local w = name_w[i]
-			if (NEED[st] or st == "approval") and show_names and w then
-				local ly = ny + R_RING + 4
-				local x0, x1 = nx - w / 2 - 4, nx + w / 2 + 4
-				if free(label_boxes, x0, ly - 1, x1, ly + 16) then
-					c:rect(x0, ly - 1, w + 8, 17, p.label_bg, 4)
-					T_NAME.color = p.secondary
-					c:text(names[i], nx, ly, T_NAME)
-				end
 			end
 		end
 	end
@@ -1093,7 +1182,7 @@ M.View = ui.component(function(props: {
 		local z = view:peek().zoom
 		local best, best_d = nil, math.huge
 		for i, n in fmodel.nodes do
-			local r = (if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING) + 4 / z
+			local r = (if n.kind == "brain" then R_BRAIN elseif n.kind == "chat" then R_RING else R_HUB) + 4 / z
 			local dx, dy = s.x[i] - wx, s.y[i] - wy
 			local d = dx * dx + dy * dy
 			if d <= r * r and d < best_d then
@@ -1145,8 +1234,8 @@ M.View = ui.component(function(props: {
 		-- pins nothing.)
 		if dropped ~= false and not s.fixed[i] then
 			sim.pin(s, i, true)
-			if not (M.pins:peek() or {})[s.ids[i]] then
-				M.pins:set_key({ s.ids[i] }, true)
+			if not (M.pins_of():peek() or {})[s.ids[i]] then
+				M.pins_of():set_key({ s.ids[i] }, true)
 			end
 		end
 		if not settled:peek() then
@@ -1162,7 +1251,7 @@ M.View = ui.component(function(props: {
 	-- into the web round their parents.
 	local function unpin(which: (i: number) -> boolean)
 		local woke: { number } = {}
-		local pins = table.clone(M.pins:peek() or {})
+		local pins = table.clone(M.pins_of():peek() or {})
 		for i = 1, s.n do
 			if s.pinned[i] and which(i) then
 				sim.pin(s, i, false)
@@ -1171,7 +1260,7 @@ M.View = ui.component(function(props: {
 			end
 		end
 		if #woke > 0 then
-			M.pins:set(pins :: any)
+			M.pins_of():set(pins :: any)
 			wake(woke)
 		end
 	end
@@ -1286,7 +1375,7 @@ M.View = ui.component(function(props: {
 		end
 		if n.kind == "chat" then
 			props.on_open_chat(id)
-		else
+		elseif n.kind ~= "machine" then
 			props.on_open_orchestrator(id)
 		end
 	end
@@ -1321,7 +1410,7 @@ M.View = ui.component(function(props: {
 		end
 		local v = view:peek()
 		local n = fmodel.nodes[i]
-		local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING
+		local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "chat" then R_RING else R_HUB
 		return s.x[i] * v.zoom + v.x, s.y[i] * v.zoom + v.y, r * v.zoom
 	end
 
@@ -1613,6 +1702,15 @@ M.View = ui.component(function(props: {
 			end
 		end
 		local out = {}
+		-- (On the machines pivot: the orchestrators, by their hue.)
+		if M.pivot:get() == "machine" then
+			for _, n in fmodel.nodes do
+				if n.lead_of and n.hue then
+					table.insert(out, { id = n.id, name = n.title, color = soft_hue(n.hue) })
+				end
+			end
+			return out
+		end
 		for _, m in fmodel.machines do
 			if used[m.id] and fills[m.id] then
 				table.insert(out, { id = m.id, name = m.name, color = fills[m.id] })
@@ -1752,8 +1850,9 @@ M.View = ui.component(function(props: {
 						M.unpin_all()
 					end } }
 				end
-				local base = if props.menu then props.menu(id) else nil
 				local i = fmodel.index[id]
+				-- (A machine's hub has no menu of its own: its pins.)
+				local base = if props.menu and not (i and fmodel.nodes[i].kind == "machine") then props.menu(id) else nil
 				if i and fmodel.nodes[i].kind ~= "chat" then
 					local out = table.clone(base or {})
 					table.insert(out, { separator = true })
@@ -1879,6 +1978,23 @@ M.View = ui.component(function(props: {
 				ui.each(legend, legend_item, { key = function(item: any): string
 					return item.id
 				end, class = "orch-force-legend", absolute = true, left = 10, bottom = 8, gap = "$space.3", direction = "row", pointer_events = "none" }),
+				-- The pivot, at the bottom right: orchestrators as the hubs (their
+				-- machines the colour), or machines (their orchestrators').
+				ui.div {
+					class = "orch-force-pivot",
+					absolute = true,
+					right = 8,
+					bottom = 6,
+					Segmented {
+						id = "orch-force-pivot",
+						value = M.pivot,
+						label = locale.t("ds.orch.map.pivot"),
+						options = {
+							{ value = "orchestrator", label = locale.t("ds.orch.map.pivot_orchestrators") },
+							{ value = "machine", label = locale.t("ds.orch.map.pivot_machines") },
+						},
+					},
+				},
 				-- Fit, at the top right.
 				ui.row {
 					absolute = true,

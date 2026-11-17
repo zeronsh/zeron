@@ -504,6 +504,49 @@ ui.command { id = "map_force_read", title = "Map: read the force graph's places"
 	end
 	force_places:set(out)
 end }
+-- How each weak pair (by its ids) was drawn and lit last, and the
+-- messages in flight, into `force_edges` (tests read them).
+local force_edges = ui.state("force_edges", {} :: any)
+ui.command { id = "map_force_edges", title = "Map: read the force graph's lines", run = function()
+	local cur = require("@ds/orch_force").current
+	if not cur then
+		return
+	end
+	local function name(key: number): string
+		local a, b = key // 65536, key % 65536
+		local ia, ib = cur.model.nodes[a].id, cur.model.nodes[b].id
+		return if ia < ib then `{ia}|{ib}` else `{ib}|{ia}`
+	end
+	local drawn, lit, arcs = {}, {}, {}
+	for k, v in cur.edge_style or {} do
+		drawn[name(k)] = v
+	end
+	for k, v in cur.lit_style or {} do
+		lit[name(k)] = v
+	end
+	for _, a in cur.model.arcs do
+		local ia, ib = cur.model.nodes[a.a].id, cur.model.nodes[a.b].id
+		table.insert(arcs, if ia < ib then `{ia}|{ib}` else `{ib}|{ia}`)
+	end
+	force_edges:set({ drawn = drawn, lit = lit, arcs = arcs })
+end }
+-- The names as placed, with the marks and lines (world units), into
+-- `force_labels` (tests read them).
+local force_labels = ui.state("force_labels", {} :: any)
+ui.command { id = "map_force_labels", title = "Map: read the force graph's names", run = function()
+	local cur = require("@ds/orch_force").current
+	if not cur then
+		return
+	end
+	local nodes, links = {}, {}
+	for i, n in cur.model.nodes do
+		table.insert(nodes, { id = n.id, kind = n.kind, x = cur.sim.x[i], y = cur.sim.y[i] })
+	end
+	for _, l in cur.model.links do
+		table.insert(links, { a = cur.model.nodes[l.a].id, b = cur.model.nodes[l.b].id, ax = cur.sim.x[l.a], ay = cur.sim.y[l.a], bx = cur.sim.x[l.b], by = cur.sim.y[l.b] })
+	end
+	force_labels:set({ labels = cur.labels or {}, nodes = nodes, links = links })
+end }
 -- A live push: one crew chat's state changes (input, then working, …).
 local push_n = 0
 ui.command { id = "map_force_push", title = "Map: a live push, one chat's state", run = function()

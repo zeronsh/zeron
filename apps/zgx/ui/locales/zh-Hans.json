@@ -4408,5 +4408,8 @@
     "chat": {
       "none": "还没有 Brain dump"
     }
-  }
+  },
+  "ds.orch.map.pivot": "Hubs",
+  "ds.orch.map.pivot_orchestrators": "Orchestrators",
+  "ds.orch.map.pivot_machines": "Machines"
 }
