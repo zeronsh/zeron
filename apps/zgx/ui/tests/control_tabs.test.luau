@@ -202,7 +202,9 @@ test("control tabs: a tab opened before its background build is done builds at o
 	app:set_state("control_tab", "board")
 	app:frames(30)
 	expect(shown(app, "board")).to_be(true)
-	expect(app:has("#control-board-done >> .orch-card")).to_be(true)
+	-- (Its cards, every column's: Done's shows only what was done since
+	-- midnight, empty in the small hours whatever the sample says.)
+	expect(app:count("#control-board-tab >> .orch-card") > 3).to_be(true)
 	expect(app:count("#control-tab-board >> .stage-idle")).to_be(0)
 end)
 
