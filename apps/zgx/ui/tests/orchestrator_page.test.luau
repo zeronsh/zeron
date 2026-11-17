@@ -101,6 +101,61 @@ test("orchestrator page: pause, and its settings open on its fields", function()
 	expect(string.find(said, "goal=", 1, true)).to_be(nil)
 end)
 
+-- Rules, crew rules and notes say who reads them: a hint under each, and
+-- an example where one is empty.
+local HINTS = {
+	"Only the orchestrator follows these. Its crew doesn't see them.",
+	"Every crew thread gets these with its first message, and again when you change them.",
+	"The orchestrator keeps its plan here and updates it as it works. Crew threads don't see it.",
+}
+local PLACEHOLDERS = {
+	"Ask me before merging. Opus for UI, Sonnet for the rest.",
+	"Own worktree per thread. Run the tests before reporting done.",
+	"Empty until the orchestrator writes its plan",
+}
+local FIELDS = { "Orchestrator rules", "Crew rules", "Plan and notes" }
+
+test("orchestrator settings: rules, crew rules and notes filled, each with its hint", function()
+	local app = open()
+	app:command("orch.settings")
+	settle(app)
+	expect(app:state("orch_settings_open")).to_be(true)
+	for _, name in FIELDS do
+		expect(app:has(`role:textbox "{name}"`)).to_be(true)
+	end
+	for _, hint in HINTS do
+		expect(app:has(`"{hint}"`)).to_be(true)
+	end
+	expect(app:text('role:textbox "Orchestrator rules"')).to_contain("Ask before merging to zeron/zgx.")
+	expect(app:text('role:textbox "Crew rules"')).to_contain("Own worktree per thread.")
+	expect(app:text('role:textbox "Plan and notes"')).to_contain("1. Contract (done)")
+	-- Filled: no examples over what's written.
+	for _, example in PLACEHOLDERS do
+		expect(app:has(`"{example}"`)).to_be(false)
+	end
+	expect(app:error()).to_be_nil()
+end)
+
+test("orchestrator settings: empty rules, crew rules and notes show an example", function()
+	local app = open()
+	app:command("orch.settings_empty")
+	settle(app)
+	expect(app:state("orch_settings_open")).to_be(true)
+	expect(app:state("orch_set_rules")).to_be("")
+	expect(app:state("orch_set_crew_rules")).to_be("")
+	expect(app:state("orch_set_notes")).to_be("")
+	for _, name in FIELDS do
+		expect(app:has(`role:textbox "{name}"`)).to_be(true)
+	end
+	for _, example in PLACEHOLDERS do
+		expect(app:has(`"{example}"`)).to_be(true)
+	end
+	for _, hint in HINTS do
+		expect(app:has(`"{hint}"`)).to_be(true)
+	end
+	expect(app:error()).to_be_nil()
+end)
+
 test("orchestrator page: New orchestrator asks createOrchestrator and opens it", function()
 	local app = open()
 	app:set_state("orch_new_open", true)

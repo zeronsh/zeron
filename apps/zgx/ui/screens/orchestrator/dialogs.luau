@@ -387,9 +387,36 @@ local function SettingsSheet(): Node
 			gap = "$space.4",
 			ds.TextField { value = name, label = ui.t("orch.dialog.name"), w_full = true },
 			ds.TextArea { value = goal, label = ui.t("orch.dialog.goal") :: any, rows = 2, max_rows = 4, w_full = true },
-			ds.TextArea { value = rules, label = ui.t("orch.dialog.rules") :: any, rows = 3, max_rows = 10, w_full = true },
-			ds.TextArea { value = crew_rules, label = ui.t("orch.dialog.crew_rules") :: any, rows = 3, max_rows = 10, w_full = true },
-			ds.TextArea { value = notes, label = ui.t("orch.dialog.notes") :: any, rows = 4, max_rows = 14, w_full = true },
+			-- Who reads each, said under it: the rules only the orchestrator
+			-- (its instructions), the crew rules every crew thread (with the
+			-- first message, and again when they change), the notes its plan.
+			ds.TextArea {
+				value = rules,
+				label = ui.t("orch.dialog.rules") :: any,
+				placeholder = ui.t("orch.dialog.rules_placeholder"),
+				hint = ui.t("orch.dialog.rules_hint") :: any,
+				rows = 3,
+				max_rows = 10,
+				w_full = true,
+			},
+			ds.TextArea {
+				value = crew_rules,
+				label = ui.t("orch.dialog.crew_rules") :: any,
+				placeholder = ui.t("orch.dialog.crew_rules_placeholder"),
+				hint = ui.t("orch.dialog.crew_rules_hint") :: any,
+				rows = 3,
+				max_rows = 10,
+				w_full = true,
+			},
+			ds.TextArea {
+				value = notes,
+				label = ui.t("orch.dialog.notes") :: any,
+				placeholder = ui.t("orch.dialog.notes_placeholder"),
+				hint = ui.t("orch.dialog.notes_hint") :: any,
+				rows = 4,
+				max_rows = 14,
+				w_full = true,
+			},
 			heading("orch.dialog.crew"),
 			ui.column {
 				w_full = true,
