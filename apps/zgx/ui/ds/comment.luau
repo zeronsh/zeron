@@ -149,7 +149,7 @@ M.CommentCard = ui.component(function(props: Comment & { on_edit: (() -> ())?, o
 				props.body,
 				wrap = true,
 				text_size = "$font.size.md",
-				line_height = 20,
+				line_height = "$zeron.paragraph.line.md",
 				color = "$text.primary",
 			} },
 		},

@@ -5,6 +5,26 @@
 
 local M = {}
 
+-- The app's own text tokens the system's text size scales (see `setup`).
+M.TEXT = {
+	"zeron.prose.size", "zeron.prose.line",
+	"zeron.prose.h1.size", "zeron.prose.h1.line",
+	"zeron.prose.h2.size", "zeron.prose.h2.line",
+	"zeron.prose.h3.size", "zeron.prose.h3.line",
+	"zeron.prose.small.size", "zeron.prose.small.line",
+	"zeron.prose.code.size", "zeron.prose.code.line", "zeron.prose.code.inline",
+	"zeron.visual.text.xs.size", "zeron.visual.text.xs.line",
+	"zeron.visual.text.sm.size", "zeron.visual.text.sm.line",
+	"zeron.visual.text.body.size", "zeron.visual.text.body.line",
+	"zeron.visual.text.lg.size", "zeron.visual.text.lg.line",
+	"zeron.visual.text.xl.size", "zeron.visual.text.xl.line",
+	"zeron.visual.text.xxl.size", "zeron.visual.text.xxl.line",
+	"zeron.field.line",
+	"zeron.display.size", "zeron.display.line",
+	"zeron.paragraph.line.md", "zeron.paragraph.line.lg",
+	"zeron.text.scale",
+}
+
 function M.setup()
 	-- The palette (palette.luau): every hue by step, the same in both themes;
 	-- the themes pick from it.
@@ -576,6 +596,13 @@ function M.setup()
 			-- Display type: Geist, large and tight, for the few words that open
 			-- a screen.
 			display = { size = 40, line = 46 },
+			-- A paragraph's line under interface type (a dialog's body, a
+			-- setting's description, a note in the sidebar): `font.size.md`
+			-- and `.lg` on a looser leading than a label's (`font.line.*`).
+			paragraph = { line = { md = 20, lg = 24 } },
+			-- 1, named with the text (`M.TEXT`), so it reads as the system's
+			-- text size as a factor (ds/look `system_scale`).
+			text = { scale = 1 },
 			-- A window's own opaque background, where it has no glass
 			-- (onboarding): the themes give it a colour of its own.
 			window = "{surface.base}",
@@ -678,6 +705,17 @@ function M.setup()
 			},
 		},
 	}
+	-- The tokens holding a size of text or a line of it that are the app's
+	-- own (not zgx's `font.*`): the system's text size (GNOME's text
+	-- scaling, Windows' Text size) scales them as it does `font.*`, so the
+	-- conversation, a visual's type, a field's line and a paragraph's
+	-- leading grow with the interface rather than staying
+	-- behind it. A token derived from another is named itself (the
+	-- visual's `body`, `xl` and `xxl` are the prose's). Code in the editor
+	-- keeps its own size (Settings' code font size, in points), a member
+	-- card its printed type, and the composer its one-line box (its draft
+	-- and line, measured with its fold: not yet).
+	ui.theme.scale_with_text(M.TEXT)
 	-- What "Accent colour throughout" (Settings → Appearance, ds/look
 	-- `accented`) draws in the accent, as the shipping app does; off, each
 	-- is the neutral it was. The conversation's list markers, its quotes'

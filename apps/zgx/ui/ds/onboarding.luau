@@ -55,7 +55,7 @@ function M.Hero(props: HeroProps): Node
 				if props.eyebrow then Text { props.eyebrow, style = "label", tone = "accent" } else nil,
 				Text { props.title, style = "display", align = "center", wrap = true, heading = 1 },
 				if props.body
-					then ui.text { props.body, align = "center", wrap = true, text_size = "$font.size.lg", line_height = 24, color = "$text.secondary" }
+					then ui.text { props.body, align = "center", wrap = true, text_size = "$font.size.lg", line_height = "$zeron.paragraph.line.lg", color = "$text.secondary" }
 					else nil,
 			},
 		},
@@ -97,7 +97,7 @@ function M.StepHeader(props: StepHeaderProps): Node
 			gap = "$space.2",
 			Text { props.title, style = "title", wrap = true, heading = 1 },
 			if props.body
-				then ui.text { props.body, wrap = true, text_size = "$font.size.lg", line_height = 24, color = "$text.secondary" }
+				then ui.text { props.body, wrap = true, text_size = "$font.size.lg", line_height = "$zeron.paragraph.line.lg", color = "$text.secondary" }
 				else nil,
 		},
 	}

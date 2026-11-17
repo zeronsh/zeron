@@ -379,7 +379,7 @@ local function delete_all_button(): Node
 end
 
 local function body(says: () -> string): Node
-	return ui.text { says, w_full = true, wrap = true, text_size = "$font.size.md", line_height = 20, color = "$text.secondary" }
+	return ui.text { says, w_full = true, wrap = true, text_size = "$font.size.md", line_height = "$zeron.paragraph.line.md", color = "$text.secondary" }
 end
 
 function M.view(): Node
