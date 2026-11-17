@@ -149,6 +149,20 @@ test("force graph: a cold open settles a frame at a time, no frame long, then no
 	expect(b.overlay - a.overlay <= 2 * 21).to_be(true)
 end)
 
+test("force graph: settled, the overlay draws nothing that moved (its last settling frame never stays over the drawing)", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(5)
+	expect(stats(app).over_moving).to_be(0)
+	-- (After a drag let go too.)
+	app:command("map_force_drag_hub_step")
+	app:frames(3)
+	expect(stats(app).over_moving > 0).to_be(true)
+	app:command("map_force_drag_hub_end")
+	app:frames(30)
+	expect(stats(app).over_moving).to_be(0)
+end)
+
 test("force graph: a warm open (places kept) is settled on its first frame", function()
 	-- (A first launch: the sample world, then the big fleet, each settled
 	-- and kept.)

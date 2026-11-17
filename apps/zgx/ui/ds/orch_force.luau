@@ -235,6 +235,9 @@ M.View = ui.component(function(props: {
 		settled:set(true)
 		geo:set(geo:peek() + 1)
 		tick:set(tick:peek() + 1)
+		-- (The overlay drawn once more, without what moved: its last frame of
+		-- the settling would stay over the settled drawing.)
+		ptick:set(ptick:peek() + 1)
 		count("frames", 0)
 	end
 
@@ -427,6 +430,7 @@ M.View = ui.component(function(props: {
 			else
 				sim.sleep(s)
 				settled:set(true)
+				ptick:set(ptick:peek() + 1)
 			end
 		end
 		counts.build_ms = (os.clock() - t0) * 1000
@@ -793,6 +797,8 @@ M.View = ui.component(function(props: {
 	local function draw_over(c: any)
 		local p = palette()
 		local x, y = s.x, s.y
+		-- (For tests: how many moving it drew last, none once settled.)
+		local moving_drawn = 0
 		if not settled:peek() then
 			local awake = s.awake
 			for _, l in fmodel.links do
@@ -802,6 +808,7 @@ M.View = ui.component(function(props: {
 			end
 			for i, n in fmodel.nodes do
 				if awake[i] then
+					moving_drawn += 1
 					if n.kind == "brain" then
 						c:circle(x[i], y[i], R_BRAIN, p.brain)
 					elseif n.kind == "orchestrator" then
@@ -817,6 +824,10 @@ M.View = ui.component(function(props: {
 					end
 				end
 			end
+		end
+		if counts.over_moving ~= moving_drawn then
+			counts.over_moving = moving_drawn
+			count("overlay", 0)
 		end
 		local over = M.hover:get()
 		local i = over and fmodel.index[over]
