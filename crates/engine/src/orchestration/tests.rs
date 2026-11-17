@@ -2727,3 +2727,54 @@ async fn a_compound_decision_is_judged_one_choice_at_a_time() {
     assert_eq!(asks_from(&core, chat).len(), 1);
     core.sessions.shutdown().await;
 }
+
+#[tokio::test]
+async fn one_create_request_makes_one_orchestrator_however_often_it_is_sent() {
+    let (_temp, core) = core().await;
+    let ask =
+        json!({"op":"createOrchestrator","name":"Auth","deviceId":REMOTE,"requestId":"req-1"});
+    let first = op(&core, Caller::Local, ask.clone()).await.unwrap();
+    let again = op(&core, Caller::Local, ask).await.unwrap();
+    assert_eq!(
+        first, again,
+        "the same request answers with the first one's id"
+    );
+    let other = op(
+        &core,
+        Caller::Local,
+        json!({"op":"createOrchestrator","name":"Auth","deviceId":REMOTE,"requestId":"req-2"}),
+    )
+    .await
+    .unwrap();
+    assert_ne!(first, other, "another request makes another");
+    let named = core
+        .orchestration
+        .state()
+        .orchestrators
+        .iter()
+        .filter(|o| o.name == "Auth")
+        .count();
+    assert_eq!(named, 2);
+}
+
+#[tokio::test]
+async fn creates_sent_together_with_one_request_id_make_one_orchestrator() {
+    let (_temp, core) = core().await;
+    let ask = || {
+        op(
+            &core,
+            Caller::Local,
+            json!({"op":"createOrchestrator","name":"Twice","deviceId":REMOTE,"requestId":"req-x"}),
+        )
+    };
+    let (a, b) = tokio::join!(ask(), ask());
+    assert_eq!(a.unwrap(), b.unwrap());
+    let named = core
+        .orchestration
+        .state()
+        .orchestrators
+        .iter()
+        .filter(|o| o.name == "Twice")
+        .count();
+    assert_eq!(named, 1);
+}

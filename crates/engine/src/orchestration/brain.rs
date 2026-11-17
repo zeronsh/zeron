@@ -768,8 +768,7 @@ impl EngineRpc {
                         harness: None,
                         model: None,
                         crew: CrewPolicy::default(),
-                    })
-                    .await?
+                    })?
                 };
                 if let Some(brain) = brain {
                     self.mark_started_by(&id, brain, Some(&dump.id), Some(&route.id));

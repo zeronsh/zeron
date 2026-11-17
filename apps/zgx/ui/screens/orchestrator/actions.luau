@@ -98,6 +98,8 @@ export type Fields = {
 	device: string?,
 	harness: string?,
 	model: string?,
+	-- The opening's request id: the same one twice makes one orchestrator.
+	request_id: string?,
 }
 
 function M.create(f: Fields): any
@@ -106,6 +108,7 @@ function M.create(f: Fields): any
 	op.deviceId = f.device
 	op.harness = f.harness
 	op.model = f.model
+	op.requestId = f.request_id
 	local p = orchestration.op(op)
 	p:after(function(reply: any)
 		local id = id_of(reply)

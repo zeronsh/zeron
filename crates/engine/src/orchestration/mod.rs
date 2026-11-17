@@ -166,6 +166,35 @@ struct Inner {
     wake_started: std::sync::atomic::AtomicBool,
     /// Progress of the chats this engine hosts.
     progress: progress::ProgressBook,
+    /// `createOrchestrator`'s request ids and what each made: a request
+    /// sent twice (a double submit, a retry) gets the first one's id back.
+    created: Mutex<CreatedBy>,
+}
+
+/// The newest request ids, oldest dropped past [`CREATED_KEPT`].
+#[derive(Default)]
+pub(crate) struct CreatedBy {
+    ids: std::collections::HashMap<String, String>,
+    order: std::collections::VecDeque<String>,
+}
+
+const CREATED_KEPT: usize = 256;
+
+impl CreatedBy {
+    pub(crate) fn get(&self, request: &str) -> Option<String> {
+        self.ids.get(request).cloned()
+    }
+
+    pub(crate) fn put(&mut self, request: String, id: String) {
+        if self.ids.insert(request.clone(), id).is_none() {
+            self.order.push_back(request);
+            while self.order.len() > CREATED_KEPT {
+                if let Some(old) = self.order.pop_front() {
+                    self.ids.remove(&old);
+                }
+            }
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -205,6 +234,7 @@ impl Orchestration {
                 rpc: Mutex::new(Weak::new()),
                 wake_started: std::sync::atomic::AtomicBool::new(false),
                 progress: progress::ProgressBook::default(),
+                created: Mutex::new(CreatedBy::default()),
             }),
         }
     }
@@ -306,6 +336,12 @@ impl Orchestration {
             .workspace
             .read_orchestration_with(|doc| doc.crew_member(chat_id))
             .filter(|m| !m.released)
+    }
+
+    /// What `createOrchestrator` made for each request id (held while one
+    /// is created, so a second with the same id waits for the first's).
+    pub(crate) fn created(&self) -> std::sync::MutexGuard<'_, CreatedBy> {
+        lock(&self.inner.created)
     }
 
     pub fn orchestrator(&self, id: &str) -> Option<Orchestrator> {

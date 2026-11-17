@@ -105,20 +105,32 @@ impl EngineRpc {
                 model,
                 crew,
                 prompt,
+                request_id,
             } => {
-                let id = self
-                    .create_orchestrator_chat(NewOrchestrator {
-                        name,
-                        goal,
-                        rules,
-                        crew_rules,
-                        space_id,
-                        device_id,
-                        harness,
-                        model,
-                        crew,
-                    })
-                    .await?;
+                // One request, one orchestrator: the same request id again
+                // (a double submit, a retry) is answered with the first's.
+                let request_id = request_id.filter(|r| !r.trim().is_empty());
+                let mut created = request_id.as_ref().map(|_| orch.created());
+                if let (Some(made), Some(request)) = (created.as_ref(), request_id.as_ref())
+                    && let Some(id) = made.get(request)
+                {
+                    return Ok(json!({ "id": id }));
+                }
+                let id = self.create_orchestrator_chat(NewOrchestrator {
+                    name,
+                    goal,
+                    rules,
+                    crew_rules,
+                    space_id,
+                    device_id,
+                    harness,
+                    model,
+                    crew,
+                })?;
+                if let (Some(made), Some(request)) = (created.as_mut(), request_id) {
+                    made.put(request, id.clone());
+                }
+                drop(created);
                 if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
                     deliver(self, &id, &prompt, who.chat(), When::Now)?;
                 }
@@ -690,7 +702,7 @@ impl EngineRpc {
 
     /// A new orchestrator: its chat, created as `createChat` creates any,
     /// named, and its row. The id (the chat's).
-    pub(crate) async fn create_orchestrator_chat(
+    pub(crate) fn create_orchestrator_chat(
         &self,
         new: NewOrchestrator,
     ) -> Result<String, RpcError> {
