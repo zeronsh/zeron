@@ -2338,7 +2338,7 @@ impl View {
             // sending or working line under it.)
             if let Some(last) = open.entries.last()
                 && last["role"].as_str() == Some("user")
-                && !last.json.as_ref().is_some_and(is_crew_reports)
+                && !last.json.as_ref().is_some_and(|e| is_crew_reports(e) || injected_of(e).is_some())
                 && let Some(Value::Map(_)) = list.last()
             {
                 let sent = last["createdAt"].as_f64().unwrap_or(0.) / 1000.;
@@ -4576,6 +4576,28 @@ impl Subagents {
     }
 }
 
+/// What the engine said `entry` is (its `injected` part: a crew ask, an
+/// answer, a relay…), as ds/orch_injected reads it: `{ kind, ask?, chat?,
+/// turn?, item?, items?, dump?, route?, by? }`. None: it's no engine message.
+fn injected_of(entry: &Json) -> Option<Value> {
+    let part = entry["parts"].as_array()?.iter().find(|p| p["kind"].as_str() == Some("injected"))?;
+    let i = &part["injected"];
+    let kind = i["kind"].as_str().filter(|k| !k.is_empty())?;
+    let text = |key: &str| i[key].as_str().filter(|s| !s.is_empty()).map_or(Value::Nil, Value::from);
+    let items: Vec<Value> = i["itemIds"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(Value::from).collect();
+    Some(Value::record([
+        ("kind", Value::from(kind)),
+        ("ask", text("askId")),
+        ("chat", text("chatId")),
+        ("turn", text("turnId")),
+        ("item", text("itemId")),
+        ("items", if items.is_empty() { Value::Nil } else { Value::List(items.into()) }),
+        ("dump", text("dumpId")),
+        ("route", text("routeId")),
+        ("by", text("by")),
+    ]))
+}
+
 /// Whether `entry` carries crew reports (an orchestrator's "Crew updates").
 fn is_crew_reports(entry: &Json) -> bool {
     entry["parts"].as_array().into_iter().flatten().any(|p| p["kind"].as_str() == Some("crewReports"))
@@ -4675,6 +4697,20 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // Always its time under it, as the shipping app's prompts carry
             // it (the strip shows on hover), and its words to copy.
             let created = entry["createdAt"].as_f64().unwrap_or(0.) / 1000.;
+            // The engine's (a crew ask, an answer…): its block, never the
+            // person's bubble. Its words are what the agent was sent, whole:
+            // the block reads what it shows from them and its ids.
+            if let Some(injected) = injected_of(entry) {
+                return Some(Value::record([
+                    ("id", Value::from(id)),
+                    ("role", Value::from("injected")),
+                    ("text", Value::from(body)),
+                    ("injected", injected),
+                    ("created", Value::Num(created.floor())),
+                    ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
+                    ("sender", sender),
+                ]));
+            }
             Some(Value::record([
                 ("id", Value::from(id)),
                 ("role", Value::from("user")),
@@ -7167,6 +7203,41 @@ mod tests {
         assert_eq!(found[0].field("title").map(text).as_deref(), Some("first"));
         assert_eq!(found[1].field("at").and_then(Value::as_f64), Some(2.));
     }
+
+    /// An engine message (its `injected` part): its block, its words whole.
+    #[test]
+    fn an_engine_message_is_its_block_with_its_words_whole() {
+        let text = "[Crew ask] Builder ended its turn waiting on a decision; it is under Needs you.\n  \u{27E6}crew-output\u{27E7}\n  Ship it?\n  \u{27E6}/crew-output\u{27E7}\nanswer it with `answer_ask` (id ak-1)";
+        let entry = json!({
+            "id": "m1", "role": "user", "createdAt": 1_794_470_000_000_i64,
+            "parts": [
+                { "kind": "text", "id": "t0", "text": text },
+                { "kind": "injected", "id": "injected", "injected": {
+                    "kind": "crew_ask", "askId": "ak-1", "chatId": "th-a", "turnId": "m-9" } },
+            ],
+        });
+        assert!(super::plainly_has_row(&entry));
+        let m = message(&entry, None).expect("a block shows");
+        let is = |v: Option<&Value>, want: &str| matches!(v, Some(Value::Str(s)) if s.as_ref() == want);
+        assert!(is(m.field("role"), "injected"));
+        assert!(is(m.field("text"), text), "the agent's words, whole, for the block to read");
+        assert_eq!(m.field("created").and_then(Value::as_f64), Some(1_794_470_000.));
+        let i = m.field("injected").expect("its kind");
+        assert!(is(i.field("kind"), "crew_ask"));
+        assert!(is(i.field("ask"), "ak-1"));
+        assert!(is(i.field("chat"), "th-a"));
+        assert!(is(i.field("turn"), "m-9"));
+        assert!(i.field("item").is_none_or(|v| matches!(v, Value::Nil)));
+        // A kind this build doesn't know is still the engine's: its block
+        // shows its words.
+        let mut newer = entry.clone();
+        newer["parts"][1]["injected"] = json!({ "kind": "someday" });
+        assert!(is(message(&newer, None).expect("shows").field("role"), "injected"));
+        // Without the part: a prompt, as ever.
+        let plain = json!({ "id": "m2", "role": "user", "createdAt": 0, "parts": [ { "kind": "text", "id": "t0", "text": "hi" } ] });
+        assert!(is(message(&plain, None).expect("shows").field("role"), "user"));
+    }
+
 
     /// Crew reports in an orchestrator's transcript (the engine's
     /// `crewReports` part, on the wake turn's user entry) are a "Crew
