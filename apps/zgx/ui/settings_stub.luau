@@ -284,6 +284,7 @@ local answers: { [string]: (arg: any) -> any } = {
 	["settings.engine"] = function(arg: any)
 		local m = arg.method
 		if string.sub(m, 1, 3) == "Set" then
+			log(`settings.engine:{m}`)
 			local r = change(nil)
 			if r.error then
 				return r
@@ -292,6 +293,10 @@ local answers: { [string]: (arg: any) -> any } = {
 			if m == "SetCommitCredit" then
 				engine[get] = { enabled = arg.params.enabled, cloud = false }
 			elseif m == "SetWorktreeSettings" then
+				-- (As the engine: on needs a folder.)
+				if arg.params.useCustomDirectory and not arg.params.customDirectory then
+					return settled(nil, "Choose a worktree folder")
+				end
 				local w = table.clone(engine[get])
 				w.settings = arg.params
 				engine[get] = w

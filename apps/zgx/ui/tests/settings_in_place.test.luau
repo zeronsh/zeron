@@ -1146,3 +1146,30 @@ test("the wallpaper's rows stand inline in one card, a hairline only between the
 	expect(app:count(`{NEW_CHAT} >> .settings-rule`)).to_be(0)
 	expect(app:state("shell_wallpaper_image")).never.to_be_nil()
 end)
+
+test("custom worktree location, turned on with no folder yet, asks for one before saving it", function()
+	local app = open("General")
+	local switch = `{PAGE} >> role:switch "Custom worktree location"`
+	local field = `{PAGE} >> role:textbox "Worktree folder"`
+	app:click(switch)
+	app:frames(20)
+	-- On, the folder asked for; nothing refused, nothing saved yet.
+	expect(app:has(field)).to_be(true)
+	expect(app:tree(switch)).never.to_contain("unchecked")
+	expect(app:tree():find("Couldn't save that", 1, true)).to_be(nil)
+	expect(asked(app, "settings.engine:SetWorktreeSettings")).to_be(false)
+	-- A folder given: saved, on.
+	app:type(field, "~/worktrees")
+	app:key("Enter")
+	app:frames(20)
+	expect(shows(app, PAGE, "~/worktrees")).to_be(true)
+	expect(app:tree(switch)).never.to_contain("unchecked")
+	-- Off: the field goes; on again, the folder kept, it saves at once.
+	app:click(switch)
+	app:frames(20)
+	expect(app:has(field)).to_be(false)
+	app:click(switch)
+	app:frames(20)
+	expect(app:has(field)).to_be(true)
+	expect(app:tree():find("Couldn't save that", 1, true)).to_be(nil)
+end)
