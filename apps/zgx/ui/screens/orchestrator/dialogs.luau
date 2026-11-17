@@ -73,8 +73,22 @@ local function project_options(): { any }
 	return out
 end
 
+-- A request id for one opening's create: the engine answers the same id
+-- again with the orchestrator the first made.
+local requests = 0
+local function request_id(): string
+	requests += 1
+	return string.format("orch-new-%d-%d-%d", os.time(), math.floor(os.clock() * 1e6), requests)
+end
+
 -- New orchestrator: a name (all it needs), its goal, the project and
 -- device it works in, its model. Created, it opens.
+--
+-- Only Create (its click, or Enter) sends it, once an opening: leaving a
+-- field never does (zgx's input commits on blur), and a second Enter or
+-- click while, or after, the first is answered asks nothing more. Closed
+-- unsent (Cancel, Escape, a click outside), what was typed is there again
+-- as it reopens; sent, it starts empty.
 local function NewDialog(): Node
 	local name = ui.state("orch_new_name", "")
 	local goal = ui.state("orch_new_goal", "")
@@ -82,17 +96,19 @@ local function NewDialog(): Node
 	local device = ui.state("orch_new_device", NONE :: string)
 	local model = ui.state("orch_new_model", NONE :: string)
 	local busy = ui.state("orch_new_busy", false)
-	-- Opened: empty again, on the project and device it was asked from.
+	-- This opening's request: set as it opens, cleared once it's sent.
+	local request = ui.state("orch_new_request", "")
+	-- Opened: on the project and device it was asked from, the draft kept.
 	ui.effect(function()
 		if actions.new_open:get() then
 			local seed = actions.new_seed:peek()
 			ui.batch(function()
-				name:set("")
-				goal:set("")
-				project:set((seed and seed.project) or NONE)
-				device:set((seed and seed.device) or NONE)
-				model:set(NONE)
+				if seed then
+					project:set(seed.project or NONE)
+					device:set(seed.device or NONE)
+				end
 				busy:set(false)
+				request:set(request_id())
 			end)
 		end
 	end)
@@ -110,10 +126,15 @@ local function NewDialog(): Node
 	end)
 	local function go()
 		local n = trim(name:peek())
-		if n == "" or busy:peek() then
+		local req = request:peek()
+		if n == "" or busy:peek() or req == "" or not actions.new_open:peek() then
 			return
 		end
-		busy:set(true)
+		ui.batch(function()
+			busy:set(true)
+			-- (Spent: nothing more is sent from this opening.)
+			request:set("")
+		end)
 		local harness, m = split_model(model:peek())
 		actions
 			.create({
@@ -123,12 +144,24 @@ local function NewDialog(): Node
 				device = if device:peek() ~= NONE then device:peek() else nil,
 				harness = harness,
 				model = m,
+				request_id = req,
 			})
 			:after(function()
-				busy:set(false)
-				actions.new_open:set(false)
+				ui.batch(function()
+					name:set("")
+					goal:set("")
+					project:set(NONE)
+					device:set(NONE)
+					model:set(NONE)
+					busy:set(false)
+					actions.new_open:set(false)
+				end)
 			end, function()
-				busy:set(false)
+				-- (Not made: the same request may go again, answered once.)
+				ui.batch(function()
+					busy:set(false)
+					request:set(req)
+				end)
 			end)
 	end
 	return ds.Dialog {
@@ -155,9 +188,7 @@ local function NewDialog(): Node
 				end,
 				autofocus = true,
 				w_full = true,
-				on_commit = function()
-					go()
-				end,
+				-- (Enter is the dialog's own: its Create.)
 			},
 			ds.TextArea {
 				value = goal,

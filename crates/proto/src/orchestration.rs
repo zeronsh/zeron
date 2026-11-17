@@ -2075,6 +2075,10 @@ pub enum OrchestrateOp {
         crew: CrewPolicy,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// The client's id for this request: sent again (a double submit, a
+        /// retry), it is answered with the orchestrator the first made.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Make an existing chat an orchestrator (the person's "make this an
     /// orchestrator"). Replies `{ id }`.
