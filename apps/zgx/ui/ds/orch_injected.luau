@@ -169,6 +169,11 @@ function M.parse(text: string?): Injected?
 	if resumed then
 		return { kind = "resumed", legacy = true, card = resumed }
 	end
+	-- The engine back after a restart: carry on, or (its turn ended into a
+	-- wait on background work the restart stopped) run that again.
+	if string.find(t, "^%[Resumed%] The engine restarted") then
+		return { kind = "resumed", legacy = true, restart = true, rerun = string.find(t, "run it again", 1, true) ~= nil }
+	end
 	local q_from, q_chat, q_body = string.match(t, "^%[Quoted message from Zeron chat (.-)%. Reply to it with the Zeron `send_message` tool, chat ([^%]]-)%.%]\n\n(.*)$")
 	if q_from then
 		return { kind = "quoted", legacy = true, from = q_from, chat = q_chat, body = q_body }
@@ -500,6 +505,10 @@ local function state_chip(v: AskView): (string, { [string]: any }?, Badge.Tone)
 			return "orch.injected.ask.in_thread", nil, "success"
 		elseif v.via == "action" then
 			return "orch.injected.ask.acted", nil, "success"
+		elseif v.via == "resolved" then
+			-- (Raised by a board check and closed by the engine once what it
+			-- asked about cleared: no one answered it.)
+			return "orch.injected.ask.resolved", nil, "neutral"
 		end
 		return "orch.injected.ask.by_you", nil, "success"
 	elseif v.state == "dismissed" then
@@ -764,6 +773,16 @@ M.Block = ui.component(function(props: Props): Node
 		end
 		return frame("board_check", "checklist", head("checklist", locale.t("orch.injected.board_check"), tostring(#(i.cards or {})), at), rows)
 	elseif i.kind == "resumed" then
+		if i.restart then
+			return frame("resumed", "action-play", head("action-play", locale.t("orch.injected.resumed")), {
+				row_node({
+					key = "restart",
+					title = locale.s("orch.injected.resumed_restart"),
+					text = locale.s(if i.rerun then "orch.injected.resumed_rerun" else "orch.injected.resumed_text"),
+					at = at,
+				}),
+			})
+		end
 		return frame("resumed", "action-play", head("action-play", locale.t("orch.injected.resumed")), {
 			row_node({ key = "card", title = i.card, text = locale.s("orch.injected.resumed_text"), at = at }),
 		})

@@ -4470,7 +4470,8 @@
         "acted": "Acted on",
         "dismissed": "Dismissed",
         "open_label": "Open {title}'s question",
-        "deferred_until": "Deferred until {time}"
+        "deferred_until": "Deferred until {time}",
+        "resolved": "Resolved"
       },
       "for_thread": "For a crew thread",
       "on_card": "On your card",
@@ -4484,7 +4485,9 @@
       "scheduled": "Scheduled check-in",
       "crew_rules": "Crew rules from {name}",
       "quoted": "Quoted from {name}",
-      "decision": "Decision"
+      "decision": "Decision",
+      "resumed_restart": "The engine restarted",
+      "resumed_rerun": "Its background work stopped: run it again"
     }
   },
   "control": {

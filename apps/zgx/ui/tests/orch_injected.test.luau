@@ -15,9 +15,10 @@ end
 
 test("injected: a block each, the agent's words never shown", function()
 	local app = mounted()
-	expect(app:count(`{CONV} >> .orch-injected-crew_ask`)).to_be(4)
+	expect(app:count(`{CONV} >> .orch-injected-crew_ask`)).to_be(5)
 	expect(app:count(`{CONV} >> .orch-injected-answer`)).to_be(2)
-	for _, kind in { "for_thread", "board_check", "resumed", "scheduled", "on_card", "changes", "retraction" } do
+	expect(app:count(`{CONV} >> .orch-injected-resumed`)).to_be(3)
+	for _, kind in { "for_thread", "board_check", "scheduled", "on_card", "changes", "retraction" } do
 		expect(app:count(`{CONV} >> .orch-injected-{kind}`)).to_be(1)
 	end
 	-- Nothing that's only the agent's: no fences, no instructions, no
@@ -33,7 +34,7 @@ end)
 
 test("injected: one card for an ask, open, deferred or answered", function()
 	local app = mounted()
-	expect(app:count(`{CONV} >> .orch-ask-state`)).to_be(6)
+	expect(app:count(`{CONV} >> .orch-ask-state`)).to_be(7)
 	expect(app:has(`{CONV} >> ~"Answered by orchestrator"`)).to_be(true)
 	expect(app:has(`{CONV} >> ~"Deferred"`)).to_be(true)
 	expect(app:has(`{CONV} >> ~"The panel, so the thread stays beside the report"`)).to_be(true)
@@ -66,4 +67,18 @@ test("injected: an ask's corner opens the thread that asked", function()
 	app:click(`{CONV} >> .orch-injected-crew_ask >> .orch-injected-aside[1]`)
 	app:frames(10)
 	expect(string.find(app:state("orch_route") or "", "th-engine-flow", 1, true) ~= nil).to_be(true)
+end)
+
+test("injected: a board check's ask the engine closed says Resolved, never answered by you", function()
+	local app = mounted()
+	expect(app:has(`{CONV} >> ~"Resolved"`)).to_be(true)
+	expect(app:has(`{CONV} >> ~"Its thread is working again"`)).to_be(true)
+	expect(app:count(`{CONV} >> ~"Answered by you"`)).to_be(2)
+end)
+
+test("injected: a resume after a restart, the engine's or an older one's, is its block", function()
+	local app = mounted()
+	expect(app:count(`{CONV} >> ~"The engine restarted"`)).to_be(2)
+	expect(app:has(`{CONV} >> ~"Its background work stopped: run it again"`)).to_be(true)
+	expect(app:has(`{CONV} >> ~"continue where you left off"`)).to_be(false)
 end)

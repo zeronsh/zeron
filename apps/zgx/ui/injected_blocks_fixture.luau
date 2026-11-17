@@ -50,6 +50,13 @@ do
 		question = "Should creating an orchestrator from a flow also write that flow into its notes as a plan?",
 		options = {}, urgent = false, state = "open", created = ago(90), origin = "turn_end", turn_id = "m-state-12",
 	})
+	-- A board check's ask, closed by the engine once its card moved on.
+	table.insert(asks, {
+		id = "ak-bc", from_chat = "th-ui-orch", orchestrator_id = "orc-orch", kind = "blocker",
+		question = "Orchestrator screen is Blocked with no ask: what does it need?", options = {}, urgent = false,
+		state = "answered", answer = "Its thread is working again", answered_via = "resolved",
+		created = ago(900), answered = ago(300), origin = "boardCheck",
+	})
 	now.asks = asks
 	orchestration.now:set(now)
 end
@@ -106,6 +113,19 @@ local conversation: { any } = {
 		id = "o-8", role = "injected", created = ago(140),
 		text = "[Resumed] The person resumed \"Reports, asks, MCP tools\": carry on where you stopped.",
 		injected = { kind = "resumed", item = "it-flow" },
+	},
+	-- After a restart: one whose turn ended into a wait the restart stopped
+	-- (the engine's), and one an older engine wrote (its text alone).
+	{
+		id = "o-8b", role = "injected", created = ago(130),
+		text = "[Resumed] The engine restarted; continue where you left off. The restart stopped the background work you were waiting on (`cargo test`): it didn't finish, so run it again.",
+		injected = { kind = "resumed", chat = "orc-orch" },
+	},
+	{ id = "o-8c", role = "user", created = ago(125), text = "[Resumed] The engine restarted; continue where you left off." },
+	{
+		id = "o-8d", role = "injected", created = ago(124),
+		text = crew_ask_text("Orchestrator screen", "ak-bc", "Orchestrator screen is Blocked with no ask: what does it need?"),
+		injected = { kind = "crew_ask", ask = "ak-bc", chat = "th-ui-orch" },
 	},
 	{
 		id = "o-9", role = "injected", created = ago(120),

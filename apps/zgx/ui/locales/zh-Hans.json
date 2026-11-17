@@ -4470,7 +4470,8 @@
         "acted": "已执行",
         "dismissed": "已忽略",
         "open_label": "打开 {title} 的问题",
-        "deferred_until": "推迟到 {time}"
+        "deferred_until": "推迟到 {time}",
+        "resolved": "已自行解决"
       },
       "for_thread": "给团队对话",
       "on_card": "关于你的卡片",
@@ -4484,7 +4485,9 @@
       "scheduled": "定时检查",
       "crew_rules": "来自 {name} 的团队规则",
       "quoted": "引用自 {name}",
-      "decision": "决定"
+      "decision": "决定",
+      "resumed_restart": "引擎已重启",
+      "resumed_rerun": "后台任务已中断：请重新运行"
     }
   },
   "control": {
