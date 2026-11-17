@@ -23,6 +23,7 @@
 --   cloud_stub.purchase_lands  a Stripe page's purchase lands: 12,000 extra
 --   cloud_stub.fail_next       the next Cloud or Billing call fails ("failed")
 --   cloud_stub.default.<id>    the size new chats start on (Settings → Cloud's)
+--   cloud_stub.real_sizes      the edge's real catalogue (policy.ts's MACHINES)
 --   cloud_stub.old_edge        an edge from before machines: no sizes, plain
 --                              sessions
 --   cloud_stub.session.<case>  the chat's Cloud session, as `cloud_stub_sessions`
@@ -89,6 +90,17 @@ local MACHINES: { cloud.Machine } = {
 	{ id = "large", name = "Large", vcpu = 4, memory_gb = 16, disk_gb = 111, rate = 2 },
 	{ id = "xlarge", name = "Extra large", vcpu = 8, memory_gb = 32, disk_gb = 400, rate = 5.56 },
 }
+-- The edge's own catalogue, as edge/src/cloud/policy.ts's `MACHINES` has it
+-- (src/cloud.rs's tests hold the two together): what Settings → Cloud and
+-- the composer's Machine menu both show against a real edge.
+-- `cloud_stub.real_sizes` serves it in place of the sizes above.
+local REAL_MACHINES: { cloud.Machine } = {
+	{ id = "small", name = "Small", vcpu = 2, memory_gb = 4, disk_gb = 51.2, rate = 0.5 },
+	{ id = "default", name = "Default", vcpu = 4, memory_gb = 8, disk_gb = 51.2, rate = 1 },
+	{ id = "large", name = "Large", vcpu = 8, memory_gb = 16, disk_gb = 111.8, rate = 2 },
+	{ id = "xlarge", name = "Extra large", vcpu = 16, memory_gb = 32, disk_gb = 251, rate = 5.56 },
+}
+local real_sizes = ui.state("cloud_stub_real_sizes", false)
 local old_edge = ui.state("cloud_stub_old_edge", false)
 local chosen_machine = ui.state("cloud_stub_machine", "default")
 local refuse_wake = ui.state("cloud_stub_refuse_wake", false)
@@ -109,7 +121,7 @@ local function status(): cloud.Status
 		credits = 44095,
 		awake = 0,
 		max_awake = 5,
-		machines = if old_edge:peek() then nil else MACHINES,
+		machines = if old_edge:peek() then nil elseif real_sizes:peek() then REAL_MACHINES else MACHINES,
 		machine = if old_edge:peek() then nil else chosen_machine:peek(),
 	}
 end
@@ -574,6 +586,14 @@ for name, make in CASES do
 		end,
 	}
 end
+ui.command {
+	id = "cloud_stub.real_sizes",
+	title = "Cloud offers the edge's real sizes",
+	run = function()
+		real_sizes:set(true)
+		cloud.load()
+	end,
+}
 -- The size new chats start on, chosen as Settings → Cloud does.
 for _, m in MACHINES do
 	ui.command {

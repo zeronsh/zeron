@@ -621,21 +621,39 @@ end
 
 -- ── A new chat's size ──────────────────────────────────────────────────────
 
--- The composer's Machine menu, for a chat about to start on Cloud: every size
--- with its specs and credit rate (Settings → Cloud's figures), the account's
--- default tagged so. `value` is what's sent with the create (`machine`).
-export type SizeChoice = { value: string, label: string, description: string, tag: string?, icon: string }
+-- The composer's Machine menu, for a chat about to start on Cloud, as the
+-- composer's other menus draw a row: one line, the size's name (the
+-- account's default tagged right after it, in the menus' quiet tag),
+-- then its vCPU, memory, disk and credit rate in columns under the menu's
+-- head (ds/composer's Machine row), so the sizes compare down the list and
+-- nothing waits under the pointer. The one picked is the menu's selected row.
+-- Every figure is the edge's catalogue (`CloudStatus.machines`), as Settings
+-- → Cloud's: never written here. `value` is what's sent with the create;
+-- `icon`, the Work in row's while it's the one chosen (the rows have none).
+export type SizeCells = { vcpu: string, memory: string, disk: string, rate: string }
+export type SizeChoice = {
+	value: string,
+	label: string,
+	tag: string?,
+	bare: boolean,
+	icon: string,
+	cells: SizeCells,
+}
 function M.size_choices(machines: { any }, default: string?): { SizeChoice }
 	local out: { SizeChoice } = {}
 	for _, m in machines do
-		local rate = say("rate", `{M.rate(m.rate)} credits`, { rate = M.rate(m.rate) })
-		local specs = M.specs(m)
 		table.insert(out, {
 			value = m.id,
 			label = M.machine_name(m),
-			description = say("size_hint", `{specs} · {rate}`, { specs = specs, rate = rate }),
 			tag = if m.id == default then say("size_default", "Your default") else nil,
-			icon = "remote-server",
+			bare = true,
+			icon = "cpu",
+			cells = {
+				vcpu = whole(m.vcpu),
+				memory = say("size_gb", `{whole(m.memory_gb)} GB`, { n = whole(m.memory_gb) }),
+				disk = say("size_gb", `{M.holds_gb(m.disk_gb)} GB`, { n = tostring(M.holds_gb(m.disk_gb)) }),
+				rate = M.rate(m.rate),
+			},
 		})
 	end
 	return out

@@ -55,6 +55,14 @@ export type Item = {
 	-- tile no letter of it (`seed`'s avatar).
 	private: boolean?,
 	tag: string?,
+	-- No tile at its start: a list whose rows are all one kind of thing,
+	-- told apart by their words alone (a machine's sizes). Its tag then
+	-- follows its name, a suffix to it, with what ends the row
+	-- (`trailing_item`) holding the right edge.
+	bare: boolean?,
+	-- More about it than its row says, under the pointer (a size's full
+	-- specs).
+	tooltip: string?,
 	warn: boolean?,
 	-- Shown but not to be picked (a device out of reach): dimmed, passed
 	-- over by the keys, its `description` saying why.
@@ -1131,7 +1139,11 @@ return ui.component(function(props: Props): Node
 							tall = item.description ~= nil,
 							opacity = if item.disabled then ui.raw(0.45, "a choice out of reach, dimmed") else nil,
 							cursor = if item.disabled then "default" else nil,
-							tile(item),
+							tooltip = item.tooltip,
+							-- (Beside the panel, never over the rows round it.)
+							tooltip_placement = if item.tooltip then { side = "right", align = "center", offset = 12 } else nil,
+							tooltip_delay = if item.tooltip then 500 else nil,
+							if item.bare then nil else tile(item),
 							if item.description
 								then ui.column {
 									grow = 1,
@@ -1162,8 +1174,30 @@ return ui.component(function(props: Props): Node
 										wrap = true,
 									},
 								}
+								elseif item.bare then ui.row {
+									grow = 1,
+									min_w = 0,
+									gap = "$space.2",
+									items = "center",
+									-- (Short of room, the tag gives way, never the name.)
+									ui.text {
+										item.label,
+										shrink = 0,
+										text_size = "$font.size.md",
+										color = "$text.primary",
+									},
+									if item.tag
+										then FadeText {
+											item.tag,
+											shrink = 1,
+											min_w = 0,
+											text_size = "$font.size.xs",
+											color = "$text.tertiary",
+										}
+										else nil,
+								}
 								else text(item.label),
-							if item.tag
+							if item.tag and not item.bare
 								then ui.text {
 									item.tag,
 									self = "center",

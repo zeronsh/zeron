@@ -668,7 +668,12 @@
       },
       "machine": {
         "label": "Machine",
-        "on": "{device} · {size}"
+        "on": "{device} · {size}",
+        "column_vcpu": "vCPU",
+        "column_memory": "Memory",
+        "column_rate": "Credits",
+        "chosen": "{size} machine",
+        "column_disk": "Disk"
       }
     },
     "markdown": {
@@ -3335,9 +3340,9 @@
       "held_sending": "Sending…",
       "outbox_uploading": "Uploading…",
       "outbox_failed": "Didn't send",
-      "size_hint": "{specs} · {rate}",
       "size_default": "Your default",
-      "on_size": "{where} · {size}"
+      "on_size": "{where} · {size}",
+      "size_gb": "{n} GB"
     },
     "turn_state": {
       "interrupted": "Interrupted",

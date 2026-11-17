@@ -22,14 +22,20 @@ local MACHINES = {
 
 -- ── What's offered (pure) ─────────────────────────────────────────────────
 
-test("each size says its specs and rate, the account's default tagged", function()
+test("each size is one line: its name, the default said after it, its figures in columns", function()
 	local choices = logic.size_choices(MACHINES, "large")
 	expect(#choices).to_be(4)
 	expect(choices[3].value).to_be("large")
 	expect(choices[3].label).to_be("Large")
-	expect(choices[3].description).to_be("4 vCPU · 16 GB memory · 111 GB disk · 2× credits")
 	expect(choices[3].tag).to_be("Your default")
-	expect(choices[4].description).to_be("8 vCPU · 32 GB memory · 400 GB disk · 5.56× credits")
+	expect(choices[3].cells.vcpu).to_be("4")
+	expect(choices[3].cells.memory).to_be("16 GB")
+	expect(choices[3].cells.disk).to_be("111 GB")
+	expect(choices[3].cells.rate).to_be("2×")
+	expect(choices[3].bare).to_be(true)
+	expect(choices[3].icon).to_be("cpu")
+	expect(choices[4].cells.disk).to_be("400 GB")
+	expect(choices[4].cells.rate).to_be("5.56×")
 	expect(choices[1].tag).to_be(nil)
 end)
 
@@ -148,9 +154,17 @@ test("starts on the account's default, each size with its specs and rate", funct
 	for _, name in { "Small", "Standard", "Large", "Extra large" } do
 		expect(app:has(`role:option ~"{name}"`)).to_be(true)
 	end
-	expect(app:has('role:option ~"Standard" >> ~"Your default"')).to_be(true)
-	expect(app:has('role:option ~"Large" >> ~"4 vCPU · 16 GB memory · 111 GB disk · 2× credits"')).to_be(true)
-	expect(app:has('role:option ~"Extra large" >> ~"5.56× credits"')).to_be(true)
+	expect(app:has('role:option ~"Standard" >> "Your default"')).to_be(true)
+	expect(app:has('role:option ~"Large" >> "16 GB"')).to_be(true)
+	expect(app:has('role:option ~"Large" >> "2×"')).to_be(true)
+	expect(app:has('role:option ~"Large" >> "111 GB"')).to_be(true)
+	expect(app:has('role:option ~"Extra large" >> "5.56×"')).to_be(true)
+	-- Its columns, named once over the list.
+	for _, column in { "vCPU", "Memory", "Disk", "Credits" } do
+		expect(app:has(`"{column}"`)).to_be(true)
+	end
+	-- No tile at their starts: told apart by their words.
+	expect(app:has('role:option ~"Large" >> img')).to_be(false)
 	-- Sent as it was: the default's id.
 	close(app)
 	send(app, "Fix the flaky test")
@@ -179,8 +193,8 @@ test("follows the account's default as Settings → Cloud changes it", function(
 	rested(app)
 	expect(chosen(app, "Machine")).to_contain("Large")
 	open_row(app, "Machine")
-	expect(app:has('role:option ~"Large" >> ~"Your default"')).to_be(true)
-	expect(app:has('role:option ~"Standard" >> ~"Your default"')).to_be(false)
+	expect(app:has('role:option ~"Large" >> "Your default"')).to_be(true)
+	expect(app:has('role:option ~"Standard" >> "Your default"')).to_be(false)
 end)
 
 test("a chat on Cloud names its machine's size on the chip", function()
@@ -200,4 +214,63 @@ test("a chat on Cloud names its machine's size on the chip", function()
 	settle(app)
 	expect(app:has('~"Cloud · Extra large"')).to_be(true)
 	expect(app:error()).to_be(nil)
+end)
+
+-- ── One catalogue ─────────────────────────────────────────────────────────
+-- The picker and Settings → Cloud read the same sizes and the same default
+-- (`cloud.machines()`, `cloud.machine()`: the engine's CloudStatus). With the
+-- edge's real catalogue (ui/cloud_stub.luau's REAL_MACHINES, held to
+-- edge/src/cloud/policy.ts by src/cloud.rs) and the account's default Large,
+-- both say the same of every size.
+
+local REAL = {
+	{ name = "Small", vcpu = "2", memory = "4 GB", disk = "51 GB", rate = "0.5×" },
+	{ name = "Default", vcpu = "4", memory = "8 GB", disk = "51 GB", rate = "1×" },
+	{ name = "Large", vcpu = "8", memory = "16 GB", disk = "111 GB", rate = "2×" },
+	{ name = "Extra large", vcpu = "16", memory = "32 GB", disk = "251 GB", rate = "5.56×" },
+}
+
+test("the picker and Settings → Cloud show the same catalogue and default", function()
+	-- Settings → Cloud.
+	local settings = mount("shell_fixture.luau")
+	settings:resize(1200, 900)
+	settings:frames(30)
+	settings:command("settings_stub.sign_in")
+	settings:command("cloud_stub.offer")
+	settings:command("cloud_stub.real_sizes")
+	settings:command("cloud_stub.default.large")
+	settings:command("shell.settings")
+	settings:frames(20)
+	settings:click('#settings-nav >> role:tab "Cloud"')
+	rested(settings)
+	local group = '#settings-page >> role:radiogroup "Default machine"'
+	-- The composer's picker.
+	local app = on_cloud()
+	app:command("cloud_stub.real_sizes")
+	app:command("cloud_stub.default.large")
+	rested(app)
+	open_row(app, "Machine")
+	for _, size in REAL do
+		local radio = `{group} >> role:radio "{size.name}"`
+		local option = `role:option ~"{size.name}"`
+		expect(settings:has(radio)).to_be(true)
+		expect(app:has(option)).to_be(true)
+		expect(settings:has(`{radio} >> "{size.vcpu} vCPU"`)).to_be(true)
+		expect(settings:has(`{radio} >> "{size.memory} memory"`)).to_be(true)
+		expect(settings:has(`{radio} >> "{size.rate} credits"`)).to_be(true)
+		expect(app:has(`{option} >> "{size.vcpu}"`)).to_be(true)
+		expect(app:has(`{option} >> "{size.memory}"`)).to_be(true)
+		expect(app:has(`{option} >> "{size.rate}"`)).to_be(true)
+		expect(settings:has(`{radio} >> "{size.disk} disk"`)).to_be(true)
+		expect(app:has(`{option} >> "{size.disk}"`)).to_be(true)
+		-- The default: Settings' Current, the picker's tag.
+		local is_default = size.name == "Large"
+		expect(settings:has(`{radio} >> ~"Current"`)).to_be(is_default)
+		expect(app:has(`{option} >> "Your default"`)).to_be(is_default)
+	end
+	-- None of the stub's other sizes.
+	expect(app:has('role:option ~"Standard"')).to_be(false)
+	expect(settings:has(`{group} >> role:radio "Standard"`)).to_be(false)
+	-- And a new chat starts on it.
+	expect(chosen(app, "Machine")).to_contain("Large")
 end)

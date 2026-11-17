@@ -4,6 +4,7 @@
 
 export type Name =
 	"plus"
+	| "cpu"
 	| "arrow-right"
 	| "arrow-up-right"
 	| "check"

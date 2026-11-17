@@ -90,7 +90,8 @@ export type Notice = {
 }
 export type Answer = { values: { string }, text: string }
 -- Where an existing chat works (`branch_fixed`).
-export type Fixed = { device: string?, name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string? }
+-- (`cloud`: it runs on a Cloud machine, the chip's glyph Cloud's.)
+export type Fixed = { device: string?, name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string?, cloud: boolean? }
 export type Props = {
 	value: State<string>,
 	placeholder: (string | Message)?,
@@ -504,7 +505,11 @@ local function submenu(
 	search: string?,
 	actions: { Dropdown.Action }?,
 	-- Choices named by the row but not listed (one an action picks).
-	unlisted: ({ Choice } | () -> { Choice })?
+	unlisted: ({ Choice } | () -> { Choice })?,
+	-- A list that says more than names (the Machine row's): its panel's
+	-- width (260 else), a head over the list, what ends each row, and how
+	-- the row it opens from names the choice made.
+	more: Submenu?
 ): Node
 	local function current(): Choice
 		local v = value:get()
@@ -535,7 +540,9 @@ local function submenu(
 		-- (Dropdown hands its label on, as the trigger's name.)
 		label = label :: any,
 		search = search or false,
-		width = 260,
+		width = if more and more.width then more.width else 260,
+		head = if more and more.head then more.head() else nil,
+		trailing_item = if more then more.trailing else nil,
 		submenu = true,
 		-- Close beside the panel, as a submenu sits: 2 from its edge (the
 		-- row it opens from sits 5 inside it, its inset and border).
@@ -600,7 +607,8 @@ local function submenu(
 				end),
 				FadeText {
 					function()
-						return current().label
+						local c = current()
+						return if more and more.name_of then more.name_of(c) else c.label
 					end,
 					text_size = "$font.size.md",
 					color = "$text.primary",
@@ -637,6 +645,76 @@ export type Project = {
 }
 -- What working in no project is, among the projects.
 local NO_PROJECT = "none"
+
+-- What a submenu's list says beyond its names (`submenu`'s `more`).
+type Submenu = {
+	width: number?,
+	head: (() -> Node)?,
+	trailing: ((item: Dropdown.Item, lit: () -> boolean) -> Node?)?,
+	name_of: ((choice: Dropdown.Item) -> string)?,
+}
+
+-- The Machine row's panel: each size on one line, its name (the account's
+-- default saying so after it), then its vCPU, memory, disk and credit rate in
+-- columns under a head naming them (the menus' heading type), right-aligned
+-- in tabular figures so the sizes compare down the list. Each column is as
+-- wide as its widest value or name ("251 GB", "Credits").
+local MACHINE_W = 360
+local MACHINE_COLUMNS = { { key = "vcpu", w = 30 }, { key = "memory", w = 44 }, { key = "disk", w = 48 }, { key = "rate", w = 40 } }
+local function machine_cells(words: (key: string) -> string, tone: string): Node
+	local cells: { Node } = {}
+	for _, column in MACHINE_COLUMNS do
+		table.insert(cells, ui.text {
+			words(column.key),
+			w = column.w,
+			shrink = 0,
+			align = "right",
+			tabular = true,
+			text_size = "$font.size.xs",
+			color = tone,
+		})
+	end
+	return ui.row { shrink = 0, self = "center", gap = "$space.2", items = "center", table.unpack(cells) }
+end
+local function machine_head(): Node
+	local cells: { Node } = {}
+	for _, column in MACHINE_COLUMNS do
+		table.insert(cells, ui.text {
+			locale.s(`ds.composer.machine.column_{column.key}`),
+			w = column.w,
+			shrink = 0,
+			align = "right",
+			text_size = "$font.size.xs",
+			weight = "$font.weight.medium",
+			color = "$text.tertiary",
+		})
+	end
+	return ui.row {
+		w_full = true,
+		h = "$zeron.menu.heading",
+		px = "$space.2",
+		justify = "end",
+		items = "center",
+		aria_hidden = true,
+		ui.row { shrink = 0, gap = "$space.2", items = "center", table.unpack(cells) },
+	}
+end
+local MACHINE_MORE: Submenu = {
+	width = MACHINE_W,
+	head = machine_head,
+	trailing = function(item: Dropdown.Item): Node?
+		local cells = (item :: any).cells
+		if not cells then
+			return nil
+		end
+		return machine_cells(function(key: string): string
+			return cells[key]
+		end, "$text.secondary")
+	end,
+	name_of = function(choice: Dropdown.Item): string
+		return if choice.label == "" then "" else locale.s("ds.composer.machine.chosen", { size = choice.label })
+	end,
+}
 
 -- Whether the device chosen is Cloud (a device row marked `cloud`): a
 -- machine of its own, so no checkout to choose.
@@ -767,7 +845,7 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return on_cloud(device, devices) and #(list_of(machines) :: { Choice }) > 0
-			end, submenu(siblings, locale.t("ds.composer.machine.label"), machine, machines :: any, 1))
+			end, submenu(siblings, locale.t("ds.composer.machine.label"), machine, machines :: any, 1, nil, nil, nil, MACHINE_MORE))
 		)
 	end
 	return ui.column { w_full = true, table.unpack(rows) }
@@ -2318,6 +2396,9 @@ return ui.component(function(props: Props): Node
 						end,
 						glyph = function(): Icon.Name?
 							local f = fixed()
+							if f and f.cloud then
+								return "cloud"
+							end
 							return if f and f.worktree then "worktree" else nil
 						end,
 						folded = folded,
