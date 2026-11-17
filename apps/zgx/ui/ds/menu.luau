@@ -98,9 +98,9 @@ function M.check(on: State<boolean> | () -> boolean): Node
 	}
 end
 
--- A row's chevron to its submenu.
+-- A row's chevron to its submenu (`.menu-chevron`).
 function M.chevron(): Node
-	return ui.div { shrink = 0, color = "$text.tertiary", Icon { name = "alt-arrow-right", size = 14 } }
+	return ui.div { class = "menu-chevron", shrink = 0, color = "$text.tertiary", Icon { name = "alt-arrow-right", size = 14 } }
 end
 
 -- A row's corner: concentric with the panel, through its edge and its

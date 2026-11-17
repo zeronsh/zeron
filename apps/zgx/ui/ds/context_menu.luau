@@ -30,6 +30,7 @@ local Menu = require("@self/menu")
 local glass_of = require("@self/glass")
 local control = require("@self/control")
 local locale = require("@self/locale")
+local corridor = require("@self/corridor")
 
 -- An entry: an item (a `label`), a `heading` over the items after it, or a
 -- `separator`. An item may have its glyph, its keys ("cmd+shift+c", shown
@@ -77,11 +78,9 @@ export type Props = {
 -- The panel's width: the menus' (`zeron.menu.width`, 232). A row's look
 -- (its height, padding and corner) is the menus' (`Menu.look`).
 local WIDTH = "$zeron.menu.width"
--- How long the pointer may take crossing other rows to an open submenu
--- before the row it rests on takes over (Zeron's grace, renewed while it
--- keeps moving toward it), how far past the submenu's edges its corridor
--- reaches, and how far the pointer must move to count as heading somewhere.
-local GRACE, SLACK, NUDGE = 300, 8, 2
+-- The way to an open submenu: how long a row on it waits, and how far a
+-- move must go to count (ds/corridor).
+local GRACE, NUDGE = corridor.GRACE, corridor.NUDGE
 -- Typing: how long between letters they still make one name (as zgx's own
 -- menus and AppKit's).
 local TYPEAHEAD = 750
@@ -91,27 +90,7 @@ local ARM_GUARD = 300
 -- A choice blinks before the menu closes, as AppKit's do: off, then on.
 local BLINK = 50
 
--- Whether the pointer at `p`, having last rested on the trigger at `o`, is
--- still heading for the submenu `b` (on the left of it, `left`): inside the
--- triangle from `o` to the submenu's near edge, its ends `SLACK` past the
--- submenu's top and foot (Zeron's `corridor`).
-local function toward(o: { x: number, y: number }, p: { x: number, y: number }, b: Element, left: boolean): boolean
-	local bx, by, bw, bh = b.x, b.y, b.width, b.height
-	if not (bx and by and bw and bh) then
-		return false
-	end
-	local edge = if left then bx + bw else bx
-	local dir = if left then -1 else 1
-	local distance = (edge - o.x) * dir
-	local advance = (p.x - o.x) * dir
-	if distance <= 0 or advance <= 0 or advance > distance + SLACK then
-		return false
-	end
-	local f = math.min(advance / distance, 1)
-	local top = o.y + (by - SLACK - o.y) * f
-	local bottom = o.y + (by + bh + SLACK - o.y) * f
-	return p.y >= top and p.y <= bottom
-end
+local toward = corridor.toward
 
 -- Rules between groups (edge to edge, the groups inset themselves) and a
 -- group's title: the menus' own (`Menu.Rule`, `Menu.Heading`).

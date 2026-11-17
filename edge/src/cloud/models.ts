@@ -69,10 +69,11 @@ const model = (
 export const CLOUD_MODELS: Readonly<Record<CloudHarness, readonly CloudModel[]>> = {
   "claude-code": [
     model("claude-opus-5-5", "Opus 5.5", "Best for everyday, complex tasks", CLAUDE_FULL, [contextWindow, toggle("fastMode", "Fast Mode")]),
-    model("claude-fable-5-1", "Fable 5.1", "Most intelligent model for building agents", CLAUDE_FULL, [contextWindow]),
+    model("claude-fable-5-2", "Fable 5.2", "For your toughest challenges", CLAUDE_FULL, [toggle("fastMode", "Fast Mode")]),
+    model("claude-fable-5-1", "Fable 5.1", "Previous generation Fable", CLAUDE_FULL, [contextWindow]),
     model("claude-sonnet-5-5", "Sonnet 5.5", "Most efficient for simpler tasks", CLAUDE_FULL),
     model("claude-haiku-5-5", "Haiku 5.5", "Fastest for quick answers", CLAUDE_FULL),
-    model("claude-fable-5", "Fable 5", "Previous generation Fable", CLAUDE_FULL, [contextWindow]),
+    model("claude-fable-5", "Fable 5", "Older generation Fable", CLAUDE_FULL, [contextWindow]),
     model("claude-opus-5", "Opus 5", "Previous generation Opus", CLAUDE_FULL),
     model("claude-opus-4-8", "Opus 4.8", "Older generation Opus", CLAUDE_FULL, [toggle("fastMode", "Fast Mode")]),
     model("claude-sonnet-5", "Sonnet 5", "Previous generation Sonnet", CLAUDE_XHIGH, [contextWindow]),

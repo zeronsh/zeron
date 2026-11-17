@@ -178,15 +178,24 @@ local function naming(): Node
 end
 
 -- The worktree folder: off, worktrees go where Zeron puts them; on, under
--- the folder typed (kept even while it's off).
+-- the folder typed (kept even while it's off). Turned on with no folder
+-- yet, the folder's field opens and nothing is saved until one is given
+-- (the engine won't take on without one).
 local folder = ui.state("settings_worktree_folder", "")
+local choosing = ui.state("settings_worktree_choosing", false)
 local function custom(): boolean
 	local w = worktrees:get()
-	return w ~= nil and w.settings.useCustomDirectory == true
+	return choosing:get() or (w ~= nil and w.settings.useCustomDirectory == true)
 end
 local function set_worktrees(on: boolean, dir: string?)
 	local w = worktrees:peek()
 	if not w then
+		return
+	end
+	if not on then
+		choosing:set(false)
+	elseif not (dir or w.settings.customDirectory) then
+		choosing:set(true)
 		return
 	end
 	local settings = { useCustomDirectory = on, customDirectory = dir or w.settings.customDirectory }
@@ -310,7 +319,7 @@ function M.view(): Node
 					end,
 					control = engine_switch(ui.t("settings.general.worktrees.label"), function()
 						local w = worktrees:get()
-						return if w then w.settings.useCustomDirectory == true else nil
+						return if w then custom() else nil
 					end, function(on: boolean)
 						set_worktrees(on, if folder:peek() ~= "" then folder:peek() else nil)
 					end, function()

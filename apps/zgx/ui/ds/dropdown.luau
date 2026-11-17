@@ -71,8 +71,9 @@ export type Item = {
 }
 -- What a caller's own trigger is given: whether the panel is open, and how
 -- to open or close it. A submenu trigger forwards its hover changes so
--- leaving both the row and its panel can close it.
-export type Menu = { open: State<boolean>, toggle: () -> (), on_hover: ((inside: boolean) -> ())? }
+-- leaving both the row and its panel can close it, and is given the
+-- panel's element while it's open (`panel`), for the way to it.
+export type Menu = { open: State<boolean>, toggle: () -> (), on_hover: ((inside: boolean) -> ())?, panel: Ref? }
 -- (The panel's own words, an action's, an empty list's, the placeholder,
 -- the search's and the detail, may be messages, `ui.t`. An item's label
 -- stays a string: the search reads it, and its tile its first letter.)
@@ -1022,6 +1023,8 @@ return ui.component(function(props: Props): Node
 		end)
 	end
 	local trigger_ref = ui.ref()
+	-- (A submenu's panel, for its trigger.)
+	local panel_ref = if props.submenu then ui.ref() else nil
 	-- (Its trigger gone from view, as Settings stand over the page: closed, not left
 	-- with nothing to hang from.)
 	ui.effect(function()
@@ -1038,6 +1041,7 @@ return ui.component(function(props: Props): Node
 				hover(inside, false)
 			end
 			else nil,
+		panel = panel_ref,
 	}) else ui.button {
 		ref = trigger_ref,
 		label = props.label,
@@ -1687,6 +1691,7 @@ return ui.component(function(props: Props): Node
 			end
 			return ui.column {
 				w_full = true,
+				ref = panel_ref,
 				on_hover = function(inside: boolean)
 					hover(inside, true)
 				end,

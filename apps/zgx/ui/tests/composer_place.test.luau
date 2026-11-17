@@ -346,3 +346,72 @@ test("composer place: hover submenus close after leaving the row and panel", fun
 	expect(showing(app, '"Search branches…"')).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
+
+-- The way to an open submenu (ds/corridor): heading for it across the rows
+-- under its own, the pointer leaves it open; resting on a row, that row's
+-- opens.
+test("composer place: heading for an open submenu across another row leaves it open", function()
+	local app = mounted()
+	app:set_state("test_place_devices", {
+		{ value = "fedora", label = "fedora", you = true },
+		{ value = "mac", label = "Mac" },
+	})
+	app:set_state("test_place_device", "fedora")
+	settle(app)
+	app:click('role:button "Branch"')
+	settle(app)
+	app:hover('role:menuitem "Device"')
+	expect(showing(app, '"Search devices…"')).to_be(true)
+	-- Down and to the right, toward the devices: across Project's row.
+	app:hover('role:menuitem "Project" >> .menu-chevron')
+	expect(showing(app, '"Search devices…"')).to_be(true)
+	expect(showing(app, '"Search projects…"')).to_be(false)
+	-- Reached: the devices stay, and stay open past the wait.
+	app:hover('"Mac"')
+	app:wait("#never-shown", { timeout_ms = 450 })
+	expect(showing(app, '"Search devices…"')).to_be(true)
+	expect(showing(app, '"Search projects…"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("composer place: stopping on a row on the way to an open submenu opens that row's", function()
+	local app = mounted()
+	app:set_state("test_place_devices", {
+		{ value = "fedora", label = "fedora", you = true },
+		{ value = "mac", label = "Mac" },
+	})
+	app:set_state("test_place_device", "fedora")
+	settle(app)
+	app:click('role:button "Branch"')
+	settle(app)
+	app:hover('role:menuitem "Device"')
+	expect(showing(app, '"Search devices…"')).to_be(true)
+	app:hover('role:menuitem "Project" >> .menu-chevron')
+	expect(showing(app, '"Search projects…"')).to_be(false)
+	-- Resting there past the wait: Project's choices, the devices closed.
+	app:wait("#never-shown", { timeout_ms = 450 })
+	expect(showing(app, '"Search projects…"')).to_be(true)
+	expect(showing(app, '"Search devices…"')).to_be(false)
+	-- Straight down to the next row: no wait.
+	app:hover('role:menuitem "Checkout"')
+	expect(showing(app, '"Search projects…"')).to_be(false)
+	expect(app:has('"An isolated copy, on a branch of its own."')).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
+test("corridor: inside the triangle to the submenu's near edge, not past it or behind", function()
+	local corridor = require("@ds/corridor")
+	local panel: any = { x = 300, y = 100, width = 200, height = 300 }
+	local o = { x = 200, y = 110 }
+	-- Down and right, toward it.
+	expect(corridor.toward(o, { x = 250, y = 200 }, panel, false)).to_be(true)
+	-- Straight down, or back left: not toward it.
+	expect(corridor.toward(o, { x = 200, y = 140 }, panel, false)).to_be(false)
+	expect(corridor.toward(o, { x = 190, y = 140 }, panel, false)).to_be(false)
+	-- Down too steeply for how little it went right.
+	expect(corridor.toward(o, { x = 205, y = 300 }, panel, false)).to_be(false)
+	-- A submenu on the left.
+	local left: any = { x = 0, y = 100, width = 150, height = 300 }
+	expect(corridor.toward({ x = 250, y = 110 }, { x = 200, y = 180 }, left, true)).to_be(true)
+end)
+

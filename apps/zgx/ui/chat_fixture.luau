@@ -1065,6 +1065,18 @@ ui.command {
 		sessions.now:set(now)
 	end,
 }
+-- Another checkout of Atlas's repository (acme/atlas), on the build box
+-- under a folder's old name.
+ui.command {
+	id = "fixture.atlas_elsewhere",
+	title = "Fixture: another checkout of Atlas's repository on the build box",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.projects = table.clone(now.projects)
+		table.insert(now.projects, { id = "atlas-old", name = "atlas-old", device = "box", path = "/srv/atlas-old", git = true, github = "acme/atlas" })
+		sessions.now:set(now)
+	end,
+}
 -- A second repository Cloud can open: Site (acme/site), on the build box.
 ui.command {
 	id = "fixture.site_project",
