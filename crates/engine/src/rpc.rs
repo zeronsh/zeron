@@ -5757,11 +5757,14 @@ impl RpcService for EngineRpc {
                     .flatten()
                     .filter(|chat| chat.device_id == self.doc_host.device_id());
                 let chat_cwd = hosted.as_ref().and_then(|chat| chat.cwd.clone());
+                // Likewise only a project made on this device: another's
+                // folder is a path there.
                 let space_cwd = canvas_space_id(&p.chat_id).and_then(|space_id| {
                     self.workspace
                         .space(space_id)
                         .ok()
                         .flatten()
+                        .filter(|space| space.device_id == self.doc_host.device_id())
                         .map(|space| space.path)
                 });
                 let cwd = resolve_open_terminal_cwd(

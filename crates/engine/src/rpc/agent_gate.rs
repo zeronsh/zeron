@@ -109,13 +109,19 @@ impl EngineRpc {
             let full = calling.as_ref().is_none_or(|c| {
                 c.ceiling.is_none_or(|(_, access)| access == AccessMode::FullAccess)
             });
-            return if full {
-                Ok(params)
-            } else {
-                Err(refused(
+            if !full {
+                return Err(refused(
                     "A command runs as the person, unconfined: only a chat with full access runs one. Ask the person to give this chat full access, or to run it themselves",
-                ))
-            };
+                ));
+            }
+            // A command is its agent's own chat's (it stops when that chat
+            // goes, and lists under it), whatever chat the call names.
+            if let Some(chat) = chat
+                && matches!(method, methods::RUN_COMMAND | methods::LIST_BACKGROUND_COMMANDS)
+            {
+                params["chatId"] = json!(chat);
+            }
+            return Ok(params);
         }
         match method {
             methods::MUTATE => match params["op"].as_str().unwrap_or_default() {
@@ -324,7 +330,15 @@ mod tests {
         chat(&core, "app", "App", "workspace-write", "full-access").await;
         chat(&core, "free", "Free", "danger-full-access", "full-access").await;
         let rpc = core.rpc_service();
-        let open = json!({"command":"ls", "targetDeviceId":"laptop"});
+        // Naming another chat: a command is filed under the caller's own.
+        let open = json!({"command":"ls", "targetDeviceId":"laptop", "chatId":"careful"});
+        let as_from = |chat: &str, method: &str| {
+            let mut params = open.clone();
+            if matches!(method, methods::RUN_COMMAND | methods::LIST_BACKGROUND_COMMANDS) {
+                params["chatId"] = json!(chat);
+            }
+            params
+        };
         for method in [
             methods::RUN_COMMAND,
             methods::READ_COMMAND_OUTPUT,
@@ -343,13 +357,13 @@ mod tests {
             let app = with_caller(agent("app"), async { rpc.agent_gate(method, open.clone()) })
                 .await
                 .unwrap();
-            assert_eq!(app, open, "{method}");
+            assert_eq!(app, as_from("app", method), "{method}");
             let allowed = with_caller(agent("free"), async {
                 rpc.agent_gate(method, open.clone())
             })
             .await
             .unwrap();
-            assert_eq!(allowed, open, "{method}");
+            assert_eq!(allowed, as_from("free", method), "{method}");
             // A server with no chat (set up by hand) is capped by nothing.
             with_caller(Caller::Agent { chat: None }, async {
                 rpc.agent_gate(method, open.clone())

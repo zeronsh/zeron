@@ -273,13 +273,20 @@ impl Commands {
             .inner
             .kind
             .says_folder()
-            .then(|| tempfile::NamedTempFile::new().ok().map(|file| file.into_temp_path()))
+            .then(|| {
+                tempfile::NamedTempFile::new()
+                    .ok()
+                    .map(|file| file.into_temp_path())
+            })
             .flatten();
-        let script = self
-            .inner
-            .kind
-            .script(command, ended_in.as_deref());
-        let mut child = spawn(&self.inner.shell, self.inner.kind, cwd, &script)?;
+        let script = self.inner.kind.script(command, ended_in.is_some());
+        let mut child = spawn(
+            &self.inner.shell,
+            self.inner.kind,
+            cwd,
+            &script,
+            ended_in.as_deref(),
+        )?;
         let (sender, mut chunks) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         let readers = pumps(&mut child, sender);
 
@@ -344,8 +351,8 @@ impl Commands {
                 "{MAX_BACKGROUND} background commands are already running on this device: stop one first"
             ));
         }
-        let script = self.inner.kind.script(command, None);
-        let mut child = spawn(&self.inner.shell, self.inner.kind, cwd, &script)?;
+        let script = self.inner.kind.script(command, false);
+        let mut child = spawn(&self.inner.shell, self.inner.kind, cwd, &script, None)?;
         let id = format!("cmd-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
         let background = Arc::new(Background {
             id: id.clone(),
@@ -505,11 +512,14 @@ impl Commands {
     }
 
     /// Stop background commands whose chat is archived or deleted, as
-    /// `chats` (this engine's) change. A chat counts as deleted only once
-    /// these chats have shown it, so one not synced here yet isn't taken as
-    /// gone. Ends with the engine.
+    /// `chats` (this engine's) change and as commands start (one started
+    /// for a chat already archived, or deleted before the chats next change,
+    /// is caught too). A chat counts as deleted only once these chats have
+    /// shown it, so one not synced here yet isn't taken as gone. Ends with
+    /// the engine.
     pub fn follow_chats(&self, mut chats: watch::Receiver<Vec<zeron_proto::Chat>>) {
         let inner: Weak<Inner> = Arc::downgrade(&self.inner);
+        let mut started = self.inner.changes.subscribe();
         tokio::spawn(async move {
             // Commands whose chat these chats have shown.
             let mut seen = std::collections::HashSet::<String>::new();
@@ -545,7 +555,11 @@ impl Commands {
                     tracing::info!(command = %command.id, "its chat went away: stopping it");
                     command.stop.notify_one();
                 }
-                if chats.changed().await.is_err() {
+                let next = tokio::select! {
+                    changed = chats.changed() => changed,
+                    changed = started.changed() => changed,
+                };
+                if next.is_err() {
                     return;
                 }
             }
@@ -611,21 +625,23 @@ impl ShellKind {
         matches!(self, Self::Posix | Self::PowerShell)
     }
 
-    /// `command` as this shell runs it; with `ended_in`, it also writes the
-    /// folder it ended in there (in PowerShell, not after an `exit`).
-    fn script(self, command: &str, ended_in: Option<&std::path::Path>) -> String {
-        match (self, ended_in) {
-            (Self::Posix, Some(path)) => format!(
-                "trap '__zeron_status=$?; pwd -P >| {} 2>/dev/null; exit $__zeron_status' EXIT\n{command}\n",
-                quote(&path.to_string_lossy()).replace('\'', r"'\''")
+    /// `command` as this shell runs it; with `says_folder`, it also writes
+    /// the folder it ended in to the file [`FOLDER_FILE_ENV`] names (in
+    /// PowerShell, not after an `exit`). The path is never in the script,
+    /// so nothing in it needs quoting.
+    fn script(self, command: &str, says_folder: bool) -> String {
+        match (self, says_folder) {
+            (Self::Posix, true) => format!(
+                "trap '__zeron_status=$?; pwd -P >| \"${FOLDER_FILE_ENV}\" 2>/dev/null; exit $__zeron_status' EXIT\n{command}\n"
             ),
-            (Self::PowerShell, ended_in) => {
-                let say_folder = ended_in.map_or_else(String::new, |path| {
+            (Self::PowerShell, says_folder) => {
+                let say_folder = if says_folder {
                     format!(
-                        "try {{ [System.IO.File]::WriteAllText('{}', (Get-Location).ProviderPath) }} catch {{}}\n",
-                        path.to_string_lossy().replace('\'', "''")
+                        "try {{ [System.IO.File]::WriteAllText($env:{FOLDER_FILE_ENV}, (Get-Location).ProviderPath) }} catch {{}}\n"
                     )
-                });
+                } else {
+                    String::new()
+                };
                 // Out in UTF-8 (as it's read back), without progress bars;
                 // a failure exits with a native command's own code, else 1.
                 format!(
@@ -674,13 +690,35 @@ impl ShellKind {
     }
 }
 
-/// Start the shell on `script` in `cwd` as an owned process.
-fn spawn(shell: &str, kind: ShellKind, cwd: &str, script: &str) -> Result<owned::Child, String> {
+/// The variable naming the file a command writes the folder it ended in to
+/// ([`ShellKind::script`]).
+const FOLDER_FILE_ENV: &str = "ZERON_COMMAND_FOLDER_FILE";
+
+/// Start the shell on `script` in `cwd` as an owned process. Zeron's own
+/// variables (its edge token, a Cloud machine's enrollment code, its ports)
+/// stay out of the command's environment, as for an agent installer
+/// (crates/harness/src/install.rs): a command that prints its environment
+/// must not put them in the transcript.
+fn spawn(
+    shell: &str,
+    kind: ShellKind,
+    cwd: &str,
+    script: &str,
+    folder_file: Option<&std::path::Path>,
+) -> Result<owned::Child, String> {
     if !std::fs::metadata(cwd).is_ok_and(|m| m.is_dir()) {
         return Err(format!("No folder {cwd} on this device"));
     }
     let mut cmd = Command::new(shell);
     cmd.args(kind.args(script)?);
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("ZERON_") {
+            cmd.env_remove(key);
+        }
+    }
+    if let Some(file) = folder_file {
+        cmd.env(FOLDER_FILE_ENV, file);
+    }
     cmd.current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -756,10 +794,6 @@ fn forget_ended(commands: &mut HashMap<String, Arc<Background>>) -> bool {
         }
     }
     commands.len() != before
-}
-
-fn quote(path: &str) -> String {
-    format!("'{}'", path.replace('\'', r"'\''"))
 }
 
 /// A run's output within [`HEAD`] + [`TAIL`] bytes: the first bytes, the
@@ -1098,6 +1132,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_command_for_a_chat_already_gone_is_stopped_as_it_starts() {
+        let chat = |id: &str, archived: bool| -> zeron_proto::Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "d", "title": null, "archived": archived, "cwd": null, "branch": null,
+                "checkoutId": null, "config": null, "lastMessagePreview": null, "lastMessageAt": null,
+                "createdAt": "2026-11-15T00:00:00Z",
+            }))
+            .unwrap()
+        };
+        let commands = sh();
+        let (chats, watched) =
+            watch::channel(vec![chat("archived", true), chat("short-lived", false)]);
+        commands.follow_chats(watched);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Archived before its command started: stopped without the chats
+        // changing again.
+        let archived = commands
+            .start("/tmp", "sleep 30", Some("archived"))
+            .unwrap()
+            .id;
+        until("stopped", || {
+            commands
+                .read(&archived)
+                .is_ok_and(|c| c.status == "stopped")
+        })
+        .await;
+        // Seen as its command starts, then deleted: stopped.
+        let short = commands
+            .start("/tmp", "sleep 30", Some("short-lived"))
+            .unwrap()
+            .id;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        chats.send_replace(Vec::new());
+        until("stopped", || {
+            commands.read(&short).is_ok_and(|c| c.status == "stopped")
+        })
+        .await;
+        commands.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn zerons_own_variables_stay_out_of_a_command() {
+        // SAFETY: a name no other test reads or writes.
+        unsafe { std::env::set_var("ZERON_TEST_SECRET_9F3A", "leaked") };
+        let ran = run("echo \"[${ZERON_TEST_SECRET_9F3A:-}]\"", DEFAULT_TIMEOUT).await;
+        assert_eq!(ran.output, "[]\n");
+    }
+
+    #[tokio::test]
     async fn commands_are_each_engines_own() {
         let (one, two) = (sh(), sh());
         let id = one.start("/tmp", "sleep 30", None).unwrap().id;
@@ -1159,7 +1242,6 @@ mod tests {
             ShellKind::of(r"C:\Windows\system32\cmd.exe"),
             ShellKind::Cmd
         );
-        assert_eq!(quote("/tmp/a'b"), r"'/tmp/a'\''b'");
         // PowerShell takes it encoded (UTF-16LE base64): no quoting to break.
         let args = ShellKind::PowerShell.args("echo \"it's\"").unwrap();
         assert_eq!(
@@ -1185,12 +1267,21 @@ mod tests {
                 .args(&"x".repeat(MAX_ENCODED_COMMAND))
                 .is_err()
         );
-        // Its script passes a failure's code on, and says where it ended.
-        let script =
-            ShellKind::PowerShell.script("git status", Some(std::path::Path::new(r"C:\t\it's")));
+        // Its script passes a failure's code on, and says where it ended to
+        // the file the environment names: no path in it to quote.
+        let script = ShellKind::PowerShell.script("git status", true);
         assert!(script.contains("\ngit status\n$__zeronOk = $?"), "{script}");
-        assert!(script.contains(r"WriteAllText('C:\t\it''s'"), "{script}");
+        assert!(
+            script.contains("WriteAllText($env:ZERON_COMMAND_FOLDER_FILE,"),
+            "{script}"
+        );
         assert!(script.contains("exit $__zeronCode"), "{script}");
+        let posix = ShellKind::Posix.script("ls", true);
+        assert!(
+            posix.contains("pwd -P >| \"$ZERON_COMMAND_FOLDER_FILE\""),
+            "{posix}"
+        );
+        assert_eq!(ShellKind::Posix.script("ls", false), "ls");
     }
 }
 

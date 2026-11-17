@@ -29,6 +29,12 @@
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
 import { chatHost, runnerCanSee, runnerOpRefusal } from "./registry-runner";
+
+/** Full states a runner from before the widening is sent at most
+ * (RegistryRoom.runnerBehind). */
+const RUNNER_FULL_TRIES = 3;
+/** The meta key of a runner's full-resync record. */
+const runnerSentKey = (device: string): string => `runnerSentAll:${device}`;
 import { AUTH_USER_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVICE_HEADER, apnsConfig, type Env } from "./env";
 import { isDeadToken, sendApns, type ApnsEnvironment } from "./apns";
 import { WriteMeter } from "./write-meter";
@@ -225,18 +231,31 @@ export class RegistryRoom implements DurableObject {
    * sees (registry-runner.ts). Before, a runner was sent only its own rows,
    * so a Cloud machine that synced then holds a cursor past laptop chats,
    * projects and sessions it never received: its first state since is full.
-   * Recorded as the seq that full state was sent at. Only a cursor PAST it
-   * proves the runner applied it (and a row since): a cursor at it may be
-   * one that never got the reply, so that runner is sent everything again
-   * (a few extra full states at most — its own rows move the head on).
-   * Records the send when true.
+   *
+   * Recorded per device as the cursor it first came with (`from`) and how
+   * many full states it was sent (`sent`). A cursor past `from` proves it
+   * applied one (it can only have moved through a state sent since). At
+   * `from` still, the reply may have been lost, or the room was quiet (the
+   * state's seq was `from` too), which a cursor can't tell apart: it is sent
+   * again, at most [`RUNNER_FULL_TRIES`] times in all. Writes only while it
+   * sends; the record goes with its device row.
+   *
+   * Returns whether the state is full: `full` (already full for another
+   * reason: a first sync, a cursor behind GC or ahead of the head), or this.
+   * A runner sent everything for another reason is recorded as caught up.
    */
-  private runnerBehind(device: string | undefined, cursor: number | null, seq: number): boolean {
-    if (device === undefined) return false;
-    const key = `runnerSentAll:${device}`;
-    const sentAt = this.getMeta(key);
-    if (sentAt !== undefined && cursor !== null && cursor > Number(sentAt)) return false;
-    this.setMeta(key, String(seq));
+  private runnerBehind(device: string | undefined, cursor: number | null, full: boolean): boolean {
+    if (device === undefined) return full;
+    const key = runnerSentKey(device);
+    const raw = this.getMeta(key);
+    if (full) {
+      if (raw === undefined) this.setMeta(key, JSON.stringify({ from: -1, sent: 0 }));
+      return true;
+    }
+    if (cursor === null) return true;
+    const record = raw === undefined ? undefined : (JSON.parse(raw) as { from: number; sent: number });
+    if (record !== undefined && (cursor > record.from || record.sent >= RUNNER_FULL_TRIES)) return false;
+    this.setMeta(key, JSON.stringify({ from: record?.from ?? cursor, sent: (record?.sent ?? 0) + 1 }));
     return true;
   }
 
@@ -388,12 +407,12 @@ export class RegistryRoom implements DurableObject {
       }
       const seq = this.seq();
       const gcFloor = this.gcFloor();
-      const full = cursor === null || cursor < gcFloor || cursor > seq || this.runnerBehind(runner, cursor, seq);
+      const full = this.runnerBehind(runner, cursor, cursor === null || cursor < gcFloor || cursor > seq);
       return json({
         seq,
         full,
         gcFloor,
-        rows: this.visible(full ? this.rowsSince(0) : this.rowsSince(cursor), runner, runnerAccount),
+        rows: this.visible(full || cursor === null ? this.rowsSince(0) : this.rowsSince(cursor), runner, runnerAccount),
         presence: Object.fromEntries(this.presence)
       });
     }
@@ -520,9 +539,8 @@ export class RegistryRoom implements DurableObject {
     // reset/wipe) — both force `full`, and the client reacts by replacing
     // (former) or re-seeding the server (latter; see registry.rs). So does a
     // Cloud machine's cursor from before it saw every row (runnerBehind).
-    const full =
-      cursor === null || cursor < gcFloor || cursor > seq || this.runnerBehind(state.runner, cursor, seq);
-    const rows = this.visible(full ? this.rowsSince(0) : this.rowsSince(cursor), state.runner, state.runnerAccount);
+    const full = this.runnerBehind(state.runner, cursor, cursor === null || cursor < gcFloor || cursor > seq);
+    const rows = this.visible(full || cursor === null ? this.rowsSince(0) : this.rowsSince(cursor), state.runner, state.runnerAccount);
     send(ws, {
       t: "state",
       seq,
@@ -621,7 +639,11 @@ export class RegistryRoom implements DurableObject {
     if (applied > 0) {
       // The rows are the only thing a push must store: their seq IS the new
       // head (see `seq`). One event's writes commit together.
-      for (const row of touched.values()) this.saveRow(row);
+      for (const row of touched.values()) {
+        this.saveRow(row);
+        // A device gone: so is its full-resync record (runnerBehind).
+        if (row.kind === "devices" && row.deleted) this.sql.exec("DELETE FROM meta WHERE key = ?", runnerSentKey(row.id));
+      }
       // Rollback gate: a release that reads the stored seq must find it
       // current in every room before it runs (see env.ts).
       if (this.env.REGISTRY_ROOM_WRITE_THROUGH === "1") this.setMeta("seq", String(nextSeq));

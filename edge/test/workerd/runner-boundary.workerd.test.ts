@@ -167,8 +167,11 @@ describe("registry reads", () => {
     const first = await pull(runner, head);
     expect(first.full).toBe(true);
     expect(find(first.rows, "chats", laptopChat)).toBeDefined();
-    // At that cursor still: maybe it never got the reply, so again.
+    // At that cursor still: maybe it never got the reply, so again, but at
+    // most three times in all (a quiet room can't tell applied from lost).
     expect((await pull(runner, head)).full).toBe(true);
+    expect((await pull(runner, head)).full).toBe(true);
+    expect((await pull(runner, head)).full).toBe(false);
     // Past it (applied, and a row since): incremental from then on.
     await push(user, [upsert("chats", laptopChat, { title: "renamed" }, "laptop")]);
     const after = (await pull(user, 0)).seq;

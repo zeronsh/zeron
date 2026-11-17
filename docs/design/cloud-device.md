@@ -193,12 +193,16 @@ its own, on its own machine, recorded with `parentChatId` = the parent's chat.
 - **Delete**: the registry lets it delete its delegates' chat and session rows
   (`runnerChildren`) — never re-home them.
 
-A stolen runner key therefore reaches what an agent on any of the person's devices reaches:
-their chats (reading them, messaging them, starting chats on their devices) and, through a
-client link, those devices' RPC surface (terminals, files) — plus starting machines on the
-repository its session already has (bounded by credits and the awake limit). It still can't
-manage the account, read the vault, host another device, or change the person's
-preferences.
+A stolen runner key therefore reaches what any of the person's devices reaches. Directly, at
+the edge: their chats (reading them, messaging them, starting chats on their devices) and
+starting machines on the repository its session already has (bounded by credits and the awake
+limit); the edge still refuses it the account (`/auth/*`, `/cloud/*`), the vault beyond its own
+grant, hosting another device's room, and the person's preferences. But through a client link
+to one of their online computers it reaches that computer's whole RPC surface, which acts with
+that computer's own session: running commands and opening terminals there, its files, and the
+calls that computer makes for the person (account, vault, Cloud and billing). So in practice a
+compromised session machine can act as the person while any of their computers is online —
+the trade-off accepted for Cloud chats working with every device as a computer's chats do.
 
 ### Workflows (Cloudflare Workflows)
 
