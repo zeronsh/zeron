@@ -766,6 +766,18 @@ fn item_value(i: &WorkItem) -> Value {
         ("space_id", opt_str(i.space_id.as_deref())),
         ("device_id", opt_str(i.device_id.as_deref())),
         ("waiting", opt_str(i.waiting.as_deref())),
+        // (Paused by the person; the board check's note on it.)
+        ("paused_at", opt(i.paused_at.as_ref(), secs)),
+        ("check", i.check.as_ref().map_or(Value::Nil, check_value)),
+    ])
+}
+
+fn check_value(c: &zeron_proto::orchestration::CardCheck) -> Value {
+    Value::record([
+        ("kind", word(&c.kind)),
+        ("note", Value::from(c.note.as_str())),
+        ("since", secs(&c.since)),
+        ("nudged_at", opt(c.nudged_at.as_ref(), secs)),
     ])
 }
 

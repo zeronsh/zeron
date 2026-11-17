@@ -17,7 +17,7 @@ local function titles(app: any, col: string): { string }
 	for line in app:tree(`#cols-{col}`):gmatch("[^\n]+") do
 		local t = line:match('^  @%d+ button "([^"]+)"')
 		-- (Not its buttons: Show more or less, Clear all done, Later's head.)
-		if t and not t:match("^Show ") and t ~= "Clear all done" and not t:match("^Later · ") then
+		if t and not t:match("^Show ") and t ~= "Clear all done" and not t:match("^Later · ") and not t:match("^Paused · ") then
 			table.insert(out, t)
 		end
 	end
@@ -83,12 +83,17 @@ test("orch board columns: a card moved into an empty Blocked brings it back", fu
 	app:frames(10)
 	app:click('role:menuitem "Move to"')
 	app:frames(10)
-	app:click('role:menuitem "Blocked"')
+	app:click('role:menuitem "Pause"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("pause:it-next1")
+	expect(app:has('#cols-blocked >> role:button "Paused · 1"')).to_be(true)
+	app:set_state("columns_paused", true)
 	app:frames(20)
 	expect(app:has('#cols-blocked >> role:button "Phase 2 migration"')).to_be(true)
-	-- Dragged out again: gone with it.
+	-- Dragged out again (resumed): gone with it.
 	app:drag('#cols-blocked >> role:button "Phase 2 migration"', "#cols-queued")
 	app:frames(20)
+	expect(app:state("calls")).to_contain("resume:it-next1:planned")
 	expect(app:has('#cols-queued >> role:button "Phase 2 migration"')).to_be(true)
 	expect(stands(app, "blocked")).to_be(false)
 	expect(app:error()).to_be_nil()

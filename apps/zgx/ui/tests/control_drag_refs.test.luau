@@ -203,8 +203,8 @@ test("drag refs: a Board card dragged to another column still moves there", func
 	app:drag(BOARD_CARD, "#control-board-blocked")
 	app:frames(20)
 	expect(app:error()).to_be_nil()
-	-- Moved (the board's own drop), and no chip made.
-	expect(calls(app)).to_contain("upsertItem")
+	-- Moved (the board's own drop: into Blocked, paused), and no chip made.
+	expect(calls(app)).to_contain("pauseItem")
 	expect(#refs_of(app)).to_be(0)
 end)
 

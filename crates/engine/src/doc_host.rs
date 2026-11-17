@@ -1634,6 +1634,45 @@ impl DocHost {
         }
     }
 
+    /// Hold `chat_id`'s queue (its card is paused on the board): queued rows
+    /// wait, as after a stop, until [`DocHost::release_queue`]. Only where
+    /// the chat is hosted; `false` elsewhere.
+    pub fn hold_queue(&self, chat_id: &str) -> bool {
+        if !self.is_host(chat_id) {
+            return false;
+        }
+        let Ok(handle) = self.open(chat_id) else { return false };
+        if !handle.queue_paused.swap(true, Ordering::AcqRel) {
+            handle.publish_queue();
+        }
+        true
+    }
+
+    /// Whether `chat_id`'s queue is held here (stopped, or its card paused).
+    pub fn queue_held(&self, chat_id: &str) -> bool {
+        self.is_host(chat_id)
+            && self.open(chat_id).is_ok_and(|h| h.queue_paused.load(Ordering::Acquire))
+    }
+
+    /// Release a queue [`DocHost::hold_queue`] held (its card resumed): the
+    /// head row is sent now, the rest drain after it. `Some(rows queued)`
+    /// where the chat is hosted (0: nothing was queued); `None` elsewhere.
+    pub async fn release_queue(&self, chat_id: &str) -> Result<Option<usize>, EngineError> {
+        if !self.is_host(chat_id) {
+            return Ok(None);
+        }
+        let handle = self.open(chat_id)?;
+        let queue = handle.doc.read_queue()?;
+        let Some(head) = queue.first() else {
+            handle.queue_paused.store(false, Ordering::Release);
+            handle.publish_queue();
+            return Ok(Some(0));
+        };
+        let head = head.id.clone();
+        let sent = self.send_queued_now(chat_id, &head).await?;
+        Ok(Some(if sent { queue.len() } else { 0 }))
+    }
+
     /// Test-only retirement sentinel: reports true once the doc-host graph
     /// has actually been freed.
     #[doc(hidden)]

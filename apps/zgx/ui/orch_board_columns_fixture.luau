@@ -9,7 +9,10 @@
 -- past ten, `!fixture.blocked` puts one in Blocked); what it's asked is
 -- noted in `calls`, a delete and a restore applied as the engine would. The
 -- chats a card links are the state `columns_chats`: nothing here touches
--- them.
+-- them. Blocked's groups: `!fixture.blocked_groups` puts two in Needs you
+-- (one asked: the state `columns_asks`) and two in Paused (folded until
+-- opened: the state `columns_paused`); `!fixture.checks` gives four cards
+-- the engine's note, one of each kind.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -75,6 +78,11 @@ local BASE = {
 local items = ui.state("columns_items", table.clone(BASE) :: { any })
 local expanded = ui.state("columns_expanded", false)
 local later_open = ui.state("columns_later", false)
+local paused_open = ui.state("columns_paused", false)
+local asks = ui.state("columns_asks", {
+	{ id = "ask-1", item_id = "it-blk1", state = "open", question = "Which region first?" },
+	{ id = "ask-2", item_id = "it-blk2", state = "answered", question = "Renew now?" },
+} :: { any })
 
 local DONE_TITLES = {
 	"Linux titlebar without controls", "Delete cards from the Board", "Map labels keep clear",
@@ -101,6 +109,30 @@ ui.command { id = "fixture.many", title = "Fill Now and Done", run = function()
 end }
 ui.command { id = "fixture.blocked", title = "Put one in Blocked", run = function()
 	items:push(card("it-blk1", "blocked", "DNS failover between regions", 1))
+end }
+ui.command { id = "fixture.blocked_groups", title = "Fill Needs you and Paused", run = function()
+	items:push(card("it-blk1", "blocked", "DNS failover between regions", 1))
+	items:push(card("it-blk2", "blocked", "Wait for the cert", 2))
+	items:push(card("it-pz1", "blocked", "Mesh admin app", 1, { paused_at = T - 12 * 60 }))
+	items:push(card("it-pz2", "blocked", "Moscow relay", 2, { paused_at = "2027-01-15T18:06:40Z" }))
+end }
+ui.command { id = "fixture.checks", title = "Notes on four cards", run = function()
+	local notes = {
+		["it-now1"] = { kind = "stale", note = "Its threads finished 20m ago" },
+		["it-rev1"] = { kind = "nothing_to_review", note = "Nothing to review" },
+		["it-done1"] = { kind = "stillWorking", note = "A thread still works" },
+		["it-next1"] = { kind = "moved", note = "Moved from Now: no thread" },
+	}
+	local list = table.clone(items:peek())
+	for i, it in list do
+		local n = notes[it.id]
+		if n then
+			local copy = table.clone(it)
+			copy.check = { kind = n.kind, note = n.note, since = T - 300 }
+			list[i] = copy
+		end
+	end
+	items:set(list)
 end }
 ui.command { id = "fixture.later", title = "Put four in Later", run = function()
 	for i, t in { "Look at the hover delay", "Try a darker map", "Remind me: renew the cert", "Someday: a CLI" } do
@@ -150,6 +182,10 @@ return ui.div { w_full = true, h_full = true, ui.scroll {
 			orchestrators = orchestrators,
 			show_filter = true,
 			later_open = later_open,
+			paused_open = paused_open,
+			asks = function(): any
+				return asks:get()
+			end,
 			expanded = expanded,
 			now = function(): number
 				return T
@@ -169,6 +205,15 @@ return ui.div { w_full = true, h_full = true, ui.scroll {
 			on_move = function(id: string, state: string, order: number)
 				note(`move:{id}:{state}:{order}`)
 				update(id, { state = state, order = order })
+			end,
+			-- (As the engine: Blocked, paused; resumed, into its state.)
+			on_pause = function(id: string)
+				note(`pause:{id}`)
+				update(id, { state = "blocked", paused_at = T })
+			end,
+			on_resume = function(id: string, state: string)
+				note(`resume:{id}:{state}`)
+				update(id, { state = state, paused_at = false })
 			end,
 			on_priority = function(id: string, p: string)
 				note(`priority:{id}:{p}`)

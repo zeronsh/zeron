@@ -4210,7 +4210,12 @@
       "approve": "批准",
       "request_changes": "请求修改…",
       "changes_placeholder": "要改什么",
-      "deferred": "已推迟"
+      "deferred": "已推迟",
+      "pause": "暂停",
+      "resume": "继续",
+      "paused_count": "已暂停 · {n}",
+      "paused_by_you": "你已暂停",
+      "asked": "已提问"
     },
     "reports": {
       "title": "Crew updates",

@@ -2778,3 +2778,367 @@ async fn creates_sent_together_with_one_request_id_make_one_orchestrator() {
         .count();
     assert_eq!(named, 1);
 }
+
+// ── Board check: hard rules, Paused, restart ────────────────────────────────
+
+/// "Geese express" with a crew thread `geese-t1` on card "Phase 1". The
+/// orchestrator's id and the card's.
+async fn geese(core: &crate::EngineCore) -> (String, String) {
+    let o = orchestrator(core, "Geese express").await;
+    chat(core, "geese-t1", "Phase 1 thread", None).await;
+    op(core, Caller::Local, json!({"op":"addToCrew","orchestratorId":o,"chatId":"geese-t1"})).await.unwrap();
+    let card = op(
+        core,
+        agent(&o),
+        json!({"op":"upsertItem","item":{"title":"Phase 1: ship","state":"active","threads":["geese-t1"]}}),
+    )
+    .await
+    .unwrap();
+    (o, card)
+}
+
+#[tokio::test]
+async fn an_agent_marks_blocked_only_with_the_persons_question() {
+    let (_temp, core) = core().await;
+    let (o, card) = geese(&core).await;
+    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"state":"blocked"}})).await.unwrap_err();
+    assert!(refused.contains("`ask`"), "{refused}");
+    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Active, "not moved");
+    let reply = call(
+        &core,
+        agent(&o),
+        methods::ORCHESTRATE,
+        json!({"op":"upsertItem","item":{"id":card,"state":"blocked"},
+               "ask":{"question":"Ship Phase 1 today or fold it into Plan 12?","options":[{"label":"Fold into Plan 12"},{"label":"Do it now"}]}}),
+    )
+    .await
+    .unwrap();
+    let ask_id = reply["askId"].as_str().unwrap();
+    let ask = core.orchestration.state().asks.into_iter().find(|a| a.id == ask_id).unwrap();
+    assert_eq!(ask.item_id.as_deref(), Some(card.as_str()), "on the card, in Needs you");
+    assert_eq!(ask.from_chat, o, "the answer goes to the orchestrator");
+    assert_eq!(ask.state, AskState::Open);
+    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Blocked);
+    // Its ask open: Blocked again is fine without another.
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"state":"active"}})).await.unwrap();
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"state":"blocked"}})).await.unwrap();
+}
+
+#[tokio::test]
+async fn pausing_stops_the_thread_and_holds_it_for_the_person() {
+    let (_temp, core) = core().await;
+    let (o, card) = geese(&core).await;
+    // Agents can't pause or resume.
+    for params in [json!({"op":"pauseItem","id":card}), json!({"op":"resumeItem","id":card})] {
+        let refused = op(&core, agent(&o), params).await.unwrap_err();
+        assert!(refused.contains("Only the person"), "{refused}");
+    }
+    op(&core, Caller::Local, json!({"op":"pauseItem","id":card})).await.unwrap();
+    let paused = core.orchestration.item(&card).unwrap();
+    assert!(paused.paused(), "Blocked, in Paused");
+    let stops = core
+        .doc_host
+        .open("geese-t1")
+        .unwrap()
+        .doc()
+        .read_commands()
+        .unwrap()
+        .into_iter()
+        .filter(|c| matches!(c.payload, SessionCommandPayload::Interrupt {}))
+        .count();
+    assert_eq!(stops, 1, "the stop button's command");
+    // The orchestrator can't move it out, nor needs an ask for it.
+    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"state":"active"}})).await.unwrap_err();
+    assert!(refused.contains("paused by the person"), "{refused}");
+    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"threads":[]}})).await.unwrap_err();
+    assert!(refused.contains("paused by the person"), "its thread stays held: {refused}");
+    assert!(super::board_checks::plan_from(
+        &core.orchestration.state(),
+        &core.orchestration.workspace().read_chats().unwrap().into_iter().map(|c| (c.id.clone(), c)).collect(),
+        &Default::default(),
+        &[],
+        None,
+        chrono::Utc::now(),
+    )
+    .iter()
+    .all(|c| c.item != card), "a paused card is true as it is");
+    // Its message to the thread waits, held.
+    let before = sent(&core, "geese-t1").len();
+    let held = call(
+        &core,
+        agent(&o),
+        methods::QUEUE_COMMAND,
+        json!({"chatId":"geese-t1","command":{"kind":"run","request":{"prompt":"carry on","cwd":"~","sandbox":"workspace-write"},"messageId":"m1"}}),
+    )
+    .await
+    .unwrap();
+    assert!(held["held"].is_string(), "{held}");
+    assert_eq!(sent(&core, "geese-t1").len(), before, "not run");
+    let queued = core.doc_host.open("geese-t1").unwrap().doc().read_queue().unwrap();
+    assert!(queued.iter().any(|q| q.text.contains("carry on")), "queued: {queued:?}");
+    // The person resumes it into Now: the thread carries on.
+    op(&core, Caller::Local, json!({"op":"resumeItem","id":card})).await.unwrap();
+    let resumed = core.orchestration.item(&card).unwrap();
+    assert_eq!(resumed.state, WorkState::Active);
+    assert!(resumed.paused_at.is_none());
+    assert!(sent(&core, "geese-t1").iter().any(|p| p.contains("[Resumed]")), "{:?}", sent(&core, "geese-t1"));
+}
+
+#[tokio::test]
+async fn the_persons_move_to_blocked_pauses_and_out_of_it_resumes() {
+    let (_temp, core) = core().await;
+    let (_o, card) = geese(&core).await;
+    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":card,"state":"blocked"}})).await.unwrap();
+    assert!(core.orchestration.item(&card).unwrap().paused());
+    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":card,"state":"planned"}})).await.unwrap();
+    let card = core.orchestration.item(&card).unwrap();
+    assert_eq!(card.state, WorkState::Planned);
+    assert!(card.paused_at.is_none());
+}
+
+#[tokio::test]
+async fn an_ask_answered_takes_its_card_out_of_blocked() {
+    let (_temp, core) = core().await;
+    let (o, card) = geese(&core).await;
+    let reply = call(
+        &core,
+        agent(&o),
+        methods::ORCHESTRATE,
+        json!({"op":"upsertItem","item":{"id":card,"state":"blocked"},"ask":{"question":"Which way?"}}),
+    )
+    .await
+    .unwrap();
+    let ask_id = reply["askId"].as_str().unwrap().to_owned();
+    op(&core, Caller::Local, json!({"op":"answerAsk","id":ask_id,"answer":"Fold it in"})).await.unwrap();
+    let rpc = core.rpc_service();
+    let plan = rpc.plan_board_checks(chrono::Utc::now(), true);
+    let change = plan.iter().find(|c| c.item == card).expect("set straight");
+    assert_eq!(change.verdict.state, Some(WorkState::Active));
+    rpc.apply_changes(&plan, chrono::Utc::now());
+    let after = core.orchestration.item(&card).unwrap();
+    assert_eq!(after.state, WorkState::Active);
+    assert_eq!(after.check.unwrap().kind, CheckKind::Moved);
+    // Run again: nothing more to do.
+    assert!(rpc.plan_board_checks(chrono::Utc::now(), true).iter().all(|c| c.item != card));
+}
+
+#[tokio::test]
+async fn after_a_restart_every_board_is_set_straight_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let assemble = || {
+        crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap()
+    };
+    let card = {
+        let core = assemble();
+        let (_o, card) = geese(&core).await;
+        // Blocked under the old rules: no ask.
+        core.orchestration
+            .patch_item(WorkItemPatch { id: Some(card.clone()), state: Some(WorkState::Blocked), ..Default::default() })
+            .unwrap();
+        // Stopped as the app stops it (the registry saved).
+        core.shutdown().await;
+        card
+    };
+    let core = assemble();
+    let rpc = core.rpc_service();
+    let plan = rpc.plan_board_checks(chrono::Utc::now(), true);
+    let items = core.orchestration.state().items;
+    assert!(plan.iter().any(|c| c.item == card), "plan {plan:?}; items {items:?}");
+    assert_eq!(plan.iter().find(|c| c.item == card).unwrap().verdict.raise, Some(super::board_checks::Raise::Blocked));
+    rpc.apply_changes(&plan, chrono::Utc::now());
+    let asks: Vec<Ask> =
+        core.orchestration.state().asks.into_iter().filter(|a| a.item_id.as_deref() == Some(card.as_str())).collect();
+    assert_eq!(asks.len(), 1);
+    assert!(asks[0].question.contains("Phase 1: ship"));
+    assert!(rpc.plan_board_checks(chrono::Utc::now(), true).iter().all(|c| c.item != card), "idempotent");
+}
+
+/// The start-up board check over a copy of real data, printed per board:
+/// what it would change, then applied (to the copy), then what a second pass
+/// would change. `BOARD_DRY_RUN_DIR` (a data dir copy), `BOARD_DRY_RUN_ORG`
+/// and `BOARD_DRY_RUN_USER` (its signed-in account). Never point it at a
+/// live data dir.
+#[tokio::test]
+#[ignore]
+async fn board_check_dry_run_on_copied_data() {
+    let dir = std::path::PathBuf::from(std::env::var("BOARD_DRY_RUN_DIR").expect("BOARD_DRY_RUN_DIR"));
+    let org = std::env::var("BOARD_DRY_RUN_ORG").expect("BOARD_DRY_RUN_ORG");
+    let user = std::env::var("BOARD_DRY_RUN_USER").expect("BOARD_DRY_RUN_USER");
+    let core = crate::EngineCore::assemble_with_profile(
+        crate::EngineProfile::synced(&dir, &org, &user),
+        std::sync::Arc::new(HarnessRegistry::new()),
+        HarnessId::Codex,
+        None,
+    )
+    .unwrap();
+    let rpc = core.rpc_service();
+    // The copy's own moment: its newest session row (heartbeats are judged
+    // against it, not against when this runs).
+    let now = core
+        .orchestration
+        .workspace()
+        .watch_session_rows()
+        .borrow()
+        .iter()
+        .map(|s| s.updated_at)
+        .max()
+        .unwrap_or_else(chrono::Utc::now);
+    println!("as of {now}");
+    let state = core.orchestration.state();
+    let here = core.orchestration.device_id().to_owned();
+    let name = |o: &Option<String>| {
+        o.as_deref()
+            .and_then(|id| state.orchestrators.iter().find(|x| x.id == id))
+            .map_or_else(|| "(loose)".to_owned(), |x| format!("{}{}", x.name, if x.archived { " [archived]" } else { "" }))
+    };
+    let print = |label: &str, plan: &[super::board_checks::Change]| {
+        println!("== {label}: {} card(s)", plan.len());
+        let mut by: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for c in plan {
+            by.entry(name(&c.orchestrator)).or_default().push(c.to_string());
+        }
+        for (board, lines) in by {
+            println!("-- {board}");
+            for l in lines {
+                println!("   {l}");
+            }
+        }
+    };
+    let open: Vec<_> = state.items.iter().filter(|i| !i.removed).collect();
+    println!(
+        "device {here}; {} boards; {} cards on them ({} open)",
+        state.orchestrators.len(),
+        open.len(),
+        open.iter().filter(|i| !matches!(i.state, WorkState::Done | WorkState::Dropped)).count()
+    );
+    // Every card in Now, and what its threads read as.
+    {
+        let chats: std::collections::HashMap<String, zeron_proto::Chat> =
+            core.orchestration.workspace().read_chats().unwrap().into_iter().map(|c| (c.id.clone(), c)).collect();
+        let rows: std::collections::HashMap<String, zeron_proto::Session> = core
+            .orchestration
+            .workspace()
+            .watch_session_rows()
+            .borrow()
+            .iter()
+            .map(|s| (s.chat_id.clone(), s.clone()))
+            .collect();
+        let now_cards: Vec<_> = open.iter().filter(|i| i.state == WorkState::Active).collect();
+        let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
+        for c in &now_cards {
+            let of: Vec<_> = c.threads.iter().map(|t| super::board_checks::Thread::of(chats.get(t), rows.get(t), now)).collect();
+            let kind = if of.iter().any(|t| matches!(t, super::board_checks::Thread::Live { .. })) {
+                "a thread at work"
+            } else if of.is_empty() {
+                "no thread"
+            } else if of.iter().any(|t| matches!(t, super::board_checks::Thread::Errored { .. })) {
+                "thread errored"
+            } else if of.iter().any(|t| matches!(t, super::board_checks::Thread::Stopped { .. })) {
+                "thread stopped"
+            } else if of.iter().all(|t| matches!(t, super::board_checks::Thread::Idle)) {
+                "thread never ran"
+            } else {
+                "thread finished"
+            };
+            *tally.entry(kind).or_default() += 1;
+        }
+        println!("== in Now: {} ({tally:?})", now_cards.len());
+        for c in now_cards {
+            let threads: Vec<String> = c
+                .threads
+                .iter()
+                .map(|t| {
+                    let row = rows.get(t);
+                    format!(
+                        "{}={:?}{}",
+                        &t[..t.len().min(8)],
+                        super::board_checks::Thread::of(chats.get(t), row, now),
+                        row.map(|r| format!(
+                            " (row {:?}, updated {}{}{}{})",
+                            r.status,
+                            r.updated_at.format("%m-%d %H:%M"),
+                            r.waiting.as_ref().map(|w| format!(", waiting since {} on {:?}", w.since.format("%m-%d %H:%M"), w.on.iter().map(|o| zeron_proto::orchestration::prompt_text::one_line(&o.label, 40)).collect::<Vec<_>>())).unwrap_or_default(),
+                            if r.running_subagents > 0 { format!(", {} subagents", r.running_subagents) } else { String::new() },
+                            if r.background_tasks.is_empty() { String::new() } else { format!(", {} bg", r.background_tasks.len()) },
+                        ))
+                        .unwrap_or_default()
+                    )
+                })
+                .collect();
+            let asks = state.asks.iter().filter(|a| a.state == AskState::Open && a.item_id.as_deref() == Some(c.id.as_str())).count();
+            println!(
+                "   {} [{}] routed={} openAsks={} links={} threads=[{}] \"{}\"",
+                &c.id[..8],
+                name(&c.orchestrator_id),
+                c.source.is_some(),
+                asks,
+                c.links.len(),
+                threads.join(", "),
+                zeron_proto::orchestration::prompt_text::one_line(&c.title, 50)
+            );
+        }
+    }
+    let kept = rpc.plan_board_checks(now, false);
+    let all = rpc.plan_board_checks(now, true);
+    print("kept by this device (what its start-up pass does)", &kept);
+    print("every board (all devices' passes together)", &all);
+    rpc.apply_changes(&all, now);
+    let asks = core.orchestration.state().asks.len() - state.asks.len();
+    println!("applied to the copy; {asks} ask(s) raised");
+    print("second pass right after", &rpc.plan_board_checks(now, true));
+    // Ten minutes on with nothing moved (threads as they are now): the
+    // stale flags aged, not the heartbeats.
+    core.orchestration.workspace().write_orchestration(|doc| {
+        for mut item in doc.read_work_items() {
+            if let Some(c) = item.check.as_mut().filter(|c| c.kind == CheckKind::Stale) {
+                c.since -= chrono::Duration::minutes(11);
+                doc.upsert_work_item(&item);
+            }
+        }
+    });
+    print("second pass with the stale flags 11 minutes old (to Review)", &rpc.plan_board_checks(now, true));
+}
+
+
+#[tokio::test]
+async fn a_crew_thread_at_work_when_the_engine_stopped_is_resumed_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let assemble = || {
+        crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap()
+    };
+    {
+        let core = assemble();
+        geese(&core).await;
+        // At work on this device when it stops.
+        let mut row = idle("geese-t1");
+        row.device_id = core.orchestration.device_id().to_owned();
+        row.status = zeron_proto::SessionStatus::Working;
+        row.started_at = Some(chrono::Utc::now());
+        core.orchestration.workspace().record_session(&row);
+        core.shutdown().await;
+    }
+    let core = assemble();
+    let rpc = core.rpc_service();
+    let resumed_text = zeron_proto::orchestration::prompt_text::RESUMED_AFTER_RESTART;
+    let before = core.orchestration.take_before_stop();
+    assert!(before.iter().any(|s| s.chat_id == "geese-t1"), "found as it was when it stopped");
+    assert_eq!(rpc.resume_after_restart(before), ["geese-t1"]);
+    // Taken once: a second pass resumes nothing.
+    assert!(rpc.resume_after_restart(core.orchestration.take_before_stop()).is_empty());
+    // Sent once: run (or queued behind what its host runs).
+    let mut said = sent(&core, "geese-t1");
+    said.extend(core.doc_host.open("geese-t1").unwrap().doc().read_queue().unwrap().into_iter().map(|q| q.text));
+    assert_eq!(said.iter().filter(|p| p.contains(resumed_text)).count(), 1, "{said:?}");
+}

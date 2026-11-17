@@ -464,6 +464,10 @@ a reply to an @ask answers it, a comment on an @card goes to its thread):\n",
         )
     }
 
+    /// What a crew thread that was at work when its engine stopped is sent
+    /// once the engine is back (board_checks::to_resume).
+    pub const RESUMED_AFTER_RESTART: &str = "[Resumed] The engine restarted; continue where you left off.";
+
     /// What a card's thread is sent when the person asks for changes on it
     /// from Review.
     pub fn changes_requested(title: &str, text: &str) -> String {
@@ -597,6 +601,80 @@ pub struct WorkItem {
     /// When the person approved it from Review (`approveItem`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<DateTime<Utc>>,
+    /// Paused by the person (`pauseItem`, or a stop of its thread): the card
+    /// is Blocked, its threads stopped and their queued messages held, until
+    /// the person resumes it (`resumeItem`). Only the person (or its thread
+    /// working again) takes a card out of Paused; agents can't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<DateTime<Utc>>,
+    /// What the engine's board check found wrong with the card, or what it
+    /// changed on it (see [`CardCheck`]). Cleared once the card is true again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CardCheck>,
+}
+
+impl WorkItem {
+    /// In Blocked's Paused group: Blocked, held by the person.
+    pub fn paused(&self) -> bool {
+        self.state == WorkState::Blocked && self.paused_at.is_some()
+    }
+}
+
+/// The engine's note on a card: a column that isn't true (flagged, the
+/// orchestrator told), or a move it made itself (`kind: moved`). One line,
+/// shown on the card and in the `board` tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardCheck {
+    pub kind: CheckKind,
+    pub note: String,
+    /// When it was found (or the move made).
+    pub since: DateTime<Utc>,
+    /// When the card's orchestrator was told about it (once per check).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudged_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckKind {
+    /// In Now, its threads finished: moved to Review if nothing moves it in
+    /// [`STALE_TO_REVIEW_SECS`].
+    Stale,
+    /// In Review with nothing to review: no open ask, no open PR, no review
+    /// line from its route.
+    NothingToReview,
+    /// Done while one of its threads still works.
+    StillWorking,
+    /// In Review, its PR's checks failing (as the app last saw them).
+    CiFailing,
+    /// The engine moved it (the note says from where and why).
+    Moved,
+    #[serde(other)]
+    Other,
+}
+
+/// How long a Now card whose threads finished stays flagged before the
+/// engine moves it to Review.
+pub const STALE_TO_REVIEW_SECS: i64 = 600;
+/// How long a Now card may have no thread at all (an orchestrator usually
+/// starts one right after) before it goes back to Up next.
+pub const NO_THREAD_GRACE_SECS: i64 = 120;
+
+/// The question an agent raises with `item_upsert(state: blocked)`: the
+/// ask that keeps a Blocked card honest, made with the move in one op.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemAsk {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<AskOption>,
+    #[serde(default)]
+    pub urgent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<AskRecommendation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1532,7 +1610,10 @@ pub mod role_prompts {
         format!(
             "You are an orchestrator in Zeron: {name}. Goal: {goal}. Your rules: {rules}.\n\
 - Split work into board items (`item_upsert`) and run each through crew threads (`create_chat`, kind crew, one item each; stack work that touches the same files).\n\
-- Keep item states true; put results in `outcome`. Not started: `planned` is Up next (real work queued for its turn, or held while your crew is full); `inbox` is Later (someday, remind me, ideas; never started on its own).\n\
+- Keep item states true; put results in `outcome`. Not started: `planned` is Up next (real work queued for its turn, or held while your crew is full); `inbox` is Later (someday, remind me, ideas; never started on its own). `active` (Now) only while a thread works on it: when its thread finishes, move its card in the same turn (Review when the person has something to check, else Done).\n\
+- Blocked means waiting on the person: set it with `item_upsert(state: blocked, ask: {{question, options, recommendation}})` in one call, so the question is in Needs you. Never Blocked without a question (Zeron refuses it).\n\
+- A paused card (Blocked, Paused) is the person's decision: never move it or message its thread; it waits until they resume it.\n\
+- A [Board check] lists cards whose column isn't true: move each, or say in its outcome why it stays.\n\
 - After starting or messaging crew, end your turn: don't wait on crew threads (`wait_for_turn`, `wait`). Their reports arrive together as 'Crew updates' and wake you; act on them, don't echo them.\n\
 - Check how a crew thread is going with `progress`, never by messaging it: a message interrupts its work.\n\
 - Ask the person only via `ask`, only for real decisions.\n\
@@ -2145,9 +2226,31 @@ pub enum OrchestrateOp {
     /// it has one not done). Replies `{ id }`.
     #[serde(rename_all = "camelCase")]
     AddToBoard { chat_id: String },
-    /// Create (no `id`) or patch an item. Replies `{ id }`. (agent)
+    /// Create (no `id`) or patch an item. Replies `{ id }` (plus `askId`
+    /// when `ask` raised one). (agent)
+    ///
+    /// Board rules: an agent's move to `blocked` needs an open ask on the
+    /// card, or `ask` here (raised with the move, on the card); an agent
+    /// never changes a paused card's state. The person's move to `blocked`
+    /// pauses the card ([`OrchestrateOp::PauseItem`]).
     #[serde(rename_all = "camelCase")]
-    UpsertItem { item: WorkItemPatch },
+    UpsertItem {
+        item: WorkItemPatch,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<ItemAsk>,
+    },
+    /// The person pauses a card: its threads stopped (as the stop button
+    /// does), their queued messages held, the card Blocked in Paused.
+    /// Replies `{ id }`.
+    PauseItem { id: String },
+    /// The person resumes a paused card into `state` (default Now): its
+    /// threads' held messages released, else each told to carry on; a card
+    /// with no thread goes to Up next (or starts, into Now). Replies `{ id }`.
+    ResumeItem {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<WorkState>,
+    },
     /// (agent) — a crew thread files a report to its orchestrator.
     #[serde(rename_all = "camelCase")]
     Report {

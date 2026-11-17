@@ -898,6 +898,13 @@ pub struct EngineRpc {
 }
 
 impl EngineRpc {
+    /// The change requests the app has already resolved (cache only).
+    pub(crate) fn known_change_requests(&self) -> Vec<zeron_proto::ChangeRequestSummary> {
+        self.change_requests.known()
+    }
+}
+
+impl EngineRpc {
     #[allow(clippy::too_many_arguments)] // engine assembly seam, not a public API
     pub fn new(
         sessions: SessionsEngine,
@@ -3277,6 +3284,10 @@ impl RpcService for EngineRpc {
         self.with_crew_rules(method, &mut params);
         let params = self.agent_gate(method, params)?;
         self.note_agent_message(method, &params);
+        // An agent's send to a paused card's thread waits in its held queue.
+        if let Some(reply) = self.held_for_paused_card(method, &params)? {
+            return Ok(reply);
+        }
         // Machine stats: answered here, or asked of another of the
         // account's devices with its own deadline and error words.
         if method == methods::DEVICE_STATS {

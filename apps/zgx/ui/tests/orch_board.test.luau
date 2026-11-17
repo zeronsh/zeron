@@ -22,10 +22,17 @@ local function titles(app: any, col: string): { string }
 	for line in app:tree(`#orch-col-{col}`):gmatch("[^\n]+") do
 		-- (A card is a button right under its column; its own buttons, its
 		-- threads' dots and its chips, sit deeper. Not the column's own:
-		-- Done's Clear all done, Show more or less, Queued's Later head; Later's
-		-- cards sit under that head, deeper.)
+		-- Done's Clear all done, Show more or less, Queued's Later head,
+		-- Blocked's Paused head; their cards sit under that head, deeper.)
 		local t = line:match('^  @%d+ button "([^"]+)"')
-		if t and t ~= "Clear all done" and not t:match("^Show %d+ more$") and t ~= "Show less" and not t:match("^Later · ") then
+		if
+			t
+			and t ~= "Clear all done"
+			and not t:match("^Show %d+ more$")
+			and t ~= "Show less"
+			and not t:match("^Later · ")
+			and not t:match("^Paused · ")
+		then
 			table.insert(out, t)
 		end
 	end

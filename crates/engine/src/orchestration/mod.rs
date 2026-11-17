@@ -34,6 +34,7 @@ pub(crate) mod queue;
 pub(crate) mod progress;
 pub mod report;
 pub(crate) mod board_cards;
+pub(crate) mod board_checks;
 pub(crate) mod placement;
 pub(crate) mod scope;
 pub(crate) mod scratchpad;
@@ -169,6 +170,14 @@ struct Inner {
     /// `createOrchestrator`'s request ids and what each made: a request
     /// sent twice (a double submit, a retry) gets the first one's id back.
     created: Mutex<CreatedBy>,
+    /// Runs the board check a moment after a change (board_checks.rs).
+    board_poke: board_checks::Poke,
+    /// This device's session rows as the engine found them on start (what
+    /// was at work when it stopped), until the start-up pass takes them.
+    before_stop: Mutex<Option<Vec<zeron_proto::Session>>>,
+    /// Crew threads resumed after the restart, and when: their cards are
+    /// left alone until their new turn has had time to start.
+    resumed: Mutex<Vec<(String, chrono::DateTime<Utc>)>>,
 }
 
 /// The newest request ids, oldest dropped past [`CREATED_KEPT`].
@@ -235,6 +244,9 @@ impl Orchestration {
                 wake_started: std::sync::atomic::AtomicBool::new(false),
                 progress: progress::ProgressBook::default(),
                 created: Mutex::new(CreatedBy::default()),
+                board_poke: board_checks::Poke::default(),
+                before_stop: Mutex::new(None),
+                resumed: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -245,6 +257,34 @@ impl Orchestration {
 
     pub fn device_id(&self) -> &str {
         self.inner.workspace.device_id()
+    }
+
+    /// This device's session rows as found on start, before anything here
+    /// rewrote them (`EngineCore` sets them once).
+    pub(crate) fn set_before_stop(&self, rows: Vec<zeron_proto::Session>) {
+        *lock(&self.inner.before_stop) = Some(rows);
+    }
+
+    /// [`Orchestration::set_before_stop`]'s rows, taken (once).
+    pub(crate) fn take_before_stop(&self) -> Vec<zeron_proto::Session> {
+        lock(&self.inner.before_stop).take().unwrap_or_default()
+    }
+
+    /// Note `chats` resumed after the restart at `at`.
+    pub(crate) fn note_resumed(&self, chats: &[String], at: chrono::DateTime<Utc>) {
+        lock(&self.inner.resumed).extend(chats.iter().map(|c| (c.clone(), at)));
+    }
+
+    /// The threads resumed after the restart less than `within` before `now`.
+    pub(crate) fn resumed_since(&self, now: chrono::DateTime<Utc>, within: chrono::Duration) -> Vec<String> {
+        let mut list = lock(&self.inner.resumed);
+        list.retain(|(_, at)| now - *at < within);
+        list.iter().map(|(c, _)| c.clone()).collect()
+    }
+
+    /// The board check, run a moment from now.
+    pub(crate) fn board_poke(&self) -> board_checks::Poke {
+        self.inner.board_poke.clone()
     }
 
     /// Everything, read now.
@@ -392,6 +432,7 @@ impl Orchestration {
             watchers::start(self.clone());
             progress::start(self.clone());
             queue::start(self.clone());
+            board_checks::start(self.clone());
             start_stats(self.clone());
         }
     }
@@ -494,6 +535,8 @@ pub(crate) fn apply_item_patch(
                 moved_at: None,
                 moved_route_state: None,
                 approved_at: None,
+                paused_at: None,
+                check: None,
             }
         }
     };

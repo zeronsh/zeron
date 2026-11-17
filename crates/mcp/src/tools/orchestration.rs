@@ -223,7 +223,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: ITEM_UPSERT,
-            description: "Create a board item (no id; title required) or change one (id plus the fields to change). States: inbox (Later: someday, remind me, ideas; never started on its own), planned (Up next: queued real work, or held while a crew is full), active (Now), blocked, review, done, dropped. Keep states true, and put the answer or result in outcome when there is one: that is what the person reads.",
+            description: "Create a board item (no id; title required) or change one (id plus the fields to change). States: inbox (Later: someday, remind me, ideas; never started on its own), planned (Up next: queued real work, or held while a crew is full), active (Now: a thread is working on it), blocked (waiting on the person), review (finished, something for the person to check), done, dropped. Keep states true, and put the answer or result in outcome when there is one: that is what the person reads.\n\nBlocked means it waits on the person, so it needs their question: pass `ask` with the move (it joins Needs you, on this card, and the answer comes back to you), unless the card already has an open ask. Zeron refuses Blocked without one. A card the person paused (Blocked, Paused) is theirs: Zeron refuses any change to its state. Zeron also checks the board itself: a card in Now whose thread finished is flagged and goes to Review if you don't move it, an errored thread's card goes to Blocked with an ask, and its notes show in `board` as `check`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -237,7 +237,30 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "threads": { "type": "array", "items": { "type": "string" }, "description": "Chat ids working on it." },
                     "links": links_schema(),
                     "order": { "type": "number", "description": "Sort key in its column, smaller first." },
-                    "orchestrator": s("Brain dump only: the orchestrator that owns it (id); omit for a loose item.")
+                    "orchestrator": s("Brain dump only: the orchestrator that owns it (id); omit for a loose item."),
+                    "ask": {
+                        "type": "object",
+                        "description": "With state blocked: the person's question, raised on this card in the same step (as the `ask` tool would). Required for blocked unless the card already has an open ask.",
+                        "properties": {
+                            "question": s("Markdown, self-contained: what the person must decide or do."),
+                            "options": {
+                                "type": "array",
+                                "description": "Choices, best first: 2 to 4. Strings, or {label, detail}. Omit for a free answer.",
+                                "items": { "anyOf": [{ "type": "string" }, { "type": "object", "properties": {
+                                    "label": s("A few words."),
+                                    "detail": s("A line on what it does and what it costs.")
+                                }, "required": ["label"] }] }
+                            },
+                            "recommendation": {
+                                "type": "object",
+                                "description": "What you'd pick, and why. `option` is the 0-based index into options.",
+                                "properties": { "option": { "type": "integer", "minimum": 0 }, "why": s("One or two sentences.") }
+                            },
+                            "context": s("Markdown the person reads to decide."),
+                            "urgent": { "type": "boolean", "default": false }
+                        },
+                        "required": ["question"]
+                    }
                 }
             }),
         },
@@ -430,6 +453,19 @@ struct ItemArgs {
     links: Option<Vec<WorkLink>>,
     order: Option<f64>,
     orchestrator: Option<String>,
+    ask: Option<ItemAskArgs>,
+}
+
+/// `item_upsert`'s `ask`: the question a move to blocked raises.
+#[derive(Deserialize)]
+struct ItemAskArgs {
+    question: String,
+    #[serde(default)]
+    options: Vec<OptionArg>,
+    recommendation: Option<RecommendationArg>,
+    context: Option<String>,
+    #[serde(default)]
+    urgent: bool,
 }
 
 #[derive(Deserialize)]
@@ -646,7 +682,46 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
                 order: a.order.filter(|o| o.is_finite()),
                 ..Default::default()
             };
-            Ok(json!({ "op": "upsertItem", "item": item }))
+            let ask = match a.ask {
+                Some(ask) => {
+                    let options: Vec<AskOption> = ask
+                        .options
+                        .into_iter()
+                        .map(|o| match o {
+                            OptionArg::Label(label) => AskOption::new(label),
+                            OptionArg::Full { label, detail, images, scores } => AskOption { label, detail, images, scores },
+                        })
+                        .filter(|o| !o.label.trim().is_empty())
+                        .collect();
+                    let recommendation = match ask.recommendation {
+                        Some(r) => {
+                            if let Some(i) = r.option
+                                && i >= options.len()
+                            {
+                                return Err(format!("ask.recommendation.option is {i}, but there are {} options (0-based)", options.len()));
+                            }
+                            let why = r.why.trim().to_owned();
+                            let label = r.option.map(|i| options[i].label.clone());
+                            (r.option.is_some() || !why.is_empty()).then(|| {
+                                json!({ "option": r.option, "label": label, "why": (!why.is_empty()).then_some(why) })
+                            })
+                        }
+                        None => None,
+                    };
+                    Some(json!({
+                        "question": nonempty("ask.question", &ask.question)?, "options": options, "urgent": ask.urgent,
+                        "recommendation": recommendation,
+                        "context": ask.context.filter(|c| !c.trim().is_empty()),
+                    }))
+                }
+                None => None,
+            };
+            // (Blocked with no `ask` is refused by the engine unless the card
+            // already has an open ask: only it sees the asks.)
+            match ask {
+                Some(ask) => Ok(json!({ "op": "upsertItem", "item": item, "ask": ask })),
+                None => Ok(json!({ "op": "upsertItem", "item": item })),
+            }
         }
         NOTES_SET => {
             let a: NotesArgs = parse(args)?;
@@ -1052,6 +1127,8 @@ impl Tools {
                     "id": i.id, "orchestratorId": i.orchestrator_id, "title": i.title, "state": i.state,
                     "priority": i.priority, "progress": i.progress, "threads": i.threads, "links": i.links,
                     "outcome": i.outcome, "detail": i.detail,
+                    "paused": i.paused().then_some("paused by the person: theirs to resume, leave it"),
+                    "check": i.check.as_ref().map(|c| json!({ "kind": c.kind, "note": c.note, "since": c.since })),
                 })
             })
             .collect();
@@ -1326,6 +1403,8 @@ mod tests {
             moved_at: None,
             moved_route_state: None,
             approved_at: None,
+            paused_at: None,
+            check: None,
         };
         let state = OrchestrationState {
             orchestrators: vec![o, orchestrator("b1", OrchestratorKind::BrainDump)],
@@ -1573,6 +1652,26 @@ mod tests {
         let patch = op_for(ITEM_UPSERT, json!({ "id": "i", "progress": null }), &orch).unwrap();
         assert_eq!(patch["item"]["progress"], Value::Null);
         assert!(patch["item"].get("orchestratorId").is_none(), "a patch keeps its owner");
+        // Blocked with its question, in one op.
+        let blocked = op_for(
+            ITEM_UPSERT,
+            json!({ "id": "i", "state": "blocked", "ask": {
+                "question": " Ship now or with Plan 12? ", "options": ["Fold into Plan 12", { "label": "Do it now", "detail": "needs creds" }],
+                "recommendation": { "option": 0, "why": "prod is rebuilt anyway" } } }),
+            &orch,
+        )
+        .unwrap();
+        assert_eq!(blocked["item"]["state"], "blocked");
+        assert_eq!(blocked["ask"]["question"], "Ship now or with Plan 12?");
+        assert_eq!(blocked["ask"]["options"][1]["detail"], "needs creds");
+        assert_eq!(blocked["ask"]["recommendation"]["label"], "Fold into Plan 12");
+        assert!(op_for(ITEM_UPSERT, json!({ "id": "i", "ask": { "question": " " } }), &orch).is_err(), "a question");
+        assert!(
+            op_for(ITEM_UPSERT, json!({ "id": "i", "ask": { "question": "q", "options": ["a"], "recommendation": { "option": 3 } } }), &orch)
+                .is_err(),
+            "its recommendation names an option"
+        );
+        assert!(op_for(ITEM_UPSERT, json!({ "id": "i", "state": "done" }), &orch).unwrap().get("ask").is_none());
 
         let notes = op_for(NOTES_SET, json!({ "text": "plan" }), &orch).unwrap();
         assert_eq!(notes, json!({ "op": "updateOrchestrator", "id": "o", "notes": "plan" }));

@@ -241,6 +241,8 @@ mod tests {
             moved_at: None,
             moved_route_state: None,
             approved_at: None,
+            paused_at: None,
+            check: None,
         }
     }
 

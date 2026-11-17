@@ -296,7 +296,7 @@ impl EngineRpc {
                     .map_err(engine_failed)?;
                 Ok(json!({ "id": chat_id }))
             }
-            OrchestrateOp::UpsertItem { mut item } => {
+            OrchestrateOp::UpsertItem { mut item, ask } => {
                 // An orchestrator's new item is its own unless it says.
                 if item.id.is_none()
                     && item.orchestrator_id.is_none()
@@ -307,8 +307,30 @@ impl EngineRpc {
                 {
                     item.orchestrator_id = Some(Some(id.clone()));
                 }
+                let current = item.id.as_deref().and_then(|id| orch.item(id));
+                // The person's own hold: Blocked is Paused, and a paused card
+                // moved out is resumed.
+                if *who == Who::Person
+                    && let Some(card) = current.as_ref()
+                {
+                    match item.state {
+                        Some(zeron_proto::orchestration::WorkState::Blocked) if card.state != zeron_proto::orchestration::WorkState::Blocked => {
+                            item.state = None;
+                            let id = card.id.clone();
+                            orch.patch_item(item).map_err(RpcError::Failed)?;
+                            return self.pause_item(&id, now);
+                        }
+                        Some(to) if card.paused() && to != zeron_proto::orchestration::WorkState::Blocked => {
+                            item.state = None;
+                            let id = card.id.clone();
+                            orch.patch_item(item).map_err(RpcError::Failed)?;
+                            return self.resume_item(&id, Some(to), now).await;
+                        }
+                        _ => {}
+                    }
+                }
                 // Into Now from Inbox or Next (or made there).
-                let was = item.id.as_deref().and_then(|id| orch.item(id)).map(|i| i.state);
+                let was = current.as_ref().map(|i| i.state);
                 let to_now = item.state == Some(zeron_proto::orchestration::WorkState::Active)
                     && was.is_none_or(|s| {
                         matches!(s, zeron_proto::orchestration::WorkState::Inbox | zeron_proto::orchestration::WorkState::Planned)
@@ -316,10 +338,34 @@ impl EngineRpc {
                 let by_hand = item.state.is_some();
                 let id = orch.patch_item(item).map_err(RpcError::Failed)?;
                 // Its column set by hand: what its route says no longer moves
-                // it, until that route's state changes (board_cards::sync_card).
+                // it, until that route's state changes (board_cards::sync_card);
+                // the board check's note on it is spent.
                 if by_hand {
                     self.mark_moved(&id, now);
+                    orch.workspace().write_orchestration(|doc| {
+                        if let Some(mut c) = doc.work_item(&id)
+                            && c.check.is_some()
+                        {
+                            c.check = None;
+                            doc.upsert_work_item(&c);
+                        }
+                    });
                 }
+                // Its question, raised with the move (Blocked waits on it).
+                let ask_id = match (ask, who) {
+                    (Some(ask), Who::Agent { chat, .. }) => {
+                        if ask.question.trim().is_empty() {
+                            return Err(RpcError::BadParams("The ask needs a question".into()));
+                        }
+                        orch.item(&id).map(|card| self.raise_item_ask(chat, &card, ask, now))
+                    }
+                    (Some(ask), Who::Person) => orch.item(&id).map(|card| {
+                        let from = card.orchestrator_id.clone().or(card.threads.first().cloned()).unwrap_or_default();
+                        self.raise_item_ask(&from, &card, ask, now)
+                    }),
+                    (None, _) => None,
+                };
+                orch.board_poke().poke();
                 // The person moving a card with no thread to Now starts it.
                 if to_now
                     && *who == Who::Person
@@ -327,8 +373,13 @@ impl EngineRpc {
                 {
                     return self.start_item(&id, true);
                 }
-                Ok(json!({ "id": id }))
+                Ok(match ask_id {
+                    Some(ask_id) => json!({ "id": id, "askId": ask_id }),
+                    None => json!({ "id": id }),
+                })
             }
+            OrchestrateOp::PauseItem { id } => self.pause_item(&id, now),
+            OrchestrateOp::ResumeItem { id, state } => self.resume_item(&id, state, now).await,
             OrchestrateOp::StartItem { id } => self.start_item(&id, *who == Who::Person),
             OrchestrateOp::Report {
                 state,
@@ -875,7 +926,17 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             (ChatRole::Orchestrator { id }, Some(member)) if member.orchestrator_id == *id => Ok(()),
             _ => refuse("Only an orchestrator releases threads, from its own crew"),
         },
-        OrchestrateOp::UpsertItem { item } => upsert_permitted(role, item, rpc),
+        OrchestrateOp::UpsertItem { item, ask } => {
+            upsert_permitted(role, item, rpc)?;
+            let current = item.id.as_deref().and_then(|id| orch.item(id));
+            let open_ask = current.as_ref().is_some_and(|c| rpc.card_has_open_ask(&c.id));
+            let threads_changed = item.threads.as_ref().is_some_and(|t| current.as_ref().is_none_or(|c| &c.threads != t));
+            super::board_checks::agent_move_allowed(current.as_ref(), item.state, threads_changed, open_ask, ask.is_some())
+                .map_err(failed)
+        }
+        OrchestrateOp::PauseItem { .. } | OrchestrateOp::ResumeItem { .. } => {
+            refuse("Only the person pauses or resumes a card")
+        }
         OrchestrateOp::StartItem { id } => match (role, orch.item(id)) {
             (ChatRole::Orchestrator { id: mine }, Some(card)) if card.orchestrator_id.as_deref() == Some(mine.as_str()) => Ok(()),
             _ => refuse("An orchestrator starts only its own cards: the person starts the rest"),
@@ -1059,8 +1120,8 @@ fn upsert_permitted(
     }
 }
 
-/// What `chat_id`'s agent is doing, freshest first: this engine's own runs,
-/// else its host's synced status row.
+/// What `chat_id`'s agent is doing, freshest first: this engine's own runs
+/// (all there is for a chat hosted here), else its host's synced status row.
 pub(crate) fn chat_status(rpc: &EngineRpc, chat_id: &str) -> SessionStatus {
     if let Some(session) = rpc
         .sessions_ref()
@@ -1070,6 +1131,12 @@ pub(crate) fn chat_status(rpc: &EngineRpc, chat_id: &str) -> SessionStatus {
         .find(|s| s.chat_id == chat_id)
     {
         return session.status;
+    }
+    // Hosted here: this engine's runs are the truth; a stored row is what an
+    // earlier run of this engine left (a stop, a restart), not a turn now.
+    let here = rpc.orchestration().device_id();
+    if rpc.workspace_host().chat(chat_id).ok().flatten().is_some_and(|c| c.device_id == here) {
+        return SessionStatus::Idle;
     }
     rpc.workspace_host()
         .read_sessions()
@@ -1129,6 +1196,12 @@ pub(crate) fn deliver_with(
     };
     let status = chat_status(rpc, chat_id);
     let doc_host = rpc.doc_host_ref();
+    // A thread of a card the person paused: an agent's message waits in its
+    // held queue until they resume the card.
+    let paused = from.is_some() && super::board_checks::paused_thread(rpc.orchestration(), chat_id);
+    if paused {
+        doc_host.hold_queue(chat_id);
+    }
     // (A queued row keeps its files apart; a run and a steer name them.)
     let with_files = crate::doc_host::queued_message_prompt(&prompt, attachments);
     let queued = |doc_host: &crate::DocHost| {
@@ -1138,6 +1211,7 @@ pub(crate) fn deliver_with(
             .map_err(engine_failed)
     };
     match (status, when) {
+        _ if paused => queued(doc_host),
         (SessionStatus::Working, When::Now) => doc_host
             .queue_command_with_transfers(
                 chat_id,

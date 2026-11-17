@@ -124,7 +124,7 @@ test("orch board queued: Move to offers Up next and Later, not Next and Inbox", 
 	app:frames(10)
 	app:click('role:menuitem "Move to"')
 	app:frames(10)
-	for _, name in { "Up next", "Later", "Now", "Blocked", "Review", "Done today" } do
+	for _, name in { "Up next", "Later", "Now", "Pause", "Review", "Done today" } do
 		expect(app:has(`role:menuitem "{name}"`)).to_be(true)
 	end
 	expect(app:has('role:menuitem "Next"')).to_be(false)

@@ -422,6 +422,17 @@ function M.move_item(id: string, state: string, order: number?): any
 	return M.op({ op = "upsertItem", item = { id = id, state = state, order = order } })
 end
 
+-- A card paused by the person: its threads stopped, their queued messages
+-- held, the card Blocked in Paused. A promise.
+function M.pause_item(id: string): any
+	return M.op({ op = "pauseItem", id = id })
+end
+
+-- A paused card resumed into `state` (left out: Now). A promise.
+function M.resume_item(id: string, state: string?): any
+	return M.op({ op = "resumeItem", id = id, state = if state then camel(state) else nil })
+end
+
 -- A card in Review approved: Done, its approval recorded. A promise.
 function M.approve_item(id: string): any
 	return M.op({ op = "approveItem", id = id })
