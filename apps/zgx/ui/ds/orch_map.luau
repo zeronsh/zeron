@@ -83,7 +83,7 @@ end
 -- Brain dump in the middle; beside the others while it's tried.)
 M.VARIANTS = { "topology", "timeline", "machines", "graph", "force" }
 M.WINDOWS = { 15, 60 }
-M.DEFAULT = { variant = "topology", window = 15 } :: View
+M.DEFAULT = { variant = "force", window = 15 } :: View
 
 -- How tall the Map stands at most: about the window (three quarters of
 -- it, 360 to 900 points; 640 where the host gives no size). A view with
