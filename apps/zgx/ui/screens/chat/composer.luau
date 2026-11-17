@@ -176,6 +176,8 @@ local function Composer(): Node
 	local project = ui.state("chat_project", nil :: string?)
 	-- On Cloud: the size of machine a new chat starts on (Work in's Machine).
 	local machine_size = ui.state("chat_machine", nil :: string?)
+	-- An open Cloud chat's size, as its machine says (its chip's Machine menu).
+	local fixed_size = ui.state("chat_fixed_machine", nil :: string?)
 	local locals: { [string]: State<any> } =
 		{ model = model, effort = effort, fast = fast, options = options, access = access, plan = plan }
 
@@ -1155,6 +1157,14 @@ local function Composer(): Node
 	end)
 	-- (The catalog's device, a new chat's project's host included.)
 	local accounts = shared.model_accounts(run_device)
+	-- (The chip's chosen size: the one its machine is on, or will come back on.)
+	ui.effect(function()
+		local s = machine.session()
+		local size = if s then cloud.resizing:get()[s.chat] or s.machine else nil
+		if fixed_size:peek() ~= size then
+			fixed_size:set(size)
+		end
+	end)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -1176,13 +1186,18 @@ local function Composer(): Node
 		end
 		-- A Cloud chat: on Cloud, and the size of its machine ("Cloud · Large").
 		local on_cloud = cloud.on_device((s :: any).device)
+		local restarting = false
 		if on_cloud then
 			local session = cloud.session_for(s.id, (s :: any).device)
-			on = CloudMachine.on_size("Cloud", CloudMachine.size_name(cloud.machines(), session and session.machine))
+			-- (Its size as picked while its machine restarts on it.)
+			local to = cloud.resizing:get()[s.id]
+			on = CloudMachine.on_size("Cloud", CloudMachine.size_name(cloud.machines(), to or (session and session.machine)))
+			restarting = to ~= nil
 		end
 		return {
 			device = on,
 			cloud = on_cloud,
+			restarting = restarting,
 			name = name,
 			worktree = path ~= nil and s.cwd ~= nil and s.cwd ~= path,
 			project = project,
@@ -1294,6 +1309,23 @@ local function Composer(): Node
 			branches = where.branches,
 			branches_empty = where.branches_empty,
 			branch_fixed = branch_fixed,
+			-- On Cloud: the chip opens its machine's sizes; a pick restarts
+			-- it on the size (or wakes it there), as the tray's sizes do.
+			fixed_machine = {
+				value = fixed_size,
+				items = function(): { any }
+					return CloudMachine.chat_size_choices(cloud.machines(), cloud.machine(), running:get()) :: any
+				end,
+				on_choose = function(size: string)
+					local s = machine.session()
+					if s and s.machine ~= size then
+						machine.pick(size)
+					end
+				end,
+				note = function(): string?
+					return CloudMachine.size_note(machine.session(), running:get())
+				end,
+			},
 			cargo = shared.cargo,
 			on_remove_cargo = shared.remove_cargo,
 			on_attach = function()

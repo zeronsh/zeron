@@ -116,9 +116,15 @@ end
 -- alerts, raising none), as the composer's old line said a host was out of
 -- reach only to someone with something to send (link_notice's `intent`), and
 -- said once there's a draft or a queue (`opts.intent`).
-function M.line(s: any, opts: { intent: boolean? }?): Notice?
+function M.line(s: any, opts: { intent: boolean?, restarting: string? }?): Notice?
 	local intent = opts ~= nil and opts.intent == true
 	local state = s.state
+	-- A size the person picked, its machine restarting on it: said as what it
+	-- is (progress, in the info tone: the chip's glyph says it too).
+	local restarting = if opts then opts.restarting else nil
+	if restarting and state ~= "error" and state ~= "data_expired" then
+		return { text = say("restarting", `Restarting on {restarting}…`, { size = restarting }), spinner = true }
+	end
 	if state == "data_expired" or state == "error" or (s.wake_blocked and s.wake_blocked.reason == "disk_too_small") then
 		return nil
 	end
@@ -659,6 +665,32 @@ function M.size_choices(machines: { any }, default: string?): { SizeChoice }
 	return out
 end
 
+-- An existing Cloud chat's Machine menu, from its chip: the same sizes, each
+-- out of reach while a turn runs (a size changes only as its machine
+-- restarts); and what a pick does to the machine, said under them.
+function M.chat_size_choices(machines: { any }, default: string?, running: boolean): { SizeChoice }
+	local out = M.size_choices(machines, default)
+	if running then
+		for _, c in out do
+			(c :: any).disabled = true
+		end
+	end
+	return out
+end
+function M.size_note(s: any?, running: boolean): string?
+	if not s then
+		return nil
+	end
+	if running then
+		return say("size_note_running", "Size can change once this turn ends.")
+	elseif s.state == "ready" or s.state == "starting" or s.state == "provisioning" then
+		return say("size_note_awake", "Restarts the machine. Files stay; processes stop.")
+	elseif s.state == "sleeping" then
+		return say("size_note_asleep", "Wakes the machine on it. Files stay.")
+	end
+	return nil
+end
+
 -- The size a new chat starts on: the one picked while it's on offer, else the
 -- account's default, else none (an edge that offers no choice).
 function M.size_for(machines: { any }, picked: string?, default: string?): string?
@@ -688,10 +720,14 @@ function M.size_name(machines: { any }, id: string?): string?
 	return nil
 end
 
--- Where a Cloud chat runs, with its size: "Cloud · Large".
-function M.on_size(where: string, size: string?): string
+-- Where a Cloud chat runs, with its size: "Cloud · Large"; while its machine
+-- restarts on a size picked, that size and so: "Cloud · Large · restarting".
+function M.on_size(where: string, size: string?, restarting: boolean?): string
 	if size == nil then
 		return where
+	end
+	if restarting then
+		return say("on_size_restarting", `{where} · {size} · restarting`, { where = where, size = size })
 	end
 	return say("on_size", `{where} · {size}`, { where = where, size = size })
 end

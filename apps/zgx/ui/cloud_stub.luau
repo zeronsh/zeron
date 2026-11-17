@@ -559,6 +559,7 @@ local CASES: { [string]: () -> any } = {
 	provisioning = function() return session_of { state = "provisioning" } end,
 	ready = function() return session_of { state = "ready", disk = { used = 10, capacity = 50, level = "ok" } } end,
 	ready_large = function() return session_of { state = "ready", machine = "large", disk = { used = 10, capacity = 111, level = "ok" } } end,
+	ready_xlarge = function() return session_of { state = "ready", machine = "xlarge", disk = { used = 10, capacity = 251, level = "ok" } } end,
 	updating = function() return session_of { state = "ready", stage = "updating", disk = { used = 10, capacity = 50, level = "ok" } } end,
 	slow = function() return session_of { state = "starting", stage = "slow" } end,
 	restored = function() return session_of { state = "ready", restored = RESTORED_AT, disk = { used = 10, capacity = 50, level = "ok" } } end,

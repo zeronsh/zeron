@@ -49,6 +49,23 @@ test("a new chat starts on the pick while it's offered, else the default", funct
 	expect(logic.on_size("Cloud", logic.size_name(MACHINES, "huge"))).to_be("Cloud")
 end)
 
+test("an active chat's sizes wait out a running turn, and say what a pick does", function()
+	local running = logic.chat_size_choices(MACHINES, "large", true)
+	for _, c in running do
+		expect((c :: any).disabled).to_be(true)
+	end
+	expect((logic.chat_size_choices(MACHINES, "large", false)[1] :: any).disabled).to_be(nil)
+	expect(logic.size_note({ state = "ready" }, true)).to_be("Size can change once this turn ends.")
+	expect(logic.size_note({ state = "ready" }, false)).to_be("Restarts the machine. Files stay; processes stop.")
+	expect(logic.size_note({ state = "sleeping" }, false)).to_be("Wakes the machine on it. Files stay.")
+	-- Restarting on a size picked: said as that, quietly; the chip says it too.
+	local line = logic.line({ state = "stopping" }, { restarting = "Extra large" }) :: any
+	expect(line.text).to_be("Restarting on Extra large…")
+	expect(line.quiet).to_be(nil)
+	expect(logic.on_size("Cloud", "Extra large", true)).to_be("Cloud · Extra large · restarting")
+	expect(logic.size_note(nil, false)).to_be(nil)
+end)
+
 -- ── On the composer ───────────────────────────────────────────────────────
 
 local function settle(app: any)
@@ -273,4 +290,75 @@ test("the picker and Settings → Cloud show the same catalogue and default", fu
 	expect(settings:has(`{group} >> role:radio "Standard"`)).to_be(false)
 	-- And a new chat starts on it.
 	expect(chosen(app, "Machine")).to_contain("Large")
+end)
+
+-- ── An active chat's size ─────────────────────────────────────────────────
+-- A chat already on Cloud, its composer at the conversation's foot: its chip
+-- opens the same sizes, the one its machine is on chosen; a pick restarts
+-- an awake machine on it (asleep, then woken on the size) and says so
+-- first; while a turn runs, none can be picked.
+
+local function active_cloud_chat(case: string): any
+	local app = mount("chat_fixture.luau")
+	app:resize(960, 760)
+	app:command("go_s2")
+	settle(app)
+	app:command("cloud_stub.offer")
+	app:command("cloud_stub.real_sizes")
+	app:command("cloud_stub.default.large")
+	app:command(`cloud_stub.session.{case}`)
+	app:command("session_on_cloud")
+	rested(app)
+	return app
+end
+
+local CHIP = 'role:button "Change the machine size"'
+
+test("an active Cloud chat's chip opens its sizes, the one it's on chosen, with what a pick does", function()
+	local app = active_cloud_chat("ready")
+	expect(app:has(CHIP)).to_be(true)
+	app:click(CHIP)
+	settle(app)
+	for _, name in { "Small", "Default", "Large", "Extra large" } do
+		expect(app:has(`role:option ~"{name}"`)).to_be(true)
+	end
+	-- The size it's on (Default), the account's default tagged.
+	expect(app:has('role:option ~"Large" >> "Your default"')).to_be(true)
+	expect(app:has('~"Restarts the machine. Files stay; processes stop."')).to_be(true)
+	app:click('role:option ~"Extra large"')
+	rested(app)
+	local calls = table.concat((app:state("cloud_stub_calls") :: any) or {}, ",")
+	expect(calls).to_contain("cloud.sleep:s2")
+	expect(calls).to_contain("cloud.wake:s2:xlarge")
+	-- Restarting on it: the chip names the size, its glyph a restart's, and
+	-- the line says so as progress (no warning).
+	expect(app:has('~"Cloud · Extra large"')).to_be(true)
+	expect(app:has(".place-lead-restart")).to_be(true)
+	app:click('role:button "Open Alerts"')
+	settle(app)
+	expect(app:has('~"Restarting on Extra large…"')).to_be(true)
+	-- Up on it: the chip names the size alone.
+	app:command("cloud_stub.session.ready_xlarge")
+	rested(app)
+	expect(app:has('~"Cloud · Extra large"')).to_be(true)
+	expect(app:has('~"restarting"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("asleep, a pick wakes its machine on the size; a chat not on Cloud has no menu", function()
+	local app = active_cloud_chat("sleeping")
+	app:click(CHIP)
+	settle(app)
+	expect(app:has('~"Wakes the machine on it. Files stay."')).to_be(true)
+	app:click('role:option ~"Small"')
+	rested(app)
+	local calls = table.concat((app:state("cloud_stub_calls") :: any) or {}, ",")
+	expect(calls).to_contain("cloud.wake:s2:small")
+	expect(string.find(calls, "cloud.sleep:s2", 1, true)).to_be(nil)
+	-- A chat on this computer: its chip says where it works, opening nothing.
+	local here = mount("chat_fixture.luau")
+	here:resize(960, 760)
+	here:command("go_s2")
+	settle(here)
+	expect(here:has(CHIP)).to_be(false)
 end)
