@@ -109,7 +109,7 @@ if __name__=='__main__':
         frames,peak=render(cue)
         write(folder/(cue[0]+'.wav'),frames)
         if args.install_attention and cue[0] == '06-attention':
-            asset = Path(__file__).resolve().parents[1] / 'crates/ui/assets/sounds/attention.wav'
+            asset = Path(__file__).resolve().parents[1] / 'assets/sounds/attention.wav'
             write(asset, frames)
         manifest.append(dict(file=cue[0]+'.wav',name=cue[1],description=cue[2],duration=cue[3],
                              peak_dbfs=round(20*math.log10(peak),1)))

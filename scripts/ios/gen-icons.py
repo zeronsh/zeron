@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Mirror the desktop's icons into the iOS asset catalog (vector SVG imagesets).
 
-- Tool icons (crates/ui/assets/icons/<name>.svg) → ToolIcons/tool-<name>
+- Tool icons (assets/icons/<name>.svg) → ToolIcons/tool-<name>
   as template images (currentColor → black; the painter tints them).
-- File icons (crates/ui/assets/file-icons/{files,folders}/*.svg) → FileIcons/
+- File icons (assets/file-icons/{files,folders}/*.svg) → FileIcons/
   fileicon-<dir>-<name>, polychrome, with a dark-appearance variant using the
   desktop's palette lift (file_icons.rs `dark_icon_svg`).
 
@@ -12,7 +12,7 @@ Re-run after the desktop icon sets change:  python3 scripts/ios/gen-icons.py
 import json, os, re, shutil, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-UI = os.path.join(ROOT, "crates/ui/assets")
+UI = os.path.join(ROOT, "assets")
 CAT = os.path.join(ROOT, "apps/ios/Zeron/Assets.xcassets")
 
 TOOL_ICONS = ["terminal", "document", "document-add", "pen", "magnifer", "folder-with-files",

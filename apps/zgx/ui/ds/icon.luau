@@ -1,4 +1,4 @@
--- Icons: Zeron's own (crates/ui/assets/icons, Solar Linear), drawn in the
+-- Icons: Zeron's own (assets/icons, Solar Linear), drawn in the
 -- colour of the text around them (a button's, hover included).
 -- `Icon { name = "plus", size = 16 }`.
 
