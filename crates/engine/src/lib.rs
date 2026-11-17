@@ -311,6 +311,15 @@ impl EngineCore {
                 local_only: matches!(profile.scope(), WorkspaceScope::Local),
             },
         )?;
+        // What was at work here when the engine last stopped: its session
+        // rows as stored, before anything here rewrites them (crew threads
+        // left waiting are resumed by the board's start-up pass).
+        let before_stop: Vec<zeron_proto::Session> = workspace
+            .read_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.device_id == device_id)
+            .collect();
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.follow_chat_deletions(workspace.watch_chats());
@@ -483,6 +492,7 @@ impl EngineCore {
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         plugins.start();
         let orchestration = orchestration::Orchestration::new(workspace.clone());
+        orchestration.set_before_stop(before_stop);
         Ok(Self {
             sessions,
             doc_host,

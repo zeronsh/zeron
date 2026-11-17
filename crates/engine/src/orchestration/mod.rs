@@ -172,6 +172,12 @@ struct Inner {
     created: Mutex<CreatedBy>,
     /// Runs the board check a moment after a change (board_checks.rs).
     board_poke: board_checks::Poke,
+    /// This device's session rows as the engine found them on start (what
+    /// was at work when it stopped), until the start-up pass takes them.
+    before_stop: Mutex<Option<Vec<zeron_proto::Session>>>,
+    /// Crew threads resumed after the restart, and when: their cards are
+    /// left alone until their new turn has had time to start.
+    resumed: Mutex<Vec<(String, chrono::DateTime<Utc>)>>,
 }
 
 /// The newest request ids, oldest dropped past [`CREATED_KEPT`].
@@ -239,6 +245,8 @@ impl Orchestration {
                 progress: progress::ProgressBook::default(),
                 created: Mutex::new(CreatedBy::default()),
                 board_poke: board_checks::Poke::default(),
+                before_stop: Mutex::new(None),
+                resumed: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -249,6 +257,29 @@ impl Orchestration {
 
     pub fn device_id(&self) -> &str {
         self.inner.workspace.device_id()
+    }
+
+    /// This device's session rows as found on start, before anything here
+    /// rewrote them (`EngineCore` sets them once).
+    pub(crate) fn set_before_stop(&self, rows: Vec<zeron_proto::Session>) {
+        *lock(&self.inner.before_stop) = Some(rows);
+    }
+
+    /// [`Orchestration::set_before_stop`]'s rows, taken (once).
+    pub(crate) fn take_before_stop(&self) -> Vec<zeron_proto::Session> {
+        lock(&self.inner.before_stop).take().unwrap_or_default()
+    }
+
+    /// Note `chats` resumed after the restart at `at`.
+    pub(crate) fn note_resumed(&self, chats: &[String], at: chrono::DateTime<Utc>) {
+        lock(&self.inner.resumed).extend(chats.iter().map(|c| (c.clone(), at)));
+    }
+
+    /// The threads resumed after the restart less than `within` before `now`.
+    pub(crate) fn resumed_since(&self, now: chrono::DateTime<Utc>, within: chrono::Duration) -> Vec<String> {
+        let mut list = lock(&self.inner.resumed);
+        list.retain(|(_, at)| now - *at < within);
+        list.iter().map(|(c, _)| c.clone()).collect()
     }
 
     /// The board check, run a moment from now.

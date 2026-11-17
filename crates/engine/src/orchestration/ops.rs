@@ -1120,8 +1120,8 @@ fn upsert_permitted(
     }
 }
 
-/// What `chat_id`'s agent is doing, freshest first: this engine's own runs,
-/// else its host's synced status row.
+/// What `chat_id`'s agent is doing, freshest first: this engine's own runs
+/// (all there is for a chat hosted here), else its host's synced status row.
 pub(crate) fn chat_status(rpc: &EngineRpc, chat_id: &str) -> SessionStatus {
     if let Some(session) = rpc
         .sessions_ref()
@@ -1131,6 +1131,12 @@ pub(crate) fn chat_status(rpc: &EngineRpc, chat_id: &str) -> SessionStatus {
         .find(|s| s.chat_id == chat_id)
     {
         return session.status;
+    }
+    // Hosted here: this engine's runs are the truth; a stored row is what an
+    // earlier run of this engine left (a stop, a restart), not a turn now.
+    let here = rpc.orchestration().device_id();
+    if rpc.workspace_host().chat(chat_id).ok().flatten().is_some_and(|c| c.device_id == here) {
+        return SessionStatus::Idle;
     }
     rpc.workspace_host()
         .read_sessions()

@@ -464,6 +464,10 @@ a reply to an @ask answers it, a comment on an @card goes to its thread):\n",
         )
     }
 
+    /// What a crew thread that was at work when its engine stopped is sent
+    /// once the engine is back (board_checks::to_resume).
+    pub const RESUMED_AFTER_RESTART: &str = "[Resumed] The engine restarted; continue where you left off.";
+
     /// What a card's thread is sent when the person asks for changes on it
     /// from Review.
     pub fn changes_requested(title: &str, text: &str) -> String {

@@ -54,6 +54,9 @@ const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 /// How long after a start the first check runs (synced rows land first).
 const AFTER_START: std::time::Duration = std::time::Duration::from_secs(25);
 
+/// How long a card of a thread resumed after a restart is left alone.
+const RESUMED_GRACE_SECS: i64 = 120;
+
 /// The errored-thread ask's options.
 pub(crate) const RETRY: &str = "Retry";
 pub(crate) const DROP: &str = "Drop it";
@@ -463,6 +466,12 @@ pub(crate) fn start(orchestration: Orchestration) {
     tokio::spawn(async move {
         tokio::time::sleep(AFTER_START).await;
         if let Some(rpc) = orchestration.rpc() {
+            // Crew threads the stop left at work: told to carry on, first.
+            let resumed = rpc.resume_after_restart(orchestration.take_before_stop());
+            if !resumed.is_empty() {
+                orchestration.note_resumed(&resumed, Utc::now());
+                tracing::info!(?resumed, "board: crew threads resumed after the restart");
+            }
             let changed = rpc.check_boards(Utc::now()).await;
             tracing::info!(cards = changed.len(), ?changed, "board: start-up check");
         }
@@ -509,6 +518,44 @@ fn changed_sigs(seen: &mut HashMap<String, Sig>, sessions: &[Session]) -> bool {
         }
     }
     changed
+}
+
+/// The crew threads to resume after a restart: hosted here (`before` is
+/// this device's rows as stored when the engine stopped), in a crew, at
+/// work when it stopped (mid-turn, waiting on their own background work, or
+/// running subagents), and nothing run since (`now`: this engine's sessions
+/// since it started; a
+/// turn in flight or a newer completed turn means something already picked
+/// them up; judged at `at`). Not a thread of a card the person paused, nor one archived,
+/// nor one whose last turn ended normally (nothing to pick back up). Pure.
+pub(crate) fn to_resume(
+    before: &[Session],
+    now: &HashMap<String, Session>,
+    state: &zeron_proto::orchestration::OrchestrationState,
+    chats: &HashMap<String, Chat>,
+    at: DateTime<Utc>,
+) -> Vec<String> {
+    let mut out: Vec<String> = before
+        .iter()
+        .filter(|b| b.status == SessionStatus::Working || b.waiting.is_some() || b.running_subagents > 0)
+        .filter(|b| state.crew.iter().any(|m| m.chat_id == b.chat_id && !m.released))
+        .filter(|b| chats.get(&b.chat_id).is_some_and(|c| !c.archived))
+        .filter(|b| !state.items.iter().any(|i| !i.removed && i.paused() && i.threads.iter().any(|t| *t == b.chat_id)))
+        .filter(|b| match now.get(&b.chat_id) {
+            // (A Working row left from before the stop has no heartbeat:
+            // stale, not a turn in flight.)
+            Some(n) => {
+                let in_flight = matches!(n.status, SessionStatus::Working | SessionStatus::AwaitingInput)
+                    && !zeron_proto::view::session_stale(n, at);
+                !in_flight && n.last_completed_turn == b.last_completed_turn
+            }
+            None => true,
+        })
+        .map(|b| b.chat_id.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// One card's check result, for the start-up report and the dry run.
@@ -657,9 +704,47 @@ impl EngineRpc {
         plan_from(&state, &chats, &sessions, &self.known_change_requests(), (!all).then(|| orch.device_id()), now)
     }
 
+    /// The crew threads `before` (this device's rows when the engine
+    /// stopped) left at work, each sent [`RESUMED_AFTER_RESTART`] once
+    /// ([`to_resume`]). The ones resumed.
+    ///
+    /// [`RESUMED_AFTER_RESTART`]: zeron_proto::orchestration::prompt_text::RESUMED_AFTER_RESTART
+    pub(crate) fn resume_after_restart(&self, before: Vec<Session>) -> Vec<String> {
+        if before.is_empty() {
+            return Vec::new();
+        }
+        let orch = self.orchestration();
+        let chats: HashMap<String, Chat> =
+            orch.workspace().read_chats().unwrap_or_default().into_iter().map(|c| (c.id.clone(), c)).collect();
+        // What ran here since the start: this engine's own sessions (its
+        // stored rows still say what they said at the stop, heartbeat or not
+        // after a quick restart).
+        let now: HashMap<String, Session> =
+            self.sessions_ref().watch_sessions().borrow().iter().map(|s| (s.chat_id.clone(), s.clone())).collect();
+        let mut resumed = Vec::new();
+        for chat in to_resume(&before, &now, &orch.state(), &chats, Utc::now()) {
+            let text = zeron_proto::orchestration::prompt_text::RESUMED_AFTER_RESTART;
+            match super::ops::deliver(self, &chat, text, None, super::ops::When::Next) {
+                Ok(_) => resumed.push(chat),
+                Err(error) => tracing::warn!(%error, %chat, "board: a crew thread wasn't resumed after the restart"),
+            }
+        }
+        resumed
+    }
+
     /// The board check, applied. The cards it changed.
     pub(crate) async fn check_boards(&self, now: DateTime<Utc>) -> Vec<Change> {
-        let changes = self.plan_board_checks(now, false);
+        let mut changes = self.plan_board_checks(now, false);
+        // Cards of threads just resumed after a restart are left alone until
+        // their new turn has started: the stop marked their last turn
+        // interrupted, which isn't the person stopping them.
+        let resumed = self.orchestration().resumed_since(now, TimeDelta::seconds(RESUMED_GRACE_SECS));
+        if !resumed.is_empty() {
+            let state = self.orchestration().state();
+            changes.retain(|c| {
+                !state.items.iter().any(|i| i.id == c.item && i.threads.iter().any(|t| resumed.contains(t)))
+            });
+        }
         self.apply_changes(&changes, now);
         changes
     }
