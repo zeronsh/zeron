@@ -503,7 +503,7 @@ M.View = ui.component(function(props: {
 			approval = kit.ink("zeron.status.approval"),
 			done = kit.ink("zeron.status.done"),
 			failed = kit.ink("zeron.status.failed"),
-			label_bg = kit.ink("background", 0.82),
+			label_bg = kit.ink("background", 0.9),
 			lit = kit.ink("text.primary", 0.85),
 			-- (A fading chat's ring, by its strength in tenths.)
 			fade = {},
@@ -587,9 +587,14 @@ M.View = ui.component(function(props: {
 		-- another name: an orchestrator's beside it, off its own link and
 		-- its fan, else above or below it, else left out (its card names it).
 		local boxes: { { number } } = {}
+		-- (The names alone, and the Brain's and orchestrators' marks.)
+		local names_at: { { number } } = {}
 		for i, n in fmodel.nodes do
 			local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING
 			table.insert(boxes, { s.x[i] - r, s.y[i] - r, s.x[i] + r, s.y[i] + r })
+			if n.kind ~= "chat" then
+				table.insert(names_at, { s.x[i] - r, s.y[i] - r, s.x[i] + r, s.y[i] + r })
+			end
 		end
 		for i, n in fmodel.nodes do
 			local x, y = s.x[i], s.y[i]
@@ -599,6 +604,7 @@ M.View = ui.component(function(props: {
 				local w = c:measure_text(names[i], M_HUB)
 				label_x[i], label_y[i], label_w[i] = x, y + R_BRAIN + 6, w
 				table.insert(boxes, { x - w / 2 - 4, y + R_BRAIN + 5, x + w / 2 + 4, y + R_BRAIN + 23 })
+				table.insert(names_at, { x - w / 2 - 4, y + R_BRAIN + 5, x + w / 2 + 4, y + R_BRAIN + 23 })
 			elseif n.kind == "orchestrator" then
 				local shape = draw.cookie_of(crew_of(i))
 				hub_shape[i] = shape
@@ -615,29 +621,47 @@ M.View = ui.component(function(props: {
 				local ax, ay = x - (if p > 0 then s.x[p] else x), y - (if p > 0 then s.y[p] else y - 1)
 				local al = math.max(1e-6, math.sqrt(ax * ax + ay * ay))
 				ax, ay = ax / al, ay / al
-				local gap = R_HUB + 6
-				local tries = {
-					{ 1, 0, x + gap + w / 2, y - 8 },
-					{ -1, 0, x - gap - w / 2, y - 8 },
-					{ 0, 1, x, y + gap },
-					{ 0, -1, x, y - gap - 17 },
-					{ 0.7, 0.7, x + gap * 0.7 + w / 2, y + gap * 0.7 - 4 },
-					{ -0.7, 0.7, x - gap * 0.7 - w / 2, y + gap * 0.7 - 4 },
-					{ 0.7, -0.7, x + gap * 0.7 + w / 2, y - gap * 0.7 - 13 },
-					{ -0.7, -0.7, x - gap * 0.7 - w / 2, y - gap * 0.7 - 13 },
-				}
+				-- (Next to it first; a crowded one's a little further out, its
+				-- name's ground over the lines between.)
+				local tries = {}
+				for _, gap in { R_HUB + 6, R_HUB + 24, R_HUB + 48 } do
+					local far = gap - R_HUB - 6
+					local function at(dx: number, dy: number, lx: number, ly: number)
+						table.insert(tries, { dx, dy, lx, ly, far })
+					end
+					at(1, 0, x + gap + w / 2, y - 8)
+					at(-1, 0, x - gap - w / 2, y - 8)
+					at(0, 1, x, y + gap)
+					at(0, -1, x, y - gap - 17)
+					at(0.7, 0.7, x + gap * 0.7 + w / 2, y + gap * 0.7 - 4)
+					at(-0.7, 0.7, x - gap * 0.7 - w / 2, y + gap * 0.7 - 4)
+					at(0.7, -0.7, x + gap * 0.7 + w / 2, y - gap * 0.7 - 13)
+					at(-0.7, -0.7, x - gap * 0.7 - w / 2, y - gap * 0.7 - 13)
+				end
 				table.sort(tries, function(a: any, b: any): boolean
+					if a[5] ~= b[5] then
+						return a[5] < b[5]
+					end
 					local da, db = a[1] * ax + a[2] * ay, b[1] * ax + b[2] * ay
 					if math.abs(math.abs(da) - math.abs(db)) > 0.05 then
 						return math.abs(da) < math.abs(db)
 					end
 					return da < db
 				end)
-				for _, t in tries do
-					local lx, ly = t[3], t[4]
-					if free(boxes, lx - w / 2 - 4, ly - 1, lx + w / 2 + 4, ly + 17) then
-						label_x[i], label_y[i], label_w[i] = lx, ly, w
-						table.insert(boxes, { lx - w / 2 - 4, ly - 1, lx + w / 2 + 4, ly + 17 })
+				-- (None clear of every mark, in a crowd: over chats' marks, its
+				-- ground under it, but never over another name or its own.)
+				for pass = 1, 2 do
+					for _, t in tries do
+						local lx, ly = t[3], t[4]
+						local x0, y0, x1, y1 = lx - w / 2 - 4, ly - 1, lx + w / 2 + 4, ly + 17
+						if free(if pass == 1 then boxes else names_at, x0, y0, x1, y1) and (pass == 1 or free({ { x - R_HUB, y - R_HUB, x + R_HUB, y + R_HUB } }, x0, y0, x1, y1)) then
+							label_x[i], label_y[i], label_w[i] = lx, ly, w
+							table.insert(boxes, { x0, y0, x1, y1 })
+							table.insert(names_at, { x0, y0, x1, y1 })
+							break
+						end
+					end
+					if label_x[i] then
 						break
 					end
 				end
@@ -774,8 +798,15 @@ M.View = ui.component(function(props: {
 					fill_mark(c, i)
 				end
 			end
-			if show_names and label_x[i] then
-				label(c, i, if n.kind == "chat" then T_NAME else T_HUB, if n.kind == "chat" then p.secondary else p.fg, p)
+		end
+		-- Names after every mark, their ground over what's under them (in a
+		-- crowd, a name sits over chats).
+		if show_names then
+			for i, n in nodes do
+				local lx, ly = label_x[i], label_y[i]
+				if lx and lx >= x0 - 200 and lx <= x1 + 200 and ly >= y0 - 40 and ly <= y1 + 40 and not (moving and awake[i]) then
+					label(c, i, if n.kind == "chat" then T_NAME else T_HUB, if n.kind == "chat" then p.secondary else p.fg, p)
+				end
 			end
 		end
 		-- Live: a dashed arc for each message in flight.
@@ -852,9 +883,9 @@ M.View = ui.component(function(props: {
 			end
 			-- (Pinned by hand: a pin at its top left, while it's lit.)
 			if s.pinned[i] and not s.fixed[i] then
-				local d = r * 0.72 + 9
-				local pin, w = draw.pin(nx - d, ny - d, 13)
-				c:circle(nx - d, ny - d, 8.5, p.bg)
+				local d = r * 0.72 + 10
+				local pin, w = draw.pin(nx - d, ny - d, 16)
+				c:circle(nx - d, ny - d, 10, p.bg)
 				c:stroke(pin, p.fg, w, ROUND)
 				count("pins")
 			end
