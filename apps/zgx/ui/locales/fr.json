@@ -591,6 +591,10 @@
         "supervised_hint": "Demander avant chaque commande ou modification de fichier.",
         "edits": "Accepter les modifications",
         "edits_hint": "Appliquer les modifications, demander pour le reste.",
+        "auto": "Auto",
+        "auto_hint": "Le vérificateur de l’agent autorise les actions sûres et vous demande pour les risquées.",
+        "auto_unavailable": "Auto indisponible",
+        "auto_unavailable_hint": "Cet agent ne prend pas en charge Auto. Choisissez un autre mode d’accès ou un autre agent.",
         "full": "Accès complet",
         "full_hint": "Exécuter les commandes et appliquer les modifications sans demander."
       },
@@ -607,6 +611,13 @@
         "worktree_hint": "Une copie isolée, sur sa propre branche."
       },
       "work_in": "Travailler dans",
+      "reach": {
+        "label": "Portée",
+        "devices": "Tous les appareils",
+        "devices_hint": "Travaille avec vos autres appareils : leurs conversations et les commandes qui s’y exécutent.",
+        "isolated": "Isolée",
+        "isolated_hint": "Seulement sa propre machine et les conversations qu’elle lance."
+      },
       "project": {
         "label": "Projet",
         "search": "Rechercher un projet…",
@@ -627,6 +638,7 @@
       "dictate": "Dicter",
       "queue_message": "Mettre en file d’attente",
       "send_message": "Envoyer le message",
+      "send_auto_unavailable": "Auto n’est pas disponible pour cet agent. Choisissez un autre mode d’accès pour envoyer.",
       "stop": "Arrêter",
       "back": "Retour",
       "next": "Suivant",
@@ -719,7 +731,18 @@
       "show_all_lines": "Afficher les {n} lignes",
       "open_subagent": "Ouvrir le sous-agent {title}",
       "subagent": "Sous-agent",
-      "worked_for": "{secs} s de travail · {summary}"
+      "worked_for": "{secs} s de travail · {summary}",
+      "review": {
+        "reviewing": "Vérification…",
+        "approved": "Approuvé automatiquement",
+        "denied": "Bloqué par la vérification automatique",
+        "timed-out": "Délai de vérification dépassé",
+        "reviewing_hint": "Le vérificateur de l’agent contrôle cette action avant son exécution.",
+        "approved_hint": "Le vérificateur de l’agent a jugé cette action sûre et l’a laissée s’exécuter.",
+        "denied_hint": "Le vérificateur de l’agent a arrêté cette action. Elle ne s’est pas exécutée.",
+        "timed-out_hint": "Le vérificateur de l’agent n’a pas tranché à temps : cette action ne s’est pas exécutée.",
+        "risk": "Risque : {risk}"
+      }
     },
     "transcript": {
       "copy_message": "Copier le message",
@@ -741,7 +764,23 @@
       "new_reply": "Nouvelle réponse",
       "display_failed": "Impossible d’afficher ce contenu",
       "image_failed": "Impossible d’afficher cette image",
-      "visual_failed": "Impossible d’afficher ce visuel"
+      "visual_failed": "Impossible d’afficher ce visuel",
+      "delegated": {
+        "stopped": "Arrêté",
+        "open_chat": "Ouvrir {title}",
+        "delegating": "{n, plural, one {Délégation à un sous-agent} other {Délégation à # sous-agents}}",
+        "delegated": "{n, plural, one {Délégué à un sous-agent} other {Délégué à # sous-agents}}",
+        "starting": "{n, plural, one {Lancement d’une conversation} other {Lancement de # conversations}}",
+        "started": "{n, plural, one {Une conversation lancée} other {# conversations lancées}}",
+        "messaging": "{n, plural, one {Envoi d’un message à une conversation} other {Envoi d’un message à # conversations}}",
+        "messaged": "{n, plural, one {Message envoyé à une conversation} other {Message envoyé à # conversations}}",
+        "running": "{n, plural, one {# en cours} other {# en cours}}",
+        "need_you": "{n, plural, one {# a besoin de vous} other {# ont besoin de vous}}",
+        "needs_approval": "Validation requise",
+        "asks": "A une question",
+        "failed": "Échec",
+        "untitled": "Sous-agent"
+      }
     },
     "user_message": {
       "open_named": "Ouvrir {name}",
@@ -872,6 +911,8 @@
       "default": "Par défaut",
       "reasoning": "RAISONNEMENT",
       "account": "Compte",
+      "account_of": "Compte {name}",
+      "no_account": "Aucun",
       "model": "Modèle",
       "search_starred": "Rechercher dans les favoris…",
       "search_agent": "Rechercher un modèle {agent}…",
@@ -883,7 +924,8 @@
       "not_found": "Aucun modèle trouvé",
       "not_found_hint": "Aucun résultat pour « {q} » dans {where}",
       "where_starred": "les modèles favoris",
-      "where_models": "les modèles"
+      "where_models": "les modèles",
+      "add_key": "Ajouter une clé API {name}"
     },
     "effort_slider": {
       "reasoning": "Raisonnement"
@@ -911,6 +953,7 @@
       "use_reset": "Utiliser une réinitialisation",
       "connect": "Connecter un compte {name}",
       "add_account": "Ajouter un compte",
+      "how_it_signs_in": "Comment il se connecte sur Cloud",
       "signing_in_to": "Connexion à {name}",
       "signing_in_hint": "Terminez la connexion dans le navigateur. Rien ne change tant que vous ne passez pas à ce compte.",
       "signing_in": "Connexion en cours",
@@ -970,7 +1013,23 @@
       "paste_key_hint": "{name} la lit dans {var}. Elle est conservée sur cet appareil et ne sera plus jamais affichée.",
       "key_name": "{var}",
       "get_key": "Obtenir une clé",
-      "save_key": "Enregistrer"
+      "save_key": "Enregistrer",
+      "add_named_account": "Ajouter un compte {name}",
+      "add_api_key": "Ajouter une clé API",
+      "key_offline": "Le moteur de Zeron ne répond pas — réessayez dans un instant.",
+      "key_remote": "Les clés API s’ajoutent sur l’ordinateur qui exécute {name}.",
+      "key_failed": "Impossible d’ajouter la clé — réessayez.",
+      "key_title": "Ajouter une clé API",
+      "key_provider": "Fournisseur",
+      "key_body": "{agent} utilise cette clé pour les modèles {name}.",
+      "key_field": "Clé API",
+      "key_kept": "Enregistrée sur ce Mac, dans les réglages de {agent}.",
+      "key_name_label": "Nom",
+      "key_name_placeholder": "Travail, Personnel…",
+      "rename": "Renommer",
+      "rename_title": "Renommer la clé API",
+      "rename_hint": "Laissez vide pour garder son nom par défaut.",
+      "key_name_optional": "Nom (facultatif)"
     },
     "command_palette": {
       "scope": {
@@ -1132,6 +1191,11 @@
         "description": "Floutées partout, pour le partage d’écran. Cliquez sur une adresse pour l’afficher.",
         "terms": "screen sharing recording blur blurred mosaic private censor redact partage écran ecran enregistrement flou flouter mosaïque mosaique privé prive masquer censurer email e-mail"
       },
+      "keep_chats_local": {
+        "label": "Garder les conversations sur cet appareil",
+        "description": "Vous restez connecté, mais les conversations, la liste des conversations et les projets de cet appareil ne sont pas synchronisés avec les serveurs de Zeron. Vos autres appareils ne les verront pas, et celui-ci ne verra pas les leurs. Zeron redémarre son moteur pour basculer.",
+        "terms": "sync synced local only offline private privacy server cloud upload chats transcripts devices synchronisation synchronisé hors ligne privé confidentialité serveur envoi conversations transcriptions appareils"
+      },
       "links_in": {
         "external": "Le navigateur par défaut.",
         "tab": "Un onglet de navigateur à côté de la conversation."
@@ -1164,6 +1228,17 @@
         "terms": "co-author coauthor attribution bot commit message co-auteur coauteur commits créditer crediter",
         "cloud": "Toujours activé pour Cloud",
         "on": "zeronsh[bot] figure comme coauteur des commits des agents"
+      },
+      "keep_running": {
+        "label": "Garder Zeron actif après l’avoir quitté",
+        "on": "Les conversations continuent, et vos autres appareils peuvent y accéder.",
+        "off": "Quand vous quittez, Zeron s’arrête une fois ses conversations terminées.",
+        "terms": "background quit close engine agents running stop memory battery arrière-plan arriere-plan quitter fermer moteur agents actif arrêter arreter mémoire memoire batterie"
+      },
+      "async_delegation": {
+        "label": "Déléguer en arrière-plan",
+        "description": "Les agents confient du travail à des sous-agents, sur n’importe quel fournisseur ou appareil, terminent leur tour et sont réveillés avec les résultats. Désactivé, ils attendent chacun d’eux. S’applique au prochain tour de chaque conversation.",
+        "terms": "subagents, orchestration, waiting, async, sous-agents, déléguer, deleguer, attente, asynchrone"
       }
     },
     "engine": {
@@ -1487,6 +1562,11 @@
         "terms": "subagent delegate side chats tasks spawn sous-agent sous-agents déléguer deleguer conversations annexes tâches taches lancer",
         "description": "Sinon, l’agent délègue par des conversations annexes."
       },
+      "code_mode": {
+        "label": "Mode code",
+        "terms": "code mode javascript script tool calls programmatic appels d’outils programmatique",
+        "description": "Exécuter en code, en un seul tour, les appels d’outils en plusieurs étapes."
+      },
       "update_policy": {
         "label": "Politique de mise à jour",
         "terms": "automatic upgrade version cli automatique mise à jour maj politique"
@@ -1519,6 +1599,7 @@
         "off_note": "Zeron ne cherche pas de nouvelle version."
       },
       "dialog_body": "Sur {device}. Les modifications s’appliquent immédiatement.",
+      "dialog_body_cloud": "Pour chaque conversation Cloud, quelle que soit la machine qui l’exécute. Les modifications s’appliquent aussitôt.",
       "done": "Terminé",
       "updates": "Mises à jour",
       "description": "Les agents de code d’un appareil et les comptes qu’ils utilisent.",
@@ -1612,6 +1693,15 @@
           "label": "Connexion à {name}"
         },
         "remove_row_description": "Les conversations qui l’utilisaient restent."
+      },
+      "couldnt_switch": "Impossible de changer de compte",
+      "cloud": "Cloud",
+      "cloud_key_kept": "Conservée dans le coffre de Zeron pour Cloud, jamais sur ce Mac. Chaque machine Cloud l’utilise dès son prochain tour, partout où aucune connexion n’est utilisée.",
+      "zeron_mcp_only": {
+        "label": "Uniquement les serveurs MCP de Zeron",
+        "description": "Masquer les serveurs MCP et connecteurs propres à {name}, pour qu’il utilise ceux de Réglages → MCP, sans doublons ni tokens supplémentaires.",
+        "unavailable": "{name} ne peut pas masquer ses propres serveurs MCP : il les garde à côté de ceux de Zeron.",
+        "terms": "mcp servers connectors built-in duplicates tokens chatgpt apps claude.ai own hide serveurs connecteurs intégrés integres doublons masquer propres"
       }
     },
     "devices": {
@@ -1992,6 +2082,12 @@
         "terms": "machine size vcpu memory disk credits rate xlarge large small standard taille mémoire memoire disque crédits tarif grande petite",
         "description": "La taille de machine des nouvelles conversations Cloud. Plus elle est grande, plus elle consomme de crédits.",
         "failed": "Impossible de changer la machine par défaut. Réessayez dans un instant."
+      },
+      "reach": {
+        "title": "Portée des nouvelles conversations",
+        "terms": "reach access devices isolated isolate remote commands security portée portee accès acces appareils isolée isolee isoler distant commandes sécurité securite",
+        "description": "Si les nouvelles conversations Cloud travaillent avec vos autres appareils (leurs conversations et les commandes qui s’y exécutent) ou restent sur leur propre machine. Vous pouvez le changer pour chaque conversation depuis sa zone de saisie.",
+        "failed": "Impossible de changer la portée des nouvelles conversations Cloud. Réessayez dans un instant."
       }
     },
     "billing": {
@@ -2311,6 +2407,182 @@
         "description": "Parakeet v3 · {total} Mo",
         "remove": "Supprimer"
       }
+    },
+    "mcp": {
+      "title": "MCP",
+      "terms": "mcp servers model context protocol tools connectors integrations oauth vault linear notion sentry stripe vercel serveurs outils connecteurs intégrations integrations coffre",
+      "description_synced": "Des outils que vos agents peuvent utiliser dans chaque conversation, avec n’importe quel fournisseur. Les connexions se synchronisent sur vos appareils et Cloud avec Zeron Vault.",
+      "description_local": "Des outils que vos agents peuvent utiliser dans chaque conversation, avec n’importe quel fournisseur. Conservés sur cet appareil ; connectez-vous à Zeron pour les synchroniser sur vos autres appareils.",
+      "servers": {
+        "title": "Vos serveurs",
+        "terms": "connected servers accounts sign in sign out enable disable work personal serveurs connectés connectes comptes connexion déconnexion deconnexion activer désactiver desactiver travail personnel"
+      },
+      "add": {
+        "title": "Ajouter un serveur",
+        "terms": "add connect custom server url command popular ajouter connecter personnalisé personnalise serveur commande populaires",
+        "connect": "Connecter",
+        "custom": "Serveur personnalisé",
+        "custom_description": "N’importe quel serveur MCP, par son URL ou une commande sur cet ordinateur."
+      },
+      "row": {
+        "waiting": "En attente de connexion…",
+        "signin": "Non connecté",
+        "expired": "Déconnecté. Reconnectez-vous pour l’utiliser.",
+        "client": "Une app OAuth est nécessaire pour se connecter",
+        "this_device": "{line} · Cet appareil uniquement",
+        "command": "Exécute {command}",
+        "sign_in": "Se connecter",
+        "needs_attention": "Requiert votre attention",
+        "connected": "Connecté",
+        "off_short": "Désactivé",
+        "unnamed": "Compte sans nom",
+        "your_account": "Votre compte",
+        "agent_name_tip": "Le nom que vos agents utilisent pour ce compte",
+        "account_actions": "Actions pour {name}",
+        "server_actions": "Actions pour {name}",
+        "where_accounts": "{where} · {n} comptes",
+        "add_account": "Ajouter un compte"
+      },
+      "connect": {
+        "title": "Connecter {name}",
+        "waiting_title": "Se connecter à {name}",
+        "waiting_body": "Terminez la connexion à {name} dans votre navigateur. Cette fenêtre se ferme une fois la connexion établie.",
+        "waiting_hint": "En attente de votre navigateur…",
+        "waiting_label": "En attente de connexion",
+        "waiting_button": "En attente…",
+        "error_title": "Impossible de connecter {name}",
+        "error_body": "Rien n’a été enregistré de cette connexion.",
+        "try_again": "Réessayer",
+        "continue": "Continuer dans le navigateur",
+        "connect": "Connecter",
+        "synced": "Synchronisé sur vos appareils avec Zeron Vault",
+        "local": "Conservé sur cet appareil"
+      },
+      "client": {
+        "body": "{name} n’autorise que les apps enregistrées auprès de lui à se connecter. Créez une app dans votre espace de travail {name}, autorisez cette URL de redirection, puis collez l’identifiant client et le secret de l’app.",
+        "redirect": "URL de redirection",
+        "copy": "Copier",
+        "id": "Identifiant client",
+        "secret": "Secret client",
+        "how": "Comment créer l’app"
+      },
+      "key": {
+        "body": "Collez la clé API fournie par {name}. Elle est conservée chiffrée et ne sera plus jamais affichée.",
+        "label": "Clé API"
+      },
+      "error": {
+        "generic": "Un problème est survenu lors de la connexion.",
+        "client": "Ce serveur nécessite votre propre app OAuth pour se connecter.",
+        "timed_out": "La connexion a expiré. Réessayez quand vous serez prêt.",
+        "browser": "Impossible d’ouvrir votre navigateur.",
+        "port": "Une autre connexion utilise encore le port de redirection. Terminez-la ou annulez-la, puis réessayez.",
+        "offline": "Impossible de joindre Zeron. Vérifiez votre connexion et réessayez.",
+        "detail": "Impossible de se connecter : {detail}"
+      },
+      "form": {
+        "add_title": "Serveur personnalisé",
+        "add_body": "Connectez n’importe quel serveur MCP par son URL, ou exécutez-en un sur cet ordinateur.",
+        "name": "Nom",
+        "name_placeholder": "Mon serveur",
+        "kind": "Type de serveur",
+        "kind_remote": "URL distante",
+        "kind_local": "Commande locale",
+        "url": "URL",
+        "auth": "Connexion",
+        "auth_oauth": "OAuth (connexion dans le navigateur)",
+        "auth_bearer": "Clé API ou token",
+        "auth_headers": "En-têtes personnalisés",
+        "auth_none": "Aucune",
+        "token": "Clé API ou token",
+        "token_kept": "Laissez vide pour conserver la valeur enregistrée.",
+        "headers": "En-têtes",
+        "headers_hint": "Un par ligne, sous la forme Nom: valeur.",
+        "headers_kept": "Enregistrés : {keys}. Les en-têtes que vous saisissez les remplacent.",
+        "own_client": "Utiliser votre propre app OAuth",
+        "own_client_hint": "Pour un serveur qui n’enregistre pas les apps lui-même. Autorisez cette URL de redirection dans les réglages de votre app.",
+        "scopes": "Scopes",
+        "scopes_placeholder": "Valeurs par défaut du serveur",
+        "command": "Commande",
+        "args": "Arguments",
+        "env": "Environnement",
+        "env_kept": "Enregistrées : {keys}. Les variables que vous saisissez les remplacent.",
+        "local_note": "Les commandes locales s’exécutent uniquement sur cet ordinateur et ne sont pas synchronisées.",
+        "sync": "Synchroniser sur vos appareils",
+        "sync_description": "Conserver ce serveur et sa connexion dans Zeron Vault, pour vos autres appareils et Cloud.",
+        "save": "Enregistrer",
+        "add": "Ajouter le serveur",
+        "error_name": "Donnez un nom au serveur.",
+        "error_url": "Saisissez une URL commençant par https://.",
+        "error_command": "Saisissez la commande à exécuter.",
+        "error_token": "Collez la clé API ou le token.",
+        "error_header_line": "« {line} » n’est pas un en-tête. Écrivez-le sous la forme Nom: valeur.",
+        "error_env_line": "« {line} » n’est pas une variable. Écrivez-la sous la forme NOM=valeur."
+      },
+      "remove": {
+        "title": "Retirer {name} ?",
+        "body": "Sa connexion est supprimée de Zeron Vault et de cet appareil. Vous pourrez le reconnecter à tout moment.",
+        "body_all": "Retire les {n} comptes et leurs connexions de Zeron Vault et de cet appareil. Vous pourrez les reconnecter à tout moment."
+      },
+      "toast": {
+        "added": "{name} ajouté",
+        "saved": "{name} enregistré",
+        "connected": "{name} connecté",
+        "removed": "{name} retiré",
+        "signed_out": "Déconnecté de {name}",
+        "couldnt_add": "Impossible d’ajouter {name}",
+        "couldnt_remove": "Impossible de retirer {name}",
+        "couldnt_switch": "Impossible de modifier {name}"
+      },
+      "account": {
+        "full_name": "{name} · {account}",
+        "title": "Ajouter un autre compte {name}",
+        "body": "Connectez-vous avec un autre compte dans votre navigateur. Vos agents peuvent tous les utiliser, chacun sous son propre nom.",
+        "new_key": "Clé API ou token du nouveau compte",
+        "switch_hint": "Connectez-vous avec votre autre compte. Si votre navigateur vous reconnecte directement avec le premier, changez de compte sur la page de {name}.",
+        "error_taken": "Vous avez déjà un compte {name} nommé « {account} ».",
+        "add": "Ajouter le compte",
+        "name": "Nom du compte",
+        "name_placeholder": "Personnel, Travail…",
+        "name_optional": "Facultatif. Vous pourrez le renommer à tout moment.",
+        "agents_see_one": "Vos agents le verront sous le nom {agent}."
+      },
+      "menu": {
+        "rename": "Renommer…",
+        "sign_in_again": "Se reconnecter",
+        "sign_out": "Se déconnecter",
+        "remove_account": "Retirer le compte",
+        "edit": "Modifier le serveur…",
+        "remove_server": "Retirer {name}"
+      },
+      "rename": {
+        "title": "Renommer le compte",
+        "body": "Nommez ce compte {name} pour que vous et vos agents puissiez le distinguer.",
+        "save": "Enregistrer",
+        "unnamed_hint": "Laissé vide, vos agents le distinguent par un numéro."
+      },
+      "requests": {
+        "title": "En attente de votre réponse",
+        "description": "Des agents ont demandé à modifier vos serveurs MCP. Rien ne change tant que vous ne l’autorisez pas.",
+        "terms": "requests agent asked approve allow decline waiting demandes demandé demande approuver autoriser refuser attente",
+        "add": "Ajouter {name}",
+        "remove": "Retirer {name}",
+        "enable": "Activer {name}",
+        "disable": "Désactiver {name}",
+        "from_chat": "{agent} a demandé dans « {chat} »",
+        "an_agent": "Un agent",
+        "from_agent": "Un agent a demandé",
+        "because": "{who} : « {reason} »",
+        "runs": "Exécute {command} sur cet ordinateur",
+        "decline": "Refuser",
+        "allow": "Autoriser",
+        "done": "{name} : effectué",
+        "couldnt": "Échec : {name}",
+        "notice_body": "Rien ne change tant que vous ne l’autorisez pas.",
+        "notice_add": "Un agent demande à ajouter {name}",
+        "notice_remove": "Un agent demande à retirer {name}",
+        "notice_enable": "Un agent demande à activer {name}",
+        "notice_disable": "Un agent demande à désactiver {name}"
+      }
     }
   },
   "common": {
@@ -2385,6 +2657,7 @@
         "unpin": "Désépingler",
         "move_to": "Déplacer vers",
         "archive_working": "Arrêtez-la d’abord : son agent travaille encore",
+        "archive_working_some": "{n, plural, one {Arrêtez-la d’abord : # d’entre elles travaille encore} other {Arrêtez-les d’abord : # d’entre elles travaillent encore}}",
         "delete": "Supprimer…",
         "rename": "Renommer…",
         "remove": "Retirer…",
@@ -2454,11 +2727,13 @@
       "session": {
         "new_session": "Nouvelle session",
         "will_delete": "La session « {title} » sera définitivement supprimée. Cette action est irréversible.",
+        "will_delete_some": "{n, plural, one {# session sera définitivement supprimée} other {# sessions seront définitivement supprimées}}. Cette action est irréversible.",
         "will_delete_with": "{will} {also}",
-        "also_deletes_side": "{n, plural, one {Cela supprime aussi sa conversation annexe.} other {Cela supprime aussi ses # conversations annexes.}}",
-        "also_deletes_subagents": "{n, plural, one {Cela supprime aussi son sous-agent.} other {Cela supprime aussi ses # sous-agents.}}",
-        "also_deletes_both": "Cela supprime aussi {subagents, plural, one {# sous-agent} other {# sous-agents}} et {sides, plural, one {# conversation annexe} other {# conversations annexes}}.",
+        "also_deletes_side": "{n, plural, one {Cela supprime aussi {of, plural, one {sa} other {leur}} conversation annexe.} other {Cela supprime aussi {of, plural, one {ses} other {leurs}} # conversations annexes.}}",
+        "also_deletes_subagents": "{n, plural, one {Cela supprime aussi {of, plural, one {son} other {leur}} sous-agent.} other {Cela supprime aussi {of, plural, one {ses} other {leurs}} # sous-agents.}}",
+        "also_deletes_both": "Cela supprime aussi {subagents, plural, one {# sous-agent} other {# sous-agents}} et {sides, plural, one {# conversation annexe} other {# conversations annexes}} {of, plural, one {de cette session} other {de ces sessions}}.",
         "delete_title": "Supprimer la session ?",
+        "delete_title_some": "{n, plural, one {Supprimer # session ?} other {Supprimer # sessions ?}}",
         "couldnt_delete": "Impossible de supprimer « {title} »",
         "rename_title": "Renommer la session",
         "name": "Nom",
@@ -2691,7 +2966,11 @@
       },
       "stop_waiting": "Arrêter d’attendre",
       "stop_waiting_failed": "Impossible d’arrêter d’attendre",
-      "wake_failed": "Impossible de réveiller cette conversation"
+      "wake_failed": "Impossible de réveiller cette conversation",
+      "waiting_more": "{first} et {n, plural, one {# autre} other {# autres}}",
+      "waiting_on_chat": "Une autre conversation",
+      "stop_delegated": "Arrêter les sous-agents",
+      "stop_delegated_failed": "Impossible d’arrêter les sous-agents"
     }
   },
   "onboarding": {
@@ -3055,6 +3334,14 @@
       "setup_summary": "Machine Cloud configurée",
       "woke_summary": "Machine Cloud réveillée",
       "unreachable": "Interrompu — impossible de joindre {host}"
+    },
+    "delegates": {
+      "allow": "Autoriser une fois",
+      "deny": "Refuser",
+      "answer": "Répondre dans sa conversation",
+      "other": "Autre chose",
+      "failed": "Impossible de répondre à ce sous-agent",
+      "stop_failed": "Impossible d’arrêter ce sous-agent"
     }
   },
   "panel": {
@@ -3201,7 +3488,8 @@
         "show": "Afficher dans le Finder",
         "dismiss": "Masquer {name}",
         "saving": "Enregistrement…"
-      }
+      },
+      "dismiss_error": "Fermer"
     },
     "browser_api": {
       "empty": "Saisissez un site web ou une adresse localhost.",
@@ -3324,6 +3612,12 @@
       "old": "Cette version de Zeron nécessite un moteur plus récent",
       "old_tip": "Le moteur est trop ancien pour cette version. Ouvrez « À propos et mises à jour » pour revenir à la version Stable.",
       "short_old": "Moteur plus récent requis"
+    },
+    "quit": {
+      "working": "{n, plural, one {# conversation est encore en cours.} other {# conversations sont encore en cours.}}",
+      "detail": "Les laisser s’exécuter en arrière-plan jusqu’à la fin, ou les arrêter maintenant ?",
+      "keep": "Continuer en arrière-plan",
+      "stop": "Les arrêter maintenant"
     }
   },
   "account": {
@@ -3350,6 +3644,9 @@
         "expired": "Votre session a expiré. Reconnectez-vous pour continuer.",
         "failed": "La connexion n’a pas abouti. Réessayez."
       }
+    },
+    "cloud": {
+      "reach_not_changed": "Impossible de changer la portée de cette conversation Cloud."
     }
   },
   "plugins": {
@@ -3465,7 +3762,11 @@
         },
         "compose": {
           "title": "Insérer du texte dans la zone de saisie",
-          "detail": "C’est toujours vous qui l’envoyez."
+          "detail": "Il peut compléter ce que vous avez écrit ou le remplacer. C’est toujours vous qui l’envoyez."
+        },
+        "draft": {
+          "title": "Lire ce que vous tapez dans la zone de saisie, et le mettre de côté",
+          "detail": "Il voit vos mots dans n’importe quelle conversation avant leur envoi, et peut retirer le brouillon pour le remettre plus tard. Il ne l’envoie jamais."
         },
         "network": {
           "title": "Se connecter à Internet",
@@ -3484,6 +3785,9 @@
         },
         "windows": {
           "title": "Ouvrir ses propres fenêtres"
+        },
+        "scene3d": {
+          "title": "Dessiner des scènes 3D"
         },
         "tools": {
           "title": "Fournir des outils à vos agents"
