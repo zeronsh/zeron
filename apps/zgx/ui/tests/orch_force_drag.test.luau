@@ -297,3 +297,69 @@ test("force pins: a pin shows by a pinned node while it's hovered, never otherwi
 	app:set_state("control_map_force_hover", nil)
 	app:frames(5)
 end)
+
+-- The kept places and pins (control_map_force_places / _pins): what's
+-- archived or gone from the data goes, once it's loaded whole; a world still
+-- loading never wipes them.
+test("force places: archived and gone ids are dropped from places and pins once the data is loaded, never while it loads", function()
+	-- (The sample fleet: Reins release, its Code signing idle.)
+	local app = mount("orch_map_fixture.luau")
+	app:resize(1440, 2400)
+	app:command("map_only")
+	app:command("map_force")
+	app:set_state("ds/orch_map_visibility.luau::control_map_show", "all")
+	app:frames(90)
+	local function kept(): ({ [string]: any }, { [string]: any })
+		return app:state("control_map_force_places") or {}, app:state("control_map_force_pins") or {}
+	end
+	local pl = kept()
+	expect(pl["th-reins-sign"] ~= nil and pl["th-reins-win"] ~= nil and pl["orc-reins"] ~= nil).to_be(true)
+	-- (Left from before: a chat gone from the data, pinned too; a pin of
+	-- one still there.)
+	local seeded = table.clone(pl)
+	seeded["gone-chat"] = { 10, 20 }
+	app:set_state("control_map_force_places", seeded)
+	app:set_state("control_map_force_pins", { ["gone-chat"] = true, ["th-reins-win"] = true })
+	app:frames(5)
+	-- Loading again (its lists empty a while): nothing dropped.
+	app:command("data_loading")
+	app:frames(40)
+	app:wait(3500)
+	app:frames(5)
+	local pins
+	pl, pins = kept()
+	expect(pl["gone-chat"] ~= nil).to_be(true)
+	expect(pins["gone-chat"]).to_be(true)
+	expect(pins["th-reins-win"]).to_be(true)
+	expect(pl["th-reins-sign"] ~= nil).to_be(true)
+	-- Loaded: the gone one's place and pin go, a while after; the web's stay.
+	app:command("data_ready")
+	app:frames(40)
+	app:wait(3500)
+	app:frames(5)
+	pl, pins = kept()
+	expect(pl["gone-chat"]).to_be(nil)
+	expect(pins["gone-chat"]).to_be(nil)
+	expect(pins["th-reins-win"]).to_be(true)
+	expect(pl["th-reins-win"] ~= nil and pl["orc-reins"] ~= nil).to_be(true)
+	-- Hidden by Show chats but still there: its place kept.
+	app:set_state("ds/orch_map_visibility.luau::control_map_show", "active")
+	app:frames(40)
+	app:wait(3500)
+	app:frames(5)
+	pl = kept()
+	expect(pl["th-reins-sign"] ~= nil).to_be(true)
+	app:set_state("ds/orch_map_visibility.luau::control_map_show", "all")
+	app:frames(40)
+	-- Archived: its place goes; an archived orchestrator's too.
+	app:command("sign_archive")
+	app:command("reins_archive")
+	app:frames(40)
+	app:wait(3500)
+	app:frames(5)
+	pl = kept()
+	expect(pl["th-reins-sign"]).to_be(nil)
+	expect(pl["orc-reins"]).to_be(nil)
+	-- (Its working crew still shown: kept.)
+	expect(pl["th-reins-win"] ~= nil).to_be(true)
+end)

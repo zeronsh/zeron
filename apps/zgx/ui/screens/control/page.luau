@@ -221,6 +221,7 @@ local function world(): any
 	return {
 		now = OV.now(),
 		chats = OV.chats(),
+		loaded = OV.loaded(),
 		devices = OV.devices(),
 		projects = OV.projects(),
 		loads = OV.loads(),
@@ -1068,6 +1069,11 @@ local function readers(live: () -> boolean, name: string): any
 	end)
 	R.chats = held(function(): any
 		return chats_now:get()
+	end)
+	-- (Both loaded from the engine: what's missing from them is gone, not
+	-- yet to come.)
+	R.loaded = held(function(): boolean
+		return sessions.now:get().state == "ready" and (orchestration.now:get() or {}).state == "ready"
 	end)
 	R.asks = held(function(): any
 		return asks_now:get()
