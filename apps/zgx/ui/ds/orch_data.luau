@@ -14,7 +14,11 @@
 --   data.target(now, chats, target)   a route's destination:
 --                                     { label, hue?, kind, id? }
 --   data.segments(text, routes)       a dump's text cut at its routes'
---                                     spans: { { text, route? } }, in order
+--                                     spans: { { text, routes, route? } },
+--                                     in order (each piece every route
+--                                     holding it)
+--   data.stripes(text, n)             a piece shared by n routes cut into
+--                                     stripes, one route's each by turns
 --   data.needs(now, sessions_now)     what needs the person: open asks and
 --                                     chats awaiting input (one row a chat:
 --                                     its ask, `input` set, when it has
@@ -219,12 +223,16 @@ function M.target(now: any, chats: { [string]: Chat }?, target: any, words: (str
 	return { label = words(kind), kind = kind, id = id }
 end
 
-export type Segment = { text: string, route: number? }
+-- A piece of a dump's text: the routes whose spans hold it (their indices
+-- in `routes`, in order; none for words routed nowhere), `route` the first.
+export type Segment = { text: string, routes: { number }, route: number? }
 
--- `text` cut at its routes' spans (0-based byte offsets, end exclusive),
--- each piece naming the route it belongs to (its index in `routes`). A
--- span that overlaps an earlier one, or runs past the text, is left out;
--- a route with no span is found by its excerpt where it can be.
+-- `text` cut at its routes' spans (0-based byte offsets, end exclusive):
+-- each piece the words between two span edges, naming every route whose
+-- span holds it, so words routed to two places (the same sentence to two
+-- orchestrators, or two parts overlapping in part) name both. A span that
+-- runs past the text is left out; a route with no span is found by its
+-- excerpt where it can be.
 function M.segments(text: string, routes: { any }): { Segment }
 	local spans: { { from: number, to: number, route: number } } = {}
 	for i, r in routes or {} do
@@ -242,21 +250,90 @@ function M.segments(text: string, routes: { any }): { Segment }
 		end
 	end
 	table.sort(spans, function(a: any, b: any): boolean
-		return a.from < b.from
+		if a.from ~= b.from then
+			return a.from < b.from
+		end
+		return a.route < b.route
 	end)
-	local out: { Segment } = {}
-	local at = 0
+	-- The text cut at every span's edge.
+	local edges: { number } = { 0, #text }
 	for _, s in spans do
-		if s.from >= at then
-			if s.from > at then
-				table.insert(out, { text = string.sub(text, at + 1, s.from) })
+		table.insert(edges, s.from)
+		table.insert(edges, s.to)
+	end
+	table.sort(edges)
+	local out: { Segment } = {}
+	local last = -1
+	for k = 1, #edges - 1 do
+		local a, b = edges[k], edges[k + 1]
+		if a ~= last and b > a then
+			last = a
+			local held: { number } = {}
+			for _, s in spans do
+				if s.from <= a and s.to >= b then
+					table.insert(held, s.route)
+				end
 			end
-			table.insert(out, { text = string.sub(text, s.from + 1, s.to), route = s.route })
-			at = s.to
+			table.sort(held)
+			local piece = string.sub(text, a + 1, b)
+			local prev = out[#out]
+			-- (Two pieces in a row with the same routes, one.)
+			if prev and #prev.routes == 0 and #held == 0 then
+				prev.text ..= piece
+			else
+				table.insert(out, { text = piece, routes = held, route = held[1] })
+			end
 		end
 	end
-	if at < #text then
-		table.insert(out, { text = string.sub(text, at + 1) })
+	return out
+end
+
+-- A stripe's least length (bytes): shorter words go with the next.
+M.STRIPE = 10
+
+-- A piece of text shared by `n` routes cut into stripes, one for each of
+-- them by turns: whole words (with the spaces after them), STRIPE long at
+-- least, or a word each if that leaves too few, or, with fewer words than
+-- routes, as many equal runs of its characters. One route: the text whole.
+function M.stripes(text: string, n: number): { string }
+	if n <= 1 then
+		return { text }
+	end
+	local words: { string } = {}
+	-- (Leading space with the first word: nothing dropped.)
+	for word in string.gmatch(text, "%s*[^%s]+%s*") do
+		table.insert(words, word)
+	end
+	local grouped: { string } = {}
+	local open = ""
+	for _, w in words do
+		open ..= w
+		if #open >= M.STRIPE then
+			table.insert(grouped, open)
+			open = ""
+		end
+	end
+	if open ~= "" then
+		if #grouped > 0 and #open < M.STRIPE / 2 then
+			grouped[#grouped] ..= open
+		else
+			table.insert(grouped, open)
+		end
+	end
+	if #grouped >= n then
+		return grouped
+	end
+	if #words >= n then
+		return words
+	end
+	local chars: { string } = {}
+	for _, c in utf8.codes(text) do
+		table.insert(chars, utf8.char(c))
+	end
+	local out: { string } = {}
+	local per = math.max(1, math.ceil(#chars / n))
+	for at = 1, #chars, per do
+		table.insert(out, table.concat(chars, "", at, math.min(#chars, at + per - 1)))
 	end
 	return out
 end
