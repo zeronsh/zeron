@@ -379,7 +379,22 @@ impl Zeron {
         harness: HarnessId,
         device: Option<&str>,
     ) -> anyhow::Result<Vec<Model>> {
+        self.models_listed(harness, device, false).await
+    }
+
+    /// The catalog as the agent lists it now: `force` asks it again instead
+    /// of answering from what the engine kept (a failure or an empty list
+    /// is kept for a while too, and a sign-in since may have changed it).
+    pub async fn models_listed(
+        &self,
+        harness: HarnessId,
+        device: Option<&str>,
+        force: bool,
+    ) -> anyhow::Result<Vec<Model>> {
         let mut params = json!({ "harness": harness });
+        if force {
+            params["force"] = json!(true);
+        }
         if let Some(device) = device {
             params["targetDeviceId"] = json!(device);
         }
