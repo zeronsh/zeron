@@ -89,7 +89,17 @@ local function chats_now(sessions_now: any): { [string]: Chat }
 	if not sessions_now then
 		return out
 	end
-	-- (What's archived says so, whether or not its row does.)
+	for _, kids in sessions_now.children or {} do
+		for _, c in kids do
+			out[c.id] = c
+		end
+	end
+	for _, c in sessions_now.chats or {} do
+		out[c.id] = c
+	end
+	-- (What's archived says so, whether or not its row does, and wins over
+	-- a row of it still listed with the live ones: a parent's children
+	-- keep an archived crew chat.)
 	for _, c in sessions_now.archived or {} do
 		if c.archived then
 			out[c.id] = c
@@ -98,14 +108,6 @@ local function chats_now(sessions_now: any): { [string]: Chat }
 			a.archived = true
 			out[c.id] = a
 		end
-	end
-	for _, kids in sessions_now.children or {} do
-		for _, c in kids do
-			out[c.id] = c
-		end
-	end
-	for _, c in sessions_now.chats or {} do
-		out[c.id] = c
 	end
 	return out
 end

@@ -1,10 +1,14 @@
--- The Map's Graph as a web that holds still: the Brain dump in the middle,
--- each orchestrator a ringed hub on a strong line to it, its chats fanned
--- round it on strong lines of their own (each chat's todo as small dots
--- round it: filled done, hollow to do), thin weak lines between chats that
--- talk or command each other, a dashed "live" arc for a message in flight.
--- Colour says whose (an orchestrator's hue) or where (a machine's), as
--- "Color by" chooses; a legend under it names them.
+-- The Map's Graph as a web that holds still: the Brain dump in the middle
+-- (Material's Ghostish), each orchestrator a cookie (more scallops the more
+-- crew it leads: ds/orch_force_draw) on a strong line to it, ringed and its
+-- lines tinted in its own hue, its chats fanned round it on strong lines of
+-- their own, thin weak lines between chats that talk or command each other,
+-- a dashed "live" arc for a message in flight. A chat or an orchestrator is
+-- filled with its machine's colour (ds/orch_force_palette: soft, never a
+-- status's), its provider's mark in it, black or white; a chat's state is
+-- its ring, as the sidebar draws it (working: the sidebar's own ring;
+-- asking, approving, failed: the sidebar's glyph by it). A legend names the
+-- machines.
 --
 -- Laid out by ds/orch_force_sim, like Obsidian's graph: stiff short
 -- springs for strong links, soft long ones for weak, nodes pushing apart.
@@ -27,40 +31,61 @@ local hue = require("@self/orch_hue")
 local kit = require("@self/orch_map_kit")
 local model = require("@self/orch_map_model")
 local Cells = require("@self/orch_cells")
-local Ref = require("@self/orch_ref")
 local sim = require("@self/orch_force_sim")
 local fm = require("@self/orch_force_model")
-local Graph2 = require("@self/orch_graph2")
+local draw = require("@self/orch_force_draw")
+local fpal = require("@self/orch_force_palette")
 
 local M = {}
 
--- Colour by: an orchestrator's hue, or a machine's. Kept on this device.
-M.COLOR_BY = { "orchestrator", "machine" }
-M.color_by = ui.persist("control_map_force_color", "orchestrator")
 -- Where each node last settled, by id: { x, y } (kept on this device).
 M.places = ui.persist("control_map_force_places", {} :: { [string]: { number } })
+-- The nodes pinned by hand (dropped there), by id (kept on this device).
+M.pins = ui.persist("control_map_force_pins", {} :: { [string]: boolean })
 -- The node the pointer is on.
 M.hover = ui.state("control_map_force_hover", nil :: string?)
+-- The node held by the pointer (pressed on, not yet let go), or nil: the
+-- drawing's mode is this alone, never whether anything moves.
+M.held = ui.state("control_map_force_held", nil :: string?)
 -- For tests and numbers: builds, wakes, steps, draws, the settling.
 M.stats = ui.state("control_map_force_stats", {} :: any)
 M.zoom_by = function(_k: number) end
 M.pan_by = function(_dx: number, _dy: number) end
 M.drag_to = function(_id: string, _x: number, _y: number) end
+-- (For tests and numbers: a drag held, moved by dx, dy each call; let go.)
+M.drag_by = function(_id: string, _dx: number, _dy: number) end
+M.drag_end = function(_id: string) end
+M.recentre = function() end
+M.unpin_children = function(_id: string) end
+M.unpin_all = function() end
 M.current = nil :: any
 
 -- A frame's share of the settling (seconds), and how often it's drawn
 -- while settling (frames).
 local STEP_BUDGET = 0.006
-local DRAW_EVERY = 3
+-- While a node is held: a frame's share of the relaxation round it.
+local DRAG_BUDGET = 0.0015
+local DRAG_STEPS = 8
+-- On letting go: what's left of the settling round it, in that frame.
+local RELEASE_BUDGET = 0.004
 local PULSE_MS = 900
 local PLACES_MAX = 4000
+-- What a secondary click on the space (no node) is, for its menu.
+local BACKGROUND = "force:background"
 local TILE_H = kit.TILE_H
 -- Names show from this zoom up (the important ones; others on hover).
 local NAMES_ZOOM = 0.3
--- Machine hues (colour by machine), in the machines' order.
-local MACHINE_HUES = { 38, 212, 282, 150, 330, 95, 190, 20, 250, 120 }
-local R_BRAIN, R_HUB, R_CHAT = 19, 15, 9.5
-local NEED: { [string]: boolean } = { waiting = true, input = true, approval = true }
+local R_BRAIN, R_HUB, R_CHAT, R_RING = draw.BRAIN_D / 2, draw.HUB_D / 2, draw.R_CHAT, draw.R_RING
+-- The fit's least zoom: past it the web is spaced closer, never drawn
+-- smaller.
+local MIN_FIT = 0.75
+-- A chat asking for the person; one the sidebar draws its working ring
+-- for (waiting on its own work too); one it draws a glyph for, by it.
+local NEED: { [string]: boolean } = { input = true }
+local RINGED: { [string]: boolean } = { working = true, waiting = true }
+local GLYPHED: { [string]: boolean } = { input = true, approval = true, failed = true }
+-- (Where a chat's glyph sits: up and right of its middle.)
+local BADGE_AT = 10.5
 
 local T_NAME: any = { size = 11.5, baseline = "top", align = "center" }
 local T_HUB: any = { size = 12.5, weight = 600, baseline = "top", align = "center" }
@@ -68,33 +93,6 @@ local M_NAME = { size = 11.5 }
 local M_HUB = { size = 12.5, weight = 600 }
 local DASH = { dash = { 4, 4 } }
 local ROUND = { cap = "round" :: "round", join = "round" :: "round" }
-local T_BADGE: any = { size = 8.5, weight = 700, baseline = "middle", align = "center" }
-
--- The Brain's mark: a ghost (Material's expressive set), a dome over three
--- scallops, r across.
-function M.ghost(x: number, y: number, r: number): any
-	local top = y - 0.15 * r
-	local p = ui.path():move(x - r, top):arc(x, top, r, 180, 180):line(x + r, y + 0.75 * r)
-	local w = 2 * r / 3
-	for k = 0, 2 do
-		local x0 = x + r - k * w
-		p = p:quad(x0 - w / 2, y + 0.75 * r + 0.42 * r, x0 - w, y + 0.75 * r)
-	end
-	return p:close()
-end
-
--- An orchestrator's mark: a cookie with `n` scallops, r across.
-function M.cookie(x: number, y: number, r: number, n: number): any
-	local p = ui.path()
-	local steps = 96
-	for k = 0, steps do
-		local t = k / steps * math.pi * 2
-		local rr = r * (1 + 0.085 * math.cos(n * t))
-		local px, py = x + math.cos(t) * rr, y + math.sin(t) * rr
-		p = if k == 0 then p:move(px, py) else p:line(px, py)
-	end
-	return p:close()
-end
 
 local function fit_name(c: any, s: string, w: number, opts: any): string
 	if c:measure_text(s, opts) <= w then
@@ -152,7 +150,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -178,8 +176,19 @@ M.View = ui.component(function(props: {
 	-- Drawn now (the settling draws every few frames).
 	local tick = ui.use_state(0)
 	local settled = ui.use_state(true)
+	-- Where things rest: bumped when the web settles (its shapes, names and
+	-- markers made again for where they now are).
+	local geo = ui.use_state(0)
+	-- The overlay's frames (what moves, what's lit, the dots), and the
+	-- working rings' steps.
+	local ptick = ui.use_state(0)
+	local status_tick = ui.use_state(0)
 	local run = ui.use_state(0)
 	local woke_at = 0
+	local holding = false
+	-- (A node dragged since the web was last laid out: the view isn't fitted
+	-- again for its settling.)
+	local dragged_since = false
 	local first_pending = false
 	local open_t0 = os.clock()
 
@@ -195,7 +204,7 @@ M.View = ui.component(function(props: {
 		local x0, y0, x1, y1 = sim.bounds(s)
 		local w, h = math.max(1, width:peek()), field_h()
 		local pad = 70
-		local z = math.clamp(math.min((w - pad * 2) / math.max(1, x1 - x0), (h - pad * 2 - 30) / math.max(1, y1 - y0)), 0.3, 1.4)
+		local z = math.clamp(math.min((w - pad * 2) / math.max(1, x1 - x0), (h - pad * 2 - 30) / math.max(1, y1 - y0)), MIN_FIT, 1.4)
 		view:set({ x = w / 2 - (x0 + x1) / 2 * z, y = (h - 30) / 2 - (y0 + y1) / 2 * z, zoom = z })
 	end
 
@@ -218,12 +227,17 @@ M.View = ui.component(function(props: {
 			kept[id] = at
 		end
 		M.places:set(kept :: any)
-		if not moved_view then
+		-- (Fitted after a web's own settling, never after a drag: what's
+		-- shown stays where it is.)
+		if not moved_view and not dragged_since then
 			fit()
 		end
 		settled:set(true)
-		version:set(version:peek() + 1)
+		geo:set(geo:peek() + 1)
 		tick:set(tick:peek() + 1)
+		-- (The overlay drawn once more, without what moved: its last frame of
+		-- the settling would stay over the settled drawing.)
+		ptick:set(ptick:peek() + 1)
 		count("frames", 0)
 	end
 
@@ -238,18 +252,32 @@ M.View = ui.component(function(props: {
 		end
 		local frames = 0
 		ui.every(16, function(): boolean?
-			if not on_screen_now() then
+			-- (Settled already, by a let go: nothing left.)
+			if not on_screen_now() or settled:peek() then
 				return false
 			end
 			local f0 = os.clock()
 			local steps0 = s.steps
-			local still = sim.run(s, STEP_BUDGET, os.clock)
+			-- (A node held by the pointer: a short relaxation a frame round
+			-- it, and never at rest while it's held.)
+			local still
+			if holding then
+				local t0 = os.clock()
+				local n = 0
+				repeat
+					sim.step(s)
+					n += 1
+				until n >= DRAG_STEPS or os.clock() - t0 >= DRAG_BUDGET
+				still = false
+			else
+				still = sim.run(s, STEP_BUDGET, os.clock)
+			end
 			count("steps", s.steps - steps0)
 			frames += 1
 			count("frames")
 			counts.worst_ms = math.max(counts.worst_ms, (os.clock() - f0) * 1000)
 			-- (A long settling, past MAX_STEPS since waking: held where it is.)
-			if not still and s.steps - counts.wake_steps > sim.MAX_STEPS then
+			if not still and not holding and s.steps - counts.wake_steps > sim.MAX_STEPS then
 				sim.sleep(s)
 				still = true
 			end
@@ -257,19 +285,31 @@ M.View = ui.component(function(props: {
 				done_settling()
 				return false
 			end
-			if frames % DRAW_EVERY == 0 then
-				tick:set(tick:peek() + 1)
-			end
+			-- (What moves is the overlay's: drawn each frame, alone; the
+			-- rest stands drawn.)
+			ptick:set(ptick:peek() + 1)
 			return nil
 		end)
 	end)
 	counts.wake_steps = 0
+	local function wake_down(i: number)
+		sim.wake_down(s, i)
+		counts.wake_steps = s.steps
+		woke_at = os.clock()
+		count("wakes")
+		settled:set(false)
+		tick:set(tick:peek() + 1)
+		run:set(run:peek() + 1)
+	end
 	local function wake(ids: { number }?)
 		sim.wake(s, ids)
 		counts.wake_steps = s.steps
 		woke_at = os.clock()
 		count("wakes")
 		settled:set(false)
+		-- (The rest drawn once without what's awake: that's the overlay's
+		-- while it moves.)
+		tick:set(tick:peek() + 1)
 		run:set(run:peek() + 1)
 	end
 
@@ -279,14 +319,27 @@ M.View = ui.component(function(props: {
 	local function rebuild(world: any, comms: { any })
 		local next_m = fm.build(world, comms, world.clock or os.time())
 		if next_m.sig == fmodel.sig then
+			-- The same web: what changed taken in place. A state alone (a
+			-- live push): the status layer drawn again, nothing else; a
+			-- name, a fade, a colour, a message in flight: the rest too.
+			local marks, colours = #next_m.arcs ~= #fmodel.arcs, false
 			fmodel.arcs = next_m.arcs
 			for i, n in next_m.nodes do
 				local o = fmodel.nodes[i]
-				o.title, o.fade, o.done, o.total, o.hue, o.device = n.title, n.fade, n.done, n.total, n.hue, n.device
+				if o.title ~= n.title or o.fade ~= n.fade or o.provider ~= n.provider then
+					marks = true
+				end
+				if o.hue ~= n.hue or o.device ~= n.device then
+					colours = true
+				end
+				o.title, o.fade, o.done, o.total, o.hue, o.device, o.provider = n.title, n.fade, n.done, n.total, n.hue, n.device, n.provider
 			end
 			fmodel.machines = next_m.machines
-			version:set(version:peek() + 1)
-			tick:set(tick:peek() + 1)
+			if colours or marks then
+				version:set(version:peek() + 1)
+				tick:set(tick:peek() + 1)
+			end
+			status_tick:set(status_tick:peek() + 1)
 			return
 		end
 		count("builds")
@@ -299,13 +352,38 @@ M.View = ui.component(function(props: {
 		for i, l in next_m.links do
 			links[i] = { a = l.a, b = l.b, strong = l.strong, hub = l.hub }
 		end
-		local next_s = sim.new(nodes, links, 7)
+		-- (Laid out across the field: wide for a wide one; closer for a
+		-- crowded web, its nodes never drawn smaller.)
+		local aspect = math.max(1, width:peek()) / field_h()
+		local dense = math.clamp(1 - (#nodes - 60) / 400, 0.7, 1)
+		local next_s = sim.new(nodes, links, 7, { aspect = aspect, dense = dense })
 		-- (Where they were: this web, else kept from before.)
 		local from: { [string]: any } = table.clone(M.places:peek() or {})
 		for i = 1, s.n do
 			from[s.ids[i]] = { s.x[i], s.y[i] }
 		end
 		local fresh = sim.place(next_s, from)
+		-- (Pinned ones held where they were dropped; a pin of a node gone
+		-- goes with it.)
+		local pins = M.pins:peek() or {}
+		local kept_pins: { [string]: boolean } = {}
+		local pruned = false
+		local chats = world.chats or {}
+		for id in pins do
+			local i = next_s.index[id]
+			if i then
+				sim.pin(next_s, i, true)
+				kept_pins[id] = true
+			elseif fmodel.index[id] and (chats[id] == nil or chats[id].archived) then
+				-- (In the web till now, its chat gone: its pin goes.)
+				pruned = true
+			else
+				kept_pins[id] = true
+			end
+		end
+		if pruned then
+			M.pins:set(kept_pins :: any)
+		end
 		local old_m = fmodel
 		fmodel = next_m
 		s = next_s
@@ -352,6 +430,7 @@ M.View = ui.component(function(props: {
 			else
 				sim.sleep(s)
 				settled:set(true)
+				ptick:set(ptick:peek() + 1)
 			end
 		end
 		counts.build_ms = (os.clock() - t0) * 1000
@@ -373,152 +452,235 @@ M.View = ui.component(function(props: {
 		rebuild(world, comms)
 	end)
 
-	-- The palette, once per theme and colour mode: no string made while
-	-- drawing.
+	-- The palette, once per theme and model: no string made while drawing.
 	local pal: any = nil
-	local pal_theme: any, pal_by: any, pal_ver = nil, nil, -1
-	local node_ink: { string } = {}
+	local pal_theme: any, pal_ver = nil, -1
+	-- Each node's fill (its machine's colour, faded with it), its mark's
+	-- ink on it, the strong line to it (its orchestrator's hue), an
+	-- orchestrator's outline (its hue).
+	local node_fill: { string } = {}
+	local node_mark: { string } = {}
 	local node_line: { string } = {}
-	local node_halo: { string } = {}
-	local function palette(): any
-		local theme = ui.theme.current:get()
-		local by = M.color_by:get()
-		local ver = version:get()
-		if pal and pal_theme == theme and pal_by == by and pal_ver == ver then
-			return pal
-		end
-		pal_theme, pal_by, pal_ver = theme, by, ver
+	local node_edge: { [number]: string } = {}
+	local function is_dark(): boolean
 		local ink = kit.ink("text.primary")
 		local r, g, b = tonumber(string.sub(ink, 2, 3), 16) or 0, tonumber(string.sub(ink, 4, 5), 16) or 0, tonumber(string.sub(ink, 6, 7), 16) or 0
-		local dark = r + g + b > 384
+		return r + g + b > 384
+	end
+	-- A machine's colour, by its place among the machines (the same each
+	-- time for the same machines).
+	local function machine_fills(): { [string]: string }
+		local fills = fpal.machines(is_dark())
+		local out: { [string]: string } = {}
+		for k, m in fmodel.machines do
+			out[m.id] = fills[(k - 1) % #fills + 1]
+		end
+		return out
+	end
+	local function alpha(hex: string, a: number): string
+		return string.sub(hex, 1, 7) .. string.format("%02x", math.clamp(math.floor(a * 255 + 0.5), 0, 255))
+	end
+	local function palette(): any
+		local theme = ui.theme.current:get()
+		local ver = version:get()
+		if pal and pal_theme == theme and pal_ver == ver then
+			return pal
+		end
+		pal_theme, pal_ver = theme, ver
+		local dark = is_dark()
 		pal = {
 			dark = dark,
 			fg = kit.ink("text.primary", 0.92),
 			secondary = kit.ink("text.primary", 0.6),
 			bg = kit.ink("background"),
-			halo = kit.ink("text.primary", if dark then 0.06 else 0.05),
 			brain = kit.ink("text.primary", if dark then 0.88 else 0.82),
-			body = kit.ink("text.primary", if dark then 0.1 else 0.07),
-			glyph = kit.ink("text.primary", if dark then 0.86 else 0.8),
-			idle = kit.ink("text.primary", 0.22),
+			-- (A node on no machine known: a plain fill.)
+			body = kit.ink("text.primary", if dark then 0.2 else 0.14),
+			idle = kit.ink("text.primary", 0.25),
 			weak = kit.ink("text.primary", 0.14),
 			live = kit.ink("text.primary", 0.78),
-			working = kit.ink("zeron.status.plan"),
 			ask = kit.ink("zeron.status.input"),
+			approval = kit.ink("zeron.status.approval"),
 			done = kit.ink("zeron.status.done"),
 			failed = kit.ink("zeron.status.failed"),
-			label_bg = kit.ink("background", 0.8),
+			label_bg = kit.ink("background", 0.9),
 			lit = kit.ink("text.primary", 0.85),
-			-- (A fading chat's ring and glyph, by its strength in tenths.)
+			-- (A fading chat's ring, by its strength in tenths.)
 			fade = {},
 		}
 		for k = 1, 10 do
-			pal.fade[k] = kit.ink("text.primary", 0.22 * k / 10)
+			pal.fade[k] = kit.ink("text.primary", 0.25 * k / 10)
 		end
-		-- Each node's colour: by its orchestrator's hue, or its machine's.
-		table.clear(node_ink)
+		table.clear(node_fill)
+		table.clear(node_mark)
 		table.clear(node_line)
-		table.clear(node_halo)
-		local mhue: { [string]: number } = {}
-		for k, m in fmodel.machines do
-			mhue[m.id] = MACHINE_HUES[(k - 1) % #MACHINE_HUES + 1]
-		end
+		table.clear(node_edge)
+		local fills = machine_fills()
 		for i, n in fmodel.nodes do
-			local h = if by == "machine" then mhue[n.device or ""] else n.hue
-			node_ink[i] = if h then hue.canvas(h, 1) else pal.secondary
-			node_line[i] = if h then hue.canvas(h, if n.kind == "orchestrator" then 0.55 else 0.42) else pal.weak
-			node_halo[i] = if h then hue.canvas(h, 0.14) else pal.halo
+			local a = if n.kind == "chat" then n.fade / 10 else 1
+			local f = fills[n.device or ""]
+			if f then
+				node_fill[i] = alpha(f, a)
+				node_mark[i] = alpha(fpal.mark_ink(f), a)
+			else
+				node_fill[i] = pal.body
+				node_mark[i] = alpha(pal.fg, a)
+			end
+			node_line[i] = if n.hue then hue.canvas(n.hue, if n.kind == "orchestrator" then 0.55 else 0.5) else pal.weak
+			if n.kind == "orchestrator" then
+				node_edge[i] = if n.hue then hue.canvas(n.hue, 1) else pal.secondary
+			end
 		end
 		return pal
 	end
 
 	-- The settled web's drawing, made once when it rests (its shapes, its
-	-- glyphs, its names and where they go): never a frame of the settling,
+	-- marks, its names and where they go): never a frame of the settling,
 	-- which draws plain discs.
 	local shapes: { [number]: any } = {}
-	local glyphs: { [number]: any } = {}
-	local glyph_fill: { [number]: boolean } = {}
+	local marks: { [number]: { { any } } } = {}
+	local hub_shape: { [number]: string } = {}
 	local rings: { [number]: any } = {}
 	local names: { string } = {}
 	local label_x: { [number]: number } = {}
 	local label_y: { [number]: number } = {}
+	local label_w: { [number]: number } = {}
 	local made_for = -1
-	local function sides(i: number): number
+	local label_boxes: { { number } } = {}
+	local name_w: { [number]: number } = {}
+	-- (The model the shapes were made for: still right for what isn't
+	-- moving while something is.)
+	local made_version = -1
+	local function crew_of(i: number): number
 		local crew = 0
 		for _, j in s.nbrs[i] do
 			if s.parent[j] == i then
 				crew += 1
 			end
 		end
-		return if crew <= 3 then 4 elseif crew <= 6 then 6 elseif crew <= 10 then 7 elseif crew <= 18 then 9 else 12
+		return crew
+	end
+	local function free(boxes: { { number } }, x0: number, y0: number, x1: number, y1: number): boolean
+		for _, bx in boxes do
+			if not (x1 < bx[1] or x0 > bx[3] or y1 < bx[2] or y0 > bx[4]) then
+				return false
+			end
+		end
+		return true
 	end
 	local function make(c: any)
-		local key = version:peek()
+		local key = version:peek() * 100000 + geo:peek()
 		if made_for == key or not settled:peek() then
 			return
 		end
 		made_for = key
+		made_version = version:peek()
 		table.clear(shapes)
-		table.clear(glyphs)
-		table.clear(glyph_fill)
+		table.clear(marks)
+		table.clear(hub_shape)
 		table.clear(rings)
 		table.clear(names)
 		table.clear(label_x)
 		table.clear(label_y)
+		table.clear(label_w)
 		-- Names placed greedily, the important first, none over a mark or
-		-- another name (an orchestrator's on the Brain's side, away from
-		-- its fan).
+		-- another name: an orchestrator's beside it, off its own link and
+		-- its fan, else above or below it, else left out (its card names it).
 		local boxes: { { number } } = {}
-		local function free(x0: number, y0: number, x1: number, y1: number): boolean
-			for _, b in boxes do
-				if not (x1 < b[1] or x0 > b[3] or y1 < b[2] or y0 > b[4]) then
-					return false
-				end
-			end
-			return true
-		end
+		-- (The names alone, and the Brain's and orchestrators' marks.)
+		local names_at: { { number } } = {}
 		for i, n in fmodel.nodes do
-			local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_CHAT + 3
+			local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING
 			table.insert(boxes, { s.x[i] - r, s.y[i] - r, s.x[i] + r, s.y[i] + r })
+			if n.kind ~= "chat" then
+				table.insert(names_at, { s.x[i] - r, s.y[i] - r, s.x[i] + r, s.y[i] + r })
+			end
 		end
 		for i, n in fmodel.nodes do
 			local x, y = s.x[i], s.y[i]
 			if n.kind == "brain" then
-				shapes[i] = M.ghost(x, y, R_BRAIN)
+				shapes[i] = draw.shape("ghostish", x, y, draw.BRAIN_D)
 				names[i] = locale.s("ds.orch.map.brain")
-				label_x[i], label_y[i] = x, y + R_BRAIN + 9
 				local w = c:measure_text(names[i], M_HUB)
-				table.insert(boxes, { x - w / 2 - 3, y + R_BRAIN + 8, x + w / 2 + 3, y + R_BRAIN + 26 })
+				label_x[i], label_y[i], label_w[i] = x, y + R_BRAIN + 6, w
+				table.insert(boxes, { x - w / 2 - 4, y + R_BRAIN + 5, x + w / 2 + 4, y + R_BRAIN + 23 })
+				table.insert(names_at, { x - w / 2 - 4, y + R_BRAIN + 5, x + w / 2 + 4, y + R_BRAIN + 23 })
 			elseif n.kind == "orchestrator" then
-				shapes[i] = M.cookie(x, y, R_HUB, sides(i))
+				local shape = draw.cookie_of(crew_of(i))
+				hub_shape[i] = shape
+				shapes[i] = { draw.shape(shape, x, y, draw.HUB_D), draw.shape(shape, x, y, draw.HUB_GAP_D), draw.shape(shape, x, y, draw.HUB_FILL_D) }
+				local mk = draw.mark_of(n.provider)
+				if mk then
+					marks[i] = draw.mark(mk, x, y, draw.mark_hub(shape))
+				end
 				names[i] = fit_name(c, n.title, 170, M_HUB)
 				local w = c:measure_text(names[i], M_HUB)
-				-- (Off its own link: beside the mark when the link comes in
-				-- from above or below, under it when from the side.)
+				-- (Its fan faces away from its parent: the sides across its
+				-- link first, then toward its parent, then away.)
 				local p = n.parent
-				local dx, dy = (if p > 0 then s.x[p] else x) - x, (if p > 0 then s.y[p] else y + 1) - y
-				if math.abs(dy) >= math.abs(dx) then
-					-- (Beside it, clear of the link.)
-					label_x[i], label_y[i] = x + R_HUB + 10 + w / 2, y - 8
-				else
-					label_x[i], label_y[i] = x, y + R_HUB + 10
+				local ax, ay = x - (if p > 0 then s.x[p] else x), y - (if p > 0 then s.y[p] else y - 1)
+				local al = math.max(1e-6, math.sqrt(ax * ax + ay * ay))
+				ax, ay = ax / al, ay / al
+				-- (Next to it first; a crowded one's a little further out, its
+				-- name's ground over the lines between.)
+				local tries = {}
+				for _, gap in { R_HUB + 6, R_HUB + 24, R_HUB + 48 } do
+					local far = gap - R_HUB - 6
+					local function at(dx: number, dy: number, lx: number, ly: number)
+						table.insert(tries, { dx, dy, lx, ly, far })
+					end
+					at(1, 0, x + gap + w / 2, y - 8)
+					at(-1, 0, x - gap - w / 2, y - 8)
+					at(0, 1, x, y + gap)
+					at(0, -1, x, y - gap - 17)
+					at(0.7, 0.7, x + gap * 0.7 + w / 2, y + gap * 0.7 - 4)
+					at(-0.7, 0.7, x - gap * 0.7 - w / 2, y + gap * 0.7 - 4)
+					at(0.7, -0.7, x + gap * 0.7 + w / 2, y - gap * 0.7 - 13)
+					at(-0.7, -0.7, x - gap * 0.7 - w / 2, y - gap * 0.7 - 13)
 				end
-				table.insert(boxes, { label_x[i] - w / 2 - 3, label_y[i], label_x[i] + w / 2 + 3, label_y[i] + 17 })
+				table.sort(tries, function(a: any, b: any): boolean
+					if a[5] ~= b[5] then
+						return a[5] < b[5]
+					end
+					local da, db = a[1] * ax + a[2] * ay, b[1] * ax + b[2] * ay
+					if math.abs(math.abs(da) - math.abs(db)) > 0.05 then
+						return math.abs(da) < math.abs(db)
+					end
+					return da < db
+				end)
+				-- (None clear of every mark, in a crowd: over chats' marks, its
+				-- ground under it, but never over another name or its own.)
+				for pass = 1, 2 do
+					for _, t in tries do
+						local lx, ly = t[3], t[4]
+						local x0, y0, x1, y1 = lx - w / 2 - 4, ly - 1, lx + w / 2 + 4, ly + 17
+						if free(if pass == 1 then boxes else names_at, x0, y0, x1, y1) and (pass == 1 or free({ { x - R_HUB, y - R_HUB, x + R_HUB, y + R_HUB } }, x0, y0, x1, y1)) then
+							label_x[i], label_y[i], label_w[i] = lx, ly, w
+							table.insert(boxes, { x0, y0, x1, y1 })
+							table.insert(names_at, { x0, y0, x1, y1 })
+							break
+						end
+					end
+					if label_x[i] then
+						break
+					end
+				end
 			else
-				glyphs[i], glyph_fill[i] = Graph2.glyph(n.provider, x, y)
-				rings[i] = ui.path():arc(x, y, R_CHAT + 3.5, 0, 360)
+				local mk = draw.mark_of(n.provider)
+				if mk then
+					marks[i] = draw.mark(mk, x, y, draw.MARK_CHAT)
+				end
+				rings[i] = ui.path():arc(x, y, R_RING, 0, 360)
 				names[i] = fit_name(c, n.title, 150, M_NAME)
 			end
 		end
-		-- Chats' names: those asking for the person (others on hover).
+		-- (Kept for the status layer: a chat asking for the person is named
+		-- where it's free of these.)
+		label_boxes = boxes
+		table.clear(name_w)
 		for i, n in fmodel.nodes do
-			if n.kind == "chat" and NEED[state_of(n.id)] and names[i] ~= "" then
-				local w = c:measure_text(names[i], M_NAME)
-				local x, y = s.x[i], s.y[i] + R_CHAT + 6
-				if free(x - w / 2 - 3, y, x + w / 2 + 3, y + 15) then
-					label_x[i], label_y[i] = x, y
-					table.insert(boxes, { x - w / 2 - 3, y, x + w / 2 + 3, y + 15 })
-				end
+			if n.kind == "chat" and names[i] ~= "" then
+				name_w[i] = c:measure_text(names[i], M_NAME)
 			end
 		end
 	end
@@ -544,109 +706,111 @@ M.View = ui.component(function(props: {
 
 	-- The drawing (world space; each band of the field a canvas of its own,
 	-- under zgx's raster cap, moved by the view).
-	local function draw_web(c: any, top: number, bottom: number)
+	local function label(c: any, i: number, t: any, ink: string, p: any)
+		local w = label_w[i] or 0
+		c:rect(label_x[i] - w / 2 - 4, label_y[i] - 1, w + 8, 18, p.label_bg, 4)
+		t.color = ink
+		c:text(names[i], label_x[i], label_y[i], t)
+	end
+	local function fill_mark(c: any, i: number)
+		local m = marks[i]
+		if m then
+			local ink = node_mark[i]
+			for _, part in m do
+				c:fill(part[1], ink, part[2])
+			end
+		end
+	end
+	local function draw_web(c: any)
 		local p = palette()
-		local v = view:peek()
 		local b = cull:get()
 		local still = settled:peek()
 		make(c)
-		local full = still and made_for == version:peek()
-		local by0, by1 = (top - v.y) / v.zoom, (bottom - v.y) / v.zoom
-		local x0, y0, x1, y1 = b.x0, math.max(b.y0, by0 - 60), b.x1, math.min(b.y1, by1 + 60)
+		local full = made_version == version:peek()
+		-- (What's awake moves on the overlay: left out here.)
+		local moving = not still
+		-- (Each band draws all the view reaches, not only its own strip: a
+		-- pan moves the drawing without drawing it again, so what comes into
+		-- a band's strip must be there already. The canvas clips to its
+		-- strip; the view's reach is what culls.)
+		local x0, y0, x1, y1 = b.x0, b.y0, b.x1, b.y1
 		local x, y = s.x, s.y
 		local nodes = fmodel.nodes
-		-- Links: weak (hairlines), then strong (a hub's heavier).
+		local awake = s.awake
+		-- Links: weak (hairlines), then strong (in the orchestrator's hue, a
+		-- hub's heavier).
 		for _, l in fmodel.links do
+			if moving and (awake[l.a] or awake[l.b]) then
+				continue
+			end
 			local ax, ay, bx, byy = x[l.a], y[l.a], x[l.b], y[l.b]
 			if math.max(ax, bx) < x0 or math.min(ax, bx) > x1 or math.max(ay, byy) < y0 or math.min(ay, byy) > y1 then
 				continue
 			end
 			if not l.strong then
-				c:line(ax, ay, bx, byy, p.weak, 0.8)
+				-- (Heavier with its traffic: a hairline, up to a point and a half.)
+				c:line(ax, ay, bx, byy, p.weak, 0.8 + math.min((l :: any).count or 0, 7) * 0.1)
 			end
 		end
 		for _, l in fmodel.links do
-			if l.strong then
+			if l.strong and not (moving and (awake[l.a] or awake[l.b])) then
 				local ax, ay, bx, byy = x[l.a], y[l.a], x[l.b], y[l.b]
 				if math.max(ax, bx) < x0 or math.min(ax, bx) > x1 or math.max(ay, byy) < y0 or math.min(ay, byy) > y1 then
 					continue
 				end
-				c:line(ax, ay, bx, byy, node_line[l.b], if l.hub then 2.2 else 1.2)
+				c:line(ax, ay, bx, byy, node_line[l.b], if l.hub then 2.4 else 1.3)
 			end
 		end
-		-- Marks.
+		-- Marks: the shape, its fill, its provider's mark.
 		local show_names = names_shown:get() and full
 		local drawn = 0
 		for i, n in nodes do
 			local nx, ny = x[i], y[i]
-			if nx < x0 - 40 or nx > x1 + 40 or ny < y0 - 40 or ny > y1 + 40 then
+			if (moving and awake[i]) or nx < x0 - 40 or nx > x1 + 40 or ny < y0 - 40 or ny > y1 + 40 then
 				continue
 			end
 			drawn += 1
 			if n.kind == "brain" then
-				c:circle(nx, ny, R_BRAIN * 1.75, p.halo)
 				if full then
 					c:fill(shapes[i], p.brain)
 				else
 					c:circle(nx, ny, R_BRAIN, p.brain)
 				end
 			elseif n.kind == "orchestrator" then
-				c:circle(nx, ny, R_HUB * 1.9, node_halo[i])
+				-- (Its outline in its hue, following its shape; a gap; its
+				-- machine's fill.)
 				if full then
-					c:fill(shapes[i], node_ink[i])
+					local sh = shapes[i]
+					c:fill(sh[1], node_edge[i])
+					c:fill(sh[2], p.bg)
+					c:fill(sh[3], node_fill[i])
+					fill_mark(c, i)
 				else
-					c:circle(nx, ny, R_HUB, node_ink[i])
+					c:circle(nx, ny, R_HUB, node_edge[i])
+					c:circle(nx, ny, draw.HUB_GAP_D / 2, p.bg)
+					c:circle(nx, ny, draw.HUB_FILL_D / 2, node_fill[i])
 				end
-				c:circle(nx, ny, 3.6, p.bg)
 			else
-				local st = state_of(n.id)
-				local faded = n.fade < 10
-				c:circle(nx, ny, R_CHAT, p.body)
-				if full and glyphs[i] then
-					local gi = if faded then p.fade[n.fade] else p.glyph
-					if glyph_fill[i] then
-						c:fill(glyphs[i], gi)
-					else
-						c:stroke(glyphs[i], gi, 1.2, ROUND)
-					end
-				end
-				local R = R_CHAT + 3.5
-				if NEED[st] then
-					c:circle(nx, ny, R + 0.9, p.ask)
-					c:circle(nx, ny, R - 0.9, p.bg)
-					c:circle(nx, ny, R_CHAT, p.body)
-					if full then
-						if glyphs[i] then
-							if glyph_fill[i] then
-								c:fill(glyphs[i], p.glyph)
-							else
-								c:stroke(glyphs[i], p.glyph, 1.2, ROUND)
-							end
-						end
-						c:circle(nx + 9.5, ny - 9.5, 6, p.ask)
-						T_BADGE.color = p.bg
-						c:text("?", nx + 9.5, ny - 9.5, T_BADGE)
-					end
-				elseif st == "working" then
-					-- (Its dashed ring is the overlay's, stepping.)
-					if not full then
-						c:circle(nx, ny, R + 0.8, p.working)
-						c:circle(nx, ny, R - 0.8, p.bg)
-						c:circle(nx, ny, R_CHAT, p.body)
-					end
-				elseif full and rings[i] then
-					local ink = if st == "done" then p.done elseif st == "failed" then p.failed elseif faded then p.fade[n.fade] else p.idle
-					c:stroke(rings[i], ink, if st == "idle" then 1.1 else 1.5)
+				-- (Its state's ring, glyph and name are the status layer's:
+				-- a state changing draws that alone.)
+				c:circle(nx, ny, R_CHAT, node_fill[i])
+				if full then
+					fill_mark(c, i)
 				end
 			end
-			if show_names and label_x[i] then
-				local t = (if n.kind == "chat" then T_NAME else T_HUB) :: any
-				t.color = if n.kind == "chat" then p.secondary else p.fg
-				c:text(names[i], label_x[i], label_y[i], t)
+		end
+		-- Names after every mark, their ground over what's under them (in a
+		-- crowd, a name sits over chats).
+		if show_names then
+			for i, n in nodes do
+				local lx, ly = label_x[i], label_y[i]
+				if lx and lx >= x0 - 200 and lx <= x1 + 200 and ly >= y0 - 40 and ly <= y1 + 40 and not (moving and awake[i]) then
+					label(c, i, if n.kind == "chat" then T_NAME else T_HUB, if n.kind == "chat" then p.secondary else p.fg, p)
+				end
 			end
 		end
 		-- Live: a dashed arc for each message in flight.
-		if full then
+		if full and not moving then
 			for _, a in fmodel.arcs do
 				local ax, ay, bx, byy = x[a.a], y[a.a], x[a.b], y[a.b]
 				local mx, my = (ax + bx) / 2, (ay + byy) / 2
@@ -657,26 +821,44 @@ M.View = ui.component(function(props: {
 		return drawn
 	end
 
-	-- The overlay: the working rings (dashed, stepping on the shared status
-	-- clock: a tenth of a second a step, none while none shows), what's lit
-	-- (the node under the pointer, its links, its name), the dots running
-	-- lines.
+	-- The overlay: what moves (plain shapes, a frame at a time), what's lit
+	-- (the node under the pointer: its shape's outline, its links; pinned, a
+	-- pin by it), the dots running lines.
 	local pulses: { any } = {}
-	local ptick = ui.use_state(0)
-	local phase = 0
-	-- (Eight dashes round a ring of radius R_CHAT + 3.5.)
-	local RING_SEG = 2 * math.pi * (R_CHAT + 3.5) / 8
-	local RING_DASH: any = { dash = { RING_SEG * 0.56, RING_SEG * 0.44 }, dash_offset = 0, cap = "round" }
 	local function draw_over(c: any)
 		local p = palette()
 		local x, y = s.x, s.y
-		if settled:peek() and made_for == version:peek() then
-			RING_DASH.dash_offset = phase
-			for i, n in fmodel.nodes do
-				if rings[i] and state_of(n.id) == "working" then
-					c:stroke(rings[i], p.working, 1.8, RING_DASH)
+		-- (For tests: how many moving it drew last, none once settled.)
+		local moving_drawn = 0
+		if not settled:peek() then
+			local awake = s.awake
+			for _, l in fmodel.links do
+				if awake[l.a] or awake[l.b] then
+					c:line(x[l.a], y[l.a], x[l.b], y[l.b], if l.strong then node_line[l.b] else p.weak, if l.hub then 2.4 elseif l.strong then 1.3 else 0.8)
 				end
 			end
+			for i, n in fmodel.nodes do
+				if awake[i] then
+					moving_drawn += 1
+					if n.kind == "brain" then
+						c:circle(x[i], y[i], R_BRAIN, p.brain)
+					elseif n.kind == "orchestrator" then
+						c:circle(x[i], y[i], R_HUB, node_edge[i])
+						c:circle(x[i], y[i], draw.HUB_GAP_D / 2, p.bg)
+						c:circle(x[i], y[i], draw.HUB_FILL_D / 2, node_fill[i])
+					else
+						local st = state_of(n.id)
+						local ring = if NEED[st] then p.ask elseif st == "approval" then p.approval elseif st == "done" then p.done elseif st == "failed" then p.failed else p.idle
+						c:circle(x[i], y[i], R_RING + 0.8, ring)
+						c:circle(x[i], y[i], R_RING - 0.8, p.bg)
+						c:circle(x[i], y[i], R_CHAT, node_fill[i])
+					end
+				end
+			end
+		end
+		if counts.over_moving ~= moving_drawn then
+			counts.over_moving = moving_drawn
+			count("overlay", 0)
 		end
 		local over = M.hover:get()
 		local i = over and fmodel.index[over]
@@ -687,13 +869,25 @@ M.View = ui.component(function(props: {
 					c:line(x[l.a], y[l.a], x[l.b], y[l.b], p.lit, if l.strong then 1.8 else 1)
 				end
 			end
-			local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_CHAT + 3.5
-			c:circle(x[i], y[i], r + 4, p.lit)
-			c:circle(x[i], y[i], r + 2.5, p.bg)
-			if n.kind == "chat" and not label_x[i] and names[i] and names[i] ~= "" then
-				T_NAME.color = p.fg
-				c:rect(x[i] - 80, y[i] + R_CHAT + 5, 160, 16, p.label_bg, 4)
-				c:text(names[i], x[i], y[i] + R_CHAT + 6, T_NAME)
+			local nx, ny = x[i], y[i]
+			local r
+			if n.kind == "brain" then
+				c:stroke(draw.shape("ghostish", nx, ny, draw.BRAIN_D + 9), p.lit, 1.6)
+				r = R_BRAIN
+			elseif n.kind == "orchestrator" then
+				c:stroke(draw.shape(hub_shape[i] or draw.cookie_of(crew_of(i)), nx, ny, draw.HUB_D + 8), p.lit, 1.6)
+				r = R_HUB
+			else
+				c:stroke(ui.path():arc(nx, ny, R_RING + 3.5, 0, 360), p.lit, 1.6)
+				r = R_RING
+			end
+			-- (Pinned by hand: a pin at its top left, while it's lit.)
+			if s.pinned[i] and not s.fixed[i] then
+				local d = r * 0.72 + 10
+				local pin, w = draw.pin(nx - d, ny - d, 16)
+				c:circle(nx - d, ny - d, 10, p.bg)
+				c:stroke(pin, p.fg, w, ROUND)
+				count("pins")
 			end
 		end
 		local now = ui.now()
@@ -702,45 +896,53 @@ M.View = ui.component(function(props: {
 			if t >= 0 and t <= 1 then
 				local a, b = q.a, q.b
 				local e = 1 - (1 - t) ^ 3
-				local px, py = x[a] + (x[b] - x[a]) * e, y[a] + (y[b] - y[a]) * e
-				c:circle(px, py, 5, p.halo)
-				c:circle(px, py, 3, p.live)
+				c:circle(x[a] + (x[b] - x[a]) * e, y[a] + (y[b] - y[a]) * e, 3, p.live)
 			end
 		end
 	end
-	-- The working rings step while some show, on screen and settled.
-	local field_el: any = nil
-	local step_key = {}
-	local stepping = false
-	ui.effect(function()
-		version:get()
-		local want = on_screen() and settled:get() and status.stepped() and not motion.reduced_now()
-		local any = false
-		if want then
-			for _, n in fmodel.nodes do
-				if n.kind == "chat" and state_of(n.id) == "working" then
-					any = true
-					break
+	-- The status layer: each chat's ring for its state (working's is the
+	-- sidebar's own ring, over the canvas), the ground under the sidebar's
+	-- glyph for one asking, approving or failed, and the names of those
+	-- asking, placed free of the rest. Drawn again for a state's change
+	-- alone (a live push), nothing else with it.
+	local function draw_status(c: any)
+		local p = palette()
+		if made_version ~= version:peek() then
+			return
+		end
+		local still = settled:peek()
+		local x, y = s.x, s.y
+		local b = cull:get()
+		local show_names = names_shown:get()
+		for i, n in fmodel.nodes do
+			if n.kind ~= "chat" or not rings[i] or (not still and s.awake[i]) then
+				continue
+			end
+			local nx, ny = x[i], y[i]
+			if nx < b.x0 - 40 or nx > b.x1 + 40 or ny < b.y0 - 40 or ny > b.y1 + 40 then
+				continue
+			end
+			local st = state_of(n.id)
+			if RINGED[st] then
+				continue
+			end
+			local ink = if NEED[st] then p.ask elseif st == "approval" then p.approval elseif st == "done" then p.done elseif st == "failed" then p.failed elseif n.fade < 10 then p.fade[n.fade] else p.idle
+			c:stroke(rings[i], ink, if st == "idle" then 1.1 else 1.6)
+			if GLYPHED[st] then
+				c:circle(nx + BADGE_AT, ny - BADGE_AT, 7.2, p.bg)
+			end
+			local w = name_w[i]
+			if (NEED[st] or st == "approval") and show_names and w then
+				local ly = ny + R_RING + 4
+				local x0, x1 = nx - w / 2 - 4, nx + w / 2 + 4
+				if free(label_boxes, x0, ly - 1, x1, ly + 16) then
+					c:rect(x0, ly - 1, w + 8, 17, p.label_bg, 4)
+					T_NAME.color = p.secondary
+					c:text(names[i], nx, ly, T_NAME)
 				end
 			end
 		end
-		if any and field_el and not stepping then
-			stepping = true
-			status.step(step_key, field_el, function(_el: any, now: number)
-				-- (Eight even dashes round the ring, a dash's eighth a step.)
-				phase = -(math.floor(now / 100) % 8) * RING_SEG / 8
-				ptick:set(ptick:peek() + 1)
-			end)
-		elseif not any and stepping then
-			stepping = false
-			status.unstep(step_key)
-		end
-	end)
-	ui.on_cleanup(function()
-		if stepping then
-			status.unstep(step_key)
-		end
-	end)
+	end
 	-- Dots: once per message, along a straight line between its ends.
 	local seen: { [string]: boolean }? = nil
 	local pulse_run = ui.use_state(0)
@@ -823,7 +1025,7 @@ M.View = ui.component(function(props: {
 		local z = view:peek().zoom
 		local best, best_d = nil, math.huge
 		for i, n in fmodel.nodes do
-			local r = (if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_CHAT) + 5 / z
+			local r = (if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING) + 4 / z
 			local dx, dy = s.x[i] - wx, s.y[i] - wy
 			local d = dx * dx + dy * dy
 			if d <= r * r and d < best_d then
@@ -834,28 +1036,153 @@ M.View = ui.component(function(props: {
 	end
 	local function drag(id: string, wx: number, wy: number)
 		local i = fmodel.index[id]
-		if not i or s.fixed[i] then
+		if not i then
 			return
 		end
+		-- (The Brain too: it moves, its hubs pulled along; let go, it stays
+		-- there, the web's anchor where it was dropped.)
 		s.held[i] = true
-		s.x[i], s.y[i] = wx, wy
-		if sim.still(s) or not s.awake[i] then
-			wake({ i })
+		dragged_since = true
+		if not holding then
+			holding = true
+			if M.held:peek() ~= fmodel.nodes[i].id then
+				M.held:set(fmodel.nodes[i].id)
+			end
 		end
-		tick:set(tick:peek() + 1)
+		s.x[i], s.y[i] = wx, wy
+		-- (Woken once: held, it never rests, so nothing wakes it again.)
+		-- (The Brain wakes the whole web: its hubs follow, their crews
+		-- after them.)
+		if not s.awake[i] then
+			if s.fixed[i] then
+				wake(nil)
+			else
+				wake_down(i)
+			end
+		end
+	end
+	-- Let go: it stays where it was dropped (its slot now), the few round
+	-- it settle in this frame, and the drawing is still again at once.
+	local function let_go(i: number, dropped: boolean?)
+		s.held[i] = s.fixed[i] or s.pinned[i]
+		if M.held:peek() ~= nil then
+			M.held:set(nil)
+		end
+		if not holding then
+			return
+		end
+		holding = false
+		sim.adopt(s, i)
+		-- (Dropped, moved there: pinned, its parent moving or not; a click
+		-- pins nothing.)
+		if dropped ~= false and not s.fixed[i] then
+			sim.pin(s, i, true)
+			if not (M.pins:peek() or {})[s.ids[i]] then
+				M.pins:set_key({ s.ids[i] }, true)
+			end
+		end
+		if not settled:peek() then
+			local steps0 = s.steps
+			sim.run(s, RELEASE_BUDGET, os.clock)
+			count("steps", s.steps - steps0)
+			sim.sleep(s)
+			done_settling()
+		end
+	end
+	-- Let go of pins: a parent's children's (the Brain's: its own children,
+	-- orchestrators and its chats, not theirs), or all; they settle back
+	-- into the web round their parents.
+	local function unpin(which: (i: number) -> boolean)
+		local woke: { number } = {}
+		local pins = table.clone(M.pins:peek() or {})
+		for i = 1, s.n do
+			if s.pinned[i] and which(i) then
+				sim.pin(s, i, false)
+				pins[s.ids[i]] = nil
+				table.insert(woke, i)
+			end
+		end
+		if #woke > 0 then
+			M.pins:set(pins :: any)
+			wake(woke)
+		end
+	end
+	M.unpin_children = function(id: string)
+		local p = fmodel.index[id]
+		if p then
+			unpin(function(i: number): boolean
+				return s.parent[i] == p
+			end)
+		end
+	end
+	M.unpin_all = function()
+		unpin(function(_i: number): boolean
+			return true
+		end)
+	end
+
+	-- Fit: the Brain back in the centre (where it was dragged, if it was),
+	-- its hubs following, the rest where they are round them.
+	local function recentre()
+		local bx, by = 0, 0
+		for i = 1, s.n do
+			if s.fixed[i] then
+				bx, by = s.x[i], s.y[i]
+			end
+		end
+		if bx == 0 and by == 0 then
+			return
+		end
+		-- (The whole web moved with it: nothing else changes shape.)
+		for i = 1, s.n do
+			s.x[i] -= bx
+			s.y[i] -= by
+		end
+		if settled:peek() then
+			done_settling()
+		end
+	end
+	M.recentre = recentre
+	M.drag_by = function(id: string, dx: number, dy: number)
+		local i = fmodel.index[id]
+		if i then
+			drag(id, s.x[i] + dx, s.y[i] + dy)
+		end
+	end
+	M.drag_end = function(id: string)
+		local i = fmodel.index[id]
+		if i then
+			let_go(i)
+		end
 	end
 	M.drag_to = function(id: string, wx: number, wy: number)
 		drag(id, wx, wy)
 		local i = fmodel.index[id]
 		if i then
-			s.held[i] = s.fixed[i]
+			let_go(i)
 		end
 	end
 	local press: any = nil
 	local grip_hot = ui.use_state(false)
 	local in_field = false
+	-- Pressed on a node: held from now (the drawing's dragging mode) till
+	-- let go or cancelled, moved or not.
 	local function on_press(px: number, py: number)
-		press = { id = hit(px, py), x = px, y = py, moved = false, view = view:peek() }
+		local id = hit(px, py)
+		press = { id = id, x = px, y = py, moved = false, view = view:peek() }
+		local i = id and fmodel.index[id]
+		if i then
+			drag(id :: string, s.x[i], s.y[i])
+		end
+	end
+	-- (Cancelled, the window hidden or covered mid-drag: let go where it is.)
+	local function cancel()
+		local p = press
+		press = nil
+		local i = p and p.id and fmodel.index[p.id]
+		if i then
+			let_go(i)
+		end
 	end
 	local function on_move(px: number, py: number)
 		if press then
@@ -878,6 +1205,11 @@ M.View = ui.component(function(props: {
 			M.hover:set(id)
 		end
 	end
+	ui.effect(function()
+		if not window_shown() and press then
+			cancel()
+		end
+	end)
 	local function open(id: string)
 		local i = fmodel.index[id]
 		local n = i and fmodel.nodes[i]
@@ -896,15 +1228,14 @@ M.View = ui.component(function(props: {
 		if not p then
 			return
 		end
+		local i = p.id and fmodel.index[p.id]
+		if i then
+			let_go(i, p.moved)
+		end
 		if not p.moved then
 			local id = hit(px, py)
 			if id then
 				open(id)
-			end
-		elseif p.id then
-			local i = fmodel.index[p.id]
-			if i then
-				s.held[i] = s.fixed[i]
 			end
 		end
 	end
@@ -922,74 +1253,9 @@ M.View = ui.component(function(props: {
 		end
 		local v = view:peek()
 		local n = fmodel.nodes[i]
-		local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_CHAT
+		local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING
 		return s.x[i] * v.zoom + v.x, s.y[i] * v.zoom + v.y, r * v.zoom
 	end
-	local function ref_of(id: string): any
-		local i = fmodel.index[id]
-		return kit.ref_of(props.world, id, if i then fmodel.nodes[i].title else nil)
-	end
-
-	-- The grip beside the node under the pointer: dragged, a reference.
-	local grip_for = ui.use_state(nil :: string?)
-	ui.effect(function()
-		local id = M.hover:get()
-		if id and id ~= grip_for:peek() then
-			grip_for:set(id)
-		end
-	end)
-	local function grip_at(): (number, number)
-		view:get()
-		tick:get()
-		local id = grip_for:get()
-		if not id then
-			return -1000, -1000
-		end
-		local x, y, r = screen_of(id)
-		return x + r + 6, y
-	end
-	local grip = ui.div {
-		id = "orch-force-grip",
-		class = "orch-force-grip",
-		label = locale.t("ds.orch.map.reference"),
-		absolute = true,
-		left = function(): number
-			local x = grip_at()
-			return x
-		end,
-		top = function(): number
-			local _, y = grip_at()
-			return y - 10
-		end,
-		w = 20,
-		h = 20,
-		rounded = "$radius.sm",
-		items = "center",
-		justify = "center",
-		color = "$text.secondary",
-		bg = "$surface.raised",
-		border = 1,
-		border_color = "$border",
-		hover = { bg = "$hover" },
-		on_hover = function(inside: boolean)
-			grip_hot:set(inside)
-			if not inside then
-				leave_later()
-			end
-		end,
-		on_drag = function(): any
-			local id = grip_for:peek()
-			local r = if id then ref_of(id) else nil
-			return if r then { ref = r } else nil
-		end,
-		drag_preview = function(payload: any): Node
-			local r = Ref.of(payload)
-			return if r then Ref.Pill(r) else ui.div {}
-		end,
-		drag_preview_anchor = { 0, 0.5 },
-		drag_preview_offset = { 12, 0 },
-		Icon { name = "drag-handle", size = 12 },
-	}
 
 	-- The card of what the pointer rests on (ds/hover_card's anchored).
 	local function card(): Node
@@ -1099,7 +1365,8 @@ M.View = ui.component(function(props: {
 	end
 	local function hover_box(): (number, number, number)
 		view:get()
-		tick:get()
+		ptick:get()
+		geo:get()
 		local id = M.hover:get()
 		if not id then
 			return -1000, -1000, 0
@@ -1156,6 +1423,7 @@ M.View = ui.component(function(props: {
 	local function marker(item: any): Node
 		local function at(): (number, number)
 			version:get()
+			geo:get()
 			local i = fmodel.index[item.id]
 			if not i then
 				return -1000, -1000
@@ -1188,6 +1456,107 @@ M.View = ui.component(function(props: {
 			end,
 			w = 8,
 			h = 8,
+		}
+	end
+
+	-- The sidebar's own status glyphs over the canvas (ds/status's
+	-- StatusIcon): working's ring round a working chat (its animation
+	-- the sidebar's, nothing when none works), asking's, approving's and
+	-- failed's glyph by one; in the layer the pan moves whole. One moving
+	-- (awake, dragged) is left out till it rests: the overlay draws it.
+	local zoom = ui.computed(function(): number
+		return view:get().zoom
+	end)
+	-- (Made the frame after the web's first drawing, not with it; only for
+	-- the chats in the view's reach.)
+	local glyphs_on = ui.use_state(false)
+	local glyphed = ui.computed(function(): { any }
+		version:get()
+		status_tick:get()
+		geo:get()
+		local b = cull:get()
+		local out = {}
+		for i, n in fmodel.nodes do
+			local x, y = s.x[i], s.y[i]
+			if n.kind == "chat" and x >= b.x0 - 40 and x <= b.x1 + 40 and y >= b.y0 - 40 and y <= b.y1 + 40 then
+				local st = state_of(n.id)
+				if RINGED[st] or GLYPHED[st] then
+					table.insert(out, { id = n.id, ring = RINGED[st] == true })
+				end
+			end
+		end
+		return out
+	end)
+	local function glyph_el(item: any): Node
+		-- (The ring's radius is 10 of its 24: sized to the chat's ring.)
+		local function size(): number
+			return if item.ring then R_RING * 2.4 * zoom:get() else 13 * zoom:get()
+		end
+		local function at(): (number, number)
+			version:get()
+			geo:get()
+			local i = fmodel.index[item.id]
+			if not i then
+				return -1000, -1000
+			end
+			local z = zoom:get()
+			if item.ring then
+				return s.x[i] * z, s.y[i] * z
+			end
+			return (s.x[i] + BADGE_AT) * z, (s.y[i] - BADGE_AT) * z
+		end
+		return ui.div {
+			class = if item.ring then "orch-force-ring" else "orch-force-glyph",
+			absolute = true,
+			pointer_events = "none",
+			left = function(): number
+				return (at()) - size() / 2
+			end,
+			top = function(): number
+				local _, y = at()
+				return y - size() / 2
+			end,
+			opacity = function(): number
+				tick:get()
+				local i = fmodel.index[item.id]
+				return if i and not settled:peek() and s.awake[i] then 0 else 1
+			end,
+			status.StatusIcon {
+				kind = function(): any
+					status_tick:get()
+					return state_of(item.id)
+				end,
+				size = size(),
+			},
+		}
+	end
+
+	-- The machines' legend: each one's colour and name, at the bottom left.
+	local legend = ui.computed(function(): { any }
+		version:get()
+		ui.theme.current:get()
+		local fills = machine_fills()
+		local used: { [string]: boolean } = {}
+		for _, n in fmodel.nodes do
+			if n.device then
+				used[n.device] = true
+			end
+		end
+		local out = {}
+		for _, m in fmodel.machines do
+			if used[m.id] and fills[m.id] then
+				table.insert(out, { id = m.id, name = m.name, color = fills[m.id] })
+			end
+		end
+		return out
+	end)
+	local function legend_item(item: any): Node
+		return ui.row {
+			class = "orch-force-legend-item",
+			gap = "$space.1",
+			items = "center",
+			ui.div { w = 8, h = 8, shrink = 0, rounded = "$radius.full", bg = item.color },
+			ui.text { item.name or item.id, text_size = "$font.size.xs", color = "$text.secondary", truncate = true, max_w = 140 },
 		}
 	end
 
@@ -1234,15 +1603,43 @@ M.View = ui.component(function(props: {
 					tick:get()
 					version:get()
 					local t0 = os.clock()
-					local n = draw_web(c, top, bottom())
+					local n = draw_web(c)
+					if not glyphs_on:peek() then
+						ui.after(0, function()
+							glyphs_on:set(true)
+						end)
+					end
 					count("draws")
 					counts.drawn = n
+					-- (Each band's own count: every band draws the view's
+					-- whole reach.)
+					counts[`drawn_{k}`] = n
 					local ms = (os.clock() - t0) * 1000
 					counts.draw_ms = ms
 					if first_pending then
 						first_pending = false
 						counts.first_ms = (os.clock() - open_t0) * 1000
 					end
+				end,
+			},
+			ui.canvas {
+				class = "orch-force-status",
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+				view = band_view,
+				draw = function(c: any, _w: number, _h: number)
+					if not on_screen() then
+						return
+					end
+					status_tick:get()
+					tick:get()
+					version:get()
+					count("status")
+					draw_status(c)
 				end,
 			},
 			ui.canvas {
@@ -1259,7 +1656,6 @@ M.View = ui.component(function(props: {
 						return
 					end
 					ptick:get()
-					tick:get()
 					count("overlay")
 					draw_over(c)
 				end,
@@ -1278,10 +1674,31 @@ M.View = ui.component(function(props: {
 			end
 		end,
 		kit.MenuField {
-			menu = props.menu,
+			-- (The node's menu, and for a parent its children's pins; the
+			-- space's: every pin.)
+			menu = function(id: string): { any }?
+				if id == BACKGROUND then
+					return { { label = locale.s("ds.orch.map.unpin_all"), icon = "pin", on_select = function()
+						M.unpin_all()
+					end } }
+				end
+				local base = if props.menu then props.menu(id) else nil
+				local i = fmodel.index[id]
+				if i and fmodel.nodes[i].kind ~= "chat" then
+					local out = table.clone(base or {})
+					table.insert(out, { separator = true })
+					table.insert(out, { label = locale.s("ds.orch.map.unpin_children"), icon = "pin", on_select = function()
+						M.unpin_children(id)
+					end })
+					return out
+				end
+				return base
+			end,
 			register = props.register,
 			key = "force",
-			hit = hit,
+			hit = function(px: number, py: number): string?
+				return hit(px, py) or BACKGROUND
+			end,
 			center = function(id: string): (number?, number?)
 				local x, y = screen_of(id)
 				if x < -999 then
@@ -1297,8 +1714,7 @@ M.View = ui.component(function(props: {
 				h = field_h,
 				overflow = "hidden",
 				rounded = "$radius.lg",
-				on_visible = function(visible: boolean, el: any)
-					field_el = el
+				on_visible = function(visible: boolean, _el: any)
 					if visible ~= in_view:peek() then
 						if visible and not in_view:peek() then
 							open_t0 = os.clock()
@@ -1337,6 +1753,24 @@ M.View = ui.component(function(props: {
 					return tostring(k)
 				end, absolute = true, left = 0, top = 0, right = 0, bottom = 0, pointer_events = "none" }),
 				ui.show(function(): boolean
+					return on_screen() and glyphs_on:get()
+				end, ui.div {
+					class = "orch-force-glyphs",
+					absolute = true,
+					pointer_events = "none",
+					left = function(): number
+						return view:get().x
+					end,
+					top = function(): number
+						return view:get().y
+					end,
+					w = 1,
+					h = 1,
+					ui.each(glyphed, glyph_el, { key = function(item: any): string
+						return `{item.id}/{item.ring}`
+					end, absolute = true, left = 0, top = 0, w = 1, h = 1, pointer_events = "none" }),
+				}),
+				ui.show(function(): boolean
 					return on_screen() and settled:get()
 				end, ui.div {
 					class = "orch-force-layer",
@@ -1352,7 +1786,7 @@ M.View = ui.component(function(props: {
 					h = 1,
 					ui.each(items, marker, { key = function(item: any): string
 						return item.id
-					end, absolute = true, left = 0, top = 0, pointer_events = "none" }),
+					end, absolute = true, left = 0, top = 0, w = 1, h = 1, pointer_events = "none" }),
 				}),
 				ui.div {
 					class = "orch-force-anchor-at",
@@ -1371,7 +1805,11 @@ M.View = ui.component(function(props: {
 						return M.hover:get() ~= nil
 					end, anchor),
 				},
-				-- Fit, at the top right (Colour by is the Map's menu's).
+				-- The machines, at the bottom left.
+				ui.each(legend, legend_item, { key = function(item: any): string
+					return item.id
+				end, class = "orch-force-legend", absolute = true, left = 10, bottom = 8, gap = "$space.3", direction = "row", pointer_events = "none" }),
+				-- Fit, at the top right.
 				ui.row {
 					absolute = true,
 					right = 8,
@@ -1384,6 +1822,7 @@ M.View = ui.component(function(props: {
 						tone = "quiet",
 						on_click = function()
 							moved_view = false
+							recentre()
 							fit()
 							recull()
 						end,
@@ -1391,9 +1830,8 @@ M.View = ui.component(function(props: {
 				},
 			},
 		},
-		ui.show(function(): boolean
-			return M.hover:get() ~= nil or grip_hot:get()
-		end, grip),
+		-- (No grip: a node is referenced from its menu, Mention in
+		-- composer; the hover card alone shows what it is.)
 	}
 end)
 

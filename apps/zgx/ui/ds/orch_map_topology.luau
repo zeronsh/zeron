@@ -78,6 +78,25 @@ local function signature(world: any, width: number): string
 	-- keeps a hide.)
 	local ctx, clock = model.visibility(world)
 	table.insert(parts_, Visibility.key(chats, clock, ctx))
+	-- (An archived orchestrator's crew shows only while live: its coming
+	-- and going too.)
+	local gone: { [string]: boolean } = {}
+	for _, o in now.orchestrators or {} do
+		local c = chats[o.id]
+		if o.archived or (c and c.archived) then
+			gone[o.id] = true
+		end
+	end
+	if next(gone) then
+		local live = {}
+		for _, m in now.crew or {} do
+			if not m.released and gone[m.orchestrator_id] and Visibility.live(chats[m.chat_id], ctx) then
+				table.insert(live, m.chat_id)
+			end
+		end
+		table.sort(live)
+		table.insert(parts_, "x" .. table.concat(live, ","))
+	end
 	return table.concat(parts_, "|")
 end
 
@@ -302,7 +321,7 @@ return ui.component(function(props: Props): Node
 			local working, total = 0, 0
 			for _, m in (props.world().now or {}).crew or {} do
 				local c = props.chat(m.chat_id)
-				if m.orchestrator_id == row:get().id and not m.released and not (c and c.archived) then
+				if m.orchestrator_id == row:get().id and not m.released and c ~= nil and not c.archived then
 					total += 1
 					if c and c.status == "working" then
 						working += 1

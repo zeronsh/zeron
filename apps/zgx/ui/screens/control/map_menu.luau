@@ -19,6 +19,8 @@ local route = require("@app/screens/shell/route")
 local orch_actions = require("@app/screens/orchestrator/actions")
 local progress = require("@app/screens/control/progress")
 local ChatMenu = require("@app/screens/shell/chat_menu")
+local Ref = require("@ds/orch_ref")
+local Shared = require("@app/screens/chat/shared")
 
 local M = {}
 
@@ -41,6 +43,28 @@ end
 
 local function chats(): { [string]: any }
 	return data.chats(sessions.now:peek())
+end
+
+-- A reference to `id` (a chat, an orchestrator) put in Capture's composer
+-- (the Brain dump's, docked or floating), as dragging it there would.
+function M.mention(id: string)
+	local now = orchestration.now:peek()
+	local brain: string? = nil
+	local ref: any = nil
+	for _, o in now.orchestrators or {} do
+		if o.kind == "brain_dump" and not o.archived then
+			brain = o.id
+		end
+		if o.id == id then
+			ref = Ref.orchestrator(o, id)
+		end
+	end
+	if not ref then
+		ref = Ref.thread(now, chats()[id], id, nil)
+	end
+	if ref and brain then
+		Shared.mention_ref(ref, brain)
+	end
 end
 
 local function rename(kind: string, id: string, text: string)
@@ -98,6 +122,13 @@ local function chat_entries(id: string, orch: any?): { any }
 			end,
 		})
 	end
+	table.insert(out, {
+		label = locale.s("control.map_menu.mention"),
+		icon = "chat-round-line",
+		on_select = function()
+			M.mention(id)
+		end,
+	})
 	table.insert(out, {
 		label = locale.s("ds.orch.progress.whats_up"),
 		icon = "info-square",
@@ -264,6 +295,13 @@ local function lead(id: string, orch: any?): { any }
 			end,
 		})
 	end
+	table.insert(out, {
+		label = locale.s("control.map_menu.mention"),
+		icon = "chat-round-line",
+		on_select = function()
+			M.mention(id)
+		end,
+	})
 	table.insert(out, {
 		label = locale.s("ds.orch.progress.whats_up"),
 		icon = "info-square",

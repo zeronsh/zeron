@@ -1227,14 +1227,10 @@
         "show_active": "Active only",
         "show_recent": "Active + recently finished",
         "show_all": "All",
-        "color_by": "Color by",
-        "color_by_orchestrator": "Orchestrator",
-        "color_by_machine": "Machine",
-        "legend_working": "working",
-        "legend_done": "done",
-        "legend_todo": "to do",
         "needs_you": "needs you",
-        "brain": "Brain"
+        "brain": "Brain",
+        "unpin_children": "Unpin all children",
+        "unpin_all": "Unpin all"
       },
       "machines": {
         "running": "{n} running",
@@ -4364,7 +4360,8 @@
       "release": "Release from crew",
       "rename_device": "Rename device",
       "no_section": "No section",
-      "failed": "Couldn't do that"
+      "failed": "Couldn't do that",
+      "mention": "Mention in composer"
     },
     "figures": {
       "urgent": "{n} 项紧急",

@@ -241,6 +241,97 @@ ui.command { id = "sign_unread", title = "Signing: unread", run = function()
 		c.status = "done"
 	end)
 end }
+-- Archived, as the engine archives it: off the live lists, into the
+-- archived one (`stale`: its row still listed among its parent's children
+-- too, as a crew chat's is); and back.
+local function archive(id: string, stale: boolean)
+	local now = table.clone(sessions.now:peek() :: any)
+	local row = nil
+	local function take(list: { any }): { any }
+		local out = {}
+		for _, c in list do
+			if c.id == id then
+				row = c
+				if not stale then
+					continue
+				end
+			end
+			table.insert(out, c)
+		end
+		return out
+	end
+	now.chats = take(now.chats or {})
+	local kids = {}
+	for parent, list in now.children or {} do
+		kids[parent] = take(list)
+	end
+	now.children = kids
+	if row then
+		local archived = table.clone(now.archived or {})
+		table.insert(archived, row)
+		now.archived = archived
+	end
+	sessions.now:set(now)
+end
+ui.command { id = "sign_archive", title = "Signing: archived", run = function()
+	archive("th-reins-sign", false)
+end }
+ui.command { id = "sign_archive_stale", title = "Signing: archived, still a child", run = function()
+	archive("th-reins-sign", true)
+end }
+ui.command { id = "sign_unarchive", title = "Signing: unarchived", run = function()
+	local now = table.clone(sessions.now:peek() :: any)
+	local archived, row = {}, nil
+	for _, c in now.archived or {} do
+		if c.id == "th-reins-sign" then
+			row = c
+		else
+			table.insert(archived, c)
+		end
+	end
+	now.archived = archived
+	if row then
+		-- (Back with the live ones, in its parent's children if it's still
+		-- there, else among the chats; moved now.)
+		local back = table.clone(row)
+		back.updated = os.time()
+		local found = false
+		local kids = {}
+		for parent, list in now.children or {} do
+			local out = {}
+			for _, c in list do
+				if c.id == back.id then
+					c = back
+					found = true
+				end
+				table.insert(out, c)
+			end
+			kids[parent] = out
+		end
+		now.children = kids
+		if not found then
+			local chats = table.clone(now.chats or {})
+			table.insert(chats, back)
+			now.chats = chats
+		end
+	end
+	sessions.now:set(now)
+end }
+-- The Reins release orchestrator archived (its crew: two working, Code
+-- signing idle).
+ui.command { id = "reins_archive", title = "Reins release: archived", run = function()
+	local now = table.clone(orchestration.now:peek() :: any)
+	local list = {}
+	for _, o in now.orchestrators or {} do
+		if o.id == "orc-reins" then
+			o = table.clone(o)
+			o.archived = true
+		end
+		table.insert(list, o)
+	end
+	now.orchestrators = list
+	orchestration.now:set(now)
+end }
 -- An open ask of its.
 ui.command { id = "sign_ask", title = "Signing: asks", run = function()
 	local now = table.clone(orchestration.now:peek() :: any)
@@ -360,11 +451,76 @@ for _, z in { { "in", 1.25 }, { "out", 0.8 } } do
 		require("@ds/orch_force").zoom_by(z[2] :: number)
 	end }
 end
-for _, by in { "orchestrator", "machine" } do
-	ui.command { id = `map_force_color_{by}`, title = `Map: the force graph coloured by {by}`, run = function()
-		require("@ds/orch_force").color_by:set(by)
+-- This theme's status colours and the machines' (as the force graph fills
+-- them), into `force_palette` (tests read it).
+local force_palette = ui.state("force_palette", {} :: any)
+ui.command { id = "map_force_palette", title = "Map: read the force graph's machine colours", run = function()
+	local pal = require("@ds/orch_force_palette")
+	local status = {}
+	for _, t in pal.STATUS_TOKENS do
+		status[t] = ui.theme.get(t)
+	end
+	local dark = ui.theme.current:peek() ~= "zeron-light"
+	force_palette:set({ theme = ui.theme.current:peek(), dark = dark, status = status, machines = pal.machines(dark), background = ui.theme.get("background") })
+end }
+-- A drag held a frame at a time: a hub (the Engine, 72 crew), a chat;
+-- then let go.
+for _, d in { { "hub", "orc-eng" }, { "chat", "vpn3" }, { "brainhub", "orc-orch" }, { "brain", "orc-brain" }, { "engchat", "eng2" } } do
+	ui.command { id = `map_force_drag_{d[1]}_step`, title = `Map: drag the force graph's {d[1]} a step`, run = function()
+		require("@ds/orch_force").drag_by(d[2], 4, 2)
+	end }
+	ui.command { id = `map_force_drag_{d[1]}_end`, title = `Map: let go of the force graph's {d[1]}`, run = function()
+		require("@ds/orch_force").drag_end(d[2])
 	end }
 end
+ui.command { id = "map_force_drag_hub_hold", title = "Map: press on the force graph's hub", run = function()
+	require("@ds/orch_force").drag_by("orc-eng", 0, 0)
+end }
+-- Every node's place now, into `force_places` (tests read it).
+local force_places = ui.state("force_places", {} :: any)
+ui.command { id = "map_force_read", title = "Map: read the force graph's places", run = function()
+	local cur = require("@ds/orch_force").current
+	local out = {}
+	if cur then
+		for i = 1, cur.sim.n do
+			out[cur.sim.ids[i]] = { cur.sim.x[i], cur.sim.y[i] }
+		end
+	end
+	force_places:set(out)
+end }
+-- A live push: one crew chat's state changes (input, then working, …).
+local push_n = 0
+ui.command { id = "map_force_push", title = "Map: a live push, one chat's state", run = function()
+	push_n += 1
+	local n: any = table.clone(sessions.now:peek())
+	local list = {}
+	for _, c in n.chats do
+		local c2 = c
+		if c.id == "vpn5" then
+			c2 = table.clone(c)
+			c2.status = if push_n % 2 == 1 then "input" else "working"
+		end
+		table.insert(list, c2)
+	end
+	n.chats = list
+	sessions.now:set(n)
+end }
+-- Capture's composer's chips (the Brain dump's, "orc-brain"), into
+-- `brain_cargo` (tests read them).
+local brain_cargo = ui.state("brain_cargo", {} :: any)
+ui.command { id = "map_read_cargo", title = "Map: read Capture's chips", run = function()
+	local out = {}
+	for _, item in require("@app/screens/chat/shared").peek_cargo("orc-brain") do
+		table.insert(out, { kind = item.kind, name = item.name, id = item.ref and item.ref.id })
+	end
+	brain_cargo:set(out)
+end }
+ui.command { id = "map_force_unpin_children", title = "Map: unpin the Engine's children", run = function()
+	require("@ds/orch_force").unpin_children("orc-eng")
+end }
+ui.command { id = "map_force_unpin_all", title = "Map: unpin all", run = function()
+	require("@ds/orch_force").unpin_all()
+end }
 ui.command { id = "map_force_pan", title = "Map: pan the force graph", run = function()
 	require("@ds/orch_force").pan_by(-40, -25)
 end }
@@ -406,11 +562,6 @@ ui.command { id = "map_big_wake", title = "Map: a big fleet, a quiet one wakes",
 	n.chats = list
 	sessions.now:set(n)
 end }
-for _, style in { "dots", "provider" } do
-	ui.command { id = `map_graph2_{style}`, title = `Map: the new graph's nodes as {style}`, run = function()
-		require("@ds/orch_graph2").node_style:set(style)
-	end }
-end
 for _, mode in { "active", "recent", "all" } do
 	ui.command { id = `map_show_{mode}`, title = `Map: show chats {mode}`, run = function()
 		require("@ds/orch_map_visibility").mode:set(mode)
@@ -460,17 +611,8 @@ ui.command { id = "map_snapshot", title = "Map: the live data's copy", run = fun
 	orchestration.now:set(snap.orchestration)
 end }
 -- The new Graph's view moved, as a drag or a ⌘/Ctrl-scroll would.
-ui.command { id = "map_graph2_zoom_in", title = "Map: zoom the new graph in", run = function()
-	require("@ds/orch_graph2").zoom_by(1.25)
-end }
-ui.command { id = "map_graph2_zoom_out", title = "Map: zoom the new graph out", run = function()
-	require("@ds/orch_graph2").zoom_by(0.8)
-end }
 ui.command { id = "map_graph_zoom_out", title = "Map: zoom the graph out", run = function()
 	require("@ds/orch_map_graph").zoom_by(0.8)
-end }
-ui.command { id = "map_graph2_pan", title = "Map: pan the new graph", run = function()
-	require("@ds/orch_graph2").pan_by(-40, -25)
 end }
 -- Zeron fixes and its crew as the Map once showed them blank: one named
 -- and done, one just created (its title given, its first turn still

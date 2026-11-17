@@ -117,7 +117,7 @@ end
 
 test("map visibility: every view hides an idle chat in Active only, shows it in All", function()
 	local app = open()
-	for _, v in { "graph", "topology", "timeline", "machines" } do
+	for _, v in { "graph", "force", "topology", "timeline", "machines" } do
 		view(app, v)
 		mode(app, "all")
 		expect(`{v} all {shows(app)}`).to_be(`{v} all true`)
@@ -162,12 +162,13 @@ test("map visibility: an archived orchestrator's chat isn't kept on the Map", fu
 	expect((Visibility.visible(chat(nil, 5 * HOUR, "here"), NOW, c))).to_be("show")
 end)
 
-test("map visibility: a crew thread with no chat row shows while new, and in All", function()
+test("map visibility: a crew thread with no chat row shows while new only, in every mode", function()
 	expect(Visibility.missing(NOW - 10 * 60, NOW, ctx("recent"))).to_be("show")
 	expect(Visibility.missing(NOW - 10 * 60, NOW, ctx("active"))).to_be("show")
 	expect(Visibility.missing(NOW - 2 * HOUR, NOW, ctx("recent"))).to_be("hide")
 	expect(Visibility.missing(nil, NOW, ctx("active"))).to_be("hide")
-	expect(Visibility.missing(NOW - 200 * HOUR, NOW, ctx("all"))).to_be("show")
+	expect(Visibility.missing(NOW - 200 * HOUR, NOW, ctx("all"))).to_be("hide")
+	expect(Visibility.missing(NOW - 10 * 60, NOW, ctx("all"))).to_be("show")
 	-- Through the fleet: an old crew row without a chat is left off; a new one stays.
 	local model = require("@ds/orch_map_model")
 	local world = {
@@ -214,4 +215,96 @@ test("map visibility: the Map's menu has Show chats, the choice kept", function(
 	expect(first:state("ds/orch_map_visibility.luau::control_map_show")).to_be("active")
 	local app = open()
 	expect(app:state("ds/orch_map_visibility.luau::control_map_show")).to_be("active")
+end)
+
+-- Archived: never on the Map, in any view, whatever the mode.
+
+local ALL_VIEWS = { "graph", "force", "topology", "timeline", "machines" }
+
+local function has(app: any, text: string): boolean
+	return string.find(app:tree(".orch-map") :: string, text, 1, true) ~= nil
+end
+
+test("map visibility: an archived chat is hidden in every view, in every mode; archived while shown, it leaves on the next push; unarchived, it's back", function()
+	local app = open()
+	for _, v in ALL_VIEWS do
+		view(app, v)
+		mode(app, "all")
+		expect(`{v} before {shows(app)}`).to_be(`{v} before true`)
+		app:command("sign_archive")
+		app:frames(20)
+		for _, m in { "all", "recent", "active" } do
+			mode(app, m)
+			expect(`{v} {m} archived {shows(app)}`).to_be(`{v} {m} archived false`)
+		end
+		mode(app, "all")
+		app:command("sign_unarchive")
+		app:frames(20)
+		expect(`{v} unarchived {shows(app)}`).to_be(`{v} unarchived true`)
+	end
+end)
+
+test("map visibility: an archived chat still listed among its parent's children is hidden all the same", function()
+	local app = open()
+	for _, v in ALL_VIEWS do
+		view(app, v)
+		mode(app, "all")
+		app:command("sign_archive_stale")
+		app:frames(20)
+		expect(`{v} stale {shows(app)}`).to_be(`{v} stale false`)
+		app:command("sign_unarchive")
+		app:frames(20)
+		expect(`{v} back {shows(app)}`).to_be(`{v} back true`)
+	end
+end)
+
+test("map visibility: an archived orchestrator goes with its crew, but for a crew chat at work or asking", function()
+	local app = open()
+	for _, v in ALL_VIEWS do
+		view(app, v)
+		mode(app, "all")
+		expect(`{v} {has(app, "Reins release")} {shows(app)}`).to_be(`{v} true true`)
+		app:command("reins_archive")
+		app:frames(20)
+		-- (Gone: the orchestrator, its idle crew chat; kept: the one working.)
+		expect(`{v} orchestrator {has(app, "Reins release")}`).to_be(`{v} orchestrator false`)
+		expect(`{v} idle crew {shows(app)}`).to_be(`{v} idle crew false`)
+		expect(`{v} working crew {has(app, "Windows installer")}`).to_be(`{v} working crew true`)
+		-- (An idle one asking for the person comes back.)
+		app:command("sign_ask")
+		app:frames(20)
+		expect(`{v} asking crew {shows(app)}`).to_be(`{v} asking crew true`)
+		app = open()
+	end
+end)
+
+test("map visibility: through the fleet, an archived orchestrator's crew and what it started go unless live", function()
+	local model = require("@ds/orch_map_model")
+	local world = {
+		here = "d",
+		devices = { { id = "d", name = "d", here = true, online = true } },
+		chats = {
+			o = { id = "o", updated = NOW },
+			idle = { id = "idle", updated = NOW - 60 },
+			busy = { id = "busy", status = "working", updated = NOW },
+			asks = { id = "asks", status = "input", updated = NOW },
+			mine = { id = "mine", updated = NOW - 60 },
+		},
+		show = "all",
+		clock = NOW,
+		now = {
+			orchestrators = { { id = "o", hue = 1, archived = true } },
+			crew = {
+				{ orchestrator_id = "o", chat_id = "idle", joined = NOW - 60 },
+				{ orchestrator_id = "o", chat_id = "busy", joined = NOW - 60 },
+				{ orchestrator_id = "o", chat_id = "asks", joined = NOW - 60 },
+			},
+		},
+	}
+	local f = model.fleet(world)
+	expect(f.threads.o).to_be(nil)
+	expect(f.threads.idle).to_be(nil)
+	expect(f.threads.busy ~= nil).to_be(true)
+	expect(f.threads.asks ~= nil).to_be(true)
+	expect(f.threads.mine ~= nil).to_be(true)
 end)

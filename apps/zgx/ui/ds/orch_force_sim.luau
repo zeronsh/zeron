@@ -48,6 +48,16 @@ M.MAX_V = 24
 M.REST = 0.1
 M.MAX_STEPS = 400
 
+-- Where the middle's k-th hub goes (radians, 0 to the right): first right,
+-- then left (the field's widest way), then the slants between, then up
+-- and down, then the golden angle on; the same for a hub whatever comes
+-- after it, so a new one never moves those before.
+local HUB_SEQ = { 0, 180, 315, 135, 45, 225, 340, 160, 20, 200, 270, 90 }
+function M.hub_angle(k: number): number
+	local deg = HUB_SEQ[k] or ((k - #HUB_SEQ) * 137.508) % 360
+	return math.rad(deg)
+end
+
 -- (`fixed`: held where it is, the middle: the Brain.)
 export type Node = { id: string, parent: number?, mass: number?, fixed: boolean? }
 -- (`len`: its rest length; a strong link's is its child's ring.)
@@ -66,6 +76,10 @@ export type Sim = {
 	awake: { boolean },
 	held: { boolean }, -- placed by the pointer (dragged), or fixed
 	fresh: { boolean }, -- placed new (no place known for it)
+	pinned: { boolean }, -- dropped by hand: held there, its parent moving or not
+	-- Each node's own slot, as a fresh web lays it out (for letting go of a pin).
+	def_r: { number },
+	def_a: { number },
 	fixed: { boolean }, -- the middle, always held
 	-- Each node's slot: how far from its parent, at what angle (from the
 	-- direction its parent faces: away from the grandparent; for the
@@ -81,6 +95,11 @@ export type Sim = {
 	energy: number,
 	cells: { [number]: number },
 	next_in: { number },
+	-- Round the middle: across and down (the field's shape), and the
+	-- spacing's scale.
+	sx: number,
+	sy: number,
+	k: number,
 }
 
 -- A steady number in [0, 1) from a string and a seed.
@@ -96,16 +115,18 @@ M.hash01 = hash01
 
 -- How `count` children sit in rows on a fan: each one's row radius and
 -- angle (across the fan, centred), and the last row's radius.
-local function fan(count: number): ({ number }, { number }, number)
+local function fan(count: number, scale: number?): ({ number }, { number }, number)
+	local sk = scale or 1
+	local len, rowd, gap = M.FAN_LEN * sk, M.FAN_ROW * sk, M.FAN_GAP * sk
 	local rs, as = table.create(count, 0), table.create(count, 0)
-	local k, row, last = 1, 0, M.FAN_LEN
+	local k, row, last = 1, 0, len
 	while k <= count do
-		local r = M.FAN_LEN + row * M.FAN_ROW
-		local cap = math.max(3, math.floor(r * M.FAN_WIDE / M.FAN_GAP))
+		local r = len + row * rowd
+		local cap = math.max(3, math.floor(r * M.FAN_WIDE / gap))
 		local here = math.min(cap, count - k + 1)
 		-- (A row holding fewer than it could: its nodes closer together,
 		-- centred, never further apart than its gap.)
-		local span = math.min(M.FAN_WIDE, (here - 1) * M.FAN_GAP / r)
+		local span = math.min(M.FAN_WIDE, (here - 1) * gap / r)
 		-- (Every other row shifted half a place: no link runs behind a node
 		-- of the row before.)
 		local shift = if row % 2 == 1 and here > 1 then span / (here - 1) / 2 else 0
@@ -121,7 +142,10 @@ local function fan(count: number): ({ number }, { number }, number)
 end
 M.fan = fan
 
-function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
+-- `opts.aspect`: the field's width over its height: round the middle, the
+-- web stretched across a wide field (an ellipse), never wasted room up
+-- and down. `opts.dense`: 1 for the full spacing, less for a crowded web.
+function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: number?, dense: number? }?): Sim
 	local n = #nodes
 	local s: Sim = {
 		n = n,
@@ -136,6 +160,9 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
 		awake = table.create(n, true),
 		held = table.create(n, false),
 		fresh = table.create(n, false),
+		pinned = table.create(n, false),
+		def_r = table.create(n, 0),
+		def_a = table.create(n, 0),
 		fixed = table.create(n, false),
 		slot_r = table.create(n, 0),
 		slot_a = table.create(n, 0),
@@ -147,7 +174,13 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
 		energy = math.huge,
 		cells = {},
 		next_in = table.create(n, 0),
+		sx = 1,
+		sy = 1,
+		k = 1,
 	}
+	local aspect = math.clamp((opts and opts.aspect) or 1, 0.6, 3)
+	s.sx, s.sy = math.sqrt(aspect), 1 / math.sqrt(aspect)
+	s.k = math.clamp((opts and opts.dense) or 1, 0.7, 1)
 	for i, nd in nodes do
 		s.ids[i] = nd.id
 		s.index[nd.id] = i
@@ -175,7 +208,7 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
 		if s.parent[p] == 0 then
 			continue
 		end
-		local rs, as, last = fan(#list)
+		local rs, as, last = fan(#list, s.k)
 		for k, c in list do
 			s.slot_r[c], s.slot_a[c] = rs[k], as[k]
 		end
@@ -193,8 +226,8 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
 			table.insert(if kids[c] then hubs else own, c)
 		end
 		for k, c in hubs do
-			s.slot_a[c] = (k - 1) / #hubs * math.pi * 2
-			s.slot_r[c] = math.max(M.HUB_LEN, s.depth[c] + 110)
+			s.slot_a[c] = M.hub_angle(k)
+			s.slot_r[c] = math.max(M.HUB_LEN * s.k, s.depth[c] + 110 * s.k)
 		end
 		-- (The middle's own chats: rings round it, as many a ring as fit
 		-- a gap apart, none within HUB_CLEAR of a hub's way out.)
@@ -213,8 +246,8 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
 		end
 		local k, ring = 1, 0
 		while k <= #own do
-			local r = M.FAN_LEN * 1.15 + ring * M.FAN_ROW
-			local cap = math.max(3, math.floor(2 * math.pi * r / M.FAN_GAP))
+			local r = (M.FAN_LEN * 1.15 + ring * M.FAN_ROW) * s.k
+			local cap = math.max(3, math.floor(2 * math.pi * r / (M.FAN_GAP * s.k)))
 			local spots: { number } = {}
 			for j = 0, cap - 1 do
 				local a = (j + (ring % 2) * 0.5) / cap * math.pi * 2 + math.pi / cap
@@ -243,6 +276,9 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?): Sim
 	for _, l in links do
 		l.len = if l.strong then s.slot_r[l.b] else M.WEAK_LEN
 	end
+	for i = 1, n do
+		s.def_r[i], s.def_a[i] = s.slot_r[i], s.slot_a[i]
+	end
 	return s
 end
 
@@ -259,8 +295,51 @@ end
 -- round anything else, from the way it faces.
 local function slot(s: Sim, i: number): (number, number)
 	local p = s.parent[i]
-	local a = s.slot_a[i] + (if s.parent[p] == 0 then -math.pi / 2 else facing(s, p))
+	if s.parent[p] == 0 then
+		local a = s.slot_a[i]
+		return s.x[p] + math.cos(a) * s.slot_r[i] * s.sx, s.y[p] + math.sin(a) * s.slot_r[i] * s.sy
+	end
+	local a = s.slot_a[i] + facing(s, p)
 	return s.x[p] + math.cos(a) * s.slot_r[i], s.y[p] + math.sin(a) * s.slot_r[i]
+end
+
+-- Node `i` takes where it is now as its slot (dropped there, or kept
+-- there from before): nothing pulls it back where it was.
+function M.adopt(s: Sim, i: number)
+	local p = s.parent[i]
+	if p == 0 then
+		return
+	end
+	local dx, dy = s.x[i] - s.x[p], s.y[i] - s.y[p]
+	if s.parent[p] == 0 then
+		-- (Round the middle: on its ellipse.)
+		local ex, ey = dx / s.sx, dy / s.sy
+		s.slot_a[i] = math.atan2(ey, ex)
+		s.slot_r[i] = math.max(1, math.sqrt(ex * ex + ey * ey))
+	else
+		s.slot_a[i] = math.atan2(dy, dx) - facing(s, p)
+		s.slot_r[i] = math.max(1, math.sqrt(dx * dx + dy * dy))
+	end
+	for _, l in s.links do
+		if l.strong and l.b == i then
+			l.len = s.slot_r[i]
+		end
+	end
+end
+
+-- Pin node `i` where it is (held: its parent moving or not), or let go of
+-- its pin: back to its own slot, woken to settle into it.
+function M.pin(s: Sim, i: number, on: boolean)
+	s.pinned[i] = on
+	s.held[i] = on or s.fixed[i]
+	if not on then
+		s.slot_r[i], s.slot_a[i] = s.def_r[i], s.def_a[i]
+		for _, l in s.links do
+			if l.strong and l.b == i then
+				l.len = s.def_r[i]
+			end
+		end
+	end
 end
 
 -- Where everything starts: kept places first; then each in its slot, a
@@ -272,7 +351,13 @@ function M.place(s: Sim, saved: { [string]: any }?): number
 	for i = 1, s.n do
 		s.fresh[i] = false
 		if s.fixed[i] then
-			s.x[i], s.y[i] = 0, 0
+			-- (The middle: where it was dropped, if it was; else the centre.)
+			local at = saved and saved[s.ids[i]]
+			if type(at) == "table" and type(at[1]) == "number" and type(at[2]) == "number" then
+				s.x[i], s.y[i] = at[1], at[2]
+			else
+				s.x[i], s.y[i] = 0, 0
+			end
 			placed[i] = true
 			continue
 		end
@@ -302,6 +387,13 @@ function M.place(s: Sim, saved: { [string]: any }?): number
 	for i = 1, s.n do
 		put(i)
 	end
+	-- (A kept place is its slot now: a reheat round it never pulls it
+	-- back to where a fresh web would put it.)
+	for i = 1, s.n do
+		if not s.fresh[i] and not s.fixed[i] then
+			M.adopt(s, i)
+		end
+	end
 	for i = 1, s.n do
 		s.vx[i], s.vy[i] = 0, 0
 	end
@@ -324,6 +416,15 @@ function M.wake(s: Sim, ids: { number }?)
 				s.awake[j] = true
 			end
 		end
+	end
+	s.energy = math.huge
+end
+
+-- Wake `i` and its children only (a drag: what it leads follows; its
+-- parent and the rest stay where they are).
+function M.wake_down(s: Sim, i: number)
+	for j = 1, s.n do
+		s.awake[j] = j == i or s.parent[j] == i
 	end
 	s.energy = math.huge
 end

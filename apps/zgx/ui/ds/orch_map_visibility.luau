@@ -18,7 +18,9 @@
 --                              view's own layout cache, so a cached layout
 --                              never keeps a hide (or a show)
 --
--- A chat always shows when it's an orchestrator's or the Brain dump's own
+-- Archived never shows; a chat with no row only while it's new
+-- (`missing`); an archived orchestrator's crew only while live (`live`,
+-- ds/orch_map_model). Otherwise a chat always shows when it's an orchestrator's or the Brain dump's own
 -- (not archived); working, waiting on its own work, or asking (input,
 -- approval); finished or failed and not seen since (unread), for a day
 -- after it last moved (UNREAD_FOR: crew chats nobody opens stay unread for
@@ -155,17 +157,22 @@ function M.visible(chat: any, now: number, ctx: Ctx): (Verdict, number)
 	return "fade", 1 - t * (1 - M.FADE_MIN)
 end
 
--- A crew thread whose chat the Map has no row for (never heard, or gone):
--- shown while it's new (`joined` within the window: a chat just started,
--- not heard yet), and in "all"; otherwise left off.
+-- A crew thread whose chat the Map has no row for (never heard, or gone:
+-- archived and dropped, deleted): shown only while it's new (`joined`
+-- within the window: a chat just started, not heard yet), whatever the
+-- mode ("all" shows every chat there is, not one gone).
 function M.missing(joined: number?, now: number, ctx: Ctx): Verdict
-	if ctx.mode == "all" then
-		return "show"
-	end
 	if type(joined) == "number" and now - joined < math.max(1, ctx.window) then
 		return "show"
 	end
 	return "hide"
+end
+
+-- Under way or asking for the person (working, waiting on its own work,
+-- asking, approving; or with an open ask): what's kept even when what it
+-- belonged to is archived.
+function M.live(chat: any, ctx: Ctx): boolean
+	return chat ~= nil and not chat.archived and (LIVE[chat.status or ""] == true or (chat.id ~= nil and ctx.asking[chat.id] == true))
 end
 
 -- Each chat's verdict (its opacity in tenths while it fades), as one

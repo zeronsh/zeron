@@ -166,6 +166,21 @@ function M.fleet(world: any): Fleet
 		local c = id and chats[id]
 		return c ~= nil and c.archived == true
 	end
+	-- (An archived orchestrator's crew, and what it started: gone with it,
+	-- unless under way or asking for the person.)
+	local ctx, clock = M.visibility(world)
+	local orphaned: { [string]: boolean } = {}
+	local gone: { [string]: boolean } = {}
+	for _, o in now.orchestrators or {} do
+		if o.archived or archived(o.id) then
+			gone[o.id] = true
+		end
+	end
+	for _, m in now.crew or {} do
+		if not m.released and gone[m.orchestrator_id] then
+			orphaned[m.chat_id] = true
+		end
+	end
 	for _, o in now.orchestrators or {} do
 		if not o.archived and not archived(o.id) then
 			orchestrators[o.id] = o
@@ -216,6 +231,9 @@ function M.fleet(world: any): Fleet
 	-- What the Brain dump started: under it, wherever they run.
 	local prov = M.provenance(world)
 	for id, by in prov.started do
+		if gone[by] then
+			orphaned[id] = true
+		end
 		local c = chats[id]
 		local o = orchestrators[by]
 		if c and o and not threads[id] and not c.archived then
@@ -237,7 +255,7 @@ function M.fleet(world: any): Fleet
 	end
 	-- The person's own (in a project or none): at work, or finished lately.
 	for id, c in chats do
-		if not threads[id] and M.shown(c) and not orchestrators[id] then
+		if not threads[id] and M.shown(c) and not orchestrators[id] and not gone[id] and (not orphaned[id] or Visibility.live(c, ctx)) then
 			local name, pid = project_of(c, nil)
 			threads[id] = ({
 				id = id,
@@ -263,7 +281,6 @@ function M.fleet(world: any): Fleet
 	end
 	-- The Map's "Show chats": a thread hidden by it leaves the Map (an
 	-- orchestrator's own always shows); one fading carries its opacity.
-	local ctx, clock = M.visibility(world)
 	for id, t in threads do
 		if t.kind ~= "orchestrator" then
 			local verdict, opacity = Visibility.visible(chats[id], clock, ctx)
