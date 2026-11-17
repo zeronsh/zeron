@@ -145,6 +145,22 @@ The simpler alternative is to hide Inbox and Next until they have cards. Which d
 		n.chats = list
 		sessions.now:set(n)
 	end }
+	-- The Brain dump routes the newest dump (a follow-up asked from an
+	-- entry's overlay) as a question to the thread that answered it, as the
+	-- engine aims a dump referencing a Q&A entry (`fixture.qa_route_follow_up`).
+	ui.command { id = "fixture.qa_route_follow_up", title = "Fixture: route the follow-up", run = function()
+		local n = table.clone(orchestration.now:peek())
+		local dumps = table.clone(n.dumps)
+		local d = table.clone(dumps[1])
+		d.routes = {
+			{ id = "rq-follow", excerpt = d.text, span = { from = 0, to = #d.text }, target = { kind = "chat", id = "th-capy" },
+				intent = "question", direct = true, message = d.text, state = "delivered", candidates = {}, delivered = os.time() },
+		}
+		d.state = "routed"
+		dumps[1] = d
+		n.dumps = dumps
+		orchestration.now:set(n)
+	end }
 	-- A thread answers (`fixture.qa_answer`): the waiting MSI question.
 	ui.command { id = "fixture.qa_answer", title = "Fixture: answer the MSI question", run = function()
 		local n = table.clone(orchestration.now:peek())

@@ -1276,7 +1276,18 @@
         "undo": "Undo",
         "actions": "Question actions",
         "more": "{n} more",
-        "fewer": "Show fewer"
+        "fewer": "Show fewer",
+        "kind_answer": "Answer",
+        "answered_ago": "answered {ago} ago",
+        "where_asked": "Where you asked",
+        "dialog_answering": "Being answered now.",
+        "dialog_waiting": "No answer yet.",
+        "follow_up_label": "Follow-up",
+        "follow_up": "Ask a follow-up",
+        "ask": "Ask",
+        "follow_up_sent": "Asked {name}",
+        "follow_up_failed": "Couldn't send the follow-up",
+        "dialog_label": "Answer"
       },
       "scratchpad": {
         "write": "Write",

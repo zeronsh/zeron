@@ -968,6 +968,39 @@ local function decision(): Node
 	}
 end
 
+-- A Q&A entry, whole (ds/orch_decision's Answer, the decision's overlay):
+-- opened from its row; a follow-up from it is a dump referencing the entry
+-- (ds/orch_qa's ref), which the engine asks of the thread that answered.
+local function qa_dialog(): Node
+	return Decision.Answer {
+		entry = function(): any
+			return QA.shown_of(OV.qa())
+		end,
+		on_close = QA.hide,
+		name_of = name_of,
+		hue_of = hue_of,
+		on_open = M.open_chat,
+		on_source = function(entry: any)
+			M.show_dump(entry.dump_id)
+		end,
+		on_read = function(entry: any, read: boolean)
+			QA.mark(QA.marks, entry.key, read)
+		end,
+		on_dismiss = function(entry: any)
+			QA.put_away(entry)
+		end,
+		on_follow_up = function(entry: any, text: string): any
+			local sent: any = orchestration.dump(text, nil, brain_dump(), nil, { QA.ref(entry) })
+			if sent ~= nil and (sent :: any).after ~= nil then
+				(sent :: any):after(function()
+					ds.toast.show { title = locale.s("ds.orch.qa.follow_up_sent", { name = name_of(entry.chat) or "" }) }
+				end, said("ds.orch.qa.follow_up_failed"))
+			end
+			return sent
+		end,
+	}
+end
+
 -- The Map's view (Topology, Timeline or Machines, and the Timeline's
 -- span), on this device; what each thread did lately, as the host keeps it
 -- (src/orchestration_timeline.rs).
@@ -2440,6 +2473,7 @@ M.Page = ui.component(function(): Node
 			exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
 		}),
 		decision(),
+		qa_dialog(),
 	}
 end)
 

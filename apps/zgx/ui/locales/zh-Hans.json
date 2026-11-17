@@ -1276,7 +1276,18 @@
         "undo": "撤销",
         "actions": "问题操作",
         "more": "另外 {n} 个",
-        "fewer": "收起"
+        "fewer": "收起",
+        "kind_answer": "回答",
+        "answered_ago": "{ago}前回答",
+        "where_asked": "提问之处",
+        "dialog_answering": "正在回答。",
+        "dialog_waiting": "还没有回答。",
+        "follow_up_label": "追问",
+        "follow_up": "追问",
+        "ask": "提问",
+        "follow_up_sent": "已问 {name}",
+        "follow_up_failed": "追问没有发出",
+        "dialog_label": "回答"
       },
       "scratchpad": {
         "write": "Write",
