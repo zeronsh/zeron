@@ -373,3 +373,9 @@ test("control tabs: the tab buttons stand in the same place on every tab", funct
 	-- (The widgets' menu, Overview's alone, to their left.)
 	expect(app:has("#control-widgets-menu")).to_be(true)
 end)
+
+test("control page: the Map's default view, written out for the page to load without the Map, is the Map's own", function()
+	local app = mount("control_page_map_default_fixture.luau")
+	app:frames(2)
+	expect(app:state("map_default_same")).to_be(true)
+end)
