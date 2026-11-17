@@ -363,11 +363,11 @@ impl EngineRpc {
                         if ask.question.trim().is_empty() {
                             return Err(RpcError::BadParams("The ask needs a question".into()));
                         }
-                        orch.item(&id).map(|card| self.raise_item_ask(chat, &card, ask, now))
+                        orch.item(&id).map(|card| self.raise_item_ask(chat, &card, ask, AskOrigin::Tool, now))
                     }
                     (Some(ask), Who::Person) => orch.item(&id).map(|card| {
                         let from = card.orchestrator_id.clone().or(card.threads.first().cloned()).unwrap_or_default();
-                        self.raise_item_ask(&from, &card, ask, now)
+                        self.raise_item_ask(&from, &card, ask, AskOrigin::Tool, now)
                     }),
                     (None, _) => None,
                 };

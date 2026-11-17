@@ -371,6 +371,9 @@ impl EngineRpc {
             orchestrator,
             card,
             ItemAsk { question: question.to_owned(), options, context, ..Default::default() },
+            // (A gate's question is the person's to answer: it never closes
+            // itself as the board check's own asks do.)
+            zeron_proto::orchestration::AskOrigin::Tool,
             now,
         );
         // (An approval is what a gate asks.)

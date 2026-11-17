@@ -636,3 +636,79 @@ fn the_resume_says_what_the_restart_stopped() {
     assert!(text.starts_with(RESUMED_AFTER_RESTART));
     assert!(text.contains("(cargo build -p zeron-engine)") && text.contains("run it again"), "{text}");
 }
+
+
+// ── Asks the board check raised close themselves ───────────────────────────
+
+fn board_ask(id: &str, item: &str) -> Ask {
+    let mut a = ask(id, item, AskState::Open, mins(1));
+    a.origin = zeron_proto::orchestration::AskOrigin::BoardCheck;
+    a
+}
+
+#[test]
+fn a_board_ask_resolves_when_its_card_leaves_blocked_or_its_thread_works() {
+    let blocked = card(WorkState::Blocked);
+    let asks = vec![board_ask("b1", "c1"), ask("a1", "c1", AskState::Open, mins(1))];
+    // Still Blocked, its thread errored: stays open.
+    let errored = vec![("t1".to_owned(), Thread::Errored { at: Some(mins(1)) })];
+    assert!(resolved_asks(&blocked, &errored, &asks).is_empty());
+    // Its thread works again.
+    let live = vec![("t1".to_owned(), live_at(mins(5)))];
+    assert_eq!(resolved_asks(&blocked, &live, &asks), [("b1".to_owned(), "its thread is working again".to_owned())]);
+    // Moved out of Blocked (by the person).
+    let now = card(WorkState::Active);
+    assert_eq!(resolved_asks(&now, &errored, &asks), [("b1".to_owned(), "the card left Blocked".to_owned())]);
+    // An agent's or the person's ask (a1) is never the check's to close; nor
+    // one on another card, nor one closed already.
+    let others = vec![ask("a1", "c1", AskState::Open, mins(1)), board_ask("b2", "other"), {
+        let mut a = board_ask("b3", "c1");
+        a.state = AskState::Answered;
+        a
+    }];
+    assert!(resolved_asks(&now, &live, &others).is_empty());
+}
+
+#[test]
+fn the_plan_closes_a_board_ask_whose_card_was_moved_back_to_now() {
+    let mut state = OrchestrationState::default();
+    state.items = vec![card(WorkState::Active)];
+    state.asks = vec![board_ask("b1", "c1")];
+    let chats: HashMap<String, Chat> = [chat("o1", "here"), chat("t1", "here")].into_iter().map(|c| (c.id.clone(), c)).collect();
+    let mut working = session("t1", SessionStatus::Working);
+    working.updated_at = mins(4);
+    let sessions: HashMap<String, Session> = [("t1".to_owned(), working)].into();
+    let plan = plan_from(&state, &chats, &sessions, &[], Some("here"), mins(4));
+    assert_eq!(plan.len(), 1, "{plan:?}");
+    assert_eq!(plan[0].verdict.resolve, [("b1".to_owned(), "the card left Blocked".to_owned())]);
+    assert_eq!(plan[0].verdict.state, None, "the card itself is fine");
+}
+
+// ── Which card a live thread works on ───────────────────────────────────────
+
+#[test]
+fn a_thread_on_a_follow_up_card_is_that_cards_not_its_done_ones() {
+    // The crew row still names the card it was started on (now Done); the
+    // follow-up card lists it in its threads: that's where it works.
+    let mut done = card(WorkState::Done);
+    done.id = "61253a3d".into();
+    let mut follow_up = card(WorkState::Active);
+    follow_up.id = "10f479ef".into();
+    let mut state = crew_state(vec![done.clone(), follow_up]);
+    state.crew[0].item_id = Some("61253a3d".into());
+    let chats: HashMap<String, Chat> = [chat("o1", "here"), chat("t1", "here")].into_iter().map(|c| (c.id.clone(), c)).collect();
+    let mut working = session("t1", SessionStatus::Working);
+    working.started_at = Some(mins(3));
+    working.updated_at = mins(4);
+    let sessions: HashMap<String, Session> = [("t1".to_owned(), working)].into();
+    let plan = plan_from(&state, &chats, &sessions, &[], Some("here"), mins(4));
+    assert!(plan.is_empty(), "no 'Done, but its thread is still working': {plan:?}");
+    // A flag set before the follow-up listed it is cleared.
+    let mut flagged = done;
+    flagged.check = check(CheckKind::StillWorking, mins(2));
+    state.items[0] = flagged;
+    let plan = plan_from(&state, &chats, &sessions, &[], Some("here"), mins(4));
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].item, "61253a3d");
+    assert_eq!(plan[0].verdict.check, Some(None));
+}
