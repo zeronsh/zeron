@@ -23,6 +23,7 @@ end
 local auth = require("@account/auth")
 local PrivateText = require("@ds/private_text")
 local status = require("@ds/status")
+local limit = require("@ds/usage_limit")
 local route = require("@app/screens/shell/route")
 local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
@@ -328,7 +329,7 @@ local ASKED: { [string]: string } = { approval = "approval", question = "input" 
 -- nil, and a word it doesn't know counts for nothing. Who's narrowing it is
 -- the host's word (`sidebar.filter_by`: the name of the plugin allowed to,
 -- src/plugins), never the plugin's own `by`, which could claim to be Zeron.
-local KNOWN = { working = true, waiting = true, input = true, approval = true, failed = true, done = true, woke = true, idle = true }
+local KNOWN = { working = true, waiting = true, input = true, approval = true, failed = true, limited = true, done = true, woke = true, idle = true }
 local filter = ui.shared("sidebar.filter", nil :: any)
 local filter_by = ui.shared("sidebar.filter_by", nil :: any)
 type Narrow = { statuses: { [string]: boolean }, words: { string }, by: string }
@@ -659,6 +660,13 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		local group = (c.project and by[c.project]) or loose
 		-- (Waiting on you beats working: an approval, then a question.)
 		local status = ASKED[asked[c.id] or ""] or c.status
+		-- (Stopped by its usage limit, waiting for the reset: limited, its
+		-- glyph saying till when, unless it's asking for you.)
+		local note: string? = nil
+		if limit.waiting(c) and not ASKED[asked[c.id] or ""] then
+			status = "limited"
+			note = limit.text(limit.of(c))
+		end
 		-- (The Activity view's: woken from sleep and not looked at since, the
 		-- alarm, unless it's asking for you or under way. Which shelf it's
 		-- on, and its place; asleep, its corner says when it wakes. Off, none
@@ -676,6 +684,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			id = c.id,
 			title = c.title,
 			status = status :: any,
+			note = note,
 			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
 			shelf = on_shelf,
 			rank = rank,

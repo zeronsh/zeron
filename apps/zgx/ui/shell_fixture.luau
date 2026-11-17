@@ -561,6 +561,17 @@ ui.command {
 		publish()
 	end,
 }
+-- "Tidy the tests" stopped by its usage limit, waiting for its reset at
+-- 14:05 (local, the fixture's day).
+ui.command { id = "fixture.limited", title = "Fixture: a chat stopped by its usage limit", menu = "Fixture", run = function()
+	local reset = require("@ds/usage_limit").local_at(NOW, 14, 5)
+	for _, c in model.chats do
+		if c.id == "a3" then
+			c.limited = { provider = "claude", account_label = "me@work.dev", until_at = reset, since = NOW - 600, attempt = 0 }
+		end
+	end
+	publish()
+end }
 ui.command { id = "fixture.icons_outdated", title = "Fixture: an engine without project icons", menu = "Fixture", run = function()
 	icons_refused = "outdated"
 end }

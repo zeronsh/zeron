@@ -333,6 +333,10 @@ local function SettingsSheet(): Node
 	local devices = ui.state("orch_set_devices", {} :: { [string]: boolean })
 	local limit = ui.state("orch_set_limit", 0)
 	local model = ui.state("orch_set_model", NONE :: string)
+	-- When its account hits its usage limit: continue on another account
+	-- (and, with none, another harness or model); off, wait for the reset.
+	local on_account = ui.state("orch_set_on_limit_account", false)
+	local on_harness = ui.state("orch_set_on_limit_harness", false)
 	local wake_on = ui.state("orch_set_wake_on", false)
 	local every = ui.state("orch_set_every", 0)
 	local at = ui.state("orch_set_at", "")
@@ -363,6 +367,9 @@ local function SettingsSheet(): Node
 			devices:set(chosen)
 			limit:set(crew.max_running or 0)
 			model:set(if crew.model then (if crew.harness then `{crew.harness}/{crew.model}` else crew.model) else NONE)
+			local policy = crew.on_limit or {}
+			on_account:set(policy.switch_account == true)
+			on_harness:set(policy.switch_harness == true)
 			wake_on:set(w ~= nil)
 			every:set((w and w.every_minutes) or 0)
 			at:set(if w and w.at then table.concat(w.at, ", ") else "")
@@ -405,17 +412,25 @@ local function SettingsSheet(): Node
 		local was_devices = table.clone(crew.devices or {})
 		table.sort(was_devices)
 		local n_limit = limit:peek()
+		local policy = crew.on_limit or {}
+		local switch_account = on_account:peek()
+		-- (Another harness only as a step past another account.)
+		local switch_harness = switch_account and on_harness:peek()
 		if
 			table.concat(chosen, ",") ~= table.concat(was_devices, ",")
 			or (if n_limit > 0 then n_limit else nil) ~= crew.max_running
 			or m ~= crew.model
 			or (m ~= nil and harness ~= crew.harness)
+			or switch_account ~= (policy.switch_account == true)
+			or switch_harness ~= (policy.switch_harness == true)
 		then
+			-- (Whole: what's left out is reset, so its limit policy goes too.)
 			fields.crew = {
 				devices = chosen,
 				maxRunning = if n_limit > 0 then n_limit else nil,
 				harness = if m then harness else nil,
 				model = m,
+				onLimit = { switchAccount = switch_account, switchHarness = switch_harness },
 			}
 		end
 		-- When it wakes: off clears it.
@@ -523,6 +538,32 @@ local function SettingsSheet(): Node
 				items = "end",
 				ds.NumberStepper { value = limit, min = 0, max = 32, label = ui.t("orch.dialog.max_running") :: any },
 				ui.column { grow = 1, min_w = 0, ds.Select { value = model, label = ui.t("orch.dialog.crew_model") :: any, options = model_options, w_full = true } },
+			},
+			-- When limited: another account, and past that (only with it on)
+			-- another harness or model.
+			ui.column {
+				id = "orch-settings-on-limit",
+				w_full = true,
+				gap = "$space.2",
+				ds.Checkbox { value = on_account, label = ui.t("orch.dialog.on_limit_account") :: any },
+				ui.presence(function(): string
+					return if on_account:get() then "on" else "off"
+				end, function(k: string): Node
+					return ui.div {
+						id = "orch-settings-on-limit-harness",
+						pl = "$space.5",
+						ds.Checkbox {
+							value = function(): boolean
+								return k == "on" and on_harness:get()
+							end,
+							on_change = function(v: boolean)
+								on_harness:set(v)
+							end,
+							disabled = k ~= "on",
+							label = ui.t("orch.dialog.on_limit_harness") :: any,
+						},
+					}
+				end),
 			},
 			heading("orch.dialog.wake"),
 			ds.Switch { value = wake_on, label = ui.t("orch.dialog.wake_on") },

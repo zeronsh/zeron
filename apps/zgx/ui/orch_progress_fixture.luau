@@ -4,6 +4,10 @@
 -- for tests/orch_progress.test.luau and audit shots. The clock is the
 -- state `now` (Unix seconds) and the rows the state `rows`, which a test
 -- may set; what's asked is noted in `calls`, pins in `pins`.
+-- `!fixture.limited` shows two threads their usage limit stopped (block
+-- `#fx-limited`, full and strip): `th-limit` waiting for its reset at 14:05
+-- (local, the next after the clock: the state `limit_reset`), `th-switch`
+-- running on another account meanwhile.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -22,6 +26,25 @@ local chats: { [string]: any } = {}
 for _, c in sample.chats do
 	chats[c.id] = c
 end
+-- The reset the limited threads wait for: the next 14:05, local, after the
+-- clock.
+local RESET = (function(): number
+	local at = require("@ds/usage_limit").local_at
+	local t = at(sample.NOW, 14, 5)
+	return if t <= sample.NOW then at(sample.NOW + 86400, 14, 5) else t
+end)()
+ui.state("limit_reset", RESET)
+local limited_shown = ui.state("limited_shown", false)
+chats["th-limit"] = { id = "th-limit", title = "Sidebar rows drag between sections", agent = "claude",
+	limited = { provider = "claude", account_label = "me@work.dev", window = "5-hour", until_at = RESET, since = sample.NOW - 900, attempt = 0 } }
+chats["th-switch"] = { id = "th-switch", title = "Map hover card keeps its place", agent = "claude", status = "working",
+	limited = { provider = "claude", account_label = "me@work.dev", window = "5-hour", until_at = RESET, since = sample.NOW - 1200, attempt = 0,
+		switched_to = { account_slot = "s2", account_label = "me@home.dev", at = sample.NOW - 1100 } } }
+local LIMITED_ROWS: { [string]: any } = {
+	["th-limit"] = { chat_id = "th-limit", state = "waiting", started = sample.NOW - 2400, updated = sample.NOW - 900, stalled = false },
+	["th-switch"] = { chat_id = "th-switch", state = "working", started = sample.NOW - 3000, last_step = sample.NOW - 120, updated = sample.NOW - 60, stalled = false,
+		steps = { done = 2, total = 5 }, note = "Picking up where it left off" },
+}
 local CONTEXT: { [string]: string } = {
 	["orc-orch"] = "Orchestrator · desk",
 	["th-engine-state"] = "Orchestrators · desk",
@@ -31,6 +54,8 @@ local CONTEXT: { [string]: string } = {
 	["th-vpn-merge"] = "Exnomic VPN · desk",
 	["th-vpn-moscow"] = "Exnomic VPN · desk",
 	["th-ci-cache"] = "CI speed · Cloud",
+	["th-limit"] = "Zeron fixes · desk",
+	["th-switch"] = "Zeron fixes · desk",
 }
 -- Full: the widget's first four; strips and chips: all of them.
 local FULL = { "th-engine-state", "th-engine-flow", "th-ui-control", "th-ui-orch" }
@@ -51,7 +76,7 @@ local function unit(id: string, variant: any, lean: boolean?): Node
 		variant = variant,
 		lean = lean,
 		row = function(): any
-			return rows:get()[id]
+			return rows:get()[id] or LIMITED_ROWS[id]
 		end,
 		chat = function(): any
 			return chats[id]
@@ -107,6 +132,9 @@ ui.command { id = "theme_dark", title = "Dark theme", run = function()
 	ui.theme.follow_system(false)
 	ui.theme.current:set("zeron-dark")
 end }
+ui.command { id = "fixture.limited", title = "Two stopped by a usage limit", run = function()
+	limited_shown:set(true)
+end }
 -- A minute on.
 ui.command { id = "fixture.later", title = "A minute later", run = function()
 	now:set(now:peek() + 60)
@@ -123,6 +151,23 @@ return ui.component(function(): Node
 			p = "$space.6",
 			gap = "$space.4",
 			items = "center",
+			ui.show(function(): boolean
+				return limited_shown:get()
+			end, ui.column {
+				id = "fx-limited",
+				w_full = true,
+				max_w = 1200,
+				Block.Block {
+					title = "Limited",
+					gap = "$space.4",
+					list({ "th-limit", "th-switch" }, function(id: string): Node
+						return unit(id, "full")
+					end, "rule"),
+					list({ "th-limit", "th-switch" }, function(id: string): Node
+						return unit(id, "strip")
+					end),
+				},
+			}),
 			ui.row {
 				w_full = true,
 				max_w = 1200,

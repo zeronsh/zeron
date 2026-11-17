@@ -47,6 +47,7 @@ export type Name =
 	| "status-failed"
 	| "status-done"
 	| "status-woke"
+	| "status-limited"
 	| "archive-minimalistic"
 	| "archive-up-minimalistic"
 	| "pin"

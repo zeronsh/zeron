@@ -144,6 +144,7 @@ local Button = require("@self/button")
 local TextField = require("@self/text_field")
 local Ref = require("@self/orch_ref")
 local trace = require("@self/orch_perf_trace")
+local limit = require("@self/usage_limit")
 
 export type Link = { kind: string, label: string, target: string }
 export type Item = {
@@ -185,7 +186,7 @@ export type Item = {
 }
 export type Orchestrator = { id: string, kind: string?, name: string, hue: number, archived: boolean? }
 export type Todo = { done: number, total: number, current: string? }
-export type Thread = { title: string, status: string?, agent: string? }
+export type Thread = { title: string, status: string?, agent: string?, limited: limit.Limit? }
 export type Props = {
 	items: control.Live<{ Item }>,
 	orchestrators: control.Live<{ Orchestrator }>?,
@@ -463,12 +464,13 @@ local function when(shown: () -> boolean, build: () -> Node, box: { [string]: an
 end
 
 -- How its threads stand where that's worth a word on its card: the lead
--- thread's status (nil: none says, or it's idle).
+-- thread's status (nil: none says, or it's idle). One its usage limit
+-- stopped, waiting for the reset, is "limited" (ds/usage_limit).
 local function thread_status(item: Item, thread_of: ((string) -> Thread?)?): string?
 	local best, rank = nil :: string?, math.huge
 	for _, chat in item.threads or {} do
 		local t = if thread_of then thread_of(chat) else nil
-		local st = t and t.status
+		local st = if t and limit.waiting(t) then "limited" else t and t.status
 		if st and LEAD[st] and LEAD[st] < rank then
 			best, rank = st, LEAD[st]
 		end
@@ -476,16 +478,32 @@ local function thread_status(item: Item, thread_of: ((string) -> Thread?)?): str
 	return best
 end
 
+-- Its threads' usage limit, where one has stopped on it: the one waiting
+-- for its reset first, else one running on another account meanwhile.
+local function thread_limit(item: Item, thread_of: ((string) -> Thread?)?): limit.Limit?
+	local found: limit.Limit? = nil
+	for _, chat in item.threads or {} do
+		local l = limit.of(if thread_of then thread_of(chat) else nil)
+		if l and not limit.switched(l) then
+			return l
+		end
+		found = found or l
+	end
+	return found
+end
+
 -- A status's word on a card, and its ink (nil: it says nothing). Working is
--- the quiet default; what wants the person stands out.
-local WORD: { [string]: { key: string, ink: string } } = {
+-- the quiet default; what wants the person stands out. (`text`: its words
+-- as they are, where they aren't one message: a usage limit's.)
+type Word = { key: string, ink: string, text: string?, limited: boolean? }
+local WORD: { [string]: Word } = {
 	working = { key = "ds.status.working", ink = "$text.secondary" },
 	connecting = { key = "ds.status.working", ink = "$text.secondary" },
 	waiting = { key = "ds.status.working", ink = "$text.secondary" },
 	input = { key = "orch.board.needs_you", ink = "$zeron.status.input" },
 	approval = { key = "orch.board.needs_you", ink = "$zeron.status.input" },
 	failed = { key = "ds.status.failed", ink = "$zeron.status.failed" },
-	limited = { key = "ds.status.failed", ink = "$zeron.status.failed" },
+	limited = { key = "ds.limit.waiting", ink = "$zeron.status.limited" },
 }
 local STALLED = { key = "ds.orch.progress.stalled", ink = "$zeron.tone.warning.ink" }
 local STARTING = { key = "orch.board.starting", ink = "$text.secondary" }
@@ -1695,6 +1713,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local lead_status = ui.computed(function(): string?
 			return thread_status(item(), props.thread_of)
 		end)
+		-- Its threads' usage limit, as one key (nil: none stopped on one), so
+		-- a row's other moves wake nothing here.
+		local lead_limit = ui.computed(function(): string?
+			local l = thread_limit(item(), props.thread_of)
+			if not l then
+				return nil
+			end
+			return `{if limit.switched(l) then "s" else "w"}|{limit.text(l)}`
+		end)
 		local todo = ui.computed(function(): any
 			local d, t = todo_of_item(item(), props.todo_of)
 			return if d and t then { d = d, t = t } else nil
@@ -1779,13 +1806,19 @@ local OrchBoard = ui.component(function(props: Props): Node
 					return DEFERRED
 				end
 				return if a.escalated ~= nil then ASKED_LONG else ASKED
+			end
+			-- Stopped by its usage limit: waiting for the reset, or on another
+			-- account meanwhile; said whole ("Waiting for limit · resets 14:05").
+			local lim = lead_limit:get()
+			if lim and it.state ~= "review" then
+				return { key = "", ink = "$zeron.status.limited", text = string.sub(lim, 3), limited = true }
 			elseif stalled() then
 				return STALLED
 			end
 			local st = lead_status:get()
 			return if st then WORD[st] else nil
 		end)
-		local function word(): { key: string, ink: string }?
+		local function word(): Word?
 			return the_word:get()
 		end
 		-- How far along: its threads' todo once a step of it is done, else
@@ -1980,12 +2013,22 @@ local OrchBoard = ui.component(function(props: Props): Node
 				color = "$zeron.status.input",
 				Icon { name = "status-input", size = 11 },
 			}),
+			-- Stopped by its usage limit: its glyph, before its words.
+			ui.show(function(): boolean
+				local w = word()
+				return w ~= nil and w.limited == true
+			end, ui.div {
+				class = "orch-card-limited",
+				shrink = 0,
+				color = "$zeron.status.limited",
+				Icon { name = "status-limited", size = 11 },
+			}),
 			ui.show(function(): boolean
 				return word() ~= nil
 			end, Card.Word {
 				text = function(): string
 					local w = word()
-					return if w then locale.s(w.key) else ""
+					return if w then (w.text or locale.s(w.key)) else ""
 				end,
 				class = "orch-card-word",
 				ink = function(): string

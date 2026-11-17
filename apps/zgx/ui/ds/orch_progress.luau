@@ -30,7 +30,11 @@
 -- last_step, time left = eta_secs − (now − updated), shown only while
 -- working with an ETA and some left. A status or activity shows 300 ms at
 -- least (ds/orch_hold). A row with `asking` set (its thread asked the
--- person and waits on the answer) reads "Waiting on you".
+-- person and waits on the answer) reads "Waiting on you". A thread its
+-- usage limit stopped (its session's `limited`, ds/usage_limit) reads
+-- "Waiting for limit · resets 14:05" in the limited state, its time left
+-- "resets in 12m" (moving with the clocks, by the minute); one running on
+-- another account meanwhile, "On me@home.dev · me@work.dev resets 14:05".
 
 local Icon = require("@self/icon")
 local Mark = require("@self/mark")
@@ -45,6 +49,7 @@ local hold = require("@self/orch_hold")
 local Tooltip = require("@self/tooltip")
 local pure = require("@self/orch_progress_clocks")
 local trace = require("@self/orch_perf_trace")
+local limit = require("@self/usage_limit")
 
 local M = {}
 
@@ -186,7 +191,7 @@ M.Progress = ui.component(function(props: Props): Node
 		if not c then
 			return nil
 		end
-		return { title = c.title, agent = c.agent, activity = c.activity }
+		return { title = c.title, agent = c.agent, activity = c.activity, limited = c.limited }
 	end)
 	local function chat(): { [string]: any }?
 		return the_chat:get()
@@ -209,8 +214,19 @@ M.Progress = ui.component(function(props: Props): Node
 		trace.hit("progress.clocks")
 		return M.clocks(row(), now())
 	end
+	-- Its usage limit, if one stopped it.
+	local function lim(): limit.Limit?
+		return limit.of(chat())
+	end
+	local function limit_words(): string?
+		local l = lim()
+		return if l then limit.text(l) else nil
+	end
 	-- How it stands, and what it's on, held 300 ms at least.
 	local kind = hold.value(function(): string
+		if limit.waiting(chat()) then
+			return "limited"
+		end
 		return M.kind(row())
 	end)
 	local stalled = hold.value(function(): boolean
@@ -292,6 +308,10 @@ M.Progress = ui.component(function(props: Props): Node
 		return if s then locale.s("ds.orch.progress.steps", { done = s.done or 0, total = s.total }) else ""
 	end
 	local function left_text(): string
+		local lm = lim()
+		if lm then
+			return limit.left(lm, now())
+		end
 		local l = clocks().left
 		return if l then locale.s("ds.orch.progress.left", { t = M.short(math.max(60, l)) }) else ""
 	end
@@ -299,7 +319,10 @@ M.Progress = ui.component(function(props: Props): Node
 	-- state's name.
 	local function doing_text(): string
 		local d = doing()
-		if d then
+		local w = limit_words()
+		if w then
+			return w
+		elseif d then
 			return d
 		elseif waiting_on_you() then
 			return locale.s("ds.orch.progress.waiting_on_you")
@@ -313,7 +336,7 @@ M.Progress = ui.component(function(props: Props): Node
 	end
 	local function tool_text(): string
 		local t = clocks().tool
-		return if t and doing() then M.short(t) else ""
+		return if t and doing() and not lim() then M.short(t) else ""
 	end
 
 	-- Its menu: what's up, open, pin.
@@ -541,10 +564,12 @@ M.Progress = ui.component(function(props: Props): Node
 						min_w = 0,
 						truncate = true,
 						font = function(): string
-							return if doing() then "$font.mono" else "$font.sans"
+							return if doing() and not lim() then "$font.mono" else "$font.sans"
 						end,
 						text_size = "$font.size.xs",
-						color = "$text.secondary",
+						color = function(): string
+							return if lim() then "$zeron.status.limited" else "$text.secondary"
+						end,
 					},
 					ui.show(function(): boolean
 						return tool_text() ~= ""
@@ -695,7 +720,10 @@ M.Progress = ui.component(function(props: Props): Node
 	-- the step, or its state's name), how long since its last step.
 	local function on_text(): string
 		local d = doing()
-		if d then
+		local w = limit_words()
+		if w then
+			return w
+		elseif d then
 			return d
 		elseif waiting_on_you() then
 			return locale.s("ds.orch.progress.waiting_on_you")
@@ -748,11 +776,13 @@ M.Progress = ui.component(function(props: Props): Node
 				min_w = 0,
 				truncate = true,
 				font = function(): string
-					return if doing() then "$font.mono" else "$font.sans"
+					return if doing() and not lim() then "$font.mono" else "$font.sans"
 				end,
 				text_size = "$font.size.xs",
 				color = function(): string
-					if doing() or kind() == "working" or kind() == "idle" then
+					if lim() then
+						return "$zeron.status.limited"
+					elseif doing() or kind() == "working" or kind() == "idle" then
 						return "$text.secondary"
 					end
 					local k = kind()

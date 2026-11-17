@@ -392,6 +392,28 @@ ui.command { id = "card_outcome", title = "Cards: Code signing done, its outcome
 	now.items = items
 	orchestration.now:set(now)
 end }
+-- Stopped by their usage limit: Release notes waiting for its reset (the
+-- next 14:05, local: the state `limit_reset`), Windows installer running on
+-- another account meanwhile.
+local limit_reset = ui.state("limit_reset", 0)
+ui.command { id = "card_limited", title = "Cards: two stopped by a usage limit", run = function()
+	local t = os.time()
+	local at = require("@ds/usage_limit").local_at
+	local reset = at(t, 14, 5)
+	if reset <= t then
+		reset = at(t + 86400, 14, 5)
+	end
+	limit_reset:set(reset)
+	touch("th-reins-notes", function(c)
+		c.status = nil
+		c.limited = { provider = "claude", account_label = "me@work.dev", window = "5-hour", until_at = reset, since = t - 900, attempt = 0 }
+	end)
+	touch("th-reins-win", function(c)
+		c.status = "working"
+		c.limited = { provider = "claude", account_label = "me@work.dev", window = "5-hour", until_at = reset, since = t - 1200, attempt = 0,
+			switched_to = { account_slot = "s2", account_label = "me@home.dev", at = t - 1100 } }
+	end)
+end }
 -- An open ask of its.
 ui.command { id = "sign_ask", title = "Signing: asks", run = function()
 	local now = table.clone(orchestration.now:peek() :: any)

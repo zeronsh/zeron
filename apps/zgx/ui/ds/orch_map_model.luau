@@ -422,8 +422,14 @@ function M.provenance(world: any): Provenance
 	return out
 end
 
--- A thread's state word, as its chat has it ("idle" for none).
+-- A thread's state word, as its chat has it ("idle" for none); stopped by
+-- its usage limit and waiting for the reset, "limited" (one running on
+-- another account meanwhile stands as it works).
 function M.status_of(chat: any): string
+	local l = chat and chat.limited
+	if type(l) == "table" and type(l.switched_to) ~= "table" then
+		return "limited"
+	end
 	local s = chat and chat.status
 	if s == "working" or s == "waiting" or s == "input" or s == "approval" or s == "failed" or s == "done" then
 		return s

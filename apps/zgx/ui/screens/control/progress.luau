@@ -186,7 +186,9 @@ local stood_in = derived(function(): ...any
 end, function(now: any, lines: any): { [string]: any }
 	local out: { [string]: any } = {}
 	local function take(c: any)
-		local state = STATE[c.status or ""]
+		-- (Stopped by its usage limit, it's still at it: waiting for the
+		-- reset, its clock running.)
+		local state = STATE[c.status or ""] or (if type(c.limited) == "table" then "waiting" else nil)
 		if state then
 			out[c.id] = {
 				chat_id = c.id,

@@ -29,7 +29,9 @@ local NAMES: { [Kind]: { string } } = {
 	plan = { "ds.status.plan", "ds.status.plan_long" },
 	done = { "ds.status.done", "ds.status.done_long" },
 	failed = { "ds.status.failed", "ds.status.failed" },
-	limited = { "ds.status.limited", "ds.status.limited" },
+	-- Stopped by its provider's usage limit, waiting for the reset
+	-- (ds/usage_limit).
+	limited = { "ds.status.limited", "ds.limit.waiting" },
 	-- Put to sleep, and woken (its time came, or it asked): not looked at since.
 	woke = { "ds.status.woke", "ds.status.woke_long" },
 }
@@ -57,7 +59,7 @@ local KINDS: { [Kind]: KindInfo } = {
 	plan = kind("plan"),
 	done = kind("done", "status-done"),
 	failed = kind("failed", "status-failed"),
-	limited = kind("limited", "status-failed"),
+	limited = kind("limited", "status-limited"),
 	woke = kind("woke", "status-woke"),
 }
 M.KINDS = KINDS

@@ -185,9 +185,16 @@ do
 		},
 	})
 end
+-- The crew policy's usage-limit part, as the last `updateOrchestrator`
+-- with a crew sent it: "switchAccount=…,switchHarness=…" (none: none sent).
+local on_limit = ui.state("orch_on_limit", "")
 ;(orchestration :: any).op = function(op: { [string]: any }): any
 	local line = said(op)
 	calls:set(if calls:peek() == "" then line else `{calls:peek()}\n{line}`)
+	local policy = op.crew and op.crew.onLimit
+	if op.op == "updateOrchestrator" and policy then
+		on_limit:set(`switchAccount={tostring(policy.switchAccount)},switchHarness={tostring(policy.switchHarness)}`)
+	end
 	if op.op == "promoteChat" then
 		return settled({ id = op.chatId })
 	end

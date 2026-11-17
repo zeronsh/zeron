@@ -211,6 +211,9 @@ struct RowWith {
     todo: Option<zeron_proto::orchestration::TodoProgress>,
     /// When the turn it's working on began (Unix seconds), while it works.
     turn_started: Option<i64>,
+    /// Stopped by its provider's usage limit (or running on another account
+    /// meanwhile), while its host says so.
+    limited: Option<zeron_proto::usage_limit::SessionLimit>,
 }
 
 /// `slot` holds `item` now; whether that's new.
@@ -655,6 +658,7 @@ fn child_row(
         activity: activity_of(status, session),
         todo: session.and_then(|s| s.todo.clone()),
         turn_started: turn_started(status, session),
+        limited: session.and_then(|s| s.limited.clone()),
     };
     if rows.get(id).is_some_and(|row| row.with == with) {
         return;
@@ -697,6 +701,10 @@ fn child_row(
         // When the turn it's working on began (Unix seconds), while it works:
         // the Q&A's "Answering" is a turn begun since its question came.
         ("turn_started", with.turn_started.map_or(Value::Nil, |t| Value::from(t as f64))),
+        // Stopped by its provider's usage limit, waiting for the reset, or
+        // running on another account meanwhile (`switched_to`):
+        // `crate::orchestration::limited_value`'s shape.
+        ("limited", with.limited.as_ref().map_or(Value::Nil, crate::orchestration::limited_value)),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks: seen_marks(c), with, value });
 }
@@ -732,6 +740,7 @@ fn top_row(
         activity: activity_of(status, session),
         todo: session.and_then(|s| s.todo.clone()),
         turn_started: turn_started(status, session),
+        limited: session.and_then(|s| s.limited.clone()),
     };
     if let Some(row) = rows.get(id).filter(|row| row.with == with) {
         return row.value.clone();
@@ -783,6 +792,10 @@ fn top_row(
         // When the turn it's working on began (Unix seconds), while it works:
         // the Q&A's "Answering" is a turn begun since its question came.
         ("turn_started", with.turn_started.map_or(Value::Nil, |t| Value::from(t as f64))),
+        // Stopped by its provider's usage limit, waiting for the reset, or
+        // running on another account meanwhile (`switched_to`):
+        // `crate::orchestration::limited_value`'s shape.
+        ("limited", with.limited.as_ref().map_or(Value::Nil, crate::orchestration::limited_value)),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks, with, value: value.clone() });
     value

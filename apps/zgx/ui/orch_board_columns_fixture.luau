@@ -12,7 +12,9 @@
 -- them. Blocked's groups: `!fixture.blocked_groups` puts two in Needs you
 -- (one asked: the state `columns_asks`) and two in Paused (folded until
 -- opened: the state `columns_paused`); `!fixture.checks` gives four cards
--- the engine's note, one of each kind.
+-- the engine's note, one of each kind. `!fixture.limited` puts two in Now
+-- whose threads their usage limit stopped: one waiting for its reset (at
+-- 14:05, local), one running on another account meanwhile.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -142,6 +144,19 @@ ui.command { id = "fixture.checks", title = "Notes on four cards", run = functio
 		end
 	end
 	items:set(list)
+end }
+-- The reset the limited threads wait for: 14:05 local, the fixture's day.
+local RESET = require("@ds/usage_limit").local_at(T, 14, 5)
+ui.command { id = "fixture.limited", title = "Two stopped by a usage limit", run = function()
+	local c = table.clone(chats:peek())
+	c["th-lim"] = { id = "th-lim", title = "Sidebar drag", status = nil,
+		limited = { provider = "claude", account_label = "me@work.dev", window = "5-hour", until_at = RESET, since = T - 900, attempt = 0 } }
+	c["th-sw"] = { id = "th-sw", title = "Map hover", status = "working",
+		limited = { provider = "claude", account_label = "me@work.dev", window = "5-hour", until_at = RESET, since = T - 1200, attempt = 0,
+			switched_to = { account_slot = "s2", account_label = "me@home.dev", at = T - 1100 } } }
+	chats:set(c)
+	items:push(card("it-lim1", "active", "Sidebar rows drag between sections", 3, { threads = { "th-lim" } }))
+	items:push(card("it-lim2", "active", "Map hover card keeps its place", 4, { threads = { "th-sw" } }))
 end }
 ui.command { id = "fixture.later", title = "Put four in Later", run = function()
 	for i, t in { "Look at the hover delay", "Try a darker map", "Remind me: renew the cert", "Someday: a CLI" } do

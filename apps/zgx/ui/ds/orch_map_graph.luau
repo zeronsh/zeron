@@ -552,7 +552,7 @@ M.View = ui.component(function(props: {
 			elseif n.kind == "thread" then
 				local st = state_of(n.id)
 				local rr = if st == "working" or st == "waiting" then 9
-					elseif st == "input" or st == "approval" or st == "failed" then r
+					elseif st == "input" or st == "approval" or st == "failed" or st == "limited" then r
 					else r * 0.85
 				return dx * dx + dy * dy <= (rr + GAP) ^ 2
 			end
@@ -1248,7 +1248,7 @@ M.View = ui.component(function(props: {
 						continue
 					end
 					local st = state_of(n.id)
-					local busy = st == "working" or st == "waiting" or st == "input" or st == "approval" or st == "failed"
+					local busy = st == "working" or st == "waiting" or st == "input" or st == "approval" or st == "failed" or st == "limited"
 					local lit_here = near ~= nil and near[n.id] == true
 					if (pass == 1) == (busy or lit_here) then
 						local a = if busy then (if dark then 0.76 else 0.82) else (if dark then 0.52 else 0.64)
@@ -1667,7 +1667,7 @@ M.View = ui.component(function(props: {
 				else
 					local rr = r
 					local paint
-					if st == "input" or st == "approval" or st == "failed" then
+					if st == "input" or st == "approval" or st == "failed" or st == "limited" then
 						paint = kit.ink(`zeron.status.{st}`, fd(1))
 						c:circle(x, y, rr + 3.5 * zs, kit.ink(`zeron.status.{st}`, fd(0.2)))
 					elseif st == "done" then

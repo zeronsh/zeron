@@ -699,6 +699,15 @@ fn orchestrator_value(o: &Orchestrator) -> Value {
         ("max_running", opt(o.crew.max_running, |n| Value::from(f64::from(n)))),
         ("harness", opt_str(o.crew.harness.as_deref())),
         ("model", opt_str(o.crew.model.as_deref())),
+        // What it and its crew do when their account hits its usage limit:
+        // `{ switch_account, switch_harness }` (both off: wait for the reset).
+        (
+            "on_limit",
+            Value::record([
+                ("switch_account", Value::Bool(o.crew.on_limit.switch_account)),
+                ("switch_harness", Value::Bool(o.crew.on_limit.switch_harness)),
+            ]),
+        ),
     ]);
     let wake = o.wake.as_ref().map_or(Value::Nil, |w| {
         Value::record([
@@ -1041,6 +1050,33 @@ pub(crate) fn todo_value(t: &TodoProgress) -> Value {
         ("done", Value::from(f64::from(t.done))),
         ("total", Value::from(f64::from(t.total))),
         ("current", opt_str(t.current.as_deref())),
+    ])
+}
+
+/// A chat its provider's usage limit stopped, for its session row:
+/// `{ provider, account_slot?, account_label?, window?, until_at?, since,
+/// attempt, switched_to? = { account_slot, account_label, at, harness?,
+/// model? } }` (times in Unix seconds; `until_at`, `until` on the wire, nil
+/// while unknown: `until` is a Luau keyword).
+pub(crate) fn limited_value(l: &zeron_proto::usage_limit::SessionLimit) -> Value {
+    let switched = l.switched_to.as_ref().map_or(Value::Nil, |s| {
+        Value::record([
+            ("account_slot", Value::from(s.account_slot.as_str())),
+            ("account_label", Value::from(s.account_label.as_str())),
+            ("at", secs(&s.at)),
+            ("harness", opt_str(s.harness.as_deref())),
+            ("model", opt_str(s.model.as_deref())),
+        ])
+    });
+    Value::record([
+        ("provider", Value::from(l.provider.as_str())),
+        ("account_slot", opt_str(l.account_slot.as_deref())),
+        ("account_label", opt_str(l.account_label.as_deref())),
+        ("window", opt_str(l.window.as_deref())),
+        ("until_at", opt(l.until.as_ref(), secs)),
+        ("since", secs(&l.since)),
+        ("attempt", Value::from(f64::from(l.attempt))),
+        ("switched_to", switched),
     ])
 }
 
@@ -1862,5 +1898,43 @@ mod tests {
         }
         let refused: Vec<&(String, String)> = sent.iter().filter(|(_, op)| !PERSON_OPS.contains(&op.as_str())).collect();
         assert!(refused.is_empty(), "sent by the scripts, refused by the bridge (add to PERSON_OPS): {refused:?}");
+    }
+
+    #[test]
+    fn a_limited_chat_and_its_policy_reach_scripts_snake_cased() {
+        let waiting: zeron_proto::usage_limit::SessionLimit = serde_json::from_value(json!({
+            "provider": "claude", "accountLabel": "me@work.dev", "window": "5-hour",
+            "until": iso(NOW + 1800), "since": iso(NOW - 60), "attempt": 1
+        }))
+        .unwrap();
+        let v = limited_value(&waiting);
+        assert_eq!(text(v.field("provider")).as_deref(), Some("claude"));
+        assert_eq!(text(v.field("account_label")).as_deref(), Some("me@work.dev"));
+        assert_eq!(num(v.field("until_at")), Some((NOW + 1800) as f64));
+        assert_eq!(num(v.field("since")), Some((NOW - 60) as f64));
+        assert_eq!(num(v.field("attempt")), Some(1.0));
+        assert!(nil(v.field("switched_to")));
+        assert!(nil(v.field("account_slot")));
+
+        let switched: zeron_proto::usage_limit::SessionLimit = serde_json::from_value(json!({
+            "provider": "claude", "since": iso(NOW - 60),
+            "switchedTo": { "accountSlot": "s2", "accountLabel": "me@home.dev", "at": iso(NOW - 30), "model": "opus" }
+        }))
+        .unwrap();
+        let v = limited_value(&switched);
+        assert!(nil(v.field("until_at")));
+        let to = v.field("switched_to").unwrap();
+        assert_eq!(text(to.field("account_slot")).as_deref(), Some("s2"));
+        assert_eq!(text(to.field("account_label")).as_deref(), Some("me@home.dev"));
+        assert_eq!(num(to.field("at")), Some((NOW - 30) as f64));
+        assert_eq!(text(to.field("model")).as_deref(), Some("opus"));
+        assert!(nil(to.field("harness")));
+
+        let mut o: Orchestrator = serde_json::from_value(sample()["orchestrators"][1].clone()).unwrap();
+        o.crew.on_limit.switch_account = true;
+        let v = orchestrator_value(&o);
+        let policy = v.field("crew").unwrap().field("on_limit").unwrap();
+        assert_eq!(policy.field("switch_account"), Some(&Value::Bool(true)));
+        assert_eq!(policy.field("switch_harness"), Some(&Value::Bool(false)));
     }
 }

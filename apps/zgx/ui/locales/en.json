@@ -1386,6 +1386,14 @@
         "timeout": "no reply from the engine",
         "recent": "Recent answers"
       }
+    },
+    "limit": {
+      "waiting": "Waiting for limit",
+      "waiting_until": "Waiting for limit · resets {time}",
+      "switched": "On {account} · {original} resets {time}",
+      "switched_unknown": "On {account} · {original} limited",
+      "resets_in": "resets in {t}",
+      "original": "its account"
     }
   },
   "settings": {
@@ -4368,7 +4376,9 @@
       "weekdays": "Weekdays only",
       "wake_prompt": "Prompt",
       "start_from": "Start from",
-      "import_flow": "Import JSON…"
+      "import_flow": "Import JSON…",
+      "on_limit_account": "When limited, continue on another account",
+      "on_limit_harness": "…or another harness or model"
     },
     "flow": {
       "blank": "Blank",

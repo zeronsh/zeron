@@ -52,6 +52,7 @@ local icon_button = require("@self/icon_button")
 local motion = require("@self/motion")
 local ContextMenu = require("@self/context_menu")
 local locale = require("@self/locale")
+local Tooltip = require("@self/tooltip")
 
 local M = {}
 
@@ -75,6 +76,9 @@ export type Session = {
 	branch: string?,
 	subagents: number?,
 	pr: { number: number, state: string?, title: string? }?,
+	-- What its state's glyph says where the pointer rests, in place of its
+	-- state's name ("Waiting for limit · resets 14:05").
+	note: string?,
 }
 
 function M.line(text: Node, ...: Node?): Node
@@ -168,9 +172,13 @@ function M.mark(cur: () -> Session, strong: () -> boolean): Node
 end
 
 -- A state, small: its glyph alone, in its hue (a state with no glyph, its
--- dot), its name a tooltip.
-function M.state(kind: status.Kind): Node
+-- dot), its name a tooltip (or `note`'s words, while it has some).
+function M.state(kind: status.Kind, note: (() -> string?)?): Node
 	local k = status.KINDS[kind]
+	local function said(): string
+		local n = if note then note() else nil
+		return if n and n ~= "" then n else k.long
+	end
 	return ui.div {
 		shrink = 0,
 		w = 16,
@@ -178,8 +186,8 @@ function M.state(kind: status.Kind): Node
 		items = "center",
 		justify = "center",
 		color = `$zeron.status.{kind}`,
-		tooltip = k.long,
-		label = k.long,
+		tooltip = if note then Tooltip { said } else k.long,
+		label = if note then said else k.long,
 		if k.glyph then status.StatusIcon { kind = kind, size = 14 } else status.StatusDot { kind = kind, size = 6 },
 	}
 end
@@ -203,7 +211,9 @@ function M.standing(cur: () -> Session): Node
 				return M.when(cur())
 			end)
 		end
-		return M.state(kind :: status.Kind)
+		return M.state(kind :: status.Kind, if kind == "limited" then function(): string?
+			return cur().note
+		end else nil)
 	end)
 end
 

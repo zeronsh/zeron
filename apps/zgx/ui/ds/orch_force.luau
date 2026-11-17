@@ -177,7 +177,7 @@ local MIN_FIT = 0.75
 -- for (waiting on its own work too); one it draws a glyph for, by it.
 local NEED: { [string]: boolean } = { input = true }
 local RINGED: { [string]: boolean } = { working = true, waiting = true }
-local GLYPHED: { [string]: boolean } = { input = true, approval = true, failed = true }
+local GLYPHED: { [string]: boolean } = { input = true, approval = true, failed = true, limited = true }
 -- (Where a chat's glyph sits: up and right of its middle.)
 local BADGE_AT = 10.5
 
@@ -669,6 +669,7 @@ M.View = ui.component(function(props: {
 			approval = kit.ink("zeron.status.approval"),
 			done = kit.ink("zeron.status.done"),
 			failed = kit.ink("zeron.status.failed"),
+			limited = kit.ink("zeron.status.limited"),
 			-- (A name's halo: the page's colour, a touch see-through on the
 			-- frosted glass.)
 			halo = kit.ink("background", 0.85),
@@ -735,7 +736,7 @@ M.View = ui.component(function(props: {
 	-- Every name, placed (ds/orch_force_labels): the Brain's and the
 	-- orchestrators' fixed under their marks, the threads' round theirs, the
 	-- ones whose node didn't move where they were while still free.
-	local NAME_RANK: { [string]: number } = { input = 0, approval = 0, failed = 1, working = 2, waiting = 2, done = 3 }
+	local NAME_RANK: { [string]: number } = { input = 0, approval = 0, failed = 1, limited = 1, working = 2, waiting = 2, done = 3 }
 	local names_job: any = nil
 	-- The scale names are placed and drawn at (world units an on-screen
 	-- point), and whether the zoom has moved off it since.
@@ -1194,7 +1195,7 @@ M.View = ui.component(function(props: {
 						c:circle(x[i], y[i], draw.HUB_FILL_D / 2, node_fill[i])
 					else
 						local st = state_of(n.id)
-						local ring = if NEED[st] then p.ask elseif st == "approval" then p.approval elseif st == "done" then p.done elseif st == "failed" then p.failed else p.idle
+						local ring = if NEED[st] then p.ask elseif st == "approval" then p.approval elseif st == "done" then p.done elseif st == "failed" then p.failed elseif st == "limited" then p.limited else p.idle
 						c:circle(x[i], y[i], R_RING + 0.8, ring)
 						c:circle(x[i], y[i], R_RING - 0.8, p.bg)
 						c:circle(x[i], y[i], R_CHAT, node_fill[i])
@@ -1273,7 +1274,7 @@ M.View = ui.component(function(props: {
 			if RINGED[st] then
 				continue
 			end
-			local ink = if NEED[st] then p.ask elseif st == "approval" then p.approval elseif st == "done" then p.done elseif st == "failed" then p.failed elseif n.fade < 10 then p.fade[n.fade] else p.idle
+			local ink = if NEED[st] then p.ask elseif st == "approval" then p.approval elseif st == "done" then p.done elseif st == "failed" then p.failed elseif st == "limited" then p.limited elseif n.fade < 10 then p.fade[n.fade] else p.idle
 			c:stroke(rings[i], ink, if st == "idle" then 1.1 else 1.6)
 			if GLYPHED[st] then
 				c:circle(nx + BADGE_AT, ny - BADGE_AT, 7.2, p.bg)

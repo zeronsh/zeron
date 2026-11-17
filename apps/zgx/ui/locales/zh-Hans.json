@@ -1251,7 +1251,45 @@
         "needs_you": "needs you",
         "brain": "Brain",
         "unpin_children": "Unpin all children",
-        "unpin_all": "Unpin all"
+        "unpin_all": "Unpin all",
+        "pivot": "Hubs",
+        "pivot_orchestrators": "Orchestrator hubs",
+        "pivot_machines": "Machine hubs",
+        "mark_done_read": "Mark {count} done as read",
+        "mark_done_read_none": "Mark done as read",
+        "card": {
+          "idle": "Idle",
+          "last_step": "last step {ago}",
+          "eta": "about {eta} left",
+          "state_ago": "{state} {ago}",
+          "column": {
+            "inbox": "Later",
+            "planned": "Up next",
+            "active": "Now",
+            "blocked": "Blocked",
+            "review": "Review",
+            "done": "Done",
+            "dropped": "Dropped"
+          },
+          "unread": "Unread",
+          "needs_you": "Needs you",
+          "failed": "Failed",
+          "open_chat": "Open chat",
+          "open_card": "Open card",
+          "open_page": "Open page",
+          "pin": "Pin",
+          "unpin": "Unpin",
+          "mark_read": "Mark read",
+          "crew": "Crew: {working} working · {idle} idle · {failed} failed",
+          "board": "Board: {now} now · {review} in review · {blocked} blocked",
+          "online": "Online",
+          "offline": "Offline",
+          "cpu": "CPU {cpu}%",
+          "running": "{count} working",
+          "seconds_ago": "{n}s ago",
+          "ago": "{ago} ago",
+          "seconds": "{n}s"
+        }
       },
       "machines": {
         "running": "{n} running",
@@ -1386,6 +1424,14 @@
         "timeout": "引擎没有回应",
         "recent": "最近的回答"
       }
+    },
+    "limit": {
+      "waiting": "等待用量限制重置",
+      "waiting_until": "等待用量限制 · {time} 重置",
+      "switched": "改用 {account} · {original} {time} 重置",
+      "switched_unknown": "改用 {account} · {original} 受限",
+      "resets_in": "{t}后重置",
+      "original": "原账户"
     }
   },
   "settings": {
@@ -4368,7 +4414,9 @@
       "weekdays": "Weekdays only",
       "wake_prompt": "Prompt",
       "start_from": "Start from",
-      "import_flow": "Import JSON…"
+      "import_flow": "Import JSON…",
+      "on_limit_account": "受限时改用其他账户继续",
+      "on_limit_harness": "…或改用其他提供方或模型"
     },
     "flow": {
       "blank": "Blank",
@@ -4557,7 +4605,9 @@
       "rename_device": "Rename device",
       "no_section": "No section",
       "failed": "Couldn't do that",
-      "mention": "Mention in composer"
+      "mention": "Mention in composer",
+      "marked_read": "Marked {count} done as read",
+      "undo": "Undo"
     },
     "figures": {
       "urgent": "{n} 项紧急",

@@ -6,7 +6,9 @@
 --   ("Done 2h ago", "Working 14m · last step 30s ago") with its steps or
 --   todo; where it sits (orchestrator · its card and column · role ·
 --   model · machine); what it's doing (Progress's note while it works, its
---   card's outcome once done); what applies of unread, asking, failed, a
+--   card's outcome once done); stopped by its usage limit, that ("Waiting
+--   for limit · resets 14:05", or "On <account> · <original> resets
+--   14:05" running on another meanwhile); what applies of unread, asking, failed, a
 --   pull request, a branch; and Open chat, Open card, Pin, Mark read;
 --   its card paused by the person, Resume (into Now) first.
 --   An orchestrator: its crew working / idle / failed, its board's Now /
@@ -22,6 +24,7 @@ local Icon = require("@self/icon")
 local Cells = require("@self/orch_cells")
 local status = require("@self/status")
 local locale = require("@self/locale")
+local limit = require("@self/usage_limit")
 
 local M = {}
 
@@ -161,10 +164,19 @@ function M.Card(props: Props): Node
 	end
 
 	-- A thread.
+	local function lim(): limit.Limit?
+		return limit.of(c())
+	end
 	local function state_line(): string
 		local s0 = st()
 		local k = status.KINDS[s0 :: any]
 		local word = if k then k.label else locale.s("ds.orch.map.card.idle")
+		local l = lim()
+		if s0 == "limited" and l then
+			-- (Waiting for the reset: how long till it, where that's known.)
+			local left = limit.left(l, os.time())
+			return if left ~= "" then `{word} · {left}` else word
+		end
 		local p = prog()
 		if LIVE[s0] then
 			local since = (p and p.started) or c().turn_started
@@ -274,6 +286,33 @@ function M.Card(props: Props): Node
 				color = "$text.primary",
 			},
 		},
+		-- Stopped by its usage limit: what it waits for, or where it runs
+		-- meanwhile.
+		ui.show(function(): boolean
+			return lim() ~= nil
+		end, ui.row {
+			class = "orch-force-card-limit",
+			w_full = true,
+			min_w = 0,
+			gap = "$zeron.space.tight",
+			items = "center",
+			color = "$zeron.status.limited",
+			-- (Waiting, its title's glyph says so already.)
+			ui.show(function(): boolean
+				return limit.switched(lim())
+			end, Icon { name = "status-limited", size = 11 }),
+			ui.text {
+				function(): string
+					return limit.text(lim())
+				end,
+				class = "orch-force-card-limit-text",
+				text_size = "$font.size.xs",
+				weight = "$font.weight.medium",
+				truncate = true,
+				min_w = 0,
+				grow = 1,
+			},
+		}),
 		ui.text { state_line, class = "orch-force-card-state", text_size = "$font.size.xs", color = "$text.secondary", truncate = true, min_w = 0, w_full = true },
 		ui.show(function(): boolean
 			local _, total = steps()
