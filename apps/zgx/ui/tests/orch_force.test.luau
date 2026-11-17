@@ -786,3 +786,22 @@ test("force pivot: kept; each pivot its own places and pins", function()
 	expect(app:state("control_map_force_pins")["eng2"]).to_be(true)
 	expect(math.abs(back[1] - at[1]) < 0.5 and math.abs(back[2] - at[2]) < 0.5).to_be(true)
 end)
+
+-- Names stand on the page with no box behind them, a halo of the page's
+-- colour round them (the first Graph's look), in both pivots.
+test("force names: no box behind any name, a halo round each; both pivots", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(25)
+	for _, pv in { "orchestrator", "machine" } do
+		app:set_state("control_map_force_pivot", pv)
+		settle(app, 240)
+		app:frames(25)
+		local st = stats(app)
+		expect(`{pv} boxes {st.label_boxes or 0}`).to_be(`{pv} boxes 0`)
+		expect((st.label_halos or 0) > 0).to_be(true)
+		check_labels(app, `{pv} halos`)
+	end
+	app:set_state("control_map_force_pivot", "orchestrator")
+	app:frames(5)
+end)

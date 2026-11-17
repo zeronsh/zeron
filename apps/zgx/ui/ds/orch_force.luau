@@ -172,6 +172,12 @@ local BADGE_AT = 10.5
 
 local T_NAME: any = { size = 11.5, baseline = "top", align = "center" }
 local T_HUB: any = { size = 12.5, weight = 600, baseline = "top", align = "center" }
+local T_NAME_HALO: any = table.clone(T_NAME)
+local T_HUB_HALO: any = table.clone(T_HUB)
+-- A name's halo: its text again in the page's colour, these offsets round
+-- it (a thread's four, fine; a fixed one's eight, fuller).
+local HALO_NAME = { -1, -1, 1, -1, -1, 1, 1, 1 }
+local HALO_FIXED = { -1.4, 0, 1.4, 0, 0, -1.4, 0, 1.4, -1, -1, 1, -1, -1, 1, 1, 1 }
 local M_NAME = { size = 11.5 }
 local M_HUB = { size = 12.5, weight = 600 }
 local DASH = { dash = { 4, 4 } }
@@ -216,7 +222,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -610,7 +616,9 @@ M.View = ui.component(function(props: {
 			approval = kit.ink("zeron.status.approval"),
 			done = kit.ink("zeron.status.done"),
 			failed = kit.ink("zeron.status.failed"),
-			label_bg = kit.ink("background", 0.9),
+			-- (A name's halo: the page's colour, a touch see-through on the
+			-- frosted glass.)
+			halo = kit.ink("background", 0.85),
 			lit = kit.ink("text.primary", 0.85),
 			-- (A fading chat's ring, by its strength in tenths.)
 			fade = {},
@@ -828,12 +836,25 @@ M.View = ui.component(function(props: {
 		if ld then
 			c:line(ld[1], ld[2], ld[3], ld[4], p.weak, 0.8)
 		end
-		c:rect(lab.x0, lab.y0, lab.x1 - lab.x0, lab.y1 - lab.y0, p.label_bg, 4)
+		-- (No box: the text alone, a halo of the page's colour round it, as
+		-- the first Graph's names stand clear; heavier for the fixed names,
+		-- which may sit on a line.)
+		local halo: any = if t == T_HUB then T_HUB_HALO else T_NAME_HALO
+		halo.color = p.halo
+		halo.align = lab.align
 		t.color = ink
 		t.align = lab.align
+		-- (For tests: names are drawn with no box behind them.)
+		counts.label_boxes = 0
 		local lh = lab.h / #lab.lines
+		local offs = if lab.fixed then HALO_FIXED else HALO_NAME
 		for k, line in lab.lines do
-			c:text(line, lab.x, lab.y + (k - 1) * lh, t)
+			local ly = lab.y + (k - 1) * lh
+			for o = 1, #offs, 2 do
+				c:text(line, lab.x + offs[o], ly + offs[o + 1], halo)
+			end
+			counts.label_halos += 1
+			c:text(line, lab.x, ly, t)
 		end
 	end
 	-- One line a pair: a pair with a message in flight is drawn by its arc
