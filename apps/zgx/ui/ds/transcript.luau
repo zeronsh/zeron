@@ -1067,6 +1067,16 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				near:set(shows)
 			end
 		end
+		-- (Its blocks, made only once it's near: a component's body runs as it
+		-- mounts, so a run held away from the view asks for none of them.)
+		local Blocks = ui.component(function(_: {}): Node
+			return ui.each(ui.computed(function(): { Block }
+				local r = row:get()
+				return if aside then blocks_in(r) else r.blocks
+			end), function(b: Block, _j: number, brow: State<Block>): Node
+				return block(b, brow)
+			end, { key = key, w_full = true, gap = "$space.3" })
+		end)
 		judges[run.key] = judge
 		ui.on_cleanup(function()
 			if judges[run.key] == judge then
@@ -1118,24 +1128,12 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 					w.offset:set(math.max(0, w.offset:peek() + size.h - before))
 				end
 			end,
-			ui.presence(function(): string
-				return if near:get() then "built" else "held"
-			end, function(kind: string): Node
-				if kind == "built" then
-					return ui.each(ui.computed(function(): { Block }
-						local r = row:get()
-						return if aside then blocks_in(r) else r.blocks
-					end), function(b: Block, _j: number, brow: State<Block>): Node
-						return block(b, brow)
-					end, { key = key, w_full = true, gap = "$space.3" })
-				end
-				return ui.div {
-					w_full = true,
-					h = function(): number
-						return held:get()
-					end,
-				}
-			end, { w_full = true, min_w = 0 }),
+			-- Away from the view, this box alone, as tall as the run last was
+			-- (or its guess); near, its blocks.
+			min_h = function(): number
+				return if near:get() then 0 else held:get()
+			end,
+			ui.show(near, Blocks {}),
 		}
 	end, {
 		key = function(run: Run): string

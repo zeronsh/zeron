@@ -2362,10 +2362,20 @@ impl View {
                     };
                     for entry in tail {
                         let id = entry["id"].as_str().unwrap_or_default().to_owned();
-                        open.built.remove(id.as_str());
+                        let fresh = Entry::new(entry);
                         match open.entries.iter_mut().find(|e| *e.id == *id) {
-                            Some(held) => *held = Entry::new(entry),
-                            None => open.entries.push(Entry::new(entry)),
+                            // The same as the row it has (most of a tail, a
+                            // chat opened again): what was built from it
+                            // stays, so nothing showing is made again.
+                            Some(held) if held.sum() == fresh.sum() => {}
+                            Some(held) => {
+                                open.built.remove(id.as_str());
+                                *held = fresh;
+                            }
+                            None => {
+                                open.built.remove(id.as_str());
+                                open.entries.push(fresh);
+                            }
                         }
                     }
                     open.heard = true;
