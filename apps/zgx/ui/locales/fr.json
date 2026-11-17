@@ -591,6 +591,10 @@
         "supervised_hint": "Demander avant chaque commande ou modification de fichier.",
         "edits": "Accepter les modifications",
         "edits_hint": "Appliquer les modifications, demander pour le reste.",
+        "auto": "Auto",
+        "auto_hint": "Le vérificateur de l’agent autorise les actions sûres et vous demande pour les risquées.",
+        "auto_unavailable": "Auto indisponible",
+        "auto_unavailable_hint": "Cet agent ne prend pas en charge Auto. Choisissez un autre mode d’accès ou un autre agent.",
         "full": "Accès complet",
         "full_hint": "Exécuter les commandes et appliquer les modifications sans demander."
       },
@@ -627,6 +631,7 @@
       "dictate": "Dicter",
       "queue_message": "Mettre en file d’attente",
       "send_message": "Envoyer le message",
+      "send_auto_unavailable": "Auto n’est pas disponible pour cet agent. Choisissez un autre mode d’accès pour envoyer.",
       "stop": "Arrêter",
       "back": "Retour",
       "next": "Suivant",
@@ -719,7 +724,18 @@
       "show_all_lines": "Afficher les {n} lignes",
       "open_subagent": "Ouvrir le sous-agent {title}",
       "subagent": "Sous-agent",
-      "worked_for": "{secs} s de travail · {summary}"
+      "worked_for": "{secs} s de travail · {summary}",
+      "review": {
+        "reviewing": "Vérification…",
+        "approved": "Approuvé automatiquement",
+        "denied": "Bloqué par la vérification automatique",
+        "timed-out": "Délai de vérification dépassé",
+        "reviewing_hint": "Le vérificateur de l’agent contrôle cette action avant son exécution.",
+        "approved_hint": "Le vérificateur de l’agent a jugé cette action sûre et l’a laissée s’exécuter.",
+        "denied_hint": "Le vérificateur de l’agent a arrêté cette action. Elle ne s’est pas exécutée.",
+        "timed-out_hint": "Le vérificateur de l’agent n’a pas tranché à temps : cette action ne s’est pas exécutée.",
+        "risk": "Risque : {risk}"
+      }
     },
     "transcript": {
       "copy_message": "Copier le message",
@@ -872,6 +888,8 @@
       "default": "Par défaut",
       "reasoning": "RAISONNEMENT",
       "account": "Compte",
+      "account_of": "Compte {name}",
+      "no_account": "Aucun",
       "model": "Modèle",
       "search_starred": "Rechercher dans les favoris…",
       "search_agent": "Rechercher un modèle {agent}…",
@@ -883,7 +901,8 @@
       "not_found": "Aucun modèle trouvé",
       "not_found_hint": "Aucun résultat pour « {q} » dans {where}",
       "where_starred": "les modèles favoris",
-      "where_models": "les modèles"
+      "where_models": "les modèles",
+      "add_key": "Ajouter une clé API {name}"
     },
     "effort_slider": {
       "reasoning": "Raisonnement"
@@ -970,7 +989,23 @@
       "paste_key_hint": "{name} la lit dans {var}. Elle est conservée sur cet appareil et ne sera plus jamais affichée.",
       "key_name": "{var}",
       "get_key": "Obtenir une clé",
-      "save_key": "Enregistrer"
+      "save_key": "Enregistrer",
+      "add_named_account": "Ajouter un compte {name}",
+      "add_api_key": "Ajouter une clé API",
+      "key_offline": "Le moteur de Zeron ne répond pas — réessayez dans un instant.",
+      "key_remote": "Les clés API s’ajoutent sur l’ordinateur qui exécute {name}.",
+      "key_failed": "Impossible d’ajouter la clé — réessayez.",
+      "key_title": "Ajouter une clé API",
+      "key_provider": "Fournisseur",
+      "key_body": "{agent} utilise cette clé pour les modèles {name}.",
+      "key_field": "Clé API",
+      "key_kept": "Enregistrée sur ce Mac, dans les réglages de {agent}.",
+      "key_name_label": "Nom",
+      "key_name_placeholder": "Travail, Personnel…",
+      "rename": "Renommer",
+      "rename_title": "Renommer la clé API",
+      "rename_hint": "Laissez vide pour garder son nom par défaut.",
+      "key_name_optional": "Nom (facultatif)"
     },
     "command_palette": {
       "scope": {
@@ -1612,6 +1647,18 @@
           "label": "Connexion à {name}"
         },
         "remove_row_description": "Les conversations qui l’utilisaient restent."
+      },
+      "couldnt_switch": "Impossible de changer de compte",
+      "cloud": "Cloud",
+      "cloud_keys": {
+        "title": "Clés API",
+        "section_description": "Au lieu d’une connexion, Cloud peut utiliser une clé API. Une clé enregistrée ici devient le compte de son agent sur chaque machine Cloud, dès son prochain tour.",
+        "anthropic": "Clé API Anthropic",
+        "openai": "Clé API OpenAI",
+        "description": "Pour {agent} sur Cloud. Conservée dans le coffre de Zeron, jamais sur cet ordinateur.",
+        "placeholder": "Coller une clé",
+        "save": "Enregistrer",
+        "saved": "{agent} sur Cloud utilise désormais cette clé"
       }
     },
     "devices": {
@@ -3201,7 +3248,8 @@
         "show": "Afficher dans le Finder",
         "dismiss": "Masquer {name}",
         "saving": "Enregistrement…"
-      }
+      },
+      "dismiss_error": "Fermer"
     },
     "browser_api": {
       "empty": "Saisissez un site web ou une adresse localhost.",
@@ -3465,7 +3513,11 @@
         },
         "compose": {
           "title": "Insérer du texte dans la zone de saisie",
-          "detail": "C’est toujours vous qui l’envoyez."
+          "detail": "Il peut compléter ce que vous avez écrit ou le remplacer. C’est toujours vous qui l’envoyez."
+        },
+        "draft": {
+          "title": "Lire ce que vous tapez dans la zone de saisie, et le mettre de côté",
+          "detail": "Il voit vos mots dans n’importe quelle conversation avant leur envoi, et peut retirer le brouillon pour le remettre plus tard. Il ne l’envoie jamais."
         },
         "network": {
           "title": "Se connecter à Internet",
