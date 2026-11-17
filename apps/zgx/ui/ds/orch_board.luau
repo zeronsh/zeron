@@ -121,6 +121,8 @@
 
 local Icon = require("@self/icon")
 local ContextMenu = require("@self/context_menu")
+-- A card shown from elsewhere (the Map's hover card, its Open card), by id.
+local reveal = ui.shared("control_board_reveal", nil :: string?)
 local Markdown = require("@self/markdown")
 local HoverCard = require("@self/hover_card")
 local badge = require("@self/badge")
@@ -2335,6 +2337,12 @@ local OrchBoard = ui.component(function(props: Props): Node
 			ref = slot,
 			class = "orch-card-slot",
 			w_full = true,
+			-- (Shown from elsewhere, the Map's hover card: ringed a moment.)
+			outline = function(): number
+				return if reveal:get() == id then 2 else 0
+			end,
+			outline_color = "$focus.ring",
+			rounded = CARD_RADIUS,
 			ContextMenu {
 				label = locale.t("orch.board.card_actions"),
 				ring = CARD_RADIUS,

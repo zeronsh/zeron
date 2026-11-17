@@ -21,9 +21,9 @@
 --   Force.View { world, chat, comms, on_open_chat, on_open_orchestrator,
 --                menu?, register? }
 
-local Icon = require("@self/icon")
 local IconButton = require("@self/icon_button").IconButton
 local HoverCard = require("@self/hover_card")
+local ForceCard = require("@self/orch_force_card")
 local Segmented = require("@self/segmented")
 local status = require("@self/status")
 local locale = require("@self/locale")
@@ -31,7 +31,6 @@ local motion = require("@self/motion")
 local hue = require("@self/orch_hue")
 local kit = require("@self/orch_map_kit")
 local model = require("@self/orch_map_model")
-local Cells = require("@self/orch_cells")
 local sim = require("@self/orch_force_sim")
 local fm = require("@self/orch_force_model")
 local Visibility = require("@self/orch_map_visibility")
@@ -210,6 +209,10 @@ M.View = ui.component(function(props: {
 	register: ((key: string, open: ((id: string) -> boolean)?) -> ())?,
 	-- Marks these chats done as read (the space's menu), with its Undo.
 	mark_read: ((ids: { string }) -> ())?,
+	-- Progress's row of a chat (its note, steps, ETA), for the hover card.
+	progress: ((id: string) -> any)?,
+	-- Shows a board card (the hover card's Open card).
+	on_open_card: ((item: string) -> ())?,
 }): Node
 	local width = ui.use_state(0)
 	local function field_h(): number
@@ -1525,109 +1528,57 @@ M.View = ui.component(function(props: {
 	end
 
 	-- The card of what the pointer rests on (ds/hover_card's anchored).
+	-- The card of what the pointer rests on (ds/orch_force_card), made as
+	-- it shows: what the Map holds of it, never a transcript.
 	local function card(): Node
-		local function id(): string?
-			return M.hover:get()
-		end
-		local function n(): any
-			version:get()
-			local x = id()
-			local i = x and fmodel.index[x]
-			return if i then fmodel.nodes[i] else nil
-		end
-		local function c(): any
-			local x = id()
-			return if x then props.chat(x) or {} else {}
-		end
-		local function st(): string
-			local x = id()
-			return if x then state_of(x) else "idle"
-		end
-		local function machine(): string
-			local x = n()
-			for _, m in fmodel.machines do
-				if x and m.id == x.device then
-					return m.name
+		return ForceCard.Card {
+			node = function(): any
+				version:get()
+				local x = M.hover:get()
+				local i = x and fmodel.index[x]
+				return if i then fmodel.nodes[i] else nil
+			end,
+			world = props.world,
+			chat = function(cid: string): any
+				return props.chat(cid)
+			end,
+			state_of = state_of,
+			machine_name = function(dev: string?): string
+				for _, m in fmodel.machines do
+					if m.id == dev then
+						return m.name
+					end
 				end
-			end
-			return ""
-		end
-		local function doing(): string
-			local s0 = st()
-			local a = c().activity
-			if s0 == "working" and a then
-				return locale.s(`ds.orch.activity.{a.kind}`)
-			end
-			return if s0 ~= "idle" and status.KINDS[s0 :: any] then status.KINDS[s0 :: any].long else ""
-		end
-		return HoverCard.Card {
-			class = "orch-force-card",
-			w = 248,
-			p = "$space.3",
-			gap = "$space.1",
-			ui.row {
-				gap = "$space.2",
-				items = "center",
-				ui.show(function(): boolean
-					local x = n()
-					return x ~= nil and x.kind == "chat" and st() ~= "idle"
-				end, status.StatusIcon { kind = function(): any
-					return st()
-				end, size = 14 }),
-				ui.text {
-					function(): string
-						local x = n()
-						if x and x.kind == "brain" then
-							return locale.s("ds.orch.map.brain")
-						end
-						return if x then x.title else ""
-					end,
-					grow = 1,
-					min_w = 0,
-					truncate = true,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					color = "$text.primary",
-				},
-			},
-			ui.show(function(): boolean
-				return doing() ~= ""
-			end, ui.text { doing, text_size = "$font.size.xs", color = "$text.secondary" }),
-			ui.row {
-				w_full = true,
-				gap = "$space.2",
-				items = "center",
-				ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "monitor", size = 12 } },
-				ui.text { machine, text_size = "$font.size.xs", color = "$text.tertiary", truncate = true, min_w = 0 },
-				ui.text {
-					function(): string
-						return c().model or ""
-					end,
-					grow = 1,
-					align = "end",
-					truncate = true,
-					min_w = 0,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
-				},
-			},
-			ui.show(function(): boolean
-				local t = c().todo
-				return t ~= nil and (t.total or 0) > 0
-			end, Cells {
-				done = function(): number
-					return (c().todo or {}).done or 0
-				end,
-				total = function(): number
-					return (c().todo or {}).total or 0
-				end,
-				current = function(): boolean
-					return st() == "working"
-				end,
-				fill = true,
-				w = 224,
-				h = 8,
-			}),
+				return ""
+			end,
+			progress = props.progress,
+			pinned = function(): boolean
+				local x = M.hover:get()
+				return x ~= nil and (M.pins_of():get() or {})[x] == true
+			end,
+			on_pin = function()
+				local x = M.hover:peek()
+				local i = x and fmodel.index[x]
+				if not i then
+					return
+				end
+				local on = not s.pinned[i]
+				sim.pin(s, i, on)
+				local pins = table.clone(M.pins_of():peek() or {})
+				pins[x :: string] = if on then true else nil
+				M.pins_of():set(pins :: any)
+				if not on then
+					wake({ i })
+				end
+			end,
+			on_open_chat = function(cid: string)
+				props.on_open_chat(cid)
+			end,
+			on_open_orchestrator = function(oid: string)
+				props.on_open_orchestrator(oid)
+			end,
+			on_open_card = props.on_open_card,
+			on_mark_read = props.mark_read,
 		}
 	end
 	local function hover_box(): (number, number, number)
@@ -1643,7 +1594,7 @@ M.View = ui.component(function(props: {
 	local anchor_at = { x = 0, y = 0 }
 	local anchor = HoverCard.Anchored {
 		class = "orch-force-anchor",
-		w = 248,
+		w = 300,
 		delay = 350,
 		placement = { side = "bottom", align = "start", offset = 6 },
 		anchor = ui.div {
