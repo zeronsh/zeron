@@ -662,6 +662,16 @@
         "capacity": "容量 {n} tokens",
         "waiting": "正在等待上下文用量",
         "unreported": "此智能体尚未报告上下文用量"
+      },
+      "machine": {
+        "label": "机器",
+        "on": "{device} · {size}",
+        "column_vcpu": "vCPU",
+        "column_memory": "内存",
+        "column_rate": "额度",
+        "chosen": "{size}机器",
+        "column_disk": "磁盘",
+        "change": "更改机器规格"
       }
     },
     "markdown": {
@@ -3079,7 +3089,15 @@
       "store_full": "等待 Cloud 机器取走的文件太多。等其中一台取走后再试。",
       "held_sending": "正在发送…",
       "outbox_uploading": "正在上传…",
-      "outbox_failed": "未发送"
+      "outbox_failed": "未发送",
+      "size_default": "你的默认",
+      "on_size": "{where} · {size}",
+      "size_gb": "{n} GB",
+      "restarting": "正在以{size}重启…",
+      "size_note_running": "本轮结束后才能更改规格。",
+      "size_note_awake": "重启机器。文件保留，进程停止。",
+      "size_note_asleep": "以此规格唤醒机器。文件保留。",
+      "on_size_restarting": "{where} · {size} · 重启中"
     },
     "turn_state": {
       "interrupted": "已中断",

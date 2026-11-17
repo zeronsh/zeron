@@ -14,6 +14,10 @@
 --   deck_alert(alert, picker, opts)  that alert as the deck's alerts take it
 --   default_rows(machines, chosen) Settings → Cloud's default sizes, on the
 --                                  alert's grid
+--   size_choices(machines, default)  a new chat's Machine menu: each size's
+--                                  specs and rate, the account's default tagged
+--   size_for(machines, picked, default)  the size a new chat starts on
+--   size_name / on_size            "Large"; "Cloud · Large"
 --   dismissed / dismiss / settle   dismissal: an alert put away stays away
 --                                  until its level worsens (the restored note:
 --                                  until its machine rebuilds again)
@@ -112,9 +116,15 @@ end
 -- alerts, raising none), as the composer's old line said a host was out of
 -- reach only to someone with something to send (link_notice's `intent`), and
 -- said once there's a draft or a queue (`opts.intent`).
-function M.line(s: any, opts: { intent: boolean? }?): Notice?
+function M.line(s: any, opts: { intent: boolean?, restarting: string? }?): Notice?
 	local intent = opts ~= nil and opts.intent == true
 	local state = s.state
+	-- A size the person picked, its machine restarting on it: said as what it
+	-- is (progress, in the info tone: the chip's glyph says it too).
+	local restarting = if opts then opts.restarting else nil
+	if restarting and state ~= "error" and state ~= "data_expired" then
+		return { text = say("restarting", `Restarting on {restarting}…`, { size = restarting }), spinner = true }
+	end
 	if state == "data_expired" or state == "error" or (s.wake_blocked and s.wake_blocked.reason == "disk_too_small") then
 		return nil
 	end
@@ -613,6 +623,113 @@ function M.default_rows(machines: { any }, chosen: string?): { DefaultRow }
 		})
 	end
 	return out
+end
+
+-- ── A new chat's size ──────────────────────────────────────────────────────
+
+-- The composer's Machine menu, for a chat about to start on Cloud, as the
+-- composer's other menus draw a row: one line, the size's name (the
+-- account's default tagged right after it, in the menus' quiet tag),
+-- then its vCPU, memory, disk and credit rate in columns under the menu's
+-- head (ds/composer's Machine row), so the sizes compare down the list and
+-- nothing waits under the pointer. The one picked is the menu's selected row.
+-- Every figure is the edge's catalogue (`CloudStatus.machines`), as Settings
+-- → Cloud's: never written here. `value` is what's sent with the create;
+-- `icon`, the Work in row's while it's the one chosen (the rows have none).
+export type SizeCells = { vcpu: string, memory: string, disk: string, rate: string }
+export type SizeChoice = {
+	value: string,
+	label: string,
+	tag: string?,
+	bare: boolean,
+	icon: string,
+	cells: SizeCells,
+}
+function M.size_choices(machines: { any }, default: string?): { SizeChoice }
+	local out: { SizeChoice } = {}
+	for _, m in machines do
+		table.insert(out, {
+			value = m.id,
+			label = M.machine_name(m),
+			tag = if m.id == default then say("size_default", "Your default") else nil,
+			bare = true,
+			icon = "cpu",
+			cells = {
+				vcpu = whole(m.vcpu),
+				memory = say("size_gb", `{whole(m.memory_gb)} GB`, { n = whole(m.memory_gb) }),
+				disk = say("size_gb", `{M.holds_gb(m.disk_gb)} GB`, { n = tostring(M.holds_gb(m.disk_gb)) }),
+				rate = M.rate(m.rate),
+			},
+		})
+	end
+	return out
+end
+
+-- An existing Cloud chat's Machine menu, from its chip: the same sizes, each
+-- out of reach while a turn runs (a size changes only as its machine
+-- restarts); and what a pick does to the machine, said under them.
+function M.chat_size_choices(machines: { any }, default: string?, running: boolean): { SizeChoice }
+	local out = M.size_choices(machines, default)
+	if running then
+		for _, c in out do
+			(c :: any).disabled = true
+		end
+	end
+	return out
+end
+function M.size_note(s: any?, running: boolean): string?
+	if not s then
+		return nil
+	end
+	if running then
+		return say("size_note_running", "Size can change once this turn ends.")
+	elseif s.state == "ready" or s.state == "starting" or s.state == "provisioning" then
+		return say("size_note_awake", "Restarts the machine. Files stay; processes stop.")
+	elseif s.state == "sleeping" then
+		return say("size_note_asleep", "Wakes the machine on it. Files stay.")
+	end
+	return nil
+end
+
+-- The size a new chat starts on: the one picked while it's on offer, else the
+-- account's default, else none (an edge that offers no choice).
+function M.size_for(machines: { any }, picked: string?, default: string?): string?
+	local offered = function(id: string?): boolean
+		for _, m in machines do
+			if id ~= nil and m.id == id then
+				return true
+			end
+		end
+		return false
+	end
+	if offered(picked) then
+		return picked
+	elseif offered(default) then
+		return default
+	end
+	return nil
+end
+
+-- A size's name by its id ("Large"), or nil for one not on offer.
+function M.size_name(machines: { any }, id: string?): string?
+	for _, m in machines do
+		if id ~= nil and m.id == id then
+			return M.machine_name(m)
+		end
+	end
+	return nil
+end
+
+-- Where a Cloud chat runs, with its size: "Cloud · Large"; while its machine
+-- restarts on a size picked, that size and so: "Cloud · Large · restarting".
+function M.on_size(where: string, size: string?, restarting: boolean?): string
+	if size == nil then
+		return where
+	end
+	if restarting then
+		return say("on_size_restarting", `{where} · {size} · restarting`, { where = where, size = size })
+	end
+	return say("on_size", `{where} · {size}`, { where = where, size = size })
 end
 
 -- ── As the deck takes it ───────────────────────────────────────────────────

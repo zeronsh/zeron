@@ -249,14 +249,16 @@ impl CloudClient {
         }
     }
 
-    /// `POST /cloud/{orgId}/sessions` with `{chatId, spaceId, repo, branch?}` — idempotent
-    /// per chat; mints the session device and starts provisioning.
+    /// `POST /cloud/{orgId}/sessions` with `{chatId, spaceId, repo, branch?, machine?}` —
+    /// idempotent per chat; mints the session device and starts provisioning,
+    /// on `machine` (a size id; the account's default without one).
     pub async fn create_session(
         &self,
         chat_id: &str,
         space_id: &str,
         repo: &GithubRepo,
         branch: Option<&str>,
+        machine: Option<&str>,
     ) -> Result<CloudSession, EngineError> {
         let mut body = serde_json::json!({
             "chatId": chat_id,
@@ -269,6 +271,10 @@ impl CloudClient {
         });
         if let Some(branch) = branch {
             body["branch"] = serde_json::Value::String(branch.to_owned());
+        }
+        if let Some(machine) = machine {
+            require_id(machine, "machine")?;
+            body["machine"] = serde_json::Value::String(machine.to_owned());
         }
         self.target()?
             .call::<CloudSession>(
@@ -373,19 +379,25 @@ impl CloudClient {
 
     /// `POST /cloud/{orgId}/sessions` from a Cloud machine: a delegate of the
     /// chat it runs (`parent_chat_id`), on a machine of its own, cloning the
-    /// parent's repository. The edge writes the delegate's chat row.
+    /// parent's repository. The edge writes the delegate's chat row. A
+    /// `machine` no bigger than this one's (the edge refuses a bigger one).
     pub async fn create_child_session(
         &self,
         chat_id: &str,
         parent_chat_id: &str,
         branch: Option<&str>,
         config: Option<&zeron_proto::ChatConfig>,
+        machine: Option<&str>,
     ) -> Result<CloudSession, EngineError> {
         require_id(chat_id, "chatId")?;
         require_id(parent_chat_id, "parentChatId")?;
         let mut body = serde_json::json!({ "chatId": chat_id, "parentChatId": parent_chat_id });
         if let Some(branch) = branch {
             body["branch"] = serde_json::Value::String(branch.to_owned());
+        }
+        if let Some(machine) = machine {
+            require_id(machine, "machine")?;
+            body["machine"] = serde_json::Value::String(machine.to_owned());
         }
         if let Some(config) = config {
             body["config"] = serde_json::to_value(config)
@@ -1719,11 +1731,21 @@ mod tests {
                     ..Default::default()
                 },
                 Some("feature/x"),
+                Some("large"),
             )
             .await
             .unwrap();
         assert_eq!(created.device_id, "cloud-s2");
         assert_eq!(created.state, CloudState::Provisioning);
+        // The size picked for it rides the create.
+        let create = edge.requests().into_iter().last().unwrap();
+        assert!(
+            create.target.ends_with("/cloud/org_1/sessions"),
+            "{}",
+            create.target
+        );
+        assert_eq!(create.body["machine"], "large");
+        assert_eq!(create.body["branch"], "feature/x");
 
         // Edge `{error, message}` → the edge's own user-facing message.
         let busy = client

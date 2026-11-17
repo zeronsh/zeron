@@ -662,6 +662,16 @@
         "capacity": "{n} token capacity",
         "waiting": "Waiting for context usage",
         "unreported": "Context usage not reported by this agent yet"
+      },
+      "machine": {
+        "label": "Machine",
+        "on": "{device} · {size}",
+        "column_vcpu": "vCPU",
+        "column_memory": "Memory",
+        "column_rate": "Credits",
+        "chosen": "{size} machine",
+        "column_disk": "Disk",
+        "change": "Change the machine size"
       }
     },
     "markdown": {
@@ -3079,7 +3089,15 @@
       "store_full": "Too many files are waiting for Cloud machines to collect them. Try again once one has.",
       "held_sending": "Sending…",
       "outbox_uploading": "Uploading…",
-      "outbox_failed": "Didn't send"
+      "outbox_failed": "Didn't send",
+      "size_default": "Your default",
+      "on_size": "{where} · {size}",
+      "size_gb": "{n} GB",
+      "restarting": "Restarting on {size}…",
+      "size_note_running": "Size can change once this turn ends.",
+      "size_note_awake": "Restarts the machine. Files stay; processes stop.",
+      "size_note_asleep": "Wakes the machine on it. Files stay.",
+      "on_size_restarting": "{where} · {size} · restarting"
     },
     "turn_state": {
       "interrupted": "Interrupted",

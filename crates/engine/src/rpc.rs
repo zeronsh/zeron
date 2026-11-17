@@ -772,6 +772,11 @@ enum MutateParams {
         /// Cloud machine, cloning the project's GitHub repository.
         #[serde(default)]
         cloud: bool,
+        /// With `cloud`: the size of machine it starts on (an id of
+        /// `CloudStatus.machines`), kept as the chat's own; the account's
+        /// default without one. Refused without `cloud`.
+        #[serde(default)]
+        machine: Option<String>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -1276,9 +1281,15 @@ impl EngineRpc {
         branch: Option<&str>,
         cloud: bool,
         config: Option<&ChatConfig>,
+        machine: Option<&str>,
     ) -> Result<Option<CloudHost>, RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         let on_cloud = |device_id: &str| device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX);
+        if machine.is_some() && !cloud {
+            return Err(RpcError::BadParams(
+                "machine picks a Cloud machine's size: only with cloud".into(),
+            ));
+        }
         // A side chat of a Cloud chat shares its machine (and files), unless
         // it asks for a Cloud session of its own.
         if !cloud
@@ -1322,7 +1333,7 @@ impl EngineRpc {
             }
             let started = self
                 .cloud()
-                .create_child_session(chat_id, parent, branch, config)
+                .create_child_session(chat_id, parent, branch, config, machine)
                 .await
                 .map_err(|e| RpcError::Failed(format!("Couldn't start a Cloud session: {e}")))?;
             self.await_chat_row(chat_id).await?;
@@ -1355,7 +1366,7 @@ impl EngineRpc {
                 ))
             })?;
         let session = cloud_client
-            .create_session(chat_id, space_id, &repo, branch)
+            .create_session(chat_id, space_id, &repo, branch, machine)
             .await
             .map_err(|e| RpcError::Failed(format!("Couldn't start a Cloud session: {e}")))?;
         Ok(Some(CloudHost {
@@ -2003,6 +2014,7 @@ impl EngineRpc {
                 parent_chat_id,
                 child_kind,
                 cloud: _,
+                machine: _,
             } => {
                 // A voice orchestrator is hidden, so the chats it creates are
                 // the user's top-level sessions rather than its side chats.
@@ -4264,6 +4276,7 @@ impl RpcService for EngineRpc {
                     parent_chat_id,
                     child_kind,
                     cloud,
+                    machine,
                 } = &p
                     && let Some(host) = Box::pin(self.cloud_chat_host(
                         chat_id,
@@ -4272,6 +4285,7 @@ impl RpcService for EngineRpc {
                         branch.as_deref().filter(|b| !b.is_empty()),
                         *cloud,
                         config.as_ref(),
+                        machine.as_deref().map(str::trim).filter(|m| !m.is_empty()),
                     ))
                     .await?
                 {
