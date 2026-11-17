@@ -10,6 +10,10 @@
 -- model's, under it once it's chosen: no card beside its row.
 -- A dropdown underneath: its trigger, keys, search, list and panel.
 --
+-- An agent without models keeps its tab, its list saying why: still
+-- looking, signed out ("Sign in", `on_sign_in`), or a look that failed
+-- ("Retry", `on_retry`).
+--
 -- `ModelPicker { model = state, effort = state, options = state, harnesses = { … }, models = { … } }`
 
 local control = require("@self/control")
@@ -28,10 +32,12 @@ local PrivateText = require("@self/private_text")
 local context_usage = require("@self/context_usage")
 local locale = require("@self/locale")
 
--- An agent: a tab of its own.
+-- An agent: a tab of its own, models or not.
 -- (`icon`: an agent from the ACP registry's one-ink SVG, in its mark's
--- place.)
-export type Harness = { id: string, label: string, mark: Mark.Name, icon: string?, auto: boolean? }
+-- place. `status`: how its models stand, the host's catalog's: "loading",
+-- "ready", "empty" (none: signed out, most likely) or "error" (the look
+-- failed, `error` saying why); its tab, with none, says which.)
+export type Harness = { id: string, label: string, mark: Mark.Name, icon: string?, auto: boolean?, status: string?, error: string? }
 -- One of a model option's choices.
 export type Choice = { id: string, label: string }
 -- An option of a model (Devin Fusion's lead and sidekick): its choices and
@@ -119,6 +125,14 @@ export type Props = {
 	-- How far its chip folds (Dropdown's `fold`): 1, without the effort; 2, its
 	-- mark alone.
 	fold: (() -> number)?,
+	-- Called as the panel opens (the catalog asked after again: an agent
+	-- short of models looked at once more, in the background).
+	on_open: (() -> ())?,
+	-- An agent whose models couldn't be looked up, asked again (its tab's
+	-- "Retry"); one signed out, its sign-in (its tab's "Sign in"). Without
+	-- them, its tab says why and offers nothing.
+	on_retry: ((harness: string) -> ())?,
+	on_sign_in: ((harness: string) -> ())?,
 }
 
 -- Devin Fusion's lead (what runs), listed first among its options.
@@ -170,6 +184,14 @@ return ui.component(function(props: Props): Node
 		local out: { [string]: Model } = {}
 		for _, m in read(props.models) :: { Model } do
 			out[m.value] = m
+		end
+		return out
+	end)
+	-- The agents with at least one model.
+	local stocked = ui.computed(function(): { [string]: boolean }
+		local out: { [string]: boolean } = {}
+		for _, m in read(props.models) :: { Model } do
+			out[m.harness] = true
 		end
 		return out
 	end)
@@ -859,6 +881,41 @@ return ui.component(function(props: Props): Node
 		-- nothing: what it looked for, and where.
 		empty = function(q: string): Dropdown.Empty
 			local agent = agents:get()[viewed()]
+			-- An agent with no models at all: why, whatever was searched for
+			-- (still looking, signed out, a look that failed).
+			local short = if agent and not stocked:get()[agent.id] then agent else nil
+			if short and short.status == "loading" then
+				return { title = locale.s("ds.model_picker.loading"), loading = true }
+			elseif short and short.status == "empty" then
+				local id = short.id
+				return {
+					title = locale.s("ds.model_picker.signed_out"),
+					hint = locale.s("ds.model_picker.signed_out_hint", { agent = short.label }),
+					action = if props.on_sign_in
+						then {
+							label = locale.s("ds.model_picker.sign_in"),
+							on_click = function()
+								(props.on_sign_in :: (string) -> ())(id)
+							end,
+						}
+						else nil,
+				}
+			elseif short and short.status == "error" then
+				local id = short.id
+				local why = if short.error and short.error ~= "" then short.error else nil
+				return {
+					title = locale.s("ds.model_picker.load_failed"),
+					hint = why or locale.s("ds.model_picker.load_failed_hint", { agent = short.label }),
+					action = if props.on_retry
+						then {
+							label = locale.s("ds.model_picker.retry"),
+							on_click = function()
+								(props.on_retry :: (string) -> ())(id)
+							end,
+						}
+						else nil,
+				}
+			end
 			if q == "" then
 				if viewed() == STARRED then
 					return { title = locale.s("ds.model_picker.no_starred"), hint = locale.s("ds.model_picker.no_starred_hint") }
@@ -879,6 +936,9 @@ return ui.component(function(props: Props): Node
 			expanded:set(false)
 			if props.on_accounts_open then
 				props.on_accounts_open()
+			end
+			if props.on_open then
+				props.on_open()
 			end
 		end,
 		-- (Nothing chosen, nothing to fold onto: opened out.)

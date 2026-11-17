@@ -1276,6 +1276,13 @@ function M.model_accounts(device: () -> string?): any
 		on_accounts_open = function()
 			agents.refresh_device(account_key(device()))
 		end,
+		-- An agent that lists no models, signed out (its tab's "Sign in"):
+		-- Settings → Providers, on the composer's device, where it signs in.
+		on_sign_in = function(_harness: string)
+			local key = account_key(device())
+			agents.target(if key == "" then nil else key)
+			route.settings("providers")
+		end,
 	}
 end
 
