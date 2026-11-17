@@ -1,0 +1,23 @@
+---
+// A fixed stage of the app's points that scales to the box it is put in
+// (a point is 1/width of the box), for pieces of the app written in HTML.
+interface Props {
+  width: number;
+  height: number;
+  class?: string;
+  label?: string;
+}
+const { width, height, class: className, label } = Astro.props;
+---
+
+<div class:list={["stage-fit", className]} style={`--sw:${width};--sh:${height}`}>
+  <div class="stage" role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : "true"}><slot /></div>
+</div>
+
+<style is:global>
+  .stage-fit { container-type: inline-size; aspect-ratio: var(--sw) / var(--sh); }
+  .stage { position: relative; width: calc(var(--sw) * 1px); height: calc(var(--sh) * 1px); transform-origin: 0 0; scale: tan(atan2(100cqw, var(--sw) * 1px)); font-family: var(--font-sans); color: #ededef; text-align: left; -webkit-font-smoothing: antialiased; }
+  .stage * { position: absolute; margin: 0; white-space: nowrap; }
+  /* (An icon's drawing fills the icon, wherever the icon is put.) */
+  .stage .icon svg { position: static; }
+</style>
