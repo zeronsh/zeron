@@ -174,6 +174,11 @@ export type Item = {
 	-- The engine's one-line note on it: `kind` stale, nothing_to_review,
 	-- still_working or moved (camelCase too), `note`, `since`, `nudged_at`.
 	check: { [string]: any }?,
+	-- Its place in a flow's run: `flow` and `step` (their names), `kind`
+	-- (the step's), `index` of `of` (its place in the run's order); and the
+	-- cards it waits on.
+	flow: { [string]: any }?,
+	depends_on: { string }?,
 }
 export type Orchestrator = { id: string, kind: string?, name: string, hue: number, archived: boolean? }
 export type Todo = { done: number, total: number, current: string? }
@@ -356,6 +361,18 @@ local function check_of(it: Item): { note: string, tone: string }?
 		return nil
 	end
 	return { note = note, tone = CHECK_TONE[c.kind or ""] or "quiet" }
+end
+
+-- A card's step in a flow's run as one key: its glyph's letter (a gate's
+-- "g"), "i/n", then "<flow> · <step>". Nil: no step of one.
+local function flow_key_of(it: Item): string?
+	local f = it.flow
+	if type(f) ~= "table" or type(f.step) ~= "string" or f.step == "" then
+		return nil
+	end
+	local of = if type(f.index) == "number" and type(f.of) == "number" then `{f.index}/{f.of}` else ""
+	local name = if type(f.flow) == "string" and f.flow ~= "" then `{f.flow} · {f.step}` else f.step
+	return `{if f.kind == "gate" then "g" else "s"}|{of}|{name}`
 end
 
 local function sorted(list: { Item }): { Item }
@@ -1675,6 +1692,43 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local the_check = ui.computed(function(): any
 			return check_of(item())
 		end)
+		-- Its step in a flow's run, as one key ("g|4/4|Plan · QA"): nil when
+		-- it's no step of one.
+		local flow_key = ui.computed(function(): string?
+			return flow_key_of(item())
+		end)
+		-- Its step in a flow's run: a quiet chip, the flow and step and how far
+		-- along the run is. (Built only on a card that's a step of one.)
+		local flow_chip = when(function(): boolean
+			return flow_key:get() ~= nil
+		end, function(): Node
+			return ui.presence(function(): string
+				return flow_key:get() or ""
+			end, function(key: string): Node
+				local glyph, of, name = string.match(key, "^(%a)|([^|]*)|(.*)$")
+				return ui.row {
+					w_full = true,
+					min_w = 0,
+					ui.row {
+						class = "orch-card-flow",
+						relative = true,
+						min_w = 0,
+						shrink = 1,
+						h = 16,
+						px = "$space.1",
+						gap = "$zeron.space.tight",
+						items = "center",
+						rounded = "$radius.sm",
+						color = "$text.secondary",
+						ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, rounded = "$radius.sm", bg = "$text.primary", opacity = 0.06, pointer_events = "none" },
+						ui.div { shrink = 0, color = "$text.tertiary", Icon { name = if glyph == "g" then "status-approval" else "git-branch", size = 11 } },
+						ui.text { name or "", class = "orch-card-flow-step", min_w = 0, shrink = 1, truncate = true, text_size = "$font.size.xs", weight = "$font.weight.medium" },
+						if of and of ~= "" then ui.text { of, class = "orch-card-flow-of", shrink = 0, tabular = true, text_size = "$font.size.xs", color = "$text.tertiary" } else nil,
+					},
+				}
+			end, { w_full = true, min_w = 0 })
+		end, { w_full = true, min_w = 0 })
+
 		local is_stalled = ui.computed(function(): boolean
 			return item().state ~= "done" and Progress.stalled(progress_row())
 		end)
@@ -2119,6 +2173,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				min_w = 0,
 				gap = if compact then "$space.1" else "$zeron.space.snug",
 				title_text,
+				flow_chip,
 				outcome_text,
 				decision,
 				ui.show(has_status, status_line),

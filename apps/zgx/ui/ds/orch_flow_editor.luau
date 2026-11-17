@@ -21,7 +21,18 @@
 --                         selection)
 --     models?,            () -> { { value, label, group? } } as "harness/model"
 --     on_import?, on_export?, on_save_template?, on_start?(kind)
+--     run?,               () -> Run? (its run as it stands: { state =
+--                         "running" | "blocked" | "finished" | "stopped",
+--                         at? = node id, step? = its name, done? = { [node
+--                         id] = true } })
+--     on_run?,            (task: string) -> () (Run…: a run started on it)
+--     on_stop?,           () -> () (the run under way stopped)
 --   }
+--
+-- With `on_run`, a flow that can run has Run… in its toolbar (a task
+-- asked for first); while a run is under way, where it is and Stop
+-- instead, the step it's at ringed on the field and the steps done
+-- ticked.
 
 local flow = require("@self/orch_flow")
 local locale = require("@self/locale")
@@ -36,6 +47,7 @@ local Select = require("@self/select")
 local badge = require("@self/badge")
 local Toolbar = require("@self/toolbar")
 local Sheet = require("@self/dialog").Sheet
+local Dialog = require("@self/dialog").Dialog
 
 local M = {}
 
@@ -132,7 +144,13 @@ export type Props = {
 	on_export: (() -> ())?,
 	on_save_template: (() -> ())?,
 	on_start: ((kind: string) -> ())?,
+	run: (() -> any)?,
+	on_run: ((task: string) -> ())?,
+	on_stop: (() -> ())?,
 }
+
+-- A run's states that are under way.
+local LIVE: { [string]: boolean } = { running = true, blocked = true }
 
 function M.FlowEditor(props: Props): Node
 	return M.Editor(props)
@@ -210,6 +228,18 @@ M.Editor = ui.component(function(props: Props): Node
 		end
 		return out
 	end)
+
+	-- Its run as it stands, and that run while it's under way.
+	local run_now = ui.computed(function(): any
+		local r = props.run
+		return if r then r() else nil
+	end)
+	local function live(): any
+		local r = run_now:get()
+		return if r and LIVE[r.state or ""] then r else nil
+	end
+	local run_open = ui.use_state(false)
+	local task = ui.use_state("")
 
 	local function change(fn: (any) -> boolean?)
 		local f = current()
@@ -378,6 +408,9 @@ M.Editor = ui.component(function(props: Props): Node
 		local sel = selected:get()
 		local ink = hue_ink()
 		local bad = faulty:get()
+		local r = run_now:get()
+		local at_id = if r and LIVE[r.state or ""] then r.at else nil
+		local done = (r and r.done) or {}
 		-- Connections first, under the cards.
 		for i, e in f.edges do
 			local a, b = by[e.from], by[e.to]
@@ -451,7 +484,22 @@ M.Editor = ui.component(function(props: Props): Node
 			else
 				c:text(name, tx, n.y + h / 2, { size = 13, color = "$text.primary", baseline = "middle" })
 			end
-			if bad[n.id] then
+			-- The step a run is at, ringed (its hue; waiting on you, the
+			-- input's); a step it has done, ticked.
+			if at_id == n.id then
+				local ring = ui.path():rect(n.x - 4, n.y - 4, W + 8, h + 8, 13)
+				c:stroke(ring, if r.state == "blocked" then "$zeron.status.input" else ink, 2)
+			end
+			if done[n.id] and at_id ~= n.id then
+				local cx, cy = n.x + W - 14, n.y + 14
+				c:circle(cx, cy, 6, "$zeron.status.done")
+				c:stroke(
+					ui.path():move(cx - 2.6, cy + 0.2):line(cx - 0.6, cy + 2.2):line(cx + 2.8, cy - 1.8),
+					"$zeron.check.mark",
+					1.6,
+					{ cap = "round", join = "round" }
+				)
+			elseif bad[n.id] then
 				c:circle(n.x + W - 12, n.y + 12, 3.5, "$danger")
 			end
 			-- Ports: in at the top, out at the bottom.
@@ -899,6 +947,102 @@ M.Editor = ui.component(function(props: Props): Node
 		table.insert(add_options, { value = kind, label = locale.s("orch.flow.kind." .. kind) })
 	end
 
+	-- Run…, while it can run; under way, where the run is and Stop.
+	local function run_controls(): Node
+		return ui.presence(function(): string
+			local r = live()
+			if r then
+				return "live:" .. (r.state or "")
+			end
+			return if #issues:get() == 0 then "ready" else ""
+		end, function(key: string): Node
+			if key == "ready" then
+				return ui.row {
+					pr = "$space.2",
+					Button {
+						ui.t("orch.flow.run.button") :: any,
+						id = "orch-flow-run",
+						size = "sm",
+						on_click = function()
+							run_open:set(true)
+						end,
+					},
+				}
+			elseif key == "" then
+				return ui.div {}
+			end
+			local blocked = key == "live:blocked"
+			return ui.row {
+				pr = "$space.2",
+				gap = "$space.1",
+				items = "center",
+				ui.div {
+					id = "orch-flow-run-state",
+					pr = "$space.1",
+					badge.Badge {
+						function(): string
+							local r = live()
+							local f = current()
+							local n = if r and r.at and f then flow.node(f, r.at) else nil
+							local step = (r and r.step) or (n and n.name) or ""
+							return locale.s(if blocked then "orch.flow.run.waiting" else "orch.flow.run.running", { step = step })
+						end,
+						color = if blocked then "$zeron.status.input" else "$zeron.status.working",
+						dot = true,
+						size = "sm",
+						shape = "pill",
+					},
+				},
+				Button {
+					ui.t("orch.flow.run.stop") :: any,
+					id = "orch-flow-stop",
+					tone = "secondary",
+					size = "sm",
+					on_click = function()
+						local stop = props.on_stop
+						if stop then
+							stop()
+						end
+					end,
+				},
+			}
+		end)
+	end
+
+	-- What a run is to work on, asked as it starts.
+	local function run_dialog(): Node
+		local function go()
+			local t = string.match(task:peek(), "^%s*(.-)%s*$") or ""
+			local start = props.on_run
+			if t == "" or not start then
+				return
+			end
+			start(t)
+			task:set("")
+			run_open:set(false)
+		end
+		return Dialog {
+			open = run_open,
+			title = ui.t("orch.flow.run.title") :: any,
+			body = ui.t("orch.flow.run.body") :: any,
+			size = "md",
+			confirm = { label = ui.t("orch.flow.run.go") :: any, on_click = go, keep_open = true },
+			ui.column {
+				id = "orch-flow-run-dialog",
+				w_full = true,
+				TextArea {
+					value = task,
+					name = ui.t("orch.flow.run.task") :: any,
+					placeholder = ui.t("orch.flow.run.task_placeholder") :: any,
+					autofocus = true,
+					rows = 4,
+					max_rows = 10,
+					w_full = true,
+				},
+			},
+		}
+	end
+
 	local function toolbar(): Node
 		-- What adds to it and what's wrong with it; what moves it in and out
 		-- of files; the view; and, narrow, the inspector's sheet.
@@ -950,6 +1094,9 @@ M.Editor = ui.component(function(props: Props): Node
 			}),
 			Toolbar.Spacer {},
 		}
+		if props.on_run then
+			table.insert(groups, run_controls())
+		end
 		if #file > 0 then
 			table.insert(groups, Toolbar.Group(file :: any))
 		end
@@ -1113,6 +1260,7 @@ M.Editor = ui.component(function(props: Props): Node
 				ui.show(narrow, inspector_sheet()),
 			}
 		end, { w_full = true, h_full = true }),
+		if props.on_run then run_dialog() else nil,
 	}
 end)
 

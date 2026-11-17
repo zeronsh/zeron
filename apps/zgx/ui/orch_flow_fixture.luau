@@ -18,9 +18,7 @@ page.view:set("flow")
 require("@ds/orch_flow_editor").selected:set({ node = "3" })
 
 ui.command { id = "flow.none", title = "No flow", run = function()
-	local all = flow.copy(flows.saved:peek())
-	all[ID] = nil
-	flows.saved:set(all)
+	flows.forget(ID)
 end }
 ui.command { id = "flow.default", title = "Plan → Build → Review", run = function()
 	flows.set(ID, flow.initial())

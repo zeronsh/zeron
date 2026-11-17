@@ -1,10 +1,18 @@
--- Orchestrators' flows (ds/orch_flow), kept on this device until the
--- engine holds them: each orchestrator's own, by its id, and the flows
--- saved as templates to start new ones from. Files in and out are the
--- version 2 team JSON (Orchestrator Builder's, by Master0fFate).
+-- Orchestrators' flows (ds/orch_flow): each orchestrator's own, as the
+-- engine holds it (its `workflow`), else as kept on this device (from
+-- before the engine held them), and the flows saved as templates to start
+-- new ones from. Files in and out are the version 2 team JSON
+-- (Orchestrator Builder's, by Master0fFate).
 --
---   flows.of(id)                 orchestrator `id`'s flow, or nil (tracked)
---   flows.set(id, f)             its flow kept
+--   flows.of(id)                 orchestrator `id`'s flow, or nil (tracked):
+--                                an edit not yet in what the engine says,
+--                                else the engine's, else this device's
+--   flows.set(id, f)             its flow kept here and sent to the engine
+--                                (`updateOrchestrator { workflow }`) once
+--                                the edits rest
+--   flows.flush(id)              its last edit sent now (a run about to
+--                                start)
+--   flows.forget(id)             this device's copy of it let go
 --   flows.starters()             what a new one can start from: { { value,
 --                                label, flow? } } (tracked)
 --   flows.starter(value)         the flow a starter's value names, a copy
@@ -16,6 +24,9 @@
 
 local flow = require("@ds/orch_flow")
 local locale = require("@ds/locale")
+local orchestration = require("@account/orchestration")
+local rows = require("@account/rows")
+local toast = require("@ds/toast")
 
 local M = {}
 
@@ -31,17 +42,146 @@ M.templates = ui.persist("orch_flow_templates", {} :: { any })
 -- Files bigger than this aren't a flow.
 local MAX_FILE = 500000
 
+-- Edits made here the engine doesn't say yet, by id: shown over its
+-- `workflow` until it does (a drag doesn't jump back while it's on its way).
+local pending = ui.state("orch_flow_pending", {} :: { [string]: any })
+-- Sent once the edits rest this long (a drag is many).
+local SEND_AFTER = 600
+-- And let go this long after the engine took one, whatever it says then.
+local SETTLE_AFTER = 3000
+local edits: { [string]: number } = {}
+-- The last edit sent, by id.
+local sent: { [string]: number } = {}
+
+-- The engine's workflow as a flow (nil: none, or not one), made once a
+-- table the host gives.
+local made: { [any]: any } = setmetatable({}, { __mode = "k" }) :: any
+local function engine_flow(id: string): any
+	local o = rows.orchestrator(id)
+	local w = o and o.workflow
+	if type(w) ~= "table" then
+		return nil
+	end
+	local f = made[w]
+	if f == nil then
+		f = flow.import(w) or false
+		made[w] = f
+	end
+	return f or nil
+end
+
+local function same(a: any, b: any): boolean
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return a == b
+	end
+	for k, v in a do
+		if not same(v, b[k]) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+
+local function settle(id: string)
+	local all = pending:peek()
+	if all[id] == nil then
+		return
+	end
+	local left = table.clone(all)
+	left[id] = nil
+	pending:set(left)
+end
+
+-- (The engine saying what was sent puts the edit to rest.)
+ui.effect(function()
+	local all = pending:get()
+	for id, f in all do
+		local e = engine_flow(id)
+		if e and same(flow.export(e), flow.export(f)) then
+			ui.after(0, function()
+				settle(id)
+			end)
+		end
+	end
+end)
+
 function M.of(id: string?): any
 	if not id then
 		return nil
 	end
-	return M.saved:get()[id]
+	local mine = pending:get()[id]
+	if mine then
+		return mine
+	end
+	return engine_flow(id) or M.saved:get()[id]
+end
+
+local function send(id: string, n: number)
+	if edits[id] ~= n or sent[id] == n then
+		return
+	end
+	local f = pending:peek()[id]
+	if not f then
+		return
+	end
+	sent[id] = n
+	orchestration.op({ op = "updateOrchestrator", id = id, workflow = flow.export(f) }):after(function()
+		ui.after(SETTLE_AFTER, function()
+			if edits[id] == n then
+				settle(id)
+			end
+		end)
+	end, function()
+		-- (Kept here: shown as it is, sent again with the next edit.)
+		toast.show { title = locale.s("orch.flow.sync_failed"), tone = "danger" }
+	end)
 end
 
 function M.set(id: string, f: any)
 	local all = flow.copy(M.saved:peek())
 	all[id] = flow.copy(f)
-	M.saved:set(all)
+	local mine = table.clone(pending:peek())
+	mine[id] = flow.copy(f)
+	ui.batch(function()
+		M.saved:set(all)
+		pending:set(mine)
+	end)
+	local n = (edits[id] or 0) + 1
+	edits[id] = n
+	ui.after(SEND_AFTER, function()
+		send(id, n)
+	end)
+end
+
+-- (Edits from before a reload, not yet taken: sent again.)
+for id in pending:peek() do
+	edits[id] = 1
+	ui.after(SEND_AFTER, function()
+		send(id, 1)
+	end)
+end
+
+-- Its last edit sent now, not once the edits rest (before a run starts).
+function M.flush(id: string)
+	local n = edits[id]
+	if n then
+		send(id, n)
+	end
+end
+
+function M.forget(id: string)
+	edits[id] = (edits[id] or 0) + 1
+	local all = flow.copy(M.saved:peek())
+	all[id] = nil
+	ui.batch(function()
+		M.saved:set(all)
+		settle(id)
+	end)
 end
 
 function M.starters(): { any }

@@ -4425,7 +4425,21 @@
       "credit": "Flows follow Orchestrator Builder, the Zeron plugin by Master0fFate.",
       "connection": "Connection",
       "toolbar": "Flow",
-      "details": "Details"
+      "details": "Details",
+      "run": {
+        "button": "Run…",
+        "title": "Run this flow",
+        "body": "Its steps work through the task in order, one card each on the board.",
+        "task": "Task",
+        "task_placeholder": "What should it work on?",
+        "go": "Run",
+        "running": "Running · {step}",
+        "waiting": "Waiting on you · {step}",
+        "stop": "Stop",
+        "failed": "Couldn't start the run",
+        "stop_failed": "Couldn't stop the run"
+      },
+      "sync_failed": "Couldn't save the flow to the engine"
     }
   },
   "control": {

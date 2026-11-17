@@ -546,8 +546,34 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 		}
 	end
 
-	-- Its flow, to edit: kept on this device by its id (screens/orchestrator/
-	-- flows) until the engine holds it.
+	-- Its flow's run as the editor shows it: its state, the step it's at
+	-- and its name, and the steps whose cards are done.
+	local function flow_run(): any
+		local o = orchestrator()
+		local r = o and o.flow_run
+		if type(r) ~= "table" then
+			return nil
+		end
+		local done: { [string]: boolean } = {}
+		for node, card in r.cards or {} do
+			local it = rows.item(card)
+			if it and it.state == "done" then
+				done[node] = true
+			end
+		end
+		local step: string? = nil
+		if r.at and type(r.flow) == "table" then
+			for _, n in r.flow.nodes or {} do
+				if n.id == r.at then
+					step = n.name
+				end
+			end
+		end
+		return { state = r.state, at = r.at, step = step, done = done }
+	end
+
+	-- Its flow, to edit: the engine's (screens/orchestrator/flows), else as
+	-- kept on this device from before.
 	local function flow_view(): Node
 		local function set(f: any)
 			local id = props.of()
@@ -573,6 +599,26 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 				models = model_options,
 				on_start = function(kind: string)
 					set(if kind == "default" then Flow.initial() else Flow.blank())
+				end,
+				run = flow_run,
+				on_run = function(task: string)
+					local id = props.of()
+					if not id then
+						return
+					end
+					-- (Its last edit there first: the run follows the flow as shown.)
+					flows.flush(id)
+					orchestration.op({ op = "startFlow", orchestratorId = id, task = task }):after(function() end, function()
+						said("orch.flow.run.failed", "danger")
+					end)
+				end,
+				on_stop = function()
+					local id = props.of()
+					if id then
+						orchestration.op({ op = "stopFlow", orchestratorId = id }):after(function() end, function()
+							said("orch.flow.run.stop_failed", "danger")
+						end)
+					end
 				end,
 				on_import = function()
 					flows.import_file(function(f: any, err: string?)
