@@ -314,10 +314,10 @@ local function Session(id: Id?): Node
 							turn_state = TurnGlue.of(function(): any
 								return store.session:get()
 							end, store.messages),
-							on_retry = function(message: string)
+							on_retry = function(message: string, without_worktree: boolean?)
 								local s = which()
 								if s then
-									store.retry(s, message)
+									store.retry(s, message, without_worktree)
 								end
 							end,
 							on_attach = shared.attach_quote,

@@ -29,7 +29,7 @@ use zeron_sync::attachment_store::{
 
 use super::{
     ChatDocHandle, DocHost, EngineError, TRANSFER_BACKOFF_BASE, TRANSFER_BACKOFF_CAP,
-    TransferProgressGuard, lock, new_id, now_ms,
+    TransferProgressGuard, command_message_id, lock, new_id, now_ms,
 };
 use crate::uploads::AttachmentTransfer;
 
@@ -69,55 +69,89 @@ impl DocHost {
     }
 
     /// A chat's messages not yet taken by its agent: unresolved runs and steers
-    /// in its doc, then what this device still holds for it.
+    /// in its doc, those its host refused (or whose clock ran out) and that
+    /// nothing has sent again, then what this device still holds for it.
     pub fn waiting_messages(&self, chat_id: &str) -> Result<Vec<WaitingMessage>, EngineError> {
         let handle = self.open(chat_id)?;
-        let pending: Vec<_> = handle
-            .doc
-            .read_commands()?
-            .into_iter()
-            .filter(|c| c.status == SessionCommandStatus::Pending)
+        let commands = handle.doc.read_commands()?;
+        // Each message's newest attempt: a retry mints a fresh one with the
+        // same message id, and that one speaks for it (`retry_delivery`).
+        let mut latest: std::collections::HashMap<&str, &SessionCommandEntry> =
+            std::collections::HashMap::new();
+        for c in &commands {
+            if let Some(mid) = command_message_id(c) {
+                let slot = latest.entry(mid).or_insert(c);
+                if c.issued_at >= slot.issued_at {
+                    *slot = c;
+                }
+            }
+        }
+        let refused = |c: &SessionCommandEntry| {
+            matches!(
+                c.status,
+                SessionCommandStatus::Rejected | SessionCommandStatus::Expired
+            ) && command_message_id(c)
+                .is_some_and(|mid| latest.get(mid).is_some_and(|newest| newest.id == c.id))
+        };
+        let shown: Vec<&SessionCommandEntry> = commands
+            .iter()
+            .filter(|c| c.status == SessionCommandStatus::Pending || refused(c))
             .collect();
         // (Read on every change to the chat while it's open: the
-        // transcript's ids only when a command waits, and shared, not
-        // copied. A long chat's every entry was copied here per commit.)
-        let landed: std::collections::HashSet<String> = if pending.is_empty() {
-            Default::default()
+        // transcript only when a command waits or was refused, and shared,
+        // not copied. A long chat's every entry was copied here per commit.)
+        let entries = if shown.is_empty() {
+            Vec::new()
         } else {
-            handle
-                .doc
-                .read_entries_shared()
-                .unwrap_or_default()
-                .iter()
-                .map(|entry| entry.id.clone())
-                .collect()
+            handle.doc.read_entries_shared().unwrap_or_default()
         };
-        let mut waiting: Vec<WaitingMessage> = pending
+        let landed: std::collections::HashSet<&str> =
+            entries.iter().map(|entry| entry.id.as_str()).collect();
+        // A refused send the chat has moved on from (a later message ran)
+        // is history, not a message still waiting on the person.
+        let newest_entry = entries
+            .iter()
+            .map(|e| e.created_at)
+            .max()
+            .unwrap_or(i64::MIN);
+        let mut waiting: Vec<WaitingMessage> = shown
             .into_iter()
             .filter_map(|c| {
-                let (message_id, prompt) = match &c.payload {
+                let (message_id, prompt, worktree) = match &c.payload {
                     SessionCommandPayload::Run {
                         request,
                         message_id,
-                    } => (Some(message_id.clone()), request.prompt.clone()),
+                    } => (
+                        Some(message_id.clone()),
+                        request.prompt.clone(),
+                        request.worktree.is_some(),
+                    ),
                     SessionCommandPayload::Steer { prompt, message_id } => {
-                        (message_id.clone(), prompt.clone())
+                        (message_id.clone(), prompt.clone(), false)
                     }
                     _ => return None,
                 };
-                if message_id.as_ref().is_some_and(|id| landed.contains(id)) {
+                if message_id.as_deref().is_some_and(|id| landed.contains(id)) {
+                    return None;
+                }
+                let refused = c.status != SessionCommandStatus::Pending;
+                if refused && newest_entry > c.issued_at {
                     return None;
                 }
                 Some(WaitingMessage {
                     expires_at: Some(c.effective_expiry()),
-                    id: c.id,
+                    id: c.id.clone(),
                     chat_id: chat_id.to_string(),
                     message_id,
                     prompt,
-                    issued_by: c.issued_by,
+                    issued_by: c.issued_by.clone(),
                     sent_at: c.issued_at,
                     held: false,
-                    failure: None,
+                    // (An expired one has no word from a host: the client
+                    // says it wasn't delivered.)
+                    failure: if refused { c.resolution.clone() } else { None },
+                    refused,
+                    worktree,
                 })
             })
             .collect();
@@ -142,6 +176,8 @@ impl DocHost {
                 expires_at: None,
                 held: true,
                 failure: send.failure,
+                refused: false,
+                worktree: false,
             });
         }
         Ok(waiting)

@@ -818,8 +818,8 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		turn_state = if tab.kind == "subagent" then nil else TurnGlue.of(function(): any
 			return view.session:get()
 		end),
-		on_retry = function(message: string)
-			store.retry(chat, message)
+		on_retry = function(message: string, without_worktree: boolean?)
+			store.retry(chat, message, without_worktree)
 		end,
 		-- (A split's pane: the keys stay with this chat, in the window's composer.)
 		on_jump = if split

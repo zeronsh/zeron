@@ -259,3 +259,92 @@ fn a_stored_file_is_named_the_way_the_engine_resolves_it() {
     let prompt = with_attachments("look", std::slice::from_ref(&reference), 1);
     assert_eq!(split_attachments(&prompt), ("look".to_owned(), vec![reference]));
 }
+
+fn refused_send(id: &str, failure: Option<&str>, worktree: bool) -> Json {
+    json!({
+        "id": format!("cmd-{id}"),
+        "chatId": "other-chat",
+        "messageId": id,
+        "prompt": "start in a worktree",
+        "issuedBy": "laptop",
+        "sentAt": 1_000,
+        "expiresAt": 2_000,
+        "failure": failure,
+        "refused": true,
+        "worktree": worktree,
+    })
+}
+
+#[test]
+fn a_send_its_host_refused_reads_failed_with_why_and_a_worktree_retry() {
+    let (_app, view, _sending) = pending_chat();
+    view.open_chat(Some("other-chat".into()));
+    view.heard_frame(json!({ "reset": [] }));
+    // Sent from here, on its way.
+    view.pending.borrow_mut().entry("other-chat".into()).or_default().push(Pending {
+        id: "w1".into(),
+        words: "start in a worktree".into(),
+        waiting: "sending",
+        ..Default::default()
+    });
+    view.publish_messages();
+    assert_eq!(messages(&view)[0]["waiting"], "sending");
+
+    // Its host refused it: failed, with why, and it can go without its worktree.
+    let why = "git: fatal: invalid reference: HEAD";
+    view.follow_refused("other-chat", &[refused_send("w1", Some(why), true)]);
+    let shown = messages(&view);
+    assert_eq!(shown.as_array().unwrap().len(), 1);
+    assert_eq!(shown[0]["waiting"], "failed");
+    assert_eq!(shown[0]["failure"], why);
+    assert_eq!(shown[0]["worktree"], true);
+    assert!(view.pending.borrow()["other-chat"][0].refused);
+
+    // Sent again: the engine lists a fresh attempt on its way.
+    let mut again = refused_send("w1", None, true);
+    again["refused"] = json!(false);
+    view.follow_refused("other-chat", &[again]);
+    assert_eq!(messages(&view)[0]["waiting"], "sending");
+    assert!(messages(&view)[0]["failure"].is_null());
+
+    // Refused again, then gone from the list (a later message ran): it goes.
+    view.follow_refused("other-chat", &[refused_send("w1", Some(why), true)]);
+    assert_eq!(messages(&view)[0]["waiting"], "failed");
+    view.follow_refused("other-chat", &[]);
+    assert_eq!(messages(&view), json!([]));
+}
+
+#[test]
+fn a_refused_send_shows_even_when_nothing_here_sent_it() {
+    let (_app, view, _sending) = pending_chat();
+    view.open_chat(Some("other-chat".into()));
+    view.heard_frame(json!({ "reset": [] }));
+    view.follow_refused("other-chat", &[refused_send("w2", Some("its folder is gone"), false)]);
+    let shown = messages(&view);
+    assert_eq!(shown[0]["id"], "w2");
+    assert_eq!(shown[0]["text"], "start in a worktree");
+    assert_eq!(shown[0]["waiting"], "failed");
+    assert_eq!(shown[0]["failure"], "its folder is gone");
+    assert_eq!(shown[0]["worktree"], false, "no worktree was asked for");
+    // Hearing the same again adds nothing.
+    view.follow_refused("other-chat", &[refused_send("w2", Some("its folder is gone"), false)]);
+    assert_eq!(messages(&view).as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_send_with_no_word_of_it_past_its_grace_is_unanswered() {
+    let now = 10_000.;
+    // Nothing on its way for it: lost.
+    assert!(unanswered(None, now));
+    // On its way, its clock running: still sending.
+    let live = json!({ "messageId": "m", "expiresAt": (now + 60.) * 1000. });
+    assert!(!unanswered(Some(&live), now));
+    // Its clock ran out with no host to say so: failed.
+    let ran_out = json!({ "messageId": "m", "expiresAt": (now - 1.) * 1000. });
+    assert!(unanswered(Some(&ran_out), now));
+    // Refused or held: the engine says how it stands.
+    let refused = json!({ "messageId": "m", "refused": true, "expiresAt": 0 });
+    assert!(!unanswered(Some(&refused), now));
+    let held = json!({ "messageId": "m", "held": true });
+    assert!(!unanswered(Some(&held), now));
+}

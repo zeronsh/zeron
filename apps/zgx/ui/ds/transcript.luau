@@ -93,6 +93,10 @@ export type Message = {
 	-- reply's place.
 	waiting: ("sending" | "working" | "failed")?,
 	since: number?,
+	-- Failed: why, as its chat's host said (a worktree it couldn't make),
+	-- and whether it can go again without the worktree it asked for.
+	failure: string?,
+	worktree: boolean?,
 	-- Its blocks laid out compact (Settings' compact transcript): its work
 	-- folded into one group, the reply it ends on shown.
 	compact: { Block }?,
@@ -122,8 +126,9 @@ export type Props = {
 	-- selection offers nothing.
 	on_mention: ((q: Quote.Quote) -> ())?,
 	on_attach: ((q: Quote.Quote) -> ())?,
-	-- A prompt that wasn't delivered, sent again (by its id).
-	on_retry: ((id: string) -> ())?,
+	-- A prompt that wasn't delivered, sent again (by its id); `without_worktree`:
+	-- in its chat's folder, the worktree it asked for dropped.
+	on_retry: ((id: string, without_worktree: boolean?) -> ())?,
 	-- What an unfinished turn's foot says in its working word's place, when
 	-- there's no turn to speak of (its host gone, its machine asleep): the
 	-- caller's, for a message (nil: the working word). `sending`: a prompt
@@ -476,15 +481,17 @@ end
 -- word and clock, as Zeron's working trailer (transcript.rs); not
 -- delivered, a line to send it again. The reply's own row takes over once
 -- it comes.
-local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, turn_state: ((m: Message, sending: boolean) -> TurnLine?)?): Node
+local function waiting_line(row: State<Message>, on_retry: ((id: string, without_worktree: boolean?) -> ())?, turn_state: ((m: Message, sending: boolean) -> TurnLine?)?): Node
 	local function said(): TurnLine?
 		local m = row:get()
 		return if turn_state and m.waiting and m.waiting ~= "failed" then turn_state(m, m.waiting == "sending") else nil
 	end
 	return ui.presence(function(): string?
-		local w = row:get().waiting
+		local m = row:get()
+		local w = m.waiting
 		if w == "failed" then
-			return "failed"
+			-- (Refused by its host: why, and what sends it again, apart.)
+			return if m.worktree then "refused-worktree" elseif m.failure then "refused" else "failed"
 		end
 		local s = if w then said() else nil
 		return if s and s.step then "step" elseif s then "said" elseif w then "waiting" else nil
@@ -522,27 +529,58 @@ local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?
 				},
 			}
 		end
-		if kind == "failed" then
-			return ui.button {
-				label = locale.t("ds.transcript.not_delivered"),
-				self = "start",
+		if kind == "failed" or kind == "refused" or kind == "refused-worktree" then
+			local function link(label: string, without_worktree: boolean?): Node
+				return ui.button {
+					label = label,
+					self = "start",
+					p = 0,
+					bg = "#00000000",
+					active = { bg = "#00000000" },
+					hover = { bg = "#00000000", underline = true },
+					cursor = "pointer",
+					selectable = false,
+					text_size = "$font.size.sm",
+					color = "$danger",
+					on_click = function()
+						if on_retry then
+							on_retry(row:peek().id, without_worktree)
+						end
+					end,
+					on_press = function() end,
+					on_release = function() end,
+					label,
+				}
+			end
+			-- No word of why (lost on its way, or its time ran out): the
+			-- line itself sends it again.
+			if kind == "failed" then
+				return ui.row { mt = "$space.4", link(locale.t("ds.transcript.not_delivered")) }
+			end
+			-- Its host refused it: why, in its words, then what sends it again.
+			return ui.column {
+				w_full = true,
 				mt = "$space.4",
-				p = 0,
-				bg = "#00000000",
-				active = { bg = "#00000000" },
-				hover = { bg = "#00000000", underline = true },
-				cursor = "pointer",
-				selectable = false,
-				text_size = "$font.size.sm",
-				color = "$danger",
-				on_click = function()
-					if on_retry then
-						on_retry(row:peek().id)
-					end
-				end,
-				on_press = function() end,
-				on_release = function() end,
-				locale.t("ds.transcript.not_delivered"),
+				gap = "$space.2",
+				ui.text {
+					function(): string
+						local failure = row:get().failure
+						return if failure
+							then locale.s("ds.transcript.refused", { reason = failure })
+							else locale.s("ds.transcript.refused_no_reason")
+					end,
+					literal = true,
+					wrap = true,
+					text_size = "$font.size.sm",
+					color = "$danger",
+				},
+				ui.row {
+					gap = "$space.4",
+					link(locale.t("ds.transcript.retry")),
+					if kind == "refused-worktree"
+						then link(locale.t("ds.transcript.retry_without_worktree"), true)
+						else nil,
+				},
 			}
 		end
 		return ui.row {

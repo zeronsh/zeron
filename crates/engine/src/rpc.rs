@@ -3485,10 +3485,22 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::RETRY_DELIVERY => {
-                let p: ChatParams = parse_params(params)?;
-                self.doc_host
-                    .retry_delivery(&p.chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct RetryParams {
+                    chat_id: String,
+                    /// A refused run sent again in the chat's folder, its
+                    /// worktree request dropped (one that couldn't be made).
+                    #[serde(default)]
+                    without_worktree: bool,
+                }
+                let p: RetryParams = parse_params(params)?;
+                let retried = if p.without_worktree {
+                    self.doc_host.retry_delivery_without_worktree(&p.chat_id)
+                } else {
+                    self.doc_host.retry_delivery(&p.chat_id)
+                };
+                retried.map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::RELAY_COMMAND => {
