@@ -36,6 +36,23 @@
 
 local flow = require("@self/orch_flow")
 local locale = require("@self/locale")
+
+-- Each block kind's name, written out so the locale check sees every key.
+local KIND_KEYS = {
+	auditor = "orch.flow.kind.auditor",
+	chief = "orch.flow.kind.chief",
+	finish = "orch.flow.kind.finish",
+	gate = "orch.flow.kind.gate",
+	planner = "orch.flow.kind.planner",
+	qa = "orch.flow.kind.qa",
+	researcher = "orch.flow.kind.researcher",
+	validator = "orch.flow.kind.validator",
+	worker = "orch.flow.kind.worker",
+}
+local function kind_name(kind: string): string
+	local key = KIND_KEYS[kind]
+	return if key then locale.s(key) else kind
+end
 local hue = require("@self/orch_hue")
 local Icon = require("@self/icon")
 local IconButton = require("@self/icon_button").IconButton
@@ -700,7 +717,7 @@ M.Editor = ui.component(function(props: Props): Node
 				gap = "$space.2",
 				items = "center",
 				Icon { name = (flow.KINDS[n.kind] and flow.KINDS[n.kind].icon or "widget") :: any, size = 16, color = "$text.secondary" },
-				Text { locale.s("orch.flow.kind." .. n.kind), style = "label", tone = "secondary" },
+				Text { kind_name(n.kind), style = "label", tone = "secondary" },
 			},
 		}
 		for _, r in rows do
@@ -944,7 +961,7 @@ M.Editor = ui.component(function(props: Props): Node
 
 	local add_options: { any } = { { value = "", label = locale.s("orch.flow.add_block") } }
 	for _, kind in flow.ROLES do
-		table.insert(add_options, { value = kind, label = locale.s("orch.flow.kind." .. kind) })
+		table.insert(add_options, { value = kind, label = kind_name(kind) })
 	end
 
 	-- Run…, while it can run; under way, where the run is and Stop.
