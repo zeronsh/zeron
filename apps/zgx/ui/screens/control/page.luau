@@ -55,6 +55,7 @@ local LaneTab = require("@app/screens/chat/lane_tab")
 local lanes = require("@app/screens/chat/lanes")
 local KeptScroll = require("@ds/kept_scroll")
 local hold = require("@ds/hold")
+local prefs = require("@app/screens/settings/prefs")
 local Scratch = require("@ds/orch_scratchpad")
 local scratchpad = require("@account/scratchpad")
 local Shared = require("@app/screens/chat/shared")
@@ -191,9 +192,14 @@ local function background(tab: string): boolean
 	return M.tab:peek() ~= tab
 end
 local live_overview, live_board = M.live("overview"), M.live("board")
+-- (Needs you floating on Board and Chat: live on either.)
+local function live_float(): boolean
+	local t = M.awake:get()
+	return t == "board" or t == "chat"
+end
 -- What Overview and the Board read (`readers`, below): live while their tab
 -- shows, held at their last value while it's kept hidden.
-local OV: any, BD: any
+local OV: any, BD: any, NF: any
 
 -- The chats by id, and the Q&A's entries: computeds the page makes again
 -- each time it is built (`fresh`, from M.Page). The shell requires this
@@ -1103,6 +1109,7 @@ local function fresh()
 	qa_entries = qa_computed()
 	OV = readers(live_overview, "overview")
 	BD = readers(live_board, "board")
+	NF = readers(live_float, "needs_float")
 end
 
 local function qa(): Node
@@ -1587,6 +1594,10 @@ end
 local FLOAT_W, FLOAT_OPEN_W = 520, 680
 -- Clear of the page's sides, and of its foot.
 local FLOAT_SIDE, FLOAT_FOOT = 24, 20
+-- Needs you floating (on Board and Chat): its width, and its list's
+-- room before it scrolls.
+local NEEDS_W = 380
+local NEEDS_MAX_H = 460
 -- Clear of a toast stack beside it.
 local FLOAT_TOAST_GAP = 12
 -- The companion's size: the pill's own one line (ds.Composer's ONE_LINE
@@ -1970,9 +1981,11 @@ local BoardTab = ui.component(function(): Node
 	return scrolled {
 		id = "control-board-scroll",
 		place = M.board_place,
-		-- (Its last cards scroll clear of the floating composer.)
+		-- (Its last cards scroll clear of the floating composer, and of
+		-- Needs you floating over its right-hand columns.)
 		pb = function(): any
-			return ui.raw(math.max(32, M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR), "the floating composer's height, measured")
+			local room = math.max(M.float_h:get() + FLOAT_FOOT, M.needs_room:get())
+			return ui.raw(math.max(32, room + FLOAT_CLEAR), "what floats at its foot, measured")
 		end,
 		ui.column {
 			id = "control-board-tab",
@@ -2015,8 +2028,17 @@ local ChatTab = ui.component(function(): Node
 						chat = id,
 						title = locale.s("control.tabs.chat"),
 						data = {
+							-- (Clear of the floating composer, and of Needs you
+							-- where the page is narrow enough for it to reach
+							-- the transcript.)
 							foot = function(): number
-								return M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR
+								local room = M.float_h:get() + FLOAT_FOOT
+								local w = M.page_w:get()
+								local half = prefs.conversation_width:get() / 2 + 24
+								if w > 0 and w / 2 + half > w - NEEDS_W - FLOAT_SIDE then
+									room = math.max(room, M.needs_room:get())
+								end
+								return room + FLOAT_CLEAR
 							end,
 							live = M.live("chat"),
 						},
@@ -2029,6 +2051,154 @@ local ChatTab = ui.component(function(): Node
 			end
 			return stage.Later(1, build)
 		end, { w_full = true, grow = 1, min_h = 0 }),
+	}
+end)
+
+-- Needs you, floating on Board and Chat (Overview has its widget): what
+-- waits on the person, answerable where they are. Compact: its count and
+-- the top ask (its chips answer it, as the widget's), the rest a click
+-- away ("n more", the widget's own). At the page's foot on the right, clear
+-- of the floating composer (lifted over it where the page is too narrow
+-- for both). Built only while it shows; nothing waiting, nothing at all.
+-- Minimised to its count (a pill): kept on this device, and opened again by
+-- an ask it hasn't seen.
+M.page_w = ui.state("control_page_w", 0)
+M.needs_min = ui.persist("control_needs_min", false)
+-- The room it takes at the page's foot (its height and its offset from the
+-- foot), while it shows: what Board and Chat keep clear at their ends.
+M.needs_room = ui.state("control_needs_room", 0)
+local NeedsFloat = ui.component(function(props: { bottom: () -> number }): Node
+	-- (Its list's own height, to the room it has: a scroll doesn't take its
+	-- content's.)
+	local content_h = ui.use_state(0)
+	-- An ask it hasn't seen opens it again (one seen, answered, gone: no).
+	local seen: { [string]: boolean }? = nil
+	ui.effect(function()
+		local now: { [string]: boolean } = {}
+		local fresh = false
+		for _, n in data.needs(NF.now(), NF.sessions()) do
+			local key = tostring(n.id or n.chat_id or "")
+			now[key] = true
+			if seen and not seen[key] then
+				fresh = true
+			end
+		end
+		seen = now
+		if fresh and M.needs_min:peek() then
+			M.needs_min:set(false)
+		end
+	end)
+	ui.on_cleanup(function()
+		M.needs_room:set(0)
+	end)
+	local function opened(): Node
+	return ui.column(glass.style({
+		id = "control-needs-float",
+		class = "control-needs-float",
+		w = NEEDS_W,
+		rounded = "$radius.xl",
+		p = "$space.3",
+		gap = "$space.2",
+		pointer_events = "auto",
+		ui.row {
+			w_full = true,
+			gap = "$space.2",
+			items = "center",
+			ui.text { locale.t("control.widget.needs"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary" },
+			Counter { value = function(): number
+				return tally.needs(false)
+			end, text_size = "$font.size.xs", color = "$text.secondary" },
+			ui.div { grow = 1 },
+			-- Minimised to its count: out of the way, a click from back.
+			IconButton {
+				id = "control-needs-min",
+				icon = "minus",
+				label = locale.t("control.needs.minimise"),
+				size = "sm",
+				tone = "quiet",
+				on_click = function()
+					M.needs_min:set(true)
+				end,
+			},
+		},
+		ui.scroll {
+			w_full = true,
+			h = function(): any
+				return ui.raw(math.min(content_h:get(), NEEDS_MAX_H), "its list's height, to its room")
+			end,
+			ui.column {
+				w_full = true,
+				on_resize = function(size: { w: number, h: number })
+					if math.abs(size.h - content_h:peek()) >= 1 then
+						content_h:set(size.h)
+					end
+				end,
+			Asks {
+				needs = function(): { any }
+					return data.needs(NF.now(), NF.sessions())
+				end,
+				recent = function(): { any }
+					return {}
+				end,
+				name_of = NF.name_of,
+				on_answer = answer,
+				on_dismiss = function(ask: any)
+					orchestration.dismiss(ask.id):after(function() end, said("control.needs.failed"))
+				end,
+				on_open = M.open_chat,
+				on_expand = function(ask: any)
+					decide.show(ask.id)
+				end,
+				limit = 1,
+			},
+			},
+		},
+	}, "menu") :: any)
+	end
+	-- Minimised: its count on a pill; a click opens it.
+	local function pill(): Node
+		return ui.button(glass.style({
+			id = "control-needs-pill",
+			class = "control-needs-pill",
+			label = function(): string
+				return locale.s("control.head.needs", { n = tally.needs(false) })
+			end,
+			h = ui.raw(36, "a pill, one line"),
+			px = "$space.3",
+			gap = "$space.2",
+			items = "center",
+			rounded = "$radius.full",
+			pointer_events = "auto",
+			on_click = function()
+				M.needs_min:set(false)
+			end,
+			status.StatusIcon { kind = "input", size = 14 },
+			ui.text {
+				function(): string
+					return locale.s("control.head.needs", { n = tally.needs(false) })
+				end,
+				tabular = true,
+				text_size = "$font.size.sm",
+				weight = "$font.weight.medium",
+				color = "$text.primary",
+			},
+		}, "menu") :: any)
+	end
+	return ui.column {
+		on_resize = function(size: { w: number, h: number })
+			local room = size.h + props.bottom()
+			if math.abs(room - M.needs_room:peek()) >= 1 then
+				M.needs_room:set(room)
+			end
+		end,
+		items = "end",
+		ui.presence(function(): string
+			return if M.needs_min:get() then "pill" else "open"
+		end, function(k: string): Node
+			return if k == "pill" then pill() else opened()
+		end, {
+			enter = motion.transition({ opacity = { 0, 1 }, scale = { 0.96, 1 }, duration = 160, ease = "out(3)" }),
+		}),
 	}
 end)
 
@@ -2127,6 +2297,20 @@ M.Page = ui.component(function(): Node
 			M.float_open:set(false)
 		end
 	end)
+	-- Needs you floating: off the page's foot, and over the floating
+	-- composer where the page has no room for both side by side.
+	local function needs_bottom(): number
+		local both = FLOAT_W + 2 * (NEEDS_W + FLOAT_SIDE)
+		if width:get() < both then
+			return M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR
+		end
+		return FLOAT_FOOT
+	end
+	-- (The page's width, for Chat to tell whether Needs you reaches its
+	-- transcript.)
+	ui.effect(function()
+		M.page_w:set(width:get())
+	end)
 	-- The floating composer: on Board and Chat, and on Overview with
 	-- Capture scrolled away.
 	local float_shown = ui.computed(function(): boolean
@@ -2196,6 +2380,22 @@ M.Page = ui.component(function(): Node
 				end,
 			},
 		},
+		-- Needs you, floating, on Board and Chat while something waits.
+		ui.presence(function(): string?
+			if M.tab:get() == "overview" or tally.needs(false) == 0 then
+				return nil
+			end
+			return "needs"
+		end, function(): Node
+			return NeedsFloat { bottom = needs_bottom }
+		end, {
+			absolute = true,
+			right = FLOAT_SIDE,
+			bottom = needs_bottom,
+			pointer_events = "none",
+			enter = motion.transition({ opacity = { 0, 1 }, y = { 8, 0 }, duration = 180, ease = "out(3)" }),
+			exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
+		}),
 		decision(),
 	}
 end)

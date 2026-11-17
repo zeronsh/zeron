@@ -4330,7 +4330,8 @@
       "collapse": "Collapse"
     },
     "needs": {
-      "failed": "Couldn't send that"
+      "failed": "Couldn't send that",
+      "minimise": "Minimise"
     },
     "board": {
       "failed": "Couldn't move it"

@@ -4330,7 +4330,8 @@
       "collapse": "收起"
     },
     "needs": {
-      "failed": "Couldn't send that"
+      "failed": "Couldn't send that",
+      "minimise": "最小化"
     },
     "board": {
       "failed": "Couldn't move it"
