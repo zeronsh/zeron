@@ -356,32 +356,44 @@ impl Repos {
         )
     }
 
-    /// Is `path` inside a git work tree? (Also the SpacesSync git-presence probe.)
-    /// The GitHub repository (`owner/name`) of `path`'s `origin` remote.
+    /// The GitHub repository (`owner/name`) of `path`'s remotes: `origin`
+    /// first, else the first other remote on GitHub.
     pub async fn github_repo(&self, path: &Path) -> Option<String> {
-        let remote = self
-            .git(&["remote", "get-url", "origin"], Some(path))
-            .await
-            .ok()?;
-        let (owner, name) = parse_github_remote(&remote)?;
-        Some(format!("{owner}/{name}"))
+        self.github_repo_checked(path).await.ok().flatten()
     }
 
-    /// [`Self::github_repo`], telling "no GitHub origin" (`Ok(None)`) from
+    /// [`Self::github_repo`], telling "no GitHub remote" (`Ok(None)`) from
     /// a git call that failed (`Err`).
+    ///
+    /// Reads each remote's URL as configured: `git remote get-url` applies
+    /// `url.<base>.insteadOf`, so a machine that routes GitHub through a
+    /// local mirror or proxy would read as having no GitHub remote. The
+    /// rewritten URL is still tried when the configured one isn't GitHub
+    /// (a `pushInsteadOf`/`insteadOf` that maps *to* GitHub).
     pub async fn github_repo_checked(&self, path: &Path) -> Result<Option<String>, EngineError> {
-        // Exit 1 with nothing said: no `origin` configured.
-        if self
-            .git_probe(&["config", "--get", "remote.origin.url"], Some(path))
+        // Exit 1 with nothing said: no remote has a URL.
+        let Some(listing) = self
+            .git_probe(
+                &["config", "--get-regexp", r"^remote\..*\.url$"],
+                Some(path),
+            )
             .await?
-            .is_none()
-        {
+        else {
             return Ok(None);
+        };
+        for (name, url) in remote_urls_origin_first(&listing) {
+            if let Some((owner, repo)) = parse_github_remote(&url) {
+                return Ok(Some(format!("{owner}/{repo}")));
+            }
+            let effective = self.git(&["remote", "get-url", &name], Some(path)).await?;
+            if let Some((owner, repo)) = parse_github_remote(&effective) {
+                return Ok(Some(format!("{owner}/{repo}")));
+            }
         }
-        let remote = self.git(&["remote", "get-url", "origin"], Some(path)).await?;
-        Ok(parse_github_remote(&remote).map(|(owner, name)| format!("{owner}/{name}")))
+        Ok(None)
     }
 
+    /// Is `path` inside a git work tree? (Also the SpacesSync git-presence probe.)
     pub async fn is_repo(&self, path: &Path) -> bool {
         matches!(
             self.git(&["rev-parse", "--is-inside-work-tree"], Some(path)).await,
@@ -1159,16 +1171,13 @@ impl Repos {
         cursor: usize,
         limit: usize,
     ) -> HashMap<String, String> {
-        let Ok(remote) = self
-            .git(&["remote", "get-url", "origin"], Some(repo_path))
-            .await
-        else {
+        let Some(full_name) = self.github_repo(repo_path).await else {
             return HashMap::new();
         };
-        let Some((owner, repo)) = parse_github_remote(&remote) else {
+        let Some((owner, repo)) = full_name.split_once('/') else {
             return HashMap::new();
         };
-        let repo_key = format!("{owner}/{repo}").to_ascii_lowercase();
+        let repo_key = full_name.to_ascii_lowercase();
         let per_page = limit.clamp(1, 100);
         let page = cursor / per_page + 1;
         let page_key = format!("{repo_key}|{page}|{per_page}");
@@ -2498,13 +2507,58 @@ struct GitHubCommitAuthor {
     email: String,
 }
 
+/// `(name, url)` of each remote in `git config --get-regexp` output,
+/// `origin` first, then `upstream`, then the rest as configured.
+fn remote_urls_origin_first(listing: &str) -> Vec<(String, String)> {
+    let mut remotes: Vec<(String, String)> = listing
+        .lines()
+        .filter_map(|line| {
+            let (key, url) = line.split_once(char::is_whitespace)?;
+            let name = key.strip_prefix("remote.")?.strip_suffix(".url")?;
+            Some((name.to_owned(), url.trim().to_owned()))
+        })
+        .filter(|(name, url)| !name.is_empty() && !url.is_empty())
+        .collect();
+    let rank = |name: &str| match name {
+        "origin" => 0,
+        "upstream" => 1,
+        _ => 2,
+    };
+    remotes.sort_by_key(|(name, _)| rank(name));
+    remotes
+}
+
+/// `(owner, repo)` of a github.com remote: `https://` / `http://` (with or
+/// without credentials), `git@github.com:`, `ssh://git@github.com[:22]/`,
+/// `git://`, and a mirror or proxy URL whose path carries
+/// `/github.com/<owner>/<repo>` (`http://127.0.0.1:7457/github.com/o/r.git`).
 fn parse_github_remote(remote: &str) -> Option<(String, String)> {
     let remote = remote.trim();
-    let path = remote
-        .strip_prefix("https://github.com/")
-        .or_else(|| remote.strip_prefix("http://github.com/"))
-        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
-        .or_else(|| remote.strip_prefix("git@github.com:"))?;
+    let path = if let Some((_, rest)) = remote.split_once("://") {
+        let (authority, path) = rest.split_once('/')?;
+        let host = authority.rsplit('@').next()?;
+        let host = host.split(':').next()?;
+        if host.eq_ignore_ascii_case("github.com") || host.eq_ignore_ascii_case("www.github.com") {
+            path
+        } else {
+            // A mirror/proxy: `…/github.com/<owner>/<repo>` in the path.
+            let lower = path.to_ascii_lowercase();
+            let at = if lower.starts_with("github.com/") {
+                0
+            } else {
+                lower.find("/github.com/")? + 1
+            };
+            &path[at + "github.com/".len()..]
+        }
+    } else {
+        // scp-like `user@host:owner/repo`.
+        let (authority, path) = remote.split_once(':')?;
+        let host = authority.rsplit('@').next()?;
+        if !host.eq_ignore_ascii_case("github.com") {
+            return None;
+        }
+        path
+    };
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     let mut parts = path.split('/');
@@ -2941,6 +2995,161 @@ mod tests {
             "https://gitlab.com/acme/app.git",
         ]);
         assert_eq!(repos.github_repo(root.path()).await, None, "not GitHub");
+    }
+
+    #[tokio::test]
+    async fn github_repo_reads_the_configured_url_under_instead_of() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        let repos = Repos::new(&root.path().join("data"), "device-1");
+        git(&["init", "-q"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/zeronsh/zeron.git",
+        ]);
+        // Every GitHub URL routed through a local proxy, as some machines do.
+        for base in [
+            "https://github.com/",
+            "git@github.com:",
+            "ssh://git@github.com/",
+        ] {
+            git(&[
+                "config",
+                "--add",
+                "url.http://127.0.0.1:7457/github.com/.insteadOf",
+                base,
+            ]);
+        }
+        let out = std::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "http://127.0.0.1:7457/github.com/zeronsh/zeron.git",
+            "the rewrite is in effect"
+        );
+        assert_eq!(
+            repos
+                .github_repo_checked(root.path())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("zeronsh/zeron")
+        );
+        git(&["remote", "set-url", "origin", "git@github.com:Acme/app.git"]);
+        assert_eq!(
+            repos.github_repo(root.path()).await.as_deref(),
+            Some("Acme/app")
+        );
+    }
+
+    #[tokio::test]
+    async fn github_repo_falls_back_to_another_github_remote() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        let repos = Repos::new(&root.path().join("data"), "device-1");
+        git(&["init", "-q"]);
+        assert_eq!(repos.github_repo_checked(root.path()).await.unwrap(), None);
+        git(&["remote", "add", "mirror", "git@github.com:acme/mirror.git"]);
+        git(&["remote", "add", "origin", "https://gitlab.com/acme/app.git"]);
+        git(&[
+            "remote",
+            "add",
+            "upstream",
+            "https://github.com/acme/app.git",
+        ]);
+        assert_eq!(
+            repos
+                .github_repo_checked(root.path())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("acme/app"),
+            "upstream before other remotes when origin isn't GitHub"
+        );
+        git(&["remote", "remove", "upstream"]);
+        assert_eq!(
+            repos.github_repo(root.path()).await.as_deref(),
+            Some("acme/mirror")
+        );
+        git(&[
+            "remote",
+            "set-url",
+            "origin",
+            "ssh://git@github.com/acme/app",
+        ]);
+        assert_eq!(
+            repos.github_repo(root.path()).await.as_deref(),
+            Some("acme/app"),
+            "origin wins once it is GitHub"
+        );
+    }
+
+    #[test]
+    fn github_remote_parsing_covers_forms_and_rewrites() {
+        let want = Some(("zeronsh".to_string(), "zeron".to_string()));
+        for url in [
+            "https://github.com/zeronsh/zeron",
+            "https://github.com/zeronsh/zeron.git",
+            "https://github.com/zeronsh/zeron/",
+            "http://GitHub.com/zeronsh/zeron.git",
+            "https://x-access-token:ghu_secret@github.com/zeronsh/zeron.git",
+            "https://www.github.com/zeronsh/zeron",
+            "git@github.com:zeronsh/zeron.git",
+            "git@github.com:zeronsh/zeron",
+            "ssh://git@github.com/zeronsh/zeron.git",
+            "ssh://git@github.com:22/zeronsh/zeron.git",
+            "git://github.com/zeronsh/zeron.git",
+            "http://127.0.0.1:7457/github.com/zeronsh/zeron.git",
+            "https://proxy.example/mirror/github.com/zeronsh/zeron",
+            "  https://github.com/zeronsh/zeron.git\n",
+        ] {
+            assert_eq!(parse_github_remote(url), want, "{url}");
+        }
+        for url in [
+            "https://gitlab.com/zeronsh/zeron.git",
+            "git@gitlab.com:zeronsh/zeron.git",
+            "https://github.com/zeronsh",
+            "https://github.com/zeronsh/zeron/tree/main",
+            "https://notgithub.com/zeronsh/zeron",
+            "http://127.0.0.1:7457/gitlab.com/zeronsh/zeron.git",
+            "/srv/git/zeron.git",
+            "",
+        ] {
+            assert_eq!(parse_github_remote(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn remotes_list_origin_then_upstream_then_the_rest() {
+        let listing = "remote.fork.url git@github.com:me/app.git\n\
+                       remote.upstream.url https://github.com/acme/app.git\n\
+                       remote.origin.url https://gitlab.com/acme/app.git\n";
+        let names: Vec<String> = remote_urls_origin_first(listing)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, ["origin", "upstream", "fork"]);
     }
 
     #[tokio::test]
