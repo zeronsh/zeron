@@ -58,13 +58,11 @@ M.ONE_W = 190
 M.TWO_W = 120
 -- How far a thread's name sits off its mark, close in then stepped out.
 M.GAP = 4
-M.STEPS = { 0, 8, 18, 30, 44, 60 }
+M.STEPS = { 0, 10, 24, 44 }
 -- Whether a name keeps off the lines.
 M.LINES = true
 -- The grid the marks, names and lines are looked up in.
 local CELL = 48
--- Lines are sampled this often.
-local SAMPLE = 6
 
 -- Words into lines no wider than `most`; the last line cut with an
 -- ellipsis where `max_lines` lines don't hold it all.
@@ -126,8 +124,9 @@ local function shortened(text: string, chars: number): string?
 	return cut .. "…"
 end
 
--- The grid: boxes (marks, names) and points (lines), by cell.
-type Grid = { boxes: { [number]: { { any } } }, pts: { [number]: { { any } } } }
+-- The grid: boxes (marks, names) and lines, by cell (a line in every cell
+-- it passes through).
+type Grid = { boxes: { [number]: { { any } } }, segs: { [number]: { { any } } } }
 local function key(cx: number, cy: number): number
 	return (cx + 32768) * 65536 + (cy + 32768)
 end
@@ -144,18 +143,63 @@ local function add_box(g: Grid, b: { any })
 		end
 	end
 end
-local function add_pt(g: Grid, x: number, y: number, a: number, b: number)
-	local k = key(math.floor(x / CELL), math.floor(y / CELL))
-	local list = g.pts[k]
-	if not list then
-		list = {}
-		g.pts[k] = list
+local function add_seg(g: Grid, sg: { any })
+	local ax, ay, bx, by = sg[1], sg[2], sg[3], sg[4]
+	local len = math.sqrt((bx - ax) ^ 2 + (by - ay) ^ 2)
+	local steps = math.max(1, math.ceil(len / (CELL / 3)))
+	local seen: { [number]: boolean } = {}
+	for k = 0, steps do
+		local t = k / steps
+		local cx, cy = math.floor((ax + (bx - ax) * t) / CELL), math.floor((ay + (by - ay) * t) / CELL)
+		-- (Its cell and the neighbours a corner-cut could touch.)
+		for ddx = -1, 1 do
+			for ddy = -1, 1 do
+				local kk = key(cx + ddx, cy + ddy)
+				if not seen[kk] then
+					seen[kk] = true
+					local list = g.segs[kk]
+					if not list then
+						list = {}
+						g.segs[kk] = list
+					end
+					table.insert(list, sg)
+				end
+			end
+		end
 	end
-	table.insert(list, { x, y, a, b })
 end
+-- Where a segment crosses a box: its entry and exit along it (0–1), or nil.
+local function clip(ax: number, ay: number, bx: number, by: number, x0: number, y0: number, x1: number, y1: number): (number?, number?)
+	local t0, t1 = 0, 1
+	local dx, dy = bx - ax, by - ay
+	local ps = { -dx, dx, -dy, dy }
+	local qs = { ax - x0, x1 - ax, ay - y0, y1 - ay }
+	for k = 1, 4 do
+		local p, q = ps[k], qs[k]
+		if p == 0 then
+			if q < 0 then
+				return nil, nil
+			end
+		else
+			local r = q / p
+			if p < 0 then
+				t0 = math.max(t0, r)
+			else
+				t1 = math.min(t1, r)
+			end
+			if t0 > t1 then
+				return nil, nil
+			end
+		end
+	end
+	return t0, t1
+end
+M.clip = clip
 -- Whether the box is free: of every box but its own node's (`own`), and of
--- every line's point but those of lines at its own node, near it.
+-- every line but its own node's where they leave its mark (within `oreach`).
+local stamp = 0
 local function free(g: Grid, x0: number, y0: number, x1: number, y1: number, own: number?, ox: number, oy: number, oreach: number): boolean
+	stamp += 1
 	for cx = math.floor(x0 / CELL), math.floor(x1 / CELL) do
 		for cy = math.floor(y0 / CELL), math.floor(y1 / CELL) do
 			local k = key(cx, cy)
@@ -164,12 +208,25 @@ local function free(g: Grid, x0: number, y0: number, x1: number, y1: number, own
 					return false
 				end
 			end
-			for _, p in (if M.LINES then g.pts[k] else nil) or {} do
-				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
-					-- (Its own lines, where they leave its mark: allowed.)
-					local mine = p[3] == own or p[4] == own
-					if not (mine and (p[1] - ox) ^ 2 + (p[2] - oy) ^ 2 <= oreach * oreach) then
-						return false
+			if M.LINES then
+				for _, sg in g.segs[k] or {} do
+					if sg[7] ~= stamp then
+						sg[7] = stamp
+						local t0, t1 = clip(sg[1], sg[2], sg[3], sg[4], x0, y0, x1, y1)
+						if t0 then
+							local mine = sg[5] == own or sg[6] == own
+							if not mine then
+								return false
+							end
+							-- (Its own line: only where it leaves its mark.)
+							local r2 = oreach * oreach
+							local ex, ey = sg[3] - sg[1], sg[4] - sg[2]
+							local px, py = sg[1] + ex * t0, sg[2] + ey * t0
+							local qx, qy = sg[1] + ex * (t1 :: number), sg[2] + ey * (t1 :: number)
+							if (px - ox) ^ 2 + (py - oy) ^ 2 > r2 or (qx - ox) ^ 2 + (qy - oy) ^ 2 > r2 then
+								return false
+							end
+						end
 					end
 				end
 			end
@@ -198,26 +255,23 @@ local function make(lines: { string }, x: number, y: number, align: "center" | "
 	}
 end
 
-function M.place(input: any): { [number]: Label }
+-- A placement begun (the marks, lines and fixed names laid down) and taken
+-- on a slice at a time: `M.run(job, seconds)` places threads' names till
+-- the time's up, true once all are.
+function M.start(input: any): any
 	local nodes = input.nodes
 	local measure = input.measure
 	local prev = input.prev or {}
 	local out: { [number]: Label } = {}
-	local g: Grid = { boxes = {}, pts = {} }
+	local g: Grid = { boxes = {}, segs = {} }
 	-- Marks: each node's box (a little past its ring).
 	for i, n in nodes do
 		local r = n.r + 2
 		add_box(g, { n.x - r, n.y - r, n.x + r, n.y + r, i })
 	end
-	-- Lines, sampled (each point knows its two ends).
+	-- Lines (each knows its two ends).
 	for _, l in input.links do
-		local dx, dy = l.bx - l.ax, l.by - l.ay
-		local len = math.sqrt(dx * dx + dy * dy)
-		local steps = math.max(1, math.floor(len / SAMPLE))
-		for k = 0, steps do
-			local t = k / steps
-			add_pt(g, l.ax + dx * t, l.ay + dy * t, l.a, l.b)
-		end
+		add_seg(g, { l.ax, l.ay, l.bx, l.by, l.a, l.b })
 	end
 	-- The fixed ones first: the Brain's and each orchestrator's, under them.
 	for i, n in nodes do
@@ -250,16 +304,33 @@ function M.place(input: any): { [number]: Label }
 		end
 		return a < b
 	end)
-	local widths: { [string]: number } = {}
-	local function w_of(t: string): number
+	local widths: { [string]: number } = input.widths or {}
+	local job: any = { nodes = nodes, order = order, at = 1, out = out, g = g, prev = prev, measure = measure }
+	-- (Measured with the measure given to the slice running: a canvas lives
+	-- for its own drawing only.)
+	job.w_of = function(t: string): number
 		local w = widths[t]
 		if not w then
-			w = measure(t, false)
+			w = job.measure(t, false)
 			widths[t] = w
 		end
 		return w
 	end
-	for _, i in order do
+	return job
+end
+
+function M.run(job: any, budget: number?, measure: any?): boolean
+	if measure then
+		job.measure = measure
+	end
+	local nodes, order, out, g, prev, w_of = job.nodes, job.order, job.out, job.g, job.prev, job.w_of
+	local t_end = if budget then os.clock() + budget else math.huge
+	while job.at <= #order do
+		if os.clock() >= t_end then
+			return false
+		end
+		local i = order[job.at]
+		job.at += 1
 		local n = nodes[i]
 		local x, y = n.x, n.y
 		local reach = n.r + 10
@@ -356,7 +427,14 @@ function M.place(input: any): { [number]: Label }
 			add_box(g, { placed.x0, placed.y0, placed.x1, placed.y1, -i })
 		end
 	end
-	return out
+	return true
+end
+
+-- All at once.
+function M.place(input: any): { [number]: Label }
+	local job = M.start(input)
+	M.run(job, nil)
+	return job.out
 end
 
 return M

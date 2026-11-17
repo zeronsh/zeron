@@ -126,6 +126,8 @@ local PLACES_MAX = 4000
 -- How long the web keeps its shape on data loaded whole before what's gone
 -- from it is swept from the places and pins (ms).
 local PRUNE_MS = 3000
+-- A frame's share of placing the threads' names (seconds).
+local NAME_SLICE = 0.003
 -- What a secondary click on the space (no node) is, for its menu.
 local BACKGROUND = "force:background"
 local TILE_H = kit.TILE_H
@@ -189,7 +191,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -611,6 +613,48 @@ M.View = ui.component(function(props: {
 	-- orchestrators' fixed under their marks, the threads' round theirs, the
 	-- ones whose node didn't move where they were while still free.
 	local NAME_RANK: { [string]: number } = { input = 0, approval = 0, failed = 1, working = 2, waiting = 2, done = 3 }
+	local names_job: any = nil
+	local names_ms = 0
+	-- (Each text's width, kept: measured once.)
+	local name_widths: { [string]: number } = {}
+	-- A slice of the threads' names (NAME_SLICE seconds); another frame for
+	-- the rest, till all are placed.
+	local names_tick = -1
+	local function names_ran_this_tick(): boolean
+		return names_tick == tick:peek()
+	end
+	local function run_names(c: any)
+		local job = names_job
+		if not job then
+			return
+		end
+		names_tick = tick:peek()
+		local t0 = os.clock()
+		local done = labels.run(job, NAME_SLICE, function(t: string, hub: boolean): number
+			return (c:measure_text(t, if hub then M_HUB else M_NAME))
+		end)
+		names_ms += (os.clock() - t0) * 1000
+		if not done then
+			ui.after(0, function()
+				if names_job == job then
+					tick:set(tick:peek() + 1)
+				end
+			end)
+			return
+		end
+		names_job = nil
+		counts.names_ms = names_ms
+		count("names")
+		table.clear(labs_by_id)
+		local list = {}
+		for i, lab in job.out do
+			labs_by_id[fmodel.nodes[i].id] = lab
+			table.insert(list, { id = fmodel.nodes[i].id, kind = fmodel.nodes[i].kind, x0 = lab.x0, y0 = lab.y0, x1 = lab.x1, y1 = lab.y1, lines = lab.lines })
+		end
+		if M.current then
+			M.current.labels = list
+		end
+	end
 	local function place_names(c: any)
 		local nodes = {}
 		for i, n in fmodel.nodes do
@@ -631,26 +675,21 @@ M.View = ui.component(function(props: {
 		for _, l in fmodel.links do
 			table.insert(links, { a = l.a, b = l.b, ax = s.x[l.a], ay = s.y[l.a], bx = s.x[l.b], by = s.y[l.b] })
 		end
-		local t0 = os.clock()
-		local placed = labels.place({
+		local ts = os.clock()
+		names_job = labels.start({
 			nodes = nodes,
 			links = links,
 			prev = labs_by_id,
+			widths = name_widths,
 			measure = function(t: string, hub: boolean): number
 				return (c:measure_text(t, if hub then M_HUB else M_NAME))
 			end,
 		})
-		counts.names_ms = (os.clock() - t0) * 1000
-		labs = placed
-		table.clear(labs_by_id)
-		local list = {}
-		for i, lab in placed do
-			labs_by_id[fmodel.nodes[i].id] = lab
-			table.insert(list, { id = fmodel.nodes[i].id, kind = fmodel.nodes[i].kind, x0 = lab.x0, y0 = lab.y0, x1 = lab.x1, y1 = lab.y1, lines = lab.lines })
-		end
-		if M.current then
-			M.current.labels = list
-		end
+		names_ms = 0
+		counts.names_start_ms = (os.clock() - ts) * 1000
+		-- (The fixed ones at once; the threads' a slice a frame, from here.)
+		labs = names_job.out
+		run_names(c)
 	end
 	local function make(c: any)
 		local key = version:peek() * 100000 + geo:peek()
@@ -659,6 +698,7 @@ M.View = ui.component(function(props: {
 		end
 		made_for = key
 		made_version = version:peek()
+		local tm = os.clock()
 		table.clear(shapes)
 		table.clear(marks)
 		table.clear(hub_shape)
@@ -683,7 +723,10 @@ M.View = ui.component(function(props: {
 				rings[i] = ui.path():arc(x, y, R_RING, 0, 360)
 			end
 		end
+		counts.make_ms = (os.clock() - tm) * 1000
+		local tp = os.clock()
 		place_names(c)
+		counts.place_ms = (os.clock() - tp) * 1000
 	end
 	local names_shown = ui.computed(function(): boolean
 		return view:get().zoom >= NAMES_ZOOM
@@ -735,6 +778,9 @@ M.View = ui.component(function(props: {
 		local b = cull:get()
 		local still = settled:peek()
 		make(c)
+		if names_job and made_version == version:peek() and not names_ran_this_tick() then
+			run_names(c)
+		end
 		local full = made_version == version:peek()
 		-- (What's awake moves on the overlay: left out here.)
 		local moving = not still

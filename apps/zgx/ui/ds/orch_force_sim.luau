@@ -40,6 +40,9 @@ M.HUB_CLEAR = math.rad(22)
 -- Weak links: soft and long.
 M.WEAK_LEN, M.WEAK_K = 240, 0.004
 M.REPEL = 1500
+-- Two hubs keep at least this far apart one way or the other: their names
+-- (up to 170 across, two lines, hung under them) never meet.
+M.HUB_SEP_X, M.HUB_SEP_Y, M.HUB_SEP_K = 190, 90, 0.25
 M.REPEL_R = 70 -- past this, no push (the grid's cell)
 M.DAMP = 0.55
 M.MAX_V = 24
@@ -65,6 +68,8 @@ export type Link = { a: number, b: number, strong: boolean, hub: boolean?, len: 
 
 export type Sim = {
 	n: number,
+	-- The hubs (the middle and every parent), kept apart.
+	hubs: { number },
 	ids: { string },
 	index: { [string]: number },
 	parent: { number },
@@ -152,6 +157,7 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: 
 		ids = table.create(n) :: any,
 		index = {},
 		parent = table.create(n, 0),
+		hubs = {},
 		mass = table.create(n, 1),
 		x = table.create(n, 0),
 		y = table.create(n, 0),
@@ -193,6 +199,23 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: 
 	for _, l in links do
 		table.insert(s.nbrs[l.a], l.b)
 		table.insert(s.nbrs[l.b], l.a)
+	end
+	-- The hubs (the middle and every parent): kept apart enough that the
+	-- names hung under them never meet.
+	local is_hub: { [number]: boolean } = {}
+	for i = 1, n do
+		if s.parent[i] > 0 then
+			is_hub[s.parent[i]] = true
+		end
+		if s.fixed[i] then
+			is_hub[i] = true
+		end
+	end
+	s.hubs = {}
+	for i = 1, n do
+		if is_hub[i] then
+			table.insert(s.hubs, i)
+		end
 	end
 	-- Slots: each parent's children in their order; the middle's spread
 	-- all round it (hubs first, evenly), every other's on its fan.
@@ -512,6 +535,39 @@ function M.step(s: Sim): number
 		end
 		vx[i] = (vx[i] + fx / mass[i]) * M.DAMP
 		vy[i] = (vy[i] + fy / mass[i]) * M.DAMP
+	end
+	-- Hubs apart: two whose names (hung under them) would meet are pushed
+	-- apart, along whichever way is the shorter.
+	local hubs = s.hubs
+	for ai = 1, #hubs do
+		local a = hubs[ai]
+		for bi = ai + 1, #hubs do
+			local b = hubs[bi]
+			if not (awake[a] or awake[b]) then
+				continue
+			end
+			local dx, dy = x[b] - x[a], y[b] - y[a]
+			local ox, oy = M.HUB_SEP_X - math.abs(dx), M.HUB_SEP_Y - math.abs(dy)
+			if ox > 0 and oy > 0 then
+				local px, py = 0, 0
+				if ox < oy * (M.HUB_SEP_X / M.HUB_SEP_Y) then
+					px = (if dx >= 0 then 1 else -1) * ox * M.HUB_SEP_K
+				else
+					py = (if dy >= 0 then 1 else -1) * oy * M.HUB_SEP_K
+				end
+				local ma = awake[a] and not held[a]
+				local mb = awake[b] and not held[b]
+				local share = if ma and mb then 0.5 else 1
+				if ma then
+					vx[a] -= px * share
+					vy[a] -= py * share
+				end
+				if mb then
+					vx[b] += px * share
+					vy[b] += py * share
+				end
+			end
+		end
 	end
 	-- Move.
 	local e, awake_n = 0, 0
