@@ -1589,7 +1589,14 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 				color = function(): string
 					return `$zeron.tone.{worst()}.ink`
 				end,
-				Icon { name = "danger-triangle", size = size },
+				-- (Only progress and news, nothing wrong: the rows' own info
+				-- glyph, not a warning's.)
+				Icon {
+					name = function(): string
+						return if worst() == "info" then "info-circle" else "danger-triangle"
+					end :: any,
+					size = size,
+				},
 			}
 		end
 		local body = ui.column {

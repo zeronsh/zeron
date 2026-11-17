@@ -529,6 +529,7 @@ return {
 	["ds.composer.machine.column_rate"] = "Credits",
 	["ds.composer.machine.chosen"] = "{size} machine",
 	["ds.composer.machine.column_disk"] = "Disk",
+	["ds.composer.machine.change"] = "Change the machine size",
 	["ds.markdown.fit_content"] = "Fit content",
 	["ds.markdown.copy_code"] = "Copy code",
 	["ds.markdown.copied"] = "Copied",

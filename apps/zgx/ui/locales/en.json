@@ -670,7 +670,8 @@
         "column_memory": "Memory",
         "column_rate": "Credits",
         "chosen": "{size} machine",
-        "column_disk": "Disk"
+        "column_disk": "Disk",
+        "change": "Change the machine size"
       }
     },
     "markdown": {
@@ -3091,7 +3092,12 @@
       "outbox_failed": "Didn't send",
       "size_default": "Your default",
       "on_size": "{where} · {size}",
-      "size_gb": "{n} GB"
+      "size_gb": "{n} GB",
+      "restarting": "Restarting on {size}…",
+      "size_note_running": "Size can change once this turn ends.",
+      "size_note_awake": "Restarts the machine. Files stay; processes stop.",
+      "size_note_asleep": "Wakes the machine on it. Files stay.",
+      "on_size_restarting": "{where} · {size} · restarting"
     },
     "turn_state": {
       "interrupted": "Interrupted",

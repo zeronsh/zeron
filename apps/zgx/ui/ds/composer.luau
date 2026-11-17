@@ -98,9 +98,18 @@ export type Notice = {
 	quiet: boolean?,
 }
 export type Answer = { values: { string }, text: string }
+-- An existing Cloud chat's sizes (`fixed_machine`).
+export type FixedMachine = {
+	value: State<string?>,
+	items: () -> { Dropdown.Item },
+	on_choose: (size: string) -> (),
+	note: (() -> string?)?,
+}
 -- Where an existing chat works (`branch_fixed`).
--- (`cloud`: it runs on a Cloud machine, the chip's glyph Cloud's.)
-export type Fixed = { device: string?, name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string?, cloud: boolean? }
+-- (`cloud`: it runs on a Cloud machine, the chip's glyph Cloud's;
+-- `restarting`: that machine restarting on a size picked, the glyph a
+-- restart's.)
+export type Fixed = { device: string?, name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string?, cloud: boolean?, restarting: boolean? }
 export type Sizes = { rest: number, target: number, presented: number, active: boolean, ready: boolean, settling: boolean, context: number }
 export type Props = {
 	on_sizes: ((sizes: Sizes) -> ())?,
@@ -188,6 +197,11 @@ export type Props = {
 	-- chip says so and opens nothing, as a chat can't move. Nil (a new
 	-- chat): the picker.
 	branch_fixed: (() -> Fixed?)?,
+	-- An existing chat on Cloud: its chip opens the Machine menu (the new
+	-- chat's sizes, as its Work in lists them), the size it's on chosen,
+	-- `on_choose` told a pick, and `note` said under the sizes (what a pick
+	-- does to the machine). Only while `branch_fixed` says `cloud`.
+	fixed_machine: FixedMachine?,
 	on_send: ((text: string) -> ())?,
 	on_stop: (() -> ())?,
 	-- A bare Escape no one else took (no mention list, question or
@@ -2295,8 +2309,8 @@ return ui.component(function(props: Props): Node
 			}
 			-- An existing chat's: where it works, said, opening nothing.
 			local fixed = props.branch_fixed
-			local static: Node? = if fixed
-				then ui.row {
+			local function fixed_row(menu: Dropdown.Menu?): Node
+				local row = ui.row {
 					h = CHIP_H,
 					px = "$zeron.space.tight",
 					gap = "$zeron.space.tight",
@@ -2331,7 +2345,7 @@ return ui.component(function(props: Props): Node
 						glyph = function(): Icon.Name?
 							local f = fixed()
 							if f and f.cloud then
-								return "cloud"
+								return if f.restarting then "restart" else "cloud"
 							end
 							return if f and f.worktree then "worktree" else nil
 						end,
@@ -2339,7 +2353,73 @@ return ui.component(function(props: Props): Node
 						on_measures = place_measures,
 					}),
 				}
-				else nil
+				if not menu then
+					return row
+				end
+				-- On Cloud: a chip, washed under the pointer and while its
+				-- sizes are open, as the new chat's is.
+				return ui.button {
+					label = locale.t("ds.composer.machine.change"),
+					h = CHIP_H,
+					-- (The row inside keeps the chip's own inset.)
+					p = 0,
+					items = "center",
+					min_w = 0,
+					rounded = CHIP_RADIUS,
+					bg = function(): string
+						return if menu.open:get() then "$hover" else "#00000000"
+					end,
+					hover = { bg = "$hover" },
+					active = { bg = "$pressed" },
+					on_click = menu.toggle,
+					row,
+				}
+			end
+			local fm = props.fixed_machine
+			local static: Node? = nil
+			if fixed and fm then
+				local fixed_fn = fixed :: () -> Fixed?
+				local function on_cloud_fixed(): boolean
+					local f = fixed_fn()
+					return f ~= nil and f.cloud == true and #fm.items() > 0
+				end
+				local note = fm.note
+				static = ui.show(on_cloud_fixed, Dropdown {
+					value = fm.value,
+					items = fm.items :: any,
+					on_choose = fm.on_choose,
+					label = locale.t("ds.composer.machine.label") :: any,
+					search = false,
+					width = MACHINE_W,
+					head = machine_head(),
+					trailing_item = MACHINE_MORE.trailing,
+					extra = if note
+						then ui.row {
+							w_full = true,
+							px = "$space.2",
+							py = "$space.1",
+							ui.text {
+								function(): string
+									return note() or ""
+								end,
+								wrap = true,
+								text_size = "$font.size.xs",
+								color = "$text.tertiary",
+							},
+						}
+						else nil,
+					extra_when = if note
+						then function(): boolean
+							return note() ~= nil
+						end
+						else nil,
+					trigger = function(menu: Dropdown.Menu): Node
+						return fixed_row(menu)
+					end,
+				}, fixed_row(nil))
+			elseif fixed then
+				static = fixed_row(nil)
+			end
 			table.insert(
 				left,
 				ui.row {
