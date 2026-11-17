@@ -36,6 +36,7 @@ local Quote = require("@ds/quote")
 -- (The chat page's places in its chats, which a split's panes share.)
 local Shared = require("@app/screens/chat/shared")
 local Asks = require("@app/screens/chat/asks")
+local CardHold = require("@app/screens/chat/card_hold")
 local Carried = require("@app/screens/chat/carried")
 local Completions = require("@app/screens/chat/completions")
 local Find = require("@app/screens/chat/find")
@@ -318,6 +319,12 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end)
 	end
 	local notice = ui.use_state(nil :: any)
+	-- A paused card's thread (screens/chat/card_hold): its queue held.
+	local card_held, resume_card = CardHold.bind(function(): string?
+		return chat
+	end, function()
+		notice:set({ tone = "danger", text = locale.s("chat.composer.didnt_resume"), dismissable = true })
+	end)
 	-- What its chat asks, and its queue, todos and tasks, from its own
 	-- session, as the window's composer shows them.
 	local asks = Asks.bind {
@@ -1023,6 +1030,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_approve = asks.on_approve,
 		on_deny = asks.on_deny,
 		queue = asks.queue,
+		held = card_held,
+		on_held_action = resume_card,
 		can_steer = function(): boolean
 			return running:get()
 		end,

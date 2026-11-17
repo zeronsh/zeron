@@ -310,6 +310,12 @@ const PERSON_OPS: &[&str] = &[
     // told and the card back in Now.)
     "approveItem",
     "requestChanges",
+    // (A card paused by the person: its threads stopped, their messages
+    // held; or resumed, into a column, its held messages sent.)
+    "pauseItem",
+    "resumeItem",
+    // (The profile's orchestration settings: crew auto-archive, notes…)
+    "updateSettings",
     "upsertItem",
     "answerAsk",
     "dismissAsk",
@@ -1102,6 +1108,12 @@ mod tests {
         assert_eq!(person_op(&json!({ "text": "no op" })), Err("invalid".to_string()));
         // (The person starts an Inbox or Next card from the board.)
         assert!(person_op(&json!({ "op": "startItem", "id": "it-1" })).is_ok());
+        // (The person pauses a card and resumes it: the Board's drag into and
+        // out of Paused, Move to, its Resume button. Refused here, they never
+        // reached the engine.)
+        assert!(person_op(&json!({ "op": "pauseItem", "id": "it-1" })).is_ok());
+        assert!(person_op(&json!({ "op": "resumeItem", "id": "it-1", "state": "active" })).is_ok());
+        assert!(person_op(&json!({ "op": "updateSettings", "crewAutoArchive": true })).is_ok());
     }
 
     #[test]
@@ -1803,5 +1815,52 @@ mod tests {
         assert!(matches!((&first, &again), (Value::Map(a), Value::Map(b)) if Rc::ptr_eq(a, b)));
         o.heard_state(json!({ "orchestrators": "nope" }));
         assert_eq!(o.now_value(), first);
+    }
+
+    /// Every op the scripts send through `orchestration.op` (by the
+    /// literal `op = "…"` in each file that calls it) is one of the
+    /// person's: one left out is refused by the bridge ("not yours") before
+    /// it reaches the engine, which the scripts' tests, on fake handlers,
+    /// never see.
+    #[test]
+    fn every_op_the_scripts_send_is_the_persons() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+                if path.is_dir() {
+                    if name != "tests" && name != "demos" {
+                        walk(&path, out);
+                    }
+                } else if name.ends_with(".luau") && !name.ends_with("_fixture.luau") {
+                    out.push(path);
+                }
+            }
+        }
+        let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+        let mut files = Vec::new();
+        walk(&ui, &mut files);
+        let mut sent: Vec<(String, String)> = Vec::new();
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let rel = path.strip_prefix(&ui).unwrap().display().to_string();
+            let account = rel.replace('\\', "/") == "account/orchestration.luau";
+            if !(text.contains("orchestration.op(") || (account && text.contains("M.op("))) {
+                continue;
+            }
+            for (at, _) in text.match_indices("op = \"") {
+                let rest = &text[at + 6..];
+                let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                if rest[name.len()..].starts_with('"') && !name.is_empty() {
+                    sent.push((rel.clone(), name));
+                }
+            }
+        }
+        // (The ones the Board's Pause and Resume send among them.)
+        for op in ["pauseItem", "resumeItem", "upsertItem"] {
+            assert!(sent.iter().any(|(_, o)| o == op), "{op} is sent by no script: the scan missed it");
+        }
+        let refused: Vec<&(String, String)> = sent.iter().filter(|(_, op)| !PERSON_OPS.contains(&op.as_str())).collect();
+        assert!(refused.is_empty(), "sent by the scripts, refused by the bridge (add to PERSON_OPS): {refused:?}");
     }
 }

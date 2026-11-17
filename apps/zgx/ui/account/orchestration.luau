@@ -35,6 +35,7 @@
 --   orchestration.approve_item(id)              a card in Review approved
 --   orchestration.request_changes(id, text)     changes asked for on one
 --   orchestration.set_priority(id, priority)
+--   orchestration.paused_card(chat)  the paused card it's a thread of, if any
 --   orchestration.settings:get()  the profile's settings, synced and read by
 --                                every engine: { crew_auto_archive,
 --                                crew_idle_hours } (defaults until the
@@ -507,6 +508,34 @@ function M.on_board(chat_id: string): boolean
 		end
 	end
 	return false
+end
+
+-- Whether a card is paused by the person: Blocked, `paused_at` set (a
+-- number or a date; false or empty once resumed).
+function M.is_paused(it: any): boolean
+	if type(it) ~= "table" or it.state ~= "blocked" or it.removed then
+		return false
+	end
+	local p = it.paused_at
+	if p == nil then
+		p = it.pausedAt
+	end
+	return type(p) == "number" or (type(p) == "string" and p ~= "")
+end
+
+-- The paused card a chat is a thread of, if any: while it's paused, what's
+-- sent to the chat is held in its queue. (Followed: read in a computed, it
+-- changes as the board does.)
+function M.paused_card(chat_id: string?): any
+	if not chat_id then
+		return nil
+	end
+	for _, it in M.now:get().items or {} do
+		if M.is_paused(it) and table.find(it.threads or {}, chat_id) then
+			return it
+		end
+	end
+	return nil
 end
 
 -- A dump asked to be shown (its id): the Control room brings its receipt

@@ -2345,6 +2345,12 @@ impl SessionsEngine {
         })
     }
 
+    /// Whether the engine's shutdown has begun (every turn is being stopped
+    /// by it, not by anyone's word).
+    pub fn shutting_down(&self) -> bool {
+        self.inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// The engine is going down because its account signed out: the turns
     /// the coming [`Self::shutdown`] cuts off stay ended, rather than
     /// starting again when the account next signs in. Sign-out is the user

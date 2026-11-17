@@ -512,6 +512,29 @@ impl Zeron {
             .to_owned())
     }
 
+    /// [`Self::queue_command`], and why the host held it instead (its
+    /// thread's card is paused by the person: it waits in the thread's
+    /// queue), when it did.
+    pub async fn queue_command_or_held(
+        &self,
+        chat_id: &str,
+        payload: &SessionCommandPayload,
+    ) -> anyhow::Result<(String, Option<String>)> {
+        let command = serde_json::to_value(payload).context("serialize command")?;
+        let reply = self.call(methods::QUEUE_COMMAND, json!({ "chatId": chat_id, "command": command })).await?;
+        let id = reply.get("commandId").and_then(Value::as_str).unwrap_or_default().to_owned();
+        Ok((id, held_reason(&reply)))
+    }
+
+    /// [`Self::queue_message`], and why the host held it, when it did.
+    pub async fn queue_message_or_held(&self, chat_id: &str, text: &str) -> anyhow::Result<(String, Option<String>)> {
+        let reply = self
+            .call(methods::QUEUE_MESSAGE, json!({ "chatId": chat_id, "text": text, "holdForTurnEnd": true }))
+            .await?;
+        let id = reply.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+        Ok((id, held_reason(&reply)))
+    }
+
     /// Queue-row send for a busy chat whose harness cannot steer mid-turn:
     /// the host promotes it when the live turn ends.
     pub async fn queue_message(&self, chat_id: &str, text: &str) -> anyhow::Result<String> {
@@ -1185,4 +1208,12 @@ mod tests {
         assert_eq!(resolve_space_in(&spaces, "comet").unwrap().id, "s1");
         assert!(resolve_space_in(&spaces, "GitHub").is_err());
     }
+}
+
+
+/// Why a send's reply says the host held it (`delivery: "held"`), if it does.
+fn held_reason(reply: &Value) -> Option<String> {
+    (reply.get("delivery").and_then(Value::as_str) == Some("held")).then(|| {
+        reply["held"]["reason"].as_str().unwrap_or("its thread's card is paused by the person").to_owned()
+    })
 }

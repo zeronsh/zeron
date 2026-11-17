@@ -219,6 +219,8 @@ M.View = ui.component(function(props: {
 	progress: ((id: string) -> any)?,
 	-- Shows a board card (the hover card's Open card).
 	on_open_card: ((item: string) -> ())?,
+	-- Resumes a paused card (the hover card's Resume).
+	on_resume_card: ((item: string) -> ())?,
 }): Node
 	local width = ui.use_state(0)
 	local function field_h(): number
@@ -1751,6 +1753,7 @@ M.View = ui.component(function(props: {
 				props.on_open_orchestrator(oid)
 			end,
 			on_open_card = props.on_open_card,
+			on_resume = props.on_resume_card,
 			on_mark_read = props.mark_read,
 		}
 	end

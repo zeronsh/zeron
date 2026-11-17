@@ -30,6 +30,7 @@ local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local CloudTray = require("@app/screens/chat/cloud_tray")
 local Held = require("@app/screens/chat/held")
+local CardHold = require("@app/screens/chat/card_hold")
 local CloudMachine = require("@app/screens/chat/cloud_machine")
 local Where = require("@app/screens/chat/where")
 local cloud = require("@account/cloud")
@@ -507,6 +508,12 @@ local function Composer(): Node
 	-- A line above it: one of its own (a send that failed), else the
 	-- session's.
 	local own_notice = ui.state("chat_own_notice", nil :: any)
+	-- A paused card's thread (screens/chat/card_hold): its queue held.
+	local card_held, resume_card = CardHold.bind(function(): string?
+		return session_id:get()
+	end, function()
+		own_notice:set { tone = "danger", key = "chat.composer.didnt_resume", dismissable = true }
+	end)
 	-- The lane of the transcript at its foot (screens/chat/shared's
 	-- `at_foot`), while that's the chat `id`'s: in a split, the focused
 	-- pane's (`split-<chat>`). Nil: the chat page's.
@@ -1366,6 +1373,9 @@ local function Composer(): Node
 			end,
 			on_escape = store.escape,
 			queue = shown_queue,
+			-- A paused card's thread: its queue held, said atop it, Resume.
+			held = card_held,
+			on_held_action = resume_card,
 			can_steer = function(): boolean
 				return running:get()
 			end,

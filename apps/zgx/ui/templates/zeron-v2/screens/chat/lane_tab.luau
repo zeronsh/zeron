@@ -34,6 +34,7 @@ local Completions = require("@app/screens/chat/completions")
 local Invocations = require("@app/screens/chat/invocations")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 local Asks = require("@app/screens/chat/asks")
+local CardHold = require("@app/screens/chat/card_hold")
 local Appshots = require("@app/screens/chat/appshots")
 local DropOverlay = require("@ds/drop_overlay")
 local orchestration = require("@account/orchestration")
@@ -142,6 +143,12 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
 	local notice = ui.use_state(nil :: any)
+	-- A paused card's thread (screens/chat/card_hold): its queue held.
+	local card_held, resume_card = CardHold.bind(function(): string?
+		return chat
+	end, function()
+		notice:set({ tone = "danger", text = locale.s("chat.composer.didnt_resume"), dismissable = true })
+	end)
 	-- Its Cloud machine, on a chat that has one (a side chat shares its
 	-- parent's).
 	local machine = CloudTray.bind {
@@ -772,6 +779,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_approve = asks.on_approve,
 		on_deny = asks.on_deny,
 		queue = asks.queue,
+		held = card_held,
+		on_held_action = resume_card,
 		can_steer = function(): boolean
 			return running:get()
 		end,

@@ -425,12 +425,10 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					on_move = function(id: string, state: string, order: number)
 						orchestration.move_item(id, state, order)
 					end,
-					on_pause = function(id: string)
-						orchestration.pause_item(id)
-					end,
-					on_resume = function(id: string, state: string)
-						orchestration.resume_item(id, state)
-					end,
+					-- (Their promises: refused, the board puts the card
+					-- back and says so.)
+					on_pause = orchestration.pause_item,
+					on_resume = orchestration.resume_item,
 					asks = function(): any
 						local now = orchestration.now:get()
 						return now and now.asks

@@ -868,7 +868,8 @@
       "show_finished": "Show {n} finished",
       "hide_finished": "Hide {n} finished",
       "queued_messages": "Queued messages",
-      "queued": "Queued"
+      "queued": "Queued",
+      "held": "Held"
     },
     "composer_mentions": {
       "files": "Files",
@@ -3262,7 +3263,10 @@
         "image": "Image",
         "file": "File"
       },
-      "drop_to_reference": "Drop to reference"
+      "drop_to_reference": "Drop to reference",
+      "held_paused": "Held · its card is paused",
+      "resume": "Resume",
+      "didnt_resume": "Couldn't resume its card"
     },
     "dictation": {
       "failed": "Dictation stopped",
@@ -4230,6 +4234,8 @@
       "queued": "Waiting for a slot",
       "later_count": "Later · {n}",
       "start_failed": "Couldn't start it",
+      "pause_failed": "Couldn't pause it",
+      "resume_failed": "Couldn't resume it",
       "needs_you": "Needs you",
       "waiting_on_you": "Waiting on you",
       "show_more": "Show {n} more",
@@ -4600,6 +4606,7 @@
   "ds.orch.map.card.failed": "Failed",
   "ds.orch.map.card.open_chat": "Open chat",
   "ds.orch.map.card.open_card": "Open card",
+  "ds.orch.map.card.resume": "Resume",
   "ds.orch.map.card.open_page": "Open page",
   "ds.orch.map.card.pin": "Pin",
   "ds.orch.map.card.unpin": "Unpin",

@@ -126,21 +126,29 @@ impl EngineRpc {
         let Some(target) = params["chatId"].as_str() else {
             return Ok(None);
         };
-        if !crate::orchestration::board_checks::paused_thread(self.orchestration(), target) {
+        let Some(card) = crate::orchestration::board_checks::paused_card_of(self.orchestration(), target) else {
             return Ok(None);
-        }
-        self.doc_host_ref().hold_queue(target);
-        if method == methods::QUEUE_MESSAGE {
-            return Ok(None);
-        }
+        };
         let Some(text) = text_slot(method, &mut params.clone()).and_then(|v| v.as_str().map(str::to_owned)) else {
             return Ok(None);
         };
+        self.doc_host_ref().hold_queue(target);
+        let attachments: Vec<String> = params["attachments"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default();
         let id = self
             .doc_host_ref()
-            .queue_message(target, &text, Vec::new())
+            .queue_message(target, &text, attachments)
             .map_err(|e| RpcError::Failed(e.to_string()))?;
-        Ok(Some(RpcReply::value(&json!({ "commandId": id, "held": "its card is paused by the person" }))?))
+        // Said as held, never as a run: it waits in the thread's queue until
+        // the person resumes its card.
+        let held = json!({ "cardId": card, "reason": crate::orchestration::board_checks::held_reason(&card) });
+        let reply = match method {
+            methods::QUEUE_MESSAGE => json!({ "id": id, "delivery": "held", "held": held }),
+            _ => json!({ "commandId": id, "delivery": "held", "held": held }),
+        };
+        Ok(Some(RpcReply::value(&reply)?))
     }
 
     /// `Some(reply)` when this call is a crew thread messaging its own

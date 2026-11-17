@@ -925,12 +925,9 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 			orchestration.move_item(id, state, order):after(function() end, said("control.board.failed"))
 		end,
 		-- (Put in Blocked: paused; a paused card taken out: resumed there.)
-		on_pause = function(id: string)
-			orchestration.pause_item(id):after(function() end, said("control.board.failed"))
-		end,
-		on_resume = function(id: string, state: string)
-			orchestration.resume_item(id, state):after(function() end, said("control.board.failed"))
-		end,
+		-- (Their promises: refused, the board puts the card back and says so.)
+		on_pause = orchestration.pause_item,
+		on_resume = orchestration.resume_item,
 		paused_open = M.board_paused,
 		-- (An open ask naming a card marks it asked.)
 		asks = function(): any
@@ -1088,6 +1085,9 @@ local function map(): Node
 				return (orchestration.progress:get() or {})[id]
 			end,
 			on_open_card = M.open_card,
+			on_resume_card = function(id: string)
+				orchestration.resume_item(id):after(function() end, said("orch.board.resume_failed"))
+			end,
 		},
 		MapMenu().Dialogs(),
 	}

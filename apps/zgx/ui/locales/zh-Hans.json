@@ -868,7 +868,8 @@
       "show_finished": "显示 {n} 个已完成",
       "hide_finished": "隐藏 {n} 个已完成",
       "queued_messages": "队列中的消息",
-      "queued": "已加入队列"
+      "queued": "已加入队列",
+      "held": "已保留"
     },
     "composer_mentions": {
       "files": "文件",
@@ -3262,7 +3263,10 @@
         "image": "图片",
         "file": "文件"
       },
-      "drop_to_reference": "Drop to reference"
+      "drop_to_reference": "Drop to reference",
+      "held_paused": "已保留 · 其卡片已暂停",
+      "resume": "继续",
+      "didnt_resume": "无法继续其卡片"
     },
     "dictation": {
       "failed": "听写已停止",
@@ -4230,6 +4234,8 @@
       "queued": "等待空位",
       "later_count": "以后 · {n}",
       "start_failed": "Couldn't start it",
+      "pause_failed": "无法暂停",
+      "resume_failed": "无法继续",
       "needs_you": "Needs you",
       "waiting_on_you": "等你回复",
       "show_more": "再显示 {n} 张",
@@ -4600,6 +4606,7 @@
   "ds.orch.map.card.failed": "Failed",
   "ds.orch.map.card.open_chat": "Open chat",
   "ds.orch.map.card.open_card": "Open card",
+  "ds.orch.map.card.resume": "继续",
   "ds.orch.map.card.open_page": "Open page",
   "ds.orch.map.card.pin": "Pin",
   "ds.orch.map.card.unpin": "Unpin",
