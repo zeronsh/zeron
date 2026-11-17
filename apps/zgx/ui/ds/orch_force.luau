@@ -241,10 +241,19 @@ M.View = ui.component(function(props: {
 	end
 
 	-- Fitting the view to the web: its box in the field, at most 1.4x.
+	-- (The names too, once placed: none cut by the field's edge.)
+	local fit_names: { [number]: labels.Label } = {}
 	local function fit()
-		local x0, y0, x1, y1 = sim.bounds(s)
+		local bx0, by0, bx1, by1 = sim.bounds(s)
+		local x0: number, y0: number, x1: number, y1: number = bx0, by0, bx1, by1
+		local any_name = false
+		for _, lab in fit_names do
+			any_name = true
+			local l: labels.Label = lab
+			x0, y0, x1, y1 = math.min(x0, l.x0), math.min(y0, l.y0), math.max(x1, l.x1), math.max(y1, l.y1)
+		end
 		local w, h = math.max(1, width:peek()), field_h()
-		local pad = 70
+		local pad = if any_name then 24 else 70
 		local z = math.clamp(math.min((w - pad * 2) / math.max(1, x1 - x0), (h - pad * 2 - 30) / math.max(1, y1 - y0)), MIN_FIT, 1.4)
 		view:set({ x = w / 2 - (x0 + x1) / 2 * z, y = (h - 30) / 2 - (y0 + y1) / 2 * z, zoom = z })
 		counts.zoom = z
@@ -619,6 +628,8 @@ M.View = ui.component(function(props: {
 	local name_widths: { [string]: number } = {}
 	-- A slice of the threads' names (NAME_SLICE seconds); another frame for
 	-- the rest, till all are placed.
+	-- (Defined with the view, below.)
+	local recull: () -> () = function() end
 	local names_tick = -1
 	local function names_ran_this_tick(): boolean
 		return names_tick == tick:peek()
@@ -645,6 +656,13 @@ M.View = ui.component(function(props: {
 		names_job = nil
 		counts.names_ms = names_ms
 		count("names")
+		fit_names = job.out
+		-- (Fitted again round the names, as after its own settling: never
+		-- once the view's been moved or a node dragged.)
+		if not moved_view and not dragged_since then
+			fit()
+			recull()
+		end
 		table.clear(labs_by_id)
 		local list = {}
 		for i, lab in job.out do
@@ -735,7 +753,7 @@ M.View = ui.component(function(props: {
 	-- What's drawn: the view's reach (world), a field past it each way;
 	-- drawn again only when the view nears its edge.
 	local cull = ui.use_state({ x0 = -1e9, y0 = -1e9, x1 = 1e9, y1 = 1e9 })
-	local function recull()
+	recull = function()
 		local v = view:peek()
 		local w, h = math.max(1, width:peek()), field_h()
 		local wx0, wy0 = -v.x / v.zoom, -v.y / v.zoom
