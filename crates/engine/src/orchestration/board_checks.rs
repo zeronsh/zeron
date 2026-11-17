@@ -777,7 +777,8 @@ impl EngineRpc {
         let mut resumed = Vec::new();
         for r in to_resume(&before, &waits, &now, &orch.state(), &chats, Utc::now()) {
             let text = zeron_proto::orchestration::prompt_text::resumed_after_restart(&r.waited_on);
-            match super::ops::deliver(self, &r.chat, &text, None, super::ops::When::Next) {
+            let injected = zeron_doc::Injected { chat_id: Some(r.chat.clone()), ..zeron_doc::Injected::of(zeron_doc::injected::RESUMED) };
+            match super::ops::deliver(self, &r.chat, &text, None, super::ops::When::Next, Some(injected)) {
                 Ok(_) => resumed.push(r.chat),
                 Err(error) => tracing::warn!(%error, chat = %r.chat, "board: a chat wasn't resumed after the restart"),
             }
@@ -860,7 +861,10 @@ impl EngineRpc {
                 continue;
             }
             let list: Vec<(&str, &str, &str)> = cards.iter().map(|(i, t, n)| (i.as_str(), t.as_str(), n.as_str())).collect();
-            if let Err(error) = super::ops::deliver(self, &orchestrator, &nudge_text(&list), None, super::ops::When::Next) {
+            let injected = zeron_doc::Injected::board_check(list.iter().map(|(id, _, _)| *id));
+            if let Err(error) =
+                super::ops::deliver(self, &orchestrator, &nudge_text(&list), None, super::ops::When::Next, Some(injected))
+            {
                 tracing::warn!(%error, %orchestrator, "board: couldn't tell the orchestrator about its cards");
             }
         }
@@ -1058,7 +1062,7 @@ impl EngineRpc {
             };
             if !sent {
                 let text = format!("[Resumed] The person resumed \"{}\": carry on where you stopped.", one_line(&card.title, 80));
-                super::ops::deliver(self, t, &text, None, super::ops::When::Next)?;
+                super::ops::deliver(self, t, &text, None, super::ops::When::Next, Some(zeron_doc::Injected::resumed(&card.id)))?;
             }
         }
         Ok(json!({ "id": id }))
