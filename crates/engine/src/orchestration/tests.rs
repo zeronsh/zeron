@@ -3084,6 +3084,18 @@ async fn board_check_dry_run_on_copied_data() {
             );
         }
     }
+    // Cards to show whole (`BOARD_DRY_RUN_SHOW`: id prefixes, comma-separated).
+    for prefix in std::env::var("BOARD_DRY_RUN_SHOW").unwrap_or_default().split(',').filter(|p| !p.is_empty()) {
+        for c in state.items.iter().filter(|i| i.id.starts_with(prefix)) {
+            println!(
+                "== card {} {:?} removed={} threads={:?} check={:?} moved_at={:?} title={:?}",
+                c.id, c.state, c.removed, c.threads, c.check, c.moved_at, c.title
+            );
+        }
+        for m in state.crew.iter().filter(|m| m.item_id.as_deref().is_some_and(|i| i.starts_with(prefix))) {
+            println!("   crew {} item {:?} released={}", m.chat_id, m.item_id, m.released);
+        }
+    }
     let kept = rpc.plan_board_checks(now, false);
     let all = rpc.plan_board_checks(now, true);
     print("kept by this device (what its start-up pass does)", &kept);
@@ -3141,4 +3153,85 @@ async fn a_crew_thread_at_work_when_the_engine_stopped_is_resumed_once() {
     let mut said = sent(&core, "geese-t1");
     said.extend(core.doc_host.open("geese-t1").unwrap().doc().read_queue().unwrap().into_iter().map(|q| q.text));
     assert_eq!(said.iter().filter(|p| p.contains(resumed_text)).count(), 1, "{said:?}");
+}
+
+
+/// `geese-t1`'s session row, as its host would write it.
+async fn geese_row(core: &crate::EngineCore, status: zeron_proto::SessionStatus, outcome: Option<zeron_proto::DoneStatus>) {
+    let mut row = idle("geese-t1");
+    row.device_id = core.orchestration.device_id().to_owned();
+    row.status = status;
+    row.updated_at = chrono::Utc::now();
+    row.started_at = (status == zeron_proto::SessionStatus::Working).then(chrono::Utc::now);
+    row.last_turn_outcome =
+        outcome.map(|status| zeron_proto::NativeTurnOutcome { status, finished_at: chrono::Utc::now() });
+    core.orchestration.workspace().record_session(&row);
+    // (Its watch publishes it a moment later.)
+    let mut rows = core.orchestration.workspace().watch_session_rows();
+    for _ in 0..200 {
+        if rows.borrow_and_update().iter().any(|s| s.chat_id == "geese-t1" && s.status == status) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("geese-t1's row never showed {status:?}");
+}
+
+#[tokio::test]
+async fn an_errored_threads_ask_closes_itself_once_it_works_again() {
+    let (_temp, core) = core().await;
+    let (_o, card) = geese(&core).await;
+    let rpc = core.rpc_service();
+    // Its thread errored: Blocked, with the check's ask.
+    geese_row(&core, zeron_proto::SessionStatus::Errored, Some(zeron_proto::DoneStatus::Errored)).await;
+    rpc.check_boards_on(chrono::Utc::now(), true).await;
+    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Blocked);
+    let raised: Vec<Ask> = core.orchestration.state().asks.into_iter().filter(|a| a.item_id.as_deref() == Some(card.as_str())).collect();
+    assert_eq!(raised.len(), 1);
+    assert_eq!(raised[0].origin, AskOrigin::BoardCheck);
+    assert_eq!(raised[0].state, AskState::Open);
+    // Resumed: working again. Its ask closes itself, and then the card is
+    // back in Now.
+    geese_row(&core, zeron_proto::SessionStatus::Working, None).await;
+    rpc.check_boards_on(chrono::Utc::now(), true).await;
+    let ask = core.orchestration.state().asks.into_iter().find(|a| a.id == raised[0].id).unwrap();
+    assert_eq!(ask.state, AskState::Answered);
+    assert_eq!(ask.answered_via, Some(AnswerVia::Resolved));
+    assert_eq!(ask.answer.as_deref(), Some("resolved: its thread is working again"));
+    rpc.check_boards_on(chrono::Utc::now(), true).await;
+    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Active);
+}
+
+#[tokio::test]
+async fn after_a_crash_a_chat_picked_back_up_gets_no_error_ask() {
+    let temp = tempfile::tempdir().unwrap();
+    let assemble = || {
+        crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap()
+    };
+    let card = {
+        let core = assemble();
+        let (_o, card) = geese(&core).await;
+        // Working when the engine dies: no shutdown, only what was saved.
+        geese_row(&core, zeron_proto::SessionStatus::Working, None).await;
+        core.orchestration.workspace().flush();
+        card
+    };
+    let core = assemble();
+    // The crash recovery marks its cut-off turn errored.
+    geese_row(&core, zeron_proto::SessionStatus::Errored, Some(zeron_proto::DoneStatus::Errored)).await;
+    let rpc = core.rpc_service();
+    let (resumed, changed) = rpc.start_up_pass(true).await;
+    assert_eq!(resumed, ["geese-t1"], "picked back up");
+    assert!(changed.iter().all(|c| c.item != card), "its card left alone: {changed:?}");
+    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Active);
+    assert!(
+        core.orchestration.state().asks.iter().all(|a| a.item_id.as_deref() != Some(card.as_str())),
+        "no 'stopped on an error' ask"
+    );
 }

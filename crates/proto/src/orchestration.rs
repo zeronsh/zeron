@@ -872,6 +872,10 @@ pub enum AskOrigin {
     /// A thread ended its turn on a question for the person (or its
     /// orchestrator) and Zeron raised it.
     TurnEnd,
+    /// The board check raised it for a card's condition (its thread errored,
+    /// a Blocked card nobody asked about): it closes itself, answered
+    /// "resolved: …" (`answeredVia: resolved`), once that condition clears.
+    BoardCheck,
     #[serde(other)]
     Other,
 }
@@ -895,6 +899,9 @@ pub enum AnswerVia {
     Orchestrator,
     /// The thread acted on it (its next turn did one of the options).
     Action,
+    /// What a board-check ask was about cleared (the card left Blocked, its
+    /// thread works again): closed by the engine, its answer "resolved: …".
+    Resolved,
     #[serde(other)]
     Other,
 }

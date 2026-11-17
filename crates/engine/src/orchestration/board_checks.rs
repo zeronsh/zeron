@@ -36,7 +36,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration as TimeDelta, Utc};
 use serde_json::{Value, json};
 use zeron_proto::orchestration::{
-    Ask, AskKind, AskOption, AskState, CardCheck, CheckKind, CommKind, ItemAsk, LinkKind, NO_THREAD_GRACE_SECS,
+    AnswerVia, Ask, AskKind, AskOption, AskOrigin, AskState, CardCheck, CheckKind, CommKind, ItemAsk, LinkKind, NO_THREAD_GRACE_SECS,
     STALE_TO_REVIEW_SECS, WorkItem, WorkItemPatch, WorkState, prompt_text::one_line,
 };
 use zeron_proto::{Chat, DoneStatus, Session, SessionStatus};
@@ -184,6 +184,9 @@ pub(crate) struct Verdict {
     pub drop_threads: Vec<String>,
     /// Tell its orchestrator (the check's note).
     pub nudge: bool,
+    /// Asks the board check raised on the card whose condition cleared:
+    /// `(ask id, why)`, closed "resolved: why".
+    pub resolve: Vec<(String, String)>,
 }
 
 impl Verdict {
@@ -388,6 +391,24 @@ pub(crate) fn agent_move_allowed(
     Ok(())
 }
 
+/// The open asks the board check raised on `card` whose condition has
+/// cleared: the card left Blocked, or one of its `threads` works again.
+/// `(ask id, why)`. Asks an agent or the person raised are theirs. Pure.
+pub(crate) fn resolved_asks(card: &WorkItem, threads: &[(String, Thread)], asks: &[Ask]) -> Vec<(String, String)> {
+    let why = if card.state != WorkState::Blocked {
+        "the card left Blocked"
+    } else if threads.iter().any(|(_, t)| t.live()) {
+        "its thread is working again"
+    } else {
+        return Vec::new();
+    };
+    asks.iter()
+        .filter(|a| a.state == AskState::Open && a.origin == AskOrigin::BoardCheck)
+        .filter(|a| a.item_id.as_deref() == Some(card.id.as_str()))
+        .map(|a| (a.id.clone(), why.to_owned()))
+        .collect()
+}
+
 /// The question an engine-raised ask puts for `card`.
 pub(crate) fn raised_ask(card: &WorkItem, raise: Raise) -> ItemAsk {
     let title = one_line(&card.title, 80);
@@ -474,14 +495,8 @@ pub(crate) fn start(orchestration: Orchestration) {
     tokio::spawn(async move {
         tokio::time::sleep(AFTER_START).await;
         if let Some(rpc) = orchestration.rpc() {
-            // Crew threads the stop left at work: told to carry on, first.
-            let resumed = rpc.resume_after_restart(orchestration.take_before_stop());
-            if !resumed.is_empty() {
-                orchestration.note_resumed(&resumed, Utc::now());
-                tracing::info!(?resumed, "board: crew threads resumed after the restart");
-            }
-            let changed = rpc.check_boards(Utc::now()).await;
-            tracing::info!(cards = changed.len(), ?changed, "board: start-up check");
+            let (resumed, changed) = rpc.start_up_pass(false).await;
+            tracing::info!(?resumed, cards = changed.len(), ?changed, "board: start-up pass");
         }
         let mut tick = tokio::time::interval(EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -626,6 +641,9 @@ impl std::fmt::Display for Change {
         if v.nudge {
             write!(f, "; orchestrator told")?;
         }
+        for (id, why) in &v.resolve {
+            write!(f, "; ask {id} resolved: {why}")?;
+        }
         Ok(())
     }
 }
@@ -701,7 +719,8 @@ pub(crate) fn plan_from(
             route_review: route.is_some_and(|r| r.review.is_some()),
             prs: prs_of(card, known_prs),
         };
-        let verdict = assess(&view, now);
+        let mut verdict = assess(&view, now);
+        verdict.resolve = resolved_asks(card, &view.threads, &state.asks);
         if !verdict.is_empty() {
             out.push(Change {
                 item: card.id.clone(),
@@ -766,12 +785,44 @@ impl EngineRpc {
         resumed
     }
 
+    /// The start-up pass: the chats the stop left at work resumed
+    /// ([`EngineRpc::resume_after_restart`]), then the board check over the
+    /// boards this engine keeps (`all`: every board). Every chat that was at
+    /// work at the stop (resumed here, or revived by the engine's own
+    /// recovery of a turn cut off by a crash) has its cards left alone for
+    /// [`RESUMED_GRACE_SECS`]: the stop or the crash marked its turn
+    /// interrupted or errored, which isn't its work failing. `(resumed,
+    /// changed)`.
+    pub(crate) async fn start_up_pass(&self, all: bool) -> (Vec<String>, Vec<Change>) {
+        let orch = self.orchestration();
+        let before = orch.take_before_stop();
+        let mut at_work: Vec<String> = before
+            .iter()
+            .filter(|b| b.status == SessionStatus::Working || b.waiting.is_some() || b.running_subagents > 0)
+            .map(|b| b.chat_id.clone())
+            .collect();
+        let resumed = self.resume_after_restart(before);
+        at_work.extend(resumed.iter().cloned());
+        at_work.sort();
+        at_work.dedup();
+        orch.note_resumed(&at_work, Utc::now());
+        let changed = self.check_boards_on(Utc::now(), all).await;
+        (resumed, changed)
+    }
+
     /// The board check, applied. The cards it changed.
     pub(crate) async fn check_boards(&self, now: DateTime<Utc>) -> Vec<Change> {
-        let mut changes = self.plan_board_checks(now, false);
-        // Cards of threads just resumed after a restart are left alone until
-        // their new turn has started: the stop marked their last turn
-        // interrupted, which isn't the person stopping them.
+        self.check_boards_on(now, false).await
+    }
+
+    /// [`EngineRpc::check_boards`] over the boards this engine keeps (`all`:
+    /// every board).
+    pub(crate) async fn check_boards_on(&self, now: DateTime<Utc>, all: bool) -> Vec<Change> {
+        let mut changes = self.plan_board_checks(now, all);
+        // Cards of threads at work when the engine stopped are left alone
+        // until their new turn has started: the stop (or a crash) marked
+        // their last turn interrupted or errored, which isn't the person
+        // stopping them, nor their work failing.
         let resumed = self.orchestration().resumed_since(now, TimeDelta::seconds(RESUMED_GRACE_SECS));
         if !resumed.is_empty() {
             let state = self.orchestration().state();
@@ -860,11 +911,16 @@ impl EngineRpc {
                 self.doc_host_ref().hold_queue(t);
             }
         }
+        for (ask, why) in &verdict.resolve {
+            if super::turn_asks::close(orch, ask, AnswerVia::Resolved, &format!("resolved: {why}"), now).is_some() {
+                tracing::info!(%ask, card = %id, %why, "board: an ask the check raised closed itself");
+            }
+        }
         if let Some(raise) = verdict.raise {
             let from = card.orchestrator_id.clone().or_else(|| card.threads.first().cloned());
             if let Some(from) = from {
                 let ask = raised_ask(&card, raise);
-                self.raise_item_ask(&from, &card, ask, now);
+                self.raise_item_ask(&from, &card, ask, AskOrigin::BoardCheck, now);
             }
         }
         Some(note)
@@ -872,7 +928,14 @@ impl EngineRpc {
 
     /// Raise `ask` on `card` from `from` (its asker: the answer goes there).
     /// Its id.
-    pub(crate) fn raise_item_ask(&self, from: &str, card: &WorkItem, ask: ItemAsk, now: DateTime<Utc>) -> String {
+    pub(crate) fn raise_item_ask(
+        &self,
+        from: &str,
+        card: &WorkItem,
+        ask: ItemAsk,
+        origin: AskOrigin,
+        now: DateTime<Utc>,
+    ) -> String {
         let orch = self.orchestration();
         let row = Ask {
             id: uuid::Uuid::new_v4().simple().to_string(),
@@ -890,7 +953,7 @@ impl EngineRpc {
             dump_id: None,
             route_id: None,
             quiet: false,
-            origin: Default::default(),
+            origin,
             turn_id: None,
             updated_at: None,
             escalated_at: None,
