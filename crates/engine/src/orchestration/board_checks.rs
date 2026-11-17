@@ -58,7 +58,7 @@ const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 const AFTER_START: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// How long a card of a thread resumed after a restart is left alone.
-const RESUMED_GRACE_SECS: i64 = 120;
+pub(crate) const RESUMED_GRACE_SECS: i64 = 120;
 
 /// The errored-thread ask's options.
 pub(crate) const RETRY: &str = "Retry";
@@ -690,8 +690,12 @@ pub(crate) fn to_resume(
     let brain = |c: &str| {
         state.orchestrators.iter().any(|o| o.id == c && o.kind != zeron_proto::orchestration::OrchestratorKind::Standard)
     };
+    // Waiting on its usage limit: its own resume goes at the reset (one
+    // "[Resumed]", not two).
+    let limit_waiting = |row: &Option<&Session>| row.is_some_and(|b| b.limited.as_ref().is_some_and(|l| l.waiting()));
     seen.into_iter()
         .filter(|(c, (_, turn, wait, subs))| (*turn && crew(c)) || wait.is_some() || subs.is_some())
+        .filter(|(_, (row, _, _, _))| !limit_waiting(row))
         .filter(|(c, _)| !brain(c))
         .filter(|(c, _)| chats.get(*c).is_some_and(|chat| !chat.archived))
         .filter(|(c, _)| !state.items.iter().any(|i| !i.removed && i.paused() && i.threads.iter().any(|t| t == c)))
@@ -1027,7 +1031,16 @@ impl EngineRpc {
                 o.id == chat && o.kind != zeron_proto::orchestration::OrchestratorKind::Standard
             });
             let gone = self.workspace_host().chat(&chat).ok().flatten().is_none();
-            if already.contains(&chat) || paused || brain || gone || self.sessions_ref().turn_in_flight(&chat) {
+            // Waiting on its usage limit: its own resume goes at the reset.
+            let limit_waiting = self
+                .sessions_ref()
+                .session_status(&chat)
+                .and_then(|s| s.limited)
+                .or_else(|| {
+                    self.workspace_host().read_sessions().ok()?.into_iter().find(|s| s.chat_id == chat)?.limited
+                })
+                .is_some_and(|l| l.waiting());
+            if already.contains(&chat) || paused || brain || gone || limit_waiting || self.sessions_ref().turn_in_flight(&chat) {
                 continue;
             }
             let text = zeron_proto::orchestration::prompt_text::resumed_after_cut_off_send(&sent);

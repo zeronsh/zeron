@@ -304,3 +304,26 @@ async fn a_resume_that_runs_straight_back_into_the_limit_waits_again_with_a_back
     assert_eq!(resumes_sent(&core, "relimit"), 2, "once per reset");
     core.shutdown().await;
 }
+
+
+#[tokio::test]
+async fn a_chat_a_restart_just_resumed_gets_no_second_resume_at_its_reset() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = core_at(temp.path()).await;
+    let rpc = core.rpc_service();
+    chat(&core, "plain-a").await;
+    let t = Utc::now();
+    let until = t + TimeDelta::hours(1);
+    limited(&core, "plain-a", limit(t - TimeDelta::hours(2), Some(until)));
+    let mut book = LimitBook::default();
+    let reset = until + TimeDelta::seconds(1);
+    // A restart path sent it its "[Resumed]" a moment ago.
+    core.orchestration.note_resumed(&["plain-a".to_owned()], reset);
+    assert!(rpc.limits_pass(&mut book, reset).await.is_empty(), "not a second message");
+    assert_eq!(resumes_sent(&core, "plain-a"), 0);
+    // Still limited past the grace (that turn never started): its own resume.
+    let later = reset + TimeDelta::seconds(super::board_checks::RESUMED_GRACE_SECS + 1);
+    assert_eq!(rpc.limits_pass(&mut book, later).await, ["plain-a"]);
+    assert_eq!(resumes_sent(&core, "plain-a"), 1);
+    core.shutdown().await;
+}

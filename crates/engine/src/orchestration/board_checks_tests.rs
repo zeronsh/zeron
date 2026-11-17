@@ -966,3 +966,26 @@ fn a_card_whose_thread_waits_for_its_limit_is_left_alone() {
     let v = assess(&view(&review, thread), mins(300));
     assert_eq!(v.state, None);
 }
+
+
+#[test]
+fn a_chat_waiting_on_its_usage_limit_gets_its_limits_resume_not_a_restart_one() {
+    let chats: HashMap<String, Chat> = [chat("t1", "here")].into_iter().map(|c| (c.id.clone(), c)).collect();
+    let state = crew_state(vec![card(WorkState::Active)]);
+    // Limited at the stop, its subagents running too: one "[Resumed]", the
+    // limit's at its reset.
+    let row = limited("t1", mins(2));
+    let subs = vec![("t1".to_owned(), vec!["t1--sub--toolu_1".to_owned()])];
+    assert!(to_resume(&[row.clone()], &[], &subs, &HashMap::new(), &state, &chats, mins(30)).is_empty());
+    // Switched to another account meanwhile: it's at work there, so a
+    // restart resume is its.
+    let mut switched = row;
+    switched.limited.as_mut().unwrap().switched_to = Some(zeron_proto::usage_limit::SwitchedAccount {
+        account_slot: "b".into(),
+        account_label: "b@x".into(),
+        at: mins(3),
+        harness: None,
+        model: None,
+    });
+    assert_eq!(ids(to_resume(&[switched], &[], &subs, &HashMap::new(), &state, &chats, mins(30))), ["t1"]);
+}

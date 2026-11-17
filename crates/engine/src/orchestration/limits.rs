@@ -389,8 +389,15 @@ impl EngineRpc {
             .collect();
         firing.sort();
         let mut resumed = Vec::new();
+        // A chat a restart resume just sent its "[Resumed]" (its cut-off turn,
+        // its wait, its subagents, a cut-off send) is left a moment: that
+        // turn clears its limit as it starts, and one message is enough.
+        let just_resumed = self.orchestration().resumed_since(now, TimeDelta::seconds(super::board_checks::RESUMED_GRACE_SECS));
         for (_, chat) in firing {
             if !rows.iter().any(|r| r.chat_id == chat && r.limited.as_ref().is_some_and(SessionLimit::waiting)) {
+                continue;
+            }
+            if just_resumed.contains(&chat) {
                 continue;
             }
             let injected = zeron_doc::Injected {
