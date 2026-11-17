@@ -200,6 +200,21 @@ end
 	local o = if type(opts) == "string" then { text = opts } else opts
 	local line = said({ op = "answer_ask", id = id, option = o.option, text = o.text })
 	calls:set(if calls:peek() == "" then line else `{calls:peek()}\n{line}`)
+	-- (The engine's state after: that ask answered, in every place.)
+	local now = table.clone(orchestration.now:peek())
+	local asks = {}
+	for _, a in now.asks or {} do
+		if a.id == id then
+			a = table.clone(a)
+			a.state = "answered"
+			a.answered = os.time()
+			local opt = o.option and a.options and a.options[o.option]
+			a.answer = if opt then opt.label else (o.text or "")
+		end
+		table.insert(asks, a)
+	end
+	now.asks = asks
+	orchestration.now:set(now)
 	return settled({ id = id })
 end
 
@@ -225,6 +240,30 @@ ui.command { id = "orch.settings", title = "Settings", run = function()
 end }
 ui.command { id = "orch.settings_empty", title = "Settings, empty", run = function()
 	require("@app/screens/orchestrator/actions").settings("orc-ci")
+end }
+-- Seven more open asks from Orchestrators' crew: past Needs you's six,
+-- "n more".
+ui.command { id = "orch.many_asks", title = "Many asks", run = function()
+	local now = table.clone(orchestration.now:peek())
+	local asks = table.clone(now.asks or {})
+	for i = 1, 7 do
+		table.insert(asks, {
+			id = `ak-many-{i}`,
+			from_chat = "th-engine-state",
+			orchestrator_id = "orc-orch",
+			kind = "question",
+			question = `Extra question {i}?`,
+			options = { { label = `Yes {i}` }, { label = `No {i}` } },
+			urgent = false,
+			state = "open",
+			created = os.time() - 100 * i,
+		})
+	end
+	now.asks = asks
+	orchestration.now:set(now)
+end }
+ui.command { id = "orch.control", title = "Control room", run = function()
+	route.control()
 end }
 ui.command { id = "orch.vpn", title = "Exnomic VPN", run = function()
 	route.orchestrator("orc-vpn")

@@ -17,7 +17,6 @@ local OrchBoard = require("@ds/orch_board")
 local OrchCrew = require("@ds/orch_crew")
 local stage = require("@ds/stage")
 local rows = require("@account/rows")
-local Asks = require("@ds/orch_asks")
 local decide = require("@ds/orch_decide")
 local Links = require("@ds/links")
 local Block = require("@ds/orch_block")
@@ -29,6 +28,7 @@ local lanes = require("@app/screens/chat/lanes")
 local LaneTab = require("@app/screens/chat/lane_tab")
 local actions = require("@app/screens/orchestrator/actions")
 local Progress = require("@app/screens/control/progress")
+local NeedsYou = require("@app/screens/control/needs")
 local KeptScroll = require("@ds/kept_scroll")
 
 local M = {}
@@ -63,23 +63,9 @@ end
 M.model_name = model_name
 
 -- What needs you from orchestrator `id` (tracked): its asks, and its own
--- chat or a crew thread waiting on an answer.
+-- chat or a crew thread waiting on an answer (screens/control/needs).
 local function needs_of(id: string?): { any }
-	local now = orchestration.now:get()
-	local crew = data.crew_by_chat(now)
-	local out = {}
-	-- (A chat waiting on its own ask is that ask, once: data.needs.)
-	for _, n in data.needs(now, sessions.now:get()) do
-		local ask = n.ask
-		if ask then
-			if ask.orchestrator_id == id then
-				table.insert(out, n)
-			end
-		elseif (n.from == id or (crew[n.from or ""] and crew[n.from or ""].orchestrator_id == id)) then
-			table.insert(out, n)
-		end
-	end
-	return out
+	return NeedsYou.of(orchestration.now:get(), sessions.now:get(), id)
 end
 
 -- A section of the live state, a block of its own: its title and count
@@ -110,6 +96,20 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 	local chats = ui.computed(function(): { [string]: any }
 		return data.chats(sessions.now:get())
 	end)
+	local function name_of(id: string?): string?
+		return data.name_of(orchestration.now:get(), chats:get(), id)
+	end
+	local function hue_of(id: string?): number?
+		return data.hue_of(orchestration.now:get(), chats:get(), id)
+	end
+	-- A link of a card's or an ask's: a chat opened here, a web one outside.
+	local function open_link(link: any)
+		if link.kind == "chat" then
+			NeedsYou.open_chat(link.target)
+		elseif string.match(link.target or "", "^https?://") then
+			Links.open(link.target)
+		end
+	end
 	-- Its crew, each with its thread's row.
 	local crew = ui.computed(function(): { any }
 		local id = props.of()
@@ -348,23 +348,16 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 				pb = "$space.6",
 				Section(ui.t("orch.page.needs_you"), function(): number
 					return needs:get()
-				end, Asks {
-					needs = function(): { any }
-						return needs_of(props.of())
+				end, NeedsYou.Asks {
+					-- (The Control room's Needs you, only this orchestrator's.)
+					now = function(): any
+						return orchestration.now:get()
 					end,
-					name_of = function(id: string?): string?
-						return data.name_of(orchestration.now:get(), chats:get(), id)
+					sessions = function(): any
+						return sessions.now:get()
 					end,
-					-- (A failure is said on the ask, with Retry: ds/orch_decide.)
-					on_answer = function(ask: any, choice: any): any
-						return orchestration.answer(ask.id, choice, ask)
-					end,
-					on_dismiss = function(ask: any)
-						orchestration.dismiss(ask.id)
-					end,
-					on_open = function(chat: string, message: string?)
-						route.open_session(chat, if message then { message = message } else nil)
-					end,
+					orchestrator = props.of,
+					name_of = name_of,
 				}, "orch-section-needs"),
 				-- (Needs you with the page; the Board, then the crew, each in a
 				-- frame of its own after: ds/stage.)
@@ -441,13 +434,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 						return nil
 					end,
 					progress_of = Progress.row,
-					on_link = function(link: any)
-						if link.kind == "chat" then
-							route.open_session(link.target)
-						elseif string.match(link.target or "", "^https?://") then
-							Links.open(link.target)
-						end
-					end,
+					on_link = open_link,
 				} end), "orch-section-board"),
 				Section(ui.t("orch.page.crew"), function(): number
 					return #crew:get()
@@ -554,6 +541,8 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 			end
 			return ui.column { w_full = true, h_full = true, head(), body() }
 		end, { w_full = true, h_full = true }),
+		-- An ask expanded from Needs you, whole (as on the Control room).
+		NeedsYou.Decision { name_of = name_of, hue_of = hue_of, on_link = open_link },
 	}
 end)
 
