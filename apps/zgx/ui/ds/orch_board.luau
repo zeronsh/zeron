@@ -1452,7 +1452,24 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end
 		local sep = Card.Sep
 		local menu_open = ui.use_state(false)
-		local status_line = Card.Line {
+		local line_h = (ui.theme.get("font.line.sm") :: number?) or 16
+		-- Its quiet line, in two parts that wrap: what it says (shrinking,
+		-- its words truncated), and its PRs and menu at the end, on a line
+		-- of their own where the column has no room for both.
+		local status_line = ui.row {
+			class = "orch-card-status",
+			w_full = true,
+			min_w = 0,
+			flex_wrap = true,
+			gap = "$space.1",
+			items = "center",
+			ui.row {
+			class = "orch-card-meta",
+			min_w = 0,
+			shrink = 1,
+			h = line_h,
+			gap = "$space.1",
+			items = "center",
 			-- Whose it is: its orchestrator's hue, named where the pointer rests.
 			ui.show(function(): boolean
 				return owner() ~= nil
@@ -1588,7 +1605,13 @@ local OrchBoard = ui.component(function(props: Props): Node
 					return if stalled() then "$zeron.tone.warning.ink" else "$text.tertiary"
 				end,
 			}),
-			ui.div { grow = 1 },
+			},
+			ui.row {
+			class = "orch-card-chips",
+			grow = 1,
+			justify = "end",
+			gap = "$space.1",
+			items = "center",
 			ui.each(ui.computed(prs), function(l: Link): Node
 				local n = tonumber(string.match(l.label, "%d+"))
 				return ui.button {
@@ -1621,6 +1644,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 					return hovered:get() and not carry:get()
 				end,
 				label = locale.t("orch.board.card_actions"),
+			},
 			},
 		}
 		local function has_status(): boolean
@@ -1737,6 +1761,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 				end, function(): Node
 					return ui.row {
 					class = "orch-card-review",
+					-- (A narrow column: Request changes under Approve.)
+					w_full = true,
+					min_w = 0,
+					flex_wrap = true,
 					gap = "$space.1",
 					items = "center",
 					pt = "$zeron.space.hair",
