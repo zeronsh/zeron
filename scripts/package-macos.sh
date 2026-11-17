@@ -43,7 +43,7 @@ cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/f
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/"
 
 mkdir -p "$APP/Contents/Resources/licenses"
-cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses"/parakeet-v3.txt
+cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses"/speech-models.txt
 
 "$ROOT/scripts/macos-app-icon.sh" "$APP/Contents/Resources"
 

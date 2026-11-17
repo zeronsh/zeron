@@ -150,7 +150,7 @@ done
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$ROOT/apps/zgx/fonts/"*-OFL.txt "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/"
-cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/parakeet-v3.txt"
+cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/speech-models.txt"
 
 # Zeron's icon, as scripts/package-macos.sh's.
 "$ROOT/scripts/macos-app-icon.sh" "$APP/Contents/Resources"

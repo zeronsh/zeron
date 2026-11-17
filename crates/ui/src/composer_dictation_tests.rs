@@ -767,7 +767,7 @@ fn dictation_silence_explains_empty_result_and_never_sends_existing_draft(cx: &m
 }
 
 fn enable_dictation(dir: &std::path::Path, cx: &mut TestAppContext) {
-    let model = dir.join("models/parakeet-tdt-0.6b-v3-int8");
+    let model = dir.join("models").join(zeron_voice::manifest().id);
     std::fs::create_dir_all(&model).unwrap();
     for file in zeron_voice::manifest().files {
         std::fs::File::create(model.join(file.name))
@@ -775,7 +775,7 @@ fn enable_dictation(dir: &std::path::Path, cx: &mut TestAppContext) {
             .set_len(file.size)
             .unwrap();
     }
-    std::fs::write(model.join("verified"), zeron_voice::manifest().revision).unwrap();
+    std::fs::write(model.join("verified"), zeron_voice::manifest().marker()).unwrap();
     cx.update(|cx| {
         crate::dictation::init(dir.into(), cx);
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |s| {

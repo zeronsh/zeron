@@ -18,6 +18,9 @@ export type Name =
 	| "pi"
 	| "hermes"
 	| "muse"
+	| "nvidia"
+	| "moondream"
+	| "cohere"
 	-- Model providers (an agent's accounts per provider, their API keys):
 	-- one set, one ink each.
 	| "provider-anthropic"
@@ -38,6 +41,10 @@ local FILES: { [Name]: string } = {
 	pi = "pi-mark",
 	hermes = "hermes-mark",
 	muse = "muse-mark",
+	-- Speech models' makers (Settings → Voice).
+	nvidia = "nvidia-mark",
+	moondream = "moondream-mark",
+	cohere = "cohere-mark",
 	["provider-anthropic"] = "provider-anthropic",
 	["provider-openai"] = "provider-openai",
 	["provider-openrouter"] = "provider-openrouter",

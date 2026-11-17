@@ -1,7 +1,8 @@
 -- Dictation: hold the microphone or its shortcut, speak, let go, and the words
 -- land in the draft you can still edit (src/dictation.rs records and
--- transcribes; Settings → Voice turns it on). Anything that changes the draft
--- while it's listening throws the recording away, and Send waits for the words.
+-- transcribes; Settings → Voice turns it on). Typing on meanwhile is fine: the
+-- words land where the caret is when they arrive. Only another chat, or the
+-- draft sent or cleared, throws them away; Send waits for them.
 --
 --   local dictation = Dictation.bind(draft, key, blocked, "main")
 --   ds.Composer { dictation = dictation, … }
@@ -19,16 +20,17 @@ local M = {}
 M.state = ui.shared("dictation", { phase = "idle" } :: any)
 M.active = ui.computed(function(): boolean
 	local p = M.state:get().phase
-	return p == "starting" or p == "listening" or p == "finalizing"
+	return p == "starting" or p == "listening" or p == "finalizing" or p == "late"
 end)
 -- The voice bar's waveform: the microphone's loudness, one bar a 60 ms slot,
 -- newest first (0 to 1), from the host as each slot fills while listening.
 -- On its own, so what reads `state` doesn't run again at each slot.
 M.levels = ui.shared("dictation_levels", {} :: { number })
 -- starting, listening or finalizing (else what it last was): the waveform's
--- mode, apart from the rest of `state`.
+-- mode, apart from the rest of `state`. Late is finalizing still.
 M.phase = ui.computed(function(): string
-	return M.state:get().phase
+	local p = M.state:get().phase
+	return if p == "late" then "finalizing" else p
 end)
 local function active_for(id: string): any
 	return ui.computed(function(): boolean
@@ -50,11 +52,9 @@ local send_pressed = false
 
 local function valid(p: any): boolean
 	if binding == nil or p.binding ~= binding or binding.key() ~= p.key or binding.blocked() then return false end
-	if binding.value:peek() ~= p.text then return false end
-	local el = binding.editor:peek()
-	if el == nil then return false end
-	local a, b = el:selection_bytes()
-	return a == p.a and b == p.b
+	-- (Sent, or cleared: not the draft the words were for.)
+	if p.text ~= "" and binding.value:peek() == "" then return false end
+	return binding.editor:peek() ~= nil
 end
 function M.cancel()
 	local capturing = pending ~= nil or M.active:peek()
@@ -92,17 +92,42 @@ function M.before_send(target: string?): boolean
 	return M.active:peek()
 end
 
+-- How long the model stays ready after a dictation (Settings → Voice). (A
+-- window with no dictation host, a fixture's, has nothing to tell.)
+ui.effect(function()
+	local seconds = prefs.dictation_keep:get()
+	pcall(function()
+		ui.call("dictation.call", { op = "keep", seconds = seconds }):after(function() end, function() end)
+	end)
+end)
+
+-- The model in use (Settings → Voice): another one loaded goes at once.
+ui.effect(function()
+	local model = prefs.dictation_model:get()
+	pcall(function()
+		ui.call("dictation.call", { op = "use", model = model }):after(function() end, function() end)
+	end)
+end)
+
 -- Holding. A tap explains the gesture; it never inserts or sends anything.
 local TAP = 300
 local starting, held, since = false, false, 0
 local from_shortcut = ui.state("dictation_shortcut_held", false)
+-- The shortcut's key (⌘D's D) until it comes up. Let go of ⌘ first and the
+-- key, still down, repeats as a bare "d": typed into the draft, it would
+-- throw the words away. Its repeats are swallowed; a fresh press types.
+local chord_key: string? = nil
+local function chord_part(e: any): boolean
+	return chord_key ~= nil and type(e.key) == "string" and string.lower(e.key) == chord_key
+end
 local function finish()
 	held = false
 	from_shortcut:set(false)
 	if starting or M.active:peek() then
 		local tap = ui.now() - since < TAP
 		op(if tap then "cancel" else "stop")
-		if tap then toast.show { title = ui.t("chat.dictation.hold_hint"):get() } end
+		-- (Not while macOS asks for the microphone: nothing to explain.)
+		if tap and not M.state:peek().asking then toast.show { title = ui.t("chat.dictation.hold_hint"):get() } end
 	end
 end
 local function start(combo: string?, target: string?)
@@ -110,9 +135,11 @@ local function start(combo: string?, target: string?)
 	if not prefs.dictation:peek() then route.settings("voice") return end
 	if starting or M.active:peek() then return end
 	starting, held, since = true, true, ui.now()
-	from_shortcut:set(combo ~= nil and string.find(combo, "+", 1, true) ~= nil)
+	local chord = combo ~= nil and string.find(combo, "+", 1, true) ~= nil
+	from_shortcut:set(chord)
+	chord_key = if chord then string.lower(string.match(combo :: string, "([^+]+)$") or "") else nil
 	local device = prefs.dictation_input:peek()
-	ui.call("dictation.call", { op = "start", device = if device == "system" then nil else device, hold = combo, target = target }):after(function(r: any)
+	ui.call("dictation.call", { op = "start", device = if device == "system" then nil else device, model = prefs.dictation_model:peek(), hold = combo, target = target }):after(function(r: any)
 		starting = false
 		M.begin(r.serial, target)
 		if not held then op(if ui.now() - since < TAP then "cancel" else "stop") end
@@ -120,14 +147,20 @@ local function start(combo: string?, target: string?)
 		starting, held = false, false
 		from_shortcut:set(false)
 		local why = if type(err) == "table" then tostring(err.message) else tostring(err)
-		if why == "no_model" then route.settings("voice") else say(why) end
+		if why == "no_model" then
+			route.settings("voice")
+		else
+			say(why)
+		end
 	end)
 end
 -- A Command chord may produce no key-up on macOS. Modifier state still
--- changes, including when the window loses focus.
+-- changes, including when the window loses focus. (Read now: the host
+-- follows the keys only once something has, and ⌘ is down by the start.)
+local held_keys = ui.modifiers
 ui.effect(function()
 	if not from_shortcut:get() then return end
-	local m = ui.modifiers
+	local m = held_keys
 	local cmd = if string.find(ui.shortcut_text("cmd"), "⌘", 1, true) then m.meta:get() else m.control:get()
 	local ctrl, alt, shift = m.control:get(), m.alt:get(), m.shift:get()
 	local combo = keys.combo("shell.dictate")
@@ -174,10 +207,10 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 		levels = M.levels, phase = M.phase,
 		status = function(): string
 			local p = M.state:get().phase
-			return ui.t(if p == "finalizing" then "chat.dictation.transcribing" elseif p == "starting" then "chat.dictation.starting" else "ds.composer.listening"):get()
+			return ui.t(if p == "finalizing" or p == "late" then "chat.dictation.transcribing" elseif p == "starting" then "chat.dictation.starting" else "ds.composer.listening"):get()
 		end,
 		cancel = M.cancel,
-		on_change = function() if pending then M.cancel() end end,
+		on_change = function() if pending and not valid(pending) then M.cancel() end end,
 		on_caret = function() if pending and not valid(pending) then M.cancel() end end,
 		-- (Pressing Send takes the focus; that's no reason to stop.)
 		on_blur = function() if not send_pressed and pending then M.cancel() end end,
@@ -185,7 +218,14 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 			send_pressed = true
 			ui.after(0, function() send_pressed = false end)
 		end,
+		on_key = function(e: any): boolean
+			if not chord_part(e) then return false end
+			if e["repeat"] then return true end
+			chord_key = nil
+			return false
+		end,
 		on_key_up = function(e: any): boolean
+			if chord_part(e) then chord_key = nil end
 			local hold = M.state:peek().hold
 			if not (pending and hold) or type(e.key) ~= "string" then return false end
 			if string.lower(e.key) ~= string.lower(string.match(hold, "([^+]+)$") or hold) then return false end
@@ -223,38 +263,68 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 	return own
 end
 
+-- The words into the draft, at its caret. Mid-composition (an IME's) they
+-- wait for it to end: inserting would throw it away.
+local function composing(): boolean
+	local ok, yes = pcall(ui.call_sync, "dictation.composing")
+	return ok and yes == true
+end
+local function land(p: any, text: string)
+	if pending ~= p then return end
+	if composing() then
+		if not p.waiting then
+			p.waiting = true
+			ui.after(100, function()
+				p.waiting = false
+				land(p, text)
+			end)
+		end
+		return
+	end
+	local ok = valid(p)
+	pending = nil
+	if not ok then op("cancel") return end
+	if not string.find(text, "%S") then
+		toast.show { title = ui.t("chat.dictation.no_speech"):get(), tone = "warning" }
+		op("cancel")
+		return
+	end
+	-- At the caret as the draft stands now (typing on was fine). One
+	-- paste is one native undo operation, selection replaced included.
+	local el = p.binding.editor:peek()
+	local now = p.binding.value:peek()
+	local a, b = el:selection_bytes()
+	a, b = math.min(a or #now, b or #now), math.max(a or #now, b or #now)
+	local applied = el:replace_selection(text)
+	if applied and p.send then
+		-- (The paste reaches the draft's state after this. Retiring the words
+		-- waits too: it runs the state's effect again, which would stop the
+		-- timer.)
+		local expected = string.sub(now, 1, a) .. text .. string.sub(now, b + 1)
+		ui.after(0, function()
+			if binding == p.binding and binding.key() == p.key and not binding.blocked() and binding.value:peek() == expected then
+				binding.send()
+			end
+			op("cancel")
+		end)
+		return
+	end
+	op("cancel") -- The words are in the draft: nothing keeps them.
+end
+
 ui.effect(function()
 	local s = M.state:get()
 	local p = pending
 	if p == nil then return end
 	if s.serial ~= p.serial then M.cancel() return end
 	if s.phase == "final" then
-		local ok = valid(p)
-		pending = nil
-		if not ok then op("cancel") return end
-		local text = s.text or ""
-		if not string.find(text, "%S") then
-			toast.show { title = ui.t("chat.dictation.no_speech"):get(), tone = "warning" }
-			op("cancel")
-			return
+		land(p, s.text or "")
+	elseif s.phase == "late" then
+		-- Overdue, not over: the words still land if they come.
+		if not p.told then
+			p.told = true
+			toast.show { title = ui.t("chat.dictation.late"):get(), body = ui.t("chat.dictation.late_body"):get() }
 		end
-		-- One paste is one native undo operation, selection replaced included.
-		local applied = p.binding.editor:peek():replace_selection(text)
-		if applied and p.send then
-			-- (The paste reaches the draft's state after this effect. Retiring
-			-- the words waits too: it runs this effect again, which would stop
-			-- the timer.)
-			local a, b = math.min(p.a, p.b), math.max(p.a, p.b)
-			local expected = string.sub(p.text, 1, a) .. text .. string.sub(p.text, b + 1)
-			ui.after(0, function()
-				if binding == p.binding and binding.key() == p.key and not binding.blocked() and binding.value:peek() == expected then
-					binding.send()
-				end
-				op("cancel")
-			end)
-			return
-		end
-		op("cancel") -- The words are in the draft: nothing keeps them.
 	elseif s.phase == "failed" or s.phase == "cancelled" then
 		pending = nil
 		if s.phase == "failed" then say(s.error) end

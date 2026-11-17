@@ -60,7 +60,7 @@ for var in ZERON_EDGE_URL ZERON_WORKOS_CLIENT_ID ZERON_CALLBACK_PORT; do
 done
 
 mkdir -p "$CONTENTS/Resources/licenses"
-cp "$ROOT/crates/voice/NOTICE.md" "$CONTENTS/Resources/licenses"/parakeet-v3.txt
+cp "$ROOT/crates/voice/NOTICE.md" "$CONTENTS/Resources/licenses"/speech-models.txt
 
 if [[ ! -f "$CONTENTS/Resources/Assets.car" ]]; then
   "$ROOT/scripts/macos-app-icon.sh" "$CONTENTS/Resources" || echo "warning: no app icon (it takes Xcode 26 or later)" >&2
