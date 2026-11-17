@@ -2046,6 +2046,75 @@ async fn compact_requires_existing_session_and_commands_reject_attachments() {
     assert!(harness().run(req, ctl).await.is_err());
 }
 
+/// A command Codex runs only in its own terminal app (`/mcp`), sent once a
+/// turn has ended, is refused as its own errored turn: it opens (Steered)
+/// and ends (Done) so the chat is never left running, and the runtime takes
+/// the next message. It used to end the stream with neither.
+#[tokio::test]
+async fn a_refused_command_between_turns_ends_its_turn_and_keeps_the_runtime() {
+    let (controls, steer, _token) = controls("Yes");
+    let mut stream = harness()
+        .run(request("scenario:refused-command"), controls)
+        .await
+        .unwrap();
+    let send = |prompt: &str| SteerMessage {
+        prompt: prompt.into(),
+        message_id: None,
+        attachments: Vec::new(),
+        config: None,
+    };
+    let mut steer = Some(steer);
+    let mut events = Vec::new();
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("the run never stalls")
+    {
+        let event = event.unwrap();
+        if let AgentEvent::Done { .. } = &event {
+            let dones = events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::Done { .. }))
+                .count();
+            match dones {
+                0 => steer.as_ref().unwrap().send(send("/mcp")).await.unwrap(),
+                1 => steer
+                    .as_ref()
+                    .unwrap()
+                    .send(send("after the refusal"))
+                    .await
+                    .unwrap(),
+                _ => drop(steer.take()),
+            }
+        }
+        events.push(event);
+    }
+    let ends: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Done { status, error, .. } => Some((*status, error.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends.len(), 3, "{events:?}");
+    assert_eq!(ends[0].0, DoneStatus::Completed);
+    assert_eq!(ends[1].0, DoneStatus::Errored);
+    let reason = ends[1].1.as_deref().unwrap_or_default();
+    assert!(
+        reason.starts_with("/mcp only works in Codex's own terminal app"),
+        "{reason}"
+    );
+    assert_eq!(ends[2].0, DoneStatus::Completed, "{events:?}");
+    // Each message's turn opened before it ended.
+    let steered = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::Steered { .. }))
+        .count();
+    assert_eq!(steered, 2, "{events:?}");
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "still here".into()
+    }));
+}
+
 #[tokio::test]
 async fn native_command_during_a_turn_waits_for_its_boundary() {
     let (controls, steer, _token) = controls("Yes");
