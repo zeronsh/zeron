@@ -171,6 +171,8 @@ impl EngineRpc {
             archived: false,
             created_at: now,
             updated_at: now,
+            workflow: None,
+            flow_run: None,
         };
         self.orchestration()
             .workspace()

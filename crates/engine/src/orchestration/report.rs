@@ -24,6 +24,8 @@ pub struct ReportParams {
     pub item_id: Option<String>,
     pub links: Vec<WorkLink>,
     pub progress: Option<f32>,
+    /// A flow step's outcome.
+    pub result: Option<zeron_proto::orchestration::flow::FlowResult>,
 }
 
 /// A crew thread's message to its orchestrator, as a `message` report: the
@@ -38,6 +40,7 @@ pub(crate) fn message_report(text: &str) -> ReportParams {
         item_id: None,
         links: Vec::new(),
         progress: None,
+        result: None,
     }
 }
 
@@ -78,6 +81,7 @@ pub async fn file_report(
         links: params.links,
         progress: params.progress.filter(|p| p.is_finite()).map(|p| p.clamp(0.0, 1.0)),
         at: Utc::now(),
+        result: params.result,
     };
     orchestration.set_last_report(
         caller_chat,
@@ -118,6 +122,10 @@ pub async fn file_report(
         &report.orchestrator_id,
         &report.summary,
     );
+    // A flow step's report leads its run on: the engine's own doing, for the
+    // person who started the run (not the reporting thread, which can't
+    // start threads).
+    zeron_rpc::with_caller(zeron_rpc::Caller::Local, async { ctx.flow_on_report(&report) }).await;
     let id = report.id.clone();
     let orchestrator = report.orchestrator_id.clone();
     if let Err(err) = ctx

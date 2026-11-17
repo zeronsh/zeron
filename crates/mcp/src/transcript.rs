@@ -276,6 +276,7 @@ mod tests {
             links: vec![],
             progress: None,
             at: chrono::Utc::now(),
+            result: None,
         };
         let rendered = render_entries(
             &[entry(

@@ -2760,6 +2760,7 @@ mod tests {
                 target: "https://example.invalid/pr/12".into(),
             }],
             progress: Some(0.5),
+            result: None,
             at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
         }
     }

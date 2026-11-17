@@ -59,6 +59,8 @@ fn named(o: &Orchestrator) -> Orchestrator {
         archived: o.archived,
         created_at: o.created_at,
         updated_at: o.updated_at,
+        workflow: None,
+        flow_run: None,
     }
 }
 
@@ -196,6 +198,8 @@ mod tests {
             crew: CrewPolicy::default(),
             wake: None,
             paused: false,
+            workflow: None,
+            flow_run: None,
             archived: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -243,6 +247,8 @@ mod tests {
             approved_at: None,
             paused_at: None,
             check: None,
+            flow: None,
+            depends_on: Vec::new(),
         }
     }
 

@@ -595,6 +595,8 @@ mod tests {
             archived: false,
             created_at: ts(1_000),
             updated_at: ts(1_000),
+            workflow: None,
+            flow_run: None,
         }
     }
 
@@ -625,6 +627,8 @@ mod tests {
             approved_at: None,
             paused_at: None,
             check: None,
+            flow: None,
+            depends_on: Vec::new(),
         }
     }
 

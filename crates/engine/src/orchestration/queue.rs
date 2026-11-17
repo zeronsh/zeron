@@ -133,6 +133,17 @@ impl EngineRpc {
     /// which a full crew doesn't hold back. Replies `{id, threadId}`, or
     /// `{id, queued: true, waiting}` when it stays in Next.
     pub(crate) fn start_item(&self, id: &str, force: bool) -> Result<Value, RpcError> {
+        self.start_item_as(id, force, None)
+    }
+
+    /// [`Self::start_item`], its thread on `agent` (harness, model) rather
+    /// than the crew's (a flow step's own).
+    pub(crate) fn start_item_as(
+        &self,
+        id: &str,
+        force: bool,
+        agent: Option<(Option<String>, Option<String>)>,
+    ) -> Result<Value, RpcError> {
         let orch = self.orchestration().clone();
         let Some(_starting) = Starting::claim(id) else {
             return Err(failed("That card is starting already"));
@@ -178,10 +189,12 @@ impl EngineRpc {
         let prompt = first_prompt(&card);
         let (space, device) = self.card_place(&card, owner.as_ref(), &prompt);
         let chat = uuid::Uuid::new_v4().to_string();
-        let (harness, model) = owner
-            .as_ref()
-            .map(|o| (o.crew.harness.clone(), o.crew.model.clone()))
-            .unwrap_or_default();
+        let (harness, model) = agent.unwrap_or_else(|| {
+            owner
+                .as_ref()
+                .map(|o| (o.crew.harness.clone(), o.crew.model.clone()))
+                .unwrap_or_default()
+        });
         self.create_chat_for(
             &chat,
             space.as_deref(),

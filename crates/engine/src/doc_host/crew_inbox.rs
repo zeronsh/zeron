@@ -139,6 +139,7 @@ impl DocHost {
                 .collect(),
             progress: report.progress.filter(|p| p.is_finite()).map(|p| p.clamp(0.0, 1.0)),
             at: report.at,
+            result: None,
         })
     }
 

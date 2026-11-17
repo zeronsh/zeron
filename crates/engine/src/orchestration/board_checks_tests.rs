@@ -46,6 +46,8 @@ fn card(state: WorkState) -> WorkItem {
         approved_at: None,
         paused_at: None,
         check: None,
+        flow: None,
+        depends_on: Vec::new(),
     }
 }
 
