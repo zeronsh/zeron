@@ -13357,6 +13357,7 @@ mod tests {
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            review: None,
         };
         let entry = assistant(
             "a1",
@@ -14556,6 +14557,7 @@ mod tests {
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            review: None,
         }
     }
 
@@ -14682,6 +14684,7 @@ mod tests {
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            review: None,
         }
     }
 

@@ -121,6 +121,8 @@ mod drop_tests;
 mod picker_settle_tests;
 #[cfg(test)]
 mod fit_tests;
+#[cfg(test)]
+mod access_mode_tests;
 // (Unix only: it reads thread CPU time through libc.)
 #[cfg(all(test, unix))]
 mod slide_bench_tests;

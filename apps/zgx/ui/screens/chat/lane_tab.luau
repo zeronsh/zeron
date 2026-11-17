@@ -697,6 +697,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		placeholder = locale.s(if split then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
+		access_auto = function(): boolean
+			return store.offers_auto(model:get())
+		end,
 		plan = plan,
 		model = model,
 		effort = effort,

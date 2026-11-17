@@ -42,6 +42,7 @@ pub(crate) fn tool(id: &str, call: ToolCall, is_error: bool, output: Option<&str
         exit_code: None,
         output_truncated: false,
         output_lines: None,
+        review: None,
     }
 }
 

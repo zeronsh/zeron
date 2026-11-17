@@ -185,7 +185,7 @@ pub fn resolve_access(wanted: AccessMode, offered: &[AccessMode]) -> AccessMode 
     if offered.contains(&wanted) {
         return wanted;
     }
-    let rank = |mode: AccessMode| AccessMode::ALL.iter().position(|m| *m == mode);
+    let rank = |mode: AccessMode| AccessMode::WITH_AUTO.iter().position(|m| *m == mode);
     offered
         .iter()
         .copied()

@@ -446,12 +446,27 @@ fn run_access(request: &RunRequest) -> AccessMode {
 /// supervised, asks before anything but codex's known-safe reads (under
 /// `"on-request"` a sandboxed `rm -rf` or `git push` would run unasked).
 /// A title run never asks and never writes, whatever its chat's mode.
+/// Auto writes the workspace and asks on request, and its requests go to
+/// codex's auto-review rather than the person ([`approvals_reviewer`]).
 fn permissions(access: AccessMode, title_only: bool) -> (&'static str, SandboxLevel) {
     match access {
         _ if title_only => ("never", SandboxLevel::ReadOnly),
         AccessMode::FullAccess => ("never", SandboxLevel::DangerFullAccess),
+        AccessMode::Auto => ("on-request", SandboxLevel::WorkspaceWrite),
         AccessMode::AutoAcceptEdits => ("untrusted", SandboxLevel::WorkspaceWrite),
         AccessMode::Supervised => ("untrusted", SandboxLevel::ReadOnly),
+    }
+}
+
+/// Who answers a run's approval requests: codex's auto-review in Auto (it
+/// escalates what it won't decide), the person in the other asking modes,
+/// and nobody to name in full access or a title run (they never ask).
+fn approvals_reviewer(access: AccessMode, title_only: bool) -> Option<&'static str> {
+    match access {
+        _ if title_only => None,
+        AccessMode::FullAccess => None,
+        AccessMode::Auto => Some("auto_review"),
+        AccessMode::Supervised | AccessMode::AutoAcceptEdits => Some("user"),
     }
 }
 
@@ -739,7 +754,7 @@ impl Harness for CodexHarness {
     /// Supervised asks before what codex does not know to be safe, and
     /// auto-accept edits before stepping outside the workspace sandbox.
     fn access_modes(&self) -> &[AccessMode] {
-        &AccessMode::ALL
+        &AccessMode::WITH_AUTO
     }
     /// Codex's own `plan` collaboration mode.
     fn supports_plan(&self) -> bool {
@@ -1388,7 +1403,7 @@ async fn run_session(session: Session) {
     // configured `approvals_reviewer` could otherwise hand them to an AI
     // reviewer instead.
     let (approval_policy, sandbox) = permissions(run_access(&request), title_only);
-    let asks_person = |live: &RunRequest| !title_only && !run_access(live).is_full_access();
+    let reviewer = |live: &RunRequest| approvals_reviewer(run_access(live), title_only);
     let start_tier = service_tier(&request);
 
     let start_params = {
@@ -1445,8 +1460,8 @@ async fn run_session(session: Session) {
         }
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert("sandbox".into(), sandbox_mode(sandbox).into());
-        if asks_person(&request) {
-            p.insert("approvalsReviewer".into(), "user".into());
+        if let Some(reviewer) = reviewer(&request) {
+            p.insert("approvalsReviewer".into(), reviewer.into());
         }
         if let Some(model) = &request.model {
             p.insert("model".into(), Value::String(model.clone()));
@@ -1697,8 +1712,8 @@ async fn run_session(session: Session) {
         let (approval_policy, sandbox) = permissions(run_access(live), title_only);
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert("sandboxPolicy".into(), sandbox_policy_value(sandbox));
-        if asks_person(live) {
-            p.insert("approvalsReviewer".into(), "user".into());
+        if let Some(reviewer) = reviewer(live) {
+            p.insert("approvalsReviewer".into(), reviewer.into());
         }
         // Reasoning summaries stream (`item/reasoning/summaryTextDelta`) only
         // when asked for — without this codex "thinks" in silence for minutes:
@@ -1903,6 +1918,15 @@ async fn run_session(session: Session) {
                             && let Some(active) = router.active.clone()
                         {
                             send_turn_interrupt(&client, &thread_id, active);
+                        }
+                    }
+
+                    // Auto's reviewer on a call: shown on the call.
+                    "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
+                        if let Some(event) = normalize::auto_review_event(&params)
+                            && !send(&event_tx, event).await
+                        {
+                            break 'main;
                         }
                     }
 
@@ -3157,7 +3181,24 @@ mod tests {
             wire(AccessMode::Supervised, false),
             ("untrusted", "read-only", json!({"type": "readOnly"}))
         );
-        for access in AccessMode::ALL {
+        // Auto asks on request, and auto-review answers (it escalates what
+        // it won't decide); the other asking modes name the person.
+        assert_eq!(
+            wire(AccessMode::Auto, false),
+            (
+                "on-request",
+                "workspace-write",
+                json!({"type": "workspaceWrite", "networkAccess": true})
+            )
+        );
+        assert_eq!(approvals_reviewer(AccessMode::Auto, false), Some("auto_review"));
+        assert_eq!(approvals_reviewer(AccessMode::AutoAcceptEdits, false), Some("user"));
+        assert_eq!(approvals_reviewer(AccessMode::Supervised, false), Some("user"));
+        assert_eq!(approvals_reviewer(AccessMode::FullAccess, false), None);
+        for access in AccessMode::WITH_AUTO {
+            assert_eq!(approvals_reviewer(access, true), None);
+        }
+        for access in AccessMode::WITH_AUTO {
             assert_eq!(
                 wire(access, true),
                 ("never", "read-only", json!({"type": "readOnly"}))
@@ -3184,6 +3225,8 @@ mod tests {
         assert_eq!(allowed(AccessMode::FullAccess), [true, true, true]);
         assert_eq!(allowed(AccessMode::AutoAcceptEdits), [true, false, false]);
         assert_eq!(allowed(AccessMode::Supervised), [false, false, false]);
+        // What auto-review escalates is asked.
+        assert_eq!(allowed(AccessMode::Auto), [false, false, false]);
     }
 
     #[test]
@@ -3205,7 +3248,7 @@ mod tests {
         let mut moved = run_request(AccessMode::Supervised, false);
         moved.cwd = "/elsewhere".into();
         assert!(!harness.reconfigures_in_place(&live, &moved));
-        assert_eq!(harness.access_modes(), &AccessMode::ALL);
+        assert_eq!(harness.access_modes(), &AccessMode::WITH_AUTO);
         assert!(harness.supports_plan());
     }
 

@@ -1206,6 +1206,7 @@ fn refresh_setup_placeholder(st: &mut CoreState, machine: MachineWait) -> bool {
                     exit_code: None,
                     output_truncated: false,
                     output_lines: None,
+                    review: None,
                 }],
                 created_at: created_at + 1,
                 device_id: String::new(),
