@@ -7,7 +7,8 @@
 --   todo; where it sits (orchestrator · its card and column · role ·
 --   model · machine); what it's doing (Progress's note while it works, its
 --   card's outcome once done); what applies of unread, asking, failed, a
---   pull request, a branch; and Open chat, Open card, Pin, Mark read.
+--   pull request, a branch; and Open chat, Open card, Pin, Mark read;
+--   its card paused by the person, Resume (into Now) first.
 --   An orchestrator: its crew working / idle / failed, its board's Now /
 --   Review / Blocked, and Open page.
 --   A machine (the machines pivot): online or not, its CPU, how many
@@ -38,6 +39,8 @@ export type Props = {
 	on_open_chat: (id: string) -> (),
 	on_open_orchestrator: (id: string) -> (),
 	on_open_card: ((item: string) -> ())?,
+	-- A paused card resumed (into Now).
+	on_resume: ((item: string) -> ())?,
 	on_mark_read: ((ids: { string }) -> ())?,
 }
 
@@ -97,6 +100,18 @@ local function open_ask(world: any, id: string): any
 		end
 	end
 	return nil
+end
+
+-- Whether a card is paused by the person: Blocked, `paused_at` set.
+local function paused(it: any): boolean
+	if not it or it.state ~= "blocked" then
+		return false
+	end
+	local p = it.paused_at
+	if p == nil then
+		p = it.pausedAt
+	end
+	return type(p) == "number" or (type(p) == "string" and p ~= "")
 end
 
 -- A row of small words, tertiary, one line.
@@ -327,8 +342,26 @@ function M.Card(props: Props): Node
 		},
 		ui.row {
 			class = "orch-force-card-actions",
+			-- (Five at most, Resume first: a second line where they don't fit.)
+			w_full = true,
+			flex_wrap = true,
 			gap = "$space.1",
 			pt = "$space.1",
+			ui.show(function(): boolean
+				local _, item = crew()
+				return paused(item) and props.on_resume ~= nil
+			end, Button {
+				id = "orch-force-card-resume",
+				tone = "secondary",
+				size = "xs",
+				on_click = function()
+					local _, item = crew()
+					if item and props.on_resume then
+						props.on_resume(item.id)
+					end
+				end,
+				locale.t("ds.orch.map.card.resume"),
+			}),
 			Button {
 				id = "orch-force-card-open",
 				tone = "secondary",

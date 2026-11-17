@@ -17,7 +17,7 @@
 -- count on its head). Its head counts both. A card dropped anywhere in
 -- Blocked is paused (`on_pause(id)`); a paused card dragged to another
 -- column resumes there (`on_resume(id, state)`); Move to says Pause, and
--- Resume for a paused card. A card the engine's board check flagged or
+-- Resume for a paused card, which has a Resume of its own too (into Now). A card the engine's board check flagged or
 -- moved carries its note (`check`) as one quiet line.
 --
 -- The columns share the board's width evenly, each a lane of its own, its
@@ -80,8 +80,9 @@
 --     inbox = true,              -- (no longer used: Later is in Queued)
 --     now = fn() -> number,      -- Unix seconds: what "today" is
 --     on_move = fn(id, state, order), on_priority = fn(id, priority),
---     on_pause = fn(id),         -- a card put in Blocked: paused
---     on_resume = fn(id, state), -- a paused card taken out, into `state`
+--     on_pause = fn(id) -> promise?,  -- a card put in Blocked: paused
+--     on_resume = fn(id, state) -> promise?,  -- a paused card taken out,
+--                                -- into `state` (refused: back, and said)
 --     paused_open = state,       -- whether Blocked's Paused group is open
 --     asks = fn() -> { Ask },    -- every ask: an open one naming a card
 --                                -- (`item_id`) marks it "asked"
@@ -1113,15 +1114,29 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 		end)
 	end
+	-- What `on_pause`/`on_resume` sent: refused, the card goes back where it
+	-- was at once, and says so.
+	local function or_back(sent: any, id: string, key: string, title: string)
+		if sent == nil or (sent :: any).after == nil then
+			return
+		end
+		(sent :: any):after(function() end, function()
+			local p = pending:peek()
+			if p and p.id == id then
+				pending:set(nil)
+			end
+			toast.show { title = locale.s(key), body = title, tone = "danger" }
+		end)
+	end
 	-- Paused (put in Blocked): its threads stopped, held there.
 	local function pause(it: Item, order: number)
 		hold_pending({ id = it.id, state = "blocked", order = order, paused = true })
-		;(props.on_pause :: any)(it.id)
+		or_back((props.on_pause :: any)(it.id), it.id, "orch.board.pause_failed", it.title)
 	end
 	-- A paused card resumed into `state`.
 	local function resume(it: Item, state: string, order: number)
 		hold_pending({ id = it.id, state = state, order = order, paused = false })
-		;(props.on_resume :: any)(it.id, state)
+		or_back((props.on_resume :: any)(it.id, state), it.id, "orch.board.resume_failed", it.title)
 	end
 
 	-- Let go at `t`: its state, and the order between its new neighbours.
@@ -1340,6 +1355,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end
 		pending:set({ id = it.id, state = place.state, order = order })
 		;(props.on_move :: any)(it.id, place.state, order)
+	end
+
+	-- A paused card resumed into Now (its own Resume; Move to's first).
+	local function resume_now(it: Item)
+		for _, place in PLACES do
+			if place.state == "active" then
+				return move_to(it, place)
+			end
+		end
 	end
 
 	-- The Review cards whose "Request changes…" box is open, by id.
@@ -2180,6 +2204,29 @@ local OrchBoard = ui.component(function(props: Props): Node
 				decision,
 				ui.show(has_status, status_line),
 				check_line,
+				-- Paused: Resume (into Now), as Move to's and a drag out.
+				when(function(): boolean
+					return paused_since:get() ~= nil and props.on_resume ~= nil
+				end, function(): Node
+					return ui.row {
+						class = "orch-card-resume-row",
+						w_full = true,
+						min_w = 0,
+						gap = "$space.1",
+						items = "center",
+						pt = "$zeron.space.hair",
+						Button {
+							class = "orch-card-resume",
+							tone = "secondary",
+							size = "xs",
+							on_click = function()
+								resume_now(item())
+							end,
+							Icon { name = "action-play", size = 12 },
+							locale.t("orch.board.resume"),
+						},
+					}
+				end),
 				-- In Review: its end, Approve or Request changes (a box for
 				-- what to change, sent to its thread).
 				when(function(): boolean

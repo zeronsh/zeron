@@ -32,6 +32,7 @@ local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local CloudTray = require("@app/screens/chat/cloud_tray")
 local CloudMachine = require("@app/screens/chat/cloud_machine")
+local CardHold = require("@app/screens/chat/card_hold")
 local files = require("@app/screens/files/api")
 local Where = require("@app/screens/chat/where")
 local cloud = require("@account/cloud")
@@ -552,6 +553,12 @@ local function Composer(): Node
 	-- A line above it: one of its own (a send that failed), else the
 	-- session's.
 	local own_notice = ui.state("chat_own_notice", nil :: any)
+	-- A paused card's thread (screens/chat/card_hold): its queue held.
+	local card_held, resume_card = CardHold.bind(function(): string?
+		return session_id:get()
+	end, function()
+		own_notice:set { tone = "danger", key = "chat.composer.didnt_resume", dismissable = true }
+	end)
 	-- Its own goes as the chat changes (kept: a reload isn't a change).
 	local notice_for = ui.state("chat_notice_for", "?")
 	ui.effect(function()
@@ -1362,6 +1369,9 @@ local function Composer(): Node
 			end,
 			on_escape = store.escape,
 			queue = queue,
+			-- A paused card's thread: its queue held, said atop it, Resume.
+			held = card_held,
+			on_held_action = resume_card,
 			can_steer = function(): boolean
 				return running:get()
 			end,

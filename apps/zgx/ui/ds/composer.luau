@@ -235,6 +235,9 @@ export type Props = {
 	on_queue_reorder: ((from: number, to: number) -> ())?,
 	on_queue_save: ((id: string) -> ())?,
 	on_queue_cancel: ((id: string) -> ())?,
+	-- The queue held (a paused card's thread): its line and action.
+	held: State<dock.Held?>?,
+	on_held_action: (() -> ())?,
 	todos: State<{ dock.Todo }>?,
 	on_dismiss_todos: (() -> ())?,
 	tasks: State<{ dock.Task }>?,
@@ -2606,6 +2609,8 @@ return ui.component(function(props: Props): Node
 			on_queue_reorder = props.on_queue_reorder,
 			on_queue_save = props.on_queue_save,
 			on_queue_cancel = props.on_queue_cancel,
+			held = props.held,
+			on_held_action = props.on_held_action,
 			todos = props.todos,
 			live = function()
 				return running ~= nil and running:get()

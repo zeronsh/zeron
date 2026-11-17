@@ -415,6 +415,22 @@ ui.command { id = "sign_review", title = "Signing: in Review", run = function()
 	now.items = items
 	orchestration.now:set(now)
 end }
+-- Its card paused by the person (Blocked, `paused_at` set).
+ui.command { id = "sign_paused", title = "Signing: paused", run = function()
+	local now = table.clone(orchestration.now:peek() :: any)
+	local items = {}
+	for _, it in now.items or {} do
+		if it.id == "it-sign" then
+			it = table.clone(it)
+			it.state = "blocked"
+			it.paused_at = os.time() - 3600
+			it.threads = { "th-reins-sign" }
+		end
+		table.insert(items, it)
+	end
+	now.items = items
+	orchestration.now:set(now)
+end }
 -- A big fleet (the new Graph's perf and shots): four machines, 104
 -- agents (4 orchestrators, 100 threads), the VPN orchestrator with 51 crew (46 on the desk, 5 on the
 -- MacBook), the Brain dump's on the cloud box. Deterministic.

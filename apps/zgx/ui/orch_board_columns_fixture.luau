@@ -79,6 +79,15 @@ local items = ui.state("columns_items", table.clone(BASE) :: { any })
 local expanded = ui.state("columns_expanded", false)
 local later_open = ui.state("columns_later", false)
 local paused_open = ui.state("columns_paused", false)
+-- Pause and Resume refused (`columns_refuse`): a promise that fails.
+local refuse = ui.state("columns_refuse", false)
+local function refused(): any
+	return { after = function(_: any, _done: any, failed: any)
+		if failed then
+			failed("not yours")
+		end
+	end }
+end
 local asks = ui.state("columns_asks", {
 	{ id = "ask-1", item_id = "it-blk1", state = "open", question = "Which region first?" },
 	{ id = "ask-2", item_id = "it-blk2", state = "answered", question = "Renew now?" },
@@ -207,13 +216,23 @@ return ui.div { w_full = true, h_full = true, ui.scroll {
 				update(id, { state = state, order = order })
 			end,
 			-- (As the engine: Blocked, paused; resumed, into its state.)
-			on_pause = function(id: string)
+			-- (`columns_refuse`: refused, as the bridge refuses an op it
+			-- doesn't know, and nothing changes.)
+			on_pause = function(id: string): any
 				note(`pause:{id}`)
+				if refuse:peek() then
+					return refused()
+				end
 				update(id, { state = "blocked", paused_at = T })
+				return nil
 			end,
-			on_resume = function(id: string, state: string)
+			on_resume = function(id: string, state: string): any
 				note(`resume:{id}:{state}`)
+				if refuse:peek() then
+					return refused()
+				end
 				update(id, { state = state, paused_at = false })
+				return nil
 			end,
 			on_priority = function(id: string, p: string)
 				note(`priority:{id}:{p}`)
