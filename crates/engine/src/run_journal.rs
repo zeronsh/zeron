@@ -78,6 +78,10 @@ impl RunJournal {
         self.dir.join(format!("{}.shutdown", sanitize_id(chat_id)))
     }
 
+    fn wait_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.waiting", sanitize_id(chat_id)))
+    }
+
     fn stop_path(&self, chat_id: &str) -> PathBuf {
         self.dir.join(format!("{}.stopped", sanitize_id(chat_id)))
     }
@@ -142,6 +146,38 @@ impl RunJournal {
 
     pub fn clear_shutdown_interrupt(&self, chat_id: &str) {
         let _ = std::fs::remove_file(self.shutdown_path(chat_id));
+    }
+
+    /// Mark a chat whose turn had ended into a wait on its own background
+    /// work (`labels`: what it waited on) when the engine's shutdown began:
+    /// the shutdown ends that work and the wait with it, so this marker is
+    /// what tells the next boot the chat still had work in hand.
+    pub fn note_shutdown_wait(&self, chat_id: &str, labels: &[String]) {
+        let body = serde_json::to_vec(labels).unwrap_or_default();
+        if let Err(err) = std::fs::write(self.wait_path(chat_id), body) {
+            tracing::warn!(chat = %chat_id, error = %err, "shutdown wait marker write failed");
+        }
+    }
+
+    /// Chats marked by [`Self::note_shutdown_wait`], with what each waited
+    /// on, taken (each marker removed as it is read).
+    pub fn take_shutdown_waits(&self) -> Result<Vec<(String, Vec<String>)>, JournalError> {
+        let mut marked = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("waiting") {
+                continue;
+            }
+            let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
+                continue;
+            };
+            let labels: Vec<String> =
+                std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            let _ = std::fs::remove_file(&path);
+            marked.push((chat_id, labels));
+        }
+        marked.sort();
+        Ok(marked)
     }
 
     /// Mark a chat whose turn the user stopped. Its journal closes only once

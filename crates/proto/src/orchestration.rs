@@ -468,6 +468,20 @@ a reply to an @ask answers it, a comment on an @card goes to its thread):\n",
     /// once the engine is back (board_checks::to_resume).
     pub const RESUMED_AFTER_RESTART: &str = "[Resumed] The engine restarted; continue where you left off.";
 
+    /// [`RESUMED_AFTER_RESTART`] for a chat whose turn had ended into a wait
+    /// on its own background work (`waited_on`: what it waited on), which
+    /// the restart stopped: run it again.
+    pub fn resumed_after_restart(waited_on: &[String]) -> String {
+        if waited_on.is_empty() {
+            return RESUMED_AFTER_RESTART.to_owned();
+        }
+        let list: Vec<String> = waited_on.iter().map(|l| one_line(l, 80)).filter(|l| !l.is_empty()).collect();
+        let what = if list.is_empty() { String::new() } else { format!(" ({})", list.join("; ")) };
+        format!(
+            "{RESUMED_AFTER_RESTART} The restart stopped the background work you were waiting on{what}: it didn't finish, so run it again."
+        )
+    }
+
     /// What a card's thread is sent when the person asks for changes on it
     /// from Review.
     pub fn changes_requested(title: &str, text: &str) -> String {

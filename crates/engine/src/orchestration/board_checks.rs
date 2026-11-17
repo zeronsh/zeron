@@ -520,42 +520,66 @@ fn changed_sigs(seen: &mut HashMap<String, Sig>, sessions: &[Session]) -> bool {
     changed
 }
 
-/// The crew threads to resume after a restart: hosted here (`before` is
-/// this device's rows as stored when the engine stopped), in a crew, at
-/// work when it stopped (mid-turn, waiting on their own background work, or
-/// running subagents), and nothing run since (`now`: this engine's sessions
-/// since it started; a
-/// turn in flight or a newer completed turn means something already picked
-/// them up; judged at `at`). Not a thread of a card the person paused, nor one archived,
-/// nor one whose last turn ended normally (nothing to pick back up). Pure.
+/// A chat to resume after a restart, and the background work its wait was
+/// on that the restart stopped (empty: it was mid-turn or running
+/// subagents).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Resume {
+    pub chat: String,
+    pub waited_on: Vec<String>,
+}
+
+/// The chats to resume after a restart, hosted here: `before` is this
+/// device's rows as stored when the engine stopped, `waits` the chats whose
+/// turn had ended into a wait on their own background work when the
+/// shutdown began (the shutdown ends the wait, so their rows no longer say
+/// it). Resumed: a crew thread that was mid-turn, running subagents, or
+/// waiting; any other chat (a standalone one) only when it was waiting,
+/// since the engine's own recovery revives a turn cut off mid-way and
+/// nothing revives a wait. Not when something ran it since (`now`: this
+/// engine's sessions since it started; a turn in flight or a newer
+/// completed turn), not a thread of a card the person paused, not one
+/// archived, not the Brain dump, not one whose last turn ended normally.
+/// Pure.
 pub(crate) fn to_resume(
     before: &[Session],
+    waits: &[(String, Vec<String>)],
     now: &HashMap<String, Session>,
     state: &zeron_proto::orchestration::OrchestrationState,
     chats: &HashMap<String, Chat>,
     at: DateTime<Utc>,
-) -> Vec<String> {
-    let mut out: Vec<String> = before
-        .iter()
-        .filter(|b| b.status == SessionStatus::Working || b.waiting.is_some() || b.running_subagents > 0)
-        .filter(|b| state.crew.iter().any(|m| m.chat_id == b.chat_id && !m.released))
-        .filter(|b| chats.get(&b.chat_id).is_some_and(|c| !c.archived))
-        .filter(|b| !state.items.iter().any(|i| !i.removed && i.paused() && i.threads.iter().any(|t| *t == b.chat_id)))
-        .filter(|b| match now.get(&b.chat_id) {
+) -> Vec<Resume> {
+    // chat → (its row at the stop, at work in a turn, what its wait was on)
+    let mut seen: std::collections::BTreeMap<&str, (Option<&Session>, bool, Option<Vec<String>>)> = Default::default();
+    for b in before {
+        let wait = b.waiting.as_ref().map(|w| w.on.iter().map(|o| o.label.clone()).collect());
+        seen.insert(&b.chat_id, (Some(b), b.status == SessionStatus::Working || b.running_subagents > 0, wait));
+    }
+    for (chat, labels) in waits {
+        let entry = seen.entry(chat.as_str()).or_insert((None, false, None));
+        entry.2 = Some(labels.clone());
+    }
+    let crew = |c: &str| state.crew.iter().any(|m| m.chat_id == c && !m.released);
+    let brain = |c: &str| {
+        state.orchestrators.iter().any(|o| o.id == c && o.kind != zeron_proto::orchestration::OrchestratorKind::Standard)
+    };
+    seen.into_iter()
+        .filter(|(c, (_, turn, wait))| (*turn && crew(c)) || wait.is_some())
+        .filter(|(c, _)| !brain(c))
+        .filter(|(c, _)| chats.get(*c).is_some_and(|chat| !chat.archived))
+        .filter(|(c, _)| !state.items.iter().any(|i| !i.removed && i.paused() && i.threads.iter().any(|t| t == c)))
+        .filter(|(c, (row, _, _))| match now.get(*c) {
             // (A Working row left from before the stop has no heartbeat:
             // stale, not a turn in flight.)
             Some(n) => {
                 let in_flight = matches!(n.status, SessionStatus::Working | SessionStatus::AwaitingInput)
                     && !zeron_proto::view::session_stale(n, at);
-                !in_flight && n.last_completed_turn == b.last_completed_turn
+                !in_flight && row.is_some_and(|b| n.last_completed_turn == b.last_completed_turn)
             }
             None => true,
         })
-        .map(|b| b.chat_id.clone())
-        .collect();
-    out.sort();
-    out.dedup();
-    out
+        .map(|(c, (_, _, wait))| Resume { chat: c.to_owned(), waited_on: wait.unwrap_or_default() })
+        .collect()
 }
 
 /// One card's check result, for the start-up report and the dry run.
@@ -704,13 +728,15 @@ impl EngineRpc {
         plan_from(&state, &chats, &sessions, &self.known_change_requests(), (!all).then(|| orch.device_id()), now)
     }
 
-    /// The crew threads `before` (this device's rows when the engine
-    /// stopped) left at work, each sent [`RESUMED_AFTER_RESTART`] once
-    /// ([`to_resume`]). The ones resumed.
+    /// The chats the stop left at work (`before`: this device's rows when the
+    /// engine stopped; and the waits its shutdown ended, read from the run
+    /// journal), each sent [`resumed_after_restart`] once ([`to_resume`]).
+    /// The ones resumed.
     ///
-    /// [`RESUMED_AFTER_RESTART`]: zeron_proto::orchestration::prompt_text::RESUMED_AFTER_RESTART
+    /// [`resumed_after_restart`]: zeron_proto::orchestration::prompt_text::resumed_after_restart
     pub(crate) fn resume_after_restart(&self, before: Vec<Session>) -> Vec<String> {
-        if before.is_empty() {
+        let waits = self.sessions_ref().take_shutdown_waits();
+        if before.is_empty() && waits.is_empty() {
             return Vec::new();
         }
         let orch = self.orchestration();
@@ -722,11 +748,11 @@ impl EngineRpc {
         let now: HashMap<String, Session> =
             self.sessions_ref().watch_sessions().borrow().iter().map(|s| (s.chat_id.clone(), s.clone())).collect();
         let mut resumed = Vec::new();
-        for chat in to_resume(&before, &now, &orch.state(), &chats, Utc::now()) {
-            let text = zeron_proto::orchestration::prompt_text::RESUMED_AFTER_RESTART;
-            match super::ops::deliver(self, &chat, text, None, super::ops::When::Next) {
-                Ok(_) => resumed.push(chat),
-                Err(error) => tracing::warn!(%error, %chat, "board: a crew thread wasn't resumed after the restart"),
+        for r in to_resume(&before, &waits, &now, &orch.state(), &chats, Utc::now()) {
+            let text = zeron_proto::orchestration::prompt_text::resumed_after_restart(&r.waited_on);
+            match super::ops::deliver(self, &r.chat, &text, None, super::ops::When::Next) {
+                Ok(_) => resumed.push(r.chat),
+                Err(error) => tracing::warn!(%error, chat = %r.chat, "board: a chat wasn't resumed after the restart"),
             }
         }
         resumed

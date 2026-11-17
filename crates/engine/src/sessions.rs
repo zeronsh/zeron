@@ -2259,6 +2259,21 @@ impl SessionsEngine {
             .revive_after_shutdown
             .load(std::sync::atomic::Ordering::Acquire)
         {
+            // Turns that ended into a wait on their own background work: the
+            // shutdown ends that work, and the wait with it (their rows say
+            // nothing of it by the next boot). Marked first, for the board's
+            // start-up pass to resume them.
+            let waits: Vec<(String, Vec<String>)> = lock(&self.inner.statuses)
+                .values()
+                .filter(|session| session.status != SessionStatus::Working)
+                .filter_map(|session| {
+                    let wait = session.waiting.as_ref()?;
+                    Some((session.chat_id.clone(), wait.on.iter().map(|o| o.label.clone()).collect()))
+                })
+                .collect();
+            for (chat_id, labels) in waits {
+                self.inner.journal.note_shutdown_wait(&chat_id, &labels);
+            }
             let working: Vec<String> = lock(&self.inner.statuses)
                 .values()
                 .filter(|session| session.status == SessionStatus::Working)
@@ -2292,6 +2307,15 @@ impl SessionsEngine {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
             }
         }
+    }
+
+    /// The chats whose wait on their own background work the last shutdown
+    /// ended, with what each waited on (see [`Self::shutdown`]); taken once.
+    pub fn take_shutdown_waits(&self) -> Vec<(String, Vec<String>)> {
+        self.inner.journal.take_shutdown_waits().unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "shutdown wait markers unreadable");
+            Vec::new()
+        })
     }
 
     /// The engine is going down because its account signed out: the turns
@@ -7118,6 +7142,60 @@ mod tests {
         assert!(s.waiting.is_none());
         assert!(s.last_completed_turn.is_some());
         rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_chat_waiting_on_its_background_work_when_the_engine_stops_is_resumed_once() {
+        use zeron_rpc::{Caller, RpcService, methods, with_caller};
+        let rig = wake_rig("chat-wait-stop", true).await;
+        // The chat as the workspace lists it (hosted here).
+        let device = rig.core.orchestration.device_id().to_owned();
+        with_caller(
+            Caller::Local,
+            rig.core.rpc_service().handle(
+                methods::MUTATE,
+                serde_json::json!({"op":"createChat","chatId":rig.chat,"deviceId":device,
+                    "config":{"harness":"mock","sandbox":"workspace-write"}}),
+            ),
+        )
+        .await
+        .unwrap();
+        // Its turn completed into a wait on its own build.
+        rig.turn.set_background(1);
+        rig.turn.set_background_agents(vec![waiting_agent("build")]);
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        assert_eq!(waits_on(&settled(&rig).await), ["build"]);
+        // The engine stops: the build and the wait end with it.
+        rig.core.shutdown().await;
+        let dir = rig._dir.path().to_path_buf();
+        drop(rig.core);
+
+        let core = crate::EngineCore::assemble(&dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
+        let rpc = core.rpc_service();
+        let before = core.orchestration.take_before_stop();
+        assert!(
+            before.iter().filter(|s| s.chat_id == "chat-wait-stop").all(|s| s.waiting.is_none()),
+            "its row no longer says it waited: the journal's mark does"
+        );
+        assert_eq!(rpc.resume_after_restart(before), ["chat-wait-stop"]);
+        // Once: the mark is taken.
+        assert!(rpc.resume_after_restart(core.orchestration.take_before_stop()).is_empty());
+        let handle = core.doc_host.open("chat-wait-stop").unwrap();
+        let mut said: Vec<String> = handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .into_iter()
+            .filter_map(|c| match c.payload {
+                zeron_doc::SessionCommandPayload::Run { request, .. } => Some(request.prompt),
+                _ => None,
+            })
+            .collect();
+        said.extend(handle.doc().read_queue().unwrap().into_iter().map(|q| q.text));
+        let resumed: Vec<&String> = said.iter().filter(|p| p.contains("[Resumed] The engine restarted")).collect();
+        assert_eq!(resumed.len(), 1, "{said:?}");
+        assert!(resumed[0].contains("agent build") && resumed[0].contains("run it again"), "{}", resumed[0]);
+        core.shutdown().await;
     }
 
     #[tokio::test]
