@@ -43,12 +43,26 @@ local WORDS = {
 }
 local ROTATE = 7
 
-return ui.component(function(props: Props): Node
-	local now = ui.use_state(ui.now() / 1000)
-	-- Once a second: the clock shows whole seconds, and the word turns on
-	-- one of them.
-	ui.every(1000, function()
+-- Once a second, one clock for every line showing (the script's own): the
+-- clock shows whole seconds, and the word turns on one of them. One timer,
+-- so all of them change in the same frame rather than each in its own; it
+-- writes nothing while no line shows.
+local now = ui.state("ds_working_now", ui.now() / 1000)
+local showing = 0
+ui.every(1000, function()
+	if showing > 0 then
 		now:set(ui.now() / 1000)
+	end
+end)
+
+return ui.component(function(props: Props): Node
+	showing += 1
+	-- (Shown after none did: the clock as it is now, not as it last was.)
+	if showing == 1 then
+		now:set(ui.now() / 1000)
+	end
+	ui.on_cleanup(function()
+		showing -= 1
 	end)
 	local seed = props.seed or 0
 	local function since(): number
@@ -67,35 +81,57 @@ return ui.component(function(props: Props): Node
 	end
 	local small = props.size == "sm"
 	local text_size = if small then "$font.size.sm" else "$font.size.md"
-	return ui.row {
-		class = "ds-working",
-		h = if small then 20 else 26,
-		gap = if small then "$zeron.space.tight" else "$space.2",
+	local h = if small then 20 else 26
+	-- The line's room, as wide as where it stands and its own height, read
+	-- once: the line itself is then a box of a set size, laid out by itself
+	-- (zgx's layout boundary), so its clock ticking, its word rolling and
+	-- its ring stepping lay out the line alone, never the transcript or the
+	-- crew around it. (Its own width given in points: a fraction of its
+	-- parent's isn't a boundary.)
+	local room = ui.use_state(0)
+	return ui.div {
+		w_full = true,
+		h = h,
 		min_w = 0,
-		items = "center",
-		selectable = false,
-		label = locale.t("ds.working.label"),
-		status.StatusIcon { kind = "working", size = if small then 14 else 16 },
-		RollText {
-			function(): string
-				if sending() then
-					return locale.s("ds.working.sending")
-				end
-				local word = WORDS[(seed + seconds() // ROTATE) % #WORDS + 1]
-				return locale.s("ds.working.word", { word = locale.s(word) })
+		on_resize = function(sz: { w: number, h: number })
+			if math.abs(sz.w - room:peek()) >= 0.5 then
+				room:set(sz.w)
+			end
+		end,
+		ui.row {
+			class = "ds-working",
+			w = function(): number
+				return room:get()
 			end,
-			text_size = text_size,
-			color = "$text.secondary",
+			h = h,
 			shrink = 0,
-		},
-		ui.text {
-			function(): string
-				return if sending() then "" else status.elapsed(seconds())
-			end,
-			tabular = true,
-			shrink = 0,
-			text_size = text_size,
-			color = "$text.tertiary",
+			gap = if small then "$zeron.space.tight" else "$space.2",
+			min_w = 0,
+			items = "center",
+			selectable = false,
+			label = locale.t("ds.working.label"),
+			status.StatusIcon { kind = "working", size = if small then 14 else 16 },
+			RollText {
+				function(): string
+					if sending() then
+						return locale.s("ds.working.sending")
+					end
+					local word = WORDS[(seed + seconds() // ROTATE) % #WORDS + 1]
+					return locale.s("ds.working.word", { word = locale.s(word) })
+				end,
+				text_size = text_size,
+				color = "$text.secondary",
+				shrink = 0,
+			},
+			ui.text {
+				function(): string
+					return if sending() then "" else status.elapsed(seconds())
+				end,
+				tabular = true,
+				shrink = 0,
+				text_size = text_size,
+				color = "$text.tertiary",
+			},
 		},
 	}
 end)
