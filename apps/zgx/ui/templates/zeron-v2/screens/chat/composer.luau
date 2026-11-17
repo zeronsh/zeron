@@ -34,6 +34,7 @@ local CloudTray = require("@app/screens/chat/cloud_tray")
 local CloudMachine = require("@app/screens/chat/cloud_machine")
 local files = require("@app/screens/files/api")
 local Where = require("@app/screens/chat/where")
+local cloud = require("@account/cloud")
 local DropOverlay = require("@ds/drop_overlay")
 local mentions = require("@ds/composer_mentions")
 local Invocations = require("@app/screens/chat/invocations")
@@ -174,6 +175,10 @@ local function Composer(): Node
 	local checkout = ui.state("chat_checkout", "worktree" :: string?)
 	local branch = ui.state("chat_branch", nil :: string?)
 	local project = ui.state("chat_project", nil :: string?)
+	-- On Cloud: the size of machine a new chat starts on (Work in's Machine).
+	local machine_size = ui.state("chat_machine", nil :: string?)
+	-- An open Cloud chat's size, as its machine says (its chip's Machine menu).
+	local fixed_size = ui.state("chat_fixed_machine", nil :: string?)
 	local locals: { [string]: State<any> } =
 		{ model = model, effort = effort, fast = fast, options = options, access = access, plan = plan }
 
@@ -467,6 +472,22 @@ local function Composer(): Node
 		branch = branch,
 		active = new_chat,
 	}
+	-- The sizes a new Cloud chat can start on, as Settings → Cloud lists them,
+	-- the account's default tagged. It starts on the default: as that changes
+	-- (Settings → Cloud), or the size picked is no longer offered, the pick
+	-- goes back to it.
+	local function machine_choices(): { CloudMachine.SizeChoice }
+		return CloudMachine.size_choices(cloud.machines(), cloud.machine())
+	end
+	local seen_default: string? = nil
+	ui.effect(function()
+		local default = cloud.machine()
+		local size = CloudMachine.size_for(cloud.machines(), if default == seen_default then machine_size:peek() else nil, default)
+		seen_default = default
+		if machine_size:peek() ~= size then
+			machine_size:set(size)
+		end
+	end)
 
 	local running = ui.computed(function(): boolean
 		local s = open()
@@ -1012,8 +1033,12 @@ local function Composer(): Node
 			-- (Down with its prompt: the dock's one slide.)
 			slide_next = true
 			route.open_session(chat_id)
+			-- On the size picked (Work in's Machine), the account's default
+			-- until another is; the next new chat starts on the default again.
+			local size = CloudMachine.size_for(cloud.machines(), machine_size:peek(), cloud.machine())
+			machine_size:set(CloudMachine.size_for(cloud.machines(), nil, cloud.machine()))
 			sessions
-				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true })
+				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true, machine = size })
 				:after(function(made: any)
 					local cwd = if type(made) == "table" then made.cwd else nil
 					req.cwd = if type(cwd) == "string" and cwd ~= "" then cwd else nil
@@ -1129,6 +1154,14 @@ local function Composer(): Node
 	end)
 	-- (The catalog's device, a new chat's project's host included.)
 	local accounts = shared.model_accounts(run_device)
+	-- (The chip's chosen size: the one its machine is on, or will come back on.)
+	ui.effect(function()
+		local s = machine.session()
+		local size = if s then cloud.resizing:get()[s.chat] or s.machine else nil
+		if fixed_size:peek() ~= size then
+			fixed_size:set(size)
+		end
+	end)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -1148,8 +1181,20 @@ local function Composer(): Node
 				on = d.name
 			end
 		end
+		-- A Cloud chat: on Cloud, and the size of its machine ("Cloud · Large").
+		local on_cloud = cloud.on_device((s :: any).device)
+		local restarting = false
+		if on_cloud then
+			local session = cloud.session_for(s.id, (s :: any).device)
+			-- (Its size as picked while its machine restarts on it.)
+			local to = cloud.resizing:get()[s.id]
+			on = CloudMachine.on_size("Cloud", CloudMachine.size_name(cloud.machines(), to or (session and session.machine)))
+			restarting = to ~= nil
+		end
 		return {
 			device = on,
+			cloud = on_cloud,
+			restarting = restarting,
 			name = name,
 			worktree = path ~= nil and s.cwd ~= nil and s.cwd ~= path,
 			project = project,
@@ -1254,10 +1299,29 @@ local function Composer(): Node
 			device = device,
 			devices = where.devices,
 			checkout = checkout,
+			machine = machine_size,
+			machines = machine_choices,
 			branch = branch,
 			branches = where.branches,
 			branches_empty = where.branches_empty,
 			branch_fixed = branch_fixed,
+			-- On Cloud: the chip opens its machine's sizes; a pick restarts
+			-- it on the size (or wakes it there), as the tray's sizes do.
+			fixed_machine = {
+				value = fixed_size,
+				items = function(): { any }
+					return CloudMachine.chat_size_choices(cloud.machines(), cloud.machine(), running:get()) :: any
+				end,
+				on_choose = function(size: string)
+					local s = machine.session()
+					if s and s.machine ~= size then
+						machine.pick(size)
+					end
+				end,
+				note = function(): string?
+					return CloudMachine.size_note(machine.session(), running:get())
+				end,
+			},
 			cargo = shared.cargo,
 			on_remove_cargo = shared.remove_cargo,
 			on_attach = function()
