@@ -675,3 +675,38 @@ test("force names: wrapped and shortened only as they must be", function()
 	local one = labels_mod.wrap("Zeron fixes", 170, 2, m)
 	expect(#one == 1 and one[1] == "Zeron fixes").to_be(true)
 end)
+
+-- One line a pair: a pair with a message in flight is its dashed arc alone,
+-- never its straight weak line too; lit (its end hovered), the arc is
+-- restyled, not a second straight line drawn.
+test("force graph: a pair with a message in flight is one line, its arc, plain and lit", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(5)
+	app:command("map_force_edges")
+	app:frames(1)
+	local e = app:state("force_edges")
+	expect(#e.arcs >= 1).to_be(true)
+	for _, pair in e.arcs do
+		expect(`{pair} {e.drawn[pair]}`).to_be(`{pair} arc`)
+	end
+	-- (Every other weak pair: its straight line, once.)
+	local lines = 0
+	for _, v in e.drawn do
+		if v == "line" then
+			lines += 1
+		end
+	end
+	expect(lines >= 1).to_be(true)
+	-- Lit from one end: the same arc, restyled.
+	local pair = e.arcs[1]
+	local one = string.split(pair, "|")[1]
+	app:set_state("control_map_force_hover", one)
+	app:frames(3)
+	app:command("map_force_edges")
+	app:frames(1)
+	e = app:state("force_edges")
+	expect(`{pair} lit {e.lit[pair]}`).to_be(`{pair} lit arc`)
+	app:set_state("control_map_force_hover", nil)
+	app:frames(3)
+end)

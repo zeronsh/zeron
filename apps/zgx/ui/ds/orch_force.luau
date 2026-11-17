@@ -782,6 +782,28 @@ M.View = ui.component(function(props: {
 			c:text(line, lab.x, lab.y + (k - 1) * lh, t)
 		end
 	end
+	-- One line a pair: a pair with a message in flight is drawn by its arc
+	-- alone (dashed, curved), never its straight weak line as well; lit, the
+	-- same arc is restyled. (By the pair, either way round.)
+	local function pair_of(a: number, b: number): number
+		return if a < b then a * 65536 + b else b * 65536 + a
+	end
+	local function arc_of(a: number, b: number): any
+		local key = pair_of(a, b)
+		for _, arc in fmodel.arcs do
+			if pair_of(arc.a, arc.b) == key then
+				return arc
+			end
+		end
+		return nil
+	end
+	local function arc_path(arc: any): any
+		local x, y = s.x, s.y
+		local ax, ay, bx, byy = x[arc.a], y[arc.a], x[arc.b], y[arc.b]
+		local mx, my = (ax + bx) / 2, (ay + byy) / 2
+		local dx, dy = bx - ax, byy - ay
+		return ui.path():move(ax, ay):quad(mx - dy * 0.18, my + dx * 0.18, bx, byy)
+	end
 	local function fill_mark(c: any, i: number)
 		local m = marks[i]
 		if m then
@@ -791,8 +813,15 @@ M.View = ui.component(function(props: {
 			end
 		end
 	end
+	-- (For tests: how each weak pair was drawn last, and lit.)
+	local edge_style: { [number]: string } = {}
+	local lit_style: { [number]: string } = {}
 	local function draw_web(c: any)
 		local p = palette()
+		table.clear(edge_style)
+		if M.current then
+			M.current.edge_style, M.current.lit_style = edge_style, lit_style
+		end
 		local b = cull:get()
 		local still = settled:peek()
 		make(c)
@@ -820,9 +849,11 @@ M.View = ui.component(function(props: {
 			if math.max(ax, bx) < x0 or math.min(ax, bx) > x1 or math.max(ay, byy) < y0 or math.min(ay, byy) > y1 then
 				continue
 			end
-			if not l.strong then
-				-- (Heavier with its traffic: a hairline, up to a point and a half.)
+			-- (Heavier with its traffic: a hairline, up to a point and a half;
+			-- one with a message in flight is its arc's, below.)
+			if not l.strong and not (full and not moving and arc_of(l.a, l.b)) then
 				c:line(ax, ay, bx, byy, p.weak, 0.8 + math.min((l :: any).count or 0, 7) * 0.1)
+				edge_style[pair_of(l.a, l.b)] = "line"
 			end
 		end
 		for _, l in fmodel.links do
@@ -885,10 +916,8 @@ M.View = ui.component(function(props: {
 		-- Live: a dashed arc for each message in flight.
 		if full and not moving then
 			for _, a in fmodel.arcs do
-				local ax, ay, bx, byy = x[a.a], y[a.a], x[a.b], y[a.b]
-				local mx, my = (ax + bx) / 2, (ay + byy) / 2
-				local dx, dy = bx - ax, byy - ay
-				c:stroke(ui.path():move(ax, ay):quad(mx - dy * 0.18, my + dx * 0.18, bx, byy), p.live, 1.4, DASH)
+				c:stroke(arc_path(a), p.live, 1.4, DASH)
+				edge_style[pair_of(a.a, a.b)] = "arc"
 			end
 		end
 		return drawn
@@ -933,13 +962,23 @@ M.View = ui.component(function(props: {
 			counts.over_moving = moving_drawn
 			count("overlay", 0)
 		end
+		table.clear(lit_style)
 		local over = M.hover:get()
 		local i = over and fmodel.index[over]
 		if i then
 			local n = fmodel.nodes[i]
 			for _, l in fmodel.links do
 				if l.a == i or l.b == i then
-					c:line(x[l.a], y[l.a], x[l.b], y[l.b], p.lit, if l.strong then 1.8 else 1)
+					-- (Lit as it's drawn: a pair's arc restyled, not a second,
+					-- straight line.)
+					local arc = if l.strong or not settled:peek() then nil else arc_of(l.a, l.b)
+					if arc then
+						c:stroke(arc_path(arc), p.lit, 1.6, DASH)
+						lit_style[pair_of(l.a, l.b)] = "arc"
+					else
+						c:line(x[l.a], y[l.a], x[l.b], y[l.b], p.lit, if l.strong then 1.8 else 1)
+						lit_style[pair_of(l.a, l.b)] = "line"
+					end
 				end
 			end
 			local nx, ny = x[i], y[i]
