@@ -877,3 +877,53 @@ test("force names: leaders are short pointers, never longer than a link could be
 	print(`FORCELEADERS {n} leaders`)
 	expect(stats(app).leaders >= 0).to_be(true)
 end)
+
+-- Each pivot its own view: a pan in one leaves the other's alone; back, the
+-- first's as it was left; both kept through a relaunch.
+test("force pivot: each pivot keeps its own pan and zoom, through a relaunch", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(10)
+	local function v(a: any): any
+		return a:state("control_map_force_views") or {}
+	end
+	-- A: panned and zoomed.
+	app:command("map_force_pan")
+	app:command("map_force_zoom_in")
+	app:frames(5)
+	local a = v(app).orchestrator
+	expect(a ~= nil).to_be(true)
+	-- B: first time, its own fit; A's view untouched.
+	app:set_state("control_map_force_pivot", "machine")
+	settle(app, 240)
+	app:frames(20)
+	expect(v(app).machine).to_be(nil)
+	local b_zoom = stats(app).zoom
+	expect(v(app).orchestrator.x).to_be(a.x)
+	-- B: panned; back to A: A's own view, as left.
+	app:command("map_force_pan")
+	app:command("map_force_pan")
+	app:frames(5)
+	local b = v(app).machine
+	expect(b ~= nil and math.abs(b.zoom - b_zoom) < 1e-6).to_be(true)
+	app:set_state("control_map_force_pivot", "orchestrator")
+	settle(app, 240)
+	app:frames(20)
+	expect(math.abs(stats(app).zoom - a.zoom) < 1e-6).to_be(true)
+	expect(v(app).machine.x).to_be(b.x)
+	-- A relaunch: both kept, A's put back.
+	local again = mount("orch_map_fixture.luau")
+	again:resize(1440, 2400)
+	again:command("map_only")
+	again:command("map_force_big")
+	again:command("map_force")
+	again:frames(90)
+	expect(v(again).orchestrator.x).to_be(a.x)
+	expect(v(again).machine.x).to_be(b.x)
+	expect(math.abs((again:state("control_map_force_stats") or {}).zoom - a.zoom) < 1e-6).to_be(true)
+	-- Fit: this pivot's view only.
+	again:click("#orch-force-fit")
+	again:frames(10)
+	expect(v(again).orchestrator).to_be(nil)
+	expect(v(again).machine.x).to_be(b.x)
+end)

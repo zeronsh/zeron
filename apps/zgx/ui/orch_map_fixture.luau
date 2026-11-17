@@ -366,6 +366,32 @@ end }
 ui.command { id = "map_mark_read_do", title = "Map: Mark all done as read", run = function()
 	page.mark_done_read(require("@ds/orch_force").done_unread_ids())
 end }
+-- The force Map's hover cards: Windows installer at work with Progress's
+-- row of it (a note, steps, its last step), Code signing done and unread
+-- with its card's outcome and pull request.
+ui.command { id = "card_progress", title = "Cards: Windows installer's progress", run = function()
+	local t = os.time()
+	local cur = table.clone(orchestration.progress:peek() or {})
+	cur["th-reins-win"] = { state = "working", started = t - 840, last_step = t - 30, note = "Signing the MSI with the release key", steps = { done = 2, total = 5 }, stalled = false, refreshing = false, updated = t }
+	orchestration.progress:set(cur)
+end }
+ui.command { id = "card_outcome", title = "Cards: Code signing done, its outcome", run = function()
+	touch("th-reins-sign", function(c)
+		c.status, c.updated = "done", os.time() - 7200
+	end)
+	local now = table.clone(orchestration.now:peek() :: any)
+	local items = {}
+	for _, it in now.items or {} do
+		if it.id == "it-sign" then
+			it = table.clone(it)
+			it.outcome = "Signed the installer with the new key; notarized."
+			it.links = { { kind = "pr", label = "#412", target = "https://example.invalid/pr/412" } }
+		end
+		table.insert(items, it)
+	end
+	now.items = items
+	orchestration.now:set(now)
+end }
 -- An open ask of its.
 ui.command { id = "sign_ask", title = "Signing: asks", run = function()
 	local now = table.clone(orchestration.now:peek() :: any)

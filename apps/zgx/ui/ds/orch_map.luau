@@ -60,6 +60,10 @@ export type Props = {
 	-- Marks these chats done as read (the space's menu: Mark all done as
 	-- read), with its Undo.
 	mark_read: ((ids: { string }) -> ())?,
+	-- Progress's row of a chat, and showing a board card (the force Map's
+	-- hover card).
+	progress: ((id: string) -> any)?,
+	on_open_card: ((item: string) -> ())?,
 }
 
 local M = {}
@@ -345,6 +349,8 @@ M.Map = ui.component(function(props: Props): Node
 					on_open_orchestrator = props.on_open_orchestrator,
 					menu = props.menu,
 					mark_read = props.mark_read,
+					progress = props.progress,
+					on_open_card = props.on_open_card,
 					register = register,
 				}
 			elseif variant == "machines" then

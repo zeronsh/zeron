@@ -256,6 +256,19 @@ local function world(): any
 	}
 end
 
+-- A board card shown (the Map's hover card): the Board tab, the card ringed
+-- a moment where it stands.
+M.board_reveal = ui.shared("control_board_reveal", nil :: string?)
+function M.open_card(item: string)
+	M.tab:set("board")
+	M.board_reveal:set(item)
+	ui.after(2400, function()
+		if M.board_reveal:peek() == item then
+			M.board_reveal:set(nil)
+		end
+	end)
+end
+
 -- Mark done as read, from the Map's menu: put away at once, an Undo for a
 -- few seconds, then read on every device (sessions.seen, as opening each
 -- would; a read can't be taken back, so it waits for the Undo to pass).
@@ -1070,6 +1083,11 @@ local function map(): Node
 			-- A secondary click on anything on it (screens/control/map_menu).
 			menu = MapMenu().entries,
 			mark_read = M.mark_done_read,
+			-- (The hover card's: Progress's row of a chat, and a card shown.)
+			progress = function(id: string): any
+				return (orchestration.progress:get() or {})[id]
+			end,
+			on_open_card = M.open_card,
 		},
 		MapMenu().Dialogs(),
 	}
