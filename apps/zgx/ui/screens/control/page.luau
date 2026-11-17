@@ -845,6 +845,19 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 		on_move = function(id: string, state: string, order: number)
 			orchestration.move_item(id, state, order):after(function() end, said("control.board.failed"))
 		end,
+		-- (Put in Blocked: paused; a paused card taken out: resumed there.)
+		on_pause = function(id: string)
+			orchestration.pause_item(id):after(function() end, said("control.board.failed"))
+		end,
+		on_resume = function(id: string, state: string)
+			orchestration.resume_item(id, state):after(function() end, said("control.board.failed"))
+		end,
+		paused_open = M.board_paused,
+		-- (An open ask naming a card marks it asked.)
+		asks = function(): any
+			local now = BD.now()
+			return now and now.asks
+		end,
 		on_approve = function(id: string)
 			orchestration.approve_item(id):after(function() end, said("control.board.failed"))
 		end,
@@ -957,6 +970,8 @@ M.map_view = ui.persist("control_map", OrchMap.DEFAULT)
 M.board_expanded = ui.persist("control_board_expanded", false)
 -- Whether the board's Queued column shows its Later group: kept as well.
 M.board_later = ui.persist("control_board_later", false)
+-- Whether its Blocked column shows its Paused group: kept too.
+M.board_paused = ui.persist("control_board_paused", false)
 local timeline = ui.shared("orchestration.timeline", {} :: { [string]: { any } })
 
 local function map(): Node

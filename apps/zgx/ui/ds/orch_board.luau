@@ -11,6 +11,15 @@
 -- head). Its head counts Up next. A card dragged from one group to the
 -- other changes its state; dragged into Now, it starts.
 --
+-- Blocked is in two groups the same way: Needs you (blocked by its work,
+-- an "asked" mark on a card whose ask is open) and, under it, Paused (held
+-- by the person: `paused_at` set), folded until opened (`paused_open`, its
+-- count on its head). Its head counts both. A card dropped anywhere in
+-- Blocked is paused (`on_pause(id)`); a paused card dragged to another
+-- column resumes there (`on_resume(id, state)`); Move to says Pause, and
+-- Resume for a paused card. A card the engine's board check flagged or
+-- moved carries its note (`check`) as one quiet line.
+--
 -- The columns share the board's width evenly, each a lane of its own, its
 -- name, glyph and count on one line across them all; an empty one keeps
 -- its width, quiet, but Blocked, which stands only while it holds a card
@@ -50,7 +59,7 @@
 --
 -- A click opens its thread. A secondary click opens its menu: Start now
 -- (a Queued card with no thread yet), its thread, Move to (Up next, Later,
--- Now, Blocked, Review, Done), its priority, the dump it came from, and
+-- Now, Pause (or Resume), Review, Done), its priority, the dump it came from, and
 -- Delete, which takes it off the board at once (never its chat), an Undo
 -- beside it for a while.
 --
@@ -71,6 +80,11 @@
 --     inbox = true,              -- (no longer used: Later is in Queued)
 --     now = fn() -> number,      -- Unix seconds: what "today" is
 --     on_move = fn(id, state, order), on_priority = fn(id, priority),
+--     on_pause = fn(id),         -- a card put in Blocked: paused
+--     on_resume = fn(id, state), -- a paused card taken out, into `state`
+--     paused_open = state,       -- whether Blocked's Paused group is open
+--     asks = fn() -> { Ask },    -- every ask: an open one naming a card
+--                                -- (`item_id`) marks it "asked"
 --     on_open_thread = fn(chat, message?), on_link = fn(link),
 --     on_answer = fn(ask, { option?, text? }),  -- a card waiting on a
 --                                -- decision: its options as chips (ds/orch_choices)
@@ -154,6 +168,12 @@ export type Item = {
 	space_id: string?,
 	device_id: string?,
 	waiting: string?,
+	-- Paused by the person (Blocked's Paused group): when, in Unix seconds
+	-- (or an RFC3339 time as the wire has it).
+	paused_at: any?,
+	-- The engine's one-line note on it: `kind` stale, nothing_to_review,
+	-- still_working or moved (camelCase too), `note`, `since`, `nudged_at`.
+	check: { [string]: any }?,
 }
 export type Orchestrator = { id: string, kind: string?, name: string, hue: number, archived: boolean? }
 export type Todo = { done: number, total: number, current: string? }
@@ -173,6 +193,10 @@ export type Props = {
 	inbox: boolean?,
 	now: (() -> number)?,
 	on_move: ((id: string, state: string, order: number) -> ())?,
+	on_pause: ((id: string) -> any)?,
+	on_resume: ((id: string, state: string) -> any)?,
+	paused_open: any?,
+	asks: (() -> { { [string]: any } }?)?,
 	on_priority: ((id: string, priority: string) -> ())?,
 	on_open_thread: ((chat: string, message: string?) -> ())?,
 	on_answer: ((ask: any, choice: any) -> any)?,
@@ -217,6 +241,12 @@ local PLACES: { Place } = {
 }
 -- Queued's two groups' states.
 local UP_NEXT, LATER = "planned", "inbox"
+-- The columns in two groups, the lower one under a head that folds:
+-- Queued's Later, Blocked's Paused.
+local FOLDS: { [string]: { head: string, glyph: Icon.Name? } } = {
+	queued = { head = "orch.board.later_count" },
+	blocked = { head = "orch.board.paused_count", glyph = "action-pause" },
+}
 
 local RANK: { [string]: number } = { urgent = 0, high = 1, normal = 2, low = 3 }
 local PRIORITIES = { "urgent", "high", "normal", "low" }
@@ -259,13 +289,73 @@ local function in_column(item: Item, col: Column, now: number): boolean
 	return (item.state == col.state or item.state == col.later) and data.shown_today(item, now)
 end
 
--- A Queued list (Up next's, then Later's) split: Up next's cards, Later's.
-local function groups(list: { Item }): ({ Item }, { Item })
-	local up, later = {}, {}
-	for _, it in list do
-		table.insert(if it.state == LATER then later else up, it)
+-- When it was paused (Unix seconds), if it's paused: Blocked, held by the
+-- person.
+local function paused_at(it: Item): number?
+	if it.state ~= "blocked" then
+		return nil
 	end
-	return up, later
+	local p = it.paused_at
+	if p == nil then
+		p = (it :: any).pausedAt
+	end
+	if type(p) == "number" then
+		-- (Milliseconds, from a host that keeps them.)
+		return if p > 1e11 then p / 1000 else p
+	elseif type(p) == "string" and p ~= "" then
+		return data.rfc3339(p) or 0
+	end
+	return nil
+end
+local function is_paused(it: Item): boolean
+	return paused_at(it) ~= nil
+end
+
+-- Whether `it` is in its column's lower group (Queued's Later, Blocked's
+-- Paused).
+local function lower_of(key: string, it: Item): boolean
+	if key == "queued" then
+		return it.state == LATER
+	elseif key == "blocked" then
+		return is_paused(it)
+	end
+	return false
+end
+
+-- A column's list split into its two groups: the upper (Up next, Needs
+-- you), the lower (Later, Paused). A column without groups: all upper.
+local function groups(list: { Item }, key: string): ({ Item }, { Item })
+	local k = key
+	local up, low = {}, {}
+	for _, it in list do
+		table.insert(if lower_of(k, it) then low else up, it)
+	end
+	return up, low
+end
+
+-- The engine's note on a card: its words and ink (a check found wrong:
+-- the warning's; a move it made: quiet).
+local CHECK_TONE: { [string]: string } = {
+	stale = "warn",
+	nothing_to_review = "warn",
+	nothingToReview = "warn",
+	still_working = "warn",
+	stillWorking = "warn",
+	ci_failing = "warn",
+	ciFailing = "warn",
+	moved = "quiet",
+}
+local TONE_INK: { [string]: string } = { warn = "$zeron.tone.warning.ink", quiet = "$text.tertiary" }
+local function check_of(it: Item): { note: string, tone: string }?
+	local c = it.check
+	if type(c) ~= "table" then
+		return nil
+	end
+	local note = c.note
+	if type(note) ~= "string" or note == "" then
+		return nil
+	end
+	return { note = note, tone = CHECK_TONE[c.kind or ""] or "quiet" }
 end
 
 local function sorted(list: { Item }): { Item }
@@ -352,6 +442,8 @@ local ASKED = { key = "orch.board.waiting_on_you", ink = "$zeron.status.input" }
 local ASKED_LONG = { key = "orch.board.waiting_on_you", ink = "$zeron.tone.warning.ink" }
 -- Its ask put off until later (ds/orch_data `deferred`).
 local DEFERRED = { key = "orch.board.deferred", ink = "$text.tertiary" }
+-- Paused by the person (Blocked's Paused group).
+local PAUSED = { key = "orch.board.paused_by_you", ink = "$text.tertiary" }
 
 -- Which card each open ask waits on, by card id: the one its `item_id`
 -- names (the card of the asking turn's own work), else its thread's newest
@@ -483,12 +575,42 @@ local OrchBoard = ui.component(function(props: Props): Node
 			own_later:set(on)
 		end
 	end
+	-- Whether Blocked's Paused group is open (folded until opened).
+	local own_paused = ui.use_state(false)
+	local function paused_open(): boolean
+		local e = props.paused_open
+		if e ~= nil then
+			return (e :: any):get() == true
+		end
+		return own_paused:get()
+	end
+	local function set_paused_open(on: boolean)
+		local e = props.paused_open
+		if e ~= nil then
+			(e :: any):set(on)
+		else
+			own_paused:set(on)
+		end
+	end
+	-- Whether a column's lower group is open (Queued's Later, Blocked's
+	-- Paused).
+	local function fold_open(key: string): boolean
+		return if key == "blocked" then paused_open() else later_open()
+	end
+	local function set_fold_open(key: string, on: boolean)
+		if key == "blocked" then
+			set_paused_open(on)
+		else
+			set_later_open(on)
+		end
+	end
 
 	local columns: { Column } = table.clone(COLUMNS)
 
 	-- A card just dropped, where it went, until the items say so (the
 	-- engine answers a beat later): it stays where it was let go.
-	type Pending = { id: string, state: string, order: number }
+	-- (`paused`: paused or resumed here, as it'll be once the engine says.)
+	type Pending = { id: string, state: string, order: number, paused: boolean? }
 	local pending = ui.use_state(nil :: Pending?)
 	-- Cards deleted here, gone at once (the engine's word follows).
 	local gone = ui.use_state({} :: { [string]: boolean })
@@ -530,6 +652,39 @@ local OrchBoard = ui.component(function(props: Props): Node
 		waits_was = now
 		return now
 	end)
+	-- The cards an open ask names (`item_id`), from `asks`: a Needs you
+	-- card's "asked" mark. (The same table while the set is.)
+	local named_was: { [string]: boolean } = {}
+	local named = ui.computed(function(): { [string]: boolean }
+		local out: { [string]: boolean } = {}
+		local all = if props.asks then props.asks() else nil
+		for _, a in all or {} do
+			local item = a.item_id or a.itemId
+			if a.state == "open" and type(item) == "string" then
+				out[item] = true
+			end
+		end
+		local same = true
+		for k in out do
+			if not named_was[k] then
+				same = false
+				break
+			end
+		end
+		if same then
+			for k in named_was do
+				if not out[k] then
+					same = false
+					break
+				end
+			end
+		end
+		if same then
+			return named_was
+		end
+		named_was = out
+		return out
+	end)
 
 	-- The items shown, by column, each sorted (filtered first).
 	local shown = ui.computed(function(): { [string]: { Item } }
@@ -547,11 +702,21 @@ local OrchBoard = ui.component(function(props: Props): Node
 			if it.removed or hidden[it.id] then
 				continue
 			end
-			if moved and it.id == moved.id and (it.state ~= moved.state or it.order ~= moved.order) then
+			if
+				moved
+				and it.id == moved.id
+				and (it.state ~= moved.state or it.order ~= moved.order or (moved.paused ~= nil and is_paused(it) ~= moved.paused))
+			then
 				local copy = table.clone(it)
 				copy.state, copy.order = moved.state, moved.order
 				if moved.state == "done" and (copy.done or 0) < today then
 					copy.done = now()
+				end
+				if moved.paused == true and not is_paused(it) then
+					copy.paused_at = at
+				elseif moved.paused == false then
+					copy.paused_at = nil
+					;(copy :: any).pausedAt = nil
 				end
 				it = copy
 			end
@@ -565,8 +730,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 		end
 		for k, l in out do
-			if k == "queued" then
-				local up, later = groups(l)
+			if FOLDS[k] then
+				local up, later = groups(l, k)
 				out[k] = table.move(sorted(later), 1, #later, #up + 1, sorted(up))
 			else
 				out[k] = sorted(l)
@@ -578,8 +743,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 	-- (Queued: Up next's, then Later's where it's open).
 	local function visible(key: string, list: { Item }): { Item }
 		local l = list
-		if key == "queued" and not later_open() then
-			l = (groups(l))
+		if FOLDS[key] and not fold_open(key) then
+			l = (groups(l, key))
 		end
 		if expanded() or #l <= CAP then
 			return l
@@ -590,8 +755,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 	-- would show, a folded Later's not among them).
 	local function past_cap(key: string, list: { Item }): number
 		local n = #list
-		if key == "queued" and not later_open() then
-			local up = groups(list)
+		if FOLDS[key] and not fold_open(key) then
+			local up = groups(list, key)
 			n = #up
 		end
 		return math.max(0, n - CAP)
@@ -666,18 +831,28 @@ local OrchBoard = ui.component(function(props: Props): Node
 	-- "carrying", or "landed" (let go on the board: the cards there take their
 	-- new places at once, not sliding back).
 	type Carry = { id: string, col: string, h: number, w: number, rank: number }
-	type Target = { col: string, index: number, y: number, state: string? }
+	-- (`lower`: in a column of two groups, whether it's the lower one.)
+	type Target = { col: string, index: number, y: number, state: string?, lower: boolean? }
 	local carry = ui.use_state(nil :: Carry?)
 	local target = ui.use_state(nil :: Target?)
 	local phase = ui.use_state("idle")
 	local lane_refs: { [string]: any } = {}
 	local body_refs: { [string]: any } = {}
 	local slot_refs: { [string]: any } = {}
-	-- Queued's Later head: above it Up next, below it Later.
-	local later_ref = ui.ref()
+	-- Each lower group's head (Queued's Later, Blocked's Paused): above it
+	-- the upper group, below it the lower.
+	local fold_refs: { [string]: any } = { queued = ui.ref(), blocked = ui.ref() }
 	local function set_target(t: Target?)
 		local was = target:peek()
-		if was and t and was.col == t.col and was.index == t.index and was.state == t.state and math.abs(was.y - t.y) < 0.5 then
+		if
+			was
+			and t
+			and was.col == t.col
+			and was.index == t.index
+			and was.state == t.state
+			and was.lower == t.lower
+			and math.abs(was.y - t.y) < 0.5
+		then
 			return
 		end
 		if was == nil and t == nil then
@@ -743,20 +918,25 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local body = rect_of(body_refs[key])
 		-- (Among the cards it shows: past ten, the rest are under "Show more".)
 		local list = visible(key, others(key, c))
-		-- (In Queued: Up next above Later's head, Later below it.)
+		-- (In Queued: Up next above Later's head, Later below it; in Blocked,
+		-- Needs you above Paused's head, Paused below it.)
 		local state: string? = nil
+		local lower: boolean? = nil
 		local offset = 0
 		local floor: number? = nil
-		if key == "queued" then
-			local up, later = groups(list)
-			local head = rect_of(later_ref)
+		if FOLDS[key] then
+			local up, low = groups(list, key)
+			local head = rect_of(fold_refs[key])
 			if head and head.height > 0 and y >= head.y then
-				state, list, offset = LATER, later, #up
+				lower, list, offset = true, low, #up
 				if body then
 					floor = head.y + head.height - body.y + gap
 				end
 			else
-				state, list = UP_NEXT, up
+				lower, list = false, up
+			end
+			if key == "queued" then
+				state = if lower then LATER else UP_NEXT
 			end
 		end
 		local index = #list + 1
@@ -790,21 +970,23 @@ local OrchBoard = ui.component(function(props: Props): Node
 		else
 			at = floor or 0
 		end
-		return { col = key, index = offset + index, y = at, state = state }
+		return { col = key, index = offset + index, y = at, state = state, lower = lower }
 	end
 
 	-- Its place where it was picked up (so nothing moves as it lifts).
 	local function home(c: Carry): Target
 		local index = 1
 		local state: string? = nil
+		local lower: boolean? = nil
 		for _, it in shown:peek()[c.col] or {} do
 			if it.id == c.id then
 				state = if c.col == "queued" then it.state else nil
+				lower = if FOLDS[c.col] then lower_of(c.col, it) else nil
 				break
 			end
 			index += 1
 		end
-		return { col = c.col, index = index, y = top_in(c.col, c.id, c) or 0, state = state }
+		return { col = c.col, index = index, y = top_in(c.col, c.id, c) or 0, state = state, lower = lower }
 	end
 
 	local function finish(how: string)
@@ -865,6 +1047,28 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end)
 	end
 
+	-- Until the engine says otherwise, where it was put (then the items
+	-- speak for themselves).
+	local function hold_pending(p: Pending)
+		pending:set(p)
+		ui.after(4000, function()
+			local was = pending:peek()
+			if was and was.id == p.id and was.order == p.order and was.state == p.state then
+				pending:set(nil)
+			end
+		end)
+	end
+	-- Paused (put in Blocked): its threads stopped, held there.
+	local function pause(it: Item, order: number)
+		hold_pending({ id = it.id, state = "blocked", order = order, paused = true })
+		;(props.on_pause :: any)(it.id)
+	end
+	-- A paused card resumed into `state`.
+	local function resume(it: Item, state: string, order: number)
+		hold_pending({ id = it.id, state = state, order = order, paused = false })
+		;(props.on_resume :: any)(it.id, state)
+	end
+
 	-- Let go at `t`: its state, and the order between its new neighbours.
 	local function land(c: Carry, t: Target)
 		local col: Column? = nil
@@ -874,19 +1078,39 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 		end
 		local back = home(c)
-		if not col or not props.on_move or (t.col == c.col and t.index == back.index and t.state == back.state) then
+		if
+			not col
+			or not props.on_move
+			or (t.col == c.col and t.index == back.index and t.state == back.state and t.lower == back.lower)
+		then
+			return finish("idle")
+		end
+		local carried: Item? = nil
+		for _, it in shown:peek()[c.col] or {} do
+			if it.id == c.id then
+				carried = it
+			end
+		end
+		local was_paused = carried ~= nil and is_paused(carried)
+		-- (A paused card into Needs you: Needs you is its work's, not the
+		-- person's to put it in. It goes back.)
+		if was_paused and t.col == "blocked" and t.lower == false then
 			return finish("idle")
 		end
 		local state = t.state or col.state
+		local lower = t.lower == true
 		local list = others(t.col, c)
-		-- (Its neighbours of its own priority, and its own group in Queued:
-		-- the board sorts by priority first, so another's order says nothing
-		-- of where it stands.)
+		-- (Its neighbours of its own priority, and its own group (Queued's,
+		-- Blocked's): the board sorts by priority first, so another's order
+		-- says nothing of where it stands.)
+		local function apart(x: Item?): boolean
+			return x ~= nil and ((RANK[x.priority] or 2) ~= c.rank or x.state ~= state or lower_of(t.col, x) ~= lower)
+		end
 		local prev, nxt = list[t.index - 1], list[t.index]
-		if prev and ((RANK[prev.priority] or 2) ~= c.rank or prev.state ~= state) then
+		if apart(prev) then
 			prev = nil
 		end
-		if nxt and ((RANK[nxt.priority] or 2) ~= c.rank or nxt.state ~= state) then
+		if apart(nxt) then
 			nxt = nil
 		end
 		local order: number
@@ -900,6 +1124,16 @@ local OrchBoard = ui.component(function(props: Props): Node
 			order = 0
 		end
 		local id = c.id
+		-- (Into Blocked from elsewhere, or into Paused: paused. A paused card
+		-- out of Blocked: resumed there. Within a group: only its order.)
+		if carried and t.col == "blocked" and not was_paused and (c.col ~= "blocked" or lower) and props.on_pause then
+			finish("landed")
+			return pause(carried, order)
+		end
+		if carried and was_paused and t.col ~= "blocked" and props.on_resume then
+			finish("landed")
+			return resume(carried, state, order)
+		end
 		-- (Queued, carried into Now: it starts.)
 		if state == "active" then
 			for _, it in shown:peek()[c.col] or {} do
@@ -1032,16 +1266,23 @@ local OrchBoard = ui.component(function(props: Props): Node
 
 	-- Moved to the end of `place` (a column, or one of Queued's groups).
 	local function move_to(it: Item, place: Place)
-		if place.state == "active" and startable(it) then
+		local paused = is_paused(it)
+		if place.state == "active" and startable(it) and not paused then
 			return start(it)
 		end
+		local into_paused = place.state == "blocked" and props.on_pause ~= nil
 		local last = 0
 		for _, x in shown:peek()[place.key] or {} do
-			if x.id ~= it.id and x.state == place.state then
+			if x.id ~= it.id and x.state == place.state and (not into_paused or is_paused(x)) then
 				last = math.max(last, x.order or 0)
 			end
 		end
 		local order = last + 1
+		if into_paused and not paused then
+			return pause(it, order)
+		elseif paused and place.state ~= "blocked" and props.on_resume then
+			return resume(it, place.state, order)
+		end
 		pending:set({ id = it.id, state = place.state, order = order })
 		;(props.on_move :: any)(it.id, place.state, order)
 	end
@@ -1106,19 +1347,45 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 		end
 		if props.on_move then
+			-- (Blocked is Pause where pausing is wired; a paused card's first
+			-- is Resume (into Now), each other place resuming it there.)
 			local sub: { any } = {}
+			local paused = is_paused(it)
+			local can_pause = props.on_pause ~= nil
+			local can_resume = paused and props.on_resume ~= nil
 			for _, place in PLACES do
-				table.insert(sub, {
-					label = locale.s(place.name),
-					checked = function(): boolean
-						return item().state == place.state
-					end,
-					on_select = function()
-						if item().state ~= place.state then
+				local blocked = place.state == "blocked"
+				if can_resume and place.state == "active" then
+					table.insert(sub, 1, {
+						label = locale.s("orch.board.resume"),
+						icon = "action-play",
+						on_select = function()
 							move_to(item(), place)
-						end
-					end,
-				})
+						end,
+					})
+				elseif can_pause and blocked and paused then
+					continue
+				elseif can_pause and blocked then
+					table.insert(sub, {
+						label = locale.s("orch.board.pause"),
+						icon = "action-pause",
+						on_select = function()
+							move_to(item(), place)
+						end,
+					})
+				else
+					table.insert(sub, {
+						label = locale.s(place.name),
+						checked = function(): boolean
+							return item().state == place.state
+						end,
+						on_select = function()
+							if item().state ~= place.state then
+								move_to(item(), place)
+							end
+						end,
+					})
+				end
 			end
 			table.insert(entries, { label = locale.s("orch.board.move_to"), icon = "arrow-right", submenu = sub })
 		end
@@ -1356,6 +1623,22 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local ask = ui.computed(function(): any
 			return waits:get()[id]
 		end)
+		-- Paused by the person: since when (nil: it isn't).
+		local paused_since = ui.computed(function(): number?
+			return paused_at(item())
+		end)
+		-- In Needs you with an ask open on it: its "asked" mark.
+		local is_asked = ui.computed(function(): boolean
+			local it = item()
+			if it.state ~= "blocked" or paused_since:get() ~= nil then
+				return false
+			end
+			return ask:get() ~= nil or named:get()[id] == true
+		end)
+		-- The engine's note on it.
+		local the_check = ui.computed(function(): any
+			return check_of(item())
+		end)
 		local is_stalled = ui.computed(function(): boolean
 			return item().state ~= "done" and Progress.stalled(progress_row())
 		end)
@@ -1371,6 +1654,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 				return nil
 			elseif WAITING[it.state] and (it.waiting or "") ~= "" then
 				return QUEUED
+			elseif paused_since:get() ~= nil then
+				return PAUSED
 			end
 			local a = ask:get()
 			if a then
@@ -1426,6 +1711,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 				return ""
 			end
 			local at = clock_now()
+			local since = paused_since:get()
+			if since then
+				return Progress.short(math.max(0, at - since))
+			end
 			local c = Progress.clocks(progress_row(), at)
 			if stalled() and c.since_step then
 				return Progress.short(c.since_step)
@@ -1532,6 +1821,28 @@ local OrchBoard = ui.component(function(props: Props): Node
 			sep(function(): boolean
 				return urgency() ~= nil and word() ~= nil
 			end),
+			-- Paused by the person: its glyph, before its words.
+			ui.show(function(): boolean
+				return paused_since:get() ~= nil
+			end, ui.div {
+				class = "orch-card-paused",
+				shrink = 0,
+				color = "$text.tertiary",
+				Icon { name = "action-pause", size = 11 },
+			}),
+			-- In Needs you, an ask open on it: asked.
+			ui.show(function(): boolean
+				return is_asked:get()
+			end, ui.div {
+				class = "orch-card-asked",
+				shrink = 0,
+				role = "img",
+				label = locale.t("orch.board.asked"),
+				tooltip = locale.s("orch.board.asked"),
+				tooltip_delay = 300,
+				color = "$zeron.status.input",
+				Icon { name = "status-input", size = 11 },
+			}),
 			ui.show(function(): boolean
 				return word() ~= nil
 			end, Card.Word {
@@ -1618,8 +1929,31 @@ local OrchBoard = ui.component(function(props: Props): Node
 			},
 		}
 		local function has_status(): boolean
-			return owner() ~= nil or where() ~= nil or has_word() or has_steps() or has_clock() or #prs() > 0
+			return owner() ~= nil or where() ~= nil or has_word() or has_steps() or has_clock() or #prs() > 0 or is_asked:get()
 		end
+		-- The engine's note on it: one quiet line (a check found wrong in the
+		-- warning's ink; a move it made, quieter).
+		local check_line = ui.show(function(): boolean
+			return the_check:get() ~= nil
+		end, Card.Line {
+			class = "orch-card-check-line",
+			-- (Its tone in its class too: `.orch-check-warn`, `.orch-check-quiet`.)
+			ui.presence(function(): string
+				local c = the_check:get()
+				return if c then c.tone else "quiet"
+			end, function(tone: string): Node
+				return Card.Word {
+					text = function(): string
+						local c = the_check:get()
+						return if c then c.note else ""
+					end,
+					class = `orch-card-check orch-check-{tone}`,
+					ink = function(): string
+						return TONE_INK[tone] or "$text.tertiary"
+					end,
+				}
+			end, { min_w = 0, grow = 1 }),
+		})
 
 		-- Its outcome: two lines of it, quietly; all of it where the pointer
 		-- rests, when there's more.
@@ -1716,6 +2050,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				outcome_text,
 				decision,
 				ui.show(has_status, status_line),
+				check_line,
 				-- In Review: its end, Approve or Request changes (a box for
 				-- what to change, sent to its thread).
 				ui.show(function(): boolean
@@ -1879,10 +2214,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 	end
 
 
-	-- Queued's Later: its head ("Later · 4", folded or open, where a card
-	-- carried below it lands in Later), and its cards while it's open. It
-	-- moves with the cards above it while one is carried, as they do.
-		-- A card, built as the page asks (`card_build`), else at once.
+	-- A card, built as the page asks (`card_build`), else at once.
 	local function built_card(it: Item, i: any, row: any, col: Column): Node
 		local wrap = props.card_build
 		if not wrap then
@@ -1893,7 +2225,18 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end, if type(i) == "number" then i else 0)
 	end
 
-local function later_group(col: Column, count: () -> number, cards: () -> { Item }): Node
+
+	-- A column's lower group (Queued's Later, Blocked's Paused): its head
+	-- ("Later · 4", "Paused · 2", folded or open, where a card carried below
+	-- it lands in that group), and its cards while it's open. It moves with
+	-- the cards above it while one is carried, as they do.
+	local function fold_group(col: Column, count: () -> number, cards: () -> { Item }): Node
+		local key = col.key
+		local fold = FOLDS[key]
+		local name = if key == "blocked" then "paused" else "later"
+		local function open(): boolean
+			return fold_open(key)
+		end
 		local function shift(): number
 			local c = carry:get()
 			if not c then
@@ -1903,15 +2246,15 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 			local off = 0
 			local t = target:get()
 			local carried: Item? = nil
-			for _, it in shown:get()[col.key] or {} do
+			for _, it in shown:get()[key] or {} do
 				if it.id == c.id then
 					carried = it
 				end
 			end
-			if carried and carried.state == UP_NEXT then
+			if carried and not lower_of(key, carried) then
 				off -= d
 			end
-			if t and t.col == col.key and t.state == UP_NEXT then
+			if t and t.col == key and t.lower == false then
 				off += d
 			end
 			return off
@@ -1935,20 +2278,21 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 				run:cancel()
 			end
 		end)
+		local function head_text(): string
+			return locale.s(fold.head, { n = count() })
+		end
 		return ui.column {
 			w_full = true,
 			gap = "$space.1",
-			-- (While a card is carried, Later is somewhere to put it.)
+			-- (While a card is carried, the group is somewhere to put it.)
 			hidden = function(): boolean
 				return count() == 0 and carry:get() == nil
 			end,
 			ui.button {
-				ref = later_ref,
-				class = "orch-later-head",
-				label = function(): string
-					return locale.s("orch.board.later_count", { n = count() })
-				end,
-				expanded = later_open,
+				ref = fold_refs[key],
+				class = `orch-{name}-head`,
+				label = head_text,
+				expanded = open,
 				w_full = true,
 				h = 28,
 				px = "$space.2",
@@ -1963,22 +2307,21 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 					return off:get()
 				end,
 				on_click = function()
-					set_later_open(not later_open())
+					set_fold_open(key, not open())
 				end,
 				ui.div {
 					shrink = 0,
 					Icon {
 						name = function(): any
-							return if later_open() then "alt-arrow-down" else "alt-arrow-right"
+							return if open() then "alt-arrow-down" else "alt-arrow-right"
 						end,
 						size = 12,
 					},
 				},
+				if fold.glyph then ui.div { shrink = 0, Icon { name = fold.glyph, size = 11 } } else nil,
 				ui.text {
-					function(): string
-						return locale.s("orch.board.later_count", { n = count() })
-					end,
-					class = "orch-later-label",
+					head_text,
+					class = `orch-{name}-label`,
 					text_size = "$font.size.xs",
 					weight = "$font.weight.medium",
 				},
@@ -1994,20 +2337,22 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 	local function column(col: Column, mode: string): Node
 		local stacked = mode == "stacked"
 		local queued = col.later ~= nil
+		local folds = FOLDS[col.key] ~= nil
 		local function list(): { Item }
 			return shown:get()[col.key] or {}
 		end
-		-- (Queued's head counts Up next; its Later head, Later.)
+		-- (Queued's head counts Up next; its Later head, Later. Blocked's
+		-- counts both of its groups; its Paused head, Paused.)
 		local function counted(): number
 			if not queued then
 				return #list()
 			end
-			local up = groups(list())
+			local up = groups(list(), col.key)
 			return #up
 		end
-		local function later_count(): number
-			local _, later = groups(list())
-			return #later
+		local function lower_count(): number
+			local _, low = groups(list(), col.key)
+			return #low
 		end
 		-- What it shows: ten at most until all are (Queued: by group).
 		local shows = ui.computed(function(): { Item }
@@ -2158,18 +2503,18 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 				}),
 				ui.each(ui.computed(function(): { Item }
 					local l = shows:get()
-					if not queued then
+					if not folds then
 						return l
 					end
-					return (groups(l))
+					return (groups(l, col.key))
 				end), function(it: Item, i: any, row: any): Node
 					return built_card(it, i, row, col)
 				end, { key = function(it: Item): string
 					return it.id
 				end, w_full = true }),
-				if queued then later_group(col, later_count, function(): { Item }
-					local _, later = groups(shows:get())
-					return later
+				if folds then fold_group(col, lower_count, function(): { Item }
+					local _, low = groups(shows:get(), col.key)
+					return low
 				end) else nil,
 			},
 			-- Past ten: the rest, for every column at once (and back).

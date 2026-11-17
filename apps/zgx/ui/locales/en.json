@@ -4210,7 +4210,12 @@
       "approve": "Approve",
       "request_changes": "Request changes…",
       "changes_placeholder": "What to change",
-      "deferred": "Deferred"
+      "deferred": "Deferred",
+      "pause": "Pause",
+      "resume": "Resume",
+      "paused_count": "Paused · {n}",
+      "paused_by_you": "Paused by you",
+      "asked": "Asked"
     },
     "reports": {
       "title": "Crew updates",
