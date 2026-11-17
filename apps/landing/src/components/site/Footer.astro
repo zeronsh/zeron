@@ -1,0 +1,49 @@
+---
+import { RELEASE_NOTES_URL } from "../../data/releases.ts";
+import { SITE } from "../../data/site.ts";
+import Mark from "../ui/Mark.astro";
+
+const columns = [
+  { name: "Product", links: [["Release notes", RELEASE_NOTES_URL], ["Architecture", "https://github.com/zeronsh/zeron/blob/main/ARCHITECTURE.md"]] },
+  { name: "Community", links: [["GitHub", SITE.github], ["Discord", SITE.discord], ["Sponsor", SITE.sponsor]] },
+  { name: "Legal", links: [["Privacy", "/privacy"], ["MIT License", SITE.license]] },
+];
+---
+
+<footer class="footer">
+  <div class="wrap inner">
+    <div class="about">
+      <a class="brand" href="/" aria-label="Zeron home"><Mark /><span>Zeron</span></a>
+      <p>The open source workspace for your coding agents.</p>
+    </div>
+    {
+      columns.map((column) => (
+        <div class="column">
+          <h2>{column.name}</h2>
+          <ul>{column.links.map(([name, href]) => <li><a href={href}>{name}</a></li>)}</ul>
+        </div>
+      ))
+    }
+  </div>
+  <div class="wrap base">
+    <span>© 2026 {SITE.company}</span>
+  </div>
+</footer>
+
+<style>
+  .footer { margin-top: var(--section); padding: 56px 0 40px; border-top: 1px solid var(--border-subtle); }
+  .inner { display: grid; grid-template-columns: minmax(0, 1.8fr) repeat(3, minmax(0, 1fr)); gap: 40px 24px; }
+  .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 600; }
+  .brand :global(.mark) { height: 14px; }
+  .about p { margin-top: 12px; max-width: 22em; font-size: 14px; color: var(--text-3); }
+  h2 { margin-bottom: 14px; font-size: 13px; font-weight: 500; letter-spacing: 0; color: var(--text); }
+  li + li { margin-top: 9px; }
+  a { font-size: 14px; color: var(--text-2); transition: color 0.12s; }
+  a:hover { color: var(--text); }
+  .base { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; margin-top: 56px; font-size: 13px; color: var(--text-3); }
+  .base a { font-size: inherit; }
+  @media (max-width: 760px) {
+    .inner { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .about { grid-column: 1 / -1; }
+  }
+</style>

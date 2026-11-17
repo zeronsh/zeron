@@ -1,0 +1,118 @@
+---
+// The message box of a new chat with its "Work in" picker open on the list
+// of machines, in HTML: the composer's foot, its chips, and the two menus
+// that hang from the place chip, laid out to the point as the app lays
+// them (the numbers are those of the canvas drawing the earlier landing
+// page checked against the app: zeron/landing-newchat-hero,
+// public/hero/chrome.js `drawOver` and `drawPopups`). Not diffed again here.
+import api from "../../../tools/recreate/reference/artwork/api.svg?raw";
+import AgentMark from "../ui/AgentMark.astro";
+import Icon from "../ui/Icon.astro";
+import Stage from "./Stage.astro";
+
+type Row = { y: number; icon?: string; art?: boolean; label: string; tag?: string; chevron?: boolean; state?: "hover" | "selected" };
+const workIn: Row[] = [
+  { y: 29, icon: "monitor", label: "MacBook Pro", chevron: true, state: "hover" },
+  { y: 57, art: true, label: "api", chevron: true },
+  { y: 85, icon: "worktree", label: "Worktree", chevron: true },
+  { y: 159, icon: "git-branch", label: "main", tag: "Current", state: "selected" },
+  { y: 189, icon: "git-branch", label: "fix/retry-after" },
+  { y: 219, icon: "git-branch", label: "feat/sweep-idle-keys" },
+];
+const devices: Row[] = [
+  { y: 42, icon: "monitor", label: "MacBook Pro", tag: "You", state: "selected" },
+  { y: 72, icon: "monitor", label: "devbox" },
+  { y: 156, icon: "cloud", label: "Cloud" },
+];
+const art = `data:image/svg+xml,${encodeURIComponent(api)}`;
+const label = "Zeron's message box with its Work in menu open: the machine, project and branch a new session will run on, and the list of machines: this MacBook Pro, a Linux devbox, a Mac mini that is offline, and Cloud.";
+---
+
+<Stage width={700} height={372} label={label} class={Astro.props.class}>
+  <!-- The composer's foot: the pill's last row, and the tray with its chips. -->
+  <div class="tray" style="left:20px;top:24px;width:660px;height:76px"></div>
+  <div class="pill" style="left:20px;top:-56px;width:660px;height:120px"></div>
+  <span class="round attach" style="left:32px;top:24px"><Icon name="plus" size={18} /></span>
+  <span class="mic" style="left:609px;top:29px"><Icon name="microphone" size={18} /></span>
+  <span class="round send" style="left:640px;top:24px"><Icon name="arrow-up" size={14} /></span>
+  <span class="chip" style="left:32px;top:70px"><Icon name="access-full" size={12} />Full access</span>
+  <span class="chip open" style="left:129px;top:70px">
+    <Icon name="worktree" size={12} />MacBook Pro<span class="sep"><Icon name="alt-arrow-right-bold" size={10} /></span>api<span class="sep"><Icon name="alt-arrow-right-bold" size={10} /></span>main
+  </span>
+  <span class="chip model" style="right:32px;top:70px"><AgentMark mark="claude" />Opus 5.5<b>High</b><svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.6"></circle><circle cx="6" cy="6" r="4.6" pathLength="100" stroke-dasharray="38 62" transform="rotate(-90 6 6)"></circle></svg></span>
+
+  <div class="menu" style="left:129px;top:100px;width:280px;height:252px">
+    <span class="head">Work in</span>
+    {
+      workIn.map((row) => (
+        <div class:list={["row", row.state]} style={`top:${row.y}px;width:270px`}>
+          {row.icon && <span class="glyph"><Icon name={row.icon as "monitor"} /></span>}
+          {row.art && <img class="tile" src={art} alt="" />}
+          <span class="name">{row.label}</span>
+          {row.tag && <span class="tag">{row.tag}</span>}
+          {row.chevron && <span class="chevron"><Icon name="alt-arrow-right" size={14} /></span>}
+        </div>
+      ))
+    }
+    <i class="rule" style="top:117px"></i>
+    <span class="find" style="top:118px"><Icon name="search" size={14} /><span>Search branches…</span></span>
+    <i class="rule" style="top:154px"></i>
+  </div>
+  <div class="menu" style="left:408px;top:129px;width:260px;height:189px">
+    <span class="find" style="top:1px"><Icon name="search" size={14} /><i class="caret"></i><span>Search devices…</span></span>
+    <i class="rule" style="top:37px"></i>
+    {
+      devices.map((row) => (
+        <div class:list={["row", row.state]} style={`top:${row.y}px;width:250px`}>
+          <span class="glyph"><Icon name={row.icon as "monitor"} /></span>
+          <span class="name">{row.label}</span>
+          {row.tag && <span class="tag">{row.tag}</span>}
+        </div>
+      ))
+    }
+    <!-- Mac mini, offline: the whole row at 0.45, its two lines, the warning. -->
+    <span class="glyph away" style="left:14px;top:111px"><Icon name="monitor" /></span>
+    <span class="away-name" style="left:39px;top:110px">Mac mini</span>
+    <span class="away-note" style="left:39px;top:130px">Offline · last seen 3 h ago</span>
+    <span class="warn" style="left:235px;top:122px"><Icon name="wifi-off" size={12} /></span>
+  </div>
+</Stage>
+
+<style>
+  .pill { background: #18181b; border-radius: 26px; box-shadow: inset 0 0 0 1px #2c2d30, 0 12px 32px #00000066; }
+  .tray { background: #18181b; border-radius: 0 0 16px 16px; }
+  .round { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; }
+  .round :global(.icon), .mic :global(.icon) { position: static; }
+  .attach { background: #2a2a2d; color: #ededef; }
+  .send { background: #6d6d6f; color: rgb(11 11 12 / 0.4); }
+  .mic { color: rgb(237 237 239 / 0.6); }
+  .chip { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 6px; font-size: 12px; font-weight: 500; color: rgb(237 237 239 / 0.42); border-radius: 8px; }
+  .chip :global(*) { position: static; }
+  .chip.open { background: rgb(255 255 255 / 0.051); }
+  .chip .sep { display: inline-flex; margin-inline: -2px; color: rgb(237 237 239 / 0.28); }
+  .chip.model :global(.agent-mark) { font-size: 12px; color: #d97757; }
+  .chip.model b { font-weight: 500; color: rgb(237 237 239 / 0.28); }
+  .chip.model svg { width: 12px; height: 12px; fill: none; stroke: rgb(237 237 239 / 0.2); stroke-width: 1.6; }
+  .chip.model svg circle + circle { stroke: #9277b0; }
+
+  .menu { background: #1c1c1f; border-radius: 8px; box-shadow: inset 0 0 0 1px #ffffff12, 0 20px 56px #00000052; }
+  .head { left: 13px; top: 9px; font-size: 11px; font-weight: 500; line-height: 16px; color: rgb(237 237 239 / 0.42); }
+  .row { left: 5px; height: 28px; border-radius: 3px; }
+  .row.hover { background: #ffffff0d; }
+  .row.selected { background: #ebebeb17; }
+  .glyph { left: 9px; top: 6px; width: 16px; height: 16px; color: rgb(237 237 239 / 0.6); }
+  .tile { left: 8px; top: 5px; width: 18px; height: 18px; border-radius: 4px; }
+  .name { left: 34px; top: 4.5px; font-size: 13px; line-height: 19px; }
+  .tag { right: 8px; top: 6px; font-size: 11px; line-height: 16px; color: rgb(237 237 239 / 0.42); }
+  .chevron { right: 8px; top: 7px; width: 14px; height: 14px; color: rgb(237 237 239 / 0.42); }
+  .rule { left: 1px; right: 1px; height: 1px; background: #ffffff0a; }
+  .find { left: 1px; right: 1px; height: 36px; color: rgb(237 237 239 / 0.42); }
+  .find :global(.icon) { left: 12px; top: 11px; }
+  .find span:last-child { left: 34px; top: 8.5px; font-size: 13px; line-height: 19px; }
+  .caret { left: 34px; top: 8.5px; width: 1px; height: 19px; background: rgb(237 237 239 / 0.42); }
+  .glyph.away { color: rgb(237 237 239 / 0.27); }
+  .away-name { font-size: 13px; font-weight: 500; line-height: 18px; color: rgb(237 237 239 / 0.45); }
+  .away-note { font-size: 12px; line-height: 16px; color: rgb(237 237 239 / 0.19); }
+  .warn { width: 12px; height: 12px; color: rgb(250 204 21 / 0.45); }
+  .glyph :global(.icon), .chevron :global(.icon), .warn :global(.icon) { left: 0; top: 0; }
+</style>

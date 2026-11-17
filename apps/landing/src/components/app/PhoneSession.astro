@@ -1,0 +1,16 @@
+---
+// The iOS app's session screen, recreated in HTML against the app's own
+// screenshot (tools/recreate/phone_check.py diffs it). A 402 × 874 point
+// stage that scales to the box it is put in.
+import fragment from "./phone.fragment.html?raw";
+import "./phone.css";
+
+interface Props {
+  class?: string;
+}
+const label = "Zeron on an iPhone: a side chat with Claude Code about a streaming animation, with a message from another agent's chat.";
+---
+
+<div class:list={["zp-fit", Astro.props.class]}>
+  <div class="zp" role="img" aria-label={label} set:html={fragment} />
+</div>

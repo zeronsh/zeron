@@ -1,0 +1,25 @@
+---
+import type { Platform } from "../../data/releases.ts";
+
+interface Props {
+  platform: Platform;
+}
+---
+
+<i class="platform-mark" data-platform={Astro.props.platform} aria-hidden="true"></i>
+
+<style>
+  .platform-mark {
+    display: inline-block;
+    flex: none;
+    width: 16px;
+    height: 16px;
+    background: currentColor;
+    -webkit-mask: var(--mark) no-repeat center / contain;
+    mask: var(--mark) no-repeat center / contain;
+  }
+  [data-platform="macos"], [data-platform="ios"] { --mark: url("../../assets/platforms/apple.svg"); }
+  [data-platform="windows"] { --mark: url("../../assets/platforms/windows.svg"); }
+  [data-platform="linux"] { --mark: url("../../assets/platforms/linux.svg"); }
+  [data-platform="android"] { --mark: url("../../assets/platforms/android.svg"); }
+</style>
