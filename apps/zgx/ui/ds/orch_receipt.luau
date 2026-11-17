@@ -65,11 +65,13 @@ local FADE, FADE_RATE = 28, 10
 
 -- What a part's text is, cut to tokens that flow as words do: each word
 -- with the space after it (a part's last word keeps its space out, so its
--- underline stops at the word), and which route it belongs to.
-type Token = { text: string, route: number? }
+-- underline stops at the word), and the routes it belongs to (none, one,
+-- or several: words routed to more than one place).
+type Token = { text: string, routes: { number }? }
 local function tokens_of(segments: { any }): { Token }
 	local out: { Token } = {}
 	for _, seg in segments do
+		local routes = if #seg.routes > 0 then seg.routes else nil
 		local pieces: { string } = {}
 		for word, space in string.gmatch(seg.text, "([^%s]*)(%s*)") do
 			if word ~= "" or space ~= "" then
@@ -77,16 +79,16 @@ local function tokens_of(segments: { any }): { Token }
 			end
 		end
 		for i, piece in pieces do
-			if seg.route and i == #pieces then
+			if routes and i == #pieces then
 				local word, space = string.match(piece, "^(.-)(%s*)$")
 				if word and word ~= "" then
-					table.insert(out, { text = word, route = seg.route })
+					table.insert(out, { text = word, routes = routes })
 				end
 				if space and space ~= "" then
 					table.insert(out, { text = space })
 				end
 			else
-				table.insert(out, { text = piece, route = seg.route })
+				table.insert(out, { text = piece, routes = routes })
 			end
 		end
 	end
@@ -109,6 +111,12 @@ local shown_lit: { [string]: number } = {}
 -- (The same, for tests to read: `orch_receipt_lit`.)
 local lit_seen = ui.state("orch_receipt_lit", {} :: { [string]: number })
 local hovered_seen = ui.state("orch_receipt_hovered", "")
+-- (And what the shown dump's text draws, for tests: each piece's words and
+-- the route it's underlined in (`marks`), and the pieces washed under the
+-- pointer, each by the route lighting it (`washed`), as "route:words",
+-- by dump id.)
+local marks_seen = ui.state("orch_receipt_marks", {} :: { [string]: { string } })
+local washed_seen = ui.state("orch_receipt_washed", {} :: { [string]: { string } })
 local function said_lit(id: string, n: number)
 	shown_lit[id] = n
 	lit_seen:set_key({ id }, n)
@@ -128,12 +136,26 @@ end
 return ui.component(function(props: Props): Node
 	-- How many of the shown dump's routes are lit.
 	local lit = ui.use_state(0)
-	-- The route whose chip or part the pointer is on (its excerpt deepens,
-	-- its chip lights; `orch_receipt_hovered` says it to tests).
-	local hovered = ui.use_state(nil :: string?)
+	-- The routes whose chip or part the pointer is on (their excerpts
+	-- deepen, their chips light; `orch_receipt_hovered` says them to tests,
+	-- joined by commas): a chip's one, or every route holding the words.
+	local hovered = ui.use_state({} :: { string })
 	ui.effect(function()
-		hovered_seen:set(hovered:get() or "")
+		hovered_seen:set(table.concat(hovered:get(), ","))
 	end)
+	-- Whether route `rid` is lit by the pointer.
+	local function hot(rid: string): boolean
+		return table.find(hovered:get(), rid) ~= nil
+	end
+	local function hover_on(rids: { string })
+		hovered:set(rids)
+	end
+	-- Let go, if what's lit is still `rids`.
+	local function hover_off(rids: { string })
+		if table.concat(hovered:peek(), ",") == table.concat(rids, ",") then
+			hovered:set({})
+		end
+	end
 	-- The chips' strip: where it's scrolled, its view and its row, each
 	-- chip's box (to bring one into view), and a drag across it.
 	local offset = ui.use_state(0)
@@ -237,8 +259,9 @@ return ui.component(function(props: Props): Node
 	end
 
 	-- The part under the pointer in the text: its word's box (in the text's
-	-- own points), the route's index and id; nil off every part.
-	type At = { x: number, y: number, w: number, h: number, index: number, rid: string }
+	-- own points), its first route's index and id (whose card hangs from
+	-- it), and every route holding the word; nil off every part.
+	type At = { x: number, y: number, w: number, h: number, index: number, rid: string, rids: { string } }
 	local at = ui.use_state(nil :: At?)
 	-- The part the pointer is on now (what lights), apart from `at`, the
 	-- word the card hangs from: that one stays put while the pointer
@@ -280,48 +303,100 @@ return ui.component(function(props: Props): Node
 		local routes = routes_of(d)
 		local text_size = props.text_size or "$font.size.md"
 		local line_height = props.line_height or "$font.line.md"
+		-- (Worked out once for each dump, its routes' count and the scheme,
+		-- as this paragraph is: never as the pointer moves.)
 		local segments = data.segments(d.text or "", routes)
 
-		-- The drawn text.
+		-- How route `i` underlines, wherever its words are.
+		type Look = { hue: number?, unsure: boolean, rid: string, asked: boolean }
+		local looks: { [number]: Look } = {}
+		for i, r in routes do
+			local unsure = r.target ~= nil and r.target.kind == "unsure"
+			looks[i] = { hue = if unsure then nil else route_hue(r), unsure = unsure, rid = r.id, asked = r.direct == true }
+		end
+		-- Route `i`'s underline on `span`, lit as its route is.
+		local function underline(span: any, i: number)
+			local look = looks[i]
+			span.underline = function(): boolean
+				return lit:get() >= i
+			end
+			span.underline_color = if look.unsure then hue.canvas(nil, 0.6) else hue.canvas(look.hue, 0.85)
+			span.underline_thickness = 1.5
+			span.underline_offset = 4
+			span.underline_style = if look.unsure then "dashed" else "solid"
+		end
+
+		-- The route lighting words held by routes `mine` under the pointer
+		-- (a chip's, or the first of the words' own), once it's lit.
+		local function washing(mine: { number }): number?
+			local lit_now = lit:get()
+			for _, i in mine do
+				if lit_now >= i and hot(looks[i].rid) then
+					return i
+				end
+			end
+			return nil
+		end
+		local marks: { string } = {}
+		local pieces_lit: { { text: string, routes: { number } } } = {}
+
+		-- The drawn text: each piece underlined in its route's colour; words
+		-- routed to several places striped, a word each in each place's
+		-- colour by turns; washed under the pointer in the colour of the
+		-- route lit there (a chip's, or the first of the words' own).
 		local runs: any = {}
 		for _, seg in segments do
-			local i = seg.route
-			if not i then
+			local mine = seg.routes
+			if #mine == 0 then
 				table.insert(runs, ui.span { seg.text, literal = true })
-			else
-				local r = routes[i]
-				local unsure = r.target and r.target.kind == "unsure"
-				local h = if unsure then nil else route_hue(r)
-				local rid = r.id
-				local index = i :: number
-				-- A question the person wants answered (its answer waits in
-				-- the Q&A): its words held in a highlighter's wash of its
-				-- hue, not only underlined.
-				local asked = r.direct == true
-				table.insert(runs, ui.span {
-					seg.text,
-					literal = true,
-					underline = function(): boolean
-						return lit:get() >= index
-					end,
-					underline_color = if unsure then hue.canvas(nil, 0.6) else hue.canvas(h, 0.85),
-					underline_thickness = 1.5,
-					underline_offset = 4,
-					underline_style = if unsure then "dashed" else "solid",
-					radius = 3,
-					-- (Under the pointer, on the part, its chip or its reply.)
-					bg = function(): any
-						if lit:get() < index then
-							return "#00000000"
-						end
-						if hovered:get() ~= rid then
-							return if asked then hue.canvas(h, hue.wash_alpha() * 0.75) else "#00000000"
-						end
-						return hue.canvas(if unsure then nil else h, hue.wash_alpha() * (if unsure then 0.8 else 1.3))
-					end,
-				})
+				continue
 			end
+			-- A question the person wants answered (its answer waits in the
+			-- Q&A): its words held in a highlighter's wash of its hue, not
+			-- only underlined.
+			local asked: number? = nil
+			for _, i in mine do
+				if looks[i].asked then
+					asked = i
+					break
+				end
+			end
+			local function bg(): any
+				local lit_now = lit:get()
+				local i = washing(mine)
+				if i then
+					local look = looks[i]
+					return hue.canvas(if look.unsure then nil else look.hue, hue.wash_alpha() * (if look.unsure then 0.8 else 1.3))
+				end
+				if asked and lit_now >= asked then
+					return hue.canvas(looks[asked].hue, hue.wash_alpha() * 0.75)
+				end
+				return "#00000000"
+			end
+			for k, piece in data.stripes(seg.text, #mine) do
+				local span: any = { piece, literal = true, radius = 3, bg = bg }
+				local i = mine[(k - 1) % #mine + 1]
+				underline(span, i)
+				table.insert(runs, ui.span(span))
+				table.insert(marks, `{looks[i].rid}:{piece}`)
+			end
+			table.insert(pieces_lit, { text = seg.text, routes = mine })
 		end
+		-- (Said for tests: what's underlined, and what the pointer washes.)
+		local dump_id = d.id
+		ui.after(0, function()
+			marks_seen:set_key({ dump_id }, marks)
+		end)
+		ui.effect(function()
+			local out: { string } = {}
+			for _, p in pieces_lit do
+				local i = washing(p.routes)
+				if i then
+					table.insert(out, `{looks[i].rid}:{p.text}`)
+				end
+			end
+			washed_seen:set_key({ dump_id }, out)
+		end)
 		runs.class = "orch-receipt-words"
 		runs.wrap = true
 		runs.w_full = true
@@ -332,7 +407,7 @@ return ui.component(function(props: Props): Node
 		-- The same words, unseen, a box each: a run of words not parted by a
 		-- space (a part's last word and the comma after it) stays one box, so
 		-- they break where the paragraph does.
-		local boxes: { { ref: any, index: number, rid: string } } = {}
+		local boxes: { { ref: any, index: number, rid: string, rids: { string } } } = {}
 		local chunks: { Node } = {}
 		local pieces: { Node } = {}
 		local function close()
@@ -344,11 +419,15 @@ return ui.component(function(props: Props): Node
 			end
 		end
 		for _, tok in tokens_of(segments) do
-			local i = tok.route
+			local i = if tok.routes then tok.routes[1] else nil
+			local asked = false
+			for _, j in tok.routes or {} do
+				asked = asked or looks[j].asked
+			end
 			local text = ui.text {
 				tok.text,
 				-- (A question's words, for tests to find.)
-				class = if i and routes[i].direct == true then "orch-question-word" else nil,
+				class = if asked then "orch-question-word" else nil,
 				literal = true,
 				text_size = text_size,
 				line_height = line_height,
@@ -357,8 +436,11 @@ return ui.component(function(props: Props): Node
 			}
 			if i then
 				local ref = ui.ref()
-				local r = routes[i]
-				table.insert(boxes, { ref = ref, index = i, rid = r.id })
+				local rids: { string } = {}
+				for _, j in tok.routes or {} do
+					table.insert(rids, looks[j].rid)
+				end
+				table.insert(boxes, { ref = ref, index = i, rid = looks[i].rid, rids = rids })
 				table.insert(pieces, ui.div { class = "orch-part", ref = ref, shrink = 0, text })
 			else
 				table.insert(pieces, text)
@@ -390,7 +472,7 @@ return ui.component(function(props: Props): Node
 			for _, b in boxes do
 				local el = b.ref:peek()
 				if el and el.x and x >= el.x and x < el.x + el.width and y >= el.y and y < el.y + el.height then
-					return { x = el.x - o.x, y = el.y - o.y, w = el.width, h = el.height, index = b.index, rid = b.rid }
+					return { x = el.x - o.x, y = el.y - o.y, w = el.width, h = el.height, index = b.index, rid = b.rid, rids = b.rids }
 				end
 			end
 			return nil
@@ -404,11 +486,12 @@ return ui.component(function(props: Props): Node
 			under = found
 			if found then
 				if not same(found, was) then
-					hovered:set(found.rid)
+					-- (Every route holding the word: each chip lights.)
+					hover_on(found.rids)
 					reveal(found.rid)
 				end
-			elseif was and hovered:peek() == was.rid then
-				hovered:set(nil)
+			elseif was then
+				hover_off(was.rids)
 			end
 			if not found or same(found, at:peek()) then
 				return
@@ -439,8 +522,8 @@ return ui.component(function(props: Props): Node
 		local function leave()
 			local was = under
 			under = nil
-			if was and hovered:peek() == was.rid then
-				hovered:set(nil)
+			if was then
+				hover_off(was.rids)
 			end
 			let_go()
 		end
@@ -663,19 +746,19 @@ return ui.component(function(props: Props): Node
 			rounded = "$radius.full",
 			border = 1,
 			border_color = function(): any
-				local lit_up = hovered:get() == row:get().id
+				local lit_up = hot(row:get().id)
 				return if unsure() then (if lit_up then "$border.strong" else "$border") else hue.paint(t().hue, if lit_up then 0.85 else 0.3)
 			end,
 			bg = function(): any
 				local h = if unsure() then nil else t().hue
-				return if hovered:get() == row:get().id then hue.wash(h) else hue.paint(h, hue.wash_alpha() * 0.35)
+				return if hot(row:get().id) then hue.wash(h) else hue.paint(h, hue.wash_alpha() * 0.35)
 			end,
 			hover = {},
 			on_hover = function(inside: boolean)
 				if inside then
-					hovered:set(row:peek().id)
-				elseif hovered:peek() == row:peek().id then
-					hovered:set(nil)
+					hover_on({ row:peek().id })
+				else
+					hover_off({ row:peek().id })
 				end
 			end,
 			on_click = function()
@@ -803,9 +886,9 @@ return ui.component(function(props: Props): Node
 			items = "center",
 			on_hover = function(inside: boolean)
 				if inside then
-					hovered:set(row:peek().id)
-				elseif hovered:peek() == row:peek().id then
-					hovered:set(nil)
+					hover_on({ row:peek().id })
+				else
+					hover_off({ row:peek().id })
 				end
 			end,
 			hue.Dot { hue = function(): number?
