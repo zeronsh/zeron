@@ -239,6 +239,46 @@ export type Block = {
 
 -- Rows not yet measured: about a short message.
 local ESTIMATE = 96
+-- Rows not yet measured, as their messages make them (`ui.list`'s
+-- `estimate`, worked out in Rust from each row's data, no script a row):
+-- a prompt's words; a reply's blocks, its prose wrapped in the column
+-- (24-point lines; a paragraph's room, a code line's, a table row's), each
+-- group of tools a folded line; a long reply's runs at about what one
+-- holds. Measured, a row takes its real height; this keeps a chat opening
+-- from building rows it then finds are far out of view.
+local PROSE: any = {
+	field = "text",
+	size = 15,
+	line = 24,
+	most = 684,
+	markdown = { paragraph = 16, heading = 12, item = 4, code = 20, table = 37 },
+}
+local ROW_ESTIMATE: any = {
+	by = "role",
+	cases = {
+		user = { height = 64, text = { field = "text", size = 15, line = 24, most = 520 } },
+		assistant = {
+			height = 40,
+			has = {
+				blocks = {
+					each = "blocks",
+					item = {
+						by = "kind",
+						cases = {
+							text = { height = 12, text = PROSE },
+							tools = { height = 38 },
+							work = { height = 38 },
+							display_failed = { height = 36 },
+						},
+						default = { height = 320 },
+					},
+				},
+				runs = { each = "runs", item = { height = 3600 } },
+			},
+		},
+	},
+	default = { height = ESTIMATE },
+}
 -- A selection's action: its words' height and its height round them (the
 -- bar's even inset and its border, each side), what it keeps from the
 -- selection and from the view's edges, and the room the way back to the end
@@ -2490,6 +2530,7 @@ local function Transcript(props: Props): Node
 			follow = true,
 			at_end = at_end,
 			height = ESTIMATE,
+			estimate = ROW_ESTIMATE,
 			overscan = 3,
 			-- (Its scrollbar is the rail below, over it: a bar of its own
 			-- would fade at its edges with the rows.)
