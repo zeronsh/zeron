@@ -96,6 +96,7 @@ async fn two_rust_clients_converge_through_a_real_registry_do() {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         })
         .unwrap();
     }
@@ -224,6 +225,7 @@ async fn cursor_delta_and_churn_stay_bounded_on_a_real_do() {
                 waiting: None,
                 activity: None,
                 todo: None,
+                limited: None,
             })
             .unwrap();
         }

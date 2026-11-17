@@ -164,6 +164,7 @@ fn main() -> anyhow::Result<()> {
                             updated_at: chrono::Utc::now(),
                             activity: None,
                             todo: None,
+                            limited: None,
                         }]);
                     })
                 });

@@ -268,6 +268,9 @@ pub mod injected {
     pub const SCHEDULED: &str = "scheduled";
     pub const BOARD_CHECK: &str = "board_check";
     pub const RESUMED: &str = "resumed";
+    /// A chat its usage limit stopped, resumed at the reset (or switched to
+    /// another account meanwhile).
+    pub const LIMIT_RESET: &str = "limit_reset";
 }
 
 impl Injected {

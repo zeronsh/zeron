@@ -185,6 +185,7 @@ fn project(
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         });
         row.terminal_activity = Some(activity.clone());
         // OSC 7501 has no heartbeat requirement. The PTY owner supplies the
@@ -263,6 +264,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         };
         let activity = TerminalActivity {
             terminal_id: "pty".into(),

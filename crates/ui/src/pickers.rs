@@ -7645,6 +7645,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         }
     }
 

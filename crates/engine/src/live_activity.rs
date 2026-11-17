@@ -250,6 +250,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         };
         settle(&mut row, SessionStatus::Working, Utc::now());
         assert_eq!(row.activity.as_ref().unwrap().kind, ActivityKind::Thinking);

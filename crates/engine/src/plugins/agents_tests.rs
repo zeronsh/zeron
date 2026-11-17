@@ -86,6 +86,7 @@ pub(crate) fn session(chat: &str, status: SessionStatus, outcome: Option<DoneSta
         waiting: None,
         activity: None,
         todo: None,
+        limited: None,
     }
 }
 

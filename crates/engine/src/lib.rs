@@ -17,6 +17,7 @@ use zeron_sync::DocsStore;
 
 pub mod acp_registry;
 pub mod agent_accounts;
+pub(crate) mod account_switch;
 
 /// Which build this engine is: its git commit and when its executable was
 /// built (the file's modification time, in seconds), as

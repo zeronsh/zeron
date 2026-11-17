@@ -12,6 +12,7 @@ pub mod cloud;
 pub mod device_paths;
 pub mod direct_question;
 pub mod turn_question;
+pub mod usage_limit;
 pub mod entities;
 pub mod annotation;
 pub mod file_mentions;

@@ -504,6 +504,7 @@ pub(crate) fn seed(
                 }),
                 activity: None,
                 todo: None,
+                limited: None,
             })?;
         }
         if let Some((until_in, slept_ago)) = demo.sleep {

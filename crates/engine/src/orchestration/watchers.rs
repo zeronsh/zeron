@@ -916,6 +916,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         };
         assert_eq!(task_state(&base), RouteState::Done);
         let half = Session { todo: Some(TodoProgress { done: 1, total: 2, current: None }), ..base.clone() };
@@ -1050,6 +1051,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         };
         let working = session(SessionStatus::Working, Some("t0"));
         let done = session(SessionStatus::Idle, Some("t1"));

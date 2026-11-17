@@ -2849,6 +2849,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         };
         // No mid-turn capability is required for a live mailbox delivery.
         let sent = tools

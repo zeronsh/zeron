@@ -782,6 +782,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 waiting: None,
                 activity: None,
                 todo: None,
+                limited: None,
             })
             .unwrap();
         store

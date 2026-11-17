@@ -5869,6 +5869,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         }
     }
 
@@ -6143,6 +6144,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         };
         assert!(state.apply_sessions_at(vec![row.clone()], now));
         row.updated_at = now + TimeDelta::seconds(30);
@@ -6181,6 +6183,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         }];
         let mut row = device("host", "Host");
         row.last_seen_at = Some(now);

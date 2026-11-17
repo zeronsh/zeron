@@ -13384,6 +13384,7 @@ mod tests {
                 waiting: None,
                 activity: None,
                 todo: None,
+                limited: None,
             }];
             state.selected_chat = Some("c".into());
             state.watch_clock_transitions(cx);

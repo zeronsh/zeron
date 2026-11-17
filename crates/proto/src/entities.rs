@@ -661,6 +661,11 @@ pub struct Session {
     /// missing on older peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo: Option<crate::orchestration::TodoProgress>,
+    /// Stopped by its provider's usage limit, waiting for the reset (or
+    /// running on another account meanwhile): host-written, kept until the
+    /// chat is resumed. Missing on older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limited: Option<crate::usage_limit::SessionLimit>,
 }
 
 /// What a chat's agent waits on after its turn ended.

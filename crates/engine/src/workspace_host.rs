@@ -2811,6 +2811,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         };
         for i in 0..300 {
             let id = format!("chat-{i:03}");
@@ -3146,6 +3147,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         }
     }
 

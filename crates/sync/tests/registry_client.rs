@@ -133,6 +133,7 @@ async fn two_clients_converge_and_stream_live_updates() {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         })
         .unwrap();
     }
@@ -453,6 +454,7 @@ async fn churn_stays_bounded_no_history_growth() {
                 waiting: None,
                 activity: None,
                 todo: None,
+                limited: None,
             })
             .unwrap();
         }

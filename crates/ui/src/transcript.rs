@@ -15663,6 +15663,7 @@ mod tests {
                             updated_at: chrono::Utc::now(),
                             activity: None,
                             todo: None,
+                            limited: None,
                         })
                     });
                     this.on_own_send("chat".into(), "prompt".into(), cx);

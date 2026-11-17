@@ -422,6 +422,7 @@ fn session(chat: &str, status: SessionStatus) -> Session {
         waiting: None,
         activity: None,
         todo: None,
+        limited: None,
     }
 }
 

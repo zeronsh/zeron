@@ -900,6 +900,7 @@ impl From<RawSession> for Session {
             waiting: raw.waiting,
             activity: raw.activity,
             todo: raw.todo,
+            limited: None,
         }
     }
 }
@@ -1022,6 +1023,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         }
     }
 

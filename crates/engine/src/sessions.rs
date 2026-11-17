@@ -2629,6 +2629,7 @@ impl Inner {
                     waiting: None,
                     activity: None,
                     todo: None,
+                    limited: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -5925,6 +5926,7 @@ mod tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         }
     }
 

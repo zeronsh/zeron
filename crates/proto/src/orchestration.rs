@@ -114,6 +114,10 @@ pub struct CrewPolicy {
     pub harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// What it and its crew do when their account hits its usage limit
+    /// (off: wait for the reset). Crew threads take their orchestrator's.
+    #[serde(default)]
+    pub on_limit: crate::usage_limit::LimitPolicy,
 }
 
 /// When an orchestrator wakes on its own.

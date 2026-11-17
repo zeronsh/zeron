@@ -460,6 +460,7 @@ mod gate_tests {
             waiting: None,
             activity: None,
             todo: None,
+            limited: None,
         }
     }
 

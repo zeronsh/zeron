@@ -1335,6 +1335,7 @@ fn idle(chat: &str) -> zeron_proto::Session {
         waiting: None,
         activity: None,
         todo: None,
+        limited: None,
     }
 }
 
