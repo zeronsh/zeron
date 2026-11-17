@@ -221,12 +221,36 @@ async fn model_switch_mid_session_sends_catalog_defaults() {
 }
 
 /// The backend can reject the Max Mode variant its own catalog marks default
-/// (Grok 4.7's 500k, verified live), so such models keep the bare id.
+/// (Grok 4.7's 500k, verified live), so such a model starts on its first
+/// variant that isn't Max Mode, sent whole.
 #[tokio::test]
 async fn max_mode_defaults_are_not_sent() {
     let (controls, _steer, _token) = controls();
     let mut req = request("scenario:model-maxmode");
     req.model = Some("grok-4.7".into());
+    let events = run_to_first_done(&harness(), req, controls).await;
+
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+/// A pick left from another model names a parameter this one doesn't have;
+/// sent, it makes a combination the backend refuses.
+#[tokio::test]
+async fn picks_of_parameters_the_model_lacks_are_not_sent() {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:model-maxmode");
+    req.model = Some("grok-4.7".into());
+    req.model_options
+        .insert("thinking".into(), serde_json::json!("enabled"));
     let events = run_to_first_done(&harness(), req, controls).await;
 
     assert!(
@@ -516,6 +540,9 @@ async fn model_discovery_maps_the_live_catalog() {
     // A parameter without displayName labels by id; default = first value.
     assert_eq!(models[1].options[0].id, "thinking");
     assert_eq!(models[1].options[0].default_choice, "enabled");
+    // A Max Mode default: the picker shows the variant a run starts on.
+    assert_eq!(models[2].id, "grok-4.7");
+    assert_eq!(models[2].options[0].default_choice, "256k");
 }
 
 #[tokio::test]
