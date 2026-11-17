@@ -580,13 +580,15 @@ struct View {
 
 /// A prompt sent and not yet in the transcript: shown under it meanwhile,
 /// sending, or failed with what sends it again.
+#[derive(Default)]
 struct Pending {
     id: String,
     words: String,
     paths: Vec<String>,
     /// "sending" or "failed".
     waiting: &'static str,
-    /// The command that sends it again, once it failed.
+    /// The command that sends it again: once it failed, or once it went
+    /// (should no word of it ever come back).
     retry: Option<Json>,
     /// When it was sent, as its hover strip says.
     at: Option<String>,
@@ -596,6 +598,13 @@ struct Pending {
     row: bool,
     /// The files the engine delivers for it, for a run sent again.
     transfers: Vec<Json>,
+    /// Why it failed, as its host or the engine said.
+    failure: Option<String>,
+    /// Its chat's host refused it (or its clock ran out): it's in the chat's
+    /// doc, and the engine sends it again (`RetryDelivery`).
+    refused: bool,
+    /// It asked for a fresh worktree: refused, it can go again without one.
+    worktree: bool,
 }
 
 impl Pending {
@@ -611,6 +620,9 @@ impl Pending {
             ("text", Value::from(words.as_str())),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments, &chats)),
             ("waiting", Value::from(self.waiting)),
+            // Failed: why, and whether it can go again without its worktree.
+            ("failure", self.failure.as_deref().filter(|_| self.waiting == "failed").map_or(Value::Nil, Value::from)),
+            ("worktree", Value::Bool(self.waiting == "failed" && self.refused && self.worktree)),
             // Still in the engine's outbox, its files uploading: nothing has
             // gone to its chat yet (a Cloud machine isn't woken for it).
             ("held", Value::Bool(self.held)),
@@ -832,6 +844,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             held: false,
             row: false,
             transfers: Vec::new(),
+            ..Default::default()
         });
     });
     let c = chats.clone();
@@ -2017,8 +2030,13 @@ impl View {
             if let Some(view) = weak.upgrade()
                 && view.generation.get() == generation
             {
-                if let Some(open) = view.open.borrow_mut().as_mut() {
-                    open.waiting = item["items"].as_array().cloned().unwrap_or_default();
+                let items = item["items"].as_array().cloned().unwrap_or_default();
+                let chat = view.open.borrow_mut().as_mut().map(|open| {
+                    open.waiting = items.clone();
+                    open.id.clone()
+                });
+                if let Some(chat) = chat {
+                    view.follow_refused(&chat, &items);
                 }
                 view.publish_session();
             }
@@ -2026,6 +2044,124 @@ impl View {
         if let Some(open) = self.open.borrow_mut().as_mut() {
             open.watches = vec![transcript, queue, waiting];
         }
+    }
+
+    /// The chat's waiting messages changed. One its host refused (a worktree
+    /// it couldn't make, a folder that's gone) or whose clock ran out shows
+    /// failed, with why, however it was sent (from here or not, before a
+    /// restart or not), and goes again through the engine. One the engine no
+    /// longer lists as refused is on its way again, or is history (a later
+    /// message ran): it goes, unless it's in the transcript by then.
+    fn follow_refused(&self, chat: &str, items: &[Json]) {
+        let mut changed = false;
+        {
+            let mut pending = self.pending.borrow_mut();
+            let refused: Vec<&Json> = items
+                .iter()
+                .filter(|w| w["refused"].as_bool() == Some(true) && w["messageId"].is_string())
+                .collect();
+            let listed = |id: &str| items.iter().find(|w| w["messageId"].as_str() == Some(id));
+            if let Some(prompts) = pending.get_mut(chat) {
+                prompts.retain_mut(|p| {
+                    if !p.refused || p.held {
+                        return true;
+                    }
+                    match listed(&p.id) {
+                        // Sent again: on its way.
+                        Some(w) if w["refused"].as_bool() != Some(true) => {
+                            changed |= p.waiting != "sending";
+                            p.waiting = "sending";
+                            true
+                        }
+                        Some(_) => true,
+                        None => {
+                            changed = true;
+                            false
+                        }
+                    }
+                });
+            }
+            for w in refused {
+                let message = w["messageId"].as_str().unwrap_or_default();
+                let failure = w["failure"].as_str().filter(|f| !f.is_empty()).map(str::to_owned);
+                let worktree = w["worktree"].as_bool() == Some(true);
+                let prompts = pending.entry(chat.to_owned()).or_default();
+                match prompts.iter_mut().find(|p| p.id == message) {
+                    Some(p) => {
+                        changed |= p.waiting != "failed" || p.failure != failure || !p.refused;
+                        p.waiting = "failed";
+                        p.failure = failure;
+                        p.refused = true;
+                        p.worktree = worktree;
+                    }
+                    None => {
+                        let (words, paths) = split_attachments(w["prompt"].as_str().unwrap_or_default());
+                        prompts.push(Pending {
+                            id: message.to_owned(),
+                            words,
+                            paths,
+                            waiting: "failed",
+                            at: stamp(w["sentAt"].as_i64().unwrap_or(0) / 1000),
+                            failure,
+                            refused: true,
+                            worktree,
+                            ..Default::default()
+                        });
+                        changed = true;
+                    }
+                }
+            }
+            if pending.get(chat).is_some_and(Vec::is_empty) {
+                pending.remove(chat);
+            }
+        }
+        if changed {
+            self.publish_messages();
+        }
+    }
+
+    /// A prompt that went with no word of it since: once the grace is past
+    /// and the engine lists nothing on its way for it — or what it lists ran
+    /// out of time — it fails, to send again, rather than read "Sending…"
+    /// for good. Checked until it's in the transcript, failed, or gone.
+    fn watch_unanswered(self: &Rc<Self>, chat: String, message: String) {
+        let weak = Rc::downgrade(self);
+        engine::get().spawn(async move {
+            let mut wait = std::time::Duration::from_secs_f64(SEND_GRACE_SECONDS);
+            loop {
+                zgx::timer::sleep(wait).await;
+                wait = std::time::Duration::from_secs_f64(UNANSWERED_RECHECK_SECONDS);
+                let Some(me) = weak.upgrade() else { return };
+                let sending = me
+                    .pending
+                    .borrow()
+                    .get(&chat)
+                    .and_then(|prompts| prompts.iter().find(|p| p.id == message))
+                    .is_some_and(|p| p.waiting == "sending" && !p.held);
+                if !sending {
+                    return;
+                }
+                // (Another chat open in this view: what the engine lists for
+                // this one isn't known here, so it isn't judged.)
+                let listed = {
+                    let open = me.open.borrow();
+                    match open.as_ref().filter(|o| o.id == chat) {
+                        Some(open) => Some(
+                            open.waiting
+                                .iter()
+                                .find(|w| w["messageId"].as_str() == Some(message.as_str()))
+                                .cloned(),
+                        ),
+                        None => None,
+                    }
+                };
+                let Some(listed) = listed else { continue };
+                if unanswered(listed.as_ref(), now_seconds() as f64) {
+                    me.mark_unanswered(&chat, &message);
+                    return;
+                }
+            }
+        });
     }
 
     /// On a new connection: the rows this view has stay, as a chat opened
@@ -2393,7 +2529,9 @@ impl View {
                 // Still on its way as the engine says (a Cloud machine coming
                 // up for it can take longer than the grace).
                 let awaited = open.waiting.iter().any(|w| {
-                    w["messageId"].as_str().is_some_and(|m| Some(m) == last["id"].as_str()) && w["failure"].is_null()
+                    w["messageId"].as_str().is_some_and(|m| Some(m) == last["id"].as_str())
+                        && w["failure"].is_null()
+                        && w["refused"].as_bool() != Some(true)
                 });
                 let waiting = match turn {
                     Some(turn) if running && turn + 1. >= sent => Some(("working", turn)),
@@ -2486,6 +2624,7 @@ impl View {
             held: false,
             row: false,
             transfers: Vec::new(),
+            ..Default::default()
         });
         drop(pending);
         self.publish_messages();
@@ -2647,7 +2786,19 @@ impl View {
                 p.transfers = transfers;
             }
             self.mark_failed(&id, &message_id, Some(run));
-        } else if !fresh && runs_otherwise(&chat["config"], &config) {
+            self.publish_messages();
+            return sent;
+        }
+        // Gone to the chat: kept to send again should no word of it come
+        // back, and watched until one does.
+        if let Some(pending) = self.pending.borrow_mut().get_mut(&id)
+            && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
+        {
+            p.retry = Some(run.clone());
+            p.transfers = transfers.clone();
+        }
+        self.watch_unanswered(id.clone(), message_id.clone());
+        if !fresh && runs_otherwise(&chat["config"], &config) {
             // Sent with another agent, model or effort than the chat had (the
             // composer's pick, kept as a draft until now): the chat takes
             // them, as the shipping app's next turn does, and its icon with
@@ -2718,6 +2869,7 @@ impl View {
                             held: true,
                             row,
                             transfers: Vec::new(),
+                            ..Default::default()
                         });
                         changed = true;
                     }
@@ -2768,19 +2920,29 @@ impl View {
         Ok(Value::Bool(removed))
     }
 
-    /// A failed prompt sent again (its run as it was), sending meanwhile.
+    /// A failed prompt sent again (its run as it was, or `without_worktree`:
+    /// in its chat's folder, the worktree it asked for dropped), sending
+    /// meanwhile.
     async fn retry(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
         let id = args.field("id").map(text).unwrap_or_default();
         let message_id = args.field("message").map(text).unwrap_or_default();
+        let without_worktree = args.field("without_worktree").is_some_and(Value::truthy);
         if self.open_id().as_deref() != Some(&id) {
             return Err("missing");
         }
-        let (run, transfers, held) = {
+        // In the chat's doc (refused, or still listed there): the engine
+        // sends it again from there, as a fresh attempt.
+        let in_doc = self.open.borrow().as_ref().is_some_and(|open| {
+            open.waiting
+                .iter()
+                .any(|w| w["messageId"].as_str() == Some(&message_id) && w["held"].as_bool() != Some(true))
+        });
+        let (run, transfers, held, refused) = {
             let mut pending = self.pending.borrow_mut();
             let prompts = pending.get_mut(&id).ok_or("missing")?;
             let p = prompts.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
             p.waiting = "sending";
-            (p.retry.clone(), p.transfers.clone(), p.held)
+            (p.retry.clone(), p.transfers.clone(), p.held, p.refused || in_doc)
         };
         self.publish_messages();
         // In the engine's outbox: the engine has what it takes to send it.
@@ -2791,19 +2953,54 @@ impl View {
                 .map(|_| ())
                 .map_err(|e| engine::outcome(&e));
         }
-        let Some(run) = run else {
+        if refused {
+            let retried = engine::get()
+                .call("RetryDelivery", json!({ "chatId": id, "withoutWorktree": without_worktree }))
+                .await
+                .map(|_| ())
+                .map_err(|e| engine::outcome(&e));
+            if retried.is_err() {
+                self.mark_failed(&id, &message_id, run);
+            } else {
+                self.watch_unanswered(id.clone(), message_id.clone());
+            }
+            return retried;
+        }
+        let Some(mut run) = run else {
             // It never got as far as a run (an upload failed): the composer
             // has the words; the row goes.
             self.forget_pending(&id, &message_id);
             self.publish_messages();
             return Err("failed");
         };
+        if without_worktree && let Some(request) = run.get_mut("request").and_then(Json::as_object_mut) {
+            request.remove("worktree");
+        }
         let sent = command_with(&id, run.clone(), &transfers).await;
         if sent.is_err() {
             self.mark_failed(&id, &message_id, Some(run));
+        } else {
+            if let Some(pending) = self.pending.borrow_mut().get_mut(&id)
+                && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
+            {
+                p.retry = Some(run);
+            }
+            self.watch_unanswered(id.clone(), message_id.clone());
         }
         self.publish_messages();
         sent
+    }
+
+    /// A prompt sent that no word of has come since (`watch_unanswered`):
+    /// failed, its run kept to send again.
+    fn mark_unanswered(&self, id: &str, message_id: &str) {
+        if let Some(pending) = self.pending.borrow_mut().get_mut(id)
+            && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
+            && p.waiting == "sending"
+        {
+            p.waiting = "failed";
+        }
+        self.publish_messages();
     }
 
     async fn respond(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
@@ -5933,6 +6130,22 @@ fn todos(open: &Open) -> Value {
 /// the shipping app's grace before it calls a send undelivered.
 const SEND_GRACE_SECONDS: f64 = 60.;
 
+/// How often a prompt past its grace is looked at again while the engine
+/// still lists it on its way (`watch_unanswered`).
+const UNANSWERED_RECHECK_SECONDS: f64 = 30.;
+
+/// A prompt past its grace that won't come: the engine lists nothing on its
+/// way for it (lost before it reached the chat's doc), or what it lists ran
+/// out of time with no host to say so. One listed refused or held is the
+/// engine's to say how it stands.
+fn unanswered(listed: Option<&Json>, now: f64) -> bool {
+    let Some(w) = listed else { return true };
+    if w["refused"].as_bool() == Some(true) || w["held"].as_bool() == Some(true) {
+        return false;
+    }
+    w["expiresAt"].as_f64().is_some_and(|at| at / 1000. <= now)
+}
+
 /// A record with more fields (or some replaced).
 fn with_fields<const N: usize>(record: Value, extra: [(&str, Value); N]) -> Value {
     let Value::Map(fields) = &record else { return record };
@@ -8138,6 +8351,7 @@ mod tests {
                 held: false,
                 row: false,
                 transfers: Vec::new(),
+                ..Default::default()
             }],
         );
         let ids = || -> Vec<String> {

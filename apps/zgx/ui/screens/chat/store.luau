@@ -215,9 +215,10 @@ function M.remove_held(id: string, item: string, message: string?): any
 	return ui.call("chat.remove_held", { id = id, item = item, message = message })
 end
 
--- A prompt that wasn't delivered, sent again.
-function M.retry(id: string, message: string)
-	quietly(ui.call("chat.retry", { id = id, message = message }))
+-- A prompt that wasn't delivered, sent again (`without_worktree`: in its
+-- chat's folder, the worktree it asked for dropped).
+function M.retry(id: string, message: string, without_worktree: boolean?)
+	quietly(ui.call("chat.retry", { id = id, message = message, without_worktree = without_worktree == true }))
 end
 
 function M.interrupt(id: string)

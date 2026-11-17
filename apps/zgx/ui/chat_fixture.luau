@@ -386,8 +386,8 @@ stub.send = function(req: any)
 	end
 	return settled(nil)
 end
-stub.retry = function(id: string, message: string)
-	note(`retry:{id}:{message}`)
+stub.retry = function(id: string, message: string, without_worktree: boolean?)
+	note(if without_worktree then `retry-without-worktree:{id}:{message}` else `retry:{id}:{message}`)
 end
 -- This device's outbox, as the engine takes a send out of it (#1256's
 -- RemoveHeldSend): gone from the chat's waiting list, or not there. An
@@ -466,6 +466,44 @@ stub.refs = function(path: string, device: string?)
 	note(`refs:{path}:{device or "here"}`)
 	return settled(REFS[path] or {})
 end
+-- A send on its way that its host then refuses (its worktree couldn't be
+-- made), as the engine's waiting list says (`refused`).
+ui.command {
+	id = "refused_sending",
+	title = "A send on its way",
+	run = function()
+		local list = table.clone(TRANSCRIPTS[opened or ""] or {})
+		table.insert(list, { id = "wt1", role = "user", text = "Start in a worktree", waiting = "sending" })
+		store.messages:set(list)
+	end,
+}
+local function refuse(failure: string, worktree: boolean)
+	-- (Built afresh from the fixture's own rows: the store's are its values.)
+	local list = table.clone(TRANSCRIPTS[opened or ""] or {})
+	table.insert(list, {
+		id = "wt1",
+		role = "user",
+		text = "Start in a worktree",
+		waiting = "failed",
+		failure = failure,
+		worktree = worktree,
+	})
+	store.messages:set(list)
+end
+ui.command {
+	id = "refused_plain",
+	title = "Its host refused it, no worktree asked",
+	run = function()
+		refuse("its folder is gone", false)
+	end,
+}
+ui.command {
+	id = "refused",
+	title = "Its host refused it",
+	run = function()
+		refuse("git: fatal: invalid reference: HEAD", true)
+	end,
+}
 ui.command {
 	id = "undelivered",
 	title = "A send wasn't delivered",

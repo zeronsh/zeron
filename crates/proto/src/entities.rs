@@ -1972,9 +1972,19 @@ pub struct WaitingMessage {
     /// Still in this device's outbox, its files uploading.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
-    /// Why a held send stopped trying.
+    /// Why a held send stopped trying, or (`refused`) why the chat's host
+    /// didn't run it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// The chat's host refused it (its run couldn't start: a worktree that
+    /// couldn't be made, a folder that's gone) or its clock ran out before a
+    /// host took it. It won't go unless it's sent again (`RetryDelivery`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refused: bool,
+    /// It asked its host for a fresh worktree to run in: a refused one can be
+    /// sent again without (`RetryDelivery { withoutWorktree }`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worktree: bool,
 }
 
 /// Live edge-connectivity posture (the `WatchConnectivity` stream): the truth

@@ -373,6 +373,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The transcript message a run or steer becomes (none for other commands, or
+/// a steer from a client that minted none).
+fn command_message_id(entry: &SessionCommandEntry) -> Option<&str> {
+    match &entry.payload {
+        SessionCommandPayload::Run { message_id, .. } => Some(message_id.as_str()),
+        SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
+        _ => None,
+    }
+}
+
 /// The queued-attachment transfers a command's `pending://` refs imply —
 /// shared by the retry escort and the retry re-issue.
 fn command_transfers(entry: &SessionCommandEntry) -> Vec<crate::uploads::AttachmentTransfer> {
@@ -5467,7 +5477,15 @@ impl DocHost {
     /// `pending://` refs (idempotent: re-pushing landed bytes re-commits the
     /// same file; the processed ledger keeps execution exactly-once).
     pub fn retry_delivery(&self, chat_id: &str) -> Result<(), EngineError> {
-        self.retry_delivery_within(chat_id, 0)
+        self.retry_delivery_within(chat_id, 0, false)
+    }
+
+    /// [`Self::retry_delivery`] for a run whose worktree couldn't be made: a
+    /// dead attempt goes again without its worktree request, so its host runs
+    /// it in the chat's folder (the repo's main checkout), as a host from
+    /// before worktree requests would.
+    pub fn retry_delivery_without_worktree(&self, chat_id: &str) -> Result<(), EngineError> {
+        self.retry_delivery_within(chat_id, 0, true)
     }
 
     /// The person woke a chat's Cloud machine (a size picked, a fresh
@@ -5486,13 +5504,19 @@ impl DocHost {
         if !known {
             return Ok(());
         }
-        self.retry_delivery_within(chat_id, WAKE_BOOT_MARGIN_MS)
+        self.retry_delivery_within(chat_id, WAKE_BOOT_MARGIN_MS, false)
     }
 
     /// [`Self::retry_delivery`], also re-issuing a pending attempt whose clock
     /// runs out within `ending_within` ms: it can't execute (or won't, by the
     /// time its host reads it), and re-sending it is what the caller asked.
-    fn retry_delivery_within(&self, chat_id: &str, ending_within: i64) -> Result<(), EngineError> {
+    /// `without_worktree`: a re-issued run drops its worktree request.
+    fn retry_delivery_within(
+        &self,
+        chat_id: &str,
+        ending_within: i64,
+        without_worktree: bool,
+    ) -> Result<(), EngineError> {
         let handle = self.open(chat_id)?;
         if let Some(chat2) = lock(&handle.chat2).as_ref() {
             chat2.redial();
@@ -5613,9 +5637,13 @@ impl DocHost {
                 self.resolve_command(&handle, &old.id, SessionCommandStatus::Rejected, Some(why));
             }
             let now = now_ms();
+            let mut payload = old.payload.clone();
+            if without_worktree && let SessionCommandPayload::Run { request, .. } = &mut payload {
+                request.worktree = None;
+            }
             let reissue = SessionCommandEntry {
                 id: new_id(),
-                payload: old.payload.clone(),
+                payload,
                 issued_by: self.inner.config.device_id.clone(),
                 issued_at: now,
                 based_on: messages.last().map(|m| CommandBasedOn {
