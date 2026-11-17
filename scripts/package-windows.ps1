@@ -155,7 +155,7 @@ try {
     Copy-Item -LiteralPath 'LICENSE','THIRD_PARTY_NOTICES.md' -Destination $stage
     $licenses = Join-Path $stage 'licenses/fonts'
     New-Item -ItemType Directory -Force -Path $licenses | Out-Null
-    Copy-Item -Path 'crates/ui/assets/fonts/licenses/*' -Destination $licenses
+    Copy-Item -Path 'assets/fonts/licenses/*' -Destination $licenses
     Copy-Item -LiteralPath 'crates/voice/NOTICE.md' -Destination (Join-Path $stage 'licenses/parakeet-v3.txt')
     if ($ZgxVersion) {
         $files = Join-Path $stage "beta/$version"

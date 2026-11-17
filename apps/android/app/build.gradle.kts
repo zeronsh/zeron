@@ -40,7 +40,7 @@ val genIcons by tasks.registering(Exec::class) {
     description = "Rasterizes the shared transcript icons."
     val out = iconsOut.get().asFile
     inputs.dir(repoRoot.resolve("apps/ios/Zeron/Assets.xcassets"))
-    inputs.dir(repoRoot.resolve("crates/ui/assets/icons"))
+    inputs.dir(repoRoot.resolve("assets/icons"))
     inputs.dir(repoRoot.resolve("apps/android/icons"))
     inputs.file(repoRoot.resolve("scripts/android/svg2vd.py"))
     outputs.dir(out)

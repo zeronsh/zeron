@@ -131,11 +131,11 @@ class FingerprintTests(unittest.TestCase):
         self.assertNotEqual(self.repo.keys(self.suites)[0], before)
 
     def test_variants_are_part_of_the_key(self):
-        with_browser = reuse.suite_keys(["core"], str(ROOT), variants={"core": "browser"})[0] \
-            if (ROOT / "crates" / "ui" / "src").is_dir() else None
-        if with_browser:
+        with_flag = reuse.suite_keys(["core"], str(ROOT), variants={"core": "slow"})[0] \
+            if (ROOT / "crates" / "engine" / "src").is_dir() else None
+        if with_flag:
             plain = reuse.suite_keys(["core"], str(ROOT))[0]
-            self.assertNotEqual(with_browser["core"], plain["core"])
+            self.assertNotEqual(with_flag["core"], plain["core"])
 
     def test_the_planner_and_scheduler_are_no_input(self):
         self.assertEqual(self.changed_after("scripts/ci/plan.py", "# plan\n"), set())
@@ -144,7 +144,7 @@ class FingerprintTests(unittest.TestCase):
 
     def test_ci_files_count_for_the_suites_that_run_them(self):
         keys = lambda: reuse.suite_keys(["core", "edge", "windows"], str(ROOT))[0]  # noqa: E731
-        if not (ROOT / "crates" / "ui" / "src").is_dir():
+        if not (ROOT / "crates" / "engine" / "src").is_dir():
             self.skipTest("Rust sources not checked out")
         self.assertIn("scripts/ci/nextest.toml", reuse.SUITE_INPUTS["core"])
         self.assertIn("scripts/ci/test-core.sh", reuse.SUITE_INPUTS["core"])
@@ -178,18 +178,21 @@ class RealWorkspaceTests(unittest.TestCase):
     """The zeron workspace itself (skipped where the sources are not checked out)."""
 
     def setUp(self):
-        if not (ROOT / "crates" / "ui" / "src").is_dir():
+        if not (ROOT / "crates" / "engine" / "src").is_dir():
             self.skipTest("Rust sources not checked out")
 
-    def test_core_does_not_read_the_ui(self):
+    def test_core_does_not_read_the_app(self):
         ws = reuse.Workspace(str(ROOT))
         core = ws.closure(reuse.SUITE_PACKAGES["core"])
-        self.assertNotIn("crates/ui", core)
-        self.assertIn("crates/ui", ws.closure(reuse.SUITE_PACKAGES["windows"]))
+        self.assertNotIn("apps/zeron", core)
+        self.assertIn("apps/zeron", ws.closure(reuse.SUITE_PACKAGES["windows"]))
 
-    def test_mobile_reads_the_ui_icons_and_fonts(self):
+    def test_mobile_reads_the_shared_fonts(self):
+        # The fingerprints follow HEAD's tree: only once the fonts are committed at the root.
+        if not reuse.exists("assets/fonts", reuse.tree_index(str(ROOT))):
+            self.skipTest("assets/fonts not committed")
         _, extra, _ = reuse.suite_keys(["ios"], str(ROOT))
-        self.assertIn("crates/ui/src/file-icons.json", extra["ios"])
+        self.assertIn("assets/fonts", extra["ios"])
 
     def test_every_rust_suite_has_packages_that_exist(self):
         ws = reuse.Workspace(str(ROOT))
@@ -269,7 +272,7 @@ class PlanMainTests(unittest.TestCase):
             os.environ.pop("GITHUB_STEP_SUMMARY", None)
             plan.api = fake_api
             reuse.SUITE_PACKAGES.clear()
-            reuse.SUITE_PACKAGES.update({"core": ["zb"], "ui": ["za"]})
+            reuse.SUITE_PACKAGES.update({"core": ["zb"], "zgx": ["za"]})
             os.chdir(repo.root)
             from contextlib import redirect_stdout
             from io import StringIO
@@ -293,7 +296,7 @@ class PlanMainTests(unittest.TestCase):
         caches = [{"key": keys["core"] + "-core-tests", "ref": "refs/pull/3/merge"}]
         second = self.run_plan("pull_request", {"pull_request": {"number": 3}}, caches)
         self.assertFalse(json.loads(second["suites"])["core"])
-        self.assertTrue(json.loads(second["suites"])["ui"])
+        self.assertTrue(json.loads(second["suites"])["zgx"])
         self.assertEqual(json.loads(second["skip"]), {"core": ["core-tests"]})
         self.assertLess(int(second["reservation"].split()[0].split("=")[1]),
                         int(first["reservation"].split()[0].split("=")[1]))
@@ -323,7 +326,7 @@ class PlanMainTests(unittest.TestCase):
     def test_a_build_file_no_fingerprint_covers_disables_reuse(self):
         first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [])
         caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests", "ref": "refs/pull/3/merge"}]
-        # crates/c is in no selected suite (core reads crates/b, ui crates/a and b).
+        # crates/c is in no selected suite (core reads crates/b, zgx crates/a and b).
         again = self.run_plan("pull_request", {"pull_request": {"number": 3}}, caches,
                               files=[{"filename": "crates/b/src/lib.rs", "patch": "+x"},
                                      {"filename": "crates/c/src/lib.rs", "patch": "+x"}])
