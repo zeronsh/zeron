@@ -33,6 +33,7 @@ local model = require("@self/orch_map_model")
 local Cells = require("@self/orch_cells")
 local sim = require("@self/orch_force_sim")
 local fm = require("@self/orch_force_model")
+local labels = require("@self/orch_force_labels")
 local draw = require("@self/orch_force_draw")
 local fpal = require("@self/orch_force_palette")
 
@@ -149,23 +150,6 @@ local M_HUB = { size = 12.5, weight = 600 }
 local DASH = { dash = { 4, 4 } }
 local ROUND = { cap = "round" :: "round", join = "round" :: "round" }
 
-local function fit_name(c: any, s: string, w: number, opts: any): string
-	if c:measure_text(s, opts) <= w then
-		return s
-	end
-	local n = utf8.len(s) or #s
-	local lo, hi = 0, n
-	while lo < hi do
-		local mid = (lo + hi + 1) // 2
-		local cut = string.sub(s, 1, (utf8.offset(s, mid + 1) or (#s + 1)) - 1) .. "…"
-		if c:measure_text(cut, opts) <= w then
-			lo = mid
-		else
-			hi = mid - 1
-		end
-	end
-	return if lo == 0 then "" else string.sub(s, 1, (utf8.offset(s, lo + 1) or (#s + 1)) - 1) .. "…"
-end
 
 M.View = ui.component(function(props: {
 	world: () -> any,
@@ -607,13 +591,10 @@ M.View = ui.component(function(props: {
 	local marks: { [number]: { { any } } } = {}
 	local hub_shape: { [number]: string } = {}
 	local rings: { [number]: any } = {}
-	local names: { string } = {}
-	local label_x: { [number]: number } = {}
-	local label_y: { [number]: number } = {}
-	local label_w: { [number]: number } = {}
+	-- (Each node's name, where it goes: ds/orch_force_labels.)
+	local labs: { [number]: labels.Label } = {}
+	local labs_by_id: { [string]: labels.Label } = {}
 	local made_for = -1
-	local label_boxes: { { number } } = {}
-	local name_w: { [number]: number } = {}
 	-- (The model the shapes were made for: still right for what isn't
 	-- moving while something is.)
 	local made_version = -1
@@ -626,13 +607,50 @@ M.View = ui.component(function(props: {
 		end
 		return crew
 	end
-	local function free(boxes: { { number } }, x0: number, y0: number, x1: number, y1: number): boolean
-		for _, bx in boxes do
-			if not (x1 < bx[1] or x0 > bx[3] or y1 < bx[2] or y0 > bx[4]) then
-				return false
-			end
+	-- Every name, placed (ds/orch_force_labels): the Brain's and the
+	-- orchestrators' fixed under their marks, the threads' round theirs, the
+	-- ones whose node didn't move where they were while still free.
+	local NAME_RANK: { [string]: number } = { input = 0, approval = 0, failed = 1, working = 2, waiting = 2, done = 3 }
+	local function place_names(c: any)
+		local nodes = {}
+		for i, n in fmodel.nodes do
+			local p = n.parent
+			table.insert(nodes, {
+				id = n.id,
+				kind = n.kind,
+				x = s.x[i],
+				y = s.y[i],
+				r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING,
+				title = if n.kind == "brain" then locale.s("ds.orch.map.brain") else (n.title or ""),
+				hx = if p > 0 then s.x[p] else nil,
+				hy = if p > 0 then s.y[p] else nil,
+				rank = if n.kind == "chat" then (NAME_RANK[state_of(n.id)] or 4) else 0,
+			})
 		end
-		return true
+		local links = {}
+		for _, l in fmodel.links do
+			table.insert(links, { a = l.a, b = l.b, ax = s.x[l.a], ay = s.y[l.a], bx = s.x[l.b], by = s.y[l.b] })
+		end
+		local t0 = os.clock()
+		local placed = labels.place({
+			nodes = nodes,
+			links = links,
+			prev = labs_by_id,
+			measure = function(t: string, hub: boolean): number
+				return (c:measure_text(t, if hub then M_HUB else M_NAME))
+			end,
+		})
+		counts.names_ms = (os.clock() - t0) * 1000
+		labs = placed
+		table.clear(labs_by_id)
+		local list = {}
+		for i, lab in placed do
+			labs_by_id[fmodel.nodes[i].id] = lab
+			table.insert(list, { id = fmodel.nodes[i].id, kind = fmodel.nodes[i].kind, x0 = lab.x0, y0 = lab.y0, x1 = lab.x1, y1 = lab.y1, lines = lab.lines })
+		end
+		if M.current then
+			M.current.labels = list
+		end
 	end
 	local function make(c: any)
 		local key = version:peek() * 100000 + geo:peek()
@@ -645,32 +663,10 @@ M.View = ui.component(function(props: {
 		table.clear(marks)
 		table.clear(hub_shape)
 		table.clear(rings)
-		table.clear(names)
-		table.clear(label_x)
-		table.clear(label_y)
-		table.clear(label_w)
-		-- Names placed greedily, the important first, none over a mark or
-		-- another name: an orchestrator's beside it, off its own link and
-		-- its fan, else above or below it, else left out (its card names it).
-		local boxes: { { number } } = {}
-		-- (The names alone, and the Brain's and orchestrators' marks.)
-		local names_at: { { number } } = {}
-		for i, n in fmodel.nodes do
-			local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING
-			table.insert(boxes, { s.x[i] - r, s.y[i] - r, s.x[i] + r, s.y[i] + r })
-			if n.kind ~= "chat" then
-				table.insert(names_at, { s.x[i] - r, s.y[i] - r, s.x[i] + r, s.y[i] + r })
-			end
-		end
 		for i, n in fmodel.nodes do
 			local x, y = s.x[i], s.y[i]
 			if n.kind == "brain" then
 				shapes[i] = draw.shape("ghostish", x, y, draw.BRAIN_D)
-				names[i] = locale.s("ds.orch.map.brain")
-				local w = c:measure_text(names[i], M_HUB)
-				label_x[i], label_y[i], label_w[i] = x, y + R_BRAIN + 6, w
-				table.insert(boxes, { x - w / 2 - 4, y + R_BRAIN + 5, x + w / 2 + 4, y + R_BRAIN + 23 })
-				table.insert(names_at, { x - w / 2 - 4, y + R_BRAIN + 5, x + w / 2 + 4, y + R_BRAIN + 23 })
 			elseif n.kind == "orchestrator" then
 				local shape = draw.cookie_of(crew_of(i))
 				hub_shape[i] = shape
@@ -679,76 +675,15 @@ M.View = ui.component(function(props: {
 				if mk then
 					marks[i] = draw.mark(mk, x, y, draw.mark_hub(shape))
 				end
-				names[i] = fit_name(c, n.title, 170, M_HUB)
-				local w = c:measure_text(names[i], M_HUB)
-				-- (Its fan faces away from its parent: the sides across its
-				-- link first, then toward its parent, then away.)
-				local p = n.parent
-				local ax, ay = x - (if p > 0 then s.x[p] else x), y - (if p > 0 then s.y[p] else y - 1)
-				local al = math.max(1e-6, math.sqrt(ax * ax + ay * ay))
-				ax, ay = ax / al, ay / al
-				-- (Next to it first; a crowded one's a little further out, its
-				-- name's ground over the lines between.)
-				local tries = {}
-				for _, gap in { R_HUB + 6, R_HUB + 24, R_HUB + 48 } do
-					local far = gap - R_HUB - 6
-					local function at(dx: number, dy: number, lx: number, ly: number)
-						table.insert(tries, { dx, dy, lx, ly, far })
-					end
-					at(1, 0, x + gap + w / 2, y - 8)
-					at(-1, 0, x - gap - w / 2, y - 8)
-					at(0, 1, x, y + gap)
-					at(0, -1, x, y - gap - 17)
-					at(0.7, 0.7, x + gap * 0.7 + w / 2, y + gap * 0.7 - 4)
-					at(-0.7, 0.7, x - gap * 0.7 - w / 2, y + gap * 0.7 - 4)
-					at(0.7, -0.7, x + gap * 0.7 + w / 2, y - gap * 0.7 - 13)
-					at(-0.7, -0.7, x - gap * 0.7 - w / 2, y - gap * 0.7 - 13)
-				end
-				table.sort(tries, function(a: any, b: any): boolean
-					if a[5] ~= b[5] then
-						return a[5] < b[5]
-					end
-					local da, db = a[1] * ax + a[2] * ay, b[1] * ax + b[2] * ay
-					if math.abs(math.abs(da) - math.abs(db)) > 0.05 then
-						return math.abs(da) < math.abs(db)
-					end
-					return da < db
-				end)
-				-- (None clear of every mark, in a crowd: over chats' marks, its
-				-- ground under it, but never over another name or its own.)
-				for pass = 1, 2 do
-					for _, t in tries do
-						local lx, ly = t[3], t[4]
-						local x0, y0, x1, y1 = lx - w / 2 - 4, ly - 1, lx + w / 2 + 4, ly + 17
-						if free(if pass == 1 then boxes else names_at, x0, y0, x1, y1) and (pass == 1 or free({ { x - R_HUB, y - R_HUB, x + R_HUB, y + R_HUB } }, x0, y0, x1, y1)) then
-							label_x[i], label_y[i], label_w[i] = lx, ly, w
-							table.insert(boxes, { x0, y0, x1, y1 })
-							table.insert(names_at, { x0, y0, x1, y1 })
-							break
-						end
-					end
-					if label_x[i] then
-						break
-					end
-				end
 			else
 				local mk = draw.mark_of(n.provider)
 				if mk then
 					marks[i] = draw.mark(mk, x, y, draw.MARK_CHAT)
 				end
 				rings[i] = ui.path():arc(x, y, R_RING, 0, 360)
-				names[i] = fit_name(c, n.title, 150, M_NAME)
 			end
 		end
-		-- (Kept for the status layer: a chat asking for the person is named
-		-- where it's free of these.)
-		label_boxes = boxes
-		table.clear(name_w)
-		for i, n in fmodel.nodes do
-			if n.kind == "chat" and names[i] ~= "" then
-				name_w[i] = c:measure_text(names[i], M_NAME)
-			end
-		end
+		place_names(c)
 	end
 	local names_shown = ui.computed(function(): boolean
 		return view:get().zoom >= NAMES_ZOOM
@@ -773,10 +708,18 @@ M.View = ui.component(function(props: {
 	-- The drawing (world space; each band of the field a canvas of its own,
 	-- under zgx's raster cap, moved by the view).
 	local function label(c: any, i: number, t: any, ink: string, p: any)
-		local w = label_w[i] or 0
-		c:rect(label_x[i] - w / 2 - 4, label_y[i] - 1, w + 8, 18, p.label_bg, 4)
+		local lab = labs[i]
+		local ld = lab.leader
+		if ld then
+			c:line(ld[1], ld[2], ld[3], ld[4], p.weak, 0.8)
+		end
+		c:rect(lab.x0, lab.y0, lab.x1 - lab.x0, lab.y1 - lab.y0, p.label_bg, 4)
 		t.color = ink
-		c:text(names[i], label_x[i], label_y[i], t)
+		t.align = lab.align
+		local lh = lab.h / #lab.lines
+		for k, line in lab.lines do
+			c:text(line, lab.x, lab.y + (k - 1) * lh, t)
+		end
 	end
 	local function fill_mark(c: any, i: number)
 		local m = marks[i]
@@ -869,8 +812,8 @@ M.View = ui.component(function(props: {
 		-- crowd, a name sits over chats).
 		if show_names then
 			for i, n in nodes do
-				local lx, ly = label_x[i], label_y[i]
-				if lx and lx >= x0 - 200 and lx <= x1 + 200 and ly >= y0 - 40 and ly <= y1 + 40 and not (moving and awake[i]) then
+				local lab = labs[i]
+				if lab and lab.x1 >= x0 and lab.x0 <= x1 and lab.y1 >= y0 and lab.y0 <= y1 and not (moving and awake[i]) then
 					label(c, i, if n.kind == "chat" then T_NAME else T_HUB, if n.kind == "chat" then p.secondary else p.fg, p)
 				end
 			end
@@ -979,7 +922,6 @@ M.View = ui.component(function(props: {
 		local still = settled:peek()
 		local x, y = s.x, s.y
 		local b = cull:get()
-		local show_names = names_shown:get()
 		for i, n in fmodel.nodes do
 			if n.kind ~= "chat" or not rings[i] or (not still and s.awake[i]) then
 				continue
@@ -996,16 +938,6 @@ M.View = ui.component(function(props: {
 			c:stroke(rings[i], ink, if st == "idle" then 1.1 else 1.6)
 			if GLYPHED[st] then
 				c:circle(nx + BADGE_AT, ny - BADGE_AT, 7.2, p.bg)
-			end
-			local w = name_w[i]
-			if (NEED[st] or st == "approval") and show_names and w then
-				local ly = ny + R_RING + 4
-				local x0, x1 = nx - w / 2 - 4, nx + w / 2 + 4
-				if free(label_boxes, x0, ly - 1, x1, ly + 16) then
-					c:rect(x0, ly - 1, w + 8, 17, p.label_bg, 4)
-					T_NAME.color = p.secondary
-					c:text(names[i], nx, ly, T_NAME)
-				end
 			end
 		end
 	end

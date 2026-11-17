@@ -513,3 +513,150 @@ test("force graph: every working ring hugs its chat as the status rings do, at a
 	app:frames(6)
 	rings_match(app, "zoomed after the drag")
 end)
+
+-- Names: every thread's shown, none on another name, a mark or a line; the
+-- Brain's and each orchestrator's fixed under their marks.
+local labels_mod = require("@ds/orch_force_labels")
+local function read_labels(app: any): any
+	app:command("map_force_labels")
+	app:frames(1)
+	return app:state("force_labels") or {}
+end
+local function seg_hits(ax: number, ay: number, bx: number, by: number, x0: number, y0: number, x1: number, y1: number): boolean
+	-- (Liang–Barsky: whether the segment enters the box.)
+	local t0, t1 = 0, 1
+	local dx, dy = bx - ax, by - ay
+	for _, pq in { { -dx, ax - x0 }, { dx, x1 - ax }, { -dy, ay - y0 }, { dy, y1 - ay } } do
+		local p, q = pq[1], pq[2]
+		if p == 0 then
+			if q < 0 then
+				return false
+			end
+		else
+			local r = q / p
+			if p < 0 then
+				t0 = math.max(t0, r)
+			else
+				t1 = math.min(t1, r)
+			end
+			if t0 > t1 then
+				return false
+			end
+		end
+	end
+	return true
+end
+local function check_labels(app: any, label: string): (number, number)
+	local d = read_labels(app)
+	local labs, nodes, links = d.labels or {}, d.nodes or {}, d.links or {}
+	local by_id = {}
+	for _, n in nodes do
+		by_id[n.id] = n
+	end
+	local radius = { brain = draw.BRAIN_D / 2, orchestrator = draw.HUB_D / 2, chat = draw.R_RING }
+	-- (A hair's tolerance: the line sampling's.)
+	local e = 1.5
+	local chats, named = 0, 0
+	for _, n in nodes do
+		if n.kind == "chat" then
+			chats += 1
+		end
+	end
+	for _, la in labs do
+		if la.kind == "chat" then
+			named += 1
+		end
+	end
+	print(`FORCENAMES {label}: {named} of {chats} threads named`)
+	for a, la in labs do
+		for b, lb in labs do
+			if a < b then
+				local hit = la.x0 + e < lb.x1 and la.x1 - e > lb.x0 and la.y0 + e < lb.y1 and la.y1 - e > lb.y0
+				expect(`{label}: {la.id} over {lb.id} {hit}`).to_be(`{label}: {la.id} over {lb.id} false`)
+			end
+		end
+		if la.kind == "chat" then
+			for _, n in nodes do
+				if n.id ~= la.id then
+					local r = radius[n.kind]
+					local hit = la.x0 + e < n.x + r and la.x1 - e > n.x - r and la.y0 + e < n.y + r and la.y1 - e > n.y - r
+					expect(`{label}: {la.id} over mark {n.id} {hit}`).to_be(`{label}: {la.id} over mark {n.id} false`)
+				end
+			end
+			local own = by_id[la.id]
+			for _, l in links do
+				if l.a ~= la.id and l.b ~= la.id then
+					local hit = seg_hits(l.ax, l.ay, l.bx, l.by, la.x0 + e, la.y0 + e, la.x1 - e, la.y1 - e)
+					expect(`{label}: {la.id} over line {l.a}-{l.b} {hit}`).to_be(`{label}: {la.id} over line {l.a}-{l.b} false`)
+				end
+			end
+			expect(own ~= nil).to_be(true)
+		else
+			-- (Fixed: centred, just under its mark.)
+			local n = by_id[la.id]
+			local r = radius[la.kind]
+			local cx = (la.x0 + la.x1) / 2
+			local top = la.y0 + labels_mod.PAD_Y
+			expect(`{label}: {la.id} at {math.abs(cx - n.x) < 0.5 and math.abs(top - (n.y + r + 3)) < 0.5}`).to_be(`{label}: {la.id} at true`)
+		end
+	end
+	return named, chats
+end
+
+test("force names: every thread named, none on another name, a mark or a line; the fixed ones under their marks", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(5)
+	local named, chats = check_labels(app, "big")
+	print(`FORCENAMES 164 agents: {named} of {chats} threads named, placed in {string.format("%.1f", stats(app).names_ms or -1)}ms`)
+	-- (A crowd of 160 can't all have room at this scale: those that do,
+	-- the pressing first; the rest on hover.)
+	expect(named >= chats * 0.5).to_be(true)
+	-- The sample fleet, every chat shown.
+	local small = mount("orch_map_fixture.luau")
+	small:resize(1440, 2400)
+	small:command("map_only")
+	small:command("map_force")
+	small:set_state("ds/orch_map_visibility.luau::control_map_show", "all")
+	small:frames(90)
+	local n2, c2 = check_labels(small, "sample")
+	expect(n2).to_be(c2)
+end)
+
+test("force names: the orchestrators' and the Brain's stay at their place under their marks at any zoom, through a drag", function()
+	local app = open()
+	settle(app, 240)
+	app:frames(5)
+	check_labels(app, "fitted")
+	for _, step in { "in", "in", "out", "out", "out" } do
+		app:command(`map_force_zoom_{step}`)
+		app:frames(5)
+		check_labels(app, `zoom {step}`)
+	end
+	app:command("map_force_drag_hub_step")
+	app:frames(3)
+	app:command("map_force_drag_hub_step")
+	app:frames(3)
+	app:command("map_force_drag_hub_end")
+	app:frames(40)
+	check_labels(app, "after a drag")
+	app:command("map_force_drag_brain_step")
+	app:frames(3)
+	app:command("map_force_drag_brain_end")
+	app:frames(40)
+	check_labels(app, "after the Brain's drag")
+end)
+
+test("force names: wrapped and shortened only as they must be", function()
+	local function m(t: string): number
+		return #t * 7
+	end
+	local two = labels_mod.wrap("VPN Orchestrator (exnomic) with a long tail", 170, 2, m)
+	expect(#two).to_be(2)
+	expect(string.find(two[1], "VPN Orchestrator", 1, true) ~= nil).to_be(true)
+	for _, l in two do
+		expect(m(l) <= 170).to_be(true)
+	end
+	local one = labels_mod.wrap("Zeron fixes", 170, 2, m)
+	expect(#one == 1 and one[1] == "Zeron fixes").to_be(true)
+end)
