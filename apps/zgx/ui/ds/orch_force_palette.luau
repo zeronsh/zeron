@@ -16,7 +16,8 @@
 
 local M = {}
 
--- The theme's colours a machine's must stay clear of.
+-- The statuses a node on the Map wears (its ring, the sidebar's glyph): a
+-- machine's colour must never read as one of them.
 M.STATUS_TOKENS = {
 	"zeron.status.working",
 	"zeron.status.connecting",
@@ -26,35 +27,25 @@ M.STATUS_TOKENS = {
 	"zeron.status.plan",
 	"zeron.status.done",
 	"zeron.status.failed",
-	"zeron.status.limited",
-	"zeron.status.dot.working",
-	"zeron.status.dot.input",
-	"zeron.status.dot.approval",
-	"zeron.status.dot.done",
-	"zeron.status.dot.failed",
-	"zeron.tone.info.ink",
-	"zeron.tone.accent.ink",
-	"zeron.tone.success.ink",
-	"zeron.tone.warning.ink",
-	"zeron.tone.danger.ink",
-	"zeron.pr.open",
-	"zeron.pr.merged",
-	"zeron.pr.closed",
 }
 -- A status colour with less chroma than this is a grey (it has no hue to
 -- keep clear of); a machine's always has more than GREY_C.
 M.GREY_C = 0.04
--- How far (degrees of OKLCH hue) a machine's colour keeps from a status's,
--- and from another machine's.
-M.MIN_HUE = 28
-M.MIN_APART = 16
--- How many machine colours there are (more machines share them, in turn).
-M.COUNT = 10
+-- How far (degrees of OKLCH hue) a machine's colour keeps from a status's
+-- (coral, not error red; yellow-green, not done green), and from another
+-- machine's.
+M.MIN_HUE = 18
+M.MIN_APART = 24
+-- How many machine colours there are, spread evenly round the wheel (more
+-- machines share them, in turn).
+M.COUNT = 8
 -- The tones: pastel, each theme its own (lighter on dark; on light, deep
 -- enough to stand off the page, light enough under a black mark).
+-- Each neighbour on the wheel this much lighter or darker (OKLCH L).
+M.LIFT = 0.04
 M.TONE = {
-	dark = { l = 0.82, c = 0.075 },
-	light = { l = 0.8, c = 0.095 },
+	dark = { l = 0.83, c = 0.1 },
+	light = { l = 0.79, c = 0.105 },
 }
 M.DARK_INK = "#000000"
 M.LIGHT_INK = "#ffffff"
@@ -138,60 +129,92 @@ function M.make(statuses: { string }, dark: boolean): { string }
 			end
 		end
 	end
+	-- (In a steady order, whatever order they came in.)
+	table.sort(avoid)
 	local tone = if dark then M.TONE.dark else M.TONE.light
-	-- (A theme whose statuses fill the wheel: the margin eased until there
-	-- are hues enough.)
-	local margin = M.MIN_HUE
-	local hues: { number } = {}
-	while true do
-		table.clear(hues)
-		local free: { number } = {}
-		for h = 0, 359 do
-			local ok = true
+	-- A hue off every status: itself if clear, else the nearer edge of the
+	-- status's margin (pushed on past any other status there).
+	local function clear(h: number): number
+		for _ = 1, 8 do
+			local hit: number? = nil
 			for _, a in avoid do
-				if apart(h, a) < margin then
-					ok = false
+				if apart(h, a) < M.MIN_HUE then
+					hit = a
 					break
 				end
 			end
-			if ok then
-				table.insert(free, h)
+			if not hit then
+				return h % 360
+			end
+			local d = ((h - hit + 540) % 360) - 180
+			h = hit + (if d >= 0 then M.MIN_HUE else -M.MIN_HUE)
+		end
+		return h % 360
+	end
+	-- COUNT hues evenly round the wheel, turned (by a degree at a time) to
+	-- where, once each is cleared of the statuses, they're most apart.
+	local step = 360 / M.COUNT
+	local best: { number } = {}
+	local best_gap = -1
+	for turn = 0, math.floor(step) - 1 do
+		local set: { number } = {}
+		for k = 0, M.COUNT - 1 do
+			table.insert(set, clear(turn + k * step))
+		end
+		local gap = math.huge
+		for i = 1, #set do
+			for j = i + 1, #set do
+				gap = math.min(gap, apart(set[i], set[j]))
 			end
 		end
-		-- Farthest-first: the first the farthest from any status, each next
-		-- the farthest from those taken (a tie to the lower hue).
-		while #hues < M.COUNT and #free > 0 do
-			local best, best_d = -1, -1
-			for _, h in free do
-				local d = math.huge
-				if #hues == 0 then
-					for _, a in avoid do
-						d = math.min(d, apart(h, a))
-					end
-				else
-					for _, t in hues do
-						d = math.min(d, apart(h, t))
-					end
-				end
-				if d > best_d then
-					best, best_d = h, d
-				end
-			end
-			if #hues > 0 and best_d < M.MIN_APART then
-				break
-			end
-			table.insert(hues, best)
+		if gap > best_gap then
+			best, best_gap = set, gap
 		end
-		if #hues >= 6 or margin <= 12 then
-			break
+	end
+	-- (Neighbours round the wheel a step apart in lightness too: two soft
+	-- colours a hue apart still read as two.)
+	local lift: { [number]: number } = {}
+	local by_hue = table.clone(best)
+	table.sort(by_hue)
+	for k, h in by_hue do
+		lift[h] = if k % 2 == 0 then M.LIFT else -M.LIFT
+	end
+	-- Handed out farthest-first: the first machines the most apart.
+	local hues: { number } = {}
+	local left = table.clone(best)
+	-- (The first: the one farthest from any status.)
+	local function far_from(list: { number }, h: number): number
+		local d = math.huge
+		for _, t in list do
+			d = math.min(d, apart(h, t))
 		end
-		margin -= 4
+		return d
+	end
+	while #left > 0 do
+		local pick, pick_d = 1, -1
+		for k, h in left do
+			local d = if #hues == 0 then far_from(avoid, h) else far_from(hues, h)
+			if d > pick_d then
+				pick, pick_d = k, d
+			end
+		end
+		table.insert(hues, table.remove(left, pick) :: number)
 	end
 	local out: { string } = {}
 	for _, h in hues do
-		table.insert(out, M.oklch(tone.l, tone.c, h))
+		table.insert(out, M.oklch(tone.l + (lift[h] or 0), tone.c, h))
 	end
 	return out
+end
+
+-- The difference two colours show (ΔE in OKLab, ×100: about 2 is a just
+-- seen difference; past 10, clearly two colours).
+function M.delta(a: string, b: string): number
+	local la, ca, ha = M.hue_of(a)
+	local lb, cb, hb = M.hue_of(b)
+	local aa, ab = ca * math.cos(math.rad(ha)), ca * math.sin(math.rad(ha))
+	local ba, bb = cb * math.cos(math.rad(hb)), cb * math.sin(math.rad(hb))
+	return math.sqrt((la - lb) ^ 2 + (aa - ba) ^ 2 + (ab - bb) ^ 2) * 100
 end
 
 -- This theme's machine colours (worked out once a theme).

@@ -191,3 +191,30 @@ test("force marks: each centred on its visual bounds within half a point, at the
 	assert(draw.mark_of("codex") == "openai" and draw.mark_of("openai") == "openai" and draw.mark_of("other") == nil)
 	assert(math.abs(sides.claude - sides.openai) <= 0.04, `claude {sides.claude} openai {sides.openai}`)
 end)
+
+for _, theme in { "theme_dark", "theme_light" } do
+	test(`force palette ({theme}): hues spread round the wheel, the first machines' clearly apart (ΔE)`, function()
+		local p: any = read(theme)
+		local m: { string } = p.machines
+		local hues = {}
+		for _, c in m do
+			local _, _, h = pal.hue_of(c)
+			table.insert(hues, h)
+		end
+		-- (Round the wheel: every quarter of it has one.)
+		local quarters = {}
+		for _, h in hues do
+			quarters[math.floor(h / 90) % 4] = true
+		end
+		expect(quarters[0] and quarters[1] and quarters[2] and quarters[3]).to_be(true)
+		-- (The first six, any two: a clear difference.)
+		local least = math.huge
+		for i = 1, math.min(6, #m) do
+			for j = i + 1, math.min(6, #m) do
+				least = math.min(least, pal.delta(m[i], m[j]))
+			end
+		end
+		print(`FORCEPAL_DE {p.theme} least ΔE among the first six {string.format("%.1f", least)}`)
+		expect(least >= 8).to_be(true)
+	end)
+end
