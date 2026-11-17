@@ -1133,6 +1133,6 @@ return {
 	["common.retry"] = "Try again",
 	["common.edit"] = "Edit",
 	["ds.orch.map.pivot"] = "Hubs",
-	["ds.orch.map.pivot_orchestrators"] = "Orchestrators",
-	["ds.orch.map.pivot_machines"] = "Machines",
+	["ds.orch.map.pivot_orchestrators"] = "Orchestrator hubs",
+	["ds.orch.map.pivot_machines"] = "Machine hubs",
 } :: { [string]: string }

@@ -14,6 +14,9 @@ local WIDTHS = { 1600, 1200, 900, 700, 520 }
 
 local function open(w: number?, h: number?): any
 	local app = mount("orch_map_fixture.luau")
+	-- (These read the Topology's rows and pills: the Map opens on Graph
+	-- (force) now.)
+	app:set_state("control_map", { variant = "topology", window = 15 })
 	app:resize(w or 1440, h or 2400)
 	app:frames(30)
 	return app

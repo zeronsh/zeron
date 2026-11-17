@@ -14,9 +14,19 @@ local function place(app: any): number
 end
 
 -- Scrolled so the Scratchpad is in view, the page with room left below.
+-- (Wholly in view, its editor too: pressed into, a field partly under the
+-- window's edge is brought into view, and the page moves for that, not
+-- the wheel. How far depends on what's above it: the Map's height.)
 local function to_scratchpad(app: any)
 	app:scroll("#control-scroll", 700)
 	app:frames(30)
+	local line = tostring(app:tree("#scratchpad-editor"):match("[^\n]+") or "")
+	local y, h = line:match("%-?[%d%.]+,(%-?[%d%.]+) [%d%.]+x([%d%.]+)")
+	local below = (tonumber(y) or 0) + (tonumber(h) or 0) - 900
+	if below > 0 then
+		app:scroll("#control-scroll", math.ceil(below) + 8)
+		app:frames(30)
+	end
 end
 
 -- A note far longer than the field (the Brain dump adding to it).
