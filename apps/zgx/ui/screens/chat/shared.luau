@@ -19,6 +19,7 @@ local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
 local route = require("@app/screens/shell/route")
 
+local Draft = require("@ds/draft_text")
 local M = {}
 
 -- The draft, what it carries, the options picked in a question being
@@ -190,21 +191,55 @@ do
 		end)
 	end
 end
-ui.effect(function()
+-- Saved as it changes, at most every SAVE_EVERY ms: each save reads the
+-- whole draft (into the saved state, then its file), and a long one read
+-- at every keystroke cost a copy of it each.
+local SAVE_EVERY = 250
+local saved_at = -math.huge
+local function save_new()
+	saved_at = ui.now()
 	local now: any = nil
-	if here:get() == "" then
-		local text, cargo, quotes = M.text:get(), M.cargo:get(), M.quotes:get()
+	if here:peek() == "" then
+		local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
 		if text ~= "" or #cargo > 0 then
 			now = { text = text, cargo = cargo, quotes = quotes }
 		end
 	else
-		local put = kept:get()[""]
+		local put = kept:peek()[""]
 		if put then
 			now = { text = put.text, cargo = put.cargo, quotes = put.quotes }
 		end
 	end
 	if now ~= nil or saved_new:peek() ~= nil then
 		saved_new:set(now)
+	end
+end
+ui.effect(function()
+	-- What it's saved from, followed (the draft's edits, not the draft).
+	if here:get() == "" then
+		M.text:len()
+		M.cargo:get()
+		M.quotes:get()
+	else
+		kept:len()
+	end
+	-- (A run's timer goes as the next run begins: steady typing saves every
+	-- SAVE_EVERY, and the last keystroke's once it has waited that long.)
+	local wait = SAVE_EVERY - (ui.now() - saved_at)
+	if wait <= 0 then
+		save_new()
+	else
+		ui.after(wait, save_new)
+	end
+end)
+-- The window closing (the app quitting, or the window closed): Zeron's
+-- window sets `app.closing` (src/main.rs) before it writes what the scripts
+-- saved, and a save still waiting its turn goes now. (A timer never fires
+-- once the window has closed, and the last keystrokes were lost with it.)
+local closing = ui.shared("app.closing", false)
+ui.effect(function()
+	if closing:get() == true then
+		save_new()
 	end
 end)
 
@@ -229,10 +264,14 @@ function M.showing(): string
 	return here:peek()
 end
 
--- The same, read as it changes.
-function M.showing_now(): string
+-- The chat the draft in `text` is (a new chat's ""), followed: it changes
+-- with `text` as a move puts one draft away and takes out the next.
+function M.owner(): string
 	return here:get()
 end
+
+-- `showing`, read as it changes.
+M.showing_now = M.owner
 
 function M.show(key: string)
 	local was = here:peek()
@@ -267,6 +306,12 @@ function M.take(): (string, { any })
 		M.cargo:set({})
 		M.quotes:set({})
 	end)
+	-- A new chat's draft, sent: saved empty at once, not on the throttle's
+	-- next turn, which a quit in between would never reach (the message
+	-- coming back as the draft at the next launch).
+	if here:peek() == "" then
+		save_new()
+	end
 	return text, cargo
 end
 
@@ -943,6 +988,39 @@ function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [str
 		cargo = if d and type(d.cargo) == "table" then d.cargo else {},
 		chosen = if d and type(d.chosen) == "table" then d.chosen else {},
 	}
+end
+
+-- Follows chat `key`'s draft as `draft_of` does, wherever it is, without
+-- reading its words (a long draft isn't copied for it): what follows it to
+-- learn that it changed reads it only then (a split pane's mirror of it).
+function M.track_draft_of(key: string)
+	if here:get() == key then
+		M.text:len()
+		M.cargo:get()
+		M.chosen:get()
+	else
+		kept:len()
+	end
+end
+
+-- The options picked in chat `key`'s question, as `draft_of` reads them,
+-- without its words.
+function M.chosen_of(key: string): { [string]: boolean }
+	if here:get() == key then
+		return M.chosen:get()
+	end
+	local d = kept:get()[key]
+	return if d and type(d.chosen) == "table" then d.chosen else {}
+end
+
+-- The length of chat `key`'s draft's words, in bytes, as `draft_of`
+-- reads them (out in the composer, its draft not copied for it).
+function M.draft_size_of(key: string): number
+	if here:peek() == key then
+		return Draft.size(M.text)
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then #d.text else 0
 end
 
 -- Chat `key`'s draft's words as they are, read without following them

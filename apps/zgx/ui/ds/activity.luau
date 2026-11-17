@@ -912,6 +912,12 @@ return ui.component(function(props: Props): Node
 	-- be built for nothing as a list scrolls, and a selection across the
 	-- reply would take text no one can see.
 	local mounted = ui.use_state(opened:peek())
+	-- (The tree itself, its list and what keeps its rows' heights, is made
+	-- the first time it opens: a finished reply's groups, folded, most of a
+	-- long thread's, never make one. `unfolded`: one made by opening eases
+	-- open from nothing, as one made earlier does.)
+	local tree_made = ui.use_state(opened:peek())
+	local unfolded = ui.use_state(opened:peek())
 	local folding: (() -> ())? = nil
 	ui.effect(function()
 		local on = opened:get()
@@ -920,7 +926,10 @@ return ui.component(function(props: Props): Node
 			folding = nil
 		end
 		if on then
-			mounted:set(true)
+			ui.batch(function()
+				tree_made:set(true)
+				mounted:set(true)
+			end)
 		elseif mounted:peek() then
 			folding = ui.after(FOLD, function()
 				folding = nil
@@ -928,98 +937,139 @@ return ui.component(function(props: Props): Node
 			end)
 		end
 	end)
-	-- The rows: a list virtualized by the view around it (the transcript's),
-	-- each call a row of its own, built only as the view shows it, the rows
-	-- about to come into it built ahead in the time frames leave over
-	-- (zgx's `ahead`), so a scroll or the tree opening builds what shows
-	-- alone. A row follows its tool in place (its item as a state), and
-	-- holds its height in `heights`: a call's line is ROW, one opened or a
-	-- thought its own, as it was last laid out.
-	local own_key = key or tostring(own)
-	local heights = ui.use_state({} :: { number })
-	local listed: { string } = {}
-	-- Calls arriving while the rows are made: each plays `ENTER` as it is
-	-- first built, as a row joining a `ui.each` does.
-	local arriving: { [string]: boolean } = {}
-	local was_mounted = false
-	-- A row's height as it is first laid out: a call's line, ROW, or as it
-	-- was last laid out if opened; a thought, as it was if it's short or
-	-- opened, else its four lines folded before it knows it's long (its
-	-- button's room comes a frame on, as the words are measured).
-	local line = ui.theme.get("zeron.prose.small.line") :: number
-	local first_folded = THOUGHT_LINES * line + (ROW - line)
-	local function height_of(t: Tool): number
-		local h = MEASURED[`{own_key}:{t.id}`]
-		local open = CALLS_OPEN:peek()[t.id] == true
-		if t.kind ~= "thought" then
-			return if open and h then h else ROW
-		end
-		if h and (open or h <= first_folded) then
-			return h
-		end
-		return first_folded
-	end
-	ui.effect(function()
-		local list = tools:get()
-		local m = mounted:get()
-		local n = #list
-		-- (Rows that were there before: the same calls in the same places,
-		-- looked at at the ends; anything else is written whole.)
-		local same = #listed <= n
-			and (#listed == 0 or (list[1].id == listed[1] and list[#listed].id == listed[#listed]))
-		ui.batch(function()
-			if not same then
-				heights:set({})
-				table.clear(listed)
+	local Tree = ui.component(function(_: {}): Node
+		-- The rows: a list virtualized by the view around it (the transcript's),
+		-- each call a row of its own, built only as the view shows it, the rows
+		-- about to come into it built ahead in the time frames leave over
+		-- (zgx's `ahead`), so a scroll or the tree opening builds what shows
+		-- alone. A row follows its tool in place (its item as a state), and
+		-- holds its height in `heights`: a call's line is ROW, one opened or a
+		-- thought its own, as it was last laid out.
+		local own_key = key or tostring(own)
+		local heights = ui.use_state({} :: { number })
+		local listed: { string } = {}
+		-- Calls arriving while the rows are made: each plays `ENTER` as it is
+		-- first built, as a row joining a `ui.each` does.
+		local arriving: { [string]: boolean } = {}
+		local was_mounted = false
+		-- A row's height as it is first laid out: a call's line, ROW, or as it
+		-- was last laid out if opened; a thought, as it was if it's short or
+		-- opened, else its four lines folded before it knows it's long (its
+		-- button's room comes a frame on, as the words are measured).
+		local line = ui.theme.get("zeron.prose.small.line") :: number
+		local first_folded = THOUGHT_LINES * line + (ROW - line)
+		local function height_of(t: Tool): number
+			local h = MEASURED[`{own_key}:{t.id}`]
+			local open = CALLS_OPEN:peek()[t.id] == true
+			if t.kind ~= "thought" then
+				return if open and h then h else ROW
 			end
-			for i = #listed + 1, n do
-				local t = list[i]
-				listed[i] = t.id
-				if m and was_mounted then
-					arriving[t.id] = true
+			if h and (open or h <= first_folded) then
+				return h
+			end
+			return first_folded
+		end
+		ui.effect(function()
+			local list = tools:get()
+			local m = mounted:get()
+			local n = #list
+			-- (Rows that were there before: the same calls in the same places,
+			-- looked at at the ends; anything else is written whole.)
+			local same = #listed <= n
+				and (#listed == 0 or (list[1].id == listed[1] and list[#listed].id == listed[#listed]))
+			ui.batch(function()
+				if not same then
+					heights:set({})
+					table.clear(listed)
 				end
-				heights:push(height_of(t))
-			end
+				for i = #listed + 1, n do
+					local t = list[i]
+					listed[i] = t.id
+					if m and was_mounted then
+						arriving[t.id] = true
+					end
+					heights:push(height_of(t))
+				end
+			end)
+			was_mounted = m
 		end)
-		was_mounted = m
-	end)
-	local function row_view(t: Tool, index: State<number>, item: State<Tool>): Node
-		local id = t.id
-		local function place(): number
-			return index:get()
-		end
-		-- Its height, as laid out, for the rows after it.
-		local function resized(size: { w: number, h: number })
-			local k = `{own_key}:{id}`
-			if MEASURED[k] ~= size.h then
-				kept_set(MEASURED, k, size.h)
+		local function row_view(t: Tool, index: State<number>, item: State<Tool>): Node
+			local id = t.id
+			local function place(): number
+				return index:get()
 			end
-			local i = index:peek()
-			local held = heights:peek()[i]
-			if held ~= nil and held ~= size.h then
-				heights:set_key(i, size.h)
+			-- Its height, as laid out, for the rows after it.
+			local function resized(size: { w: number, h: number })
+				local k = `{own_key}:{id}`
+				if MEASURED[k] ~= size.h then
+					kept_set(MEASURED, k, size.h)
+				end
+				local i = index:peek()
+				local held = heights:peek()[i]
+				if held ~= nil and held ~= size.h then
+					heights:set_key(i, size.h)
+				end
 			end
+			local function made(): Node
+				return row(function(): Tool
+					return item:get()
+				end, function(): boolean
+					return place() < last_branch:get()
+				end, function(): boolean
+					return live() and place() == count:get()
+				end, props.open_subagent, props.thought, props.key, resized, place() < count:peek(), props.pictures)
+			end
+			-- (A call arriving joins as a row joining a `ui.each` does; the rest
+			-- are made as they come into view, as they were.)
+			if arriving[id] then
+				arriving[id] = nil
+				return ui.presence(function(): string
+					return "row"
+				end, made, { enter = ENTER, initial = true, w_full = true })
+			end
+			return made()
 		end
-		local function made(): Node
-			return row(function(): Tool
-				return item:get()
-			end, function(): boolean
-				return place() < last_branch:get()
-			end, function(): boolean
-				return live() and place() == count:get()
-			end, props.open_subagent, props.thought, props.key, resized, place() < count:peek(), props.pictures)
-		end
-		-- (A call arriving joins as a row joining a `ui.each` does; the rest
-		-- are made as they come into view, as they were.)
-		if arriving[id] then
-			arriving[id] = nil
-			return ui.presence(function(): string
-				return "row"
-			end, made, { enter = ENTER, initial = true, w_full = true })
-		end
-		return made()
-	end
 
+		return ui.column {
+			w_full = true,
+			overflow = "hidden",
+			layout = "height",
+			layout_clip = true,
+			layout_duration = FOLD,
+			layout_ease = "outQuart",
+			max_h = function(): number
+				return if opened:get() and unfolded:get() then 1e6 else 0
+			end,
+			on_mount = function()
+				if not unfolded:peek() then
+					ui.after(0, function()
+						unfolded:set(true)
+					end)
+				end
+			end,
+			if props.body
+				then ui.presence(function(): string?
+					return if mounted:get() then "body" else nil
+				end, function(): Node
+					return (props.body :: () -> Node)()
+				end, { w_full = true })
+				else ui.show(
+				mounted,
+				ui.list {
+					w_full = true,
+					virtualize = "ancestor",
+					data = tools,
+					key = "id",
+					heights = heights,
+					row = row_view,
+				}
+			),
+		}
+	end)
+
+	-- (Made while it works: its line rolls and its loader shows as it goes.
+	-- Made done, it stays done: a finished reply's group never works again.)
+	local working = live()
 	return ui.column {
 		w_full = true,
 		ui.show(
@@ -1055,40 +1105,14 @@ return ui.component(function(props: Props): Node
 				-- While it works, the working loader before the summary, its
 				-- ring over the trunk below; done, the summary alone, on the
 				-- reply's left edge.
-				ui.show(live, status.StatusIcon { kind = "working", size = LOADER }),
+				if working then ui.show(live, status.StatusIcon { kind = "working", size = LOADER }) else nil,
 				-- (Its box fills the header: its width easing would show nothing,
-				-- and lay the header out every frame of a roll.)
-				FadeText { title, roll = true, glide = false, grow = 1, text_size = "$font.size.sm" },
+				-- and lay the header out every frame of a roll. A group made once
+				-- it's done keeps its line: nothing to roll.)
+				FadeText { title, roll = working, glide = false, grow = 1, text_size = "$font.size.sm" },
 			}
 		),
-		-- The tree: its rows, each arriving under the last.
-		ui.column {
-			w_full = true,
-			overflow = "hidden",
-			layout = "height",
-			layout_clip = true,
-			layout_duration = FOLD,
-			layout_ease = "outQuart",
-			max_h = function(): number
-				return if opened:get() then 1e6 else 0
-			end,
-			if props.body
-				then ui.presence(function(): string?
-					return if mounted:get() then "body" else nil
-				end, function(): Node
-					return (props.body :: () -> Node)()
-				end, { w_full = true })
-				else ui.show(
-				mounted,
-				ui.list {
-					w_full = true,
-					virtualize = "ancestor",
-					data = tools,
-					key = "id",
-					heights = heights,
-					row = row_view,
-				}
-			),
-		},
+		-- The tree: its rows, each arriving under the last (made once it opens).
+		ui.show(tree_made, Tree {}),
 	}
 end)

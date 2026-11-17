@@ -12,6 +12,11 @@ use zeron_app::{edge_url_from_env, paths, workos_client_id_from_env};
 use zeron_cli::{Engines, Launch};
 
 fn main() -> anyhow::Result<()> {
+    // The engine runs its own executable as an agent's stdio MCP forwarder
+    // (`zeron headless`'s agents): first, before any setup, to stay tiny.
+    if std::env::args().nth(1).as_deref() == Some("mcp-proxy") {
+        return zeron_mcp::proxy::run();
+    }
     match zeron_cli::run(zeron_update::current_version(), Engines::InProcess) {
         Launch::Done(result) => result,
         Launch::Engine(command) => zeron_app::run_engine_command(command),

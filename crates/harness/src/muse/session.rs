@@ -1089,12 +1089,14 @@ mod session_mcp_tests {
             command: "/opt/zeron/zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         let extra = zeron_proto::McpServer {
             name: "plugin-focus".into(),
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec![],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
         assert_eq!(session_mcp_config(None, &[], true), None);
         assert_eq!(

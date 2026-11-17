@@ -37,6 +37,7 @@ local M = {}
 M.debug = false
 
 local tokens = require("@self/mention_tokens")
+local Draft = require("@self/draft_text")
 local locale = require("@self/locale")
 
 export type Trigger = tokens.Trigger
@@ -103,6 +104,10 @@ function M.use(opts: Use)
 	-- The token whose list was put away (Escape, a click away from it), by
 	-- where it starts, for each draft (`key`): that token's alone, see below.
 	local dismissed = ui.use_state({} :: { [any]: number })
+	-- The draft as it was when its list was put away, and at each keystroke
+	-- while it stays away (nil otherwise): whether its trigger was typed
+	-- again reads it then alone, not a long draft at every keystroke.
+	local was_text: string? = nil
 	local function key_now(): any
 		return if opts.key then opts.key() else ""
 	end
@@ -112,6 +117,9 @@ function M.use(opts: Use)
 	end
 	local function dismiss(key: any, from: number?)
 		local all = dismissed:peek()
+		if from ~= nil then
+			was_text = opts.value:peek()
+		end
 		if all[key] ~= from then
 			local next = table.clone(all)
 			next[key] = from
@@ -120,7 +128,7 @@ function M.use(opts: Use)
 	end
 	local active = ui.use_state(1)
 	local token = ui.computed(function(): Token?
-		local t = M.token(opts.value:get(), caret:get())
+		local t = Draft.token(opts.value, caret:get())
 		if t and opts.enabled and not opts.enabled(t.trigger) then
 			return nil
 		end
@@ -259,21 +267,27 @@ function M.use(opts: Use)
 	-- (moved, the token deleted), or its trigger typed again, and the next
 	-- token's list opens. Typed further at, it stays away. (Another chat's draft shown in
 	-- its place: that draft's own, kept with it.)
-	local was_text = opts.value:peek()
 	local was_key = key_now()
 	ui.effect(function()
 		local t = token:get()
-		local text = opts.value:get()
+		Draft.track(opts.value)
 		local key = key_now()
+		local moved = key ~= was_key
+		was_key = key
+		local gone = dismissed:peek()[key]
+		if gone == nil then
+			was_text = nil
+			return
+		end
+		local text = opts.value:get()
 		-- (The draft just as it was with the token's trigger put in: that
 		-- trigger was typed.)
 		local typed = t ~= nil
+			and was_text ~= nil
 			and #text == #was_text + 1
 			and string.sub(text, 1, t.from) .. string.sub(text, t.from + 2) == was_text
-		local moved = key ~= was_key
-		was_text, was_key = text, key
-		local gone = dismissed:peek()[key]
-		if gone == nil or moved then
+		was_text = text
+		if moved then
 			return
 		end
 		if t == nil or t.from ~= gone or typed then
@@ -285,11 +299,12 @@ function M.use(opts: Use)
 	-- path with it.
 	local refs = ui.use_state({} :: { [string]: string })
 	ui.effect(function()
-		local now = opts.value:get()
+		-- (Each looked for where the draft is held, not copied out of it.)
+		Draft.track(opts.value)
 		local kept = refs:peek()
 		local stale: { string } = {}
 		for tok in kept do
-			if not string.find(now, tok, 1, true) then
+			if #opts.value:find(tok, { limit = 1 }) == 0 then
 				table.insert(stale, tok)
 			end
 		end

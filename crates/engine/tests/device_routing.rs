@@ -166,6 +166,13 @@ impl Harness for InstantHarness {
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
     }
+    /// (Parks nothing: enough for a warm start's routing.)
+    fn prewarms(&self) -> bool {
+        true
+    }
+    async fn prewarm(&self, _key: &str, _request: RunRequest) -> Result<(), HarnessError> {
+        Ok(())
+    }
     async fn run(
         &self,
         _request: RunRequest,
@@ -2373,6 +2380,49 @@ async fn workspace_entry_mutations_are_forwarded_to_the_owning_plain_folder() {
     })).await.unwrap();
     assert_eq!(created["status"], "applied");
     assert_eq!(std::fs::read(folder.join("made.txt")).unwrap(), b"");
+    viewer.shutdown().await;
+    host.shutdown().await;
+}
+
+/// A new chat that will run on another device starts nothing early, there or
+/// here: a warm start on that device would outlive this app's quit (only its
+/// own engine hears that).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_warm_start_for_another_device_starts_nothing() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let host = assemble(&dirs.path().join("host"), "warm-host");
+    let _host_relay = host.start_host_relay(&relay_url);
+    let viewer = assemble(&dirs.path().join("viewer"), "warm-viewer");
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    viewer.set_links(LinkCache::new(config));
+    let folder = dirs.path().join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let client = zeron_rpc::memory_client(viewer.rpc_service());
+    let chat = "3f3b2a1c-9d4e-4c5b-8a7f-123456789abc";
+    let request = serde_json::json!({ "prompt": "", "harness": "mock", "model": "instant-1", "reasoning": null,
+        "cwd": folder.to_string_lossy(), "sandbox": "workspace-write", "resume": null });
+    let answer = client
+        .call(
+            methods::WARM_START,
+            serde_json::json!({ "chatId": chat, "targetDeviceId": "warm-host", "typed": false, "request": request }),
+        )
+        .await
+        .expect("warm start answered");
+    assert_eq!(answer["outcome"], "unsupported");
+    assert!(host.sessions.warm_chats().is_empty(), "never on the chat's device");
+    assert!(viewer.sessions.warm_chats().is_empty(), "nor on the composer's");
+    // (The same ask for this device's own chat does start.)
+    let answer = client
+        .call(
+            methods::WARM_START,
+            serde_json::json!({ "chatId": chat, "targetDeviceId": "warm-viewer", "typed": false, "request": request }),
+        )
+        .await
+        .expect("warm start answered");
+    assert_eq!(answer["outcome"], "started");
+    assert_eq!(viewer.sessions.warm_chats(), vec![chat.to_string()]);
     viewer.shutdown().await;
     host.shutdown().await;
 }

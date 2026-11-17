@@ -21,6 +21,9 @@ xnotify() { # $1 = update json object body — grok's extension channel (the
   emit "{\"method\":\"_x.ai/session_notification\",\"params\":{\"sessionId\":\"$SID\",\"update\":$1}}"
 }
 
+# (A warm start's test counts launches.)
+[ -n "$FAKE_LAUNCH_LOG" ] && echo "launch $$" >> "$FAKE_LAUNCH_LOG"
+
 # ---- handshake -------------------------------------------------------------
 read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1

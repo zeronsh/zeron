@@ -337,6 +337,9 @@ struct DocHostInner {
     /// publishes the edge posture on change (see `watch_connectivity`).
     connectivity: OnceLock<watch::Sender<zeron_proto::Connectivity>>,
     connectivity_started: AtomicBool,
+    /// Told as the workspace is wired (`set_workspace`): a connectivity
+    /// monitor started before then learns whether there is an edge to watch.
+    workspace_wired: tokio::sync::Notify,
     /// In-flight queued-attachment transfers, published per landed chunk
     /// (see `watch_transfers`). Entries live exactly as long as bytes are
     /// moving: added when a file's push starts, removed on commit or failure
@@ -417,6 +420,20 @@ impl Drop for TransferProgressGuard<'_> {
 /// is never delayed.
 const DEGRADE_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// How often the connectivity monitor looks once the posture has held
+/// healthy for [`CONNECTIVITY_SETTLE_TICKS`] seconds. A fresh degradation is
+/// then seen up to this late, on top of its [`DEGRADE_GRACE`]; recovery from
+/// one is still seen within a second, as the monitor looks every second
+/// while anything is degraded.
+const CONNECTIVITY_STEADY: std::time::Duration = std::time::Duration::from_secs(5);
+const CONNECTIVITY_SETTLE_TICKS: u32 = 3;
+
+/// Nothing degraded: local, or connected with every open chat connected.
+fn connectivity_healthy(posture: &zeron_proto::Connectivity) -> bool {
+    use zeron_proto::ConnectivityState as S;
+    matches!(posture.state, S::Connected | S::Disabled) && posture.chats.iter().all(|chat| chat.connected)
+}
+
 /// One tracked degradation source in [`DegradeGrace`].
 enum GraceKey<'a> {
     OsPath,
@@ -461,6 +478,11 @@ impl DegradeGrace {
         }
         let since = *slot.get_or_insert(now);
         now.duration_since(since) >= DEGRADE_GRACE
+    }
+
+    /// A degradation is being timed: the report may change with time alone.
+    fn timing(&self) -> bool {
+        self.os_path.is_some() || self.registry.is_some() || !self.chats.is_empty()
     }
 
     /// Drop timers for chats that no longer have open docs.
@@ -1298,6 +1320,7 @@ impl DocHost {
                 uploads: OnceLock::new(),
                 connectivity: OnceLock::new(),
                 connectivity_started: AtomicBool::new(false),
+                workspace_wired: tokio::sync::Notify::new(),
                 transfers: watch::channel(Vec::new()).0,
                 held_active: Mutex::new(HashSet::new()),
                 held_gate: Mutex::new(()),
@@ -1704,6 +1727,7 @@ impl DocHost {
     pub fn set_workspace(&self, workspace: WorkspaceHost) {
         let chats = workspace.watch_chats();
         if self.inner.workspace.set(workspace).is_ok() {
+            self.inner.workspace_wired.notify_one();
             self.spawn_cutover_watcher(chats);
             self.spawn_migration_sweep();
             self.kick_sync();
@@ -2442,7 +2466,25 @@ impl DocHost {
                         _ = tokio::time::sleep_until(last + SYNC_PASS_SPACING), if busy => {}
                         _ = kick.notified() => {}
                         Ok(()) = jobs.changed() => {}
-                        Ok(()) = outbox.changed() => {}
+                        Ok(()) = outbox.changed() => {
+                            // Rows a started chat's own client sends: nothing
+                            // for a pass to admit. A streaming chat adds
+                            // several a second, and each pass reads the store.
+                            let Some(inner) = weak.upgrade() else { return };
+                            let changed = inner.store.take_outbox_changes();
+                            let handles = lock(&inner.handles);
+                            let own = changed.iter().all(|id| {
+                                !stopping_ids.contains(id)
+                                    && handles.get(id).is_some_and(|h| {
+                                        h.sync_started.load(Ordering::Acquire)
+                                            && !h.publication_failed.load(Ordering::Acquire)
+                                    })
+                            });
+                            drop(handles);
+                            if own && !busy {
+                                continue;
+                            }
+                        }
                         Ok(()) = socket_contention.changed() => {}
                         Some(Ok(())) = changed(&mut registry_chats) => {}
                         Some(Ok(())) = changed(&mut registry_synced) => {}
@@ -2463,6 +2505,9 @@ impl DocHost {
                 // Whatever changes from here on wakes the next pass.
                 jobs.borrow_and_update();
                 outbox.borrow_and_update();
+                if let Some(inner) = weak.upgrade() {
+                    inner.store.take_outbox_changes();
+                }
                 socket_contention.borrow_and_update();
                 let Some(inner) = weak.upgrade() else { return };
                 let host = Self { inner };
@@ -3436,7 +3481,25 @@ impl DocHost {
                 }
             }
             let mut after = String::new();
+            let mut jobs_changed = host.inner.store.watch_sync_jobs();
             loop {
+                // With no recovery owed, nothing to retry: sleep until a
+                // job is scheduled (a salvage failed) rather than looking
+                // every half minute. One owed is tried a half minute apart.
+                if after.is_empty() {
+                    jobs_changed.borrow_and_update();
+                    let owed = host
+                        .inner
+                        .store
+                        .pending_sync_jobs("recovery", "", 1)
+                        .map_or(true, |jobs| !jobs.is_empty());
+                    if !owed {
+                        if jobs_changed.changed().await.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 let jobs = host
                     .inner
@@ -3998,10 +4061,13 @@ impl DocHost {
     }
 
     /// The connectivity stream: current posture first, then every change.
-    /// Lazily starts a monitor — a 1s recompute over in-memory stats
-    /// (atomics + small locks), published only when the value changes. The
-    /// retry countdown renders client-side from `retry_at_ms`, so quiet
-    /// periods emit nothing at all.
+    /// Lazily starts a monitor — a recompute over in-memory stats (atomics +
+    /// small locks), published only when the value changes: every second
+    /// while it's changing, degraded or timing a degradation's grace, and
+    /// every [`CONNECTIVITY_STEADY`] once it has held healthy (or local) for
+    /// a few seconds, so a settled engine isn't woken each second to find
+    /// nothing changed. The retry countdown renders client-side from
+    /// `retry_at_ms`, so quiet periods emit nothing at all.
     pub fn watch_connectivity(&self) -> watch::Receiver<zeron_proto::Connectivity> {
         let tx = self
             .inner
@@ -4013,12 +4079,30 @@ impl DocHost {
         {
             let host = self.clone();
             self.spawn_worker(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut held = 0u32;
                 loop {
-                    tick.tick().await;
+                    // A local profile's posture is the default for good
+                    // (`compute_connectivity`): nothing to look at, once its
+                    // workspace (no edge either) is wired.
+                    if !host.edge_expected() {
+                        if host.inner.workspace.get().is_some() {
+                            std::future::pending::<()>().await;
+                        }
+                        host.inner.workspace_wired.notified().await;
+                        continue;
+                    }
+                    if held >= CONNECTIVITY_SETTLE_TICKS {
+                        // Settled: on the beat grid, with the sockets' pings
+                        // (`zeron_sync::wake`), so it wakes the engine with
+                        // them rather than between.
+                        tokio::time::sleep_until(zeron_sync::wake::next_beat(CONNECTIVITY_STEADY))
+                            .await;
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
                     let next = host.compute_connectivity();
-                    if let Some(tx) = host.inner.connectivity.get() {
+                    let healthy = connectivity_healthy(&next);
+                    let changed = host.inner.connectivity.get().is_some_and(|tx| {
                         tx.send_if_modified(|cur| {
                             if *cur == next {
                                 false
@@ -4026,8 +4110,10 @@ impl DocHost {
                                 *cur = next;
                                 true
                             }
-                        });
-                    }
+                        })
+                    });
+                    let timing = lock(&host.inner.connectivity_grace).timing();
+                    held = if changed || timing || !healthy { 0 } else { held.saturating_add(1) };
                 }
             });
         }
@@ -4043,12 +4129,16 @@ impl DocHost {
     /// those flashed amber warnings and "Queued" badges at every chat
     /// switch. Raw degradation must persist [`DEGRADE_GRACE`] before it is
     /// reported; recovery reports instantly.
+    /// Whether this engine syncs through an edge (signed in): otherwise its
+    /// connectivity is the local profile's, always the default.
+    fn edge_expected(&self) -> bool {
+        self.inner.config.edge.is_some() || self.workspace().is_some_and(|w| w.edge_expected())
+    }
+
     fn compute_connectivity(&self) -> zeron_proto::Connectivity {
         use zeron_proto::{ChatConnectivity, Connectivity, ConnectivityState};
         let workspace = self.workspace();
-        let edge_expected = self.inner.config.edge.is_some()
-            || workspace.as_ref().is_some_and(|w| w.edge_expected());
-        if !edge_expected {
+        if !self.edge_expected() {
             return Connectivity::default();
         }
         let now = std::time::Instant::now();
@@ -4265,6 +4355,7 @@ impl DocHost {
         payload: SessionCommandPayload,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        tracing::debug!(target: "first_word", chat = %chat_id, "queue command");
         let handle = self.open(chat_id)?;
         // A chat hosted on Cloud: the bytes go to the edge's store first, and
         // the message enters the chat only once they're there.
@@ -6141,6 +6232,7 @@ impl DocHost {
                         SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
                     ) {
                         crate::wake_trace::mark_command(entry.issued_at);
+                        tracing::debug!(target: "first_word", chat = %handle.chat_id, "drain picked the run");
                         self.await_earlier_controls(handle, &entry.id).await;
                     }
                     let (status, resolution) = match self.execute(&sessions, handle, &entry).await {
@@ -6797,9 +6889,15 @@ impl DocHost {
     async fn capture_source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {
         let repos = self.inner.repos.get()?;
         let path = Path::new(cwd);
-        let identity = repos.checkout_identity(path).await.ok()?;
-        let branch = repos.current_branch(path).await.ok()?;
-        let head_sha = repos.head_sha(path).await.ok().flatten();
+        // Three `git` processes: side by side, not one after another.
+        let (identity, branch, head_sha) = tokio::join!(
+            repos.checkout_identity(path),
+            repos.current_branch(path),
+            repos.head_sha(path),
+        );
+        let identity = identity.ok()?;
+        let branch = branch.ok()?;
+        let head_sha = head_sha.ok().flatten();
         Some(ConversationSourceContext {
             checkout_id: identity.id,
             repo_root: identity.root.to_string_lossy().into_owned(),
@@ -6811,10 +6909,13 @@ impl DocHost {
     }
 
     /// Every fresh harness dispatch crosses this boundary, including
-    /// steer/input fallbacks and crash recovery. Capture immediately before
-    /// dispatch so the conversation records the checkout the harness will
-    /// actually observe, rather than whichever checkout state was current on
-    /// an earlier turn.
+    /// steer/input fallbacks and crash recovery. The conversation records
+    /// the checkout the harness will actually observe, rather than whichever
+    /// checkout state was current on an earlier turn: read as the dispatch
+    /// starts, beside it rather than before it. Its `git` processes took
+    /// ~25 ms (M5 Max; more on slower Macs) in front of every agent start,
+    /// and the agent reads nothing of its checkout for far longer than that
+    /// (its own startup is ~250 ms before its first request).
     pub(crate) async fn dispatch_with_source_context(
         &self,
         sessions: &SessionsEngine,
@@ -6823,11 +6924,21 @@ impl DocHost {
         request: zeron_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        if let Some(workspace) = self.workspace()
-            && let Some(context) = self.capture_source_context(&request.cwd).await
-            && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
-        {
-            tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
+        // Stamped on a task of its own: the drain resolves the command as
+        // soon as the run is dispatched, never behind the `git` processes.
+        if self.workspace().is_some() {
+            let host = self.clone();
+            let chat_id = chat_id.to_owned();
+            let cwd = request.cwd.clone();
+            self.spawn_worker(async move {
+                if let Some(workspace) = host.workspace()
+                    && let Some(context) = host.capture_source_context(&cwd).await
+                    && let Err(err) = workspace.set_chat_source_context(&chat_id, &context)
+                {
+                    tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
+                }
+                tracing::debug!(target: "first_word", chat = %chat_id, "source context: stamped");
+            });
         }
         sessions
             .dispatch(chat_id, harness, request, message_id)

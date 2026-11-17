@@ -115,20 +115,24 @@ fn name_models_from(models: &mut [Model], catalog: &Path) {
     // map of it) would cost far more than the few names wanted.
     // Only a regular file of a sane size: a FIFO (or a device) there would
     // block the read forever, a runaway file would be parsed for minutes.
-    let Ok(meta) = std::fs::metadata(catalog) else {
-        return;
+    // (Checked on the open handle: one swapped for a FIFO after a check of
+    // its path would still block.)
+    let file = match crate::bounded_file::open(catalog, MAX_CATALOG_BYTES) {
+        Ok((file, _)) => file,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(
+                    error = %err,
+                    "Hermes's model catalog isn't a file of a usable size; models keep their ids"
+                );
+            }
+            return;
+        }
     };
-    if !meta.is_file() || meta.len() > MAX_CATALOG_BYTES {
-        tracing::debug!(
-            "Hermes's model catalog isn't a file of a usable size; models keep their ids"
-        );
-        return;
-    }
-    let Ok(file) = std::fs::File::open(catalog) else {
-        return;
-    };
-    let mut reader =
-        serde_json::Deserializer::from_reader(std::io::BufReader::with_capacity(64 * 1024, file));
+    let mut reader = serde_json::Deserializer::from_reader(std::io::BufReader::with_capacity(
+        64 * 1024,
+        std::io::Read::take(file, MAX_CATALOG_BYTES),
+    ));
     let names = match (Catalog { wanted: &wanted }).deserialize(&mut reader) {
         Ok(names) => names,
         Err(error) => {
@@ -403,6 +407,13 @@ mod tests {
         let file = std::fs::File::create(&big).unwrap();
         file.set_len(MAX_CATALOG_BYTES + 1).unwrap();
         name_models_from(&mut models, &big);
+        assert_eq!(models[0].label, "claude-opus-5-5");
+        // A symlink to an endless device: refused once opened, not read.
+        let zero = dir.path().join("zero.json");
+        std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+        let started = std::time::Instant::now();
+        name_models_from(&mut models, &zero);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
         assert_eq!(models[0].label, "claude-opus-5-5");
     }
 

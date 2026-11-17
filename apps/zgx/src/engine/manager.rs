@@ -81,6 +81,7 @@ const BETA: bool = cfg!(feature = "beta");
 /// The soonest a second engine is started after the first.
 const SPAWN_SPACING: Duration = Duration::from_secs(10);
 
+#[derive(Clone)]
 pub struct Config {
     pub port: u16,
     pub data_dir: PathBuf,
@@ -278,6 +279,13 @@ impl Spawner {
         self.said_held
     }
 
+    /// Whether an engine this app started is likely still coming up: started
+    /// less than [`SPAWN_SPACING`] ago, so it's dialled again soon rather
+    /// than less and less often.
+    pub fn starting(&self) -> bool {
+        self.last.is_some_and(|at| at.elapsed() < SPAWN_SPACING)
+    }
+
     /// Nothing answers on the port: start an engine, if this app may and
     /// it's been long enough since the last. Whether one was started. An
     /// engine that holds the data dir without serving yet is on its way in or
@@ -311,17 +319,24 @@ impl Spawner {
         }
         self.said_held = false;
         self.last = Some(Instant::now());
-        let started = if config.managed { launch(config) } else { spawn(config, bin) };
-        match started {
-            Ok(()) => {
-                eprintln!("zeron-zgx: engine: started {} ({})", bin.display(), config.describe());
-                true
+        // Started on a thread of its own: creating the process waits for the
+        // system to map (and Windows' antivirus to scan) the engine's
+        // executable, a few hundred milliseconds the first time a new
+        // version runs, which the window's first frame shouldn't wait for.
+        let (config, bin) = (config.clone(), bin.clone());
+        let started = std::thread::Builder::new().name("engine-start".into()).spawn(move || {
+            let started = if config.managed { launch(&config) } else { spawn(&config, &bin) };
+            match started {
+                Ok(()) => eprintln!("zeron-zgx: engine: started {} ({})", bin.display(), config.describe()),
+                Err(error) => eprintln!("zeron-zgx: engine: {} didn't start: {error}", bin.display()),
             }
-            Err(error) => {
-                eprintln!("zeron-zgx: engine: {} didn't start: {error}", bin.display());
-                false
-            }
+        });
+        if let Err(error) = started {
+            eprintln!("zeron-zgx: engine: couldn't start a thread to start it: {error}");
+            self.last = None;
+            return false;
         }
+        true
     }
 }
 
@@ -517,6 +532,34 @@ mod tests {
         assert!(!spawner.start_if_due(&config), "held: nothing started");
         lock.unlock().unwrap();
         assert!(spawner.start_if_due(&config), "let go: started at once");
+    }
+
+    /// A start returns at once (the process is made on a thread of its own),
+    /// and the engine it started counts as coming up until a second could
+    /// be started: one start, not two, however soon it's asked again.
+    #[test]
+    fn a_start_returns_at_once_and_is_coming_up_until_the_next_is_due() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            port: 1,
+            data_dir: dir.path().join("data"),
+            bin: Some(dir.path().join("no-such-engine")),
+            home: None,
+            spawn: true,
+            edge: String::new(),
+            client: String::new(),
+            callback_port: 0,
+            managed: false,
+        };
+        let mut spawner = Spawner::new();
+        assert!(!spawner.starting());
+        let asked = Instant::now();
+        assert!(spawner.start_if_due(&config));
+        assert!(asked.elapsed() < Duration::from_secs(1), "not waiting for the process");
+        assert!(spawner.starting());
+        assert!(!spawner.start_if_due(&config), "one start per SPAWN_SPACING");
+        let never = Config { spawn: false, ..config };
+        assert!(!Spawner::new().start_if_due(&never));
     }
 
     #[test]

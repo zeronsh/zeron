@@ -2004,6 +2004,7 @@ impl EngineRpc {
                 child_kind,
                 cloud: _,
             } => {
+                tracing::debug!(target: "first_word", chat = %chat_id, "create chat");
                 // A voice orchestrator is hidden, so the chats it creates are
                 // the user's top-level sessions rather than its side chats.
                 let parent_chat_id = parent_chat_id
@@ -2151,6 +2152,7 @@ impl EngineRpc {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }
             MutateParams::SetChatConfig { chat_id, config } => {
+                tracing::debug!(target: "first_word", chat = %chat_id, "set chat config");
                 // A chat may change provider between turns, never during one:
                 // the live run belongs to the old harness and would keep
                 // writing into the transcript the new one is about to read.
@@ -2466,6 +2468,38 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
+/// Whether `harness` is known to be signed out, so a new chat's agent isn't
+/// started early (`WarmStart`): the agents' last listing (`snapshot`) has no
+/// live login for it and the engine's environment (`set`) holds none of the
+/// variables its CLI signs in with. Unknown (never listed, or an agent whose
+/// logins aren't tracked) is not signed out.
+fn warm_signed_out(
+    snapshot: Option<&zeron_proto::AgentAccountsSnapshot>,
+    harness: zeron_proto::HarnessId,
+    set: impl Fn(&str) -> bool,
+) -> bool {
+    use zeron_proto::HarnessId;
+    let env: &[&str] = match harness {
+        HarnessId::ClaudeCode => &[
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+        ],
+        HarnessId::Codex => &["OPENAI_API_KEY", "CODEX_API_KEY"],
+        _ => return false,
+    };
+    let Some(snapshot) = snapshot else {
+        return false;
+    };
+    !env.iter().any(|name| set(name))
+        && !snapshot
+            .accounts
+            .iter()
+            .any(|account| account.harness == harness && account.active)
+}
+
 fn forwardable(method: &str) -> bool {
     if voice_remote::handles(method) {
         return true;
@@ -3470,6 +3504,53 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
+            methods::WARM_START => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct WarmStartParams {
+                    chat_id: String,
+                    request: zeron_proto::RunRequest,
+                    #[serde(default)]
+                    typed: bool,
+                }
+                let p: WarmStartParams = parse_params(params.clone())?;
+                let Some(harness) = p.request.harness else {
+                    return Err(RpcError::BadParams("a warm start names its harness".into()));
+                };
+                // An agent known to be signed out: its CLI would only wait for a
+                // sign-in, so nothing starts early (its send says what's wrong).
+                if warm_signed_out(
+                    self.agent_accounts.watch_snapshots().borrow().as_ref(),
+                    harness,
+                    |name| std::env::var_os(name).is_some_and(|v| !v.is_empty()),
+                ) {
+                    self.sessions.warm_stop(&p.chat_id).await;
+                    return RpcReply::value(
+                        &serde_json::json!({ "outcome": crate::sessions::WarmOutcome::Unsupported }),
+                    );
+                }
+                // Only for a chat on this device: one elsewhere would outlive
+                // this app's quit (only this engine hears it), so nothing
+                // starts early there.
+                if params
+                    .get("targetDeviceId")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|target| target != self.doc_host.device_id())
+                {
+                    return RpcReply::value(&serde_json::json!({ "outcome": crate::sessions::WarmOutcome::Unsupported }));
+                }
+                let outcome = self
+                    .sessions
+                    .warm_start(&p.chat_id, harness, p.request, p.typed)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "outcome": outcome }))
+            }
+            methods::WARM_STOP => {
+                let p: ChatParams = parse_params(params)?;
+                self.sessions.warm_stop(&p.chat_id).await;
+                RpcReply::value(&serde_json::json!({}))
+            }
             methods::TAKE_PROJECT_ACTION_SETUP => {
                 let p: TakeProjectActionSetupParams = parse_params(params)?;
                 let outcome = self
@@ -3713,10 +3794,25 @@ impl RpcService for EngineRpc {
                     .transpose()
                     .map_err(|e| RpcError::BadParams(e.to_string()))?;
                 let p: ChatParams = parse_params(params)?;
+                // Someone reading the chat (this device's app, or another
+                // device) keeps its parked agent for the longer idle window:
+                // its person is likely to write next. Not an agent reading
+                // it through its tools.
+                let viewer = (!matches!(zeron_rpc::caller(), zeron_rpc::Caller::Agent { .. }))
+                    .then(|| self.sessions.retain_viewer(&p.chat_id));
                 if let Some(window) = window {
                     return windowed_doc_messages_stream(self.doc_host.clone(), p.chat_id, window)
                         .await
-                        .map(RpcReply::Stream);
+                        .map(|stream| {
+                            RpcReply::Stream(
+                                stream
+                                    .map(move |frame| {
+                                        let _held = &viewer;
+                                        frame
+                                    })
+                                    .boxed(),
+                            )
+                        });
                 }
                 // An open transcript keeps its chat's checkout diff live (and
                 // discardable) even when the chat is archived; the guard lives
@@ -3736,7 +3832,7 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Stream(
                     stream
                         .map(move |frame| {
-                            let _held = &interest;
+                            let _held = (&interest, &viewer);
                             frame
                         })
                         .boxed(),
@@ -5863,6 +5959,37 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No warm start for an agent known to be signed out; one whose logins
+    /// aren't known yet, or that signs in from the environment, still gets it.
+    #[test]
+    fn a_new_chat_starts_early_only_for_an_agent_not_known_signed_out() {
+        use zeron_proto::HarnessId;
+        let snapshot = |accounts: serde_json::Value| -> zeron_proto::AgentAccountsSnapshot {
+            serde_json::from_value(serde_json::json!({ "accounts": accounts, "warnings": [] }))
+                .unwrap()
+        };
+        let none = |_: &str| false;
+        let signed_out = snapshot(serde_json::json!([]));
+        let claude_in =
+            snapshot(serde_json::json!([{ "id": "a", "harness": "claude-code", "active": true }]));
+        let claude_saved =
+            snapshot(serde_json::json!([{ "id": "a", "harness": "claude-code", "active": false }]));
+        // No login listed, none in the environment: signed out.
+        assert!(warm_signed_out(Some(&signed_out), HarnessId::ClaudeCode, none));
+        assert!(warm_signed_out(Some(&signed_out), HarnessId::Codex, none));
+        // A saved login that isn't the live one doesn't sign the CLI in.
+        assert!(warm_signed_out(Some(&claude_saved), HarnessId::ClaudeCode, none));
+        // A live login, or a key the CLI reads from the environment.
+        assert!(!warm_signed_out(Some(&claude_in), HarnessId::ClaudeCode, none));
+        assert!(!warm_signed_out(Some(&signed_out), HarnessId::ClaudeCode, |n| n
+            == "ANTHROPIC_API_KEY"));
+        assert!(!warm_signed_out(Some(&signed_out), HarnessId::Codex, |n| n == "OPENAI_API_KEY"));
+        // Never listed yet: unknown, not signed out.
+        assert!(!warm_signed_out(None, HarnessId::ClaudeCode, none));
+        // An agent whose logins aren't tracked here.
+        assert!(!warm_signed_out(Some(&signed_out), HarnessId::Opencode, none));
+    }
 
     /// What a viewport does with a keyed list frame: the list it shows after.
     fn apply_frame(list: &[serde_json::Value], frame: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {

@@ -56,6 +56,7 @@ local Tooltip = require("@self/tooltip")
 local VoiceWave = require("@self/voice_wave").VoiceWave
 local context_usage = require("@self/context_usage")
 local TextMetrics = require("@self/composer_metrics")
+local Draft = require("@self/draft_text")
 local Layout = require("@self/composer_layout")
 local ComposerMotion = require("@self/composer_motion")
 local EditorMenu = require("@self/editor_menu")
@@ -1013,12 +1014,14 @@ return ui.component(function(props: Props): Node
 		-- Past the cap a draft is measured no more: its size changes nothing
 		-- (Layout.estimate). The type's line height changed (tracked), it is
 		-- measured again.
-		estimate = function(text: string, line_height: number): Layout.Sample?
+		estimate = function(line_height: number): Layout.Sample?
 			local line = ui.theme.get("zeron.composer.line")
 			if type(line) == "number" and math.abs(line - line_height) > 0.01 then
 				return nil
 			end
-			return Layout.estimate(text, line_height)
+			-- Its line breaks counted where it's held, up to the cap's.
+			local capped = Layout.capped_lines(line_height)
+			return Layout.estimate_lines(1 + #value:find("\n", { limit = capped - 1 }), line_height)
 		end,
 	}
 	local head_h_seen = kept("head_h", 0)
@@ -1059,7 +1062,7 @@ return ui.component(function(props: Props): Node
 	end
 
 	local function has_text(): boolean
-		return string.find(value:get(), "%S") ~= nil
+		return Draft.has_text(value)
 	end
 	local function disabled(): boolean
 		return read(props.disabled) == true
@@ -1201,7 +1204,7 @@ return ui.component(function(props: Props): Node
 			cargo = has_cargo(),
 			asking = asking(),
 			dictating = dictating(),
-			multiline = string.find(value:get(), "\n") ~= nil,
+			multiline = Draft.multiline(value),
 		}
 	end
 	local target_geometry = ui.use_state(Layout.calculate(layout_input(), previous_text_expanded:peek()))

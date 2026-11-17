@@ -152,10 +152,21 @@ fn agent_tools_off() -> [(String, Value); 3] {
 /// to the user's `mcp_servers` table.
 fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
     let key = |field: &str| format!("mcp_servers.{}.{field}", mcp.name);
-    vec![
-        (key("command"), mcp.command.clone().into()),
-        (key("args"), json!(mcp.args)),
-        (key("env"), json!(mcp.env)),
+    // The engine serves Zeron's tools itself over Streamable HTTP, which
+    // Codex speaks: no server process. These overrides ride `thread/start`
+    // on the app-server's stdin, never the command line.
+    let transport = match &mcp.http {
+        Some(http) => vec![
+            (key("url"), http.url.clone().into()),
+            (key("http_headers"), json!(http.headers)),
+        ],
+        None => vec![
+            (key("command"), mcp.command.clone().into()),
+            (key("args"), json!(mcp.args)),
+            (key("env"), json!(mcp.env)),
+        ],
+    };
+    transport.into_iter().chain([
         // Our injected server's tools are Zeron's own: approve them in every
         // access mode, so Codex neither rejects a call under `never` nor
         // asks about one under the others.
@@ -167,7 +178,8 @@ fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
         // A cold start (a fresh machine paging the binary in) can outlast
         // the 10 s default before the server answers `initialize`.
         (key("startup_timeout_sec"), 30.into()),
-    ]
+    ])
+    .collect()
 }
 
 /// Dotted `thread/start` config overrides for the plugins' native MCP
@@ -216,6 +228,19 @@ pub struct CodexHarness {
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
     kill_grace: Duration,
+    /// App-servers started before their chat's first message
+    /// ([`Harness::prewarm`]), by key: launched and past `initialize`.
+    warm: std::sync::Mutex<std::collections::HashMap<String, WarmServer>>,
+}
+
+/// A parked warm start: the app-server, initialized, and what it was
+/// launched from (its binary, folder and environment: all a launch takes —
+/// the thread's model, modes and MCP servers ride `thread/start`).
+struct WarmServer {
+    exe: PathBuf,
+    cwd: String,
+    env: std::collections::BTreeMap<String, String>,
+    server: AppServer,
 }
 
 impl Default for CodexHarness {
@@ -225,6 +250,7 @@ impl Default for CodexHarness {
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
+            warm: Default::default(),
         }
     }
 }
@@ -232,6 +258,28 @@ impl Default for CodexHarness {
 impl CodexHarness {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The binary a launch runs: the physical release, pinned for this
+    /// process and its voice helper (an installer may move the current
+    /// symlink while this runtime stays warm), its version checked.
+    async fn launch_executable(&self) -> Result<PathBuf, HarnessError> {
+        let exe = plain_executable(
+            self.resolve_executable()?
+                .canonicalize()
+                .map_err(HarnessError::Io)?,
+        );
+        // Cached per binary; a fixed test executable is never version-probed.
+        if self.executable.is_none() {
+            let probe = exe.clone();
+            let version =
+                tokio::task::spawn_blocking(move || crate::executable::binary_version(&probe))
+                    .await
+                    .ok()
+                    .flatten();
+            check_codex_version(version.as_ref())?;
+        }
+        Ok(exe)
     }
 
     /// Use a fixed CLI binary instead of PATH/known-location resolution.
@@ -285,7 +333,7 @@ impl CodexHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -338,7 +386,7 @@ impl CodexHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -843,7 +891,91 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false, false).await
+        self.run_with_mode(request, controls, false, false, None).await
+    }
+
+    /// An app-server waits for its client once `initialize` is answered:
+    /// started that far, it has done its startup and asked no model anything
+    /// (the thread is started with the first message, from its config).
+    fn prewarms(&self) -> bool {
+        true
+    }
+
+    async fn prewarm(&self, key: &str, mut request: RunRequest) -> Result<(), HarnessError> {
+        self.discard_warm(key).await;
+        let exe = self.launch_executable().await?;
+        request.sandbox = permissions(run_access(&request), false).1;
+        let mut server = spawn_app_server(&exe, &request)?;
+        // The same handshake a run makes (`run_session`), opt-outs first;
+        // bounded, so a stuck app-server never holds the warm start open.
+        let mut opt_out = true;
+        loop {
+            let handshake = server.client.request("initialize", initialize_params(opt_out));
+            let answered = tokio::time::timeout(WARM_HANDSHAKE, handshake)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(HarnessError::Protocol("codex app-server: initialize timed out".into()))
+                });
+            match answered {
+                Ok(_) => break,
+                Err(_) if !server.client.is_closed() && std::mem::take(&mut opt_out) => continue,
+                Err(error) => {
+                    server.client.close_stdin_for_teardown();
+                    shutdown_child(&mut server.child, self.kill_grace).await;
+                    return Err(error);
+                }
+            }
+        }
+        server.client.notify("initialized", None);
+        let warm = WarmServer {
+            exe,
+            cwd: request.cwd.clone(),
+            env: request.env.clone(),
+            server,
+        };
+        let replaced = lock_warm(&self.warm).insert(key.to_owned(), warm);
+        if let Some(old) = replaced {
+            spawn_retire(old, self.kill_grace);
+        }
+        Ok(())
+    }
+
+    async fn run_warm(
+        &self,
+        key: &str,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let mut warm = lock_warm(&self.warm).remove(key);
+        let alive = warm
+            .as_mut()
+            .is_some_and(|w| matches!(w.server.child.try_wait(), Ok(None)) && !w.server.client.is_closed());
+        let exe = self.launch_executable().await.ok();
+        let server = match warm {
+            Some(w)
+                if alive
+                    && exe.as_ref() == Some(&w.exe)
+                    && w.cwd == request.cwd
+                    && w.env == request.env =>
+            {
+                Some(w.server)
+            }
+            Some(w) => {
+                tracing::info!(target: "zeron_harness::codex", key, "warm start not used; starting afresh");
+                spawn_retire(w, self.kill_grace);
+                None
+            }
+            None => None,
+        };
+        self.run_with_mode(request, controls, false, false, server).await
+    }
+
+    /// Ends once the app-server has.
+    async fn discard_warm(&self, key: &str) {
+        let warm = lock_warm(&self.warm).remove(key);
+        if let Some(warm) = warm {
+            retire(warm, self.kill_grace).await;
+        }
     }
 
     async fn start_idle(
@@ -851,7 +983,7 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false, true).await
+        self.run_with_mode(request, controls, false, true, None).await
     }
 
     async fn run_title(
@@ -869,7 +1001,33 @@ impl Harness for CodexHarness {
         request.auto_approve = false;
         request.access = AccessMode::Supervised;
         request.plan = false;
-        self.run_with_mode(request, controls, true, false).await
+        self.run_with_mode(request, controls, true, false, None).await
+    }
+}
+
+fn lock_warm<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// How long a warm start waits for its app-server's `initialize` answer.
+const WARM_HANDSHAKE: Duration = Duration::from_secs(30);
+
+/// End a warm start no message reached.
+async fn retire(warm: WarmServer, kill_grace: Duration) {
+    let WarmServer { server, .. } = warm;
+    let AppServer { mut child, client, .. } = server;
+    client.close_stdin_for_teardown();
+    shutdown_child(&mut child, kill_grace).await;
+}
+
+/// [`retire`], in the background.
+fn spawn_retire(warm: WarmServer, kill_grace: Duration) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(retire(warm, kill_grace));
+        }
+        // (No runtime: the child is killed on drop.)
+        Err(_) => drop(warm),
     }
 }
 
@@ -880,6 +1038,7 @@ impl CodexHarness {
         controls: RunControls,
         title_only: bool,
         idle: bool,
+        warm: Option<AppServer>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let native = command_request(&request.prompt, "")?;
         if native
@@ -896,36 +1055,26 @@ impl CodexHarness {
                 "Codex commands cannot include attachments; send them in a separate prompt".into(),
             ));
         }
-        // Pin the physical release for this process and its voice helper: an
-        // installer may move the current symlink while this runtime stays warm.
-        let exe = plain_executable(
-            self.resolve_executable()?
-                .canonicalize()
-                .map_err(HarnessError::Io)?,
-        );
-        // Cached per binary; a fixed test executable is never version-probed.
-        if self.executable.is_none() {
-            let probe = exe.clone();
-            let version =
-                tokio::task::spawn_blocking(move || crate::executable::binary_version(&probe))
-                    .await
-                    .ok()
-                    .flatten();
-            check_codex_version(version.as_ref())?;
-        }
+        let exe = self.launch_executable().await?;
         // The sandbox is the access mode's (see [`permissions`]), never the
         // request's own level.
         request.sandbox = permissions(run_access(&request), title_only).1;
+        // A warm start (`prewarm`) is launched and initialized already.
+        let initialized = warm.is_some();
         let AppServer {
             child,
             client,
             incoming,
             stderr_tail,
-        } = spawn_app_server(&exe, &request)?;
+        } = match warm {
+            Some(server) => server,
+            None => spawn_app_server(&exe, &request)?,
+        };
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             title_only,
             idle,
+            initialized,
             executable: exe,
             child,
             client,
@@ -967,7 +1116,7 @@ fn spawn_app_server(exe: &Path, request: &RunRequest) -> Result<AppServer, Harne
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| {
+    let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
         let cwd = (!request.cwd.is_empty()).then(|| Path::new(&request.cwd));
         crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
     })?;
@@ -1169,6 +1318,8 @@ struct Session {
     executable: PathBuf,
     title_only: bool,
     idle: bool,
+    /// Its app-server answered `initialize` already (a warm start).
+    initialized: bool,
     child: Child,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
@@ -1377,6 +1528,7 @@ async fn run_session(session: Session) {
         executable,
         title_only,
         idle,
+        initialized,
         mut child,
         mut client,
         mut incoming,
@@ -1476,6 +1628,9 @@ async fn run_session(session: Session) {
     let mut attempt = 0;
     let mut opt_out = true;
     loop {
+        if initialized {
+            break;
+        }
         let handshake = client.request("initialize", initialize_params(opt_out));
         let failed = tokio::select! {
             res = handshake => match res {
@@ -1581,7 +1736,9 @@ async fn run_session(session: Session) {
         shutdown_child(&mut child, kill_grace).await;
         return;
     }
-    client.notify("initialized", None);
+    if !initialized {
+        client.notify("initialized", None);
+    }
 
     // ---- thread + first turn (interruptible) ------------------------------
     let setup = async {
@@ -3460,6 +3617,32 @@ mod tests {
 mod mcp_injection_tests {
     use super::*;
 
+    /// The engine serves Zeron's tools itself: Codex gets its URL and
+    /// header (over the app-server's stdin), no command to start.
+    #[test]
+    fn an_engine_served_zeron_server_is_codex_http() {
+        let mcp = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron-engine".into(),
+            args: vec!["mcp-proxy".into()],
+            env: Default::default(),
+            http: Some(zeron_proto::McpHttp {
+                url: "http://127.0.0.1:4321/mcp".into(),
+                headers: [("Authorization".to_owned(), "Bearer t".to_owned())]
+                    .into_iter()
+                    .collect(),
+            }),
+        };
+        let overrides: std::collections::HashMap<String, Value> =
+            codex_mcp_overrides(&mcp).into_iter().collect();
+        assert_eq!(overrides["mcp_servers.zeron.url"], "http://127.0.0.1:4321/mcp");
+        assert_eq!(overrides["mcp_servers.zeron.http_headers"]["Authorization"], "Bearer t");
+        assert!(!overrides.contains_key("mcp_servers.zeron.command"));
+        assert!(!overrides.contains_key("mcp_servers.zeron.env"));
+        assert_eq!(overrides["mcp_servers.zeron.default_tools_approval_mode"], "approve");
+        assert_eq!(overrides["mcp_servers.zeron.tool_timeout_sec"], ZERON_TOOL_TIMEOUT_SECS);
+    }
+
     #[test]
     fn codex_mcp_overrides_use_the_dotted_mcp_servers_keys() {
         let mcp = zeron_proto::McpServer {
@@ -3469,6 +3652,7 @@ mod mcp_injection_tests {
             env: [("ZERON_CHAT_ID".to_owned(), "chat-1".to_owned())]
                 .into_iter()
                 .collect(),
+            http: None,
         };
         let overrides: serde_json::Map<String, Value> =
             codex_mcp_overrides(&mcp).into_iter().collect();
@@ -3493,6 +3677,7 @@ mod mcp_injection_tests {
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec!["--stdio".into()],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
         let overrides: serde_json::Map<String, Value> =
             codex_extra_mcp_overrides(&[extra]).into_iter().collect();

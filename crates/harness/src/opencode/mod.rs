@@ -1016,7 +1016,7 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             let cwd = cwd.map(std::path::Path::new);
             fatal(crate::executable::spawn_error(e, cwd, || {
                 crate::executable::binary_hint(exe)
@@ -5998,12 +5998,14 @@ mod mcp_injection_tests {
             command: "/opt/zeron/zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         let extra = zeron_proto::McpServer {
             name: "plugin-focus".into(),
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec!["--stdio".into()],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
         assert_eq!(
             mcp_configs(Some("{\"model\":\"keep\"}".into()), None, &[], Protocol::V1).unwrap(),
@@ -6068,6 +6070,7 @@ http.createServer((req, res) => {{
                 command: "/path with spaces/zeron".into(),
                 args: vec!["mcp".into()],
                 env: [("ZERON_CHAT_ID".into(), "first".into())].into(),
+                http: None,
             };
             let mut second = first.clone();
             second.env.insert("ZERON_CHAT_ID".into(), "second".into());
@@ -6160,6 +6163,7 @@ http.createServer((req, res) => {
             command: "zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         let mut server = Server::spawn(
             &exe,
@@ -6287,6 +6291,7 @@ if (process.argv.includes('--version')) {{
             command: "zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         for _ in 0..2 {
             let mut server = Server::spawn(
@@ -6313,6 +6318,7 @@ if (process.argv.includes('--version')) {{
             command: "/path with spaces/zeron".into(),
             args: vec!["mcp".into()],
             env: [("ZERON_CHAT_ID".into(), "first".into())].into(),
+            http: None,
         };
         for protocol in [Protocol::V1, Protocol::V2] {
             let inherited = match protocol {

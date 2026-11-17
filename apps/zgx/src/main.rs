@@ -60,6 +60,7 @@ mod mermaid;
 mod plugins;
 mod previews;
 mod projects;
+mod quit_prompt;
 mod relaunch;
 mod session_home;
 mod sessions;
@@ -135,6 +136,8 @@ mod scroll_script_tests;
 mod transcript_scroll_tests;
 #[cfg(test)]
 mod transcript_paint_tests;
+#[cfg(test)]
+mod long_thread_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]
@@ -336,6 +339,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // requires find them compiled. (After the last `set_var` above: it
     // starts a thread.)
     compile_ahead(&screen);
+    // The engine, if none is running, started as the launch begins (on a
+    // thread of its own), not once the first window is up: it's ready about
+    // when the window is.
+    if matches!(screen, Screen::Intro | Screen::Onboarding | Screen::Main) {
+        engine::start_ahead();
+    }
 
     let mut application = Application::new();
     for font in fonts() {
@@ -375,6 +384,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             links::open(url);
         }
     })?;
+    // Quitting with "Keep Zeron running after you quit" off: the engine
+    // stops once its work is done, asking first about any still running
+    // (src/quit_prompt.rs). (Not for a relaunch: the app is coming back.)
+    if !relaunch::asked() {
+        quit_prompt::after_quit();
+    }
     // Quitting: an update downloaded and never restarted for installs now,
     // so the next launch is on it (src/about.rs).
     about::install_on_quit();
@@ -552,7 +567,9 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
         let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
         carried_settings::carry(from.as_deref(), state.as_deref());
     }
-    let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
+    let live = plugins::prepare_live();
+    zgx::profile::mark("templates laid");
+    let host = script_host_at(cx, live, "app.luau");
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
@@ -1101,6 +1118,12 @@ fn serve_with(
     cx.on_closed(move || {
         reloading.borrow_mut().take();
         if let Some((host, devtools, commands, corner)) = keep.borrow_mut().take() {
+            // The scripts' last word before what they saved is written: a
+            // save still waiting on a timer (the new chat's draft,
+            // ui/screens/chat/shared.luau) goes now, as no timer fires
+            // after this. (Read at once: setting it runs what follows it.)
+            host.shared("app.closing", Value::Bool(false))
+                .set(Value::Bool(true));
             host.save();
             drop(devtools);
             drop(commands);
