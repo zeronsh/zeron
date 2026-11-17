@@ -1996,6 +1996,10 @@ M.View = ui.component(function(props: {
 				return hit(px, py) or BACKGROUND
 			end,
 			center = function(id: string): (number?, number?)
+				-- (The space's own menu: low at its left, clear of the web.)
+				if id == BACKGROUND then
+					return 24, field_h() - 60
+				end
 				local x, y = screen_of(id)
 				if x < -999 then
 					return nil, nil
