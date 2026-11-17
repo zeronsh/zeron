@@ -549,19 +549,19 @@ fn a_crew_thread_at_work_when_the_engine_stopped_is_resumed() {
     let idle_now: HashMap<String, Session> = [("t1".to_owned(), session("t1", SessionStatus::Idle))].into();
     // Mid-turn, or waiting on its own work, or running subagents: resumed.
     let working = session("t1", SessionStatus::Working);
-    assert_eq!(ids(to_resume(&[working.clone()], &[], &none, &state, &chats, at)), ["t1"]);
-    assert_eq!(ids(to_resume(&[working.clone()], &[], &idle_now, &state, &chats, at)), ["t1"], "its row set idle since");
+    assert_eq!(ids(to_resume(&[working.clone()], &[], &[], &none, &state, &chats, at)), ["t1"]);
+    assert_eq!(ids(to_resume(&[working.clone()], &[], &[], &idle_now, &state, &chats, at)), ["t1"], "its row set idle since");
     let stale_working: HashMap<String, Session> = [("t1".to_owned(), working.clone())].into();
-    assert_eq!(ids(to_resume(&[working.clone()], &[], &stale_working, &state, &chats, at)), ["t1"], "the old row, no heartbeat");
+    assert_eq!(ids(to_resume(&[working.clone()], &[], &[], &stale_working, &state, &chats, at)), ["t1"], "the old row, no heartbeat");
     let mut waiting = session("t1", SessionStatus::Idle);
     waiting.waiting = Some(serde_json::from_value(serde_json::json!({"since": mins(1), "on": []})).unwrap());
-    assert_eq!(ids(to_resume(&[waiting], &[], &none, &state, &chats, at)), ["t1"]);
+    assert_eq!(ids(to_resume(&[waiting], &[], &[], &none, &state, &chats, at)), ["t1"]);
     let mut subagents = session("t1", SessionStatus::Idle);
     subagents.running_subagents = 2;
-    assert_eq!(ids(to_resume(&[subagents], &[], &none, &state, &chats, at)), ["t1"]);
+    assert_eq!(ids(to_resume(&[subagents], &[], &[], &none, &state, &chats, at)), ["t1"]);
     // Its last turn ended normally, or it waits on the person: nothing to pick up.
-    assert!(to_resume(&[session("t1", SessionStatus::Idle)], &[], &none, &state, &chats, at).is_empty());
-    assert!(to_resume(&[session("t1", SessionStatus::AwaitingInput)], &[], &none, &state, &chats, at).is_empty());
+    assert!(to_resume(&[session("t1", SessionStatus::Idle)], &[], &[], &none, &state, &chats, at).is_empty());
+    assert!(to_resume(&[session("t1", SessionStatus::AwaitingInput)], &[], &[], &none, &state, &chats, at).is_empty());
 }
 
 #[test]
@@ -574,21 +574,21 @@ fn a_thread_already_picked_up_paused_or_not_crew_is_not_resumed() {
     let mut live = session("t1", SessionStatus::Working);
     live.updated_at = at;
     let now: HashMap<String, Session> = [("t1".to_owned(), live)].into();
-    assert!(ids(to_resume(&[working.clone()], &[], &now, &state, &chats, at)).is_empty());
+    assert!(ids(to_resume(&[working.clone()], &[], &[], &now, &state, &chats, at)).is_empty());
     let mut later = session("t1", SessionStatus::Idle);
     later.last_completed_turn = Some("t2".into());
     let now: HashMap<String, Session> = [("t1".to_owned(), later)].into();
-    assert!(ids(to_resume(&[working.clone()], &[], &now, &state, &chats, at)).is_empty());
+    assert!(ids(to_resume(&[working.clone()], &[], &[], &now, &state, &chats, at)).is_empty());
     // Its card paused by the person.
     let mut paused = card(WorkState::Blocked);
     paused.paused_at = Some(mins(1));
-    assert!(to_resume(&[working.clone()], &[], &HashMap::new(), &crew_state(vec![paused]), &chats, at).is_empty());
+    assert!(to_resume(&[working.clone()], &[], &[], &HashMap::new(), &crew_state(vec![paused]), &chats, at).is_empty());
     // Not in a crew, or archived.
-    assert!(to_resume(&[working.clone()], &[], &HashMap::new(), &OrchestrationState::default(), &chats, at).is_empty());
+    assert!(to_resume(&[working.clone()], &[], &[], &HashMap::new(), &OrchestrationState::default(), &chats, at).is_empty());
     let mut archived = chat("t1", "here");
     archived.archived = true;
     let gone: HashMap<String, Chat> = [("t1".to_owned(), archived)].into();
-    assert!(to_resume(&[working], &[], &HashMap::new(), &state, &gone, at).is_empty());
+    assert!(to_resume(&[working], &[], &[], &HashMap::new(), &state, &gone, at).is_empty());
 }
 
 
@@ -605,29 +605,29 @@ fn a_chat_whose_wait_the_shutdown_ended_is_resumed_crew_or_not() {
     let state = crew_state(vec![card(WorkState::Active)]);
     let at = mins(30);
     let rows = [session("t1", SessionStatus::Idle), session("solo", SessionStatus::Idle)];
-    assert!(to_resume(&rows, &[], &HashMap::new(), &state, &chats, at).is_empty(), "ended normally, as its row reads");
+    assert!(to_resume(&rows, &[], &[], &HashMap::new(), &state, &chats, at).is_empty(), "ended normally, as its row reads");
     let waits = vec![
         ("solo".to_owned(), vec!["cargo build -p zeron-engine".to_owned()]),
         ("t1".to_owned(), vec!["deploy build".to_owned()]),
     ];
-    let out = to_resume(&rows, &waits, &HashMap::new(), &state, &chats, at);
+    let out = to_resume(&rows, &waits, &[], &HashMap::new(), &state, &chats, at);
     assert_eq!(
         out,
         [
-            Resume { chat: "solo".into(), waited_on: vec!["cargo build -p zeron-engine".into()] },
-            Resume { chat: "t1".into(), waited_on: vec!["deploy build".into()] },
+            Resume { chat: "solo".into(), waited_on: vec!["cargo build -p zeron-engine".into()], subagents: None },
+            Resume { chat: "t1".into(), waited_on: vec!["deploy build".into()], subagents: None },
         ],
         "a standalone chat too"
     );
     // A standalone chat that was mid-turn is the engine's own recovery's.
     let mut mid = session("solo", SessionStatus::Working);
     mid.last_completed_turn = None;
-    assert!(to_resume(&[mid], &[], &HashMap::new(), &state, &chats, at).is_empty());
+    assert!(to_resume(&[mid], &[], &[], &HashMap::new(), &state, &chats, at).is_empty());
     // Ran since (picked up by something else): not again.
     let mut ran = session("solo", SessionStatus::Idle);
     ran.last_completed_turn = Some("t9".into());
     let now: HashMap<String, Session> = [("solo".to_owned(), ran)].into();
-    assert!(ids(to_resume(&rows, &waits, &now, &state, &chats, at)) == ["t1"]);
+    assert!(ids(to_resume(&rows, &waits, &[], &now, &state, &chats, at)) == ["t1"]);
 }
 
 #[test]
@@ -867,4 +867,34 @@ fn a_thread_waiting_on_its_own_work_or_between_turns_is_not_flagged() {
     assert!(assess(&v, mins(30)).is_empty());
     v.active_at = Some(mins(27));
     assert_eq!(assess(&v, mins(30)).check.unwrap().unwrap().kind, CheckKind::Stale);
+}
+
+
+#[test]
+fn a_chat_whose_subagents_the_stop_ended_is_resumed_crew_or_not() {
+    let chats: HashMap<String, Chat> =
+        [chat("t1", "here"), chat("solo", "here")].into_iter().map(|c| (c.id.clone(), c)).collect();
+    let state = crew_state(vec![card(WorkState::Active)]);
+    let at = mins(30);
+    // Its turn ended; its subagents ran on (the shutdown zeroed its row).
+    let rows = [session("t1", SessionStatus::Idle), session("solo", SessionStatus::Idle)];
+    let subs = vec![("solo".to_owned(), vec!["solo--sub--toolu_1".to_owned()])];
+    let out = to_resume(&rows, &[], &subs, &HashMap::new(), &state, &chats, at);
+    assert_eq!(out, [Resume { chat: "solo".into(), waited_on: vec![], subagents: Some(vec!["solo--sub--toolu_1".into()]) }]);
+    // A crash leaves the count on its row.
+    let mut crashed = session("t1", SessionStatus::Idle);
+    crashed.running_subagents = 2;
+    let out = to_resume(&[crashed], &[], &[], &HashMap::new(), &state, &chats, at);
+    assert_eq!(out, [Resume { chat: "t1".into(), waited_on: vec![], subagents: Some(vec![]) }]);
+}
+
+#[test]
+fn the_subagent_resume_names_them() {
+    use zeron_proto::orchestration::prompt_text::resumed_after_restart_subagents;
+    let text = resumed_after_restart_subagents(&["9c1c9639--sub--toolu_01".into()]);
+    assert_eq!(
+        text,
+        "[Resumed] The engine restarted; your subagents (9c1c9639--sub--toolu_01) were stopped. Check their transcripts and rerun what didn't finish."
+    );
+    assert!(resumed_after_restart_subagents(&[]).starts_with("[Resumed] The engine restarted; your subagents were stopped."));
 }

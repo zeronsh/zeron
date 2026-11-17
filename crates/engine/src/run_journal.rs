@@ -78,6 +78,10 @@ impl RunJournal {
         self.dir.join(format!("{}.shutdown", sanitize_id(chat_id)))
     }
 
+    fn subagents_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.subagents", sanitize_id(chat_id)))
+    }
+
     fn wait_path(&self, chat_id: &str) -> PathBuf {
         self.dir.join(format!("{}.waiting", sanitize_id(chat_id)))
     }
@@ -157,6 +161,42 @@ impl RunJournal {
         if let Err(err) = std::fs::write(self.wait_path(chat_id), body) {
             tracing::warn!(chat = %chat_id, error = %err, "shutdown wait marker write failed");
         }
+    }
+
+    /// Mark a chat whose subagents (`docs`: their sub-chats) were still at
+    /// work when the engine's shutdown began: it stops them, so this marker
+    /// is what tells the next boot the chat still had work in hand.
+    pub fn note_shutdown_subagents(&self, chat_id: &str, docs: &[String]) {
+        let body = serde_json::to_vec(docs).unwrap_or_default();
+        if let Err(err) = std::fs::write(self.subagents_path(chat_id), body) {
+            tracing::warn!(chat = %chat_id, error = %err, "shutdown subagent marker write failed");
+        }
+    }
+
+    /// Chats marked by [`Self::note_shutdown_subagents`], with their
+    /// sub-chats, taken (each marker removed as it is read).
+    pub fn take_shutdown_subagents(&self) -> Result<Vec<(String, Vec<String>)>, JournalError> {
+        self.take_marks("subagents")
+    }
+
+    /// Every `<chat>.<ext>` marker holding a JSON list of strings, taken.
+    fn take_marks(&self, ext: &str) -> Result<Vec<(String, Vec<String>)>, JournalError> {
+        let mut marked = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some(ext) {
+                continue;
+            }
+            let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
+                continue;
+            };
+            let list: Vec<String> =
+                std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            let _ = std::fs::remove_file(&path);
+            marked.push((chat_id, list));
+        }
+        marked.sort();
+        Ok(marked)
     }
 
     /// Chats marked by [`Self::note_shutdown_wait`], with what each waited
