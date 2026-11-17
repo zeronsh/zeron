@@ -109,3 +109,21 @@ test("orch new: closed unsent, the draft is there again as it reopens", function
 	expect(app:state("orch_new_name")).to_be("Half a name")
 	expect(app:text(NAME)).to_contain("Half a name")
 end)
+
+test("orch new: as Zeron's New dialogs, a line under its title, its name, its goal, then its chips", function()
+	local app = open()
+	expect(app:has('"An agent that plans the work and runs a crew to finish it."')).to_be(true)
+	expect(app:has(NAME)).to_be(true)
+	expect(app:has('#orch-new-dialog >> role:textbox "Goal"')).to_be(true)
+	-- (The chips say what they hold, named for assistive technology, no
+	-- label over them: the only text in the dialog besides the name's.)
+	local tree = app:tree("#orch-new-dialog") :: string
+	expect(app:tree('#orch-new-dialog >> role:button "Project"')).to_contain('"No project"')
+	expect(app:tree('#orch-new-dialog >> role:button "Device"')).to_contain('"This device"')
+	expect(app:tree('#orch-new-dialog >> role:button "Model"')).to_contain('"Default model"')
+	expect(tree).to_contain('text "Name"')
+	expect(string.find(tree, 'text "Model"', 1, true)).to_be(nil)
+	expect(string.find(tree, 'text "Goal"', 1, true)).to_be(nil)
+	-- (Its rules are its settings', not here.)
+	expect(string.find(tree, "Rules", 1, true)).to_be(nil)
+end)

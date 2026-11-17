@@ -164,9 +164,13 @@ local function NewDialog(): Node
 				end)
 			end)
 	end
+	-- As Zeron's own "New …" dialogs (a template, a plugin): a title and a
+	-- line, its name, then what it's for; where it runs and its model as the
+	-- composer's chips do, small, along one row under them.
 	return ds.Dialog {
 		open = actions.new_open,
 		title = ui.t("orch.dialog.new_title") :: any,
+		body = ui.t("orch.dialog.new_body") :: any,
 		size = "md",
 		confirm = {
 			label = ui.t("orch.dialog.create") :: any,
@@ -179,7 +183,7 @@ local function NewDialog(): Node
 		ui.column {
 			id = "orch-new-dialog",
 			w_full = true,
-			gap = "$space.4",
+			gap = "$space.3",
 			ds.TextField {
 				value = name,
 				label = ui.t("orch.dialog.name"),
@@ -192,23 +196,23 @@ local function NewDialog(): Node
 			},
 			ds.TextArea {
 				value = goal,
-				label = ui.t("orch.dialog.goal") :: any,
+				name = ui.t("orch.dialog.goal") :: any,
 				placeholder = ui.t("orch.dialog.goal_placeholder") :: any,
-				rows = 2,
-				max_rows = 5,
+				rows = 3,
+				max_rows = 6,
 				w_full = true,
 			},
 			ui.row {
 				w_full = true,
-				gap = "$space.3",
-				ui.column { grow = 1, basis = 0, min_w = 0, ds.Select { value = project, label = ui.t("orch.dialog.project") :: any, options = project_options, w_full = true } },
-				ui.column { grow = 1, basis = 0, min_w = 0, ds.Select { value = device, label = ui.t("orch.dialog.device") :: any, options = function(): { any }
+				gap = "$space.2",
+				ui.column { grow = 1, basis = 0, min_w = 0, ds.Select { value = project, name = ui.t("orch.dialog.project") :: any, options = project_options, size = "sm", w_full = true } },
+				ui.column { grow = 1, basis = 0, min_w = 0, ds.Select { value = device, name = ui.t("orch.dialog.device") :: any, options = function(): { any }
 					return device_options(true)
-				end, w_full = true, disabled = function(): boolean
+				end, size = "sm", w_full = true, disabled = function(): boolean
 					return project:get() ~= NONE
 				end } },
+				ui.column { grow = 1, basis = 0, min_w = 0, ds.Select { value = model, name = ui.t("orch.dialog.model") :: any, options = model_options, size = "sm", w_full = true } },
 			},
-			ds.Select { value = model, label = ui.t("orch.dialog.model") :: any, options = model_options, w_full = true },
 		},
 	}
 end

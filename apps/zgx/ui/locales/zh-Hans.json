@@ -4283,6 +4283,7 @@
     },
     "dialog": {
       "new_title": "New orchestrator",
+      "new_body": "一个规划工作并带领团队完成的智能体。",
       "create": "Create",
       "name": "Name",
       "name_placeholder": "Release train",
