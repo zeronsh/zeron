@@ -1638,6 +1638,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
     }
+    if let Some(injected) = &doc_part.injected {
+        map.insert("injected", loro_value_from_json(injected))?;
+    }
     if let Some(reports) = &doc_part.reports {
         map.insert("reports", loro_value_from_json(reports))?;
     }
@@ -2173,6 +2176,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
+    }
+    if let Some(injected) = &doc_part.injected {
+        map.insert("injected", loro_value_from_json(injected))?;
     }
     if let Some(reports) = &doc_part.reports {
         map.insert("reports", loro_value_from_json(reports))?;
