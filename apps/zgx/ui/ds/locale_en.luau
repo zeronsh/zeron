@@ -530,6 +530,7 @@ return {
 	["ds.markdown.copied"] = "Copied",
 	["ds.markdown.view_named"] = "View {name}",
 	["ds.markdown.done"] = "Done",
+	["ds.markdown.copy_quote"] = "Copy quote",
 	["ds.mermaid.show_source"] = "Show source",
 	["ds.mermaid.show_diagram"] = "Show diagram",
 	["ds.mermaid.failed"] = "Couldn't draw this diagram: {reason}",

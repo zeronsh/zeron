@@ -12,7 +12,8 @@
 //!
 //! A shot is `<fixture>` (ui/<fixture>_fixture.luau, or a name ending
 //! .luau) or `gallery:<page>`, optionally `@<w>x<h>`, `#<target>` (crop to
-//! a node's box) and `!<command>` / `=<state>:<json>` / `^<target>` (a click) / `+<ms>` (a wait)
+//! a node's box) and `!<command>` / `=<state>:<json>` / `^<target>` (a click) /
+//! `/<from>=><to>` (a drag: text selected) / `+<ms>` (a wait)
 //! / `:<target>:<text>` (a click, then the text typed) steps, joined by `|`:
 //! `gallery:composer|#gallery-demo@1240x820`. `AUDIT_SCALE` (2) is the
 //! pixels a point; `AUDIT_DARK=1` the dark scheme where the screen has one.
@@ -50,6 +51,8 @@ enum Step {
     Key(String),
     // The pointer resting on a target (`*target`): its hover state.
     Hover(String),
+    // A drag from one target to another (`/from=>to`): text selected.
+    Drag(String, String),
     // A field clicked, then text typed into it (`:target:text`).
     Type(String, String),
     State(String, serde_json::Value),
@@ -90,6 +93,9 @@ fn parse(spec: &str, dark: bool) -> Shot {
             steps.push(Step::Key(key.to_string()));
         } else if let Some(target) = part.strip_prefix('*') {
             steps.push(Step::Hover(target.to_string()));
+        } else if let Some(rest) = part.strip_prefix('/') {
+            let (from, to) = rest.split_once("=>").expect("/<from>=><to>");
+            steps.push(Step::Drag(from.to_string(), to.to_string()));
         } else if let Some(rest) = part.strip_prefix(':') {
             let (target, text) = rest.split_once(':').expect(":<target>:<text>");
             steps.push(Step::Type(target.to_string(), text.to_string()));
@@ -116,7 +122,8 @@ fn hex(s: &str) -> [u8; 3] {
 /// Draws `shot` and writes `<out>/<name>.png`.
 fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, String> {
     let script = shot.script.clone();
-    let app = TestApp::try_new(|runtime| {
+    // (A desktop of its own: what a Copy writes goes somewhere, as in a window.)
+    let app = TestApp::try_with_desktop(|runtime| {
         let host = crate::plugins::lend_design_system(ScriptHost::new(runtime, script.clone()), &script);
         // (What a window host answers and a test host doesn't.)
         host.action("appearance", |_| {});
@@ -183,6 +190,11 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
             Step::Hover(target) => {
                 app.target(target).map_err(|e| format!("{}: hover {target}: {e}", shot.name))?;
                 app.hover(target);
+            }
+            Step::Drag(from, to) => {
+                app.target(from).map_err(|e| format!("{}: drag from {from}: {e}", shot.name))?;
+                app.target(to).map_err(|e| format!("{}: drag to {to}: {e}", shot.name))?;
+                app.drag(from, to);
             }
             Step::Command(id) => {
                 if !app.host.run_command(id) {

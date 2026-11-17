@@ -672,7 +672,8 @@
       "copy_code": "拷贝代码",
       "copied": "已拷贝",
       "view_named": "查看 {name}",
-      "done": "完成"
+      "done": "完成",
+      "copy_quote": "复制引用"
     },
     "mermaid": {
       "show_source": "显示源代码",
