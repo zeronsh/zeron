@@ -21,6 +21,9 @@
 --   measure: (text, hub: boolean) -> width,
 --   prev: { [string]: Label }?   the last placement, by id
 --   hub_r: number   an orchestrator mark's radius (its name hangs under it)
+--   reserved: { { x0, y0, x1, y1 } }?   what the field's own controls
+--              cover (the legend, the pivot, Fit), in world units for the
+--              view placed at: no name there
 -- }
 
 local M = {}
@@ -281,6 +284,19 @@ function M.start(input: any): any
 	for _, l in input.links do
 		add_seg(g, { l.ax, l.ay, l.bx, l.by, l.a, l.b })
 	end
+	-- The field's controls: taken (no node's own, so never free to one).
+	local reserved: { { number } } = input.reserved or {}
+	for _, r in reserved do
+		add_box(g, { r[1], r[2], r[3], r[4], 0 })
+	end
+	local function on_reserved(lab: Label): boolean
+		for _, r in reserved do
+			if lab.x0 < r[3] and lab.x1 > r[1] and lab.y0 < r[4] and lab.y1 > r[2] then
+				return true
+			end
+		end
+		return false
+	end
 	-- The fixed ones first: the Brain's and each orchestrator's, under them.
 	local fixed: { Label } = {}
 	for i, n in nodes do
@@ -299,7 +315,7 @@ function M.start(input: any): any
 			local h = M.LH_HUB * k * #lines
 			for _, top in { n.y + n.r + 3 * k, n.y - n.r - 3 * k - h } do
 				local lab = make(lines, n.x, top, "center", w, M.LH_HUB * k, true, n.x, n.y, k)
-				local clear = true
+				local clear = not on_reserved(lab)
 				for _, f in fixed do
 					if lab.x0 < f.x1 and lab.x1 > f.x0 and lab.y0 < f.y1 and lab.y1 > f.y0 then
 						clear = false

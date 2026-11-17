@@ -521,7 +521,12 @@ ui.command { id = "map_force_palette", title = "Map: read the force graph's mach
 		status[t] = ui.theme.get(t)
 	end
 	local dark = ui.theme.current:peek() ~= "zeron-light"
-	force_palette:set({ theme = ui.theme.current:peek(), dark = dark, status = status, machines = pal.machines(dark), background = ui.theme.get("background") })
+	-- (And the machines' tokens, as this theme declares them.)
+	local tokens = {}
+	for k = 1, pal.COUNT do
+		tokens[k] = ui.theme.get(`zeron.force.machine.m{k}`)
+	end
+	force_palette:set({ theme = ui.theme.current:peek(), dark = dark, status = status, machines = pal.machines(dark), tokens = tokens, background = ui.theme.get("background") })
 end }
 -- A drag held a frame at a time: a hub (the Engine, 72 crew), a chat;
 -- then let go.
@@ -589,7 +594,13 @@ ui.command { id = "map_force_labels", title = "Map: read the force graph's names
 	for _, l in cur.model.links do
 		table.insert(links, { a = cur.model.nodes[l.a].id, b = cur.model.nodes[l.b].id, ax = cur.sim.x[l.a], ay = cur.sim.y[l.a], bx = cur.sim.x[l.b], by = cur.sim.y[l.b] })
 	end
-	force_labels:set({ labels = cur.labels or {}, nodes = nodes, links = links })
+	-- (And the view now, with the room the field's controls take: field
+	-- points.)
+	local view, corners = nil, nil
+	if cur.live then
+		view, corners = cur.live()
+	end
+	force_labels:set({ labels = cur.labels or {}, nodes = nodes, links = links, view = view, corners = corners })
 end }
 -- A live push: one crew chat's state changes (input, then working, …).
 local push_n = 0
@@ -626,6 +637,13 @@ ui.command { id = "map_force_unpin_all", title = "Map: unpin all", run = functio
 end }
 ui.command { id = "map_force_pan", title = "Map: pan the force graph", run = function()
 	require("@ds/orch_force").pan_by(-40, -25)
+end }
+-- (Toward the bottom left, and the right: names to the field's controls.)
+ui.command { id = "map_force_pan_down_left", title = "Map: pan the force graph down and left", run = function()
+	require("@ds/orch_force").pan_by(-60, 70)
+end }
+ui.command { id = "map_force_pan_right", title = "Map: pan the force graph right", run = function()
+	require("@ds/orch_force").pan_by(140, 20)
 end }
 -- A node dragged a little way (an orchestrator: its crew follow).
 ui.command { id = "map_force_drag", title = "Map: drag a hub of the force graph", run = function()

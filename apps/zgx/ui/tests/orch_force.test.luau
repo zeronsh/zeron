@@ -927,3 +927,74 @@ test("force pivot: each pivot keeps its own pan and zoom, through a relaunch", f
 	expect(v(again).orchestrator).to_be(nil)
 	expect(v(again).machine.x).to_be(b.x)
 end)
+
+-- The field's own controls (the legend bottom left, the pivot bottom
+-- right, Fit top right) keep their corners: no name under one, in either
+-- pivot, as it opens and once a pan has settled. Their room is the
+-- controls' own boxes (read from the tree), a little round them.
+local function box_of(app: any, target: string): { number }?
+	for line in (app:tree(target) :: string):gmatch("[^\n]+") do
+		local x, y, w, h = line:match("(%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+		if x then
+			return { tonumber(x) :: number, tonumber(y) :: number, tonumber(w) :: number, tonumber(h) :: number }
+		end
+	end
+	return nil
+end
+local function names_clear_of_controls(app: any, label: string): number
+	app:frames(5)
+	app:wait(400)
+	app:frames(25)
+	app:wait(400)
+	app:frames(25)
+	local d = read_labels(app)
+	local v, cs = d.view, d.corners or {}
+	assert(v, `{label}: no view read`)
+	expect(`{label}: {#cs} corners`).to_be(`{label}: 3 corners`)
+	-- (Each control within its corner's room.)
+	local field = box_of(app, "#orch-force-field") :: { number }
+	for _, t in { ".orch-force-legend", ".orch-force-pivot", "#orch-force-fit" } do
+		local b = box_of(app, t)
+		assert(b, `{label}: no {t}`)
+		local x0, y0 = b[1] - field[1], b[2] - field[2]
+		local inside = false
+		for _, r in cs do
+			if x0 >= r[1] - 0.5 and y0 >= r[2] - 0.5 and x0 + b[3] <= r[3] + 0.5 and y0 + b[4] <= r[4] + 0.5 then
+				inside = true
+			end
+		end
+		expect(`{label}: {t} in its room {inside}`).to_be(`{label}: {t} in its room true`)
+	end
+	-- (No name, on screen, over any of them.)
+	local over = 0
+	for _, la in d.labels do
+		local sx0, sy0 = la.x0 * v.zoom + v.x, la.y0 * v.zoom + v.y
+		local sx1, sy1 = la.x1 * v.zoom + v.x, la.y1 * v.zoom + v.y
+		for _, r in cs do
+			local hit = sx0 + 1 < r[3] and sx1 - 1 > r[1] and sy0 + 1 < r[4] and sy1 - 1 > r[2]
+			if hit then
+				over += 1
+			end
+			expect(`{label}: {la.id} under a control {hit}`).to_be(`{label}: {la.id} under a control false`)
+		end
+	end
+	print(`FORCECORNERS {label}: {#d.labels} names, {over} under a control, {stats(app).corner_replaces or 0} placed again for them`)
+	return #d.labels
+end
+for _, p in { "machine", "orchestrator" } do
+	test(`force names: clear of the legend, the pivot and Fit ({p} pivot), as it opens and after a pan`, function()
+		local app = open(900)
+		settle(app, 240)
+		pivot(app, p)
+		expect(names_clear_of_controls(app, `{p} opened`) > 0).to_be(true)
+		-- Panned toward the bottom left and right, a step at a time, then let
+		-- rest: placed again clear of them.
+		for _, way in { "map_force_pan_down_left", "map_force_pan_right" } do
+			for _ = 1, 3 do
+				app:command(way)
+				app:frames(1)
+			end
+			names_clear_of_controls(app, `{p} {way}`)
+		end
+	end)
+end
