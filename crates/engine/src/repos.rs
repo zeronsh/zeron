@@ -2530,18 +2530,28 @@ fn remote_urls_origin_first(listing: &str) -> Vec<(String, String)> {
 
 /// `(owner, repo)` of a github.com remote: `https://` / `http://` (with or
 /// without credentials), `git@github.com:`, `ssh://git@github.com[:22]/`,
-/// `git://`, and a mirror or proxy URL whose path carries
+/// `git://`, and a local (loopback) proxy URL whose path carries
 /// `/github.com/<owner>/<repo>` (`http://127.0.0.1:7457/github.com/o/r.git`).
 fn parse_github_remote(remote: &str) -> Option<(String, String)> {
     let remote = remote.trim();
     let path = if let Some((_, rest)) = remote.split_once("://") {
         let (authority, path) = rest.split_once('/')?;
         let host = authority.rsplit('@').next()?;
-        let host = host.split(':').next()?;
+        let host = match host.strip_prefix('[') {
+            Some(v6) => v6.split(']').next()?,
+            None => host.split(':').next()?,
+        };
         if host.eq_ignore_ascii_case("github.com") || host.eq_ignore_ascii_case("www.github.com") {
             path
         } else {
-            // A mirror/proxy: `…/github.com/<owner>/<repo>` in the path.
+            // A proxy on this machine (what `url.<base>.insteadOf` rewrites
+            // to): `…/github.com/<owner>/<repo>` in the path. Only loopback,
+            // so a remote elsewhere can't pass as a GitHub repository.
+            let loopback = host.eq_ignore_ascii_case("localhost")
+                || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+            if !loopback {
+                return None;
+            }
             let lower = path.to_ascii_lowercase();
             let at = if lower.starts_with("github.com/") {
                 0
@@ -3121,7 +3131,9 @@ mod tests {
             "ssh://git@github.com:22/zeronsh/zeron.git",
             "git://github.com/zeronsh/zeron.git",
             "http://127.0.0.1:7457/github.com/zeronsh/zeron.git",
-            "https://proxy.example/mirror/github.com/zeronsh/zeron",
+            "http://localhost:7457/mirror/github.com/zeronsh/zeron",
+            "http://[::1]:7457/github.com/zeronsh/zeron.git",
+            "http://127.0.0.2/github.com/zeronsh/zeron.git",
             "  https://github.com/zeronsh/zeron.git\n",
         ] {
             assert_eq!(parse_github_remote(url), want, "{url}");
@@ -3133,6 +3145,10 @@ mod tests {
             "https://github.com/zeronsh/zeron/tree/main",
             "https://notgithub.com/zeronsh/zeron",
             "http://127.0.0.1:7457/gitlab.com/zeronsh/zeron.git",
+            // Not on this machine: a host elsewhere can't pass as GitHub.
+            "https://proxy.example/mirror/github.com/zeronsh/zeron",
+            "https://evil.example/github.com/zeronsh/zeron.git",
+            "http://github.com.evil.example/zeronsh/zeron",
             "/srv/git/zeron.git",
             "",
         ] {
