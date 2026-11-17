@@ -351,19 +351,22 @@ pub(crate) fn assess(view: &CardView, now: DateTime<Utc>) -> Verdict {
 }
 
 /// The board's rules for an agent's `upsertItem` on `current` (`None`: a
-/// new card) to `state`: never a paused card's state; Blocked only with an
+/// new card) to `state`: never a paused card's state or threads; Blocked only with an
 /// open ask on the card (`open_ask`) or one raised with the move
 /// (`ask_given`). The refusal says what to do instead.
 pub(crate) fn agent_move_allowed(
     current: Option<&WorkItem>,
     state: Option<WorkState>,
+    threads_changed: bool,
     open_ask: bool,
     ask_given: bool,
 ) -> Result<(), String> {
-    let Some(state) = state else { return Ok(()) };
-    if current.is_some_and(WorkItem::paused) {
-        return Err("That card is paused by the person: it stays in Paused until they resume it. Don't move it or message its thread.".into());
+    // A paused card's state and threads are the person's: its threads are
+    // what keeps their messages held.
+    if current.is_some_and(WorkItem::paused) && (state.is_some() || threads_changed) {
+        return Err("That card is paused by the person: it stays in Paused, with its threads, until they resume it. Don't move it or message its thread.".into());
     }
+    let Some(state) = state else { return Ok(()) };
     let already = current.is_some_and(|c| c.state == WorkState::Blocked);
     if state == WorkState::Blocked && !already && !open_ask && !ask_given {
         let on = current.map(|c| format!(" (item {})", c.id)).unwrap_or_default();

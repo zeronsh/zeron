@@ -930,7 +930,9 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             upsert_permitted(role, item, rpc)?;
             let current = item.id.as_deref().and_then(|id| orch.item(id));
             let open_ask = current.as_ref().is_some_and(|c| rpc.card_has_open_ask(&c.id));
-            super::board_checks::agent_move_allowed(current.as_ref(), item.state, open_ask, ask.is_some()).map_err(failed)
+            let threads_changed = item.threads.as_ref().is_some_and(|t| current.as_ref().is_none_or(|c| &c.threads != t));
+            super::board_checks::agent_move_allowed(current.as_ref(), item.state, threads_changed, open_ask, ask.is_some())
+                .map_err(failed)
         }
         OrchestrateOp::PauseItem { .. } | OrchestrateOp::ResumeItem { .. } => {
             refuse("Only the person pauses or resumes a card")

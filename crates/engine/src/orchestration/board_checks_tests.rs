@@ -74,14 +74,14 @@ fn check(kind: CheckKind, since: DateTime<Utc>) -> Option<CardCheck> {
 #[test]
 fn an_agent_blocks_only_with_a_question() {
     let now = card(WorkState::Active);
-    let refused = agent_move_allowed(Some(&now), Some(WorkState::Blocked), false, false).unwrap_err();
+    let refused = agent_move_allowed(Some(&now), Some(WorkState::Blocked), false, false, false).unwrap_err();
     assert!(refused.contains("`ask`"), "says how: {refused}");
-    assert!(agent_move_allowed(Some(&now), Some(WorkState::Blocked), false, true).is_ok(), "ask with the move");
-    assert!(agent_move_allowed(Some(&now), Some(WorkState::Blocked), true, false).is_ok(), "an open ask already");
-    assert!(agent_move_allowed(None, Some(WorkState::Blocked), false, false).is_err(), "a new card too");
-    assert!(agent_move_allowed(None, Some(WorkState::Blocked), false, true).is_ok());
-    assert!(agent_move_allowed(Some(&now), Some(WorkState::Review), false, false).is_ok());
-    assert!(agent_move_allowed(Some(&now), None, false, false).is_ok(), "no state, no rule");
+    assert!(agent_move_allowed(Some(&now), Some(WorkState::Blocked), false, false, true).is_ok(), "ask with the move");
+    assert!(agent_move_allowed(Some(&now), Some(WorkState::Blocked), false, true, false).is_ok(), "an open ask already");
+    assert!(agent_move_allowed(None, Some(WorkState::Blocked), false, false, false).is_err(), "a new card too");
+    assert!(agent_move_allowed(None, Some(WorkState::Blocked), false, false, true).is_ok());
+    assert!(agent_move_allowed(Some(&now), Some(WorkState::Review), false, false, false).is_ok());
+    assert!(agent_move_allowed(Some(&now), None, false, false, false).is_ok(), "no state, no rule");
 }
 
 #[test]
@@ -89,10 +89,12 @@ fn an_agent_never_moves_a_paused_card() {
     let mut paused = card(WorkState::Blocked);
     paused.paused_at = Some(t0());
     for to in [WorkState::Active, WorkState::Done, WorkState::Planned, WorkState::Blocked] {
-        let refused = agent_move_allowed(Some(&paused), Some(to), true, true).unwrap_err();
+        let refused = agent_move_allowed(Some(&paused), Some(to), false, true, true).unwrap_err();
         assert!(refused.contains("paused by the person"), "{to:?}: {refused}");
     }
-    assert!(agent_move_allowed(Some(&paused), None, false, false).is_ok(), "its outcome may change");
+    assert!(agent_move_allowed(Some(&paused), None, false, false, false).is_ok(), "its outcome may change");
+    // Taking its thread off would let that thread's messages run: refused.
+    assert!(agent_move_allowed(Some(&paused), None, true, false, false).unwrap_err().contains("paused by the person"));
 }
 
 // ── Blocked ─────────────────────────────────────────────────────────────────

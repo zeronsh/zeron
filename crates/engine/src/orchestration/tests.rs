@@ -2850,6 +2850,8 @@ async fn pausing_stops_the_thread_and_holds_it_for_the_person() {
     // The orchestrator can't move it out, nor needs an ask for it.
     let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"state":"active"}})).await.unwrap_err();
     assert!(refused.contains("paused by the person"), "{refused}");
+    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"threads":[]}})).await.unwrap_err();
+    assert!(refused.contains("paused by the person"), "its thread stays held: {refused}");
     assert!(super::board_checks::plan_from(
         &core.orchestration.state(),
         &core.orchestration.workspace().read_chats().unwrap().into_iter().map(|c| (c.id.clone(), c)).collect(),
