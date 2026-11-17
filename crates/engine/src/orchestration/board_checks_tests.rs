@@ -235,11 +235,17 @@ fn now_whose_thread_errored_is_blocked_with_an_ask() {
 }
 
 #[test]
-fn now_whose_thread_was_stopped_is_paused() {
+fn now_whose_thread_was_stopped_is_never_paused_by_the_check() {
+    // A stop may be the engine's own (a shutdown, a recovery, a crash, a
+    // limit) or an agent's: only the person's Pause pauses a card. Read as
+    // its work ended.
     let c = card(WorkState::Active);
-    let v = assess(&view(&c, Thread::Stopped { at: mins(2) }), mins(3));
-    assert_eq!(v.state, Some(WorkState::Blocked));
-    assert_eq!(v.paused, Some(true));
+    for at in [mins(3), mins(30)] {
+        let v = assess(&view(&c, Thread::Stopped { at: mins(2) }), at);
+        assert_ne!(v.paused, Some(true), "{v:?}");
+        assert_ne!(v.state, Some(WorkState::Blocked), "{v:?}");
+    }
+    assert_eq!(assess(&view(&c, Thread::Stopped { at: mins(2) }), mins(30)).check.unwrap().unwrap().kind, CheckKind::Stale);
 }
 
 #[test]

@@ -352,8 +352,10 @@ pub(crate) fn assess(view: &CardView, now: DateTime<Utc>) -> Verdict {
                     raise: Some(Raise::Errored),
                     ..Verdict::moved(WorkState::Blocked, "Blocked: its thread stopped on an error", now)
                 }
-            } else if here.iter().any(|t| matches!(t, Thread::Stopped { at } if *at > since)) {
-                Verdict { paused: Some(true), ..Verdict::moved(WorkState::Blocked, "Paused: its thread was stopped", now) }
+            // (A stopped thread never pauses its card: the board can't tell
+            // the person's Stop from an engine shutdown, a recovery, a crash,
+            // a limit or an agent's interrupt. Only the person's own Pause
+            // pauses a card. A stop reads as its work ended.)
             } else if here.iter().any(|t| matches!(t, Thread::Finished | Thread::Errored { .. } | Thread::Stopped { .. }))
                 || (here.is_empty() && (!gone.is_empty() || card.links.iter().any(|l| l.kind == LinkKind::Chat)))
             {
@@ -920,6 +922,42 @@ impl EngineRpc {
         resumed
     }
 
+    /// The cards the board check paused itself (an engine shutdown or
+    /// recovery read as a Stop, before only the person could pause): back in
+    /// Now, a note saying so, and their threads' held messages sent. Run
+    /// once at start; logged. The ones un-paused.
+    pub(crate) async fn unpause_engine_pauses(&self, now: DateTime<Utc>) -> Vec<String> {
+        let orch = self.orchestration();
+        let cards: Vec<WorkItem> = orch.state().items.into_iter().filter(|i| !i.removed && engine_paused(i)).collect();
+        let mut done = Vec::new();
+        for card in cards {
+            if let Err(error) =
+                orch.patch_item(WorkItemPatch { id: Some(card.id.clone()), state: Some(WorkState::Active), ..Default::default() })
+            {
+                tracing::warn!(%error, card = %card.id, "board: an engine pause wasn't undone");
+                continue;
+            }
+            self.mark_moved(&card.id, now);
+            orch.workspace().write_orchestration(|doc| {
+                if let Some(mut c) = doc.work_item(&card.id) {
+                    c.paused_at = None;
+                    c.check = Some(note_of(CheckKind::Moved, "Back in Now: the engine had paused it, not you", now));
+                    doc.upsert_work_item(&c);
+                }
+            });
+            for t in &card.threads {
+                match self.doc_host_ref().release_queue(t).await {
+                    Ok(Some(n)) if n > 0 => tracing::info!(thread = %t, held = n, "board: held messages released"),
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, thread = %t, "board: held messages weren't released"),
+                }
+            }
+            tracing::warn!(card = %card.id, title = %card.title, "board: un-paused a card the engine had paused");
+            done.push(card.id);
+        }
+        done
+    }
+
     /// The start-up pass: the chats the stop left at work resumed
     /// ([`EngineRpc::resume_after_restart`]), then the board check over the
     /// boards this engine keeps (`all`: every board). Every chat that was at
@@ -930,6 +968,10 @@ impl EngineRpc {
     /// changed)`.
     pub(crate) async fn start_up_pass(&self, all: bool) -> (Vec<String>, Vec<Change>) {
         let orch = self.orchestration();
+        let unpaused = self.unpause_engine_pauses(Utc::now()).await;
+        if !unpaused.is_empty() {
+            tracing::warn!(cards = ?unpaused, "board: cards the engine had paused (not the person) un-paused");
+        }
         let before = orch.take_before_stop();
         let mut at_work: Vec<String> = before
             .iter()
@@ -1003,6 +1045,11 @@ impl EngineRpc {
     /// [`EngineRpc::check_boards`] over the boards this engine keeps (`all`:
     /// every board).
     pub(crate) async fn check_boards_on(&self, now: DateTime<Utc>, all: bool) -> Vec<Change> {
+        // Never while the engine stops: its own shutdown interrupts every turn,
+        // which is nobody's word on any card.
+        if self.sessions_ref().shutting_down() {
+            return Vec::new();
+        }
         let mut changes = self.plan_board_checks(now, all);
         // Cards of threads at work when the engine stopped are left alone
         // until their new turn has started: the stop (or a crash) marked
@@ -1195,6 +1242,7 @@ impl EngineRpc {
             }
         }
         orch.comms().say(CommKind::Message, YOU, card.orchestrator_id.as_deref().unwrap_or(YOU), &format!("Paused: {}", one_line(&card.title, 80)));
+        tracing::info!(card = %id, title = %card.title, threads = ?card.threads, "board: the person paused a card");
         Ok(json!({ "id": id }))
     }
 
@@ -1227,7 +1275,20 @@ impl EngineRpc {
             }
         });
         orch.comms().say(CommKind::Message, YOU, card.orchestrator_id.as_deref().unwrap_or(YOU), &format!("Resumed: {}", one_line(&card.title, 80)));
-        // Into a waiting column: nothing runs.
+        tracing::info!(card = %id, title = %card.title, to = ?to, threads = ?card.threads, "board: the person resumed a paused card");
+        // Its threads' held messages go now, wherever it was taken (a held
+        // queue under a card no longer paused would wait for nothing).
+        let mut released = std::collections::HashSet::new();
+        for t in &live {
+            match self.doc_host_ref().release_queue(t).await {
+                Ok(Some(n)) if n > 0 => {
+                    released.insert(t.clone());
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, thread = %t, "board: a resumed card's held messages weren't sent"),
+            }
+        }
+        // Into a waiting column: nothing else runs.
         if to != WorkState::Active {
             return Ok(json!({ "id": id }));
         }
@@ -1235,16 +1296,9 @@ impl EngineRpc {
             // Nothing to resume: started afresh (or queued for its crew).
             return self.start_item(id, true);
         }
+        // Into Now: each thread carries on (its held messages, else told to).
         for t in &live {
-            let sent = match self.doc_host_ref().release_queue(t).await {
-                Ok(Some(n)) => n > 0,
-                Ok(None) => false,
-                Err(error) => {
-                    tracing::warn!(%error, thread = %t, "board: a resumed card's held messages weren't sent");
-                    false
-                }
-            };
-            if !sent {
+            if !released.contains(t) {
                 let text = format!("[Resumed] The person resumed \"{}\": carry on where you stopped.", one_line(&card.title, 80));
                 super::ops::deliver(self, t, &text, None, super::ops::When::Next, Some(zeron_doc::Injected::resumed(&card.id)))?;
             }
@@ -1256,7 +1310,28 @@ impl EngineRpc {
 /// The threads of a paused card: an agent's message to one waits in its
 /// queue until the person resumes the card.
 pub(crate) fn paused_thread(orch: &Orchestration, chat: &str) -> bool {
-    orch.state().items.iter().any(|i| !i.removed && i.paused() && i.threads.iter().any(|t| t == chat))
+    paused_card_of(orch, chat).is_some()
+}
+
+/// The paused card `chat` is a thread of, if any (its id).
+pub(crate) fn paused_card_of(orch: &Orchestration, chat: &str) -> Option<String> {
+    orch.state().items.into_iter().find(|i| !i.removed && i.paused() && i.threads.iter().any(|t| t == chat)).map(|i| i.id)
+}
+
+/// What a paused card's held sends say why: the person paused it.
+pub(crate) fn held_reason(card: &str) -> String {
+    format!("card {card} is paused by the person")
+}
+
+/// The note the board check set when it paused a card itself (before only
+/// the person could): such a pause had no person behind it.
+pub(crate) const ENGINE_PAUSE_NOTE: &str = "Paused: its thread was stopped";
+
+/// Whether `card`'s pause was the board check's own, not the person's: it
+/// carries the check's note (the person's Pause clears any note).
+pub(crate) fn engine_paused(card: &WorkItem) -> bool {
+    card.paused()
+        && card.check.as_ref().is_some_and(|c| c.kind == CheckKind::Moved && c.note == ENGINE_PAUSE_NOTE)
 }
 
 #[cfg(test)]

@@ -1685,7 +1685,14 @@ impl Tools {
         let delivered = self
             .deliver(&chat, space, &harnesses, baseline.as_ref(), body, mode)
             .await?;
+        let held = delivered.receipt["delivery"] == "held";
         result["sent"] = delivered.receipt;
+        // Held (its card is paused by the person): no turn starts until they
+        // resume it, so there's nothing to wait on.
+        if held {
+            result["note"] = json!("Held in the thread's queue: its card is paused by the person. It runs when they resume the card.");
+            return Ok(result);
+        }
         let pending = Arc::new(PendingTurn {
             baseline,
             start: TurnStart {
@@ -1941,7 +1948,7 @@ impl Tools {
             other => anyhow::bail!("unknown mode {other:?}; expected auto, run, steer, or queue"),
         };
         let new_message_id = uuid::Uuid::new_v4().to_string();
-        let (id, message_id) = match chosen {
+        let (id, message_id, held) = match chosen {
             "run" => {
                 let config = chat.config.clone();
                 let cwd = chat
@@ -1973,9 +1980,9 @@ impl Tools {
                     env: Default::default(),
                     extra_mcp: Vec::new(),
                 };
-                let id = self
+                let (id, held) = self
                     .zeron
-                    .queue_command(
+                    .queue_command_or_held(
                         &chat.id,
                         &SessionCommandPayload::Run { injected: None,
                             request,
@@ -1983,12 +1990,12 @@ impl Tools {
                         },
                     )
                     .await?;
-                (id, new_message_id)
+                (id, new_message_id, held)
             }
             "steer" => {
-                let id = self
+                let (id, held) = self
                     .zeron
-                    .queue_command(
+                    .queue_command_or_held(
                         &chat.id,
                         &SessionCommandPayload::Steer { injected: None,
                             prompt: text,
@@ -1996,22 +2003,21 @@ impl Tools {
                         },
                     )
                     .await?;
-                (id, new_message_id)
+                (id, new_message_id, held)
             }
             // A held message keeps its row's id when it's sent.
             _ => {
-                let id = self.zeron.queue_message(&chat.id, &text).await?;
-                (id.clone(), id)
+                let (id, held) = self.zeron.queue_message_or_held(&chat.id, &text).await?;
+                (id.clone(), id, held)
             }
         };
-        Ok(Delivered {
-            receipt: json!({
-                "delivery": chosen,
-                "id": id,
-                "chatStatusAtSend": status,
-            }),
-            message_id,
-        })
+        // Held by its host (its card is paused by the person): it waits in
+        // the thread's queue, and the receipt says so, never "run".
+        let receipt = match held {
+            Some(reason) => json!({ "delivery": "held", "reason": reason, "id": id, "chatStatusAtSend": status }),
+            None => json!({ "delivery": chosen, "id": id, "chatStatusAtSend": status }),
+        };
+        Ok(Delivered { receipt, message_id })
     }
 
     async fn await_pending_turn(
@@ -2189,6 +2195,9 @@ mod tests {
     /// two chats with a two-message transcript. Writes are recorded for assertions.
     #[derive(Default)]
     struct World {
+        /// Sends are held by the host: their thread's card (this id) is
+        /// paused by the person.
+        held_by: Option<String>,
         writes: Mutex<Vec<(String, Value)>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
@@ -2359,6 +2368,14 @@ mod tests {
                         // No dispatch can finish until both chats have work.
                         // A sequential batch deadlocks here, before any waits.
                         barrier.wait().await;
+                    }
+                    if let Some(card) = &self.held_by
+                        && method != methods::MUTATE
+                    {
+                        return Ok(RpcReply::Value(json!({
+                            "commandId": "cmd-1", "id": "q-1", "delivery": "held",
+                            "held": { "cardId": card, "reason": format!("card {card} is paused by the person") },
+                        })));
                     }
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
                 }
@@ -2598,6 +2615,32 @@ mod tests {
         assert_eq!(read["returned"], 1);
         assert_eq!(read["olderRemaining"], 1);
         assert_eq!(read["messages"][0]["id"], "a1");
+    }
+
+    #[tokio::test]
+    async fn a_send_to_a_paused_cards_thread_says_held_never_run() {
+        let world = Arc::new(World { held_by: Some("5d46d316".into()), ..World::default() });
+        let tools = tools(
+            world.clone(),
+            Origin { chat_id: Some("chat-beta-2".into()), device_id: Some("dev-local".into()), ..Default::default() },
+        );
+        // Waiting would never end: no turn starts until the person resumes it.
+        let sent = tools
+            .call("send_message", json!({ "chat": "alpha", "text": "deploy now", "wait": true, "timeout_secs": 600 }))
+            .await
+            .unwrap();
+        assert_eq!(sent["sent"]["delivery"], "held", "{sent}");
+        assert_eq!(sent["sent"]["reason"], "card 5d46d316 is paused by the person");
+        assert!(sent.get("turn").is_none(), "{sent}");
+        for mode in ["steer", "queue"] {
+            let sent = tools.call("send_message", json!({ "chat": "alpha", "text": "x", "mode": mode })).await.unwrap();
+            assert_eq!(sent["sent"]["delivery"], "held", "{mode}: {sent}");
+        }
+        let batch = tools
+            .call("send_messages", json!({ "requests": [{ "chat": "alpha", "text": "y" }] }))
+            .await
+            .unwrap();
+        assert!(batch.to_string().contains("\"delivery\":\"held\""), "{batch}");
     }
 
     #[tokio::test]

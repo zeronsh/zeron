@@ -2926,7 +2926,14 @@ async fn pausing_stops_the_thread_and_holds_it_for_the_person() {
     )
     .await
     .unwrap();
-    assert!(held["held"].is_string(), "{held}");
+    assert_eq!(held["delivery"], "held", "{held}");
+    assert_eq!(held["held"]["cardId"], card.as_str());
+    assert_eq!(held["held"]["reason"], format!("card {card} is paused by the person"));
+    // A queued message, the same.
+    let held_row = call(&core, agent(&o), methods::QUEUE_MESSAGE, json!({"chatId":"geese-t1","text":"and this"}))
+        .await
+        .unwrap();
+    assert_eq!(held_row["delivery"], "held", "{held_row}");
     assert_eq!(sent(&core, "geese-t1").len(), before, "not run");
     let queued = core.doc_host.open("geese-t1").unwrap().doc().read_queue().unwrap();
     assert!(queued.iter().any(|q| q.text.contains("carry on")), "queued: {queued:?}");
@@ -3391,4 +3398,145 @@ async fn a_send_the_stop_cut_off_mid_execute_resumes_its_chat_once() {
         .filter(|c| matches!(&c.payload, SessionCommandPayload::Run { request, .. } if request.prompt == "Deploy the lane from main."))
         .count();
     assert_eq!(again, 0, "never re-sent blind");
+}
+
+
+#[tokio::test]
+async fn an_engine_shutdown_with_crew_mid_turn_never_pauses_their_cards() {
+    // 5d46d316: the old engine's board check, running during its own
+    // shutdown, read the shutdown's interrupts as a Stop and paused the card.
+    let (_temp, core) = core().await;
+    let (_o, card) = geese(&core).await;
+    let rpc = core.rpc_service();
+    // Its thread's turn, interrupted (as a shutdown, a recovery or a limit
+    // leaves it).
+    let mut row = idle("geese-t1");
+    row.device_id = core.orchestration.device_id().to_owned();
+    row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+        status: zeron_proto::DoneStatus::Interrupted,
+        finished_at: chrono::Utc::now() + chrono::Duration::seconds(1),
+    });
+    core.orchestration.workspace().record_session(&row);
+    let mut rows = core.orchestration.workspace().watch_session_rows();
+    for _ in 0..200 {
+        if rows.borrow_and_update().iter().any(|s| s.chat_id == "geese-t1" && s.last_turn_outcome.is_some()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let later = chrono::Utc::now() + chrono::Duration::minutes(5);
+    let plan = rpc.plan_board_checks(later, true);
+    assert!(plan.iter().all(|c| c.verdict.paused != Some(true)), "never paused by the check: {plan:?}");
+    // While the engine shuts down, no check runs at all.
+    core.sessions.shutdown().await;
+    assert!(rpc.check_boards_on(later, true).await.is_empty());
+    let after = core.orchestration.item(&card).unwrap();
+    assert!(!after.paused(), "{after:?}");
+}
+
+#[tokio::test]
+async fn a_card_the_engine_paused_is_unpaused_at_start_and_its_held_sends_go() {
+    let (_temp, core) = core().await;
+    let (o, card) = geese(&core).await;
+    // Paused by the board check itself (as the old rule did).
+    core.orchestration
+        .patch_item(WorkItemPatch { id: Some(card.clone()), state: Some(WorkState::Blocked), ..Default::default() })
+        .unwrap();
+    core.orchestration.workspace().write_orchestration(|doc| {
+        let mut c = doc.work_item(&card).unwrap();
+        c.paused_at = Some(chrono::Utc::now());
+        c.check = Some(CardCheck {
+            kind: CheckKind::Moved,
+            note: super::board_checks::ENGINE_PAUSE_NOTE.into(),
+            since: chrono::Utc::now(),
+            nudged_at: None,
+        });
+        doc.upsert_work_item(&c);
+    });
+    // The orchestrator's send to it was held.
+    let held = call(&core, agent(&o), methods::QUEUE_MESSAGE, json!({"chatId":"geese-t1","text":"deploy now"})).await.unwrap();
+    assert_eq!(held["delivery"], "held");
+    // A card the person paused stays paused.
+    let mine = op(&core, agent(&o), json!({"op":"upsertItem","item":{"title":"Mine","state":"active","threads":["geese-t1"]}}))
+        .await
+        .unwrap();
+    op(&core, Caller::Local, json!({"op":"pauseItem","id":mine})).await.unwrap();
+
+    let rpc = core.rpc_service();
+    assert_eq!(rpc.unpause_engine_pauses(chrono::Utc::now()).await, [card.clone()]);
+    let after = core.orchestration.item(&card).unwrap();
+    assert!(!after.paused());
+    assert_eq!(after.state, WorkState::Active);
+    assert!(after.check.unwrap().note.contains("the engine had paused it"));
+    assert!(core.orchestration.item(&mine).unwrap().paused(), "the person's own pause stands");
+    // Run again: nothing more.
+    assert!(rpc.unpause_engine_pauses(chrono::Utc::now()).await.is_empty());
+}
+
+
+#[tokio::test]
+async fn a_paused_card_dropped_on_now_unpauses_and_its_thread_carries_on() {
+    // The person's drop of a Paused card on Now: `resumeItem` (the board's
+    // drop and its Resume button), or a plain move to Now from an older
+    // board. Either way: not paused, in Now, its idle thread told to carry on.
+    for via in ["resumeItem", "upsertItem"] {
+        let (_temp, core) = core().await;
+        let (_o, card) = geese(&core).await;
+        op(&core, Caller::Local, json!({"op":"pauseItem","id":card})).await.unwrap();
+        assert!(core.orchestration.item(&card).unwrap().paused());
+        let before = sent(&core, "geese-t1").len();
+        let params = match via {
+            "resumeItem" => json!({"op":"resumeItem","id":card,"state":"active"}),
+            _ => json!({"op":"upsertItem","item":{"id":card,"state":"active"}}),
+        };
+        op(&core, Caller::Local, params).await.unwrap();
+        let after = core.orchestration.item(&card).unwrap();
+        assert!(!after.paused(), "{via}: {after:?}");
+        assert_eq!(after.state, WorkState::Active, "{via}");
+        let said = sent(&core, "geese-t1");
+        assert_eq!(said.len(), before + 1, "{via}: its idle thread runs: {said:?}");
+        assert!(said.last().unwrap().contains("[Resumed] The person resumed"), "{via}");
+    }
+}
+
+#[tokio::test]
+async fn a_paused_card_taken_to_up_next_lets_its_held_queue_go() {
+    let (_temp, core) = core().await;
+    let here = core.orchestration.device_id().to_owned();
+    let o = orchestrator(&core, "Local").await;
+    call(
+        &core,
+        Caller::Local,
+        methods::MUTATE,
+        json!({"op":"createChat","chatId":"local-t1","deviceId":here,"config":{"harness":"codex","sandbox":"workspace-write"}}),
+    )
+    .await
+    .unwrap();
+    op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":o,"chatId":"local-t1"})).await.unwrap();
+    let card = op(&core, agent(&o), json!({"op":"upsertItem","item":{"title":"Local work","state":"active","threads":["local-t1"]}}))
+        .await
+        .unwrap();
+    op(&core, Caller::Local, json!({"op":"pauseItem","id":card})).await.unwrap();
+    assert!(core.doc_host.queue_held("local-t1"), "held while paused");
+    op(&core, Caller::Local, json!({"op":"resumeItem","id":card,"state":"planned"})).await.unwrap();
+    let after = core.orchestration.item(&card).unwrap();
+    assert_eq!(after.state, WorkState::Planned);
+    assert!(!after.paused());
+    assert!(!core.doc_host.queue_held("local-t1"), "a card no longer paused holds nothing");
+}
+
+#[tokio::test]
+async fn a_paused_card_with_no_thread_dropped_on_now_starts_one() {
+    let (_temp, core) = core().await;
+    let o = orchestrator(&core, "Empty").await;
+    let card = op(&core, agent(&o), json!({"op":"upsertItem","item":{"title":"Write the runbook","state":"planned"}}))
+        .await
+        .unwrap();
+    op(&core, Caller::Local, json!({"op":"pauseItem","id":card})).await.unwrap();
+    let reply = call(&core, Caller::Local, methods::ORCHESTRATE, json!({"op":"resumeItem","id":card,"state":"active"}))
+        .await
+        .unwrap();
+    let after = core.orchestration.item(&card).unwrap();
+    assert!(!after.paused());
+    assert!(reply["threadId"].is_string() || reply["queued"] == true, "started (or queued for its crew): {reply}");
 }
