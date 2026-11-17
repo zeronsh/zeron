@@ -43,6 +43,12 @@ export type View = { variant: string, window: number }
 
 export type Props = {
 	world: () -> any,
+	-- One chat by id, followed by itself (account/rows); else read out of
+	-- the world, every thread following all of it.
+	chat: ((id: string) -> any)?,
+	-- A thread's name by itself (account/rows), for the views that show
+	-- names per row; else they read it out of the world.
+	name_of: ((id: string) -> string)?,
 	comms: () -> { any },
 	timeline: (() -> { [string]: { any } })?,
 	view: State<View>?,
@@ -284,7 +290,9 @@ M.Map = ui.component(function(props: Props): Node
 	-- view's layout does.
 	local world = M.shaped(props.world)
 
-	local function chat(id: string): any
+	-- (A thread's chat: the page's own reader of one chat when it gives one
+	-- (account/rows), else out of the world.)
+	local chat = props.chat or function(id: string): any
 		return (world().chats or {})[id]
 	end
 	local function timeline(): { [string]: { any } }
@@ -348,6 +356,7 @@ M.Map = ui.component(function(props: Props): Node
 			return bounded(Topology {
 				world = world,
 				chat = chat,
+				name_of = props.name_of,
 				comms = props.comms,
 				on_open_chat = props.on_open_chat,
 				on_open_orchestrator = props.on_open_orchestrator,

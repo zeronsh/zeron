@@ -30,6 +30,8 @@ local Visibility = require("@self/orch_map_visibility")
 export type Props = {
 	world: () -> any,
 	chat: (id: string) -> any,
+	-- A thread's name by itself (account/rows); else from the world.
+	name_of: ((id: string) -> string)?,
 	comms: () -> { any },
 	on_open_chat: (id: string) -> (),
 	on_open_orchestrator: (id: string) -> (),
@@ -187,7 +189,11 @@ return ui.component(function(props: Props): Node
 	local named = ui.computed(function(): Name.Index
 		return Name.index(props.world().now)
 	end)
+	local given = props.name_of
 	local function name_of(id: string): string
+		if given then
+			return given(id)
+		end
 		return Name.from(named:get(), props.world().chats, id)
 	end
 	local function by_id(x: any): string

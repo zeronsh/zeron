@@ -36,6 +36,7 @@ local Asks = require("@ds/orch_asks")
 local Decision = require("@ds/orch_decision")
 local decide = require("@ds/orch_decide")
 local OrchMap = require("@ds/orch_map")
+local rows = require("@account/rows")
 local MapMenu = require("@app/screens/control/map_menu")
 local Machines = require("@ds/orch_machines")
 local Visibility = require("@ds/orch_map_visibility")
@@ -811,19 +812,25 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 			return BD.now().orchestrators or {}
 		end,
 		show_filter = true,
+		-- (Each card's thread, ask and owner read by themselves,
+		-- account/rows through the Board's held readers: a push wakes the
+		-- cards whose rows it changed, and none while the Board is hidden.)
+		orchestrator_of = function(id: string): any
+			return BD.orchestrator(id)
+		end,
 		todo_of = function(chat: string): any
-			local c = BD.chats()[chat]
+			local c = BD.chat(chat)
 			return c and c.todo
 		end,
 		thread_of = function(chat: string): any
-			return BD.chats()[chat]
+			return BD.chat(chat)
 		end,
 		ask_of = function(chat: string): any
-			return BD.asks()[chat]
+			return BD.ask(chat)
 		end,
 		-- (Whose a card is: the project its thread or orchestrator works in.)
 		project_of = function(chat: string): string?
-			local c = BD.chats()[chat]
+			local c = BD.chat(chat)
 			local id = c and c.project
 			if not id then
 				return nil
@@ -957,6 +964,15 @@ local function map(): Node
 		w_full = true,
 		OrchMap.Map {
 			world = world,
+			-- (Each thread's chat and name by itself, account/rows through
+			-- the Overview's held readers: a push wakes the Map rows of the
+			-- chats it changed, none while the Overview is hidden.)
+			chat = function(id: string): any
+				return OV.chat(id)
+			end,
+			name_of = function(id: string): string
+				return OV.name(id)
+			end,
 			view = M.map_view,
 			timeline = function(): { [string]: { any } }
 				return OV.timeline()
@@ -1059,6 +1075,12 @@ local function readers(live: () -> boolean, name: string): any
 	R.named = held(function(): any
 		return named:get()
 	end)
+	-- One row by itself (account/rows), as held: while shown, a reader
+	-- wakes only for its own row; hidden, its last value, nothing read.
+	R.chat = hold.by(live, rows.chat, name)
+	R.ask = hold.by(live, rows.ask, name)
+	R.orchestrator = hold.by(live, rows.orchestrator, name)
+	R.name = hold.by(live, rows.name, name)
 	R.qa = held(function(): any
 		return qa_entries:get()
 	end)

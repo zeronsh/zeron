@@ -28,6 +28,7 @@ local locale = require("@ds/locale")
 local orchestration = require("@account/orchestration")
 local hold = require("@ds/hold")
 local sessions = require("@account/sessions")
+local rows = require("@account/rows")
 local route = require("@app/screens/shell/route")
 
 local M = {}
@@ -110,7 +111,7 @@ end
 -- A script-owned computed of `f`, handing its readers the very table it
 -- gave before while what it says is the same: a push of sessions or the
 -- timeline that changes no row wakes none of the rows' readers.
-local function stable<T>(f: () -> T): { get: (any) -> T }
+local function stable<T>(f: () -> T): { get: (any) -> T, peek: (any) -> T }
 	local prev: any = nil
 	return ui.computed(function(): T
 		local v = f()
@@ -136,11 +137,6 @@ local leads_now = derived(function(): any
 	return orchestration.now:get()
 end, function(now: any): { [string]: any }
 	return data.orchestrators(now)
-end)
-local crew_now = derived(function(): any
-	return orchestration.now:get()
-end, function(now: any): { [string]: any }
-	return data.crew_by_chat(now)
 end)
 -- Chats a check found nothing to say about yet.
 local quiet = ui.state("progress_quiet", {} :: { [string]: boolean })
@@ -304,8 +300,55 @@ function M.open(id: string)
 	route.open_session(id)
 end
 
+-- Each row by itself: a reader of one chat's row runs again when that row
+-- says something new, not whenever any row does. One effect, the script's,
+-- walks the rows as they change and bumps the version of each that did
+-- (compared by what they say: a row rebuilt the same wakes nobody).
+local row_held: { [string]: any } = {}
+local row_versions: { [string]: State<number> } = {}
+local function row_version(id: string): State<number>
+	local v = row_versions[id]
+	if not v then
+		v = ui.state(`progress_row:{id}`, 0)
+		row_versions[id] = v
+	end
+	return v
+end
+local function take_rows(all: { [string]: any })
+	local bump: { string } = {}
+	for id, r in all do
+		local was = row_held[id]
+		if was ~= r then
+			row_held[id] = r
+			if was == nil or not same(r, was, { n = 512 }) then
+				table.insert(bump, id)
+			end
+		end
+	end
+	for id in row_held do
+		if all[id] == nil then
+			row_held[id] = nil
+			table.insert(bump, id)
+		end
+	end
+	if #bump > 0 then
+		ui.batch(function()
+			for _, id in bump do
+				local v = row_versions[id]
+				if v then
+					v:set(v:peek() + 1)
+				end
+			end
+		end)
+	end
+end
+take_rows(M.rows:peek())
+ui.effect(function()
+	take_rows(M.rows:get())
+end)
 local function row_of(id: string): any
-	return M.rows:get()[id]
+	row_version(id):get()
+	return row_held[id]
 end
 -- A chat's progress row (nil while it has none): what a board card's
 -- clocks read.
@@ -314,10 +357,11 @@ M.row = row_of
 -- Whose work it is and where it runs: its orchestrator (or project) and
 -- its machine.
 function M.context(id: string): string
-	local c = chats_now:get()[id]
+	-- (Its chat, its crew row and its orchestrator, each by itself.)
+	local c = rows.chat(id)
 	local parts = {}
-	local m = crew_now:get()[id]
-	local orchestrator = m and leads_now:get()[m.orchestrator_id]
+	local m = rows.member(id)
+	local orchestrator = m and rows.orchestrator(m.orchestrator_id)
 	if orchestrator then
 		table.insert(parts, orchestrator.name)
 	elseif c and c.project then
@@ -356,7 +400,7 @@ local function unit(id: string, variant: Unit.Variant, lean: boolean?, live: (()
 			return if quiet:get()[id] then locale.s("control.progress.no_details") else nil
 		end),
 		chat = held(function(): any
-			return chats_now:get()[id]
+			return rows.chat(id)
 		end),
 		context = held(function(): string
 			return M.context(id)

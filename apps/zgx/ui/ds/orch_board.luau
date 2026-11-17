@@ -161,6 +161,9 @@ export type Thread = { title: string, status: string?, agent: string? }
 export type Props = {
 	items: control.Live<{ Item }>,
 	orchestrators: control.Live<{ Orchestrator }>?,
+	-- One orchestrator by id, followed by itself (account/rows): a card's
+	-- owner then wakes it alone. Without it, read out of `orchestrators`.
+	orchestrator_of: ((id: string) -> Orchestrator?)?,
 	todo_of: ((chat: string) -> Todo?)?,
 	thread_of: ((chat: string) -> Thread?)?,
 	ask_of: ((chat: string) -> { [string]: any }?)?,
@@ -432,6 +435,11 @@ local OrchBoard = ui.component(function(props: Props): Node
 		if not id then
 			return nil
 		end
+		-- (One orchestrator by itself when the page reads them so, a card
+		-- then following its own, not the whole list.)
+		if props.orchestrator_of then
+			return props.orchestrator_of(id)
+		end
 		for _, o in orchestrators() do
 			if o.id == id then
 				return o
@@ -493,8 +501,34 @@ local OrchBoard = ui.component(function(props: Props): Node
 	end
 
 	-- The card each open ask waits on (asks_by_card).
+	-- (The same table while every card's ask is: the cards' own selectors
+	-- then don't run again for a push that moved none.)
+	local waits_was: { [string]: { [string]: any } }? = nil
 	local waits = ui.computed(function(): { [string]: { [string]: any } }
-		return asks_by_card((control.value(props.items) :: { Item }?) or {}, props.ask_of)
+		local now = asks_by_card((control.value(props.items) :: { Item }?) or {}, props.ask_of)
+		local was = waits_was
+		if was then
+			local same = true
+			for k, v in now do
+				if was[k] ~= v then
+					same = false
+					break
+				end
+			end
+			if same then
+				for k in was do
+					if now[k] == nil then
+						same = false
+						break
+					end
+				end
+			end
+			if same then
+				return was
+			end
+		end
+		waits_was = now
+		return now
 	end)
 
 	-- The items shown, by column, each sorted (filtered first).
