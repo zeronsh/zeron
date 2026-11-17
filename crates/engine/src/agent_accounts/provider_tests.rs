@@ -472,6 +472,7 @@ async fn a_rejected_saved_grok_token_refreshes_once_against_its_issuer() {
         saved_at: 1,
         created_at: None,
         store_key: detected.store_key,
+        user_id: None,
     };
     accounts.write_slot(&slot).unwrap();
     // The LIVE login is never refreshed by zeron.
@@ -1225,6 +1226,7 @@ async fn keyed_logins_probe_the_vendor_behind_them() {
         saved_at: 1,
         created_at: None,
         store_key: Some("github-copilot".into()),
+        user_id: None,
     };
     let usage = accounts.keyed_usage(HarnessId::Pi, &copilot).await.unwrap();
     assert_eq!(usage.plan_label.as_deref(), Some("Copilot Business"));
@@ -3013,4 +3015,167 @@ async fn a_switch_over_a_login_it_cant_identify_is_refused_and_the_login_kept() 
     let live: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(live["anthropic"], claude);
+}
+
+// ── Cursor: one slot per account, and keys Cursor rejected ─────────────────
+
+/// The SDK store a Cursor browser login leaves (`StoredSdkCredentials`):
+/// `backend` is the mock's base plus a path that tells this key's requests
+/// apart (the mock sees no headers).
+fn cursor_store(key: &str, email: Option<&str>, created_at: i64, backend: &str) -> serde_json::Value {
+    let mut store = serde_json::json!({
+        "version": 1,
+        "backendUrl": backend,
+        "apiKey": key,
+        "apiKeyExpiresAtMs": now_ms() + 86_400_000,
+        "createdAtMs": created_at,
+    });
+    if let Some(email) = email {
+        store["email"] = email.into();
+    }
+    store
+}
+
+/// A Cursor backend whose `/{name}/…` answers for one key: the exchanged
+/// session names `sub` (none: the key is rejected), and the plan's usage.
+async fn cursor_backend(keys: Arc<Mutex<HashMap<String, Option<String>>>>) -> MockServer {
+    MockServer::start(move |_, path, _| {
+        let name = path.trim_start_matches('/').split('/').next().unwrap_or("").to_string();
+        let Some(user) = lock(&keys).get(&name).cloned() else {
+            return (404, "{}".into());
+        };
+        let Some(user) = user else {
+            return (401, r#"{"error":"invalid api key"}"#.into());
+        };
+        if path.ends_with("/auth/exchange_user_api_key") {
+            let token = jwt(serde_json::json!({ "sub": user }));
+            return (200, serde_json::json!({ "accessToken": token }).to_string());
+        }
+        if path.contains("GetCurrentPeriodUsage") {
+            return (200, r#"{"planUsage":{"totalSpend":100,"limit":1000}}"#.into());
+        }
+        (404, "{}".into())
+    })
+    .await
+}
+
+fn cursor_slot_files(config: &AgentAccountsConfig) -> usize {
+    std::fs::read_dir(config.root_dir().join("cursor"))
+        .map(|dir| {
+            dir.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn a_cursor_relogin_of_the_same_account_replaces_its_dead_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let keys: Arc<Mutex<HashMap<String, Option<String>>>> = Arc::default();
+    let server = cursor_backend(keys.clone()).await;
+    let (accounts, config) = accounts_with(dir.path(), mocked(&server.base));
+    let file = config.cursor_sdk_auth_file.clone();
+
+    // A store that names no email: the slot is keyed by the key's digest,
+    // and its probe learns whose key it is.
+    lock(&keys).insert("old".into(), Some("user_1".into()));
+    let old = cursor_store("key-old", None, 1, &format!("{}/old", server.base));
+    write(&file, &old.to_string());
+    let rows_now = rows(&accounts.list(true).await.unwrap(), HarnessId::Cursor);
+    assert_eq!(rows_now.len(), 1);
+    let old_id = rows_now[0].id.clone();
+
+    // Signing in again mints a new key (no email either) and Cursor revokes
+    // the old one. The new key's probe says it is the same user: its slot
+    // replaces the old one, in the old one's place, live.
+    lock(&keys).insert("old".into(), None);
+    lock(&keys).insert("new".into(), Some("user_1".into()));
+    let new = cursor_store("key-new", None, 2, &format!("{}/new", server.base));
+    write(&file, &new.to_string());
+    let rows_now = rows(&accounts.list(true).await.unwrap(), HarnessId::Cursor);
+    assert_eq!(rows_now.len(), 1, "{rows_now:?}");
+    assert_ne!(rows_now[0].id, old_id);
+    assert!(rows_now[0].active);
+    assert!(!rows_now[0].invalid);
+    assert_eq!(cursor_slot_files(&config), 1);
+    assert_eq!(read_json(&file).unwrap()["apiKey"], "key-new");
+    // And it stays one: the next list re-snapshots the live key alone.
+    let rows_now = rows(&accounts.list(false).await.unwrap(), HarnessId::Cursor);
+    assert_eq!(rows_now.len(), 1);
+
+    // A store that does name the email folds a re-login at once, whatever
+    // the address's case — no probe needed.
+    write(&file, &cursor_store("key-a1", Some("Dev@Example.com"), 3, &server.base).to_string());
+    accounts.list(false).await.unwrap();
+    write(&file, &cursor_store("key-a2", Some("dev@example.com"), 4, &server.base).to_string());
+    let rows_now = rows(&accounts.list(false).await.unwrap(), HarnessId::Cursor);
+    let dev: Vec<_> = rows_now
+        .iter()
+        .filter(|a| a.email.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("dev@example.com")))
+        .collect();
+    assert_eq!(dev.len(), 1, "{rows_now:?}");
+    assert!(dev[0].active);
+    // (The user_1 account is another account: kept.)
+    assert_eq!(rows_now.len(), 2, "{rows_now:?}");
+}
+
+#[tokio::test]
+async fn a_rejected_cursor_key_is_invalid_and_never_switched_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let keys: Arc<Mutex<HashMap<String, Option<String>>>> = Arc::default();
+    let server = cursor_backend(keys.clone()).await;
+    let (accounts, config) = accounts_with(dir.path(), mocked(&server.base));
+    let file = config.cursor_sdk_auth_file.clone();
+
+    // Ada's key was revoked; Bo's works and is in use.
+    lock(&keys).insert("ada".into(), None);
+    lock(&keys).insert("bo".into(), Some("user_bo".into()));
+    write(&file, &cursor_store("key-ada", Some("ada@example.com"), 1, &format!("{}/ada", server.base)).to_string());
+    accounts.list(false).await.unwrap();
+    write(&file, &cursor_store("key-bo", Some("bo@example.com"), 2, &format!("{}/bo", server.base)).to_string());
+    let snapshot = accounts.list(true).await.unwrap();
+    let cursor = rows(&snapshot, HarnessId::Cursor);
+    assert_eq!(cursor.len(), 2);
+    let ada = cursor.iter().find(|a| a.email.as_deref() == Some("ada@example.com")).unwrap();
+    let bo = cursor.iter().find(|a| a.email.as_deref() == Some("bo@example.com")).unwrap();
+    assert!(ada.invalid);
+    assert_eq!(ada.invalid_reason.as_deref(), Some("Key rejected — sign in again"));
+    assert_eq!(ada.usage_error.as_deref(), Some("Key rejected — sign in again"));
+    assert!(!bo.invalid && bo.invalid_reason.is_none() && bo.active);
+    // (On the wire: camelCase, and absent while valid.)
+    let wire = serde_json::to_value(ada).unwrap();
+    assert_eq!(wire["invalid"], true);
+    assert_eq!(wire["invalidReason"], "Key rejected — sign in again");
+    assert!(serde_json::to_value(bo).unwrap().get("invalid").is_none());
+
+    // Switching to it is refused, and the live login is left alone.
+    let refused = accounts.activate(HarnessId::Cursor, &ada.id).await.unwrap_err();
+    assert!(refused.to_string().contains("Key rejected"), "{refused}");
+    assert_eq!(read_json(&file).unwrap()["apiKey"], "key-bo");
+    // Asked for explicitly, it goes through.
+    let forced = accounts.activate_with(HarnessId::Cursor, &ada.id, true).await.unwrap();
+    assert!(rows(&forced, HarnessId::Cursor).iter().any(|a| a.id == ada.id && a.active));
+    assert_eq!(read_json(&file).unwrap()["apiKey"], "key-ada");
+
+    // And it can be removed (signing the live store out with it).
+    let left = accounts.forget(HarnessId::Cursor, &ada.id).await.unwrap();
+    assert!(rows(&left, HarnessId::Cursor).iter().all(|a| a.id != ada.id));
+}
+
+#[tokio::test]
+async fn an_expired_cursor_key_is_invalid_without_a_probe() {
+    let dir = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(dir.path(), mocked("http://127.0.0.1:9"));
+    let file = config.cursor_sdk_auth_file.clone();
+    let mut old = cursor_store("key-old", Some("cy@example.com"), 1, "https://api2.cursor.sh");
+    old["apiKeyExpiresAtMs"] = (now_ms() - 1000).into();
+    write(&file, &old.to_string());
+    accounts.list(false).await.unwrap();
+    write(&file, &cursor_store("key-dee", Some("dee@example.com"), 2, "https://api2.cursor.sh").to_string());
+    let cursor = rows(&accounts.list(false).await.unwrap(), HarnessId::Cursor);
+    let cy = cursor.iter().find(|a| a.email.as_deref() == Some("cy@example.com")).unwrap();
+    assert!(cy.invalid);
+    assert_eq!(cy.invalid_reason.as_deref(), Some("Key expired — sign in again"));
+    assert!(accounts.activate(HarnessId::Cursor, &cy.id).await.is_err());
 }

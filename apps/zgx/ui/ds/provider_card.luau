@@ -74,6 +74,11 @@ export type Account = {
 	-- whether it can be put in use.
 	active: boolean?,
 	switchable: boolean?,
+	-- A login whose key its provider rejected (revoked or expired): said on
+	-- its row (`invalid_reason`, the engine's words), with Remove at hand,
+	-- and never offered to switch to.
+	invalid: boolean?,
+	invalid_reason: string?,
 	-- An API key, not an account: no plan, no meters, its provider's mark
 	-- for a face (`provider`, the agent's id for it).
 	key: boolean?,
@@ -367,10 +372,11 @@ local Actions = ui.component(function(p: { card: CardProps, account: State<Accou
 					end,
 				}),
 				-- (Only to one that can be put in use and isn't already: a
-				-- switch the agent can't take is never offered.)
+				-- switch the agent can't take, or to a key it rejected, is
+				-- never offered.)
 				ui.show(function(): boolean
 					local a = account:get()
-					return a.switchable ~= false and a.active ~= true
+					return a.switchable ~= false and a.active ~= true and a.invalid ~= true
 				end, Menu.Row {
 					icon = "check-circle",
 					label = locale.s("ds.provider_card.switch"),
@@ -427,9 +433,14 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 	local function week(): number
 		return row:get().week
 	end
+	local function invalid(): boolean
+		return row:get().invalid == true
+	end
 	local function detail(): string
 		local a = row:get()
-		if reset() then
+		if a.invalid == true then
+			return a.invalid_reason or locale.s("ds.provider_card.key_rejected")
+		elseif reset() then
 			return locale.s("ds.provider_card.reset_just_now", { plan = a.plan })
 		elseif a.resets_at then
 			return locale.s("ds.provider_card.limit_reached_at", { plan = a.plan, at = a.resets_at })
@@ -490,9 +501,22 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 		control = ui.row {
 			gap = "$space.3",
 			items = "center",
+			-- (A key its provider rejected: nothing to measure, only to
+			-- take away — Remove, at hand rather than behind the ⋯.)
+			ui.show(invalid, Button {
+				locale.t("ds.provider_card.remove_rejected"),
+				tone = "secondary",
+				size = "sm",
+				on_click = function()
+					if c.on_remove then
+						c.on_remove(row:peek())
+					end
+				end,
+			}),
 			-- (An API key has no plan, so no windows: no meters for it.)
 			ui.show(function(): boolean
-				return row:get().key ~= true
+				local a = row:get()
+				return a.key ~= true and a.invalid ~= true
 			end, ui.column {
 				gap = "$zeron.space.hair",
 				-- (Labels alone where no reset is known, as the shipping app.)

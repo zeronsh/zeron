@@ -128,7 +128,8 @@ impl AgentAccounts {
     /// `None` (not on this device, or not this kind of login: an API key
     /// bills per token, so spreading over it saves nothing).
     pub fn pin_mechanism(&self, account: &AgentAccount) -> Option<&'static str> {
-        if account.auth_kind == Some(AgentAuthKind::ApiKey) {
+        // (Nor one whose credential the provider rejected.)
+        if account.auth_kind == Some(AgentAuthKind::ApiKey) || account.invalid {
             return None;
         }
         match account.harness {
