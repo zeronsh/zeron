@@ -150,6 +150,8 @@ local PLACES_MAX = 4000
 local PRUNE_MS = 3000
 -- A frame's share of placing the threads' names (seconds).
 local NAME_SLICE = 0.003
+-- How long a zoom rests before the names are placed again at its scale (ms).
+local ZOOM_SETTLE_MS = 250
 -- A machine's hub on the machines pivot: Material's Clover (four leaves),
 -- never a cookie (an orchestrator's).
 local MACHINE_SHAPE = "clover4"
@@ -172,6 +174,7 @@ local BADGE_AT = 10.5
 
 local T_NAME: any = { size = 11.5, baseline = "top", align = "center" }
 local T_HUB: any = { size = 12.5, weight = 600, baseline = "top", align = "center" }
+local T_NAME_BASE, T_HUB_BASE = T_NAME.size, T_HUB.size
 local T_NAME_HALO: any = table.clone(T_NAME)
 local T_HUB_HALO: any = table.clone(T_HUB)
 -- A name's halo: its text again in the page's colour, these offsets round
@@ -180,6 +183,15 @@ local HALO_NAME = { -1, -1, 1, -1, -1, 1, 1, 1 }
 local HALO_FIXED = { -1.4, 0, 1.4, 0, 0, -1.4, 0, 1.4, -1, -1, 1, -1, -1, 1, 1, 1 }
 local M_NAME = { size = 11.5 }
 local M_HUB = { size = 12.5, weight = 600 }
+-- (The same, in world units at the names' scale: on screen, always the
+-- sizes above.)
+local M_NAME_S: any = table.clone(M_NAME)
+local M_HUB_S: any = table.clone(M_HUB)
+local function name_opts(hub: boolean, k: number): any
+	local o = if hub then M_HUB_S else M_NAME_S
+	o.size = (if hub then M_HUB.size else M_NAME.size) * k
+	return o
+end
 local DASH = { dash = { 4, 4 } }
 local ROUND = { cap = "round" :: "round", join = "round" :: "round" }
 
@@ -198,6 +210,8 @@ M.View = ui.component(function(props: {
 		return math.clamp(math.floor(width:get() * 0.62), 420, 760)
 	end
 	local view = ui.use_state({ x = 0, y = 0, zoom = 1 })
+	-- (Bumped by each zoom: the names' rescale waits for it to settle.)
+	local zoom_req = ui.use_state(0)
 	local moved_view = false
 
 	-- On screen: in view, in a window that shows. Off screen nothing runs.
@@ -222,7 +236,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { rescales = 0, leaders = 0, name_size = 0, label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -287,6 +301,7 @@ M.View = ui.component(function(props: {
 		local pad = if any_name then 24 else 70
 		local z = math.clamp(math.min((w - pad * 2) / math.max(1, x1 - x0), (h - pad * 2 - 30) / math.max(1, y1 - y0)), MIN_FIT, 1.4)
 		view:set({ x = w / 2 - (x0 + x1) / 2 * z, y = (h - 30) / 2 - (y0 + y1) / 2 * z, zoom = z })
+		zoom_req:set(zoom_req:peek() + 1)
 		counts.zoom = z
 		count("frames", 0)
 	end
@@ -619,6 +634,8 @@ M.View = ui.component(function(props: {
 			-- (A name's halo: the page's colour, a touch see-through on the
 			-- frosted glass.)
 			halo = kit.ink("background", 0.85),
+			-- (A name's pointer to its mark: fine, faint, never a link.)
+			leader = kit.ink("text.primary", 0.35),
 			lit = kit.ink("text.primary", 0.85),
 			-- (A fading chat's ring, by its strength in tenths.)
 			fade = {},
@@ -682,6 +699,25 @@ M.View = ui.component(function(props: {
 	-- ones whose node didn't move where they were while still free.
 	local NAME_RANK: { [string]: number } = { input = 0, approval = 0, failed = 1, working = 2, waiting = 2, done = 3 }
 	local names_job: any = nil
+	-- The scale names are placed and drawn at (world units an on-screen
+	-- point), and whether the zoom has moved off it since.
+	local names_k = 1
+	local names_dirty = false
+	-- (A zoom, settled ZOOM_SETTLE_MS: the names placed again at its scale;
+	-- never a wheel step's frame.)
+	ui.effect(function()
+		if zoom_req:get() == 0 then
+			return
+		end
+		ui.after(ZOOM_SETTLE_MS, function()
+			local k = 1 / math.max(0.05, view:peek().zoom)
+			if math.abs(k - names_k) / names_k > 0.02 then
+				names_dirty = true
+				count("rescales")
+				tick:set(tick:peek() + 1)
+			end
+		end)
+	end)
 	local names_ms = 0
 	-- (Each text's width, kept: measured once.)
 	local name_widths: { [string]: number } = {}
@@ -701,7 +737,7 @@ M.View = ui.component(function(props: {
 		names_tick = tick:peek()
 		local t0 = os.clock()
 		local done = labels.run(job, NAME_SLICE, function(t: string, hub: boolean): number
-			return (c:measure_text(t, if hub then M_HUB else M_NAME))
+			return (c:measure_text(t, name_opts(hub, names_k)))
 		end)
 		names_ms += (os.clock() - t0) * 1000
 		if not done then
@@ -753,13 +789,23 @@ M.View = ui.component(function(props: {
 			table.insert(links, { a = l.a, b = l.b, ax = s.x[l.a], ay = s.y[l.a], bx = s.x[l.b], by = s.y[l.b] })
 		end
 		local ts = os.clock()
+		-- (At this zoom: names keep their size on screen. A new scale: every
+		-- name placed afresh, its widths measured again.)
+		local k = 1 / math.max(0.05, view:peek().zoom)
+		if math.abs(k - names_k) > 1e-6 then
+			table.clear(name_widths)
+			table.clear(labs_by_id)
+			names_k = k
+		end
+		names_dirty = false
 		names_job = labels.start({
+			scale = names_k,
 			nodes = nodes,
 			links = links,
 			prev = labs_by_id,
 			widths = name_widths,
 			measure = function(t: string, hub: boolean): number
-				return (c:measure_text(t, if hub then M_HUB else M_NAME))
+				return (c:measure_text(t, name_opts(hub, names_k)))
 			end,
 		})
 		names_ms = 0
@@ -832,26 +878,35 @@ M.View = ui.component(function(props: {
 	-- under zgx's raster cap, moved by the view).
 	local function label(c: any, i: number, t: any, ink: string, p: any)
 		local lab = labs[i]
+		local k = names_k
 		local ld = lab.leader
 		if ld then
-			c:line(ld[1], ld[2], ld[3], ld[4], p.weak, 0.8)
+			-- (A short pointer from the name toward its mark, a dot at the
+			-- name: never a line that reads as a link.)
+			c:line(ld[1], ld[2], ld[3], ld[4], p.leader, 0.7 * k, ROUND)
+			c:circle(ld[1], ld[2], 1.6 * k, p.leader)
+			counts.leaders += 1
 		end
 		-- (No box: the text alone, a halo of the page's colour round it, as
 		-- the first Graph's names stand clear; heavier for the fixed names,
 		-- which may sit on a line.)
 		local halo: any = if t == T_HUB then T_HUB_HALO else T_NAME_HALO
+		local size = (if t == T_HUB then T_HUB_BASE else T_NAME_BASE) * k
 		halo.color = p.halo
 		halo.align = lab.align
+		halo.size = size
 		t.color = ink
 		t.align = lab.align
+		t.size = size
+		counts.name_size = T_NAME_BASE * k
 		-- (For tests: names are drawn with no box behind them.)
 		counts.label_boxes = 0
 		local lh = lab.h / #lab.lines
 		local offs = if lab.fixed then HALO_FIXED else HALO_NAME
-		for k, line in lab.lines do
-			local ly = lab.y + (k - 1) * lh
+		for li, line in lab.lines do
+			local ly = lab.y + (li - 1) * lh
 			for o = 1, #offs, 2 do
-				c:text(line, lab.x + offs[o], ly + offs[o + 1], halo)
+				c:text(line, lab.x + offs[o] * k, ly + offs[o + 1] * k, halo)
 			end
 			counts.label_halos += 1
 			c:text(line, lab.x, ly, t)
@@ -900,7 +955,9 @@ M.View = ui.component(function(props: {
 		local b = cull:get()
 		local still = settled:peek()
 		make(c)
-		if names_job and made_version == version:peek() and not names_ran_this_tick() then
+		if names_dirty and made_version == version:peek() and settled:peek() and not names_job then
+			place_names(c)
+		elseif names_job and made_version == version:peek() and not names_ran_this_tick() then
 			run_names(c)
 		end
 		local full = made_version == version:peek()
@@ -1167,7 +1224,11 @@ M.View = ui.component(function(props: {
 
 	-- The view.
 	local function set_view(x: number, y: number, zoom: number)
+		local was = view:peek().zoom
 		view:set({ x = x, y = y, zoom = zoom })
+		if math.abs(zoom - was) > 1e-6 then
+			zoom_req:set(zoom_req:peek() + 1)
+		end
 		counts.zoom = zoom
 		count("frames", 0)
 		recull()

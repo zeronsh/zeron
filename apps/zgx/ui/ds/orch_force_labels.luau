@@ -58,6 +58,10 @@ M.ONE_W = 190
 M.TWO_W = 120
 -- How far a thread's name sits off its mark, close in then stepped out.
 M.GAP = 4
+-- A name set off from its mark further than LEADER_FROM gets a pointer this
+-- long toward it (on-screen points).
+M.LEADER_FROM = 9
+M.LEADER = 8
 M.STEPS = { 0, 10, 24, 44 }
 -- Whether a name keeps off the lines.
 M.LINES = true
@@ -235,7 +239,8 @@ local function free(g: Grid, x0: number, y0: number, x1: number, y1: number, own
 	return true
 end
 
-local function make(lines: { string }, x: number, y: number, align: "center" | "start" | "end", w: number, lh: number, fixed: boolean, nx: number, ny: number): Label
+local function make(lines: { string }, x: number, y: number, align: "center" | "start" | "end", w: number, lh: number, fixed: boolean, nx: number, ny: number, k: number?): Label
+	local pk = k or 1
 	local h = lh * #lines
 	local x0 = if align == "center" then x - w / 2 elseif align == "start" then x else x - w
 	return {
@@ -245,10 +250,10 @@ local function make(lines: { string }, x: number, y: number, align: "center" | "
 		align = align,
 		w = w,
 		h = h,
-		x0 = x0 - M.PAD_X,
-		y0 = y - M.PAD_Y,
-		x1 = x0 + w + M.PAD_X,
-		y1 = y + h + M.PAD_Y,
+		x0 = x0 - M.PAD_X * pk,
+		y0 = y - M.PAD_Y * pk,
+		x1 = x0 + w + M.PAD_X * pk,
+		y1 = y + h + M.PAD_Y * pk,
 		fixed = fixed,
 		nx = nx,
 		ny = ny,
@@ -259,6 +264,9 @@ end
 -- on a slice at a time: `M.run(job, seconds)` places threads' names till
 -- the time's up, true once all are.
 function M.start(input: any): any
+	-- (Sizes are on-screen points, `scale` world units each: names keep
+	-- their size on screen whatever the zoom.)
+	local k: number = input.scale or 1
 	local nodes = input.nodes
 	local measure = input.measure
 	local prev = input.prev or {}
@@ -274,20 +282,37 @@ function M.start(input: any): any
 		add_seg(g, { l.ax, l.ay, l.bx, l.by, l.a, l.b })
 	end
 	-- The fixed ones first: the Brain's and each orchestrator's, under them.
+	local fixed: { Label } = {}
 	for i, n in nodes do
 		if n.kind ~= "chat" then
 			local hub = true
 			local function m(t: string): number
 				return measure(t, hub)
 			end
-			local lines = if n.kind == "brain" then { n.title } else M.wrap(n.title, M.HUB_W, 2, m)
+			local lines = if n.kind == "brain" then { n.title } else M.wrap(n.title, M.HUB_W * k, 2, m)
 			local w = 0
 			for _, t in lines do
 				w = math.max(w, m(t))
 			end
-			local lab = make(lines, n.x, n.y + n.r + 3, "center", w, M.LH_HUB, true, n.x, n.y)
-			out[i] = lab
-			add_box(g, { lab.x0, lab.y0, lab.x1, lab.y1, -i })
+			-- (Under its mark; zoomed far out, where that meets another hub's
+			-- name, over its mark instead; else none, its card names it.)
+			local h = M.LH_HUB * k * #lines
+			for _, top in { n.y + n.r + 3 * k, n.y - n.r - 3 * k - h } do
+				local lab = make(lines, n.x, top, "center", w, M.LH_HUB * k, true, n.x, n.y, k)
+				local clear = true
+				for _, f in fixed do
+					if lab.x0 < f.x1 and lab.x1 > f.x0 and lab.y0 < f.y1 and lab.y1 > f.y0 then
+						clear = false
+						break
+					end
+				end
+				if clear then
+					out[i] = lab
+					table.insert(fixed, lab)
+					add_box(g, { lab.x0, lab.y0, lab.x1, lab.y1, -i })
+					break
+				end
+			end
 		end
 	end
 	-- Threads, the most pressing first.
@@ -305,7 +330,7 @@ function M.start(input: any): any
 		return a < b
 	end)
 	local widths: { [string]: number } = input.widths or {}
-	local job: any = { nodes = nodes, order = order, at = 1, out = out, g = g, prev = prev, measure = measure }
+	local job: any = { nodes = nodes, order = order, at = 1, out = out, g = g, prev = prev, measure = measure, k = k }
 	-- (Measured with the measure given to the slice running: a canvas lives
 	-- for its own drawing only.)
 	job.w_of = function(t: string): number
@@ -323,6 +348,7 @@ function M.run(job: any, budget: number?, measure: any?): boolean
 	if measure then
 		job.measure = measure
 	end
+	local k: number = job.k
 	local nodes, order, out, g, prev, w_of = job.nodes, job.order, job.out, job.g, job.prev, job.w_of
 	local t_end = if budget then os.clock() + budget else math.huge
 	while job.at <= #order do
@@ -333,7 +359,7 @@ function M.run(job: any, budget: number?, measure: any?): boolean
 		job.at += 1
 		local n = nodes[i]
 		local x, y = n.x, n.y
-		local reach = n.r + 10
+		local reach = n.r + 10 * k
 		local placed: any = nil
 		-- (Where it was, if its node didn't move and it's still free.)
 		local was: any = prev[n.id]
@@ -346,10 +372,10 @@ function M.run(job: any, budget: number?, measure: any?): boolean
 			-- (Its forms: one line, two, then shortened.)
 			local forms: { { string } } = {}
 			local title = n.title or ""
-			if w_of(title) <= M.ONE_W then
+			if w_of(title) <= M.ONE_W * k then
 				table.insert(forms, { title })
 			end
-			local two = M.wrap(title, M.TWO_W, 2, w_of)
+			local two = M.wrap(title, M.TWO_W * k, 2, w_of)
 			if #two == 2 or #forms == 0 then
 				table.insert(forms, two)
 			end
@@ -369,8 +395,8 @@ function M.run(job: any, budget: number?, measure: any?): boolean
 				end
 			end
 			local dirs = {}
-			for k = 0, 15 do
-				local a = k * math.pi / 8
+			for q = 0, 15 do
+				local a = q * math.pi / 8
 				local dx, dy = math.cos(a), math.sin(a)
 				table.insert(dirs, { dx, dy, if dx > 0.3 then "start" elseif dx < -0.3 then "end" else "center" })
 			end
@@ -382,9 +408,10 @@ function M.run(job: any, budget: number?, measure: any?): boolean
 				for _, t in form do
 					w = math.max(w, w_of(t))
 				end
-				local h = M.LH * #form
-				for _, step in M.STEPS do
-					local r = n.r + M.GAP + step
+				local h = M.LH * k * #form
+				for _, step0 in M.STEPS do
+					local step = step0 * k
+					local r = n.r + M.GAP * k + step
 					for _, d in dirs do
 						local dx: number, dy: number, align: any = d[1] :: any, d[2] :: any, d[3]
 						local lx = x + dx * r
@@ -394,20 +421,23 @@ function M.run(job: any, budget: number?, measure: any?): boolean
 						elseif dy < -0.5 then
 							ly = y - r - h
 						elseif dy > 0 then
-							ly = y + dy * r - h / 2 + 4
+							ly = y + dy * r - h / 2 + 4 * k
 						elseif dy < 0 then
-							ly = y + dy * r - h / 2 - 4
+							ly = y + dy * r - h / 2 - 4 * k
 						else
 							ly = y - h / 2
 						end
-						local lab = make(form, lx, ly, align :: any, w, M.LH, false, x, y)
+						local lab = make(form, lx, ly, align :: any, w, M.LH * k, false, x, y, k)
 						if free(g, lab.x0, lab.y0, lab.x1, lab.y1, i, x, y, reach + step) then
-							if step >= 18 then
-								-- (From its ring's edge to the name's nearest point.)
-								local qx, qy = math.clamp(x, lab.x0, lab.x1), math.clamp(y, lab.y0, lab.y1)
-								local gx, gy = qx - x, qy - y
-								local gd = math.max(0.01, math.sqrt(gx * gx + gy * gy))
-								lab.leader = { x + gx / gd * (n.r + 1), y + gy / gd * (n.r + 1), qx - gx / gd * 2, qy - gy / gd * 2 }
+							-- (Set off from its mark: a short pointer from the name
+							-- toward it, a dot at the name; never a line to it.)
+							local qx, qy = math.clamp(x, lab.x0, lab.x1), math.clamp(y, lab.y0, lab.y1)
+							local gx, gy = qx - x, qy - y
+							local gd = math.max(0.01, math.sqrt(gx * gx + gy * gy))
+							local gap = gd - n.r
+							if gap > M.LEADER_FROM * k then
+								local len = math.min(gap - 2 * k, M.LEADER * k)
+								lab.leader = { qx - gx / gd * k, qy - gy / gd * k, qx - gx / gd * (k + len), qy - gy / gd * (k + len) }
 							end
 							placed = lab
 							break

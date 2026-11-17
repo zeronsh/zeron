@@ -321,7 +321,10 @@ test("force graph: the Brain, orchestrators and those asking are named; working 
 	-- a glyph an asking, approving or failed one.)
 	expect(app:count("#control-widget-map >> .orch-force-ring") >= 1).to_be(true)
 	expect(app:count("#control-widget-map >> .orch-force-glyph") >= 1).to_be(true)
-	-- (Idle: the canvases stand as they were.)
+	-- (Idle, once the fit's zoom has had its names placed at its scale: the
+	-- canvases stand as they were.)
+	app:wait(400)
+	app:frames(30)
 	local a = stats(app)
 	app:frames(30)
 	local b = stats(app)
@@ -560,8 +563,11 @@ local function seg_hits(ax: number, ay: number, bx: number, by: number, x0: numb
 	return true
 end
 local function check_labels(app: any, label: string): (number, number)
-	-- (The names, placed a slice a frame: all placed first.)
-	app:frames(20)
+	-- (The names, placed a slice a frame, again at a zoom's scale once it
+	-- settles: all placed first.)
+	app:frames(5)
+	app:wait(400)
+	app:frames(25)
 	local d = read_labels(app)
 	local labs, nodes, links = d.labels or {}, d.nodes or {}, d.links or {}
 	local by_id = {}
@@ -611,8 +617,15 @@ local function check_labels(app: any, label: string): (number, number)
 			local n = by_id[la.id]
 			local r = radius[la.kind]
 			local cx = (la.x0 + la.x1) / 2
-			local top = la.y0 + labels_mod.PAD_Y
-			expect(`{label}: {la.id} at {math.abs(cx - n.x) < 0.5 and math.abs(top - (n.y + r + 3)) < 0.5}`).to_be(`{label}: {la.id} at true`)
+			-- (Sizes in on-screen points: the names' scale, world units a point.)
+			local k = (stats(app).name_size or 11.5) / 11.5
+			local top = la.y0 + labels_mod.PAD_Y * k
+			-- (Under its mark, or, where that meets another hub's name far out,
+			-- over it.)
+			local bottom = la.y1 - labels_mod.PAD_Y * k
+			local under = math.abs(top - (n.y + r + 3 * k)) < 0.5
+			local over = math.abs(bottom - (n.y - r - 3 * k)) < 0.5
+			expect(`{label}: {la.id} at {math.abs(cx - n.x) < 0.5 and (under or over)}`).to_be(`{label}: {la.id} at true`)
 		end
 	end
 	return named, chats
