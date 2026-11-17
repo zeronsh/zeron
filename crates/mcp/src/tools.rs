@@ -160,6 +160,7 @@ fn catalog() -> Vec<ToolDef> {
                     "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine." },
                     "item": { "type": "string", "description": "Crew threads: the board item it works on (one item per thread)." },
                     "role": { "type": "string", "description": "Crew threads: a short role, e.g. \"auth PR\"." },
+                    "machine": { "type": "string", "description": "Only with cloud: the size of Cloud machine it starts on, a size id (small, default, large, xlarge; the ones offered are those of Settings → Cloud → Default machine, each with its vCPU, memory, disk and credit multiplier). Kept as the chat's own: it wakes on the same size. Omitted: the account's default machine. An unknown id fails, listing the valid ones. From a Cloud chat, no bigger than that chat's own machine." },
                     "prompt": { "type": "string", "description": "First message to send right away." },
                     "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
@@ -693,6 +694,7 @@ struct CreateChatArgs {
     cwd: Option<String>,
     #[serde(default)]
     cloud: bool,
+    machine: Option<String>,
     prompt: Option<String>,
     #[serde(default)]
     wait: bool,
@@ -1168,7 +1170,50 @@ impl Tools {
             .unwrap_or_default()
     }
 
+    /// With `cloud`: the size the new chat's machine starts on, checked
+    /// against the sizes Cloud offers (`CloudStatus.machines`). Gives the
+    /// size to send (`None`: the account's default, decided by the edge) and
+    /// the size it will be on, when known. Where the sizes can't be read (a
+    /// Cloud machine's engine, an edge that predates them), the edge checks
+    /// the one asked for.
+    async fn cloud_machine(
+        &self,
+        asked: Option<&str>,
+    ) -> anyhow::Result<(Option<String>, Option<String>)> {
+        let asked = asked.map(str::trim).filter(|m| !m.is_empty());
+        let status = self
+            .zeron
+            .call(zeron_rpc::methods::CLOUD_STATUS, json!({}))
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<zeron_proto::CloudStatus>(v).ok())
+            .filter(|status| !status.machines.is_empty());
+        let Some(status) = status else {
+            return Ok((asked.map(str::to_owned), asked.map(str::to_owned)));
+        };
+        match asked {
+            Some(id) => {
+                anyhow::ensure!(
+                    status.machines.iter().any(|m| m.id == id),
+                    "machine {id:?} is not a Cloud machine size; valid ids: {}",
+                    status
+                        .machines
+                        .iter()
+                        .map(|m| m.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                Ok((Some(id.to_owned()), Some(id.to_owned())))
+            }
+            None => Ok((None, status.machine)),
+        }
+    }
+
     async fn create_chat(&self, mut args: CreateChatArgs) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            args.cloud || args.machine.as_deref().is_none_or(|m| m.trim().is_empty()),
+            "machine picks a Cloud machine's size: pass cloud: true with it"
+        );
         // Parent: the explicit `parent` argument, else the chat this server
         // speaks for. Resolved so a prefix/title works and a typo fails loud.
         let explicit_parent = args
@@ -1349,6 +1394,11 @@ impl Tools {
                 "{harness:?} on device {device_id} has no plan mode"
             );
         }
+        let (machine, machine_shown) = if args.cloud {
+            self.cloud_machine(args.machine.as_deref()).await?
+        } else {
+            (None, None)
+        };
         let config = ChatConfig {
             harness,
             model: args.model.clone(),
@@ -1425,6 +1475,9 @@ impl Tools {
         }
         if args.cloud {
             mutate["cloud"] = json!(true);
+            if let Some(machine) = &machine {
+                mutate["machine"] = json!(machine);
+            }
         }
         let created = self.zeron.mutate(mutate).await?;
         // Its role and item in the crew, before its first turn reads them.
@@ -1478,6 +1531,9 @@ impl Tools {
         });
         if let Some(capped) = &capped {
             result["accessCapped"] = json!(capped);
+        }
+        if let Some(machine) = &machine_shown {
+            result["machine"] = json!(machine);
         }
         if signed_out {
             result["warning"] = json!(format!(
@@ -2153,6 +2209,8 @@ mod tests {
         /// `WatchOrchestration`'s orchestrators; absent = an engine that
         /// predates them.
         orchestrators: Option<Value>,
+        /// `CloudStatus` reply; absent = an engine without the method.
+        cloud_status: Option<Value>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -2303,6 +2361,9 @@ mod tests {
                         barrier.wait().await;
                     }
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
+                }
+                methods::CLOUD_STATUS if self.cloud_status.is_some() => {
+                    RpcReply::Value(self.cloud_status.clone().unwrap_or_default())
                 }
                 methods::DEVICE_STATS if self.stats.is_some() => {
                     self.reads
@@ -3131,6 +3192,99 @@ mod tests {
             .await
             .unwrap_err();
         assert!(refused.contains("Codex and Claude Code"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_cloud_child_starts_on_the_machine_size_asked_for_else_the_default() {
+        let world = Arc::new(World {
+            cloud_status: Some(json!({
+                "state": "ready", "available": true, "awakeSessions": 0, "maxAwakeSessions": 5,
+                "machine": "large",
+                "machines": [
+                    { "id": "small", "name": "Small", "vcpu": 2, "memoryGB": 4, "diskGiB": 51.2, "creditMultiplier": 0.5 },
+                    { "id": "default", "name": "Default", "vcpu": 4, "memoryGB": 8, "diskGiB": 51.2, "creditMultiplier": 1 },
+                    { "id": "large", "name": "Large", "vcpu": 8, "memoryGB": 16, "diskGiB": 111.8, "creditMultiplier": 2 },
+                    { "id": "xlarge", "name": "Extra large", "vcpu": 16, "memoryGB": 32, "diskGiB": 251, "creditMultiplier": 5.56 }
+                ]
+            })),
+            ..Default::default()
+        });
+        let alpha = tools(world.clone(), origin("chat-alpha-1"));
+        let creates = || {
+            world
+                .writes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(method, w)| method == methods::MUTATE && w["op"] == "createChat")
+                .map(|(_, w)| w.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // Omitted: the account's default, decided by the edge (none sent),
+        // and said in the reply.
+        let plain = alpha.call("create_chat", json!({"cloud": true})).await.unwrap();
+        assert_eq!(plain["machine"], "large");
+        assert!(creates()[0].get("machine").is_none(), "{:?}", creates()[0]);
+
+        // Asked for: sent with the create, and said.
+        let sized = alpha
+            .call("create_chat", json!({"cloud": true, "machine": "xlarge"}))
+            .await
+            .unwrap();
+        assert_eq!(sized["machine"], "xlarge");
+        assert_eq!(creates()[1]["machine"], "xlarge");
+        assert_eq!(creates()[1]["cloud"], true);
+
+        // An id Cloud doesn't offer: refused before anything is made, the
+        // valid ones listed.
+        let unknown = alpha
+            .call("create_chat", json!({"cloud": true, "machine": "huge"}))
+            .await
+            .unwrap_err();
+        assert!(
+            unknown.contains("valid ids: small, default, large, xlarge"),
+            "{unknown}"
+        );
+        // Only with cloud.
+        let local = alpha
+            .call("create_chat", json!({"machine": "large"}))
+            .await
+            .unwrap_err();
+        assert!(local.contains("cloud: true"), "{local}");
+        assert_eq!(creates().len(), 2);
+
+        // The batch takes it per request.
+        let batch = alpha
+            .call(
+                "create_chats",
+                json!({"requests": [{"cloud": true, "machine": "small"}, {"cloud": true, "machine": "nope"}]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(creates()[2]["machine"], "small");
+        assert_eq!(creates().len(), 3, "{batch}");
+
+        // No sizes to check against (an engine that can't read them): the
+        // edge checks the one asked for.
+        let bare = Arc::new(World::default());
+        let beta = tools(bare.clone(), origin("chat-alpha-1"));
+        let sent = beta
+            .call("create_chat", json!({"cloud": true, "machine": "large"}))
+            .await
+            .unwrap();
+        assert_eq!(sent["machine"], "large");
+        let defaulted = beta.call("create_chat", json!({"cloud": true})).await.unwrap();
+        assert!(defaulted.get("machine").is_none(), "{defaulted}");
+
+        // Described in the tool's schema.
+        let defs = catalog();
+        let create = defs.iter().find(|d| d.name == "create_chat").unwrap();
+        let described = create.input_schema["properties"]["machine"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(described.contains("Only with cloud"), "{described}");
+        assert!(described.contains("default"), "{described}");
     }
 
     #[tokio::test]

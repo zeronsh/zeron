@@ -59,7 +59,7 @@ those marked `connected` can take work from you whichever provider you run \
 on (a claude-code agent may hand a task to codex, and the reverse). Pass \
 `harness` (and a model from `list_models`) to `create_chat` to choose one. \
 Delegation is one level deep: a chat that has a parent cannot create chats. \
-Pass `cloud: true` to run a child on a Cloud machine of its own (Codex or Claude Code); \
+Pass `cloud: true` to run a child on a Cloud machine of its own (Codex or Claude Code), and `machine` with it to pick that machine's size (the account's default without one); \
 from a Cloud chat it clones the same repository, and without `cloud` it shares your machine.\n\
 \n\
 When a chart, table, diagram, dashboard, or 3D view would say more than prose and \
