@@ -218,6 +218,14 @@ ui.command { id = "orch.light", title = "Light", run = function()
 	ui.theme.follow_system(false)
 	ui.theme.current:set("zeron-light")
 end }
+-- Its settings sheet open: Orchestrators' (every field filled) or CI
+-- speed's (rules, crew rules and notes empty).
+ui.command { id = "orch.settings", title = "Settings", run = function()
+	require("@app/screens/orchestrator/actions").settings("orc-orch")
+end }
+ui.command { id = "orch.settings_empty", title = "Settings, empty", run = function()
+	require("@app/screens/orchestrator/actions").settings("orc-ci")
+end }
 ui.command { id = "orch.vpn", title = "Exnomic VPN", run = function()
 	route.orchestrator("orc-vpn")
 end }
