@@ -82,9 +82,12 @@ pub mod methods {
     pub const GET_COMMIT_CREDIT: &str = "GetCommitCredit";
     pub const SET_COMMIT_CREDIT: &str = "SetCommitCredit";
     /// Which providers on this device run without their own subagents
-    /// (`{switchable, off}`; set with `{harness, enabled}`).
+    /// (`{switchable, off, zeronToolsOff}`; set with `{harness, enabled}`).
     pub const GET_NATIVE_SUBAGENTS: &str = "GetNativeSubagents";
     pub const SET_NATIVE_SUBAGENTS: &str = "SetNativeSubagents";
+    /// Whether a provider's runs on this device get Zeron's own MCP tools;
+    /// set with `{harness, enabled}`, replies like `GetNativeSubagents`.
+    pub const SET_ZERON_TOOLS: &str = "SetZeronTools";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
