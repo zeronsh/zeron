@@ -289,7 +289,7 @@ function M.Card(props: Props): Node
 			quiet(context, "orch-force-card-context"),
 			ui.show(function(): boolean
 				return column() ~= ""
-			end, ui.text { column, class = "orch-force-card-column", shrink = 0, px = "$space.1", rounded = "$radius.sm", bg = "$zeron.secondary.bg", text_size = "$font.size.xs", color = "$text.secondary" }),
+			end, ui.text { column, class = "orch-force-card-column", shrink = 0, px = "$space.1", rounded = "$radius.sm", bg = "$zeron.chip.bg", text_size = "$font.size.xs", color = "$text.secondary" }),
 		},
 		-- Signals: only those that apply.
 		ui.row {
