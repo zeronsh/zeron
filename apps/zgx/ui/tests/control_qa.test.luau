@@ -59,25 +59,6 @@ test("Q&A: unread answers stand out; read ones step back", function()
 	expect(app:has(`{QA} >> .orch-qa-answer`)).to_be(false)
 end)
 
-test("Q&A: opening an entry shows its whole answer, rendered, and reads it", function()
-	local app = open()
-	app:click(`{QA} >> role:button ~"Are Inbox and Next sections"`)
-	app:frames(10)
-	expect(app:error()).to_be_nil()
-	-- All of it, as markdown (its list items, its bold).
-	expect(app:has(`{QA} >> .orch-qa-answer >> ~"Which do you want?"`)).to_be(true)
-	expect(app:has(`{QA} >> .orch-qa-answer >> ~"Why you've never seen one:"`)).to_be(true)
-	expect(marks(app).read["dp-qa/rq-1"]).to_be(true)
-	expect(app:count(`{QA} >> .orch-qa-unread`)).to_be(1)
-	-- Opened, kept so (a named state): closed again with another click.
-	expect((app:state("control_qa_open") or {})["dp-qa/rq-1"]).to_be(true)
-	app:click(`{QA} >> role:button ~"Are Inbox and Next sections"`)
-	app:frames(10)
-	expect(app:has(`{QA} >> .orch-qa-answer`)).to_be(false)
-	-- Still read.
-	expect(marks(app).read["dp-qa/rq-1"]).to_be(true)
-end)
-
 test("Q&A: the thread's link opens it and reads the answer", function()
 	local app = open()
 	app:click(`{QA} >> role:button "Go to Explaining Capy.ai Captains"`)
@@ -224,4 +205,124 @@ test("Q&A: Answering only while the thread is on a turn begun since the question
 	local answering = string.find(after, "Answering", 1, true)
 	expect(waiting ~= nil).to_be(true)
 	expect(answering == nil or answering > (waiting :: number)).to_be(true)
+end)
+
+
+-- ── The overlay (ds/orch_decision's Answer) ────────────────────────────────
+
+local DIALOG = ".orch-qa-dialog"
+local REAL = `{QA} >> role:button ~"Are Inbox and Next sections"`
+
+local function calls(app: any): string
+	return tostring(app:state("calls") or "")
+end
+
+test("Q&A: a click opens the entry whole in the overlay: question, answer, who answered and when, its thread and where it was asked", function()
+	local app = open()
+	app:click(REAL)
+	app:frames(15)
+	expect(app:error()).to_be_nil()
+	expect(app:state("control_qa_shown")).to_be("dp-qa/rq-1")
+	expect(app:has(DIALOG)).to_be(true)
+	expect(app:has(`{DIALOG} >> .orch-decision-question >> ~"Are Inbox and Next sections in the board ever used?"`)).to_be(true)
+	expect(app:has(`{DIALOG} >> .orch-qa-dialog-answer >> ~"Which do you want?"`)).to_be(true)
+	expect(app:has(`{DIALOG} >> role:button "Go to Explaining Capy.ai Captains"`)).to_be(true)
+	expect(app:has(`{DIALOG} >> .orch-qa-dialog-when >> ~"answered 7h ago"`)).to_be(true)
+	expect(app:has(`{DIALOG} >> role:button "Where you asked"`)).to_be(true)
+	expect(app:has(`{DIALOG} >> .orch-qa-dialog-state >> "Answer"`)).to_be(true)
+	-- Opened is read; the row stays a preview (nothing opens in the column).
+	expect(marks(app).read["dp-qa/rq-1"]).to_be(true)
+	expect(app:has(`{QA} >> .orch-qa-answer`)).to_be(false)
+	expect(app:has(`{QA} >> .orch-qa-preview >> ~"essentially nothing reaches Inbox or Next"`)).to_be(true)
+	-- The thread, from it: the overlay closes and the thread opens.
+	app:click(`{DIALOG} >> role:button "Go to Explaining Capy.ai Captains"`)
+	app:frames(15)
+	expect(app:state("shell_route_path")).to_be("/session/th-capy")
+	expect(app:state("control_qa_shown")).to_be_nil()
+end)
+
+test("Q&A: the overlay renders the answer as markdown", function()
+	local app = open()
+	app:click(REAL)
+	app:frames(15)
+	-- Its bold and its lists as markdown draws them, never the marks.
+	expect(app:has(`{DIALOG} >> .orch-qa-dialog-answer >> ~"Why you've never seen one:"`)).to_be(true)
+	expect(app:has(`{DIALOG} >> .orch-qa-dialog-answer >> ~"the Brain dump routing a fragment straight to a board card"`)).to_be(true)
+	expect(app:has(`{DIALOG} >> .orch-qa-dialog-answer >> ~"**"`)).to_be(false)
+	expect(app:has(`{DIALOG} >> .orch-qa-dialog-answer >> ~"- **Inbox"`)).to_be(false)
+end)
+
+test("Q&A: a waiting entry opens too, saying it has no answer yet", function()
+	local app = open()
+	app:click(`{QA} >> role:button "Is the Windows MSI signed yet?"`)
+	app:frames(15)
+	expect(app:has(`{DIALOG} >> .orch-qa-dialog-none >> "No answer yet."`)).to_be(true)
+	expect(app:has(`{DIALOG} >> .orch-qa-dialog-state >> "Waiting"`)).to_be(true)
+	expect(app:has(`{DIALOG} >> role:button "Mark read"`)).to_be(false)
+end)
+
+test("Q&A: read and unread, and dismiss, from inside the overlay", function()
+	local app = open()
+	local vpn = `{QA} >> role:button "ask the vpn guy whether moscow rebooted fine"`
+	app:click(vpn)
+	app:frames(15)
+	expect(marks(app).read["dp-2/rt-7"]).to_be(true)
+	app:click(`{DIALOG} >> role:button "Mark unread"`)
+	app:frames(5)
+	expect(marks(app).read["dp-2/rt-7"]).to_be_nil()
+	expect(app:has(`{DIALOG} >> .orch-qa-dialog-unread`)).to_be(true)
+	app:click(`{DIALOG} >> role:button "Mark read"`)
+	app:frames(5)
+	expect(marks(app).read["dp-2/rt-7"]).to_be(true)
+	app:click(`{DIALOG} >> role:button "Dismiss"`)
+	app:frames(15)
+	expect(marks(app).dismissed["dp-2/rt-7"]).to_be(true)
+	expect(app:state("control_qa_shown")).to_be_nil()
+	expect(app:has(vpn)).to_be(false)
+	app:click('role:button "Undo"')
+	app:frames(10)
+	expect(app:has(vpn)).to_be(true)
+end)
+
+test("Q&A: a follow-up from the overlay goes to the same thread and comes back as a new entry", function()
+	local app = open()
+	app:click(REAL)
+	app:frames(15)
+	expect(app:count(`{QA} >> .orch-qa-entry`)).to_be(5)
+	app:type(`{DIALOG} >> role:textbox`, "So which one would you wire up first?")
+	app:key("Enter")
+	app:frames(15)
+	expect(app:error()).to_be_nil()
+	-- The Q&A's ask: a dump carrying the entry, which the engine asks of
+	-- the thread that answered it.
+	expect(calls(app)).to_contain("dump:So which one would you wire up first?")
+	expect(calls(app)).to_contain("dump-ref:qa:rq-1")
+	local sent = app:state("last_dump") or {}
+	expect(((sent.refs or {})[1] or {}).context.chat).to_be("th-capy")
+	expect(app:state("control_qa_shown")).to_be_nil()
+	app:command("fixture.qa_route_follow_up")
+	app:frames(15)
+	expect(app:count(`{QA} >> .orch-qa-entry`) >= 6).to_be(true)
+	expect(app:has(`{QA} >> role:button "So which one would you wire up first?"`)).to_be(true)
+end)
+
+test("Q&A: Escape closes the overlay", function()
+	local app = open()
+	app:click(REAL)
+	app:frames(15)
+	expect(app:has(DIALOG)).to_be(true)
+	app:key("Escape")
+	app:frames(5)
+	expect(app:state("control_qa_shown")).to_be_nil()
+	-- (Hidden once it has eased out, as the decision's overlay.)
+	local gone = false
+	for _ = 1, 40 do
+		app:frames(5)
+		local first = if app:has(DIALOG) then (string.match(app:tree(DIALOG, 0), "^[^\n]*") or "") else "hidden"
+		if string.find(first, "hidden", 1, true) then
+			gone = true
+			break
+		end
+	end
+	expect(gone).to_be(true)
 end)

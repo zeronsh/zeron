@@ -2,13 +2,15 @@
 -- The Control room's Q&A: each question the person dumped, with the answer
 -- the thread it went to gave, waiting for them when they come back. An
 -- entry is a card of the board's look (ds/orch_card): the question as its
--- title, under it the answer (a few lines of it, all of it opened, as the
--- transcript renders markdown), and one quiet line: where it was answered
+-- title, under it a few lines of the answer, and one quiet line: where it
+-- was answered
 -- (a way into that thread), when it was asked and when answered, or that it
 -- still waits. An answer not read yet is the one thing filled and marked:
 -- a dot before it, its words in the primary ink; read ones step back.
--- Opening an entry (or its thread) reads it; where the pointer rests, it
--- can be marked read or unread and put away.
+-- Opening an entry (or its thread) reads it: a click opens it whole in the
+-- decision overlay (ds/orch_decision's Answer: the answer as markdown, who
+-- answered and when, a follow-up asked of the same thread); where the
+-- pointer rests, it can be marked read or unread and put away.
 --
 -- The entries keep the order they were asked in (newest first) whatever
 -- comes back, so nothing moves under the pointer or the scroll as answers
@@ -18,7 +20,12 @@
 --   QA.marks        what was read and put away, on this device, kept
 --                   across restarts (ui.persist `control_qa`):
 --                   { read = { [key] = true }, dismissed = { [key] = true } }
---   QA.opened       the entries opened, kept as the page is made again
+--   QA.shown        the entry open in the overlay (its key), or nil:
+--                   QA.show(entry) opens it (and reads it), QA.hide()
+--   QA.ref(entry)   the entry as a reference (ds/orch_ref): what dragging
+--                   it onto Capture carries, and what a follow-up sends
+--                   with its words (the engine asks the thread that
+--                   answered it)
 --   QA.entries(dumps, marks, chats?) -> { Entry }      -- what it lists
 --   QA.counts(entries) -> { unread, waiting }
 --   QA.mark(marks, key, read), QA.dismiss(marks, key, away)
@@ -34,7 +41,6 @@
 
 local IconButton = require("@self/icon_button").IconButton
 local ContextMenu = require("@self/context_menu")
-local Markdown = require("@self/markdown")
 local Icon = require("@self/icon")
 local status = require("@self/status")
 local locale = require("@self/locale")
@@ -69,7 +75,59 @@ export type Marks = { read: { [string]: boolean }?, dismissed: { [string]: boole
 
 M.marks = ui.persist("control_qa", { read = {}, dismissed = {} } :: Marks)
 M.opened = ui.state("control_qa_open", {} :: { [string]: boolean })
+M.shown = ui.state("control_qa_shown", nil :: string?)
 M.all = ui.state("control_qa_all", false)
+
+-- An entry put away, with a moment to take it back (Undo).
+function M.put_away(entry: any, marks: any?)
+	local m = marks or M.marks
+	local k = entry.key
+	M.dismiss(m, k, true)
+	toast.show {
+		key = `orch-qa-dismissed-{k}`,
+		title = locale.s("ds.orch.qa.dismissed"),
+		body = entry.question,
+		duration = 6000,
+		action = {
+			label = locale.s("ds.orch.qa.undo"),
+			run = function()
+				M.dismiss(m, k, false)
+			end,
+		},
+	}
+end
+
+-- The entry open in the overlay: shown whole, its answer read.
+function M.show(entry: any)
+	if entry.answer ~= nil and entry.status == "unread" then
+		M.mark(M.marks, entry.key, true)
+	end
+	M.shown:set(entry.key)
+end
+
+function M.hide()
+	M.shown:set(nil)
+end
+
+-- The entry shown, from `entries` (nil: none, or not among them).
+function M.shown_of(entries: { any }): any
+	local key = M.shown:get()
+	if not key then
+		return nil
+	end
+	for _, e in entries do
+		if e.key == key then
+			return e
+		end
+	end
+	return nil
+end
+
+-- An entry as a reference (ds/orch_ref): its route, its question, the dump
+-- it was asked in and the chat that answers it.
+function M.ref(en: any): any
+	return Ref.make("qa", en.route_id, en.question, { dump = en.dump_id, chat = en.chat, answer = en.answer })
+end
 
 -- An entry's key: its dump's and route's ids.
 function M.key(dump_id: string, route_id: string): string
@@ -211,9 +269,6 @@ local function entry(props: Props, row: State<Entry>): Node
 	local function key(): string
 		return row:peek().key
 	end
-	local function opened(): boolean
-		return (props.open:get() or {})[row:get().key] == true
-	end
 	local function answered(): boolean
 		return row:get().answer ~= nil
 	end
@@ -226,15 +281,6 @@ local function entry(props: Props, row: State<Entry>): Node
 	local function read(on: boolean)
 		M.mark(props.marks, key(), on)
 	end
-	-- Opened (or closed): an answer opened is read.
-	local function toggle()
-		local k = key()
-		local now = opened()
-		props.open:set_key({ k }, if now then nil else true)
-		if not now and answered() and row:peek().status == "unread" then
-			read(true)
-		end
-	end
 	local function open_thread()
 		local c = row:peek().chat
 		if not c then
@@ -246,20 +292,7 @@ local function entry(props: Props, row: State<Entry>): Node
 		props.on_open_thread(c)
 	end
 	local function dismiss()
-		local k = key()
-		M.dismiss(props.marks, k, true)
-		toast.show {
-			key = `orch-qa-dismissed-{k}`,
-			title = locale.s("ds.orch.qa.dismissed"),
-			body = row:peek().question,
-			duration = 6000,
-			action = {
-				label = locale.s("ds.orch.qa.undo"),
-				run = function()
-					M.dismiss(props.marks, k, false)
-				end,
-			},
-		}
+		M.put_away(row:peek(), props.marks)
 	end
 	local function items(): { any }
 		local out: { any } = {}
@@ -355,26 +388,10 @@ local function entry(props: Props, row: State<Entry>): Node
 		actions,
 	}
 
-	-- The answer: a few lines of it, or all of it opened.
+	-- The answer: a few lines of it (all of it in the overlay).
 	local answer = ui.show(answered, ui.presence(function(): string
-		return if opened() then "full" elseif unread() then "unread" else "read"
+		return if unread() then "unread" else "read"
 	end, function(kind: string): Node
-		if kind == "full" then
-			return ui.column {
-				class = "orch-qa-answer",
-				w_full = true,
-				min_w = 0,
-				pl = ui.raw(14, "past the gutter, under the question's words"),
-				pt = "$space.1",
-				-- (A reply's own markdown, as the transcript sets it.)
-				Markdown {
-					text = function(): string
-						return e().answer or ""
-					end,
-					small = true,
-				},
-			}
-		end
 		return ui.text {
 			function(): string
 				return M.plain(e().answer or "")
@@ -464,23 +481,11 @@ local function entry(props: Props, row: State<Entry>): Node
 			end,
 		},
 		ui.div { grow = 1 },
-		ui.show(answered, ui.div {
-			class = "orch-qa-chevron",
-			shrink = 0,
-			color = "$text.tertiary",
-			Icon {
-				name = function(): any
-					return if opened() then "alt-arrow-up" else "alt-arrow-down"
-				end,
-				size = 12,
-			},
-		}),
 	}
 
 	-- Dragged: a reference to the question (ds/orch_ref), for Capture.
 	local drag = Ref.source(function(): any
-		local en = row:peek()
-		return Ref.make("qa", en.route_id, en.question, { dump = en.dump_id, chat = en.chat, answer = en.answer })
+		return M.ref(row:peek())
 	end)
 	local box = ui.button {
 		class = "orch-qa-entry",
@@ -490,9 +495,6 @@ local function entry(props: Props, row: State<Entry>): Node
 		drag_preview_offset = drag.drag_preview_offset,
 		label = function(): string
 			return e().question
-		end,
-		expanded = function(): boolean
-			return answered() and opened()
 		end,
 		w_full = true,
 		p = 0,
@@ -516,12 +518,9 @@ local function entry(props: Props, row: State<Entry>): Node
 		on_hover = function(inside: boolean)
 			hovered:set(inside)
 		end,
+		-- Opened whole in the overlay (and read).
 		on_click = function()
-			if answered() then
-				toggle()
-			else
-				open_thread()
-			end
+			M.show(row:peek())
 		end,
 		ui.column {
 			w_full = true,
