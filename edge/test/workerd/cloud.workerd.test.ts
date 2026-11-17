@@ -50,7 +50,7 @@ const registryRows = async (u: TestUser) =>
 describe("account", () => {
   it("reports off + available for a new user and refuses another org", async () => {
     const u = newUser();
-    expect(await status(u)).toEqual({ state: "off", awakeSessions: 0, maxAwakeSessions: 2, available: true, credits: 0, machines: MACHINES, machine: "default" });
+    expect(await status(u)).toEqual({ state: "off", awakeSessions: 0, maxAwakeSessions: 2, available: true, credits: 0, machines: MACHINES, machine: "default", reach: "devices" });
     expect((await call("GET", "/cloud/other-org", userBearer(u))).status).toBe(403);
     expect((await call("GET", "/cloud/org1")).status).toBe(401);
   });

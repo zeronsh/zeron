@@ -798,6 +798,11 @@ enum MutateParams {
         /// Cloud machine, cloning the project's GitHub repository.
         #[serde(default)]
         cloud: bool,
+        /// What that machine reaches (the composer's pick under Cloud); `None`
+        /// = the account's default. The person's alone: from an agent, or
+        /// another device, it is ignored.
+        #[serde(default)]
+        cloud_reach: Option<zeron_proto::CloudReach>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -1303,7 +1308,9 @@ impl EngineRpc {
     /// repository — or, for a side chat whose parent runs on a session
     /// machine, that same machine (they share files), unless an agent names
     /// another device for it (a Cloud chat's agent starting a chat on the
-    /// person's computer). `None` = not Cloud; create normally.
+    /// person's computer). `None` = not Cloud; create normally. `reach`: what
+    /// a new session reaches (`None`: the account's default); a delegate
+    /// always reaches what its parent does (the edge decides).
     async fn cloud_chat_host(
         &self,
         chat_id: &str,
@@ -1312,6 +1319,7 @@ impl EngineRpc {
         parent_chat_id: Option<&str>,
         branch: Option<&str>,
         cloud: bool,
+        reach: Option<zeron_proto::CloudReach>,
         config: Option<&ChatConfig>,
     ) -> Result<Option<CloudHost>, RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
@@ -1398,7 +1406,7 @@ impl EngineRpc {
                 ))
             })?;
         let session = cloud_client
-            .create_session(chat_id, space_id, &repo, branch)
+            .create_session(chat_id, space_id, &repo, branch, reach)
             .await
             .map_err(|e| RpcError::Failed(format!("Couldn't start a Cloud session: {e}")))?;
         Ok(Some(CloudHost {
@@ -2154,6 +2162,7 @@ impl EngineRpc {
                 parent_chat_id,
                 child_kind,
                 cloud: _,
+                cloud_reach: _,
             } => {
                 tracing::debug!(target: "first_word", chat = %chat_id, "create chat");
                 // A voice orchestrator is hidden, so the chats it creates are
@@ -4563,6 +4572,7 @@ impl RpcService for EngineRpc {
                     parent_chat_id,
                     child_kind,
                     cloud,
+                    cloud_reach,
                 } = &p
                     && let Some(host) = Box::pin(self.cloud_chat_host(
                         chat_id,
@@ -4571,6 +4581,7 @@ impl RpcService for EngineRpc {
                         parent_chat_id.as_deref(),
                         branch.as_deref().filter(|b| !b.is_empty()),
                         *cloud,
+                        cloud_reach.filter(|_| zeron_rpc::caller().is_local()),
                         config.as_ref(),
                     ))
                     .await?

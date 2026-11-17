@@ -100,6 +100,8 @@ import { handleAdminRoute, runCloudCron } from "./cloud/billing";
 import { sandboxProvider } from "./cloud/providers";
 import { FakeProvider } from "./cloud/providers/fake";
 import { handleAttachmentBlob } from "./attachment-blobs";
+import { runnerChatGate, runnerDeviceGate } from "./runner-access";
+import type { RunnerDrop } from "./runner-revocation";
 import { runnerRefusal } from "./runner-policy";
 import { handleOnboardingRoute } from "./onboarding-routes";
 import { handlePluginKeyRoute } from "./plugin-keys";
@@ -180,7 +182,9 @@ export default {
     // Runner bearers (the Cloud device) act as their DEVICE, not the user:
     // no account management, no vault beyond their own grants, another
     // device's room only as a client, no legacy rooms (runner-policy.ts);
-    // registry writes ownership-checked in RegistryRoom (registry-runner.ts).
+    // other chats and devices as their session's reach allows
+    // (runner-access.ts); registry rows filtered and writes
+    // ownership-checked in RegistryRoom (registry-runner.ts).
     const refused = runnerRefusal(auth, request.method, url);
     if (refused) return json({ error: "forbidden", message: refused }, 403);
 
@@ -247,7 +251,14 @@ export default {
     //    client-minted). The DO handles /ws, /checkpoint (GET Range-resumable
     //    + POST floor-guarded), host-published /tail + /diff sidecars,
     //    /stats, /reset. ──────────────────────────────────────────────────────
-    const chatResponse = chatRoute(request, env, auth.userId, auth.orgId);
+    let chatRunner: RunnerDrop | undefined;
+    if (parts[0] === "chat2" && parts[1] && ID_RE.test(parts[1])) {
+      // A Cloud runner reaches the chats its session's reach allows.
+      const admission = await runnerChatGate(env, auth, parts[1]);
+      if (admission.refused) return admission.refused;
+      if (admission.epoch !== undefined && auth.deviceId) chatRunner = { device: auth.deviceId, epoch: admission.epoch };
+    }
+    const chatResponse = chatRoute(request, env, auth.userId, auth.orgId, chatRunner);
     if (chatResponse) return chatResponse;
 
     // ── workspace rooms (ARCHITECTURE §2.2/§6.1): same SessionRoom DO class;
@@ -364,6 +375,14 @@ export default {
     // ── device rooms ────────────────────────────────────────────────────────
     if (parts[0] === "device" && parts[1] && ID_RE.test(parts[1])) {
       const deviceId = parts[1];
+      // Another device's link or nudge: as the runner's reach allows (the
+      // policy already admitted nothing else but liveness).
+      let runnerEpoch: number | undefined;
+      if (parts[2] === "ws" || parts[2] === "nudge") {
+        const admission = await runnerDeviceGate(env, auth, deviceId);
+        if (admission.refused) return admission.refused;
+        runnerEpoch = admission.epoch;
+      }
       if (parts[2] === "ws") {
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
           return json({ error: "expected websocket" }, 426);
@@ -371,7 +390,7 @@ export default {
         // Dials never wake a sleeping Cloud session (viewing a chat must not
         // start a billed machine): the dial sees host_offline. Sends do —
         // through the nudge below.
-        return dialDeviceRoom(env, auth, request, url, deviceId);
+        return dialDeviceRoom(env, auth, request, url, deviceId, runnerEpoch);
       }
       if (parts[2] === "sidecar" && parts[3] && /^[a-z0-9-]{1,64}$/.test(parts[3])) {
         return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth, `/sidecar/${parts[3]}`, "");
@@ -409,6 +428,8 @@ export default {
       if (partId === undefined || !PART_RE.test(partId)) {
         return json({ error: "bad part id" }, 400);
       }
+      const admission = await runnerChatGate(env, auth, parts[1]);
+      if (admission.refused) return admission.refused;
       const key = `blob/${auth.userId}/${parts[1]}/${partId}`;
       if (request.method === "PUT") {
         const body = await request.arrayBuffer();

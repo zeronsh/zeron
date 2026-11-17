@@ -430,6 +430,13 @@ pub mod methods {
     pub const CLOUD_SESSIONS: &str = "CloudSessions";
     /// `{machine}` → `CloudStatus`. The size new sessions start on.
     pub const CLOUD_SET_MACHINE: &str = "CloudSetMachine";
+    /// `{reach: "devices" | "isolated"}` → `CloudStatus`. The reach new
+    /// sessions start with. The person's alone ([`local_only`]).
+    pub const CLOUD_SET_REACH: &str = "CloudSetReach";
+    /// `{chatId, reach}` → `CloudSession`. Whether that session reaches the
+    /// person's other devices; isolating closes it out of what it reached.
+    /// The person's alone ([`local_only`]).
+    pub const CLOUD_SESSION_SET_REACH: &str = "CloudSessionSetReach";
     /// `{chatId, machine?, wake?}` → `CloudSession`. Wake one session's sandbox
     /// (on `machine`, when given; `wake: false` only records the size for its
     /// next wake); sending to a sleeping session wakes it on its own (the host
@@ -775,6 +782,10 @@ pub fn local_only(method: &str) -> bool {
             | methods::SET_BUILTIN_PLUGINS
             | methods::POST_NOTIFICATION
             | methods::EXPORT_PLUGIN
+            // What a Cloud chat reaches: this device's app sets it, never
+            // another device (a Cloud machine among them) and never an agent.
+            | methods::CLOUD_SET_REACH
+            | methods::CLOUD_SESSION_SET_REACH
     )
 }
 
@@ -1077,6 +1088,15 @@ mod tests {
                 )),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
+        }
+    }
+
+    #[test]
+    fn what_a_cloud_chat_reaches_is_set_by_this_devices_app_alone() {
+        for method in [methods::CLOUD_SET_REACH, methods::CLOUD_SESSION_SET_REACH] {
+            assert!(local_only(method), "{method}");
+            assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
+            assert!(!agent_allowed(method), "{method}");
         }
     }
 

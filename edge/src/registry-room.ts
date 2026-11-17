@@ -19,22 +19,29 @@
  * - presence — memory-only by construction (15s client beats, rebroadcast).
  *
  * Cloud runners (the Worker stamps RUNNER_DEVICE_HEADER for runner bearers)
- * act as their device, not the user: row deliveries to them leave out the
- * user's own kinds, and every op they push is ownership-checked
- * (registry-runner.ts).
+ * act as their device, not the user: row deliveries to them are filtered and
+ * every op they push is ownership-checked, by their session's reach
+ * (registry-runner.ts). The reach is kept here, where it is enforced: only
+ * the person's CloudAccount sets it (`/runner-reach`), and the Worker asks
+ * here before a runner reaches another chat or device (`/runner-admit`).
  *
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
  * auto-response pair; the one alarm does the bookkeeping flush and, daily,
  * tombstone GC + the R2 backup.
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
-import { chatHost, runnerCanSee, runnerOpRefusal } from "./registry-runner";
-
-/** Full states a runner from before the widening is sent at most
- * (RegistryRoom.runnerBehind). */
-const RUNNER_FULL_TRIES = 3;
-/** The meta key of a runner's full-resync record. */
-const runnerSentKey = (device: string): string => `runnerSentAll:${device}`;
+import {
+  NO_SCOPE,
+  chatHost,
+  isRunnerReach,
+  parentOf,
+  runnerCanSee,
+  runnerOpRefusal,
+  type RunnerReach,
+  type RunnerScope
+} from "./registry-runner";
+import { CLOUD_DEVICE_PREFIX } from "./cloud/policy";
+import { RUNNER_DROP_PATH, type RunnerDrop } from "./runner-revocation";
 import { AUTH_USER_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVICE_HEADER, apnsConfig, type Env } from "./env";
 import { isDeadToken, sendApns, type ApnsEnvironment } from "./apns";
 import { WriteMeter } from "./write-meter";
@@ -46,6 +53,21 @@ import {
   type Category,
   type PushPrefs
 } from "./push-notify";
+
+/** Full states a runner is sent at most once what it sees changed
+ * (RegistryRoom.runnerBehind). */
+const RUNNER_FULL_TRIES = 3;
+/** Meta keys per runner device: its full-resync record, its session's reach
+ * (absent: `devices`) and its revocation epoch (RegistryRoom.setRunnerReach). */
+const runnerSentKey = (device: string): string => `runnerSentAll:${device}`;
+const runnerReachKey = (device: string): string => `runnerReach:${device}`;
+const runnerEpochKey = (device: string): string => `runnerEpoch:${device}`;
+/** Rooms one `/runner-reach` call closes a runner out of at most; the
+ * CloudAccount calls again for the rest. */
+const MAX_DROPS_PER_CALL = 200;
+/** Close code for a runner's registry sockets when its reach changes: it
+ * reconnects, and its next state is full. */
+const REACH_CHANGED = 1012;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Tombstones older than this are purged; cursors from before the purge
@@ -83,6 +105,12 @@ interface RejectedOp {
 
 interface WireOp extends Op {}
 
+/** What a runner's rows are filtered by (registry-runner.ts). */
+interface RunnerView {
+  reach: RunnerReach;
+  scope: RunnerScope;
+}
+
 interface PushOutcome {
   ok: number;
   rejected: number;
@@ -114,6 +142,7 @@ interface PushLogEntry {
 }
 
 const TOKEN_RE = /^[0-9a-fA-F]{32,512}$/;
+const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const PUSH_LOG_MAX = 30;
 
 export class RegistryRoom implements DurableObject {
@@ -146,6 +175,12 @@ export class RegistryRoom implements DurableObject {
     // every socket, sync to every device and back up to R2).
     this.sql.exec(
       "CREATE TABLE IF NOT EXISTS push_targets (device TEXT PRIMARY KEY, token TEXT NOT NULL, environment TEXT NOT NULL, prefs TEXT NOT NULL, updated_at INTEGER NOT NULL)"
+    );
+    // The rooms each runner was admitted to through its `devices` reach
+    // (`chat:{id}`, `device:{id}`): what isolating it closes it out of.
+    // Bounded by the chats and devices the registry has.
+    this.sql.exec(
+      "CREATE TABLE IF NOT EXISTS runner_rooms (device TEXT NOT NULL, room TEXT NOT NULL, PRIMARY KEY (device, room))"
     );
     // Same protocol-level keepalive as SessionRoom — and the same caveat: a
     // pong is runtime-answered and proves nothing about this DO's health.
@@ -220,10 +255,26 @@ export class RegistryRoom implements DurableObject {
   }
 
   /** What one reader may receive: everything for user callers; for a
-   * runner, every device, chat, project and session row (registry-runner.ts). */
-  private visible(rows: Row[], runner: string | undefined, _account: string | undefined): Row[] {
-    if (runner === undefined) return rows;
-    return rows.filter((row) => runnerCanSee(runner, row));
+   * runner, what its reach shows it (registry-runner.ts). `view` is the
+   * runner's, when the caller already has it. */
+  private visible(rows: Row[], runner: string | undefined, view = runner === undefined ? undefined : this.runnerView(runner)): Row[] {
+    if (runner === undefined || view === undefined) return rows;
+    return rows.filter((row) => runnerCanSee(runner, row, view.reach, view.scope));
+  }
+
+  /** The reach of runner `device`'s session, as its CloudAccount last set it. */
+  private runnerReach(device: string): RunnerReach {
+    return this.getMeta(runnerReachKey(device)) === "isolated" ? "isolated" : "devices";
+  }
+
+  /** The reach and, isolated, the scope a runner's rows are filtered by. */
+  private runnerView(device: string): RunnerView {
+    const reach = this.runnerReach(device);
+    return { reach, scope: reach === "isolated" ? this.runnerScope(device) : NO_SCOPE };
+  }
+
+  private runnerEpoch(device: string): number {
+    return Number(this.getMeta(runnerEpochKey(device)) ?? "0");
   }
 
   /**
@@ -259,9 +310,11 @@ export class RegistryRoom implements DurableObject {
     return true;
   }
 
-  /** The live chats whose parent `device` hosts: delegates it started on
-   * other machines, which it may delete. */
-  private runnerChildren(device: string): Set<string> {
+  /** What `device` reaches beyond its own rows: the projects of the live
+   * chats it hosts, and the live chats whose parent it hosts (delegates it
+   * started on other machines). */
+  private runnerScope(device: string): RunnerScope {
+    const spaces = new Set<string>();
     const hosted = new Set<string>();
     const parents: [string, string][] = [];
     for (const raw of this.sql.exec<{ id: string; fields: string }>(
@@ -269,13 +322,148 @@ export class RegistryRoom implements DurableObject {
     )) {
       try {
         const fields = JSON.parse(raw.fields) as Record<string, unknown>;
-        if (fields.deviceId === device) hosted.add(raw.id);
+        if (fields.deviceId === device) {
+          hosted.add(raw.id);
+          if (typeof fields.spaceId === "string") spaces.add(fields.spaceId);
+        }
         if (typeof fields.parentChatId === "string") parents.push([raw.id, fields.parentChatId]);
       } catch {
-        /* a malformed row names no parent */
+        /* a malformed row names no project and no parent */
       }
     }
-    return new Set(parents.filter(([, parent]) => hosted.has(parent)).map(([id]) => id));
+    const children = new Set(parents.filter(([, parent]) => hosted.has(parent)).map(([id]) => id));
+    return { spaces, children };
+  }
+
+  /** Whether Cloud machine `target` hosts a live chat whose parent `device`
+   * hosts: a delegate `device` started, which it manages in any reach. */
+  private delegatesTo(device: string, target: string): boolean {
+    if (!target.startsWith(CLOUD_DEVICE_PREFIX)) return false;
+    for (const raw of this.sql.exec<{ fields: string }>(
+      "SELECT fields FROM rows WHERE kind = 'chats' AND deleted = 0"
+    )) {
+      try {
+        const fields = JSON.parse(raw.fields) as Record<string, unknown>;
+        if (fields.deviceId !== target || typeof fields.parentChatId !== "string") continue;
+        if (chatHost(this.loadRow("chats", fields.parentChatId)) === device) return true;
+      } catch {
+        /* a malformed row delegates nothing */
+      }
+    }
+    return false;
+  }
+
+  /** Whether `device` is one of the person's: a live device row, or the host
+   * of a live chat (a Cloud machine whose engine hasn't written its row yet). */
+  private knownDevice(device: string): boolean {
+    const row = this.loadRow("devices", device);
+    if (row && !row.deleted) return true;
+    for (const raw of this.sql.exec<{ fields: string }>(
+      "SELECT fields FROM rows WHERE kind = 'chats' AND deleted = 0"
+    )) {
+      try {
+        if ((JSON.parse(raw.fields) as Record<string, unknown>).deviceId === device) return true;
+      } catch {
+        /* a malformed row hosts nothing */
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether runner `device` may reach chat `chat`'s room, or device
+   * `target`'s as a client (the Worker's gate, runner-access.ts), and at
+   * which revocation epoch.
+   *
+   * In any reach: its own chats and their delegates' (a chat it hosts or
+   * whose parent it hosts), and the Cloud machines of its delegates. Those
+   * carry no epoch. A `devices` reach also admits any live chat and any
+   * device the person has (`knownDevice`), at the runner's epoch, recorded
+   * so isolating the session can close it out (`setRunnerReach`).
+   */
+  private admitRunner(device: string, ask: { chat: string } | { target: string }): { ok: boolean; epoch?: number } {
+    if ("chat" in ask) {
+      const row = this.loadRow("chats", ask.chat);
+      const host = chatHost(row);
+      if (host === undefined) return { ok: false };
+      const parent = parentOf(row);
+      if (host === device || (parent !== undefined && chatHost(this.loadRow("chats", parent)) === device)) return { ok: true };
+      if (this.runnerReach(device) === "isolated") return { ok: false };
+    } else {
+      if (this.delegatesTo(device, ask.target)) return { ok: true };
+      if (this.runnerReach(device) === "isolated" || !this.knownDevice(ask.target)) return { ok: false };
+    }
+    const room = "chat" in ask ? `chat:${ask.chat}` : `device:${ask.target}`;
+    this.sql.exec("INSERT OR IGNORE INTO runner_rooms (device, room) VALUES (?, ?)", device, room);
+    return { ok: true, epoch: this.runnerEpoch(device) };
+  }
+
+  /**
+   * Set runner `device`'s reach (its session's; only the CloudAccount calls
+   * this). A change resends it everything it now sees, as a full state on
+   * its next sync, and closes its registry sockets so that sync is now.
+   * Isolating also bumps its epoch and closes it out of every room it was
+   * admitted to through its `devices` reach (runner-revocation.ts), at most
+   * [`MAX_DROPS_PER_CALL`] per call: a room stays recorded until its drop
+   * lands, and an isolated runner gains no new ones, so calling again
+   * finishes. Returns how many rooms are left.
+   */
+  private async setRunnerReach(userId: string, device: string, reach: RunnerReach): Promise<number> {
+    if (this.runnerReach(device) !== reach) {
+      if (reach === "isolated") {
+        this.setMeta(runnerReachKey(device), reach);
+        this.setMeta(runnerEpochKey(device), String(this.runnerEpoch(device) + 1));
+      } else {
+        this.sql.exec("DELETE FROM meta WHERE key = ?", runnerReachKey(device));
+      }
+      this.setMeta(runnerSentKey(device), JSON.stringify({ from: this.seq(), sent: 0 }));
+      for (const socket of this.ctx.getWebSockets()) {
+        if ((socket.deserializeAttachment() as SocketState | null)?.runner !== device) continue;
+        try {
+          socket.close(REACH_CHANGED, "this Cloud chat's reach changed");
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+    if (reach !== "isolated") return 0;
+    const drop: RunnerDrop = { device, epoch: this.runnerEpoch(device) };
+    const rooms = [
+      ...this.sql.exec<{ room: string }>(
+        "SELECT room FROM runner_rooms WHERE device = ? LIMIT ?",
+        device,
+        MAX_DROPS_PER_CALL
+      )
+    ].map((raw) => raw.room);
+    const results = await Promise.allSettled(rooms.map((room) => this.dropRunner(userId, room, drop)));
+    rooms.forEach((room, i) => {
+      if (results[i]?.status === "fulfilled") this.sql.exec("DELETE FROM runner_rooms WHERE device = ? AND room = ?", device, room);
+      else console.warn("registry: closing a runner out of a room failed", room, String((results[i] as PromiseRejectedResult).reason));
+    });
+    return [...this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM runner_rooms WHERE device = ?", device)][0]?.n ?? 0;
+  }
+
+  /** Send one recorded room its drop. */
+  private async dropRunner(userId: string, room: string, drop: RunnerDrop): Promise<void> {
+    const [kind, id] = [room.slice(0, room.indexOf(":")), room.slice(room.indexOf(":") + 1)];
+    const ns = kind === "chat" ? this.env.CHAT_ROOMS : this.env.DEVICE_ROOMS;
+    const stub = ns.get(ns.idFromName(kind === "chat" ? `chat2/${id}` : `d2/${id}`));
+    const reply = await stub.fetch(
+      new Request(`https://room${RUNNER_DROP_PATH}`, {
+        method: "POST",
+        headers: { [AUTH_USER_HEADER]: userId, "content-type": "application/json" },
+        body: JSON.stringify(drop)
+      })
+    );
+    if (!reply.ok) throw new Error(`room ${reply.status}`);
+  }
+
+  /** A deleted session's runner: its reach, epoch and recorded rooms. */
+  private forgetRunner(device: string): void {
+    for (const key of [runnerReachKey(device), runnerEpochKey(device), runnerSentKey(device)]) {
+      this.sql.exec("DELETE FROM meta WHERE key = ?", key);
+    }
+    this.sql.exec("DELETE FROM runner_rooms WHERE device = ?", device);
   }
 
   private rowsSince(cursor: number): Row[] {
@@ -412,7 +600,7 @@ export class RegistryRoom implements DurableObject {
         seq,
         full,
         gcFloor,
-        rows: this.visible(full || cursor === null ? this.rowsSince(0) : this.rowsSince(cursor), runner, runnerAccount),
+        rows: this.visible(full || cursor === null ? this.rowsSince(0) : this.rowsSince(cursor), runner),
         presence: Object.fromEntries(this.presence)
       });
     }
@@ -428,6 +616,34 @@ export class RegistryRoom implements DurableObject {
         // must take a fresh id, never an existing (or deleted) chat's.
         known: row !== undefined
       });
+    }
+
+    // A Cloud session's reach (registry-runner.ts): set only by the person's
+    // CloudAccount, never reachable through the Worker's routes, and refused
+    // above to any runner. Answers how many rooms the runner is still to be
+    // closed out of (call again until none).
+    if (url.pathname === "/runner-reach" && request.method === "POST") {
+      const body = (await request.json().catch(() => null)) as { device?: unknown; reach?: unknown } | null;
+      const device = typeof body?.device === "string" ? body.device : "";
+      if (!ID_RE.test(device) || !isRunnerReach(body?.reach)) return json({ error: "bad_request" }, 400);
+      return json({ pending: await this.setRunnerReach(userId, device, body.reach) });
+    }
+    if (url.pathname === "/runner-forget" && request.method === "POST") {
+      const body = (await request.json().catch(() => null)) as { device?: unknown } | null;
+      const device = typeof body?.device === "string" ? body.device : "";
+      if (!ID_RE.test(device)) return json({ error: "bad_request" }, 400);
+      this.forgetRunner(device);
+      return json({ ok: true });
+    }
+
+    // The Worker's gate for a runner reaching another chat's room or
+    // another device's (runner-access.ts).
+    if (url.pathname === "/runner-admit" && request.method === "GET") {
+      const device = url.searchParams.get("device") ?? "";
+      const chat = url.searchParams.get("chat");
+      const target = url.searchParams.get("target");
+      if (!ID_RE.test(device) || (chat === null) === (target === null)) return json({ error: "bad_request" }, 400);
+      return json(this.admitRunner(device, chat !== null ? { chat } : { target: target! }));
     }
 
     if (url.pathname === "/push" && request.method === "POST") {
@@ -540,7 +756,7 @@ export class RegistryRoom implements DurableObject {
     // (former) or re-seeding the server (latter; see registry.rs). So does a
     // Cloud machine's cursor from before it saw every row (runnerBehind).
     const full = this.runnerBehind(state.runner, cursor, cursor === null || cursor < gcFloor || cursor > seq);
-    const rows = this.visible(full || cursor === null ? this.rowsSince(0) : this.rowsSince(cursor), state.runner, state.runnerAccount);
+    const rows = this.visible(full || cursor === null ? this.rowsSince(0) : this.rowsSince(cursor), state.runner);
     send(ws, {
       t: "state",
       seq,
@@ -617,13 +833,14 @@ export class RegistryRoom implements DurableObject {
     const sessionsBefore = new Map<string, Row | undefined>();
     let applied = 0;
     const rejected: RejectedOp[] = [];
-    // Children as the batch starts: a delegate the runner may delete.
-    const children = runner === undefined ? undefined : this.runnerChildren(runner);
+    // Its reach, and its delegates as the batch starts (registry-runner.ts).
+    const reach = runner === undefined ? undefined : this.runnerReach(runner);
+    const children = runner === undefined ? undefined : this.runnerScope(runner).children;
     for (const op of ops) {
       const key = `${op.kind} ${op.id}`;
       const before = touched.get(key) ?? this.loadRow(op.kind, op.id);
       if (runner !== undefined) {
-        const refusal = runnerOpRefusal(runner, before, op, children);
+        const refusal = runnerOpRefusal(runner, before, op, reach!, children);
         if (refusal !== null) {
           rejected.push({ kind: op.kind, id: op.id, error: refusal });
           continue;
@@ -661,12 +878,20 @@ export class RegistryRoom implements DurableObject {
       // current by the time the ack retires its optimistic pending batch --
       // no between-frames flicker window.
       const rows = [...touched.values()];
+      // Each runner's view once per batch (an isolated one's scope is a scan).
+      const views = new Map<string, RunnerView>();
       for (const socket of this.ctx.getWebSockets()) {
         const socketState = socket.deserializeAttachment() as SocketState | null;
         if (!socketState?.ready) continue;
+        const runner = socketState.runner;
+        let view: RunnerView | undefined;
+        if (runner !== undefined) {
+          view = views.get(runner) ?? this.runnerView(runner);
+          views.set(runner, view);
+        }
         // A runner still gets the frame (possibly empty) so its cursor
         // advances with the room's seq.
-        send(socket, { t: "rows", seq, rows: this.visible(rows, socketState.runner, socketState.runnerAccount) });
+        send(socket, { t: "rows", seq, rows: this.visible(rows, runner, view) });
       }
       this.notifySessions(sessionsBefore, touched);
     }

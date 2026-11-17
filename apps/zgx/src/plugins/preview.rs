@@ -105,6 +105,9 @@ pub const BLOCKED: &[&str] = &[
     "cloud.sleep",
     "cloud.retry",
     "cloud.set_machine",
+    // (What a Cloud chat reaches: the person's own choice.)
+    "cloud.set_reach",
+    "cloud.set_session_reach",
 ];
 
 pub fn blocked(action: &str) -> bool {

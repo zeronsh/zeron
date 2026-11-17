@@ -6,11 +6,11 @@
  * a runner token must be treated as possibly stolen. It acts as ITS DEVICE,
  * not as the user: it never manages the account (`/auth/*` org routes,
  * `/cloud/*`), touches the vault beyond a grant for itself, hosts another
- * device's room, uses the legacy loro rooms, or sees registry internals. Like
- * any of the person's devices it reaches their other devices (a client link:
- * their chats, terminals and files) and every chat's data (chat2 rooms,
- * blobs); its registry writes are ownership-checked inside RegistryRoom
- * (registry-runner.ts).
+ * device's room, uses the legacy loro rooms, or sees registry internals.
+ * Another device's room (as a client) and other chats' data (chat2 rooms,
+ * blobs) are as its session's reach allows (runner-access.ts): with
+ * `devices` reach, like any of the person's devices. Its registry rows are
+ * filtered and ownership-checked inside RegistryRoom (registry-runner.ts).
  * Pure, so the whole path table is unit-testable without a Worker.
  */
 import type { Verified } from "./auth";
@@ -45,9 +45,9 @@ export const runnerRefusal = (auth: Verified, method: string, url: URL): string 
     case "device":
       if (parts[1] === auth.deviceId) return undefined;
       // Another device's room is that device's RPC surface (chats,
-      // terminals, files): read-only liveness, a client link and the command
-      // nudge (a message to a chat it hosts), as any of the person's devices
-      // has. Never the host role, never its sidecars.
+      // terminals, files): read-only liveness, and as its reach allows
+      // (runner-access.ts) a client link and the command nudge (a message to
+      // a chat it hosts). Never the host role, never its sidecars.
       if (parts[2] === "status" && parts.length === 3 && method === "GET") return undefined;
       if (parts[2] === "ws" && parts.length === 3 && (url.searchParams.get("role") ?? "client") === "client") return undefined;
       if (parts[2] === "nudge" && parts.length === 3 && method === "POST") return undefined;
@@ -66,7 +66,7 @@ export const runnerRefusal = (auth: Verified, method: string, url: URL): string 
       return "runner tokens cannot use this route";
     case "chat2":
     case "blob":
-      // Any of the person's chats, as their devices reach them.
+      // As its reach allows (runner-access.ts).
       return undefined;
     case "runner":
       // Its own heartbeat (the account DO checks the device).

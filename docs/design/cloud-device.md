@@ -130,39 +130,77 @@ next token refresh fails and that engine goes dark within one token lifetime.
 
 The sandbox runs full-access agents on arbitrary repository code, so anything that can read
 `runner-key` can mint runner tokens. A runner token therefore acts as **its session's device**
-(the JWT's verified `dev` claim), never as the whole user. Like any of the person's devices,
-though, it reaches their other devices and every one of their chats: a Cloud chat's agent
-lists and messages chats on the laptop, starts chats there, and runs commands on any online
-device (`run_command`), as an agent on the laptop can. Enforced at the edge:
+(the JWT's verified `dev` claim), never as the whole user. What else it reaches is its
+session's **reach**, which only the person sets:
+
+- **`devices`** (the default). Like any of the person's devices, it reaches their other
+  devices and every one of their chats: a Cloud chat's agent lists and messages chats on the
+  laptop, starts chats there, and runs commands on any online device (`run_command`), as an
+  agent on the laptop can. Through a client link to one of their computers that is that
+  computer's whole remote interface, so a compromised session can act as the person while
+  one of their computers is online.
+- **`isolated`**. Its own machine, and the delegates it starts (below): it sees no other
+  chat, touches none, and reaches no other device's room.
+
+The account's default is `PUT /cloud/{org}/reach {reach}` (Settings → Cloud); a session takes
+it at creation unless the composer picks one (`POST /cloud/{org}/sessions {…, reach}`), and
+`POST /cloud/{org}/sessions/{chatId}/reach {reach}` changes one session's (the composer's
+place menu). A delegate always takes its parent's reach, whatever it asks. Runner bearers are
+refused on all three (no `/cloud/*` but delegation; `CloudAccount` refuses any machine
+caller too), and on the engine they are local-only methods (`CloudSetReach`,
+`CloudSessionSetReach`): neither an agent's token nor another device (a Cloud machine among
+them) may call them, and a reach named in an agent's `CreateChat` is ignored.
+
+The reach is enforced where it is kept, in the user's registry (`RegistryRoom`, meta
+`runnerReach:{device}`, absent = `devices`); `CloudAccount` tells it first and records it
+once it holds. Enforced at the edge:
 
 - **Paths** (`edge/src/runner-policy.ts`, 403): no `/auth/*` org routes, no `/cloud/*`, no
   `/vault/*` except `POST /vault/{org}/grant` for its own device. `/device/{id}/*` fully for
   its own id; for any other device a client socket (`ws`, role client — that device's RPC
-  surface: chats, terminals, files), the command nudge, and `GET /device/{id}/status` — never
-  the host role or that device's sidecars. No legacy loro rooms (`/session`, `/tail`,
-  `/stats`, `/diff`, `/snapshot`, `/append`, `/workspace`). On `/registry/{org}` only row sync
-  (`ws`, `GET rows`, `POST push`) — no `stats`, `push-target` (APNs titles) or `reset`.
-- **Chat-scoped data**: `/chat2/{chatId}/*` and `/blob/{chatId}/*` for any of the user's
-  chats, as for their other devices (the rooms are the user's, by bearer).
+  surface: chats, terminals, files) and the command nudge as its reach allows (below), and
+  `GET /device/{id}/status` — never the host role or that device's sidecars. No legacy loro
+  rooms (`/session`, `/tail`, `/stats`, `/diff`, `/snapshot`, `/append`, `/workspace`). On
+  `/registry/{org}` only row sync (`ws`, `GET rows`, `POST push`) — no `stats`,
+  `push-target` (APNs titles) or `reset`.
+- **Other chats and devices** (`edge/src/runner-access.ts`, asking the registry's
+  `/runner-admit`): in either reach, the chats it hosts and its delegates' (a subagent's doc
+  by the chat that spawned it), and its delegates' Cloud machines. With `devices`, also any
+  live chat and any of the person's devices; such an admission carries the runner's
+  revocation epoch, and the room is recorded. Only admissions that hold in every reach are
+  cached (per isolate, 5 minutes); the rest are asked each time, so a change takes effect at
+  once. Covers `/chat2/{chatId}/*`, `/blob/{chatId}/*`, attachment blobs, and another
+  device's `ws`/`nudge`.
+- **Revocation** (`edge/src/runner-revocation.ts`): isolating a session bumps its epoch and
+  sends each recorded room a drop; a `ChatRoom` or `DeviceRoom` closes the runner's sockets
+  admitted at an older epoch (4403) and remembers the epoch, refusing a dial admitted before
+  the change that arrives after it. Its registry sockets close too (1012), and its next
+  state is `full`, so what it held of other devices' rows goes. A room whose drop fails stays
+  recorded, and the change answers 503 until a retry closes it.
 - **Registry** (`edge/src/registry-runner.ts`; the Worker stamps `x-zeron-runner-device`
-  on runner forwards and strips any inbound value). Writes: `devices` only its own row;
-  `chats`, `spaces`, `sessions` when the existing live row is hosted by the runner AND the
-  row after the op still is (no claiming, handing away or ownerless rows) — except that a
-  chat hosted elsewhere may have any field set but its host (`deviceId`: a chat is never
-  re-homed), and a new chat row may be hosted by any device (a chat it starts there);
-  another device's `spaces` and `sessions` rows stay its own; deletes need a live owned row
-  (or a delegate's, below); tombstones are never revived; every other kind (`preferences`,
-  `sidebarPins`, anything new) is refused. Refused ops are skipped individually (an
-  `{t:"error", code:"not_owner"}` frame each, plus `rejected` in the ack); the rest of the
-  batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): every
-  `devices`, `chats`, `spaces` and `sessions` row; none of the user's own kinds. A machine
-  that synced while it saw only its own rows holds a cursor past rows it never got, so its
-  first state since is `full` (`RegistryRoom.runnerBehind`, recorded per device as the seq
-  it was sent at; sent again until the machine's cursor passes that seq).
+  on runner forwards and strips any inbound value). Writes, either reach: `devices` only its
+  own row; `chats`, `spaces`, `sessions` when the existing live row is hosted by the runner
+  AND the row after the op still is (no claiming, handing away or ownerless rows); a
+  delegate's chat and session rows may be deleted; deletes otherwise need a live owned row;
+  tombstones are never revived; every other kind (`preferences`, `sidebarPins`, anything
+  new) is refused. With `devices`, a chat hosted elsewhere may have any field set but its
+  host (`deviceId`: a chat is never re-homed), and a new chat row may be hosted by any device
+  (a chat it starts there); isolated, a delegate may only be renamed or archived. Another
+  device's `spaces` and `sessions` rows stay its own. Refused ops are skipped individually
+  (an `{t:"error", code:"not_owner"}` frame each, plus `rejected` in the ack); the rest of
+  the batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): with
+  `devices`, every `devices`, `chats`, `spaces` and `sessions` row; isolated, every
+  `devices` row, the rows it hosts, the projects of the chats it hosts, its delegates and
+  their session rows, and tombstones; never the user's own kinds. A machine whose view
+  changed (a reach changed, or one that synced while it saw only its own rows) holds a
+  cursor that doesn't match what it now sees, so its next state is `full`
+  (`RegistryRoom.runnerBehind`, recorded per device as the seq it was sent at; sent again,
+  at most three times, until the machine's cursor passes that seq).
   Presence is unfiltered, but a runner socket's presence/attribution device is pinned to its
   verified id.
 - **Waking**: a Cloud machine's send (`POST /device/{id}/nudge`) wakes any of the person's
-  sleeping sessions, as their other devices' sends do (`CloudAccount.autoWake`).
+  sleeping sessions while its reach is `devices`, as their other devices' sends do; isolated,
+  only its delegates (`CloudAccount.autoWake`).
 - **Engine** (`crates/engine/src/rpc/agent_gate.rs`): what an agent may do is the same on
   Cloud as on a computer. It runs commands (`RunCommand`, `ReadCommandOutput`, `StopCommand`,
   `ListBackgroundCommands`, here or on another device) only from a chat with full access (what every
