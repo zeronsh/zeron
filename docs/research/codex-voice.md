@@ -135,8 +135,10 @@ Codex's current helper protocol does not expose device selection.
 
 The native helper/runtime is supplied by the standalone Codex installation,
 not redistributed by Zeron, on macOS, Linux and Windows; the desktop client of
-a remote call uses its own installation the same way. npm/CLI-only
-installations without those resources report `nativeRuntimeUnavailable`. macOS production/dev bundles declare microphone
+a remote call uses its own installation the same way. A mise or asdf shim
+resolves to the standalone package that shim launches (`installs/<tool>/<version>`),
+including the package selected by `mise which` when several releases are
+installed. npm installations without those resources report `nativeRuntimeUnavailable`. macOS production/dev bundles declare microphone
 usage and audio-input entitlements. The viewport verifies microphone authorization
 and requests it when voice is explicitly started, before creating a provider
 session or opening devices. Denied access shows a settings hint. Cargo builds

@@ -241,6 +241,7 @@ impl Shell {
             .child(
                 div()
                     .id("voice-failure-dismiss")
+                    .debug_selector(|| "voice-failure-dismiss".into())
                     .flex_none()
                     .cursor_pointer()
                     .rounded(px(4.0))
@@ -268,7 +269,9 @@ impl Shell {
                     .rounded_full()
                     .bg(theme.warning),
             )
-            .child(popover::anchored_menu_above_end(
+            // Not a menu: it stays until its own dismiss control, so an
+            // outside press must still reach the rest of the window.
+            .child(popover::anchored_notice_above_end(
                 "voice-failure",
                 card,
                 None,
