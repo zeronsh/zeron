@@ -47,6 +47,9 @@ M.places = ui.persist("control_map_force_places", {} :: { [string]: { number } }
 -- its own places and pins.
 M.PIVOTS = { "orchestrator", "machine" }
 M.pivot = ui.persist("control_map_force_pivot", "orchestrator")
+-- Each pivot's own view (pan and zoom), as the person left it: kept; a
+-- pivot never shown yet, or fitted, has none (it fits its web).
+M.views = ui.persist("control_map_force_views", {} :: { [string]: { x: number, y: number, zoom: number } })
 M.places_m = ui.persist("control_map_force_places_machine", {} :: { [string]: { number } })
 M.pins_m = ui.persist("control_map_force_pins_machine", {} :: { [string]: boolean })
 function M.places_of(): any
@@ -221,6 +224,8 @@ M.View = ui.component(function(props: {
 	local view = ui.use_state({ x = 0, y = 0, zoom = 1 })
 	-- (Bumped by each zoom: the names' rescale waits for it to settle.)
 	local zoom_req = ui.use_state(0)
+	-- (Bumped when a pivot's own view is put back: what's drawn culled anew.)
+	local view_reset = ui.use_state(0)
 	local moved_view = false
 
 	-- On screen: in view, in a window that shows. Off screen nothing runs.
@@ -489,6 +494,20 @@ M.View = ui.component(function(props: {
 		if pivot == built_pivot then
 			for i = 1, s.n do
 				from[s.ids[i]] = { s.x[i], s.y[i] }
+			end
+		end
+		-- (A pivot opened: its own view as it was left, else fitted to its
+		-- web once it rests; the other's left as it is.)
+		if pivot ~= built_pivot then
+			local kept = (M.views:peek() or {})[pivot]
+			if kept and type(kept.zoom) == "number" then
+				view:set({ x = kept.x, y = kept.y, zoom = kept.zoom })
+				zoom_req:set(zoom_req:peek() + 1)
+				view_reset:set(view_reset:peek() + 1)
+				counts.zoom = kept.zoom
+				moved_view = true
+			else
+				moved_view = false
 			end
 		end
 		built_pivot = pivot
@@ -875,6 +894,11 @@ M.View = ui.component(function(props: {
 	-- What's drawn: the view's reach (world), a field past it each way;
 	-- drawn again only when the view nears its edge.
 	local cull = ui.use_state({ x0 = -1e9, y0 = -1e9, x1 = 1e9, y1 = 1e9 })
+	ui.effect(function()
+		if view_reset:get() > 0 then
+			cull:set({ x0 = -1e9, y0 = -1e9, x1 = 1e9, y1 = 1e9 })
+		end
+	end)
 	recull = function()
 		local v = view:peek()
 		local w, h = math.max(1, width:peek()), field_h()
@@ -1251,6 +1275,10 @@ M.View = ui.component(function(props: {
 		counts.zoom = zoom
 		count("frames", 0)
 		recull()
+		-- (The person's own view: kept for this pivot alone.)
+		if moved_view then
+			M.views:set_key({ M.pivot:peek() }, { x = x, y = y, zoom = zoom })
+		end
 	end
 	local function zoom_at(px: number, py: number, k: number)
 		moved_view = true
@@ -2090,6 +2118,8 @@ M.View = ui.component(function(props: {
 						tone = "quiet",
 						on_click = function()
 							moved_view = false
+							-- (This pivot's view only: fitted, its kept one gone.)
+							M.views:set_key({ M.pivot:peek() }, nil)
 							recentre()
 							fit()
 							recull()
