@@ -109,8 +109,13 @@ pub struct RelayedCallback {
     pub location: Option<String>,
 }
 
+mod codex_homes;
+mod limit_switch;
 mod muse;
 mod pins;
+#[cfg(test)]
+pub(crate) use limit_switch::fixtures as limit_fixtures;
+pub use limit_switch::{FRESH_USAGE_MS, LimitSwitch, account_label, headroom, pick_switch_account};
 mod oauth;
 mod registry_login;
 #[cfg(test)]
@@ -816,6 +821,12 @@ struct Inner {
     /// Asked for a chat's account at its first run (a plugin's
     /// `run.preparing`).
     pin_hook: Mutex<Option<PinHook>>,
+    /// Serializes seeding, retiring and removing the accounts' own Codex
+    /// dirs (see [`codex_homes`]).
+    homes: tokio::sync::Mutex<()>,
+    /// Chats running on another account while theirs is limited; mirrored to
+    /// disk (see [`limit_switch`]).
+    limit_switches: Mutex<limit_switch::SwitchState>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -883,6 +894,8 @@ impl AgentAccounts {
             }
         }
         let pins = pins::PinState::load(&config.root_dir().join(pins::PINS_FILE));
+        let limit_switches =
+            limit_switch::SwitchState::load(&config.root_dir().join(limit_switch::SWITCHES_FILE));
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
@@ -911,6 +924,8 @@ impl AgentAccounts {
                 snapshots: tokio::sync::watch::channel(None).0,
                 pins: Mutex::new(pins),
                 pin_hook: Mutex::new(None),
+                homes: tokio::sync::Mutex::new(()),
+                limit_switches: Mutex::new(limit_switches),
             }),
         }
     }
@@ -1016,6 +1031,8 @@ impl AgentAccounts {
             }
         }
         self.migrate_codex_slot_keys()?;
+        // Logins Codex refreshed in chats' account dirs (codex_homes).
+        self.sync_codex_homes();
         if let Some(detected) = self.detect_codex() {
             live(HarnessId::Codex, &detected);
             self.snapshot_detected(HarnessId::Codex, &detected)?;
@@ -1284,7 +1301,12 @@ impl AgentAccounts {
                 let slot = self.revive_claude_slot(slot).await?;
                 self.activate_claude(&slot).await?
             }
-            HarnessId::Codex => self.activate_codex(&slot)?,
+            HarnessId::Codex => {
+                // (The list above copied its dir's newest login into the
+                // slot.) The machine holds it from now on: the dir lets go.
+                self.activate_codex(&slot)?;
+                self.retire_codex_home_login(&slot.id).await;
+            }
             HarnessId::Cursor => self.write_cursor_auth(&slot.credentials)?,
             HarnessId::Grok => {
                 self.write_grok_entry(slot.store_key.as_deref(), &slot.credentials)?
@@ -1649,6 +1671,9 @@ impl AgentAccounts {
         let file = self.slots_dir(harness)?.join(format!("{account_id}.json"));
         if file.exists() {
             std::fs::remove_file(&file)?;
+        }
+        if harness == HarnessId::Codex {
+            self.remove_codex_home(account_id).await;
         }
         self.list_locked(false).await
     }

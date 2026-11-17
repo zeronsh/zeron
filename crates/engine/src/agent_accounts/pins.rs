@@ -12,6 +12,7 @@
 //! | harness     | mechanism | how a pinned chat reaches its account |
 //! |-------------|-----------|---------------------------------------|
 //! | Claude Code | `env`     | `CLAUDE_CODE_OAUTH_TOKEN` = the saved login's access token |
+//! | Codex       | `home`    | `CODEX_HOME` = the account's own dir ([`super::codex_homes`]) |
 //! | Muse        | `root`    | the account's own config root (`XDG_CONFIG_HOME`) |
 //!
 //! Every other harness reports `pinnable = false` until it has a mechanism.
@@ -93,6 +94,7 @@ impl PinState {
 }
 
 /// What a pinned chat's run gets.
+#[derive(Debug)]
 pub(crate) struct PinRun {
     pub env: BTreeMap<String, String>,
     pub credential: String,
@@ -106,7 +108,7 @@ fn fingerprint(prefix: &str, secret: &str) -> String {
 
 /// Whether `harness` has a per-chat mechanism at all.
 fn pinnable(harness: HarnessId) -> bool {
-    matches!(harness, HarnessId::ClaudeCode | HarnessId::Muse)
+    matches!(harness, HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Muse)
 }
 
 impl AgentAccounts {
@@ -124,7 +126,8 @@ impl AgentAccounts {
     }
 
     /// How a chat can run on `account` beside the live login: `"env"` (a
-    /// credential in its process), `"root"` (a config root of its own), or
+    /// credential in its process), `"home"` (a CLI home of its own, Codex),
+    /// `"root"` (a config root of its own), or
     /// `None` (not on this device, or not this kind of login: an API key
     /// bills per token, so spreading over it saves nothing).
     pub fn pin_mechanism(&self, account: &AgentAccount) -> Option<&'static str> {
@@ -137,11 +140,20 @@ impl AgentAccounts {
                 .read_slot(account.harness, &account.id)
                 .is_some_and(|slot| slot.credentials.get("claudeAiOauth").is_some())
                 .then_some("env"),
+            HarnessId::Codex => self
+                .read_slot(account.harness, &account.id)
+                .is_some_and(|slot| slot.credentials.get("tokens").is_some())
+                .then_some("home"),
             HarnessId::Muse if account.id != OWN_LOGIN => {
                 self.read_slot(account.harness, &account.id).is_some().then_some("root")
             }
             _ => None,
         }
+    }
+
+    /// The account `chat` is pinned to on `harness` (`None`: the live login).
+    pub fn pinned_account(&self, harness: HarnessId, chat: &str) -> Option<String> {
+        lock(&self.inner.pins).entry(harness, chat).and_then(|e| e.account.clone())
     }
 
     /// Every chat pinned to an account.
@@ -233,6 +245,7 @@ impl AgentAccounts {
                     env: BTreeMap::from([("CLAUDE_CODE_OAUTH_TOKEN".to_owned(), token)]),
                 }))
             }
+            HarnessId::Codex => self.codex_pin_run(account).await,
             HarnessId::Muse => {
                 if self.read_slot(harness, account).is_none() {
                     return Ok(None);

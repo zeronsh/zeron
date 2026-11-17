@@ -1162,6 +1162,7 @@ impl Tools {
                     "status": status_of(session.as_ref()).0,
                     "activity": session.as_ref().and_then(|s| s.activity.clone()),
                     "todo": session.as_ref().and_then(|s| s.todo.clone()),
+                    "limited": session.as_ref().and_then(|s| s.limited.as_ref()).map(limited_row),
                     "lastReport": m.last_report, "deviceId": chat.map(|c| c.device_id.clone()),
                 })
             })
@@ -1251,6 +1252,16 @@ impl Tools {
             "note": "Crew threads are listed under their orchestrator. A task, priority or cancel for one goes to that orchestrator (name the thread in message); info and questions may go to the thread. A task with no owner is a newThread in the project it's about (projects: most recently active first; prefer one the text names, then one here). Recent chats are context, not owners: route to one only when it is doing that very work.",
         }))
     }
+}
+
+/// A crew thread its usage limit stopped, as `board` lists it: waiting for
+/// the reset, or running meanwhile on another account (`on`).
+fn limited_row(limit: &zeron_proto::usage_limit::SessionLimit) -> Value {
+    json!({
+        "account": limit.account_label, "window": limit.window, "resetsAt": limit.until,
+        "on": limit.switched_to.as_ref().map(|s| &s.account_label),
+        "harness": limit.switched_to.as_ref().and_then(|s| s.harness.as_ref()),
+    })
 }
 
 /// The projects as `world` lists them: compact, most recently active first
@@ -1766,5 +1777,47 @@ mod tests {
         for op in [json!({ "op": "read" }), json!({ "op": "write", "text": "x", "heading": null }), json!({ "op": "append", "text": "y" })] {
             serde_json::from_value::<zeron_proto::scratchpad::ScratchpadOp>(op).unwrap();
         }
+    }
+
+    #[test]
+    fn an_orchestrators_on_limit_is_read_and_kept() {
+        let mut o = orchestrator("o", OrchestratorKind::Standard);
+        o.crew.on_limit = zeron_proto::usage_limit::LimitPolicy { switch_account: true, switch_harness: false };
+        let wire = serde_json::to_value(&o).unwrap();
+        assert_eq!(wire["crew"]["onLimit"], json!({ "switchAccount": true, "switchHarness": false }));
+        let read: zeron_proto::orchestration::Orchestrator = serde_json::from_value(wire).unwrap();
+        assert_eq!(read.crew.on_limit, o.crew.on_limit);
+        // An older row has none: off.
+        let mut old = serde_json::to_value(&o).unwrap();
+        old["crew"].as_object_mut().unwrap().remove("onLimit");
+        let read: zeron_proto::orchestration::Orchestrator = serde_json::from_value(old).unwrap();
+        assert_eq!(read.crew.on_limit, Default::default());
+    }
+
+    #[test]
+    fn a_limited_crew_thread_shows_the_account_it_runs_on_meanwhile() {
+        let at = Utc::now();
+        let mut limit = zeron_proto::usage_limit::SessionLimit {
+            provider: "claude".into(),
+            account_slot: Some("a".into()),
+            account_label: Some("a@example.com".into()),
+            window: Some("5-hour".into()),
+            until: Some(at),
+            since: at,
+            attempt: 0,
+            switched_to: None,
+        };
+        let waiting = limited_row(&limit);
+        assert_eq!((waiting["account"].clone(), waiting["on"].clone()), (json!("a@example.com"), Value::Null));
+        limit.switched_to = Some(zeron_proto::usage_limit::SwitchedAccount {
+            account_slot: "b".into(),
+            account_label: "b@example.com".into(),
+            at,
+            harness: None,
+            model: None,
+        });
+        let switched = limited_row(&limit);
+        assert_eq!(switched["on"], "b@example.com");
+        assert_eq!(switched["resetsAt"], json!(at));
     }
 }
