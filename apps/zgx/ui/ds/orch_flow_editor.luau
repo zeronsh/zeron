@@ -34,6 +34,8 @@ local TextField = require("@self/text_field")
 local TextArea = require("@self/text_area")
 local Select = require("@self/select")
 local badge = require("@self/badge")
+local Toolbar = require("@self/toolbar")
+local Sheet = require("@self/dialog").Sheet
 
 local M = {}
 
@@ -46,6 +48,7 @@ local PORT = 5
 local HIT_PORT = 14
 local ZOOM_MIN, ZOOM_MAX = 0.3, 2
 local INSPECTOR_W = 300
+local NARROW_AT = 860
 local NONE = "none"
 
 -- Every block's height: an entry or a finish says only its name.
@@ -154,9 +157,18 @@ M.Editor = ui.component(function(props: Props): Node
 	-- A block being moved, as it is now (applied once it's let go).
 	local moving = ui.use_state(nil :: { id: string, x: number, y: number }?)
 	local drag: any = nil
+	-- A block pressed: its sheet opens as it's let go, unless it was moved.
+	local pending_sheet = false
 	-- Whether the person has panned or zoomed (else it fits as it resizes).
 	local touched = false
 	local add_kind = ui.use_state("")
+	-- The editor's own width: narrower than NARROW_AT, what's selected opens
+	-- in a sheet rather than a column beside the field.
+	local width = ui.use_state(1200)
+	local sheet_open = ui.use_state(false)
+	local function narrow(): boolean
+		return width:get() < NARROW_AT
+	end
 
 	local function hue_ink(): string
 		local of_hue = props.hue
@@ -267,6 +279,7 @@ M.Editor = ui.component(function(props: Props): Node
 			end
 			if x >= n.x and x <= n.x + W and y >= n.y and y <= n.y + height(n) then
 				selected:set({ node = n.id })
+				pending_sheet = true
 				drag = { kind = "node", id = n.id, dx = x - n.x, dy = y - n.y }
 				return
 			end
@@ -284,6 +297,9 @@ M.Editor = ui.component(function(props: Props): Node
 		end
 		if best > 0 then
 			selected:set({ edge = best })
+			if narrow() then
+				sheet_open:set(true)
+			end
 			return
 		end
 		selected:set({})
@@ -334,6 +350,11 @@ M.Editor = ui.component(function(props: Props): Node
 			end
 		elseif d.kind == "node" then
 			local m = moving:peek()
+			-- A block pressed and let go where it was: open, when narrow.
+			if not m and pending_sheet and narrow() then
+				sheet_open:set(true)
+			end
+			pending_sheet = false
 			if m then
 				change(function(g: any): boolean?
 					local n = flow.node(g, m.id)
@@ -580,35 +601,42 @@ M.Editor = ui.component(function(props: Props): Node
 				max_rows = 12,
 				w_full = true,
 			})
-			table.insert(rows, ui.row {
-				w_full = true,
-				Button {
-					ui.t("orch.flow.restore_default") :: any,
-					tone = "ghost",
-					size = "sm",
-					on_click = function()
-						instructions:set(flow.instructions(n.kind))
-					end,
-				},
+		end
+		-- Its actions, along its foot: put its instructions back, or take it
+		-- out (the entry stays).
+		local actions: { any } = {}
+		if n.kind ~= "chief" and n.kind ~= "finish" then
+			table.insert(actions, Button {
+				ui.t("orch.flow.restore_default") :: any,
+				id = "orch-flow-restore",
+				tone = "secondary",
+				size = "sm",
+				disabled = function(): boolean
+					return instructions:get() == flow.instructions(n.kind)
+				end,
+				on_click = function()
+					instructions:set(flow.instructions(n.kind))
+				end,
 			})
 		end
+		table.insert(actions, ui.div { grow = 1 })
 		if n.kind ~= "chief" then
-			table.insert(rows, ui.row {
-				w_full = true,
-				Button {
-					ui.t("orch.flow.remove_block") :: any,
-					id = "orch-flow-remove-block",
-					tone = "ghost",
-					size = "sm",
-					on_click = function()
-						selected:set({})
-						change(function(g: any): boolean?
-							flow.remove(g, id)
-							return true
-						end)
-					end,
-				},
+			table.insert(actions, Button {
+				ui.t("orch.flow.remove_block") :: any,
+				id = "orch-flow-remove-block",
+				tone = "danger",
+				size = "sm",
+				on_click = function()
+					selected:set({})
+					change(function(g: any): boolean?
+						flow.remove(g, id)
+						return true
+					end)
+				end,
 			})
+		end
+		if #actions > 1 then
+			table.insert(rows, ui.row { w_full = true, gap = "$space.2", items = "center", pt = "$space.1", table.unpack(actions) })
 		end
 		local mine: { any } = {}
 		for _, i in issues:peek() do
@@ -698,10 +726,12 @@ M.Editor = ui.component(function(props: Props): Node
 			}),
 			ui.row {
 				w_full = true,
+				pt = "$space.1",
+				ui.div { grow = 1 },
 				Button {
 					ui.t("orch.flow.remove_connection") :: any,
 					id = "orch-flow-remove-connection",
-					tone = "ghost",
+					tone = "danger",
 					size = "sm",
 					on_click = function()
 						selected:set({})
@@ -786,19 +816,9 @@ M.Editor = ui.component(function(props: Props): Node
 		return flow_panel()
 	end)
 
-	local function inspector(): Node
-		return ui.column {
-			id = "orch-flow-inspector",
-			w = INSPECTOR_W,
-			shrink = 0,
-			h_full = true,
-			ui.scroll {
-				w_full = true,
-				grow = 1,
-				min_h = 0,
-				fade = { 12, 12 },
-				fade_overflow = true,
-				ui.presence(function(): string
+	-- What's selected, to change: a block, a connection, or the flow.
+	local function inspector_body(pad: boolean): Node
+		return ui.presence(function(): string
 					local s = selected:get()
 					if s.node then
 						return "n:" .. s.node
@@ -812,9 +832,45 @@ M.Editor = ui.component(function(props: Props): Node
 					local body = if kind == "n" then BlockPanel { node = rest }
 						elseif kind == "e" then EdgePanel { index = tonumber(string.match(rest, "^(%d+)")) or 0 }
 						else FlowPanel {}
-					return ui.column { w_full = true, p = "$space.4", body }
-				end, { w_full = true }),
+					return ui.column { w_full = true, p = if pad then "$space.4" else nil, body }
+				end, { w_full = true })
+	end
+
+	-- Wide: a column beside the field.
+	local function inspector(): Node
+		return ui.column {
+			id = "orch-flow-inspector",
+			w = INSPECTOR_W,
+			shrink = 0,
+			h_full = true,
+			ui.scroll {
+				w_full = true,
+				grow = 1,
+				min_h = 0,
+				fade = { 12, 12 },
+				fade_overflow = true,
+				inspector_body(true),
 			},
+		}
+	end
+
+	-- Narrow: a sheet over the page, opened by selecting something (or
+	-- Details), closed to go back to the field.
+	local function inspector_sheet(): Node
+		return Sheet {
+			open = sheet_open,
+			title = function(): string
+				local s = selected:get()
+				local f = current()
+				if s.node and f then
+					local n = flow.node(f, s.node)
+					return if n then n.name else ""
+				elseif s.edge then
+					return locale.s("orch.flow.connection")
+				end
+				return if f then f.name else ""
+			end,
+			ui.column { id = "orch-flow-sheet", w_full = true, inspector_body(false) },
 		}
 	end
 
@@ -844,33 +900,44 @@ M.Editor = ui.component(function(props: Props): Node
 	end
 
 	local function toolbar(): Node
-		return ui.row {
-			id = "orch-flow-toolbar",
-			w_full = true,
-			shrink = 0,
-			gap = "$space.2",
-			items = "center",
-			px = "$space.4",
-			py = "$space.2",
-			Select {
-				value = add_kind,
-				name = ui.t("orch.flow.add_block") :: any,
-				options = add_options,
-				size = "sm",
-				w = 148,
-				on_change = function(kind: any)
-					if kind ~= "" then
-						add(kind)
-						add_kind:set("")
-					end
-				end,
+		-- What adds to it and what's wrong with it; what moves it in and out
+		-- of files; the view; and, narrow, the inspector's sheet.
+		local file: { any } = {}
+		if props.on_import then
+			table.insert(file, Button { ui.t("orch.flow.import_button") :: any, id = "orch-flow-import", tone = "ghost", size = "sm", on_click = props.on_import })
+		end
+		if props.on_export then
+			table.insert(file, Button { ui.t("orch.flow.export_button") :: any, id = "orch-flow-export", tone = "ghost", size = "sm", on_click = props.on_export })
+		end
+		if props.on_save_template then
+			table.insert(file, Button { ui.t("orch.flow.save_template") :: any, id = "orch-flow-save-template", tone = "ghost", size = "sm", on_click = props.on_save_template })
+		end
+		local groups: { any } = {
+			Toolbar.Group {
+				Select {
+					value = add_kind,
+					name = ui.t("orch.flow.add_block") :: any,
+					options = add_options,
+					size = "sm",
+					w = 148,
+					on_change = function(kind: any)
+						if kind ~= "" then
+							add(kind)
+							add_kind:set("")
+						end
+					end,
+				},
 			},
 			ui.show(function(): boolean
 				return #issues:get() > 0
 			end, ui.div {
 				id = "orch-flow-issues",
+				pl = "$space.2",
 				on_click = function()
 					selected:set({})
+					if narrow() then
+						sheet_open:set(true)
+					end
 				end,
 				badge.Badge {
 					function(): string
@@ -881,10 +948,12 @@ M.Editor = ui.component(function(props: Props): Node
 					icon = "danger-triangle",
 				},
 			}),
-			ui.div { grow = 1 },
-			if props.on_import then Button { ui.t("orch.flow.import_button") :: any, tone = "ghost", size = "sm", on_click = props.on_import } else nil,
-			if props.on_export then Button { ui.t("orch.flow.export_button") :: any, tone = "ghost", size = "sm", on_click = props.on_export } else nil,
-			if props.on_save_template then Button { ui.t("orch.flow.save_template") :: any, tone = "ghost", size = "sm", on_click = props.on_save_template } else nil,
+			Toolbar.Spacer {},
+		}
+		if #file > 0 then
+			table.insert(groups, Toolbar.Group(file :: any))
+		end
+		table.insert(groups, Toolbar.Group {
 			IconButton { icon = "minus", label = ui.t("orch.flow.zoom_out") :: any, size = "sm", tone = "quiet", on_click = function()
 				local s = size:peek()
 				zoom_at(s.w / 2, s.h / 2, 1 / 1.2)
@@ -897,6 +966,26 @@ M.Editor = ui.component(function(props: Props): Node
 				touched = false
 				fit()
 			end },
+		})
+		table.insert(groups, ui.show(narrow, IconButton {
+			id = "orch-flow-details",
+			icon = "tuning",
+			label = ui.t("orch.flow.details") :: any,
+			size = "sm",
+			tone = "quiet",
+			on_click = function()
+				sheet_open:set(true)
+			end,
+		}))
+		return ui.row {
+			id = "orch-flow-toolbar",
+			w_full = true,
+			shrink = 0,
+			Toolbar.Toolbar {
+				label = ui.t("orch.flow.toolbar") :: any,
+				look = "bar",
+				table.unpack(groups),
+			},
 		}
 	end
 
@@ -996,6 +1085,11 @@ M.Editor = ui.component(function(props: Props): Node
 		id = "orch-flow",
 		w_full = true,
 		h_full = true,
+		on_resize = function(s: { w: number, h: number })
+			if math.abs(s.w - width:peek()) >= 1 then
+				width:set(s.w)
+			end
+		end,
 		ui.presence(function(): string
 			return if current() then "flow" else "empty"
 		end, function(kind: string): Node
@@ -1011,9 +1105,12 @@ M.Editor = ui.component(function(props: Props): Node
 					grow = 1,
 					min_h = 0,
 					field_box(),
-					ui.div { w = 1, h_full = true, shrink = 0, bg = "$border" },
-					inspector(),
+					ui.div { w = 1, h_full = true, shrink = 0, bg = "$border", hidden = narrow },
+					ui.show(function(): boolean
+						return not narrow()
+					end, inspector()),
 				},
+				ui.show(narrow, inspector_sheet()),
 			}
 		end, { w_full = true, h_full = true }),
 	}
