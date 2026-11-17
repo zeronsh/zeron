@@ -63,6 +63,9 @@ local s_stub = sessions :: any
 s_stub.archive = function(id: string)
 	note(`archive:{id}`)
 end
+s_stub.seen = function(id: string)
+	note(`seen:{id}`)
+end
 s_stub.stop = function(id: string): any
 	note(`stop:{id}`)
 	return settled()
@@ -347,6 +350,21 @@ ui.command { id = "data_ready", title = "Data: loaded again", run = function()
 		sessions.now:set(before_loading)
 		before_loading = nil
 	end
+end }
+-- Mark all done as read, from the force Map's space menu: what it would mark
+-- (into `mark_read`), and doing it (the page's own action, its Undo toast).
+local mark_read = ui.state("mark_read", {} :: any)
+ui.command { id = "map_mark_read_count", title = "Map: what Mark all done as read would mark", run = function()
+	mark_read:set({ ids = require("@ds/orch_force").done_unread_ids() })
+end }
+ui.command { id = "map_force_menu_space", title = "Map: the force Map's space menu", run = function()
+	require("@ds/orch_map").open_menu("force:background")
+end }
+ui.command { id = "map_mark_read_undo", title = "Map: Undo the last Mark all done as read (its toast's)", run = function()
+	page.undo_read(nil)
+end }
+ui.command { id = "map_mark_read_do", title = "Map: Mark all done as read", run = function()
+	page.mark_done_read(require("@ds/orch_force").done_unread_ids())
 end }
 -- An open ask of its.
 ui.command { id = "sign_ask", title = "Signing: asks", run = function()
