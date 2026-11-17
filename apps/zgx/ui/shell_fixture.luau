@@ -235,6 +235,11 @@ chat_store.send = function(req: any): any
 		end,
 	}
 end
+-- (No host here: a model picker opening, or an agent's "Retry", asks
+-- nothing.)
+local catalog_stub = store :: any
+catalog_stub.refresh_catalog = function() end
+catalog_stub.retry_catalog = function() end
 store.catalog:set({
 	state = "ready",
 	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },

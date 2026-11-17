@@ -902,7 +902,14 @@
       "not_found": "未找到模型",
       "not_found_hint": "{where}中没有与“{q}”匹配的内容",
       "where_starred": "已加星标的模型",
-      "where_models": "模型"
+      "where_models": "模型",
+      "loading": "正在查找模型",
+      "signed_out": "没有模型 — 请登录",
+      "signed_out_hint": "登录 {agent} 以使用其模型",
+      "sign_in": "登录",
+      "load_failed": "无法加载模型",
+      "load_failed_hint": "{agent} 没有列出其模型",
+      "retry": "重试"
     },
     "effort_slider": {
       "reasoning": "推理强度"
@@ -989,7 +996,9 @@
       "paste_key_hint": "{name} 以 {var} 读取它。它保存在此设备上，不会再次显示。",
       "key_name": "{var}",
       "get_key": "获取密钥",
-      "save_key": "保存"
+      "save_key": "保存",
+      "key_rejected": "密钥已被拒绝 — 请重新登录",
+      "remove_rejected": "移除"
     },
     "command_palette": {
       "scope": {

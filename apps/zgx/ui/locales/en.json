@@ -902,7 +902,14 @@
       "not_found": "No models found",
       "not_found_hint": "Nothing in {where} matches “{q}”",
       "where_starred": "starred models",
-      "where_models": "models"
+      "where_models": "models",
+      "loading": "Looking up models",
+      "signed_out": "No models — sign in",
+      "signed_out_hint": "Sign in to {agent} to use its models",
+      "sign_in": "Sign in",
+      "load_failed": "Couldn't load models",
+      "load_failed_hint": "{agent} didn't list its models",
+      "retry": "Retry"
     },
     "effort_slider": {
       "reasoning": "Reasoning"
@@ -989,7 +996,9 @@
       "paste_key_hint": "{name} reads it as {var}. It's kept on this device and never shown again.",
       "key_name": "{var}",
       "get_key": "Get a key",
-      "save_key": "Save"
+      "save_key": "Save",
+      "key_rejected": "Key rejected — sign in again",
+      "remove_rejected": "Remove"
     },
     "command_palette": {
       "scope": {

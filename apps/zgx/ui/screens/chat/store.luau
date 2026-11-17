@@ -25,6 +25,9 @@
 --   store.queue_edit(id, item), store.queue_finish(id, item, action, text?)
 --                         a queued message edited in the composer
 --   store.load_catalog()  the models, looked up again
+--   store.refresh_catalog()  a picker opened: the agents short of models
+--                         (none, a failed look, an old one) looked up again
+--   store.retry_catalog(harness)  one agent's models, looked up again
 --
 -- What can go wrong, a promise's `message`: "offline", "signed_out",
 -- "missing" (no such chat), "failed".
@@ -81,6 +84,9 @@ export type Session = {
 	notice: any?,
 }
 export type Catalog = { state: string, harnesses: { ds.Harness }, models: { ds.Model } }
+-- Each agent of it says how its models stand (`status`): "loading",
+-- "ready", "empty" (none: signed out, most likely) or "error" (the look
+-- failed, `error` its words). An agent without models is still listed.
 export type Request = {
 	-- The session it goes to; nil for a new chat.
 	session: string?,
@@ -271,6 +277,18 @@ end
 
 function M.load_catalog()
 	ui.invoke("chat.catalog")
+end
+
+-- A model picker opening: the host looks again, in the background, at the
+-- agents it holds no models for (none, a failed look) or looked at long ago
+-- (src/chat.rs `catalog_fresh`). The picker opens on what's there.
+function M.refresh_catalog()
+	ui.invoke("chat.catalog_fresh")
+end
+
+-- One agent's models looked up again (its "Retry", after a failed look).
+function M.retry_catalog(harness: string)
+	ui.invoke("chat.catalog_retry", { harness = harness })
 end
 
 -- A background process of `session` stopped on its host: a promise of

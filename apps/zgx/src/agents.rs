@@ -936,6 +936,12 @@ impl Agents {
         for harness in changed {
             crate::chat::accounts_changed(&key, &harness);
         }
+        // (A key replaced in place, or the same account signed in to again,
+        // changes no login: an agent signed in whose models failed or came
+        // empty is asked again all the same.)
+        let signed_in: std::collections::BTreeSet<String> =
+            accounts.iter().filter_map(|a| a["harness"].as_str().map(str::to_owned)).collect();
+        crate::chat::accounts_seen(&key, &signed_in.into_iter().collect::<Vec<_>>());
     }
 
     /// A composer on `key`'s device: its accounts, on first sight of it.
