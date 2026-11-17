@@ -568,7 +568,7 @@ local function check_labels(app: any, label: string): (number, number)
 	for _, n in nodes do
 		by_id[n.id] = n
 	end
-	local radius = { brain = draw.BRAIN_D / 2, orchestrator = draw.HUB_D / 2, chat = draw.R_RING }
+	local radius = { brain = draw.BRAIN_D / 2, orchestrator = draw.HUB_D / 2, machine = draw.HUB_D / 2, chat = draw.R_RING }
 	-- (A hair's tolerance: the line sampling's.)
 	local e = 1.5
 	local chats, named = 0, 0
@@ -709,4 +709,80 @@ test("force graph: a pair with a message in flight is one line, its arc, plain a
 	expect(`{pair} lit {e.lit[pair]}`).to_be(`{pair} lit arc`)
 	app:set_state("control_map_force_hover", nil)
 	app:frames(3)
+end)
+
+
+-- The pivot: machines as the hubs, orchestrators as the colour. Kept; its
+-- own places and pins; switching lays it out once, then nothing runs.
+local function pivot(app: any, to: string)
+	app:set_state("control_map_force_pivot", to)
+	settle(app, 240)
+	app:frames(25)
+end
+test("force pivot: machines as hubs, every thread off its machine, the legend the orchestrators; then still", function()
+	local app = open()
+	settle(app, 240)
+	pivot(app, "machine")
+	local d = read_labels(app)
+	local kinds, machines = {}, {}
+	for _, n in d.nodes do
+		kinds[n.kind] = (kinds[n.kind] or 0) + 1
+		if n.kind == "machine" then
+			machines[n.id] = true
+		end
+	end
+	expect((kinds.machine or 0) >= 2).to_be(true)
+	expect(kinds.orchestrator).to_be(nil)
+	-- (Each thread hangs off a machine, or the Brain.)
+	local parent_of = {}
+	for _, l in d.links do
+		if machines[l.a] or l.a == "orc-brain" then
+			parent_of[l.b] = true
+		end
+	end
+	for _, n in d.nodes do
+		if n.kind == "chat" then
+			expect(`{n.id} {parent_of[n.id] == true}`).to_be(`{n.id} true`)
+		end
+	end
+	check_labels(app, "machines pivot")
+	-- (The legend: the orchestrators.)
+	expect(app:count("#control-widget-map >> .orch-force-legend-item") >= 3).to_be(true)
+	-- Still once laid out.
+	app:wait(1200)
+	app:frames(2)
+	local a = stats(app)
+	app:frames(60)
+	local b = stats(app)
+	expect(b.steps).to_be(a.steps)
+	expect(b.draws).to_be(a.draws)
+	pivot(app, "orchestrator")
+end)
+
+test("force pivot: kept; each pivot its own places and pins", function()
+	local app = open()
+	settle(app, 240)
+	-- A pin on the orchestrators pivot.
+	for _ = 1, 8 do
+		app:command("map_force_drag_engchat_step")
+		app:frames(1)
+	end
+	app:command("map_force_drag_engchat_end")
+	app:frames(20)
+	app:command("map_force_read")
+	local at = app:state("force_places")["eng2"]
+	expect(app:state("control_map_force_pins")["eng2"]).to_be(true)
+	pivot(app, "machine")
+	expect(app:state("control_map_force_pivot")).to_be("machine")
+	expect((app:state("control_map_force_pins_machine") or {})["eng2"]).to_be(nil)
+	-- (A relaunch keeps the pivot.)
+	local again = mount("orch_map_fixture.luau")
+	again:frames(5)
+	expect(again:state("control_map_force_pivot")).to_be("machine")
+	-- Back: the orchestrators pivot's pin and place as they were.
+	pivot(app, "orchestrator")
+	app:command("map_force_read")
+	local back = app:state("force_places")["eng2"]
+	expect(app:state("control_map_force_pins")["eng2"]).to_be(true)
+	expect(math.abs(back[1] - at[1]) < 0.5 and math.abs(back[2] - at[2]) < 0.5).to_be(true)
 end)

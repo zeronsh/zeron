@@ -24,6 +24,7 @@
 local Icon = require("@self/icon")
 local IconButton = require("@self/icon_button").IconButton
 local HoverCard = require("@self/hover_card")
+local Segmented = require("@self/segmented")
 local status = require("@self/status")
 local locale = require("@self/locale")
 local motion = require("@self/motion")
@@ -41,6 +42,19 @@ local M = {}
 
 -- Where each node last settled, by id: { x, y } (kept on this device).
 M.places = ui.persist("control_map_force_places", {} :: { [string]: { number } })
+-- The pivot: "orchestrator" (orchestrators the hubs, machines the colour)
+-- or "machine" (machines the hubs, orchestrators the colour). Kept; each
+-- its own places and pins.
+M.PIVOTS = { "orchestrator", "machine" }
+M.pivot = ui.persist("control_map_force_pivot", "orchestrator")
+M.places_m = ui.persist("control_map_force_places_machine", {} :: { [string]: { number } })
+M.pins_m = ui.persist("control_map_force_pins_machine", {} :: { [string]: boolean })
+function M.places_of(): any
+	return if M.pivot:peek() == "machine" then M.places_m else M.places
+end
+function M.pins_of(): any
+	return if M.pivot:peek() == "machine" then M.pins_m else M.pins
+end
 -- The nodes pinned by hand (dropped there), by id (kept on this device).
 M.pins = ui.persist("control_map_force_pins", {} :: { [string]: boolean })
 -- The node the pointer is on.
@@ -74,6 +88,10 @@ end
 -- chat not heard yet shows while it's new).
 function M.gone(world: any, keep: { [string]: any }?): (id: string) -> boolean
 	local chats = world.chats or {}
+	local devices: { [string]: boolean } = {}
+	for _, d in world.devices or {} do
+		devices[d.id] = true
+	end
 	local leads: { [string]: boolean } = {}
 	for _, o in (world.now or {}).orchestrators or {} do
 		leads[o.id] = not o.archived
@@ -81,6 +99,10 @@ function M.gone(world: any, keep: { [string]: any }?): (id: string) -> boolean
 	return function(id: string): boolean
 		if keep and keep[id] then
 			return false
+		end
+		-- (A machine's hub: gone with its machine.)
+		if string.sub(id, 1, #fm.MACHINE) == fm.MACHINE then
+			return not devices[string.sub(id, #fm.MACHINE + 1)]
 		end
 		local c = chats[id]
 		if c then
@@ -95,7 +117,7 @@ end
 function M.prune(world: any, model: any?): number
 	local gone = M.gone(world, model and model.index)
 	local dropped = 0
-	for _, st in { M.places :: any, M.pins :: any } do
+	for _, st in { M.places :: any, M.pins :: any, M.places_m :: any, M.pins_m :: any } do
 		local cur = st:peek() or {}
 		local out, n = {}, 0
 		for id, v in cur do
@@ -128,6 +150,9 @@ local PLACES_MAX = 4000
 local PRUNE_MS = 3000
 -- A frame's share of placing the threads' names (seconds).
 local NAME_SLICE = 0.003
+-- A machine's hub on the machines pivot: Material's Clover (four leaves),
+-- never a cookie (an orchestrator's).
+local MACHINE_SHAPE = "clover4"
 -- What a secondary click on the space (no node) is, for its menu.
 local BACKGROUND = "force:background"
 local TILE_H = kit.TILE_H
@@ -267,7 +292,7 @@ M.View = ui.component(function(props: {
 		-- (Kept for every node seen, so a node shown again, or another
 		-- world's, opens where it was; at most PLACES_MAX, the web's own
 		-- first.)
-		local kept = table.clone(M.places:peek() or {})
+		local kept = table.clone(M.places_of():peek() or {})
 		local n_kept = 0
 		for _ in kept do
 			n_kept += 1
@@ -278,7 +303,7 @@ M.View = ui.component(function(props: {
 		for id, at in sim.positions(s) do
 			kept[id] = at
 		end
-		M.places:set(kept :: any)
+		M.places_of():set(kept :: any)
 		-- (Fitted after a web's own settling, never after a drag: what's
 		-- shown stays where it is.)
 		if not moved_view and not dragged_since then
@@ -384,8 +409,10 @@ M.View = ui.component(function(props: {
 			end
 		end)
 	end)
+	local built_pivot: string? = nil
 	local function rebuild(world: any, comms: { any })
-		local next_m = fm.build(world, comms, world.clock or os.time())
+		local pivot = M.pivot:peek()
+		local next_m = fm.build(world, comms, world.clock or os.time(), pivot)
 		if next_m.sig == fmodel.sig then
 			-- The same web: what changed taken in place. A state alone (a
 			-- live push): the status layer drawn again, nothing else; a
@@ -414,7 +441,7 @@ M.View = ui.component(function(props: {
 		local t0 = os.clock()
 		local nodes: { sim.Node } = table.create(#next_m.nodes) :: any
 		for i, n in next_m.nodes do
-			nodes[i] = { id = n.id, parent = if n.parent > 0 then n.parent else nil, mass = if n.kind == "brain" then 4 elseif n.kind == "orchestrator" then 2.5 else 1, fixed = n.kind == "brain" }
+			nodes[i] = { id = n.id, parent = if n.parent > 0 then n.parent else nil, mass = if n.kind == "brain" then 4 elseif n.kind == "orchestrator" or n.kind == "machine" then 2.5 else 1, fixed = n.kind == "brain" }
 		end
 		local links: { sim.Link } = table.create(#next_m.links) :: any
 		for i, l in next_m.links do
@@ -426,14 +453,19 @@ M.View = ui.component(function(props: {
 		local dense = math.clamp(1 - (#nodes - 60) / 400, 0.7, 1)
 		local next_s = sim.new(nodes, links, 7, { aspect = aspect, dense = dense })
 		-- (Where they were: this web, else kept from before.)
-		local from: { [string]: any } = table.clone(M.places:peek() or {})
-		for i = 1, s.n do
-			from[s.ids[i]] = { s.x[i], s.y[i] }
+		local from: { [string]: any } = table.clone(M.places_of():peek() or {})
+		-- (The web as it stands, on the same pivot: a pivot's own places
+		-- are never the other's.)
+		if pivot == built_pivot then
+			for i = 1, s.n do
+				from[s.ids[i]] = { s.x[i], s.y[i] }
+			end
 		end
+		built_pivot = pivot
 		local fresh = sim.place(next_s, from)
 		-- (Pinned ones held where they were dropped; a pin of a node not
 		-- shown kept for when it is, till the data says it's gone.)
-		for id in M.pins:peek() or {} do
+		for id in M.pins_of():peek() or {} do
 			local i = next_s.index[id]
 			if i then
 				sim.pin(next_s, i, true)
@@ -510,6 +542,7 @@ M.View = ui.component(function(props: {
 		local comms = props.comms() or {}
 		chats_now = world.chats or {}
 		width:get()
+		M.pivot:get()
 		rebuild(world, comms)
 	end)
 
@@ -540,6 +573,19 @@ M.View = ui.component(function(props: {
 	end
 	local function alpha(hex: string, a: number): string
 		return string.sub(hex, 1, 7) .. string.format("%02x", math.clamp(math.floor(a * 255 + 0.5), 0, 255))
+	end
+	-- An orchestrator's hue as a soft fill (the machines' tone), by theme.
+	local soft_made: { [string]: string } = {}
+	local function soft_hue(h: number): string
+		local key = `{ui.theme.current:peek()}/{h}`
+		local kept = soft_made[key]
+		if not kept then
+			local _, _, deg = fpal.hue_of(string.sub(hue.canvas(h, 1), 1, 7))
+			local tone = if is_dark() then fpal.TONE.dark else fpal.TONE.light
+			kept = fpal.oklch(tone.l, tone.c, deg)
+			soft_made[key] = kept
+		end
+		return kept
 	end
 	local function palette(): any
 		local theme = ui.theme.current:get()
@@ -577,9 +623,12 @@ M.View = ui.component(function(props: {
 		table.clear(node_line)
 		table.clear(node_edge)
 		local fills = machine_fills()
+		local by_machine = M.pivot:peek() ~= "machine"
 		for i, n in fmodel.nodes do
 			local a = if n.kind == "chat" then n.fade / 10 else 1
-			local f = fills[n.device or ""]
+			-- (Its machine's colour; on the machines pivot, a thread's its
+			-- orchestrator's hue, soft, and a machine hub its own colour.)
+			local f = if by_machine or n.kind == "machine" then fills[n.device or ""] else (if n.hue then soft_hue(n.hue) else nil)
 			if f then
 				node_fill[i] = alpha(f, a)
 				node_mark[i] = alpha(fpal.mark_ink(f), a)
@@ -587,9 +636,11 @@ M.View = ui.component(function(props: {
 				node_fill[i] = pal.body
 				node_mark[i] = alpha(pal.fg, a)
 			end
-			node_line[i] = if n.hue then hue.canvas(n.hue, if n.kind == "orchestrator" then 0.55 else 0.5) else pal.weak
+			node_line[i] = if n.hue then hue.canvas(n.hue, if n.kind == "orchestrator" then 0.55 else 0.5) elseif n.kind == "machine" and f then alpha(f, 0.6) else pal.weak
 			if n.kind == "orchestrator" then
 				node_edge[i] = if n.hue then hue.canvas(n.hue, 1) else pal.secondary
+			elseif n.kind == "machine" then
+				node_edge[i] = pal.secondary
 			end
 		end
 		return pal
@@ -682,7 +733,7 @@ M.View = ui.component(function(props: {
 				kind = n.kind,
 				x = s.x[i],
 				y = s.y[i],
-				r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING,
+				r = if n.kind == "brain" then R_BRAIN elseif n.kind == "chat" then R_RING else R_HUB,
 				title = if n.kind == "brain" then locale.s("ds.orch.map.brain") else (n.title or ""),
 				hx = if p > 0 then s.x[p] else nil,
 				hy = if p > 0 then s.y[p] else nil,
@@ -725,6 +776,9 @@ M.View = ui.component(function(props: {
 			local x, y = s.x[i], s.y[i]
 			if n.kind == "brain" then
 				shapes[i] = draw.shape("ghostish", x, y, draw.BRAIN_D)
+			elseif n.kind == "machine" then
+				hub_shape[i] = MACHINE_SHAPE
+				shapes[i] = { draw.shape(MACHINE_SHAPE, x, y, draw.HUB_D), draw.shape(MACHINE_SHAPE, x, y, draw.HUB_GAP_D), draw.shape(MACHINE_SHAPE, x, y, draw.HUB_FILL_D) }
 			elseif n.kind == "orchestrator" then
 				local shape = draw.cookie_of(crew_of(i))
 				hub_shape[i] = shape
@@ -880,7 +934,7 @@ M.View = ui.component(function(props: {
 				else
 					c:circle(nx, ny, R_BRAIN, p.brain)
 				end
-			elseif n.kind == "orchestrator" then
+			elseif n.kind == "orchestrator" or n.kind == "machine" then
 				-- (Its outline in its hue, following its shape; a gap; its
 				-- machine's fill.)
 				if full then
@@ -944,7 +998,7 @@ M.View = ui.component(function(props: {
 					moving_drawn += 1
 					if n.kind == "brain" then
 						c:circle(x[i], y[i], R_BRAIN, p.brain)
-					elseif n.kind == "orchestrator" then
+					elseif n.kind == "orchestrator" or n.kind == "machine" then
 						c:circle(x[i], y[i], R_HUB, node_edge[i])
 						c:circle(x[i], y[i], draw.HUB_GAP_D / 2, p.bg)
 						c:circle(x[i], y[i], draw.HUB_FILL_D / 2, node_fill[i])
@@ -986,7 +1040,7 @@ M.View = ui.component(function(props: {
 			if n.kind == "brain" then
 				c:stroke(draw.shape("ghostish", nx, ny, draw.BRAIN_D + 9), p.lit, 1.6)
 				r = R_BRAIN
-			elseif n.kind == "orchestrator" then
+			elseif n.kind == "orchestrator" or n.kind == "machine" then
 				c:stroke(draw.shape(hub_shape[i] or draw.cookie_of(crew_of(i)), nx, ny, draw.HUB_D + 8), p.lit, 1.6)
 				r = R_HUB
 			else
@@ -1128,7 +1182,7 @@ M.View = ui.component(function(props: {
 		local z = view:peek().zoom
 		local best, best_d = nil, math.huge
 		for i, n in fmodel.nodes do
-			local r = (if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING) + 4 / z
+			local r = (if n.kind == "brain" then R_BRAIN elseif n.kind == "chat" then R_RING else R_HUB) + 4 / z
 			local dx, dy = s.x[i] - wx, s.y[i] - wy
 			local d = dx * dx + dy * dy
 			if d <= r * r and d < best_d then
@@ -1180,8 +1234,8 @@ M.View = ui.component(function(props: {
 		-- pins nothing.)
 		if dropped ~= false and not s.fixed[i] then
 			sim.pin(s, i, true)
-			if not (M.pins:peek() or {})[s.ids[i]] then
-				M.pins:set_key({ s.ids[i] }, true)
+			if not (M.pins_of():peek() or {})[s.ids[i]] then
+				M.pins_of():set_key({ s.ids[i] }, true)
 			end
 		end
 		if not settled:peek() then
@@ -1197,7 +1251,7 @@ M.View = ui.component(function(props: {
 	-- into the web round their parents.
 	local function unpin(which: (i: number) -> boolean)
 		local woke: { number } = {}
-		local pins = table.clone(M.pins:peek() or {})
+		local pins = table.clone(M.pins_of():peek() or {})
 		for i = 1, s.n do
 			if s.pinned[i] and which(i) then
 				sim.pin(s, i, false)
@@ -1206,7 +1260,7 @@ M.View = ui.component(function(props: {
 			end
 		end
 		if #woke > 0 then
-			M.pins:set(pins :: any)
+			M.pins_of():set(pins :: any)
 			wake(woke)
 		end
 	end
@@ -1321,7 +1375,7 @@ M.View = ui.component(function(props: {
 		end
 		if n.kind == "chat" then
 			props.on_open_chat(id)
-		else
+		elseif n.kind ~= "machine" then
 			props.on_open_orchestrator(id)
 		end
 	end
@@ -1356,7 +1410,7 @@ M.View = ui.component(function(props: {
 		end
 		local v = view:peek()
 		local n = fmodel.nodes[i]
-		local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "orchestrator" then R_HUB else R_RING
+		local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "chat" then R_RING else R_HUB
 		return s.x[i] * v.zoom + v.x, s.y[i] * v.zoom + v.y, r * v.zoom
 	end
 
@@ -1648,6 +1702,15 @@ M.View = ui.component(function(props: {
 			end
 		end
 		local out = {}
+		-- (On the machines pivot: the orchestrators, by their hue.)
+		if M.pivot:get() == "machine" then
+			for _, n in fmodel.nodes do
+				if n.lead_of and n.hue then
+					table.insert(out, { id = n.id, name = n.title, color = soft_hue(n.hue) })
+				end
+			end
+			return out
+		end
 		for _, m in fmodel.machines do
 			if used[m.id] and fills[m.id] then
 				table.insert(out, { id = m.id, name = m.name, color = fills[m.id] })
@@ -1787,8 +1850,9 @@ M.View = ui.component(function(props: {
 						M.unpin_all()
 					end } }
 				end
-				local base = if props.menu then props.menu(id) else nil
 				local i = fmodel.index[id]
+				-- (A machine's hub has no menu of its own: its pins.)
+				local base = if props.menu and not (i and fmodel.nodes[i].kind == "machine") then props.menu(id) else nil
 				if i and fmodel.nodes[i].kind ~= "chat" then
 					local out = table.clone(base or {})
 					table.insert(out, { separator = true })
@@ -1914,6 +1978,23 @@ M.View = ui.component(function(props: {
 				ui.each(legend, legend_item, { key = function(item: any): string
 					return item.id
 				end, class = "orch-force-legend", absolute = true, left = 10, bottom = 8, gap = "$space.3", direction = "row", pointer_events = "none" }),
+				-- The pivot, at the bottom right: orchestrators as the hubs (their
+				-- machines the colour), or machines (their orchestrators').
+				ui.div {
+					class = "orch-force-pivot",
+					absolute = true,
+					right = 8,
+					bottom = 6,
+					Segmented {
+						id = "orch-force-pivot",
+						value = M.pivot,
+						label = locale.t("ds.orch.map.pivot"),
+						options = {
+							{ value = "orchestrator", label = locale.t("ds.orch.map.pivot_orchestrators") },
+							{ value = "machine", label = locale.t("ds.orch.map.pivot_machines") },
+						},
+					},
+				},
 				-- Fit, at the top right.
 				ui.row {
 					absolute = true,

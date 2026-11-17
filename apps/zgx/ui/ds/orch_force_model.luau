@@ -34,7 +34,9 @@ M.LIVE_S = 90
 
 export type Node = {
 	id: string,
-	kind: string, -- "brain" | "orchestrator" | "chat"
+	kind: string, -- "brain" | "orchestrator" | "machine" | "chat"
+	-- (Machine pivot: a thread that's an orchestrator's own.)
+	lead_of: boolean?,
 	title: string,
 	device: string?,
 	hue: number?, -- its orchestrator's (a chat's lead's)
@@ -66,7 +68,13 @@ export type Model = {
 	sig: string,
 }
 
-function M.build(world: any, comms: { any }?, now: number?): Model
+-- `pivot`: "orchestrator" (the hubs are the orchestrators, colour says
+-- the machine) or "machine" (the hubs are the machines, each a "machine"
+-- node `machine:<device>`, the Brain dump linked to them; every thread,
+-- an orchestrator's own too, hangs off its machine, coloured by its
+-- orchestrator's hue).
+M.MACHINE = "machine:"
+function M.build(world: any, comms: { any }?, now: number?, pivot: string?): Model
 	local fleet = model.fleet(world)
 	local chats = world.chats or {}
 	local t = now or os.time()
@@ -118,6 +126,59 @@ function M.build(world: any, comms: { any }?, now: number?): Model
 		end
 		return a.id < b.id
 	end)
+	if pivot == "machine" then
+		-- The Brain dump in the middle; a hub a machine (in the machines'
+		-- order); every thread off its machine, an orchestrator's own as a
+		-- thread wearing its hue.
+		local brain_th: any = nil
+		for _, th in leads do
+			if th.id == brain then
+				brain_th = th
+			end
+		end
+		if brain_th then
+			add({ id = brain_th.id, kind = "brain", title = brain_th.title, device = brain_th.device, hue = brain_th.hue, parent = 0, own = false, provider = "other", fade = 10, done = 0, total = 0 })
+		end
+		local hub_of: { [string]: number } = {}
+		for _, m in fleet.machines do
+			local any_here = false
+			for _, g in m.groups do
+				for _, th in g.threads do
+					if th.id ~= brain then
+						any_here = true
+					end
+				end
+			end
+			if any_here then
+				add({ id = M.MACHINE .. m.id, kind = "machine", title = m.name or m.id, device = m.id, parent = if brain then 1 else 0, own = false, provider = "other", fade = 10, done = 0, total = 0 })
+				hub_of[m.id] = #out.nodes
+			end
+		end
+		for _, list in { leads, rest } do
+			for _, th in list do
+				if th.id ~= brain then
+					local d, tot = todo(th.id)
+					local lead = if th.kind == "orchestrator" then th.id else th.orchestrator
+					add({
+						id = th.id,
+						kind = "chat",
+						title = th.title,
+						device = th.device,
+						hue = th.hue,
+						lead = lead,
+						parent = hub_of[th.device or ""] or (if brain then 1 else 0),
+						own = lead == nil,
+						lead_of = th.kind == "orchestrator",
+						provider = provider(chats[th.id]),
+						fade = if th.kind == "orchestrator" then 10 else tenths(th),
+						done = d,
+						total = tot,
+					} :: any)
+				end
+			end
+		end
+		leads, rest = {}, {}
+	end
 	for _, th in leads do
 		local is_brain = th.id == brain
 		add({
@@ -158,7 +219,7 @@ function M.build(world: any, comms: { any }?, now: number?): Model
 	-- link, longer).
 	for i, n in out.nodes do
 		if n.parent > 0 then
-			table.insert(out.links, { a = n.parent, b = i, strong = true, hub = n.kind == "orchestrator" })
+			table.insert(out.links, { a = n.parent, b = i, strong = true, hub = n.kind == "orchestrator" or n.kind == "machine" })
 		end
 	end
 	-- Weak: who talked to whom lately (comms), an open ask to its
