@@ -241,6 +241,97 @@ ui.command { id = "sign_unread", title = "Signing: unread", run = function()
 		c.status = "done"
 	end)
 end }
+-- Archived, as the engine archives it: off the live lists, into the
+-- archived one (`stale`: its row still listed among its parent's children
+-- too, as a crew chat's is); and back.
+local function archive(id: string, stale: boolean)
+	local now = table.clone(sessions.now:peek() :: any)
+	local row = nil
+	local function take(list: { any }): { any }
+		local out = {}
+		for _, c in list do
+			if c.id == id then
+				row = c
+				if not stale then
+					continue
+				end
+			end
+			table.insert(out, c)
+		end
+		return out
+	end
+	now.chats = take(now.chats or {})
+	local kids = {}
+	for parent, list in now.children or {} do
+		kids[parent] = take(list)
+	end
+	now.children = kids
+	if row then
+		local archived = table.clone(now.archived or {})
+		table.insert(archived, row)
+		now.archived = archived
+	end
+	sessions.now:set(now)
+end
+ui.command { id = "sign_archive", title = "Signing: archived", run = function()
+	archive("th-reins-sign", false)
+end }
+ui.command { id = "sign_archive_stale", title = "Signing: archived, still a child", run = function()
+	archive("th-reins-sign", true)
+end }
+ui.command { id = "sign_unarchive", title = "Signing: unarchived", run = function()
+	local now = table.clone(sessions.now:peek() :: any)
+	local archived, row = {}, nil
+	for _, c in now.archived or {} do
+		if c.id == "th-reins-sign" then
+			row = c
+		else
+			table.insert(archived, c)
+		end
+	end
+	now.archived = archived
+	if row then
+		-- (Back with the live ones, in its parent's children if it's still
+		-- there, else among the chats; moved now.)
+		local back = table.clone(row)
+		back.updated = os.time()
+		local found = false
+		local kids = {}
+		for parent, list in now.children or {} do
+			local out = {}
+			for _, c in list do
+				if c.id == back.id then
+					c = back
+					found = true
+				end
+				table.insert(out, c)
+			end
+			kids[parent] = out
+		end
+		now.children = kids
+		if not found then
+			local chats = table.clone(now.chats or {})
+			table.insert(chats, back)
+			now.chats = chats
+		end
+	end
+	sessions.now:set(now)
+end }
+-- The Reins release orchestrator archived (its crew: two working, Code
+-- signing idle).
+ui.command { id = "reins_archive", title = "Reins release: archived", run = function()
+	local now = table.clone(orchestration.now:peek() :: any)
+	local list = {}
+	for _, o in now.orchestrators or {} do
+		if o.id == "orc-reins" then
+			o = table.clone(o)
+			o.archived = true
+		end
+		table.insert(list, o)
+	end
+	now.orchestrators = list
+	orchestration.now:set(now)
+end }
 -- An open ask of its.
 ui.command { id = "sign_ask", title = "Signing: asks", run = function()
 	local now = table.clone(orchestration.now:peek() :: any)
