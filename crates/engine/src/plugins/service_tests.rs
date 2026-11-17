@@ -145,7 +145,7 @@ async fn a_tool_call_says_its_chats_folder_with_sessions_read() {
     let f = fixture();
     let docs = tempfile::tempdir().unwrap();
     let workspace = crate::WorkspaceHost::open(
-        Arc::new(zeron_sync::DocsStore::open(&docs.path().join("docs")).unwrap()),
+        Arc::new(zeron_sync::DocsStore::open(docs.path().join("docs")).unwrap()),
         crate::workspace_host::WorkspaceHostConfig {
             device_id: "dev-1".into(),
             device_name: "Laptop".into(),
