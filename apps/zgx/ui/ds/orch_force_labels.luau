@@ -48,8 +48,8 @@ export type Label = {
 
 M.LH_HUB = 16
 M.LH = 15
--- A name's ground round its text.
-M.PAD_X = 4
+-- What a name takes round its text: its halo, and a hair.
+M.PAD_X = 2
 M.PAD_Y = 1
 -- An orchestrator's name: lines at most this wide; a thread's one line at
 -- most this wide before it wraps, its two lines this wide.
