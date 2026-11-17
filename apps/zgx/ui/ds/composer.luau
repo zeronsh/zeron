@@ -41,6 +41,7 @@ local Dropdown = require("@self/dropdown")
 local ModelPicker = require("@self/model_picker")
 local Switch = require("@self/switch")
 local Menu = require("@self/menu")
+local corridor = require("@self/corridor")
 local IconButton = require("@self/icon_button").IconButton
 local status = require("@self/status")
 local markdown = require("@self/markdown_edit")
@@ -475,8 +476,29 @@ local function list_of(given: any): any
 	return given or {}
 end
 
+-- The rows of one panel that open their choices beside it: one open at a
+-- time, and the way to the open one kept (ds/corridor): a row the pointer
+-- crosses heading for it waits before taking over, the open one held open
+-- meanwhile; stopping on the row, or turning back, hands over to it.
+type WayRow = { open: State<boolean>, panel: Ref?, hover: ((inside: boolean) -> ())?, under: boolean }
+type Way = {
+	rows: { WayRow },
+	-- Where the pointer last was on the open one's row.
+	origin: { x: number, y: number }?,
+	-- The row waiting, where the pointer was when its wait was renewed,
+	-- and how to stop the wait.
+	pending: WayRow?,
+	pending_at: { x: number, y: number }?,
+	stop_wait: (() -> ())?,
+	-- The open one, held open while the pointer heads for it.
+	held: WayRow?,
+}
+local function way(): Way
+	return { rows = {} }
+end
+
 local function submenu(
-	siblings: { State<boolean> },
+	siblings: Way,
 	label: Message,
 	value: State<string?>,
 	choices: { Choice } | () -> { Choice },
@@ -500,13 +522,48 @@ local function submenu(
 		-- (None yet, as a list still coming: a blank row.)
 		return listed[fallback] or listed[1] or { value = "", label = "" }
 	end
-	local own: State<boolean>? = nil
+	local me: WayRow? = nil
 	local function close_siblings()
-		for _, open in siblings do
-			if open ~= own then
-				open:set(false)
+		for _, r in siblings.rows do
+			if r ~= me then
+				r.open:set(false)
 			end
 		end
+	end
+	local function cancel_wait()
+		local stop = siblings.stop_wait
+		siblings.stop_wait = nil
+		siblings.pending = nil
+		siblings.pending_at = nil
+		if stop then
+			stop()
+		end
+	end
+	-- Let go of the open one: left to its own closing as the pointer is
+	-- off its row (not when it's this one, the pointer on it).
+	local function release()
+		local held = siblings.held
+		siblings.held = nil
+		if held and held ~= me and held.hover then
+			held.hover(false)
+		end
+	end
+	local function hold(r: WayRow)
+		if siblings.held ~= r then
+			release()
+			siblings.held = r
+			if r.hover then
+				r.hover(true)
+			end
+		end
+	end
+	local function other_open(): WayRow?
+		for _, r in siblings.rows do
+			if r ~= me and r.open:peek() then
+				return r
+			end
+		end
+		return nil
 	end
 	return Dropdown {
 		on_open = close_siblings,
@@ -522,8 +579,92 @@ local function submenu(
 		-- row it opens from sits 5 inside it, its inset and border).
 		placement = { side = "right", align = "start", offset = 7 },
 		trigger = function(menu: Dropdown.Menu): Node
-			own = menu.open
-			table.insert(siblings, menu.open)
+			local row: WayRow = { open = menu.open, panel = menu.panel, hover = menu.on_hover, under = false }
+			me = row
+			table.insert(siblings.rows, row)
+			-- (Gone, as a row shown again is a new one: out of the way.)
+			ui.on_cleanup(function()
+				if siblings.pending == row then
+					cancel_wait()
+				end
+				if siblings.held == row then
+					siblings.held = nil
+				end
+				local i = table.find(siblings.rows, row)
+				if i then
+					table.remove(siblings.rows, i)
+				end
+			end)
+			-- This one open now, the others closed.
+			local function take()
+				cancel_wait()
+				release()
+				close_siblings()
+				if not menu.open:peek() then
+					menu.toggle()
+				end
+			end
+			-- The pointer on this row while another's choices are open:
+			-- heading for them, it waits (renewed while the pointer keeps
+			-- on toward them); else, or turning back, it takes over.
+			local function crossing(p: { x: number, y: number }?)
+				local open = other_open()
+				local origin = siblings.origin
+				local el = if open and open.panel then open.panel:peek() else nil
+				if not (open and origin and el) then
+					take()
+					return
+				end
+				if not p then
+					-- (Just entered: where it's heading is for its first
+					-- move to say, or the wait's end.)
+					if siblings.pending ~= row then
+						cancel_wait()
+						siblings.pending = row
+						hold(open)
+						siblings.stop_wait = ui.after(corridor.GRACE, function()
+							siblings.stop_wait = nil
+							if siblings.pending == row then
+								siblings.pending = nil
+								if row.under then
+									take()
+								else
+									release()
+								end
+							end
+						end)
+					end
+					return
+				end
+				local left = el.x ~= nil and (el.x :: number) < origin.x
+				if not corridor.toward(origin, p, el, left) then
+					take()
+					return
+				end
+				local dir = if left then -1 else 1
+				local was = if siblings.pending == row then siblings.pending_at else nil
+				local forward = if was then (p.x - was.x) * dir else corridor.NUDGE
+				if siblings.pending == row and was and forward <= -corridor.NUDGE then
+					take()
+				elseif siblings.pending ~= row or not was or forward >= corridor.NUDGE then
+					cancel_wait()
+					siblings.pending = row
+					siblings.pending_at = p
+					hold(open)
+					siblings.stop_wait = ui.after(corridor.GRACE, function()
+						siblings.stop_wait = nil
+						if siblings.pending == row then
+							siblings.pending = nil
+							siblings.pending_at = nil
+							if row.under then
+								take()
+							else
+								release()
+							end
+						end
+					end)
+				end
+			end
 			return ui.menu_item(Menu.look {
 				label = label,
 				bg = function()
@@ -531,21 +672,31 @@ local function submenu(
 				end,
 				-- A press opens it, as hovering does; one already open stays
 				-- open (a hover opened it just before), as a system menu's row.
-				on_click = function()
-					close_siblings()
-					if not menu.open:peek() then
-						menu.toggle()
-					end
-				end,
+				on_click = take,
 				on_hover = function(inside: boolean)
+					row.under = inside
 					if menu.on_hover then
 						menu.on_hover(inside)
 					end
 					if inside then
-						close_siblings()
-						if not menu.open:peek() then
-							menu.toggle()
+						if menu.open:peek() then
+							take()
+						else
+							crossing(nil)
 						end
+					elseif siblings.pending == row then
+						-- Off it on the way (into the choices, or away):
+						-- the open one to its own closing.
+						cancel_wait()
+						release()
+					end
+				end,
+				on_pointer_move = function(e: any)
+					local p = { x = e.x :: number, y = e.y :: number }
+					if menu.open:peek() then
+						siblings.origin = p
+					elseif row.under then
+						crossing(p)
 					end
 				end,
 				-- The choice's own tile (a project's hue or artwork), else its
@@ -645,7 +796,7 @@ local function work_in(
 	device: State<string?>?,
 	devices: ({ Device } | State<{ Device }> | () -> { Device })?
 ): Node
-	local siblings: { State<boolean> } = {}
+	local siblings = way()
 	local rows: { Node } = {
 		Menu.Heading { locale.t("ds.composer.work_in") },
 	}
