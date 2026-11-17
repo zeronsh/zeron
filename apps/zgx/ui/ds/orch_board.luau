@@ -218,15 +218,15 @@ local UP_NEXT, LATER = "planned", "inbox"
 local RANK: { [string]: number } = { urgent = 0, high = 1, normal = 2, low = 3 }
 local PRIORITIES = { "urgent", "high", "normal", "low" }
 
--- The least a column takes side by side: narrower than that for them all,
--- they stand in rows of `PER_ROW`; narrower than that for those, one under
--- another.
-local COLUMN_MIN = 160
+-- The least a column takes (a card as narrow fits all its rows,
+-- tests/orch_board_fit): narrower than that for them all side by side,
+-- they stand in rows of equal columns, as many a row as fit, the rows
+-- balanced (four: two and two); room for one alone, one under another.
+local COLUMN_MIN = 220
 -- The most cards a column shows until its cards are all shown.
 local CAP = 10
 -- The columns that stand only while they hold a card.
 local ONLY_HELD: { [string]: boolean } = { blocked = true }
-local PER_ROW = 3
 -- Each column's glyph at its head: how its cards stand.
 local COLUMN_GLYPH: { [string]: Icon.Name } = {
 	queued = "clock-circle",
@@ -2347,8 +2347,9 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 		}
 	end
 
-	-- Side by side where there's room; in rows of three where there's
-	-- less; one under another where there's little.
+	-- Side by side where there's room; in balanced rows of equal columns
+	-- where there's less (only those standing: an empty Blocked holds no
+	-- place); one under another where there's room for one.
 	local width = ui.use_state(0)
 	local function need(n: number): number
 		return n * COLUMN_MIN + (n - 1) * space("space.2", 8)
@@ -2369,10 +2370,26 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 	end
 	local mode = ui.computed(function(): string
 		local w = width:get()
-		if w <= 0 or w >= need(standing()) then
+		local n = standing()
+		if w <= 0 or w >= need(n) then
 			return "side"
 		end
-		return if w >= need(PER_ROW) then "rows" else "stacked"
+		local gap = space("space.2", 8)
+		local fit = math.floor((w + gap) / (COLUMN_MIN + gap))
+		if fit <= 1 then
+			return "stacked"
+		end
+		local rows = math.ceil(n / fit)
+		local per = math.ceil(n / rows)
+		-- (Which stand, in the key: one coming or going lays them out anew.)
+		local keys = {}
+		local lists = shown:get()
+		for _, c in columns do
+			if not ONLY_HELD[c.key] or #(lists[c.key] or {}) > 0 then
+				table.insert(keys, c.key)
+			end
+		end
+		return `rows:{per}:{table.concat(keys, ",")}`
 	end)
 	local function lanes(k: string): Node
 		if k == "stacked" then
@@ -2384,9 +2401,24 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 		end
 		-- (In rows, the last one's columns as wide as the rest: room kept
 		-- where it has fewer.)
-		local per = if k == "rows" then PER_ROW else #columns
+		local per, list = #columns, columns
+		local per_s, keys = string.match(k, "^rows:(%d+):(.*)$")
+		if per_s then
+			per = tonumber(per_s) :: number
+			local standing_keys: { [string]: boolean } = {}
+			for key in string.gmatch(keys, "[^,]+") do
+				standing_keys[key] = true
+			end
+			list = {}
+			for _, c in columns do
+				if standing_keys[c.key] then
+					table.insert(list, c)
+				end
+			end
+			k = "rows"
+		end
 		local rows: { Node } = {}
-		for from = 1, #columns, per do
+		for from = 1, #list, per do
 			local cells: { [any]: any } = {
 				class = "orch-board-side",
 				w_full = true,
@@ -2394,7 +2426,7 @@ local function later_group(col: Column, count: () -> number, cards: () -> { Item
 				items = "stretch",
 			}
 			for i = from, from + per - 1 do
-				local c = columns[i]
+				local c = list[i]
 				table.insert(cells, if c then column(c, k) else ui.div { grow = 1, basis = 0, min_w = COLUMN_MIN })
 			end
 			table.insert(rows, ui.row(cells))
