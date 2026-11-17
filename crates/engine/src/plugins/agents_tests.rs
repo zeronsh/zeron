@@ -37,6 +37,8 @@ pub(crate) fn account(id: &str, active: bool, used: f32) -> AgentAccount {
         switchable: true,
         saved_at: None,
         provider: None,
+        invalid: false,
+        invalid_reason: None,
     }
 }
 

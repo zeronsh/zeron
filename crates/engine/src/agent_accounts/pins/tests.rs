@@ -61,6 +61,7 @@ fn claude_slot(uuid: &str, email: &str, access: &str, expires_at: i64) -> Slot {
         saved_at: now_ms(),
         created_at: None,
         store_key: None,
+        user_id: None,
     }
 }
 
@@ -313,6 +314,7 @@ async fn a_pinned_muse_chat_runs_on_its_accounts_own_config_root() {
         saved_at: now_ms(),
         created_at: None,
         store_key: None,
+        user_id: None,
     };
     accounts.write_slot(&slot).unwrap();
     let env = PinRunEnvironment(accounts.clone());

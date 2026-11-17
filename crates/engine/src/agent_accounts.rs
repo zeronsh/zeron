@@ -37,7 +37,11 @@
 //! - **Cursor** — `~/.cursor/sdk/auth.json`: the Cursor SDK's credential store
 //!   (`StoredSdkCredentials`) holding the named, expiring user API key its
 //!   browser login mints. Deliberately SEPARATE from `cursor-agent login`'s
-//!   whole-account session tokens, which zeron never reads.
+//!   whole-account session tokens, which zeron never reads. Each login
+//!   mints a new key (revoking the one it replaces), so one account keeps
+//!   ONE slot — the newest key's (`supersede_cursor_slots`) — and a key
+//!   Cursor rejected or that expired is listed `invalid`: offered for
+//!   removal, never switched to.
 //! - **Antigravity** — its ACP server keeps one Google login per
 //!   `GEMINI_HOME`: a token blob in the macOS Keychain (service `gemini`) or
 //!   `antigravity-acp/acp_token.json`, plus the method in `settings.json`.
@@ -399,6 +403,12 @@ struct Slot {
     /// under (`openai`, `anthropic`, …). Swapping rewrites that entry only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     store_key: Option<String>,
+    /// Cursor only: the Cursor user the slot's key belongs to, learned from
+    /// the session its usage probe exchanges the key for. Its account key
+    /// may be the key's own digest (a store that names no email), so this
+    /// is what tells a re-login of the same account from another account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>,
 }
 
 /// A live detection result (before it's persisted into a slot).
@@ -1027,8 +1037,11 @@ impl AgentAccounts {
             self.snapshot_detected(HarnessId::Codex, &detected)?;
         }
         if let Some(detected) = self.detect_cursor() {
-            live(HarnessId::Cursor, &detected);
             self.snapshot_detected(HarnessId::Cursor, &detected)?;
+            // (A newer key of the same account may have just replaced the
+            // live one: the login in use is whatever the store holds now.)
+            let detected = self.detect_cursor().unwrap_or(detected);
+            live(HarnessId::Cursor, &detected);
             // The SDK's minted keys expire (90-day default) — an expired live
             // key fails every run with an auth error, so say so up front.
             if !self.cursor_live_usable() {
@@ -1114,10 +1127,18 @@ impl AgentAccounts {
             self.refresh_usage(&targets).await;
             // A probe can teach a slot who it is (Devin's key file names no
             // one): show that in this very list.
+            // A Cursor probe can learn a key's user, folding a re-login's
+            // slot into its account's earlier one (and the live key with it).
             for (harness, slots) in providers.iter_mut() {
-                if *harness == HarnessId::Devin {
+                if matches!(*harness, HarnessId::Devin | HarnessId::Cursor) {
                     *slots = self.read_slots(*harness);
                 }
+            }
+            if let Some(detected) = self.detect_cursor() {
+                active_keys.insert(
+                    HarnessId::Cursor,
+                    std::iter::once(detected.account_key).collect(),
+                );
             }
         }
         let now = now_ms();
@@ -1130,6 +1151,7 @@ impl AgentAccounts {
                 let active = active_set.is_some_and(|keys| keys.contains(&slot.account_key));
                 let entry = usage.get(&usage_key(harness, &slot.account_key));
                 let snapshot = entry.and_then(|entry| entry.usage.as_ref());
+                let invalid = invalid_reason(harness, slot, entry);
                 accounts.push(AgentAccount {
                     id: slot.id.clone(),
                     harness,
@@ -1164,6 +1186,8 @@ impl AgentAccounts {
                     switchable: harness != HarnessId::Hermes,
                     saved_at: (harness != HarnessId::Hermes).then_some(slot.saved_at),
                     provider: provider_group(harness, slot.store_key.as_deref()),
+                    invalid: invalid.is_some(),
+                    invalid_reason: invalid,
                 });
             }
             // A live login whose credentials we couldn't read has no slot — still
@@ -1188,6 +1212,8 @@ impl AgentAccounts {
                     switchable: false,
                     saved_at: None,
                     provider: provider_group(harness, u.store_key.as_deref()),
+                    invalid: false,
+                    invalid_reason: None,
                 });
             }
         }
@@ -1209,12 +1235,26 @@ impl AgentAccounts {
     /// credential pool and rotates through it itself — a running Hermes
     /// would write its own order back over any change — so zeron keeps it
     /// read-only (see [`stores`]).
+    ///
+    /// A login whose credential the provider rejected (`AgentAccount::invalid`)
+    /// is refused: switching to it would only break the agent. `force` (an
+    /// explicit ask, never an automatic switch) installs it anyway.
     pub async fn activate(
         &self,
         harness: HarnessId,
         account_id: &str,
     ) -> Result<AgentAccountsSnapshot, EngineError> {
-        let activated = self.activate_unpublished(harness, account_id).await;
+        self.activate_with(harness, account_id, false).await
+    }
+
+    /// [`Self::activate`], `force` installing a login known to be rejected.
+    pub async fn activate_with(
+        &self,
+        harness: HarnessId,
+        account_id: &str,
+        force: bool,
+    ) -> Result<AgentAccountsSnapshot, EngineError> {
+        let activated = self.activate_unpublished(harness, account_id, force).await;
         self.published(activated)
     }
 
@@ -1222,6 +1262,7 @@ impl AgentAccounts {
         &self,
         harness: HarnessId,
         account_id: &str,
+        force: bool,
     ) -> Result<AgentAccountsSnapshot, EngineError> {
         if harness == HarnessId::Hermes {
             return Err(EngineError::Other(
@@ -1241,7 +1282,19 @@ impl AgentAccounts {
         // The pre-swap snapshot must hold the CURRENT tokens (the CLI may have
         // rotated its refresh token seconds ago) — never a cached read.
         *lock(&self.inner.claude_credentials) = None;
-        self.list_locked(false).await?;
+        let listed = self.list_locked(false).await?;
+        if !force
+            && let Some(row) = listed
+                .accounts
+                .iter()
+                .find(|a| a.harness == harness && a.id == account_id && a.invalid && !a.active)
+        {
+            let who = row.email.as_deref().unwrap_or("that account");
+            let why = row.invalid_reason.as_deref().unwrap_or("Key rejected — sign in again");
+            return Err(EngineError::Other(format!(
+                "Can't switch to {who}: {why}, or remove it."
+            )));
+        }
         let slot = self
             .read_slots(harness)
             .into_iter()
@@ -1486,7 +1539,8 @@ impl AgentAccounts {
         let store_key = slot.store_key.as_deref();
         let live = self.live_account_key(slot.harness, store_key).await;
         let usable = match slot.harness {
-            HarnessId::Cursor => self.cursor_live_usable(),
+            // (A live key Cursor already rejected is no login to keep.)
+            HarnessId::Cursor => self.cursor_live_usable() && !self.cursor_live_rejected(),
             _ => live.is_some() || self.has_live_entry(slot.harness, store_key),
         };
         if usable && live.as_deref() != Some(slot.account_key.as_str()) {
@@ -2521,6 +2575,7 @@ impl AgentAccounts {
             saved_at: now_ms(),
             created_at: None,
             store_key: None,
+            user_id: None,
         };
         let _ops = self.inner.ops.lock().await;
         self.write_slot(&slot)?;
@@ -2931,6 +2986,21 @@ impl AgentAccounts {
             .is_some_and(|auth| cursor_key_usable(&auth))
     }
 
+    /// Whether the live Cursor key is one its usage probe saw rejected.
+    fn cursor_live_rejected(&self) -> bool {
+        let Some(detected) = self.detect_cursor() else {
+            return false;
+        };
+        let Some(slot) =
+            self.read_slot(HarnessId::Cursor, &slot_id_for(HarnessId::Cursor, &detected.account_key))
+        else {
+            return false;
+        };
+        let usage = lock(&self.inner.usage);
+        let entry = usage.get(&usage_key(HarnessId::Cursor, &slot.account_key));
+        invalid_reason(HarnessId::Cursor, &slot, entry).is_some()
+    }
+
     fn write_cursor_auth(&self, credentials: &serde_json::Value) -> Result<(), EngineError> {
         let file = &self.inner.config.cursor_sdk_auth_file;
         if let Some(dir) = file.parent() {
@@ -2959,14 +3029,20 @@ impl AgentAccounts {
         }
         // A store without identity (Devin's bare key) must not overwrite the
         // identity a usage probe already wrote into the slot.
+        let existing = self.read_slot(harness, &id);
         let profile = match d.identity_known {
             true => d.profile.clone(),
-            false => self
-                .read_slot(harness, &id)
-                .map(|existing| existing.profile)
+            false => existing
+                .as_ref()
+                .map(|existing| existing.profile.clone())
                 .unwrap_or_else(|| d.profile.clone()),
         };
-        self.write_slot(&Slot {
+        // Who a Cursor key belongs to is learned from the key itself (its
+        // usage probe): kept while the key is, dropped with a new one.
+        let user_id = existing
+            .filter(|existing| existing.credentials == *credentials)
+            .and_then(|existing| existing.user_id);
+        let slot = Slot {
             id,
             harness,
             account_key: d.account_key.clone(),
@@ -2976,7 +3052,78 @@ impl AgentAccounts {
             saved_at: now_ms(),
             created_at: None,
             store_key: d.store_key.clone(),
-        })
+            user_id,
+        };
+        self.write_slot(&slot)?;
+        if harness == HarnessId::Cursor {
+            self.supersede_cursor_slots(&slot)?;
+        }
+        Ok(())
+    }
+
+    /// One Cursor account, one slot. A browser login mints a NEW key each
+    /// time (and Cursor revokes the one it replaces), and a store that names
+    /// no email keys its slot by the key's digest — so a re-login used to
+    /// leave the old slot behind, holding a dead key that broke Cursor again
+    /// when switched to. Every slot of `slot`'s account (same email, or the
+    /// same Cursor user once a probe has said) is folded into the one with
+    /// the newest key: the others are deleted, the survivor keeps the
+    /// oldest's place in the list, and if a superseded key was the live one
+    /// the newest goes live in its place.
+    fn supersede_cursor_slots(&self, slot: &Slot) -> Result<(), EngineError> {
+        let slots = self.read_slots(HarnessId::Cursor);
+        let same: Vec<&Slot> = slots
+            .iter()
+            .filter(|other| other.id == slot.id || same_cursor_account(other, slot))
+            .collect();
+        if same.len() < 2 {
+            return Ok(());
+        }
+        let Some(keep) = same.iter().copied().max_by_key(|s| cursor_key_age(s)) else {
+            return Ok(());
+        };
+        let live_key = read_json(&self.inner.config.cursor_sdk_auth_file)
+            .and_then(|auth| str_field(&auth, "apiKey"));
+        let mut place = keep.created_at.unwrap_or(keep.saved_at);
+        let mut was_live = false;
+        let dir = self.slots_dir(HarnessId::Cursor)?;
+        for old in same.iter().filter(|s| s.id != keep.id) {
+            place = place.min(old.created_at.unwrap_or(old.saved_at));
+            was_live |= live_key.is_some() && str_field(&old.credentials, "apiKey") == live_key;
+            tracing::info!(slot = %old.id, kept = %keep.id, "cursor: a re-login replaced an older key's slot");
+            remove_if_exists(&dir.join(format!("{}.json", old.id)))?;
+        }
+        if keep.created_at != Some(place) {
+            let mut moved = keep.clone();
+            moved.created_at = Some(place);
+            let json = serde_json::to_string_pretty(&moved)
+                .map_err(|e| EngineError::Other(format!("serialize slot: {e}")))?;
+            write_file_atomic(&dir.join(format!("{}.json", moved.id)), json.as_bytes(), true)?;
+        }
+        if was_live {
+            self.write_cursor_auth(&keep.credentials)?;
+        }
+        Ok(())
+    }
+
+    /// What a probe learned about who a Cursor key belongs to, saved into
+    /// its slot (which may then replace an older slot of the same account).
+    fn learn_cursor_user(&self, slot: &Slot, user_id: String) {
+        // (The slot as it is now: a list may have re-snapshotted it, or a
+        // re-login superseded it, since the probe started.)
+        let Some(mut current) = self.read_slot(HarnessId::Cursor, &slot.id) else {
+            return;
+        };
+        if current.credentials != slot.credentials || current.user_id.as_deref() == Some(&user_id) {
+            return;
+        }
+        current.user_id = Some(user_id);
+        let saved = self
+            .write_slot(&current)
+            .and_then(|()| self.supersede_cursor_slots(&current));
+        if let Err(err) = saved {
+            tracing::warn!(slot = %slot.id, error = %err, "cursor identity write-back failed");
+        }
     }
 
     /// One saved slot by id (`None` when missing or unparseable).
@@ -3504,6 +3651,11 @@ impl AgentAccounts {
         .await?;
         let access_token =
             str_field(&session, "accessToken").ok_or_else(|| schema_error("cursor", &session))?;
+        // The session names the Cursor user the key belongs to: what folds a
+        // re-login's slot into the account's earlier one.
+        if let Some(user_id) = jwt_claims(&access_token).and_then(|claims| str_field(&claims, "sub")) {
+            self.learn_cursor_user(slot, user_id);
+        }
         let body = probe_json(
             "cursor",
             "usage",
@@ -3888,6 +4040,8 @@ impl AntigravityLogin {
             switchable: false,
             saved_at: None,
             provider: None,
+            invalid: false,
+            invalid_reason: None,
         }
     }
 }
@@ -4281,6 +4435,48 @@ fn parse_cursor_auth(auth: serde_json::Value) -> Option<Detected> {
     })
 }
 
+/// Whether two Cursor slots are one Cursor account: the same email (as the
+/// SDK store names it, case aside), or the same user as their keys' sessions
+/// said. A slot that names neither matches only itself.
+fn same_cursor_account(a: &Slot, b: &Slot) -> bool {
+    let email = |slot: &Slot| {
+        str_field(&slot.credentials, "email")
+            .map(|email| email.trim().to_ascii_lowercase())
+            .filter(|email| !email.is_empty())
+    };
+    let same = |x: Option<String>, y: Option<String>| x.is_some() && x == y;
+    same(email(a), email(b)) || same(a.user_id.clone(), b.user_id.clone())
+}
+
+/// How recent a Cursor slot's key is: when the SDK minted it, then when it
+/// expires (later = newer at a fixed lifetime), then when the slot was made.
+fn cursor_key_age(slot: &Slot) -> (i64, i64, i64) {
+    let field = |name: &str| slot.credentials.get(name).and_then(|v| v.as_i64()).unwrap_or(0);
+    (
+        field("createdAtMs"),
+        field("apiKeyExpiresAtMs"),
+        slot.created_at.unwrap_or(slot.saved_at),
+    )
+}
+
+/// Why a saved login can't be used — `None` while it can. Cursor's keys are
+/// never refreshed, so one past its expiry, or one the provider rejected
+/// (401/403 on the probe, against these very credentials), stays dead until
+/// the account signs in again. Other agents refresh their tokens (or their
+/// CLI does), so a rejection there says nothing lasting.
+fn invalid_reason(harness: HarnessId, slot: &Slot, entry: Option<&UsageEntry>) -> Option<String> {
+    if harness != HarnessId::Cursor {
+        return None;
+    }
+    if str_field(&slot.credentials, "apiKey").is_some() && !cursor_key_usable(&slot.credentials) {
+        return Some("Key expired — sign in again".into());
+    }
+    let entry = entry?;
+    let rejected = matches!(entry.error, Some(ProbeError::Unauthorized { .. }))
+        && entry.credentials.as_deref() == Some(credentials_fingerprint(&slot.credentials).as_str());
+    rejected.then(|| "Key rejected — sign in again".into())
+}
+
 /// Present, parseable, and unexpired — what a run can actually use.
 fn cursor_key_usable(auth: &serde_json::Value) -> bool {
     str_field(auth, "apiKey").is_some()
@@ -4430,6 +4626,10 @@ fn usage_error_message(
         // revoked, whichever login it is.
         ProbeError::Unauthorized { .. } if harness == HarnessId::Devin => {
             "Signed out — sign in again".to_string()
+        }
+        // A Cursor key is never refreshed: rejected is revoked, live or not.
+        ProbeError::Unauthorized { .. } if harness == HarnessId::Cursor => {
+            "Key rejected — sign in again".to_string()
         }
         ProbeError::Unauthorized { .. } if active => {
             // The CLI owns (and refreshes) the live token; it just hasn't yet.
@@ -5345,6 +5545,7 @@ mod tests {
             saved_at: 0,
             created_at: None,
             store_key: None,
+            user_id: None,
         };
         assert!(codex_slot_auth(&slot).is_err());
         slot.credentials["tokens"]["account_id"] = serde_json::json!("account-alice");
@@ -6269,6 +6470,7 @@ mod login_tests {
             saved_at: now_ms(),
             created_at: None,
             store_key: None,
+            user_id: None,
         }
     }
 

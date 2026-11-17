@@ -112,11 +112,13 @@ pub struct CursorHarness {
     silence_timeout: Duration,
     /// Credential-scoped successful catalog, with bounded refresh and backoff.
     pub(crate) models_cache: catalog::Catalog,
-    /// Models whose catalog default is a Max Mode variant, from the latest
-    /// discovery. Their defaults are never sent: the backend can reject the
-    /// very variant the catalog marks default (verified live: Grok 4.7's
-    /// 500k default fails "Invalid parameters" while the bare id runs).
-    max_mode_defaults: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Each model's variants (its real parameter combinations), from the
+    /// latest discovery. Implicit parameters are filled from one of these,
+    /// never assembled value by value: the backend rejects a combination it
+    /// doesn't list ("Invalid parameters for registry model"), and can reject
+    /// the Max Mode variant its own catalog marks default (verified live:
+    /// Grok 4.7's 500k default fails while the bare id runs).
+    variants: std::sync::Mutex<Variants>,
 }
 
 impl Default for CursorHarness {
@@ -128,7 +130,7 @@ impl Default for CursorHarness {
             stop_timeout: DEFAULT_STOP_TIMEOUT,
             silence_timeout: DEFAULT_SILENCE_TIMEOUT,
             models_cache: catalog::Catalog::default(),
-            max_mode_defaults: Default::default(),
+            variants: Default::default(),
         }
     }
 }
@@ -216,10 +218,7 @@ impl CursorHarness {
                 .ok_or_else(|| {
                     HarnessError::Protocol("cursor models probe returned no catalog".into())
                 })?;
-            *self
-                .max_mode_defaults
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = max_mode_default_ids(&items);
+            *self.variants.lock().unwrap_or_else(|e| e.into_inner()) = catalog_variants(&items);
             Ok::<_, HarnessError>(map_model_items(&items))
         };
         tokio::time::timeout(Duration::from_secs(15), run)
@@ -229,10 +228,9 @@ impl CursorHarness {
 
     /// The catalog that supplies omitted parameter defaults. The picker has
     /// normally loaded it already, so a run never waits on a refresh; only a
-    /// cold catalog is fetched. A failed fetch yields none (bare SDK ids), and
-    /// Max Mode defaults are left out (bare ids, as before).
-    async fn catalog_for_defaults(&self) -> Vec<Model> {
-        let mut models = match self
+    /// cold catalog is fetched. A failed fetch yields none (bare SDK ids).
+    async fn catalog_for_defaults(&self) -> Defaults {
+        let models = match self
             .model_context()
             .ok()
             .flatten()
@@ -241,12 +239,12 @@ impl CursorHarness {
             Some(models) => models,
             None => self.models().await.unwrap_or_default(),
         };
-        let max_mode = self
-            .max_mode_defaults
+        let variants = self
+            .variants
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        models.retain(|model| !max_mode.contains(&model.id));
-        models
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        Defaults { models, variants }
     }
 
     /// (program, args) for the shim process: the test override, or node
@@ -482,56 +480,183 @@ impl Harness for CursorHarness {
     }
 }
 
-/// Send every parameter the user left implicit as the account catalog's
-/// default — the value the picker shows. Cursor resolves a bare model id
-/// server-side, which on some plans (Plus) is a variant the account cannot
-/// run, while the catalog's credential-scoped default is one it can.
-fn fill_catalog_defaults(
-    catalog: &[Model],
-    model: Option<&str>,
-    options: &mut serde_json::Map<String, Value>,
-) {
-    let Some(model) = model.and_then(|id| catalog.iter().find(|m| m.id == id)) else {
-        return;
-    };
-    for option in &model.options {
-        // Legacy sessions carry the pre-discovery `optimizeFor`, which the
-        // shim translates; its catalog twin must not ride beside it.
-        if option.id == "optimize_for" && options.contains_key("optimizeFor") {
-            continue;
-        }
-        options
-            .entry(option.id.clone())
-            .or_insert_with(|| Value::String(option.default_choice.clone()));
-    }
+/// One of a model's variants: a parameter combination the catalog lists.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Variant {
+    params: std::collections::BTreeMap<String, String>,
+    default: bool,
+    max_mode: bool,
 }
 
-/// Catalog items whose default variant is a Max Mode variant.
-fn max_mode_default_ids(items: &Value) -> std::collections::HashSet<String> {
+/// Each catalog model's variants, by model id, in catalog order.
+type Variants = std::collections::HashMap<String, Vec<Variant>>;
+
+/// What fills a run's implicit parameters: the catalog and its variants.
+#[derive(Clone, Debug, Default)]
+struct Defaults {
+    models: Vec<Model>,
+    variants: Variants,
+}
+
+/// A catalog item's variants. A variant is Max Mode when the catalog says
+/// so (`isMaxMode`, or `maxMode` as its protobuf messages name it).
+fn item_variants(item: &Value) -> Vec<Variant> {
+    let flag = |v: &Value, key: &str| v.get(key).and_then(Value::as_bool) == Some(true);
+    item.get("variants")
+        .and_then(Value::as_array)
+        .map(|a| a.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|v| Variant {
+            params: v
+                .get("params")
+                .and_then(Value::as_array)
+                .map(|a| a.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|p| {
+                    let id = p
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())?;
+                    let value = p
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())?;
+                    Some((id.to_owned(), value.to_owned()))
+                })
+                .collect(),
+            default: flag(v, "isDefault"),
+            max_mode: flag(v, "isMaxMode") || flag(v, "maxMode"),
+        })
+        .filter(|v| !v.params.is_empty())
+        .collect()
+}
+
+fn catalog_variants(items: &Value) -> Variants {
     items
         .as_array()
         .map(|a| a.as_slice())
         .unwrap_or_default()
         .iter()
-        .filter(|item| {
-            item.get("variants")
-                .and_then(Value::as_array)
-                .and_then(|variants| {
-                    variants
-                        .iter()
-                        .find(|v| v.get("isDefault").and_then(Value::as_bool) == Some(true))
-                })
-                .and_then(|v| v.get("isMaxMode").and_then(Value::as_bool))
-                == Some(true)
+        .filter_map(|item| {
+            let id = item.get("id").and_then(Value::as_str)?;
+            let variants = item_variants(item);
+            (!variants.is_empty()).then(|| (id.to_owned(), variants))
         })
-        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect()
 }
 
-/// `Cursor.models.list()` items → picker models. Item shape (1.0.28
+/// The catalog's default first, then the rest in catalog order.
+fn default_first(variants: &[Variant]) -> impl Iterator<Item = &Variant> + Clone {
+    variants
+        .iter()
+        .filter(|v| v.default)
+        .chain(variants.iter().filter(|v| !v.default))
+}
+
+/// The variant a model starts on when nothing is picked: the catalog's
+/// default, unless that is Max Mode (which the backend can refuse), then
+/// the first variant that isn't. None: only Max Mode is listed, and the
+/// bare id runs.
+fn starting_variant(variants: &[Variant]) -> Option<&Variant> {
+    default_first(variants).find(|v| !v.max_mode)
+}
+
+/// The variant that completes `picks` (parameter id → value): one listing
+/// every pick, not Max Mode unless only a Max Mode one does. A pick of a
+/// parameter no variant names is free (the catalog doesn't tie it to the
+/// others). None: no listed variant holds the picks together.
+fn variant_for<'a>(variants: &'a [Variant], picks: &[(String, String)]) -> Option<&'a Variant> {
+    let tied: Vec<&(String, String)> = picks
+        .iter()
+        .filter(|(id, _)| variants.iter().any(|v| v.params.contains_key(id)))
+        .collect();
+    if tied.is_empty() {
+        return starting_variant(variants);
+    }
+    let holds = |v: &&Variant| {
+        tied.iter()
+            .all(|(id, value)| v.params.get(id) == Some(value))
+    };
+    let candidates = default_first(variants);
+    candidates
+        .clone()
+        .filter(|v| !v.max_mode)
+        .find(holds)
+        .or_else(|| candidates.filter(|v| v.max_mode).find(holds))
+}
+
+/// Send every parameter the user left implicit as the account catalog's
+/// default — the value the picker shows. Cursor resolves a bare model id
+/// server-side, which on some plans (Plus) is a variant the account cannot
+/// run, while the catalog's credential-scoped default is one it can.
+///
+/// The filled set is always one of the model's listed variants, completed
+/// around what was picked (the picker leaves defaults out, but always sends
+/// Fast): filling each parameter on its own, or from a Max Mode default,
+/// sends a combination the backend refuses. Picks of parameters the model
+/// doesn't have (left from another model) are dropped for the same reason.
+fn fill_catalog_defaults(
+    defaults: &Defaults,
+    model: Option<&str>,
+    options: &mut serde_json::Map<String, Value>,
+) {
+    let Some(id) = model else {
+        return;
+    };
+    let Some(model) = defaults.models.iter().find(|m| m.id == id) else {
+        return;
+    };
+    let has = |param: &str| model.options.iter().any(|o| o.id == param);
+    // Legacy sessions carry the pre-discovery `optimizeFor`, which the shim
+    // translates; it stands for `optimize_for` here.
+    options.retain(|key, _| has(key) || (key == "optimizeFor" && has("optimize_for")));
+    let picks: Vec<(String, String)> = options
+        .iter()
+        .filter_map(|(key, value)| {
+            let value = value.as_str().filter(|v| !v.is_empty())?;
+            Some(if key == "optimizeFor" {
+                let value = if value == "speed" { "cost" } else { value };
+                ("optimize_for".to_owned(), value.to_owned())
+            } else {
+                (key.clone(), value.to_owned())
+            })
+        })
+        .collect();
+    let picked = |param: &str| picks.iter().any(|(id, _)| id == param);
+    let variants = defaults
+        .variants
+        .get(id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if variants.is_empty() {
+        // No combinations listed: each option's own default.
+        for option in &model.options {
+            if !picked(&option.id) {
+                options
+                    .entry(option.id.clone())
+                    .or_insert_with(|| Value::String(option.default_choice.clone()));
+            }
+        }
+        return;
+    }
+    // Picks no variant holds together are sent as picked, nothing added.
+    let Some(variant) = variant_for(variants, &picks) else {
+        return;
+    };
+    for (param, value) in &variant.params {
+        if !picked(param) {
+            options.insert(param.clone(), Value::String(value.clone()));
+        }
+    }
+}
+
+/// `Cursor.models.list()` items → picker models. Item shape (1.0.32
 /// `options.d.ts` `ModelListItem`): `{id, displayName, description?,
 /// aliases?, parameters?: [{id, displayName?, values: [{value,
-/// displayName?}]}], variants?: [{params: [{id, value}], isDefault?}]}`.
+/// displayName?}]}], variants?: [{params: [{id, value}], isDefault?}]}`
+/// (variants may also say `isMaxMode`).
 fn map_model_items(items: &Value) -> Vec<Model> {
     let str_of = |v: &Value, key: &str| -> Option<String> {
         v.get(key)
@@ -552,16 +677,15 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                 return None;
             }
             let label = str_of(item, "displayName").unwrap_or_else(|| id.clone());
-            // A variant marked default carries the catalog's preferred value
-            // for each parameter (e.g. Auto's optimize_for=balanced).
-            let default_variant = item
-                .get("variants")
-                .and_then(Value::as_array)
-                .map(|a| a.as_slice())
-                .unwrap_or_default()
-                .iter()
-                .find(|v| v.get("isDefault").and_then(Value::as_bool) == Some(true))
-                .and_then(|v| v.get("params").and_then(Value::as_array).cloned())
+            // The variant a run starts on carries each parameter's default
+            // (e.g. Auto's optimize_for=balanced): the one marked default,
+            // or the first that isn't Max Mode when that is (what a run
+            // fills; see `fill_catalog_defaults`). Only Max Mode listed: the
+            // marked one, as the catalog shows it.
+            let variants = item_variants(item);
+            let default_variant = starting_variant(&variants)
+                .or_else(|| variants.iter().find(|v| v.default))
+                .map(|v| v.params.clone())
                 .unwrap_or_default();
             let options: Vec<ModelOption> = item
                 .get("parameters")
@@ -589,9 +713,9 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                         return None;
                     }
                     let default_choice = default_variant
-                        .iter()
-                        .find(|dv| dv.get("id").and_then(Value::as_str) == Some(pid.as_str()))
-                        .and_then(|dv| str_of(dv, "value"))
+                        .get(&pid)
+                        .filter(|value| choices.iter().any(|c| &c.id == *value))
+                        .cloned()
                         .unwrap_or_else(|| choices[0].id.clone());
                     Some(ModelOption {
                         label: str_of(p, "displayName").unwrap_or_else(|| pid.clone()),
@@ -644,7 +768,7 @@ struct Session {
     request_cwd: String,
     request_model: String,
     /// Fills implicit parameters of a model the session switches to.
-    catalog: Vec<Model>,
+    catalog: Defaults,
     interrupt_grace: Duration,
     kill_grace: Duration,
     stop_timeout: Duration,
@@ -1185,6 +1309,190 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Grok 4.7-shaped item: one parameter, a Max Mode default.
+    fn grok() -> Value {
+        json!({
+            "id": "grok-4.7",
+            "displayName": "Grok 4.7",
+            "parameters": [{"id": "context", "values": [{"value": "256k"}, {"value": "500k"}]}],
+            "variants": [
+                {"params": [{"id": "context", "value": "500k"}], "isDefault": true, "isMaxMode": true},
+                {"params": [{"id": "context", "value": "256k"}]},
+            ],
+        })
+    }
+
+    /// A Gemini 4 Carbon-shaped item: parameters tied to each other (Fast
+    /// and the long context only with high thinking), a Max Mode default,
+    /// and a first value per parameter that is no variant's.
+    fn carbon() -> Value {
+        json!({
+            "id": "gemini-4-carbon",
+            "displayName": "Gemini 4 Carbon",
+            "parameters": [
+                {"id": "thinking", "values": [{"value": "low"}, {"value": "high"}]},
+                {"id": "context", "values": [{"value": "1m"}, {"value": "200k"}]},
+                {"id": "fast", "values": [{"value": "true"}, {"value": "false"}]},
+            ],
+            "variants": [
+                {"params": [{"id": "thinking", "value": "high"}, {"id": "context", "value": "1m"}, {"id": "fast", "value": "false"}], "isDefault": true, "isMaxMode": true},
+                {"params": [{"id": "thinking", "value": "high"}, {"id": "context", "value": "200k"}, {"id": "fast", "value": "false"}]},
+                {"params": [{"id": "thinking", "value": "low"}, {"id": "context", "value": "200k"}, {"id": "fast", "value": "false"}]},
+                {"params": [{"id": "thinking", "value": "high"}, {"id": "context", "value": "200k"}, {"id": "fast", "value": "true"}]},
+            ],
+        })
+    }
+
+    fn defaults(items: Value) -> Defaults {
+        Defaults {
+            models: map_model_items(&items),
+            variants: catalog_variants(&items),
+        }
+    }
+
+    fn filled(defaults: &Defaults, model: &str, picks: Value) -> Value {
+        let mut options = picks.as_object().cloned().unwrap_or_default();
+        fill_catalog_defaults(defaults, Some(model), &mut options);
+        Value::Object(options)
+    }
+
+    fn default_of(models: &[Model], model: &str, option: &str) -> String {
+        let model = models.iter().find(|m| m.id == model).unwrap();
+        let option = model.options.iter().find(|o| o.id == option).unwrap();
+        option.default_choice.clone()
+    }
+
+    #[test]
+    fn a_max_mode_default_shows_the_variant_a_run_starts_on() {
+        let models = map_model_items(&json!([grok(), carbon()]));
+        assert_eq!(default_of(&models, "grok-4.7", "context"), "256k");
+        assert_eq!(default_of(&models, "gemini-4-carbon", "thinking"), "high");
+        assert_eq!(default_of(&models, "gemini-4-carbon", "context"), "200k");
+        assert_eq!(default_of(&models, "gemini-4-carbon", "fast"), "false");
+    }
+
+    #[test]
+    fn implicit_parameters_fill_from_a_variant_that_is_not_max_mode() {
+        let defaults = defaults(json!([grok(), carbon()]));
+        assert_eq!(
+            filled(&defaults, "grok-4.7", json!({})),
+            json!({"context": "256k"})
+        );
+        assert_eq!(
+            filled(&defaults, "gemini-4-carbon", json!({})),
+            json!({"thinking": "high", "context": "200k", "fast": "false"})
+        );
+    }
+
+    /// The composer always sends Fast, at its default when off: the rest is
+    /// completed around it to a listed variant, never left bare or filled
+    /// value by value.
+    #[test]
+    fn picks_are_completed_to_a_listed_variant() {
+        let defaults = defaults(json!([carbon()]));
+        assert_eq!(
+            filled(&defaults, "gemini-4-carbon", json!({"fast": "false"})),
+            json!({"thinking": "high", "context": "200k", "fast": "false"})
+        );
+        assert_eq!(
+            filled(&defaults, "gemini-4-carbon", json!({"fast": "true"})),
+            json!({"thinking": "high", "context": "200k", "fast": "true"})
+        );
+        assert_eq!(
+            filled(
+                &defaults,
+                "gemini-4-carbon",
+                json!({"thinking": "low", "fast": "false"})
+            ),
+            json!({"thinking": "low", "context": "200k", "fast": "false"})
+        );
+    }
+
+    /// Max Mode picked outright runs as its whole variant.
+    #[test]
+    fn a_picked_max_mode_value_runs_its_variant() {
+        let defaults = defaults(json!([grok(), carbon()]));
+        assert_eq!(
+            filled(&defaults, "grok-4.7", json!({"context": "500k"})),
+            json!({"context": "500k"})
+        );
+        assert_eq!(
+            filled(
+                &defaults,
+                "gemini-4-carbon",
+                json!({"context": "1m", "fast": "false"})
+            ),
+            json!({"thinking": "high", "context": "1m", "fast": "false"})
+        );
+    }
+
+    /// Picks no variant holds together go as picked: nothing guessed in.
+    #[test]
+    fn picks_no_variant_holds_are_sent_as_picked() {
+        let defaults = defaults(json!([carbon()]));
+        assert_eq!(
+            filled(
+                &defaults,
+                "gemini-4-carbon",
+                json!({"thinking": "low", "fast": "true"})
+            ),
+            json!({"thinking": "low", "fast": "true"})
+        );
+    }
+
+    #[test]
+    fn picks_of_parameters_the_model_lacks_are_dropped() {
+        let defaults = defaults(json!([grok()]));
+        assert_eq!(
+            filled(
+                &defaults,
+                "grok-4.7",
+                json!({"thinking": "enabled", "fast": "true"})
+            ),
+            json!({"context": "256k"})
+        );
+        // A model the catalog doesn't list keeps what it was given.
+        assert_eq!(
+            filled(&defaults, "unlisted", json!({"thinking": "enabled"})),
+            json!({"thinking": "enabled"})
+        );
+    }
+
+    /// Only Max Mode listed and nothing picked: the bare id (it runs where
+    /// the Max Mode default is refused).
+    #[test]
+    fn only_max_mode_listed_sends_the_bare_id() {
+        let item = json!({
+            "id": "grok-4.7",
+            "parameters": [{"id": "context", "values": [{"value": "500k"}]}],
+            "variants": [{"params": [{"id": "context", "value": "500k"}], "isDefault": true, "isMaxMode": true}],
+        });
+        let defaults = defaults(json!([item]));
+        assert_eq!(filled(&defaults, "grok-4.7", json!({})), json!({}));
+        assert_eq!(default_of(&defaults.models, "grok-4.7", "context"), "500k");
+    }
+
+    #[test]
+    fn legacy_optimize_for_matches_its_catalog_twin() {
+        let auto = json!({
+            "id": "auto-smart",
+            "parameters": [{"id": "optimize_for", "values": [{"value": "intelligence"}, {"value": "balanced"}, {"value": "cost"}]}],
+            "variants": [
+                {"params": [{"id": "optimize_for", "value": "balanced"}], "isDefault": true},
+                {"params": [{"id": "optimize_for", "value": "cost"}]},
+            ],
+        });
+        let defaults = defaults(json!([auto]));
+        assert_eq!(
+            filled(&defaults, "auto-smart", json!({"optimizeFor": "speed"})),
+            json!({"optimizeFor": "speed"})
+        );
+        assert_eq!(
+            filled(&defaults, "auto-smart", json!({})),
+            json!({"optimize_for": "balanced"})
+        );
+    }
 
     #[test]
     fn decodes_cursor_tool_vocabulary() {
