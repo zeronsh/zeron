@@ -29,6 +29,7 @@ search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"
 	{ key = "escape_stops", title = ui.t("settings.general.escape_stops.label"), terms = ui.t("settings.general.escape_stops.terms") },
 	{ key = "close_panel", title = ui.t("settings.general.close_panel.label"), terms = ui.t("settings.general.close_panel.terms") },
 	{ key = "hide_emails", title = ui.t("settings.general.hide_emails.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.hide_emails.terms") },
+	{ key = "agent_titles", title = ui.t("settings.general.thread_naming.agent_titles"), terms = "Claude Codex session titles sync" },
 	{ key = "thread_naming", title = ui.t("settings.general.thread_naming.label"), terms = ui.t("settings.general.thread_naming.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
 	{ key = "commit_credit", title = ui.t("settings.general.commit_credit.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.commit_credit.terms") },
@@ -42,7 +43,7 @@ type Worktrees = {
 	effectiveDirectory: string?,
 	environmentOverride: string?,
 }
-type Titles = { harness: string?, model: string? }
+type Titles = { harness: string?, model: string?, useAgentTitles: boolean? }
 local credit = ui.state("settings_commit_credit", nil :: Credit?)
 local worktrees = ui.state("settings_worktrees", nil :: Worktrees?)
 local titles = ui.state("settings_titles", nil :: Titles?)
@@ -166,12 +167,16 @@ local function naming(): Node
 			w = 200,
 			options = options,
 			on_change = function(v: string)
+				local current = titles:peek()
+				local useAgentTitles = current == nil or current.useAgentTitles ~= false
 				if v == AUTO then
-					change("titles", titles, {}, "SetTitleSettings", {})
+					local next = { useAgentTitles = useAgentTitles }
+					change("titles", titles, next, "SetTitleSettings", next)
 					return
 				end
 				local harness, model = string.match(v, "^([^/]+)/(.+)$")
-				change("titles", titles, { harness = harness, model = model }, "SetTitleSettings", { harness = harness, model = model })
+				local next = { harness = harness, model = model, useAgentTitles = useAgentTitles }
+				change("titles", titles, next, "SetTitleSettings", next)
 			end,
 		}
 	end)()
@@ -268,6 +273,19 @@ function M.view(): Node
 		},
 		ds.Settings.Section {
 			ds.Settings.Group {
+				row("agent_titles", {
+					label = ui.t("settings.general.thread_naming.agent_titles"),
+					description = ui.t("settings.general.thread_naming.agent_titles_description"),
+					control = engine_switch(ui.t("settings.general.thread_naming.agent_titles"), function()
+						local t = titles:get()
+						return if t then t.useAgentTitles ~= false else nil
+					end, function(on: boolean)
+						local t = titles:peek()
+						if not t then return end
+						local next = { harness = t.harness, model = t.model, useAgentTitles = on }
+						change("titles", titles, next, "SetTitleSettings", next)
+					end, function() return titles:get() == nil end),
+				}),
 				row("thread_naming", {
 					label = ui.t("settings.general.thread_naming.label"),
 					description = function()

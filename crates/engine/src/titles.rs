@@ -1,9 +1,18 @@
 //! Automatic session titles from the first user prompt. Device preferences select
 //! the harness and model; restricted title drivers run outside the repository.
 //! Failures fall back to the prompt's first words. A user rename always wins.
+//!
+//! Agent titles first: Claude Code names its own sessions (`ai-title` /
+//! `custom-title` transcript records). When the chat's session has one, the chat
+//! takes it instead of a throwaway titling run, and keeps following it while the
+//! chat's title is one the agent gave. The `useAgentTitles` preference controls this.
+//! Codex names threads in its client, so threads Zeron runs have no name of
+//! their own: Codex chats are titled with Codex's own prompt and title model
+//! (see [`codex_style`]).
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::StreamExt;
 
@@ -21,6 +30,11 @@ use crate::workspace_host::WorkspaceHost;
 /// Throwaway title runs are cheap but still cross a process boundary — retry a
 /// couple of times with a short backoff before falling back (zeron's ladder).
 const RETRY_DELAYS_MS: &[u64] = &[250, 1_000];
+
+/// How long a new chat waits for its agent's own title before falling back to
+/// a titling run, and how often it looks.
+const NATIVE_WAIT: Duration = Duration::from_secs(30);
+const NATIVE_POLL: Duration = Duration::from_millis(1_500);
 
 struct Inner {
     workspace: WorkspaceHost,
@@ -86,11 +100,16 @@ impl TitleGenerator {
             .workspace
             .chat(chat_id)?
             .ok_or_else(|| EngineError::Other("chat has no workspace row".into()))?;
-        if chat.title.as_deref().is_some_and(|t| !t.trim().is_empty()) {
-            return Ok(()); // already named
+        if let Some(current) = chat.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            // Already named: keep following the agent's title, if that's what it is.
+            self.write_codex_name(chat_id, harness_id, current).await;
+            return self.follow_native(chat_id, harness_id, current).await;
         }
 
-        let generated = self.run_title_model(harness_id, prompt, cwd).await;
+        let generated = match self.wait_native(chat_id, harness_id).await {
+            Some(title) => Some(title),
+            None => self.run_title_model(harness_id, prompt, cwd).await,
+        };
         // Fallback so a chat is always named even if the model run produced nothing.
         let fallback: String = prompt
             .split_whitespace()
@@ -140,7 +159,108 @@ impl TitleGenerator {
         }
 
         self.inner.workspace.rename_chat(chat_id, &title)?;
+        self.write_codex_name(chat_id, harness_id, &title).await;
         tracing::info!(chat = %chat_id, title = %title, "chat auto-titled");
+        Ok(())
+    }
+
+    /// Also backfill existing Zeron titles when an older engine left the
+    /// Codex thread unnamed. A failed write never prevents the local title.
+    async fn write_codex_name(&self, chat_id: &str, harness: HarnessId, title: &str) {
+        if !self.inner.registry.title_settings().use_agent_titles || harness != HarnessId::Codex {
+            return;
+        }
+        let Some(stored) = self.inner.workspace.chat_harness_session(chat_id) else {
+            return;
+        };
+        if stored.session_id.is_empty() || stored.harness.is_some_and(|h| h != harness) {
+            return;
+        }
+        let _lease = self.inner.registry.execution_lease(harness).await;
+        let result = match self.inner.registry.resolve(harness) {
+            Ok(driver) => driver.name_session_if_unnamed(&stored.session_id, title).await,
+            Err(err) => {
+                tracing::debug!(chat = %chat_id, error = %err, "Codex title driver unavailable");
+                return;
+            }
+        };
+        if let Err(err) = result {
+            tracing::warn!(chat = %chat_id, error = %err, "Codex session title write failed");
+        }
+    }
+
+    /// The titles the agent has given this chat's provider session, if the chat
+    /// has one owned by `harness_id`.
+    async fn native_titles(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+    ) -> Option<native::NativeTitles> {
+        if !self.inner.registry.title_settings().use_agent_titles || !native::supported(harness_id) {
+            return None;
+        }
+        let stored = self.inner.workspace.chat_harness_session(chat_id)?;
+        if stored.session_id.is_empty() || stored.harness.is_some_and(|h| h != harness_id) {
+            return None;
+        }
+        let id = stored.session_id;
+        tokio::task::spawn_blocking(move || native::read(harness_id, &id))
+            .await
+            .ok()
+    }
+
+    /// A new chat: wait a little for the agent to name its session (it does
+    /// so alongside the first reply), so no separate titling run is needed.
+    async fn wait_native(&self, chat_id: &str, harness_id: HarnessId) -> Option<String> {
+        if !self.inner.registry.title_settings().use_agent_titles || !native::supported(harness_id) {
+            return None;
+        }
+        let deadline = tokio::time::Instant::now() + NATIVE_WAIT;
+        loop {
+            if let Some(title) = self
+                .native_titles(chat_id, harness_id)
+                .await
+                .and_then(|n| n.latest)
+            {
+                return Some(title);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::debug!(chat = %chat_id, "no agent title yet; running the titler");
+                return None;
+            }
+            tokio::time::sleep(NATIVE_POLL).await;
+        }
+    }
+
+    /// A named chat follows its agent's title — only while its current title
+    /// is one the agent gave, so a name the person chose is never replaced.
+    async fn follow_native(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        current: &str,
+    ) -> Result<(), EngineError> {
+        let Some(native) = self.native_titles(chat_id, harness_id).await else {
+            return Ok(());
+        };
+        let Some(latest) = native.latest else {
+            return Ok(());
+        };
+        if latest == current || !native.seen.iter().any(|t| t == current) {
+            return Ok(());
+        }
+        // `current` was read before the transcript (and any Codex write-back):
+        // the person may have renamed the chat since, so only replace it if it
+        // still holds that agent title.
+        if !self
+            .inner
+            .workspace
+            .rename_chat_from(chat_id, current, &latest)?
+        {
+            tracing::debug!(chat = %chat_id, "chat renamed meanwhile; keeping its title");
+            return Ok(());
+        }
+        tracing::info!(chat = %chat_id, title = %latest, "chat follows its agent's title");
         Ok(())
     }
 
@@ -181,8 +301,8 @@ impl TitleGenerator {
         };
         let model = match settings.model {
             Some(model) => Some(model),
-            None => cheapest_model(
-                &tokio::time::timeout(
+            None => {
+                let models = tokio::time::timeout(
                     std::time::Duration::from_secs(10),
                     self.inner
                         .registry
@@ -190,14 +310,23 @@ impl TitleGenerator {
                 )
                 .await
                 .ok()?
-                .unwrap_or_default(),
-            ),
+                .unwrap_or_default();
+                settings
+                    .use_agent_titles
+                    .then(|| codex_style::model(harness_id, &models))
+                    .flatten()
+                    .or_else(|| cheapest_model(&models))
+            }
         };
-        let title_prompt = format!(
-            "{}\n\nSession request (JSON string):\n{}",
-            zeron_harness::TITLE_INSTRUCTIONS,
-            serde_json::to_string(prompt).ok()?
-        );
+        let title_prompt = if settings.use_agent_titles && harness_id == HarnessId::Codex {
+            codex_style::prompt(prompt)
+        } else {
+            format!(
+                "{}\n\nSession request (JSON string):\n{}",
+                zeron_harness::TITLE_INSTRUCTIONS,
+                serde_json::to_string(prompt).ok()?
+            )
+        };
         for attempt in 0..=RETRY_DELAYS_MS.len() {
             let mut request = RunRequest {
                 mcp: None,
@@ -336,10 +465,196 @@ async fn collect_text(
     }
 }
 
+/// Codex names threads in its client, not its app server (codex-rs
+/// `tui/src/app/thread_title.rs`): threads Zeron runs are never named. So a
+/// Codex chat is titled the way Codex's own client titles it — its prompt, its
+/// title model when offered — rather than with Zeron's instructions.
+mod codex_style {
+    use zeron_proto::{HarnessId, Model};
+
+    const MAX_CHARS: usize = 36;
+    const PROMPT_MAX_BYTES: usize = 960;
+    const MODEL: &str = "gpt-5.6-luna";
+
+    pub(super) fn model(harness: HarnessId, models: &[Model]) -> Option<String> {
+        (harness == HarnessId::Codex && models.iter().any(|m| m.id == MODEL))
+        .then(|| MODEL.to_owned())
+    }
+
+    pub(super) fn prompt(user_message: &str) -> String {
+        let prefix = format!(
+            "Generate a concise, single-line task title of at most {MAX_CHARS} characters \
+             and under five words where possible. Start with an imperative verb. Capitalize \
+             only the first word unless the user's language, proper nouns, acronyms, or code \
+             terms require otherwise. Preserve ticket references exactly. Write in the user's \
+             language. Do not use quotes, markdown, or trailing punctuation. Do not answer the \
+             request.\n\nUser prompt:\n"
+        );
+        let remaining = PROMPT_MAX_BYTES.saturating_sub(prefix.len());
+        let message: String = user_message
+            .trim()
+            .char_indices()
+            .take_while(|(i, c)| i + c.len_utf8() <= remaining)
+            .map(|(_, c)| c)
+            .collect();
+        format!("{prefix}{message}")
+    }
+}
+
+/// The names agents give their own sessions, read from their local stores.
+mod native {
+    use std::io::{BufRead, BufReader};
+    use std::path::{Path, PathBuf};
+
+    use zeron_proto::HarnessId;
+
+    #[derive(Debug, Default, PartialEq)]
+    pub(super) struct NativeTitles {
+        /// What the agent calls the session now: the name the person set in the
+        /// agent, else its latest generated one.
+        pub latest: Option<String>,
+        /// Every name the agent has given the session.
+        pub seen: Vec<String>,
+    }
+
+    pub(super) fn supported(harness: HarnessId) -> bool {
+        matches!(harness, HarnessId::ClaudeCode)
+    }
+
+    pub(super) fn read(harness: HarnessId, session_id: &str) -> NativeTitles {
+        if !supported(harness)
+            || session_id.is_empty()
+            || session_id.contains(['/', '\\'])
+            || session_id.contains("..")
+        {
+            return NativeTitles::default();
+        }
+        claude_transcript(&claude_dir(), session_id)
+            .map(|path| claude_titles(&path))
+            .unwrap_or_default()
+    }
+
+    fn claude_dir() -> PathBuf {
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| crate::repos::home_dir().join(".claude"))
+    }
+
+    /// `<config>/projects/<encoded cwd>/<id>.jsonl`, found by id rather than by
+    /// re-deriving Claude Code's cwd encoding.
+    pub(super) fn claude_transcript(dir: &Path, id: &str) -> Option<PathBuf> {
+        let name = format!("{id}.jsonl");
+        std::fs::read_dir(dir.join("projects"))
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path().join(&name))
+            .find(|path| path.is_file())
+    }
+
+    fn contains(line: &[u8], needle: &[u8]) -> bool {
+        line.windows(needle.len()).any(|w| w == needle)
+    }
+
+    fn note(seen: &mut Vec<String>, title: &str) {
+        if !seen.iter().any(|t| t == title) {
+            seen.push(title.to_owned());
+        }
+    }
+
+    fn clean(raw: Option<&str>) -> Option<String> {
+        Some(super::clean_title(raw?)).filter(|t| !t.is_empty())
+    }
+
+    pub(super) fn claude_titles(path: &Path) -> NativeTitles {
+        let Ok(file) = std::fs::File::open(path) else {
+            return NativeTitles::default();
+        };
+        let (mut generated, mut chosen, mut seen) = (None, None, Vec::new());
+        for line in BufReader::new(file).split(b'\n').map_while(Result::ok) {
+            // Transcripts run to tens of MB: parse only the title records.
+            if !contains(&line, b"-title\"") {
+                continue;
+            }
+            let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let (slot, key) = match record["type"].as_str() {
+                Some("ai-title") => (&mut generated, "aiTitle"),
+                Some("custom-title") => (&mut chosen, "customTitle"),
+                _ => continue,
+            };
+            if let Some(title) = clean(record[key].as_str()) {
+                note(&mut seen, &title);
+                *slot = Some(title);
+            }
+        }
+        NativeTitles {
+            latest: chosen.or(generated),
+            seen,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use zeron_proto::Model;
+
+    #[test]
+    fn claude_titles_prefer_the_persons_name_then_the_latest_generated() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("projects").join("-home-me-repo");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = project.join("abc.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"content\":\"say \\\"ai-title\\\"\"}}\n",
+                "{\"type\":\"ai-title\",\"aiTitle\":\"First Name\",\"sessionId\":\"abc\"}\n",
+                "not json -title\"\n",
+                "{\"type\":\"ai-title\",\"aiTitle\":\"Zeron 对话命名\",\"sessionId\":\"abc\"}\n",
+                "{\"type\":\"ai-title\",\"aiTitle\":\"Zeron 对话命名\",\"sessionId\":\"abc\"}\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            native::claude_transcript(dir.path(), "abc").as_deref(),
+            Some(transcript.as_path())
+        );
+        assert_eq!(native::claude_transcript(dir.path(), "nope"), None);
+        let titles = native::claude_titles(&transcript);
+        assert_eq!(titles.latest.as_deref(), Some("Zeron 对话命名"));
+        assert_eq!(titles.seen, vec!["First Name", "Zeron 对话命名"]);
+
+        let mut more = std::fs::read_to_string(&transcript).unwrap();
+        more.push_str("{\"type\":\"custom-title\",\"customTitle\":\"Mine\",\"sessionId\":\"abc\"}\n");
+        more.push_str("{\"type\":\"ai-title\",\"aiTitle\":\"Later\",\"sessionId\":\"abc\"}\n");
+        std::fs::write(&transcript, more).unwrap();
+        assert_eq!(native::claude_titles(&transcript).latest.as_deref(), Some("Mine"));
+    }
+
+    #[test]
+    fn codex_chats_are_titled_the_way_codex_titles_them() {
+        let p = codex_style::prompt("  排查一下 hana 的显卡连接  ");
+        assert!(p.contains("Write in the user's language"));
+        assert!(p.ends_with("User prompt:\n排查一下 hana 的显卡连接"));
+        // Bounded without splitting a character.
+        let long = codex_style::prompt(&"汉".repeat(1_000));
+        assert!(long.len() <= 960);
+        let luna = vec![model("gpt-6.1-mini", "Mini"), model("gpt-5.6-luna", "Luna")];
+        assert_eq!(codex_style::model(HarnessId::Codex, &luna).as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(codex_style::model(HarnessId::ClaudeCode, &luna), None);
+        assert_eq!(codex_style::model(HarnessId::Codex, &[model("gpt-6.1-mini", "Mini")]), None);
+    }
+
+    #[test]
+    fn only_claude_code_sessions_are_read_for_agent_titles() {
+        assert!(native::supported(HarnessId::ClaudeCode));
+        assert!(!native::supported(HarnessId::Codex));
+        assert_eq!(native::read(HarnessId::Codex, "t1"), native::NativeTitles::default());
+        assert_eq!(native::read(HarnessId::ClaudeCode, "../x"), native::NativeTitles::default());
+    }
 
     fn model(id: &str, label: &str) -> Model {
         Model {
@@ -478,6 +793,7 @@ mod tests {
             .set_title_settings(crate::registry::TitleSettings {
                 harness: Some(HarnessId::ClaudeCode),
                 model: Some("chosen-title-model".into()),
+                ..Default::default()
             })
             .unwrap();
         let generator = TitleGenerator::new(core.workspace.clone(), registry, core.repos.clone());
