@@ -262,6 +262,10 @@ struct Inner {
     device_id: String,
     /// The engine is shutting down: dying runs re-dispatch nothing.
     shutting_down: std::sync::atomic::AtomicBool,
+    /// Each chat's live subagents (their sub-chat docs,
+    /// `{chat}--sub--{tool_use_id}`), as its run reports them: what the
+    /// shutdown marks when it stops them.
+    live_subagents: Mutex<HashMap<String, Vec<String>>>,
     /// A shutdown marks the turns it cuts off for pick-up on the next boot
     /// (cleared by [`SessionsEngine::forgo_revival`]).
     revive_after_shutdown: std::sync::atomic::AtomicBool,
@@ -361,6 +365,7 @@ impl SessionsEngine {
                 voice: crate::voice::VoiceManager::default(),
                 device_id,
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
+                live_subagents: Mutex::new(HashMap::new()),
                 revive_after_shutdown: std::sync::atomic::AtomicBool::new(true),
                 revivals: Mutex::new(HashMap::new()),
                 revivals_starting: Mutex::new(std::collections::HashSet::new()),
@@ -2274,6 +2279,19 @@ impl SessionsEngine {
             for (chat_id, labels) in waits {
                 self.inner.journal.note_shutdown_wait(&chat_id, &labels);
             }
+            // Chats whose subagents are still at work (in-process subagents:
+            // their sub-chats): the shutdown stops them, and the chat's row
+            // says nothing of them by the next boot. Marked, for the board's
+            // start-up pass to resume the chat with them named.
+            let live = lock(&self.inner.live_subagents).clone();
+            let with_subagents: Vec<(String, Vec<String>)> = lock(&self.inner.statuses)
+                .values()
+                .filter(|session| session.running_subagents > 0 || live.get(&session.chat_id).is_some_and(|d| !d.is_empty()))
+                .map(|session| (session.chat_id.clone(), live.get(&session.chat_id).cloned().unwrap_or_default()))
+                .collect();
+            for (chat_id, docs) in with_subagents {
+                self.inner.journal.note_shutdown_subagents(&chat_id, &docs);
+            }
             let working: Vec<String> = lock(&self.inner.statuses)
                 .values()
                 .filter(|session| session.status == SessionStatus::Working)
@@ -2307,6 +2325,15 @@ impl SessionsEngine {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
             }
         }
+    }
+
+    /// The chats whose subagents the last shutdown stopped, with their
+    /// sub-chats (see [`Self::shutdown`]); taken once.
+    pub fn take_shutdown_subagents(&self) -> Vec<(String, Vec<String>)> {
+        self.inner.journal.take_shutdown_subagents().unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "shutdown subagent markers unreadable");
+            Vec::new()
+        })
     }
 
     /// The chats whose wait on their own background work the last shutdown
@@ -2500,8 +2527,16 @@ impl Inner {
     /// mirrored like any status transition (it doubles as a heartbeat); an
     /// unchanged count is a no-op, and a chat without a status row has
     /// nothing to badge yet.
-    fn set_running_subagents(&self, chat_id: &str, running: usize) {
-        let running = u32::try_from(running).unwrap_or(u32::MAX);
+    fn set_running_subagents(&self, chat_id: &str, docs: Vec<String>) {
+        let running = u32::try_from(docs.len()).unwrap_or(u32::MAX);
+        {
+            let mut live = lock(&self.live_subagents);
+            if docs.is_empty() {
+                live.remove(chat_id);
+            } else {
+                live.insert(chat_id.to_owned(), docs);
+            }
+        }
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
@@ -5068,7 +5103,7 @@ async fn drive_run(
                             dirty: false,
                         },
                     );
-                    inner.set_running_subagents(&chat_id, subagents.len());
+                    inner.set_running_subagents(&chat_id, subagents.values().map(|s| s.doc_id.clone()).collect());
                     if !chip_streaming {
                         let _ = doc_ref.update_subagent_chip(
                             parent_tool_use_id,
@@ -5125,7 +5160,7 @@ async fn drive_run(
                         _ => MessageStatus::Complete,
                     };
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
-                    inner.set_running_subagents(&chat_id, subagents.len());
+                    inner.set_running_subagents(&chat_id, subagents.values().map(|s| s.doc_id.clone()).collect());
                     let doc_id = sink.doc_id.clone();
                     // FREEZE: the finished transcript uploads as a static R2
                     // blob (`blob/{chatId}/{subDocId}`) so viewers of
@@ -5775,7 +5810,7 @@ async fn drive_run(
             );
         }
     }
-    inner.set_running_subagents(&chat_id, 0);
+    inner.set_running_subagents(&chat_id, Vec::new());
     // The runtime is gone, and its background processes with it.
     inner.set_background_tasks(&chat_id, Vec::new());
     // So is anything it waited on. A wait's held end stands, unless the
@@ -7195,6 +7230,70 @@ mod tests {
         let resumed: Vec<&String> = said.iter().filter(|p| p.contains("[Resumed] The engine restarted")).collect();
         assert_eq!(resumed.len(), 1, "{said:?}");
         assert!(resumed[0].contains("agent build") && resumed[0].contains("run it again"), "{}", resumed[0]);
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_chat_whose_subagent_runs_when_the_engine_stops_is_resumed_once() {
+        use zeron_rpc::{Caller, RpcService, methods, with_caller};
+        let rig = wake_rig("chat-sub-stop", false).await;
+        let device = rig.core.orchestration.device_id().to_owned();
+        with_caller(
+            Caller::Local,
+            rig.core.rpc_service().handle(
+                methods::MUTATE,
+                serde_json::json!({"op":"createChat","chatId":rig.chat,"deviceId":device,
+                    "config":{"harness":"mock","sandbox":"workspace-write"}}),
+            ),
+        )
+        .await
+        .unwrap();
+        // The parent spawns a subagent, which streams; the parent's turn ends
+        // while it runs on.
+        rig.feed
+            .send(AgentEvent::ToolCall {
+                id: "toolu_sub1".into(),
+                call: zeron_proto::ToolCall::Unknown { name: "Agent".into(), input: None },
+            })
+            .unwrap();
+        rig.feed
+            .send(AgentEvent::Subagent {
+                parent_tool_use_id: "toolu_sub1".into(),
+                event: Box::new(AgentEvent::TextDelta { text: "looking".into() }),
+            })
+            .unwrap();
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        let s = settled(&rig).await;
+        assert_eq!(s.running_subagents, 1, "{s:?}");
+        // The engine stops: the subagent with it.
+        rig.core.shutdown().await;
+        let dir = rig._dir.path().to_path_buf();
+        drop(rig.core);
+
+        let core = crate::EngineCore::assemble(&dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
+        let rpc = core.rpc_service();
+        let before = core.orchestration.take_before_stop();
+        assert!(
+            before.iter().filter(|s| s.chat_id == "chat-sub-stop").all(|s| s.running_subagents == 0),
+            "its row no longer counts the subagent: the journal's mark does"
+        );
+        assert_eq!(rpc.resume_after_restart(before), ["chat-sub-stop"]);
+        assert!(rpc.resume_after_restart(core.orchestration.take_before_stop()).is_empty(), "once");
+        let handle = core.doc_host.open("chat-sub-stop").unwrap();
+        let mut said: Vec<String> = handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .into_iter()
+            .filter_map(|c| match c.payload {
+                zeron_doc::SessionCommandPayload::Run { request, .. } => Some(request.prompt),
+                _ => None,
+            })
+            .collect();
+        said.extend(handle.doc().read_queue().unwrap().into_iter().map(|q| q.text));
+        let resumed: Vec<&String> = said.iter().filter(|p| p.contains("[Resumed] The engine restarted; your subagents")).collect();
+        assert_eq!(resumed.len(), 1, "{said:?}");
+        assert!(resumed[0].contains("chat-sub-stop--sub--toolu_sub1"), "{}", resumed[0]);
         core.shutdown().await;
     }
 

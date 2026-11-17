@@ -491,6 +491,16 @@ a reply to an @ask answers it, a comment on an @card goes to its thread):\n",
         )
     }
 
+    /// [`RESUMED_AFTER_RESTART`]'s wording for a chat whose subagents
+    /// (`subagents`: their sub-chats) the restart stopped.
+    pub fn resumed_after_restart_subagents(subagents: &[String]) -> String {
+        let list: Vec<String> = subagents.iter().map(|s| one_line(s, 80)).filter(|s| !s.is_empty()).collect();
+        let named = if list.is_empty() { String::new() } else { format!(" ({})", list.join(", ")) };
+        format!(
+            "[Resumed] The engine restarted; your subagents{named} were stopped. Check their transcripts and rerun what didn't finish."
+        )
+    }
+
     /// [`RESUMED_AFTER_RESTART`] for a chat whose turn had ended into a wait
     /// on its own background work (`waited_on`: what it waited on), which
     /// the restart stopped: run it again.

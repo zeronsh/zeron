@@ -630,6 +630,9 @@ fn changed_sigs(seen: &mut HashMap<String, Sig>, sessions: &[Session]) -> bool {
 pub(crate) struct Resume {
     pub chat: String,
     pub waited_on: Vec<String>,
+    /// Its subagents the stop ended (their sub-chats; empty when only their
+    /// count is known): `None` when it had none.
+    pub subagents: Option<Vec<String>>,
 }
 
 /// The chats to resume after a restart, hosted here: `before` is this
@@ -647,31 +650,40 @@ pub(crate) struct Resume {
 pub(crate) fn to_resume(
     before: &[Session],
     waits: &[(String, Vec<String>)],
+    subagents: &[(String, Vec<String>)],
     now: &HashMap<String, Session>,
     state: &zeron_proto::orchestration::OrchestrationState,
     chats: &HashMap<String, Chat>,
     at: DateTime<Utc>,
 ) -> Vec<Resume> {
-    // chat → (its row at the stop, at work in a turn, what its wait was on)
-    let mut seen: std::collections::BTreeMap<&str, (Option<&Session>, bool, Option<Vec<String>>)> = Default::default();
+    // chat → (its row at the stop, mid-turn, what its wait was on, its
+    // subagents)
+    type Seen<'a> = (Option<&'a Session>, bool, Option<Vec<String>>, Option<Vec<String>>);
+    let mut seen: std::collections::BTreeMap<&str, Seen> = Default::default();
     for b in before {
         let wait = b.waiting.as_ref().map(|w| w.on.iter().map(|o| o.label.clone()).collect());
-        seen.insert(&b.chat_id, (Some(b), b.status == SessionStatus::Working || b.running_subagents > 0, wait));
+        // (A crash leaves the row as it was: its subagents' count, no names.)
+        let subs = (b.running_subagents > 0).then(Vec::new);
+        seen.insert(&b.chat_id, (Some(b), b.status == SessionStatus::Working, wait, subs));
     }
     for (chat, labels) in waits {
-        let entry = seen.entry(chat.as_str()).or_insert((None, false, None));
+        let entry = seen.entry(chat.as_str()).or_insert((None, false, None, None));
         entry.2 = Some(labels.clone());
+    }
+    for (chat, docs) in subagents {
+        let entry = seen.entry(chat.as_str()).or_insert((None, false, None, None));
+        entry.3 = Some(docs.clone());
     }
     let crew = |c: &str| state.crew.iter().any(|m| m.chat_id == c && !m.released);
     let brain = |c: &str| {
         state.orchestrators.iter().any(|o| o.id == c && o.kind != zeron_proto::orchestration::OrchestratorKind::Standard)
     };
     seen.into_iter()
-        .filter(|(c, (_, turn, wait))| (*turn && crew(c)) || wait.is_some())
+        .filter(|(c, (_, turn, wait, subs))| (*turn && crew(c)) || wait.is_some() || subs.is_some())
         .filter(|(c, _)| !brain(c))
         .filter(|(c, _)| chats.get(*c).is_some_and(|chat| !chat.archived))
         .filter(|(c, _)| !state.items.iter().any(|i| !i.removed && i.paused() && i.threads.iter().any(|t| t == c)))
-        .filter(|(c, (row, _, _))| match now.get(*c) {
+        .filter(|(c, (row, _, _, _))| match now.get(*c) {
             // (A Working row left from before the stop has no heartbeat:
             // stale, not a turn in flight.)
             Some(n) => {
@@ -681,7 +693,7 @@ pub(crate) fn to_resume(
             }
             None => true,
         })
-        .map(|(c, (_, _, wait))| Resume { chat: c.to_owned(), waited_on: wait.unwrap_or_default() })
+        .map(|(c, (_, _, wait, subs))| Resume { chat: c.to_owned(), waited_on: wait.unwrap_or_default(), subagents: subs })
         .collect()
 }
 
@@ -881,7 +893,8 @@ impl EngineRpc {
     /// [`resumed_after_restart`]: zeron_proto::orchestration::prompt_text::resumed_after_restart
     pub(crate) fn resume_after_restart(&self, before: Vec<Session>) -> Vec<String> {
         let waits = self.sessions_ref().take_shutdown_waits();
-        if before.is_empty() && waits.is_empty() {
+        let subagents = self.sessions_ref().take_shutdown_subagents();
+        if before.is_empty() && waits.is_empty() && subagents.is_empty() {
             return Vec::new();
         }
         let orch = self.orchestration();
@@ -893,8 +906,11 @@ impl EngineRpc {
         let now: HashMap<String, Session> =
             self.sessions_ref().watch_sessions().borrow().iter().map(|s| (s.chat_id.clone(), s.clone())).collect();
         let mut resumed = Vec::new();
-        for r in to_resume(&before, &waits, &now, &orch.state(), &chats, Utc::now()) {
-            let text = zeron_proto::orchestration::prompt_text::resumed_after_restart(&r.waited_on);
+        for r in to_resume(&before, &waits, &subagents, &now, &orch.state(), &chats, Utc::now()) {
+            let text = match &r.subagents {
+                Some(subs) => zeron_proto::orchestration::prompt_text::resumed_after_restart_subagents(subs),
+                None => zeron_proto::orchestration::prompt_text::resumed_after_restart(&r.waited_on),
+            };
             let injected = zeron_doc::Injected { chat_id: Some(r.chat.clone()), ..zeron_doc::Injected::of(zeron_doc::injected::RESUMED) };
             match super::ops::deliver(self, &r.chat, &text, None, super::ops::When::Next, Some(injected)) {
                 Ok(_) => resumed.push(r.chat),
