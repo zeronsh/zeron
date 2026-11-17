@@ -84,3 +84,35 @@ test("progress embed: a working session's line in its head", function()
 		expect(e == nil or string.find(tostring(e), "no host action named `chat.open`", 1, true) ~= nil).to_be(true)
 	end
 end)
+
+-- The head's line is a crew thread's alone (its orchestrator's work being
+-- followed): a chat of the person's own keeps its head as it was. And it's as
+-- wide as what it says, centred: never its tool at one edge and its clocks
+-- at the other.
+local function box(app: any, target: string): (number, number)
+	local line = string.match(app:tree(target), "[^\n]+") or ""
+	local x, _, w = line:match(" (%-?%d+),(%-?%d+) (%d+)x(%d+)")
+	return tonumber(x) or 0, tonumber(w) or 0
+end
+
+test("progress embed: a head's line is a crew thread's, as wide as what it says", function()
+	local app = mount("control_fixture.luau")
+	app:resize(1440, 2400)
+	app:frames(40)
+	app:click("#progress-full-th-engine-state >> .orch-progress-menu")
+	app:frames(10)
+	app:click('role:menuitem "Open"')
+	app:frames(30)
+	expect(app:has("#session-header >> #chat-progress >> #progress-strip-th-engine-state")).to_be(true)
+	-- Hugging, centred in the head.
+	app:command("fixture.progress_none")
+	app:frames(20)
+	local hx, hw = box(app, "#chat-progress")
+	local sx, sw = box(app, "#progress-strip-th-engine-state")
+	expect(sw < 560).to_be(true)
+	expect(math.abs((sx + sw / 2) - (hx + hw / 2)) <= 2).to_be(true)
+	-- Out of its crew: no line.
+	app:command("fixture.uncrew")
+	app:frames(20)
+	expect(app:has("#chat-progress")).to_be(false)
+end)

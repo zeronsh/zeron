@@ -467,6 +467,18 @@ return function()
 		}
 		orchestration.progress:set(rows)
 	end }
+	-- The engine-state thread out of its crew: a chat of the person's own.
+	ui.command { id = "fixture.uncrew", title = "Fixture: a thread no crew's", run = function()
+		republish(function(o)
+			local crew = {}
+			for _, m in o.crew do
+				if m.chat_id ~= "th-engine-state" then
+					table.insert(crew, m)
+				end
+			end
+			o.crew = crew
+		end)
+	end }
 	-- Every chat at rest.
 	ui.command { id = "fixture.all_idle", title = "Fixture: nothing working", run = function()
 		local n: any = table.clone(sessions.now:peek())

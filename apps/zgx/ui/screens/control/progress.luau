@@ -384,7 +384,7 @@ end
 
 -- (`live`: whether what shows it is shown; while not, what it reads is
 -- held at its last value, ds/hold.)
-local function unit(id: string, variant: Unit.Variant, lean: boolean?, live: (() -> boolean)?): Node
+local function unit(id: string, variant: Unit.Variant, lean: boolean?, live: (() -> boolean)?, hug: boolean?): Node
 	local fixed = clock:peek()
 	local function held<T>(f: () -> T): () -> T
 		return if live then hold.fn(live, f) else f
@@ -393,6 +393,7 @@ local function unit(id: string, variant: Unit.Variant, lean: boolean?, live: (()
 		id = `progress-{variant}-{id}`,
 		variant = variant,
 		lean = lean,
+		hug = hug,
 		row = held(function(): any
 			return row_of(id)
 		end),
@@ -603,9 +604,15 @@ end
 
 -- A working session's line, in its head (the shell's `#session-header`):
 -- shown while its work is under way (or stalled), the one line centred.
+-- Which chats have it: "crew" (a crew thread's, where its orchestrator's
+-- work is followed), "all" (any chat at work), or "none".
+M.HEADER_IN = "crew"
 function M.Header(id: () -> string?): Node
 	return ui.presence(function(): string
 		local s = id() or ""
+		if M.HEADER_IN == "none" or (M.HEADER_IN == "crew" and s ~= "" and rows.member(s) == nil) then
+			return ""
+		end
 		local r = if s ~= "" then row_of(s) else nil
 		if not r or not (Unit.ACTIVE[r.state or ""] or Unit.stalled(r)) then
 			return ""
@@ -620,12 +627,13 @@ function M.Header(id: () -> string?): Node
 			w_full = true,
 			min_w = 0,
 			justify = "center",
+			-- (As wide as what it says, centred: never its tool at one edge
+			-- and its clocks at the other.)
 			ui.row {
 				pointer_events = "auto",
-				w_full = true,
 				min_w = 0,
 				max_w = 560,
-				unit(s, "strip"),
+				unit(s, "strip", nil, nil, true),
 			},
 		}
 	end, { grow = 1, min_w = 0 })

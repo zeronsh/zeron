@@ -58,6 +58,8 @@ export type Props = {
 	context: (() -> string?)?,
 	now: (() -> number)?,
 	lean: boolean?,
+	-- strip: as wide as what it says (a line on its own), not the width given
+	hug: boolean?,
 	-- Said quietly where its note would be, while it has none ("No
 	-- details yet").
 	placeholder: (() -> string?)?,
@@ -475,7 +477,9 @@ M.Progress = ui.component(function(props: Props): Node
 			tooltip = if lean then Tooltip { note } else nil,
 			class = if lean then "orch-progress orch-progress-strip orch-progress-lean" else "orch-progress orch-progress-strip",
 			label = label,
-			w_full = true,
+			-- (Hugging: as wide as what it says, for a line on its own, e.g. a
+			-- session's head; else the width it's given, its clocks at the end.)
+			w_full = not props.hug,
 			grow = props.grow,
 			min_w = props.min_w or 0,
 			h = 22,
@@ -525,7 +529,8 @@ M.Progress = ui.component(function(props: Props): Node
 					end, note_line { text_size = "$font.size.xs" }),
 				}
 				else ui.row {
-					grow = 1,
+					grow = if props.hug then 0 else 1,
+					shrink = 1,
 					min_w = 0,
 					items = "center",
 					ui.row {
