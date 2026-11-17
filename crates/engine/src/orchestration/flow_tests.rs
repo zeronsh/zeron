@@ -262,3 +262,69 @@ async fn a_flows_cards_keep_the_boards_rules() {
     let gate = card(&core, &o, "4").id;
     assert!(changes.iter().all(|c| c.item != gate), "the board check moved the gate's card");
 }
+
+#[tokio::test]
+async fn only_a_steps_own_thread_ends_it_and_never_a_gate() {
+    let (_temp, core) = core().await;
+    let o = with_flow(&core).await;
+    op(&core, Caller::Local, json!({"op":"startFlow","orchestratorId":o,"task":"T"})).await.unwrap();
+    let worker = card(&core, &o, "2");
+    let worker_thread = worker.threads[0].clone();
+
+    // Another thread of the same crew names the worker's card: nothing moves.
+    op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":o,"chatId":"other","role":"x"})).await.ok();
+    let rpc = core.rpc_service();
+    zeron_rpc::with_caller(
+        Caller::Local,
+        rpc.handle(methods::MUTATE, json!({"op":"createChat","chatId":"other","deviceId":REMOTE,"parentChatId":o,"childKind":"crew",
+            "config":{"harness":"codex","sandbox":"workspace-write"}})),
+    )
+    .await
+    .unwrap();
+    op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":o,"chatId":"other","role":"x"})).await.unwrap();
+    op(&core, agent("other"), json!({"op":"report","state":"done","summary":"me too","itemId":worker.id})).await.unwrap();
+    assert_eq!(card(&core, &o, "2").state, WorkState::Active);
+    assert_eq!(run(&core, &o).at.as_deref(), Some("2"));
+
+    // On to the gate; a crew thread naming the gate's card with a pass
+    // doesn't approve it.
+    report(&core, &worker_thread, None, "built").await;
+    let qa = card(&core, &o, "3").threads[0].clone();
+    report(&core, &qa, Some("pass"), "works").await;
+    let gate = card(&core, &o, "4");
+    op(&core, agent(&qa), json!({"op":"report","state":"done","summary":"approved","itemId":gate.id,"result":"pass"})).await.unwrap();
+    assert_eq!(card(&core, &o, "4").state, WorkState::Blocked);
+    assert_eq!(run(&core, &o).state, RunState::Blocked);
+    assert_ne!(run(&core, &o).state, RunState::Finished);
+}
+
+#[tokio::test]
+async fn only_the_ask_the_run_waits_on_leads_it_on() {
+    let (_temp, core) = core().await;
+    let o = with_flow(&core).await;
+    op(&core, Caller::Local, json!({"op":"startFlow","orchestratorId":o,"task":"T"})).await.unwrap();
+    let worker = card(&core, &o, "2").threads[0].clone();
+    report(&core, &worker, None, "built").await;
+    let qa = card(&core, &o, "3").threads[0].clone();
+    report(&core, &qa, Some("pass"), "works").await;
+    let gate = card(&core, &o, "4");
+    // Another ask on the gate's card, its first option "Approve": answered,
+    // the run still waits on its own.
+    let other = op(
+        &core,
+        agent(&o),
+        json!({"op":"ask","kind":"decision","question":"Unrelated?","options":[{"label":"Approve"}],"itemId":gate.id}),
+    )
+    .await
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    op(&core, Caller::Local, json!({"op":"answerAsk","id":other,"answer":"","option":0})).await.unwrap();
+    assert_eq!(run(&core, &o).state, RunState::Blocked);
+    assert_eq!(run(&core, &o).at.as_deref(), Some("4"));
+    // Its own: on.
+    let own = run(&core, &o).asks["4"].clone();
+    op(&core, Caller::Local, json!({"op":"answerAsk","id":own,"answer":"","option":0})).await.unwrap();
+    assert_eq!(run(&core, &o).state, RunState::Finished);
+}

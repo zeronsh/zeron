@@ -152,6 +152,8 @@ impl EngineRpc {
             state: RunState::Running,
             cards: Default::default(),
             returns: Default::default(),
+            threads: Default::default(),
+            asks: Default::default(),
             at: None,
             reason: None,
             started_at: now,
@@ -273,10 +275,11 @@ impl EngineRpc {
                 } else {
                     format!("{}: {}", step.name, one_line(&step.instructions, 200))
                 };
-                self.block_with_ask(orchestrator, &card, &question, options, context, AskKind::Approval, "Waiting on you: its gate", now);
+                let ask = self.block_with_ask(orchestrator, &card, &question, options, context, AskKind::Approval, "Waiting on you: its gate", now);
                 self.set_run(orchestrator, |r| {
                     r.state = RunState::Blocked;
                     r.at = Some(node.to_owned());
+                    r.asks.insert(node.to_owned(), ask);
                 });
                 Ok(())
             }
@@ -312,6 +315,10 @@ impl EngineRpc {
                         // Its crew role: the step's name.
                         if let Some(thread) = started["threadId"].as_str() {
                             self.add_to_crew(orchestrator, thread, &step.name, Some(card_id.clone()))?;
+                            let (node, thread) = (node.to_owned(), thread.to_owned());
+                            self.set_run(orchestrator, |r| {
+                                r.threads.insert(node, thread);
+                            });
                         }
                         Ok(())
                     }
@@ -390,7 +397,13 @@ impl EngineRpc {
         let Some(card) = report.item_id.as_deref().and_then(|id| self.orchestration().item(id)) else { return };
         let Some(step) = card.flow.clone() else { return };
         let Some(run) = self.live_run(&report.orchestrator_id).filter(|r| r.id == step.run) else { return };
-        if run.at.as_deref() != Some(step.node.as_str()) {
+        // Only a role step's own thread (the one the engine started for it)
+        // ends it: not a gate (the person's), not another thread naming
+        // the card.
+        if run.at.as_deref() != Some(step.node.as_str())
+            || !step.kind.is_role()
+            || run.threads.get(&step.node).map(String::as_str) != Some(report.from_chat.as_str())
+        {
             return;
         }
         let now = report.at;
@@ -404,7 +417,11 @@ impl EngineRpc {
             ReportState::Blocked | ReportState::Failed => {
                 if !self.card_has_open_ask(&card.id) {
                     let question = format!("{} can't go on: {}. What now?", step.step, one_line(&report.summary, 160));
-                    self.block_with_ask(&report.orchestrator_id, &card, &question, Vec::new(), None, AskKind::Blocker, "Blocked: its step can't go on", now);
+                    let ask = self.block_with_ask(&report.orchestrator_id, &card, &question, Vec::new(), None, AskKind::Blocker, "Blocked: its step can't go on", now);
+                    let node = step.node.clone();
+                    self.set_run(&report.orchestrator_id, |r| {
+                        r.asks.insert(node, ask);
+                    });
                 }
                 self.set_run(&report.orchestrator_id, |r| r.state = RunState::Blocked);
             }
@@ -433,8 +450,11 @@ impl EngineRpc {
                     AskOption { detail: "Send it back".into(), ..AskOption::new(FAIL) },
                 ];
                 self.set_outcome(&card.id, said, now);
-                self.block_with_ask(orchestrator, card, &question, options, Some(one_line(said, 300)), AskKind::Decision, "Waiting on you: pass or fail?", now);
-                self.set_run(orchestrator, |r| r.state = RunState::Blocked);
+                let ask = self.block_with_ask(orchestrator, card, &question, options, Some(one_line(said, 300)), AskKind::Decision, "Waiting on you: pass or fail?", now);
+                self.set_run(orchestrator, |r| {
+                    r.state = RunState::Blocked;
+                    r.asks.insert(node.clone(), ask);
+                });
             }
             Next::Exhausted { key, max } => {
                 let question = format!("{} sent it back {max} times, its limit. What now?", step.step);
@@ -443,10 +463,11 @@ impl EngineRpc {
                     AskOption { detail: "End the run here".into(), ..AskOption::new(STOP) },
                 ];
                 self.set_outcome(&card.id, said, now);
-                self.block_with_ask(orchestrator, card, &question, options, Some(one_line(said, 300)), AskKind::Decision, "Waiting on you: its return limit is reached", now);
+                let ask = self.block_with_ask(orchestrator, card, &question, options, Some(one_line(said, 300)), AskKind::Decision, "Waiting on you: its return limit is reached", now);
                 self.set_run(orchestrator, |r| {
                     r.state = RunState::Blocked;
                     r.reason = Some(format!("Return limit reached ({key})"));
+                    r.asks.insert(node.clone(), ask);
                 });
             }
             Next::Go { to, counted } => {
@@ -485,9 +506,19 @@ impl EngineRpc {
         let Some(step) = card.flow.clone() else { return false };
         let Some(orchestrator) = card.orchestrator_id.clone() else { return false };
         let Some(run) = self.live_run(&orchestrator).filter(|r| r.id == step.run) else { return false };
-        if run.at.as_deref() != Some(step.node.as_str()) {
+        // Only the ask the run raised and waits on, and only the person's
+        // answer (an orchestrator answering its crew's asks doesn't approve
+        // a gate or pass a step).
+        if run.at.as_deref() != Some(step.node.as_str())
+            || run.asks.get(&step.node) != Some(&ask.id)
+            || ask.answered_via == Some(zeron_proto::orchestration::AnswerVia::Orchestrator)
+        {
             return false;
         }
+        let node = step.node.clone();
+        self.set_run(&orchestrator, |r| {
+            r.asks.remove(&node);
+        });
         let now = Utc::now();
         let said = card.outcome.clone().unwrap_or_else(|| format!("The person answered: {picked}"));
         let result = match picked {
@@ -562,6 +593,8 @@ mod tests {
             state: RunState::Running,
             cards: Default::default(),
             returns: Default::default(),
+            threads: Default::default(),
+            asks: Default::default(),
             at: None,
             reason: None,
             started_at: Utc::now(),

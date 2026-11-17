@@ -136,6 +136,13 @@ pub struct FlowRun {
     /// How often each fail connection went back, by `from>to`.
     #[serde(default)]
     pub returns: BTreeMap<String, u32>,
+    /// The thread the engine started for each role step, by step id: only
+    /// its report ends the step.
+    #[serde(default)]
+    pub threads: BTreeMap<String, String>,
+    /// The ask the run waits on, by step id: only its answer leads on.
+    #[serde(default)]
+    pub asks: BTreeMap<String, String>,
     /// The step now under way (none once it ended).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
