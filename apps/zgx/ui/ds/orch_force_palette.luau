@@ -239,4 +239,24 @@ function M.machines(dark: boolean): { string }
 	return kept
 end
 
+-- The machines' colours as theme tokens, `$zeron.force.machine.m1`… (this
+-- theme's own, declared again as the theme changes): what a style wears
+-- (the legend's dots); the canvas draws the same colours from `machines`.
+function M.token(k: number): string
+	return `$zeron.force.machine.m{k}`
+end
+local declared: string? = nil
+function M.declare(dark: boolean)
+	local key = `{ui.theme.current:peek()}/{dark}`
+	if declared == key then
+		return
+	end
+	declared = key
+	local tokens: { [string]: string } = {}
+	for k, c in M.machines(dark) do
+		tokens[`m{k}`] = c
+	end
+	ui.theme.tokens { zeron = { force = { machine = tokens } } }
+end
+
 return M

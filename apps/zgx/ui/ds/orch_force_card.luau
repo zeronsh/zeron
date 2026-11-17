@@ -242,7 +242,7 @@ function M.Card(props: Props): Node
 			w_full = true,
 			ui.show(function(): boolean
 				return st() ~= "idle"
-			end, ui.div { pt = 2, shrink = 0, status.StatusIcon { kind = function(): any
+			end, ui.div { pt = "$zeron.space.hair", shrink = 0, status.StatusIcon { kind = function(): any
 				return st()
 			end, size = 14 } }),
 			ui.text {

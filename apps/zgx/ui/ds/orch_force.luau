@@ -253,7 +253,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { pin_clicks = 0, rescales = 0, leaders = 0, name_size = 0, label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { corner_replaces = 0, pin_clicks = 0, rescales = 0, leaders = 0, name_size = 0, label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -739,6 +739,61 @@ M.View = ui.component(function(props: {
 	-- point), and whether the zoom has moved off it since.
 	local names_k = 1
 	local names_dirty = false
+	-- The field's own controls in its corners (the legend bottom left, the
+	-- pivot bottom right, Fit top right): their sizes as laid out, and the
+	-- room each takes (field points, a little round it). No name goes
+	-- there: they're placed clear of it for the view at the time, and placed
+	-- again once a moved view (a pan, a zoom, Fit) settles with one under.
+	local CORNER_PAD = 4
+	local corner_size: { [string]: { w: number, h: number } } = {}
+	local corner_ver = ui.use_state(0)
+	local names_for_corners = false
+	local function corners(): { { number } }
+		local w, h = math.max(1, width:peek()), field_h()
+		local out: { { number } } = {}
+		local function add(x0: number, y0: number, x1: number, y1: number)
+			table.insert(out, { x0 - CORNER_PAD, y0 - CORNER_PAD, x1 + CORNER_PAD, y1 + CORNER_PAD })
+		end
+		local lg, pv, ft = corner_size.legend, corner_size.pivot, corner_size.fit
+		if lg and lg.w > 0 then
+			add(10, h - 8 - lg.h, 10 + lg.w, h - 8)
+		end
+		if pv and pv.w > 0 then
+			add(w - 8 - pv.w, h - 6 - pv.h, w - 8, h - 6)
+		end
+		if ft and ft.w > 0 then
+			add(w - 8 - ft.w, 8, w - 8, 8 + ft.h)
+		end
+		return out
+	end
+	local function reserved_world(): { { number } }
+		local v = view:peek()
+		local out: { { number } } = {}
+		for _, r in corners() do
+			table.insert(out, { (r[1] - v.x) / v.zoom, (r[2] - v.y) / v.zoom, (r[3] - v.x) / v.zoom, (r[4] - v.y) / v.zoom })
+		end
+		return out
+	end
+	local function measured(which: string, size: { w: number, h: number })
+		local was = corner_size[which]
+		if not was or math.abs(was.w - size.w) >= 1 or math.abs(was.h - size.h) >= 1 then
+			corner_size[which] = { w = size.w, h = size.h }
+			corner_ver:set(corner_ver:peek() + 1)
+		end
+	end
+	-- (Whether a name placed lies under one, in this view.)
+	local function corners_covered(): boolean
+		local rs = reserved_world()
+		for _, lab in labs do
+			local l: labels.Label = lab
+			for _, r in rs do
+				if l.x0 < r[3] and l.x1 > r[1] and l.y0 < r[4] and l.y1 > r[2] then
+					return true
+				end
+			end
+		end
+		return false
+	end
 	-- (A zoom, settled ZOOM_SETTLE_MS: the names placed again at its scale;
 	-- never a wheel step's frame.)
 	ui.effect(function()
@@ -789,8 +844,9 @@ M.View = ui.component(function(props: {
 		count("names")
 		fit_names = job.out
 		-- (Fitted again round the names, as after its own settling: never
-		-- once the view's been moved or a node dragged.)
-		if not moved_view and not dragged_since then
+		-- once the view's been moved or a node dragged, nor when they were
+		-- placed again only to clear the field's controls.)
+		if not moved_view and not dragged_since and not job.for_corners then
 			fit()
 			recull()
 		end
@@ -802,6 +858,10 @@ M.View = ui.component(function(props: {
 		end
 		if M.current then
 			M.current.labels = list
+			-- (For tests: the view now, and the controls' room in the field.)
+			M.current.live = function(): (any, { { number } })
+				return view:peek(), corners()
+			end
 		end
 	end
 	local function place_names(c: any)
@@ -838,12 +898,15 @@ M.View = ui.component(function(props: {
 			scale = names_k,
 			nodes = nodes,
 			links = links,
+			reserved = reserved_world(),
 			prev = labs_by_id,
 			widths = name_widths,
 			measure = function(t: string, hub: boolean): number
 				return (c:measure_text(t, name_opts(hub, names_k)))
 			end,
 		})
+		names_job.for_corners = names_for_corners
+		names_for_corners = false
 		names_ms = 0
 		counts.names_start_ms = (os.clock() - ts) * 1000
 		-- (The fixed ones at once; the threads' a slice a frame, from here.)
@@ -1459,6 +1522,31 @@ M.View = ui.component(function(props: {
 	local press: any = nil
 	local grip_hot = ui.use_state(false)
 	local in_field = false
+	-- A moved view (or the controls resized), settled: a name now under one
+	-- of the field's controls has the names placed again, clear of them
+	-- (once a view; the rest keep their places).
+	local corners_token = 0
+	local corners_tried: string? = nil
+	ui.effect(function()
+		local v = view:get()
+		corner_ver:get()
+		corners_token += 1
+		local token = corners_token
+		ui.after(ZOOM_SETTLE_MS, function()
+			if token ~= corners_token or press or names_job or names_dirty or not settled:peek() then
+				return
+			end
+			local key = string.format("%.1f/%.1f/%.4f/%d", v.x, v.y, v.zoom, corner_ver:peek())
+			if key == corners_tried or not corners_covered() then
+				return
+			end
+			corners_tried = key
+			names_dirty = true
+			names_for_corners = true
+			count("corner_replaces")
+			tick:set(tick:peek() + 1)
+		end)
+	end)
 	-- Hover intent: the node lit stays while the pointer goes from it to its
 	-- card (or its pin) and while it's on them; off all of them, it goes
 	-- after CLOSE_MS. The card's own grace (ds/hover_card) holds the card
@@ -1845,6 +1933,12 @@ M.View = ui.component(function(props: {
 		}
 	end
 
+	-- The machines' colours declared as this theme's tokens (again as it
+	-- changes), for the legend to wear.
+	ui.effect(function()
+		ui.theme.current:get()
+		fpal.declare(is_dark())
+	end)
 	-- The machines' legend: each one's colour and name, at the bottom left.
 	local legend = ui.computed(function(): { any }
 		version:get()
@@ -1857,18 +1951,22 @@ M.View = ui.component(function(props: {
 			end
 		end
 		local out = {}
-		-- (On the machines pivot: the orchestrators, by their hue.)
+		-- (On the machines pivot: the orchestrators, by their hue, as the
+		-- canvas fills them: a hue is the orchestrator's own, no token's.)
 		if M.pivot:get() == "machine" then
 			for _, n in fmodel.nodes do
 				if n.lead_of and n.hue then
-					table.insert(out, { id = n.id, name = n.title, color = soft_hue(n.hue) })
+					table.insert(out, { id = n.id, name = n.title, color = soft_hue(n.hue), hue = true })
 				end
 			end
 			return out
 		end
-		for _, m in fmodel.machines do
+		-- (Machines: their colours as this theme's tokens, by the same place
+		-- among the machines the canvas fills them by.)
+		local count_of = #fpal.machines(is_dark())
+		for k, m in fmodel.machines do
 			if used[m.id] and fills[m.id] then
-				table.insert(out, { id = m.id, name = m.name, color = fills[m.id] })
+				table.insert(out, { id = m.id, name = m.name, color = fpal.token((k - 1) % count_of + 1) })
 			end
 		end
 		return out
@@ -1878,7 +1976,7 @@ M.View = ui.component(function(props: {
 			class = "orch-force-legend-item",
 			gap = "$space.1",
 			items = "center",
-			ui.div { w = 8, h = 8, shrink = 0, rounded = "$radius.full", bg = item.color },
+			ui.div { w = 8, h = 8, shrink = 0, rounded = "$radius.full", bg = if item.hue then ui.raw(item.color, "an orchestrator's own hue, in the machines' soft tone (ds/orch_hue)") else item.color },
 			ui.text { item.name or item.id, text_size = "$font.size.xs", color = "$text.secondary", truncate = true, max_w = 140 },
 		}
 	end
@@ -2195,9 +2293,18 @@ M.View = ui.component(function(props: {
 					end, anchor),
 				},
 				-- The machines, at the bottom left.
-				ui.each(legend, legend_item, { key = function(item: any): string
-					return item.id
-				end, class = "orch-force-legend", absolute = true, left = 10, bottom = 8, gap = "$space.3", direction = "row", pointer_events = "none" }),
+				ui.div {
+					absolute = true,
+					left = 10,
+					bottom = 8,
+					pointer_events = "none",
+					on_resize = function(size: { w: number, h: number })
+						measured("legend", size)
+					end,
+					ui.each(legend, legend_item, { key = function(item: any): string
+						return item.id
+					end, class = "orch-force-legend", gap = "$space.3", direction = "row", pointer_events = "none" }),
+				},
 				-- The pivot, at the bottom right: orchestrators as the hubs (their
 				-- machines the colour), or machines (their orchestrators').
 				ui.div {
@@ -2205,6 +2312,9 @@ M.View = ui.component(function(props: {
 					absolute = true,
 					right = 8,
 					bottom = 6,
+					on_resize = function(size: { w: number, h: number })
+						measured("pivot", size)
+					end,
 					Segmented {
 						id = "orch-force-pivot",
 						value = M.pivot,
@@ -2220,6 +2330,9 @@ M.View = ui.component(function(props: {
 					absolute = true,
 					right = 8,
 					top = 8,
+					on_resize = function(size: { w: number, h: number })
+						measured("fit", size)
+					end,
 					IconButton {
 						id = "orch-force-fit",
 						icon = "expand-arrows",

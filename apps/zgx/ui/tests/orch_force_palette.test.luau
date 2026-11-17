@@ -218,3 +218,31 @@ for _, theme in { "theme_dark", "theme_light" } do
 		expect(least >= 8).to_be(true)
 	end)
 end
+
+-- The legend wears the machines' colours as this theme's tokens
+-- (`$zeron.force.machine.m1`…, declared with the Map): the same colours
+-- the canvas fills them with, in each theme, and again after a switch.
+test("force palette: the machines' tokens are their colours, in each theme and after a switch", function()
+	local app = mount("orch_map_fixture.luau")
+	app:resize(1440, 2400)
+	app:command("map_only")
+	app:command("map_force_big")
+	app:command("map_force")
+	app:frames(5)
+	for _, theme in { "theme_dark", "theme_light", "theme_dark" } do
+		app:command(theme)
+		app:frames(3)
+		app:command("map_force_palette")
+		app:frames(1)
+		local p: any = app:state("force_palette")
+		for k, m in p.machines do
+			local t = p.tokens[k]
+			expect(`{theme} m{k} {t and string.lower(string.sub(t, 1, 7))}`).to_be(`{theme} m{k} {m}`)
+		end
+		expect(pal.token(3)).to_be("$zeron.force.machine.m3")
+	end
+	-- (The legend's dots wear them: a token, no colour written out.)
+	app:command("theme_dark")
+	app:frames(3)
+	expect(app:count(".orch-force-legend-item") >= 2).to_be(true)
+end)
