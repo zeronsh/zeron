@@ -1,0 +1,13 @@
+[package]
+name = "zeron-plugin-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A plugin's own SQLite database (`zeron.db`), the one file its windows (Zeron's zgx app) and its service (Zeron's engine) share"
+
+[dependencies]
+# `limits` keeps a plugin from attaching another file; `hooks` for the
+# authorizer that keeps it from lifting its own limits.
+rusqlite = { version = "0.32", features = ["bundled", "limits", "hooks"] }
+serde_json = "1"

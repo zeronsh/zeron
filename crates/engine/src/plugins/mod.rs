@@ -67,6 +67,10 @@ pub const REMOVED_DIR: &str = ".removed";
 /// with none of it.
 pub(crate) fn forget_storage(plugins_dir: &Path, id: &str) {
     let storage = plugins_dir.join(".storage");
+    // Its service's connection first: an open database can't be deleted.
+    if let Some(db) = zeron_plugin_db::path_in(&storage, id) {
+        zeron_plugin_db::close(&db);
+    }
     for end in ["json", "settings.json", "sqlite3", "sqlite3-wal", "sqlite3-shm"] {
         let _ = std::fs::remove_file(storage.join(format!("{id}.{end}")));
     }
@@ -669,6 +673,13 @@ impl Plugins {
 
     fn directory(&self) -> Option<Arc<dyn KeyDirectory>> {
         lock(&self.inner.directory).clone()
+    }
+
+    /// Chat `id`'s folder, when it's on this device.
+    fn chat_folder(&self, id: &str) -> Option<String> {
+        let workspace = lock(&self.inner.workspace).clone()?;
+        let chat = workspace.chat(id).ok()??;
+        (chat.device_id == self.inner.device_id).then_some(chat.cwd?).filter(|cwd| !cwd.is_empty())
     }
 
     fn device_name(&self, device_id: &str) -> String {
@@ -2474,11 +2485,19 @@ impl Plugins {
         // Its service answers it, window or not; a tool it doesn't serve
         // goes to the window.
         if let Some(plan) = self.entry(&plugin).as_ref().and_then(service_plan) {
-            let call = serde_json::json!({
+            let mut call = serde_json::json!({
                 "kind": "tool",
                 "from": self.here(),
                 "chat": p.chat_id,
             });
+            // The chat's folder, where its work goes (`zeron.write_file`):
+            // as much as "sessions.read" says, for a chat on this device.
+            if plan.allows("sessions.read")
+                && let Some(chat) = p.chat_id.as_deref()
+                && let Some(cwd) = self.chat_folder(chat)
+            {
+                call["cwd"] = serde_json::json!(cwd);
+            }
             match self
                 .inner
                 .services
@@ -2674,6 +2693,7 @@ fn service_plan(entry: &Entry) -> Option<Plan> {
         allowed: item.allowed.clone(),
         commands: item.commands.clone(),
         hosts: item.network_hosts.clone(),
+        memory_mb: item.service_memory_mb,
     })
 }
 

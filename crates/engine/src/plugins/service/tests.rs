@@ -7,9 +7,13 @@ use serde_json::json;
 struct Recorder {
     emitted: Mutex<Vec<(String, String, Json)>>,
     notified: Mutex<Vec<String>>,
+    folders: Mutex<Vec<String>>,
 }
 
 impl Hooks for Recorder {
+    fn folders(&self) -> Vec<String> {
+        lock(&self.folders).clone()
+    }
     fn emit(&self, plugin: &str, event: &str, data: Json) {
         lock(&self.emitted).push((plugin.into(), event.into(), data));
     }
@@ -61,6 +65,7 @@ impl Rig {
             allowed: allowed.iter().map(|s| s.to_string()).collect(),
             commands: vec!["echo".into()],
             hosts: Vec::new(),
+            memory_mb: None,
         }
     }
 
@@ -220,6 +225,47 @@ fn small() -> Config {
         },
         ..Config::default()
     }
+}
+
+/// Holds 96 MB at once: past the default 64 MB.
+const BIG: &str = r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("big", function()
+	local t = {}
+	for i = 1, 96 do t[i] = string.rep("x", 1048576 - 8) .. i end
+	return #t
+end)
+"#;
+
+#[tokio::test]
+async fn a_service_gets_the_memory_its_manifest_asks() {
+    let r = rig(quick());
+    let mut plan = r.plan("1.0.0", BIG, &["service"]);
+    assert!(r.ask(&plan, "big", json!({})).await.is_err(), "64 MB unless it asks");
+    plan.memory_mb = Some(256);
+    plan.hash = "hash-more".into();
+    assert_eq!(r.ask(&plan, "big", json!({})).await.unwrap(), json!(96));
+}
+
+/// Holds 40 MB during the call and lets it go: garbage once it answers.
+const CHURN: &str = r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("churn", function()
+	local t = {}
+	for i = 1, 40 do t[i] = string.rep("x", 1048576 - 8) .. i end
+	return #t
+end)
+"#;
+
+#[tokio::test]
+async fn a_big_calls_garbage_leaves_room_for_the_next() {
+    let r = rig(quick());
+    let plan = r.plan("1.0.0", CHURN, &["service"]);
+    for call in 1..=3 {
+        let answer = r.ask(&plan, "churn", json!({})).await;
+        assert_eq!(answer, Ok(json!(40)), "call {call}");
+    }
+    assert_eq!(r.starts(), 1, "the same VM served them all");
 }
 
 #[tokio::test]
@@ -394,6 +440,42 @@ async fn a_watch_needs_files_read_and_a_folder() {
     assert!(refused.message.contains("no folder"), "{refused:?}");
 }
 
+const WRITER: &str = r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("write", function(args)
+	return zeron.write_file(args.path, args.data, { base64 = args.base64 }):await()
+end)
+"#;
+
+#[tokio::test]
+async fn a_service_writes_files_only_in_a_chats_folder_with_files_write() {
+    let r = rig(Config::default());
+    let project = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    lock(&r.hooks.folders).push(project.path().display().to_string());
+    let plan = r.plan("1.0.0", WRITER, &["service", "files.write"]);
+    let png = project.path().join("design").join("01-home.png");
+    let wrote = r
+        .ask(&plan, "write", json!({ "path": png.display().to_string(), "data": "iVBORw==", "base64": true }))
+        .await
+        .unwrap();
+    assert_eq!(wrote["bytes"], 4, "{wrote}");
+    assert_eq!(std::fs::read(&png).unwrap(), [0x89, b'P', b'N', b'G']);
+    // Outside this device's chats' and projects' folders: refused.
+    let out = elsewhere.path().join("x.html");
+    let refused = r.ask(&plan, "write", json!({ "path": out.display().to_string(), "data": "x" })).await.unwrap_err();
+    assert!(refused.message.contains("isn't inside"), "{refused:?}");
+    assert!(!out.exists());
+    // Without "files.write": refused, nothing written.
+    let r = rig(Config::default());
+    lock(&r.hooks.folders).push(project.path().display().to_string());
+    let plan = r.plan("1.0.0", WRITER, &["service"]);
+    let html = project.path().join("index.html");
+    let refused = r.ask(&plan, "write", json!({ "path": html.display().to_string(), "data": "x" })).await.unwrap_err();
+    assert!(refused.message.contains("wasn't allowed to write files"), "{refused:?}");
+    assert!(!html.exists());
+}
+
 /// R5: a plugin file that is Luau bytecode (unvalidated by Luau, so it could
 /// corrupt the engine) is refused, by `require` and as the entry.
 #[tokio::test]
@@ -458,6 +540,52 @@ async fn local_server(to: Option<String>) -> u16 {
     port
 }
 
+/// A font or a picture comes whole: with `binary` the body is its bytes in
+/// base64 (every byte, NUL and those that aren't UTF-8); without, text.
+#[tokio::test]
+async fn fetch_gives_bytes_in_base64_when_asked() {
+    use base64::Engine as _;
+    let bytes: Vec<u8> = (0..=255u8).chain([0xff, 0xfe, 0, 0x80]).collect();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = bytes.clone();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let head = format!("HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+", body.len());
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+            });
+        }
+    });
+    let r = rig(Config::default());
+    let mut plan = r.plan(
+        "1.0.0",
+        r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("get", function(args)
+	return zeron.fetch(args.url, { binary = args.binary }):await().body
+end)
+"#,
+        &["service", "network"],
+    );
+    plan.hosts = vec![format!("127.0.0.1:{port}")];
+    let url = format!("http://127.0.0.1:{port}/font.ttf");
+    let binary = r.ask(&plan, "get", json!({ "url": url, "binary": true })).await.unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD.decode(binary.as_str().unwrap()).unwrap();
+    assert_eq!(decoded, bytes);
+    let text = r.ask(&plan, "get", json!({ "url": url })).await.unwrap();
+    assert_eq!(text, json!(String::from_utf8_lossy(&bytes)));
+}
+
 /// R15: "network" is the internet. A plugin's fetch never reaches this
 /// device, your network or instance metadata (by address, by a name that
 /// resolves there, or by a redirect), unless its manifest names the host.
@@ -496,4 +624,41 @@ async fn fetch_never_reaches_this_device_or_metadata_unless_named() {
     let open = r.plan("1.0.0", FETCHER, &["service", "network"]);
     let auth = r.ask(&open, "get", json!({ "url": "https://example.invalid/", "headers": { "Authorization": "Bearer x" } })).await;
     assert!(auth.unwrap_err().message.contains("Authorization"));
+}
+
+const DB: &str = r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("put", function(args)
+	zeron.db.exec("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)"):await()
+	return zeron.db.exec("INSERT OR REPLACE INTO kv VALUES (?, ?)", { args.k, args.v }):await()
+end)
+zeron.serve("get", function(args)
+	local rows = zeron.db.query("SELECT v FROM kv WHERE k = ?", { args.k }):await()
+	return rows[1] and rows[1].v
+end)
+zeron.serve("bad", function()
+	return zeron.db.exec("ATTACH DATABASE 'x.sqlite3' AS x"):await()
+end)
+"#;
+
+/// A service's `zeron.db` is its windows' database: the same file
+/// (`<storage>/<id>.sqlite3`), so what one writes the other reads.
+#[tokio::test]
+async fn a_service_and_its_windows_share_one_database() {
+    let r = rig(quick());
+    let plan = r.plan("1.0.0", DB, &["service"]);
+    let put = r.ask(&plan, "put", json!({ "k": "a", "v": "from the service" })).await.unwrap();
+    assert_eq!(put["changes"], 1);
+    // The window's side: zeron.db in the app opens this path.
+    let path = Services::db_path(&r.dir.path().join(".storage"), "svc").unwrap();
+    assert!(path.exists(), "{}", path.display());
+    let rows = zeron_plugin_db::call(&path, &json!({ "op": "query", "sql": "SELECT v FROM kv WHERE k = 'a'" })).unwrap();
+    assert_eq!(rows, json!([{ "v": "from the service" }]));
+    zeron_plugin_db::call(&path, &json!({ "op": "exec", "sql": "INSERT INTO kv VALUES ('b', 'from a window')" })).unwrap();
+    assert_eq!(r.ask(&plan, "get", json!({ "k": "b" })).await.unwrap(), json!("from a window"));
+    // Kept across the service's stops, and held to the same limits.
+    until("it stops when idle", || !r.running()).await;
+    assert_eq!(r.ask(&plan, "get", json!({ "k": "a" })).await.unwrap(), json!("from the service"));
+    let bad = r.ask(&plan, "bad", json!({})).await;
+    assert!(bad.is_err(), "{bad:?}");
 }
