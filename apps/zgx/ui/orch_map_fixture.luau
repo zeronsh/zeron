@@ -332,6 +332,22 @@ ui.command { id = "reins_archive", title = "Reins release: archived", run = func
 	now.orchestrators = list
 	orchestration.now:set(now)
 end }
+-- The data reloading (the engine reconnecting): sessions loading, its
+-- lists empty for a while; then back as it was.
+local before_loading: any = nil
+ui.command { id = "data_loading", title = "Data: loading again", run = function()
+	before_loading = sessions.now:peek()
+	local now = table.clone(before_loading)
+	now.state = "loading"
+	now.chats, now.archived, now.children = {}, {}, {}
+	sessions.now:set(now)
+end }
+ui.command { id = "data_ready", title = "Data: loaded again", run = function()
+	if before_loading then
+		sessions.now:set(before_loading)
+		before_loading = nil
+	end
+end }
 -- An open ask of its.
 ui.command { id = "sign_ask", title = "Signing: asks", run = function()
 	local now = table.clone(orchestration.now:peek() :: any)

@@ -153,7 +153,8 @@ export type Name =
 -- box around it to do that (a row of thousands' glyph: one node, not three).
 export type Props = {
 	name: Name | () -> Name,
-	size: number?,
+	-- Points, or a function it follows (drawn at the size it is each frame).
+	size: (number | () -> number)?,
 	glyph_stroke: boolean?,
 	absolute: boolean?,
 	left: number?,
@@ -182,14 +183,18 @@ local function in_glyph_stroke(src: string, size: number): string
 end
 
 return function(props: Props): Node
-	local size = props.size or 16
+	local given = props.size or 16
+	local function size_now(): number
+		return if type(given) == "function" then given() else given
+	end
+	local size: any = given
 	local name = props.name
 	local themed = props.glyph_stroke == true
 	return ui.svg {
 		src = if type(name) == "function" or themed
 			then function()
 				local src = file(if type(name) == "function" then name() else name)
-				return if themed then in_glyph_stroke(src, size) else src
+				return if themed then in_glyph_stroke(src, size_now()) else src
 			end
 			else file(name),
 		w = size,

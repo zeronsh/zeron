@@ -60,6 +60,58 @@ M.unpin_children = function(_id: string) end
 M.unpin_all = function() end
 M.current = nil :: any
 
+-- The sidebar's glyph over a chat at `zoom`, in points: its working ring
+-- (the ring's radius is 10 of its 24 units) round the chat exactly where its
+-- status ring is (R_RING), or the glyph by it.
+function M.ring_size(ring: boolean, zoom: number): number
+	return if ring then draw.R_RING * 24 / 10 * zoom else 13 * zoom
+end
+
+-- What's gone for good from a world loaded whole: an id whose chat is
+-- archived, or that's in none of its chats nor its orchestrators (an
+-- archived orchestrator too); never one in `keep` (the web shown: a crew
+-- chat not heard yet shows while it's new).
+function M.gone(world: any, keep: { [string]: any }?): (id: string) -> boolean
+	local chats = world.chats or {}
+	local leads: { [string]: boolean } = {}
+	for _, o in (world.now or {}).orchestrators or {} do
+		leads[o.id] = not o.archived
+	end
+	return function(id: string): boolean
+		if keep and keep[id] then
+			return false
+		end
+		local c = chats[id]
+		if c then
+			return c.archived == true or leads[id] == false
+		end
+		return not leads[id]
+	end
+end
+
+-- The kept places and pins with what's gone dropped (`model`: the web
+-- shown, kept whatever). Only for a world loaded whole (`world.loaded`).
+function M.prune(world: any, model: any?): number
+	local gone = M.gone(world, model and model.index)
+	local dropped = 0
+	for _, st in { M.places :: any, M.pins :: any } do
+		local cur = st:peek() or {}
+		local out, n = {}, 0
+		for id, v in cur do
+			if gone(id) then
+				n += 1
+			else
+				out[id] = v
+			end
+		end
+		if n > 0 then
+			st:set(out :: any)
+			dropped += n
+		end
+	end
+	return dropped
+end
+
 -- A frame's share of the settling (seconds), and how often it's drawn
 -- while settling (frames).
 local STEP_BUDGET = 0.006
@@ -70,6 +122,9 @@ local DRAG_STEPS = 8
 local RELEASE_BUDGET = 0.004
 local PULSE_MS = 900
 local PLACES_MAX = 4000
+-- How long the web keeps its shape on data loaded whole before what's gone
+-- from it is swept from the places and pins (ms).
+local PRUNE_MS = 3000
 -- What a secondary click on the space (no node) is, for its menu.
 local BACKGROUND = "force:background"
 local TILE_H = kit.TILE_H
@@ -150,7 +205,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -206,6 +261,8 @@ M.View = ui.component(function(props: {
 		local pad = 70
 		local z = math.clamp(math.min((w - pad * 2) / math.max(1, x1 - x0), (h - pad * 2 - 30) / math.max(1, y1 - y0)), MIN_FIT, 1.4)
 		view:set({ x = w / 2 - (x0 + x1) / 2 * z, y = (h - 30) / 2 - (y0 + y1) / 2 * z, zoom = z })
+		counts.zoom = z
+		count("frames", 0)
 	end
 
 	-- Settled: kept (by node), drawn, the markers to their places.
@@ -316,6 +373,22 @@ M.View = ui.component(function(props: {
 	-- A new model when what's shown changes: the same nodes and links, its
 	-- states and names taken in place; else a new web, from where its
 	-- nodes were (this one, else kept), waking only what's new and round it.
+	-- The sweep of places and pins (M.prune), a while after the web last
+	-- changed shape on data loaded whole: a world that's replaced at once
+	-- (opening on a sample, a reconnect's first answer) never sweeps.
+	local prune_req = ui.use_state(0)
+	local prune_world: any, prune_model: any = nil, nil
+	ui.effect(function()
+		if prune_req:get() == 0 then
+			return
+		end
+		ui.after(PRUNE_MS, function()
+			if prune_world and prune_world.loaded == true then
+				count("prunes")
+				counts.pruned += M.prune(prune_world, prune_model)
+			end
+		end)
+	end)
 	local function rebuild(world: any, comms: { any })
 		local next_m = fm.build(world, comms, world.clock or os.time())
 		if next_m.sig == fmodel.sig then
@@ -363,27 +436,20 @@ M.View = ui.component(function(props: {
 			from[s.ids[i]] = { s.x[i], s.y[i] }
 		end
 		local fresh = sim.place(next_s, from)
-		-- (Pinned ones held where they were dropped; a pin of a node gone
-		-- goes with it.)
-		local pins = M.pins:peek() or {}
-		local kept_pins: { [string]: boolean } = {}
-		local pruned = false
-		local chats = world.chats or {}
-		for id in pins do
+		-- (Pinned ones held where they were dropped; a pin of a node not
+		-- shown kept for when it is, till the data says it's gone.)
+		for id in M.pins:peek() or {} do
 			local i = next_s.index[id]
 			if i then
 				sim.pin(next_s, i, true)
-				kept_pins[id] = true
-			elseif fmodel.index[id] and (chats[id] == nil or chats[id].archived) then
-				-- (In the web till now, its chat gone: its pin goes.)
-				pruned = true
-			else
-				kept_pins[id] = true
 			end
 		end
-		if pruned then
-			M.pins:set(kept_pins :: any)
-		end
+		-- (The data loaded whole, never a world still loading: the places
+		-- and pins of what's archived or gone from it go, the web's own
+		-- kept.)
+		-- (Loading again: a sweep due for the world before is called off.)
+		prune_world, prune_model = if world.loaded == true then world else nil, next_m
+		prune_req:set(prune_req:peek() + 1)
 		local old_m = fmodel
 		fmodel = next_m
 		s = next_s
@@ -992,6 +1058,8 @@ M.View = ui.component(function(props: {
 	-- The view.
 	local function set_view(x: number, y: number, zoom: number)
 		view:set({ x = x, y = y, zoom = zoom })
+		counts.zoom = zoom
+		count("frames", 0)
 		recull()
 	end
 	local function zoom_at(px: number, py: number, k: number)
@@ -1487,10 +1555,12 @@ M.View = ui.component(function(props: {
 		end
 		return out
 	end)
+	local ring_size = M.ring_size
 	local function glyph_el(item: any): Node
 		-- (The ring's radius is 10 of its 24: sized to the chat's ring.)
+		-- (Followed as the zoom moves, never the size it was made at.)
 		local function size(): number
-			return if item.ring then R_RING * 2.4 * zoom:get() else 13 * zoom:get()
+			return ring_size(item.ring, zoom:get())
 		end
 		local function at(): (number, number)
 			version:get()
@@ -1526,7 +1596,7 @@ M.View = ui.component(function(props: {
 					status_tick:get()
 					return state_of(item.id)
 				end,
-				size = size(),
+				size = size,
 			},
 		}
 	end
