@@ -1068,7 +1068,22 @@ impl Tools {
             Some(key) => Some(self.zeron.resolve_device_id(Some(key)).await?),
             None => None,
         };
-        let models = self.zeron.models_on(harness, device.as_deref()).await?;
+        // No models is never an answer: it reads as success with nothing to
+        // pick. Say why instead (the agent's own failure, or its login).
+        let host = device.as_deref().unwrap_or("local");
+        let models = match self.fresh_models(harness, device.as_deref(), None).await {
+            Ok(models) if !models.is_empty() => models,
+            Ok(_) => {
+                let hint = self.catalog_hint(harness, device.as_deref()).await;
+                anyhow::bail!("{harness:?} lists no models on device {host}.{hint}")
+            }
+            Err(error) => {
+                let hint = self.catalog_hint(harness, device.as_deref()).await;
+                return Err(error.context(format!(
+                    "{harness:?} could not list its models on device {host}.{hint}"
+                )));
+            }
+        };
         Ok(json!({
             "harness": harness,
             "models": models.iter().map(|m| json!({
@@ -1078,6 +1093,43 @@ impl Tools {
                 "reasoningLevels": m.reasoning_levels,
             })).collect::<Vec<_>>()
         }))
+    }
+
+    /// A harness's models, asked of the agent again once when what the
+    /// engine kept failed, is empty, or lacks `wanted`: it keeps a failed or
+    /// empty answer for a while, and a sign-in since can have changed it.
+    async fn fresh_models(
+        &self,
+        harness: HarnessId,
+        device: Option<&str>,
+        wanted: Option<&str>,
+    ) -> anyhow::Result<Vec<zeron_proto::Model>> {
+        match self.zeron.models_on(harness, device).await {
+            Ok(models)
+                if !models.is_empty()
+                    && wanted.is_none_or(|id| models.iter().any(|m| m.id == id)) =>
+            {
+                Ok(models)
+            }
+            _ => self.zeron.models_listed(harness, device, true).await,
+        }
+    }
+
+    /// Why a harness may list no models, as far as the device tells: it
+    /// isn't there, installed, on, or signed in. Empty when nothing says.
+    async fn catalog_hint(&self, harness: HarnessId, device: Option<&str>) -> &'static str {
+        let Ok(harnesses) = self.zeron.harnesses_on(device).await else {
+            return "";
+        };
+        match harnesses.iter().find(|h| h.id == harness) {
+            None => " It isn't offered there (see list_harnesses).",
+            Some(h) if !h.installed => " It isn't installed there.",
+            Some(h) if h.enabled == Some(false) => " It is turned off there.",
+            Some(h) if h.signed_in == Some(false) => {
+                " It isn't signed in there: sign in to it (Settings → Accounts), then retry."
+            }
+            _ => "",
+        }
     }
 
     async fn list_chats(&self, args: ListChatsArgs) -> anyhow::Result<Value> {
@@ -1236,7 +1288,13 @@ impl Tools {
         };
         // A Cloud machine's catalog is checked when it runs, not here.
         if let Some(model) = args.model.as_deref().filter(|_| !args.cloud) {
-            let models = self.zeron.models_on(harness, Some(&device_id)).await?;
+            let models = self
+                .fresh_models(harness, Some(&device_id), Some(model))
+                .await?;
+            if models.is_empty() {
+                let hint = self.catalog_hint(harness, Some(&device_id)).await;
+                anyhow::bail!("{harness:?} lists no models on device {device_id}.{hint}");
+            }
             anyhow::ensure!(
                 models.iter().any(|m| m.id == model),
                 "model {model:?} is not offered by {harness:?} on device {device_id}; available: {}",
@@ -2035,6 +2093,10 @@ mod tests {
         remote_dark: bool,
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
+        /// The local `ListModels` reply unless forced (what the engine
+        /// kept); `forced_models` is the forced one (the agent asked again).
+        kept_models: Option<Value>,
+        forced_models: Option<Value>,
         reads: Mutex<Vec<(String, Value)>>,
         /// `DeviceStats` reply; absent = an engine without the method.
         stats: Option<Value>,
@@ -2139,6 +2201,14 @@ mod tests {
                     { "id": "codex", "name": "Codex", "supportsSteering": true,
                       "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
                 ])),
+                methods::LIST_MODELS
+                    if !remote && params["force"] == true && self.forced_models.is_some() =>
+                {
+                    RpcReply::Value(self.forced_models.clone().unwrap())
+                }
+                methods::LIST_MODELS if !remote && self.kept_models.is_some() => {
+                    RpcReply::Value(self.kept_models.clone().unwrap())
+                }
                 methods::LIST_MODELS if remote => RpcReply::Value(json!([
                     {"id":"remote-model", "label":"Remote model"}
                 ])),
@@ -3262,6 +3332,109 @@ mod tests {
             );
             assert!(broken.writes.lock().unwrap().is_empty());
         }
+    }
+
+    fn forced_reads(world: &World) -> usize {
+        world
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, params)| method == methods::LIST_MODELS && params["force"] == true)
+            .count()
+    }
+
+    /// A kept empty catalog (a failure, or one from before a sign-in) is
+    /// asked again of the agent, not answered as success.
+    #[tokio::test]
+    async fn list_models_asks_again_when_the_kept_catalog_is_empty() {
+        let world = Arc::new(World {
+            kept_models: Some(json!([])),
+            forced_models: Some(json!([{ "id": "grok-4.7", "label": "Grok 4.7" }])),
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let listed = tools
+            .call("list_models", json!({"harness":"claude-code"}))
+            .await
+            .unwrap();
+        assert_eq!(listed["models"][0]["id"], "grok-4.7");
+        assert_eq!(forced_reads(&world), 1);
+    }
+
+    #[tokio::test]
+    async fn list_models_says_why_it_has_none() {
+        let signed_out = json!({ "accounts": [{
+            "id": "a1", "harness": "claude-code", "active": false,
+            "email": null, "planLabel": null
+        }], "warnings": [] });
+        let world = Arc::new(World {
+            kept_models: Some(json!([])),
+            forced_models: Some(json!([])),
+            accounts: Some(signed_out),
+            ..Default::default()
+        });
+        let error = tools(world.clone(), Origin::default())
+            .call("list_models", json!({"harness":"claude-code"}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("lists no models"), "{error}");
+        assert!(error.contains("isn't signed in"), "{error}");
+        assert_eq!(forced_reads(&world), 1);
+
+        let world = Arc::new(World {
+            catalog_error: Some(methods::LIST_MODELS),
+            ..Default::default()
+        });
+        let error = tools(world.clone(), Origin::default())
+            .call("list_models", json!({"harness":"cursor"}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("could not list its models"), "{error}");
+        assert!(error.contains("catalog unavailable"), "{error}");
+        assert!(error.contains("isn't offered there"), "{error}");
+        assert_eq!(forced_reads(&world), 1);
+    }
+
+    /// A model the kept catalog lacks is checked against the agent's own
+    /// list before the chat is refused.
+    #[tokio::test]
+    async fn create_chat_checks_a_missing_model_against_a_fresh_catalog() {
+        let world = Arc::new(World {
+            kept_models: Some(json!([{ "id": "opus", "label": "Opus" }])),
+            forced_models: Some(json!([
+                { "id": "opus", "label": "Opus" },
+                { "id": "gemini-4-carbon", "label": "Gemini 4 Carbon" }
+            ])),
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let created = tools
+            .call(
+                "create_chat",
+                json!({"harness":"claude-code", "model":"gemini-4-carbon"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["model"], "gemini-4-carbon");
+        assert_eq!(forced_reads(&world), 1);
+        // A model the kept catalog has needs no second ask.
+        tools
+            .call(
+                "create_chat",
+                json!({"harness":"claude-code", "model":"opus"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forced_reads(&world), 1);
+        let error = tools
+            .call(
+                "create_chat",
+                json!({"harness":"claude-code", "model":"nope"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("is not offered"), "{error}");
     }
 
     #[tokio::test]
