@@ -4438,6 +4438,43 @@ impl DocHost {
         }
     }
 
+    /// `injected` as a command or row `issued_by` that device may say it:
+    /// only an engine says what its own deliveries are (`ops::deliver`), so
+    /// only this engine's, or another engine's of this account (a device row
+    /// it booted, advertising `INJECTED_MESSAGES_V1`), is kept. Callers'
+    /// RPCs never carry it (`QUEUE_COMMAND`, `RELAY_COMMAND` strip it); a
+    /// client writing the doc itself is no engine.
+    pub(crate) fn trusted_injected<'a>(
+        &self,
+        issued_by: &str,
+        injected: Option<&'a zeron_doc::Injected>,
+    ) -> Option<&'a zeron_doc::Injected> {
+        let injected = injected?;
+        if issued_by == self.inner.config.device_id {
+            return Some(injected);
+        }
+        let engine = self
+            .workspace()
+            .and_then(|ws| ws.read_devices().ok())
+            .into_iter()
+            .flatten()
+            .any(|d| {
+                d.id == issued_by
+                    && d.version.is_some()
+                    && d.supports(zeron_proto::capabilities::INJECTED_MESSAGES_V1)
+            });
+        engine.then_some(injected)
+    }
+
+    /// A queue row's `injected`, trusted as [`Self::trusted_injected`]
+    /// says, and never once its words were edited.
+    fn trusted_row_injected<'a>(&self, row: &'a QueuedMessage) -> Option<&'a zeron_doc::Injected> {
+        if row.edited_at.is_some() {
+            return None;
+        }
+        self.trusted_injected(&row.issued_by, row.injected.as_ref())
+    }
+
     /// Hold a message for later: append it to the doc's queue. Any device may
     /// write here (unlike `messages`), and the change subscription kicks
     /// [`Self::drain_queue`], so a queue that lands while the agent is already
@@ -5278,7 +5315,7 @@ impl DocHost {
                 continue;
             };
             changed = true;
-            handle.expect_injected(&row.id, row.injected.as_ref());
+            handle.expect_injected(&row.id, self.trusted_row_injected(&row));
             if let Err(err) = handle.write_user_message(&row.id, &row.text, row.issued_at) {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "cancelled held send write failed");
             }
@@ -5309,7 +5346,7 @@ impl DocHost {
         // therefore wait without disturbing the active turn's runway, then
         // anchor the prompt only once this exact row reaches the transcript.
         let message_id = item.id.clone();
-        handle.expect_injected(&message_id, item.injected.as_ref());
+        handle.expect_injected(&message_id, self.trusted_row_injected(item));
         if !self.missing_row_attachments(item).is_empty() {
             return Err(EngineError::Other(
                 "this message's images are still uploading".into(),
@@ -6493,13 +6530,13 @@ impl DocHost {
             return Ok((SessionCommandStatus::Applied, Some("filed by orchestration".into())));
         }
         // The engine's message (a crew ask, an answer…): its entry says so,
-        // whichever path writes it.
+        // whichever path writes it, when an engine wrote it.
         match &entry.payload {
             SessionCommandPayload::Run { message_id, injected, .. } => {
-                handle.expect_injected(message_id, injected.as_ref());
+                handle.expect_injected(message_id, self.trusted_injected(&entry.issued_by, injected.as_ref()));
             }
             SessionCommandPayload::Steer { message_id: Some(message_id), injected, .. } => {
-                handle.expect_injected(message_id, injected.as_ref());
+                handle.expect_injected(message_id, self.trusted_injected(&entry.issued_by, injected.as_ref()));
             }
             _ => {}
         }
@@ -7495,6 +7532,17 @@ mod transfer_progress_tests {
             ]
         );
         assert_eq!(entries[1].parts.len(), 1, "a person's: its words alone");
+        // Only an engine says what its deliveries are: this one, never a
+        // device that isn't a known engine's (a client writing the doc).
+        let said = zeron_doc::Injected::scheduled();
+        assert!(host.trusted_injected("dev-test", Some(&said)).is_some());
+        assert!(host.trusted_injected("phone", Some(&said)).is_none());
+        // An edited row's words are no longer the engine's.
+        let mut row = super::QueuedMessage::new("q1", "[Dump d] words", "dev-test");
+        row.injected = Some(said);
+        assert!(host.trusted_row_injected(&row).is_some());
+        row.edited_at = Some(1);
+        assert!(host.trusted_row_injected(&row).is_none());
         host.shutdown_workers().await;
     }
 

@@ -3606,9 +3606,11 @@ impl RpcService for EngineRpc {
                 {
                     return Err(RpcError::BadParams("Only Zeron files crew reports".into()));
                 }
+                // What the engine's own deliveries say they are (`injected`)
+                // is never a caller's to claim, the local UI's included.
                 let command_id = self
                     .doc_host
-                    .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
+                    .queue_command_with_transfers(&p.chat_id, p.command.without_injected(), p.transfers)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
@@ -3637,7 +3639,13 @@ impl RpcService for EngineRpc {
                 let p: RelayCommandParams = parse_params(params)?;
                 let outcome = self
                     .doc_host
-                    .ingest_relayed_command(&p.chat_id, p.entry)
+                    .ingest_relayed_command(&p.chat_id, {
+                        // (A relayed entry's sender can't be checked here:
+                        // it runs as its words, its doc row still trusted.)
+                        let mut entry = p.entry;
+                        entry.payload = entry.payload.without_injected();
+                        entry
+                    })
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))

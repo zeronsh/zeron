@@ -190,6 +190,8 @@ impl SessionDoc {
         }
         map.insert("text", text)?;
         map.insert("editedAt", now_ms)?;
+        // (Edited, the words are no longer the engine's.)
+        map.delete("injected")?;
         self.commit();
         Ok(true)
     }
@@ -267,6 +269,7 @@ impl SessionDoc {
             if !unchanged {
                 map.insert("text", text)?;
                 map.insert("editedAt", now_ms)?;
+                map.delete("injected")?;
             }
         }
         if let Some(attachments) = attachments {

@@ -76,6 +76,15 @@ pub enum SessionCommandPayload {
 }
 
 impl SessionCommandPayload {
+    /// The payload without what only the engine's own deliveries may say
+    /// ([`crate::Injected`]): what a caller sends never claims it.
+    pub fn without_injected(mut self) -> Self {
+        if let SessionCommandPayload::Run { injected, .. } | SessionCommandPayload::Steer { injected, .. } = &mut self {
+            *injected = None;
+        }
+        self
+    }
+
     pub fn kind(&self) -> SessionCommandKind {
         match self {
             SessionCommandPayload::Run { .. } => SessionCommandKind::Run,

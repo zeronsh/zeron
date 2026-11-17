@@ -62,6 +62,11 @@ pub mod capabilities {
     /// synced session row and transcript.
     pub const ORCHESTRATION_ROUTES_V1: &str = "orchestration-routes-v1";
 
+    /// The engine writes `injected` on the commands and queue rows it
+    /// delivers itself (a crew ask, an answer…): a host trusts a row's
+    /// `injected` only from a device that says so.
+    pub const INJECTED_MESSAGES_V1: &str = "injected-messages-v1";
+
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
         MESSAGE_QUEUE_V1,
@@ -79,6 +84,7 @@ pub mod capabilities {
         ATTACHMENT_STORE_V1,
         ORCHESTRATION_PROGRESS_V1,
         ORCHESTRATION_ROUTES_V1,
+        INJECTED_MESSAGES_V1,
         crate::voice::remote::CAPABILITY,
     ];
 

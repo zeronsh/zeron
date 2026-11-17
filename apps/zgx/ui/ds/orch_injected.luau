@@ -184,8 +184,15 @@ function M.read(text: string?, injected: Injected?): Injected?
 	if not injected then
 		return said
 	end
+	-- (Every block but a scheduled wake's shows less than its text: one
+	-- whose text isn't what its kind says shows all of it, as words, so
+	-- what's hidden is only ever the engine's own.)
+	local agrees = said ~= nil and said.kind == injected.kind
+	if not agrees and injected.kind ~= "scheduled" then
+		return nil
+	end
 	local out: Injected = {}
-	if said and said.kind == injected.kind then
+	if said and agrees then
 		for k, v in said do
 			out[k] = v
 		end
@@ -197,10 +204,6 @@ function M.read(text: string?, injected: Injected?): Injected?
 	-- (A scheduled wake's own prompt: its words are the block's.)
 	if out.kind == "scheduled" and not (said and said.kind == "scheduled") then
 		out.prompt = text
-	end
-	-- (A dump's words, when its text didn't read as one: all of it.)
-	if out.kind == "dump" and not out.body then
-		out.body = text or ""
 	end
 	return out
 end
