@@ -165,8 +165,8 @@ device (`run_command`), as an agent on the laptop can. Enforced at the edge:
   sleeping sessions, as their other devices' sends do (`CloudAccount.autoWake`).
 - **Engine** (`crates/engine/src/rpc/agent_gate.rs`): what an agent may do is the same on
   Cloud as on a computer. It runs commands (`RunCommand`, `ReadCommandOutput`, `StopCommand`,
-  `ListBackgroundCommands`, here or on another device) only from a chat with full access and no
-  sandbox. A command running on a Cloud machine counts as background work in its heartbeat,
+  `ListBackgroundCommands`, here or on another device) only from a chat with full access (what every
+  harness already runs unconfined). A command running on a Cloud machine counts as background work in its heartbeat,
   so the machine stays awake for it.
 
 User bearers are unaffected by all of the above.

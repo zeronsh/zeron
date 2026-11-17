@@ -15,10 +15,12 @@
 //! - What it writes into a chat carries Zeron's header naming the sending
 //!   chat, built here; a header in the text can't claim another chat.
 //! - A command it runs (`RunCommand`, on this device or any other of the
-//!   person's) runs as the person, with no sandbox: only an agent whose own
-//!   chat runs with full access and no sandbox may. Anything less would let
-//!   a supervised or sandboxed agent do through it what it would itself
-//!   have to ask for.
+//!   person's) runs as the person, unconfined: only an agent whose own chat
+//!   runs with full access may. That is what full access already means to
+//!   every harness (Codex and Muse drop their sandbox for it, Claude Code
+//!   allows every tool call), whatever sandbox level the chat records, so
+//!   it gains nothing; anything less would let a supervised agent do
+//!   through it what it would itself have to ask for.
 //!
 //! The calling chat is the one its MCP server names (`x-zeron-chat`): the
 //! engine sets that server's environment, so a sandboxed agent can't change
@@ -104,16 +106,14 @@ impl EngineRpc {
             )
         };
         if command {
-            let unconfined = calling.as_ref().is_none_or(|c| {
-                c.ceiling.is_none_or(|(sandbox, access)| {
-                    sandbox == SandboxLevel::DangerFullAccess && access == AccessMode::FullAccess
-                })
+            let full = calling.as_ref().is_none_or(|c| {
+                c.ceiling.is_none_or(|(_, access)| access == AccessMode::FullAccess)
             });
-            return if unconfined {
+            return if full {
                 Ok(params)
             } else {
                 Err(refused(
-                    "A command runs as the person with no sandbox: only a chat with full access and no sandbox runs one. Ask the person to give this chat full access, or to run it themselves",
+                    "A command runs as the person, unconfined: only a chat with full access runs one. Ask the person to give this chat full access, or to run it themselves",
                 ))
             };
         }
@@ -314,19 +314,14 @@ mod tests {
     }
 
     /// A command, here or on another device, only for an agent whose chat
-    /// runs with full access and no sandbox; the person's own calls pass.
+    /// runs with full access, whatever sandbox level it records (the app's
+    /// chats record workspace-write); the person's own calls pass.
     #[tokio::test]
-    async fn only_an_unconfined_agent_runs_a_command() {
+    async fn only_a_full_access_agent_runs_a_command() {
         let (_temp, core) = core().await;
         chat(&core, "careful", "Careful", "read-only", "supervised").await;
-        chat(
-            &core,
-            "sandboxed",
-            "Sandboxed",
-            "workspace-write",
-            "full-access",
-        )
-        .await;
+        chat(&core, "edits", "Edits", "workspace-write", "auto-accept-edits").await;
+        chat(&core, "app", "App", "workspace-write", "full-access").await;
         chat(&core, "free", "Free", "danger-full-access", "full-access").await;
         let rpc = core.rpc_service();
         let open = json!({"command":"ls", "targetDeviceId":"laptop"});
@@ -336,14 +331,19 @@ mod tests {
             methods::STOP_COMMAND,
             methods::LIST_BACKGROUND_COMMANDS,
         ] {
-            for who in ["careful", "sandboxed", "nowhere"] {
+            for who in ["careful", "edits", "nowhere"] {
                 let refused =
                     with_caller(agent(who), async { rpc.agent_gate(method, open.clone()) }).await;
                 assert!(
-                    matches!(&refused, Err(zeron_rpc::RpcError::Failed(m)) if m.contains("full access and no sandbox")),
+                    matches!(&refused, Err(zeron_rpc::RpcError::Failed(m)) if m.contains("only a chat with full access")),
                     "{who} {method}: {refused:?}"
                 );
             }
+            // A chat made in the app: full access, workspace-write recorded.
+            let app = with_caller(agent("app"), async { rpc.agent_gate(method, open.clone()) })
+                .await
+                .unwrap();
+            assert_eq!(app, open, "{method}");
             let allowed = with_caller(agent("free"), async {
                 rpc.agent_gate(method, open.clone())
             })

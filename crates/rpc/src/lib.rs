@@ -822,7 +822,7 @@ pub fn app_forward_only(method: &str, params: &serde_json::Value) -> bool {
 /// (`ReadToolOutput`: an agent reads a chat as its doc keeps it).
 /// Running a command (`RunCommand`, on any of the person's devices) is
 /// here, and the engine allows it only to an agent whose chat runs with
-/// full access and no sandbox (its agent gate).
+/// full access (its agent gate).
 pub fn agent_allowed(method: &str) -> bool {
     matches!(
         method,
@@ -1502,7 +1502,7 @@ mod tests {
         let asked = agent.call(methods::EXPORT_PLUGIN, serde_json::json!({})).await.unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
         // A command reaches the engine as the agent's, which runs it only
-        // for a chat with full access and no sandbox.
+        // for a chat with full access.
         let asked = agent
             .call(methods::RUN_COMMAND, serde_json::json!({}))
             .await

@@ -5,8 +5,8 @@
 //! The engine's `RunCommand` & co., sent to another device by
 //! `targetDeviceId`. The device that runs a command bounds it: its output,
 //! its time, and everything it started, which ends at a timeout, a stop, or
-//! when this chat is archived or deleted (crates/engine/src/run_command.rs).
-//! The engine allows it only from a chat with full access and no sandbox
+//! when this chat is archived or deleted (crates/engine/src/commands.rs).
+//! The engine allows it only from a chat with full access
 //! (rpc/agent_gate.rs).
 //!
 //! Kept here: each device's folder after the last command, so `cd` carries
