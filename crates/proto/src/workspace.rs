@@ -182,6 +182,7 @@ mod tests {
                     "attachment-store-v1",
                     "orchestration-progress-v1",
                     "orchestration-routes-v1",
+                    "injected-messages-v1",
                     "voice-client-media-v1"
                 ],
             })
