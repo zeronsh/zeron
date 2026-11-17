@@ -30,6 +30,18 @@ pub enum JournalError {
     Json(#[from] serde_json::Error),
 }
 
+/// A chat its usage limit stopped, as kept beside its journal
+/// (`{chat_id}.limited`, JSON).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitMark {
+    pub chat_id: String,
+    pub limit: zeron_proto::usage_limit::SessionLimit,
+    /// When its resume was sent for this limit (once per reset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JournalLine {
     seq: u64,
@@ -88,6 +100,44 @@ impl RunJournal {
 
     fn stop_path(&self, chat_id: &str) -> PathBuf {
         self.dir.join(format!("{}.stopped", sanitize_id(chat_id)))
+    }
+
+    fn limited_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.limited", sanitize_id(chat_id)))
+    }
+
+    /// Mark a chat its usage limit stopped (`mark`: the limit and whether
+    /// its resume was sent), kept until [`Self::clear_limited`]: what the
+    /// next boot re-arms the chat's wait from.
+    pub fn note_limited(&self, chat_id: &str, mark: &LimitMark) {
+        let body = serde_json::to_vec(mark).unwrap_or_default();
+        if let Err(err) = std::fs::write(self.limited_path(chat_id), body) {
+            tracing::warn!(chat = %chat_id, error = %err, "usage limit marker write failed");
+        }
+    }
+
+    pub fn clear_limited(&self, chat_id: &str) {
+        let _ = std::fs::remove_file(self.limited_path(chat_id));
+    }
+
+    /// Every chat [`Self::note_limited`] marked, by chat id (kept: each mark
+    /// stays until its chat is resumed). A mark that won't read is dropped.
+    pub fn limited_marks(&self) -> Result<Vec<LimitMark>, JournalError> {
+        let mut marked = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("limited") {
+                continue;
+            }
+            match std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<LimitMark>(&b).ok()) {
+                Some(mark) => marked.push(mark),
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        marked.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+        Ok(marked)
     }
 
     /// Auto-resume revival budget (zeron `resumeAttempt`/`MAX_AUTO_RESUME`):

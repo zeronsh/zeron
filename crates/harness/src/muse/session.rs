@@ -626,6 +626,13 @@ impl Runner {
                 if self.active.as_deref() == Some(&turn) {
                     let (status, error) = terminal(&params, self.interrupting);
                     self.error = error;
+                    // Its account's quota stopped the turn: the engine
+                    // waits for the reset and resumes it then.
+                    if status == DoneStatus::Errored
+                        && let Some(stop) = super::normalize::quota_stop(&params)
+                    {
+                        self.emit(stop).await?;
+                    }
                     // Steers accepted into this turn were part of it.
                     while !self.deliveries.is_empty() && status == DoneStatus::Completed {
                         self.confirm_delivery().await?;

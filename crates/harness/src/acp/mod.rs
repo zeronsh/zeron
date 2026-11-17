@@ -4023,6 +4023,12 @@ fn stop_outcome(
                 DoneStatus::Errored,
                 Some("The agent refused to continue.".to_owned()),
             ),
+            // Grok: its provider's usage limit stopped the turn (the engine
+            // reads this wording as a usage limit and waits for the reset).
+            Some("rate_limit") => (
+                DoneStatus::Errored,
+                Some("The agent's usage limit was reached — the turn stopped. Try again after it resets.".to_owned()),
+            ),
             // end_turn / max_tokens / max_turn_requests: the turn ended;
             // partial output is already in the doc.
             _ => (DoneStatus::Completed, None),

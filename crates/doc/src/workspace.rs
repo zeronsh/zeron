@@ -521,6 +521,10 @@ impl WorkspaceDoc {
             Some(todo) => row.insert("todo", LoroValue::from(serde_json::to_value(todo)?))?,
             None => row.delete("todo")?,
         }
+        match &session.limited {
+            Some(limited) => row.insert("limited", LoroValue::from(serde_json::to_value(limited)?))?,
+            None => row.delete("limited")?,
+        }
         self.doc.commit();
         Ok(())
     }
@@ -865,6 +869,9 @@ pub(crate) struct RawSession {
     activity: Option<zeron_proto::orchestration::ChatActivity>,
     #[serde(default, deserialize_with = "lenient_value")]
     todo: Option<zeron_proto::orchestration::TodoProgress>,
+    /// LENIENT like `waiting`.
+    #[serde(default, deserialize_with = "lenient_value")]
+    limited: Option<zeron_proto::usage_limit::SessionLimit>,
 }
 
 fn lenient_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -900,7 +907,7 @@ impl From<RawSession> for Session {
             waiting: raw.waiting,
             activity: raw.activity,
             todo: raw.todo,
-            limited: None,
+            limited: raw.limited,
         }
     }
 }

@@ -16,7 +16,9 @@
 //! - **Now** needs a live thread, or an open ask it waits on ("Waiting on
 //!   you" on the card). Errored: Blocked with an ask. Stopped:
 //!   Paused. Finished (or archived after finishing): flagged stale, its
-//!   orchestrator told, and in Review after [`STALE_TO_REVIEW_SECS`]. No
+//!   orchestrator told, and in Review after [`STALE_TO_REVIEW_SECS`]. A
+//!   thread its usage limit stopped is at work (it is resumed at the
+//!   reset, `orchestration::limits`). No
 //!   thread at all after [`NO_THREAD_GRACE_SECS`]: Up next.
 //! - **Up next / Later**: a thread at work on it, Now.
 //! - **Review** means an open ask or an open PR (or its route's review
@@ -135,6 +137,13 @@ impl Thread {
         }
         if chat.is_some_and(|c| c.archived) {
             return Thread::Gone;
+        }
+        // Stopped by its usage limit: waiting for the reset (its host resumes
+        // it then) or running on another account meanwhile. At work: no
+        // stale flag, no Blocked, no ask. At work since the limit stopped
+        // it, so a card paused after that stays paused.
+        if let Some(limit) = session.and_then(|s| s.limited.as_ref()) {
+            return Thread::Live { started_at: Some(limit.since) };
         }
         let Some(s) = session else { return Thread::Idle };
         let fresh = fresh(s);
@@ -601,7 +610,7 @@ pub(crate) fn start(orchestration: Orchestration) {
 }
 
 /// What of a session a card's check reads.
-type Sig = (SessionStatus, Option<String>, Option<(DoneStatus, DateTime<Utc>)>, bool);
+type Sig = (SessionStatus, Option<String>, Option<(DoneStatus, DateTime<Utc>)>, bool, Option<DateTime<Utc>>);
 
 fn sig(s: &Session) -> Sig {
     (
@@ -609,6 +618,7 @@ fn sig(s: &Session) -> Sig {
         s.last_completed_turn.clone(),
         s.last_turn_outcome.map(|o| (o.status, o.finished_at)),
         s.waiting.is_some() || s.running_subagents > 0,
+        s.limited.as_ref().map(|l| l.since),
     )
 }
 

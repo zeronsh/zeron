@@ -2114,6 +2114,7 @@ impl RegistryDoc {
             ("waiting", serde_json::to_value(&session.waiting)?),
             ("activity", serde_json::to_value(&session.activity)?),
             ("todo", serde_json::to_value(&session.todo)?),
+            ("limited", serde_json::to_value(&session.limited)?),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())

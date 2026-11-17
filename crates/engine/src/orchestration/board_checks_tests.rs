@@ -905,3 +905,64 @@ fn the_subagent_resume_names_them() {
     );
     assert!(resumed_after_restart_subagents(&[]).starts_with("[Resumed] The engine restarted; your subagents were stopped."));
 }
+
+// ── Stopped by its usage limit ──────────────────────────────────────────────
+
+fn limited(chat: &str, since: DateTime<Utc>) -> Session {
+    Session {
+        status: SessionStatus::Errored,
+        started_at: None,
+        updated_at: since,
+        last_turn_outcome: Some(NativeTurnOutcome { status: DoneStatus::Errored, finished_at: since }),
+        limited: Some(zeron_proto::usage_limit::SessionLimit {
+            provider: "claude".into(),
+            account_slot: None,
+            account_label: None,
+            window: Some("5-hour".into()),
+            until: Some(since + TimeDelta::hours(2)),
+            since,
+            attempt: 0,
+            switched_to: None,
+        }),
+        ..session(chat, SessionStatus::Errored)
+    }
+}
+
+#[test]
+fn a_thread_stopped_by_its_usage_limit_is_at_work() {
+    let c = chat("t1", "d1");
+    // Its row says errored, and stale hours later (no heartbeat): at work
+    // all the same, here or on another device.
+    let row = limited("t1", mins(2));
+    for local in [true, false] {
+        assert_eq!(Thread::of(Some(&c), Some(&row), None, local, mins(300)), Thread::Live { started_at: Some(mins(2)) });
+    }
+    // Archived, it's gone.
+    let mut archived = c.clone();
+    archived.archived = true;
+    assert_eq!(Thread::of(Some(&archived), Some(&row), None, true, mins(300)), Thread::Gone);
+}
+
+#[test]
+fn a_card_whose_thread_waits_for_its_limit_is_left_alone() {
+    let thread = Thread::of(Some(&chat("t1", "d1")), Some(&limited("t1", mins(2))), None, true, mins(300));
+    // Now: no stale flag, no Blocked, no ask, no Review, however long.
+    let now = card(WorkState::Active);
+    for at in [mins(3), mins(30), mins(300)] {
+        let v = assess(&view(&now, thread), at);
+        assert!(v.is_empty(), "{v:?}");
+    }
+    // A stale flag from before goes.
+    let mut flagged = card(WorkState::Active);
+    flagged.check = check(CheckKind::Stale, mins(1));
+    assert_eq!(assess(&view(&flagged, thread), mins(300)).check, Some(None));
+    // Paused by the person after the limit stopped it: stays paused.
+    let mut paused = card(WorkState::Blocked);
+    paused.paused_at = Some(mins(5));
+    assert!(assess(&view(&paused, thread), mins(300)).is_empty());
+    // In Review (moved there by hand after the limit): stays.
+    let mut review = card(WorkState::Review);
+    review.moved_at = Some(mins(10));
+    let v = assess(&view(&review, thread), mins(300));
+    assert_eq!(v.state, None);
+}

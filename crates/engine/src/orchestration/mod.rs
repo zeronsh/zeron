@@ -38,6 +38,7 @@ pub(crate) mod board_cards;
 pub(crate) mod board_checks;
 pub(crate) mod placement;
 pub(crate) mod scope;
+pub(crate) mod limits;
 pub(crate) mod scratchpad;
 pub(crate) mod stale_dumps;
 pub(crate) mod turn_asks;
@@ -436,6 +437,7 @@ impl Orchestration {
             progress::start(self.clone());
             queue::start(self.clone());
             board_checks::start(self.clone());
+            limits::start(self.clone());
             start_stats(self.clone());
         }
     }

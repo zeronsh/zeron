@@ -1007,6 +1007,10 @@ impl EngineRpc {
         &self.uploads
     }
 
+    pub(crate) fn agent_accounts_ref(&self) -> &AgentAccounts {
+        &self.agent_accounts
+    }
+
     /// This engine's data folder.
     pub(crate) fn data_dir(&self) -> &std::path::Path {
         self.repos.data_dir()

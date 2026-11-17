@@ -1123,6 +1123,18 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_label: Option<String>,
     },
+    /// The account's usage limit stopped this turn (a plan window, a quota:
+    /// one that resets by itself), with which window and when it resets if
+    /// the provider said. Beside the `Error`/`Done` text that tells the
+    /// person; the engine keeps it for the wait and the resume at the reset
+    /// ([`crate::usage_limit`]), never journals it or writes it to docs.
+    #[serde(rename_all = "camelCase")]
+    LimitReached {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {

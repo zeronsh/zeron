@@ -26,6 +26,17 @@ fn assistant_error_text(code: &str) -> String {
     }
 }
 
+/// What an assistant frame's `error` tells the person: its own text when a
+/// refusal sharing `rate_limit` says which one it is (the account's usage
+/// limit and when it resets, a server throttle that is "not your usage
+/// limit"), else the code's wording.
+fn assistant_error_message(code: &str, frame: &MessageFrame) -> String {
+    match frame.text() {
+        Some(text) if code == "rate_limit" => text,
+        _ => assistant_error_text(code),
+    }
+}
+
 /// Which claude.ai usage window a `rate_limit_event` refers to.
 fn rate_window_label(kind: &str) -> &'static str {
     match kind {
@@ -1157,8 +1168,17 @@ impl Normalizer {
                 // and no `result` error — so surface it visibly.
                 if let Some(code) = &f.error {
                     self.turn_error_shown = true;
+                    // The account's own usage limit (never a server
+                    // throttle sharing `rate_limit`): the engine waits for
+                    // its reset and resumes the turn then.
+                    if f.usage_limit_reached() && f.limit_resets_itself() {
+                        out.push(AgentEvent::LimitReached {
+                            window: f.limit_window().map(|w| rate_window_label(w).to_owned()),
+                            resets_at: f.limit_resets_at(),
+                        });
+                    }
                     out.push(AgentEvent::Error {
-                        message: assistant_error_text(code),
+                        message: assistant_error_message(code, &f),
                     });
                 }
                 // The enclosing assistant frame closes the streamed message
@@ -1231,11 +1251,18 @@ impl Normalizer {
                 let window =
                     rate_window_label(f.rate_limit_info.rate_limit_type.as_deref().unwrap_or(""));
                 self.turn_error_shown = true;
-                vec![AgentEvent::Error {
-                    message: format!(
-                        "Claude {window} limit reached — the turn was blocked. Try again after it resets."
-                    ),
-                }]
+                let resets_at = f
+                    .rate_limit_info
+                    .resets_at
+                    .and_then(|secs| chrono::DateTime::from_timestamp(secs as i64, 0));
+                vec![
+                    AgentEvent::LimitReached { window: Some(window.to_owned()), resets_at },
+                    AgentEvent::Error {
+                        message: format!(
+                            "Claude {window} limit reached — the turn was blocked. Try again after it resets."
+                        ),
+                    },
+                ]
             }
 
             Frame::Result(f) => {
@@ -1607,9 +1634,13 @@ mod tests {
     #[test]
     fn a_rejected_window_carried_by_overage_is_not_an_error() {
         let blocked = normalize_one(
-            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected"}}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected","resetsAt":1793620800}}"#,
         );
-        assert!(matches!(blocked.as_slice(), [AgentEvent::Error { .. }]));
+        assert!(matches!(
+            blocked.as_slice(),
+            [AgentEvent::LimitReached { window: Some(w), resets_at: Some(at) }, AgentEvent::Error { .. }]
+                if w == "5-hour" && at.timestamp() == 1_793_620_800
+        ), "{blocked:?}");
         for overage in [
             r#""overageStatus":"allowed""#,
             r#""overageStatus":"allowed_warning""#,
@@ -1628,6 +1659,31 @@ mod tests {
         events.into_iter().nth(1).expect("done event")
     }
 
+    #[test]
+    fn only_the_accounts_own_usage_limit_is_a_limit_stop() {
+        let quota = normalize_one(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You've hit your 5-hour limit · resets 3pm (Europe/Berlin)"}]},"parent_tool_use_id":null,"error":"rate_limit","is_api_error_message":true,"api_error_status":429,"api_error":"usage_limit_reached","api_error_params":{"rate_limit_info":{"status":"rejected","resetsAt":1793620800,"rateLimitType":"seven_day"}}}"#,
+        );
+        assert!(
+            quota.iter().any(|e| matches!(e, AgentEvent::LimitReached { window: Some(w), resets_at: Some(at) }
+                if w == "weekly" && at.timestamp() == 1_793_620_800)),
+            "{quota:?}"
+        );
+        assert!(quota.contains(&AgentEvent::Error {
+            message: "You've hit your 5-hour limit · resets 3pm (Europe/Berlin)".into()
+        }));
+        // The same code and status for a server throttle: shown in its own
+        // words, never a limit stop.
+        let throttle = normalize_one(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"API Error: Server is temporarily limiting requests (not your usage limit)"}]},"parent_tool_use_id":null,"error":"rate_limit","is_api_error_message":true,"api_error_status":429}"#,
+        );
+        assert!(!throttle.iter().any(|e| matches!(e, AgentEvent::LimitReached { .. })), "{throttle:?}");
+        // Spent credits an admin must raise don't reset by themselves.
+        let spent = normalize_one(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You're out of usage credits"}]},"parent_tool_use_id":null,"error":"rate_limit","api_error_status":429,"api_error":"usage_limit_reached","api_error_params":{"rate_limit_info":{"status":"rejected","rateLimitType":"overage","overageDisabledReason":"member_zero_credit_limit"}}}"#,
+        );
+        assert!(!spent.iter().any(|e| matches!(e, AgentEvent::LimitReached { .. })), "{spent:?}");
+    }
     #[test]
     fn stream_deltas_map_to_text_reasoning_and_heartbeats() {
         // Real thinking text streams as a reasoning delta.

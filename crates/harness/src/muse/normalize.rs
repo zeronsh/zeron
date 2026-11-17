@@ -263,6 +263,19 @@ pub(super) fn terminal(params: &Value, interrupted: bool) -> (DoneStatus, Option
     }
 }
 
+/// A failed `turn/completed` the account's quota stopped (`error.quota`),
+/// with when it resets (`resetsAtMs`).
+pub(super) fn quota_stop(params: &Value) -> Option<AgentEvent> {
+    let quota = params["error"]["quota"].as_object()?;
+    Some(AgentEvent::LimitReached {
+        window: Some("quota".to_owned()),
+        resets_at: quota
+            .get("resetsAtMs")
+            .and_then(Value::as_i64)
+            .and_then(chrono::DateTime::from_timestamp_millis),
+    })
+}
+
 fn reasoning_text(item: &Value) -> String {
     match item["summary"].as_array() {
         Some(parts) if !parts.is_empty() => parts

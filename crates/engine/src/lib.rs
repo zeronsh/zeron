@@ -73,6 +73,7 @@ pub mod remote_terminals;
 pub mod repos;
 pub mod rpc;
 pub mod run_journal;
+pub(crate) mod usage_limit_text;
 pub mod runner;
 pub mod wake_trace;
 pub mod wake_update;

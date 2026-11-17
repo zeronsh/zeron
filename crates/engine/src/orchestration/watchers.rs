@@ -382,6 +382,10 @@ pub(crate) fn latest_reply_until(entries: &[SessionMessageEntry], message: &str,
 /// with nothing running or left on its todo list; else still going
 /// (`Answered`: an outcome so far, its card in Now, never Review).
 pub(crate) fn task_state(session: &Session) -> RouteState {
+    // Stopped by its usage limit: resumed at the reset, still going.
+    if session.limited.is_some() {
+        return RouteState::Answered;
+    }
     if session
         .last_turn_outcome
         .is_some_and(|o| o.status == zeron_proto::DoneStatus::Errored)
