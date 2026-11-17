@@ -1735,6 +1735,15 @@ pub struct AgentAccount {
     /// most one of them is in use. `None` for single-login agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// The provider REJECTED this login's credential (a revoked or expired
+    /// key — Cursor's minted SDK keys): switching to it would only break the
+    /// agent, so the engine refuses to unless forced, and the UI offers to
+    /// remove it instead. Absent (false) from older engines.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invalid: bool,
+    /// Why `invalid` ("Key rejected — sign in again"). `None` when valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

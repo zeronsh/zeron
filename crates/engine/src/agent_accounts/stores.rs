@@ -1131,6 +1131,7 @@ impl AgentAccounts {
                     saved_at: 0,
                     created_at: None,
                     store_key: Some(provider.clone()),
+                    user_id: None,
                 });
             }
         }

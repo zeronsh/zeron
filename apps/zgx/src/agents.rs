@@ -12,11 +12,14 @@
 //!                login_methods = { { id, name, description?, kind, var?,
 //!                link? } }
 //!                (an agent from the ACP registry, as it says it is),
-//!                accounts = { { id, email, plan, session, week, active } } } } }
+//!                accounts = { { id, email, plan, session, week, active,
+//!                               invalid?, invalid_reason? } } } } }
 //! Each agent carries all it shows, so a page keys its rows by `id` and an
 //! account by its `id`, and they update in place. (`session` and `week` are
 //! the plan's two windows, 0 to 1; `mark` is the design system's name for
-//! the agent's mark, nil for one it has none for.)
+//! the agent's mark, nil for one it has none for. `invalid`: a login whose
+//! key its provider rejected — never switchable, only removed — and
+//! `invalid_reason` the engine's words for why.)
 //! and call, each rejecting with an outcome word as its `message`:
 //!   agents.load (an action)        looks again (and once at first)
 //!   agents.sign_in(id)             a new account for that agent: the browser
@@ -1548,6 +1551,12 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
         ("week", Value::from(week_used)),
         ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
     ];
+    if invalid(account) {
+        fields.push(("invalid", Value::Bool(true)));
+        if let Some(why) = account["invalidReason"].as_str() {
+            fields.push(("invalid_reason", Value::from(why)));
+        }
+    }
     if account["codexResetCredits"].is_object() {
         let (count, list) = banked(&account["codexResetCredits"], spent);
         fields.push(("banked", Value::from(count as f64)));
@@ -1658,16 +1667,31 @@ fn device_accounts_value(accounts: &[Json]) -> Value {
             ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
             (
                 "can_switch",
-                Value::Bool(account["switchable"].as_bool().unwrap_or(false) && zeron_proto::providers::switches_accounts(id)),
+                // (Never to a key its provider rejected: the engine refuses
+                // that switch anyway.)
+                Value::Bool(
+                    account["switchable"].as_bool().unwrap_or(false)
+                        && !invalid(account)
+                        && zeron_proto::providers::switches_accounts(id),
+                ),
             ),
             ("windows", Value::List(windows.into())),
         ];
-        if let Some(error) = account["usageError"].as_str() {
+        if let Some(error) = account["invalidReason"].as_str().filter(|_| invalid(account)).or(account["usageError"].as_str()) {
             fields.push(("error", Value::from(error)));
+        }
+        if invalid(account) {
+            fields.push(("invalid", Value::Bool(true)));
         }
         by.entry(harness).or_default().push(Value::record(fields));
     }
     Value::record(by.into_iter().map(|(harness, rows)| (harness, Value::List(rows.into()))))
+}
+
+/// A login whose key its provider rejected (revoked or expired): shown so it
+/// can be removed, never switched to.
+fn invalid(account: &Json) -> bool {
+    account["invalid"].as_bool().unwrap_or(false)
 }
 
 /// What an account goes by.
@@ -1816,6 +1840,28 @@ mod tests {
         // Only an account with a credit summary (Codex's) banks anything.
         assert_eq!(bare.field("banked"), None);
         assert_eq!(bare.field("resets"), None);
+    }
+
+    #[test]
+    fn a_rejected_key_is_shown_to_remove_never_to_switch_to() {
+        let dead = json!({
+            "id": "c1", "harness": "cursor", "email": "a@example.com", "active": false,
+            "switchable": true, "invalid": true, "invalidReason": "Key rejected — sign in again",
+            "usageError": "Key rejected — sign in again"
+        });
+        let value = account_value(&dead, None);
+        assert!(value.field("invalid").is_some_and(Value::truthy));
+        assert_eq!(value.field("invalid_reason").map(text).as_deref(), Some("Key rejected — sign in again"));
+        let live = json!({ "id": "c2", "harness": "cursor", "email": "b@example.com", "active": true, "switchable": true });
+        let value = account_value(&live, None);
+        assert_eq!(value.field("invalid"), None);
+        // The composer's rows alike: no switch to it.
+        let composer = device_accounts_value(&[dead, live]);
+        let rows = composer.field("cursor").expect("cursor").list().to_vec();
+        assert!(!rows[0].field("can_switch").is_some_and(Value::truthy));
+        assert!(rows[0].field("invalid").is_some_and(Value::truthy));
+        assert_eq!(rows[0].field("error").map(text).as_deref(), Some("Key rejected — sign in again"));
+        assert!(rows[1].field("can_switch").is_some_and(Value::truthy));
     }
 
     fn ids(value: &Value) -> Vec<String> {

@@ -69,6 +69,11 @@ export type Account = {
 	-- When each window starts over (seconds since the epoch), if known.
 	session_resets: number?,
 	week_resets: number?,
+	-- A login whose key its provider rejected (revoked or expired): said on
+	-- its row (`invalid_reason`, the engine's words), with Remove at hand,
+	-- and never offered to switch to.
+	invalid: boolean?,
+	invalid_reason: string?,
 }
 
 -- When a window starts over, in this Mac's time, as the shipping app says
@@ -291,7 +296,11 @@ local Actions = ui.component(function(p: { card: CardProps, account: State<Accou
 				w_full = true,
 				p = "$space.1",
 				gap = "$zeron.list.gap",
-				Menu.Row {
+				-- (Never to a key its provider rejected: the engine refuses
+				-- that switch anyway.)
+				ui.show(function(): boolean
+					return account:get().invalid ~= true
+				end, Menu.Row {
 					icon = "check-circle",
 					label = locale.s("ds.provider_card.switch"),
 					on_click = function()
@@ -300,7 +309,7 @@ local Actions = ui.component(function(p: { card: CardProps, account: State<Accou
 							c.on_switch(account:peek())
 						end
 					end,
-				},
+				}),
 				ui.show(function()
 					local a = account:get()
 					return banks(c, a) and count(a) > 0 and word(a) ~= "using"
@@ -347,9 +356,14 @@ local function account(c: CardProps, row: State<Account>): Node
 	local function week(): number
 		return row:get().week
 	end
+	local function invalid(): boolean
+		return row:get().invalid == true
+	end
 	local function detail(): string
 		local a = row:get()
-		if reset() then
+		if a.invalid == true then
+			return a.invalid_reason or locale.s("ds.provider_card.key_rejected")
+		elseif reset() then
 			return locale.s("ds.provider_card.reset_just_now", { plan = a.plan })
 		elseif a.resets_at then
 			return locale.s("ds.provider_card.limit_reached_at", { plan = a.plan, at = a.resets_at })
@@ -398,7 +412,21 @@ local function account(c: CardProps, row: State<Account>): Node
 		control = ui.row {
 			gap = "$space.3",
 			items = "center",
-			ui.column {
+			-- (A key its provider rejected: nothing to measure, only to
+			-- take away — Remove, at hand rather than behind the ⋯.)
+			ui.show(invalid, Button {
+				locale.t("ds.provider_card.remove_rejected"),
+				tone = "secondary",
+				size = "sm",
+				on_click = function()
+					if c.on_remove then
+						c.on_remove(row:peek())
+					end
+				end,
+			}),
+			ui.show(function(): boolean
+				return row:get().invalid ~= true
+			end, ui.column {
 				gap = "$zeron.space.hair",
 				-- (Labels alone where no reset is known, as the shipping app.)
 				tooltip = Tooltip {
@@ -408,7 +436,7 @@ local function account(c: CardProps, row: State<Account>): Node
 				},
 				meter("ds.provider_card.session", session),
 				meter("ds.provider_card.week", week),
-			},
+			}),
 			Actions { card = c, account = row },
 		},
 	}
