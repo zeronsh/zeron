@@ -94,12 +94,14 @@
 		"zeron": {
 			"window": "#f6f6f7",
 			// Where nothing shows through: the window, sidebar and page one
-			// colour as everywhere, and muted text about 7:1 and 4.5:1 on it
-			// (on the page, #fdfdfd: 7.2 and 4.9; on the window: 7.0 and
-			// 4.7), where glass's tones fall under 3:1.
+			// colour (#f6f6f7), and muted text that holds on it and on the
+			// washes over it, where glass's tones fall under 3:1: secondary
+			// 7.0:1 on the page; tertiary 5.0:1 on the page and at least
+			// 4.68:1 on the darkest wash it sits on (a chip under the
+			// pointer, #00000014; a selected sidebar row, #00000012, 4.71).
 			"solid": {
 				"secondary": "alpha({text.primary}, 0.74)",
-				"tertiary": "alpha({text.primary}, 0.62)"
+				"tertiary": "alpha({text.primary}, 0.64)"
 			},
 			// The title bar's controls' wash, shipping's (theme.rs
 			// `element_hover` hsla(0, 0, 0.10, 0.06), `element_active` 0.10),
