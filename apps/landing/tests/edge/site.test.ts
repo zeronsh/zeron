@@ -287,6 +287,28 @@ describe("the catalog, from the edge's real listing", () => {
   });
 });
 
+describe("a version in review's pictures", () => {
+  test("its owner and the admins see them through the site, kept by no one; anyone else gets the sandboxed 404", async () => {
+    await ada.publish("pending-pics", "0.1.0");
+    const path = "/plugins/pending-pics/files/0.1.0/shots/one.png";
+    const kai = await signInOnTheWeb("user_kai");
+    for (const [who, browser] of [["the owner", adaOnWeb], ["an admin", grace]] as const) {
+      const shown = await edge.site(path, { headers: { cookie: browser.cookie } });
+      expect(shown.status, who).toBe(200);
+      expect(shown.headers.get("content-type"), who).toBe("image/png");
+      expect(shown.headers.get("cache-control"), who).toBe("private, no-store");
+      expect(shown.headers.get("content-security-policy"), who).toContain("sandbox");
+      expect(Buffer.from(await shown.arrayBuffer()).equals(PNG), who).toBe(true);
+    }
+    for (const [who, cookie] of [["anyone", undefined], ["another member", kai.cookie]] as const) {
+      const refused = await edge.site(path, cookie ? { headers: { cookie } } : {});
+      expect(refused.status, who).toBe(404);
+      expect(refused.headers.get("content-security-policy"), who).toContain("sandbox");
+      expect(refused.headers.get("cache-control"), who).toBe("no-store");
+    }
+  });
+});
+
 describe("an author's pages", () => {
   test("their plugins, each with its versions and keys", async () => {
     const account = await adaOnWeb.get("/account");
