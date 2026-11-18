@@ -708,6 +708,23 @@ fn listing_cases() -> Value {
         two.insert(b.into(), b"2".to_vec());
         cases.push((name.into(), base.clone(), two));
     }
+    // Three paths, in code point order: a path that clashes records nothing
+    // (no file, no folders), so a later one is held only to what came
+    // before it without a problem. The first two decide that: a folder, a
+    // file folding onto it (the clash), then a path inside that folder,
+    // which doesn't clash.
+    for (name, paths) in [
+        ("a file on a folder, then a path inside it", ["UI/a", "Ui", "ui/b"]),
+        ("a file on a folder in Unicode's other spelling, then a path inside it", ["cafe\u{301}/a", "caf\u{e9}", "caf\u{e9}/b"]),
+        ("a file, a path under it, a path deeper under it", ["A", "A/B", "a/b/c"]),
+        ("a file, the same file, a path under it", ["A", "a", "a/x"]),
+    ] {
+        let mut three = files.clone();
+        for rel in paths {
+            three.insert(rel.into(), b"1".to_vec());
+        }
+        cases.push((name.into(), base.clone(), three));
+    }
     Value::Array(
         cases
             .into_iter()

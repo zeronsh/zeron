@@ -1020,6 +1020,17 @@ pub(crate) mod tests {
             assert_eq!(problems.iter().map(|p| (p.rule, p.field, p.path.as_deref())).collect::<Vec<_>>(), [("bad_listing", Some("files"), Some(at))], "{a} {b}");
             assert!(problems[0].words.contains("needs a folder of that name"), "{}", problems[0].words);
         }
+        // A path that clashes records nothing: later paths are held only to
+        // what came before them without a problem (in code point order).
+        for (paths, clashing) in [
+            (["UI/a", "Ui", "ui/b"], &["Ui"][..]),
+            (["cafe\u{301}/a", "caf\u{e9}", "caf\u{e9}/b"], &["caf\u{e9}"]),
+            (["A", "A/B", "a/b/c"], &["A/B", "a/b/c"]),
+            (["A", "a", "a/x"], &["a", "a/x"]),
+        ] {
+            let found: Vec<String> = clashes(paths, &[]).iter().map(|c| c.path().to_owned()).collect();
+            assert_eq!(found, clashing, "{paths:?}");
+        }
         // Names that only look alike are anyone's.
         let mut alike = files.clone();
         for rel in ["ui/a.luau", "ui2", "uix/b.luau"] {
