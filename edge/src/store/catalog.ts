@@ -19,49 +19,16 @@ import { authorCard, authorsOf, fileUrl, packageUrl, permissionsOf, pluginCard, 
 import { LISTED, PUBLIC_STATUSES, type PluginRow, VERSION_ORDER, type VersionRow, parseList, pluginRow } from "./db";
 import { answer, fail, notFound } from "./http";
 import { CATEGORIES, isCategory } from "./listing";
+import { decodeCursor, encodeCursor, ftsQuery, searchTerms } from "./search";
 
 export const SORTS = ["relevance", "popular", "updated", "new"] as const;
 export type Sort = (typeof SORTS)[number];
 export const DEFAULT_LIMIT = 24;
 export const MAX_LIMIT = 50;
 const MAX_QUERY = 200;
-const MAX_TERMS = 8;
 const DETAIL_VERSIONS = 5;
 
 const publicCache = (ttl: number) => `public, max-age=${ttl}`;
-
-/** The words of a search, as FTS5 prefix terms: letters and digits only,
- * each quoted, so the query can never be FTS syntax. */
-export const searchTerms = (q: string): string[] =>
-  (q.normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).slice(0, MAX_TERMS).map((t) => t.slice(0, 64));
-
-export const ftsQuery = (terms: readonly string[]): string => terms.map((t) => `"${t.replaceAll('"', '""')}"*`).join(" ");
-
-const b64url = (text: string): string => btoa(String.fromCharCode(...new TextEncoder().encode(text))).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-const unb64url = (text: string): string | undefined => {
-  try {
-    const bin = atob(text.replaceAll("-", "+").replaceAll("_", "/"));
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
-  } catch {
-    return undefined;
-  }
-};
-
-/** A keyset cursor: the query it pages (`f`), and the last item's sort
- * key (`k`) and seq (`i`). */
-export const encodeCursor = (filter: string, key: number, seq: number): string => b64url(JSON.stringify({ f: filter, k: key, i: seq }));
-export const decodeCursor = (cursor: string, filter: string): { key: number; seq: number } | undefined => {
-  if (cursor.length > 512) return undefined;
-  const text = unb64url(cursor);
-  if (text === undefined) return undefined;
-  try {
-    const value = JSON.parse(text) as { f?: unknown; k?: unknown; i?: unknown };
-    if (value.f !== filter || typeof value.k !== "number" || !Number.isFinite(value.k) || !Number.isSafeInteger(value.i)) return undefined;
-    return { key: value.k, seq: value.i as number };
-  } catch {
-    return undefined;
-  }
-};
 
 interface ListQuery {
   readonly q: string | undefined;
