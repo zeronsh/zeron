@@ -541,7 +541,7 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
       // (zeron-claims.ts: move it to an account with the badge, or take the
       // versions that say so down, first).
       if (!(await isZeronsOwn(env, plugin.owner_id)) && (await pluginsClaimingZeron(db, [plugin.owner_id], id)).length > 0) {
-        return fail(409, "claims_zeron", "Its listing says it's Zeron's own and its owner doesn't carry Zeron's badge: transfer it to an account that does, or take those versions down, first.");
+        return fail(409, "claims_zeron", "Its listing says it's Zeron's own and its owner doesn't carry Zeron's badge: transfer it to an account that does, or remove those versions (a remove, not a take-down: it isn't harmful), first.");
       }
       conflict = await change(
         db,

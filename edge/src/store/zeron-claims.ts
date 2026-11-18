@@ -12,8 +12,10 @@
  *   leaves their installed copies running (user-directory.ts). Granting the
  *   badge back doesn't relist them: a staff restore does, once the plugin
  *   is moved to an account with the badge or the versions that say so are
- *   taken down (a suspended plugin takes no new version, so its owner
- *   can't rename it); until then a restore is refused 409 `claims_zeron`.
+ *   removed (a suspended plugin takes no new version, so its owner can't
+ *   rename it); until then a restore is refused 409 `claims_zeron`. A
+ *   remove, not a take-down: a misnamed plugin isn't harmful, and its
+ *   installed copies keep running.
  *
  * A plugin says what its listed versions, and the versions its author may
  * unyank, say. One a newer version superseded comes back only by a staff

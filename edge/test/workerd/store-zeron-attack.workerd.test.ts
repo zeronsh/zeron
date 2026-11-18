@@ -80,9 +80,12 @@ describe("a claim doesn't outlive the badge", () => {
     // A staff restore is refused while it would still say so…
     const early = await adminCall("POST", `/store/v1/admin/plugins/${claims}/restore`);
     expect([early.status, (await json(early)).error]).toEqual([409, "claims_zeron"]);
-    // …and goes through once the versions that say so are taken down.
-    expect((await adminCall("POST", `/store/v1/admin/plugins/${yanked}/versions/1.0.0/take-down`, { reason: "Not Zeron's." })).status).toBe(200);
+    // …and goes through once the versions that say so are removed: quietly,
+    // nothing in the take-down feed, nothing turned off on devices.
+    const feedHead = (await json<{ head: number }>(await call(zeron.userId, "GET", "/store/v1/takedowns"))).head;
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${yanked}/versions/1.0.0/remove`, { reason: "Renamed: not Zeron's." })).status).toBe(200);
     expect((await adminCall("POST", `/store/v1/admin/plugins/${yanked}/restore`)).status).toBe(200);
+    expect((await json<{ head: number }>(await call(zeron.userId, "GET", "/store/v1/takedowns"))).head).toBe(feedHead);
     // The badge back relists nothing by itself; a staff restore does (now allowed: its owner is Zeron's).
     expect((await operator("/admin/badges/grant", { badgeId: "maintainer", userIds: [zeron.userId] })).status).toBe(200);
     expect((await call(undefined, "GET", `/store/v1/plugins/${claims}`)).status).toBe(404);

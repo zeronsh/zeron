@@ -2225,7 +2225,7 @@ const handleBadgeRoute = async (
         revoked,
         suspended,
         ...(suspended.length
-          ? { message: "Each suspended plugin comes back by a staff restore, once it's moved to an account with Zeron's badge or the versions that say it's Zeron's own are taken down." }
+          ? { message: "Each suspended plugin comes back by a staff restore, once it's moved to an account with Zeron's badge or the versions that say it's Zeron's own are removed (not taken down: it isn't harmful, and installed copies keep running)." }
           : {})
       });
     }
