@@ -939,6 +939,15 @@ fn listing_cases() -> Value {
         ("keywords: heron is fine", "heron"),
         ("keywords: verify is fine", "verify"),
         ("keywords: zeronaut is fine", "zeronaut"),
+        ("keywords: ver-ified joined", "ver-ified"),
+        ("keywords: ver1fied", "ver1fied"),
+        ("keywords: official as a part", "official-docs"),
+        ("keywords: by-zeron", "by-zeron"),
+        ("keywords: zeron-team", "zeron-team"),
+        ("keywords: zer0n-approved", "zer0n-approved"),
+        ("keywords: zero-config is fine", "zero-config"),
+        ("keywords: verification is fine", "verification"),
+        ("keywords: officially-unsupported is fine", "officially-unsupported"),
     ] {
         let mut m = base.clone();
         m["keywords"] = json!(["focus", keyword]);
