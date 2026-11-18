@@ -51,6 +51,11 @@ export interface Env {
    * organization and organization_membership. Unset ⇒ that route answers 503
    * and WorkOS retries. */
   WORKOS_WEBHOOK_SECRET?: string;
+  /** The web site's origin (`https://zeron.sh`), where web sign-in lives
+   * (web-auth-routes.ts): its callback is `${WEB_ORIGIN}/auth/web/callback`,
+   * registered with WorkOS, and cookie-authenticated changes must come from
+   * it. Unset ⇒ no web sign-in, and no cookie is ever accepted. */
+  WEB_ORIGIN?: string;
   /** Every WorkOS user and organization, with members (`users1`; user-directory.ts). */
   USER_DIRECTORY?: DurableObjectNamespace<import("./user-directory").UserDirectory>;
   /** APNs auth key (contents of AuthKey_XXXX.p8, wrangler secret) and its

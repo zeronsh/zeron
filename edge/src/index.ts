@@ -18,6 +18,15 @@
  *   GET  /auth/orgs/:orgId/invitations — admin: pending + recently expired
  *   DELETE /auth/orgs/:orgId/invitations/:id, POST …/:id/resend — admin
  *   GET  /auth/cli/callback           — headless sign-in paste-code page
+ *
+ * Web sign-in (web-auth-routes.ts; only on WEB_ORIGIN, routed from zeron.sh):
+ *   GET  /auth/web/login, /auth/web/callback, /auth/web/session
+ *   POST /auth/web/logout
+ *
+ * Staff roles and the store's identity routes:
+ *   GET  /admin/roles, POST /admin/roles/{grant|revoke} — ADMIN_TOKEN (roles.ts)
+ *   GET|POST /store/v1/plugins/:id/keys, DELETE …/keys/:key — deploy keys
+ *     (store/identity/deploy-keys.ts; a signed-in owner, checked there)
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
  *   GET  /diff/:chatId                — latest working-tree diff (§6.1)
@@ -107,6 +116,10 @@ import { handleOnboardingRoute } from "./onboarding-routes";
 import { handlePluginKeyRoute } from "./plugin-keys";
 import { handleVaultRoute } from "./vault-routes";
 import { handleUserDirectoryRoute, UserDirectory } from "./user-directory";
+import { handleWebAuthRoute } from "./web-auth-routes";
+import { handleRoleAdminRoute } from "./roles";
+import { handleDeployKeyRoute, type PluginOwnerLookup } from "./store/identity/deploy-keys";
+import { withSessionCookie } from "./web-session";
 import installSh from "./install.sh";
 
 export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, CloudAccount, CloudIndex, UserDirectory };
@@ -126,6 +139,10 @@ const safeDecode = (segment: string): string | undefined => {
  * wider than ID_RE but still no slashes, so a part id can't traverse keys. */
 const PART_RE = /^[A-Za-z0-9._:#~-]{1,200}$/;
 const MAX_TOOL_BLOB_BYTES = 1024 * 1024;
+
+/** Who owns a store plugin id. The store's catalog answers this once it is
+ * merged in; until then no id has an owner, so no deploy key can be made. */
+const pluginOwner: PluginOwnerLookup = async () => null;
 
 const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), {
@@ -157,6 +174,10 @@ export default {
     const modelList = await modelListRoute(request, env, url);
     if (modelList) return modelList;
 
+    // ── web sign-in (cookies, not bearers; web-auth-routes.ts) ─────────────
+    const webAuthRouted = await handleWebAuthRoute(request, env, url);
+    if (webAuthRouted) return webAuthRouted;
+
     // ── WorkOS auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────
     const authRouted = await handleAuthRoute(request, env, url);
@@ -173,6 +194,11 @@ export default {
     if (runnerRouted) return runnerRouted;
     const usersRouted = await handleUserDirectoryRoute(request, env, url);
     if (usersRouted) return usersRouted;
+    const rolesRouted = await handleRoleAdminRoute(request, env, url);
+    if (rolesRouted) return rolesRouted;
+    // The store's own principals (store/principal.ts): before the bearer gate.
+    const deployKeysRouted = await handleDeployKeyRoute(request, env, url, pluginOwner);
+    if (deployKeysRouted) return withSessionCookie(request, deployKeysRouted);
     const cardRouted = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
     if (cardRouted) return cardRouted;
 

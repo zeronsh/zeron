@@ -67,7 +67,16 @@
  * Plugin keys (`/plugin-keys`, plugin-keys.ts): `plugin_keys` binds each
  * plugin signing key (raw ed25519, b64url) to the account that registered
  * it, at most `PLUGIN_KEYS_PER_DAY` new ones a user a day. Revoked rows stay,
- * so a key is never re-bound; deleting a user revokes theirs.
+ * so a key is never re-bound; deleting a user revokes theirs. Deploy keys
+ * (store/identity/deploy-keys.ts) are rows of the same table with `kind`
+ * `deploy`, scoped to one plugin (`plugin_id`), named, with an optional
+ * expiry and a last-used time; `deploy_key_uses` remembers each signed
+ * request for `DEPLOY_REPLAY_WINDOW_MS`, so none is accepted twice.
+ * Roles (roles.ts): `user_roles` holds the edge's own staff roles (`admin`),
+ * granted and revoked by operators; a revoked row stays for the record.
+ * Web sessions (web-session.ts): `web_sessions` holds each signed-in browser
+ * by its token's hash, with its CSRF token and the step-up its sign-in
+ * earned. Deleting a user drops their roles and web sessions.
  *
  * Settings (auth-routes.ts): `PATCH /auth/me` writes the renamed user with the
  * webhook's own `upsert` right away, and an org's member list reads names,
@@ -113,6 +122,36 @@ export const MAX_IMAGE_BYTES_PER_USER = 20_000_000;
 export const IMAGE_UPLOADS_PER_DAY = 200;
 /** How long an org's role lock holds before it lapses (a request that died). */
 export const ORG_LOCK_MS = 30_000;
+
+/** The edge's own staff roles. WorkOS roles are per organization (everyone
+ * is `admin` of their own), so they never stand in for these. */
+export const ROLES = ["admin"] as const;
+export type Role = (typeof ROLES)[number];
+export const isRole = (value: unknown): value is Role => (ROLES as readonly unknown[]).includes(value);
+
+/** Deploy keys: live at once per plugin, new per plugin and per user in 24 hours. */
+export const MAX_LIVE_DEPLOY_KEYS_PER_PLUGIN = 10;
+export const DEPLOY_KEYS_PER_PLUGIN_PER_DAY = 10;
+export const DEPLOY_KEYS_PER_USER_PER_DAY = 20;
+/** How long a signed request is remembered: past the clock skew both ways,
+ * so its timestamp is refused before its record is forgotten. */
+export const DEPLOY_REPLAY_WINDOW_MS = 11 * 60_000;
+
+/** Web sessions (web-session.ts). An account holding any role gets the
+ * short lifetimes, decided on every read, so a grant shortens live ones. */
+export const WEB_SESSION_IDLE_MS = 7 * 86_400_000;
+export const WEB_SESSION_ABSOLUTE_MS = 30 * 86_400_000;
+export const STAFF_SESSION_IDLE_MS = 30 * 60_000;
+export const STAFF_SESSION_ABSOLUTE_MS = 12 * 3_600_000;
+/** A staff session's token is replaced at its first privileged use and then
+ * this often while it's used for privileged work. */
+export const STAFF_TOKEN_ROTATION_MS = 10 * 60_000;
+/** How long a replaced token still works, for requests already in flight. */
+export const ROTATED_TOKEN_GRACE_MS = 60_000;
+/** Live web sessions per user; past this, the least recently used go. */
+export const MAX_WEB_SESSIONS_PER_USER = 10;
+/** `last_seen_at` is written at most this often. */
+const WEB_SESSION_TOUCH_MS = 60_000;
 
 /** Availability checks and claims one user may make a minute. */
 const USERNAME_ATTEMPTS_PER_MINUTE = 60;
@@ -301,6 +340,69 @@ export interface PluginKeyLookup {
   /** When it was first registered, epoch ms. */
   readonly firstSeen: number;
   readonly revokedAt: number | null;
+  /** Deploy keys only (absent on a device's key, as before). */
+  readonly kind?: "deploy";
+  /** The one plugin a deploy key may publish. */
+  readonly plugin?: string;
+  readonly expiresAt?: number | null;
+  readonly expired?: boolean;
+}
+
+/** `registerDeployKey`'s answer. */
+export type DeployKeyRegistration =
+  | "registered"
+  | "key_taken"
+  | "key_revoked"
+  | "deleted_user"
+  | "rate_limited"
+  | "too_many_keys"
+  | "step_up_required";
+
+/** One of a plugin's deploy keys, as its owner sees it: never a secret (the
+ * edge never has one). Times are epoch ms. */
+export interface DeployKeyRow {
+  readonly key: string;
+  readonly fingerprint: string;
+  readonly name: string;
+  readonly createdAt: number;
+  readonly lastUsedAt: number | null;
+  readonly expiresAt: number | null;
+  readonly revokedAt: number | null;
+}
+
+/** `useDeployKey`: whose key signed a request, or why it may not. */
+export type DeployKeyUse =
+  | { readonly userId: string; readonly username: string | null }
+  | { readonly error: "unknown_key" | "key_revoked" | "key_expired" | "key_not_allowed" | "replayed_request" };
+
+/** A live web session, as `webSession` reads it. */
+export interface WebSessionRead {
+  readonly userId: string;
+  readonly username: string | null;
+  readonly roles: readonly Role[];
+  readonly csrf: string;
+  /** When it ends unless used again (idle), or for good (absolute): the sooner. */
+  readonly expiresAt: number;
+  /** When it ends for good: the cookie's lifetime. */
+  readonly absoluteExpiresAt: number;
+  /** The step-up ticket its sign-in earned, still unused and live. */
+  readonly stepUpHash: string | null;
+  /** The caller's successor token replaced the one presented: set it as
+   * the cookie. */
+  readonly rotated: boolean;
+}
+
+/** One `user_roles` row, as the operator list shows it. Times are epoch ms. */
+export interface RoleRow {
+  readonly userId: string;
+  readonly role: Role;
+  readonly username: string | null;
+  readonly email: string | null;
+  readonly grantedAt: number;
+  readonly grantedBy: string;
+  readonly note: string | null;
+  readonly revokedAt: number | null;
+  readonly revokedBy: string | null;
 }
 
 /** One of the caller's keys in `GET /plugin-keys`. Times are epoch ms. */
@@ -400,6 +502,34 @@ export class UserDirectory extends DurableObject<Env> {
       org_id TEXT PRIMARY KEY, holder TEXT NOT NULL, expires_at INTEGER NOT NULL)`);
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS invite_quota_day (
       user_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL, sent INTEGER NOT NULL)`);
+    // Deploy keys: plugin_keys rows of another kind (store/identity/deploy-keys.ts).
+    const keyColumns = [...this.ctx.storage.sql.exec("SELECT name FROM pragma_table_info('plugin_keys')")].map((row) => row.name);
+    if (!keyColumns.includes("kind")) this.ctx.storage.sql.exec("ALTER TABLE plugin_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'device'");
+    if (!keyColumns.includes("plugin_id")) this.ctx.storage.sql.exec("ALTER TABLE plugin_keys ADD COLUMN plugin_id TEXT");
+    if (!keyColumns.includes("name")) this.ctx.storage.sql.exec("ALTER TABLE plugin_keys ADD COLUMN name TEXT");
+    if (!keyColumns.includes("last_used_at")) this.ctx.storage.sql.exec("ALTER TABLE plugin_keys ADD COLUMN last_used_at INTEGER");
+    if (!keyColumns.includes("expires_at")) this.ctx.storage.sql.exec("ALTER TABLE plugin_keys ADD COLUMN expires_at INTEGER");
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS plugin_keys_plugin ON plugin_keys(plugin_id) WHERE plugin_id IS NOT NULL");
+    // Each signed request a deploy key made, by the hash of what it signed.
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS deploy_key_uses (
+      request_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)`);
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS deploy_key_uses_expiry ON deploy_key_uses(expires_at)");
+    // roles.ts: the edge's own staff roles.
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS user_roles (
+      user_id TEXT NOT NULL, role TEXT NOT NULL, granted_at INTEGER NOT NULL, granted_by TEXT NOT NULL,
+      note TEXT, revoked_at INTEGER, revoked_by TEXT, PRIMARY KEY (user_id, role))`);
+    // web-session.ts: one row per signed-in browser. `prev_token_hash` is the
+    // token a rotation replaced, good until `prev_valid_until`.
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS web_sessions (
+      session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE, token_issued_at INTEGER NOT NULL,
+      prev_token_hash TEXT, prev_valid_until INTEGER,
+      csrf TEXT NOT NULL, step_up_hash TEXT, workos_session_id TEXT,
+      created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, privileged_at INTEGER)`);
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS web_sessions_user ON web_sessions(user_id)");
+    this.ctx.storage.sql.exec(
+      "CREATE INDEX IF NOT EXISTS web_sessions_prev ON web_sessions(prev_token_hash) WHERE prev_token_hash IS NOT NULL"
+    );
     this.backfillEarnedBadges();
   }
 
@@ -628,9 +758,13 @@ export class UserDirectory extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM user_badges WHERE user_id = ?", user.id);
     this.ctx.storage.sql.exec("DELETE FROM earned_badge_waivers WHERE user_id = ?", user.id);
     this.ctx.storage.sql.exec("DELETE FROM onboarding_done WHERE user_id = ?", user.id);
-    // Their plugins stop reading as theirs (or anyone's).
+    // Their plugins stop reading as theirs (or anyone's), and their deploy
+    // keys publish nothing.
     this.ctx.storage.sql.exec("UPDATE plugin_keys SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", Date.now(), user.id);
     this.ctx.storage.sql.exec("DELETE FROM step_ups WHERE user_id = ?", user.id);
+    // Signed out of the web everywhere, and no longer staff.
+    this.ctx.storage.sql.exec("DELETE FROM web_sessions WHERE user_id = ?", user.id);
+    this.ctx.storage.sql.exec("DELETE FROM user_roles WHERE user_id = ?", user.id);
     this.ctx.storage.sql.exec(
       `INSERT INTO users (user_id, created_at, updated_at, deleted_at, recorded_at, user_number)
        VALUES (?, ?, ?, ?, ?, ${NEXT_USER_NUMBER})
@@ -1077,15 +1211,16 @@ export class UserDirectory extends DurableObject<Env> {
    * revoked key stays revoked. */
   registerPluginKey(userId: string, key: string, deviceId: string | null, stepUpHash?: string): PluginKeyRegistration {
     return this.ctx.storage.transactionSync((): PluginKeyRegistration => {
-      const [row] = this.ctx.storage.sql.exec("SELECT user_id, revoked_at FROM plugin_keys WHERE key = ?", key).toArray();
+      const [row] = this.ctx.storage.sql.exec("SELECT user_id, kind, revoked_at FROM plugin_keys WHERE key = ?", key).toArray();
       if (row) {
-        if (row.user_id !== userId) return "key_taken";
+        // A deploy key is never a device's, even its owner's.
+        if (row.user_id !== userId || row.kind !== "device") return "key_taken";
         return row.revoked_at === null ? "registered" : "key_revoked";
       }
       if (this.userRefusal(userId) === "deleted_user") return "deleted_user";
       const now = Date.now();
       const today = this.ctx.storage.sql
-        .exec("SELECT COUNT(*) AS n FROM plugin_keys WHERE user_id = ? AND created_at > ?", userId, now - 86_400_000)
+        .exec("SELECT COUNT(*) AS n FROM plugin_keys WHERE user_id = ? AND kind = 'device' AND created_at > ?", userId, now - 86_400_000)
         .one().n as number;
       if (today >= PLUGIN_KEYS_PER_DAY) return "rate_limited";
       if (!this.useStepUp(userId, stepUpHash)) return "step_up_required";
@@ -1104,15 +1239,22 @@ export class UserDirectory extends DurableObject<Env> {
    * user id. Undefined for a key never registered, and, to anyone but its
    * owner, for a live key whose owner has no username: nothing vouches for
    * it, so it reads as unknown to every engine, old ones included. Read
-   * straight from storage on every call, so a revocation shows at once. */
-  async pluginKey(key: string, viewerId: string): Promise<PluginKeyLookup | undefined> {
-    const [row] = this.ctx.storage.sql.exec("SELECT user_id, created_at, revoked_at FROM plugin_keys WHERE key = ?", key).toArray();
+   * straight from storage on every call, so a revocation shows at once.
+   *
+   * A deploy key also answers its kind, plugin and expiry, and reads as
+   * verified only when the lookup names its plugin (`forPlugin`) and it
+   * hasn't expired: it vouches for that one plugin, never for its owner's
+   * others. Engines that don't name a plugin see it unverified. */
+  async pluginKey(key: string, viewerId: string, forPlugin?: string): Promise<PluginKeyLookup | undefined> {
+    const [row] = this.ctx.storage.sql
+      .exec("SELECT user_id, kind, plugin_id, created_at, revoked_at, expires_at FROM plugin_keys WHERE key = ?", key)
+      .toArray();
     if (!row) return undefined;
     const username = this.username(row.user_id as string);
     const mine = row.user_id === viewerId;
     const revoked = row.revoked_at !== null;
     if (!mine && !revoked && username === null) return undefined;
-    return {
+    const base = {
       key,
       username,
       mine,
@@ -1122,23 +1264,35 @@ export class UserDirectory extends DurableObject<Env> {
       firstSeen: row.created_at as number,
       revokedAt: row.revoked_at as number | null
     };
+    if (row.kind !== "deploy") return base;
+    const expiresAt = row.expires_at as number | null;
+    const expired = expiresAt !== null && expiresAt <= Date.now();
+    return {
+      ...base,
+      verified: base.verified && !expired && forPlugin === row.plugin_id,
+      kind: "deploy",
+      plugin: row.plugin_id as string,
+      expiresAt,
+      expired
+    };
   }
 
   /** The device a live key of `userId`'s was registered from (device-link.ts),
    * or null: not theirs, revoked, or registered without one. */
   pluginKeyDevice(key: string, userId: string): string | null {
     const [row] = this.ctx.storage.sql
-      .exec("SELECT device_id FROM plugin_keys WHERE key = ? AND user_id = ? AND revoked_at IS NULL", key, userId)
+      .exec("SELECT device_id FROM plugin_keys WHERE key = ? AND user_id = ? AND kind = 'device' AND revoked_at IS NULL", key, userId)
       .toArray();
     return (row?.device_id as string | null | undefined) ?? null;
   }
 
-  /** A user's plugin keys, oldest first, revoked ones included. With `since`
-   * (epoch ms), only those registered or revoked after it. */
+  /** A user's devices' plugin keys, oldest first, revoked ones included
+   * (deploy keys are listed with their plugin). With `since` (epoch ms), only
+   * those registered or revoked after it. */
   async pluginKeys(userId: string, since?: number): Promise<PluginKeyRow[]> {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT key, device_id, created_at, revoked_at FROM plugin_keys WHERE user_id = ?
+        `SELECT key, device_id, created_at, revoked_at FROM plugin_keys WHERE user_id = ? AND kind = 'device'
            AND (? IS NULL OR created_at > ? OR revoked_at > ?) ORDER BY created_at, key`,
         userId,
         since ?? null,
@@ -1157,13 +1311,357 @@ export class UserDirectory extends DurableObject<Env> {
     );
   }
 
-  /** Revoke one of the user's keys (the first revocation's time stays).
-   * False when the key isn't theirs. */
+  /** Revoke one of the user's devices' keys (the first revocation's time
+   * stays). False when the key isn't theirs, or is a deploy key (revoked
+   * with its plugin's keys). */
   revokePluginKey(userId: string, key: string): boolean {
-    const [row] = this.ctx.storage.sql.exec("SELECT user_id FROM plugin_keys WHERE key = ?", key).toArray();
-    if (row?.user_id !== userId) return false;
+    const [row] = this.ctx.storage.sql.exec("SELECT user_id, kind FROM plugin_keys WHERE key = ?", key).toArray();
+    if (row?.user_id !== userId || row.kind !== "device") return false;
     this.ctx.storage.sql.exec("UPDATE plugin_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE key = ?", Date.now(), key);
     return true;
+  }
+
+  // ── deploy keys (store/identity/deploy-keys.ts) ──────────────────────────
+
+  /** Bind a deploy key (proof already checked) to `userId`, scoped to
+   * `pluginId`, which the caller has checked they own. A new key uses up a
+   * step-up ticket. The same live key again for the same user and plugin is
+   * a no-op that succeeds without one (a retry whose answer was lost). */
+  registerDeployKey(
+    userId: string,
+    pluginId: string,
+    key: string,
+    name: string,
+    expiresAt: number | null,
+    stepUpHash: string | undefined
+  ): DeployKeyRegistration {
+    return this.ctx.storage.transactionSync((): DeployKeyRegistration => {
+      const [row] = this.ctx.storage.sql.exec("SELECT user_id, kind, plugin_id, revoked_at FROM plugin_keys WHERE key = ?", key).toArray();
+      if (row) {
+        if (row.user_id !== userId || row.kind !== "deploy" || row.plugin_id !== pluginId) return "key_taken";
+        return row.revoked_at === null ? "registered" : "key_revoked";
+      }
+      if (this.userRefusal(userId) === "deleted_user") return "deleted_user";
+      const now = Date.now();
+      const count = (where: string, ...args: unknown[]) =>
+        this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM plugin_keys WHERE kind = 'deploy' AND ${where}`, ...args).one().n as number;
+      if (count("user_id = ? AND created_at > ?", userId, now - 86_400_000) >= DEPLOY_KEYS_PER_USER_PER_DAY) return "rate_limited";
+      if (count("plugin_id = ? AND created_at > ?", pluginId, now - 86_400_000) >= DEPLOY_KEYS_PER_PLUGIN_PER_DAY) return "rate_limited";
+      const live = count("plugin_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", pluginId, now);
+      if (live >= MAX_LIVE_DEPLOY_KEYS_PER_PLUGIN) return "too_many_keys";
+      if (!this.useStepUp(userId, stepUpHash)) return "step_up_required";
+      this.ctx.storage.sql.exec(
+        "INSERT INTO plugin_keys (key, user_id, device_id, created_at, kind, plugin_id, name, expires_at) VALUES (?, ?, NULL, ?, 'deploy', ?, ?, ?)",
+        key,
+        userId,
+        now,
+        pluginId,
+        name,
+        expiresAt
+      );
+      return "registered";
+    });
+  }
+
+  /** `pluginId`'s deploy keys that `ownerId` registered, oldest first,
+   * revoked and expired ones included. */
+  async deployKeys(pluginId: string, ownerId: string): Promise<DeployKeyRow[]> {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT key, name, created_at, last_used_at, expires_at, revoked_at FROM plugin_keys
+         WHERE kind = 'deploy' AND plugin_id = ? AND user_id = ? ORDER BY created_at, key`,
+        pluginId,
+        ownerId
+      )
+      .toArray();
+    return Promise.all(
+      rows.map(async (row) => ({
+        key: row.key as string,
+        fingerprint: await pluginKeyFingerprint(row.key as string),
+        name: row.name as string,
+        createdAt: row.created_at as number,
+        lastUsedAt: row.last_used_at as number | null,
+        expiresAt: row.expires_at as number | null,
+        revokedAt: row.revoked_at as number | null
+      }))
+    );
+  }
+
+  /** Revoke one of `pluginId`'s deploy keys that `ownerId` registered (the
+   * first revocation's time stays). False when there's no such key. */
+  revokeDeployKey(pluginId: string, ownerId: string, key: string): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec(
+          `UPDATE plugin_keys SET revoked_at = COALESCE(revoked_at, ?)
+           WHERE key = ? AND kind = 'deploy' AND plugin_id = ? AND user_id = ? RETURNING key`,
+          Date.now(),
+          key,
+          pluginId,
+          ownerId
+        )
+        .toArray().length > 0
+    );
+  }
+
+  /** Revoke every live deploy key of `pluginId`, whoever registered it (the
+   * plugin changed hands, or was taken down). Answers how many. */
+  revokeDeployKeys(pluginId: string): number {
+    return this.ctx.storage.sql
+      .exec(
+        "UPDATE plugin_keys SET revoked_at = ? WHERE kind = 'deploy' AND plugin_id = ? AND revoked_at IS NULL RETURNING key",
+        Date.now(),
+        pluginId
+      )
+      .toArray().length;
+  }
+
+  /** A deploy key's signed request for `pluginId` (signature already
+   * checked): whose it is, or why it may not. Each request is accepted once:
+   * `requestHash` (what it signed) is remembered for
+   * `DEPLOY_REPLAY_WINDOW_MS`, longer than its timestamp is accepted. */
+  useDeployKey(key: string, pluginId: string, requestHash: string): DeployKeyUse {
+    return this.ctx.storage.transactionSync((): DeployKeyUse => {
+      const now = Date.now();
+      const status = this.deployKeyStatus(key, pluginId);
+      if (status !== "ok") return { error: status };
+      const userId = this.ctx.storage.sql.exec("SELECT user_id FROM plugin_keys WHERE key = ?", key).one().user_id as string;
+      this.ctx.storage.sql.exec("DELETE FROM deploy_key_uses WHERE expires_at <= ?", now);
+      const fresh = this.ctx.storage.sql
+        .exec(
+          "INSERT INTO deploy_key_uses (request_hash, expires_at) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING request_hash",
+          requestHash,
+          now + DEPLOY_REPLAY_WINDOW_MS
+        )
+        .toArray().length;
+      if (!fresh) return { error: "replayed_request" };
+      this.ctx.storage.sql.exec("UPDATE plugin_keys SET last_used_at = ? WHERE key = ?", now, key);
+      return { userId, username: this.username(userId) };
+    });
+  }
+
+  /** Whether a deploy key may act on `pluginId` now (nothing recorded). */
+  deployKeyStatus(key: string, pluginId: string): "ok" | "unknown_key" | "key_revoked" | "key_expired" | "key_not_allowed" {
+    const [row] = this.ctx.storage.sql
+      .exec("SELECT user_id, plugin_id, revoked_at, expires_at FROM plugin_keys WHERE key = ? AND kind = 'deploy'", key)
+      .toArray();
+    if (!row || this.userRefusal(row.user_id as string) === "deleted_user") return "unknown_key";
+    if (row.revoked_at !== null) return "key_revoked";
+    if (row.expires_at !== null && (row.expires_at as number) <= Date.now()) return "key_expired";
+    if (row.plugin_id !== pluginId) return "key_not_allowed";
+    return "ok";
+  }
+
+  // ── roles (roles.ts) ─────────────────────────────────────────────────────
+
+  /** The staff roles `userId` holds now. */
+  roles(userId: string): Role[] {
+    return this.ctx.storage.sql
+      .exec("SELECT role FROM user_roles WHERE user_id = ? AND revoked_at IS NULL ORDER BY role", userId)
+      .toArray()
+      .map((row) => row.role as string)
+      .filter(isRole);
+  }
+
+  hasRole(userId: string, role: Role): boolean {
+    return this.roles(userId).includes(role);
+  }
+
+  /** An operator grants a role to a live directory user. A revoked grant is
+   * granted afresh; one held already stays as it was. */
+  grantRole(userId: string, role: Role, by: string, note: string | null): "granted" | "held" | "unknown_user" | "deleted_user" {
+    return this.ctx.storage.transactionSync(() => {
+      const refusal = this.userRefusal(userId);
+      if (refusal) return refusal;
+      const granted = this.ctx.storage.sql
+        .exec(
+          `INSERT INTO user_roles (user_id, role, granted_at, granted_by, note) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (user_id, role) DO UPDATE SET
+             granted_at = excluded.granted_at, granted_by = excluded.granted_by, note = excluded.note,
+             revoked_at = NULL, revoked_by = NULL
+           WHERE user_roles.revoked_at IS NOT NULL
+           RETURNING user_id`,
+          userId,
+          role,
+          Date.now(),
+          by,
+          note
+        )
+        .toArray().length;
+      return granted ? "granted" : "held";
+    });
+  }
+
+  /** An operator takes a role back; the row stays, revoked. False when they
+   * didn't hold it. */
+  revokeRole(userId: string, role: Role, by: string): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec(
+          "UPDATE user_roles SET revoked_at = ?, revoked_by = ? WHERE user_id = ? AND role = ? AND revoked_at IS NULL RETURNING user_id",
+          Date.now(),
+          by,
+          userId,
+          role
+        )
+        .toArray().length > 0
+    );
+  }
+
+  /** Every grant, oldest first; revoked ones only with `all`. */
+  listRoles(all: boolean): RoleRow[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT r.*, n.username, u.email FROM user_roles r
+         LEFT JOIN usernames n ON n.user_id = r.user_id AND n.retired_at IS NULL
+         LEFT JOIN users u ON u.user_id = r.user_id
+         WHERE ? OR r.revoked_at IS NULL ORDER BY r.granted_at, r.user_id, r.role`,
+        all ? 1 : 0
+      )
+      .toArray()
+      .filter((row) => isRole(row.role))
+      .map((row) => ({
+        userId: row.user_id as string,
+        role: row.role as Role,
+        username: row.username as string | null,
+        email: row.email as string | null,
+        grantedAt: row.granted_at as number,
+        grantedBy: row.granted_by as string,
+        note: row.note as string | null,
+        revokedAt: row.revoked_at as number | null,
+        revokedBy: row.revoked_by as string | null
+      }));
+  }
+
+  // ── web sessions (web-session.ts) ────────────────────────────────────────
+
+  /** A browser signed in as `userId`: a new session under `tokenHash`, with
+   * `csrf` and the step-up its sign-in earned. The session the browser held
+   * before (`replacing`, a token hash) ends; past
+   * `MAX_WEB_SESSIONS_PER_USER`, the least recently used go. Sessions past
+   * every lifetime are swept. */
+  createWebSession(session: {
+    readonly userId: string;
+    readonly tokenHash: string;
+    readonly csrf: string;
+    readonly stepUpHash: string | null;
+    readonly workosSessionId: string | null;
+    readonly replacing: string | null;
+  }): "created" | "deleted_user" {
+    return this.ctx.storage.transactionSync(() => {
+      if (this.userRefusal(session.userId) === "deleted_user") return "deleted_user";
+      const now = Date.now();
+      this.ctx.storage.sql.exec(
+        "DELETE FROM web_sessions WHERE created_at <= ? OR last_seen_at <= ?",
+        now - WEB_SESSION_ABSOLUTE_MS,
+        now - WEB_SESSION_IDLE_MS
+      );
+      if (session.replacing) this.ctx.storage.sql.exec("DELETE FROM web_sessions WHERE token_hash = ?", session.replacing);
+      this.ctx.storage.sql.exec(
+        `INSERT INTO web_sessions (session_id, user_id, token_hash, token_issued_at, csrf, step_up_hash, workos_session_id, created_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        crypto.randomUUID(),
+        session.userId,
+        session.tokenHash,
+        now,
+        session.csrf,
+        session.stepUpHash,
+        session.workosSessionId,
+        now,
+        now
+      );
+      this.ctx.storage.sql.exec(
+        `DELETE FROM web_sessions WHERE user_id = ? AND session_id NOT IN
+           (SELECT session_id FROM web_sessions WHERE user_id = ? ORDER BY last_seen_at DESC, created_at DESC LIMIT ?)`,
+        session.userId,
+        session.userId,
+        MAX_WEB_SESSIONS_PER_USER
+      );
+      return "created";
+    });
+  }
+
+  /**
+   * The live session behind a token's hash, used now. Undefined when there's
+   * none: never issued, signed out, past its idle or absolute lifetime (an
+   * account holding a role gets the staff lifetimes), or a rotated-out token
+   * past its grace. A session found past its lifetime is deleted.
+   *
+   * `successorHash`: this use exercises a role, and here is the hash of a
+   * new token the caller minted. A staff session's token is replaced by it on
+   * its first privileged use and every `STAFF_TOKEN_ROTATION_MS` (the answer
+   * says `rotated`); the old one works for `ROTATED_TOKEN_GRACE_MS` more.
+   * The new token itself never comes here.
+   */
+  webSession(tokenHash: string, successorHash?: string): WebSessionRead | undefined {
+    return this.ctx.storage.transactionSync((): WebSessionRead | undefined => {
+      const now = Date.now();
+      let current = true;
+      let [row] = this.ctx.storage.sql.exec("SELECT * FROM web_sessions WHERE token_hash = ?", tokenHash).toArray();
+      if (!row) {
+        current = false;
+        [row] = this.ctx.storage.sql
+          .exec("SELECT * FROM web_sessions WHERE prev_token_hash = ? AND prev_valid_until > ?", tokenHash, now)
+          .toArray();
+      }
+      if (!row) return undefined;
+      const sessionId = row.session_id as string;
+      const userId = row.user_id as string;
+      const roles = this.roles(userId);
+      const staff = roles.length > 0;
+      const absoluteExpiresAt = (row.created_at as number) + (staff ? STAFF_SESSION_ABSOLUTE_MS : WEB_SESSION_ABSOLUTE_MS);
+      const idle = staff ? STAFF_SESSION_IDLE_MS : WEB_SESSION_IDLE_MS;
+      if (this.userRefusal(userId) === "deleted_user" || now >= absoluteExpiresAt || now >= (row.last_seen_at as number) + idle) {
+        this.ctx.storage.sql.exec("DELETE FROM web_sessions WHERE session_id = ?", sessionId);
+        return undefined;
+      }
+      const due =
+        !!successorHash &&
+        staff &&
+        current &&
+        (row.privileged_at === null || now - (row.token_issued_at as number) >= STAFF_TOKEN_ROTATION_MS);
+      if (due) {
+        this.ctx.storage.sql.exec(
+          `UPDATE web_sessions SET prev_token_hash = token_hash, prev_valid_until = ?, token_hash = ?, token_issued_at = ?,
+             privileged_at = COALESCE(privileged_at, ?), last_seen_at = ? WHERE session_id = ?`,
+          now + ROTATED_TOKEN_GRACE_MS,
+          successorHash,
+          now,
+          now,
+          now,
+          sessionId
+        );
+      } else if (now - (row.last_seen_at as number) >= WEB_SESSION_TOUCH_MS) {
+        this.ctx.storage.sql.exec("UPDATE web_sessions SET last_seen_at = ? WHERE session_id = ?", now, sessionId);
+      }
+      const lastSeen = due || now - (row.last_seen_at as number) >= WEB_SESSION_TOUCH_MS ? now : (row.last_seen_at as number);
+      const stepUpHash = row.step_up_hash as string | null;
+      return {
+        userId,
+        username: this.username(userId),
+        roles,
+        csrf: row.csrf as string,
+        expiresAt: Math.min(absoluteExpiresAt, lastSeen + idle),
+        absoluteExpiresAt,
+        stepUpHash: stepUpHash && this.hasStepUp(userId, stepUpHash) ? stepUpHash : null,
+        rotated: due
+      };
+    });
+  }
+
+  /** Sign a browser out: its session ends, whichever of its tokens is
+   * presented. Answers the WorkOS session it was signed in under (null for
+   * none), for the caller to end too; undefined when there was no session. */
+  endWebSession(tokenHash: string): { readonly workosSessionId: string | null } | undefined {
+    const [row] = this.ctx.storage.sql
+      .exec(
+        "DELETE FROM web_sessions WHERE token_hash = ? OR (prev_token_hash = ? AND prev_valid_until > ?) RETURNING workos_session_id",
+        tokenHash,
+        tokenHash,
+        Date.now()
+      )
+      .toArray();
+    return row ? { workosSessionId: row.workos_session_id as string | null } : undefined;
   }
 
   list(): DirectoryUser[] {

@@ -5,7 +5,7 @@
  * here (runner-policy.ts names no `/plugin-keys`).
  *
  *   POST   /plugin-keys { key, deviceId?, proof, stepUp } → 201 { key, registered: true }
- *   GET    /plugin-keys/:key → { key, username, mine, revoked, verified, fingerprint, firstSeen, revokedAt }
+ *   GET    /plugin-keys/:key[?plugin=id] → { key, username, mine, revoked, verified, fingerprint, firstSeen, revokedAt }
  *   GET    /plugin-keys[?since=ms] → { keys: [{ key, fingerprint, deviceId, createdAt, revokedAt }], now }
  *   DELETE /plugin-keys/:key                      → { revoked: true }
  *
@@ -26,7 +26,16 @@
  * lookup. Lookups and lists are `no-store`.
  *
  * Only `verified` keys may read as "Made by @username": not revoked, owner
- * holds a live username. To anyone but the owner, a live key whose owner has
+ * holds a live username.
+ *
+ * A deploy key (store/identity/deploy-keys.ts) answers the same lookup,
+ * plus `kind: "deploy"`, `plugin`, `expiresAt` and `expired`. It vouches
+ * for its one plugin only: it reads as verified only when the lookup names
+ * that plugin (`GET /plugin-keys/:key?plugin=<id>`) and it is neither
+ * revoked nor expired. Engines that don't name the plugin (all before deploy
+ * keys) see it unverified, so it can't pass as its owner's key for their
+ * other plugins. Lists (`GET /plugin-keys`) and DELETE here are devices'
+ * keys only. To anyone but the owner, a live key whose owner has
  * no username answers 404 like an unregistered one.
  *
  * Stored in the user directory (user-directory.ts, `plugin_keys`).
@@ -117,7 +126,8 @@ export const handlePluginKeyRoute = async (
   // The b64url alphabet needs no escaping, so an escaped key isn't one.
   const key = parseKey(parts[1]);
   if (request.method === "GET") {
-    const found = key ? await directory.pluginKey(key, auth.userId) : undefined;
+    const plugin = url.searchParams.get("plugin") ?? undefined;
+    const found = key ? await directory.pluginKey(key, auth.userId, plugin) : undefined;
     return found ? fresh(found) : unknownKey();
   }
   if (request.method !== "DELETE") return jsonError(405, "method_not_allowed", "GET or DELETE only.");
