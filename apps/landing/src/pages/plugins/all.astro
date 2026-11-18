@@ -122,7 +122,7 @@ const when = (p: PluginCard) =>
           <div class="wide-facet">
             <h2 class="facet-h">Keywords</h2>
             <ul class="tags">
-              {keywords.map((k) => <li><a class="tag" href={at({ keyword: state.keyword === k ? null : k })} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
+              {keywords.map((k) => <li><a class="tag" href={at({ keyword: state.keyword === k ? null : k })} title={k} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
             </ul>
           </div>
         )}
@@ -141,12 +141,12 @@ const when = (p: PluginCard) =>
           <p id="results">{total !== undefined ? <><b class="num">{count(total)}</b> {total === 1 ? "plugin" : "plugins"}</> : "Plugins"}</p>
           {/* The phone's: the order and the filters, each a disclosure. */}
           <div class="fbar">
-            <details class="drop">
+            {items.length > 0 && (<details class="drop">
               <summary>{sortLabel(sort)}<span class="sr-only">: change the order</span><Icon name="chev" /></summary>
               <div class="pop">
                 {sorts.map((s) => <a href={at({ sort: s })} aria-current={s === sort ? "page" : undefined}>{sortLabel(s)}</a>)}
               </div>
-            </details>
+            </details>)}
             <details class="drop">
               <summary>Filters{filtering > 0 && <span class="n num">{filtering}</span>}<Icon name="chev" /></summary>
               <div class="pop wide">
@@ -159,17 +159,20 @@ const when = (p: PluginCard) =>
                   <>
                     <p class="facet-h">Keywords</p>
                     <ul class="tags">
-                      {keywords.map((k) => <li><a class="tag" href={at({ keyword: state.keyword === k ? null : k })} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
+                      {keywords.map((k) => <li><a class="tag" href={at({ keyword: state.keyword === k ? null : k })} title={k} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
                     </ul>
                   </>
                 )}
               </div>
             </details>
           </div>
-          <nav class="sort" aria-label={store("plugins.store.order_label")}>
-            <span aria-hidden="true">Sort</span>
-            {sorts.map((s) => <a href={at({ sort: s })} aria-current={s === sort ? "page" : undefined}>{sortLabel(s)}</a>)}
-          </nav>
+          {/* (Nothing to order, no order: the count line keeps its place, so the heading doesn't move.) */}
+          {items.length > 0 && (
+            <nav class="sort" aria-label={store("plugins.store.order_label")}>
+              <span aria-hidden="true">Sort</span>
+              {sorts.map((s) => <a href={at({ sort: s })} aria-current={s === sort ? "page" : undefined}>{sortLabel(s)}</a>)}
+            </nav>
+          )}
         </div>
 
         {

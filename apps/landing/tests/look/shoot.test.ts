@@ -51,6 +51,16 @@ const SHOTS: Shot[] = [
   { page: "browse", as: "page-2", path: "/plugins/all", act: async (page) => { await page.getByRole("link", { name: "Next" }).click(); await page.waitForLoadState("networkidle"); } },
   { page: "browse", as: "filters-open", path: "/plugins/all?category=productivity&keyword=focus", widths: [390], act: async (page) => { await page.locator("details.drop summary", { hasText: "Filters" }).click(); } },
   { page: "browse", as: "order-open", path: "/plugins/all?category=productivity", widths: [390], act: async (page) => { await page.locator("details.drop summary").first().click(); } },
+  // Your pages: every state of a plugin and a key (Ada's), signed out, nothing published; the many-plugin key opened; the revoke question.
+  { page: "account", as: "plugins", path: "/account", user: "user_ada" },
+  { page: "account", as: "plugins-signed-out", path: "/account" },
+  { page: "account", as: "plugins-none", path: "/account", user: "user_noor" },
+  { page: "account", as: "keys", path: "/account/keys", user: "user_ada" },
+  { page: "account", as: "keys-all-open", path: "/account/keys", user: "user_ada", act: async (page) => { await page.locator("details.every summary").first().click(); await page.locator("details.gone summary").click(); } },
+  { page: "account", as: "keys-signed-out", path: "/account/keys" },
+  { page: "account", as: "keys-none", path: "/account/keys", user: "user_noor" },
+  { page: "account", as: "revoke", path: "/account/keys/Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", user: "user_ada" },
+  { page: "account", as: "new-key", path: "/account/keys", user: "user_ada", widths: [1440, 390], act: async (page) => { await page.getByRole("button", { name: "New key" }).click(); } },
 ];
 const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}]];
 
@@ -75,7 +85,11 @@ test.skipIf(!DIR)("pictures of the store's pages", async () => {
         const page = await context.newPage();
         if (shot.user) await page.goto(new URL(`/auth/web/callback?as=${shot.user}&return_to=/plugins`, site.url).href);
         await page.goto(new URL(shot.path, site.url).href, { waitUntil: "networkidle" });
-        if (shot.act) await shot.act(page);
+        if (shot.act) {
+          await shot.act(page);
+          // (A full page is taken from its top: else the bar, fixed, shows where the page was scrolled to.)
+          await page.evaluate(() => window.scrollTo(0, 0));
+        }
         await page.evaluate(() => document.fonts.ready);
         await page.screenshot({ path: join(DIR!, `${shot.page}-${shot.as}-${width}-${scheme}.png`), fullPage: true });
         await context.close();

@@ -28,7 +28,9 @@
 .pick a[aria-current] i { box-shadow: inset 0 0 0 5px var(--text); }
 .pick .seal { margin-left: -4px; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; list-style: none; }
-.tags .tag { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* (A chip no wider than the rail, its ellipsis inside it; the whole keyword in its title and address.) */
+.tags li { min-width: 0; max-width: 100%; }
+.tags .tag { display: block; max-width: 100%; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tags .tag[aria-current] { background: var(--text); color: var(--bg); }
 
 /* The search, in what's chosen. */

@@ -782,7 +782,15 @@ export interface FakeKey {
 }
 
 export function keys(): FakeKey[] {
+  // (Keys for many of Ada's plugins: the keys page names three, then counts, and lists the rest on request.)
+  const adas = plugins().filter((p) => p.owner === "user_ada").map((p) => p.id).sort();
   return [
+    { owner: "user_ada", scope: { plugins: adas.slice(0, 14) }, last_used_plugin: "focus-timer", key: "Mn4pQ7rS1tU2vW3xY5zA6bC8dE9fG0hJ2kL3mN4oP5q", name: "GitHub Actions, the monorepo", created_at: NOW - 30 * DAY, last_used_at: NOW - 2 * 3_600_000, expires_at: NOW + 300 * DAY, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: adas.slice(0, 4) }, last_used_plugin: null, key: "Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", name: "Docs site build", created_at: NOW - 6 * DAY, last_used_at: null, expires_at: null, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: adas.slice(4, 6) }, last_used_plugin: "focus-timer", key: "Rr7sT8uV9wX0yZ1aB2cD3eF4gH5iJ6kL7mN8oP9qR0s", name: "An old runner, ended", created_at: NOW - 400 * DAY, last_used_at: NOW - 40 * DAY, expires_at: NOW - 5 * DAY, revoked_at: null },
+    // (Three, named in full; and fifty, the most a key may name: its ids past Ada's own are plugins' ids as an edge keeps them.)
+    { owner: "user_ada", scope: { plugins: adas.slice(6, 9) }, last_used_plugin: null, key: "Tt1uV2wX3yZ4aB5cD6eF7gH8iJ9kL0mN1oP2qR3sT4u", name: "Three of them", created_at: NOW - 3 * DAY, last_used_at: null, expires_at: NOW + 200 * DAY, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: [...adas, ...Array.from({ length: 50 - adas.length }, (_, i) => `a-plugin-with-a-long-id-${String(i).padStart(2, "0")}`)].sort() }, last_used_plugin: null, key: "Ww5xY6zA7bC8dE9fG0hJ1kL2mN3oP4qR5sT6uV7wX8y", name: "Every one", created_at: NOW - 1 * DAY, last_used_at: null, expires_at: null, revoked_at: null },
     { owner: "user_ada", scope: { plugins: ["focus-timer"] }, last_used_plugin: "focus-timer", key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq", name: "GitHub Actions", created_at: NOW - 50 * DAY, last_used_at: NOW - 9 * DAY, expires_at: NOW + 315 * DAY, revoked_at: null },
     { owner: "user_ada", scope: { all: true }, last_used_plugin: "session-badges", key: "Zt8nQ1wE4rT7yU0iO3pA6sD9fG2hJ5kL8zX1cV4bN7m", name: "Old laptop script", created_at: NOW - 110 * DAY, last_used_at: NOW - 100 * DAY, expires_at: null, revoked_at: NOW - 60 * DAY },
     // The worst case's ten: live and revoked, used and never, ending soon and never.

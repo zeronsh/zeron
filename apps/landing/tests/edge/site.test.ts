@@ -139,9 +139,10 @@ describe("signing in on the web", () => {
   });
 
   test("signed out, the account pages ask you to sign in, and the admin ones aren't there", async () => {
+    // (Your own pages say so and offer sign-in, here: never a redirect.)
     const account = await edge.site("/account");
-    expect(account.status).toBe(303);
-    expect(account.headers.get("location")).toBe("/auth/web/login?return_to=%2Faccount");
+    expect(account.status).toBe(200);
+    expect(await account.text()).toContain('<a class="btn pri" href="/auth/web/login?return_to=%2Faccount">Sign in</a>');
     expect((await edge.site("/admin/plugins")).status).toBe(404);
     // (A member who isn't staff gets the same 404 as an address that isn't there.)
     expect((await adaOnWeb.get("/admin/plugins")).response.status).toBe(404);
@@ -376,13 +377,14 @@ describe("an author's pages", () => {
     expect(keys.response.status).toBe(200);
     expect(keys.body).toContain(`/account/keys/${key}`);
     // (What it may publish, by the plugins' own names: the package's.)
-    expect(keys.body).toMatch(/May publish:\s*<a href="\/account\/plugins\/focus-timer">focus timer<\/a>, <a href="\/account\/plugins\/pr-review">/);
+    // (Two plugins, named in full: the app's "{a} and {b}".)
+    expect(keys.body).toContain('<div class="names">focus timer and pr review</div><small>2 plugins</small>');
     const csrf = await adaOnWeb.token("/account/keys");
     const revoked = await adaOnWeb.post(`/account/keys/${key}`, { csrf });
     expect(revoked.status).toBe(303);
     expect(revoked.headers.get("location")).toBe("/account/keys");
     expect(adaOnWeb.flash()).toBe("key_revoked");
-    expect((await adaOnWeb.get("/account/keys")).body).toMatch(/Revoked keys · 1/);
+    expect((await adaOnWeb.get("/account/keys")).body).toMatch(/Revoked and ended keys · 1/);
   });
 
   test("stop new installs of a version, and allow them again", async () => {
@@ -607,6 +609,7 @@ describe("signing out", () => {
     expect(out.status).toBe(303);
     expect(browser.cookies.has(SESSION)).toBe(false);
     // The old cookie, kept by someone, opens nothing.
-    expect((await edge.site("/account", { headers: { cookie: kept } })).status).toBe(303);
+    const reopened = await edge.site("/account", { headers: { cookie: kept } });
+    expect(await reopened.text()).toContain("<h2>Sign in to see the plugins you publish</h2>");
   });
 });

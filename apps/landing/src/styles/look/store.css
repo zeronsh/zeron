@@ -223,6 +223,24 @@ a.tag:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 7
 .more svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.12s var(--ease); }
 .more:hover svg { transform: translateX(2px); }
 
+/* ---- a command to copy (Discover, Your plugins, New key) ---- */
+.cmd { display: inline-flex; align-items: center; gap: 4px; height: 40px; padding: 0 4px 0 14px; border-radius: 11px; background: var(--surface); box-shadow: var(--shadow-1); flex: none; }
+.cmd code { font: 500 13px/1 var(--mono); white-space: nowrap; }
+.cmd em { font-style: normal; color: var(--text-3); }
+.cmd button { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--text-3); transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
+.cmd button:hover { color: var(--text); background: var(--sunken); }
+.cmd button.is-done { color: var(--verified); }
+.cmd svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---- a danger button, a form's line, a page's question ---- */
+/* (Its words in the page's own ground: 4.6:1 on light's red, 7:1 on dark's.) */
+.btn.danger { background: var(--danger); color: var(--bg); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18); }
+.btn.danger:hover { background: color-mix(in srgb, var(--danger) 88%, #000); }
+.flash { margin-top: 20px; padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 20px; background: var(--sunken); color: var(--text-2); }
+.flash.ok { background: var(--verified-wash); color: var(--verified); }
+.flash.bad { background: var(--danger-wash); color: var(--danger); }
+.flash.info { background: var(--warn-wash); color: var(--warn); }
+
 /* ---- surfaces ---- */
 .card { background: var(--surface); border-radius: 18px; box-shadow: var(--shadow-1); overflow: hidden; }
 a.card { transition: box-shadow 0.16s var(--ease), transform 0.16s var(--ease); }

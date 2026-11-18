@@ -1,0 +1,149 @@
+/* Your pages: Your plugins and Deploy keys (the prototype's yours.css and keys.css), with their states. */
+.crumbs { display: flex; align-items: center; gap: 6px; padding-top: 28px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.crumbs svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.crumbs a:hover { color: var(--text); }
+
+.wrap.acct { padding-top: 56px; }
+.acct .crumbs { padding-top: 0; margin-top: -28px; margin-bottom: 20px; }
+.acct .hd { display: flex; align-items: flex-end; justify-content: space-between; gap: 48px; }
+.acct h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; }
+.acct .lead { margin-top: 12px; max-width: 37em; }
+.sub { display: flex; gap: 28px; margin-top: 36px; box-shadow: inset 0 -1px 0 var(--line); }
+.sub a { position: relative; padding: 0 0 12px; font-size: 15px; line-height: 22px; font-weight: 500; color: var(--text-3); display: flex; gap: 7px; align-items: baseline; border-radius: 4px 4px 0 0; transition: color 0.12s var(--ease); }
+.sub a:hover { color: var(--text); }
+.sub a span { font-size: 13px; font-weight: 450; }
+.sub a[aria-current] { color: var(--text); }
+.sub a[aria-current]::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 1px; background: var(--text); }
+.sub a:focus-visible { outline-offset: -2px; }
+
+/* Signed out: the page's own invitation. */
+.please { margin-top: 32px; padding: 28px; border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-1); max-width: 34em; }
+.please h2 { font-size: 19px; line-height: 26px; }
+.please p { margin-top: 4px; color: var(--text-2); }
+.please .btn { margin-top: 18px; }
+.acct .empty { padding-top: 32px; }
+.acct .empty .cmd { margin-top: 16px; }
+
+/* ---- Your plugins: each one, its newest version, and where that version stands ---- */
+.mine { margin-top: 28px; }
+.mine ul, .keys ul { padding: 0; list-style: none; }
+.row { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.45fr) minmax(0, 0.95fr) 80px 16px; gap: 32px; align-items: start; padding: 20px 24px; transition: background-color 0.12s var(--ease); }
+a.row:hover { background: color-mix(in srgb, var(--sunken) 55%, transparent); }
+a.row:hover > svg { transform: translateX(2px); stroke: var(--text); }
+a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
+.mine li + li .row, .row.h + ul .row { box-shadow: 0 -1px 0 var(--line); }
+.row.h { padding-top: 14px; padding-bottom: 12px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.row .r { text-align: right; }
+.who { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.who > div { min-width: 0; }
+.who .nm { font-weight: 550; letter-spacing: -0.005em; line-height: 22px; }
+.who .id { font: 450 12.5px/18px var(--mono); color: var(--text-3); margin-top: 2px; overflow-wrap: anywhere; }
+.ver { font-size: 14px; line-height: 20px; padding-top: 1px; min-width: 0; }
+.ver .top1 { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; min-height: 24px; }
+.ver b { font: 600 14px/20px var(--mono); letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.ver small { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 13px; line-height: 18px; color: var(--text-3); }
+.ver small .seal { vertical-align: 0; }
+.ver small.why { display: block; color: var(--text-2); overflow-wrap: anywhere; }
+.pub { font-size: 14px; line-height: 20px; padding-top: 3px; min-width: 0; }
+.pub small { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 13px; line-height: 18px; color: var(--text-3); min-width: 0; }
+.pub small svg { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.row .n { text-align: right; font-size: 14px; line-height: 20px; padding-top: 3px; }
+.row > svg { width: 16px; height: 16px; margin-top: 5px; fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.12s var(--ease), stroke 0.12s var(--ease); }
+.row.off .tile { filter: grayscale(1); opacity: 0.7; }
+.row.off .nm, .row.off .n { color: var(--text-2); }
+
+/* ---- Deploy keys ---- */
+.keys { margin-top: 28px; }
+.key { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.25fr) minmax(0, 1fr) 132px 72px; gap: 32px; align-items: center; padding: 20px 24px; }
+.keys li + li.key, .key.h + ul .key { box-shadow: 0 -1px 0 var(--line); }
+.key.h { padding-top: 14px; padding-bottom: 12px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.key .kname { min-width: 0; }
+.key .nm { font-weight: 550; letter-spacing: -0.005em; overflow-wrap: anywhere; }
+.key .id { margin-top: 2px; font: 450 12.5px/18px var(--mono); color: var(--text-3); }
+.scope { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.scope .tiles { display: flex; flex: none; padding-top: 2px; }
+.scope .tiles .tile { margin-left: -6px; box-shadow: 0 0 0 2.5px var(--surface), inset 0 0 0 1px color-mix(in oklch, currentColor 12%, transparent); }
+.scope .tiles .tile:first-child { margin-left: 0; }
+/* A key for many plugins: three tiles, a count, and the whole list on request. */
+.scope .tiles .more { width: auto; min-width: 32px; padding: 0 7px 0 9px; background: var(--sunken); color: var(--text-2); font: 600 11.5px/1 var(--sans); letter-spacing: -0.01em; box-shadow: 0 0 0 2.5px var(--surface); font-variant-numeric: tabular-nums; }
+.scope .w { min-width: 0; font-size: 14px; line-height: 20px; }
+.scope .w .names { overflow-wrap: anywhere; }
+.scope .w small { display: block; font-size: 13px; color: var(--text-3); }
+.all { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 27%; background: var(--sunken); color: var(--text-2); flex: none; }
+.all svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.key .every { grid-column: 2 / -1; margin-top: -14px; }
+.every summary { display: inline-flex; align-items: center; gap: 2px; font-size: 13px; line-height: 20px; color: var(--text-2); font-weight: 500; list-style: none; cursor: pointer; border-radius: 4px; }
+.every summary::-webkit-details-marker { display: none; }
+.every summary:hover { color: var(--text); }
+.every summary svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
+.every[open] summary svg { transform: rotate(-90deg); }
+.plist { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding: 12px; border-radius: 14px; background: var(--sunken); list-style: none; }
+.pl { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; max-width: 100%; padding: 4px 12px 4px 5px; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-1); font-size: 13px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; }
+.used { font-size: 14px; line-height: 20px; min-width: 0; }
+.used small { display: block; font-size: 13px; color: var(--text-3); overflow-wrap: anywhere; }
+.ends { font-size: 14px; line-height: 20px; color: var(--text-2); }
+.key .btn { justify-self: end; margin-right: -10px; }
+.key.was { color: var(--text-2); }
+.key.was .nm { color: var(--text-2); }
+.gone { margin-top: 20px; }
+.gone summary { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; line-height: 20px; color: var(--text-2); font-weight: 500; list-style: none; cursor: pointer; border-radius: 4px; }
+.gone summary::-webkit-details-marker { display: none; }
+.gone summary:hover { color: var(--text); }
+.gone summary svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
+.gone[open] summary svg { transform: rotate(-90deg); }
+.gone .keys { margin-top: 12px; }
+
+/* New key: where a key is made (never here). */
+.newkey.menu { inset: 0; margin: auto; height: fit-content; width: min(480px, calc(100vw - 32px)); padding: 22px 24px; gap: 12px; font-size: 14px; line-height: 21px; color: var(--text-2); }
+.newkey h2 { font-size: 19px; line-height: 26px; color: var(--text); }
+.newkey code { font: 500 12.5px/1 var(--mono); }
+/* (The command wraps, never scrolls in a box nothing can focus.) */
+.newkey .cmd { align-self: stretch; justify-content: space-between; height: auto; min-height: 40px; padding-top: 6px; padding-bottom: 6px; }
+.newkey .cmd code { white-space: normal; overflow-wrap: anywhere; line-height: 18px; }
+.newkey a.more { display: inline-flex; width: auto; height: auto; padding: 0; }
+.newkey a.more:hover { background: none; }
+
+/* How it works, in three. */
+.how { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 32px; margin-top: 56px; padding-top: 28px; box-shadow: 0 -1px 0 var(--line); }
+.how h3 { display: flex; align-items: center; gap: 10px; }
+.how h3 b { display: grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; font: 600 12px/1 var(--mono); color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.how p { margin-top: 8px; color: var(--text-2); font-size: 14px; line-height: 21px; }
+.how code { font: 500 12.5px/1 var(--mono); padding: 2px 5px; border-radius: 5px; background: var(--sunken); color: var(--text); }
+
+/* A question before something that can't be taken back. */
+.askcard { max-width: 520px; margin-top: 8px; padding: 28px; overflow: visible; }
+.askcard h1 { font-size: 24px; line-height: 30px; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.askcard p { margin-top: 8px; color: var(--text-2); }
+.askcard .answers { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+
+@media (max-width: 1024px) {
+  .row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 0.9fr) 16px; gap: 24px; }
+  .row .n, .row.h .r { display: none; }
+  .key { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 0.9fr) 112px 72px; gap: 20px; }
+}
+@media (max-width: 860px) {
+  .acct .hd { flex-direction: column; align-items: flex-start; gap: 20px; }
+  .row.h, .key.h { display: none; }
+  .row { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px 20px; }
+  .row .who { grid-column: 1; }
+  .row > svg { grid-column: 2; grid-row: 1; align-self: center; }
+  .row .ver, .row .pub { grid-column: 1 / -1; }
+  .row .pub { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 0; }
+  .row .pub small { margin: 0; }
+  .key { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px 20px; align-items: start; }
+  .key .kname { grid-column: 1; grid-row: 1; }
+  .key .btn { grid-column: 2; grid-row: 1; }
+  .key .scope, .key .used, .key .ends, .key .every { grid-column: 1 / -1; grid-row: auto; margin: 0; }
+  .key .used { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+  .how { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+}
+@media (max-width: 720px) {
+  .wrap.acct { padding-top: 32px; }
+  .acct .crumbs { margin-top: -12px; }
+  .acct h1 { font-size: 32px; line-height: 36px; }
+  .sub { margin-top: 28px; gap: 22px; }
+  .please { padding: 22px 20px; }
+  .askcard { padding: 22px 20px; }
+  .askcard .answers { flex-direction: column-reverse; }
+  .askcard .answers .btn { width: 100%; }
+}

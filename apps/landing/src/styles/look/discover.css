@@ -78,13 +78,6 @@ section.blk { margin-top: 72px; }
 .make { display: flex; align-items: center; gap: 24px; margin-top: 72px; padding: 24px 28px; border-radius: 20px; background: var(--sunken); }
 .make .txt { flex: 1; min-width: 0; }
 .make p { color: var(--text-2); margin-top: 2px; }
-.cmd { display: inline-flex; align-items: center; gap: 4px; height: 40px; padding: 0 4px 0 14px; border-radius: 11px; background: var(--surface); box-shadow: var(--shadow-1); flex: none; }
-.cmd code { font: 500 13px/1 var(--mono); white-space: nowrap; }
-.cmd em { font-style: normal; color: var(--text-3); }
-.cmd button { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--text-3); transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
-.cmd button:hover { color: var(--text); background: var(--sunken); }
-.cmd button.is-done { color: var(--verified); }
-.cmd svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 @media (max-width: 1024px) {
   .intro .hd { flex-direction: column; align-items: flex-start; gap: 24px; }

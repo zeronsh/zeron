@@ -27,6 +27,15 @@ export const STORE_WORDS = {
   // Why a version takes no new installs, when a newer one replaced it unverified (amendment 45); and one waiting.
   "plugins.store.superseded": "Replaced by {version} before it was verified",
   "plugins.store.review.waiting": "Not verified yet",
+  "plugins.store.review.declined": "Not verified",
+  "plugins.store.review.declined_said": "The reviewer's note: “{words}”",
+  // Your plugins' line under a newest version (the app's Yours).
+  "plugins.store.summary.newest_verified": "{version} is the newest verified",
+  "plugins.store.summary.none_verified": "nothing verified yet",
+  // What a deploy key may publish, and when it was used (the app's keys).
+  "plugins.store.key.scope.label": "Can publish",
+  "plugins.store.key.scope.two": "{a} and {b}",
+  "plugins.store.key.not_used_made": "Not used yet · made {date}",
   // The account's deploy keys (amendment 44).
   "plugins.store.keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each key publishes the plugins chosen when it's made.",
   "plugins.store.key.scope.all": "All your plugins",

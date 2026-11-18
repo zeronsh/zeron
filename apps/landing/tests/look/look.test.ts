@@ -17,9 +17,10 @@ afterAll(async () => {
   await site?.dispose();
 });
 
-async function open(path: string, width: number, scheme: "light" | "dark" = "light"): Promise<Page> {
+async function open(path: string, width: number, scheme: "light" | "dark" = "light", user?: string): Promise<Page> {
   const context = await browser.newContext({ viewport: { width, height: 900 }, colorScheme: scheme, reducedMotion: "reduce" });
   const page = await context.newPage();
+  if (user) await page.goto(new URL(`/auth/web/callback?as=${user}&return_to=/plugins`, site.url).href);
   await page.goto(new URL(path, site.url).href, { waitUntil: "networkidle" });
   return page;
 }
@@ -57,11 +58,14 @@ const PAGES = [
   "/plugins/all?q=zzzzqqq",
 ];
 
+/** Your own pages, signed in as Ada (every state of a plugin and a key) and as no one. */
+const YOURS: [string, string | undefined][] = [["/account", "user_ada"], ["/account/keys", "user_ada"], ["/account", undefined], ["/account/keys", "user_noor"], ["/account/keys/Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", "user_ada"]];
+
 describe("nothing runs off the side", () => {
-  for (const path of PAGES) {
+  for (const [path, user] of [...PAGES.map((p): [string, string | undefined] => [p, undefined]), ...YOURS]) {
     for (const width of [1440, 1024, 768, 390]) {
-      test(`${path} at ${width}`, async () => {
-        const page = await open(path, width);
+      test(`${path}${user ? ` as ${user}` : ""} at ${width}`, async () => {
+        const page = await open(path, width, "light", user);
         try {
           expect(await overflowing(page)).toEqual([]);
         } finally {

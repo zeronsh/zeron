@@ -180,9 +180,9 @@ describe("All plugins (/plugins/all)", () => {
     expect(git.body).toContain('<link rel="canonical" href="https://zeron.sh/plugins/all?category=git">');
     expect(git.body).toMatch(/<a href="\/plugins\/all\?category=git" aria-current="page"><span>Git<\/span><span class="num">\d+<\/span><\/a>/);
     // The category's keywords, each a link that narrows it; the chosen one marked, and a link that lets it go.
-    expect(git.body).toMatch(/<a class="tag" href="\/plugins\/all\?category=git&amp;keyword=[a-z]+">/);
+    expect(git.body).toMatch(/<a class="tag" href="\/plugins\/all\?category=git&amp;keyword=[a-z]+" title="[a-z]+">/);
     const kw = await html("/plugins/all?category=git&keyword=github");
-    expect(kw.body).toContain('<a class="tag" href="/plugins/all?category=git" aria-current="true">github</a>');
+    expect(kw.body).toContain('<a class="tag" href="/plugins/all?category=git" title="github" aria-current="true">github</a>');
     expect(listed((await html("/plugins/all?keyword=github")).body)).toContain("pr-radar");
   });
 
@@ -389,8 +389,18 @@ describe("public pages are the same for everyone (so a shared cache can keep the
 });
 
 describe("signed-in pages", () => {
-  test("signed out, they send you to sign in and back (a path here, never anywhere else)", async () => {
-    for (const path of ["/account", "/account/plugins/focus-timer", "/plugins/focus-timer/report"]) {
+  test("signed out, Your plugins and Deploy keys say so and offer sign-in, here; never a redirect", async () => {
+    for (const path of ["/account", "/account/keys"]) {
+      const { response, body } = await html(path);
+      expect(response.status, path).toBe(200);
+      expect(response.headers.get("cache-control"), path).toBe("private, no-store");
+      expect(body, path).toContain(`<a class="btn pri" href="/auth/web/login?return_to=${encodeURIComponent(path)}">Sign in</a>`);
+      expect(body, path).toMatch(/<h2>Sign in to see (the plugins you publish|your deploy keys)<\/h2>/);
+    }
+  });
+
+  test("signed out, the pages that act send you to sign in and back (a path here, never anywhere else)", async () => {
+    for (const path of ["/account/plugins/focus-timer", "/plugins/focus-timer/report"]) {
       const response = await site.fetch(path);
       expect(response.status, path).toBe(303);
       expect(response.headers.get("location"), path).toBe(`/auth/web/login?return_to=${encodeURIComponent(path)}`);
@@ -416,18 +426,23 @@ describe("signed-in pages", () => {
     expect(response.headers.get("cloudflare-cdn-cache-control") ?? "").not.toMatch(/public/);
   });
 
-  test("its place in the store: Listed, plain, the moment a version is published, verified or not; Not listed, once nothing of it can be installed", async () => {
+  test("where each plugin's newest version stands: verified, not yet, the reviewer's note, taken down and why, removed", async () => {
     const { body } = await html("/account", await site.signIn("user_ada"));
-    const cell = (id: string) => body.slice(body.indexOf(`<span class="id">${id}</span>`)).match(/<td class="listing">(.*?)<\/td>/)![1]!;
-    const newest = (id: string) => body.slice(body.indexOf(`<span class="id">${id}</span>`)).match(/<td class="newest">(.*?)<\/td>/)![1]!;
-    expect(cell("focus-timer")).toBe('<span class="steady">Listed</span>');
-    // (Amendment 45: a first version is listed at once; its newest says it isn't verified yet, or a reviewer didn't verify it.)
-    expect(cell("first-light")).toBe('<span class="steady">Listed</span>');
-    expect(newest("first-light")).toContain(">Not verified yet<");
-    expect(cell("rough-draft")).toBe('<span class="steady">Listed</span>');
-    expect(newest("rough-draft")).toContain(">Not verified<");
-    expect(cell("clipboard-sync")).toContain(">Not listed<");
-    expect(newest("clipboard-sync")).toContain(">Taken down<");
+    const row = (id: string) => body.slice(body.indexOf(`<div class="id">${id}</div>`), body.indexOf("</li>", body.indexOf(`<div class="id">${id}</div>`)));
+    expect(row("linear-issues")).toMatch(/<span class="state ok">.*?Verified<\/span>/);
+    expect(row("linear-issues")).toMatch(/<small>Verified on [A-Z][a-z]{2} \d{1,2}<\/small>/);
+    expect(row("first-light")).toContain('<span class="state no">Not verified yet</span>');
+    expect(row("first-light")).toContain("Nothing verified yet: agents can&#39;t install it until one is.");
+    // (Not verified: the reviewer's note, in the app's words, to its author only.)
+    expect(row("rough-draft")).toContain('<span class="state bad">Not verified</span>');
+    expect(row("rough-draft")).toContain('<small class="why">The reviewer&#39;s note: “The README is one line.');
+    expect(row("clipboard-sync")).toContain('<span class="state bad">Taken down</span>');
+    expect(row("clipboard-sync")).toMatch(/“It sent every copied password to its sync host in plain text\.” Off since [A-Z][a-z]{2} \d{1,2}\./);
+    expect(row("old-sketch")).toContain('<span class="state bad">Removed</span>');
+    // (One whose newest isn't verified says which is, and since when.)
+    expect(row("session-badges")).toMatch(/1\.1\.1 is the newest verified, since [A-Z][a-z]{2} \d{1,2}/);
+    // Where it was published from: a deploy key by its name, or one of your devices.
+    expect(body).toContain("One of your devices");
   });
 
   test("an id with nothing that can be installed says it goes back after 90 days", async () => {
@@ -632,9 +647,9 @@ describe("forms", () => {
 
   test("an author with nothing sent is told how to send the first", async () => {
     const { body } = await html("/account", await site.signIn("user_noor"));
-    expect(body).toContain("You haven't published a plugin yet");
-    expect(body).toContain("<code tabindex=\"0\">zeron plugin publish</code>");
-    expect(body).toMatch(/Your plugins<span class="title-count"> · 0<\/span>/);
+    expect(body).toContain("<h2>Nothing published yet</h2>");
+    expect(body).toContain('data-copy="zeron plugin publish"');
+    expect(body).toContain('<a href="/account" aria-current="page">Your plugins<span class="num">0</span></a>');
   });
 
   test("one plugin: where each version stands and whether it's verified; a version's one action in its column", async () => {
@@ -667,18 +682,32 @@ describe("forms", () => {
     expect((await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.1.0")).body).toContain("Its author stopped new installs of it.");
   });
 
-  test("the account's deploy keys: each with what it may publish; keys short, the gone ones apart", async () => {
+  test("the account's deploy keys: each with what it can publish, never cut; keys short; the revoked and ended apart", async () => {
     const { body } = await html("/account/keys", await site.signIn("user_ada"));
-    // Eight working (one Ada made for focus-timer, seven of the worst case's), four gone in their group.
-    expect(body.match(/data-dialog="revoke-/g)).toHaveLength(8);
-    expect(body).toMatch(/<details class="gone"><summary>Revoked keys · 4/);
-    for (const m of body.matchAll(/<span class="line key" title="([^"]+)">([^<]+)<\/span>/g)) expect(m[2]).toBe(`${m[1]!.slice(0, 6)}…${m[1]!.slice(-4)}`);
-    // What each may publish: all of yours, or the plugins it names, by their names.
-    expect(body).toContain("May publish: All your plugins, those you publish later too");
-    expect(body).toContain('<a href="/account/plugins/focus-timer">Focus timer</a>');
-    // Ending within 14 days: the warning's ink and its days in words, never colour alone.
-    expect([...body.matchAll(/<span class="line soon" title="Ends in (\d+) days?">.*?<span class="sr-only">, Ends in \1 days?<\/span>/g)].length).toBeGreaterThan(0);
-    expect(body).toContain('<dialog class="sheet" id="new-key"');
+    // Twelve live, each with Revoke; five revoked or ended, in their group.
+    expect(body.match(/<a class="btn ghost sm" href="\/account\/keys\/[\w-]+">Revoke/g)).toHaveLength(12);
+    // (Three named in full; fifty counted, every one on request.)
+    expect(body).toMatch(/<div class="names">[^<,]+, [^<,]+, [^<,]+<\/div><small>3 plugins<\/small>/);
+    expect(body).toContain("<div>50 plugins</div>");
+    expect(body).toContain('<span class="tile s more">+47</span>');
+    expect(body).toMatch(/<details class="gone"><summary>Revoked and ended keys · 5/);
+    expect(body).toMatch(/<span class="state quiet">Ended [A-Z][a-z]{2} \d{1,2}<\/span>/);
+    for (const m of body.matchAll(/<div class="id" title="([^"]+)">([^<]+)<\/div>/g)) expect(m[2]).toBe(`${m[1]!.slice(0, 6)}…${m[1]!.slice(-4)}`);
+    // All of yours; one to three named in full; past three, three tiles, "+n", and every one on request.
+    expect(body).toMatch(/All your plugins<\/div><small>\d+ today, and any you publish later<\/small>/);
+    expect(body).toMatch(/<div class="names">[^<]+ and [^<]+<\/div><small>2 plugins<\/small>/);
+    const many = body.slice(body.indexOf("GitHub Actions, the monorepo"), body.indexOf("</li>\n", body.indexOf('<ul class="plist"')));
+    expect(many).toContain('<span class="tile s more">+11</span>');
+    expect(many).toContain("<div>14 plugins</div>");
+    expect(many).toMatch(/<summary>Show all 14/);
+    const list = body.slice(body.indexOf('<ul class="plist"'), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
+    expect(list.match(/<li class="pl">/g)).toHaveLength(14);
+    expect(body).not.toMatch(/text-overflow|…<\/div><small>\d+ plugins?/);
+    // Ending within 14 days: the warning's pill, in days.
+    expect(body).toMatch(/<span class="state no">Ends in \d+ days?<\/span>/);
+    // A key is made on your computer: New key says where, and nothing here makes or shows a secret.
+    expect(body).toContain('<div class="menu newkey" id="new-key" popover>');
+    expect(body).not.toMatch(/zpk_[A-Za-z0-9]/);
   });
 
   test("revoking a key asks first, then the key stops", async () => {
@@ -867,12 +896,13 @@ describe("forms", () => {
   test("signing out is a form post with the token; the session ends", async () => {
     const lin = await site.signIn("user_lin");
     const page = await html("/account", lin);
-    expect(page.body).toContain("Claim a username first.");
+    expect(page.body).toContain("Claim a username first:");
     const response = await post("/auth/web/logout", lin, { csrf: tokenOf(page.body) });
     expect(response.status).toBe(303);
     // (As the edge does: always the front page, absolute.)
     expect(response.headers.get("location")).toBe("https://zeron.sh/");
-    expect((await site.fetch("/account", { headers: { cookie: lin } })).status).toBe(303);
+    // (Signed out now: the page offers sign-in again.)
+    expect((await html("/account", lin)).body).toContain("<h2>Sign in to see the plugins you publish</h2>");
   });
 });
 

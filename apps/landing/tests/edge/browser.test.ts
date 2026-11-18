@@ -106,8 +106,10 @@ describe("a reviewer, start to finish", () => {
       // Signed out, the admin pages aren't there; signing in comes back to where it was asked.
       await page.goto(`${edge.origin}/admin/plugins`);
       expect(await page.title()).toMatch(/not found/i);
+      // (Your plugins, signed out, offers sign-in on the page itself; it comes back there.)
       await page.goto(`${edge.origin}/account`);
-      expect(page.url()).toBe(`${edge.origin}/account`);
+      await page.locator(".please").getByRole("link", { name: "Sign in" }).click();
+      await page.waitForURL(`${edge.origin}/account`);
       await expect.poll(() => page.getByText("@gracehop").first().isVisible()).toBe(true);
       const signedIn = await session(context);
       expect(signedIn).toMatchObject({ secure: true, httpOnly: true, sameSite: "Lax", path: "/" });

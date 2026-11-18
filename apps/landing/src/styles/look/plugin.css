@@ -140,6 +140,8 @@
 .facts dt { color: var(--text-3); } .facts dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 .facts .okline { display: inline-flex; align-items: center; gap: 6px; color: var(--verified); font-weight: 500; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; list-style: none; }
+.tags li { min-width: 0; max-width: 100%; }
+.tags .tag { display: block; max-width: 100%; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .links { display: flex; flex-direction: column; gap: 8px; padding: 0; list-style: none; font-size: 14px; line-height: 20px; }
 .links a { display: flex; align-items: center; gap: 10px; color: var(--text-2); border-radius: 4px; overflow-wrap: anywhere; transition: color 0.12s var(--ease); }
 .links a:hover { color: var(--text); }

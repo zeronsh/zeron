@@ -65,7 +65,7 @@ const repository = httpsUrl(plugin.repository);
   {
     plugin.keywords.length > 0 && (
       <ul class="tags" aria-label="Keywords">
-        {plugin.keywords.map((k) => <li><a class="tag" href={catalogHref({ keyword: k })}>{k}</a></li>)}
+        {plugin.keywords.map((k) => <li><a class="tag" href={catalogHref({ keyword: k })} title={k}>{k}</a></li>)}
       </ul>
     )
   }

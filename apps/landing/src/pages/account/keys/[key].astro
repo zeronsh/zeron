@@ -1,23 +1,26 @@
 ---
 // Revoke one of your account's deploy keys (amendment 44: a key is the
-// account's, with its scope). A post does it; a visit asks first.
-import Confirm from "../../../components/kit/Confirm.astro";
-import Glyph from "../../../components/ui/Glyph.astro";
-import App from "../../../layouts/App.astro";
+// account's, with its scope). A post does it; a visit asks first, as a
+// page of its own (it works with no script). Signed out, the page says so.
+import AskCard from "../../../components/look/AskCard.astro";
+import Icon from "../../../components/look/Icon.astro";
+import SignInPlease from "../../../components/look/SignInPlease.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
 import { isKey, revokeAsk } from "../../../lib/store/actions.ts";
 import { done, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { privatePage } from "../../../lib/store/http.ts";
-import { requireSession } from "../../../lib/store/session.ts";
 
 export const prerender = false;
 
 const { key } = Astro.params;
 if (!isKey(key)) return new Response(null, { status: 404 });
-const session = await requireSession(Astro);
-if (session instanceof Response) return session;
+const who = await Astro.locals.edge.who();
+const session = who.state === "in" ? who.session : null;
 const back = "/account/keys";
 
 if (Astro.request.method === "POST") {
+  if (!session) return Astro.redirect(back, 303);
   const form = await formOf(Astro.request);
   if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
   const result = await Astro.locals.edge.revokeKey(key, session.csrf);
@@ -25,16 +28,25 @@ if (Astro.request.method === "POST") {
 }
 if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
 
-const keys = await Astro.locals.edge.keys();
-const found = keys.ok ? keys.data.keys.find((k) => k.key === key && !k.revoked_at) : undefined;
-if (!found) return new Response(null, { status: 404 });
+const keys = session ? await Astro.locals.edge.keys() : null;
+const found = keys?.ok ? keys.data.keys.find((k) => k.key === key && !k.revoked_at) : undefined;
+if (session && !found) return new Response(null, { status: 404 });
 privatePage(Astro);
-const ask = revokeAsk(found.name);
+if (who.state === "down") Astro.response.status = 503;
+const ask = found ? revokeAsk(found.name) : null;
 ---
 
-<App title={`${ask.title} · Zeron`} description={ask.title} noindex current="keys" session={session}>
-  <nav slot="title" class="crumbs" aria-label="Where this is">
-    <a href={back}>Deploy keys</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">Revoke a key</span>
-  </nav>
-  <Confirm ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
-</App>
+<Store title={`${ask?.title ?? "Revoke a key"} · Zeron`} description="Revoke a deploy key." noindex current="publish" session={session}>
+  <div class="wrap acct">
+    <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><a href={back}>Deploy keys</a></nav>
+    {
+      who.state === "down" ? (
+        <div class="empty" role="status"><h2>The plugin store didn't answer</h2><p>Try again in a moment.</p><a class="btn sec" href={Astro.url.pathname}>Try again</a></div>
+      ) : session && ask ? (
+        <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
+      ) : (
+        <SignInPlease what="your deploy keys" />
+      )
+    }
+  </div>
+</Store>

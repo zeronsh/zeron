@@ -37,7 +37,8 @@ const { title, description, noindex = false, canonical, current = null, session,
 const isPublic = session === undefined;
 const staff = session?.roles.includes("admin") ?? false;
 const here = `${Astro.url.pathname}${Astro.url.search}`;
-const handle = session ? (session.username ?? session.user.name ?? "You") : "";
+// (As the script says it on a public page, and as the store says an author: "@ada".)
+const handle = session ? (session.username ? `@${session.username}` : (session.user.name ?? "You")) : "";
 const face = handle.replace(/^@/, "").charAt(0).toUpperCase() || "?";
 const SECTIONS: { id: Section; label: string; href: string }[] = [
   { id: "discover", label: "Discover", href: "/plugins" },

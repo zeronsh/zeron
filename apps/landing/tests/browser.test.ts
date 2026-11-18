@@ -51,6 +51,10 @@ const PAGES: [string, string | undefined][] = [
   ["/account/plugins/focus-timer", "user_ada"],
   ["/account/plugins/session-badges/versions/1.2.1/yank", "user_ada"],
   ["/account/keys", "user_ada"],
+  ["/account/keys", undefined],
+  ["/account", "user_noor"],
+  ["/account", undefined],
+  ["/account/keys/Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", "user_ada"],
   ["/plugins/all?verified=1", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/versions", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0", undefined],
@@ -110,9 +114,13 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
     await page.getByRole("link", { name: "Remove…" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
-  ["the new key sheet", "/account/keys", "user_ada", async (page) => {
-    await page.locator("[data-dialog='new-key']").first().click();
-    await expect.poll(() => page.locator("dialog#new-key").isVisible()).toBe(true);
+  ["New key, where a key is made", "/account/keys", "user_ada", async (page) => {
+    await page.getByRole("button", { name: "New key" }).click();
+    await expect.poll(() => page.locator("#new-key").isVisible()).toBe(true);
+  }],
+  ["a key's fourteen plugins, shown", "/account/keys", "user_ada", async (page) => {
+    await page.getByText("Show all 14").click();
+    await expect.poll(() => page.getByRole("list", { name: "What GitHub Actions, the monorepo can publish" }).isVisible()).toBe(true);
   }],
   ["the stop new installs dialog", "/account/plugins/session-badges", "user_ada", async (page) => {
     await page.getByRole("link", { name: "Stop new installs" }).first().click();
