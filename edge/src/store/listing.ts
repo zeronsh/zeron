@@ -15,6 +15,7 @@ import { type Json, type JsonObject, canonicalJson, isArray, isObject } from "./
 import { MANIFEST_FILE, type Manifest, RESERVED_ID_ERROR, idProblem, isRustWhitespace, rustTrim, rustTrimStart } from "./manifest";
 import { MAX_BYTES, MAX_FILES } from "./package";
 import { LIMITS, STORE_DATA } from "./data";
+import { MARK_LOOKALIKES } from "./mark-lookalikes";
 import { foldPath, plainPath } from "./paths";
 import { type Range, type Version, parseRange, parseVersion } from "./semver";
 
@@ -117,37 +118,37 @@ const markWord = (folded: string): string | undefined =>
   });
 
 /**
- * Letters of other scripts that read as Latin ones at a glance, each to the
- * Latin letter it passes for: Cyrillic and Greek (and a few Latin
- * variants), lowercase, after `markText` (so capitals and accented forms
- * are already folded here). Only letters that look like the Latin one in
- * ordinary type, so honest text in those scripts never spells a mark word.
+ * The edge's own reading (a device's check has none: the vectors' cases
+ * with `edge_problems`): a mark word spelled with characters that pass for
+ * its letters, from Unicode's confusables (UTS #39) plus the Latin small
+ * capitals and the digit 3 (mark-lookalikes.ts, generated). A look-alike of
+ * `l` stands for `i` too (UTS #39 folds capital I, and so its look-alikes,
+ * to `l`). Whole words, as the shared rule's.
  */
-const LOOKALIKES: Readonly<Record<string, string>> = {
-  // Cyrillic
-  "а": "a", "е": "e", "і": "i", "ј": "j", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x", "ѕ": "s", "һ": "h",
-  "ԁ": "d", "ԛ": "q", "ԝ": "w", "ӏ": "l", "ѵ": "v", "ү": "y", "к": "k",
-  // Greek
-  "α": "a", "ε": "e", "ι": "i", "ο": "o", "ν": "v", "ρ": "p", "υ": "u", "χ": "x", "κ": "k", "ϲ": "c", "ϳ": "j", "ϝ": "f",
-  // Latin variants NFKC leaves alone
-  "ı": "i", "ɩ": "i", "ɑ": "a", "ɡ": "g", "ʟ": "l",
-  // Armenian
-  "օ": "o", "ս": "u", "ց": "g"
+const lookalikeClass = (letter: string): string => {
+  const chars = [letter, ...(MARK_LOOKALIKES[letter] ?? ""), ...(letter === "i" ? (MARK_LOOKALIKES.l ?? "") : "")];
+  return `[${chars.map((ch) => `\\u{${ch.codePointAt(0)!.toString(16)}}`).join("")}]`;
 };
-const LOOKALIKE_RE = new RegExp(`[${Object.keys(LOOKALIKES).join("")}]`, "gu");
+const LOOKALIKE_WORDS: readonly (readonly [string, RegExp])[] = MARK_WORDS.map(
+  (word) => [word, new RegExp(`(?<![A-Za-z0-9])${[...word].map(lookalikeClass).join("")}(?![A-Za-z0-9])`, "u")] as const
+);
+/** Ticks the shared glyphs leave out, refused on the edge: √ (used as one)
+ * and 𐄂 AEGEAN CHECK MARK. */
+const EDGE_GLYPHS: readonly string[] = ["\u{221a}", "\u{10102}"];
 
 /**
  * What in `text` claims the store's mark, if anything: the shared rule's
- * glyph or word, or (`lookalikes`, the edge's alone: a device's check has
- * no skeleton) a mark word spelled with letters of another script that pass
- * for Latin ones, e.g. a Cyrillic е in "verified". The vectors' cases with
- * `edge_problems` hold the edge to the second.
+ * glyph or word, or (`lookalikes`, the edge's alone) one of its own ticks
+ * or a mark word spelled with look-alike characters ("Vеrified" with a
+ * Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ", "VER1F1ED").
  */
 export const markClaim = (text: string, lookalikes = true): string | undefined => {
   const folded = markText(text);
-  const glyph = [...folded].find((ch) => MARK_GLYPHS.includes(ch));
+  const glyph = [...folded].find((ch) => MARK_GLYPHS.includes(ch) || (lookalikes && EDGE_GLYPHS.includes(ch)));
   if (glyph !== undefined) return glyph;
-  return markWord(folded) ?? (lookalikes ? markWord(folded.replace(LOOKALIKE_RE, (ch) => LOOKALIKES[ch]!)) : undefined);
+  const word = markWord(folded);
+  if (word !== undefined || !lookalikes) return word;
+  return LOOKALIKE_WORDS.find(([, re]) => re.test(folded))?.[0];
 };
 
 /** (The fold of a path, as the store and devices compare paths: paths.ts.) */

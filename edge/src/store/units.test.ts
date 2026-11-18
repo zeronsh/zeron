@@ -181,6 +181,20 @@ describe("store listing: the mark (amendment 45)", () => {
     }
   });
 
+  it("refuses the identity lane's look-alikes: small capitals, Lisu, digits and the ticks the shared glyphs leave out", () => {
+    for (const text of [
+      "\u{1d20}\u{1d07}\u{280}\u{26a}\u{a730}\u{26a}\u{1d07}\u{1d05} Focus", // ᴠᴇʀɪꜰɪᴇᴅ
+      "\u{a4e6}\u{a4f0}\u{a4e3}\u{a4f2}\u{a4dd}\u{a4f2}\u{a4f0}\u{a4d3} Focus", // Lisu VERIFIED
+      "\u{a4f3}\u{a4dd}\u{a4dd}\u{a4f2}\u{a4da}\u{a4f2}\u{a4ee}\u{a4e1} Git", // Lisu OFFICIAL
+      "Ver\u{26a}f\u{26a}ed", // small capital I
+      "VER1F1ED", "0FFICIAL tools", "v3rified", "officia1",
+      "Focus \u{221a}", "Focus \u{10102}"
+    ]) {
+      expect(markClaim(text), text).toBeDefined();
+      expect(markClaim(text, false), `${text} (device)`).toBeUndefined();
+    }
+  });
+
   it("leaves honest words alone, in those alphabets and mixed", () => {
     for (const text of [
       // Whole words only, after the look-alikes too.
@@ -194,7 +208,9 @@ describe("store listing: the mark (amendment 45)", () => {
       "Ελεγμένο πρόσθετο",
       "Ρεκόρ και σημειώσεις",
       // Latin words near the mark's.
-      "verify your builds", "verification", "officer", "officialdom"
+      "verify your builds", "verification", "officer", "officialdom",
+      // Digits and symbols where the look-alikes don't spell a word.
+      "Top 10 tools", "v1.0 verifier", "Notes | Files", "100% local", "Verifiedly 3D"
     ]) {
       expect(markClaim(text), text).toBeUndefined();
     }
