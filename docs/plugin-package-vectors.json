@@ -1688,8 +1688,31 @@
       "ts": 1763000000000
     },
     "max_skew_ms": 300000,
-    "proof": "HzZttdv3iM853x3qWQN-cgp1p6Ld8eQ5veSs1N-c-_AP0RslixzOk3ALUfSypfA2-6moC6qt-432zqo050rhDw",
-    "proof_message": "zeron-deploy-key:v1:focus:7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
+    "proofs": [
+      {
+        "expires_at": null,
+        "message": "zeron-deploy-key:v2:pub_0123456789abcdef0123456789abcdef:never:*:7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
+        "proof": "0xJS8snOlv5db_dgOlXAyH8Qy09BZw2ZX0yrcika59_kEecQrcx2e5VfXqvmBlWgpfALtGzKsZoMGlvvZN4zDQ",
+        "publisher_id": "pub_0123456789abcdef0123456789abcdef",
+        "scope": {
+          "all": true
+        },
+        "scope_text": "*"
+      },
+      {
+        "expires_at": 1800000000000,
+        "message": "zeron-deploy-key:v2:pub_0123456789abcdef0123456789abcdef:1800000000000:focus,git:7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
+        "proof": "ah8u1x0q_z6w7tx16qoDoeS3nb-lbzdB7eN9qXJ7opdqPvexyJHUduUxu-_6hqN7di9fZUxajU1Hhd1kvVTxCw",
+        "publisher_id": "pub_0123456789abcdef0123456789abcdef",
+        "scope": {
+          "plugins": [
+            "focus",
+            "git"
+          ]
+        },
+        "scope_text": "focus,git"
+      }
+    ],
     "public": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
     "request": {
       "body_b64": "eyJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEifQ==",
