@@ -85,10 +85,27 @@ thread_local! {
     static LAST: RefCell<Value> = RefCell::new(Value::record([("seq", Value::from(0.0))]));
 }
 
-/// A window's `app.link`.
+/// A window's `app.link`, and `app.link_followed(seq)`: the main window
+/// followed that link, so a window made later (after signing out and in)
+/// isn't sent to it again.
 pub fn install(host: &ScriptHost) {
     let last = LAST.with(|l| l.borrow().clone());
     WINDOWS.with(|w| w.borrow_mut().push(host.shared("app.link", last)));
+    host.action("app.link_followed", |seq| {
+        if let Value::Num(seq) = seq {
+            followed(seq);
+        }
+    });
+}
+
+/// The link numbered `seq` was followed: kept as its number alone.
+fn followed(seq: f64) {
+    LAST.with(|l| {
+        let mut last = l.borrow_mut();
+        if matches!(last.field("seq"), Some(Value::Num(n)) if *n == seq) {
+            *last = Value::record([("seq", Value::from(seq))]);
+        }
+    });
 }
 
 /// Open `url`: a banner's target at once; a chat's link once the engine says
@@ -257,6 +274,13 @@ mod tests {
         assert_eq!(last(), (None, None));
         // (A window installed now starts from it: `install` reads `LAST`.)
         let kept = LAST.with(|l| l.borrow().clone());
-        assert!(matches!(kept.field("seq"), Some(Value::Num(n)) if *n >= 1.0), "{kept:?}");
+        let Some(Value::Num(seq)) = kept.field("seq").cloned() else { panic!("{kept:?}") };
+        assert!(seq >= 1.0);
+        // Followed by the main window: a later window isn't sent there again.
+        followed(seq - 1.0);
+        assert_eq!(field("plugin").as_deref(), Some("focus-timer"), "only the link it followed");
+        followed(seq);
+        assert_eq!(field("plugin"), None);
+        assert!(matches!(LAST.with(|l| l.borrow().field("seq").cloned()), Some(Value::Num(n)) if n == seq));
     }
 }

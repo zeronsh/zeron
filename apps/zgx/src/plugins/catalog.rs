@@ -114,7 +114,7 @@ pub(super) fn install(host: &ScriptHost, me: std::rc::Weak<super::Bridge>) {
     host.async_action("plugins.store.version_action", |arg| async move {
         crate::plugins::preview::refuse("plugins.store.version_action")?;
         let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_found")?;
-        let version = arg.field("version").map(text).filter(|v| !v.is_empty() && v.len() <= 128).ok_or("not_found")?;
+        let version = arg.field("version").map(text).filter(|v| version_ok(v)).ok_or("not_found")?;
         let action = arg.field("action").map(text).unwrap_or_default();
         if !["withdraw", "yank", "unyank"].contains(&action.as_str()) {
             return Err("invalid".into());
@@ -122,6 +122,7 @@ pub(super) fn install(host: &ScriptHost, me: std::rc::Weak<super::Bridge>) {
         engine("StoreVersionAction", json!({ "id": id, "version": version, "action": action })).await
     });
     host.async_action("plugins.store.prepare", |id| async move {
+        crate::plugins::preview::refuse("plugins.store.prepare")?;
         let id = store_id(&text(&id)).ok_or("not_found")?;
         engine("PreparePluginPublish", json!({ "id": id })).await
     });
@@ -164,6 +165,7 @@ pub(super) fn install(host: &ScriptHost, me: std::rc::Weak<super::Bridge>) {
         engine("RevokeDeployKey", json!({ "id": id, "key": key })).await
     });
     host.async_action("plugins.store.report", |arg| async move {
+        crate::plugins::preview::refuse("plugins.store.report")?;
         let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_found")?;
         let reason = arg.field("reason").map(text).unwrap_or_default();
         if !REPORT_REASONS.contains(&reason.as_str()) {
@@ -204,12 +206,41 @@ fn answered(reply: &Json) -> Result<(), String> {
     Err(if message.is_empty() { word.to_string() } else { format!("{word}: {message}") })
 }
 
-/// One file of a store version, as the engine keeps it.
+/// A file of a package, as a README or a listing names it: relative,
+/// inside it (no `..`, no `/` first, no scheme, no `\\`, no escapes, no
+/// NUL), at most 512 bytes. (The engine checks it against the version's
+/// files too.)
+fn package_path(path: &str) -> Option<String> {
+    if path.is_empty() || path.len() > 512 || path.starts_with('/') || path.contains(['\\', ':', '%', '\0']) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => return None,
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// One file of a store version, as the engine keeps it: its answer, its
+/// `file` a path here (absolute, or it's no file).
 async fn file(arg: &Value) -> Result<Json, String> {
     let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_found")?;
-    let version = arg.field("version").map(text).filter(|v| !v.is_empty() && v.len() <= 128).ok_or("not_found")?;
-    let path = arg.field("path").map(text).filter(|p| !p.is_empty() && p.len() <= 512).ok_or("not_found")?;
-    super::call("StoreFile", json!({ "id": id, "version": version, "path": path })).await
+    let version = arg.field("version").map(text).filter(|v| version_ok(v)).ok_or("not_found")?;
+    let path = arg.field("path").map(text).and_then(|p| package_path(&p)).ok_or("not_found")?;
+    let reply = super::call("StoreFile", json!({ "id": id, "version": version, "path": path })).await?;
+    if !reply["file"].as_str().is_some_and(|f| std::path::Path::new(f).is_absolute()) {
+        return Err("not_found".into());
+    }
+    Ok(reply)
+}
+
+/// A version as the store names them: SemVer's characters, at most 128.
+fn version_ok(v: &str) -> bool {
+    !v.is_empty() && v.len() <= 128 && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
 }
 
 /// An icon's text, as an installed plugin's is taken (mod.rs `icon_svg`):
@@ -276,6 +307,39 @@ async fn create_key(params: Json) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every store call that sends, changes or reports anything as you is
+    /// refused while a template is only being previewed.
+    #[test]
+    fn a_preview_can_t_act_as_you_in_the_store() {
+        let source = include_str!("catalog.rs");
+        let mut guarded = 0;
+        for line in source.lines() {
+            if let Some(rest) = line.split("preview::refuse(\"").nth(1) {
+                let name = rest.split('"').next().unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
+                assert!(crate::plugins::preview::BLOCKED.contains(&name), "{name} isn't blocked in a preview");
+                guarded += 1;
+            }
+        }
+        assert!(guarded >= 7, "{guarded}");
+        for read in ["plugins.store.search", "plugins.store.detail", "plugins.store.mine", "plugins.store.keys"] {
+            assert!(!crate::plugins::preview::BLOCKED.contains(&read), "{read} only reads");
+        }
+    }
+
+    #[test]
+    fn a_package_file_is_inside_its_package() {
+        assert_eq!(package_path("shots/a.png").as_deref(), Some("shots/a.png"));
+        assert_eq!(package_path("./shots//a.png").as_deref(), Some("shots/a.png"));
+        for bad in ["", "/etc/passwd", "../x.png", "shots/../../x.png", "%2e%2e/x.png", "https://e.com/a.png", "file:///a", "C:\\a.png", "a\0.png"] {
+            assert_eq!(package_path(bad), None, "{bad:?}");
+        }
+        assert!(version_ok("1.2.3-beta.1+b"));
+        assert!(!version_ok("1.2.3/../x"));
+    }
 
     #[test]
     fn only_a_store_id_is_one() {

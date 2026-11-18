@@ -82,6 +82,20 @@ test("the README is drawn: its own pictures through the store, one from the web 
 	expect(readme).to_contain('link "the guide"')
 end)
 
+test("the README can't draw Zeron's own chips: a chat, a file, a skill or a picture link is a link's words", function()
+	local app = page("Focus timer")
+	-- The same words, as links to Zeron's own things and as plain words (a
+	-- quote in the README), stand as wide: no chip among them.
+	local widths: { number } = {}
+	for line in app:tree("#store-readme"):gmatch("[^\n]+") do
+		if line:find('"See Your chats, your key, Allow and a picture."', 1, true) then
+			table.insert(widths, tonumber(line:match(" ([%d.]+)x[%d.]+$")) or 0)
+		end
+	end
+	expect(#widths).to_be(2)
+	expect(widths[1]).to_be(widths[2])
+end)
+
 test("its pictures open in the lightbox, one after the other", function()
 	local app = page("Focus timer")
 	expect(app:has('#store-shots >> role:button "Open header.png"')).to_be(true)
@@ -105,7 +119,7 @@ test("Install asks the engine for the store's version on the device shown; the c
 	settle(app)
 	-- Waiting for you to allow it (the consent window's): Review, never Allow.
 	expect(app:has('#store-offer >> role:button "Review"')).to_be(true)
-	expect(app:tree()).never.to_contain("Allow")
+	expect(app:has('role:button "Allow"')).to_be(false)
 	app:click('#store-offer >> role:button "Review"')
 	expect(calls(app)).to_contain("review:focus-timer")
 	app:command("store.allowed")
@@ -157,6 +171,11 @@ test("a version Zeron took down says why, and can be turned back on", function()
 	expect(offer).to_contain("Zeron turned off Focus timer 1.2.0")
 	expect(offer).to_contain("taken down from the store")
 	app:click('#store-offer >> role:button "Turn it back on"')
+	settle(app)
+	-- Asked once more, with why it was taken down.
+	expect(calls(app)).never.to_contain("set_off:focus-timer:false")
+	expect(app:tree("role:dialog")).to_contain("Turn Focus timer back on?")
+	app:click('role:dialog >> role:button "Turn it back on"')
 	settle(app)
 	-- (Turned on as any plugin is: the engine keeps it on as you chose.)
 	expect(calls(app)).to_contain("set_off:focus-timer:false")
@@ -257,4 +276,32 @@ test("a page that can't be read offline says so, and Try again reads it", functi
 	app:command("store_stub.online")
 	app:click('role:button "Try again"')
 	app:wait("#store-offer", { timeout_ms = 3000 })
+end)
+
+test("another plugin with the same id, from elsewhere, is never taken for this one", function()
+	local app = page("Focus timer")
+	app:set_state("plugins", (function()
+		local now = app:state("plugins")
+		local list = {}
+		for _, p in now.list do
+			table.insert(list, p)
+		end
+		table.insert(list, { id = "focus-timer", name = "Focus timer", version = "9.9.9", author = { kind = "unknown" }, status = "on", permissions = {}, allowed = {}, ask = {}, hash = "x", source = { kind = "link", url = "https://evil.example/f.zeron-plugin" } })
+		return { state = now.state, list = list }
+	end)())
+	settle(app)
+	local offer = app:tree("#store-offer")
+	expect(offer).to_contain("different plugin with this id")
+	expect(app:tree('#store-offer >> role:button "Install"')).to_contain("disabled")
+	expect(app:has('#store-offer >> role:button "Turn on"')).to_be(false)
+end)
+
+test("a README with more pictures than a page shows asks for only so many", function()
+	local app = page("Screenshot tray")
+	app:scroll("#fixture-scroll", 20000)
+	settle(app, 500)
+	local _, n = calls(app):gsub("picture:screenshot%-tray", "")
+	-- (Forty in its README, every one drawn: twenty-four asked, the rest links.)
+	expect(n).to_be(24)
+	expect(app:error()).to_be_nil()
 end)

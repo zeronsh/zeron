@@ -72,7 +72,7 @@ end
 -- A picture path of its package, as the store serves them: relative,
 -- inside it. Anything else (a URL, an absolute path, a way out) isn't one.
 local function package_path(src: string): string?
-	if src == "" or #src > 512 or string.find(src, "^%a[%w+.-]*:") or string.sub(src, 1, 1) == "/" or string.find(src, "\\", 1, true) then
+	if src == "" or #src > 512 or string.find(src, "^%a[%w+.-]*:") or string.sub(src, 1, 1) == "/" or string.find(src, "[\\%%:]") then
 		return nil
 	end
 	local parts: { string } = {}
@@ -105,6 +105,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		return details:get()[id] or {}
 	end
 	local first: any = details:peek()[id] or {}
+	-- (The version this page is of: a newer one builds the page again.)
+	local version: string = if type(first.version) == "string" then first.version else ""
 	local busy = ui.use_state(false)
 	local updating = ui.use_state(false)
 	local update_open = ui.use_state(false)
@@ -112,14 +114,28 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local report_reason = ui.use_state(store.REPORT_REASONS[1])
 	local report_text = ui.use_state("")
 	local unblocking = ui.use_state(false)
+	local unblock_open = ui.use_state(false)
 
+	-- What the device shown has of it: this store plugin (installed from
+	-- the store); another plugin that has its id (from a file, a link)
+	-- is never taken for it.
 	local function item(): state.Item?
 		for _, p in state.shown:get() do
-			if p.id == id then
+			local source: any = p.source
+			if p.id == id and type(source) == "table" and source.kind == "store" then
 				return p
 			end
 		end
 		return nil
+	end
+	local function other(): boolean
+		for _, p in state.shown:get() do
+			local source: any = p.source
+			if p.id == id and not (type(source) == "table" and source.kind == "store") then
+				return true
+			end
+		end
+		return false
 	end
 	-- Whether it works with this Zeron, as the engine judges it (its
 	-- `engines.zeron` against the Zeron it runs), and why not in its words.
@@ -158,6 +174,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end
 		if here.away() then
 			return "away"
+		elseif other() then
+			return "other"
 		elseif not compatible() then
 			return "incompatible"
 		end
@@ -225,7 +243,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 
 	-- The one button, by what it does now.
 	local function action(kind: string): Node
-		if kind == "install" or kind == "incompatible" or kind == "away" then
+		if kind == "install" or kind == "incompatible" or kind == "away" or kind == "other" then
 			return ds.Button {
 				id = "store-install",
 				tone = "primary",
@@ -314,6 +332,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			return incompatible()
 		elseif k == "away" then
 			return ui.t("plugins.store.device_away", { device = here.device_name() }):get()
+		elseif k == "other" then
+			return ui.t("plugins.store.other_installed"):get()
 		elseif k == "update" then
 			return ui.t("plugins.store.update_note"):get()
 		elseif k == "review" then
@@ -349,7 +369,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				label = ui.t("plugins.store.turn_back_on"),
 				on_click = function()
 					if not unblocking:peek() then
-						unblock()
+						unblock_open:set(true)
 					end
 				end,
 			},
@@ -379,6 +399,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				install = action("install"),
 				incompatible = action("incompatible"),
 				away = action("away"),
+				other = action("other"),
 				update = action("update"),
 				review = action("review"),
 				off = action("off"),
@@ -483,10 +504,22 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					table.insert(names, browse.category_name(c))
 				end
 			end
-			table.insert(items, { key = ui.t("plugins.store.fact.category"), value = table.concat(names, ui.t("plugins.words.list_sep"):get()) })
+			local said = table.concat(names, ui.t("plugins.words.list_sep"):get())
+			table.insert(items, {
+				key = ui.t("plugins.store.fact.category"),
+				value = function(): string
+					return said
+				end,
+			})
 		end
 		if type(first.license) == "string" and first.license ~= "" then
-			table.insert(items, { key = ui.t("plugins.store.fact.license"), value = first.license })
+			local license = string.sub(first.license, 1, 64)
+			table.insert(items, {
+				key = ui.t("plugins.store.fact.license"),
+				value = function(): string
+					return license
+				end,
+			})
 		end
 		for _, link in { { "homepage", "plugins.store.fact.homepage" }, { "repository", "plugins.store.fact.repository" } } do
 			local url = web(first[link[1]])
@@ -495,7 +528,9 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				table.insert(items, {
 					key = ui.t(link[2]),
 					value = ds.Link {
-						shown_url(u),
+						function(): string
+							return shown_url(u)
+						end :: any,
 						external = true,
 						href = u,
 						size = "sm",
@@ -523,6 +558,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					px = "$space.4",
 					py = "$space.4",
 					Markdown {
+						-- (Its author's words: links are links, never Zeron's chips.)
+						foreign = true,
 						text = function(): string
 							local r = d().readme
 							return if type(r) == "string" then string.sub(r, 1, 200000) else ""
@@ -534,7 +571,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 							if not path then
 								return false
 							end
-							return store.picture_src(id, d().version or "", path :: string)
+							return store.picture_src(id, version, path :: string)
 						end,
 					},
 				},
@@ -556,8 +593,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		local function items(): { any }
 			local out = {}
 			for _, path in list do
-				local src = store.picture_src(id, d().version or "", path)
-				if src then
+				local src = store.picture_src(id, version, path)
+				if type(src) == "string" then
 					table.insert(out, { src = src, name = string.match(path, "([^/]+)$") or path, key = path })
 				end
 			end
@@ -566,10 +603,13 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		local thumbs: { Node } = {}
 		for _, path in list do
 			table.insert(thumbs, ui.presence(function(): string
-				return store.picture_src(id, d().version or "", path) or ""
+				local src = store.picture_src(id, version, path)
+				return if src == false then "\0none" else (src or "")
 			end, function(src: string): Node
 				if src == "" then
 					return ds.Skeleton { w = 200, h = 125, rounded = "$radius.lg" }
+				elseif src == "\0none" then
+					return ui.div {}
 				end
 				local index = 1
 				for i, it in items() do
@@ -644,7 +684,9 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	end)
 	local function version_row(first_v: store.Version, _i: number, now: State<store.Version>): Node
 		return ds.Settings.Row {
-			label = first_v.version,
+			label = function(): string
+				return now:get().version
+			end,
 			badge = ui.show(function(): boolean
 				return now:get().yanked == true or now:get().status == "yanked"
 			end, ds.Badge { ui.t("plugins.store.yanked"), tone = "neutral", size = "sm" }),
@@ -663,6 +705,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						return string.sub(now:get().notes or "", 1, 20000)
 					end,
 					small = true,
+					foreign = true,
 				},
 			}),
 		}
@@ -692,7 +735,9 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		local chips: { Node } = {}
 		for _, k in list do
 			table.insert(chips, ds.Tag {
-				k,
+				function(): string
+					return k
+				end :: any,
 				size = "sm",
 				on_click = function()
 					browse.show_keyword(k)
@@ -747,7 +792,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						w_full = true,
 						gap = "$space.2",
 						ui.text { ui.t("plugins.store.whats_new"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" },
-						Markdown { text = notes, small = true },
+						Markdown { text = notes, small = true, foreign = true },
 					}),
 					ui.presence(function(): string
 						local a, r = changed("added"), changed("removed")
@@ -849,6 +894,23 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		},
 		update_dialog(),
 		report_dialog(),
+		-- Back on, once more asked: it was taken down for a reason.
+		ds.Dialog {
+			open = unblock_open,
+			title = function(): string
+				return ui.t("plugins.store.unblock_title", { name = d().name or id }):get()
+			end,
+			body = function(): string
+				local b = blocked()
+				local why = if b and type(b.reason) == "string" and b.reason ~= "" then string.sub(b.reason, 1, 500) else nil
+				return if why then ui.t("plugins.store.unblock_body_reason", { reason = why }):get() else ui.t("plugins.store.unblock_body"):get()
+			end,
+			tone = "danger",
+			confirm = {
+				label = ui.t("plugins.store.turn_back_on"),
+				on_click = unblock,
+			},
+		},
 	}
 end)
 
@@ -877,7 +939,8 @@ M.Page = ui.component(function(props: { plugin: string, here: Here }): Node
 	ui.on_mount(function()
 		load()
 	end)
-	local function body(kind: string): Node
+	local function body(key: string): Node
+		local kind = if string.match(key, "^found:") then "found" else key
 		if kind == "found" then
 			return Found { plugin = id, here = props.here }
 		elseif kind == "loading" then
@@ -934,8 +997,15 @@ M.Page = ui.component(function(props: { plugin: string, here: Here }): Node
 				nav.back()
 			end,
 		},
+		-- (Found, by the version it's of: a new version is another page,
+		-- its README, pictures and asks all its own.)
 		ui.presence(function(): string
-			return phase:get()
+			local p = phase:get()
+			if p == "found" then
+				local v = (details:get()[id] or {}).version
+				return `found:{if type(v) == "string" then v else ""}`
+			end
+			return p
 		end, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 	}
 end)

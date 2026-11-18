@@ -42,6 +42,12 @@ M.Section = ui.component(function(props: { plugin: string, here: any }): Node
 	local made_phase = ui.use_state("idle")
 	local secret = ui.use_state(nil :: string?)
 	local secret_open = ui.use_state(false)
+	-- (Its secret held only while its dialog is up, however that closes.)
+	ui.effect(function()
+		if not secret_open:get() and secret:peek() ~= nil then
+			secret:set(nil)
+		end
+	end)
 	local revoking = ui.use_state(nil :: any)
 	local revoke_open = ui.use_state(false)
 
@@ -61,6 +67,13 @@ M.Section = ui.component(function(props: { plugin: string, here: any }): Node
 		end)
 	end
 	ui.on_mount(load)
+	-- Gone from the page (another page, a link): a sign-in still waited for
+	-- is given up, so no key is made whose secret nobody would see.
+	ui.on_cleanup(function()
+		if made_phase:peek() == "busy" then
+			store.cancel_step_up()
+		end
+	end)
 
 	local function create()
 		local n = string.match(name:peek(), "^%s*(.-)%s*$") or ""
@@ -92,7 +105,10 @@ M.Section = ui.component(function(props: { plugin: string, here: any }): Node
 
 	local function key_row(first: any, _i: number, now: State<any>): Node
 		return ds.Settings.Row {
-			label = first.name or first.key,
+			label = function(): string
+				local k = now:get()
+				return k.name or k.key
+			end,
 			description = function(): string
 				local k = now:get()
 				local parts: { string } = {}
@@ -278,10 +294,15 @@ M.Section = ui.component(function(props: { plugin: string, here: any }): Node
 			body = ui.t("plugins.store.key.secret_body"),
 			cancel = false,
 			dismissable = false,
+			-- (Nothing closes it but its button: Escape doesn't either.)
+			hold = function(): boolean
+				return secret:get() ~= nil
+			end,
 			confirm = {
 				label = ui.t("plugins.store.key.done"),
 				on_click = function()
 					secret:set(nil)
+					secret_open:set(false)
 				end,
 			},
 			ui.row {

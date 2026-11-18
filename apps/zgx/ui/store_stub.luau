@@ -188,6 +188,25 @@ for i, name in WORDS do
 	by_id[id] = e
 end
 
+-- A README of forty pictures (a page asks for only so many).
+do
+	local lines = { "# Screenshot tray" }
+	for i = 1, 40 do
+		table.insert(lines, "")
+		table.insert(lines, `![shot {i}](shots/s{i}.png)`)
+	end
+	by_id["screenshot-tray"].detail.readme = table.concat(lines, "\n")
+end
+
+-- Words that look like templates, as anyone may write them: drawn as they are.
+do
+	local b = by_id["haiku-commit"]
+	b.card.name = "Haiku {commit}"
+	b.card.keywords = { "{oops}", "daily" }
+	b.card.author = { username = "mara", badges = { { id = "x", name = "{badge}" } } }
+	by_id["rubber-duck"].card.keywords = { "{oops}", "review" }
+end
+
 -- Focus timer: a page with everything on it.
 do
 	local f = by_id["focus-timer"]
@@ -206,6 +225,10 @@ do
 		"![A picture from the web](https://example.com/tracker.png)",
 		"",
 		"Read [the guide](https://example.com/guide) for more.",
+		"",
+		"See [Your chats](zeron-chat:abc), [your key](zeron-file:/Users/you/.ssh/id_ed25519), [Allow](zeron-invoke:allow) and [a picture](zeron-image:1).",
+		"",
+		"> See Your chats, your key, Allow and a picture.",
 		"",
 		"<script>zeron.decide(true)</script>",
 		"",

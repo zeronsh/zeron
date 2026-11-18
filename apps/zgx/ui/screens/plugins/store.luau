@@ -158,28 +158,50 @@ function M.valid_id(id: any): boolean
 	return type(id) == "string" and #id >= 2 and #id <= 40 and string.match(id, "^[a-z0-9][a-z0-9%-]*$") ~= nil
 end
 
--- Its pictures, as the host has them here: by `id@version/path`, the file
--- to show, or false for one that can't come (not a picture of its
--- package, too big, offline). Read reactively, asked once.
+-- Its pictures, as the engine keeps them here: by `id@version/path`, the
+-- file to show, or false for one that isn't (not a picture of its package).
+-- Read reactively, asked once; one that couldn't come for now (offline)
+-- is asked again the next time it's drawn. At most `PICTURES_MOST` of one
+-- version's are ever asked for (a README of thousands of pictures shows
+-- the rest as their links).
 local pictures = ui.state("store_pictures", {} :: { [string]: string | false })
 local asking: { [string]: boolean } = {}
+local asked_of: { [string]: number } = {}
+M.PICTURES_MOST = 24
 
-function M.picture_src(id: string, version: string, path: string): string?
+-- Whether a failure says what the picture is (it never will be one), not
+-- just that it can't come now.
+local function lasting(err: any): boolean
+	local m = if type(err) == "table" then err.message else err
+	return m ~= "offline" and m ~= "signed_out" and not (type(m) == "string" and string.match(m, "^rate_limited"))
+end
+
+function M.picture_src(id: string, version: string, path: string): (string | false)?
 	local key = `{id}@{version}/{path}`
 	local have = pictures:get()[key]
 	if have ~= nil then
-		return have or nil
+		return have
 	end
-	if not asking[key] then
-		asking[key] = true
-		M.picture(id, version, path):after(function(r: any)
-			asking[key] = nil
-			pictures:set_key(key, if type(r) == "table" and type(r.src) == "string" and r.src ~= "" then r.src else false)
-		end, function()
-			asking[key] = nil
+	if asking[key] then
+		return nil
+	end
+	local of = `{id}@{version}`
+	if (asked_of[of] or 0) >= M.PICTURES_MOST then
+		return false
+	end
+	asked_of[of] = (asked_of[of] or 0) + 1
+	asking[key] = true
+	M.picture(id, version, path):after(function(r: any)
+		asking[key] = nil
+		pictures:set_key(key, if type(r) == "table" and type(r.src) == "string" and r.src ~= "" then r.src else false)
+	end, function(err: any)
+		asking[key] = nil
+		if lasting(err) then
 			pictures:set_key(key, false)
-		end)
-	end
+		else
+			asked_of[of] = math.max(0, (asked_of[of] or 1) - 1)
+		end
+	end)
 	return nil
 end
 
@@ -189,7 +211,8 @@ local asking_icon: { [string]: boolean } = {}
 
 function M.icon_svg(card: Card): string?
 	local path = card.icon
-	if type(path) ~= "string" or path == "" then
+	-- (An SVG of its package: a path in it, as the host checks again.)
+	if type(path) ~= "string" or path == "" or #path > 512 or not string.match(path, "%.svg$") or string.find(path, "%.%.") or string.find(path, "^/") or string.find(path, "[:%%\\]") then
 		return nil
 	end
 	local key = `{card.id}@{card.version}`

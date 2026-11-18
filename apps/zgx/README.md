@@ -346,6 +346,8 @@ it opened on. From a fullscreen app it is covered and waits; zgx's
 
 **When a plugin fails** (at load, at build, or later), Zeron goes on without it, with the window's state kept (`src/plugins/recovery.rs`).
 
+**The plugin store** is Settings → Plugins → Browse (`ui/screens/plugins/browse.luau`), a plugin's page (`listing.luau`), and publishing yours from Yours (`publish.luau`, `keys.luau`). The engine is the store's one client; `src/plugins/catalog.rs` only carries its `Store*` calls, and `ui/screens/plugins/store.luau` names each one (`ui/store_stub.luau` answers them in `ui/plugins_store_fixture.luau`). A store install is `InstallPlugin { store }`, then the same consent window as any plugin. `zeron://open/plugin/<id>` opens that plugin's page and never installs (`src/links.rs`).
+
 **Examples and how to write one:** `plugins-dev/README.md`. A staging rig of three engines is in `plugins-dev/rig/`.
 
 ```sh

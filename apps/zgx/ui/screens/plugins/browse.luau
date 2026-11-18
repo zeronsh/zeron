@@ -181,11 +181,15 @@ function M.category_name(id: string): string
 	return id
 end
 
--- What's installed on the device shown, by id.
+-- What's installed on the device shown from the store, by id (another
+-- plugin with the same id, from a file or a link, is never this one).
 local installed = ui.computed(function(): { [string]: state.Item }
 	local out: { [string]: state.Item } = {}
 	for _, p in state.shown:get() do
-		out[p.id] = p
+		local source: any = p.source
+		if type(source) == "table" and source.kind == "store" then
+			out[p.id] = p
+		end
 	end
 	return out
 end)
@@ -258,7 +262,14 @@ function M.badges(card: () -> store.Card): Node
 		gap = "$space.1",
 		items = "center",
 		ui.each(list, function(name: string): Node
-			return ds.Badge { name, tone = "neutral", look = "outline", size = "sm" }
+			return ds.Badge {
+				function(): string
+					return name
+				end,
+				tone = "neutral",
+				look = "outline",
+				size = "sm",
+			}
 		end, {
 			key = function(name: string): string
 				return name
@@ -277,7 +288,10 @@ local function row(first: store.Card, _i: State<number>, now: State<store.Card>)
 		return now:get()
 	end
 	return ds.Settings.Row {
-		label = first.name,
+		-- (Its words drawn as they are: a store's are never a template.)
+		label = function(): string
+			return now:get().name
+		end,
 		badge = M.badges(card),
 		byline = function(): string
 			return M.byline(now:get())
@@ -346,7 +360,7 @@ local function filters(): Node
 		local counts: { [string]: number } = {}
 		local order_seen: { string } = {}
 		for _, c in listing.items:get() do
-			for _, k in (c.keywords or {}) :: { string } do
+			for _, k in (if type(c.keywords) == "table" then c.keywords else {}) :: { any } do
 				if type(k) == "string" and k ~= "" and k ~= category:get() then
 					if counts[k] == nil then
 						counts[k] = 0
@@ -399,7 +413,9 @@ local function filters(): Node
 		ui.each(suggested, function(chip: { k: string, chosen: boolean }): Node
 			local k = chip.k
 			return ds.Tag {
-				k,
+				function(): string
+					return k
+				end :: any,
 				size = "sm",
 				selected = chip.chosen,
 				on_click = if chip.chosen
@@ -560,7 +576,9 @@ end
 -- One featured plugin, a card of its own that opens it.
 local function feature(first: store.Card, _i: number, now: State<store.Card>): Node
 	return ds.Settings.Feature {
-		label = first.name,
+		label = function(): string
+			return now:get().name
+		end,
 		byline = function(): string
 			return M.author(now:get())
 		end,

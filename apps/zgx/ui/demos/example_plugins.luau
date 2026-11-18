@@ -1,5 +1,9 @@
 -- Settings: plugins. What's installed, what's new, and what could be: a
 -- real page's search, tabs, updates, and its loading, empty and failed states.
+-- Browse is the store's catalog on the page's own pieces: the featured
+-- (`Settings.Feature`), the catalog's card with a bar of filters
+-- (`Settings.CatalogCard`), its rows built as they show (`Settings.ListRows`);
+-- a plugin opens a page under it (`Settings.SubPage`, `Settings.Back`).
 
 local ds = require("@ds")
 local kit = require("@demos/example_kit")
@@ -8,6 +12,9 @@ local tab = ui.state("ex_pl_tab", "installed")
 local query = ui.state("ex_pl_query", "")
 local shown = ui.state("ex_pl_state", "ready")
 local removing = ui.state("ex_pl_removing", false)
+local category = ui.state("ex_pl_category", "")
+local order = ui.state("ex_pl_order", "popular")
+local opened = ui.state("ex_pl_opened", nil :: string?)
 local enabled = {
 	linear = ui.state("ex_pl_linear", true),
 	sentry = ui.state("ex_pl_sentry", true),
@@ -22,9 +29,9 @@ local INSTALLED = {
 	{ id = "playwright", name = "Playwright", by = "Microsoft", hue = "emerald", version = "3.2.0", about = "Drive a browser to check what an agent built." },
 }
 local CATALOG = {
-	{ id = "figma", name = "Figma", by = "Figma, Inc.", hue = "orange", version = "1.2.0", about = "Read frames and variables from a design file." },
-	{ id = "slack", name = "Slack", by = "Salesforce", hue = "purple", version = "4.0.2", about = "Hear when an agent needs you, where you already are." },
-	{ id = "datadog", name = "Datadog", by = "Datadog, Inc.", hue = "violet", version = "0.5.1", about = "Bring a monitor's graph and its logs into a chat." },
+	{ id = "figma", name = "Figma", by = "figma", hue = "orange", version = "1.2.0", installs = 4210, about = "Read frames and variables from a design file." },
+	{ id = "slack", name = "Slack", by = "salesforce", hue = "purple", version = "4.0.2", installs = 3874, about = "Hear when an agent needs you, where you already are." },
+	{ id = "datadog", name = "Datadog", by = "datadog", hue = "violet", version = "0.5.1", installs = 1290, about = "Bring a monitor's graph and its logs into a chat." },
 }
 
 local function matches(p: any): boolean
@@ -42,6 +49,99 @@ local found = ui.computed(function(): { any }
 	end
 	return out
 end)
+
+-- Browse: the featured over the catalog's card, its search, a bar of
+-- filters, and its rows; a row opens the plugin's page.
+local function browse(): Node
+	local function feature(p: any): Node
+		return ds.Settings.Feature {
+			label = p.name,
+			byline = `by @{p.by}`,
+			description = p.about,
+			lead = ds.Tile { label = p.name, hue = p.hue, size = 40 },
+			on_click = function()
+				opened:set(p.id)
+			end,
+		}
+	end
+	return ui.column {
+		w_full = true,
+		gap = "$space.5",
+		ui.show(function(): boolean
+			return query:get() == ""
+		end, ds.Settings.Section {
+			title = "Featured",
+			ui.row { w_full = true, gap = "$space.3", flex_wrap = true, feature(CATALOG[1]), feature(CATALOG[2]), feature(CATALOG[3]) },
+		}),
+		ds.Settings.CatalogCard {
+			search = { value = query, placeholder = "Search plugins" },
+			filters = ui.row {
+				w_full = true,
+				p = "$space.2",
+				pl = ds.Settings.inset(1 + 8),
+				gap = "$space.2",
+				items = "center",
+				flex_wrap = true,
+				ds.Select { value = category, name = "Category", size = "sm", options = { { value = "", label = "All categories" }, { value = "integrations", label = "Integrations" }, { value = "developer-tools", label = "Developer tools" } } },
+				ds.Select { value = order, name = "Order", size = "sm", options = { { value = "popular", label = "Most installed" }, { value = "updated", label = "Recently updated" }, { value = "new", label = "Newest" } } },
+				ds.Tag { "design", size = "sm", on_click = function() end },
+				ds.Tag { "alerts", size = "sm", on_click = function() end },
+			},
+			body = ds.Settings.ListRows(found, function(p: any): Node
+				return ds.Settings.Row {
+					label = p.name,
+					byline = `by @{p.by} · {p.installs} installs`,
+					description = p.about,
+					lead = ds.Tile { label = p.name, hue = p.hue, size = 32 },
+					truncate = true,
+					value = if p.id == "slack" then "Installed" else "",
+					on_click = function()
+						opened:set(p.id)
+					end,
+				}
+			end, {
+				key = function(p: any): string
+					return p.id
+				end,
+				height = function(): number
+					return ds.Settings.truncated_row_h(32, true)
+				end,
+			}),
+		},
+	}
+end
+
+-- A plugin of the store, opened: a page under Plugins.
+local function listing(id: string): Node
+	local p = CATALOG[1]
+	for _, c in CATALOG do
+		if c.id == id then
+			p = c
+		end
+	end
+	return ds.Settings.SubPage {
+		where = ds.Settings.Back {
+			label = "Plugins",
+			on_click = function()
+				opened:set(nil)
+			end,
+		},
+		ds.Settings.Page {
+			title = p.name,
+			description = p.about,
+			trail = ds.Tile { label = p.name, hue = p.hue, size = 48 },
+			ds.Settings.Group {
+				ui.column {
+					w_full = true,
+					px = "$space.4",
+					py = "$space.3",
+					ds.KeyValue { items = { { key = "By", value = `@{p.by}` }, { key = "Version", value = p.version }, { key = "Installs", value = `{p.installs} installs` } }, key_width = 96 },
+				},
+			},
+			ui.row { w_full = true, justify = "end", ds.Button { "Install", tone = "primary" } },
+		},
+	}
+end
 
 local function row(p: any, installed: boolean): Node
 	local control: Node
@@ -120,6 +220,9 @@ return {
 			if string.match(key, ":nothing$") then
 				return nothing()
 			end
+			if key == "list:browse" then
+				return browse()
+			end
 			return list(string.match(key, "^list:(%a+)") or "installed")
 		end
 		return kit.stage {
@@ -143,7 +246,13 @@ return {
 			},
 			kit.settings {
 				page = "plugins",
-				ds.Settings.Page {
+				ui.presence(function(): string
+					return opened:get() or ""
+				end, function(id: string): Node
+				if id ~= "" then
+					return listing(id)
+				end
+				return ds.Settings.Page {
 					title = "Plugins",
 					description = "Tools your agents can use, in every project in Halcyon Labs.",
 					trail = ds.SearchField { value = query, placeholder = "Search plugins", size = "sm", w = 200 },
@@ -167,7 +276,8 @@ return {
 							return if #found:get() > 0 then `list:{tab:get()}` else `list:{tab:get()}:nothing`
 						end, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 					},
-				},
+				}
+				end, { w_full = true }),
 			},
 		}
 	end,

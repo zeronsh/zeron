@@ -4057,7 +4057,11 @@
         "revoke_title": "Revoke {name}?",
         "revoke_body": "Anything publishing with it stops working at once. Versions it already sent stay as they are.",
         "revoke_failed": "Couldn't revoke the key"
-      }
+      },
+      "other_installed": "A different plugin with this id is installed here, from somewhere else. Remove it to install this one.",
+      "unblock_title": "Turn {name} back on?",
+      "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",
+      "unblock_body_reason": "Zeron took this version down from the store: {reason} It runs again here, as you allowed it."
     }
   },
   "templates": {

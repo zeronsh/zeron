@@ -121,6 +121,10 @@ test("a deploy key is made after a fresh sign-in, its secret shown once to copy"
 	local dialog = app:tree("role:dialog")
 	expect(dialog).to_contain("Copy your key now")
 	expect(dialog).to_contain("zpk_live_")
+	-- Escape doesn't lose it: only its button closes it.
+	app:key("Escape")
+	settle(app)
+	expect(app:tree("role:dialog")).to_contain("zpk_live_")
 	app:click('role:dialog >> role:button "Copy"')
 	settle(app)
 	expect(app:clipboard()).to_contain("zpk_live_")

@@ -31,9 +31,7 @@ function M.open_listing(id: string, from_outside: boolean?)
 	end
 	M.tab:set("browse")
 	M.view:set(`store:{id}`)
-	if from_outside then
-		opened:set(true)
-	end
+	opened:set(from_outside == true)
 end
 
 function M.open_publish(id: string)
@@ -42,9 +40,11 @@ function M.open_publish(id: string)
 	end
 	M.tab:set("yours")
 	M.view:set(`publish:{id}`)
+	opened:set(false)
 end
 
 function M.back()
+	opened:set(false)
 	M.view:set("catalog")
 end
 

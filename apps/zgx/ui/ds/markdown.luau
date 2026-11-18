@@ -126,6 +126,10 @@ export type Props = {
 	small: boolean?,
 	-- Its words' ink, where not the primary (a thought's, in the secondary).
 	ink: string?,
+	-- Words from outside Zeron (a store plugin's README, its changelog):
+	-- every link is drawn as a link, never as one of Zeron's own chips (a
+	-- chat, a file, a picture, a skill), whatever its target says.
+	foreign: boolean?,
 }
 export type FindAt = { key: string, block: number, k: number }
 export type Find = {
@@ -299,6 +303,8 @@ type Ctx = {
 	-- The whole text now: a ```mermaid fence reads its end to know whether
 	-- it's still being written (ds/mermaid).
 	source: (() -> string)?,
+	-- Props' `foreign`: links are links, never chips.
+	foreign: boolean?,
 }
 
 -- A reply's pictures in the order it wrote them, by its group (each of its
@@ -743,17 +749,19 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 		end
 		-- (What the page says a link is: one of the chat's files, or one of
 		-- its agent's skills.)
-		local chip = if r.a and ctx and ctx.link_chip and not opens(r.a) then ctx.link_chip(r.a) else nil
-		local named = (r :: any).attached
+		-- (Words from outside Zeron: every link a link, whatever it says.)
+		local foreign = ctx ~= nil and ctx.foreign == true
+		local chip = if r.a and ctx and ctx.link_chip and not opens(r.a) and not foreign then ctx.link_chip(r.a) else nil
+		local named = if foreign then nil else (r :: any).attached
 		if named and ctx and ctx.attached and ctx.attached[named] then
 			attachment_chip(span, named, ctx.attached[named])
-		elseif r.a and string.match(r.a, "^zeron%-invoke:") then
+		elseif r.a and not foreign and string.match(r.a, "^zeron%-invoke:") then
 			invocation_chip(span, r.x)
-		elseif r.a and (string.match(r.a, "^zeron%-image:%d+$") or string.match(r.a, "^zeron%-attachment:%d+$")) then
+		elseif r.a and not foreign and (string.match(r.a, "^zeron%-image:%d+$") or string.match(r.a, "^zeron%-attachment:%d+$")) then
 			-- What it carries, mentioned by its number (ds/attachment_mentions):
 			-- its chip, a picture's glyph or a file's icon, by its name.
 			attachment_chip(span, r.x, { kind = if string.match(r.a, "^zeron%-image:") then "image" else "file" })
-		elseif r.a and string.match(r.a, "^zeron%-annotation:") then
+		elseif r.a and not foreign and string.match(r.a, "^zeron%-annotation:") then
 			-- A browser pick, mentioned (its token): its chip.
 			attachment_chip(span, r.x, { kind = "file", icon = "cursor" })
 		elseif chip and chip.skill then
@@ -767,9 +775,8 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 			span.underline_offset = 4
 			span.hover = { underline = true, color = "$accent" }
 			if
-				string.match(r.a, "^zeron%-file:")
-				or string.match(r.a, "^zeron%-chat:")
-				or (chip and chip.file)
+				not foreign
+				and (string.match(r.a, "^zeron%-file:") or string.match(r.a, "^zeron%-chat:") or (chip and chip.file))
 			then
 				mention_chip(span, r.a, r.x)
 			end
@@ -1771,8 +1778,8 @@ end
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.foreign
+		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small, foreign = props.foreign }
 		else nil
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).

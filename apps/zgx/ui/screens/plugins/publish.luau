@@ -217,13 +217,23 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 		return if p then p.name else id
 	end
 
+	-- (Each check numbered: only the last one's answer, and its ticket, count.)
+	local checks_asked = 0
 	local function check()
+		checks_asked += 1
+		local mine_ = checks_asked
 		phase:set("checking")
 		sent_error:set("")
 		store.prepare(id):after(function(r: any)
+			if mine_ ~= checks_asked then
+				return
+			end
 			prepared:set(r)
 			phase:set("ready")
 		end, function(err: any)
+			if mine_ ~= checks_asked then
+				return
+			end
 			local m = if type(err) == "table" then err.message else err
 			phase:set(if type(m) == "string" and m ~= "" then m else "failed")
 		end)
@@ -424,7 +434,9 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 			return if s == "pending" then "withdraw" elseif s == "approved" then "yank" elseif s == "yanked" then "unyank" else nil
 		end
 		return ds.Settings.Row {
-			label = first.version,
+			label = function(): string
+				return now:get().version
+			end,
 			-- (Each state its own badge: its tone is its state's.)
 			badge = ui.switch(function(): string
 				local s = status_of(now:get())

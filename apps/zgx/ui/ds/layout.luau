@@ -130,7 +130,9 @@ end
 -- in the tertiary ink, values beside them; a value may be a node (a badge,
 -- a person). `copy` puts a copy button at a value's end, shown under the
 -- pointer.
-export type Pair = { key: string | Message, value: string | Node, mono: boolean?, copy: boolean? }
+-- (`value` a function: its words as they are now, drawn as they are,
+-- never read as a template: words from elsewhere.)
+export type Pair = { key: string | Message, value: string | Node | () -> string, mono: boolean?, copy: boolean? }
 export type KeyValueProps = { items: { Pair }, key_width: number?, dense: boolean? }
 
 local Pair = ui.component(function(props: { pair: Pair, key_width: number, dense: boolean? }): Node
@@ -138,7 +140,7 @@ local Pair = ui.component(function(props: { pair: Pair, key_width: number, dense
 	local over = ui.use_state(false)
 	local copied = ui.use_state(false)
 	local value: Node
-	if type(pair.value) == "string" then
+	if type(pair.value) == "string" or type(pair.value) == "function" then
 		value = SelectionMenu { grow = 1, min_w = 0, FadeText {
 			pair.value,
 			w_full = true,
