@@ -1,0 +1,101 @@
+---
+// What people reported about listed plugins, the open ones first, each
+// closed with what was done. Admins only.
+import AccountBar from "../../../components/store/AccountBar.astro";
+import Action from "../../../components/ui/Action.astro";
+import Badge from "../../../components/ui/Badge.astro";
+import Glyph from "../../../components/ui/Glyph.astro";
+import Pagination from "../../../components/ui/Pagination.astro";
+import Tabs from "../../../components/ui/Tabs.astro";
+import Store from "../../../layouts/Store.astro";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { ago, date } from "../../../lib/store/format.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { adminSession } from "../../../lib/store/session.ts";
+import { reasonWords } from "../../../lib/store/states.ts";
+
+export const prerender = false;
+
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+privatePage(Astro);
+const toast = takeFlash(Astro.cookies);
+const open = Astro.url.searchParams.get("status") !== "closed";
+const cursor = Astro.url.searchParams.get("cursor");
+const result = await Astro.locals.edge.reports(open ? "open" : "all", cursor && /^[A-Za-z0-9_-]{1,512}$/.test(cursor) ? cursor : undefined);
+const reports = result.ok ? result.data.reports.filter((r) => (open ? r.status === "open" : r.status !== "open")) : [];
+const base = open ? "/admin/reports" : "/admin/reports?status=closed";
+---
+
+<Store title="Reports · Zeron" description="Reports about plugins." noindex toast={toast}>
+  <div class="wrap reports-page">
+    <AccountBar session={session} current="reports">
+      <h1>Reports</h1>
+      <p class="lead">What people told us about plugins in the store.</p>
+    </AccountBar>
+    <Tabs label="Reports by state" tabs={[{ href: "/admin/reports", label: "Open", current: open }, { href: "/admin/reports?status=closed", label: "Closed", current: !open }]} />
+    {
+      !result.ok ? (
+        <p class="empty">Reports can't be loaded right now. Try again in a minute.</p>
+      ) : reports.length === 0 ? (
+        <div class="empty">
+          <Glyph name="check-circle" size={20} />
+          <p>{open ? "No open reports." : "No closed reports yet."}</p>
+        </div>
+      ) : (
+        <ul class="list" role="list">
+          {reports.map((r) => (
+            <li class="report">
+              <div class="head">
+                <a class="plugin" href={`/admin/plugins/${encodeURIComponent(r.plugin_id)}`}>
+                  {r.plugin_name ?? r.plugin_id}
+                  {r.version && <span class="num"> {r.version}</span>}
+                </a>
+                <Badge tone={r.reason === "malware" ? "danger" : "warning"} size="sm">{reasonWords(r.reason)}</Badge>
+                {!open && <Badge size="sm">{r.status === "actioned" ? "Acted on" : "Dismissed"}</Badge>}
+                <span class="from">
+                  {r.reporter.username ? `@${r.reporter.username}` : "Someone with no username"} · <time datetime={new Date(r.created_at).toISOString()} title={date(r.created_at)}>{ago(r.created_at)}</time>
+                </span>
+              </div>
+              {r.text ? <p class="text">{r.text}</p> : <p class="text faint">No words given.</p>}
+              {r.note && <p class="note"><b>Note:</b> {r.note}</p>}
+              {r.status === "open" && (
+                <form class="resolve" method="post" action={`/admin/reports/${encodeURIComponent(r.id)}`}>
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <label class="sr-only" for={`note-${r.id}`}>Note on what was done</label>
+                  <input class="note-field" id={`note-${r.id}`} name="note" maxlength="500" placeholder="What was done (optional)" />
+                  <Action tone="secondary" size="md" name="resolution" value="dismissed">Dismiss</Action>
+                  <Action tone="primary" size="md" name="resolution" value="actioned">Acted on it</Action>
+                </form>
+              )}
+            </li>
+          ))}
+        </ul>
+      )
+    }
+    {result.ok && <Pagination label="More reports" next={result.data.next_cursor ? `${base}${open ? "?" : "&"}cursor=${encodeURIComponent(result.data.next_cursor)}` : null} previous={cursor ? base : null} />}
+  </div>
+</Store>
+
+<style>
+  .reports-page { display: grid; gap: 24px; }
+  .lead { max-width: 36em; font-size: 16px; }
+  .list { display: grid; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .report { display: grid; gap: 10px; padding: 18px 20px; }
+  .report + .report { border-top: 1px solid var(--line); }
+  .head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 14px; }
+  .plugin { font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+  .plugin:hover { color: var(--accent-soft); }
+  .from { margin-left: auto; font-size: 13px; color: var(--text-3); }
+  .text { max-width: 60em; font-size: 14.5px; line-height: 1.6; color: var(--text-2); white-space: pre-line; overflow-wrap: anywhere; }
+  .faint { color: var(--text-3); }
+  .note { font-size: 13.5px; color: var(--text-2); }
+  .note b { font-weight: 500; color: var(--text); }
+  .resolve { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .note-field { flex: 1 1 18em; height: 32px; padding: 0 12px; font: inherit; font-size: 14px; color: var(--text); background: var(--field-bg); border: 0; border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--field-edge); outline: none; transition: box-shadow 0.12s, background-color 0.12s; }
+  .note-field:hover { background: var(--field-hover); box-shadow: inset 0 0 0 1px var(--field-edge-hover); }
+  .note-field:focus-visible { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 80%, white), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .note-field::placeholder { color: var(--text-3); }
+  .empty { display: grid; justify-items: center; gap: 8px; padding: 56px 24px; color: var(--text-3); text-align: center; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .empty p { color: var(--text-2); }
+</style>

@@ -1,0 +1,30 @@
+---
+// The page that asks "are you sure?" when there's no script to ask in a
+// dialog: the same words and the same form.
+import ConfirmForm from "./ConfirmForm.astro";
+
+interface Props {
+  title: string;
+  action: string;
+  csrf: string;
+  confirm: string;
+  tone?: "primary" | "danger";
+  back: string;
+}
+const { title, action, csrf, confirm, tone, back } = Astro.props;
+---
+
+<section class="ask" aria-labelledby="ask-title">
+  <h1 id="ask-title">{title}</h1>
+  <div class="words"><slot name="words" /></div>
+  <ConfirmForm action={action} csrf={csrf} confirm={confirm} tone={tone} mode="page" back={back}>
+    <slot />
+  </ConfirmForm>
+</section>
+
+<style>
+  .ask { display: grid; gap: 12px; max-width: 520px; margin: clamp(24px, 6vw, 72px) auto 0; padding: 28px; background: var(--menu-solid); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--border), var(--dialog-shadow); }
+  .ask h1 { font-size: 20px; letter-spacing: -0.015em; }
+  .words { font-size: 14.5px; line-height: 1.55; color: var(--text-2); }
+  .words :global(p + p) { margin-top: 8px; }
+</style>

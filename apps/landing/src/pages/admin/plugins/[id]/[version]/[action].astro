@@ -1,0 +1,72 @@
+---
+// Approve, reject or take down a version. A post does it; a visit (no
+// script to open the dialog) is the same question as a page.
+import ConfirmPage from "../../../../../components/store/ConfirmPage.astro";
+import Field from "../../../../../components/ui/Field.astro";
+import Select from "../../../../../components/ui/Select.astro";
+import Store from "../../../../../layouts/Store.astro";
+import { isVersionAction, REJECT_REASONS, VERSION_FLASH, versionRequest } from "../../../../../lib/store/admin.ts";
+import { done, field, flashFor, formOf, tokenMatches } from "../../../../../lib/store/forms.ts";
+import { privatePage } from "../../../../../lib/store/http.ts";
+import { isPluginId, isVersion } from "../../../../../lib/store/names.ts";
+import { adminSession } from "../../../../../lib/store/session.ts";
+
+export const prerender = false;
+
+const { id, version, action } = Astro.params;
+if (!isPluginId(id) || !isVersion(version) || !isVersionAction(action)) return new Response(null, { status: 404 });
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+const submission = `/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(version)}`;
+const back = action === "remove" ? `/admin/plugins/${encodeURIComponent(id)}` : submission;
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
+  const request = versionRequest(id, version, action, { get: (name) => field(form, name) });
+  if (!request) return done(Astro, "bad_input", back);
+  const result = await Astro.locals.edge.admin(request.path, request.body, session.csrf);
+  return done(Astro, flashFor(result, VERSION_FLASH[action]), back);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+privatePage(Astro);
+
+const ASK = {
+  approve: { title: `Approve ${id} ${version}?`, words: "It's listed at once, and offered to everyone who has it at their next update check.", confirm: "Approve", tone: "primary" },
+  reject: { title: `Reject ${id} ${version}?`, words: "The author reads your reason and your words, in Zeron and on the web. They can publish a new version.", confirm: "Reject", tone: "danger" },
+  remove: { title: `Take down ${id} ${version}?`, words: "Nobody can install it from the store again. Choose whether the devices that have it turn it off too.", confirm: "Take down", tone: "danger" },
+} as const;
+const ask = ASK[action];
+---
+
+<Store title={`${ask.title} · Zeron`} description={ask.title} noindex>
+  <div class="wrap">
+    <ConfirmPage title={ask.title} action={Astro.url.pathname} csrf={session.csrf} confirm={ask.confirm} tone={ask.tone} back={back}>
+      <p slot="words">{ask.words}</p>
+      {
+        action === "reject" && (
+          <>
+            <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} visibleLabel />
+            <Field name="message" label="For the author" multiline required maxlength={2000} hint="Say what to change, plainly. They'll read it as you write it." />
+          </>
+        )
+      }
+      {
+        action === "remove" && (
+          <>
+            <Field name="reason" label="Why" multiline required maxlength={2000} hint="Its author reads this, and so does anyone whose device turns it off." />
+            <label class="check">
+              <input type="checkbox" name="block" />
+              <span>Also turn it off on the devices that have it. People can turn it back on; it's theirs.</span>
+            </label>
+          </>
+        )
+      }
+    </ConfirmPage>
+  </div>
+</Store>
+
+<style>
+  .check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 1.5; color: var(--text-2); cursor: pointer; }
+  .check input { margin-top: 3px; accent-color: var(--destructive-bg); }
+</style>

@@ -11,13 +11,16 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "test": "astro build && vitest run"
+    "test": "astro build && vitest run",
+    "deploy": "npm ci && npm run check && npm test && wrangler deploy",
+    "deploy:staging": "npm ci && npm run check && CLOUDFLARE_ENV=staging npm test && wrangler deploy"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^14.4.8",
     "astro": "^7.4.12",
     "diff": "^9.0.0",
     "github-slugger": "^2.0.0",
+    "hast-util-to-html": "^9.0.6",
     "hast-util-to-text": "^4.0.3",
     "lowlight": "^3.3.0",
     "rehype-sanitize": "^6.0.0",

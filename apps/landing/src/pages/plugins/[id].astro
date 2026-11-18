@@ -1,0 +1,260 @@
+---
+// A plugin's page: who made it, what it does (its README, as reviewed),
+// what it asks for, its versions, and Install in Zeron. The same for
+// everyone, so kept by the Worker cache for at most a minute.
+import InstallButton from "../../components/store/InstallButton.astro";
+import PermissionList from "../../components/store/PermissionList.astro";
+import PluginTile from "../../components/store/PluginTile.astro";
+import Screenshots from "../../components/store/Screenshots.astro";
+import Badge from "../../components/ui/Badge.astro";
+import Glyph from "../../components/ui/Glyph.astro";
+import Store from "../../layouts/Store.astro";
+import { ago, bytes, compatibility, count, date } from "../../lib/store/format.ts";
+import { publicPage } from "../../lib/store/http.ts";
+import { renderMarkdown } from "../../lib/store/markdown.ts";
+import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
+import { fileUrl, memberUrl, pluginUrl } from "../../lib/store/urls.ts";
+import type { VersionInfo } from "../../lib/store/types.ts";
+
+export const prerender = false;
+
+const { id } = Astro.params;
+if (!isPluginId(id)) return new Response(null, { status: 404 });
+
+const edge = Astro.locals.edge;
+const [result, versionsResult, categoriesResult] = await Promise.all([edge.plugin(id), edge.versions(id), edge.categories()]);
+if (!result.ok) {
+  if (result.error === "not_found") return new Response(null, { status: 404 });
+  Astro.response.status = 503;
+}
+const plugin = result.ok ? result.data : null;
+
+let readme = "";
+let versions: (VersionInfo & { html: string | null })[] = [];
+if (plugin) {
+  publicPage(Astro);
+  const file = (version: string) => (path: string) => fileUrl(plugin.id, version, path);
+  readme = renderMarkdown(plugin.readme, { file: file(plugin.version), demote: true });
+  const all = versionsResult.ok ? versionsResult.data.versions : plugin.versions;
+  versions = all.map((v) => ({ ...v, html: v.notes ? renderMarkdown(v.notes, { file: file(v.version), demote: true }) : null }));
+}
+const categories = categoriesResult.ok ? new Map(categoriesResult.data.categories.map((c) => [c.id, c.name])) : new Map<string, string>();
+const RECENT = 4;
+
+// The page as a search engine reads it (a data block; nothing runs).
+const structured = plugin
+  ? JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      name: plugin.name,
+      description: plugin.summary,
+      applicationCategory: "Plugin",
+      operatingSystem: "macOS, Windows, Linux",
+      softwareVersion: plugin.version,
+      dateModified: new Date(plugin.updated_at).toISOString(),
+      author: { "@type": "Person", name: `@${plugin.author.username}`, url: new URL(memberUrl(plugin.author.username), Astro.site).href },
+      url: new URL(pluginUrl(plugin.id), Astro.site).href,
+      offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+    }).replace(/</g, "\\u003c")
+  : null;
+---
+
+<Store title={plugin ? `${plugin.name}, a plugin for Zeron` : "Plugins · Zeron"} description={plugin?.summary ?? "A plugin for Zeron."}>
+  {structured && <script slot="head" type="application/ld+json" set:html={structured} />}
+  <div class="wrap page">
+    <a class="back" href="/plugins"><Glyph name="alt-arrow-left" size={12} />Plugins</a>
+    {
+      !plugin ? (
+        <div class="unreachable">
+          <Glyph name="danger-triangle" size={20} />
+          <h1>The store can't be reached right now</h1>
+          <p>Try again in a minute.</p>
+          <a href={pluginUrl(id)}>Try again</a>
+        </div>
+      ) : (
+        <>
+          <header class="hero">
+            <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={80} class="hero-tile" />
+            <div class="identity">
+              <h1>{plugin.name}</h1>
+              <p class="author">
+                <span>
+                  by <a href={memberUrl(plugin.author.username)}>@{plugin.author.username}</a>
+                </span>
+                {!plugin.author.verified && <Badge tone="warning" icon="danger-triangle" size="sm">Unverified</Badge>}
+                {plugin.author.badges.map((b) => <Badge size="sm" title={b.description}>{b.name}</Badge>)}
+              </p>
+              <p class="summary">{plugin.summary}</p>
+            </div>
+            <div class="get">
+              <InstallButton id={plugin.id} name={plugin.name} />
+            </div>
+          </header>
+
+          <Screenshots name={plugin.name} pictures={plugin.screenshots.map((s) => fileUrl(plugin.id, plugin.version, s))} />
+
+          <div class="columns">
+            <div class="main">
+              <section aria-label="About" class="readme" set:html={readme} />
+
+              <section class="versions" aria-labelledby="versions-heading" id="versions">
+                <h2 id="versions-heading">Versions</h2>
+                <ol class="timeline" role="list">
+                  {versions.slice(0, RECENT).map((v) => (
+                    <li class="version">
+                      <div class="version-head">
+                        <h3 class="num">{v.version}</h3>
+                        {v.version === plugin.version && <Badge tone="success" size="sm">Latest</Badge>}
+                        {isPrerelease(v.version) && <Badge tone="accent" size="sm">Pre-release</Badge>}
+                        {v.yanked && <Badge tone="warning" size="sm" title="Its author stopped offering it. Anyone who has it can keep it.">No longer offered</Badge>}
+                        <time datetime={new Date(v.published_at).toISOString()} title={date(v.published_at)}>{ago(v.published_at)}</time>
+                      </div>
+                      {v.html ? <div class="readme notes" set:html={v.html} /> : <p class="no-notes">No notes for this version.</p>}
+                    </li>
+                  ))}
+                </ol>
+                {versions.length > RECENT && (
+                  <details class="older">
+                    <summary>
+                      {versions.length - RECENT === 1 ? "1 older version" : `${versions.length - RECENT} older versions`}
+                      <Glyph name="alt-arrow-down" size={12} />
+                    </summary>
+                    <ol class="timeline" role="list">
+                      {versions.slice(RECENT).map((v) => (
+                        <li class="version">
+                          <div class="version-head">
+                            <h3 class="num">{v.version}</h3>
+                            {v.yanked && <Badge tone="warning" size="sm">No longer offered</Badge>}
+                            <time datetime={new Date(v.published_at).toISOString()}>{date(v.published_at)}</time>
+                          </div>
+                          {v.html && <div class="readme notes" set:html={v.html} />}
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
+                )}
+              </section>
+            </div>
+
+            <aside class="side">
+              <section class="panel" aria-labelledby="asks-heading">
+                <h2 id="asks-heading">What it asks for</h2>
+                <PermissionList permissions={plugin.permissions} author={plugin.author.username} />
+                <p class="asked">Zeron asks you to allow these when you install it, and again if an update asks for more.</p>
+              </section>
+
+              <section class="panel facts" aria-label="About this plugin">
+                <dl>
+                  <div><dt>Version</dt><dd class="num">{plugin.version}</dd></div>
+                  <div><dt>Updated</dt><dd><time datetime={new Date(plugin.updated_at).toISOString()} title={date(plugin.updated_at)}>{ago(plugin.updated_at)}</time></dd></div>
+                  <div><dt>Works with</dt><dd>{compatibility(plugin.engines?.zeron)}</dd></div>
+                  <div><dt>Installs</dt><dd class="num">{count(plugin.installs)}</dd></div>
+                  <div><dt>Size</dt><dd class="num">{bytes(plugin.package.bytes)}</dd></div>
+                  {plugin.license && <div><dt>License</dt><dd>{plugin.license}</dd></div>}
+                  {plugin.categories.length > 0 && (
+                    <div>
+                      <dt>Category</dt>
+                      <dd class="links">{plugin.categories.map((c) => <a href={`/plugins?category=${encodeURIComponent(c)}`}>{categories.get(c) ?? c}</a>)}</dd>
+                    </div>
+                  )}
+                </dl>
+                {plugin.keywords.length > 0 && (
+                  <ul class="keywords" role="list" aria-label="Tags">
+                    {plugin.keywords.map((k) => (
+                      <li><a href={`/plugins?keyword=${encodeURIComponent(k)}`}>{k}</a></li>
+                    ))}
+                  </ul>
+                )}
+                {(plugin.homepage || plugin.repository) && (
+                  <ul class="out" role="list">
+                    {plugin.homepage && /^https?:\/\//.test(plugin.homepage) && (
+                      <li><a href={plugin.homepage} rel="nofollow noopener ugc"><Glyph name="global" size={14} />Website<Glyph name="arrow-up-right" size={12} /></a></li>
+                    )}
+                    {plugin.repository && /^https?:\/\//.test(plugin.repository) && (
+                      <li><a href={plugin.repository} rel="nofollow noopener ugc"><Glyph name="file-code" size={14} />Source code<Glyph name="arrow-up-right" size={12} /></a></li>
+                    )}
+                  </ul>
+                )}
+              </section>
+
+              <a class="report" href={`${pluginUrl(plugin.id)}/report`}><Glyph name="flag" size={14} />Report this plugin</a>
+            </aside>
+          </div>
+        </>
+      )
+    }
+  </div>
+</Store>
+
+<style>
+  .page { display: grid; gap: 32px; }
+  .back { display: inline-flex; align-items: center; gap: 6px; justify-self: start; height: 28px; font-size: 14px; font-weight: 500; color: var(--text-3); transition: color 0.12s; }
+  .back:hover { color: var(--text); }
+
+  .hero { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 24px; align-items: start; }
+  .identity { display: grid; gap: 8px; min-width: 0; padding-top: 2px; }
+  .identity h1 { overflow-wrap: anywhere; }
+  .author { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 15px; color: var(--text-2); }
+  .author a { color: var(--text); font-weight: 500; transition: color 0.12s; }
+  .author a:hover { color: var(--accent-soft); }
+  .summary { max-width: 38em; margin-top: 4px; font-size: clamp(16px, 1.3vw, 18px); line-height: 1.55; color: var(--text-2); text-wrap: pretty; overflow-wrap: anywhere; }
+  .get { padding-top: 6px; }
+
+  .columns { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 56px; align-items: start; margin-top: 8px; }
+  .main { display: grid; gap: 64px; min-width: 0; }
+  .main > .readme { max-width: 720px; }
+
+  .versions { display: grid; gap: 20px; max-width: 720px; padding-top: 40px; border-top: 1px solid var(--line); }
+  .versions > h2, .panel h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.015em; }
+  .timeline { display: grid; gap: 28px; }
+  .version { display: grid; gap: 10px; }
+  .version-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .version-head h3 { font-size: 15px; font-weight: 600; }
+  .version-head time { margin-left: auto; font-size: 13px; color: var(--text-3); }
+  .notes { font-size: 14.5px; }
+  .notes :global(h3), .notes :global(h4) { margin-top: 16px; font-size: 14px; }
+  .no-notes { font-size: 14px; color: var(--text-3); }
+  .older summary { display: inline-flex; align-items: center; gap: 6px; height: 32px; font-size: 14px; font-weight: 500; color: var(--text-2); cursor: pointer; list-style: none; }
+  .older summary::-webkit-details-marker { display: none; }
+  .older summary:hover { color: var(--text); }
+  .older[open] summary :global(.glyph) { rotate: 180deg; }
+  .older .timeline { margin-top: 16px; }
+
+  .side { position: sticky; top: 24px; display: grid; gap: 16px; }
+  .panel { display: grid; gap: 16px; padding: 20px; background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .asked { padding-top: 14px; border-top: 1px solid var(--line); font-size: 12.5px; line-height: 1.5; color: var(--text-3); }
+  dl { display: grid; gap: 10px; }
+  dl > div { display: flex; justify-content: space-between; gap: 16px; font-size: 13.5px; line-height: 1.45; }
+  dt { flex: none; color: var(--text-3); }
+  dd { min-width: 0; text-align: right; color: var(--text); overflow-wrap: anywhere; }
+  dd.links { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 10px; }
+  dd a, .keywords a { transition: color 0.12s, background-color 0.12s; }
+  dd a:hover { color: var(--accent-soft); }
+  .keywords { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .keywords a { display: inline-flex; align-items: center; max-width: 100%; height: 24px; padding: 0 9px; overflow: hidden; font-size: 12.5px; color: var(--text-2); text-overflow: ellipsis; white-space: nowrap; background: var(--secondary-bg); border-radius: 12px; }
+  .keywords a:hover { color: var(--text); background: var(--secondary-hover); }
+  .out { display: grid; gap: 2px; margin: 0 -8px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .out a { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; font-size: 14px; font-weight: 500; color: var(--text-2); border-radius: var(--radius-lg); transition: color 0.12s, background-color 0.12s; }
+  .out a:hover { color: var(--text); background: var(--hover); }
+  .out a :global(.glyph:last-child) { margin-left: auto; color: var(--text-3); }
+  .report { display: inline-flex; align-items: center; gap: 8px; justify-self: start; height: 28px; margin-left: 2px; font-size: 13px; color: var(--text-3); transition: color 0.12s; }
+  .report:hover { color: var(--tone-danger); }
+
+  .unreachable { display: grid; justify-items: start; gap: 8px; padding: 48px 0 24px; color: var(--text-3); }
+  .unreachable h1 { margin-top: 8px; font-size: 24px; color: var(--text); }
+  .unreachable p { color: var(--text-2); }
+  .unreachable a { margin-top: 8px; display: inline-flex; align-items: center; height: 32px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-lg); }
+
+  @media (max-width: 1000px) {
+    .columns { grid-template-columns: minmax(0, 1fr); gap: 40px; }
+    .side { position: static; grid-row: 1; }
+    .hero { grid-template-columns: auto minmax(0, 1fr); }
+    .get { grid-column: 1 / -1; padding-top: 0; }
+  }
+  @media (max-width: 560px) {
+    .hero { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+    .hero :global(.hero-tile) { width: 64px; height: 64px; font-size: 27px; }
+    .get :global(.open) { width: 100%; }
+    .get :global(.install) { justify-items: stretch; }
+  }
+</style>

@@ -1,0 +1,95 @@
+---
+// "Install in Zeron": a plain link to the app's own address for this
+// plugin, which opens Zeron on its page with Install ready (it never
+// installs by itself). When nothing takes the link (Zeron isn't on this
+// computer, or the browser keeps it), what to do instead is right under
+// it: always there to open, and opened for you when the page sees the link
+// went nowhere. No popup, no frame, nothing in the history.
+import { appUrl } from "../../lib/store/urls.ts";
+import Glyph from "../ui/Glyph.astro";
+import Mark from "../ui/Mark.astro";
+
+interface Props {
+  id: string;
+  name: string;
+}
+const { id, name } = Astro.props;
+---
+
+<div class="install" data-install>
+  <a class="open" href={appUrl(id)} data-install-link>
+    <Mark />
+    Install in Zeron
+  </a>
+  <details class="help" data-install-help>
+    <summary>Nothing happened?</summary>
+    <div class="steps" role="status" aria-live="polite">
+      <p>The button opens Zeron on your computer at this plugin, ready to install. If nothing opened:</p>
+      <ol>
+        <li><span><a href="/#downloads">Download Zeron</a> for your computer, open it, and press Install in Zeron again.</span></li>
+        <li><span>Or, in Zeron, open <b>Settings</b> <Glyph name="alt-arrow-right" size={12} /> <b>Plugins</b> <Glyph name="alt-arrow-right" size={12} /> <b>Browse</b> and search for <b>{name}</b>.</span></li>
+      </ol>
+    </div>
+  </details>
+</div>
+
+<script>
+  // If the page is still in front a moment after the link was followed,
+  // nothing took it: open the help. (Leaving for the app blurs the page or
+  // hides it; a browser's own "Open Zeron?" prompt blurs it too.)
+  for (const root of document.querySelectorAll<HTMLElement>("[data-install]")) {
+    const link = root.querySelector<HTMLAnchorElement>("[data-install-link]");
+    const help = root.querySelector<HTMLDetailsElement>("[data-install-help]");
+    if (!link || !help) continue;
+    link.addEventListener("click", () => {
+      let left = false;
+      const away = () => (left = true);
+      window.addEventListener("blur", away, { once: true });
+      document.addEventListener("visibilitychange", away, { once: true });
+      window.addEventListener("pagehide", away, { once: true });
+      window.setTimeout(() => {
+        window.removeEventListener("blur", away);
+        document.removeEventListener("visibilitychange", away);
+        window.removeEventListener("pagehide", away);
+        if (!left && document.hasFocus()) help.open = true;
+      }, 1600);
+    });
+  }
+</script>
+
+<style>
+  .install { display: grid; justify-items: start; gap: 10px; }
+  .open {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    height: 44px;
+    padding: 0 20px;
+    font-size: 15px;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--primary-text);
+    background: var(--primary-bg);
+    border-radius: var(--radius-lg);
+    transition: background-color 0.12s;
+  }
+  .open:hover { background: var(--primary-hover); }
+  .open:active { background: var(--primary-active); }
+  .open :global(.mark) { height: 12px; }
+  .help { font-size: 13.5px; line-height: 1.5; color: var(--text-2); }
+  .help summary { display: inline-flex; align-items: center; min-height: 24px; color: var(--text-3); cursor: pointer; list-style: none; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; transition: color 0.12s; }
+  .help summary::-webkit-details-marker { display: none; }
+  .help summary:hover { color: var(--text); }
+  .steps { display: grid; gap: 8px; max-width: 30em; margin-top: 8px; padding: 14px 16px; background: var(--surface); border-radius: var(--radius-xl); box-shadow: inset 0 0 0 1px var(--line); }
+  ol { display: grid; gap: 6px; padding-left: 20px; list-style: decimal; }
+  li::marker { color: var(--text-3); }
+  li span :global(.glyph) { display: inline-block; vertical-align: -1px; color: var(--text-3); }
+  b { font-weight: 500; color: var(--text); }
+  .steps a { color: var(--accent-soft); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 55%, transparent); text-underline-offset: 3px; }
+  .steps a:hover { text-decoration-color: var(--accent-soft); }
+  @media (prefers-reduced-motion: no-preference) {
+    .help[open] .steps { animation: help-in 0.2s var(--ease-out); }
+    @keyframes help-in { from { opacity: 0; translate: 0 -4px; } }
+  }
+</style>

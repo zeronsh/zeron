@@ -1,0 +1,405 @@
+---
+// One submission, as a reviewer reads it: who sent it, what it asks for
+// (what's new since the last approved version first), the automated
+// checks, the README as it will show, every file, and what changed line by
+// line. Then approve, or say why not. Admins only; anyone else gets the
+// site's 404.
+import AccountBar from "../../../../components/store/AccountBar.astro";
+import CodeView from "../../../../components/store/CodeView.astro";
+import ConfirmForm from "../../../../components/store/ConfirmForm.astro";
+import DiffView from "../../../../components/store/DiffView.astro";
+import FileTree from "../../../../components/store/FileTree.astro";
+import PermissionList from "../../../../components/store/PermissionList.astro";
+import PluginTile from "../../../../components/store/PluginTile.astro";
+import Badge from "../../../../components/ui/Badge.astro";
+import Dialog from "../../../../components/ui/Dialog.astro";
+import Field from "../../../../components/ui/Field.astro";
+import Glyph from "../../../../components/ui/Glyph.astro";
+import Select from "../../../../components/ui/Select.astro";
+import Tabs from "../../../../components/ui/Tabs.astro";
+import Store from "../../../../layouts/Store.astro";
+import { REJECT_REASONS } from "../../../../lib/store/admin.ts";
+import { takeFlash } from "../../../../lib/store/flash.ts";
+import { age, ago, bytes } from "../../../../lib/store/format.ts";
+import { privatePage } from "../../../../lib/store/http.ts";
+import { renderMarkdown } from "../../../../lib/store/markdown.ts";
+import { isPluginId, isVersion, packagePath } from "../../../../lib/store/names.ts";
+import { grew } from "../../../../lib/store/permissions.ts";
+import { changedFiles, countRows, diffRows, fileTree, isPicture, languageOf, manifestChanges, readText, type DiffRow } from "../../../../lib/store/review.ts";
+import { adminSession } from "../../../../lib/store/session.ts";
+import { reasonWords, versionState } from "../../../../lib/store/states.ts";
+import { fileUrl, memberUrl } from "../../../../lib/store/urls.ts";
+
+export const prerender = false;
+
+const { id, version } = Astro.params;
+if (!isPluginId(id) || !isVersion(version)) return new Response(null, { status: 404 });
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+
+const edge = Astro.locals.edge;
+const result = await edge.submission(id, version);
+if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
+privatePage(Astro);
+const toast = takeFlash(Astro.cookies);
+const s = result.ok ? result.data : null;
+
+const VIEWS = { overview: "Overview", readme: "README", files: "Files", changes: "Changes" } as const;
+type View = keyof typeof VIEWS;
+const askedView = Astro.url.searchParams.get("view");
+const view: View = askedView && Object.hasOwn(VIEWS, askedView) ? (askedView as View) : "overview";
+const here = `/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(version)}`;
+const viewHref = (v: View, extra: Record<string, string> = {}) => `${here}${v === "overview" && !Object.keys(extra).length ? "" : `?${new URLSearchParams({ view: v, ...extra })}`}`;
+
+const changes = s?.base ? changedFiles(s.files, s.base.files) : [];
+const changeOf = new Map(changes.map((c) => [c.path, c.change]));
+
+// README, as it will show in the store (its pictures through the file
+// route, which lets an admin see a pending version's).
+const readme = s && view === "readme" ? renderMarkdown(s.readme, { file: (p) => fileUrl(id, version, p), demote: true }) : "";
+
+// The file viewer: the file asked for, else the manifest.
+let viewing: { path: string; content: { text: string } | { binary: true } | { tooBig: true } | { picture: string } | null } | null = null;
+if (s && view === "files") {
+  const asked = packagePath(Astro.url.searchParams.get("path") ?? "");
+  const file = s.files.find((f) => f.path === asked) ?? s.files.find((f) => f.path === "zeron-plugin.json") ?? s.files[0];
+  if (file) {
+    viewing = isPicture(file.path)
+      ? { path: file.path, content: { picture: fileUrl(id, version, file.path) } }
+      : { path: file.path, content: file.binary ? { binary: true } : await readText(await edge.file(id, version, file.path, true)) };
+  }
+}
+
+// The changes: every changed text file's lines, read from both versions
+// (at most this many files on one page; the rest are listed).
+const DIFF_FILES = 40;
+let diffs: { path: string; change: string; rows: DiffRow[] | null; note?: string }[] = [];
+if (s?.base && view === "changes") {
+  const base = s.base.version;
+  diffs = await Promise.all(
+    changes.map(async (c, i) => {
+      const file = c.now ?? c.before!;
+      if (i >= DIFF_FILES) return { path: c.path, change: c.change, rows: null, note: "Open it in Files to read it." };
+      if (file.binary) return { path: c.path, change: c.change, rows: null, note: "Not text: compare it by its files." };
+      const [now, before] = await Promise.all([
+        c.now ? readText(await edge.file(id, version, c.path, true)) : Promise.resolve({ text: "" }),
+        c.before ? readText(await edge.file(id, base, c.path, true)) : Promise.resolve({ text: "" }),
+      ]);
+      if (!now || !before) return { path: c.path, change: c.change, rows: null, note: "It couldn't be read." };
+      if (!("text" in now) || !("text" in before)) return { path: c.path, change: c.change, rows: null, note: "tooBig" in now || "tooBig" in before ? "Too big to show here." : "Not text." };
+      return { path: c.path, change: c.change, rows: diffRows(before.text, now.text) };
+    }),
+  );
+}
+
+const state = s ? versionState(s.version) : null;
+const pending = s?.version.status === "pending";
+const newLines = s ? grew(s.permissions, s.permissions_diff) : [];
+const manifestDiff = s?.base ? manifestChanges(s.manifest, s.base.manifest) : [];
+const checks = s?.checks ?? [];
+const failing = checks.filter((c) => c.level === "fail").length;
+---
+
+<Store title={`${s?.plugin.name ?? id} ${version} · Review · Zeron`} description="A submission in review." noindex toast={toast}>
+  <div class="wrap review">
+    <AccountBar session={session} current="queue">
+      <a class="back" href="/admin/plugins"><Glyph name="alt-arrow-left" size={12} />Review</a>
+    </AccountBar>
+    {
+      !s ? (
+        <p class="unreachable">This submission can't be loaded right now. Try again in a minute.</p>
+      ) : (
+        <>
+          <header class="head">
+            <PluginTile id={s.plugin.id} name={s.plugin.name} icon={s.plugin.icon} version={version} size={64} />
+            <div class="identity">
+              <h1>
+                {s.plugin.name} <span class="v num">{version}</span>
+              </h1>
+              <p class="meta">
+                {state && <Badge tone={state.tone} size="sm">{state.label}</Badge>}
+                <span>{s.base ? `Update from ${s.base.version}` : "First listing"}</span>
+                <span>·</span>
+                <a href={`/admin/plugins/${encodeURIComponent(id)}`}>
+                  <code>{id}</code>
+                </a>
+                <span>·</span>
+                <span>submitted {ago(s.version.published_at)}</span>
+              </p>
+            </div>
+            {pending && (
+              <div class="decide">
+                <a class="decide-link reject" href={`${here}/reject`} data-dialog="reject">
+                  Reject…
+                </a>
+                <a class="decide-link approve" href={`${here}/approve`} data-dialog="approve">
+                  <Glyph name="check" size={14} />
+                  Approve…
+                </a>
+              </div>
+            )}
+          </header>
+
+          {s.version.review?.message && (
+            <p class="decided">
+              <b>{s.version.review.reason ? reasonWords(s.version.review.reason) : "Decided"}:</b> {s.version.review.message}
+            </p>
+          )}
+
+          <Tabs
+            label="What to read"
+            tabs={(Object.keys(VIEWS) as View[])
+              .filter((v) => v !== "changes" || s.base)
+              .map((v) => ({ href: viewHref(v), label: VIEWS[v], current: v === view, count: v === "changes" ? changes.length : v === "files" ? s.files.length : undefined }))}
+          />
+
+          {view === "overview" && (
+            <div class="overview">
+              <div class="col">
+                {s.base && (
+                  <section class="panel" aria-labelledby="new-heading">
+                    <h2 id="new-heading">New since {s.base.version}</h2>
+                    {newLines.length === 0 ? (
+                      <p class="quiet">It asks for nothing it didn't already.</p>
+                    ) : (
+                      <PermissionList permissions={s.permissions} only={newLines} heading="It now also asks to:" />
+                    )}
+                    {manifestDiff.length > 0 && (
+                      <div class="manifest">
+                        <p class="label">Manifest changes</p>
+                        <dl>
+                          {manifestDiff.map((m) => (
+                            <div class:list={{ risky: m.risky }}>
+                              <dt>
+                                <code>{m.key}</code>
+                                {m.risky && <Badge tone="danger" size="sm">reach</Badge>}
+                              </dt>
+                              <dd>
+                                {m.before !== null && <code class="was">{m.before}</code>}
+                                {m.after !== null && <code class="now">{m.after}</code>}
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </div>
+                    )}
+                  </section>
+                )}
+                <section class="panel" aria-labelledby="asks-heading">
+                  <h2 id="asks-heading">What it asks for</h2>
+                  <PermissionList permissions={s.permissions} author={s.publisher.username ?? undefined} />
+                </section>
+              </div>
+              <div class="col">
+                <section class="panel" aria-labelledby="publisher-heading">
+                  <h2 id="publisher-heading">Publisher</h2>
+                  <p class="who">
+                    {s.publisher.username ? <a href={memberUrl(s.publisher.username)}>@{s.publisher.username}</a> : <span>No username</span>}
+                    <span class="faint">{age(s.publisher.created_at)}</span>
+                  </p>
+                  <dl class="facts">
+                    <div><dt>Approved</dt><dd class="num">{s.publisher.decisions.approved}</dd></div>
+                    <div><dt>Not approved</dt><dd class="num">{s.publisher.decisions.rejected}</dd></div>
+                    <div><dt>Taken down</dt><dd class="num">{s.publisher.decisions.removed}</dd></div>
+                  </dl>
+                  {s.publisher.recent.length > 0 && (
+                    <ul class="recent" role="list">
+                      {s.publisher.recent.map((r) => (
+                        <li>
+                          <a href={`/admin/plugins/${encodeURIComponent(r.id)}/${encodeURIComponent(r.version)}`}>
+                            <code>{r.id}</code> <span class="num">{r.version}</span>
+                          </a>
+                          <Badge tone={versionState({ status: r.status }).tone} size="sm">{versionState({ status: r.status }).label}</Badge>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+                <section class="panel" aria-labelledby="checks-heading">
+                  <h2 id="checks-heading">Checks {failing > 0 && <Badge tone="danger" size="sm">{failing} failed</Badge>}</h2>
+                  <ul class="check-list" role="list">
+                    {checks.map((c) => (
+                      <li class={c.level}>
+                        <Glyph name={c.level === "ok" ? "check-circle" : c.level === "warn" ? "danger-triangle" : "close-circle"} size={16} />
+                        <span>
+                          {c.message}
+                          <span class="sr-only"> ({c.level === "ok" ? "passed" : c.level === "warn" ? "to look at" : "failed"})</span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              </div>
+            </div>
+          )}
+
+          {view === "readme" && (
+            <section class="readme-view" aria-label="README as it will show">
+              <p class="quiet">As it will show on its page.</p>
+              <div class="readme" set:html={readme} />
+            </section>
+          )}
+
+          {view === "files" && (
+            <div class="files">
+              <nav class="tree-pane" aria-label="Files">
+                <FileTree nodes={fileTree(s.files)} current={viewing?.path ?? null} href={(p) => viewHref("files", { path: p })} changes={changeOf} />
+              </nav>
+              <section class="viewer" aria-label={viewing ? viewing.path : "File"}>
+                {viewing && (
+                  <>
+                    <p class="file-head">
+                      <code>{viewing.path}</code>
+                      <span class="faint num">{bytes(s.files.find((f) => f.path === viewing!.path)?.bytes ?? 0)}</span>
+                      {changeOf.get(viewing.path) && (
+                        <a href={`${viewHref("changes")}#${encodeURIComponent(viewing.path)}`}>See its changes</a>
+                      )}
+                    </p>
+                    {viewing.content === null ? (
+                      <p class="quiet">It couldn't be read.</p>
+                    ) : "picture" in viewing.content ? (
+                      <img class="picture" src={viewing.content.picture} alt={viewing.path} />
+                    ) : "binary" in viewing.content ? (
+                      <p class="flag"><Glyph name="danger-triangle" size={16} />Not text, so not shown. Binary files can hold code: ask what it's for.</p>
+                    ) : "tooBig" in viewing.content ? (
+                      <p class="quiet">Too big to show here.</p>
+                    ) : (
+                      <CodeView text={viewing.content.text} language={languageOf(viewing.path)} label={viewing.path} />
+                    )}
+                  </>
+                )}
+              </section>
+            </div>
+          )}
+
+          {view === "changes" && s.base && (
+            <section class="changes" aria-label={`Changes since ${s.base.version}`}>
+              <p class="quiet">
+                {changes.length === 0 ? `No file changed since ${s.base.version}.` : `${changes.length} ${changes.length === 1 ? "file" : "files"} changed since ${s.base.version}.`}
+              </p>
+              {diffs.map((d) => {
+                const n = d.rows ? countRows(d.rows) : null;
+                return (
+                  <article class="change" id={encodeURIComponent(d.path)}>
+                    <header>
+                      <Badge tone={d.change === "added" ? "success" : d.change === "removed" ? "danger" : "warning"} size="sm">
+                        {d.change === "added" ? "Added" : d.change === "removed" ? "Removed" : "Changed"}
+                      </Badge>
+                      <a href={viewHref("files", { path: d.path })}><code>{d.path}</code></a>
+                      {n && (
+                        <span class="counts num">
+                          <span class="plus">+{n.added}</span> <span class="minus">−{n.removed}</span>
+                        </span>
+                      )}
+                    </header>
+                    {d.rows ? d.rows.length > 0 ? <DiffView rows={d.rows} language={languageOf(d.path)} /> : <p class="quiet">Only its bytes changed.</p> : <p class="quiet">{d.note}</p>}
+                  </article>
+                );
+              })}
+            </section>
+          )}
+
+          {pending && (
+            <>
+              <Dialog id="approve" title={`Approve ${s.plugin.name} ${version}?`}>
+                <p>It's listed at once, and offered to everyone who has it at their next update check.</p>
+                <ConfirmForm action={`${here}/approve`} csrf={session.csrf} confirm="Approve" mode="dialog" back={here} />
+              </Dialog>
+              <Dialog id="reject" title={`Reject ${s.plugin.name} ${version}?`} tone="danger">
+                <p>The author reads your reason and your words, in Zeron and on the web. They can publish a new version.</p>
+                <ConfirmForm action={`${here}/reject`} csrf={session.csrf} confirm="Reject" tone="danger" mode="dialog" back={here}>
+                  <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} visibleLabel />
+                  <Field name="message" label="For the author" multiline required maxlength={2000} hint="Say what to change, plainly. They'll read it as you write it." />
+                </ConfirmForm>
+              </Dialog>
+            </>
+          )}
+        </>
+      )
+    }
+  </div>
+</Store>
+
+<style>
+  .review { display: grid; gap: 24px; }
+  .back { display: inline-flex; align-items: center; gap: 6px; justify-self: start; height: 28px; font-size: 14px; font-weight: 500; color: var(--text-3); transition: color 0.12s; }
+  .back:hover { color: var(--text); }
+  .head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 20px; }
+  .identity { display: grid; gap: 6px; min-width: 0; }
+  .identity h1 { font-size: clamp(24px, 2.8vw, 32px); overflow-wrap: anywhere; }
+  .v { font-weight: 500; color: var(--text-3); }
+  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13.5px; color: var(--text-3); }
+  .meta a { color: var(--text-2); transition: color 0.12s; }
+  .meta a:hover { color: var(--text); }
+  .decide { display: flex; gap: 8px; }
+  .decide-link { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px; font-size: 14px; font-weight: 500; border-radius: var(--radius-lg); transition: background-color 0.12s, color 0.12s; }
+  .reject { color: var(--tone-danger); background: var(--secondary-bg); }
+  .reject:hover { background: var(--tone-danger-wash); }
+  .approve { color: var(--primary-text); background: var(--primary-bg); }
+  .approve:hover { background: var(--primary-hover); }
+  .approve:active { background: var(--primary-active); }
+  .decided { padding: 12px 14px; font-size: 14px; color: var(--text-2); background: var(--surface); border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); }
+  .decided b { font-weight: 500; color: var(--text); }
+
+  .overview { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  .col { display: grid; gap: 16px; }
+  .panel { display: grid; gap: 14px; padding: 20px; background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .panel h2 { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+  .quiet { font-size: 14px; color: var(--text-3); }
+  .faint { color: var(--text-3); }
+  .label { font-size: 13px; font-weight: 500; color: var(--text-2); }
+  .manifest { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .manifest dl { display: grid; gap: 10px; }
+  .manifest dl > div { display: grid; gap: 4px; }
+  .manifest dt { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .manifest dd { display: grid; gap: 2px; }
+  .manifest dd code { display: block; padding: 4px 8px; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; border-radius: var(--radius-sm); }
+  .was { color: var(--text-2); background: var(--diff-removed-wash); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--diff-removed) 60%, transparent); }
+  .now { color: var(--text); background: var(--diff-added-wash); }
+  .who { display: flex; align-items: baseline; gap: 10px; font-size: 15px; }
+  .who a { font-weight: 600; color: var(--text); }
+  .who a:hover { color: var(--accent-soft); }
+  .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .facts > div { display: grid; gap: 2px; padding: 10px 12px; background: var(--surface); border-radius: var(--radius-lg); }
+  .facts dt { font-size: 12px; color: var(--text-3); }
+  .facts dd { font-size: 18px; font-weight: 600; }
+  .recent { display: grid; gap: 6px; font-size: 13px; }
+  .recent li { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .recent a { color: var(--text-2); }
+  .recent a:hover { color: var(--text); }
+  .check-list { display: grid; gap: 10px; font-size: 14px; line-height: 1.45; }
+  .check-list li { display: flex; gap: 10px; align-items: flex-start; color: var(--text-2); }
+  .check-list :global(.glyph) { margin-top: 1px; }
+  .check-list .ok :global(.glyph) { color: var(--tone-success); }
+  .check-list .warn { color: var(--tone-warning); }
+  .check-list .fail { color: var(--tone-danger); }
+
+  .readme-view { display: grid; gap: 16px; max-width: 760px; }
+
+  .files { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 20px; align-items: start; }
+  .tree-pane { position: sticky; top: 24px; max-height: calc(100dvh - 48px); overflow: auto; padding: 8px; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .viewer { display: grid; gap: 12px; min-width: 0; }
+  .file-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 13.5px; }
+  .file-head code { color: var(--text); }
+  .file-head a { margin-left: auto; color: var(--accent-soft); }
+  .picture { max-width: 100%; border-radius: 12px; box-shadow: 0 0 0 1px var(--line); background: repeating-conic-gradient(#ffffff08 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
+  .flag { display: flex; gap: 10px; padding: 12px 14px; font-size: 14px; color: var(--tone-warning); background: var(--tone-warning-wash); border-radius: var(--radius-lg); }
+
+  .changes { display: grid; gap: 24px; }
+  .change { display: grid; gap: 10px; scroll-margin-top: 24px; }
+  .change header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 13.5px; }
+  .change header a { color: var(--text); }
+  .change header a:hover { color: var(--accent-soft); }
+  .counts { margin-left: auto; font-family: var(--mono); font-size: 12.5px; }
+  .plus { color: var(--diff-added); }
+  .minus { color: var(--diff-removed); }
+  .unreachable { padding: 40px 0; color: var(--text-2); }
+
+  @media (max-width: 900px) {
+    .overview { grid-template-columns: minmax(0, 1fr); }
+    .files { grid-template-columns: minmax(0, 1fr); }
+    .tree-pane { position: static; max-height: 320px; }
+    .head { grid-template-columns: auto minmax(0, 1fr); }
+    .decide { grid-column: 1 / -1; }
+  }
+</style>

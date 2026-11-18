@@ -5,12 +5,12 @@
   // rendered by the Worker, which reads the store and the sign-in session
   // from the edge worker through the EDGE service binding. The site never
   // holds a WorkOS secret.
-  // `wrangler deploy` builds it first (`build` below): a clean install, the
-  // type check, the build into ./dist and the tests, so a deploy from CI
+  // Deploy with `npm run deploy`: a clean install, the type check, the build
+  // into ./dist and the tests, then `wrangler deploy`, so a deploy from CI
   // (.github/workflows/deploy.yml, on a push to main that touches this
   // folder) or from this directory uploads only a build that passed. The
   // build writes the deployable config (dist/server/wrangler.json) and
-  // points wrangler at it.
+  // points wrangler at it, so wrangler itself never builds.
   // The install surface (/install.sh, /releases/*), member cards (/@*) and
   // web sign-in (/auth/web/*) are served by the edge worker via path routes
   // on the same hostname; path routes beat this custom domain, so this
@@ -21,12 +21,13 @@
   "name": "comet-landing",
   "main": "@astrojs/cloudflare/entrypoints/server",
   "compatibility_date": "2026-07-01",
+  // Node's APIs where a dependency reaches for them (as the edge worker has).
+  "compatibility_flags": ["nodejs_compat"],
   "routes": [
     { "pattern": "zeron.sh", "custom_domain": true },
     { "pattern": "comet.zeron.sh", "custom_domain": true }
   ],
   "workers_dev": true,
-  "build": { "command": "npm ci && npm run check && npm test" },
   "assets": {
     "directory": "./dist",
     // (An address that is no file goes to the Worker, which answers with
@@ -37,5 +38,18 @@
   "services": [{ "binding": "EDGE", "service": "comet-native-edge" }],
   // The Worker cache in front of the Worker: public store pages say how
   // long they may be kept (Astro's route cache); everything else is no-store.
-  "cache": { "enabled": true }
+  "cache": { "enabled": true },
+  "env": {
+    // The site's staging copy, at https://site-staging.zeron.sh: the same
+    // site on its own worker (zeron-landing-staging), which holds only that
+    // domain and so can never take zeron.sh, reading the staging edge.
+    // Built with CLOUDFLARE_ENV=staging (`npm run deploy:staging`); the
+    // build bakes the choice into dist/server/wrangler.json.
+    "staging": {
+      "name": "zeron-landing-staging",
+      "routes": [{ "pattern": "site-staging.zeron.sh", "custom_domain": true }],
+      "services": [{ "binding": "EDGE", "service": "zeron-edge-staging" }],
+      "cache": { "enabled": true }
+    }
+  }
 }

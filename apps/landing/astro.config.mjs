@@ -30,15 +30,18 @@ export default defineConfig({
   // (Astro.cache in the route); anything that doesn't say is never kept.
   cache: { provider: cacheCloudflare() },
   security: { checkOrigin: true },
-  // The pages' CSS is collected from the server build. Without the adapter
-  // that build's CSS target was esnext; the Cloudflare plugin would make it
-  // es2024, which adds prefixes and changes every stylesheet. Kept as it was.
   vite: {
     plugins: [
       {
         name: "zeron:css-target",
         enforce: "post",
-        configEnvironment: (name) => (name === "ssr" || name === "prerender" ? { build: { cssTarget: "esnext" } } : undefined),
+        configEnvironment(name, config) {
+          // The pages' CSS is collected from the server build. Without the
+          // adapter that build's CSS target was esnext; the Cloudflare plugin
+          // would make it es2024, which adds prefixes and changes every
+          // stylesheet. Kept as it was.
+          if (name === "ssr" || name === "prerender") config.build = { ...config.build, cssTarget: "esnext" };
+        },
       },
     ],
   },

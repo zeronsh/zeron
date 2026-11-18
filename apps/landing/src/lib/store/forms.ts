@@ -1,0 +1,53 @@
+// A form's post, the same way everywhere: signed in, the session's token
+// echoed back (the edge checks it too, with the Origin, which Astro has
+// already held to this site), the edge asked, the answer said once, and
+// back to a page with 303 so a reload never posts again.
+import type { AstroGlobal } from "astro";
+import type { Result } from "./edge.ts";
+import { setFlash, type FlashWord } from "./flash.ts";
+import type { WebSession } from "./types.ts";
+import { sitePath } from "./urls.ts";
+
+/** The post's fields, or null when it isn't a form. */
+export async function formOf(request: Request): Promise<FormData | null> {
+  const type = request.headers.get("content-type") ?? "";
+  if (!type.startsWith("application/x-www-form-urlencoded") && !type.startsWith("multipart/form-data")) return null;
+  try {
+    return await request.formData();
+  } catch {
+    return null;
+  }
+}
+
+export const field = (form: FormData, name: string, max = 2000): string => {
+  const value = form.get(name);
+  return typeof value === "string" ? value.trim().slice(0, max) : "";
+};
+
+/** Whether the post carries this session's token. */
+export const tokenMatches = (form: FormData, session: WebSession) => field(form, "csrf", 200) === session.csrf;
+
+/** What to say about an answer from the edge. */
+export function flashFor(result: Result<unknown>, done: FlashWord): FlashWord {
+  if (result.ok) return done;
+  switch (result.error) {
+    case "conflict":
+    case "not_found":
+      return "conflict";
+    case "forbidden":
+    case "signed_out":
+      return "not_allowed";
+    case "bad_csrf":
+      return "expired";
+    case "bad_request":
+      return "bad_input";
+    default:
+      return "failed";
+  }
+}
+
+/** Says `word` on the page at `to` (a path on this site), and goes there. */
+export function done(astro: Pick<AstroGlobal, "cookies" | "redirect">, word: FlashWord, to: string): Response {
+  setFlash(astro.cookies, word);
+  return astro.redirect(sitePath(to), 303);
+}

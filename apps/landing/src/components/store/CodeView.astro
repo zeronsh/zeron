@@ -1,0 +1,25 @@
+---
+// A file's text with its line numbers, highlighted on the server.
+import { highlight } from "../../lib/store/highlight.ts";
+
+interface Props {
+  text: string;
+  language: string | null;
+  label: string;
+}
+const { text, language, label } = Astro.props;
+const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n").length : text.split("\n").length;
+---
+
+<div class="code" role="region" aria-label={label} tabindex="0">
+  <pre class="numbers" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join("\n")}</pre>
+  <pre class="text"><code class="hljs" set:html={highlight(text, language)} /></pre>
+</div>
+
+<style>
+  .code { display: grid; grid-template-columns: auto minmax(0, 1fr); overflow-x: auto; font-size: 12.5px; line-height: 20px; background: var(--field-bg); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--border); }
+  .code:focus-visible { outline-offset: 2px; }
+  pre { margin: 0; padding: 12px 0; font-family: var(--mono); }
+  .numbers { padding-inline: 14px 12px; text-align: right; color: var(--text-3); user-select: none; border-right: 1px solid var(--line); }
+  .text { padding-inline: 14px; tab-size: 2; }
+</style>

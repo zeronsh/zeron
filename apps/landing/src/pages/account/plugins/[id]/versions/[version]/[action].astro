@@ -1,0 +1,37 @@
+---
+// Withdraw, stop offering, or offer again one of your versions. A post does
+// it; a visit (a link followed without a script) asks first.
+import ConfirmPage from "../../../../../../components/store/ConfirmPage.astro";
+import Store from "../../../../../../layouts/Store.astro";
+import { AUTHOR_ACTIONS, isAuthorAction } from "../../../../../../lib/store/actions.ts";
+import { done, flashFor, formOf, tokenMatches } from "../../../../../../lib/store/forms.ts";
+import { privatePage } from "../../../../../../lib/store/http.ts";
+import { isPluginId, isVersion } from "../../../../../../lib/store/names.ts";
+import { requireSession } from "../../../../../../lib/store/session.ts";
+
+export const prerender = false;
+
+const { id, version, action } = Astro.params;
+if (!isPluginId(id) || !isVersion(version) || !isAuthorAction(action)) return new Response(null, { status: 404 });
+const session = await requireSession(Astro);
+if (session instanceof Response) return session;
+const back = `/account/plugins/${id}`;
+const ask = AUTHOR_ACTIONS[action].ask(version);
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
+  const result = await Astro.locals.edge.versionAction(id, version, action, session.csrf);
+  return done(Astro, flashFor(result, ask.flash), back);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+privatePage(Astro);
+---
+
+<Store title={`${ask.title} · Zeron`} description={ask.title} noindex>
+  <div class="wrap">
+    <ConfirmPage title={ask.title} action={Astro.url.pathname} csrf={session.csrf} confirm={ask.confirm} tone={ask.tone} back={back}>
+      <Fragment slot="words">{ask.words.map((w) => <p>{w}</p>)}</Fragment>
+    </ConfirmPage>
+  </div>
+</Store>

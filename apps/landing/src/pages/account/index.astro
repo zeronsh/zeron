@@ -1,0 +1,117 @@
+---
+// Your plugins: each one's place in the store and the state of its newest
+// version. One person's page: never cached, never indexed.
+import AccountBar from "../../components/store/AccountBar.astro";
+import PluginTile from "../../components/store/PluginTile.astro";
+import Badge from "../../components/ui/Badge.astro";
+import Glyph from "../../components/ui/Glyph.astro";
+import Store from "../../layouts/Store.astro";
+import { takeFlash } from "../../lib/store/flash.ts";
+import { ago } from "../../lib/store/format.ts";
+import { privatePage } from "../../lib/store/http.ts";
+import { requireSession } from "../../lib/store/session.ts";
+import { listingState, versionState } from "../../lib/store/states.ts";
+
+export const prerender = false;
+
+const session = await requireSession(Astro);
+if (session instanceof Response) return session;
+privatePage(Astro);
+const toast = takeFlash(Astro.cookies);
+const result = await Astro.locals.edge.myPlugins();
+const plugins = result.ok ? result.data.plugins : [];
+---
+
+<Store title="Your plugins · Zeron" description="The plugins you publish." noindex toast={toast}>
+  <div class="wrap account">
+    <AccountBar session={session} current="mine">
+      <h1>Your plugins</h1>
+      <p class="lead">Each version you publish is reviewed before anyone else can install it. Your own devices can use it straight away.</p>
+    </AccountBar>
+
+    {
+      !session.username && (
+        <p class="notice">
+          <Glyph name="info-circle" size={16} />
+          <span>To publish, claim a username first: Zeron asks for one right after you sign in. Your plugins will read “by @username”.</span>
+        </p>
+      )
+    }
+
+    {
+      !result.ok ? (
+        <div class="empty">
+          <h2>Your plugins can't be loaded right now</h2>
+          <p>Try again in a minute.</p>
+        </div>
+      ) : plugins.length === 0 ? (
+        <div class="empty">
+          <Glyph name="plug-circle" size={20} />
+          <h2>You haven't published a plugin yet</h2>
+          <p>
+            Publish one from Zeron: <b>Settings</b> → <b>Plugins</b> → <b>Yours</b> → <b>Publish…</b>, or from a terminal with <code>zeron plugin publish</code>.
+          </p>
+        </div>
+      ) : (
+        <ul class="list" role="list">
+          {plugins.map((p) => {
+            const newest = p.versions[0];
+            const state = newest ? versionState(newest) : null;
+            const listing = listingState(p.listing);
+            return (
+              <li class="row">
+                <PluginTile id={p.id} name={p.name} icon={p.icon} version={newest?.version ?? p.version} size={40} />
+                <div class="what">
+                  <h2><a class="follow" href={`/account/plugins/${p.id}`}>{p.name}</a></h2>
+                  <p class="id">{p.id}</p>
+                </div>
+                <div class="states">
+                  {/* Only what needs a look: a listed plugin and an approved version are the usual. */}
+                  {p.listing !== "listed" && <Badge tone={listing.tone} size="sm">{listing.label}</Badge>}
+                  {newest && state && (
+                    <span class="newest">
+                      <span class="num">{newest.version}</span>
+                      {newest.status !== "approved" && <Badge tone={state.tone} size="sm">{state.label}</Badge>}
+                      <span class="when">{ago(newest.published_at)}</span>
+                    </span>
+                  )}
+                </div>
+                <Glyph name="alt-arrow-right" size={14} class="chev" />
+              </li>
+            );
+          })}
+        </ul>
+      )
+    }
+  </div>
+</Store>
+
+<style>
+  .account { display: grid; gap: 28px; }
+  .lead { max-width: 36em; font-size: 16px; }
+  .notice { display: flex; gap: 10px; padding: 12px 14px; font-size: 14px; line-height: 1.5; color: var(--tone-info); background: var(--tone-info-wash); border-radius: var(--radius-lg); }
+  .notice :global(.glyph) { margin-top: 2px; }
+  .list { display: grid; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
+  .row { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 16px; padding: 16px 20px; transition: background-color 0.12s; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row:hover { background: var(--hover); }
+  .row:has(.follow:focus-visible) { outline: 2px solid color-mix(in srgb, var(--accent) 80%, white); outline-offset: -2px; }
+  .what h2 { font-size: 15px; font-weight: 600; line-height: 1.35; }
+  .follow::before { content: ""; position: absolute; inset: 0; }
+  .follow:focus-visible { outline: none; }
+  .id { font-family: var(--mono); font-size: 12.5px; color: var(--text-3); }
+  .states { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px 14px; }
+  .newest { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); }
+  .when { color: var(--text-3); }
+  .row :global(.chev) { color: var(--text-3); }
+  .empty { display: grid; justify-items: center; gap: 8px; padding: 64px 24px; text-align: center; color: var(--text-3); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .empty h2 { margin-top: 6px; font-size: 16px; font-weight: 600; color: var(--text); }
+  .empty p { max-width: 34em; font-size: 14px; line-height: 1.6; color: var(--text-2); }
+  .empty b { font-weight: 500; color: var(--text); }
+  .empty code { font-size: 0.92em; color: var(--text); }
+  @media (max-width: 640px) {
+    .row { grid-template-columns: auto minmax(0, 1fr) auto; }
+    .states { grid-column: 2 / -1; justify-content: flex-start; }
+    .row :global(.chev) { grid-row: 1; grid-column: 3; }
+  }
+</style>

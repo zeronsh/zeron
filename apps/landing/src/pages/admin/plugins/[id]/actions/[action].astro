@@ -1,0 +1,50 @@
+---
+// Suspend, restore, feature or move a plugin to another account. A post
+// does it; a visit is the same question as a page.
+import ConfirmPage from "../../../../../components/store/ConfirmPage.astro";
+import Field from "../../../../../components/ui/Field.astro";
+import Store from "../../../../../layouts/Store.astro";
+import { isPluginAction, PLUGIN_FLASH, pluginRequest } from "../../../../../lib/store/admin.ts";
+import { done, field, flashFor, formOf, tokenMatches } from "../../../../../lib/store/forms.ts";
+import { privatePage } from "../../../../../lib/store/http.ts";
+import { isPluginId } from "../../../../../lib/store/names.ts";
+import { adminSession } from "../../../../../lib/store/session.ts";
+
+export const prerender = false;
+
+const { id, action } = Astro.params;
+if (!isPluginId(id) || !isPluginAction(action)) return new Response(null, { status: 404 });
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+const back = `/admin/plugins/${encodeURIComponent(id)}`;
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
+  const request = pluginRequest(id, action, { get: (name) => field(form, name) });
+  if (!request) return done(Astro, "bad_input", back);
+  const result = await Astro.locals.edge.admin(request.path, request.body, session.csrf);
+  return done(Astro, flashFor(result, PLUGIN_FLASH[action]), back);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+privatePage(Astro);
+
+const ASK = {
+  suspend: { title: `Suspend ${id}?`, words: "It's gone from the store at once: no page, no installs, no updates. Anyone who has it keeps it. You can restore it.", confirm: "Suspend", tone: "danger" },
+  restore: { title: `Restore ${id}?`, words: "It's back in the store with its approved versions.", confirm: "Restore", tone: "primary" },
+  feature: { title: `Feature ${id}?`, words: "It shows in the store's featured row.", confirm: "Feature", tone: "primary" },
+  unfeature: { title: `Stop featuring ${id}?`, words: "It leaves the featured row.", confirm: "Stop featuring", tone: "primary" },
+  transfer: { title: `Move ${id} to another account?`, words: "Its new owner publishes its versions from now on. Its current owner can't, and their deploy keys for it stop working.", confirm: "Move it", tone: "danger" },
+} as const;
+const ask = ASK[action];
+---
+
+<Store title={`${ask.title} · Zeron`} description={ask.title} noindex>
+  <div class="wrap">
+    <ConfirmPage title={ask.title} action={Astro.url.pathname} csrf={session.csrf} confirm={ask.confirm} tone={ask.tone} back={back}>
+      <p slot="words">{ask.words}</p>
+      {action === "suspend" && <Field name="reason" label="Why" multiline required maxlength={2000} hint="Its author reads this." />}
+      {action === "transfer" && <Field name="to_username" label="New owner's username" required maxlength={21} placeholder="@username" />}
+    </ConfirmPage>
+  </div>
+</Store>

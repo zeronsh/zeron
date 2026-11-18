@@ -1,0 +1,40 @@
+---
+// Revoke one of your plugin's deploy keys. A post does it; a visit asks first.
+import ConfirmPage from "../../../../../components/store/ConfirmPage.astro";
+import Store from "../../../../../layouts/Store.astro";
+import { isKey, revokeAsk } from "../../../../../lib/store/actions.ts";
+import { done, flashFor, formOf, tokenMatches } from "../../../../../lib/store/forms.ts";
+import { privatePage } from "../../../../../lib/store/http.ts";
+import { isPluginId } from "../../../../../lib/store/names.ts";
+import { requireSession } from "../../../../../lib/store/session.ts";
+
+export const prerender = false;
+
+const { id, key } = Astro.params;
+if (!isPluginId(id) || !isKey(key)) return new Response(null, { status: 404 });
+const session = await requireSession(Astro);
+if (session instanceof Response) return session;
+const back = `/account/plugins/${id}`;
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
+  const result = await Astro.locals.edge.revokeKey(id, key, session.csrf);
+  return done(Astro, flashFor(result, "key_revoked"), back);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+
+const keys = await Astro.locals.edge.keys(id);
+const found = keys.ok ? keys.data.keys.find((k) => k.key === key && !k.revoked_at) : undefined;
+if (!found) return new Response(null, { status: 404 });
+privatePage(Astro);
+const ask = revokeAsk(found.name);
+---
+
+<Store title={`${ask.title} · Zeron`} description={ask.title} noindex>
+  <div class="wrap">
+    <ConfirmPage title={ask.title} action={Astro.url.pathname} csrf={session.csrf} confirm={ask.confirm} tone="danger" back={back}>
+      <Fragment slot="words">{ask.words.map((w) => <p>{w}</p>)}</Fragment>
+    </ConfirmPage>
+  </div>
+</Store>

@@ -1,0 +1,275 @@
+---
+// One of your plugins: every version you've submitted with its review state
+// and what the reviewer said, what you can do with each, and the deploy
+// keys that can publish it. Yours only: anyone else's id is the 404 page.
+import AccountBar from "../../../components/store/AccountBar.astro";
+import ConfirmForm from "../../../components/store/ConfirmForm.astro";
+import PluginTile from "../../../components/store/PluginTile.astro";
+import Badge from "../../../components/ui/Badge.astro";
+import Dialog from "../../../components/ui/Dialog.astro";
+import Glyph from "../../../components/ui/Glyph.astro";
+import Store from "../../../layouts/Store.astro";
+import { AUTHOR_ACTIONS, revokeAsk, type AuthorAction } from "../../../lib/store/actions.ts";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { ago, date } from "../../../lib/store/format.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { isPluginId } from "../../../lib/store/names.ts";
+import { requireSession } from "../../../lib/store/session.ts";
+import { listingState, reasonWords, versionState } from "../../../lib/store/states.ts";
+import { pluginUrl } from "../../../lib/store/urls.ts";
+import type { VersionInfo } from "../../../lib/store/types.ts";
+
+export const prerender = false;
+
+const { id } = Astro.params;
+if (!isPluginId(id)) return new Response(null, { status: 404 });
+const session = await requireSession(Astro);
+if (session instanceof Response) return session;
+
+const [mine, keysResult] = await Promise.all([Astro.locals.edge.myPlugins(), Astro.locals.edge.keys(id)]);
+const plugin = mine.ok ? mine.data.plugins.find((p) => p.id === id) : undefined;
+if (mine.ok && !plugin) return new Response(null, { status: 404 });
+privatePage(Astro);
+const toast = takeFlash(Astro.cookies);
+const keys = keysResult.ok ? keysResult.data.keys : null;
+const here = `/account/plugins/${id}`;
+
+/** What can be done with a version now. */
+const actionOf = (v: VersionInfo): AuthorAction | null =>
+  v.status === "pending" ? "withdraw" : v.status === "approved" ? "yank" : v.status === "yanked" ? "unyank" : null;
+const dialogId = (action: string, version: string) => `${action}-${version.replace(/[^\w-]/g, "_")}`;
+const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
+---
+
+<Store title={`${plugin?.name ?? id} · Your plugins · Zeron`} description="One of your plugins." noindex toast={toast}>
+  <div class="wrap mine">
+    <AccountBar session={session} current="mine">
+      <a class="back" href="/account"><Glyph name="alt-arrow-left" size={12} />Your plugins</a>
+    </AccountBar>
+    {
+      !plugin ? (
+        <div class="empty">
+          <h1>This plugin can't be loaded right now</h1>
+          <p>Try again in a minute.</p>
+        </div>
+      ) : (
+        <>
+          <header class="head">
+            <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.versions[0]?.version ?? plugin.version} size={64} />
+            <div class="identity">
+              <h1>{plugin.name}</h1>
+              <p class="meta">
+                <code>{plugin.id}</code>
+                <Badge tone={listingState(plugin.listing).tone} size="sm">{listingState(plugin.listing).label}</Badge>
+              </p>
+            </div>
+            {plugin.listing === "listed" && (
+              <a class="see" href={pluginUrl(plugin.id)}>
+                See it in the store<Glyph name="arrow-up-right" size={12} />
+              </a>
+            )}
+          </header>
+
+          <section aria-labelledby="versions-heading" class="block">
+            <h2 id="versions-heading">Versions</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Version</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Submitted</th>
+                    <th scope="col"><span class="sr-only">What you can do</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {plugin.versions.map((v) => {
+                    const state = versionState(v);
+                    const action = actionOf(v);
+                    const ask = action ? AUTHOR_ACTIONS[action].ask(v.version) : null;
+                    const warn = (v.checks ?? []).filter((c) => c.level !== "ok");
+                    return (
+                      <tr>
+                        <th scope="row" class="num">{v.version}</th>
+                        <td>
+                          <div class="state">
+                            <Badge tone={state.tone} size="sm">{state.label}</Badge>
+                            <span class="about">{state.about}</span>
+                            {v.review?.message && (
+                              <blockquote class="said">
+                                <p class="who">
+                                  The reviewer said{v.review.reason ? <> · {reasonWords(v.review.reason)}</> : null}
+                                </p>
+                                <p>{v.review.message}</p>
+                              </blockquote>
+                            )}
+                            {v.status === "pending" && warn.length > 0 && (
+                              <ul class="checks" role="list">
+                                {warn.map((c) => (
+                                  <li class={c.level}>
+                                    <Glyph name={c.level === "fail" ? "close-circle" : "danger-triangle"} size={14} />
+                                    {c.message}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        </td>
+                        <td class="when">
+                          <time datetime={new Date(v.published_at).toISOString()} title={date(v.published_at)}>{ago(v.published_at)}</time>
+                        </td>
+                        <td class="do">
+                          {action && ask && (
+                            <a class:list={["do-link", ask.tone]} href={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} data-dialog={dialogId(action, v.version)}>
+                              {ask.confirm}
+                            </a>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section aria-labelledby="keys-heading" class="block">
+            <h2 id="keys-heading">Deploy keys</h2>
+            <p class="explain">
+              A deploy key lets a script or a GitHub Action publish new versions of {plugin.name} without signing in. Each version it publishes is still reviewed.
+            </p>
+            <div class="make">
+              <Glyph name="info-circle" size={16} />
+              <div>
+                <p>
+                  <b>Make a key on your computer</b>, where its secret is made and stays: in Zeron, open <b>Settings</b> → <b>Plugins</b> → <b>Yours</b> → <b>{plugin.name}</b> → <b>Deploy keys</b>, or run:
+                </p>
+                <pre><code>zeron plugin keys add {plugin.id}</code></pre>
+                <p>The secret is shown once there. Put it in your CI's secrets; it never comes here.</p>
+              </div>
+            </div>
+            {keys === null ? (
+              <p class="explain">The keys can't be loaded right now.</p>
+            ) : keys.length === 0 ? (
+              <p class="none">No deploy keys yet.</p>
+            ) : (
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Name</th>
+                      <th scope="col">Key</th>
+                      <th scope="col">Last used</th>
+                      <th scope="col">Expires</th>
+                      <th scope="col"><span class="sr-only">What you can do</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {keys.map((k) => {
+                      const revoked = Boolean(k.revoked_at);
+                      const expired = !revoked && k.expires_at != null && k.expires_at < Date.now();
+                      return (
+                        <tr class:list={{ off: revoked || expired }}>
+                          <th scope="row">
+                            {k.name}
+                            {revoked && <Badge size="sm">Revoked</Badge>}
+                            {expired && <Badge size="sm">Expired</Badge>}
+                          </th>
+                          <td><code title={k.key}>{short(k.key)}</code></td>
+                          <td class="when">{k.last_used_at ? ago(k.last_used_at) : "Never"}</td>
+                          <td class="when">{revoked ? `Revoked ${ago(k.revoked_at!)}` : k.expires_at ? date(k.expires_at) : "Never"}</td>
+                          <td class="do">
+                            {!revoked && (
+                              <a class="do-link danger" href={`${here}/keys/${encodeURIComponent(k.key)}`} data-dialog={`revoke-${k.key}`}>
+                                Revoke
+                              </a>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          {plugin.versions.map((v) => {
+            const action = actionOf(v);
+            if (!action) return null;
+            const ask = AUTHOR_ACTIONS[action].ask(v.version);
+            return (
+              <Dialog id={dialogId(action, v.version)} title={ask.title} tone={ask.tone === "danger" ? "danger" : "default"}>
+                {ask.words.map((w) => <p>{w}</p>)}
+                <ConfirmForm action={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} csrf={session.csrf} confirm={ask.confirm} tone={ask.tone} mode="dialog" back={here} />
+              </Dialog>
+            );
+          })}
+          {(keys ?? []).filter((k) => !k.revoked_at).map((k) => {
+            const ask = revokeAsk(k.name);
+            return (
+              <Dialog id={`revoke-${k.key}`} title={ask.title} tone="danger">
+                {ask.words.map((w) => <p>{w}</p>)}
+                <ConfirmForm action={`${here}/keys/${encodeURIComponent(k.key)}`} csrf={session.csrf} confirm={ask.confirm} tone="danger" mode="dialog" back={here} />
+              </Dialog>
+            );
+          })}
+        </>
+      )
+    }
+  </div>
+</Store>
+
+<style>
+  .mine { display: grid; gap: 28px; }
+  .back { display: inline-flex; align-items: center; gap: 6px; justify-self: start; height: 28px; font-size: 14px; font-weight: 500; color: var(--text-3); transition: color 0.12s; }
+  .back:hover { color: var(--text); }
+  .head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 20px; }
+  .identity { display: grid; gap: 6px; min-width: 0; }
+  .identity h1 { font-size: clamp(26px, 3vw, 34px); overflow-wrap: anywhere; }
+  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .meta code { font-size: 13px; color: var(--text-3); }
+  .see { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-lg); transition: background-color 0.12s; }
+  .see:hover { background: var(--secondary-hover); }
+
+  .block { display: grid; gap: 14px; }
+  .block h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.015em; }
+  .explain { max-width: 44em; font-size: 14.5px; line-height: 1.6; color: var(--text-2); }
+  .none { font-size: 14px; color: var(--text-3); }
+  .make { display: flex; gap: 12px; max-width: 44em; padding: 14px 16px; font-size: 14px; line-height: 1.6; color: var(--text-2); background: var(--surface); border-radius: var(--radius-xl); box-shadow: inset 0 0 0 1px var(--line); }
+  .make > :global(.glyph) { margin-top: 3px; color: var(--tone-info); }
+  .make > div { display: grid; gap: 8px; min-width: 0; }
+  .make b { font-weight: 500; color: var(--text); }
+  .make pre { padding: 8px 12px; overflow-x: auto; font-size: 13px; color: var(--text); background: var(--field-bg); border-radius: var(--radius-md); box-shadow: inset 0 0 0 1px var(--border); }
+
+  /* A table of the app's: rows on hairlines, quiet headings, inside a card's ring. */
+  .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.5; }
+  th, td { padding: 14px 16px; text-align: left; vertical-align: top; }
+  thead th { padding-block: 10px; font-size: 12.5px; font-weight: 500; color: var(--text-3); border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tbody tr + tr > * { border-top: 1px solid var(--line); }
+  tbody th { font-weight: 600; color: var(--text); white-space: nowrap; }
+  tbody th :global(.badge) { margin-left: 8px; }
+  .off th, .off td { color: var(--text-3); }
+  .state { display: grid; justify-items: start; gap: 6px; min-width: 16em; }
+  .about { font-size: 13px; color: var(--text-3); }
+  .said { margin-top: 4px; padding: 10px 12px; font-size: 13.5px; color: var(--text); background: var(--tone-danger-wash); border-radius: var(--radius-lg); }
+  .said .who { margin-bottom: 2px; font-size: 12px; font-weight: 500; color: var(--tone-danger); }
+  .checks { display: grid; gap: 4px; font-size: 13px; }
+  .checks li { display: flex; gap: 6px; align-items: flex-start; color: var(--tone-warning); }
+  .checks li.fail { color: var(--tone-danger); }
+  .checks :global(.glyph) { margin-top: 3px; }
+  .when { color: var(--text-2); white-space: nowrap; }
+  .do { text-align: right; white-space: nowrap; }
+  .do-link { display: inline-flex; align-items: center; margin-top: -4px; height: 28px; padding: 0 10px; font-size: 13px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-md); transition: background-color 0.12s, color 0.12s; }
+  .do-link:hover { background: var(--secondary-hover); }
+  .do-link.danger { color: var(--tone-danger); }
+  .do-link.danger:hover { background: var(--tone-danger-wash); }
+
+  .empty { padding: 48px 0; }
+  .empty p { color: var(--text-2); }
+  @media (max-width: 640px) {
+    .head { grid-template-columns: auto minmax(0, 1fr); }
+    .see { grid-column: 1 / -1; justify-self: start; }
+  }
+</style>

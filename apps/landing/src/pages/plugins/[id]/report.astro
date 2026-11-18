@@ -1,0 +1,125 @@
+---
+// Report a listed plugin to the people who review them. Signed in, so a
+// report has someone behind it; the plugin's page itself stays the same
+// for everyone (and cached), so the thanks are said here.
+import PluginTile from "../../../components/store/PluginTile.astro";
+import Action from "../../../components/ui/Action.astro";
+import Field from "../../../components/ui/Field.astro";
+import Glyph from "../../../components/ui/Glyph.astro";
+import Store from "../../../layouts/Store.astro";
+import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { isPluginId } from "../../../lib/store/names.ts";
+import { requireSession } from "../../../lib/store/session.ts";
+import { REPORT_REASONS } from "../../../lib/store/types.ts";
+import { pluginUrl } from "../../../lib/store/urls.ts";
+
+export const prerender = false;
+
+const { id } = Astro.params;
+if (!isPluginId(id)) return new Response(null, { status: 404 });
+const session = await requireSession(Astro);
+if (session instanceof Response) return session;
+const here = `${pluginUrl(id)}/report`;
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", here);
+  const reason = field(form, "reason");
+  if (!(REPORT_REASONS as readonly string[]).includes(reason)) return done(Astro, "bad_input", here);
+  const result = await Astro.locals.edge.report(id, { reason, text: field(form, "text", 2000) }, session.csrf);
+  return done(Astro, flashFor(result, "report_sent"), here);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+
+const result = await Astro.locals.edge.plugin(id);
+if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
+privatePage(Astro);
+const flash = takeFlash(Astro.cookies);
+const sent = flash?.word === "report_sent";
+const plugin = result.ok ? result.data : null;
+
+const REASONS: Record<(typeof REPORT_REASONS)[number], { label: string; about: string }> = {
+  malware: { label: "It's harmful", about: "It steals, spies, or does damage." },
+  misleading: { label: "It isn't what it says", about: "It asks for or does more than it tells you." },
+  broken: { label: "It doesn't work", about: "It fails, or breaks part of Zeron." },
+  copyright: { label: "It uses my work or name", about: "It copies someone's code, art or brand without leave." },
+  other: { label: "Something else", about: "Tell us below." },
+};
+---
+
+<Store title={`Report ${plugin?.name ?? id} · Zeron`} description="Report a plugin." noindex toast={sent ? null : flash}>
+  <div class="wrap report">
+    <a class="back" href={pluginUrl(id)}><Glyph name="alt-arrow-left" size={12} />{plugin?.name ?? "Back"}</a>
+    {
+      sent ? (
+        <section class="card-like done" aria-labelledby="sent-heading">
+          <Glyph name="check-circle" size={20} />
+          <h1 id="sent-heading">Thanks for telling us</h1>
+          <p>Your report reached the people who review plugins. If it needs to go, it goes from the store and from people's devices.</p>
+          <a class="back-to" href={pluginUrl(id)}>Back to {plugin?.name ?? "the plugin"}</a>
+        </section>
+      ) : (
+        <section class="card-like" aria-labelledby="report-heading">
+          <header class="who">
+            {plugin && <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={40} />}
+            <div>
+              <h1 id="report-heading">Report {plugin?.name ?? id}</h1>
+              {plugin && <p class="by">by @{plugin.author.username}</p>}
+            </div>
+          </header>
+          <form method="post" action={here} class="form">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <fieldset>
+              <legend>What's wrong?</legend>
+              {REPORT_REASONS.map((r, i) => (
+                <label class="choice">
+                  <input type="radio" name="reason" value={r} required checked={i === 0} />
+                  <span>
+                    <b>{REASONS[r].label}</b>
+                    <span class="about">{REASONS[r].about}</span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
+            <Field name="text" label="What happened" multiline maxlength={2000} hint="What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it." />
+            <div class="answers">
+              <a class="cancel" href={pluginUrl(id)}>Cancel</a>
+              <Action tone="danger">Send report</Action>
+            </div>
+          </form>
+        </section>
+      )
+    }
+  </div>
+</Store>
+
+<style>
+  .report { display: grid; gap: 24px; max-width: calc(560px + 2 * var(--gutter)); }
+  .back { display: inline-flex; align-items: center; gap: 6px; justify-self: start; height: 28px; font-size: 14px; font-weight: 500; color: var(--text-3); transition: color 0.12s; overflow-wrap: anywhere; }
+  .back:hover { color: var(--text); }
+  .card-like { display: grid; gap: 20px; padding: 24px; background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .who { display: flex; align-items: center; gap: 12px; }
+  .who h1 { font-size: 20px; letter-spacing: -0.015em; overflow-wrap: anywhere; }
+  .by { font-size: 13px; color: var(--text-3); }
+  .form { display: grid; gap: 20px; }
+  fieldset { display: grid; gap: 4px; border: 0; }
+  legend { margin-bottom: 8px; font-size: 13px; font-weight: 500; color: var(--text); }
+  .choice { display: flex; gap: 12px; align-items: flex-start; margin: 0 -10px; padding: 10px; border-radius: var(--radius-lg); cursor: pointer; transition: background-color 0.12s; }
+  .choice:hover { background: var(--hover); }
+  .choice:has(input:checked) { background: var(--selected); }
+  .choice:has(input:focus-visible) { outline: 2px solid color-mix(in srgb, var(--accent) 80%, white); outline-offset: -2px; }
+  .choice input { margin-top: 3px; accent-color: var(--accent); }
+  .choice b { display: block; font-size: 14px; font-weight: 500; }
+  .about { font-size: 13px; color: var(--text-3); }
+  .answers { display: flex; justify-content: flex-end; gap: 8px; }
+  .cancel { display: inline-flex; align-items: center; height: 32px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-lg); transition: background-color 0.12s; }
+  .cancel:hover { background: var(--secondary-hover); }
+  .done { justify-items: start; gap: 10px; }
+  .done > :global(.glyph) { color: var(--tone-success); }
+  .done h1 { font-size: 22px; letter-spacing: -0.015em; }
+  .done p { color: var(--text-2); }
+  .back-to { margin-top: 6px; display: inline-flex; align-items: center; height: 32px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-lg); }
+  .back-to:hover { background: var(--secondary-hover); }
+</style>

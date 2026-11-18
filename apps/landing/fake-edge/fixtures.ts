@@ -166,6 +166,8 @@ function build(spec: Spec): FakePlugin {
     const checks = h.status === "pending" && (h.permissions ?? spec.permissions ?? []).some((p) => p === "commands" || p === "native")
       ? [...OK_CHECKS, { id: "risky", level: "warn" as const, message: "Asks to run programs on the computer as you." }]
       : OK_CHECKS;
+    // The signed manifest travels in the package too (its signature left out here).
+    files["zeron-plugin.json"] = `${JSON.stringify(manifest, null, 2)}\n`;
     return {
       version: h.version,
       status: h.status,

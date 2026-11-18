@@ -1,0 +1,44 @@
+---
+// The head of a signed-in page: for an admin, the dashboard's tabs; then
+// the page's title, and who is signed in with the way out beside it.
+import type { WebSession } from "../../lib/store/types.ts";
+import Action from "../ui/Action.astro";
+import Tabs from "../ui/Tabs.astro";
+
+interface Props {
+  session: WebSession;
+  /** Which of the signed-in pages this is. */
+  current: "mine" | "queue" | "reports" | "audit" | null;
+}
+const { session, current } = Astro.props;
+const admin = session.roles.includes("admin");
+const tabs = [
+  { href: "/account", label: "Your plugins", current: current === "mine" },
+  { href: "/admin/plugins", label: "Review", current: current === "queue" },
+  { href: "/admin/reports", label: "Reports", current: current === "reports" },
+  { href: "/admin/audit", label: "Audit log", current: current === "audit" },
+];
+---
+
+<div class="bar">
+  {admin && <Tabs label="Your pages" tabs={tabs} />}
+  <div class="row">
+    <div class="title"><slot /></div>
+    <div class="who">
+      <span class="name">{session.username ? `@${session.username}` : (session.user.name ?? "Signed in")}</span>
+      <form method="post" action="/auth/web/logout">
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <input type="hidden" name="return_to" value="/plugins" />
+        <Action tone="ghost" size="sm">Sign out</Action>
+      </form>
+    </div>
+  </div>
+</div>
+
+<style>
+  .bar { display: grid; gap: 28px; }
+  .row { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px 24px; }
+  .title { display: grid; gap: 10px; min-width: 0; flex: 1 1 28em; }
+  .who { display: flex; align-items: center; gap: 4px; margin-top: 6px; font-size: 13.5px; }
+  .name { margin-right: 4px; font-weight: 500; color: var(--text-2); }
+</style>

@@ -1,0 +1,221 @@
+---
+// One plugin, for an admin: its place in the store, its owner, every
+// version in every state, its reports, and what can be done to it.
+import AccountBar from "../../../../components/store/AccountBar.astro";
+import ConfirmForm from "../../../../components/store/ConfirmForm.astro";
+import PluginTile from "../../../../components/store/PluginTile.astro";
+import Action from "../../../../components/ui/Action.astro";
+import Badge from "../../../../components/ui/Badge.astro";
+import Dialog from "../../../../components/ui/Dialog.astro";
+import Field from "../../../../components/ui/Field.astro";
+import Glyph from "../../../../components/ui/Glyph.astro";
+import Store from "../../../../layouts/Store.astro";
+import { takeFlash } from "../../../../lib/store/flash.ts";
+import { age, ago, count, date } from "../../../../lib/store/format.ts";
+import { privatePage } from "../../../../lib/store/http.ts";
+import { isPluginId } from "../../../../lib/store/names.ts";
+import { adminSession } from "../../../../lib/store/session.ts";
+import { listingState, reasonWords, versionState } from "../../../../lib/store/states.ts";
+import { memberUrl, pluginUrl } from "../../../../lib/store/urls.ts";
+
+export const prerender = false;
+
+const { id } = Astro.params;
+if (!isPluginId(id)) return new Response(null, { status: 404 });
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+const result = await Astro.locals.edge.adminPlugin(id);
+if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
+privatePage(Astro);
+const toast = takeFlash(Astro.cookies);
+const a = result.ok ? result.data : null;
+const here = `/admin/plugins/${encodeURIComponent(id)}`;
+const act = (action: string) => `${here}/actions/${action}`;
+const removable = (status: string) => status === "approved" || status === "yanked";
+const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
+---
+
+<Store title={`${a?.plugin.name ?? id} · Review · Zeron`} description="A plugin, for its reviewers." noindex toast={toast}>
+  <div class="wrap one">
+    <AccountBar session={session} current="queue">
+      <a class="back" href="/admin/plugins"><Glyph name="alt-arrow-left" size={12} />Review</a>
+    </AccountBar>
+    {
+      !a ? (
+        <p class="quiet">This plugin can't be loaded right now. Try again in a minute.</p>
+      ) : (
+        <>
+          <header class="head">
+            <PluginTile id={a.plugin.id} name={a.plugin.name} icon={a.plugin.icon} version={a.plugin.version} size={64} />
+            <div class="identity">
+              <h1>{a.plugin.name}</h1>
+              <p class="meta">
+                <Badge tone={listingState(a.status).tone} size="sm">{listingState(a.status).label}</Badge>
+                {a.plugin.featured && <Badge tone="accent" size="sm" icon="star">Featured</Badge>}
+                <code>{a.plugin.id}</code>
+                <span>·</span>
+                <span>
+                  by {a.owner.username ? <a href={memberUrl(a.owner.username)}>@{a.owner.username}</a> : "an account with no username"} ({age(a.owner.created_at).toLowerCase()})
+                </span>
+                <span>·</span>
+                <span class="num">{count(a.plugin.installs)} installs</span>
+              </p>
+            </div>
+            {a.status === "listed" && (
+              <a class="quiet-link" href={pluginUrl(a.plugin.id)}>
+                Its page<Glyph name="arrow-up-right" size={12} />
+              </a>
+            )}
+          </header>
+
+          <section class="panel actions" aria-label="What can be done">
+            <form method="post" action={act(a.plugin.featured ? "unfeature" : "feature")}>
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <Action tone="secondary" size="md"><Glyph name="star" size={14} />{a.plugin.featured ? "Stop featuring" : "Feature"}</Action>
+            </form>
+            <a class="act" href={act("transfer")} data-dialog="transfer">Move to another account…</a>
+            {a.status === "suspended" ? (
+              <form method="post" action={act("restore")}>
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <Action tone="secondary" size="md">Restore</Action>
+              </form>
+            ) : (
+              <a class="act danger" href={act("suspend")} data-dialog="suspend">Suspend…</a>
+            )}
+          </section>
+
+          <section class="block" aria-labelledby="versions-heading">
+            <h2 id="versions-heading">Versions</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Version</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Submitted</th>
+                    <th scope="col"><span class="sr-only">What can be done</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {a.versions.map((v) => (
+                    <tr>
+                      <th scope="row">
+                        <a href={`${here}/${encodeURIComponent(v.version)}`} class="num">{v.version}</a>
+                      </th>
+                      <td>
+                        <span class="state">
+                          <Badge tone={versionState(v).tone} size="sm">{versionState(v).label}</Badge>
+                          {v.review?.blocked && <Badge tone="danger" size="sm">Turned off on devices</Badge>}
+                          {v.review?.reason && <span class="reason">{reasonWords(v.review.reason)}</span>}
+                        </span>
+                      </td>
+                      <td class="when"><time datetime={new Date(v.published_at).toISOString()} title={date(v.published_at)}>{ago(v.published_at)}</time></td>
+                      <td class="do">
+                        {removable(v.status) && (
+                          <a class="act danger small" href={`${here}/${encodeURIComponent(v.version)}/remove`} data-dialog={vid(v.version)}>
+                            Take down…
+                          </a>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="block" aria-labelledby="reports-heading">
+            <h2 id="reports-heading">Reports</h2>
+            {a.reports.length === 0 ? (
+              <p class="quiet">No one has reported it.</p>
+            ) : (
+              <ul class="reports" role="list">
+                {a.reports.map((r) => (
+                  <li>
+                    <p class="report-head">
+                      <Badge tone={r.status === "open" ? "warning" : "neutral"} size="sm">{r.status === "open" ? "Open" : r.status === "actioned" ? "Acted on" : "Dismissed"}</Badge>
+                      <b>{reasonWords(r.reason)}</b>
+                      <span class="quiet">from {r.reporter.username ? `@${r.reporter.username}` : "someone with no username"} · {ago(r.created_at)}{r.version ? ` · about ${r.version}` : ""}</span>
+                    </p>
+                    {r.text && <p class="report-text">{r.text}</p>}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {a.reports.some((r) => r.status === "open") && <a class="quiet-link" href="/admin/reports">Resolve them in Reports</a>}
+          </section>
+
+          <Dialog id="suspend" title={`Suspend ${a.plugin.name}?`} tone="danger">
+            <p>It's gone from the store at once: no page, no installs, no updates. Anyone who has it keeps it. You can restore it.</p>
+            <ConfirmForm action={act("suspend")} csrf={session.csrf} confirm="Suspend" tone="danger" mode="dialog" back={here}>
+              <Field name="reason" id="suspend-reason" label="Why" multiline required maxlength={2000} hint="Its author reads this." />
+            </ConfirmForm>
+          </Dialog>
+          <Dialog id="transfer" title={`Move ${a.plugin.name} to another account?`} tone="danger">
+            <p>Its new owner publishes its versions from now on. Its current owner can't, and their deploy keys for it stop working.</p>
+            <ConfirmForm action={act("transfer")} csrf={session.csrf} confirm="Move it" tone="danger" mode="dialog" back={here}>
+              <Field name="to_username" id="transfer-to" label="New owner's username" required maxlength={21} placeholder="@username" />
+            </ConfirmForm>
+          </Dialog>
+          {a.versions.filter((v) => removable(v.status)).map((v) => (
+            <Dialog id={vid(v.version)} title={`Take down ${a.plugin.name} ${v.version}?`} tone="danger">
+              <p>Nobody can install it from the store again. Choose whether the devices that have it turn it off too.</p>
+              <ConfirmForm action={`${here}/${encodeURIComponent(v.version)}/remove`} csrf={session.csrf} confirm="Take down" tone="danger" mode="dialog" back={here}>
+                <Field name="reason" id={`${vid(v.version)}-reason`} label="Why" multiline required maxlength={2000} hint="Its author reads this, and so does anyone whose device turns it off." />
+                <label class="check">
+                  <input type="checkbox" name="block" />
+                  <span>Also turn it off on the devices that have it. People can turn it back on; it's theirs.</span>
+                </label>
+              </ConfirmForm>
+            </Dialog>
+          ))}
+        </>
+      )
+    }
+  </div>
+</Store>
+
+<style>
+  .one { display: grid; gap: 24px; }
+  .back { display: inline-flex; align-items: center; gap: 6px; justify-self: start; height: 28px; font-size: 14px; font-weight: 500; color: var(--text-3); transition: color 0.12s; }
+  .back:hover { color: var(--text); }
+  .head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 20px; }
+  .identity { display: grid; gap: 6px; min-width: 0; }
+  .identity h1 { font-size: clamp(24px, 2.8vw, 32px); overflow-wrap: anywhere; }
+  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13.5px; color: var(--text-3); }
+  .meta a { color: var(--text-2); }
+  .meta a:hover { color: var(--text); }
+  .quiet-link { display: inline-flex; align-items: center; gap: 6px; justify-self: start; font-size: 14px; font-weight: 500; color: var(--text-2); transition: color 0.12s; }
+  .quiet-link:hover { color: var(--text); }
+  .panel.actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .act { display: inline-flex; align-items: center; height: 32px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-lg); transition: background-color 0.12s; }
+  .act:hover { background: var(--secondary-hover); }
+  .act.danger { color: var(--tone-danger); }
+  .act.danger:hover { background: var(--tone-danger-wash); }
+  .act.small { height: 28px; margin-top: -4px; padding: 0 10px; font-size: 13px; border-radius: var(--radius-md); }
+  .block { display: grid; gap: 14px; }
+  .block h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.015em; }
+  .quiet { font-size: 14px; color: var(--text-3); }
+  .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.5; }
+  th, td { padding: 14px 16px; text-align: left; vertical-align: top; }
+  thead th { padding-block: 10px; font-size: 12.5px; font-weight: 500; color: var(--text-3); border-bottom: 1px solid var(--line); }
+  tbody tr + tr > * { border-top: 1px solid var(--line); }
+  tbody th a { font-weight: 600; color: var(--text); }
+  tbody th a:hover { color: var(--accent-soft); }
+  .state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+  .reason { font-size: 13px; color: var(--text-3); }
+  .when { color: var(--text-2); white-space: nowrap; }
+  .do { text-align: right; }
+  .reports { display: grid; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .reports li { display: grid; gap: 6px; padding: 14px 16px; }
+  .reports li + li { border-top: 1px solid var(--line); }
+  .report-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 14px; }
+  .report-head b { font-weight: 500; }
+  .report-text { font-size: 14px; line-height: 1.55; color: var(--text-2); white-space: pre-line; overflow-wrap: anywhere; }
+  .check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 1.5; color: var(--text-2); cursor: pointer; }
+  .check input { margin-top: 3px; accent-color: var(--destructive-bg); }
+  @media (max-width: 640px) {
+    .head { grid-template-columns: auto minmax(0, 1fr); }
+  }
+</style>

@@ -155,7 +155,7 @@ const noindex = Boolean(state.q || state.cursor || state.keyword);
   .catalog { display: grid; gap: 32px; }
   .intro { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 32px; flex-wrap: wrap; }
   .intro .lead { max-width: 34em; margin-top: 12px; }
-  .mine { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 2px; font-size: 14px; font-weight: 500; color: var(--text-2); transition: color 0.12s; }
+  .mine { display: inline-flex; align-items: center; gap: 6px; height: 32px; font-size: 14px; font-weight: 500; color: var(--text-2); transition: color 0.12s; }
   .mine:hover { color: var(--text); }
 
   .controls { display: flex; gap: 12px; align-items: center; }
@@ -193,7 +193,7 @@ const noindex = Boolean(state.q || state.cursor || state.keyword);
   @media (max-width: 1080px) {
     .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .featured-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .featured-grid > :nth-child(3) { display: none; }
+    .featured-grid > :global(:nth-child(3)) { display: none; }
   }
   @media (max-width: 800px) {
     .layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
@@ -202,7 +202,7 @@ const noindex = Boolean(state.q || state.cursor || state.keyword);
     .categories a { flex: none; height: 32px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); border-radius: 16px; }
     .categories a[aria-current="page"] { color: var(--primary-text); background: var(--primary-bg); box-shadow: none; }
     .featured-grid { grid-template-columns: minmax(0, 1fr); }
-    .featured-grid > :nth-child(n + 2) { display: none; }
+    .featured-grid > :global(:nth-child(n + 2)) { display: none; }
   }
   @media (max-width: 600px) {
     .grid { grid-template-columns: minmax(0, 1fr); }
