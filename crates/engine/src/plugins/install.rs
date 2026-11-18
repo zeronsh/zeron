@@ -239,34 +239,12 @@ fn keep_path(rel: &str) -> bool {
 
 /// The first two of `files`' paths that would be one file, or a file where
 /// the other needs a folder, on a disk that folds names as macOS's and
-/// Windows' do (Unicode NFC, then case and the rest: `listing::fold_path`,
-/// the store's own rule), the manifest's name and `.source.json` taken
-/// already: in words naming both.
+/// Windows' do (`listing::clashes`, the store's own rule), the manifest's
+/// name and `.source.json` taken already: in words naming both.
 fn colliding(files: &BTreeMap<String, Vec<u8>>) -> Option<String> {
-    use super::listing::fold_path;
-    // Each folded path: the path it was, as written.
-    let mut taken: BTreeMap<String, &str> = [MANIFEST_FILE, SOURCE_FILE].into_iter().map(|rel| (fold_path(rel), rel)).collect();
-    // Each folded folder: a path inside it, as written.
-    let mut folders: BTreeMap<String, &str> = BTreeMap::new();
-    for rel in files.keys() {
-        let folded = fold_path(rel);
-        if let Some(other) = taken.get(&folded) {
-            return Some(format!("{rel:?} and {other:?} are one file on macOS and Windows"));
-        }
-        if let Some(inside) = folders.get(&folded) {
-            return Some(format!("{rel:?} is a file where {inside:?} needs a folder of that name on macOS and Windows"));
-        }
-        let parts: Vec<&str> = folded.split('/').collect();
-        for end in 1..parts.len() {
-            let folder = parts[..end].join("/");
-            if let Some(file) = taken.get(&folder) {
-                return Some(format!("{file:?} is a file where {rel:?} needs a folder of that name on macOS and Windows"));
-            }
-            folders.entry(folder).or_insert(rel);
-        }
-        taken.insert(folded, rel);
-    }
-    None
+    super::listing::clashes(files.keys().map(String::as_str), &[MANIFEST_FILE, SOURCE_FILE])
+        .first()
+        .map(super::listing::Clash::words)
 }
 
 /// The plugin package `raw`, verified (signature over every file, a

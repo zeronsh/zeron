@@ -698,6 +698,10 @@ fn listing_cases() -> Value {
         ("two folders differing in case", "shots/a.png", "Shots/A.png"),
         ("a path and the same with a trailing dot", "x.txt", "x.txt."),
         ("a file that is its manifest on a Mac", "ZERON-PLUGIN.JSON", "init2.luau"),
+        // (Amendment 42: a file where another needs a folder of that name.)
+        ("a file and a folder that fold alike", "ui", "UI/x.luau"),
+        ("a folder and a file that fold alike", "Ui", "ui/x.luau"),
+        ("its manifest's name as a folder on a Mac", "ZERON-PLUGIN.JSON/x.luau", "init2.luau"),
     ] {
         let mut two = files.clone();
         two.insert(a.into(), b"1".to_vec());
