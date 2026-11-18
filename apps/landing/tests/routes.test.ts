@@ -685,7 +685,7 @@ describe("forms", () => {
     expect(files.body).toContain("alert('file')");
     const changes = await html(`${here}?view=changes`, grace);
     inert(changes.body);
-    expect(changes.body).toMatch(/&#x3C;\/code>&#x3C;\/pre>&#x3C;script>alert\('diff'\)|&lt;\/code&gt;&lt;\/pre&gt;&lt;script&gt;alert\(&#39;diff&#39;\)/);
+    expect(changes.body).toMatch(/&lt;\/code&gt;&lt;\/pre&gt;&lt;script&gt;alert\(('|&#39;)diff('|&#39;)\)/);
     const readme = await html(`${here}?view=readme`, grace);
     inert(readme.body);
     // The public page's notes too.

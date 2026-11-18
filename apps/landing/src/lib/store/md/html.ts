@@ -1,8 +1,9 @@
 // The store's markdown, last pass: blocks and inlines to HTML.
 //
 // Safe by construction: the author's markdown never becomes HTML by itself.
-// This writes a fixed set of tags with a fixed set of attributes (TAGS),
-// every text and attribute value escaped, every address through `target`
+// It is written by the store's one writer (md/writer.ts): a fixed set of
+// tags with a fixed set of attributes (TAGS), every text and attribute
+// value escaped, every address through `target`
 // (a link: https or mail, parsed and written back as parsed; a picture: a
 // file of the package, through the store's file route). `Html` refuses
 // anything else, so a mistake here fails loudly instead of writing it.
@@ -14,11 +15,14 @@
 // recursion; past NESTING, what's inside is written as its words.
 
 import GithubSlugger from "github-slugger";
-import type { Root, RootContent } from "hast";
+import type { Root } from "hast";
 import { highlightable, lowlight, nestsTooDeep } from "../highlight.ts";
 import { resolvePackagePath } from "../names.ts";
 import { blocksOf, NESTING, type Align, type Block, type Definition } from "./blocks.ts";
 import { inlinesOf, plainText, unescape, type Inline } from "./inlines.ts";
+import { Html, TAGS, TooLarge, writeHighlighted } from "./writer.ts";
+
+export { TAGS, TooLarge };
 
 export interface RenderOptions {
   /** The address a file of the package is served at, given its normalized path (names.ts). */
@@ -28,42 +32,6 @@ export interface RenderOptions {
   /** The plugin's name, said by the page already: a first top-level heading that only says it again is not drawn. */
   title?: string;
 }
-
-/** Every tag written, and the attributes each may carry. */
-export const TAGS: Readonly<Record<string, readonly string[]>> = {
-  // (`class` on p and pre only for asText's own notice and block, never from a document.)
-  p: ["class"],
-  br: [],
-  hr: [],
-  h1: ["id"],
-  h2: ["id"],
-  h3: ["id"],
-  h4: ["id"],
-  h5: ["id"],
-  h6: ["id"],
-  blockquote: [],
-  ul: ["class"],
-  ol: ["start", "class"],
-  li: ["class"],
-  input: ["type", "disabled", "checked"],
-  pre: ["tabindex", "class"],
-  code: ["class"],
-  span: ["class"],
-  em: [],
-  strong: [],
-  del: [],
-  a: ["href", "rel"],
-  img: ["src", "alt", "title", "loading", "decoding"],
-  div: ["class", "tabindex"],
-  table: [],
-  thead: [],
-  tbody: [],
-  tr: [],
-  th: ["align"],
-  td: ["align"],
-};
-
-const VOID = new Set(["br", "hr", "img", "input"]);
 
 /** The prefix every id the document makes carries, so none can clobber the page's. */
 export const PREFIX = "user-content-";
@@ -78,56 +46,6 @@ const REL = "nofollow noopener ugc";
 
 /** What one document's code blocks may highlight, together, in bytes (highlight.ts bounds each). */
 export const HIGHLIGHT_BUDGET = 16 * 1024;
-
-/** A rendering past this many characters is not written (the text is shown instead). */
-export class TooLarge extends Error {}
-
-const escapeText = (s: string) => s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-
-/** Writes HTML from the allowed tags alone, and stops at `most` characters. */
-class Html {
-  private readonly parts: string[] = [];
-  private size = 0;
-  private readonly most: number;
-  constructor(most: number) {
-    this.most = most;
-  }
-
-  private add(s: string) {
-    this.size += s.length;
-    if (this.size > this.most) throw new TooLarge();
-    this.parts.push(s);
-  }
-
-  open(tag: string, attributes: [string, string | true][] = []) {
-    const allowed = TAGS[tag];
-    if (!allowed) throw new Error(`not a tag this writes: ${tag}`);
-    let out = `<${tag}`;
-    for (const [name, value] of attributes) {
-      if (!allowed.includes(name)) throw new Error(`not an attribute this writes: ${tag} ${name}`);
-      out += value === true ? ` ${name}` : ` ${name}="${escapeText(value)}"`;
-    }
-    this.add(`${out}>`);
-  }
-
-  close(tag: string) {
-    if (!TAGS[tag] || VOID.has(tag)) throw new Error(`not a tag this closes: ${tag}`);
-    this.add(`</${tag}>`);
-  }
-
-  text(s: string) {
-    if (s) this.add(escapeText(s));
-  }
-
-  /** A line end between blocks (as CommonMark's own HTML has). */
-  line() {
-    this.add("\n");
-  }
-
-  toString() {
-    return this.parts.join("");
-  }
-}
 
 // ── addresses ─────────────────────────────────────────────────────────────
 
@@ -293,26 +211,6 @@ function writeCode(w: Writing, info: string, text: string): void {
   }
   out.close("code");
   out.close("pre");
-}
-
-/** The highlighter's tree: its spans' classes and its text, nothing else (walked without recursion). */
-function writeHighlighted(out: Html, tree: Root): void {
-  const stack: { nodes: RootContent[]; i: number; close: boolean }[] = [{ nodes: tree.children, i: 0, close: false }];
-  while (stack.length > 0) {
-    const frame = stack[stack.length - 1];
-    if (frame.i >= frame.nodes.length) {
-      stack.pop();
-      if (frame.close) out.close("span");
-      continue;
-    }
-    const node = frame.nodes[frame.i++];
-    if (node.type === "text") out.text(node.value);
-    else if (node.type === "element") {
-      const classes = (Array.isArray(node.properties.className) ? node.properties.className : []).map(String).filter((c) => /^[\w-]{1,64}$/.test(c));
-      out.open("span", classes.length > 0 ? [["class", classes.join(" ")]] : []);
-      stack.push({ nodes: node.children as RootContent[], i: 0, close: true });
-    }
-  }
 }
 
 function writeBlocks(w: Writing, blocks: Block[], tight: boolean): void {
