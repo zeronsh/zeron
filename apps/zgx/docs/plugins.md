@@ -609,7 +609,7 @@ zeron.set_status("shortcut", nil)   -- cleared
 
 ## Settings pages
 
-When declared rows aren't enough (a list the person edits, one thing chosen from it and set up under it, rows that come with a choice, an action and what came of it), draw a page of your own. It goes on your page in Settings, after your declared rows, under the header Zeron draws (your icon, your name, your `settings_description`, and Unverified when Zeron can't say who made it). It needs no permission.
+When declared rows aren't enough (a list the person edits, one thing chosen from it and set up under it, rows that come with a choice, an action and what came of it), draw a page of your own. It goes on your page in Settings, after your declared rows, under the header Zeron draws (your icon, your name, your `settings_description`, and Unverified when Zeron can't say who made it). It needs no permission, and it draws only while its page is open in Settings.
 
 ```lua
 local Settings = require("@ds/settings")
