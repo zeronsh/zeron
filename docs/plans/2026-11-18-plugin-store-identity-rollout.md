@@ -194,6 +194,9 @@ lists revoked grants too.
   claims later, never one transferred in). This needs a fresh sign-in. A
   key never claims an id: each plugin's first version comes from a device.
   An account has at most 20 live keys and makes at most 10 a day.
+- Keys from before amendment 44 (one plugin's each): there are none in any
+  environment (no store database has existed, and the schema is one new
+  file), so nothing is converted.
 - CI then publishes with the key's signed requests.
 - Check, with a test account that owns two plugins, A and B:
   1. Create a key scoped to A (`{"plugins":["A"]}`). `GET

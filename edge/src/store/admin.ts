@@ -35,7 +35,7 @@ import type { Env } from "../env";
 import { userDirectoryStub } from "../user-directory";
 import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, reviewOf, versionInfo } from "./cards";
 import { ASK_PATHS, type ConsentItem, askParts, askPartsOf, asksChanged, consentDiff } from "./consent";
-import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, versionRow } from "./db";
+import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
 import { dropFromDeployKeys, readBody, requireAdmin } from "./principal";
 import { purgeCatalog, purgeTakedowns } from "./purge";
@@ -447,38 +447,53 @@ const remove = async (db: D1Database, adminId: string, id: string, v: VersionRow
 };
 
 /** Restore a taken-down version: unverified and undecided again, and
- * straight to yanked by the superseding rule when anything newer on its
- * line is listed (a release's line: newer releases; a pre-release's: any
- * newer version); the block lifts (an event in the feed). */
+ * straight to yanked by the superseding rule when a newer version on its
+ * line is listed or yanked (a release's line: newer releases; a
+ * pre-release's: any newer version), decided in the UPDATE itself so a
+ * publish racing it can't slip between; listed, it supersedes what is
+ * older, as any version listed does. The block lifts (an event in the feed). */
 const restore = async (db: D1Database, adminId: string, id: string, v: VersionRow, body: Record<string, unknown> | undefined): Promise<Response> => {
   const reason = reasonOf(body, "why it comes back");
   if (reason instanceof Response) return reason;
   if (v.status !== "taken_down") return fail(409, "invalid_state", `Version ${v.version} is ${v.status}: only a taken-down version can be restored.`);
   const now = Date.now();
-  const newer = await db
-    .prepare(
-      `SELECT version FROM versions WHERE plugin_id = ? AND status = 'listed' AND (? = 0 OR is_release = 1)
-         AND (major, minor, patch, is_release, pre_key) > (?, ?, ?, ?, ?) ORDER BY ${VERSION_ORDER} LIMIT 1`
-    )
-    .bind(id, v.is_release, v.major, v.minor, v.patch, v.is_release, v.pre_key)
-    .first<string>("version");
+  // (`versions` in the subquery is the row being restored: its line and
+  // place never change.)
+  const newer = `(SELECT n.version FROM versions n WHERE n.plugin_id = versions.plugin_id AND n.status IN ('listed', 'yanked')
+      AND (versions.is_release = 0 OR n.is_release = 1)
+      AND (n.major, n.minor, n.patch, n.is_release, n.pre_key) > (versions.major, versions.minor, versions.patch, versions.is_release, versions.pre_key)
+      ORDER BY n.major DESC, n.minor DESC, n.patch DESC, n.is_release DESC, n.pre_key DESC LIMIT 1)`;
   const conflict = await change(
     db,
     db
       .prepare(
-        `UPDATE versions SET status = ?, yanked_by = ?, superseded_at = ?, superseded_by = ?, removed_at = NULL, removed_by = NULL, removal_reason = NULL,
+        `UPDATE versions SET status = CASE WHEN ${newer} IS NULL THEN 'listed' ELSE 'yanked' END,
+           yanked_by = CASE WHEN ${newer} IS NULL THEN NULL ELSE 'superseded' END,
+           superseded_at = CASE WHEN ${newer} IS NULL THEN NULL ELSE ?1 END,
+           superseded_by = ${newer},
+           removed_at = NULL, removed_by = NULL, removal_reason = NULL,
            verification = 'unverified', verified_at = NULL, verified_by = NULL,
            declined_at = NULL, declined_by = NULL, decline_reason = NULL, decline_message = NULL
-         WHERE plugin_id = ? AND version = ? AND status = 'taken_down'`
+         WHERE plugin_id = ?2 AND version = ?3 AND status = 'taken_down'`
       )
-      .bind(newer ? "yanked" : "listed", newer ? "superseded" : null, newer ? now : null, newer ?? null, id, v.version),
-    auditIfChanged(db, now, adminId, "version.restore", id, v.version, { reason, ...(newer ? { superseded_by: newer } : {}) }),
+      .bind(now, id, v.version),
+    // The audit row names what superseded it, as the UPDATE found it.
+    db
+      .prepare(
+        `INSERT INTO audit (at, actor_id, action, plugin_id, version, detail)
+         SELECT ?1, ?2, 'version.restore', ?3, ?4,
+           CASE WHEN superseded_by IS NULL THEN json_object('reason', ?5) ELSE json_object('reason', ?5, 'superseded_by', superseded_by) END
+         FROM versions WHERE plugin_id = ?3 AND version = ?4 AND changes() > 0`
+      )
+      .bind(now, adminId, id, v.version, reason),
     id,
     null,
     "The version changed meanwhile: look again.",
-    [takedownEvent(db, "restore", id, v.version, reason, now)]
+    [takedownEvent(db, "restore", id, v.version, reason, now), supersedeOlder(db, id, v.version, now)]
   );
-  return conflict ?? afterEvent(db, id, v.version);
+  if (conflict) return conflict;
+  await purgeCatalog(db, id, await supersededAt(db, id, v.version, now));
+  return afterEvent(db, id, v.version);
 };
 
 const versionAction = async (db: D1Database, adminId: string, id: string, versionText: string, action: string, body: Record<string, unknown> | undefined): Promise<Response> => {

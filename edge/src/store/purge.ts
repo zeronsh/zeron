@@ -14,16 +14,11 @@
  * suspend, restore of a plugin, transfer and release.
  */
 import { cacheKey, purge } from "./cache";
-import { firstPageKeys, versionKey, versionsPageKey } from "./catalog";
+import { CATEGORIES_KEY, STATS_KEY, firstPageKeys, takedownsKey, versionKey, versionsPageKey } from "./catalog";
 import { CATEGORIES } from "./listing";
 import { versionFileKeys } from "./serve";
 
-export const STATS_KEY = cacheKey(["stats"]);
-export const CATEGORIES_KEY = cacheKey(["categories"]);
 
-/** The take-down feed's answer for a device at `after` (none: one that
- * starts afresh). */
-export const takedownsKey = (after: number | undefined): string => cacheKey(["takedowns"], { after: after === undefined ? undefined : String(after) });
 
 /** Purge what a change to plugin `id`, and to `versions` of it, moves. */
 export const purgeCatalog = async (db: D1Database, id: string, versions: readonly string[] = []): Promise<void> => {

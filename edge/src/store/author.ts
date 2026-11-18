@@ -11,7 +11,8 @@
  *
  * Version transitions an author makes: listed → yanked (no new installs,
  * existing ones keep working); yanked → listed, for a version its author
- * yanked (one a newer version superseded stays yanked: amendment 45).
+ * yanked (one a newer version superseded stays yanked: amendment 45), which
+ * supersedes what is older on its line, as any version listed does.
  * Each is one guarded UPDATE, logged in the audit log with the author as
  * actor, and moves the listing in the same batch.
  *
@@ -26,7 +27,7 @@
 import type { Env } from "../env";
 import { STORE_DATA } from "./data";
 import { authorCard, authorsOf, listingState, ownerCard, publisherId, versionInfo } from "./cards";
-import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, versionRow } from "./db";
+import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, rateLimited, refusedBody } from "./http";
 import { authenticatePublisher, keyInScope, readBody } from "./principal";
 import { allowWrite } from "./publish";
@@ -63,6 +64,9 @@ export const handleMyPlugins = async (request: Request, env: Env, db: D1Database
         listing: listingState(p),
         versions: own.map((v) => ({
           ...versionInfo(v, true),
+          // A deploy key's name is its account's: a version a former owner
+          // published shows none to whoever owns the plugin now.
+          ...(v.publisher_id === publisher.userId ? {} : { deploy_key: null }),
           yanked_by: v.status === "yanked" ? v.yanked_by : null,
           superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null
         }))
@@ -108,10 +112,12 @@ export const handleAuthorAction = async (request: Request, env: Env, db: D1Datab
   const results = await db.batch([
     update.bind(id, version.version, id, publisher.userId),
     auditIfChanged(db, now, publisher.userId, `version.${action}`, id, version.version, undefined),
+    // Listed again, it supersedes what is older, as any version listed does.
+    ...(action === "unyank" ? [supersedeOlder(db, id, version.version, now)] : []),
     ...relist(db, id, null)
   ]);
   if ((results[0]?.meta.changes ?? 0) === 0) return fail(409, "invalid_state", "The version changed meanwhile: look again.");
-  await purgeCatalog(db, id, [version.version]);
+  await purgeCatalog(db, id, [version.version, ...(action === "unyank" ? await supersededAt(db, id, version.version, now) : [])]);
   const updated = await versionRow(db, id, version.version);
   return answer({ version: versionInfo(updated!, true) });
 };

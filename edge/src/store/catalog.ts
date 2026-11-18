@@ -105,11 +105,13 @@ const limitOf = (p: URLSearchParams, fallback: number): number | undefined => {
   return Number.isSafeInteger(limit) && limit >= 1 && limit <= MAX_LIMIT ? limit : undefined;
 };
 
-type ListKey = Pick<ListQuery, "terms" | "category" | "keyword" | "author" | "featured" | "verified" | "sort" | "limit" | "cursor">;
+type ListKey = Pick<ListQuery, "terms" | "category" | "keyword" | "author" | "featured" | "verified" | "sort" | "limit" | "cursor"> & { readonly q?: string };
 
 /** The cache key params of a list query: only what changes its answer. */
 export const listParams = (lq: ListKey) => ({
-  q: lq.terms.length ? lq.terms.join(" ") : undefined,
+  // A search with no searchable word ("!!!") answers nothing: keyed as a
+  // search (`q=`), never as the list without one.
+  q: lq.q === undefined ? undefined : lq.terms.join(" "),
   category: lq.category,
   keyword: lq.keyword,
   author: lq.author,
@@ -139,6 +141,11 @@ export const firstPageKeys = (categories: readonly string[]): string[] => {
 };
 
 /** The cache keys of a plugin's versions' first page and one version. */
+export const STATS_KEY = cacheKey(["stats"]);
+export const CATEGORIES_KEY = cacheKey(["categories"]);
+/** The take-down feed's answer for a device at `after` (none: one that
+ * starts afresh). */
+export const takedownsKey = (after: number | undefined): string => cacheKey(["takedowns"], { after: after === undefined ? undefined : String(after) });
 export const versionsPageKey = (id: string): string => cacheKey(["plugins", id, "versions"]);
 export const versionKey = (id: string, version: string): string => cacheKey(["plugins", id, "versions", version]);
 
@@ -361,10 +368,7 @@ const stats = async (db: D1Database): Promise<Response> => {
  * full update check before going on from `head`. A cached answer can only
  * delay an event, never skip one: a device asks again from the `seq` it got.
  */
-const takedowns = async (db: D1Database, url: URL): Promise<Response> => {
-  const raw = url.searchParams.get("after");
-  const after = raw === null ? undefined : Number(raw);
-  if (after !== undefined && !(Number.isSafeInteger(after) && after >= 0)) return fail(400, "bad_request", "after is a seq the feed gave.");
+const takedowns = async (db: D1Database, after: number | undefined): Promise<Response> => {
   // (The 30-day prune always keeps the newest event, so the head never
   // goes back; AUTOINCREMENT never reuses a number.)
   const [headRow, oldestRow] = await db.batch<{ n: number | null }>([
@@ -393,14 +397,18 @@ const takedowns = async (db: D1Database, url: URL): Promise<Response> => {
 
 export const handleCatalog = async (request: Request, env: Env, db: D1Database, url: URL, parts: readonly string[]): Promise<Response | undefined> => {
   if (request.method !== "GET" && request.method !== "HEAD") return undefined;
-  if (parts.length === 3 && parts[2] === "categories") return throughCache(request, cacheKey(["categories"]), LIST_TTL, () => categories(db));
-  if (parts.length === 3 && parts[2] === "stats") return throughCache(request, cacheKey(["stats"]), LIST_TTL, () => stats(db));
+  if (parts.length === 3 && parts[2] === "categories") return throughCache(request, CATEGORIES_KEY, LIST_TTL, () => categories(db));
+  if (parts.length === 3 && parts[2] === "stats") return throughCache(request, STATS_KEY, LIST_TTL, () => stats(db));
   if (parts.length === 3 && parts[2] === "takedowns") {
+    // Read once: the key and the answer are the same `after`. Anything but
+    // digits is refused, never cached (so no spelling of a seq can fill the
+    // fresh start's entry with a page that isn't a reset).
     const raw = url.searchParams.get("after");
-    const after = raw !== null && /^[0-9]{1,15}$/.test(raw) ? Number(raw) : undefined;
+    if (raw !== null && !/^[0-9]{1,15}$/.test(raw)) return fail(400, "bad_request", "after is a seq the feed gave.");
+    const after = raw === null ? undefined : Number(raw);
     // (Keyed by the `after` it answers, so a device that is up to date and
     // every other at the same place share one answer.)
-    return throughCache(request, cacheKey(["takedowns"], { after: after === undefined ? undefined : String(after) }), LIST_TTL, () => takedowns(db, url));
+    return throughCache(request, takedownsKey(after), LIST_TTL, () => takedowns(db, after));
   }
   if (parts[2] !== "plugins") return undefined;
   if (parts.length === 3) {

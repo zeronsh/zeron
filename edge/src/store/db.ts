@@ -93,6 +93,36 @@ export interface VersionRow {
 
 /** Highest precedence first. */
 export const VERSION_ORDER = "major DESC, minor DESC, patch DESC, is_release DESC, pre_key DESC";
+/**
+ * The superseding rule (amendment 45) for version `version` of plugin `id`
+ * once it is listed, however that happened (a publish, an author's unyank, a
+ * restore): every older unverified version on its line that isn't already
+ * superseded, listed or yanked, stops taking new installs for good. A
+ * release's line is every older version; a pre-release's, older
+ * pre-releases. Decided in the statement, from the row as it is then: it
+ * does nothing unless `version` is listed when it runs, so it belongs in the
+ * same batch as the change that lists it.
+ */
+export const supersedeOlder = (db: D1Database, id: string, version: string, at: number): D1PreparedStatement =>
+  db
+    .prepare(
+      `UPDATE versions SET status = 'yanked', yanked_by = 'superseded', superseded_at = ?3, superseded_by = ?2
+       WHERE plugin_id = ?1 AND version != ?2 AND verification = 'unverified' AND status IN ('listed', 'yanked') AND superseded_at IS NULL
+         AND EXISTS (SELECT 1 FROM versions x WHERE x.plugin_id = ?1 AND x.version = ?2 AND x.status = 'listed'
+           AND (x.is_release = 1 OR versions.is_release = 0)
+           AND (versions.major, versions.minor, versions.patch, versions.is_release, versions.pre_key) < (x.major, x.minor, x.patch, x.is_release, x.pre_key))`
+    )
+    .bind(id, version, at);
+
+/** The versions `version` superseded at `at` (to purge them). */
+export const supersededAt = async (db: D1Database, id: string, version: string, at: number): Promise<string[]> =>
+  (
+    await db
+      .prepare(`SELECT version FROM versions WHERE plugin_id = ? AND superseded_by = ? AND superseded_at = ? AND yanked_by = 'superseded' ORDER BY ${VERSION_ORDER}`)
+      .bind(id, version, at)
+      .all<{ version: string }>()
+  ).results.map((r) => r.version);
+
 /** The listed version first: releases before pre-releases, then precedence. */
 const LISTING_ORDER = "is_release DESC, major DESC, minor DESC, patch DESC, pre_key DESC";
 /** Where a plugin shows to the public. */
