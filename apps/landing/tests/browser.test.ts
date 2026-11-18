@@ -49,7 +49,11 @@ const PAGES: [string, string | undefined][] = [
   ["/account", "user_lin"],
   ["/account/plugins/session-badges", "user_ada"],
   ["/account/plugins/focus-timer", "user_ada"],
-  ["/account/plugins/session-badges/versions/1.2.1/withdraw", "user_ada"],
+  ["/account/plugins/session-badges/versions/1.2.1/yank", "user_ada"],
+  ["/account/keys", "user_ada"],
+  ["/plugins/all?verified=1", undefined],
+  ["/plugins/worst-case-listing-at-every-limit-xyz12/versions", undefined],
+  ["/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0", undefined],
   ["/admin/plugins", "user_grace"],
   ["/admin/plugins/session-badges", "user_grace"],
   ["/admin/plugins/crypto-ticker", "user_grace"],
@@ -63,7 +67,10 @@ const PAGES: [string, string | undefined][] = [
   ["/admin/plugins/session-badges/1.2.1?view=files&path=init.luau", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1?view=changes", "user_grace"],
   ["/admin/plugins/xss-probe/1.1.0?view=changes", "user_grace"],
-  ["/admin/plugins/session-badges/1.2.1/reject", "user_grace"],
+  ["/admin/plugins/session-badges/1.2.1/decline", "user_grace"],
+  ["/admin/plugins/session-badges/1.2.1/verify", "user_grace"],
+  ["/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.2.0/restore", "user_grace"],
+  ["/admin/plugins?state=all", "user_grace"],
   ["/admin/plugins/session-badges/actions/suspend", "user_grace"],
   ["/admin/plugins/session-badges/actions/transfer", "user_grace"],
   ["/admin/reports", "user_grace"],
@@ -74,14 +81,14 @@ const PAGES: [string, string | undefined][] = [
 
 /** The states a page opens into: each must be as clean as the page. */
 const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>][] = [
-  ["Approve, asked once", "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", "user_grace", async (page) => {
-    // (Exact: "Don't approve…" holds the words too, and comes first in a phone's bar.)
-    await page.getByRole("link", { name: "Approve…", exact: true }).first().click();
+  ["Verify, asked once", "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", "user_grace", async (page) => {
+    // (Exact: "Don't verify…" holds the words too, and comes first in a phone's bar.)
+    await page.getByRole("link", { name: "Verify…", exact: true }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
-    expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Approve");
+    expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Verify");
   }],
-  ["Don't approve, written", "/admin/plugins/session-badges/1.2.1", "user_grace", async (page) => {
-    await page.getByRole("link", { name: "Don't approve…" }).first().click();
+  ["Don't verify, written", "/admin/plugins/session-badges/1.2.1", "user_grace", async (page) => {
+    await page.getByRole("link", { name: "Don't verify…" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
     await page.getByRole("dialog").getByLabel("Reason").selectOption("listing");
     await page.getByRole("dialog").getByLabel("For the author").fill("Say what each panel shows.");
@@ -94,12 +101,16 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
     await page.getByRole("link", { name: "Close it…" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
-  ["the new key sheet", "/account/plugins/worst-case-listing-at-every-limit-xyz12#keys", "user_ada", async (page) => {
+  ["Remove", "/admin/plugins/focus-timer/1.2.0", "user_grace", async (page) => {
+    await page.getByRole("link", { name: "Remove…" }).first().click();
+    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
+  }],
+  ["the new key sheet", "/account/keys", "user_ada", async (page) => {
     await page.locator("[data-dialog='new-key']").first().click();
     await expect.poll(() => page.locator("dialog#new-key").isVisible()).toBe(true);
   }],
-  ["the withdraw dialog", "/account/plugins/session-badges", "user_ada", async (page) => {
-    await page.getByRole("link", { name: "Withdraw" }).first().click();
+  ["the stop new installs dialog", "/account/plugins/session-badges", "user_ada", async (page) => {
+    await page.getByRole("link", { name: "Stop new installs" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
   ["the screenshots", "/plugins/focus-timer", undefined, async (page) => {
@@ -248,15 +259,15 @@ describe("by keyboard", () => {
   test("a destructive action asks in a dialog that starts on Cancel and closes on Escape, back where it was", async () => {
     const { page, context } = await open("/account/plugins/session-badges", { as: "user_ada" });
     try {
-      const opener = page.getByRole("link", { name: "Withdraw" });
+      const opener = page.getByRole("link", { name: "Stop new installs" }).first();
       await opener.focus();
       await page.keyboard.press("Enter");
-      const dialog = page.getByRole("dialog", { name: "Withdraw Session badges 1.2.1?" });
+      const dialog = page.getByRole("dialog", { name: "Stop new installs of Session badges 1.2.1?" });
       await expect.poll(() => dialog.isVisible()).toBe(true);
       expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Cancel");
       await page.keyboard.press("Escape");
       await expect.poll(() => dialog.isVisible()).toBe(false);
-      expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Withdraw");
+      expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Stop new installs");
     } finally {
       await context.close();
     }

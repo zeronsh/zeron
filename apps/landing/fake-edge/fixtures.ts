@@ -40,15 +40,41 @@ export const CATEGORIES = [
   { id: "utilities", name: "Utilities" },
 ];
 
-export type Status = "pending" | "approved" | "rejected" | "withdrawn" | "yanked" | "removed";
+/**
+ * How a version came to be, as a fixture says it (amendment 45): listed and
+ * verified, listed and waiting for a reviewer, listed and declined, yanked by
+ * its author (it was verified), taken down by staff (harmful: turned off on
+ * devices), removed by staff (not harmful).
+ */
+export type Story = "verified" | "undecided" | "declined" | "yanked" | "taken_down" | "removed";
+
+export type VersionStatus = "listed" | "yanked" | "taken_down" | "removed";
+
+export interface FakeReview {
+  decided: boolean;
+  decision: "verified" | "declined" | null;
+  reason?: string;
+  message?: string;
+  decided_at?: number;
+}
 
 export interface FakeVersion {
   version: string;
-  status: Status;
+  status: VersionStatus;
+  verified: boolean;
+  verified_at: number | null;
   published_at: number;
   notes: string | null;
   engines: { zeron?: string } | null;
-  review?: { state: Status; reason?: string; message?: string; decided_at?: number };
+  review: FakeReview;
+  via: "device" | "deploy_key";
+  /** The deploy key that published it, when one did. */
+  deploy_key: { key: string; name: string } | null;
+  /** Who stopped its new installs: its author, or the store when a newer version superseded it unverified. */
+  yanked_by: "author" | "superseded" | null;
+  superseded: { at: number; by: string } | null;
+  /** Why staff took it down or removed it. */
+  removal: { at: number; reason: string | null } | null;
   checks: { id: string; level: "ok" | "warn" | "fail"; message: string }[];
   manifest: Record<string, unknown>;
   files: Record<string, string>;
@@ -91,8 +117,8 @@ interface Spec {
   installs?: number;
   featured?: boolean;
   age: number;
-  /** Older versions first; the last is the newest. Default: one approved 1.0.0. */
-  history?: { version: string; status: Status; ago: number; notes?: string; review?: FakeVersion["review"]; engines?: string; permissions?: string[]; commands?: string[]; network?: string[]; mcp?: { command: string; args?: string[]; env?: Record<string, string> }; service?: string; settings?: Record<string, unknown>[]; files?: Record<string, string>; shots?: string[] }[];
+  /** Older versions first; the last is the newest. Default: one verified 1.0.0. */
+  history?: { version: string; status: Story; ago: number; notes?: string; review?: { reason?: string; message?: string; decided_at?: number }; via?: FakeVersion["via"]; engines?: string; permissions?: string[]; commands?: string[]; network?: string[]; mcp?: { command: string; args?: string[]; env?: Record<string, string> }; service?: string; settings?: Record<string, unknown>[]; files?: Record<string, string>; shots?: string[] }[];
   readme?: string;
   screenshots?: number;
   /** More files in every version's package. */
@@ -142,10 +168,29 @@ Made with care. Questions and ideas are welcome on [the repository](${spec.repos
 `;
 }
 
+/**
+ * The store's superseding rule (amendment 45), over a plugin's versions
+ * oldest first: when a version is published, every older listed version that
+ * isn't verified stops taking new installs, `yanked_by: "superseded"` (a
+ * release supersedes older releases and pre-releases; a pre-release, older
+ * pre-releases only). Verified versions are untouched.
+ */
+function supersede(oldestFirst: FakeVersion[]): void {
+  const pre = (v: FakeVersion) => v.version.includes("-");
+  for (const [i, v] of oldestFirst.entries()) {
+    if (v.status !== "listed" || v.verified) continue;
+    const by = oldestFirst.slice(i + 1).find((w) => !pre(w) || pre(v));
+    if (!by) continue;
+    v.status = "yanked";
+    v.yanked_by = "superseded";
+    v.superseded = { at: by.published_at, by: by.version };
+  }
+}
+
 function build(spec: Spec): FakePlugin {
   const accent = spec.accent ?? "#9277b0";
   const shots = Array.from({ length: spec.screenshots ?? 2 }, (_, i) => `shots/screen-${i + 1}.svg`);
-  const history = spec.history ?? [{ version: "1.0.0", status: "approved" as Status, ago: spec.age }];
+  const history = spec.history ?? [{ version: "1.0.0", status: "verified" as Story, ago: spec.age }];
   const versions: FakeVersion[] = history.map((h, index) => {
     const files: Record<string, string> = {
       "init.luau": `-- ${spec.name}\nlocal zeron = require("zeron")\n\nzeron.place { at = "#session-header", after = true, build = function()\n\treturn ui.text { "${spec.name}" }\nend }\n${index > 0 ? `\n-- ${h.version}: ${h.notes ?? "changes"}\nzeron.on("ready", function() end)\n` : ""}`,
@@ -179,26 +224,47 @@ function build(spec: Spec): FakePlugin {
       screenshots: [...shots, ...(h.shots ?? [])],
       engines: { zeron: h.engines ?? ">=0.3.0" },
     };
-    const checks = h.status === "pending" && (h.permissions ?? spec.permissions ?? []).some((p) => p === "commands" || p === "native")
+    const checks = h.status === "undecided" && (h.permissions ?? spec.permissions ?? []).some((p) => p === "commands" || p === "native")
       ? [...OK_CHECKS, { id: "risky", level: "warn" as const, message: "Asks to run programs on the computer as you." }]
       : OK_CHECKS;
+    const published = NOW - h.ago * DAY;
+    // A verified version was verified half a day after it was published (a yanked one was, before it was yanked).
+    const verifiedAt = h.status === "verified" || h.status === "yanked" ? (h.review?.decided_at ?? published + DAY / 2) : null;
+    const status: VersionStatus = h.status === "yanked" || h.status === "taken_down" || h.status === "removed" ? h.status : "listed";
+    const staff = h.status === "taken_down" || h.status === "removed";
+    const review: FakeReview =
+      verifiedAt !== null
+        ? { decided: true, decision: "verified", decided_at: verifiedAt }
+        : h.status === "declined"
+          ? { decided: true, decision: "declined", ...h.review }
+          : { decided: false, decision: null };
     // (The manifest travels beside the files, never as one: the edge lists it apart.)
     return {
       version: h.version,
-      status: h.status,
-      published_at: NOW - h.ago * DAY,
+      status,
+      verified: verifiedAt !== null,
+      verified_at: verifiedAt,
+      published_at: published,
       notes: h.notes ?? (index === 0 ? "First release." : null),
       engines: { zeron: h.engines ?? ">=0.3.0" },
-      ...(h.review ? { review: h.review } : {}),
+      review,
+      via: h.via ?? "device",
+      deploy_key: h.via === "deploy_key" ? { key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq", name: "GitHub Actions" } : null,
+      yanked_by: h.status === "yanked" ? ("author" as const) : null,
+      superseded: null,
+      removal: staff ? { at: h.review?.decided_at ?? published + DAY, reason: h.review?.message ?? h.review?.reason ?? null } : null,
+      ...(h.status === "taken_down" ? { blocked: true } : {}),
       checks,
       manifest,
       files,
     };
   });
+  supersede(versions);
   return {
     id: spec.id,
     owner: spec.owner ?? "user_ada",
-    status: spec.status ?? "listed",
+    // (Listed or not is its versions' to say: a plugin is listed while one of them is.)
+    status: spec.status === "suspended" ? "suspended" : "listed",
     featured: spec.featured ?? false,
     installs: spec.installs ?? 0,
     created_at: NOW - spec.age * DAY,
@@ -224,10 +290,10 @@ const SPECS: Spec[] = [
     featured: true,
     age: 120,
     history: [
-      { version: "1.0.0", status: "approved", ago: 120, notes: "First release." },
-      { version: "1.1.0", status: "approved", ago: 60, notes: "- Pauses when your computer sleeps.\n- A sound at the end, if you want one." },
-      { version: "1.2.0", status: "approved", ago: 9, notes: "### New\n\n- Breaks that follow your agents: a long run gets a long break.\n\n### Fixed\n\n- The timer kept counting after its chat closed." },
-      { version: "1.3.0-beta.1", status: "pending", ago: 1, notes: "Try the new compact look." },
+      { version: "1.0.0", status: "verified", ago: 120, notes: "First release." },
+      { version: "1.1.0", status: "verified", ago: 60, notes: "- Pauses when your computer sleeps.\n- A sound at the end, if you want one." },
+      { version: "1.2.0", status: "verified", ago: 9, via: "deploy_key", notes: "### New\n\n- Breaks that follow your agents: a long run gets a long break.\n\n### Fixed\n\n- The timer kept counting after its chat closed." },
+      { version: "1.3.0-beta.1", status: "undecided", ago: 1, notes: "Try the new compact look." },
     ],
   },
   {
@@ -249,8 +315,8 @@ const SPECS: Spec[] = [
     featured: true,
     age: 80,
     history: [
-      { version: "0.9.0", status: "approved", ago: 80, notes: "First release." },
-      { version: "1.0.0", status: "approved", ago: 20, notes: "Reviews requested from your teams show too." },
+      { version: "0.9.0", status: "verified", ago: 80, notes: "First release." },
+      { version: "1.0.0", status: "verified", ago: 20, notes: "Reviews requested from your teams show too." },
     ],
   },
   {
@@ -391,14 +457,15 @@ const SPECS: Spec[] = [
     age: 12,
     // A version in every state, a reviewer's reason as long as they write them.
     history: [
-      { version: "1.0.0", status: "approved", ago: 12, mcp: { command: "node", args: ["server.js"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com" } }, service: "service.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }] },
-      { version: "1.1.0", status: "yanked", ago: 10, notes: "Moved the panel; stopped offering it after the sidebar changed under it." },
-      { version: "1.2.0", status: "removed", ago: 8, review: { state: "removed", reason: "unsafe", message: "Taken down: it sent the open chat's text to a host its README doesn't name. Anyone who has it has had it turned off.", decided_at: NOW - 7 * DAY } },
-      { version: "1.3.0", status: "withdrawn", ago: 6 },
-      { version: "1.4.0", status: "rejected", ago: 4, review: { state: "rejected", reason: "asks_too_much", message: "It asks to run python3, git and jq and to reach any site at all, but nothing in the README or the listing says what it runs them for or what it sends where. Name the hosts it needs and drop the wildcard, say in the README what each program is run for, and send it again: a reviewer will look at the new version the same day. Until then it can't be listed, and nobody else can install it.", decided_at: NOW - 3 * DAY } },
+      { version: "1.0.0", status: "verified", ago: 12, mcp: { command: "node", args: ["server.js"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com" } }, service: "service.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }] },
+      // (Verified, then stopped by its author: still its newest verified version, what 1.5.0 is weighed against.)
+      { version: "1.1.0", status: "yanked", ago: 10, notes: "Moved the panel; stopped offering it after the sidebar changed under it.", mcp: { command: "node", args: ["server.js"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com" } }, service: "service.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }] },
+      { version: "1.2.0", status: "taken_down", ago: 8, review: { reason: "unsafe", message: "Taken down: it sent the open chat's text to a host its README doesn't name. Anyone who has it has had it turned off.", decided_at: NOW - 7 * DAY } },
+      { version: "1.3.0", status: "removed", ago: 6 },
+      { version: "1.4.0", status: "declined", ago: 4, review: { reason: "asks_too_much", message: "It asks to run python3, git and jq and to reach any site at all, but nothing in the README or the listing says what it runs them for or what it sends where. Name the hosts it needs and drop the wildcard, say in the README what each program is run for, and send it again: a reviewer will look at the new version the same day. Until then this one stays listed, not verified.", decided_at: NOW - 3 * DAY } },
       // (The worst to weigh: two new asks, a program more, hosts named in place
       // of the wildcard, its MCP server and service changed, a setting that grants.)
-      { version: "1.5.0", status: "pending", ago: 1, notes: "Names the hosts it reaches; says what it runs and why.", permissions: ["ui.add", "network", "commands", "tools", "messages.send", "notifications"], commands: ["python3", "git", "jq", "bash"], network: ["api.averyveryverylongsubdomainname.example.com", "localhost:8080", "uploads.averyveryverylongsubdomainname.example.com"], mcp: { command: "node", args: ["server.js", "--listen", "0.0.0.0:7777"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com", UPLOAD_TOKEN: "set-on-first-run" } }, service: "services/sync.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }, { key: "share", kind: "permission", label: "Share notes with agents" }] },
+      { version: "1.5.0", status: "undecided", ago: 1, notes: "Names the hosts it reaches; says what it runs and why.", permissions: ["ui.add", "network", "commands", "tools", "messages.send", "notifications"], commands: ["python3", "git", "jq", "bash"], network: ["api.averyveryverylongsubdomainname.example.com", "localhost:8080", "uploads.averyveryverylongsubdomainname.example.com"], mcp: { command: "node", args: ["server.js", "--listen", "0.0.0.0:7777"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com", UPLOAD_TOKEN: "set-on-first-run" } }, service: "services/sync.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }, { key: "share", kind: "permission", label: "Share notes with agents" }] },
     ],
   },
   {
@@ -425,8 +492,8 @@ const SPECS: Spec[] = [
       "lib/%2e%2e/x.lua": "return 'the dotted one'\n",
     },
     history: [
-      { version: "1.0.0", status: "approved", ago: 3, notes: `<script>alert('notes')</script> and [a link](javascript:alert('notes'))` },
-      { version: "1.1.0", status: "pending", ago: 1, notes: `</code></pre><script>alert('diff')</script><img src=x onerror=alert('diff')>`, network: ["*", "localhost:9090"] },
+      { version: "1.0.0", status: "verified", ago: 3, notes: `<script>alert('notes')</script> and [a link](javascript:alert('notes'))` },
+      { version: "1.1.0", status: "undecided", ago: 1, notes: `</code></pre><script>alert('diff')</script><img src=x onerror=alert('diff')>`, network: ["*", "localhost:9090"] },
     ],
     ui: { replace: ["@app/screens/chat/composer"] },
     network: ["*", "localhost:8080"],
@@ -474,7 +541,7 @@ Footnote[^x"><script>].
 `,
   },
   {
-    // Listed, with a version in review and one rejected: the author's view.
+    // Listed, with a version waiting for a reviewer and one declined: the author's view.
     id: "session-badges",
     name: "Session badges",
     summary: "A small badge on each sidebar row: its branch, its checks, its cost.",
@@ -488,15 +555,15 @@ Footnote[^x"><script>].
     installs: 2970,
     age: 70,
     history: [
-      { version: "1.0.0", status: "approved", ago: 70 },
+      { version: "1.0.0", status: "verified", ago: 70 },
       { version: "1.1.0", status: "yanked", ago: 40, notes: "Broke the sidebar on narrow windows." },
-      { version: "1.1.1", status: "approved", ago: 39, notes: "Fixed the sidebar on narrow windows." },
-      { version: "1.2.0", status: "rejected", ago: 5, notes: "Shows the cost of each chat.", permissions: ["ui.add", "sessions.read", "network"], network: ["*"], review: { state: "rejected", reason: "asks_too_much", message: "It asks to reach any site, but the README doesn't say why. Name the hosts it needs, or say what it sends where.", decided_at: NOW - 4 * DAY } },
-      { version: "1.2.1", status: "pending", ago: 2, notes: "Shows the cost of each chat, from your agents' own usage.", permissions: ["ui.add", "sessions.read", "usage.read"] },
+      { version: "1.1.1", status: "verified", ago: 39, notes: "Fixed the sidebar on narrow windows." },
+      { version: "1.2.0", status: "declined", ago: 5, notes: "Shows the cost of each chat.", permissions: ["ui.add", "sessions.read", "network"], network: ["*"], review: { reason: "asks_too_much", message: "It asks to reach any site, but the README doesn't say why. Name the hosts it needs, or say what it sends where.", decided_at: NOW - 4 * DAY } },
+      { version: "1.2.1", status: "undecided", ago: 2, notes: "Shows the cost of each chat, from your agents' own usage.", permissions: ["ui.add", "sessions.read", "usage.read"] },
     ],
   },
   {
-    // First submission, still in review: not listed anywhere yet.
+    // A first version, listed at once, waiting for a reviewer.
     id: "voice-memos",
     name: "Voice memos",
     summary: "Record a thought and drop it into a chat as text.",
@@ -508,11 +575,11 @@ Footnote[^x"><script>].
     network: ["api.openai.com"],
     owner: "user_mo",
     age: 1,
-    history: [{ version: "0.1.0", status: "pending", ago: 1 }],
+    history: [{ version: "0.1.0", status: "undecided", ago: 1 }],
     status: "unlisted",
   },
   {
-    // Only a rejected version: nothing listed or in review, so its id goes back in 90 days.
+    // Only a declined version: listed, never verified.
     id: "old-idea",
     name: "Old idea",
     summary: "Tried once.",
@@ -520,7 +587,7 @@ Footnote[^x"><script>].
     categories: ["utilities"],
     owner: "user_kai",
     age: 20,
-    history: [{ version: "0.1.0", status: "rejected", ago: 20, review: { state: "rejected", reason: "broken", message: "It doesn't start.", decided_at: NOW - 19 * DAY } }],
+    history: [{ version: "0.1.0", status: "declined", ago: 20, review: { reason: "broken", message: "It doesn't start.", decided_at: NOW - 19 * DAY } }],
     status: "unlisted",
   },
   {
@@ -581,21 +648,21 @@ for (const [i, [id, name, summary, icon, categories]] of MORE.entries()) {
     age: 10 + i * 3,
     screenshots: i % 4 === 0 ? 0 : 1,
     // (Weather needs a Zeron not out yet: Install is off on its page.)
-    history: [{ version: `1.${i % 5}.0`, status: "approved", ago: 10 + i * 3, ...(id === "weather" ? { engines: ">=0.9.0" } : {}) }],
+    history: [{ version: `1.${i % 5}.0`, status: "verified", ago: 10 + i * 3, ...(id === "weather" ? { engines: ">=0.9.0" } : {}) }],
   });
 }
 
 // Ada's plugins in the states an author's list must show apart from the
-// steady one: a first version in review, one not approved and never listed,
-// one taken down, one withdrawn and inside its 90 days.
+// steady one: a first version waiting for a reviewer, one declined, one
+// taken down, one whose newest version staff removed.
 SPECS.push(
-  { id: "first-light", name: "First light", summary: "Opens your morning chats as you left them.", icon: null, categories: ["productivity"], keywords: ["morning"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 2, screenshots: 0, history: [{ version: "0.1.0", status: "pending", ago: 2 }] },
-  { id: "rough-draft", name: "Rough draft", summary: "Drafts a reply in the composer from the chat so far.", icon: null, categories: ["chat"], keywords: ["draft"], permissions: ["ui.add", "messages.read"], owner: "user_ada", installs: 0, age: 9, screenshots: 0, history: [{ version: "0.1.0", status: "rejected", ago: 9, review: { state: "rejected", reason: "listing", message: "The README is one line. Say what it drafts from, where the draft appears, and add a picture of it.", decided_at: NOW - 8 * DAY } }] },
-  { id: "clipboard-sync", name: "Clipboard sync", summary: "Keeps the clipboard the same on all your devices.", icon: null, categories: ["utilities"], keywords: ["clipboard"], permissions: ["ui.add", "clipboard", "network"], network: ["sync.clipboard-sync.example.com"], owner: "user_ada", installs: 310, age: 40, screenshots: 0, history: [{ version: "1.0.0", status: "removed", ago: 40, review: { state: "removed", reason: "unsafe", message: "It sent every copied password to its sync host in plain text.", decided_at: NOW - 12 * DAY } }] },
-  { id: "old-sketch", name: "Old sketch", summary: "A first try at a sidebar of pinned chats.", icon: null, categories: ["productivity"], keywords: ["pins"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 30, screenshots: 0, history: [{ version: "0.1.0", status: "yanked", ago: 30 }, { version: "0.2.0", status: "withdrawn", ago: 20 }] },
+  { id: "first-light", name: "First light", summary: "Opens your morning chats as you left them.", icon: null, categories: ["productivity"], keywords: ["morning"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 2, screenshots: 0, history: [{ version: "0.1.0", status: "undecided", ago: 2 }] },
+  { id: "rough-draft", name: "Rough draft", summary: "Drafts a reply in the composer from the chat so far.", icon: null, categories: ["chat"], keywords: ["draft"], permissions: ["ui.add", "messages.read"], owner: "user_ada", installs: 0, age: 9, screenshots: 0, history: [{ version: "0.1.0", status: "declined", ago: 9, review: { reason: "listing", message: "The README is one line. Say what it drafts from, where the draft appears, and add a picture of it.", decided_at: NOW - 8 * DAY } }] },
+  { id: "clipboard-sync", name: "Clipboard sync", summary: "Keeps the clipboard the same on all your devices.", icon: null, categories: ["utilities"], keywords: ["clipboard"], permissions: ["ui.add", "clipboard", "network"], network: ["sync.clipboard-sync.example.com"], owner: "user_ada", installs: 310, age: 40, screenshots: 0, history: [{ version: "1.0.0", status: "taken_down", ago: 40, review: { reason: "unsafe", message: "It sent every copied password to its sync host in plain text.", decided_at: NOW - 12 * DAY } }] },
+  { id: "old-sketch", name: "Old sketch", summary: "A first try at a sidebar of pinned chats.", icon: null, categories: ["productivity"], keywords: ["pins"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 30, screenshots: 0, history: [{ version: "0.1.0", status: "yanked", ago: 30 }, { version: "0.2.0", status: "removed", ago: 20 }] },
   // Words built to cost the parser the square of their length, each at the store's cap (a 512 KB
   // README, 64 KB notes): the page must still answer at once, showing them as text.
-  { id: "slow-words", name: "Slow words", summary: "Its README and notes are built to be slow to draw.", icon: null, categories: ["utilities"], keywords: ["slow"], permissions: ["ui.add"], owner: "user_mo", installs: 3, age: 7, screenshots: 0, readme: "- a\n+ b\n".repeat(65_536), history: [{ version: "1.0.0", status: "approved", ago: 7, notes: ">".repeat(65_536) }, { version: "1.1.0", status: "approved", ago: 5, notes: "[".repeat(13_107) + "a" + "](b)".repeat(13_107) }, { version: "1.2.0", status: "pending", ago: 1, notes: `|${"a|".repeat(64)}\n|${"-|".repeat(64)}\n${"a\n".repeat(32_000)}`, files: { "src/nest.js": "`${\n".repeat(300) + "`${".repeat(130) }, shots: ["../../../../account/me.json"] }] },
+  { id: "slow-words", name: "Slow words", summary: "Its README and notes are built to be slow to draw.", icon: null, categories: ["utilities"], keywords: ["slow"], permissions: ["ui.add"], owner: "user_mo", installs: 3, age: 7, screenshots: 0, readme: "- a\n+ b\n".repeat(65_536), history: [{ version: "1.0.0", status: "verified", ago: 7, notes: ">".repeat(65_536) }, { version: "1.1.0", status: "verified", ago: 5, notes: "[".repeat(13_107) + "a" + "](b)".repeat(13_107) }, { version: "1.2.0", status: "undecided", ago: 1, notes: `|${"a|".repeat(64)}\n|${"-|".repeat(64)}\n${"a\n".repeat(32_000)}`, files: { "src/nest.js": "`${\n".repeat(300) + "`${".repeat(130) }, shots: ["../../../../account/me.json"] }] },
 );
 
 export function plugins(): FakePlugin[] {
@@ -626,7 +693,7 @@ export interface FakeAudit {
   seq: number;
   at: number;
   actor: string;
-  /** The edge's words: version.approve, plugin.suspend, report.dismissed, reservation.set, … */
+  /** The edge's words: version.verify, plugin.suspend, report.dismissed, reservation.set, … */
   action: string;
   plugin_id: string | null;
   version: string | null;
@@ -635,14 +702,17 @@ export interface FakeAudit {
 
 export function audit(): FakeAudit[] {
   return [
-    { seq: 3, at: NOW - 4 * DAY, actor: "user_grace", action: "version.reject", plugin_id: "session-badges", version: "1.2.0", detail: { reason: "asks_too_much" } },
-    { seq: 2, at: NOW - 9 * DAY, actor: "user_grace", action: "version.approve", plugin_id: "focus-timer", version: "1.2.0", detail: null },
+    { seq: 3, at: NOW - 4 * DAY, actor: "user_grace", action: "version.decline", plugin_id: "session-badges", version: "1.2.0", detail: { reason: "asks_too_much" } },
+    { seq: 2, at: NOW - 9 * DAY, actor: "user_grace", action: "version.verify", plugin_id: "focus-timer", version: "1.2.0", detail: null },
     { seq: 1, at: NOW - 20 * DAY, actor: "user_grace", action: "plugin.suspend", plugin_id: "crypto-ticker", version: null, detail: { reason: "Sends what you type to a third party." } },
   ];
 }
 
+/** A deploy key, the account's (amendment 44), with its scope fixed when made. */
 export interface FakeKey {
-  plugin_id: string;
+  owner: string;
+  scope: { all: true } | { plugins: string[] };
+  last_used_plugin: string | null;
   key: string;
   name: string;
   created_at: number;
@@ -653,8 +723,8 @@ export interface FakeKey {
 
 export function keys(): FakeKey[] {
   return [
-    { plugin_id: "focus-timer", key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq", name: "GitHub Actions", created_at: NOW - 50 * DAY, last_used_at: NOW - 9 * DAY, expires_at: NOW + 315 * DAY, revoked_at: null },
-    { plugin_id: "focus-timer", key: "Zt8nQ1wE4rT7yU0iO3pA6sD9fG2hJ5kL8zX1cV4bN7m", name: "Old laptop script", created_at: NOW - 110 * DAY, last_used_at: NOW - 100 * DAY, expires_at: null, revoked_at: NOW - 60 * DAY },
+    { owner: "user_ada", scope: { plugins: ["focus-timer"] }, last_used_plugin: "focus-timer", key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq", name: "GitHub Actions", created_at: NOW - 50 * DAY, last_used_at: NOW - 9 * DAY, expires_at: NOW + 315 * DAY, revoked_at: null },
+    { owner: "user_ada", scope: { all: true }, last_used_plugin: "session-badges", key: "Zt8nQ1wE4rT7yU0iO3pA6sD9fG2hJ5kL8zX1cV4bN7m", name: "Old laptop script", created_at: NOW - 110 * DAY, last_used_at: NOW - 100 * DAY, expires_at: null, revoked_at: NOW - 60 * DAY },
     // The worst case's ten: live and revoked, used and never, ending soon and never.
     ...[
       ["GitHub Actions: release on tag, the main repository's workflow", 40, 1, 300, null],
@@ -668,7 +738,10 @@ export function keys(): FakeKey[] {
       ["Test", 20, 19, 30, 10],
       ["Contributor's fork", 8, 3, 3, null],
     ].map(([name, made, used, ends, revoked], i) => ({
-      plugin_id: "worst-case-listing-at-every-limit-xyz12",
+      // (The worst case is Ada's, as every plugin with no owner of its own is.)
+      owner: "user_ada",
+      scope: i % 3 === 0 ? ({ all: true } as const) : { plugins: ["worst-case-listing-at-every-limit-xyz12", ...(i % 3 === 2 ? ["focus-timer"] : [])].sort() },
+      last_used_plugin: used === null ? null : "worst-case-listing-at-every-limit-xyz12",
       // (Each its own 43 characters of base64url, as an ed25519 key is.)
       key: Array.from({ length: 43 }, (_, j) => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"[(i * 131 + j * j * 17 + j * 7 + 3) % 64]).join(""),
       name: name as string,

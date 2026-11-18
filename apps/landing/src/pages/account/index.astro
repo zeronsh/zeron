@@ -9,7 +9,7 @@ import { takeFlash } from "../../lib/store/flash.ts";
 import { count, day } from "../../lib/store/format.ts";
 import { privatePage } from "../../lib/store/http.ts";
 import { requireSession } from "../../lib/store/session.ts";
-import { everListed, listingState, toneClass, versionState } from "../../lib/store/states.ts";
+import { everListed, listingState, toneClass, verificationState, versionState } from "../../lib/store/states.ts";
 
 export const prerender = false;
 
@@ -60,15 +60,16 @@ const plugins = result.ok ? result.data.plugins : [];
           <table class="table comfortable mine">
             <caption class="sr-only">Your plugins</caption>
             <colgroup><col /><col class="listing" /><col class="newest" /><col class="updated" /></colgroup>
-            <thead><tr><th scope="col">Plugin</th><th scope="col">In the store</th><th scope="col">Newest version</th><th scope="col" class="end">Sent</th></tr></thead>
+            <thead><tr><th scope="col">Plugin</th><th scope="col">In the store</th><th scope="col">Newest version</th><th scope="col" class="end">Published</th></tr></thead>
             <tbody>
               {plugins.map((p) => {
                 const newest = p.versions[0];
-                const state = newest ? versionState(newest) : null;
+                // (A newest version that's listed says whether it's verified; one that isn't, where it stands.)
+                const state = newest ? (newest.status === "listed" ? verificationState(newest) : versionState(newest)) : null;
                 const listing = listingState(p.listing, everListed(p.versions));
-                // (Steady is quiet: listed, its newest approved. A badge only where a row needs a look.)
+                // (Steady is quiet: listed, its newest verified. A badge only where a row needs a look.)
                 const listedSteady = p.listing === "listed";
-                const newestSteady = listedSteady && newest?.status === "approved";
+                const newestSteady = listedSteady && newest?.status === "listed" && newest.verified;
                 return (
                   <tr>
                     <td>
@@ -86,7 +87,7 @@ const plugins = result.ok ? result.data.plugins : [];
                     </td>
                     <td class="listing">{listedSteady ? <span class="steady">{listing.label}</span> : <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>}</td>
                     <td class="newest">{newest && state ? <span class="newest-cell"><span class="t-mono">{newest.version}</span>{!newestSteady && <span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>}</span> : <span class="t-3">{"—"}</span>}</td>
-                    <td class="updated end muted">{newest ? <time datetime={new Date(newest.submitted_at).toISOString()}>{day(newest.submitted_at)}</time> : "—"}</td>
+                    <td class="updated end muted">{newest ? <time datetime={new Date(newest.published_at).toISOString()}>{day(newest.published_at)}</time> : "—"}</td>
                   </tr>
                 );
               })}

@@ -26,9 +26,14 @@ const pager = result.ok ? pagerOf("/admin/audit", pluginFilter ? { plugin: plugi
 
 /** The edge's words for what was done, as a person says them. */
 const ACTIONS: Record<string, string> = {
+  // (Amendment 45's words; the ones before them stay, for the entries made then.)
+  "version.publish": "Published",
+  "version.verify": "Verified",
+  "version.decline": "Didn't verify",
+  "version.take_down": "Took down",
+  "version.remove": "Removed",
   "version.approve": "Approved",
   "version.reject": "Didn't approve",
-  "version.remove": "Took down",
   "version.withdraw": "Withdrew",
   "version.yank": "Stopped new installs of",
   "version.unyank": "Allowed installs again of",

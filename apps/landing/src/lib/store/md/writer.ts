@@ -78,6 +78,11 @@ export class Html {
   }
 
   private unit(code: number) {
+    // (Checked a character at a time: a long text stops at the bound, not a text past it.)
+    if (this.size === this.most) {
+      if (this.meter) this.meter.written = this.size;
+      throw TOO_LARGE;
+    }
     if (this.at === CHUNK) this.flush();
     this.buffer[this.at++] = code;
     this.size++;
@@ -93,7 +98,6 @@ export class Html {
       } else this.unit(code);
     }
     if (this.meter) this.meter.written = this.size;
-    if (this.size > this.most) throw TOO_LARGE;
   }
 
   open(tag: string, attributes: [string, string | true][] = []) {

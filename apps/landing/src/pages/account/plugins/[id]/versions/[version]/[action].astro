@@ -23,7 +23,7 @@ if (Astro.request.method === "POST") {
   const form = await formOf(Astro.request);
   if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
   const result = await Astro.locals.edge.versionAction(id, version, action, session.csrf);
-  if (result.ok && action !== "withdraw") await purge(Astro, id);
+  if (result.ok) await purge(Astro, id);
   return done(Astro, flashFor(result, ask.flash), back);
 }
 if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });

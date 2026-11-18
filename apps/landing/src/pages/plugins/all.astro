@@ -10,8 +10,8 @@ import { canonicalSearch, catalogHref, effectiveSort, PAGE_SIZE, pageHref, range
 import { count, day } from "../../lib/store/format.ts";
 import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
 import { CATEGORIES } from "../../lib/store/nav.ts";
-import type { PluginCard, Sort } from "../../lib/store/types.ts";
-import { store } from "../../lib/store/words.ts";
+import type { PluginCard } from "../../lib/store/types.ts";
+import { EMPTY_BODY, store } from "../../lib/store/words.ts";
 
 export const prerender = false;
 
@@ -25,7 +25,7 @@ const canonical = canonicalSearch(Astro.url.searchParams, state);
 if (canonical && categoriesResult.ok) return Astro.redirect(canonical, 301);
 
 const sort = effectiveSort(state);
-const page = await edge.catalog({ q: state.q || undefined, category: state.category ?? undefined, keyword: state.keyword ?? undefined, sort, cursor: state.cursor ?? undefined, limit: PAGE_SIZE });
+const page = await edge.catalog({ q: state.q || undefined, category: state.category ?? undefined, keyword: state.keyword ?? undefined, verified: state.verified || undefined, sort, cursor: state.cursor ?? undefined, limit: PAGE_SIZE });
 
 // A cursor from another search, or an old one: this search's first page.
 if (!page.ok && page.error === "bad_cursor") return Astro.redirect(catalogHref({ ...state, cursor: null }), 303);
@@ -58,22 +58,33 @@ const measure: Measure =
       ? { head: "Published", cell: published, folded: (p) => `Published ${published(p)}` }
       : { head: "Installs", cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
 
-const sorts = (["relevance", "popular", "updated", "new"] as Sort[]).filter((s) => s !== "relevance" || state.q);
+// (The orders Browse offers, each in the app's words; "Newly verified" is Discover's shelf, reached by its link.)
+const sorts = (["relevance", "popular", "updated", "new"] as const).filter((s) => s !== "relevance" || state.q);
 const heading = state.q ? `Results for “${state.q}”` : state.category ? categoryName(state.category) : state.keyword ? `Tagged “${state.keyword}”` : "All plugins";
 const title = state.q ? `“${state.q}” · Plugins · Zeron` : state.category ? `${categoryName(state.category)} plugins · Zeron` : "All plugins · Zeron";
 const description = state.category
-  ? `Plugins for Zeron in ${categoryName(state.category)}: reviewed before they're listed, installed in a click.`
-  : "Every plugin for Zeron: panels, commands, tools for your agents and more. Each one is reviewed before it's listed.";
+  ? `Plugins for Zeron in ${categoryName(state.category)}, each saying whether Zeron verified it.`
+  : "Every plugin for Zeron: panels, commands, tools for your agents and more, each saying whether Zeron verified it.";
 // Search results and later pages stay out of search engines; the list and its categories don't.
-const noindex = Boolean(state.q || state.cursor || state.keyword);
+const noindex = Boolean(state.q || state.cursor || state.keyword || state.verified);
 const here = `${Astro.url.pathname}${Astro.url.search}`;
 ---
 
 <App title={title} description={description} noindex={noindex} canonical={catalogHref({ category: state.category })} current={state.category ?? (state.q || state.keyword ? null : "all")} query={state.q}>
   <h1 slot="title" class="t-title">{heading}{total !== undefined && <span class="title-count"> · {count(total)}</span>}</h1>
   {
+    // (A filter, never a sort: amendment 45. Every sort keeps its own order, verified or not. A link, so its
+    // words say what it does: a link can't be pressed. Beside the order, each the tools' own child, as the
+    // phone's rules for the order expect.)
+    page.ok && (items.length > 0 || state.verified) && (
+      <a slot="tools" class="btn ghost sm" href={catalogHref({ ...state, verified: !state.verified, cursor: null, page: null })}>
+        <Glyph name="shield-check" size={14} />{state.verified ? "Show all, verified or not" : store("plugins.store.verified_only")}
+      </a>
+    )
+  }
+  {
     page.ok && items.length > 0 && (
-      <nav slot="tools" class="segmented" aria-label="Order">
+      <nav slot="tools" class="segmented" aria-label={store("plugins.store.order_label")}>
         {sorts.map((s) => (
           <a href={catalogHref({ ...state, sort: s, cursor: null })} aria-current={s === sort ? "page" : undefined}>{store(`plugins.store.sort.${s}`)}</a>
         ))}
@@ -96,13 +107,17 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
           <span class="tile"><Glyph name={state.q ? "magnifer" : "widget"} size={20} /></span>
           {state.q ? (
             <div class="words"><h2 class="t-heading">{store("plugins.store.nothing_matches", { query: state.q })}</h2><p>{store("plugins.store.try_another")}</p></div>
+          ) : state.verified ? (
+            <div class="words"><h2 class="t-heading">{store("plugins.store.nothing_here")}</h2><p>No plugin here has a verified newest version yet.</p></div>
           ) : state.category || state.keyword ? (
-            <div class="words"><h2 class="t-heading">{store("plugins.store.nothing_here")}</h2><p>{store("plugins.store.empty_body")}</p></div>
+            <div class="words"><h2 class="t-heading">{store("plugins.store.nothing_here")}</h2><p>{EMPTY_BODY}</p></div>
           ) : (
-            <div class="words"><h2 class="t-heading">{store("plugins.store.empty_title")}</h2><p>{store("plugins.store.empty_body")}</p></div>
+            <div class="words"><h2 class="t-heading">{store("plugins.store.empty_title")}</h2><p>{EMPTY_BODY}</p></div>
           )}
           {state.q ? (
             <div class="actions"><a class="btn secondary sm" href={catalogHref({ category: state.category, keyword: state.keyword })}>{store("plugins.store.clear")}</a></div>
+          ) : state.verified ? (
+            <div class="actions"><a class="btn secondary sm" href={catalogHref({ ...state, verified: false, cursor: null, page: null })}>Show them all</a></div>
           ) : state.category || state.keyword ? (
             <div class="actions"><a class="btn secondary sm" href={catalogHref({})}>All plugins</a></div>
           ) : null}

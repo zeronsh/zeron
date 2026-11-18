@@ -181,6 +181,35 @@ FAMILIES["definitions with a title on the next line"] = (n) => '[a]: b\n"\n'.rep
 FAMILIES["a fake fence (a backtick in its info string)"] = (n) => "``` a`b\n" + "a\n=\n".repeat(n / 4);
 FAMILIES["a sparse table 1,300 columns wide"] = (n) => `|${"a|".repeat(1300)}\n|${"-|".repeat(1300)}\n` + "|a|\n".repeat(n / 4);
 FAMILIES["a markdown code block of link openers"] = (n) => "```markdown\n" + "[a](".repeat(n / 4) + "\n```\n";
+// The identity lane's, from its check of this tier: each catches a regression the tier passed without it.
+// A definition at its caps used again and again (F1 come back with the caps kept: each use resolved again).
+FAMILIES["def at its caps reused"] = (n) => `[l]: /${"a".repeat(2000)} "${"t".repeat(1000)}"\n\n` + rep("[l] ", n - 3100);
+// The same, inside a picture's words (its alt is built from them).
+FAMILIES["def at its caps reused in an alt"] = (n) => `[l]: /${"a".repeat(2000)} "${"t".repeat(1000)}"\n\n![` + rep("[a][l]", n - 3110) + "](b)";
+// Lists that deepen a step a line (the nesting cap gone: each line matched against every list above it).
+FAMILIES["lists rising"] = (n) => {
+  const lines: string[] = [];
+  let length = 0;
+  for (let i = 1; length < n; i++) {
+    const line = `${"- ".repeat(i)}a`;
+    lines.push(line);
+    length += line.length + 1;
+  }
+  return lines.join("\n").slice(0, n);
+};
+// Many definitions, each used once, a paragraph each: never stopped (each paragraph's inlines are let go as
+// it is written), so a lookup that scans the definitions (uncounted or not) shows in its time.
+FAMILIES["definitions used once each, a paragraph each"] = (n) => {
+  const uses: string[] = [];
+  const definitions: string[] = [];
+  let length = 0;
+  for (let i = 0; length < n; i++) {
+    uses.push(`[l${i}]`);
+    definitions.push(`[l${i}]: /`);
+    length += 2 * `${i}`.length + 12;
+  }
+  return `${uses.join("\n\n")}\n\n${definitions.join("\n")}`.slice(0, n);
+};
 FAMILIES["an ordinary README"] = (n) => rep("## A heading\n\nSome *words* and a [link](https://example.com), `code`.\n\n- one\n- two\n\n```js\nconst a = 1;\n```\n\n", n);
 FAMILIES["prose and tables"] = (n) =>
   rep("## Usage\n\nThis plugin shows the cost of each chat in the sidebar, from your agents' own usage.\n\n| Setting | What it does |\n|---|---|\n| `limit` | The monthly limit. |\n| `warn` | When to warn you. |\n\n", n);

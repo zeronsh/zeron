@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { ON_THE_WEB } from "./permissions.ts";
 import { AUTHOR_ACTIONS, revokeAsk } from "./actions.ts";
-import { versionState } from "./states.ts";
+import { verificationState, versionState } from "./states.ts";
 import { store, STORE_WORDS } from "./words.ts";
 import type { VersionStatus } from "./types.ts";
 
@@ -25,15 +25,23 @@ describe.skipIf(!appHasThem)("the store's words are the app's", () => {
 });
 
 describe("the site says them where they belong", () => {
-  test("every state of a version, by the app's name", () => {
-    const names = (["pending", "approved", "rejected", "withdrawn", "yanked", "removed"] as VersionStatus[]).map((status) => versionState({ status }).label);
-    expect(names).toEqual(["In review", "Approved", "Not approved", "Withdrawn", "No new installs", "Taken down"]);
+  test("every state of a version (amendment 45), by the app's name where it has one", () => {
+    const names = (["listed", "yanked", "taken_down", "removed"] as VersionStatus[]).map((status) => versionState({ status }).label);
+    expect(names).toEqual(["Listed", "No new installs", "Taken down", "Removed"]);
+  });
+
+  test("whether it's verified: the public's two words, and a decline the author's and staff's alone", () => {
+    // (The contract's three states: a decline reads "Not verified" to its author only; the public reads "Not verified yet".)
+    expect(verificationState({ verified: true }).label).toBe("Verified");
+    expect(verificationState({ verified: false }).label).toBe("Not verified yet");
+    expect(verificationState({ verified: false, review: { decided: false, decision: null } }).label).toBe("Not verified yet");
+    expect(verificationState({ verified: false, review: { decided: true, decision: "declined", reason: "broken" } })).toMatchObject({ label: "Not verified", tone: "warning" });
   });
 
   test("an author's actions and their questions", () => {
     expect(AUTHOR_ACTIONS.yank.ask("Focus timer", "1.2.0")).toMatchObject({ title: "Stop new installs of Focus timer 1.2.0?", confirm: "Stop new installs" });
     expect(AUTHOR_ACTIONS.unyank.ask("Focus timer", "1.2.0")).toMatchObject({ title: "Allow installs of Focus timer 1.2.0?", confirm: "Allow installs again" });
-    expect(AUTHOR_ACTIONS.withdraw.ask("Focus timer", "1.2.0")).toMatchObject({ title: "Withdraw Focus timer 1.2.0?", confirm: "Withdraw" });
+    expect(Object.keys(AUTHOR_ACTIONS)).toEqual(["yank", "unyank"]);
     expect(revokeAsk("GitHub Actions")).toMatchObject({ title: "Revoke GitHub Actions?", confirm: "Revoke" });
   });
 });

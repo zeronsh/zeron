@@ -2,7 +2,7 @@
 // A plugin's page: who made it, what it does (its README, as reviewed),
 // what it asks for, its versions, and Install in Zeron. The same for
 // everyone, so kept by the Worker cache for at most a minute.
-import { statusWords, store } from "../../lib/store/words.ts";
+import { statusWords, store, storeAround } from "../../lib/store/words.ts";
 import Asks from "../../components/kit/Asks.astro";
 import Install from "../../components/kit/Install.astro";
 import Strip from "../../components/kit/Strip.astro";
@@ -17,13 +17,14 @@ import { CATEGORIES } from "../../lib/store/nav.ts";
 import { satisfies } from "../../lib/store/semver.ts";
 import { pluginTag, publicPage } from "../../lib/store/http.ts";
 import { drawn, keepable, type Drawn } from "../../lib/store/rendered.ts";
+import { stoppedWhy } from "../../lib/store/states.ts";
 import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
-import { fileUrl, httpsUrl, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
+import { appUrl, fileUrl, httpsUrl, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
 import type { VersionInfo } from "../../lib/store/types.ts";
 
 export const prerender = false;
 
-// An id no plugin is listed under (unknown, in review, taken down, or not
+// An id no plugin is listed under (unknown, taken down or removed, or not
 // an id at all) is one page, the same for each: the shell's own 404, which
 // says nothing of why. (A malformed id never reaches the edge.)
 const asked = Astro.params.id ?? "";
@@ -33,9 +34,11 @@ const id = valid ? asked : "";
 // made again, and can't split its cache.
 if (valid && Astro.url.search) return Astro.redirect(pluginUrl(id), 301);
 
+/** Versions whose notes the page shows (each is rendered once, then kept); the rows after them, to 20 more; the rest on its versions page. */
+const NOTED = 8;
 const edge = Astro.locals.edge;
 const [result, versionsResult, categoriesResult, latestZeron] = valid
-  ? await Promise.all([edge.plugin(id), edge.versions(id), edge.categories(), edge.latestRelease()])
+  ? await Promise.all([edge.plugin(id), edge.versions(id, undefined, NOTED + 20), edge.categories(), edge.latestRelease()])
   : [null, null, await edge.categories(), null];
 // (A listed plugin always has a version; one without is not the public's.)
 const missing = !result || (!result.ok && result.error === "not_found") || (result.ok && !result.data.version);
@@ -43,8 +46,6 @@ if (missing) Astro.response.status = 404;
 else if (!result.ok) Astro.response.status = 503;
 const plugin = result?.ok && result.data.version ? { ...result.data, version: result.data.version } : null;
 
-/** Versions whose notes the page shows (each is rendered once, then kept). */
-const NOTED = 8;
 let readme = "";
 let versions: (VersionInfo & { html: string | null })[] = [];
 if (plugin) {
@@ -85,7 +86,12 @@ const first = plugin?.categories[0] ?? null;
 const latest = plugin ? (versions.find((v) => v.version === plugin.version) ?? null) : null;
 const older = plugin ? versions.filter((v) => v !== latest) : [];
 const asks = plugin ? lines(plugin.permissions).length : 0;
-const when = (v: VersionInfo) => v.published_at ?? v.submitted_at;
+const when = (v: VersionInfo) => v.published_at;
+/** Every listed version can be seen and installed (amendment 45): its versions page, when this one shows only some. */
+const allVersions = plugin ? `${pluginUrl(plugin.id)}/versions` : "";
+const versionsTotal = versionsResult?.ok ? versionsResult.data.total : versions.length;
+const versionUrl = (v: string) => `${allVersions}/${encodeURIComponent(v)}`;
+const [before, after] = plugin ? storeAround("plugins.store.not_verified_line", { version: plugin.version }, "verified") : ["", ""];
 // Install is off when the plugin's range leaves out the latest Zeron: the
 // web can't know your Zeron, but it knows none released can install this.
 // (A range it can't read: nothing said, Install left on.)
@@ -148,6 +154,7 @@ const structured = plugin
               {plugin.author.badges.map((b) => <span class="badge sm" title={b.description}>{b.name}</span>)}
               <span class="dot" aria-hidden="true">·</span>
               <span class="num">{plugin.version}</span>
+              {plugin.verified ? <span class="badge sm ok" title="Zeron verified this version.">{store("plugins.store.verified")}</span> : <span class="badge sm" title="Zeron hasn't verified this version yet.">{store("plugins.store.review.waiting")}</span>}
               <span class="dot" aria-hidden="true">·</span>
               <span class="num">{count(plugin.installs)} {plugin.installs === 1 ? "install" : "installs"}</span>
               <span class="dot updated" aria-hidden="true">·</span>
@@ -156,6 +163,17 @@ const structured = plugin
           </div>
           <Install id={plugin.id} name={plugin.name} off={off} />
         </header>
+        {!plugin.verified && (
+          <p class="notice" role="note">
+            <Glyph name="info-circle" size={16} />
+            <span>
+              {/* (The app's sentence, its verified version a link; then what that means, the web's.) */}
+              <b>{plugin.verified_version ? <>{before}<a href={versionUrl(plugin.verified_version)}>{plugin.verified_version}</a>{after}</> : store("plugins.store.none_verified")}</b>{" "}
+              It's listed as its author published it, and Zeron asks before it installs it.
+              {plugin.verified_version && <>{" "}<a href={appUrl(plugin.id, plugin.verified_version)}>{store("plugins.store.install_instead", { version: plugin.verified_version })}</a></>}
+            </span>
+          </p>
+        )}
         {off && (
           <p class="notice warn" role="note">
             <Glyph name="danger-triangle" size={16} />
@@ -184,8 +202,9 @@ const structured = plugin
                       <div class="version-head">
                         <h2 class="num">{latest.version}</h2>
                         <span class="badge sm ok">Latest</span>
+                        {latest.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{store("plugins.store.review.waiting")}</span>}
                         {isPrerelease(latest.version) && <span class="badge sm info">Pre-release</span>}
-                        {latest.yanked && <span class="badge sm warn" title="Its author stopped new installs. Those who have it keep it working.">{statusWords("yanked")}</span>}
+                        {latest.yanked && <span class="badge sm warn" title={stoppedWhy(latest)}>{statusWords("yanked")}</span>}
                         <time datetime={new Date(when(latest)).toISOString()}>{day(when(latest))}</time>
                       </div>
                       {latest.html ? <div class="prose notes" set:html={latest.html} data-clamp /> : <p class="t-text t-3">No notes for this version.</p>}
@@ -197,12 +216,14 @@ const structured = plugin
                         <details class:list={{ "more-version": i >= SHOWN }}>
                           <summary>
                             <span class="num">{v.version}</span>
+                            {v.verified && <span class="badge sm ok">{store("plugins.store.verified")}</span>}
                             <span class="first">{firstLine(v.notes) || "No notes"}</span>
                             <time datetime={new Date(when(v)).toISOString()}>{day(when(v))}</time>
                             <Glyph name="alt-arrow-down" size={14} />
                           </summary>
                           <div class="notes">
-                            {v.yanked && <p><span class="badge sm warn">{statusWords("yanked")}</span></p>}
+                            {v.yanked && <p><span class="badge sm warn" title={stoppedWhy(v)}>{statusWords("yanked")}</span></p>}
+                            <p><a href={versionUrl(v.version)}>{v.version} on its own page</a></p>
                             {v.html ? <div class="prose" set:html={v.html} /> : v.notes ? <p class="t-text t-2">{v.notes}</p> : <p class="t-text t-3">No notes for this version.</p>}
                           </div>
                         </details>
@@ -214,6 +235,8 @@ const structured = plugin
                       {store("plugins.store.all_versions", { n: versions.length })}
                     </button>
                   )}
+                  {/* (A page of its own, not the list above opened: so not the app's "Show all versions", which that button says.) */}
+                  <p><a class="btn ghost sm" href={allVersions}>Every version{versionsTotal > versions.length ? ` (${count(versionsTotal)})` : ""}</a></p>
                 </div>
               </section>
               <section class="tab-panel" id="permissions" aria-label="Permissions">

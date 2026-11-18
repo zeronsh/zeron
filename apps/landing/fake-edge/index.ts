@@ -73,10 +73,16 @@ const userOf = (id: string) => USERS.find((u) => u.id === id)!;
 
 // ── The store's views of a plugin ───────────────────────────────────────
 
-const latest = (p: FakePlugin) => p.versions.find((v) => v.status === "approved");
-const listed = (p: FakePlugin) => p.status === "listed" && latest(p) !== undefined;
-/** When it was first listed (amendment 39): its first approved version's day, never moved by a later one; null with no listed version. */
-const listedAt = (p: FakePlugin) => (latest(p) ? Math.min(...p.versions.filter((v) => v.status === "approved" || v.status === "yanked").map((v) => v.published_at)) : null);
+const prerelease = (v: FakeVersion) => v.version.includes("-");
+/** What the public sees of a plugin's versions: listed and yanked (amendment 45). */
+const shown = (v: FakeVersion) => v.status === "listed" || v.status === "yanked";
+/** The newest listed version, a release before a pre-release, verified or not (amendment 45). */
+const latest = (p: FakePlugin) => p.versions.find((v) => v.status === "listed" && !prerelease(v)) ?? p.versions.find((v) => v.status === "listed");
+/** The newest verified listed version, a release before a pre-release. */
+const verifiedVersion = (p: FakePlugin) => p.versions.find((v) => v.status === "listed" && v.verified && !prerelease(v)) ?? p.versions.find((v) => v.status === "listed" && v.verified);
+const listed = (p: FakePlugin) => p.status !== "suspended" && latest(p) !== undefined;
+/** When it was first listed (amendment 39): its first version's day, never moved by a later one; null with no listed version. */
+const listedAt = (p: FakePlugin) => (latest(p) ? Math.min(...p.versions.filter(shown).map((v) => v.published_at)) : null);
 
 const author = (userId: string) => {
   const u = userOf(userId);
@@ -96,6 +102,9 @@ function card(p: FakePlugin, version: FakeVersion | undefined = latest(p)) {
     categories: (m.categories as string[]) ?? [],
     keywords: (m.keywords as string[]) ?? [],
     version: listedVersion?.version ?? null,
+    verified: listedVersion?.verified ?? false,
+    verified_version: verifiedVersion(p)?.version ?? null,
+    verified_at: verifiedVersion(p)?.verified_at ?? null,
     updated_at: (listedVersion ?? v).published_at,
     listed_at: listedAt(p),
     installs: p.installs,
@@ -123,21 +132,35 @@ function permissions(m: Record<string, unknown>) {
 
 function versionInfo(v: FakeVersion, full: boolean) {
   const bytes = Object.values(v.files).reduce((n, f) => n + f.length, 0);
-  const decided = v.status === "approved" || v.status === "yanked" || v.status === "removed";
   return {
     version: v.version,
     status: v.status,
-    published_at: decided ? (v.review?.decided_at ?? v.published_at) : null,
-    submitted_at: v.published_at,
+    published_at: v.published_at,
+    verified: v.verified,
+    verified_at: v.verified_at,
+    via: v.via,
     notes: v.notes,
     engines: v.engines,
     yanked: v.status === "yanked",
+    // (Why it takes no new installs, in public too: the contract after e3daa69b4.)
+    yanked_by: v.status === "yanked" ? v.yanked_by : null,
+    superseded_by: v.status === "yanked" && v.yanked_by === "superseded" ? (v.superseded?.by ?? null) : null,
     prerelease: v.version.includes("-"),
     key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq",
     hash: `b3:${hash(v.version + bytes)}`,
     sha256: hash(JSON.stringify(v.manifest)).slice(0, 64),
     bytes,
-    ...(full ? { review: { state: v.status, ...(v.review ?? {}) }, checks: v.checks, blocked: v.blocked === true, via: "session" } : {}),
+    // (The owner's and staff's: the reviewer's decision, the key that published it, why staff stopped it; never the public's.)
+    ...(full
+      ? {
+          review: v.review,
+          checks: v.checks,
+          blocked: v.blocked === true,
+          deploy_key: v.deploy_key,
+          superseded: v.superseded,
+          ...(v.removal ? { removal: v.removal } : {}),
+        }
+      : {}),
   };
 }
 
@@ -154,7 +177,9 @@ function detail(p: FakePlugin) {
     homepage: (m.homepage as string) ?? null,
     repository: (m.repository as string) ?? null,
     license: (m.license as string) ?? null,
-    versions: p.versions.filter((x) => x.status === "approved" || x.status === "yanked").slice(0, 5).map((x) => versionInfo(x, false)),
+    // (The first page of its versions; the versions route has the rest.)
+    versions: p.versions.filter(shown).slice(0, 5).map((x) => versionInfo(x, false)),
+    ...(p.versions.filter(shown).length > 5 ? { versions_next_cursor: btoa("5").replace(/=+$/, "") } : {}),
     package: { bytes, sha256: "9f2c1e4b7a0d3c6f8e1b4a7d0c3f6e9b2a5d8c1f4e7b0a3d6c9f2e5b8a1d4c7f", hash: "b3:7d1e4a9c2f5b8e1d4a7c0f3b6e9d2a5c", key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq" },
   };
 }
@@ -197,14 +222,17 @@ function catalog(url: URL): Response {
   const category = url.searchParams.get("category");
   const keyword = url.searchParams.get("keyword")?.toLowerCase();
   const featured = url.searchParams.get("featured") === "true";
+  // (A filter, never a sort: amendment 45 and the coordinator's ruling.)
+  const verified = url.searchParams.get("verified") === "1";
+  const authorName = url.searchParams.get("author");
   let sort = url.searchParams.get("sort") ?? (terms.length ? "relevance" : "popular");
-  if (!["relevance", "popular", "updated", "new"].includes(sort)) return fail(400, "bad_request", "Unknown sort.");
+  if (!["relevance", "popular", "updated", "new", "verified"].includes(sort)) return fail(400, "bad_request", "Unknown sort.");
   if (sort === "relevance" && !terms.length) sort = "popular";
   if (category && !CATEGORIES.some((c) => c.id === category)) return fail(400, "bad_request", "Unknown category.");
   const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? 24) || 24));
 
   const keyOf = (p: FakePlugin): Key => {
-    const value = sort === "relevance" ? score(p, terms) : sort === "popular" ? p.installs : sort === "updated" ? latest(p)!.published_at : listedAt(p)!;
+    const value = sort === "relevance" ? score(p, terms) : sort === "popular" ? p.installs : sort === "updated" ? latest(p)!.published_at : sort === "verified" ? (verifiedVersion(p)?.verified_at ?? 0) : listedAt(p)!;
     return [value, p.id];
   };
   // Descending by value, then ascending by id: a stable total order.
@@ -212,7 +240,12 @@ function catalog(url: URL): Response {
 
   const all = state.plugins
     .filter(listed)
-    .filter((p) => !featured || p.featured)
+    // (Featured holds only plugins whose newest version is verified.)
+    .filter((p) => !featured || (p.featured && latest(p)!.verified))
+    .filter((p) => !verified || latest(p)!.verified)
+    // (Newly verified: only plugins with a verified listed version, at its time: contract ee380cca3.)
+    .filter((p) => sort !== "verified" || verifiedVersion(p) !== undefined)
+    .filter((p) => !authorName || userOf(p.owner).username === authorName)
     .filter((p) => !category || card(p).categories.includes(category))
     .filter((p) => !keyword || card(p).keywords.some((k) => k.toLowerCase() === keyword))
     .filter((p) => !terms.length || score(p, terms) > 0)
@@ -254,7 +287,7 @@ function file(request: Request, id: string, version: string, path: string): Resp
   const body = v.files[path]!;
   const MAGIC: Record<string, RegExp> = { png: /^\x89PNG/, jpg: /^\xff\xd8/, jpeg: /^\xff\xd8/, gif: /^GIF8[79]a/, webp: /^RIFF/, avif: /^....ftyp/, svg: /^\s*<svg[\s>]/ };
   const picture = Object.hasOwn(MAGIC, ext) && MAGIC[ext]!.test(body);
-  const open = listed(p) && (v.status === "approved" || v.status === "yanked") && picture;
+  const open = listed(p) && shown(v) && picture;
   const s = session(request);
   const allowed = open || (s && (s.user.id === p.owner || isAdmin(s.user)));
   if (!allowed) return notFound();
@@ -276,8 +309,12 @@ function file(request: Request, id: string, version: string, path: string): Resp
 function mine(user: FakeUser) {
   return state.plugins
     .filter((p) => p.owner === user.id)
-    .map((p) => ({ ...card(p), listing: p.status === "suspended" ? "suspended" : listed(p) ? "listed" : "unlisted", versions: p.versions.map((v) => versionInfo(v, true)) }));
+    // (Each version's publisher_id is the account that published it: here always its owner, nothing being transferred in.)
+    .map((p) => ({ ...card(p), listing: p.status === "suspended" ? "suspended" : listed(p) ? "listed" : "unlisted", versions: p.versions.map((v) => ({ ...versionInfo(v, true), publisher_id: publisherOf(p.owner) })) }));
 }
+
+/** An account's opaque publisher id (amendment 33), as the edge spells one. */
+const publisherOf = (userId: string) => `pub_${[...userId].map((c) => c.charCodeAt(0).toString(16)).join("").padEnd(32, "0").slice(0, 32)}`;
 
 function versionAction(request: Request, id: string, version: string, action: string): Response {
   const who = writer(request);
@@ -285,10 +322,14 @@ function versionAction(request: Request, id: string, version: string, action: st
   const p = state.plugins.find((x) => x.id === id && x.owner === who.user.id);
   const v = p?.versions.find((x) => x.version === version);
   if (!p || !v) return notFound();
-  const from: Record<string, FakeVersion["status"]> = { withdraw: "pending", yank: "approved", unyank: "yanked" };
-  const to: Record<string, FakeVersion["status"]> = { withdraw: "withdrawn", yank: "yanked", unyank: "approved" };
+  // (Amendment 45: withdraw goes; a version is listed at once, and an author can stop and allow new installs.)
+  const from: Record<string, FakeVersion["status"]> = { yank: "listed", unyank: "yanked" };
+  const to: Record<string, FakeVersion["status"]> = { yank: "yanked", unyank: "listed" };
   if (!(action in from)) return notFound();
   if (v.status !== from[action]) return fail(409, "conflict", `It's ${v.status}.`);
+  // (A superseded version is the store's to stop, for good: verifying it allows installs again, its author can't.)
+  if (action === "unyank" && v.yanked_by === "superseded") return fail(409, "invalid_state", "It was superseded.");
+  v.yanked_by = action === "yank" ? "author" : null;
   v.status = to[action]!;
   return json(versionInfo(v, true));
 }
@@ -333,41 +374,65 @@ function log(actor: FakeUser, action: string, plugin: string | null, version: st
   state.audit.unshift({ seq: (state.audit[0]?.seq ?? 0) + 1, at: Date.now(), actor: actor.id, action, plugin_id: plugin, version, detail });
 }
 
+/** The newest verified other version (amendment 45): what a version is weighed against. */
+const baseOf = (p: FakePlugin, v: FakeVersion) => p.versions.find((x) => x !== v && x.verified && shown(x)) ?? null;
+
+/**
+ * The staff queue (amendment 45): versions to verify (no reviewer has
+ * decided), or those verified, or declined, or all; one row per plugin in
+ * the undecided view (its newest, standing for its earlier undecided ones);
+ * oldest first, plugins with open reports first.
+ */
 function queue(url: URL): Response {
-  const status = url.searchParams.get("status") ?? "pending";
-  const items = state.plugins.flatMap((p) =>
-    p.versions
-      .filter((v) => v.status === status)
-      .map((v) => {
-        const base = p.versions.find((x) => x.status === "approved" && x !== v && x.published_at < v.published_at);
-        const asked = (v.manifest.permissions as string[]) ?? [];
-        const had = (base?.manifest.permissions as string[]) ?? [];
-        // (Amendment 40: inside an ask both have, a host, program, place or tool's words differ.)
-        const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-        const now = permissions(v.manifest);
-        const was = base ? permissions(base.manifest) : null;
-        const sorted = (list: string[]) => [...list].sort();
-        const bound = base ? binds(base.manifest, v.manifest) : null;
-        const asksChanged = was !== null && (!same(sorted(now.commands), sorted(was.commands)) || !same(sorted(now.network_hosts), sorted(was.network_hosts)) || !same(now.tools, was.tools) || !same(now.ui ?? null, was.ui ?? null) || bound!.mcp_changed !== null || bound!.service_changed !== null || bound!.settings_changed);
-        return {
-          plugin: { id: p.id, name: String(v.manifest.name) },
-          version: v.version,
-          icon: typeof v.manifest.icon === "string" ? v.manifest.icon : null,
-          asks_changed: asksChanged,
-          status: v.status,
-          prerelease: v.version.includes("-"),
-          submitted_at: v.published_at,
-          publisher: { id: author(p.owner).id, username: userOf(p.owner).username },
-          ...(base ? { base: base.version } : {}),
-          new_asks: asked.filter((a) => !had.includes(a)),
-          checks: { ok: v.checks.filter((c) => c.level === "ok").length, warn: v.checks.filter((c) => c.level === "warn").length, fail: v.checks.filter((c) => c.level === "fail").length },
-        };
-      }),
-  );
-  if (status === "pending" && state.queueAs === "empty") items.length = 0;
-  if (status === "pending" && typeof state.queueAs === "number") items.push(...filler(state.queueAs - items.length));
-  // Oldest waiting first.
-  items.sort((a, b) => a.submitted_at - b.submitted_at);
+  const view = url.searchParams.get("state") ?? "undecided";
+  if (!["undecided", "verified", "declined", "all"].includes(view)) return fail(400, "bad_request", "Unknown state.");
+  // (Undecided: listed, not yanked by the superseding rule; nothing that leaves the queue unread can be installed.)
+  const fits = (v: FakeVersion) =>
+    shown(v) && (view === "all" || (view === "undecided" ? !v.review.decided && v.yanked_by !== "superseded" : view === "verified" ? v.verified : v.review.decision === "declined"));
+  const row = (p: FakePlugin, v: FakeVersion, earlier: number) => {
+    const base = baseOf(p, v);
+    const asked = (v.manifest.permissions as string[]) ?? [];
+    const had = (base?.manifest.permissions as string[]) ?? [];
+    // (Amendment 40: inside an ask both have, a host, program, place or tool's words differ.)
+    const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+    const now = permissions(v.manifest);
+    const was = base ? permissions(base.manifest) : null;
+    const sorted = (list: string[]) => [...list].sort();
+    const bound = base ? binds(base.manifest, v.manifest) : null;
+    const asksChanged = was !== null && (!same(sorted(now.commands), sorted(was.commands)) || !same(sorted(now.network_hosts), sorted(was.network_hosts)) || !same(now.tools, was.tools) || !same(now.ui ?? null, was.ui ?? null) || bound!.mcp_changed !== null || bound!.service_changed !== null || bound!.settings_changed);
+    return {
+      plugin: { id: p.id, name: String(v.manifest.name) },
+      version: v.version,
+      icon: typeof v.manifest.icon === "string" ? v.manifest.icon : null,
+      asks_changed: asksChanged,
+      status: v.status,
+      review: v.review,
+      reports: state.reports.filter((r) => r.plugin_id === p.id && r.status === "open").length,
+      earlier_undecided: earlier,
+      prerelease: prerelease(v),
+      submitted_at: v.published_at,
+      published_at: v.published_at,
+      publisher: { id: author(p.owner).id, username: userOf(p.owner).username },
+      ...(base ? { base: base.version } : {}),
+      new_asks: asked.filter((a) => !had.includes(a)),
+      checks: { ok: v.checks.filter((c) => c.level === "ok").length, warn: v.checks.filter((c) => c.level === "warn").length, fail: v.checks.filter((c) => c.level === "fail").length },
+    };
+  };
+  // (How many earlier undecided versions a row superseded.)
+  const earlierOf = (p: FakePlugin, v: FakeVersion) => p.versions.filter((x) => x.superseded?.by === v.version && !x.review.decided).length;
+  const items = state.plugins.flatMap((p) => {
+    const matching = p.versions.filter(fits);
+    if (view !== "undecided") return matching.map((v) => row(p, v, earlierOf(p, v)));
+    // At most two a plugin: its newest undecided release, and its newest undecided pre-release when that is newer.
+    const release = matching.find((v) => !prerelease(v));
+    const pre = matching.find((v) => prerelease(v));
+    const rows = [release, pre && (!release || pre.published_at > release.published_at) ? pre : undefined].filter((v): v is FakeVersion => v !== undefined);
+    return rows.map((v) => row(p, v, earlierOf(p, v)));
+  });
+  if (view === "undecided" && state.queueAs === "empty") items.length = 0;
+  if (view === "undecided" && typeof state.queueAs === "number") items.push(...filler(state.queueAs - items.length));
+  // Plugins with open reports first; then oldest waiting first.
+  items.sort((a, b) => Number(b.reports > 0) - Number(a.reports > 0) || a.submitted_at - b.submitted_at);
   return json(paged(items, url, "items"));
 }
 
@@ -392,7 +457,7 @@ function binds(was: Record<string, unknown> | null, now: Record<string, unknown>
   };
 }
 
-/** Submissions that fill a long queue for its picture: made up, each a plausible one (none opens). */
+/** Versions that fill a long queue for its picture: made up, each a plausible one (none opens). */
 function filler(n: number) {
   const NAMES = ["Commit coach", "Diff digest", "Branch tidy", "Standup bot", "Tab groups", "Prompt shelf", "Log lens", "Issue triage", "Cron watch", "Snippet box", "Focus music", "Daily notes", "Review buddy", "Docker peek", "Env check", "Port finder", "Token budget", "Release notes", "Sprint board", "Lint on save", "Model picker", "Chat export", "Quiet hours", "Time zones", "PR labels", "Test runner", "Changelog bot", "Rate limits", "Spell check", "Code owners", "Weekly recap", "Icon pack", "Pair mode", "Night owl", "Ticket links", "Build badge", "Gist share", "Error lens", "Merge queue", "Inbox zero"];
   const PEOPLE = ["ada", "kai", "mo-dev", "noor", null];
@@ -403,9 +468,13 @@ function filler(n: number) {
     return {
       plugin: { id: name.toLowerCase().replace(/ /g, "-"), name },
       version: update ? `1.${(i % 4) + 1}.${i % 3}` : "0.1.0",
-      status: "pending" as const,
+      status: "listed" as const,
+      review: { decided: false, decision: null },
+      reports: i % 11 === 4 ? 1 : 0,
+      earlier_undecided: i % 6 === 5 ? 2 : 0,
       prerelease: false,
       submitted_at: NOW - (i * 5.5 + 1) * 3_600_000,
+      published_at: NOW - (i * 5.5 + 1) * 3_600_000,
       publisher: { id: `pub_${i}`, username },
       ...(update ? { base: `1.${i % 4}.0` } : {}),
       icon: null,
@@ -420,10 +489,10 @@ function submission(id: string, version: string): Response {
   const p = state.plugins.find((x) => x.id === id);
   const v = p?.versions.find((x) => x.version === version);
   if (!p || !v) return notFound();
-  const base = p.versions.find((x) => x.status === "approved" && x !== v && x.published_at < v.published_at) ?? null;
+  const base = baseOf(p, v);
   const files = (fv: FakeVersion) => Object.entries(fv.files).map(([path, text]) => ({ path, bytes: text.length, sha256: hash(text), binary: false }));
   const owner = userOf(p.owner);
-  const decided = state.plugins.filter((x) => x.owner === p.owner).flatMap((x) => x.versions.map((y) => ({ id: x.id, version: y.version, status: y.status, decided_at: y.review?.decided_at ?? (y.status === "approved" ? y.published_at : null) })));
+  const theirs = state.plugins.filter((x) => x.owner === p.owner).flatMap((x) => x.versions.map((y) => ({ plugin: x, v: y })));
   const permissionsNow = permissions(v.manifest);
   const permissionsBase = base ? permissions(base.manifest) : null;
   const added = <T,>(now: T[], then: T[] | undefined) => now.filter((x) => !(then ?? []).includes(x));
@@ -431,19 +500,23 @@ function submission(id: string, version: string): Response {
   return json({
     plugin: card(p, v),
     version: { ...versionInfo(v, true), name: String(m.name), summary: String(m.description), icon: typeof m.icon === "string" ? m.icon : null, readme: v.files["README.md"] ?? "", screenshots: (m.screenshots as string[]) ?? [] },
+    superseded: v.superseded,
     publisher: {
       id: author(p.owner).id,
       username: owner.username,
       created_at: owner.created_at,
-      decisions: { approved: decided.filter((d) => d.status === "approved" || d.status === "yanked").length, rejected: decided.filter((d) => d.status === "rejected").length },
-      recent: state.plugins.filter((x) => x.owner === p.owner).flatMap((x) => x.versions.map((y) => ({ plugin_id: x.id, version: y.version, status: y.status, submitted_at: y.published_at, reason: y.review?.reason ?? null }))).sort((a, b) => b.submitted_at - a.submitted_at).slice(0, 10),
+      decisions: { verified: theirs.filter(({ v: y }) => y.review.decision === "verified").length, declined: theirs.filter(({ v: y }) => y.review.decision === "declined").length },
+      recent: theirs
+        .map(({ plugin: x, v: y }) => ({ plugin_id: x.id, version: y.version, status: y.status, verified: y.verified, published_at: y.published_at }))
+        .sort((a, b) => b.published_at - a.published_at)
+        .slice(0, 10),
     },
     manifest: v.manifest,
     permissions: permissionsNow,
     files: files(v),
     base: base ? { version: base.version, manifest: base.manifest } : null,
     base_files: base ? files(base) : [],
-    // (The edge's consentDiff, against nothing for a first listing.)
+    // (The edge's consentDiff, against the newest verified other version, or nothing.)
     permissions_diff: (() => {
       const was = permissionsBase ?? { asks: [] as string[], commands: [] as string[], network_hosts: [] as string[], tools: [] as { name: string }[], ui: undefined };
       const ui = (x: { ui?: { change?: string[]; replace?: string[] } }) => ({ change: x.ui?.change ?? [], replace: x.ui?.replace ?? [] });
@@ -489,40 +562,75 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
   if (who instanceof Response) return who;
   const input = await body(request);
   const text = (key: string) => (typeof input[key] === "string" ? (input[key] as string).trim() : "");
-  // submissions/:id/:version/{approve|reject}
-  if (parts[0] === "submissions" && parts.length === 4) {
+  // versions/:id/:version/{verify|decline} (amendment 45)
+  if (parts[0] === "versions" && parts.length === 4) {
     const p = state.plugins.find((x) => x.id === parts[1]);
     const v = p?.versions.find((x) => x.version === parts[2]);
     if (!p || !v) return notFound();
-    if (v.status !== "pending") return fail(409, "conflict", `It's ${v.status}.`);
-    if (parts[3] === "approve") {
-      v.status = "approved";
-      v.review = { state: "approved", decided_at: Date.now() };
-      if (p.status === "unlisted") p.status = "listed";
-      log(who.user, "version.approve", p.id, v.version, null);
+    if (!shown(v)) return fail(409, "invalid_state", `It's ${v.status}.`);
+    if (parts[3] === "verify") {
+      if (v.verified) return fail(409, "invalid_state", "It's verified.");
+      v.verified = true;
+      v.verified_at = Date.now();
+      v.review = { decided: true, decision: "verified", decided_at: v.verified_at };
+      // (Every verified version can be installed: a superseded stop goes; an author's own stays.)
+      if (v.yanked_by === "superseded") {
+        v.status = "listed";
+        v.yanked_by = null;
+      }
+      log(who.user, "version.verify", p.id, v.version, null);
       return json(versionInfo(v, true));
     }
-    if (parts[3] === "reject") {
+    if (parts[3] === "decline") {
+      if (v.review.decided) return fail(409, "invalid_state", "A reviewer already decided.");
       if (!text("reason") || !text("message")) return fail(400, "bad_request", "A reason and a message for the author are needed.");
-      v.status = "rejected";
-      v.review = { state: "rejected", reason: text("reason"), message: text("message"), decided_at: Date.now() };
-      log(who.user, "version.reject", p.id, v.version, { reason: text("reason") });
+      v.review = { decided: true, decision: "declined", reason: text("reason"), message: text("message"), decided_at: Date.now() };
+      log(who.user, "version.decline", p.id, v.version, { reason: text("reason") });
       return json(versionInfo(v, true));
     }
     return notFound();
   }
-  // plugins/:id/{suspend|restore|feature|transfer} and plugins/:id/versions/:version/remove
+  // plugins/:id/{suspend|restore|feature|transfer} and plugins/:id/versions/:version/{take-down|remove}
   if (parts[0] === "plugins") {
     const p = state.plugins.find((x) => x.id === parts[1]);
     if (!p) return notFound();
-    if (parts[2] === "versions" && parts[4] === "remove") {
+    if (parts[2] === "versions" && parts[4] === "restore") {
+      // (A taken-down version back to listed, unverified, its block lifted; superseded again if anything newer on its line is listed.)
       const v = p.versions.find((x) => x.version === parts[3]);
       if (!v) return notFound();
+      if (v.status !== "taken_down") return fail(409, "invalid_state", `It's ${v.status}.`);
       if (!text("reason")) return fail(400, "bad_request", "A reason is needed.");
-      v.status = "removed";
-      v.review = { state: "removed", reason: text("reason"), decided_at: Date.now() };
-      log(who.user, "version.remove", p.id, v.version, { reason: text("reason"), block: input.block === true });
-      v.blocked = input.block === true;
+      v.status = "listed";
+      v.blocked = false;
+      v.removal = null;
+      v.verified = false;
+      v.verified_at = null;
+      v.review = { decided: false, decision: null };
+      const newer = p.versions.find((x) => x !== v && x.status === "listed" && x.published_at > v.published_at && (!prerelease(x) || prerelease(v)));
+      if (newer) {
+        v.status = "yanked";
+        v.yanked_by = "superseded";
+        v.superseded = { at: Date.now(), by: newer.version };
+      }
+      log(who.user, "version.restore", p.id, v.version, { reason: text("reason") });
+      return json(versionInfo(v, true));
+    }
+    if (parts[2] === "versions" && (parts[4] === "take-down" || parts[4] === "remove")) {
+      const v = p.versions.find((x) => x.version === parts[3]);
+      if (!v) return notFound();
+      if (!shown(v)) return fail(409, "invalid_state", `It's ${v.status}.`);
+      if (!text("reason")) return fail(400, "bad_request", "A reason is needed.");
+      // (Taken down: harmful, turned off on devices, and no longer verified. Removed: neither.)
+      const harmful = parts[4] === "take-down";
+      v.status = harmful ? "taken_down" : "removed";
+      v.blocked = harmful;
+      v.yanked_by = null;
+      v.removal = { at: Date.now(), reason: text("reason") };
+      if (harmful) {
+        v.verified = false;
+        v.verified_at = null;
+      }
+      log(who.user, harmful ? "version.take_down" : "version.remove", p.id, v.version, { reason: text("reason") });
       return json(versionInfo(v, true));
     }
     switch (parts[2]) {
@@ -533,10 +641,12 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
         p.suspend_reason = text("reason");
         return json({ status: p.status });
       case "restore":
-        p.status = latest(p) ? "listed" : "unlisted";
+        p.status = "listed";
         log(who.user, "plugin.restore", p.id, null, null);
         return json({ status: p.status });
       case "feature":
+        // (Only a plugin whose newest version is verified can be featured: amendment 45.)
+        if (input.featured === true && !latest(p)?.verified) return fail(409, "not_verified", "Its newest version isn't verified.");
         p.featured = input.featured === true;
         log(who.user, p.featured ? "plugin.feature" : "plugin.unfeature", p.id, null, null);
         return json({ featured: p.featured });
@@ -555,7 +665,7 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
     if (!/^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/.test(id)) return fail(400, "bad_request", "id is a plugin id.");
     // (The site's own page words: nobody can be granted one, with an account or without.)
     if (SITE_IDS.includes(id)) return fail(400, "site_id", `"${id}" is one of the site's pages: no plugin can have it.`);
-    if (state.plugins.some((p) => p.id === id && p.versions.some((v) => v.status === "approved" || v.status === "pending"))) return fail(409, "invalid_state", `"${id}" is in use: transfer it instead.`);
+    if (state.plugins.some((p) => p.id === id && p.versions.some(shown))) return fail(409, "invalid_state", `"${id}" is in use: transfer it instead.`);
     let user: string | null = null;
     if (text("to_username")) {
       user = USERS.find((u) => u.username === text("to_username"))?.id ?? null;
@@ -659,33 +769,54 @@ async function route(request: Request): Promise<Response> {
   if (state.down) return fail(503, "unknown", "The store is down (the fake's own switch).");
   const [, , a, b, c, d, e] = parts;
 
-  if (a === "categories" && method === "GET") return json({ categories: CATEGORIES }, 200, { "cache-control": "public, max-age=300" });
+  if (a === "categories" && b === undefined && method === "GET") {
+    // (Each with how many listed plugins it holds; with `top`, its n most installed, as the list's popular order has them: ac4fc5d3f.)
+    const topText = url.searchParams.get("top");
+    if (topText !== null && !/^[1-4]$/.test(topText)) return fail(400, "bad_request", "top is 1 to 4.");
+    const counted = await Promise.all(
+      CATEGORIES.map(async (c) => ({
+        ...c,
+        count: state.plugins.filter((p) => listed(p) && card(p).categories.includes(c.id)).length,
+        ...(topText ? { top: ((await catalog(new URL(`https://fake.invalid/?category=${c.id}&sort=popular&limit=${topText}`)).json()) as { items: unknown[] }).items } : {}),
+      })),
+    );
+    return json({ categories: counted }, 200, { "cache-control": "public, max-age=60" });
+  }
+  if (a === "keywords" && b === undefined && method === "GET") {
+    // (Most used first, ties by keyword; each count the list's total for ?keyword=: ac4fc5d3f.)
+    const category = url.searchParams.get("category");
+    const limitText = url.searchParams.get("limit");
+    if (category !== null && !CATEGORIES.some((c) => c.id === category)) return fail(400, "bad_request", "Unknown category.");
+    if (limitText !== null && !(/^\d{1,2}$/.test(limitText) && Number(limitText) >= 1 && Number(limitText) <= 24)) return fail(400, "bad_request", "limit is 1 to 24.");
+    const counts = new Map<string, number>();
+    for (const p of state.plugins.filter(listed).filter((p) => !category || card(p).categories.includes(category))) {
+      for (const k of new Set(card(p).keywords.map((k) => k.toLowerCase()))) counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    const keywords = [...counts].map(([keyword, count]) => ({ keyword, count })).sort((x, y) => y.count - x.count || (x.keyword < y.keyword ? -1 : x.keyword > y.keyword ? 1 : 0));
+    return json({ keywords: keywords.slice(0, Number(limitText ?? 24)) }, 200, { "cache-control": "public, max-age=60" });
+  }
+  if (a === "stats" && method === "GET") {
+    const all = state.plugins.filter(listed);
+    // (new_7d: listed plugins first listed in the last seven days: ac4fc5d3f.)
+    return json({ plugins: all.length, verified: all.filter((p) => latest(p)!.verified).length, new_7d: all.filter((p) => listedAt(p)! >= NOW - 7 * DAY).length }, 200, { "cache-control": "public, max-age=30" });
+  }
   if (a === "plugins" && b === undefined && method === "GET") return catalog(url);
   if (a === "plugins" && b && c === undefined && method === "GET") {
     const p = state.plugins.find((x) => x.id === b);
     return p && listed(p) ? json(detail(p), 200, { "cache-control": "public, max-age=30" }) : notFound();
   }
   if (a === "plugins" && b && c === "versions" && d === undefined && method === "GET") {
+    // (Every listed and yanked version, newest first, paged: amendment 45.)
     const p = state.plugins.find((x) => x.id === b);
-    return p && listed(p) ? json({ versions: p.versions.filter((v) => v.status === "approved" || v.status === "yanked").map((v) => versionInfo(v, false)) }) : notFound();
+    return p && listed(p) ? json(paged(p.versions.filter(shown).map((v) => versionInfo(v, false)), url, "versions"), 200, { "cache-control": "public, max-age=30" }) : notFound();
+  }
+  if (a === "plugins" && b && c === "versions" && d && e === undefined && method === "GET") {
+    const p = state.plugins.find((x) => x.id === b);
+    const v = p && listed(p) ? p.versions.find((x) => x.version === d && shown(x)) : undefined;
+    return v ? json(versionInfo(v, false), 200, { "cache-control": "public, max-age=30" }) : notFound();
   }
   if (a === "plugins" && b && c === "files" && d && parts.length > 6 && method === "GET") return file(request, b, d, parts.slice(6).join("/"));
-  if (a === "plugins" && b && c === "versions" && d && ["withdraw", "yank", "unyank"].includes(e ?? "") && method === "POST") return versionAction(request, b, d, e!);
-  if (a === "plugins" && b && c === "keys") {
-    const s = session(request);
-    if (!s) return fail(401, "signed_out");
-    const p = state.plugins.find((x) => x.id === b && x.owner === s.user.id);
-    if (!p) return notFound();
-    if (d === undefined && method === "GET") return json({ keys: state.keys.filter((k) => k.plugin_id === b).map(({ plugin_id: _, ...k }) => k) });
-    if (d && method === "DELETE") {
-      const who = writer(request);
-      if (who instanceof Response) return who;
-      const k = state.keys.find((x) => x.plugin_id === b && x.key === d);
-      if (!k) return notFound();
-      k.revoked_at ??= Date.now();
-      return json({ revoked: true });
-    }
-  }
+  if (a === "plugins" && b && c === "versions" && d && ["yank", "unyank"].includes(e ?? "") && method === "POST") return versionAction(request, b, d, e!);
   if (a === "plugins" && b && c === "reports" && method === "POST") {
     const who = writer(request);
     if (who instanceof Response) return who;
@@ -700,7 +831,22 @@ async function route(request: Request): Promise<Response> {
   }
   if (a === "me" && b === "plugins" && method === "GET") {
     const s = session(request);
-    return s ? json({ plugins: mine(s.user) }) : fail(401, "signed_out");
+    // (`{publisher_id, plugins}`: the contract after e3daa69b4.)
+    return s ? json({ publisher_id: publisherOf(s.user.id), plugins: mine(s.user) }) : fail(401, "signed_out");
+  }
+  // The account's deploy keys (amendment 44): listed and revoked here; made only on a device.
+  if (a === "me" && b === "keys") {
+    const s = session(request);
+    if (!s) return fail(401, "signed_out");
+    if (c === undefined && method === "GET") return json({ keys: state.keys.filter((k) => k.owner === s.user.id).map(({ owner: _, ...k }) => k) });
+    if (c && method === "DELETE") {
+      const who = writer(request);
+      if (who instanceof Response) return who;
+      const k = state.keys.find((x) => x.owner === who.user.id && x.key === c);
+      if (!k) return notFound();
+      k.revoked_at ??= Date.now();
+      return json({ revoked: true });
+    }
   }
   if (a === "admin") {
     if (b === "reservations" && method === "DELETE" && c) {
@@ -716,7 +862,7 @@ async function route(request: Request): Promise<Response> {
     const who = admin(request);
     if (who instanceof Response) return who;
     if (b === "queue") return queue(url);
-    if (b === "submissions" && c && d) return submission(c, d);
+    if (b === "versions" && c && d) return submission(c, d);
     if (b === "plugins" && c) {
       const p = state.plugins.find((x) => x.id === c);
       if (!p) return notFound();

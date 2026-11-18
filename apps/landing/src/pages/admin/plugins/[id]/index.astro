@@ -1,8 +1,8 @@
 ---
 // One plugin, for its reviewers: its place in the store and its owner;
 // what can be done to it (feature, move, suspend or restore); every version
-// in every state, each to its submission, an approved one's Take down in
-// the action column; its reports; its history in the audit log.
+// in every state, verified or not, each to its review, a listed one's Take
+// down in the action column; its reports; its history in the audit log.
 import TakeDown from "../../../../components/kit/TakeDown.astro";
 import Toast from "../../../../components/kit/Toast.astro";
 import PluginTile from "../../../../components/store/PluginTile.astro";
@@ -14,7 +14,7 @@ import { age, count, dateTime, day, unbidi } from "../../../../lib/store/format.
 import { privatePage } from "../../../../lib/store/http.ts";
 import { isPluginId } from "../../../../lib/store/names.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
-import { everListed, listingState, reasonWords, toneClass, versionState } from "../../../../lib/store/states.ts";
+import { everListed, listingState, reasonWords, toneClass, verificationState, versionState } from "../../../../lib/store/states.ts";
 import { memberUrl, pluginUrl } from "../../../../lib/store/urls.ts";
 
 export const prerender = false;
@@ -30,8 +30,8 @@ const toast = takeFlash(Astro.cookies);
 const a = result.ok ? result.data : null;
 const here = `/admin/plugins/${encodeURIComponent(id)}`;
 const act = (action: string) => `${here}/actions/${action}`;
-const removable = (status: string) => status === "approved" || status === "yanked";
-const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
+const removable = (status: string) => status === "listed" || status === "yanked";
+const vid = (v: string) => `take-down-${v.replace(/[^\w-]/g, "_")}`;
 const name = a ? unbidi(a.plugin.name) : id;
 const listing = a ? listingState(a.status, everListed(a.versions)) : null;
 const suspend = pluginAsk("suspend", name);
@@ -100,21 +100,22 @@ const REPORT = { open: { label: "Open", tone: "warn" }, actioned: { label: "Acte
             <table class="table wrapping staff-versions">
               <caption class="sr-only">Its versions, the newest first</caption>
               <colgroup><col class="version" /><col class="state" /><col /><col class="when" /><col class="action" /></colgroup>
-              <thead><tr><th scope="col">Version</th><th scope="col">State</th><th scope="col">What was said</th><th scope="col">Sent</th><th scope="col"><span class="sr-only">What can be done</span></th></tr></thead>
+              <thead><tr><th scope="col">Version</th><th scope="col">State</th><th scope="col">What was said</th><th scope="col">Published</th><th scope="col"><span class="sr-only">What can be done</span></th></tr></thead>
               <tbody>
                 {a.versions.map((v) => {
                   const st = versionState(v);
+                  const ver = verificationState(v);
                   const decided = v.review?.decided_at;
                   return (
                     <tr>
                       <td><span class="line version"><a href={`${here}/${encodeURIComponent(v.version)}`}>{v.version}</a></span></td>
-                      <td><span class="line"><span class:list={["badge sm", toneClass(st.tone)]}>{st.label}</span>{v.blocked && <span class="badge sm bad" title="Turned off on the devices that had it">Off</span>}</span></td>
+                      <td><span class="line"><span class:list={["badge sm", toneClass(st.tone)]}>{st.label}</span><span class:list={["badge sm", toneClass(ver.tone)]}>{ver.label}</span>{v.blocked && <span class="badge sm bad" title="Turned off on the devices that had it">Off</span>}</span></td>
                       <td class="words">
-                        {v.review?.message ? <span class="said">“{v.review.message}”</span> : <span>{v.status === "pending" ? "Waiting for a reviewer." : st.about}</span>}
-                        {(v.review?.reason || decided) && <span class="who">{[v.review?.reason && reasonLabel(v.review.reason), decided && `${v.status === "removed" ? "taken down" : "decided"} ${day(decided)}`].filter(Boolean).join(" · ")}</span>}
+                        {v.removal?.reason ? <span class="said">“{v.removal.reason}”</span> : v.review?.message ? <span class="said">“{v.review.message}”</span> : <span>{v.review && !v.review.decided && v.status === "listed" ? "Listed, waiting for a reviewer." : st.about}</span>}
+                        {(v.review?.reason || decided) && <span class="who">{[v.review?.reason && reasonLabel(v.review.reason), decided && `${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "decided"} ${day(decided)}`].filter(Boolean).join(" · ")}</span>}
                       </td>
-                      <td><span class="line t-2"><time datetime={new Date(v.submitted_at).toISOString()} title={dateTime(v.submitted_at)}>{day(v.submitted_at)}</time></span></td>
-                      <td class="end"><span class="line end">{removable(v.status) && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/remove`} data-dialog={vid(v.version)}>Take down…</a>}</span></td>
+                      <td><span class="line t-2"><time datetime={new Date(v.published_at).toISOString()} title={dateTime(v.published_at)}>{day(v.published_at)}</time></span></td>
+                      <td class="end"><span class="line end">{removable(v.status) && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/take_down`} data-dialog={vid(v.version)}>Take down…</a>}{v.status === "taken_down" && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/restore`}>Restore…</a>}</span></td>
                     </tr>
                   );
                 })}
@@ -189,13 +190,13 @@ const REPORT = { open: { label: "Open", tone: "warn" }, actioned: { label: "Acte
           </form>
         </dialog>
         {a.versions.filter((v) => removable(v.status)).map((v) => {
-          const remove = versionAsk("remove", name, v.version);
+          const remove = versionAsk("take_down", name, v.version);
           return (
             <dialog class="dialog" id={vid(v.version)} aria-labelledby={`${vid(v.version)}-title`} closedby="any">
-              <form method="post" action={`${here}/${encodeURIComponent(v.version)}/remove`}>
+              <form method="post" action={`${here}/${encodeURIComponent(v.version)}/take_down`}>
                 <input type="hidden" name="csrf" value={session.csrf} />
                 <div class="head"><h2 id={`${vid(v.version)}-title`}>{remove.title}</h2>{remove.words.map((w) => <p>{w}</p>)}</div>
-                <TakeDown id={vid(v.version)} />
+                <TakeDown id={vid(v.version)} harmful />
                 <div class="answers">
                   <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
                   <button class="btn danger" type="submit">{remove.confirm}</button>

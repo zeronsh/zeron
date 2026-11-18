@@ -12,7 +12,8 @@ export interface Ask {
   flash: FlashWord;
 }
 
-export type AuthorAction = "withdraw" | "yank" | "unyank";
+/** What an author can do to a version (amendment 45: withdraw goes; nothing waits for review). */
+export type AuthorAction = "yank" | "unyank";
 
 /** An author's action on one version: the app's words for it, its question, and the state it starts from. */
 const authorAsk = (action: AuthorAction, tone: Ask["tone"], flash: FlashWord) => (name: string, version: string): Ask => ({
@@ -24,8 +25,7 @@ const authorAsk = (action: AuthorAction, tone: Ask["tone"], flash: FlashWord) =>
 });
 
 export const AUTHOR_ACTIONS: Record<AuthorAction, { from: VersionStatus; ask: (name: string, version: string) => Ask }> = {
-  withdraw: { from: "pending", ask: authorAsk("withdraw", "danger", "withdrawn") },
-  yank: { from: "approved", ask: authorAsk("yank", "danger", "yanked") },
+  yank: { from: "listed", ask: authorAsk("yank", "danger", "yanked") },
   unyank: { from: "yanked", ask: authorAsk("unyank", "primary", "unyanked") },
 };
 

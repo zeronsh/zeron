@@ -14,6 +14,9 @@ import AxeBuilder from "@axe-core/playwright";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { Publisher, startRealEdge, type RealEdge } from "./real-edge.ts";
+import { FLASH } from "../../src/lib/store/flash.ts";
+
+const VERIFIED = FLASH.verified.message;
 
 let edge: RealEdge;
 let browser: Browser;
@@ -97,7 +100,7 @@ const overflowing = (page: Page) =>
   });
 
 describe("a reviewer, start to finish", () => {
-  test("signs in, sees the rotated session arrive, approves, signs out", async () => {
+  test("signs in, sees the rotated session arrive, verifies, signs out", async () => {
     const { context, page } = await visitor("user_grace");
     try {
       // Signed out, the admin pages aren't there; signing in comes back to where it was asked.
@@ -115,14 +118,14 @@ describe("a reviewer, start to finish", () => {
       await expect.poll(() => page.getByRole("link", { name: /focus timer/i }).first().isVisible()).toBe(true);
 
       await page.goto(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
-      // (Approve asks once, its own button focused: a clean update is a click, then Enter.)
-      await page.getByRole("complementary", { name: "Decision" }).getByRole("link", { name: "Approve…", exact: true }).click();
-      const dialog = page.getByRole("dialog", { name: "Approve focus timer 1.0.0?" });
+      // (Verify asks once, its own button focused: a clean update is a click, then Enter.)
+      await page.getByRole("complementary", { name: "Decision" }).getByRole("link", { name: "Verify…", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Verify focus timer 1.0.0?" });
       await expect.poll(() => dialog.isVisible()).toBe(true);
-      expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Approve");
+      expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Verify");
       await page.keyboard.press("Enter");
       await page.waitForURL(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
-      await expect.poll(() => page.getByText("Approved. It's listed now.").isVisible()).toBe(true);
+      await expect.poll(() => page.getByText(VERIFIED).isVisible()).toBe(true);
 
       await page.getByRole("button", { name: "Sign out" }).click();
       await page.waitForURL(`${edge.origin}/`);
@@ -140,7 +143,10 @@ describe("no violations axe can find, with the edge's data", () => {
     ["/plugins", null],
     ["/plugins/all", null],
     ["/plugins/focus-timer", null],
+    ["/plugins/focus-timer/versions", null],
+    ["/plugins/focus-timer/versions/1.0.0", null],
     ["/account", "user_ada"],
+    ["/account/keys", "user_ada"],
     ["/account/plugins/focus-timer", "user_ada"],
     ["/admin/plugins", "user_grace"],
     ["/admin/plugins/pr-review/0.3.0", "user_grace"],

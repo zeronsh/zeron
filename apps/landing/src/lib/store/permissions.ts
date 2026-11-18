@@ -425,7 +425,7 @@ export function details(p: Permissions): { title: string; list: string[] }[] {
   return out;
 }
 
-/** One ask's line, beside the last approved version's: new, changed inside, or as it was. */
+/** One ask's line, beside the newest verified version's: new, changed inside, or as it was. */
 export interface Compared extends Line {
   /** The permission, as the manifest names it. */
   name: string;
@@ -465,7 +465,7 @@ function bound(diff: PermissionsDiff): Compared[] {
 
 /**
  * What a version asks for, as a reviewer weighs it against the last
- * approved one (the edge's consentDiff): each ask marked new, changed
+ * verified one (the edge's consentDiff): each ask marked new, changed
  * inside (what it now names, changed or dropped), or as before; those that
  * moved first, the risky ones last within each, then what it binds past
  * its asks that changed (its MCP server, service, granting settings); and

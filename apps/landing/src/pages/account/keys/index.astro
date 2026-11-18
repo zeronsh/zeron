@@ -1,0 +1,145 @@
+---
+// Your deploy keys (amendment 44): the account's, in one place. Each says
+// what it may publish (the plugins it names, or all of yours, those you
+// publish later included: fixed when it was made), when it was last used
+// and for which plugin, and when it ends; each can be revoked. A key is
+// made in Zeron on your computer, where its secret stays, never here.
+import Ask from "../../../components/kit/Ask.astro";
+import Toast from "../../../components/kit/Toast.astro";
+import Glyph from "../../../components/ui/Glyph.astro";
+import App from "../../../layouts/App.astro";
+import { revokeAsk } from "../../../lib/store/actions.ts";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { day, shortKey } from "../../../lib/store/format.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { requireSession } from "../../../lib/store/session.ts";
+import type { DeployKey } from "../../../lib/store/types.ts";
+import { store } from "../../../lib/store/words.ts";
+
+export const prerender = false;
+
+const session = await requireSession(Astro);
+if (session instanceof Response) return session;
+const [keysResult, mine] = await Promise.all([Astro.locals.edge.keys(), Astro.locals.edge.myPlugins()]);
+privatePage(Astro);
+const toast = takeFlash(Astro.cookies);
+const here = "/account/keys";
+const now = Date.now();
+
+const keys = keysResult.ok ? keysResult.data.keys : null;
+const working = (k: DeployKey) => !k.revoked_at && !(k.expires_at != null && k.expires_at < now);
+const live = keys?.filter(working) ?? [];
+const gone = keys?.filter((k) => !working(k)) ?? [];
+const anyExpired = gone.some((k) => !k.revoked_at);
+/** Ending within 14 days: said in the warning's ink, and in words. */
+const soon = (k: DeployKey) => k.expires_at != null && k.expires_at - now < 14 * 86_400_000;
+/** When it ends, in the app's words: "Ends today", "Ends tomorrow", "Ends in 11 days". */
+const endsIn = (k: DeployKey) => {
+  const days = Math.max(0, Math.ceil((k.expires_at! - now) / 86_400_000));
+  return days === 0 ? store("plugins.store.key.ends_today") : days === 1 ? store("plugins.store.key.ends_tomorrow") : store("plugins.store.key.ends_in", { n: days });
+};
+/** Your plugins by id, so a scope reads as their names. */
+const names = new Map((mine.ok ? mine.data.plugins : []).map((p) => [p.id, p.name]));
+const pluginLink = (id: string) => `/account/plugins/${encodeURIComponent(id)}`;
+/** A key can be made once you have a plugin in the store (its first version is sent from a computer). */
+const published = mine.ok && mine.data.plugins.some((p) => p.versions.length > 0);
+---
+
+<App title="Deploy keys · Zeron" description="Your account's deploy keys." noindex current="keys" session={session}>
+  <h1 slot="title" class="t-title">Deploy keys</h1>
+  <a slot="tools" class="btn secondary sm" href="#new-key" data-dialog="new-key"><Glyph name="plus" size={14} />{store("plugins.store.key.new")}</a>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="words">
+        <p>{store("plugins.store.keys_body")} Each version it sends is listed as any is, waiting to be verified, and your devices tell you which key sent it.</p>
+      </div>
+    </div>
+    {keys === null ? (
+      <div class="panel"><div class="empty" role="status"><span class="tile"><Glyph name="wifi-off" size={20} /></span><div class="words"><h2>{store("plugins.store.keys_failed")}</h2><p>Try again in a moment.</p></div><div class="actions"><a class="btn secondary sm" href={here}>Try again</a></div></div></div>
+    ) : live.length === 0 ? (
+      <div class="panel">
+        <div class="empty">
+          <span class="tile"><Glyph name="lock-keyhole-unlocked" size={20} /></span>
+          <div class="words"><h2>{store("plugins.store.keys_none")}</h2><p>{published ? "A key is made in Zeron on your computer, where its secret stays. New key… says how." : "Publish a plugin's first version from your computer; a deploy key can send the ones after it."}</p></div>
+          <div class="actions"><a class="btn secondary sm" href="#new-key" data-dialog="new-key"><Glyph name="plus" size={14} />{store("plugins.store.key.new")}</a></div>
+        </div>
+      </div>
+    ) : (
+      <div class="panel">
+        <table class="table wrapping keys-table">
+          <caption class="sr-only">Deploy keys</caption>
+          <colgroup><col /><col class="key" /><col class="when" /><col class="when" /><col class="when" /><col class="action" /></colgroup>
+          <thead><tr><th scope="col">{store("plugins.store.key.name")}</th><th scope="col">Key</th><th scope="col">Made</th><th scope="col">Last used</th><th scope="col">{store("plugins.store.key.expiry_label")}</th><th scope="col" class="end"><span class="sr-only">What you can do</span></th></tr></thead>
+          <tbody>
+            {live.map((k) => (
+              <tr>
+                <td>
+                  <span class="line"><span class="key-name" title={k.name}>{k.name}</span></span>
+                  {/* What it may publish, fixed when it was made (amendment 44): under its name, so the table keeps its columns. */}
+                  <span class="scope">
+                    May publish:{" "}
+                    {"all" in k.scope ? `${store("plugins.store.key.scope.all")}, those you publish later too` : k.scope.plugins.map((id, i) => <>{i > 0 && ", "}<a href={pluginLink(id)}>{names.get(id) ?? id}</a></>)}
+                  </span>
+                </td>
+                <td><span class="line key" title={k.key}>{shortKey(k.key)}</span></td>
+                <td data-label="Made"><span class="line muted">{day(k.created_at)}</span></td>
+                <td data-label="Last used">
+                  <span class="line muted" title={k.last_used_at && k.last_used_plugin ? store("plugins.store.key.last_used_on", { date: day(k.last_used_at), plugin: names.get(k.last_used_plugin) ?? k.last_used_plugin }) : undefined}>{k.last_used_at ? day(k.last_used_at) : store("plugins.store.key.not_used")}</span>
+                </td>
+                <td data-label="Ends">
+                  {soon(k) ? (
+                    <span class="line soon" title={endsIn(k)}>{day(k.expires_at!)}<span class="in-days" aria-hidden="true">{" · "}{endsIn(k)}</span><span class="sr-only">, {endsIn(k)}</span></span>
+                  ) : (
+                    <span class="line muted">{k.expires_at ? day(k.expires_at) : store("plugins.store.key.no_end")}</span>
+                  )}
+                </td>
+                <td class="end"><span class="line end"><a class="btn ghost sm" href={`${here}/${encodeURIComponent(k.key)}`} data-dialog={`revoke-${k.key}`}>{revokeAsk(k.name).confirm}</a></span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )}
+    {gone.length > 0 && (
+      <details class="gone">
+        <summary>{anyExpired ? "Revoked and expired keys" : "Revoked keys"} · {gone.length}<Glyph name="alt-arrow-down" size={14} /></summary>
+        <div class="panel">
+          <table class="table wrapping keys-table">
+            <caption class="sr-only">{anyExpired ? "Revoked and expired keys" : "Revoked keys"}</caption>
+            <colgroup><col /><col class="key" /><col class="when" /><col class="when" /><col class="when" /><col class="action" /></colgroup>
+            <thead><tr><th scope="col">{store("plugins.store.key.name")}</th><th scope="col">Key</th><th scope="col">Made</th><th scope="col">Last used</th><th scope="col">Stopped</th><th scope="col" class="end"><span class="sr-only">Why</span></th></tr></thead>
+            <tbody>
+              {gone.map((k) => (
+                <tr>
+                  <td><span class="line"><span class="key-name" title={k.name}>{k.name}</span></span></td>
+                  <td><span class="line key" title={k.key}>{shortKey(k.key)}</span></td>
+                  <td data-label="Made"><span class="line">{day(k.created_at)}</span></td>
+                  <td data-label="Last used"><span class="line">{k.last_used_at ? day(k.last_used_at) : store("plugins.store.key.not_used")}</span></td>
+                  <td data-label="Stopped"><span class="line">{day(k.revoked_at ?? k.expires_at!)}</span></td>
+                  <td class="end"><span class="line end">{k.revoked_at ? "Revoked" : "Expired"}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </details>
+    )}
+  </div>
+
+  {/* New key: a sheet that says how (the secret is made where it stays). */}
+  <dialog class="sheet" id="new-key" aria-labelledby="new-key-title" closedby="any">
+    <div class="head">
+      <h2 id="new-key-title">{store("plugins.store.key.new_title")}</h2>
+      <p>A key's secret is made on your computer and never leaves it, so a key is made there, not here: in Zeron, in Settings, under Plugins. You choose then what it may publish: the plugins you name, or all of yours. Put the secret in your CI's secrets; this page then lists the key.</p>
+    </div>
+    <div class="body ways">
+      {!published && <p class="notice warn"><Glyph name="info-circle" size={16} /><span>{"Publish a plugin's first version from your computer; a deploy key can send the ones after it."}</span></p>}
+      <p class="first">A key never publishes a plugin's first version: that one is always sent from your computer.</p>
+    </div>
+    <form method="dialog" class="answers"><a class="btn secondary" href={here} data-close>Done</a></form>
+  </dialog>
+
+  {live.map((k) => <Ask id={`revoke-${k.key}`} ask={revokeAsk(k.name)} action={`${here}/${encodeURIComponent(k.key)}`} csrf={session.csrf} />)}
+  <Toast toast={toast} />
+</App>

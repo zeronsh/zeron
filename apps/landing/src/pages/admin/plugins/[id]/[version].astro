@@ -1,11 +1,12 @@
 ---
-// One submission, as a reviewer weighs it, in that order: the public page's
-// head; what it asks for, marked against the last approved version; what
+// One version, as a reviewer weighs it, in that order: the public page's
+// head; what it asks for, marked against the newest verified version; what
 // changed (its notes, its files); its listing as visitors will see it; the
-// raw manifest, folded. Beside it, the decision, which never scrolls away:
-// Approve, Don't approve (a reason, words, and the author's view of them),
-// or, for an approved version, Take down. Its files and its changes line by
-// line are views of their own. Admins only; anyone else gets the site's 404.
+// raw manifest, folded. Beside it, the decision, which never scrolls away
+// (amendment 45: it is listed already): Verify, Don't verify (a reason,
+// words, and the author's view of them), Take down (harmful: turned off on
+// devices) or Remove. Its files and its changes line by line are views of
+// their own. Admins only; anyone else gets the site's 404.
 import Decline from "../../../../components/kit/Decline.astro";
 import Strip from "../../../../components/kit/Strip.astro";
 import TakeDown from "../../../../components/kit/TakeDown.astro";
@@ -27,7 +28,7 @@ import { isPluginId, isVersion } from "../../../../lib/store/names.ts";
 import { compared, together } from "../../../../lib/store/permissions.ts";
 import { changedFiles, countRows, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, pictureType, readText, type DiffRow } from "../../../../lib/store/review.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
-import { toneClass, versionState } from "../../../../lib/store/states.ts";
+import { toneClass, verificationState, versionState } from "../../../../lib/store/states.ts";
 import { fileUrl, memberUrl, pictureUrl, pluginUrl } from "../../../../lib/store/urls.ts";
 import type { Check, PackageFile } from "../../../../lib/store/types.ts";
 
@@ -121,7 +122,7 @@ if (s?.base && view === "changes") {
   );
 }
 
-// The overview's parts. (Rendered each time: a version in review is no one's to keep.)
+// The overview's parts. (Rendered each time: what staff see of a version is no one's to keep.)
 const overview = s && view === "overview";
 const file = (p: string) => fileUrl(id, version, p);
 const readmeText = s ? (s.version.readme ?? (await (async () => {
@@ -130,7 +131,7 @@ const readmeText = s ? (s.version.readme ?? (await (async () => {
 })())) : "";
 // Drawn on every view (linear in their text, markdown.ts), each try recorded
 // first (rendered.ts: one that never finished is not tried again while it
-// is held), shown on the overview. Nothing is kept: a version in review is
+// is held), shown on the overview. Nothing is kept: what staff see of a version is
 // no one's to keep.
 const origin = Astro.url.origin;
 const cf = (Astro.locals as { cfContext?: { waitUntil(p: Promise<unknown>): void } }).cfContext;
@@ -140,7 +141,7 @@ const notesDrawn = s?.version.notes ? await drawn(origin, id, version, "notes", 
 const notes = overview ? (notesDrawn?.html ?? "") : "";
 const readme = overview ? (readmeDrawn?.html ?? "") : "";
 // Shown as its text, for any cause, the reviewer is told, loudly, on every
-// view: a submission that can't be drawn is itself a reason not to approve it.
+// view: a version that can't be drawn is itself a reason not to verify it.
 const drawing: Check[] = drawingChecks(readmeDrawn, notesDrawn, version);
 // (Each a path in the package, never anything else: pictureUrl refuses one that climbs out of it.)
 const pictures = (s?.version.screenshots ?? []).flatMap((p) => pictureUrl(id, version, p) ?? []);
@@ -153,20 +154,31 @@ const failed = checks.filter((c) => c.level === "fail").length;
 const passed = checks.length - toLook.length;
 const manifestMoved = s?.base ? manifestChanges(s.manifest, s.base.manifest).map((m) => m.key) : [];
 
+// Where it stands, and whether it's verified (amendment 45): listed (or
+// yanked) versions can be verified (undecided or declined), declined
+// (undecided only), taken down or removed; one taken down or removed, none.
 const state = s ? versionState(s.version) : null;
-const pending = s?.version.status === "pending";
-const removable = s?.version.status === "approved" || s?.version.status === "yanked";
+const verification = s ? verificationState(s.version) : null;
 const review = s?.version.review;
-const decided = review?.decided_at ?? s?.version.published_at ?? null;
+const shown = s?.version.status === "listed" || s?.version.status === "yanked";
+// (A version taken down can be restored: listed again, unverified.)
+const restorable = s?.version.status === "taken_down";
+const restore = versionAsk("restore", name, version);
+const verifiable = shown && !s?.version.verified;
+const declinable = shown && review?.decided === false;
+const pending = verifiable || declinable;
+const removable = shown;
+const decided = review?.decided_at ?? null;
 const author = s?.publisher.username ?? null;
-const approve = versionAsk("approve", name, version);
+const approve = versionAsk("verify", name, version);
 const weigh = s ? toWeigh({ ...s, checks }) : null;
-const reject = versionAsk("reject", name, version);
+const reject = versionAsk("decline", name, version);
+const takeDown = versionAsk("take_down", name, version);
 const remove = versionAsk("remove", name, version);
 const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n === 1 ? one : many}`;
 ---
 
-<App title={`${name} ${version} · Review · Zeron`} description="A submission in review." noindex current="queue" session={session}>
+<App title={`${name} ${version} · Review · Zeron`} description="A version to verify." noindex current="queue" session={session}>
   <nav slot="title" class="crumbs" aria-label="Where this is">
     <a href="/admin/plugins">Queue</a><Glyph name="alt-arrow-right" size={12} />
     {view === "overview" ? <span aria-current="page">{unbidi(name)} {version}</span> : <><a href={here}>{unbidi(name)} {version}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{VIEWS[view]}</span></>}
@@ -199,7 +211,8 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
             <p class="meta">
               <span>by {author ? <a href={memberUrl(author)}>@{author}</a> : "an account with no username"}</span>
               <span class="dot" aria-hidden="true">·</span>
-              <span>{s.base ? `Update from ${s.base.version}` : "First listing"}</span>
+              {/* (Weighed against its newest verified version; with none, everything it asks for is new.) */}
+              <span>{s.base ? `Update from ${s.base.version}, its newest verified version` : "None verified yet"}</span>
               {s.version.prerelease && <span class="badge sm">Pre-release</span>}
               <span class="dot" aria-hidden="true">·</span>
               <a href={`/admin/plugins/${encodeURIComponent(id)}`}><code>{id}</code></a>
@@ -210,8 +223,9 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
         <aside class="decide panel" aria-label="Decision">
           <p class="state">
             {state && <span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>}
-            {pending ? (
-              <span>waited <time datetime={new Date(s.version.submitted_at).toISOString()} title={dateTime(s.version.submitted_at)}>{waitedFor(s.version.submitted_at)}</time></span>
+            {verification && <span class:list={["badge sm", toneClass(verification.tone)]}>{verification.label}</span>}
+            {review?.decided === false && shown ? (
+              <span>waited <time datetime={new Date(s.version.published_at).toISOString()} title={dateTime(s.version.published_at)}>{waitedFor(s.version.published_at)}</time></span>
             ) : (
               decided && <span><time datetime={new Date(decided).toISOString()} title={dateTime(decided)}>{day(decided)}</time></span>
             )}
@@ -219,24 +233,29 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
           {review?.message && (
             <p class="said">
               “{review.message}”
-              <span class="who">{[review.reason && reasonLabel(review.reason), review.decided_at && `${s.version.status === "removed" ? "taken down" : "reviewed"} ${day(review.decided_at)}`].filter(Boolean).join(" · ")}</span>
+              <span class="who">{[review.reason && reasonLabel(review.reason), review.decided_at && `reviewed ${day(review.decided_at)}`].filter(Boolean).join(" · ")}</span>
             </p>
           )}
+          {s.version.removal?.reason && (
+            <p class="said">
+              “{s.version.removal.reason}”
+              <span class="who">{`${s.version.status === "taken_down" ? "taken down" : "removed"} ${day(s.version.removal.at)}`}</span>
+            </p>
+          )}
+          {s.superseded && <p class="t-caption">Superseded by {s.superseded.by} {day(s.superseded.at)}{s.version.yanked_by === "superseded" ? ": it takes no new installs until it's verified." : "."}</p>}
+          {restorable && <div class="buttons"><a class="btn secondary" href={`${here}/restore`}>{restore.confirm}…</a></div>}
           {(pending || removable) && (
             <div class="buttons">
-              {pending && (
-                <>
-                  <a class="btn primary" href={`${here}/approve`} data-dialog="approve">Approve…</a>
-                  <a class="btn secondary" href={`${here}/reject`} data-dialog="reject">Don't approve…</a>
-                </>
-              )}
-              {removable && <a class="btn secondary" href={`${here}/remove`} data-dialog="take-down">Take down…</a>}
+              {verifiable && <a class="btn primary" href={`${here}/verify`} data-dialog="approve">Verify…</a>}
+              {declinable && <a class="btn secondary" href={`${here}/decline`} data-dialog="reject">Don't verify…</a>}
+              {removable && <a class="btn secondary" href={`${here}/take_down`} data-dialog="take-down">Take down…</a>}
+              {removable && <a class="btn secondary" href={`${here}/remove`} data-dialog="remove">Remove…</a>}
             </div>
           )}
           <dl class="facts">
-            <div><dt>Sent by</dt><dd>{author ? <a href={memberUrl(author)}>@{author}</a> : "No username"}</dd></div>
+            <div><dt>Published by</dt><dd>{author ? <a href={memberUrl(author)}>@{author}</a> : "No username"}</dd></div>
             <div><dt>Account</dt><dd>{age(s.publisher.created_at) || "Deleted"}</dd></div>
-            <div><dt>This author</dt><dd>{count(s.publisher.decisions.approved)} approved · {count(s.publisher.decisions.rejected)} not approved</dd></div>
+            <div><dt>This author</dt><dd>{count(s.publisher.decisions.verified)} verified · {count(s.publisher.decisions.declined)} not verified</dd></div>
             <div>
               <dt>Checks</dt>
               <dd>
@@ -265,7 +284,7 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
                 <div class="section-head">
                   <div class="words">
                     <h2 id="asks-heading">What it asks for</h2>
-                    <p>{s.base ? (moved.length || weighed.dropped.length ? `Against ${s.base.version}, the last approved version: ${[moved.filter((l) => l.change === "new").length && `${plural(moved.filter((l) => l.change === "new").length, "new ask")}`, moved.filter((l) => l.change === "changed" && !l.bound).length && `${plural(moved.filter((l) => l.change === "changed" && !l.bound).length, "ask")} changed inside`, weighed.dropped.length && `${plural(weighed.dropped.length, "ask")} dropped`, moved.some((l) => l.bound) && `${together(moved.filter((l) => l.bound).map((l) => l.bound!))} changed`].filter(Boolean).join(", ")}.` : `Nothing new since ${s.base.version}, the last approved version.`) : "Its first version: everything it asks for is new."}</p>
+                    <p>{s.base ? (moved.length || weighed.dropped.length ? `Against ${s.base.version}, the newest verified version: ${[moved.filter((l) => l.change === "new").length && `${plural(moved.filter((l) => l.change === "new").length, "new ask")}`, moved.filter((l) => l.change === "changed" && !l.bound).length && `${plural(moved.filter((l) => l.change === "changed" && !l.bound).length, "ask")} changed inside`, weighed.dropped.length && `${plural(weighed.dropped.length, "ask")} dropped`, moved.some((l) => l.bound) && `${together(moved.filter((l) => l.bound).map((l) => l.bound!))} changed`].filter(Boolean).join(", ")}.` : `Nothing new since ${s.base.version}, the newest verified version.`) : "Its first version: everything it asks for is new."}</p>
                   </div>
                 </div>
                 <div class="panel">
@@ -482,21 +501,19 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
   {
     s && (pending || removable) && (
       <div class="decide-bar">
-        {pending && (
-          <>
-            <a class="btn secondary" href={`${here}/reject`} data-dialog="reject">Don't approve…</a>
-            <a class="btn primary" href={`${here}/approve`} data-dialog="approve">Approve…</a>
-          </>
-        )}
-        {removable && <a class="btn secondary" href={`${here}/remove`} data-dialog="take-down">Take down…</a>}
+        {removable && <a class="btn secondary" href={`${here}/take_down`} data-dialog="take-down">Take down…</a>}
+        {/* (Three fit a phone's bar: Remove joins it once the version is decided; until then it's the rail's and its own page's.) */}
+        {removable && !pending && <a class="btn secondary" href={`${here}/remove`} data-dialog="remove">Remove…</a>}
+        {declinable && <a class="btn secondary" href={`${here}/decline`} data-dialog="reject">Don't verify…</a>}
+        {verifiable && <a class="btn primary" href={`${here}/verify`} data-dialog="approve">Verify…</a>}
       </div>
     )
   }
 
   {
-    s && pending && (
+    s && verifiable && (
       <dialog class="dialog sm" id="approve" aria-labelledby="approve-title" closedby="any">
-        <form method="post" action={`${here}/approve`}>
+        <form method="post" action={`${here}/verify`}>
           <input type="hidden" name="csrf" value={session.csrf} />
           <div class="head">
             <h2 id="approve-title">{unbidi(approve.title)}</h2>
@@ -512,9 +529,9 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
     )
   }
   {
-    s && pending && (
+    s && declinable && (
       <dialog class="dialog" id="reject" aria-labelledby="reject-title" closedby="any">
-        <form method="post" action={`${here}/reject`}>
+        <form method="post" action={`${here}/decline`}>
           <input type="hidden" name="csrf" value={session.csrf} />
           <div class="head">
             <h2 id="reject-title">{unbidi(reject.title)}</h2>
@@ -532,13 +549,31 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
   {
     s && removable && (
       <dialog class="dialog" id="take-down" aria-labelledby="take-down-title" closedby="any">
+        <form method="post" action={`${here}/take_down`}>
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <div class="head">
+            <h2 id="take-down-title">{unbidi(takeDown.title)}</h2>
+            {takeDown.words.map((w) => <p>{w}</p>)}
+          </div>
+          <TakeDown id="take-down" harmful />
+          <div class="answers">
+            <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+            <button class="btn danger" type="submit">{takeDown.confirm}</button>
+          </div>
+        </form>
+      </dialog>
+    )
+  }
+  {
+    s && removable && (
+      <dialog class="dialog" id="remove" aria-labelledby="remove-title" closedby="any">
         <form method="post" action={`${here}/remove`}>
           <input type="hidden" name="csrf" value={session.csrf} />
           <div class="head">
-            <h2 id="take-down-title">{unbidi(remove.title)}</h2>
+            <h2 id="remove-title">{unbidi(remove.title)}</h2>
             {remove.words.map((w) => <p>{w}</p>)}
           </div>
-          <TakeDown id="take-down" />
+          <TakeDown id="remove" harmful={false} />
           <div class="answers">
             <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
             <button class="btn danger" type="submit">{remove.confirm}</button>

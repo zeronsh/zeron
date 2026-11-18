@@ -13,18 +13,21 @@ interface Props {
   name: string;
   /** No Zeron released can install it: the button stays, off (the page says why). */
   off?: boolean;
+  /** A version other than the newest: the link names it, and so does the button ("Install 1.2.0 in Zeron"). */
+  version?: string;
 }
-const { id, name, off = false } = Astro.props;
+const { id, name, off = false, version } = Astro.props;
+const label = version ? `Install ${version} in Zeron` : "Install in Zeron";
 ---
 
 <div class="install" data-install>
-  {off ? <span class="btn primary" aria-disabled="true"><Mark />Install in Zeron</span> : <a class="btn primary" href={appUrl(id)} data-install-link><Mark />Install in Zeron</a>}
+  {off ? <span class="btn primary" aria-disabled="true"><Mark />{label}</span> : <a class="btn primary" href={appUrl(id, version)} data-install-link><Mark />{label}</a>}
   <details class="install-help" data-install-help hidden={off}>
     <summary>Nothing happened?</summary>
     <div class="install-card" role="status" aria-live="polite">
-      <p>Install in Zeron opens Zeron on your computer at this plugin, ready to install. If nothing opened:</p>
+      <p>{label} opens Zeron on your computer at this plugin, ready to install{version ? ` ${version}` : ""}. If nothing opened:</p>
       <ol>
-        <li><a href="/#downloads">Download Zeron</a> for your computer, open it, and press Install in Zeron again.</li>
+        <li><a href="/#downloads">Download Zeron</a> for your computer, open it, and press {label} again.</li>
         <li>Or, in Zeron, open <b>Settings</b> <Glyph name="alt-arrow-right" size={12} /> <b>Plugins</b> <Glyph name="alt-arrow-right" size={12} /> <b>Browse</b> and search for <b>{name}</b>.</li>
       </ol>
     </div>

@@ -1034,6 +1034,7 @@ a.row:focus-visible { outline-offset: -2px; }
 .keys-table .key { font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-2); }
 .keys-table .soon { color: var(--warn-ink); }
 .keys-table .in-days { display: none; }
+.keys-table .scope { display: block; margin-top: 4px; color: var(--text-3); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; } /* (what a key may publish, under its name: amendment 44) */
 .keys-table td.end .btn { margin-right: -10px; } /* (the button's words, not its wash, on the column's edge) */
 .versions-table td.end .btn { margin-right: -10px; }
 

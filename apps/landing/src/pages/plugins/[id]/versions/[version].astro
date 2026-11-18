@@ -1,0 +1,94 @@
+---
+// One version of a plugin (amendment 45: every listed version can be seen
+// and installed): whether a reviewer verified it, when it was published and
+// how, what it needs and weighs, and its notes. Public, kept by shared
+// caches as the plugin's page is.
+import Install from "../../../../components/kit/Install.astro";
+import PluginTile from "../../../../components/store/PluginTile.astro";
+import { stoppedWhy } from "../../../../lib/store/states.ts";
+import Glyph from "../../../../components/ui/Glyph.astro";
+import App from "../../../../layouts/App.astro";
+import { bytes, compatibility, day } from "../../../../lib/store/format.ts";
+import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
+import { isPluginId, isPrerelease, isVersion } from "../../../../lib/store/names.ts";
+import { drawn, keepable } from "../../../../lib/store/rendered.ts";
+import { fileUrl, pluginUrl } from "../../../../lib/store/urls.ts";
+import { statusWords, store, storeAround } from "../../../../lib/store/words.ts";
+
+export const prerender = false;
+
+const { id, version } = Astro.params;
+if (!isPluginId(id) || !isVersion(version)) return new Response(null, { status: 404 });
+const edge = Astro.locals.edge;
+const [plugin, found] = await Promise.all([edge.plugin(id), edge.version(id, version)]);
+if ((!plugin.ok && plugin.error === "not_found") || (!found.ok && found.error === "not_found")) return new Response(null, { status: 404 });
+const v = found.ok ? found.data : null;
+const name = plugin.ok ? plugin.data.name : id;
+let notes = "";
+if (v && plugin.ok) {
+  // (Drawn once and kept by its text, as the plugin page draws it: rendered.ts.)
+  const cf = (Astro.locals as { cfContext?: { waitUntil(p: Promise<unknown>): void } }).cfContext;
+  const out = v.notes ? await drawn(Astro.url.origin, id, v.version, "notes", v.notes, { file: (p) => fileUrl(id, v.version, p), demote: true }, { keep: true, waitUntil: cf ? (p) => cf.waitUntil(p) : undefined }) : null;
+  notes = out?.html ?? "";
+  if (!out || keepable([out])) publicPage(Astro, [pluginTag(id)]);
+  else Astro.response.headers.set("cache-control", "no-store");
+} else Astro.response.status = 503;
+const isNewest = plugin.ok && v ? plugin.data.version === v.version : false;
+const newestVerified = plugin.ok ? plugin.data.verified_version : null;
+// (The app's sentences around their values: a link, a time.)
+const [before, after] = storeAround("plugins.store.not_verified_line", { version }, "verified");
+const [onBefore, onAfter] = storeAround("plugins.store.verified_on", {}, "date");
+---
+
+<App title={`${name} ${version} · Plugins · Zeron`} description={`${name} ${version}, a plugin for Zeron.`} current={null}>
+  <nav slot="title" class="crumbs" aria-label="Where this is">
+    <a href="/plugins/all">All plugins</a><Glyph name="alt-arrow-right" size={12} /><a href={pluginUrl(id)}>{name}</a><Glyph name="alt-arrow-right" size={12} /><a href={`${pluginUrl(id)}/versions`}>Versions</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{version}</span>
+  </nav>
+  {
+    !v || !plugin.ok ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h1 class="t-heading">{store("plugins.store.failed_title")}</h1><p>{store("plugins.store.failed_body")}</p></div>
+          <div class="actions"><a class="btn secondary sm" href={Astro.url.pathname}>{store("plugins.store.try_again")}</a></div>
+        </div>
+      </div>
+    ) : (
+      <article class="version-page">
+        <header class="plugin-head">
+          {/* (The head as the plugin's page has it: its tile first, the column its grid keeps for it.) */}
+          <PluginTile id={id} name={name} icon={plugin.data.icon} version={plugin.data.version} size={56} class="plugin-tile" />
+          <div class="who">
+            <h1 class="t-title">{name} <span class="num">{v.version}</span></h1>
+            <p class="meta">
+              {v.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{store("plugins.store.review.waiting")}</span>}
+              {isNewest && <span class="badge sm ok">Latest</span>}
+              {isPrerelease(v.version) && <span class="badge sm info">Pre-release</span>}
+              {v.yanked && <span class="badge sm warn">{statusWords("yanked")}</span>}
+              <span>Published <time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at)}</time>{v.via === "deploy_key" ? " by a deploy key" : ""}</span>
+              {v.verified && v.verified_at && <span>{onBefore}<time datetime={new Date(v.verified_at).toISOString()}>{day(v.verified_at)}</time>{onAfter}</span>}
+            </p>
+          </div>
+          {/* (The newest by the plain link; any other by a link that names it.) */}
+          {!v.yanked && <Install id={id} name={name} off={false} version={isNewest ? undefined : v.version} />}
+        </header>
+        {v.yanked && <p class="notice warn" role="note"><Glyph name="danger-triangle" size={16} /><span>{stoppedWhy(v)}</span></p>}
+        {!v.verified && (
+          <p class="notice" role="note">
+            <Glyph name="info-circle" size={16} />
+            <span><b>{newestVerified ? <>{before}<a href={`${pluginUrl(id)}/versions/${encodeURIComponent(newestVerified)}`}>{newestVerified}</a>{after}</> : store("plugins.store.none_verified")}</b> Zeron asks before it installs it.</span>
+          </p>
+        )}
+        <dl class="facts">
+          <div><dt>{store("plugins.store.fact.works_with")}</dt><dd>{compatibility(v.engines?.zeron)}</dd></div>
+          {v.bytes !== undefined && <div><dt>Size</dt><dd class="num">{bytes(v.bytes)}</dd></div>}
+        </dl>
+        <section aria-label="What changed">
+          <h2>What changed</h2>
+          {notes ? <div class="prose notes" set:html={notes} /> : <p class="t-text t-3">No notes for this version.</p>}
+        </section>
+        <p><a class="btn ghost sm" href={`${pluginUrl(id)}/versions`}>Every version</a></p>
+      </article>
+    )
+  }
+</App>
