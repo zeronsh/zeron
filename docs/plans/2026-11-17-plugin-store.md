@@ -525,3 +525,12 @@ Agreed after the plan was first written. Newest last.
     retries a `body_mismatch`; it treats `invalid_signature` as a refused
     key. A request whose signature does not verify stays `401
     invalid_signature`.
+37. **The site's own words are never plugin ids.** The generated data file
+    carries `site_ids` (36 words: `all`, `search`, `publishing`, `admin`, …)
+    beside `reserved_ids` (the three a device refuses). A device runs a
+    plugin with a site id; the store refuses to list it (`id_reserved`), and
+    no reservation lifts that: reserving one answers `400 site_id`. The list
+    is closed once anyone can publish.
+38. **Every paged list carries `total`**: the number of items the query
+    matches, beside `items`, `next_cursor` and `prev_cursor` (the catalog,
+    the admin queue per state, reports, the audit log).
