@@ -50,6 +50,11 @@ struct InstallParams {
     upload: Option<String>,
     #[serde(default)]
     name: Option<String>,
+    /// A store id: its latest version for you (`version`: that one).
+    #[serde(default)]
+    store: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -112,6 +117,12 @@ impl Plugins {
                 }
                 let path = p.path.filter(|s| !s.trim().is_empty());
                 let url = p.url.filter(|s| !s.trim().is_empty());
+                if let Some(id) = p.store.filter(|s| !s.trim().is_empty()) {
+                    if path.is_some() || url.is_some() || p.upload.as_deref().is_some_and(|u| !u.trim().is_empty()) {
+                        return Err(failed("Give one of a store id (`store`), a package file (`path`), a link (`url`) or a file sent here (`upload`)"));
+                    }
+                    return self.install_from_store(id.trim(), p.version.as_deref(), false).await;
+                }
                 if let Some(upload) = p.upload.filter(|s| !s.trim().is_empty()) {
                     if path.is_some() || url.is_some() {
                         return Err(failed("Give a package file (`path`), a link (`url`) or a file sent here (`upload`)"));
@@ -131,6 +142,7 @@ impl Plugins {
                         commit: None,
                         version: String::new(),
                         installed_at: 0,
+                        store: None,
                     };
                     return self.install_package(package, source).await;
                 }
@@ -151,6 +163,7 @@ impl Plugins {
                             commit: None,
                             version: String::new(),
                             installed_at: 0,
+                            store: None,
                         };
                         (package, source)
                     }
@@ -236,7 +249,7 @@ impl Plugins {
 
     /// Install a verified package, keep the decisions right, and say what
     /// changed.
-    async fn install_package(&self, package: Package, source: Source) -> Result<RpcReply, RpcError> {
+    pub(in crate::plugins) async fn install_package(&self, package: Package, source: Source) -> Result<RpcReply, RpcError> {
         self.install_package_keeping(package, source, false).await
     }
 
@@ -245,15 +258,18 @@ impl Plugins {
     async fn install_package_keeping(&self, package: Package, mut source: Source, keep_storage: bool) -> Result<RpcReply, RpcError> {
         self.rescan().await;
         let id = package.id().to_owned();
+        // Made for another Zeron: never installed here, from anywhere.
+        install::compatible(&package.manifest).map_err(failed)?;
+        // What a decision about it is bound to: its owner in the store, or
+        // the key that signed it.
+        let binding = source.store().map_or_else(|| package.key.clone(), |s| s.binding());
+        let mut old_binding = None;
         // Signed by another key than the installed one: only its author's
-        // own (a new machine), which asks you again.
+        // own (a new machine), which asks you again; or, from the store,
+        // whoever owns its id there (store to store, the store's record
+        // decides; into the store from elsewhere, the same username).
         let mut rotated_from = None;
         if let Some(entry) = self.entry(&id) {
-            if let Some(key) = entry.key().filter(|k| *k != package.key)
-                && self.same_account(key, &package.key).await
-            {
-                rotated_from = Some(key.to_owned());
-            }
             if entry.item.builtin {
                 return Err(failed(super::manifest::RESERVED_ID_ERROR));
             }
@@ -262,11 +278,30 @@ impl Plugins {
                     "You're making a plugin called {id} on this device. Remove or rename it first to install this one."
                 )));
             }
+            old_binding = entry.binding().map(str::to_owned);
+            if let Some(key) = entry.key().filter(|k| *k != package.key) {
+                let takes_over = match (&entry.store, source.store()) {
+                    (Some(_), Some(_)) => true,
+                    (None, Some(store)) => matches!(
+                        &entry.item.author,
+                        Author::Verified { username: Some(name), .. } if name.trim().eq_ignore_ascii_case(store.publisher.trim())
+                    ),
+                    _ => self.same_account(key, &package.key).await,
+                };
+                if takes_over {
+                    rotated_from = Some(key.to_owned());
+                }
+            }
         }
         source.version = package.manifest.version.clone();
         source.installed_at = now_secs();
         let local = zeron_rpc::caller().is_local();
-        let author = self.resolve_now(&package.key).await;
+        let author = match source.store() {
+            Some(store) => super::scan::store_author(store),
+            None => self.resolve_now(&package.key).await,
+        };
+        let from_store = source.store().is_some();
+        let version = package.manifest.version.clone();
         let plugins_dir = self.inner.plugins_dir.clone();
         let staged = package.clone();
         // Held while the folder is swapped: a scan in between would see it
@@ -307,13 +342,14 @@ impl Plugins {
                     );
                 }
             }
-            // Signed by its author's new key: what you allowed stands
-            // against that key now, and asks you again.
-            Some(old) if old.key != package.key => {
+            // Signed by its author's new key, or another owner's in the
+            // store (or into the store from elsewhere): what you allowed
+            // stands against that now, and asks you again.
+            Some(_) if old_binding.as_deref() != Some(binding.as_str()) => {
                 if let Some(d) = state.decisions.get_mut(&id)
                     && d.allowed
                 {
-                    d.author_key = Some(package.key.clone());
+                    d.author_key = Some(binding.clone());
                     d.content_hash = None;
                     d.reask = true;
                 }
@@ -331,6 +367,16 @@ impl Plugins {
                     d.content_hash = Some(package.hash.clone());
                     d.reask = true;
                 }
+            }
+        })?;
+        self.update_state(|state| {
+            // A block was for the version it replaced.
+            if state.blocked.get(&id).is_some_and(|b| b.version != version) {
+                state.blocked.remove(&id);
+            }
+            // Installing a pre-release from the store takes its later ones.
+            if from_store && super::version::Version::parse(&version).is_ok_and(|v| v.is_prerelease()) {
+                state.prerelease.insert(id.clone());
             }
         })?;
         drop(scan_guard);
@@ -373,7 +419,8 @@ impl Plugins {
         let decisions = lock(&self.inner.state).decisions.clone();
         let candidates: Vec<Candidate> = lock(&self.inner.entries)
             .iter()
-            .filter(|e| !e.item.builtin && !e.item.own && only.is_none_or(|id| id == e.item.id))
+            // (The store's are checked together, in one request, below.)
+            .filter(|e| !e.item.builtin && !e.item.own && e.store.is_none() && only.is_none_or(|id| id == e.item.id))
             .filter_map(|e| {
                 let key = e.key()?.to_owned();
                 // Compared with what you allowed it, or what it is when
@@ -436,6 +483,9 @@ impl Plugins {
                 Err(error) => errors.push(json!({ "id": id, "name": name, "error": error })),
             }
         }
+        let (store_updates, store_errors) = self.check_store_updates(only).await;
+        updates.extend(store_updates);
+        errors.extend(store_errors);
         self.rescan().await;
         json!({ "updates": updates, "errors": errors })
     }
@@ -525,7 +575,13 @@ impl Plugins {
                 "Where it came from isn't known, so it can't be installed again from there",
             ))
         })?;
-        let (package, mut fresh) = install::refetch(&source, &self.scratch()?).await.map_err(failed)?;
+        let (package, mut fresh) = if source.kind == install::STORE {
+            // The version installed, again from the store (yanked or not:
+            // it's yours already).
+            self.fetch_from_store(id, Some(source.version.as_str()), true).await?
+        } else {
+            install::refetch(&source, &self.scratch()?).await.map_err(failed)?
+        };
         if package.id() != id {
             return Err(failed(install::failure(
                 install::reason::DIFFERENT_PLUGIN,

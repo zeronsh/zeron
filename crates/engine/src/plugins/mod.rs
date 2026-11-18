@@ -179,6 +179,7 @@ pub fn handles(method: &str) -> bool {
             | methods::PLUGIN_STATUS
             | methods::WATCH_THEMES
     ) || lifecycle::handles(method)
+        || store::handles(method)
         || themes::handles(method)
 }
 
@@ -292,6 +293,9 @@ struct Inner {
     /// When this device's own key was last looked up on a peer's word
     /// (`CheckPluginKey`): at most every few seconds.
     own_key_checked: Mutex<Option<Instant>>,
+    /// The plugin store (the edge's `/store/v1`) and the session it's
+    /// spoken to as (`store::device`).
+    store: Mutex<Option<store::StoreHandle>>,
 }
 
 type StepUpFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
@@ -556,6 +560,7 @@ impl Plugins {
                 new_keys: Mutex::new(Vec::new()),
                 key_notices: Mutex::new(Vec::new()),
                 own_key_checked: Mutex::new(None),
+                store: Mutex::new(None),
             }),
         };
         plugins.inner.services.set_hooks(Arc::new(ServiceHooks {
@@ -626,6 +631,9 @@ impl Plugins {
     /// Follow `auth`: the account for lookups, and on every sign-in change a
     /// key registration and a rescan.
     pub fn attach_auth(&self, auth: crate::Auth) {
+        // The store is at the edge it signs in against, spoken to as the
+        // session signed in (public reads when nobody is).
+        self.set_store(store::client::StoreClient::new(auth.edge_url()), Some(Arc::new(auth.clone())));
         let for_account = auth.clone();
         self.set_account(move || for_account.user_id());
         let for_step_up = auth.clone();
@@ -1187,6 +1195,13 @@ impl Plugins {
             .map(|dir| {
                 let inspected = scan::inspect(&dir, true);
                 let own = state.own.contains(&inspected.folder);
+                // From the store, and what it vouched for: by its owner
+                // there, its decision bound to that owner.
+                let store = (!own).then(|| scan::store_record(&inspected)).flatten();
+                if let Some(store) = store {
+                    let binding = Some(store.binding());
+                    return scan::entry_bound(inspected, scan::store_author(&store), binding, Some(store), &state);
+                }
                 let author = match inspected.signature_author() {
                     _ if own => Author::You,
                     Ok(author) => author,
@@ -1624,6 +1639,7 @@ impl Plugins {
         let what = match kind {
             reviews::Kind::Plugin => "Allowing a plugin",
             reviews::Kind::Template => "Allowing a template",
+            reviews::Kind::Publish => "Publishing a plugin",
         };
         let origin = reviews::Origin::of(&zeron_rpc::caller()).ok_or_else(|| reviews::needed(what))?;
         if kind == reviews::Kind::Template && origin != reviews::Origin::Local {
@@ -1751,9 +1767,12 @@ impl Plugins {
                 }
                 // Allowed for who made it as known now: a stale or offline
                 // lookup is Unknown, and what was shown must still hold.
+                // (A store plugin's author is the store's record of it, kept
+                // beside it: nothing to look up.)
                 if p.allow
                     && !entry.item.own
                     && !entry.item.builtin
+                    && entry.store.is_none()
                     && let Some(key) = entry.key()
                     && self.resolve_now(key).await != entry.item.author
                 {
@@ -1763,6 +1782,11 @@ impl Plugins {
                 let decision = entry.facts().record(p.allow);
                 self.update_state(|state| {
                     state.decisions.insert(p.id.clone(), decision);
+                    // Allowing a version the store blocked: the person's
+                    // call, which later checks leave be.
+                    if p.allow {
+                        unblock(state, &p.id);
+                    }
                 })?;
                 self.rescan().await;
                 self.item(&p.id)
@@ -1811,6 +1835,11 @@ impl Plugins {
                 decision.off = p.off;
                 self.update_state(|state| {
                     state.decisions.insert(p.id.clone(), decision);
+                    // Turned back on though the store blocked it: it's
+                    // theirs, and later checks leave it on.
+                    if !p.off {
+                        unblock(state, &p.id);
+                    }
                 })?;
                 self.rescan().await;
                 self.item(&p.id)
@@ -2435,6 +2464,7 @@ impl Plugins {
                 RpcReply::value(&reply)
             }
             method if lifecycle::handles(method) => self.lifecycle(method, params).await,
+            method if store::handles(method) => self.store_method(method, params).await,
             _ => Err(RpcError::UnknownMethod(method.to_owned())),
         }
     }
@@ -2676,6 +2706,11 @@ impl Plugins {
         };
         if here == there {
             return true;
+        }
+        // A store plugin's owner is no key to look up: only the same owner
+        // is the same author.
+        if here.starts_with("store:") || there.starts_with("store:") {
+            return false;
         }
         let (a, b) = futures::join!(self.resolve_now(&here), self.resolve_now(&there));
         same_account(&a, &b)
@@ -3241,6 +3276,14 @@ pub fn same_account(a: &Author, b: &Author) -> bool {
     }
 }
 
+/// The store's block on plugin `id` overridden by the person (kept, so
+/// it's still said; later checks leave it on).
+fn unblock(state: &mut State, id: &str) {
+    if let Some(blocked) = state.blocked.get_mut(id) {
+        blocked.overridden = true;
+    }
+}
+
 /// What a device that isn't vouched for is called (`from`).
 pub const UNKNOWN_DEVICE: &str = "unknown";
 
@@ -3250,7 +3293,9 @@ fn author_identity(entry: &Entry) -> Option<String> {
     if entry.item.builtin {
         return Some(BUILTIN_AUTHOR.to_owned());
     }
-    entry.key().map(str::to_owned)
+    // (A store plugin's is its owner there: the same plugin on two devices,
+    // whichever of the owner's keys signed each version.)
+    entry.binding().map(str::to_owned)
 }
 
 impl Plugins {

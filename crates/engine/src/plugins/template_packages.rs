@@ -406,6 +406,7 @@ pub fn import(dir: &Path, path: &Path, author_of: impl Fn(&str) -> Author) -> Re
         commit: None,
         version: package.text("version"),
         installed_at: super::now_secs(),
+        store: None,
     };
     let from = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     import_package(dir, package, &from, source, author_of)
@@ -616,7 +617,7 @@ pub async fn fetch(origin: &Origin) -> Result<(Package, Source), String> {
     let (raw, source) = match origin {
         Origin::Link(url) => (
             install::download(url).await?,
-            Source { kind: "link".into(), url: Some(url.clone()), path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0 },
+            Source { kind: "link".into(), url: Some(url.clone()), path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: None },
         ),
         Origin::Release { repo, tag } => {
             let asset = install::release_asset_of(repo, tag.as_deref(), EXTENSION).await.map_err(|error| {
@@ -640,6 +641,7 @@ pub async fn fetch(origin: &Origin) -> Result<(Package, Source), String> {
                     commit: None,
                     version: String::new(),
                     installed_at: 0,
+                    store: None,
                 },
             )
         }
@@ -749,7 +751,7 @@ pub fn compare(dir: &Path, id: &str, key: &str, hash: &str, fetched: &Package, s
         refused,
         source: Some(source),
         digest_diff: None,
-        new_key: false,
+        ..Found::default()
     })
 }
 
@@ -814,6 +816,7 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
             commit: None,
             version: String::new(),
             installed_at: 0,
+            store: None,
         });
         let from = shown.url.clone().unwrap_or_default();
         let pending = stage_as(dir, &package, &from, &shown, Some(id))?;
