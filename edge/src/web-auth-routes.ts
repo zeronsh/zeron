@@ -27,75 +27,34 @@
  */
 import { decodeJwt } from "jose";
 import { escapeHtml } from "./auth-routes";
-import { b64urlDecode, b64urlEncode, constantTimeEqual } from "./cloud/crypto";
+import { constantTimeEqual } from "./cloud/crypto";
 import type { Env } from "./env";
 import { MAX_LIVE_STEP_UPS, STEP_UP_TTL_MS, newStepUpToken, stepUpHash } from "./step-up";
 import { WEB_SESSION_ABSOLUTE_MS, userDirectoryStub } from "./user-directory";
 import {
   CSRF_HEADER,
+  LOGIN_COOKIE,
+  LOGIN_TTL_MS,
   SESSION_COOKIE,
   clearSessionCookie,
+  codeChallenge,
   crossSiteRefusal,
   hostCookie,
+  loginCookieValue,
   newToken,
+  parseLoginCookie,
   readCookie,
-  resolveWebSession,
+  safeReturnTo,
+  sendsCookie,
   sessionCookie,
   sessionTokenHash,
-  webOrigin,
-  withSessionCookie
-} from "./web-session";
+  webOrigin
+} from "./web-cookies";
+import { resolveWebSession, withSessionCookie } from "./web-session";
 import { WorkOsAuthFailed, authorizeUrl, exchange, getUser, revokeSession } from "./workos";
 
-export const LOGIN_COOKIE = "__Host-zeron_web_login";
-/** How long a sign-in may take from login to callback. */
-export const LOGIN_TTL_MS = 10 * 60_000;
 export const CALLBACK_PATH = "/auth/web/callback";
-const MAX_RETURN_TO = 2048;
 const MAX_FORM_BODY = 4096;
-
-/**
- * Where to send the browser after signing in: a path (and query) on the web
- * origin, or `/`. Refuses anything that could leave it (`//host`, `/\host`,
- * a scheme, backslashes, control characters) and the sign-in routes
- * themselves.
- */
-export const safeReturnTo = (raw: string | null | undefined, origin: string): string => {
-  if (!raw || raw.length > MAX_RETURN_TO || !raw.startsWith("/") || raw.startsWith("//")) return "/";
-  if (/[\\\u0000-\u001f\u007f]/.test(raw)) return "/";
-  let url: URL;
-  try {
-    url = new URL(raw, origin);
-  } catch {
-    return "/";
-  }
-  if (url.origin !== origin) return "/";
-  if (url.pathname === "/auth/web" || url.pathname.startsWith("/auth/web/")) return "/";
-  return `${url.pathname}${url.search}`;
-};
-
-const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
-
-/** The login cookie: `state.verifier.b64url(returnTo)`. */
-export const loginCookieValue = (state: string, verifier: string, returnTo: string): string =>
-  `${state}.${verifier}.${b64urlEncode(new TextEncoder().encode(returnTo))}`;
-
-export const parseLoginCookie = (value: string | undefined): { state: string; verifier: string; returnTo: string } | undefined => {
-  const [state, verifier, encoded, extra] = value?.split(".") ?? [];
-  if (extra !== undefined || !state || !verifier || encoded === undefined) return undefined;
-  if (!TOKEN_RE.test(state) || !TOKEN_RE.test(verifier)) return undefined;
-  const bytes = b64urlDecode(encoded);
-  if (!bytes) return undefined;
-  try {
-    return { state, verifier, returnTo: new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes) };
-  } catch {
-    return undefined;
-  }
-};
-
-/** PKCE S256: b64url(SHA-256(verifier)). */
-export const codeChallenge = async (verifier: string): Promise<string> =>
-  b64urlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
 
 const NO_STORE = { "cache-control": "no-store", vary: "Cookie" };
 
@@ -242,8 +201,9 @@ const logoutCsrf = async (request: Request): Promise<{ csrf: string | null; form
   if (type !== "application/x-www-form-urlencoded") return { csrf: header, form: false };
   const declared = Number(request.headers.get("content-length") ?? "0");
   if (declared > MAX_FORM_BODY) return { csrf: header, form: true };
-  const text = await request.text().catch(() => "");
-  if (text.length > MAX_FORM_BODY) return { csrf: header, form: true };
+  const bytes = await request.arrayBuffer().catch(() => new ArrayBuffer(0));
+  if (bytes.byteLength > MAX_FORM_BODY) return { csrf: header, form: true };
+  const text = new TextDecoder().decode(bytes);
   return { csrf: header ?? new URLSearchParams(text).get("csrf"), form: true };
 };
 
@@ -272,7 +232,7 @@ const session = async (request: Request, env: Env, url: URL): Promise<Response> 
   const live = await resolveWebSession(request, env);
   if (!live) {
     // A cookie that names no live session goes.
-    const stale = readCookie(request, SESSION_COOKIE) !== undefined ? [clearSessionCookie()] : [];
+    const stale = sendsCookie(request, SESSION_COOKIE) ? [clearSessionCookie()] : [];
     return jsonAnswer({ error: "unauthenticated" }, 401, stale);
   }
   let profile: Awaited<ReturnType<NonNullable<ReturnType<typeof userDirectoryStub>>["profiles"]>>[string] | undefined;

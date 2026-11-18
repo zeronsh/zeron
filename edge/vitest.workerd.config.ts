@@ -84,6 +84,9 @@ export default defineConfig({
           STRIPE_API_URL: "https://stripe.test",
           CLOUD_MAX_AWAKE: "2",
           ADMIN_TOKEN: "test-admin-token",
+          // Web sign-in (web-auth-routes.ts) answers on this origin only.
+          WEB_ORIGIN: "https://site.test",
+          WORKOS_API_KEY: "sk_test",
           WORKOS_WEBHOOK_SECRET: "workos_whsec_test",
           RUNNER_JWT_PRIVATE_KEY: JSON.stringify(runnerKeys.privateKey.export({ format: "jwk" })),
           RUNNER_JWT_PUBLIC_KEY: JSON.stringify(runnerKeys.publicKey.export({ format: "jwk" }))

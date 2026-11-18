@@ -24,6 +24,11 @@ import { handleVaultRoute } from "../../src/vault-routes";
 import { handleUserDirectoryRoute } from "../../src/user-directory";
 import { handleOnboardingRoute } from "../../src/onboarding-routes";
 import { handlePluginKeyRoute } from "../../src/plugin-keys";
+import { handleWebAuthRoute } from "../../src/web-auth-routes";
+import { handleRoleAdminRoute } from "../../src/roles";
+import { handleDeployKeyRoute } from "../../src/store/identity/deploy-keys";
+import { sha256Hex } from "../../src/store/identity/signing";
+import { authenticatePublisher, optionalUser, readBody, requireAdmin, withSessionCookie } from "../../src/store/principal";
 export { DeviceRoom } from "../../src/device-room";
 export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
@@ -117,6 +122,33 @@ export class VaultStub extends WorkerEntrypoint {
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 
+/** Plugin owners, as the store's catalog would answer (set with
+ * `POST /__test/owner {pluginId, userId}`). */
+const owners = new Map<string, string>();
+
+/**
+ * Stand-ins for the store lane's routes, each answering who its principal
+ * says is calling: publisher routes (`POST /store/v1/plugins/:id/versions`
+ * and its version actions, `GET /store/v1/me/plugins`) with the body's hash
+ * as the route reads it after authentication, admin routes
+ * (`/store/v1/admin/*`), and a public one (`/store/v1/public`).
+ */
+const storeStandIn = async (request: Request, env: Env, url: URL): Promise<Response | undefined> => {
+  const path = url.pathname;
+  if (path.startsWith("/store/v1/admin/")) {
+    const admin = await requireAdmin(request, env);
+    return admin instanceof Response ? admin : json({ admin });
+  }
+  if (path === "/store/v1/public") return json({ user: await optionalUser(request, env) });
+  if (path === "/store/v1/me/plugins" || /^\/store\/v1\/plugins\/[^/]+\/versions(\/[^/]+\/[a-z]+)?$/.test(path)) {
+    const publisher = await authenticatePublisher(request, env);
+    if (publisher instanceof Response) return publisher;
+    const body = await readBody(request);
+    return json({ publisher, body: body === "too_large" ? body : await sha256Hex(body) });
+  }
+  return undefined;
+};
+
 /**
  * The production routing seam, in src/index.ts's order, minus the routes
  * that need loro's WASM (which cannot load in this tier): releases, admin + runner
@@ -139,6 +171,20 @@ export default {
     if (runner) return runner;
     const users = await handleUserDirectoryRoute(request, env, url);
     if (users) return users;
+    const webAuth = await handleWebAuthRoute(request, env, url);
+    if (webAuth) return webAuth;
+    const roles = await handleRoleAdminRoute(request, env, url);
+    if (roles) return roles;
+    if (url.pathname === "/__test/owner" && request.method === "POST") {
+      const { pluginId, userId } = (await request.json()) as { pluginId: string; userId: string | null };
+      if (userId) owners.set(pluginId, userId);
+      else owners.delete(pluginId);
+      return json({ ok: true });
+    }
+    const deployKeys = await handleDeployKeyRoute(request, env, url, async (_env, pluginId) => owners.get(pluginId) ?? null);
+    if (deployKeys) return withSessionCookie(request, deployKeys);
+    const store = await storeStandIn(request, env, url);
+    if (store) return withSessionCookie(request, store);
     const card = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
     if (card) return card;
     const auth = await authenticate(env, request);

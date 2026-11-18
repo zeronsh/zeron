@@ -34,12 +34,7 @@ import { b64urlEncode, parseEd25519PublicKey, verifyEd25519 } from "../../cloud/
 import { pluginKeyFingerprint, userDirectoryStub } from "../../user-directory";
 import { cookieSession, bearerUser, forbidden, headerBearer, unauthenticated } from "./callers";
 import { readBody } from "./body";
-import { PLUGIN_ID_RE } from "./signed-request";
-
-export const DEPLOY_KEY_PROOF_PREFIX = "zeron-deploy-key:v1:";
-
-/** What a deploy key's proof of possession signs. */
-export const deployKeyProofMessage = (pluginId: string, key: string): string => `${DEPLOY_KEY_PROOF_PREFIX}${pluginId}:${key}`;
+import { PLUGIN_ID_RE, deployKeyProofMessage } from "./signing";
 
 /** The owner of a store plugin id (a user id), or null when no one has
  * claimed it. The store lane's (D1). */

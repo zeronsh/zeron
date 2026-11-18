@@ -23,78 +23,9 @@
  *   stays the same across rotation; one session's token is worthless with
  *   another's cookie.
  */
-import { b64urlEncode, constantTimeEqual } from "./cloud/crypto";
 import type { Env } from "./env";
-import { userDirectoryStub, type Role, type WebSessionRead } from "./user-directory";
-
-export const SESSION_COOKIE = "__Host-zeron_session";
-export const CSRF_HEADER = "x-zeron-csrf";
-
-const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
-
-/** 32 random bytes, b64url: a session token or a CSRF token. */
-export const newToken = (): string => b64urlEncode(crypto.getRandomValues(new Uint8Array(32)));
-
-/** The stored form of a session token: SHA-256, hex. Undefined for
- * something that isn't one. */
-export const sessionTokenHash = async (token: unknown): Promise<string | undefined> => {
-  if (typeof token !== "string" || !TOKEN_RE.test(token)) return undefined;
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-};
-
-/** The one value of cookie `name` in the request; undefined when it's absent
- * or sent more than once (a cookie can't be told from a planted twin). */
-export const readCookie = (request: Request, name: string): string | undefined => {
-  const header = request.headers.get("cookie");
-  if (!header) return undefined;
-  let found: string | undefined;
-  for (const part of header.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq < 0 || part.slice(0, eq).trim() !== name) continue;
-    if (found !== undefined) return undefined;
-    found = part.slice(eq + 1).trim();
-  }
-  return found;
-};
-
-/** A `__Host-` cookie: Secure, Path=/, no Domain; HttpOnly and SameSite=Lax.
- * `maxAgeMs` 0 clears it. */
-export const hostCookie = (name: string, value: string, maxAgeMs: number): string =>
-  `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${Math.max(0, Math.floor(maxAgeMs / 1000))}`;
-
-export const sessionCookie = (token: string, absoluteExpiresAt: number, now = Date.now()): string =>
-  hostCookie(SESSION_COOKIE, token, absoluteExpiresAt - now);
-
-export const clearSessionCookie = (): string => hostCookie(SESSION_COOKIE, "", 0);
-
-/** The site's origin, when web sign-in is set up here. */
-export const webOrigin = (env: Pick<Env, "WEB_ORIGIN">): string | undefined => {
-  const raw = env.WEB_ORIGIN;
-  if (!raw) return undefined;
-  try {
-    const url = new URL(raw);
-    return url.protocol === "https:" && url.origin === raw ? url.origin : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
-const SAFE_METHODS = new Set(["GET", "HEAD"]);
-
-export const isSafeMethod = (method: string): boolean => SAFE_METHODS.has(method);
-
-/** Why a cookie-authenticated state-changing request is refused: not sent
- * from the web origin, or without the session's CSRF token. `csrf` is the
- * token the request carried (its header, or a form field). */
-export const crossSiteRefusal = (request: Request, env: Pick<Env, "WEB_ORIGIN">, expected: string, csrf: string | null): string | undefined => {
-  const origin = webOrigin(env);
-  if (!origin || request.headers.get("origin") !== origin) return "bad_origin";
-  const site = request.headers.get("sec-fetch-site");
-  if (site !== null && site !== "same-origin") return "bad_origin";
-  if (!csrf || !constantTimeEqual(csrf, expected)) return "bad_csrf";
-  return undefined;
-};
+import { userDirectoryStub, type WebSessionRead } from "./user-directory";
+import { SESSION_COOKIE, newToken, readCookie, sessionCookie, sessionTokenHash, webOrigin } from "./web-cookies";
 
 /** A live session, resolved for one request. */
 export interface ResolvedSession extends WebSessionRead {
@@ -144,5 +75,3 @@ export const withSessionCookie = (request: Request, response: Response): Respons
   for (const cookie of cookies) answer.headers.append("set-cookie", cookie);
   return answer;
 };
-
-export const sessionHasRole = (session: Pick<WebSessionRead, "roles">, role: Role): boolean => session.roles.includes(role);

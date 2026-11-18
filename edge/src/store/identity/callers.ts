@@ -15,7 +15,8 @@
 import { verifyToken } from "../../auth";
 import type { Env } from "../../env";
 import { jsonError } from "../../http";
-import { CSRF_HEADER, crossSiteRefusal, isSafeMethod, resolveWebSession, type ResolvedSession } from "../../web-session";
+import { CSRF_HEADER, crossSiteRefusal, isSafeMethod } from "../../web-cookies";
+import { resolveWebSession, type ResolvedSession } from "../../web-session";
 
 /** The bearer token in `Authorization`, or undefined (none, or not Bearer). */
 export const headerBearer = (request: Request): string | undefined => {
