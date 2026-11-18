@@ -86,8 +86,12 @@ export const LISTED = "p.status = 'active' AND p.listed_version IS NOT NULL";
 /** Versions anyone may see and download. */
 export const PUBLIC_STATUSES = ["approved", "yanked"] as const;
 
-export const packageKey = (id: string, version: string, sha256: string): string => `pkg/${id}/${version}/${sha256}.zeron-plugin`;
-export const filesKey = (id: string, version: string, sha256: string): string => `files/${id}/${version}/${sha256}.bin`;
+/** R2 keys: `<prefix><id>/<version>/<sha256><suffix>`, a package's and a
+ * version's files object's. */
+export const PACKAGE_KEY = { prefix: "pkg/", suffix: ".zeron-plugin" } as const;
+export const FILES_KEY = { prefix: "files/", suffix: ".bin" } as const;
+export const packageKey = (id: string, version: string, sha256: string): string => `${PACKAGE_KEY.prefix}${id}/${version}/${sha256}${PACKAGE_KEY.suffix}`;
+export const filesKey = (id: string, version: string, sha256: string): string => `${FILES_KEY.prefix}${id}/${version}/${sha256}${FILES_KEY.suffix}`;
 
 export const pluginRow = (db: D1Database, id: string): Promise<PluginRow | null> =>
   db.prepare("SELECT * FROM plugins WHERE id = ?").bind(id).first<PluginRow>();

@@ -138,7 +138,7 @@ const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Res
   const hasPrev = back ? more : after !== undefined;
   return answer(
     {
-      items: page.map((p) => pluginCard(p, authorCard(authors[p.owner_id]))),
+      items: page.map((p) => pluginCard(p, authorCard(authors[p.owner_id]!))),
       ...(hasNext && last ? { next_cursor: encodeCursor(filter, last.sort_key, last.seq) } : {}),
       ...(hasPrev && first ? { prev_cursor: encodeCursor(filter, first.sort_key, first.seq, "prev") } : {})
     },
@@ -171,7 +171,7 @@ const pluginDetail = async (env: Env, db: D1Database, id: string): Promise<Respo
   if (!listed) return notFound();
   return answer(
     {
-      ...pluginCard(p, authorCard(authors[p.owner_id])),
+      ...pluginCard(p, authorCard(authors[p.owner_id]!)),
       readme: listed.readme,
       screenshots: parseList(listed.screenshots).map((s) => fileUrl(id, listed.version, s)),
       permissions: permissionsOf(listed),

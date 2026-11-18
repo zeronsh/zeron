@@ -1,6 +1,6 @@
 /**
  * `POST /store/v1/updates { zeron, plugins: [{ id, version, hash, prerelease? }] }`
- * → { updates: [{ id, version, hash, key, publisher, sha256, bytes, prerelease, notes, added, removed, in_review? }],
+ * → { updates: [{ id, version, hash, key, publisher, publisher_id, sha256, bytes, prerelease, notes, added, removed, in_review? }],
  *     blocked: [{ id, version, reason }] }
  *
  * One request for every store-installed plugin on a device. For each, the
@@ -142,6 +142,7 @@ export const handleUpdates = async (request: Request, env: Env, db: D1Database):
       hash: best.row.content_hash,
       key: best.row.signer_key,
       publisher: owners[best.row.owner_id]?.username ?? null,
+      publisher_id: owners[best.row.owner_id]!.id,
       sha256: best.row.package_sha256,
       bytes: best.row.package_bytes,
       prerelease: best.row.is_release === 0,

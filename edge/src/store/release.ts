@@ -6,73 +6,127 @@
  * its deploy keys are revoked. What stays: the audit log (a
  * `plugin.release` entry naming every version released, so the history of
  * what was submitted and decided survives), and the claim in `id_claims`
- * (which counts towards the claimer's weekly limit as before).
+ * (which counts towards the claimer's weekly limit as before). The sweep
+ * never releases an id an admin reserved for an account.
  *
  * "Never approved" is "no version approved, yanked or removed": only an
  * approved version becomes either. The hourly cron sweeps
  * (`releaseUnusedIds`); an admin releases one at once through the
  * reservations routes (`releaseId` with no wait).
+ *
+ * No release is ever left half done. Its rows go in one D1 batch, which
+ * also records, in the same transaction, every R2 object it owes
+ * (`object_purges`) and the deploy-key revocation (`key_revocations`); the
+ * objects and keys go after (`finishReleases`). If that's interrupted, the
+ * records stay, and every sweep finishes what any release still owes
+ * before it releases anything new.
  */
 import type { Env } from "../env";
+import { FILES_KEY, PACKAGE_KEY } from "./db";
 import { revokeDeployKeys } from "./principal";
 
 export const UNUSED_ID_DAYS = 90;
 const DAY = 86_400_000;
-/** Ids released per sweep, at most. */
+/** Ids released, and owed objects deleted, per sweep at most. */
 const SWEEP = 100;
+const PURGE_BATCH = 500;
 
 /** SQL true for plugin `?1` when it is unused and its last submission (or
- * its claim, if it has none) is older than `?2`. */
-const UNUSED = `NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?1 AND status IN ('pending', 'approved', 'yanked', 'removed'))
-  AND COALESCE((SELECT MAX(submitted_at) FROM versions WHERE plugin_id = ?1), (SELECT created_at FROM plugins WHERE id = ?1)) < ?2`;
+ * its claim, if it has none) is older than `?2`, and (`?3` = 1) no admin
+ * reserved it for an account. */
+const RELEASABLE = `NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?1 AND status IN ('pending', 'approved', 'yanked', 'removed'))
+  AND COALESCE((SELECT MAX(submitted_at) FROM versions WHERE plugin_id = ?1), (SELECT created_at FROM plugins WHERE id = ?1)) < ?2
+  AND (?3 = 0 OR NOT EXISTS (SELECT 1 FROM reservations WHERE id = ?1 AND user_id IS NOT NULL))`;
 
 /**
- * Release `id` if it is unused and quiet since `before` (ms; `Infinity`:
- * any unused id, for an admin). True when it was released. One D1 batch,
- * each statement guarded, so a submission landing meanwhile keeps it.
+ * The rows of a release, in one batch: what it owes recorded, then the rows
+ * gone, each statement guarded, so a submission landing meanwhile keeps the
+ * id. True when it was released. `honourReservations`: the sweep's (an
+ * admin's own release doesn't).
  */
-export const releaseId = async (env: Env, db: D1Database, bucket: R2Bucket, id: string, before: number, actor: string): Promise<boolean> => {
+export const releaseRows = async (db: D1Database, id: string, before: number, actor: string, honourReservations: boolean): Promise<boolean> => {
   const now = Date.now();
   const cutoff = Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER;
+  const reserved = honourReservations ? 1 : 0;
   const versions = (await db.prepare("SELECT version, status FROM versions WHERE plugin_id = ?").bind(id).all<{ version: string; status: string }>()).results;
+  const owed = (key: { readonly prefix: string; readonly suffix: string }) =>
+    db
+      .prepare(
+        `INSERT INTO object_purges (key, at) SELECT ?4 || plugin_id || '/' || version || '/' || package_sha256 || ?5, ?6
+         FROM versions WHERE plugin_id = ?1 AND ${RELEASABLE} ON CONFLICT DO NOTHING`
+      )
+      .bind(id, cutoff, reserved, key.prefix, key.suffix, now);
   const results = await db.batch([
-    db.prepare(`DELETE FROM version_files WHERE plugin_id = ?1 AND ${UNUSED}`).bind(id, cutoff),
-    db.prepare(`DELETE FROM versions WHERE plugin_id = ?1 AND ${UNUSED}`).bind(id, cutoff),
-    db.prepare(`DELETE FROM plugins WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?1) AND created_at < ?2`).bind(id, cutoff),
+    owed(PACKAGE_KEY),
+    owed(FILES_KEY),
+    db.prepare(`INSERT INTO key_revocations (plugin_id, at) SELECT ?1, ?4 WHERE ${RELEASABLE} AND EXISTS (SELECT 1 FROM plugins WHERE id = ?1) ON CONFLICT DO NOTHING`).bind(id, cutoff, reserved, now),
+    db.prepare(`DELETE FROM version_files WHERE plugin_id = ?1 AND ${RELEASABLE}`).bind(id, cutoff, reserved),
+    db.prepare(`DELETE FROM versions WHERE plugin_id = ?1 AND ${RELEASABLE}`).bind(id, cutoff, reserved),
+    db
+      .prepare(
+        `DELETE FROM plugins WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?1) AND created_at < ?2
+           AND (?3 = 0 OR NOT EXISTS (SELECT 1 FROM reservations WHERE id = ?1 AND user_id IS NOT NULL))`
+      )
+      .bind(id, cutoff, reserved),
     db
       .prepare("INSERT INTO audit (at, actor_id, action, plugin_id, version, detail) SELECT ?, ?, 'plugin.release', ?, NULL, ? WHERE changes() > 0")
       .bind(now, actor, id, JSON.stringify({ versions }))
   ]);
-  if ((results[2]?.meta.changes ?? 0) === 0) return false;
-  for (const prefix of [`pkg/${id}/`, `files/${id}/`]) {
-    let cursor: string | undefined;
-    do {
-      const page = await bucket.list({ prefix, cursor });
-      if (page.objects.length) await bucket.delete(page.objects.map((o) => o.key));
-      cursor = page.truncated ? page.cursor : undefined;
-    } while (cursor);
-  }
-  await revokeDeployKeys(env, id);
-  return true;
+  return (results[5]?.meta.changes ?? 0) > 0;
 };
 
-/** The hourly sweep: release ids unused for `UNUSED_ID_DAYS`. */
+/** Finish what releases still owe: delete their R2 objects and revoke their
+ * deploy keys, clearing each record once done. Answers how much was done. */
+export const finishReleases = async (env: Env, db: D1Database, bucket: R2Bucket): Promise<number> => {
+  let done = 0;
+  for (;;) {
+    const keys = (await db.prepare("SELECT key FROM object_purges ORDER BY at LIMIT ?").bind(PURGE_BATCH).all<{ key: string }>()).results.map((r) => r.key);
+    if (keys.length === 0) break;
+    await bucket.delete(keys);
+    await db.prepare("DELETE FROM object_purges WHERE key IN (SELECT value FROM json_each(?))").bind(JSON.stringify(keys)).run();
+    done += keys.length;
+    if (keys.length < PURGE_BATCH) break;
+  }
+  const revocations = (await db.prepare("SELECT plugin_id, at FROM key_revocations ORDER BY at LIMIT ?").bind(SWEEP).all<{ plugin_id: string; at: number }>()).results;
+  for (const r of revocations) {
+    // Claimed again since: its new owner's keys are theirs (and the old
+    // owner's no longer verify, amendment 28).
+    const again = await db.prepare("SELECT 1 FROM plugins WHERE id = ? AND created_at >= ?").bind(r.plugin_id, r.at).first();
+    if (!again) await revokeDeployKeys(env, r.plugin_id);
+    await db.prepare("DELETE FROM key_revocations WHERE plugin_id = ? AND at = ?").bind(r.plugin_id, r.at).run();
+    done++;
+  }
+  return done;
+};
+
+/** Release `id` now if it is unused (an admin's: reservations aside). */
+export const releaseId = async (env: Env, db: D1Database, bucket: R2Bucket, id: string, before: number, actor: string): Promise<boolean> => {
+  const released = await releaseRows(db, id, before, actor, false);
+  if (released) await finishReleases(env, db, bucket);
+  return released;
+};
+
+/** The hourly sweep: finish what earlier releases owe, then release ids
+ * unused for `UNUSED_ID_DAYS` (never one reserved for an account). */
 export const releaseUnusedIds = async (env: Env, now: number): Promise<number> => {
   const db = env.STORE_DB;
   const bucket = env.PLUGIN_STORE;
   if (!db || !bucket) return 0;
+  await finishReleases(env, db, bucket);
   const before = now - UNUSED_ID_DAYS * DAY;
   const stale = await db
     .prepare(
       `SELECT p.id FROM plugins p
        WHERE NOT EXISTS (SELECT 1 FROM versions v WHERE v.plugin_id = p.id AND v.status IN ('pending', 'approved', 'yanked', 'removed'))
          AND COALESCE((SELECT MAX(submitted_at) FROM versions v WHERE v.plugin_id = p.id), p.created_at) < ?
+         AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.id = p.id AND r.user_id IS NOT NULL)
        LIMIT ?`
     )
     .bind(before, SWEEP)
     .all<{ id: string }>();
   let released = 0;
-  for (const { id } of stale.results) if (await releaseId(env, db, bucket, id, before, "system")) released++;
+  for (const { id } of stale.results) if (await releaseRows(db, id, before, "system", true)) released++;
+  if (released) await finishReleases(env, db, bucket);
   return released;
 };
 

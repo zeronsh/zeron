@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { packageBytesKey, packageStateKey } from "../../src/store/serve";
+import { publisherId } from "../../src/store/cards";
 import { ADMIN, PNG, author, call, listed, makePackage, publish, randomLetters, uniqueId, adminCall } from "./store-helpers";
 
 type Card = { id: string; name: string; version: string; installs: number; author: { username: string }; icon: string | null; featured: boolean };
@@ -24,7 +25,7 @@ describe("store catalog", () => {
       version: "1.0.0",
       summary: `The ${id} plugin.`,
       icon: `/store/v1/plugins/${id}/files/1.0.0/icon.svg`,
-      author: { username: a.username, badges: [] },
+      author: { id: await publisherId(a.userId), username: a.username, badges: [] },
       categories: ["productivity"],
       keywords: [tag],
       installs: 0,

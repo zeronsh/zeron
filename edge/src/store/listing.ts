@@ -39,12 +39,12 @@ export const MAX_CATEGORIES = 2;
 export const MAX_KEYWORDS = 8;
 export const MAX_KEYWORD_LEN = 32;
 export const MAX_SCREENSHOTS = 8;
-export const MAX_URL_LEN = 300;
+export const MAX_URL_LEN = 2048;
 export const MAX_LICENSE_LEN = 64;
-export const MAX_NAME_LEN = 60;
-export const MAX_DESCRIPTION_LEN = 200;
+export const MAX_NAME_LEN = 64;
+export const MAX_DESCRIPTION_LEN = 300;
 export const MAX_ICON_BYTES = 32 * 1024;
-export const SCREENSHOT_TYPES = ["png", "jpg", "jpeg", "webp", "gif"];
+export const SCREENSHOT_TYPES = ["png", "jpg", "jpeg"];
 /** Amendment 31: README.md and CHANGELOG.md at most 512 KB each, the
  * canonical manifest at most 256 KB. */
 export const MAX_README_BYTES = 512 * 1024;
@@ -107,13 +107,18 @@ export const foldPath = (rel: string): string =>
     .map((part) => part.replace(/[. ]+$/, ""))
     .join("/");
 
-/** The URL as written, when it parses to exactly that (amendment 31:
- * `https:\\evil.com` reads as `https://evil.com/`, and is refused). */
-const exactUrl = (raw: string): boolean => {
+/** A link's parsed text (amendment 31): it begins `https://`, holds no
+ * backslash, whitespace, control character or `user:password@` part, and
+ * parses as a URL; what's stored is the parser's text of it
+ * (`https://example.com` → `https://example.com/`). `https:\\evil.com`,
+ * which a browser reads as `https://evil.com/`, is refused. */
+export const parsedUrl = (raw: string): string | undefined => {
+  if (!raw.startsWith("https://") || raw.includes("\\") || [...raw].some((c) => isRustWhitespace(c) || isControl(c))) return undefined;
   try {
-    return new URL(raw).href === raw;
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.username === "" && url.password === "" ? url.href : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 };
 
@@ -134,6 +139,10 @@ const httpsUrl = (url: string): boolean => {
 /** listing.rs `keyword` (ASCII only: no control or format character). */
 const keyword = (k: string): boolean =>
   k !== "" && byteLength(k) <= MAX_KEYWORD_LEN && rustTrim(k) === k && !k.includes("  ") && /^[a-z0-9 -]+$/.test(k);
+
+/** listing.rs `is_screenshot`: a PNG or a JPEG, by its signature. */
+const isScreenshot = (b: Uint8Array): boolean =>
+  [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((x, i) => b[i] === x) || (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff);
 
 /** listing.rs `is_picture`: a PNG, JPEG, GIF or WebP by its first bytes. */
 const isPicture = (b: Uint8Array): boolean => {
@@ -250,7 +259,7 @@ export const checkListing = (
 
   const readme = files.get(README_FILE);
   if (!readme) problems.push(problem("missing_readme", null, "It needs a README.md: its page in the store"));
-  else if (readme.length > MAX_README_BYTES) problems.push(problem("too_large", null, "README.md is over 512 KB", README_FILE));
+  else if (readme.length > MAX_README_BYTES) problems.push(problem("bad_listing", "readme", `Its README.md is at most ${MAX_README_BYTES / 1024} KB`, README_FILE));
   else {
     const text = decodeText(readme);
     if (text === undefined || rustTrim(text) === "") problems.push(problem("missing_readme", null, "Its README.md is empty or isn't text", README_FILE));
@@ -297,7 +306,7 @@ export const checkListing = (
 
   for (const field of ["homepage", "repository"]) {
     const url = raw.get(field);
-    if (url === undefined || url === null || (typeof url === "string" && httpsUrl(url) && exactUrl(url))) continue;
+    if (url === undefined || url === null || (typeof url === "string" && httpsUrl(url) && parsedUrl(url) !== undefined)) continue;
     problems.push(problem("bad_listing", field, `Its "${field}" must be an https:// link`));
   }
   const license = raw.get("license");
@@ -316,7 +325,7 @@ export const checkListing = (
       const dot = path.lastIndexOf(".");
       const typed = dot >= 0 && SCREENSHOT_TYPES.includes(path.slice(dot + 1).replace(/[A-Z]/g, (c) => c.toLowerCase()));
       const bytes = plainPath(path) ? files.get(path) : undefined;
-      if (!typed || !bytes || !isPicture(bytes)) problems.push(problem("bad_listing", "screenshots", "A screenshot must be a PNG, JPEG, WebP or GIF picture in it", path));
+      if (!typed || !bytes || !isScreenshot(bytes)) problems.push(problem("bad_listing", "screenshots", "A screenshot must be a PNG or JPEG picture in it", path));
     }
   } else if (screenshots !== undefined && screenshots !== null) problems.push(problem("bad_listing", "screenshots", 'Its "screenshots" must be a list'));
 
@@ -324,6 +333,23 @@ export const checkListing = (
   if ("error" in range) problems.push(problem("bad_listing", "engines", range.error));
   else if (range.range !== null && !parseRange(range.range)) problems.push(problem("bad_listing", "engines", `"${range.range}" isn't a range of versions`));
 
+  let total = 0;
+  for (const bytes of files.values()) total += bytes.length;
+  if (files.size > MAX_FILES || total > MAX_BYTES) problems.push(problem("too_large", null, "It's too big for a plugin (2,000 files, 50 MB)"));
+
+  for (const [rel, bytes] of [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    if (!readable(rel, bytes, isText)) warnings.push(problem("binary_file", null, "It isn't text or a picture: reviewers look closely at files like this", rel));
+  }
+  const changelog = files.get(CHANGELOG_FILE);
+  const notes = changelog && changelog.length <= MAX_CHANGELOG_BYTES ? changelogNotes(lossy.decode(changelog), manifest.version) : undefined;
+  if (notes !== undefined && byteLength(notes) > MAX_NOTES_BYTES) {
+    problems.push(problem("bad_listing", "changelog", `This version's notes in CHANGELOG.md are at most ${MAX_NOTES_BYTES / 1024} KB`, CHANGELOG_FILE));
+  }
+  if (changelog && changelog.length <= MAX_CHANGELOG_BYTES && notes === undefined) {
+    warnings.push(problem("no_notes", null, `CHANGELOG.md has no section for ${manifest.version}: this version shows without notes`, CHANGELOG_FILE));
+  }
+
+  // Amendment 31's rules, after the engine's own.
   const changelogBytes = files.get(CHANGELOG_FILE);
   if (changelogBytes && changelogBytes.length > MAX_CHANGELOG_BYTES) problems.push(problem("too_large", null, "CHANGELOG.md is over 512 KB", CHANGELOG_FILE));
   // (As written: without the signature, which the store keeps apart.)
@@ -340,17 +366,6 @@ export const checkListing = (
     else folded.set(key, rel);
   }
 
-  let total = 0;
-  for (const bytes of files.values()) total += bytes.length;
-  if (files.size > MAX_FILES || total > MAX_BYTES) problems.push(problem("too_large", null, "It's too big for a plugin (2,000 files, 50 MB)"));
-
-  for (const [rel, bytes] of [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-    if (!readable(rel, bytes, isText)) warnings.push(problem("binary_file", null, "It isn't text or a picture: reviewers look closely at files like this", rel));
-  }
-  const changelog = files.get(CHANGELOG_FILE);
-  if (changelog && changelog.length <= MAX_CHANGELOG_BYTES && changelogNotes(lossy.decode(changelog), manifest.version) === undefined) {
-    warnings.push(problem("no_notes", null, `CHANGELOG.md has no section for ${manifest.version}: this version shows without notes`, CHANGELOG_FILE));
-  }
   return { problems, warnings };
 };
 
@@ -379,7 +394,6 @@ export const listingOf = (manifest: Manifest, files: ReadonlyMap<string, Uint8Ar
   const readmeBytes = files.get(README_FILE)!;
   const changelog = files.get(CHANGELOG_FILE);
   const notes = changelog ? (changelogNotes(lossy.decode(changelog), manifest.version) ?? null) : null;
-  if (notes !== null && byteLength(notes) > MAX_NOTES_BYTES) return problem("too_large", null, "This version's changelog section is over 64 KB.", CHANGELOG_FILE);
   const text = (key: string) => {
     const v = raw.get(key);
     return typeof v === "string" ? v : null;
@@ -396,8 +410,8 @@ export const listingOf = (manifest: Manifest, files: ReadonlyMap<string, Uint8Ar
     icon: text("icon")!,
     categories: list("categories"),
     keywords: list("keywords"),
-    homepage: text("homepage"),
-    repository: text("repository"),
+    homepage: text("homepage") === null ? null : (parsedUrl(text("homepage")!) ?? null),
+    repository: text("repository") === null ? null : (parsedUrl(text("repository")!) ?? null),
     license: text("license"),
     screenshots: list("screenshots"),
     engines,

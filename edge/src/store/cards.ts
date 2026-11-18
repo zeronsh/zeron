@@ -12,20 +12,41 @@ import type { StoreAuthor } from "../user-directory";
 import { type PluginRow, type VersionRow, parseList } from "./db";
 
 export interface Author {
+  /** `publisherId`: stable and opaque (amendment 33). */
+  readonly id: string;
   readonly username: string | null;
   readonly badges: readonly { readonly id: string; readonly name: string; readonly icon: string | null }[];
 }
 
-export const authorsOf = async (env: Env, userIds: readonly string[]): Promise<Record<string, StoreAuthor>> => {
-  const directory = userDirectoryStub(env);
-  if (!directory || userIds.length === 0) return {};
-  return directory.storeAuthors([...new Set(userIds)]);
+/**
+ * An account's publisher id (amendment 33): `pub_` and the first 32 hex
+ * characters of sha256("zeron-publisher:v1:" + its user id). It never
+ * changes for an account, says nothing of its user id, and is what a device
+ * binds a store install's consent to, so a username an operator moves never
+ * carries another account's decisions.
+ */
+export const publisherId = async (userId: string): Promise<string> => {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`zeron-publisher:v1:${userId}`)));
+  return `pub_${[...digest].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32)}`;
 };
 
-export const authorCard = (found: StoreAuthor | undefined): Author => ({
-  username: found?.username ?? null,
-  badges: found?.badges ?? []
-});
+/** What the store shows of each of `userIds`: one entry for every one, a
+ * deleted account's without a username. */
+export const authorsOf = async (env: Env, userIds: readonly string[]): Promise<Record<string, Author & { readonly createdAt: string | null }>> => {
+  const unique = [...new Set(userIds)];
+  const directory = userDirectoryStub(env);
+  const found: Record<string, StoreAuthor> = directory && unique.length ? await directory.storeAuthors(unique) : {};
+  const ids = await Promise.all(unique.map(publisherId));
+  return Object.fromEntries(
+    unique.map((userId, i) => [
+      userId,
+      { id: ids[i]!, username: found[userId]?.username ?? null, badges: found[userId]?.badges ?? [], createdAt: found[userId]?.createdAt ?? null }
+    ])
+  );
+};
+
+/** The card's author: never the user id. */
+export const authorCard = (found: Author): Author => ({ id: found.id, username: found.username, badges: found.badges });
 
 /** Where a packaged file is served (relative to the edge). */
 export const fileUrl = (id: string, version: string, path: string): string =>

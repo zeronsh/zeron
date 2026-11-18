@@ -159,6 +159,20 @@ CREATE TABLE id_claims (
 );
 CREATE INDEX id_claims_user ON id_claims (user_id, at);
 
+-- What a release (store/release.ts) still owes after its rows went, in the
+-- same transaction: R2 objects to delete, and a plugin's deploy keys to
+-- revoke. Each sweep finishes these first, so a release interrupted midway
+-- is completed by the next one.
+CREATE TABLE object_purges (
+  key TEXT PRIMARY KEY,
+  at INTEGER NOT NULL
+);
+CREATE TABLE key_revocations (
+  plugin_id TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (plugin_id, at)
+);
+
 -- Ids kept back from first come, first served: for nobody (user_id null), or
 -- for the one account that may take one the reserved-name rules refuse.
 CREATE TABLE reservations (

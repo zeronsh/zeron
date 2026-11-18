@@ -50,7 +50,7 @@ export const handleMyPlugins = async (request: Request, env: Env, db: D1Database
       ).results
     : [];
   const authors = await authorsOf(env, [publisher.userId]);
-  const author = authorCard(authors[publisher.userId]);
+  const author = authorCard(authors[publisher.userId]!);
   return answer({
     plugins: plugins.map((p) => {
       const own = versions.filter((v) => v.plugin_id === p.id);

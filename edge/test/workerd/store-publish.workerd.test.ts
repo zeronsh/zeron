@@ -138,7 +138,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       [tampered, 400, "bad_signature", "tampered"],
       [await makePackage({ id, version: "1.0.0", signer: a.signer, manifest: { permissions: ["root"] } }), 400, "bad_package", "bad_manifest"],
       [await makePackage({ id, version: "1.0.0", signer: a.signer, files: { "../evil": "x" } }), 400, "bad_package", "bad_file"],
-      [await makePackage({ id, version: "1.0.0", signer: a.signer, manifest: { entry: "missing.luau" } }), 400, "bad_package", "bad_manifest"],
+      [await makePackage({ id, version: "1.0.0", signer: a.signer, manifest: { entry: "missing.luau" } }), 400, "bad_package", "missing_entry"],
       [await makePackage({ id: `${id}-x`, version: "1.0.0", signer: a.signer }), 400, "bad_package", "id_mismatch"]
     ];
     for (const [pkg, status, error, reason] of cases) {
@@ -166,7 +166,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       [{ screenshots: ["init.luau"] }, {}, "bad_listing"],
       [{ homepage: "http://example.com" }, {}, "bad_listing"],
       [{ engines: { zeron: ">= 0.4" } }, {}, "bad_listing"],
-      [{ description: "x".repeat(201) }, {}, "bad_listing"]
+      [{ description: "x".repeat(301) }, {}, "bad_listing"]
     ];
     for (const [manifest, files, error] of cases) {
       const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer, manifest, files }));

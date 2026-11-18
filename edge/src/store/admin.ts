@@ -111,9 +111,10 @@ const pageOf = <R>(rows: R[], limit: number, after: Keyset | undefined, key: (ro
   };
 };
 
-const usernames = async (env: Env, ids: readonly string[]): Promise<Record<string, string | null>> => {
+/** Who each of `ids` is, as admin views show a person: publisher id and username. */
+const people = async (env: Env, ids: readonly string[]): Promise<Record<string, { id: string; username: string | null }>> => {
   const found = await authorsOf(env, ids);
-  return Object.fromEntries(ids.map((id) => [id, found[id]?.username ?? null]));
+  return Object.fromEntries(Object.entries(found).map(([userId, a]) => [userId, { id: a.id, username: a.username }]));
 };
 
 // ── the queue and a submission ───────────────────────────────────────────────
@@ -140,7 +141,7 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
       .all<{ rid: number; plugin_id: string; version: string; status: string; submitted_at: number; decided_at: number | null; publisher_id: string; via: string; checks: string; name: string; is_release: number }>()
   ).results;
   const { page, links } = pageOf(rows, limit, after, (r) => [r.submitted_at, r.rid]);
-  const names = await usernames(env, page.map((r) => r.publisher_id));
+  const names = await people(env, page.map((r) => r.publisher_id));
   return answer({
     items: page.map((r) => {
       const checks = parseStoredJson<{ level: string }[]>(r.checks, []);
@@ -151,7 +152,7 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
         prerelease: r.is_release === 0,
         submitted_at: r.submitted_at,
         decided_at: r.decided_at,
-        publisher: { username: names[r.publisher_id] ?? null },
+        publisher: names[r.publisher_id] ?? null,
         via: r.via,
         warnings: checks.filter((c) => c.level === "warn").length
       };
@@ -173,7 +174,7 @@ const submission = async (env: Env, db: D1Database, id: string, versionText: str
       .bind(id, q.version)
       .all<{ path: string; bytes: number; sha256: string; kind: string }>()
       .then((r) => r.results.map((f) => ({ path: f.path, bytes: f.bytes, sha256: f.sha256, kind: f.kind, binary: f.kind === "binary" })));
-  const [ownFiles, baseFiles, decisions, recent, people] = await Promise.all([
+  const [ownFiles, baseFiles, decisions, recent, authors] = await Promise.all([
     files(v),
     base ? files(base) : Promise.resolve([]),
     db
@@ -189,14 +190,17 @@ const submission = async (env: Env, db: D1Database, id: string, versionText: str
       .all<{ plugin_id: string; version: string; status: string; submitted_at: number; reason: string | null }>(),
     authorsOf(env, [v.publisher_id, plugin.owner_id])
   ]);
+  const publisher = authors[v.publisher_id]!;
+  const owner = authors[plugin.owner_id]!;
   const permissions = parseStoredJson<ConsentItem | null>(v.permissions, null);
   const basePermissions = base ? parseStoredJson<ConsentItem | null>(base.permissions, null) : null;
   return answer({
-    plugin: { id: plugin.id, status: plugin.status, listed_version: plugin.listed_version, owner: { username: people[plugin.owner_id]?.username ?? null } },
+    plugin: { id: plugin.id, status: plugin.status, listed_version: plugin.listed_version, owner: { id: owner.id, username: owner.username } },
     version: { ...versionInfo(v, true), name: v.name, summary: v.summary, icon: v.icon, readme: v.readme, homepage: v.homepage, repository: v.repository, license: v.license, categories: parseStoredJson(v.categories, []), keywords: parseStoredJson(v.keywords, []), screenshots: parseStoredJson(v.screenshots, []) },
     publisher: {
-      username: people[v.publisher_id]?.username ?? null,
-      created_at: people[v.publisher_id]?.createdAt ?? null,
+      id: publisher.id,
+      username: publisher.username,
+      created_at: publisher.createdAt,
       decisions: { approved: decisions?.approved ?? 0, rejected: decisions?.rejected ?? 0 },
       recent: recent.results
     },
@@ -226,7 +230,7 @@ const change = async (
   return (results[0]?.meta.changes ?? 0) === 0 ? fail(409, "invalid_state", conflict) : undefined;
 };
 
-const ownerUsername = async (env: Env, ownerId: string): Promise<string | null> => (await authorsOf(env, [ownerId]))[ownerId]?.username ?? null;
+const ownerUsername = async (env: Env, ownerId: string): Promise<string | null> => (await authorsOf(env, [ownerId]))[ownerId]!.username;
 
 const reviewVersion = async (env: Env, db: D1Database, adminId: string, id: string, versionText: string, action: "approve" | "reject", body: Record<string, unknown> | undefined): Promise<Response> => {
   const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, versionText)]);
@@ -364,15 +368,15 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
 const adminPlugin = async (env: Env, db: D1Database, id: string): Promise<Response> => {
   const plugin = await pluginRow(db, id);
   if (!plugin) return notFound();
-  const [versions, reports, people] = await Promise.all([
+  const [versions, reports, authors] = await Promise.all([
     db.prepare(`SELECT * FROM versions WHERE plugin_id = ? ORDER BY ${VERSION_ORDER}`).bind(id).all<VersionRow>(),
     db.prepare("SELECT id, version, reason, text, status, created_at, resolved_at, note FROM reports WHERE plugin_id = ? ORDER BY id DESC LIMIT 100").bind(id).all(),
     authorsOf(env, [plugin.owner_id])
   ]);
-  const owner = people[plugin.owner_id];
+  const owner = authors[plugin.owner_id]!;
   return answer({
     plugin: { ...pluginCard(plugin, authorCard(owner)), listed_version: plugin.listed_version, created_at: plugin.created_at, suspend_reason: plugin.suspend_reason },
-    owner: { username: owner?.username ?? null, user_id: plugin.owner_id, created_at: owner?.createdAt ?? null },
+    owner: { id: owner.id, username: owner.username, user_id: plugin.owner_id, created_at: owner.createdAt },
     versions: versions.results.map((v) => versionInfo(v, true)),
     reports: reports.results,
     featured: plugin.featured_at !== null,
@@ -398,18 +402,18 @@ const reports = async (env: Env, db: D1Database, url: URL): Promise<Response> =>
       .all<{ id: number; plugin_id: string; plugin_name: string | null; version: string | null; reporter_id: string; reason: string; text: string; created_at: number; status: string; resolved_by: string | null; resolved_at: number | null; note: string | null }>()
   ).results;
   const { page, links } = pageOf(rows, limit, after, (r) => [r.id, r.id]);
-  const names = await usernames(env, [...page.map((r) => r.reporter_id), ...page.flatMap((r) => (r.resolved_by ? [r.resolved_by] : []))]);
+  const names = await people(env, [...page.map((r) => r.reporter_id), ...page.flatMap((r) => (r.resolved_by ? [r.resolved_by] : []))]);
   return answer({
     reports: page.map((r) => ({
       id: r.id,
       plugin: { id: r.plugin_id, name: r.plugin_name },
       version: r.version,
-      reporter: { username: names[r.reporter_id] ?? null },
+      reporter: names[r.reporter_id] ?? null,
       reason: r.reason,
       text: r.text,
       created_at: r.created_at,
       status: r.status,
-      resolved_by: r.resolved_by ? { username: names[r.resolved_by] ?? null } : null,
+      resolved_by: r.resolved_by ? (names[r.resolved_by] ?? null) : null,
       resolved_at: r.resolved_at,
       note: r.note
     })),
@@ -449,12 +453,12 @@ const audit = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
       .all<{ seq: number; at: number; actor_id: string; action: string; plugin_id: string | null; version: string | null; detail: string | null }>()
   ).results;
   const { page, links } = pageOf(rows, limit, after, (r) => [r.seq, r.seq]);
-  const names = await usernames(env, page.map((r) => r.actor_id));
+  const names = await people(env, page.map((r) => r.actor_id));
   return answer({
     entries: page.map((r) => ({
       seq: r.seq,
       at: r.at,
-      actor: { username: names[r.actor_id] ?? null, user_id: r.actor_id },
+      actor: { id: names[r.actor_id]?.id ?? null, username: names[r.actor_id]?.username ?? null, user_id: r.actor_id },
       action: r.action,
       plugin_id: r.plugin_id,
       version: r.version,
@@ -467,8 +471,8 @@ const audit = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
 const reservations = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, adminId: string, rest: readonly string[], body: Record<string, unknown> | undefined): Promise<Response> => {
   if (rest.length === 0 && request.method === "GET") {
     const rows = (await db.prepare("SELECT * FROM reservations ORDER BY id").all<{ id: string; user_id: string | null; note: string | null; created_at: number }>()).results;
-    const names = await usernames(env, rows.flatMap((r) => (r.user_id ? [r.user_id] : [])));
-    return answer({ reservations: rows.map((r) => ({ id: r.id, to: r.user_id ? { username: names[r.user_id] ?? null } : null, note: r.note, created_at: r.created_at })) });
+    const names = await people(env, rows.flatMap((r) => (r.user_id ? [r.user_id] : [])));
+    return answer({ reservations: rows.map((r) => ({ id: r.id, to: r.user_id ? (names[r.user_id] ?? null) : null, note: r.note, created_at: r.created_at })) });
   }
   const now = Date.now();
   if (rest.length === 0 && request.method === "POST") {

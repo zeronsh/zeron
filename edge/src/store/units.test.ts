@@ -123,7 +123,7 @@ describe("store listing", () => {
     expect(rules({ keywords: ["timer", "deep work"], homepage: "https://example.com/", engines: { zeron: ">=0.4.0" } })).toEqual([]);
     const ok = listingOf(manifest({ keywords: ["timer"], engines: { zeron: ">=0.4.0" } }), files());
     expect(ok).toMatchObject({ summary: "Focus.", icon: "icon.svg", categories: ["productivity"], keywords: ["timer"], engines: ">=0.4.0", readme: "# Hi", notes: null });
-    expect(rules({}, { "README.md": `# Big\n${"x".repeat(512 * 1024)}` })).toEqual(["too_large"]);
+    expect(rules({}, { "README.md": `# Big\n${"x".repeat(512 * 1024)}` })).toEqual(["bad_listing"]);
     expect(rules({}, { "CHANGELOG.md": `## 1.0.0\n${"x".repeat(512 * 1024)}` })).toEqual(["too_large"]);
     expect(rules({ x: "y".repeat(256 * 1024) })).toEqual(["too_large"]);
     expect(rules({ icon: "../icon.svg" })).toEqual(["bad_listing"]);
@@ -142,8 +142,14 @@ describe("store listing", () => {
     expect(problems({ description: "Fo\u200bcus." })).toEqual([["bad_listing", "description", null]]);
     expect(problems({ description: "Tab\there." })).toEqual([["bad_listing", "description", null]]);
     expect(problems({ homepage: "https://example.com/a b" })).toEqual([["bad_listing", "homepage", null]]);
-    expect(problems({ repository: "https://example.com/x/../y" })).toEqual([["bad_listing", "repository", null]]);
-    expect(problems({ homepage: "https://Example.com/" })).toEqual([["bad_listing", "homepage", null]]);
+    expect(problems({ repository: "https:\\\\evil.com" })).toEqual([["bad_listing", "repository", null]]);
+    expect(problems({ homepage: "https://user:pw@example.com/" })).toEqual([["bad_listing", "homepage", null]]);
+    // What every author writes is taken, and kept as the parser spells it.
+    expect(problems({ homepage: "https://example.com", repository: "https://Example.com/x/../y" })).toEqual([]);
+    expect(listingOf(manifest({ homepage: "https://example.com", repository: "https://Example.com/x/../y" }), files())).toMatchObject({
+      homepage: "https://example.com/",
+      repository: "https://example.com/y"
+    });
     expect(problems({ homepage: "https://example.com/focus?x=1#y" })).toEqual([]);
   });
 });

@@ -1,6 +1,8 @@
-import { env } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { CLAIMS_PER_WEEK } from "../../src/store/publish";
+import { publisherId } from "../../src/store/cards";
+import { releaseRows } from "../../src/store/release";
 import { releaseUnusedIds } from "../../src/store/release";
 import { ADMIN, ADMIN2, author, call, listed, makePackage, publish, uniqueId, adminCall } from "./store-helpers";
 
@@ -53,10 +55,11 @@ describe("store admin routes", () => {
     await pending(a, id, "1.1.0", { manifest: { permissions: ["ui.add", "network"], network: { hosts: ["localhost:8080"] } }, files: { "lib.wasm": new Uint8Array([0, 97, 115, 109]) } });
     const queue = await json<{ items: { plugin: { id: string }; version: string; publisher: { username: string } }[] }>(await adminCall("GET", "/store/v1/admin/queue"));
     const mine = queue.items.filter((i) => i.plugin.id === id);
-    expect(mine).toEqual([expect.objectContaining({ version: "1.1.0", status: "pending", publisher: { username: a.username } })]);
+    expect(mine).toEqual([expect.objectContaining({ version: "1.1.0", status: "pending", publisher: { id: await publisherId(a.userId), username: a.username } })]);
     const sub = await json<Record<string, any>>(await adminCall("GET", `/store/v1/admin/submissions/${id}/1.1.0`));
     expect(sub.base.version).toBe("1.0.0");
-    expect(sub.publisher).toMatchObject({ username: a.username, created_at: "2026-10-31T10:00:00.000Z", decisions: { approved: 1, rejected: 0 } });
+    expect(sub.publisher).toMatchObject({ id: await publisherId(a.userId), username: a.username, created_at: "2026-10-31T10:00:00.000Z", decisions: { approved: 1, rejected: 0 } });
+    expect(sub.plugin.owner).toEqual({ id: await publisherId(a.userId), username: a.username });
     expect(sub.files.find((f: { path: string }) => f.path === "lib.wasm")).toMatchObject({ binary: true });
     expect(sub.base_files.map((f: { path: string }) => f.path)).not.toContain("lib.wasm");
     expect(sub.permissions_diff).toMatchObject({ added: ["network"], network_added: ["localhost:8080"] });
@@ -136,7 +139,7 @@ describe("store admin routes", () => {
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/restore`)).status).toBe(200);
     const moved = await adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: b.username });
     expect(moved.status).toBe(200);
-    expect(await json(moved)).toMatchObject({ owner: { username: b.username, user_id: b.userId }, status: "active" });
+    expect(await json(moved)).toMatchObject({ owner: { id: await publisherId(b.userId), username: b.username, user_id: b.userId }, status: "active" });
     expect((await json<{ author: { username: string } }>(await call(undefined, "GET", `/store/v1/plugins/${id}`))).author.username).toBe(b.username);
     // The new owner publishes; the old one can't.
     expect((await publish(a.userId, id, await makePackage({ id, version: "1.2.0", signer: a.signer }))).status).toBe(403);
@@ -171,7 +174,7 @@ describe("store admin routes", () => {
     // Once per person while it's open.
     expect(await json(await call(reader.userId, "POST", `/store/v1/plugins/${id}/reports`, { reason: "malware", text: "again" }))).toEqual({ id: reportId, status: "open" });
     const open = await json<{ reports: { id: number; reporter: { username: string }; plugin: { id: string } }[] }>(await adminCall("GET", "/store/v1/admin/reports"));
-    expect(open.reports.find((r) => r.id === reportId)).toMatchObject({ reporter: { username: reader.username }, plugin: { id }, reason: "misleading" });
+    expect(open.reports.find((r) => r.id === reportId)).toMatchObject({ reporter: { id: await publisherId(reader.userId), username: reader.username }, plugin: { id }, reason: "misleading" });
     expect((await adminCall("POST", `/store/v1/admin/reports/${reportId}/resolve`, { resolution: "closed" })).status).toBe(400);
     expect((await adminCall("POST", `/store/v1/admin/reports/${reportId}/resolve`, { resolution: "dismissed", note: "It is official." })).status).toBe(200);
     expect((await adminCall("POST", `/store/v1/admin/reports/${reportId}/resolve`, { resolution: "actioned" })).status).toBe(409);
@@ -364,5 +367,65 @@ describe("store ids: claiming and release (amendment 30)", () => {
     expect(await given.json()).toMatchObject({ released: true });
     expect((await publish(a.userId, unused, await makePackage({ id: unused, version: "1.0.1", signer: a.signer }))).status).toBe(403);
     expect((await publish(b.userId, unused, await makePackage({ id: unused, version: "1.0.0", signer: b.signer }))).status).toBe(201);
+  });
+
+  it("never sweeps away an id reserved for an account", async () => {
+    const a = await author();
+    const id = uniqueId("kept");
+    expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    expect((await call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.0.0/withdraw`)).status).toBe(200);
+    // Reserved for its holder, as an admin may: the sweep leaves it.
+    await env.STORE_DB.prepare("INSERT INTO reservations (id, user_id, note, created_by, created_at) VALUES (?, ?, 'kept', ?, ?)").bind(id, a.userId, ADMIN, Date.now()).run();
+    await releaseUnusedIds(env as never, Date.now() + 91 * 86_400_000);
+    expect(await env.STORE_DB.prepare("SELECT 1 FROM plugins WHERE id = ?").bind(id).first()).not.toBeNull();
+  });
+
+  it("finishes a release interrupted after its rows went: the next sweep deletes what it owed", async () => {
+    const a = await author();
+    const id = uniqueId("half");
+    expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    expect((await call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.0.0/withdraw`)).status).toBe(200);
+    // The rows' batch alone, as if the Worker stopped right after it.
+    expect(await releaseRows(env.STORE_DB, id, Date.now() + 91 * 86_400_000, "system", true)).toBe(true);
+    expect(await env.STORE_DB.prepare("SELECT 1 FROM plugins WHERE id = ?").bind(id).first()).toBeNull();
+    expect((await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` })).objects).toHaveLength(1);
+    const owed = await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM object_purges WHERE key LIKE ?").bind(`%/${id}/%`).first<{ n: number }>();
+    expect(owed?.n).toBe(2);
+    await releaseUnusedIds(env as never, Date.now());
+    expect((await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` })).objects).toEqual([]);
+    expect((await env.PLUGIN_STORE.list({ prefix: `files/${id}/` })).objects).toEqual([]);
+    expect((await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM object_purges WHERE key LIKE ?").bind(`%/${id}/%`).first<{ n: number }>())?.n).toBe(0);
+    expect(await env.STORE_DB.prepare("SELECT 1 FROM key_revocations WHERE plugin_id = ?").bind(id).first()).toBeNull();
+  });
+});
+
+describe("store publisher ids (amendment 33)", () => {
+  it("are stable across a username change, differ per account, and ride on every shape that names an author", async () => {
+    const a = await author();
+    const b = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    const pid = await publisherId(a.userId);
+    expect(pid).toMatch(/^pub_[0-9a-f]{32}$/);
+    expect(pid).not.toBe(await publisherId(b.userId));
+    expect(pid).not.toContain(a.userId);
+    const cardAuthor = async () => ((await (await call(a.userId, "GET", `/store/v1/plugins/${id}`)).json()) as { author: { id: string; username: string } }).author;
+    expect(await cardAuthor()).toMatchObject({ id: pid, username: a.username });
+    // An operator moves the username: the id stays.
+    const renamed = `zz${a.username.slice(2)}`;
+    const set = await SELF.fetch("https://edge.test/admin/usernames/set", {
+      method: "POST",
+      headers: { authorization: "Bearer test-admin-token", "content-type": "application/json" },
+      body: JSON.stringify({ userId: a.userId, username: renamed })
+    });
+    expect(set.status).toBe(200);
+    expect(await cardAuthor()).toEqual({ id: pid, username: renamed, badges: expect.any(Array) });
+    const list = (await (await call(a.userId, "GET", "/store/v1/me/plugins")).json()) as { plugins: { author: { id: string } }[] };
+    expect(list.plugins[0]!.author.id).toBe(pid);
+    const hash = (await env.STORE_DB.prepare("SELECT content_hash FROM versions WHERE plugin_id = ?").bind(id).first<{ content_hash: string }>())!.content_hash;
+    expect((await publish(a.userId, id, await makePackage({ id, version: "1.1.0", signer: a.signer }))).status).toBe(201);
+    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.1.0/approve`)).status).toBe(200);
+    const offers = (await (await call(undefined, "POST", "/store/v1/updates", { zeron: "0.4.0", plugins: [{ id, version: "1.0.0", hash }] })).json()) as { updates: Record<string, unknown>[] };
+    expect(offers.updates[0]).toMatchObject({ publisher: renamed, publisher_id: pid });
   });
 });

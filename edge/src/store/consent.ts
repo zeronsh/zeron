@@ -14,7 +14,7 @@ import { namesExactly, riskyHost } from "./manifest";
 
 /** Programs known to neither run others nor write files (plugin-guard
  * `CONTAINED`). */
-const CONTAINED = [
+export const contained: readonly string[] = [
   "basename", "cat", "cksum", "cut", "date", "df", "dirname", "du", "echo", "false", "file", "grep", "head",
   "hostname", "id", "jq", "ls", "md5", "md5sum", "nproc", "printenv", "printf", "ps", "pwd", "readlink",
   "realpath", "sha1sum", "sha256sum", "shasum", "sleep", "stat", "sw_vers", "tail", "tr", "true", "uname",
@@ -22,30 +22,32 @@ const CONTAINED = [
 ];
 
 /** Shells and interpreters (plugin-guard `FULL_CONTROL`). */
-const FULL_CONTROL = [
+export const fullControlNames: readonly string[] = [
   "ash", "bash", "bun", "cmd", "csh", "dash", "deno", "elixir", "erl", "fish", "ksh", "lua", "luajit", "node", "nodejs",
   "osascript", "perl", "php", "powershell", "pwsh", "python", "pypy", "ruby", "sh", "swift", "tclsh",
   "tcsh", "wscript", "cscript", "zsh"
 ];
 
+/** Programs held to rules of their own (plugin-guard `held_to_its_own_rules`). */
+export const heldNames: readonly string[] = ["git", "gh"];
+/** The extensions a program's name loses (plugin-guard `normalized`). */
+export const windowsExtensions: readonly string[] = [".exe", ".cmd", ".bat", ".com"];
+
 /** plugin-guard `normalized`: lowercase ASCII, no Windows extension. */
 export const normalizedProgram = (program: string): string => {
   const lower = program.replace(/[A-Z]/g, (c) => c.toLowerCase());
-  for (const ext of [".exe", ".cmd", ".bat", ".com"]) if (lower.endsWith(ext)) return lower.slice(0, -ext.length);
+  for (const ext of windowsExtensions) if (lower.endsWith(ext)) return lower.slice(0, -ext.length);
   return lower;
 };
 
-export const canDoAnything = (program: string): boolean => !CONTAINED.includes(normalizedProgram(program));
+export const canDoAnything = (program: string): boolean => !contained.includes(normalizedProgram(program));
 
 export const fullControl = (program: string): boolean => {
   const name = normalizedProgram(program);
-  return FULL_CONTROL.includes(name) || FULL_CONTROL.includes(name.replace(/[0-9.]+$/, ""));
+  return fullControlNames.includes(name) || fullControlNames.includes(name.replace(/[0-9.]+$/, ""));
 };
 
-export const heldToItsOwnRules = (program: string): boolean => {
-  const name = normalizedProgram(program);
-  return name === "git" || name === "gh";
-};
+export const heldToItsOwnRules = (program: string): boolean => heldNames.includes(normalizedProgram(program));
 
 export interface ConsentItem {
   readonly asks: readonly string[];
