@@ -458,74 +458,87 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 	-- (Rows are built for their tab: Yours' own plugins, made on this
 	-- device, say where they stand in the store.)
 	local publishing = tab:peek() == "yours" and device_now() == nil and (p.own == true or p.author.kind == "you") and not (p :: any).builtin
-	return ds.Settings.Row {
-		label = function(): string
-			return now:get().name
-		end,
-		description = function(): string
-			local it = now:get()
-			-- (The host's words: where it was placed and couldn't show, or
-			-- what this template doesn't have.)
-			local problem = (it :: any).problem
-			if type(problem) == "string" and problem ~= "" and it.status == "on" then
-				return problem
-			end
-			return words.about(it)
-		end,
-		-- Who made it, on its own line; for one whose author can't be told
-		-- and that came from nowhere named, none: its Unknown author badge
-		-- says it.
-		byline = function(): string
-			local it = now:get()
-			if words.unverified(it) and words.from(it.source) == nil then
-				return ""
-			end
-			return words.author(it)
-		end,
-		-- (Its icon from its device: the listing carries it.)
-		lead = words.tile(p, 32),
-		-- (Zeron's own: what it's allowed, wrapped on a line of its own.)
-		-- (Someone else's: a newer version found where it came from.)
-		detail = function(): string?
-			local it = now:get()
-			if publishing then
-				return publish.summary(it.id) or ui.t("plugins.store.summary.unknown"):get()
-			end
-			-- (And a store version running that the store hasn't verified.)
-			-- (Waiting for nothing new, its line under the name says it.)
-			return words.grants(it) or words.update(it, held_by(it), device_name())
-				or (if it.status == "pending" and it.nothing_new == true then nil else words.store_unverified(it))
-		end,
-		detail_action = if publishing then nil else UpdateLink { now = now },
-		-- (Publish… is its sentence's own link: right after its last word,
-		-- wrapping with it.)
-		detail_link = if publishing
-			then {
-				label = ui.t("plugins.store.publish_link"),
-				on_click = function()
-					nav.open_publish(now:peek().id)
-				end,
-			}
-			else nil,
-		truncate = true,
-		-- Its version, centred on the row beside its controls; before it,
-		-- Unknown author for one whose maker Zeron can't vouch for.
-		control = ui.row {
-			gap = "$space.3",
-			items = "center",
-			ui.show(function(): boolean
-				return words.unverified(now:get())
-			end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
-			ds.Badge {
-				function(): string
-					return now:get().version
-				end,
-				tone = "neutral",
-				tabular = true,
+	-- (`store_line`: the store's line and Publish… in the detail's place.)
+	local function build(store_line: boolean): Node
+		return ds.Settings.Row {
+			label = function(): string
+				return now:get().name
+			end,
+			description = function(): string
+				local it = now:get()
+				-- (The host's words: where it was placed and couldn't show, or
+				-- what this template doesn't have.)
+				local problem = (it :: any).problem
+				if type(problem) == "string" and problem ~= "" and it.status == "on" then
+					return problem
+				end
+				return words.about(it)
+			end,
+			-- Who made it, on its own line; for one whose author can't be told
+			-- and that came from nowhere named, none: its Unknown author badge
+			-- says it.
+			byline = function(): string
+				local it = now:get()
+				if words.unverified(it) and words.from(it.source) == nil then
+					return ""
+				end
+				return words.author(it)
+			end,
+			-- (Its icon from its device: the listing carries it.)
+			lead = words.tile(p, 32),
+			-- (Zeron's own: what it's allowed, wrapped on a line of its own.)
+			-- (Someone else's: a newer version found where it came from.)
+			detail = function(): string?
+				local it = now:get()
+				if store_line then
+					return publish.summary(it.id) or ui.t("plugins.store.summary.unknown"):get()
+				end
+				-- (And a store version running that the store hasn't verified.)
+				-- (Waiting for nothing new, its line under the name says it.)
+				return words.grants(it) or words.update(it, held_by(it), device_name())
+					or (if it.status == "pending" and it.nothing_new == true then nil else words.store_unverified(it))
+			end,
+			detail_action = if store_line then nil else UpdateLink { now = now },
+			-- (Publish… is its sentence's own link: right after its last word,
+			-- wrapping with it.)
+			detail_link = if store_line
+				then {
+					label = ui.t("plugins.store.publish_link"),
+					on_click = function()
+						nav.open_publish(now:peek().id)
+					end,
+				}
+				else nil,
+			truncate = true,
+			-- Its version, centred on the row beside its controls; before it,
+			-- Unknown author for one whose maker Zeron can't vouch for.
+			control = ui.row {
+				gap = "$space.3",
+				items = "center",
+				ui.show(function(): boolean
+					return words.unverified(now:get())
+				end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
+				ds.Badge {
+					function(): string
+						return now:get().version
+					end,
+					tone = "neutral",
+					tabular = true,
+				},
+				Control { now = now, on = device_now() },
 			},
-			Control { now = now, on = device_now() },
-		},
-	}
+		}
+	end
+	if not publishing then
+		return build(false)
+	end
+	-- Yours' own plugins: where each stands in the store, with Publish…;
+	-- but what a row has always said comes first: an update found where it
+	-- came from (its line and Update), as on Installed.
+	return ui.switch(function(): string
+		local it = now:get()
+		return if words.grants(it) or words.update(it, held_by(it), device_name()) then "base" else "store"
+	end, { base = build(false), store = build(true) })
 end
 
 -- What a tab says with no plugins at all: here, the folder they go in;

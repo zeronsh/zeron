@@ -169,6 +169,21 @@ local PLUGINS: { [string]: any } = {
 	-- From the plugin store, a version the store hasn't verified: an update
 	-- asking nothing new, a verified one between; and a first install with
 	-- none to offer.
+	-- From a git link, allowed before, asking again with nothing new (a
+	-- new signing key): the engine's `nothing_new`, as for any re-ask.
+	rekeyed = {
+		id = "rekeyed",
+		name = "Rekeyed",
+		version = "2.0.0",
+		hash = "rekeyed-2",
+		status = "pending",
+		author = { kind = "verified", username = "ada" },
+		source = { kind = "git", url = "https://github.com/ada/rekeyed.git" },
+		permissions = { "ui.add" },
+		allowed = { "ui.add" },
+		ask = { "ui.add" },
+		nothing_new = true,
+	},
 	timer = {
 		id = "timer",
 		name = "Focus timer",
@@ -279,6 +294,7 @@ ui.command {
 ui.command { id = "wide", title = "Show Composer kit", run = function() show("wide") end }
 ui.command { id = "grown", title = "Show Gh helper, grown", run = function() show("grown") end }
 ui.command { id = "timer", title = "Show Focus timer 1.3.0, not verified", run = function() show("timer") end }
+ui.command { id = "rekeyed", title = "Show Rekeyed, a git plugin asking again with nothing new", run = function() show("rekeyed") end }
 ui.command { id = "fresh", title = "Show Fresh, a first install not verified", run = function() show("fresh") end }
 ui.command { id = "long", title = "Show Everything", run = function() show("long") end }
 ui.command { id = "sync_devbox", title = "Show Checkout sync, on Devbox", run = function() show("sync", "Devbox") end }

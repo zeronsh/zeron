@@ -131,9 +131,11 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 	local replaced_verified: string? = if type(replaced) == "table" and replaced.verified == true and type(replaced.version) == "string" and string.match(replaced.version, "^[%w%.%+%-]+$") and #replaced.version <= 32
 		then replaced.version
 		else nil
-	-- Asking again for nothing beyond what was allowed (an unverified
-	-- version always asks): the engine says so; one line.
-	local nothing_new = it.nothing_new == true
+	-- Asking again for nothing beyond what was allowed, only because the
+	-- store hasn't verified this version: the engine says so (`nothing_new`);
+	-- one line. Any other re-ask (a file's, a link's) lists its asks, as it
+	-- always has.
+	local nothing_new = it.nothing_new == true and unverified
 
 	local asks: Node
 	if nothing_new and #grew == 0 then
