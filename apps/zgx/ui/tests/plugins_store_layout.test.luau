@@ -712,7 +712,10 @@ test("publishing's buttons and its versions' actions end on one edge, the conten
 	expect(math.abs(new.x + new.w - 10 - content) < 0.6).to_be(true)
 end)
 
-test("a deploy key's secret is one line in the code face, never broken inside it", function()
+-- Shown once, the secret is seen whole, to check by eye: its block opens
+-- wrapped (ds/markdown `code_fit`), the key in the code face broken onto
+-- the next line inside the block, never hidden past its edge.
+test("a deploy key's secret is seen whole, wrapped inside its block in the code face", function()
 	local app = keys_page()
 	app:click("#keys-new")
 	settle(app)
@@ -721,9 +724,12 @@ test("a deploy key's secret is one line in the code face, never broken inside it
 	settle(app)
 	app:command("store_stub.signed_in_again")
 	settle(app, 400)
+	local block = box(app, "#key-secret")
 	local line = app:tree("#key-secret")
-	local text_h = tonumber(line:match('text "zpk_[^"]*" [%-%d.]+,[%-%d.]+ [%d.]+x([%d.]+)')) or 0
-	expect(text_h <= 20).to_be(true)
+	local x, w, h = line:match('text "zpk_[^"]*" ([%-%d.]+),[%-%d.]+ ([%d.]+)x([%d.]+)')
+	assert(x, line)
+	expect(tonumber(h) > 20).to_be(true)
+	expect(tonumber(x) + tonumber(w) <= block.x + block.w).to_be(true)
 end)
 
 -- A row's badges are whole or absent, never cut: in a narrowing row the

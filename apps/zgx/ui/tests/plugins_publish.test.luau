@@ -179,6 +179,14 @@ test("a deploy key is made for the plugins chosen, after a fresh sign-in, its se
 	local dialog = app:tree("role:dialog")
 	expect(dialog).to_contain("Copy your key now")
 	expect(dialog).to_contain("zpk_live_")
+	-- Whole, wrapped inside the dialog: never cut behind a scroll.
+	local block = app:tree("#key-secret")
+	local bx, _, bw = block:match("#key%-secret (%-?%d+),(%-?%d+) (%d+)x")
+	local kx, _, kw, kh = block:match('text "zpk_live_[^"]*" (%-?%d+),(%-?%d+) (%d+)x(%d+)')
+	assert(bx and kx, block)
+	expect(tonumber(kx) + tonumber(kw) <= tonumber(bx) + tonumber(bw)).to_be(true)
+	expect(tonumber(kh) > 20).to_be(true)
+	expect(block).never.to_contain("scroll")
 	-- Escape doesn't lose it: only its button closes it.
 	app:key("Escape")
 	settle(app)

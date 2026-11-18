@@ -3616,10 +3616,10 @@
         "available_unversioned": "Update available:.",
         "added": "It also asks to {list}; you'll be asked first.",
         "removed": "It no longer asks to {list}.",
-        "held": "{version} is out, not verified yet: it takes verified updates only.",
+        "held": "{version} is waiting: it takes verified updates only.",
         "unverified": "{version} is out, not verified yet.",
-        "held_plugin": "{version} is out, not verified yet: this plugin takes verified updates only.",
-        "held_computer": "{version} is out, not verified yet: this computer takes verified updates only."
+        "held_plugin": "{version} is waiting: this plugin takes verified updates only.",
+        "held_computer": "{version} is waiting: this computer takes verified updates only."
       },
       "unverified": "Unverified",
       "from": "From {where}",
@@ -4153,7 +4153,7 @@
       "superseded": "Replaced by {version} before it was verified",
       "sent_toast_body": "It shows as not verified until a reviewer has read it.",
       "updates_label": "Updates",
-      "updates_body": "Which new versions it updates to on this computer.",
+      "updates_body": "Take every new version of this plugin, or only the ones Zeron has verified.",
       "updates_newest": "Newest version",
       "updates_verified": "Verified versions only",
       "couldnt_updates": "Couldn't change {name}'s updates",
@@ -4162,7 +4162,7 @@
       "updates_follows_verified": "Follows this computer: verified versions only.",
       "updates_section": "Plugin store",
       "updates_all_label": "Updates",
-      "updates_all_body": "Which new versions your plugins from the store update to on this computer.",
+      "updates_all_body": "Take every new version, or only the ones Zeron has verified.",
       "couldnt_updates_all": "Couldn't change which updates your plugins take",
       "installed_was_verified_plain": "The version you have was verified.",
       "newest_verified_is": "{version} is the newest version Zeron has verified."

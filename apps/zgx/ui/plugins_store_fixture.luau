@@ -93,6 +93,26 @@ s.install = function(from: any): any
 		end,
 	}
 end
+-- The consent window, as its own window's host shares it (src/plugins/
+-- consent.rs): shown over the page at its own size while it asks, as Zeron
+-- opens it over the main window. Its answers are the host's.
+local consent = require("@screens/plugins/consent")
+local consent_shown = ui.shared("consent", { busy = false } :: any)
+ui.actions {
+	["plugins.decide"] = function(arg: any)
+		stub.note(`decide:{arg.id}:{tostring(arg.allow)}`)
+		local p = find(arg.id)
+		if p then
+			p.status = if arg.allow then "on" else "off"
+			publish()
+		end
+		consent_shown:set({ busy = false })
+	end,
+	["plugins.install_verified"] = function(arg: any)
+		stub.note(`install_verified:{arg.id}:{arg.hash}`)
+		consent_shown:set({ busy = false })
+	end,
+}
 -- (A one-click update the engine refuses, while set: its words.)
 local refuse_update: string? = nil
 s.update = function(id: string, _device: string?, verified_only: boolean?): any
@@ -108,6 +128,38 @@ s.update = function(id: string, _device: string?, verified_only: boolean?): any
 	end
 	local p = find(id)
 	if p and p.update then
+		-- One the store hasn't verified is staged, as the engine stages it:
+		-- the plugin waits for you at the new version, and the consent
+		-- window opens on it (below), asking with its warning.
+		if p.update.verified == false then
+			local u = p.update
+			local from = p.version
+			local was_verified = not (type(p.source) == "table" and p.source.verified == false)
+			p.version = u.version
+			p.hash = `{id}-{u.version}`
+			p.status = "pending"
+			p.update = nil
+			p.source = { kind = "store", id = id, publisher = "ada", verified = false, replaced = { version = from, verified = was_verified } }
+			publish()
+			consent_shown:set({
+				busy = false,
+				item = {
+					id = id,
+					name = p.name,
+					version = u.version,
+					hash = p.hash,
+					status = "pending",
+					author = p.author,
+					source = p.source,
+					permissions = p.permissions,
+					allowed = p.allowed,
+					ask = {},
+					nothing_new = true,
+					update = { version = u.version, verified = false, installed_verified = was_verified, verified_alternative = u.verified_alternative },
+				},
+			})
+			return nil
+		end
 		p.version = p.update.version
 		p.hash = `{id}-{p.version}`
 		p.update = nil
@@ -320,6 +372,7 @@ ui.command { id = "theme_light", title = "Light theme", run = function() ui.them
 return ui.column {
 	w_full = true,
 	h_full = true,
+	relative = true,
 	ui.scroll {
 		id = "fixture-scroll",
 		w_full = true,
@@ -335,4 +388,29 @@ return ui.column {
 		},
 	},
 	Lightbox.Host(),
+	-- (The consent window: Zeron's 460 × 540 over the main window.)
+	ui.show(function(): boolean
+		return consent_shown:get().item ~= nil
+	end, ui.div {
+		id = "fixture-consent-window",
+		absolute = true,
+		left = 0,
+		right = 0,
+		top = 0,
+		bottom = 0,
+		items = "center",
+		justify = "center",
+		ui.column {
+			w = 460,
+			h = 540,
+			relative = true,
+			rounded = "$radius.xl",
+			overflow = "hidden",
+			border = 1,
+			border_color = "$zeron.settings.edge",
+			shadow = "$shadow.lg",
+			bg = "$background",
+			consent.View(),
+		},
+	}),
 }

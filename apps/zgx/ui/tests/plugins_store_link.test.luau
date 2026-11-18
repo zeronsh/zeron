@@ -215,6 +215,9 @@ test("a link to a version that takes no new installs, or one the store hasn't, l
 	app:wait(`{PAGE} >> "The store has no version 9.9.9 of it."`, { timeout_ms = 3000 })
 	expect(calls(app)).to_contain("version:focus-timer:9.9.9")
 	expect(app:tree(`{PAGE} >> #store-install`)).to_contain("disabled")
+	-- (Never naming a version the store hasn't.)
+	expect(app:tree(`{PAGE} >> #store-offer`)).to_contain('button "Install"')
+	expect(app:tree(`{PAGE} >> #store-offer`)).never.to_contain("Install 9.9.9")
 end)
 
 test("a link whose version doesn't read as one opens the page as if it chose none", function()

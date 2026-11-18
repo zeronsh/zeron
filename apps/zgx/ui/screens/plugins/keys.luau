@@ -486,9 +486,10 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 				end,
 			},
 			-- The secret as the app shows a line of code to copy: a chat
-			-- reply's code block (mono, scrolling sideways, never broken, its
-			-- own Copy), drawn by ds/markdown from one fence labelled "key". (A
-			-- deploy key's characters never close it.)
+			-- reply's code block (mono, its own Copy), drawn by ds/markdown
+			-- from one fence labelled "key", opened wrapped so the whole key
+			-- shows at once to check by eye (`code_fit`; its toggle its own).
+			-- (A deploy key's characters never close it.)
 			ui.div {
 				id = "key-secret",
 				w_full = true,
@@ -498,6 +499,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 						-- block's label reads "key" over the plain text.)
 						return "```key\n" .. (secret:get() or "") .. "\n```"
 					end,
+					code_fit = true,
 				},
 			},
 		},

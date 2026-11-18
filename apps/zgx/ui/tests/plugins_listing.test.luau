@@ -736,8 +736,9 @@ test("a store plugin's page chooses which updates it takes here: the same as thi
 	app:click('role:menuitem "Verified versions only"')
 	settle(app)
 	expect(calls(app)).to_contain("updates:focus-timer:verified")
-	-- Its own choice: the plain line.
-	expect(app:tree()).to_contain("Which new versions it updates to on this computer.")
+	-- Its own choice: the plain line alone, nothing following.
+	expect(app:tree()).to_contain("Take every new version of this plugin, or only")
+	expect(app:tree()).never.to_contain("Follows this computer")
 	-- Back to the device's: its own choice cleared.
 	app:click("#store-updates")
 	app:frames(10)
@@ -759,11 +760,11 @@ test("a store plugin's page chooses which updates it takes here: the same as thi
 	app:click('role:tab "Installed"')
 	settle(app)
 	-- (Following this computer: its rule, said as whose.)
-	expect(app:tree()).to_contain("1.3.0 is out, not verified yet: this computer takes verified")
+	expect(app:tree()).to_contain("1.3.0 is waiting: this computer takes verified")
 	-- Its own choice: said as its own.
 	app:set_state("plugins.store_updates", { device = "newest", plugins = { ["focus-timer"] = "verified" } })
 	settle(app)
-	expect(app:tree()).to_contain("1.3.0 is out, not verified yet: this plugin takes verified")
+	expect(app:tree()).to_contain("1.3.0 is waiting: this plugin takes verified")
 end)
 
 test("Installed sets which updates this device's store plugins take, and says when one runs a version the store hasn't verified", function()
@@ -810,9 +811,15 @@ test("an unverified update is said on its row, and its Update stages it for the 
 	settle(app, 600)
 	expect(calls(app)).to_contain("update:focus-timer")
 	expect(calls(app)).never.to_contain("update:focus-timer:verified_only")
-	-- Still Installed: no page and no sheet of its own between.
+	-- Still Installed: no page and no sheet of its own between; the consent
+	-- window asks, with its warning, the version you have and the verified
+	-- one to take instead.
 	expect(app:state("plugins_view")).to_be("catalog")
-	expect(app:has("role:dialog")).to_be(false)
+	app:wait("#fixture-consent-window >> #consent-unverified", { timeout_ms = 3000 })
+	local sheet = app:tree("#fixture-consent-window")
+	expect(sheet).to_contain("Zeron hasn't verified 1.3.0 yet.")
+	expect(sheet).to_contain("The version you have, 1.2.0, was verified.")
+	expect(app:has('#fixture-consent-window >> role:button "Install 1.2.1 instead"')).to_be(true)
 end)
 
 -- A verified update still takes one click, verified only.

@@ -652,10 +652,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				on_click = function()
 					install(chosen_version())
 				end,
-				-- (A version a link chose: named, "Install 1.2.0".)
+				-- (A version a link chose: named, "Install 1.2.0"; never one
+				-- the store hasn't.)
 				function(): string
 					local v = chosen_version()
-					if v then
+					if v and chosen:get().state ~= "missing" then
 						return if here.device()
 							then ui.t("plugins.store.install_version_on", { version = v, device = here.device_name() }):get()
 							else ui.t("plugins.store.install_version", { version = v }):get()
@@ -1196,16 +1197,17 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	end, ds.Settings.Group {
 		ds.Settings.Row {
 			label = ui.t("plugins.store.updates_label"),
-			-- (What's in effect: following this computer, which choice that
-			-- is, named once, here; its own choice, the plain line.)
-			description = function(): string
+			description = ui.t("plugins.store.updates_body"),
+			-- (What's in effect, under it: following this computer, which
+			-- choice that is, named once, here. Its own choice: none.)
+			detail = function(): string?
 				local prefs = local_prefs()
 				if prefs and updates:get() == "device" then
 					return if prefs.device == "verified"
 						then ui.t("plugins.store.updates_follows_verified"):get()
 						else ui.t("plugins.store.updates_follows_newest"):get()
 				end
-				return ui.t("plugins.store.updates_body"):get()
+				return nil
 			end,
 			control = ui.div {
 				id = "store-updates",
