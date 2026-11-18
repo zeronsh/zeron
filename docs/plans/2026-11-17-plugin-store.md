@@ -461,3 +461,8 @@ Agreed after the plan was first written. Newest last.
 29. **Paging goes both ways.** Every paged list (`/store/v1/plugins`, the
     admin queue, reports, audit) returns `prev_cursor` beside `next_cursor`,
     so Previous is a real link on the web.
+30. **Claiming ids is limited, and unused ids come back.** An account may
+    claim at most 5 new ids in any 7 days (apart from the publish limits).
+    An id that has never had an approved version and has no pending one is
+    released 90 days after its last submission; an admin can release or
+    grant one at any time through reservations.
