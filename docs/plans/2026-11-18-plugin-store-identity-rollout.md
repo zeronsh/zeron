@@ -119,11 +119,11 @@ With the session cookie from step b (copy its value):
 # A foreign Origin: refused.
 curl -s -X POST "SITE/auth/web/logout" -H "origin: https://evil.example" \
   -H "cookie: __Host-zeron_session=$COOKIE" -H "x-csrf-token: $CSRF" -w ' %{http_code}\n'
-#   {"error":"forbidden","reason":"bad_origin"} 403
+#   {"error":"bad_csrf","message":"This request didn't come from the Zeron site."} 403
 # The right Origin without the session's CSRF token: refused.
 curl -s -X POST "SITE/auth/web/logout" -H "origin: SITE" \
   -H "cookie: __Host-zeron_session=$COOKIE" -w ' %{http_code}\n'
-#   {"error":"forbidden","reason":"bad_csrf"} 403
+#   {"error":"bad_csrf","message":"This page is out of date. Reload it and try again."} 403
 ```
 
 The browser is still signed in afterwards (re-check

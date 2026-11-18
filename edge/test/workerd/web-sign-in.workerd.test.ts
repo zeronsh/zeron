@@ -360,6 +360,8 @@ describe("signing out", () => {
     for (const [what, headers] of attempts) {
       const res = await fetchSite("/auth/web/logout", { method: "POST", cookie: browser.cookie, headers });
       expect(res.status, what).toBe(403);
+      // The same word as every store route's refused cookie write.
+      expect(await errorOf(res), what).toBe("bad_csrf");
     }
     expect((await sessionOf(browser.cookie)).status).toBe(200);
   });
@@ -391,7 +393,8 @@ describe("signing out", () => {
   it("clears a dead cookie without a token, from the site only", async () => {
     const res = await fetchSite("/auth/web/logout", { method: "POST", cookie: sessionHeader("A".repeat(43)), headers: { origin: SITE } });
     expect(res.status).toBe(200);
-    expect((await fetchSite("/auth/web/logout", { method: "POST", headers: { origin: "https://evil.example" } })).status).toBe(403);
+    const foreign = await fetchSite("/auth/web/logout", { method: "POST", headers: { origin: "https://evil.example" } });
+    expect([foreign.status, await errorOf(foreign)]).toEqual([403, "bad_csrf"]);
   });
 });
 
@@ -402,9 +405,10 @@ describe("cookie-authenticated store routes", () => {
     const other = await webSignIn(await person());
     const path = "/store/v1/plugins/demo/versions";
     const refused: [string, Record<string, string>, string][] = [
-      ["no Origin", { "x-csrf-token": browser.csrf }, "forbidden"],
-      ["foreign Origin", { origin: "https://evil.example", "x-csrf-token": browser.csrf }, "forbidden"],
-      ["the edge's origin", { origin: "https://edge.test", "x-csrf-token": browser.csrf }, "forbidden"],
+      // (A wrong Origin is bad_csrf too on a store route: amendment 35.)
+      ["no Origin", { "x-csrf-token": browser.csrf }, "bad_csrf"],
+      ["foreign Origin", { origin: "https://evil.example", "x-csrf-token": browser.csrf }, "bad_csrf"],
+      ["the edge's origin", { origin: "https://edge.test", "x-csrf-token": browser.csrf }, "bad_csrf"],
       ["no token", { origin: SITE }, "bad_csrf"],
       ["another session's token", { origin: SITE, "x-csrf-token": other.csrf }, "bad_csrf"],
       ["a guessed token", { origin: SITE, "x-csrf-token": "A".repeat(43) }, "bad_csrf"]
