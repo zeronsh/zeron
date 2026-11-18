@@ -458,3 +458,6 @@ Agreed after the plan was first written. Newest last.
 28. **After a transfer**, a former owner's deploy key no longer reads as
     verified for the plugin (verified needs the key's maker to own the
     plugin now), and the current owner can list and revoke every key of it.
+29. **Paging goes both ways.** Every paged list (`/store/v1/plugins`, the
+    admin queue, reports, audit) returns `prev_cursor` beside `next_cursor`,
+    so Previous is a real link on the web.
