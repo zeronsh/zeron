@@ -397,65 +397,64 @@ describe("POST /store/v1/plugins/:id/versions", () => {
   });
 });
 
-describe("a listing that says the plugin is Zeron's own (claims_zeron)", () => {
+describe("Zeron in a listing is not policed (fa75e5a40)", () => {
   const operator = (path: string, body: unknown, token = "test-admin-token") =>
     SELF.fetch(`https://edge.test${path}`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
 
-  it("is refused from anyone but a publisher with Zeron's own badge, which only an operator grants", async () => {
+  it("publishes a name or description that mentions Zeron from any account, and Zeron's badge stays an operator's to grant", async () => {
     const a = await author();
-    const go = async (who: typeof a, id: string, version: string, manifest: Record<string, unknown>) =>
-      publish(who.userId, id, await makePackage({ id, version, signer: who.signer, manifest }));
-    const id = uniqueId();
-    // Refused, whichever field says it, however it's spelled.
     for (const manifest of [
       { name: "Git by Zeron" },
       { name: "Zeron Approved Themes" },
+      { name: "Zeron-Certified" },
       { description: "Boards from Zeron, for focus." },
-      { description: "The zeron’s own board." },
-      { name: "Zeron-Certified" }
+      { description: "The zeron’s own board." }
     ]) {
-      const res = await go(a, id, "1.0.0", manifest);
-      const body = await json(res);
-      expect([res.status, body.error], JSON.stringify(manifest)).toEqual([400, "claims_zeron"]);
-      expect(body.field).toBe("name" in manifest ? "name" : "description");
+      const id = uniqueId();
+      const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer, manifest }));
+      expect(res.status, JSON.stringify(manifest)).toBe(201);
     }
-    // Saying it's for Zeron is anyone's.
-    expect((await go(a, id, "1.0.0", { name: "Themes for Zeron" })).status).toBe(201);
-
-    // Nothing the publisher sends makes them Zeron's own: not the manifest,
-    // not their own call to the badge routes.
-    const pretend = uniqueId();
-    const sent = await go(a, pretend, "1.0.0", { name: "Git by Zeron", author: { badges: [{ id: "maintainer" }] }, badges: ["maintainer"], maintainer: true });
-    expect((await json(sent)).error).toBe("claims_zeron");
+    // The badge itself stays: a publisher can't grant it to themselves.
     expect((await operator("/admin/badges", { id: "maintainer", name: "Maintainer" }, a.userId)).status).toBe(401);
     expect((await operator("/admin/badges/grant", { badgeId: "maintainer", userIds: [a.userId] }, a.userId)).status).toBe(401);
-    expect((await json(await go(a, pretend, "1.0.0", { name: "Git by Zeron" }))).error).toBe("claims_zeron");
-
-    // An operator grants it: then Zeron's own plugin may say so.
-    await operator("/admin/badges", { id: "maintainer", name: "Maintainer" });
-    const zeron = await author();
-    expect((await operator("/admin/badges/grant", { badgeId: "maintainer", userIds: [zeron.userId] })).status).toBe(200);
-    const own = uniqueId();
-    const res = await go(zeron, own, "1.0.0", { name: "Git by Zeron" });
-    expect(res.status, await res.clone().text()).toBe(201);
-    // (The badge is the account's, not anyone's who publishes beside it.)
-    expect((await json(await go(a, uniqueId(), "1.0.0", { name: "Git by Zeron" }))).error).toBe("claims_zeron");
   });
 });
 
-describe("keywords held to both rules (367b7fbd7)", () => {
-  it("refuses at publish a keyword that says the mark or Zeron, for every publisher, so /keywords never shows one", async () => {
+describe("keywords held to the mark's rule (367b7fbd7)", () => {
+  it("refuses at publish a keyword that says the mark, for every publisher, so /keywords never shows one; zeron in a keyword is anyone's", async () => {
     await SELF.fetch("https://edge.test/admin/badges", { method: "POST", headers: { authorization: "Bearer test-admin-token", "content-type": "application/json" }, body: JSON.stringify({ id: "maintainer", name: "Maintainer" }) });
     const zeron = await author();
     await SELF.fetch("https://edge.test/admin/badges/grant", { method: "POST", headers: { authorization: "Bearer test-admin-token", "content-type": "application/json" }, body: JSON.stringify({ badgeId: "maintainer", userIds: [zeron.userId] }) });
-    for (const keyword of ["verified", "official", "zeron-official", "by-zeron", "zeron-approved", "zeron-team"]) {
+    for (const keyword of ["verified", "official", "zeron-official"]) {
       const id = uniqueId();
       // (Zeron's badge lifts no keyword rule.)
       const res = await publish(zeron.userId, id, await makePackage({ id, version: "1.0.0", signer: zeron.signer, manifest: { keywords: [keyword] } }));
       const body = await json(res);
-      expect([res.status, body.error, body.field], keyword).toEqual([400, "bad_listing", "keywords"]);
+      expect([res.status, body.error, body.field, body.cause, body.word], keyword).toEqual([400, "bad_listing", "keywords", "mark_word", keyword]);
+    }
+    for (const keyword of ["by-zeron", "zeron-approved", "zeron-team"]) {
+      const id = uniqueId();
+      expect((await publish(zeron.userId, id, await makePackage({ id, version: "1.0.0", signer: zeron.signer, manifest: { keywords: [keyword] } }))).status, keyword).toBe(201);
     }
     const shown = ((await json(await call(zeron.userId, "GET", "/store/v1/keywords"))).keywords as { keyword: string }[]).map((k) => k.keyword);
-    for (const keyword of ["verified", "official", "zeron-official", "by-zeron", "zeron-approved", "zeron-team"]) expect(shown).not.toContain(keyword);
+    for (const keyword of ["verified", "official", "zeron-official"]) expect(shown).not.toContain(keyword);
+  });
+});
+
+describe("a refusal says why and where (listing_causes)", () => {
+  it("gives the field, cause and word of the first problem, and of each one", async () => {
+    const a = await author();
+    const go = async (manifest: Record<string, unknown>) => {
+      const id = uniqueId();
+      return publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer, manifest }));
+    };
+    const name = await json(await go({ name: "Verified Third Board" }));
+    expect(name).toMatchObject({ error: "bad_listing", field: "name", cause: "mark_word", word: "Verified" });
+    expect((name.problems as Record<string, unknown>[])[0]).toMatchObject({ rule: "bad_listing", field: "name", cause: "mark_word", word: "Verified" });
+    expect(await json(await go({ description: "The оfficial board." }))).toMatchObject({ field: "description", cause: "mark_word", word: "оfficial" });
+    expect(await json(await go({ name: "Focus\u{200b}Board" }))).toMatchObject({ field: "name", cause: "unseen_char", word: "U+200B" });
+    // Zeron is nobody's concern.
+    expect((await go({ name: "Zeron Third Board" })).status).toBe(201);
+    expect((await go({ description: "Boards, by Zeron." })).status).toBe(201);
   });
 });

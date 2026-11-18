@@ -1,10 +1,11 @@
 /**
- * What a store listing's name or description may not say (amendment 45):
- * that it carries the store's mark, or that the plugin is Zeron's own. One
+ * What a store listing's name, description or keywords may not say
+ * (amendment 45): that the plugin carries the store's mark. ("Zeron"
+ * anywhere is nobody's concern: the owner's ruling, contract fa75e5a40.) One
  * rule for a device's check and the edge: a port of the engine's
  * crates/engine/src/plugins/mark.rs, reading every list from the shared data
- * file (docs/plugin-store-data.json: `mark_claims`, `claims_zeron`,
- * `keyword_claims`), whose `about` texts state each step, and held to the
+ * file (docs/plugin-store-data.json: `mark_claims`, `keyword_claims`,
+ * `listing_causes`), whose `about` texts state each step, and held to the
  * shared listing cases (docs/plugin-package-vectors.json).
  *
  * Text is read as code points throughout: `folded` (NFKC, lowercase, NFKD
@@ -16,10 +17,7 @@
  *   beside a store word (4, no negation lifts it); alone as a sentence or
  *   the text's first word (1); directly after a subject word (3); within two
  *   words of a word for the plugin (2). A negation directly before lifts 1–3.
- * - `claims_zeron`: in a name, "zeron" only as the object of an allowed
- *   form, and never beside a word of belonging; in a description, after a
- *   word of origin, beside a word of standing, or with a word of belonging.
- * - A keyword may say neither the mark nor "zeron".
+ * - A keyword may not say the mark.
  */
 import { STORE_DATA } from "./data";
 
@@ -54,6 +52,7 @@ const MARKS = STORE_DATA.mark_claims as unknown as {
     readonly negations: readonly string[];
     readonly negations_after: readonly string[];
     readonly authorities: readonly string[];
+    readonly certified_words: readonly string[];
     readonly object_words: readonly string[];
     readonly plugin_words: Readonly<Record<string, WordList>>;
     readonly predicate_before: readonly string[];
@@ -65,20 +64,6 @@ const MARKS = STORE_DATA.mark_claims as unknown as {
     readonly subject_words: readonly string[];
   };
 };
-const ZERONS = STORE_DATA.claims_zeron as unknown as {
-  readonly word: string;
-  readonly name: { readonly allowed_before: Readonly<Record<string, readonly string[]>> };
-  readonly description: {
-    readonly origin_before: readonly string[];
-    readonly standing: readonly string[];
-    readonly standing_other: readonly string[];
-    readonly standing_after_word: readonly string[];
-    readonly belonging: readonly string[];
-    readonly belonging_joins: readonly string[];
-    readonly belonging_zh: readonly string[];
-  };
-};
-
 const MARK_GLYPHS = MARKS.glyphs;
 const MARK_WORDS = MARKS.words;
 const LOOKALIKES = MARKS.lookalikes;
@@ -104,15 +89,9 @@ const RELATION_AFTER = MARKS.description.relation_after;
 const RELATION_BEFORE_ZH = MARKS.description.relation_before_zh;
 const RELATION_WORDS = MARKS.description.relation_words;
 
-const ZERON = ZERONS.word;
-const NAME_FORMS: readonly string[] = Object.values(ZERONS.name.allowed_before).flat();
-const ORIGIN_WORDS = ZERONS.description.origin_before;
-const STANDING_WORDS = ZERONS.description.standing;
-const STANDING_OTHER = ZERONS.description.standing_other;
-const STANDING_AFTER_ZERON = ZERONS.description.standing_after_word;
-const BELONGING = ZERONS.description.belonging;
-const BELONGING_JOINS = ZERONS.description.belonging_joins;
-const BELONGING_ZH = ZERONS.description.belonging_zh;
+const CERTIFIED_WORDS = MARKS.description.certified_words;
+const CAUSES = (STORE_DATA as unknown as { listing_causes: { max_word_chars: number; written_max_words: number } }).listing_causes;
+const WRITTEN_MAX_WORDS = CAUSES.written_max_words;
 
 const SEPARATOR = /^[\p{White_Space}\u{feff}\p{P}]$/u;
 const ANY_WORD = /^[\p{L}\p{N}]$/u;
@@ -320,10 +299,8 @@ const loneCjk = (text: Text, word: Text): boolean => {
   return text.filter(cjk).length === word.length && word.every(cjk);
 };
 
-/** Whether a word of a text is `word`: the same, or "zeron" spelled. */
-const ZERON_CHARS = [...ZERON];
-const sameWord = (text: Text, word: Text): boolean =>
-  eq(text, word) || (eq(word, ZERON_CHARS) && spellEnd(text, 0, ZERON_CHARS) === text.length);
+/** Whether a word of a text is `word`. */
+const sameWord = (text: Text, word: Text): boolean => eq(text, word);
 
 /** A reading of a description: its text, its words, and how a listed word
  * is put in its form. */
@@ -415,7 +392,7 @@ class Reading {
     const [first, last] = covered;
     const [from, to] = this.sentence(span);
     const inSentence = (n: number) => this.words[n]![0] >= from && this.words[n]![1] <= to;
-    // 4: beside "zeron", "the store", "the plugin store". No negation lifts it.
+    // 4: beside "the store", "the plugin store". No negation lifts it.
     if (STORE_WORDS.some((w) => this.beforeIs(first, w) || this.afterIs(last, w))) return true;
     // A negation lifts the rest: within four words before it in its
     // sentence, inside its word (非公式), or after it in Japanese and Korean.
@@ -494,7 +471,7 @@ class Reading {
    * it's certified) after it within two words with no relation between, or
    * directly before it; not when the phrase is someone else's. */
   nearPlugin([first, last]: readonly [number, number], span: Span, ambiguous: boolean): boolean {
-    const neighbours: WordList[] = [...PLUGIN_WORDS, { substring: true, words: ambiguous ? [] : STANDING_OTHER }];
+    const neighbours: WordList[] = [...PLUGIN_WORDS, { substring: true, words: ambiguous ? [] : CERTIFIED_WORDS }];
     return neighbours.some(({ substring, words }) =>
       words.some((entry) => {
         const [word, stem] = listed(entry);
@@ -698,74 +675,73 @@ const descriptionMark = (text: string): string | undefined => {
  * (`inName`) anywhere; in a description only when said of the plugin. */
 export const markClaim = (text: string, inName = true): string | undefined => (inName ? nameMark(text) : descriptionMark(text));
 
-/** `a` then `b` as a spelling: a space, or `~` beside a script that doesn't
- * space its words. */
-const joined = (a: string, b: string): string => (isAscii(a) && isAscii(b) ? `${a} ${b}` : `${a}~${b}`);
-const NAME_SPELLINGS: readonly string[] = NAME_FORMS.map((form) => joined(form, ZERON));
-const ZERON_PHRASES: readonly string[] = [
-  ...ORIGIN_WORDS.map((o) => joined(o, ZERON)),
-  ...[...STANDING_WORDS, ...STANDING_OTHER, ...OTHER_LANGUAGES.flatMap(([, words]) => words.map((w) => listed(w.word)[0]))].flatMap((st) => [
-    joined(ZERON, st),
-    joined(st, ZERON),
-    ...(isAscii(st) ? [`${ZERON}'s ${st}`] : [])
-  ])
-];
-const BELONGING_PHRASES: readonly string[] = [
-  ...BELONGING.flatMap((word) =>
-    BELONGING_JOINS.some((join) => word.endsWith(` ${join}`)) ? [`${word} ${ZERON}`] : BELONGING_JOINS.map((join) => `${word} ${join} ${ZERON}`)
-  ),
-  ...BELONGING_ZH.flatMap((word) => [
-    ...["\u{4e8e}", "\u{65bc}", "\u{5728}", "\u{5230}"].map((join) => `${word}~${join}~${ZERON}`),
-    `\u{968f}~${ZERON}~${word}`,
-    `\u{96a8}~${ZERON}~${word}`
-  ])
-];
-
-/** Whether a name says "zeron" other than as the object of an allowed form,
- * or beside a word of belonging anywhere. */
-export const claimsZeronInName = (text: string): boolean => {
-  const plain = folded(text);
-  return [plain, unspaced(plain)].some((reading) => {
-    const zerons = ends(reading, ZERON);
-    const allowed = new Set(NAME_SPELLINGS.flatMap((form) => [...ends(reading, form)]));
-    return [...zerons].some((end) => !allowed.has(end)) || (zerons.size > 0 && [...BELONGING, ...BELONGING_ZH].some((b) => spelled(reading, b)));
-  });
-};
-
-/** Which phrase a description says that only Zeron's own plugins may, if any. */
-export const claimsZeron = (text: string): string | undefined => {
-  const plain = folded(text);
-  const readings = [plain, unspaced(plain)];
-  const phrase = [...ZERON_PHRASES, ...BELONGING_PHRASES].find((p) => readings.some((r) => spelled(r, p)));
-  if (phrase !== undefined) return phrase.replace(/~/g, " ");
-  // "made", "built" only directly after a bare "zeron", never as "built-in"
-  // or "built in".
-  const word = STANDING_AFTER_ZERON.find((w) =>
-    readings.some((r) =>
-      [...ends(r, `${ZERON} ${w}`)].some((end) => {
-        let n = end;
-        while (n < r.length && separator(r[n])) n++;
-        const gap = n - end;
-        return !(gap > 0 && r[n] === "i" && r[n + 1] === "n" && !asciiWord(r[n + 2]));
-      })
-    )
-  );
-  return word === undefined ? undefined : `${ZERON} ${word}`;
-};
-
 /** What a keyword says that it may not: a part (or its parts joined) that
- * is a mark word in any language a keyword's letters can write, or "zeron".
- * No badge lifts it. */
+ * is a mark word in any language a keyword's letters can write. No badge
+ * lifts it ("zeron" in a keyword is anyone's). */
 export const keywordClaim = (keyword: string): string | undefined => {
   const parts = keyword.split(/[- ]/).filter((p) => p !== "").map(folded);
   const candidates = [...parts, parts.flat()];
   const whole = (text: Text, word: string) => spellEnd(text, 0, [...markText(word)]) === text.length;
-  if (candidates.some((part) => whole(part, ZERON))) return ZERON;
   const words = [...MARK_WORDS, ...OTHER_LANGUAGES.flatMap(([, ws]) => ws.map((w) => listed(w.word)[0])).filter(isAscii)];
   return words.find((word) => candidates.some((part) => whole(part, word)));
 };
 
-/** Whether a listing with this name and summary would be refused
- * `claims_zeron` for a publisher without Zeron's own badge. */
-export const listingClaimsZeron = (name: string | null, summary: string | null): boolean =>
-  (name !== null && claimsZeronInName(name)) || (summary !== null && claimsZeron(summary) !== undefined);
+/** A word as a refusal names it (`listing_causes`): without control,
+ * format or other default-ignorable characters, at most `max_word_chars`
+ * characters; undefined when nothing is left. */
+export const problemWord = (text: string | undefined): string | undefined => {
+  if (text === undefined) return undefined;
+  const word = [...text].filter((c) => !/^[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]$/u.test(c)).slice(0, CAUSES.max_word_chars).join("");
+  return word === "" ? undefined : word;
+};
+
+/** The first character a name or description may not hold (amendment 31):
+ * a control or format character, any other default-ignorable, a variation
+ * selector but U+FE0F, or a U+FE0F not directly after an emoji. */
+export const firstUnseen = (text: string): string | undefined => {
+  let before: string | undefined;
+  for (const c of text) {
+    const selector = /^\p{Variation_Selector}$/u.test(c);
+    const bad =
+      /^[\p{Cc}\p{Cf}]$/u.test(c) ||
+      (/^\p{Default_Ignorable_Code_Point}$/u.test(c) && !selector) ||
+      (selector && c !== "\u{fe0f}") ||
+      (c === "\u{fe0f}" && !(before !== undefined && /^\p{Emoji}$/u.test(before)));
+    if (bad) return c;
+    before = c;
+  }
+  return undefined;
+};
+
+/** Where a name or description says `claim`, as written (`listing_causes`):
+ * the shortest, earliest run of its whitespace-separated words (at most
+ * `written_max_words`) that read as a name claims the same, then without
+ * its first character while it still does, then without its last;
+ * undefined when no run does. */
+export const asWritten = (text: string, claim: string): string | undefined => {
+  const claims = (run: string) => nameMark(run) === claim;
+  const chars = [...text];
+  const words: [number, number][] = [];
+  let start: number | undefined;
+  chars.forEach((c, at) => {
+    if (WHITE_SPACE.test(c)) {
+      if (start !== undefined) words.push([start, at]);
+      start = undefined;
+    } else if (start === undefined) start = at;
+  });
+  if (start !== undefined) words.push([start, chars.length]);
+  let run: string[] | undefined;
+  for (let len = 1; len <= Math.min(words.length, WRITTEN_MAX_WORDS) && run === undefined; len++) {
+    for (let at = 0; at + len <= words.length; at++) {
+      const candidate = chars.slice(words[at]![0], words[at + len - 1]![1]);
+      if (claims(candidate.join(""))) {
+        run = candidate;
+        break;
+      }
+    }
+  }
+  if (run === undefined) return undefined;
+  while (run.length > 1 && claims(run.slice(1).join(""))) run = run.slice(1);
+  while (run.length > 1 && claims(run.slice(0, -1).join(""))) run = run.slice(0, -1);
+  return run.join("");
+};

@@ -30,8 +30,6 @@ import { isReservedUsername, skeleton } from "../username";
 import { type FileKind, fileKind, isText, runChecks } from "./checks";
 import { type ConsentItem, consentItem } from "./consent";
 import { VERSION_ORDER, auditIfChanged, filesKey, packageKey, pluginRow, relist } from "./db";
-import { authorsOf } from "./cards";
-import { ZERON_BADGE } from "./zeron-claims";
 import { purgeCatalog } from "./purge";
 import { fail, answer, rateLimited, refusedBody } from "./http";
 import { type Listing, type Problem, checkListing, listingOf } from "./listing";
@@ -133,14 +131,16 @@ const refusal = (e: PackageRefusal): Response => {
 /** A listing problem as the publish error: its rule word is the error word
  * (`id_reserved` 403, `too_large` 413, the rest 400), with every problem
  * found, so one upload shows them all. */
-export const isZeronsOwn = async (env: Env, userId: string): Promise<boolean> =>
-  ((await authorsOf(env, [userId]))[userId]?.badges ?? []).some((b) => b.id === ZERON_BADGE);
+/** The why and where of a bad name, description or keywords
+ * (`listing_causes`), when the problem has them. */
+const causeOf = (p: Problem) => ({ ...(p.cause === undefined ? {} : { cause: p.cause }), ...(p.word === undefined ? {} : { word: p.word }) });
 
 const listingRefusal = (first: Problem, all: readonly Problem[]): Response =>
   fail(first.rule === "id_reserved" ? 403 : first.rule === "too_large" ? 413 : 400, first.rule, first.words, {
     field: first.field,
     path: first.path,
-    problems: all.slice(0, 100).map((p) => ({ rule: p.rule, field: p.field, path: p.path, message: p.words }))
+    ...causeOf(first),
+    problems: all.slice(0, 100).map((p) => ({ rule: p.rule, field: p.field, path: p.path, ...causeOf(p), message: p.words }))
   });
 
 /** The publish answer: the version, and the older unverified versions it
@@ -190,10 +190,6 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   // device), then the store's own size limits.
   const { problems, warnings } = checkListing(pkg.manifest, pkg.files, isText);
   if (problems.length > 0) return listingRefusal(problems[0]!, problems);
-  // Saying the plugin is Zeron's own: a warning on a device, which can't
-  // know the publisher; refused here unless the publisher is.
-  const zeron = warnings.filter((w) => w.rule === "claims_zeron");
-  if (zeron.length > 0 && !(await isZeronsOwn(env, publisher.userId))) return listingRefusal(zeron[0]!, zeron);
   const listing = listingOf(pkg.manifest, pkg.files);
   if ("rule" in listing) return listingRefusal(listing, [listing]);
 

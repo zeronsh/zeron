@@ -7,7 +7,9 @@ import { readManifest } from "./manifest";
 const files = new Map(Object.entries({ "init.luau": "x", "README.md": "# Hi", "icon.svg": "<svg/>" }).map(([k, s]) => [k, new TextEncoder().encode(s)]));
 const fields = (keywords: string[]) =>
   checkListing(readManifest(parseJsonText(JSON.stringify({ id: "focus", name: "Focus", version: "1.0.0", entry: "init.luau", description: "Focus.", icon: "icon.svg", categories: ["productivity"], keywords })) as JsonObject), files, isText);
-for (const k of ["verified", "official", "zeron-official", "by-zeron", "zeron-approved", "zeron-team"]) {
+// (Kept as written but for its three Zeron keywords, which the owner's
+// ruling (fa75e5a40) makes anyone's: "by-zeron", "zeron-approved", "zeron-team".)
+for (const k of ["verified", "official", "zeron-official"]) {
   it(`refuses the keyword ${k}`, () => {
     const { problems, warnings } = fields([k]);
     expect([...problems, ...warnings].some((p) => p.field === "keywords")).toBe(true);

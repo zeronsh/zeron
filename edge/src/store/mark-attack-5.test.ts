@@ -3,17 +3,9 @@
 // "认证插件" is also "authentication plugin" (双因素认证插件), so bare 认证 is a claim
 // only beside "zeron" (standing_other), never by itself.
 import { describe, expect, it } from "vitest";
-import { claimsZeronInName, markClaim } from "./listing";
+import { markClaim } from "./listing";
 
-describe("names that read as Zeron's own through an allowed form", () => {
-  for (const name of ["Built-in Zeron Git", "Built in Zeron", "Ships with Zeron", "Bundled with Zeron", "Included in Zeron", "Comes with Zeron", "Native to Zeron", "Default in Zeron"])
-    it(`refuses ${JSON.stringify(name)}`, () => expect(claimsZeronInName(name)).toBe(true));
-});
-
-describe("the edge reads the zh forms as the device does (07e926df0)", () => {
-  for (const name of ["使用 Zeron 的技巧", "使用Zeron的Git"]) it(`keeps ${JSON.stringify(name)}`, () => expect(claimsZeronInName(name)).toBe(false));
-});
-
+// (Its Zeron cases went with claims_zeron: the owner's ruling, fa75e5a40.)
 describe("the mark in other languages, as people write it", () => {
   for (const text of [
     "Официальной", // Официальной

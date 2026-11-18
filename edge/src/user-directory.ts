@@ -94,7 +94,6 @@ import { json, jsonError } from "./http";
 import { adminAuthorized } from "./cloud/billing";
 import { foldUsername } from "./username";
 import { deleteUserBlobs } from "./user-images";
-import { ZERON_BADGE, suspendZeronClaims } from "./store/zeron-claims";
 
 export const USER_DIRECTORY_NAME = "users1";
 
@@ -2167,8 +2166,7 @@ const earnedBadgeError = (id: string): Response =>
 const handleBadgeRoute = async (
   request: Request,
   directory: DurableObjectStub<UserDirectory>,
-  action: string,
-  storeDb: D1Database | undefined
+  action: string
 ): Promise<Response> => {
   if (action === "") {
     if (request.method === "GET") return json({ badges: await directory.listBadges() });
@@ -2215,22 +2213,7 @@ const handleBadgeRoute = async (
     );
   }
   const ids = userIds === "all" ? "all" : [...new Set(userIds as string[])];
-  if (action === "revoke") {
-    const revoked = await directory.revokeBadge(body.badgeId, ids as string[]);
-    // Zeron's own badge gone, each of their plugins that says it's Zeron's
-    // own is suspended (store/zeron-claims.ts): named here and in the audit.
-    if (body.badgeId === ZERON_BADGE && storeDb) {
-      const suspended = await suspendZeronClaims(storeDb, ids as string[], "operator");
-      return json({
-        revoked,
-        suspended,
-        ...(suspended.length
-          ? { message: "Each suspended plugin comes back by a staff restore, once it's moved to an account with Zeron's badge or the versions that say it's Zeron's own are removed (not taken down: it isn't harmful, and installed copies keep running)." }
-          : {})
-      });
-    }
-    return json({ revoked });
-  }
+  if (action === "revoke") return json({ revoked: await directory.revokeBadge(body.badgeId, ids as string[]) });
   if (isEarnedBadge(body.badgeId)) {
     if (ids === "all") return earnedBadgeError(body.badgeId);
     return json({ granted: await directory.restoreEarnedBadge(body.badgeId, ids) });
@@ -2315,7 +2298,7 @@ export const handleUserDirectoryRoute = async (
     }
     const directory = userDirectoryStub(env);
     if (!directory) return jsonError(503, "unavailable", "The user directory isn't set up on this server.");
-    if (badgeAction !== undefined) return handleBadgeRoute(request, directory, badgeAction, env.STORE_DB);
+    if (badgeAction !== undefined) return handleBadgeRoute(request, directory, badgeAction);
     if (usernameAction !== undefined) return handleUsernameAdminRoute(request, directory, usernameAction);
     if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET only.");
     const csv = url.searchParams.get("format") === "csv";

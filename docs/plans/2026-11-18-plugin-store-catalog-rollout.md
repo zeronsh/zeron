@@ -244,17 +244,6 @@ suspended, or its versions removed. On staging, leave it.
   - then revoke its deploy keys (identity notes, step 5).
 - **A leaked account**: suspend its plugins; the identity notes cover its
   keys.
-- **Zeron's own badge (`maintainer`) taken back** (`POST
-  EDGE/admin/badges/revoke`, operator token): never refused. It answers
-  `{revoked, suspended: [ids]}`: each of the account's plugins whose
-  listing says it's Zeron's own (`claims_zeron`) is suspended, in the audit
-  as `plugin.suspend` by `operator`; installed copies keep running. Granting
-  the badge back relists nothing. A suspended plugin takes no new version,
-  so its owner can't rename it: staff bring it back with a restore, once it
-  is transferred to an account with the badge or the versions that say so
-  are **removed** (until then the restore answers 409 `claims_zeron`). Not
-  taken down: a take-down is for harm only. It goes out on the feed and
-  turns off every installed copy, and a misnamed plugin isn't harmful.
 - **The store itself misbehaving**: deploy the edge with the `STORE_DB`
   binding removed from that environment's `d1_databases`. Every store route
   then answers `503 unavailable`, and the rest of the edge is untouched. The

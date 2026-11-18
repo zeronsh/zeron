@@ -4,7 +4,7 @@ import { isText, readmePictures } from "./checks";
 import { askParts, askPartsOf, asksChanged, consentDiff, consentItem, fullControl, heldToItsOwnRules } from "./consent";
 import { canonicalJson, formatFloat, parseJsonText } from "./json";
 import type { JsonObject } from "./json";
-import { changelogNotes, checkListing, claimsZeron, claimsZeronInName, keywordClaim, listingOf, markClaim } from "./listing";
+import { asWritten, changelogNotes, checkListing, firstUnseen, keywordClaim, listingOf, markClaim, problemWord } from "./listing";
 import { firstCollision } from "./paths";
 import { readManifest } from "./manifest";
 import { PAYLOAD_PREFIX, decodeBase64, inspectPackageJson, sha256Hex, signaturePayload, verifyPackage } from "./package";
@@ -258,49 +258,24 @@ describe("store listing: the mark (amendment 45)", () => {
   });
 });
 
-describe("store listing: claims of being Zeron's own", () => {
-  it("reads each phrase as the mark's words are read", () => {
-    for (const text of [
-      "Git by Zeron", "Git by Zer0n", "Git by Z\u{435}ron", "Git b\u{443} Zeron", "Git by \u{1d22}\u{1d07}\u{280}\u{1d0f}\u{274}", "z e r o n approved", "Z.E.R.O.N. approved", "Git by Z e r o n",
-      "Zeron  -  certified", "the zeron\u{2019}s own board", "Zeron\u{2bc}s own", "Notes from Zer\u{fe0f}on"
-    ]) {
-      expect(claimsZeron(text), JSON.stringify(text)).toBeDefined();
-    }
-  });
-
-  it("leaves what is only about Zeron alone", () => {
-    for (const text of ["Themes for Zeron", "Zeronaut", "Zeron notes", "A board by Zenon", "Lazeron approved", "by zeronaut", "from zero n"]) {
-      expect(claimsZeron(text), JSON.stringify(text)).toBeUndefined();
-    }
-  });
-});
-
 describe("store listing: Zeron in a name, and the mark in other languages (58fc12caf)", () => {
-  it("holds keywords to both rules, for every publisher (367b7fbd7)", () => {
-    for (const k of ["verified", "official", "zeron-official", "by-zeron", "zeron-approved", "zeron-team", "ze-ron", "veri-fied", "oficial", "zer0n"]) {
+  it("holds keywords to the mark's rule, for every publisher (367b7fbd7)", () => {
+    for (const k of ["verified", "official", "zeron-official", "veri-fied", "oficial", "ver1fied"]) {
       expect(keywordClaim(k), k).toBeDefined();
     }
-    for (const k of ["focus", "git-flow", "code review", "heron", "zero", "verify", "officer"]) {
+    // ("zeron" in a keyword is anyone's: fa75e5a40.)
+    for (const k of ["focus", "git-flow", "code review", "heron", "zero", "verify", "officer", "zeron", "by-zeron", "zeron-team", "ze-ron"]) {
       expect(keywordClaim(k), k).toBeUndefined();
     }
   });
 
-  it("lets a name say Zeron only as what it's for", () => {
-    for (const name of ["Themes for Zeron", "Git in Zeron", "Notes with Zer0n", "适用于Zeron的主题", "Zeron 用于"]) {
-      expect(claimsZeronInName(name), name).toBe(name === "Zeron 用于");
+  it("leaves Zeron in a name or description alone (fa75e5a40)", () => {
+    for (const text of ["Zeron Labs", "Team Zeron", "Git by Zeron", "Built-in Zeron Git", "Made by Zeron.", "Zeron HQ approved.", "使用 Zeron 的技巧"]) {
+      expect(markClaim(text, true), text).toBeUndefined();
+      expect(markClaim(text, false), text).toBeUndefined();
     }
-    for (const name of ["Zeron Labs", "Team Zeron", "Zeron Git", "Zeron's git", "Zeron-made", "Themes for Zeron, by Zeron", "Z e r o n tools"]) {
-      expect(claimsZeronInName(name), name).toBe(true);
-    }
-  });
-
-  it("holds a description to the words of origin and standing, leaving prose about Zeron alone", () => {
-    for (const text of ["Made by Zeron.", "Boards von Zeron.", "From the Zeron team.", "Zeron Labs' own board.", "Zeron HQ approved.", "Zeron官方插件", "官方 Zeron"]) {
-      expect(claimsZeron(text), text).toBeDefined();
-    }
-    for (const text of ["Adds a panel to Zeron's sidebar.", "Works in Zeron.", "Themes for Zeron users."]) {
-      expect(claimsZeron(text), text).toBeUndefined();
-    }
+    // (But Zeron verifying is the store's mark itself.)
+    expect(markClaim("Verified by Zeron.", false)).toBe("verified");
   });
 
   it("refuses the mark's words in the store's other languages: whole where words are spaced, anywhere in CJK", () => {
@@ -311,6 +286,52 @@ describe("store listing: Zeron in a name, and the mark in other languages (58fc1
     for (const text of ["Unofficial", "Неофициальный клиент", "Oficialmente útil", "Verificador", "数学公式", "公式编辑器", "수학 공식", "공식 계산기"]) {
       expect(markClaim(text), text).toBeUndefined();
     }
+  });
+});
+
+describe("store listing: a refusal says why and where (listing_causes)", () => {
+  it("gives a name's, description's or keywords' first problem its cause and word", () => {
+    const first = (fields: Record<string, unknown>) => {
+      const manifest = readManifest(parseJsonText(JSON.stringify({ id: "focus", name: "Focus", version: "1.0.0", entry: "init.luau", description: "Boards.", icon: "icon.svg", categories: ["productivity"], ...fields })) as JsonObject);
+      const files = new Map([["init.luau", "x"], ["README.md", "# Focus"], ["icon.svg", "<svg/>"]].map(([k, v]) => [k!, new TextEncoder().encode(v)]));
+      const p = checkListing(manifest, files, isText).problems[0]!;
+      return [p.field, p.cause, p.word];
+    };
+    expect(first({ name: "Verified Focus" })).toEqual(["name", "mark_word", "Verified"]);
+    expect(first({ name: "Focus \u{2705}" })).toEqual(["name", "mark_glyph", "\u{2705}"]);
+    expect(first({ name: "n".repeat(65) })).toEqual(["name", "too_long", undefined]);
+    expect(first({ name: "Focus\u{200b}Board" })).toEqual(["name", "unseen_char", "U+200B"]);
+    expect(first({ description: "a\nb" })).toEqual(["description", "not_one_line", undefined]);
+    expect(first({ description: "Official Git tools." })).toEqual(["description", "mark_word", "Official"]);
+    expect(first({ description: "The \u{43e}fficial board." })).toEqual(["description", "mark_word", "\u{43e}fficial"]);
+    expect(first({ keywords: ["a", "b", "a"] })).toEqual(["keywords", "repeated", "a"]);
+    expect(first({ keywords: ["a", "b", "c", "d", "e", "f", "g", "h", "i"] })).toEqual(["keywords", "too_many", undefined]);
+    expect(first({ keywords: ["Focus"] })).toEqual(["keywords", "keyword_shape", "Focus"]);
+    expect(first({ keywords: ["timer\u{fe0f}"] })).toEqual(["keywords", "keyword_shape", "timer"]);
+    expect(first({ keywords: ["veri-fied"] })).toEqual(["keywords", "mark_word", "veri-fied"]);
+    // Other fields' problems carry none.
+    expect(first({ categories: ["games"] })).toEqual(["categories", undefined, undefined]);
+  });
+
+  it("names a claim as its author wrote it", () => {
+    for (const [text, inName, written] of [
+      ["Verified Focus", true, "Verified"],
+      ["Focus, VERIFIED.", true, "VERIFIED"],
+      ["verified_focus", true, "verified"],
+      ["The \u{43e}fficial board.", false, "\u{43e}fficial"],
+      ["Notes. V.E.R.I.F.I.E.D. Boards", false, "V.E.R.I.F.I.E.D"],
+      ["A board V E R I F I E D", true, "V E R I F I E D"],
+      ["Focus \u{2714}\u{fe0f}", true, "\u{2714}"],
+      ["\u{5df2}\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}", false, "\u{5df2}\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}"],
+      ["\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", true, "\u{516c}\u{5f0f}"]
+    ] as const) {
+      const claim = markClaim(text, inName)!;
+      expect(asWritten(text, claim), text).toBe(written);
+    }
+    expect(asWritten("Plain words", "verified")).toBeUndefined();
+    expect(firstUnseen("Focus\u{200b}Board\u{202e}")).toBe("\u{200b}");
+    expect(firstUnseen("Stars \u{2b50}\u{fe0f}")).toBeUndefined();
+    expect(problemWord(`a\u{202e}${"x".repeat(100)}`)).toBe(`a${"x".repeat(63)}`);
   });
 });
 
