@@ -599,6 +599,10 @@ ui.command {
 			mono = t["font.mono"],
 			secondary = t["text.secondary"],
 			tertiary = t["text.tertiary"],
+			-- (The page's and sidebar's fill and edge, when the window's
+			-- theme says its own.)
+			page_bg = t["zeron.inset.bg"],
+			page_edge = t["zeron.inset.edge"],
 			-- "Accent colour throughout": a status dot, a find's highlight,
 			-- an @file token, a list marker, and a link's ink (nil: the
 			-- text's own).
