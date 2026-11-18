@@ -554,3 +554,21 @@ Agreed after the plan was first written. Newest last.
     the engine's `digest_diff` shapes and names, so the reviewer's page and
     a device's consent sheet say the same thing. The flag is never true
     while the diff names nothing.
+42. **A package whose paths collide once folded is refused everywhere, by
+    one rule.** A device refuses it at parse, before writing, on every disk
+    (`paths_collide`, naming both paths): two paths that fold alike (case,
+    NFC against NFD), a file where another path needs a folder of that
+    name, and any path whose fold is the manifest's or `.source.json`'s.
+    The fold is the store's own (`listing::fold_path`). The edge's
+    `verifyPackage` refuses the same with the same word, held to the shared
+    package vectors, and the listing rule refuses a file and a folder that
+    fold alike too, so the store never approves a package a device will
+    not install. The device's re-scan after writing stays as the backstop.
+43. **A store install over an installed plugin is the person's.** From
+    anyone but the person (this device's app, or another of their devices
+    as the edge verified the link) it is refused `needs_person`, before
+    anything is fetched, and a non-person never sets the pre-release
+    opt-in. `CreateDeployKey` accepts only a step-up begun for it
+    (`StepUp {for: "deploy_key"}`), once. A store record without `bytes`
+    is refused; `bytes` is the read limit. The store client follows no
+    redirect.
