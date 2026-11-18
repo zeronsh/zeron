@@ -164,7 +164,12 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
     let e = engine.clone();
     host.async_action("plugins.store.mine", move |_| {
         let e = e.clone();
-        async move { ask(&e, "StoreMyPlugins", json!({})).await }
+        async move {
+            // (Your own account, not the catalog: every version of yours,
+            // pending and rejected ones with the reviewers' reasons.)
+            crate::plugins::preview::refuse("plugins.store.mine")?;
+            ask(&e, "StoreMyPlugins", json!({})).await
+        }
     });
     let e = engine.clone();
     host.async_action("plugins.store.version_action", move |arg| {
@@ -204,6 +209,9 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
     host.async_action("plugins.store.keys", move |id| {
         let e = e.clone();
         async move {
+            // (Your own account: your keys' names, fingerprints and when
+            // they were last used.)
+            crate::plugins::preview::refuse("plugins.store.keys")?;
             let id = store_id(&text(&id)).ok_or("not_in_store")?;
             ask(&e, "ListDeployKeys", json!({ "id": id })).await
         }
@@ -408,8 +416,9 @@ mod seam_tests;
 mod tests {
     use super::*;
 
-    /// Every store call that sends, changes or reports anything as you is
-    /// refused while a template is only being previewed.
+    /// Every store call that sends, changes or reports anything as you, or
+    /// reads your own account (your plugins, your keys), is refused while a
+    /// template is only being previewed; the public catalog stays open.
     #[test]
     fn a_preview_can_t_act_as_you_in_the_store() {
         let source = include_str!("catalog.rs");
@@ -424,9 +433,9 @@ mod tests {
                 guarded += 1;
             }
         }
-        assert!(guarded >= 7, "{guarded}");
-        for read in ["plugins.store.search", "plugins.store.detail", "plugins.store.mine", "plugins.store.keys"] {
-            assert!(!crate::plugins::preview::BLOCKED.contains(&read), "{read} only reads");
+        assert!(guarded >= 9, "{guarded}");
+        for read in ["plugins.store.search", "plugins.store.detail", "plugins.store.categories", "plugins.store.picture", "plugins.store.icon"] {
+            assert!(!crate::plugins::preview::BLOCKED.contains(&read), "{read} only reads the catalog");
         }
     }
 

@@ -169,6 +169,20 @@ fn a_deploy_key_s_sign_in_is_begun_for_a_deploy_key() {
 }
 
 #[test]
+fn a_preview_reads_the_catalog_but_never_your_own_account() {
+    crate::plugins::preview::set(Some(crate::plugins::preview::Preview { id: "dusk".into(), name: "Dusk".into() }));
+    for call in [r#"ui.call("plugins.store.mine", nil)"#, r#"ui.call("plugins.store.keys", "focus")"#] {
+        let (out, asked) = run(call, json!({ "plugins": [], "keys": [] }));
+        assert!(out.starts_with("err:Dusk is a preview."), "{call}: {out}");
+        assert!(asked.is_empty(), "{call} reached the engine: {asked:?}");
+    }
+    let (out, asked) = run(r#"ui.call("plugins.store.search", { q = "timer" })"#, json!({ "items": [] }));
+    assert!(out.starts_with("ok:"), "{out}");
+    assert_eq!(asked[0].0, "StoreSearch");
+    crate::plugins::preview::set(None);
+}
+
+#[test]
 fn pre_releases_go_to_the_device_chosen() {
     let (_, asked) = run(r#"ui.call("plugins.store.prereleases", { id = "focus", on = true, device = "devbox" })"#, json!({}));
     assert_eq!(asked[0], ("SetPluginPrereleases".into(), json!({ "id": "focus", "on": true }), Some("devbox".into())));

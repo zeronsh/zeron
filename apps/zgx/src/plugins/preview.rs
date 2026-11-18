@@ -55,8 +55,11 @@ pub const BLOCKED: &[&str] = &[
     "plugins.remove",
     "plugins.setting_set",
     "plugins.set_off",
-    // The plugin store: what sends, changes or reports anything as you
-    // (src/plugins/catalog.rs). Reading the catalog and your own stays.
+    // The plugin store: what sends, changes or reports anything as you, and
+    // what reads your own account (src/plugins/catalog.rs). Reading the
+    // catalog stays.
+    "plugins.store.mine",
+    "plugins.store.keys",
     "plugins.store.prepare",
     "plugins.store.publish",
     "plugins.store.version_action",
