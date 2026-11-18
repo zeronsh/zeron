@@ -17,7 +17,7 @@ describe("a reviewer is told when a README or notes are shown as text, whatever 
       ["notes_drawn", "fail"],
     ]);
     expect(rows[0].message).toContain(readme);
-    expect(rows[0].message).toContain("That alone is a reason not to approve it.");
+    expect(rows[0].message).toContain("That alone is a reason not to verify it.");
     expect(rows[1].message).toContain(notes);
   });
 

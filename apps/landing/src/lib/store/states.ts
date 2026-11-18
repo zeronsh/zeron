@@ -1,35 +1,70 @@
-// A version's state, as an author and a reviewer read it (named as the app names it: words.ts).
-// Six states, six tones, none shared: in review (info), approved (success),
-// not approved (warning: the author's to fix), withdrawn (neutral), no new
-// installs (accent), taken down (danger).
-import type { Listing, PluginStatus, VersionInfo } from "./types.ts";
-import { statusWords } from "./words.ts";
+// A version's state and its verification, as an author and a reviewer read
+// them (amendment 45: publishing is immediate, review verifies). Two things
+// a version says, never one: where it stands (listed, no new installs,
+// taken down, removed) and whether a reviewer verified it.
+import type { Listing, PluginStatus, Review, VersionInfo } from "./types.ts";
+import { SITE_WORDS, statusWords, store } from "./words.ts";
 
 /** A badge's tone: its ink on its wash (app.css .badge, by toneClass). */
 export type Tone = "neutral" | "accent" | "info" | "success" | "warning" | "danger";
 
-export function versionState(v: Pick<VersionInfo, "status" | "review">): { label: string; tone: Tone; about: string } {
+export interface State {
+  label: string;
+  tone: Tone;
+  about: string;
+}
+
+/** Where a version stands. */
+export function versionState(v: Pick<VersionInfo, "status"> & Pick<Partial<VersionInfo>, "yanked_by" | "superseded">): State {
   switch (v.status) {
-    case "pending":
-      return { label: statusWords("pending"), tone: "info", about: "Waiting for a reviewer. Your own devices can install it now; nobody else's can yet." };
-    case "approved":
-      return { label: statusWords("approved"), tone: "success", about: "Anyone can install it." };
-    case "rejected":
-      return { label: statusWords("rejected"), tone: "warning", about: "Send a new version with the changes the reviewer asked for." };
-    case "withdrawn":
-      return { label: statusWords("withdrawn"), tone: "neutral", about: "Taken out of review by its author." };
+    case "listed":
+      return { label: statusWords("listed"), tone: "success", about: "Anyone can see and install it." };
     case "yanked":
-      return { label: statusWords("yanked"), tone: "accent", about: "Nobody can install it anymore. Those who have it keep it working." };
+      // (Superseded: a newer version was published while this one wasn't verified, amendment 45.)
+      return v.yanked_by === "superseded"
+        ? { label: statusWords("yanked"), tone: "accent", about: `${replaced(v)}. Those who have it keep it working; verifying it would allow installs again.` }
+        : { label: statusWords("yanked"), tone: "accent", about: "Nobody can install it anymore. Those who have it keep it working." };
+    case "taken_down":
+      return { label: statusWords("taken_down"), tone: "danger", about: "Taken down by the store's reviewers as harmful: turned off on the devices that had it." };
     case "removed":
-      return { label: statusWords("removed"), tone: "danger", about: "Taken down by the store's reviewers: turned off on the devices that had it." };
+      return { label: statusWords("removed"), tone: "danger", about: "Removed by the store's reviewers. Nobody can install it; those who have it keep it." };
     default:
       // A state this site doesn't know yet: named as the edge says it.
       return { label: reasonWords(String(v.status)), tone: "neutral", about: "" };
   }
 }
 
-/** Whether a plugin was ever listed: a version of it was approved once (since stopped or taken down, maybe). */
-export const everListed = (versions: readonly Pick<VersionInfo, "status">[]) => versions.some((v) => v.status === "approved" || v.status === "yanked" || v.status === "removed");
+/**
+ * Whether a reviewer verified it. The public reads Verified or Not verified;
+ * its author and staff also read Not verified yet (no decision) apart from a
+ * reviewer declining it (`review`, theirs only).
+ */
+export function verificationState(v: Pick<VersionInfo, "verified"> & { review?: Review }): State {
+  if (v.verified) return { label: store("plugins.store.verified"), tone: "success", about: "A reviewer checked this version." };
+  if (v.review?.decision === "declined") return { label: store("plugins.store.not_verified"), tone: "warning", about: "A reviewer didn't verify it; their reason and words are below. It stays listed." };
+  if (v.review && !v.review.decided) return { label: SITE_WORDS.undecided, tone: "info", about: `${store("plugins.store.review.waiting")}.` };
+  return { label: store("plugins.store.not_verified"), tone: "neutral", about: "No reviewer has verified this version." };
+}
+
+/** The app's sentence for a superseded version (its replacer from the public field or the owner's). */
+const replaced = (v: Pick<Partial<VersionInfo>, "superseded_by" | "superseded">) => {
+  const by = v.superseded_by ?? v.superseded?.by;
+  return by ? store("plugins.store.superseded", { version: by }) : "Replaced by a newer version before it was verified: no new installs";
+};
+
+/**
+ * Why a version takes no new installs, for anyone: replaced before it was
+ * verified, or stopped by its author. An edge that doesn't say why (before
+ * dc45c3606) gets neither claim.
+ */
+export function stoppedWhy(v: Pick<Partial<VersionInfo>, "yanked_by" | "superseded_by" | "superseded">): string {
+  if (v.yanked_by === "superseded") return `${replaced(v)}. Those who have it keep it working.`;
+  if (v.yanked_by === "author") return "Its author stopped new installs of it. Those who have it keep it working.";
+  return "It takes no new installs. Those who have it keep it working.";
+}
+
+/** Whether a plugin was ever listed: a version of it was (since stopped or taken down, maybe). */
+export const everListed = (versions: readonly Pick<VersionInfo, "status">[]) => versions.length > 0;
 
 /**
  * Its place in the store, in three words while it isn't suspended: Listed;

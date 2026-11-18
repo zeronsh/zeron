@@ -1,21 +1,23 @@
 ---
-// One of your plugins: every version you've sent with its state and what
-// the reviewer said, the one thing you can do with each, and the deploy
-// keys that can send it. Yours only: anyone else's id is the 404 page.
+// One of your plugins: every version you've published, where it stands and
+// whether a reviewer verified it (amendment 45: each is listed at once), what
+// the reviewer said, and the one thing you can do with each. Its deploy keys
+// are your account's (amendment 44): Deploy keys. Yours only: anyone else's
+// id is the 404 page.
 import Ask from "../../../components/kit/Ask.astro";
 import Toast from "../../../components/kit/Toast.astro";
 import PluginTile from "../../../components/store/PluginTile.astro";
 import Glyph from "../../../components/ui/Glyph.astro";
 import App from "../../../layouts/App.astro";
-import { AUTHOR_ACTIONS, revokeAsk, type AuthorAction } from "../../../lib/store/actions.ts";
+import { AUTHOR_ACTIONS, type AuthorAction } from "../../../lib/store/actions.ts";
 import { reasonLabel } from "../../../lib/store/admin.ts";
 import { takeFlash } from "../../../lib/store/flash.ts";
-import { day, shortKey } from "../../../lib/store/format.ts";
+import { day } from "../../../lib/store/format.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId } from "../../../lib/store/names.ts";
 import { requireSession } from "../../../lib/store/session.ts";
-import { everListed, listingState, toneClass, versionState } from "../../../lib/store/states.ts";
-import type { DeployKey, VersionInfo } from "../../../lib/store/types.ts";
+import { everListed, listingState, toneClass, verificationState, versionState } from "../../../lib/store/states.ts";
+import type { VersionInfo } from "../../../lib/store/types.ts";
 import { pluginUrl } from "../../../lib/store/urls.ts";
 import { store } from "../../../lib/store/words.ts";
 
@@ -25,34 +27,20 @@ const { id } = Astro.params;
 if (!isPluginId(id)) return new Response(null, { status: 404 });
 const session = await requireSession(Astro);
 if (session instanceof Response) return session;
-const [mine, keysResult] = await Promise.all([Astro.locals.edge.myPlugins(), Astro.locals.edge.keys(id)]);
+const mine = await Astro.locals.edge.myPlugins();
 const plugin = mine.ok ? mine.data.plugins.find((p) => p.id === id) : undefined;
 if (mine.ok && !plugin) return new Response(null, { status: 404 });
 privatePage(Astro);
 const toast = takeFlash(Astro.cookies);
 const here = `/account/plugins/${id}`;
-const now = Date.now();
 
 /** The one thing that can be done with a version now. */
-const actionOf = (v: VersionInfo): AuthorAction | null =>
-  v.status === "pending" ? "withdraw" : v.status === "approved" ? "yank" : v.status === "yanked" ? "unyank" : null;
+// (A superseded version is the store's to stop: its author can't allow installs again; verifying it does.)
+const actionOf = (v: VersionInfo): AuthorAction | null => (v.status === "listed" ? "yank" : v.status === "yanked" && v.yanked_by !== "superseded" ? "unyank" : null);
 const dialogId = (action: string, version: string) => `${action}-${version.replace(/[^\w-]/g, "_")}`;
 
-const keys = keysResult.ok ? keysResult.data.keys : null;
-const working = (k: DeployKey) => !k.revoked_at && !(k.expires_at != null && k.expires_at < now);
-const live = keys?.filter(working) ?? [];
-const gone = keys?.filter((k) => !working(k)) ?? [];
-const anyExpired = gone.some((k) => !k.revoked_at);
-/** Ending within 14 days: said in the warning's ink, and in words. */
-const soon = (k: DeployKey) => k.expires_at != null && k.expires_at - now < 14 * 86_400_000;
-/** When it ends, in the app's words: "Ends today", "Ends tomorrow", "Ends in 11 days". */
-const endsIn = (k: DeployKey) => {
-  const days = Math.max(0, Math.ceil((k.expires_at! - now) / 86_400_000));
-  return days === 0 ? store("plugins.store.key.ends_today") : days === 1 ? store("plugins.store.key.ends_tomorrow") : store("plugins.store.key.ends_in", { n: days });
-};
-/** A key can be made once the plugin has a version (its first is sent from a computer). */
-const sent = plugin?.versions.some((v) => v.status === "approved" || v.status === "yanked" || v.status === "pending") ?? false;
-const idle = plugin && !plugin.versions.some((v) => v.status === "approved" || v.status === "yanked" || v.status === "pending");
+/** Nothing of it can be installed: every version was taken down or removed. */
+const idle = plugin && plugin.versions.length > 0 && !plugin.versions.some((v) => v.status === "listed" || v.status === "yanked");
 const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions)) : null;
 ---
 
@@ -89,14 +77,14 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
         {idle && (
           <p class="notice">
             <Glyph name="info-circle" size={16} />
-            <span>No version of it is listed or in review. Its id stays yours for 90 days after your last submission; after that, anyone can take it.</span>
+            <span>No version of it can be installed: each was taken down or removed. Its id stays yours for 90 days after your last version; after that, anyone can take it.</span>
           </p>
         )}
 
         <div class="plugin-main">
           <nav class="tabs" aria-label="This plugin" data-tabs>
             <a href="#versions" aria-current="page">Versions <span class="count">{plugin.versions.length}</span></a>
-            <a href="#keys">{store("plugins.store.keys")} <span class="count">{live.length}</span></a>
+            <a href="/account/keys">{store("plugins.store.keys")}</a>
           </nav>
           <div class="tab-panels">
             <section class="tab-panel" id="versions" aria-label="Versions">
@@ -104,7 +92,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                 <div class="panel">
                   <div class="empty">
                     <span class="tile"><Glyph name="document" size={20} /></span>
-                    <div class="words"><h2>{store("plugins.store.no_versions")}</h2><p>Versions you send show here with where their review stands.</p></div>
+                    <div class="words"><h2>{store("plugins.store.no_versions")}</h2><p>Versions you publish show here, each saying whether a reviewer verified it.</p></div>
                   </div>
                 </div>
               ) : (
@@ -112,28 +100,40 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                   <table class="table wrapping versions-table">
                     <caption class="sr-only">{store("plugins.store.your_versions")}</caption>
                     <colgroup><col class="version" /><col class="state" /><col /><col class="sent" /><col class="action" /></colgroup>
-                    <thead><tr><th scope="col">Version</th><th scope="col">State</th><th scope="col">What it means</th><th scope="col">Sent</th><th scope="col" class="end"><span class="sr-only">What you can do</span></th></tr></thead>
+                    <thead><tr><th scope="col">Version</th><th scope="col">State</th><th scope="col">What it means</th><th scope="col">Published</th><th scope="col" class="end"><span class="sr-only">What you can do</span></th></tr></thead>
                     <tbody>
                       {plugin.versions.map((v) => {
                         const state = versionState(v);
+                        const verification = verificationState(v);
                         const action = actionOf(v);
                         const ask = action ? AUTHOR_ACTIONS[action].ask(plugin.name, v.version) : null;
                         return (
                           <tr>
                             <td><span class="line version">{v.version}</span></td>
-                            <td><span class="line"><span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span></span></td>
+                            <td><span class="line"><span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>{(v.status === "listed" || v.status === "yanked") && <span class:list={["badge sm", toneClass(verification.tone)]}>{verification.label}</span>}</span></td>
                             <td class="words">
                               {v.review?.message ? (
                                 <>
+                                  {/* (Superseded: why it takes no new installs comes first; the reviewer's words after.) */}
+                                  {v.yanked_by === "superseded" && state.about}
                                   <span class="said">“{v.review.message}”</span>
-                                  <span class="who">{[v.review.reason ? reasonLabel(v.review.reason) : null, v.review.decided_at ? `${v.status === "removed" ? "taken down" : "reviewed"} ${day(v.review.decided_at)}` : null].filter(Boolean).join(" · ")}</span>
+                                  <span class="who">{[v.review.reason ? reasonLabel(v.review.reason) : null, v.review.decided_at ? `${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "reviewed"} ${day(v.review.decided_at)}` : null].filter(Boolean).join(" · ")}</span>
                                 </>
+                              ) : v.status === "listed" || v.status === "yanked" ? (
+                                `${state.about} ${verification.about}`
                               ) : (
                                 state.about
                               )}
+                              {v.removal?.reason && (
+                                <>
+                                  <span class="said">“{v.removal.reason}”</span>
+                                  <span class="who">{`${v.status === "taken_down" ? "taken down" : "removed"} ${day(v.removal.at)}`}</span>
+                                </>
+                              )}
+                              {v.via === "deploy_key" && <span class="who">Published by {v.deploy_key ? `the deploy key “${v.deploy_key.name}”` : "a deploy key"}.</span>}
                               {v.blocked && <span class="who">It was turned off on the devices that had it.</span>}
                             </td>
-                            <td><span class="line muted"><time datetime={new Date(v.submitted_at).toISOString()}>{day(v.submitted_at)}</time></span></td>
+                            <td><span class="line muted"><time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at)}</time></span></td>
                             <td class="end">
                               <span class="line end">
                                 {action && ask && (
@@ -149,115 +149,13 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                 </div>
               )}
             </section>
-
-            <section class="tab-panel" id="keys" aria-label={store("plugins.store.keys")}>
-              <div class="section">
-                <div class="section-head">
-                  <div class="words"><h2>{store("plugins.store.keys")}</h2><p>{store("plugins.store.keys_body")}</p></div>
-                  <a class="btn secondary sm" href="#new-key" data-dialog="new-key"><Glyph name="plus" size={14} />{store("plugins.store.key.new")}</a>
-                </div>
-                {keys === null ? (
-                  <div class="panel"><div class="empty" role="status"><span class="tile"><Glyph name="wifi-off" size={20} /></span><div class="words"><h3>{store("plugins.store.keys_failed")}</h3><p>Try again in a moment.</p></div></div></div>
-                ) : live.length === 0 ? (
-                  <div class="panel">
-                    <div class="empty">
-                      <span class="tile"><Glyph name="lock-keyhole-unlocked" size={20} /></span>
-                      <div class="words"><h3>{store("plugins.store.keys_none")}</h3><p>{sent ? "A key is made on your computer, where its secret stays. New key… says how." : store("plugins.store.keys_publish_first")}</p></div>
-                      <div class="actions"><a class="btn secondary sm" href="#new-key" data-dialog="new-key"><Glyph name="plus" size={14} />{store("plugins.store.key.new")}</a></div>
-                    </div>
-                  </div>
-                ) : (
-                  <div class="panel">
-                    <table class="table wrapping keys-table">
-                      <caption class="sr-only">{store("plugins.store.keys")}</caption>
-                      <colgroup><col /><col class="key" /><col class="when" /><col class="when" /><col class="when" /><col class="action" /></colgroup>
-                      <thead><tr><th scope="col">{store("plugins.store.key.name")}</th><th scope="col">Key</th><th scope="col">Made</th><th scope="col">Last used</th><th scope="col">{store("plugins.store.key.expiry_label")}</th><th scope="col" class="end"><span class="sr-only">What you can do</span></th></tr></thead>
-                      <tbody>
-                        {live.map((k) => (
-                          <tr>
-                            <td><span class="line"><span class="key-name" title={k.name}>{k.name}</span></span></td>
-                            <td><span class="line key" title={k.key}>{shortKey(k.key)}</span></td>
-                            <td data-label="Made"><span class="line muted">{day(k.created_at)}</span></td>
-                            <td data-label="Last used"><span class="line muted">{k.last_used_at ? day(k.last_used_at) : store("plugins.store.key.not_used")}</span></td>
-                            <td data-label="Ends">
-                              {soon(k) ? (
-                                <span class="line soon" title={endsIn(k)}>{day(k.expires_at!)}<span class="in-days" aria-hidden="true">{" · "}{endsIn(k)}</span><span class="sr-only">, {endsIn(k)}</span></span>
-                              ) : (
-                                <span class="line muted">{k.expires_at ? day(k.expires_at) : store("plugins.store.key.no_end")}</span>
-                              )}
-                            </td>
-                            <td class="end"><span class="line end"><a class="btn ghost sm" href={`${here}/keys/${encodeURIComponent(k.key)}`} data-dialog={`revoke-${k.key}`}>{revokeAsk(k.name).confirm}</a></span></td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-                {gone.length > 0 && (
-                  <details class="gone">
-                    <summary>{anyExpired ? "Revoked and expired keys" : "Revoked keys"} · {gone.length}<Glyph name="alt-arrow-down" size={14} /></summary>
-                    <div class="panel">
-                      <table class="table wrapping keys-table">
-                        <caption class="sr-only">{anyExpired ? "Revoked and expired keys" : "Revoked keys"}</caption>
-                        <colgroup><col /><col class="key" /><col class="when" /><col class="when" /><col class="when" /><col class="action" /></colgroup>
-                        <thead><tr><th scope="col">{store("plugins.store.key.name")}</th><th scope="col">Key</th><th scope="col">Made</th><th scope="col">Last used</th><th scope="col">Stopped</th><th scope="col" class="end"><span class="sr-only">Why</span></th></tr></thead>
-                        <tbody>
-                          {gone.map((k) => (
-                            <tr>
-                              <td><span class="line"><span class="key-name" title={k.name}>{k.name}</span></span></td>
-                              <td><span class="line key" title={k.key}>{shortKey(k.key)}</span></td>
-                              <td data-label="Made"><span class="line">{day(k.created_at)}</span></td>
-                              <td data-label="Last used"><span class="line">{k.last_used_at ? day(k.last_used_at) : store("plugins.store.key.not_used")}</span></td>
-                              <td data-label="Stopped"><span class="line">{day(k.revoked_at ?? k.expires_at!)}</span></td>
-                              <td class="end"><span class="line end">{k.revoked_at ? "Revoked" : "Expired"}</span></td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </details>
-                )}
-              </div>
-            </section>
           </div>
         </div>
-
-        {/* New key: a sheet that says how (the secret is made where it stays). */}
-        <dialog class="sheet" id="new-key" aria-labelledby="new-key-title" closedby="any">
-          <div class="head">
-            <h2 id="new-key-title">{store("plugins.store.key.new_title")}</h2>
-            <p>A key's secret is made on your computer and never leaves it, so a key is made there, not here. Put the secret in your CI's secrets; this page then lists the key.</p>
-          </div>
-          <div class="body ways">
-            {sent ? (
-              <>
-                <div class="way">
-                  <h3>In Zeron</h3>
-                  <p class="path">
-                    <b>Settings</b>
-                    {["Plugins", "Yours", plugin.name, store("plugins.store.keys"), store("plugins.store.key.new")].map((step) => (
-                      <span class="step"><Glyph name="alt-arrow-right" size={12} /><b>{step}</b></span>
-                    ))}
-                  </p>
-                </div>
-                <div class="way">
-                  <h3>With the command</h3>
-                  <div class="copybox"><code tabindex="0">zeron plugin key create {plugin.id}</code><button type="button" class="btn ghost icon xs" aria-label="Copy" data-copy><Glyph name="copy" size={14} /></button></div>
-                </div>
-                <p class="first">A key sends the versions after the first; this plugin's first is already sent.</p>
-              </>
-            ) : (
-              <p class="notice warn"><Glyph name="info-circle" size={16} /><span>{store("plugins.store.keys_publish_first")}</span></p>
-            )}
-          </div>
-          <form method="dialog" class="answers"><a class="btn secondary" href="#keys" data-close>Done</a></form>
-        </dialog>
 
         {plugin.versions.map((v) => {
           const action = actionOf(v);
           return action ? <Ask id={dialogId(action, v.version)} ask={AUTHOR_ACTIONS[action].ask(plugin.name, v.version)} action={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} csrf={session.csrf} /> : null;
         })}
-        {live.map((k) => <Ask id={`revoke-${k.key}`} ask={revokeAsk(k.name)} action={`${here}/keys/${encodeURIComponent(k.key)}`} csrf={session.csrf} />)}
       </div>
     )
   }

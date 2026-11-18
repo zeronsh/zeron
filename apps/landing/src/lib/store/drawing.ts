@@ -1,8 +1,8 @@
 // What a reviewer is told when a submission's README or notes are shown as
 // their text instead of drawn, whatever the cause: a row in the danger ink
 // on every view (Overview, Files, Changes), counted with the rest in the
-// rail and in Approve's line. A document that can't be drawn is itself a
-// reason not to approve it.
+// rail and in Verify's line. A document that can't be drawn is itself a
+// reason not to verify it.
 
 import type { Drawn, Why } from "./rendered.ts";
 import type { Check } from "./types.ts";
@@ -18,8 +18,8 @@ export function drawingChecks(readme: Drawn | null, notes: Drawn | null, version
       id: "readme_drawn",
       level: "fail",
       message: long(readme.cut)
-        ? "This README is too long to lay out: it's shown as plain text. That alone is a reason not to approve it."
-        : "This README could not be drawn: it's shown as plain text. That alone is a reason not to approve it.",
+        ? "This README is too long to lay out: it's shown as plain text. That alone is a reason not to verify it."
+        : "This README could not be drawn: it's shown as plain text. That alone is a reason not to verify it.",
     });
   }
   if (notes?.cut) {

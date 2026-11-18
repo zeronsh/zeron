@@ -1,5 +1,5 @@
 // What a reviewer reads: a package's files as a tree, what changed since the
-// last approved version (files, manifest, lines), and each file's language.
+// newest verified version (files, manifest, lines), and each file's language.
 import { structuredPatch } from "diff";
 import type { PackageFile } from "./types.ts";
 

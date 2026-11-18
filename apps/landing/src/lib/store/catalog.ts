@@ -21,6 +21,8 @@ export interface CatalogState {
   q: string;
   category: string | null;
   keyword: string | null;
+  /** Only plugins whose newest version is verified (amendment 45: a filter, never a sort). */
+  verified: boolean;
   /** As asked; null is the default for the search (relevance with words, else popular). */
   sort: Sort | null;
   cursor: string | null;
@@ -51,6 +53,7 @@ export function readCatalog(params: URLSearchParams, categories: readonly Catego
     // (An unknown category is no filter at all, rather than an empty page.)
     category: category && (categories === null || categories.some((c) => c.id === category)) && /^[a-z0-9-]{1,40}$/.test(category) ? category : null,
     keyword: keyword || null,
+    verified: params.get("verified") === "1",
     sort: sort && (SORTS as readonly string[]).includes(sort) ? (sort as Sort) : null,
     cursor: cursor && CURSOR.test(cursor) ? cursor : null,
     page: cursor && CURSOR.test(cursor) && Number.isInteger(page) && page >= 2 && page <= 10_000 ? page : null,
@@ -70,6 +73,7 @@ export function catalogHref(state: Partial<CatalogState>): string {
   if (state.q) params.set("q", state.q);
   if (state.category) params.set("category", state.category);
   if (state.keyword) params.set("keyword", state.keyword);
+  if (state.verified) params.set("verified", "1");
   const sort = state.sort ?? null;
   if (sort && sort !== effectiveSort({ q: state.q ?? "", sort: null })) params.set("sort", sort);
   if (state.cursor) params.set("cursor", state.cursor);
@@ -94,7 +98,7 @@ export function range(state: CatalogState, shown: number): { from: number; to: n
 }
 
 /** Whether this is the store's front: no search, no filter, its first page. */
-export const isFront = (state: CatalogState) => !state.q && !state.category && !state.keyword && !state.cursor && effectiveSort(state) === "popular";
+export const isFront = (state: CatalogState) => !state.q && !state.category && !state.keyword && !state.verified && !state.cursor && effectiveSort(state) === "popular";
 
 /** Words as typed, with runs of space made one and control characters gone. */
 function clean(value: string): string {

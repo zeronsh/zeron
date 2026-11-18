@@ -4,13 +4,15 @@
 import type { AstroCookies } from "astro";
 
 export const FLASH = {
-  withdrawn: { message: "Withdrawn from review.", tone: "success" },
   yanked: { message: "New installs stopped. Those who have it keep it working.", tone: "success" },
   unyanked: { message: "It can be installed again.", tone: "success" },
   key_revoked: { message: "Key revoked. It can't publish anything now.", tone: "success" },
-  approved: { message: "Approved. It's listed now.", tone: "success" },
-  rejected: { message: "Not approved. The author can read why.", tone: "success" },
-  removed: { message: "Taken down.", tone: "success" },
+  verified: { message: "Verified. Anyone installing it sees so.", tone: "success" },
+  declined: { message: "Not verified. It stays listed; the author can read why.", tone: "success" },
+  taken_down: { message: "Taken down, and turned off on the devices that have it.", tone: "success" },
+  removed: { message: "Removed. Those who have it keep it.", tone: "success" },
+  version_restored: { message: "Restored: listed again, not verified.", tone: "success" },
+  not_verified: { message: "Only a plugin with a verified version can be featured.", tone: "danger" },
   suspended: { message: "Suspended. It's gone from the store.", tone: "success" },
   restored: { message: "Restored to the store.", tone: "success" },
   featured: { message: "Featured.", tone: "success" },

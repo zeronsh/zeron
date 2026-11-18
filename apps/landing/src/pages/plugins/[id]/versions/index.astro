@@ -1,0 +1,84 @@
+---
+// Every listed version of a plugin (amendment 45: each can be seen and
+// installed, and says whether a reviewer verified it), newest first, a page
+// at a time; each to its own page. Public, kept by shared caches as the
+// plugin's page is.
+import Glyph from "../../../../components/ui/Glyph.astro";
+import App from "../../../../layouts/App.astro";
+import { count, day } from "../../../../lib/store/format.ts";
+import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
+import { firstLine } from "../../../../lib/store/markdown.ts";
+import { isPluginId, isPrerelease } from "../../../../lib/store/names.ts";
+import { pagerOf, placeOf, ADMIN_PAGE } from "../../../../lib/store/paging.ts";
+import { stoppedWhy } from "../../../../lib/store/states.ts";
+import { pluginUrl } from "../../../../lib/store/urls.ts";
+import { statusWords, store } from "../../../../lib/store/words.ts";
+
+export const prerender = false;
+
+const asked = Astro.params.id ?? "";
+if (!isPluginId(asked)) return new Response(null, { status: 404 });
+const id = asked;
+const place = placeOf(Astro.url);
+const edge = Astro.locals.edge;
+const [plugin, page] = await Promise.all([edge.plugin(id), edge.versions(id, place.cursor, ADMIN_PAGE)]);
+if ((!plugin.ok && plugin.error === "not_found") || (!page.ok && page.error === "not_found")) return new Response(null, { status: 404 });
+// A cursor from elsewhere (or an old one): its first page.
+if (!page.ok && page.error === "bad_cursor") return Astro.redirect(`${pluginUrl(id)}/versions`, 303);
+const name = plugin.ok ? plugin.data.name : id;
+const versions = page.ok ? page.data.versions : [];
+const pager = page.ok ? pagerOf(`${pluginUrl(id)}/versions`, {}, place, page.data, versions.length) : null;
+if (plugin.ok && page.ok) publicPage(Astro, [pluginTag(id)]);
+else Astro.response.status = 503;
+const versionUrl = (v: string) => `${pluginUrl(id)}/versions/${encodeURIComponent(v)}`;
+---
+
+<App title={`Versions · ${name} · Plugins · Zeron`} description={`Every version of ${name}, a plugin for Zeron, and which are verified.`} noindex={Boolean(place.cursor)} current={null}>
+  <nav slot="title" class="crumbs" aria-label="Where this is">
+    <a href="/plugins/all">All plugins</a><Glyph name="alt-arrow-right" size={12} /><a href={pluginUrl(id)}>{name}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">Versions</span>
+  </nav>
+  {
+    !page.ok || !plugin.ok ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h1 class="t-heading">{store("plugins.store.failed_title")}</h1><p>{store("plugins.store.failed_body")}</p></div>
+          <div class="actions"><a class="btn secondary sm" href={Astro.url.pathname}>{store("plugins.store.try_again")}</a></div>
+        </div>
+      </div>
+    ) : (
+      <>
+        {/* (Its name is the crumbs': the heading stays short enough for a phone whatever the name.) */}
+        <h1 class="t-title">Versions <span class="title-count">· {count(page.data.total)}</span></h1>
+        <p class="t-text t-2">Each can be installed. A verified version is one a reviewer checked; the newest verified one is {plugin.data.verified_version ? <a href={versionUrl(plugin.data.verified_version)}>{plugin.data.verified_version}</a> : "none yet"}.</p>
+        <div class="panel">
+          <table class="table wrapping versions-table">
+            <caption class="sr-only">Its versions, the newest first</caption>
+            <thead><tr><th scope="col">Version</th><th scope="col">Verified</th><th scope="col">What changed</th><th scope="col" class="end">Published</th></tr></thead>
+            <tbody>
+              {versions.map((v) => (
+                <tr>
+                  <td>
+                    <span class="line version"><a href={versionUrl(v.version)}>{v.version}</a></span>
+                    {isPrerelease(v.version) && <span class="badge sm info">Pre-release</span>}
+                    {v.yanked && <span class="badge sm warn" title={stoppedWhy(v)}>{statusWords("yanked")}</span>}
+                  </td>
+                  <td><span class="line">{v.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{store("plugins.store.not_verified")}</span>}</span></td>
+                  <td class="words">{firstLine(v.notes) || "No notes"}</td>
+                  <td class="end"><span class="line muted"><time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at)}</time></span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {pager && (pager.previous || pager.next) && (
+          <nav class="pager" aria-label="Pages">
+            {pager.previous ? <a class="btn secondary sm" href={pager.previous} rel="prev"><Glyph name="alt-arrow-left" size={14} />Previous</a> : <span class="btn secondary sm" aria-disabled="true"><Glyph name="alt-arrow-left" size={14} />Previous</span>}
+            <span class="where">{pager.where}</span>
+            {pager.next ? <a class="btn secondary sm" href={pager.next} rel="next">Next<Glyph name="alt-arrow-right" size={14} /></a> : <span class="btn secondary sm" aria-disabled="true">Next<Glyph name="alt-arrow-right" size={14} /></span>}
+          </nav>
+        )}
+      </>
+    )
+  }
+</App>

@@ -7,7 +7,7 @@ const read = (search: string) => readCatalog(new URLSearchParams(search), CATEGO
 describe("reading the catalog's address", () => {
   test("the front page", () => {
     const state = read("");
-    expect(state).toEqual({ q: "", category: null, keyword: null, sort: null, cursor: null, page: null });
+    expect(state).toEqual({ q: "", category: null, keyword: null, verified: false, sort: null, cursor: null, page: null });
     expect(effectiveSort(state)).toBe("popular");
     expect(isFront(state)).toBe(true);
   });
@@ -87,4 +87,13 @@ describe("which page, for the pager's range", () => {
     expect(range(read("cursor=c"), 24)).toBeNull();
     expect(range(read(""), 0)).toBeNull();
   });
+});
+
+test("only verified: a filter in the address, never a sort, and never the front", async () => {
+  const { catalogHref, readCatalog, isFront } = await import("./catalog.ts");
+  const state = readCatalog(new URLSearchParams("verified=1&sort=new"), null);
+  expect(state.verified).toBe(true);
+  expect(catalogHref(state)).toBe("/plugins/all?verified=1&sort=new");
+  expect(isFront(state)).toBe(false);
+  expect(readCatalog(new URLSearchParams("verified=yes"), null).verified).toBe(false);
 });

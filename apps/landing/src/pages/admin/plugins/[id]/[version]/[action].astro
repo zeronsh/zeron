@@ -1,5 +1,5 @@
 ---
-// Approve, don't approve, or take down a version. A post does it; a visit
+// Verify a version, decline to, take it down or remove it (amendment 45). A post does it; a visit
 // (no script to open the dialog, or a link from elsewhere) is the same
 // question as a page, with what is being decided above it.
 import Confirm from "../../../../../components/kit/Confirm.astro";
@@ -24,7 +24,7 @@ if (!isPluginId(id) || !isVersion(version) || !isVersionAction(action)) return n
 const session = await adminSession(Astro);
 if (!session) return new Response(null, { status: 404 });
 const submission = `/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(version)}`;
-const back = action === "remove" ? `/admin/plugins/${encodeURIComponent(id)}` : submission;
+const back = action === "remove" || action === "take_down" || action === "restore" ? `/admin/plugins/${encodeURIComponent(id)}` : submission;
 
 if (Astro.request.method === "POST") {
   const form = await formOf(Astro.request);
@@ -32,7 +32,8 @@ if (Astro.request.method === "POST") {
   const request = versionRequest(id, version, action, { get: (name) => field(form, name) });
   if (!request) return done(Astro, "bad_input", back);
   const result = await Astro.locals.edge.admin(request.path, request.body, session.csrf);
-  if (result.ok && action !== "reject") await purge(Astro, id);
+  // (Every decision changes what the public sees: verified, or the version gone, or which one is the newest verified.)
+  if (result.ok) await purge(Astro, id);
   return done(Astro, flashFor(result, VERSION_FLASH[action]), back);
 }
 if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
@@ -47,20 +48,20 @@ const warnings = s?.checks.filter((c) => c.level === "warn").length ?? 0;
 const facts = s
   ? [
       s.publisher.username ? `by @${s.publisher.username}` : "No username",
-      s.base ? `Update from ${s.base.version}` : "First listing",
+      s.base ? `Against ${s.base.version}, its newest verified version` : "None verified yet",
       failing ? `${failing} checks failed` : warnings ? `${warnings} checks to look at` : "Checks passed",
       ...(s.permissions_diff?.added?.length && s.base ? [`asks for more: ${s.permissions_diff.added.join(", ")}`] : []),
     ]
   : [];
 const ask = versionAsk(action, name, version);
-const weigh = s && action === "approve" ? toWeigh(s) : null;
+const weigh = s && action === "verify" ? toWeigh(s) : null;
 ---
 
 <App title={`${ask.title} · Zeron`} description={ask.title} noindex current="queue" session={session}>
   <nav slot="title" class="crumbs" aria-label="Where this is">
     <a href="/admin/plugins">Queue</a><Glyph name="alt-arrow-right" size={12} /><a href={submission}>{unbidi(name)} {version}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{ask.confirm}</span>
   </nav>
-  <Confirm ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={submission} size={action === "approve" ? "sm" : "md"}>
+  <Confirm ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={submission} size={action === "verify" ? "sm" : "md"}>
     {
       (s || wasCut(Astro.url)) && (
         <div class="body">
@@ -70,7 +71,7 @@ const weigh = s && action === "approve" ? toWeigh(s) : null;
         </div>
       )
     }
-    {action === "reject" && <Decline id="reject" version={version} author={s?.publisher.username ?? null} reason={resumed(Astro.url, "reason")} message={resumed(Astro.url, "message")} />}
-    {action === "remove" && <TakeDown id="take-down" reason={resumed(Astro.url, "reason")} block={resumed(Astro.url, "block") === "on"} />}
+    {action === "decline" && <Decline id="reject" version={version} author={s?.publisher.username ?? null} reason={resumed(Astro.url, "reason")} message={resumed(Astro.url, "message")} />}
+    {(action === "take_down" || action === "remove" || action === "restore") && <TakeDown id="take-down" harmful={action === "take_down"} reason={resumed(Astro.url, "reason")} />}
   </Confirm>
 </App>

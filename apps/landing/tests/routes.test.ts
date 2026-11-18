@@ -35,6 +35,8 @@ const flashOf = (response: Response) => response.headers.getSetCookie().find((c)
 
 /** A version's state on its author's page, as its row's badge says it. */
 const stateOf = (body: string, version: string) => new RegExp(`<span class="line version">${version.replace(/\./g, "\\.")}</span></td><td><span class="line"><span class="badge sm[^"]*">([^<]+)</span>`).exec(body)?.[1];
+/** A version's second badge in its row: whether a reviewer verified it (amendment 45), when it's listed or yanked. */
+const verifiedOf = (body: string, version: string) => new RegExp(`<span class="line version">${version.replace(/\./g, "\\.")}</span></td><td><span class="line"><span class="badge sm[^"]*">[^<]+</span><span class="badge sm[^"]*">([^<]+)</span>`).exec(body)?.[1];
 
 /** The session's CSRF token, as a page carries it in its forms. */
 const tokenOf = (body: string) => /name="csrf" value="([^"]+)"/.exec(body)?.[1] ?? "";
@@ -75,7 +77,8 @@ describe("the site's own pages", () => {
     expect(plugins.response.headers.get("content-type")).toContain("application/xml");
     expect(plugins.body).toContain("<loc>https://zeron.sh/plugins/focus-timer</loc>");
     expect(plugins.body).toContain("<loc>https://zeron.sh/plugins?category=git</loc>");
-    expect(plugins.body).not.toContain("voice-memos");
+    // (Nothing of it listed: every version taken down.)
+    expect(plugins.body).not.toContain("clipboard-sync");
   });
 });
 
@@ -263,7 +266,7 @@ describe("a plugin's page", () => {
   });
 
   test("unknown, unlisted and malformed ids are one 404, in the shell, saying nothing of why", async () => {
-    const pages = await Promise.all(["/plugins/no-such-plugin", "/plugins/voice-memos", "/plugins/crypto-ticker", "/plugins/Bad_Id", "/plugins/a%2Fb"].map(async (path) => ({ path, ...(await html(path)) })));
+    const pages = await Promise.all(["/plugins/no-such-plugin", "/plugins/clipboard-sync", "/plugins/crypto-ticker", "/plugins/Bad_Id", "/plugins/a%2Fb"].map(async (path) => ({ path, ...(await html(path)) })));
     for (const { path, response, body } of pages) {
       expect(response.status, path).toBe(404);
       expect(body, path).toContain("No plugin is listed here");
@@ -345,8 +348,10 @@ describe("package files", () => {
     }
   });
 
-  test("a version in review: nobody's but its author's and the admins', and kept by no one", async () => {
-    const path = "/plugins/focus-timer/files/1.3.0-beta.1/icon.svg";
+  test("a version taken down: nobody's but its author's and the admins', and kept by no one; one waiting for a reviewer is everyone's", async () => {
+    // (Amendment 45: a version is listed at once, verified or not.)
+    expect((await site.fetch("/plugins/focus-timer/files/1.3.0-beta.1/icon.svg")).status).toBe(200);
+    const path = "/plugins/worst-case-listing-at-every-limit-xyz12/files/1.2.0/icon.svg";
     expect((await site.fetch(path)).status).toBe(404);
     expect((await site.fetch(path, { headers: { cookie: await site.signIn("user_kai") } })).status).toBe(404);
     for (const user of ["user_ada", "user_grace"]) {
@@ -398,20 +403,25 @@ describe("signed-in pages", () => {
     expect(response.headers.get("cloudflare-cdn-cache-control") ?? "").not.toMatch(/public/);
   });
 
-  test("its place in the store, in three words: Listed, plain; Not listed yet, never was; Not listed, was and isn't now", async () => {
+  test("its place in the store: Listed, plain, the moment a version is published, verified or not; Not listed, once nothing of it can be installed", async () => {
     const { body } = await html("/account", await site.signIn("user_ada"));
     const cell = (id: string) => body.slice(body.indexOf(`<span class="id">${id}</span>`)).match(/<td class="listing">(.*?)<\/td>/)![1]!;
+    const newest = (id: string) => body.slice(body.indexOf(`<span class="id">${id}</span>`)).match(/<td class="newest">(.*?)<\/td>/)![1]!;
     expect(cell("focus-timer")).toBe('<span class="steady">Listed</span>');
-    expect(cell("rough-draft")).toContain(">Not listed yet<");
-    expect(cell("first-light")).toContain(">Not listed yet<");
+    // (Amendment 45: a first version is listed at once; its newest says it isn't verified yet, or a reviewer didn't verify it.)
+    expect(cell("first-light")).toBe('<span class="steady">Listed</span>');
+    expect(newest("first-light")).toContain(">Not verified yet<");
+    expect(cell("rough-draft")).toBe('<span class="steady">Listed</span>');
+    expect(newest("rough-draft")).toContain(">Not verified<");
     expect(cell("clipboard-sync")).toContain(">Not listed<");
-    expect(cell("old-sketch")).toContain(">Not listed<");
+    expect(newest("clipboard-sync")).toContain(">Taken down<");
   });
 
-  test("an id with nothing listed or in review says it goes back after 90 days", async () => {
-    const kai = await site.signIn("user_kai");
-    expect((await html("/account/plugins/old-idea", kai)).body).toContain("Its id stays yours for 90 days after your last submission");
-    expect((await html("/account/plugins/pr-radar", kai)).body).not.toContain("90 days");
+  test("an id with nothing that can be installed says it goes back after 90 days", async () => {
+    const ada = await site.signIn("user_ada");
+    expect((await html("/account/plugins/clipboard-sync", ada)).body).toContain("Its id stays yours for 90 days after your last version");
+    // (A version declined is listed still: its id is in use.)
+    expect((await html("/account/plugins/rough-draft", ada)).body).not.toContain("90 days");
   });
 
   test("someone else's plugin is the 404 page", async () => {
@@ -437,7 +447,7 @@ describe("who is signed in, for a public page's list (account/me.json)", () => {
 });
 
 describe("the admin pages can't be told from pages that don't exist", () => {
-  const PATHS = ["/admin/reservations", "/admin/reservations/linear", "/admin/plugins", "/admin/plugins/session-badges", "/admin/plugins/session-badges/1.2.1", "/admin/plugins/session-badges/1.2.1/approve", "/admin/plugins/session-badges/actions/suspend", "/admin/reports", "/admin/audit"];
+  const PATHS = ["/admin/reservations", "/admin/reservations/linear", "/admin/plugins", "/admin/plugins/session-badges", "/admin/plugins/session-badges/1.2.1", "/admin/plugins/session-badges/1.2.1/verify", "/admin/plugins/session-badges/actions/suspend", "/admin/reports", "/admin/audit"];
 
   test("signed out, or signed in without the role: the site's 404, byte for byte", async () => {
     const notFound = readFileSync(new URL("../dist/client/404.html", import.meta.url), "utf8");
@@ -490,7 +500,7 @@ describe("the admin pages can't be told from pages that don't exist", () => {
   /** Pages that are there, beside addresses that aren't (an action no page has among them). */
   const PAIRS: [string, string][] = [
     ["/admin/reservations", "/admin/nothing-here"],
-    ["/admin/plugins/session-badges/1.2.1/approve", "/admin/plugins/session-badges/1.2.1/bogus"],
+    ["/admin/plugins/session-badges/1.2.1/verify", "/admin/plugins/session-badges/1.2.1/bogus"],
     ["/admin/plugins/session-badges/actions/suspend", "/admin/plugins/session-badges/actions/bogus"],
     ["/admin/reports/1", "/admin/reports/1/more"],
   ];
@@ -548,9 +558,9 @@ describe("the admin pages can't be told from pages that don't exist", () => {
   test("a post from a non-admin does nothing and says nothing", async () => {
     const ada = await site.signIn("user_ada");
     const page = await html("/account", ada);
-    const response = await post("/admin/plugins/voice-memos/0.1.0/approve", ada, { csrf: tokenOf(page.body) });
+    const response = await post("/admin/plugins/voice-memos/0.1.0/verify", ada, { csrf: tokenOf(page.body) });
     expect(response.status).toBe(404);
-    expect((await html("/plugins/voice-memos")).response.status).toBe(404);
+    expect((await html("/plugins/voice-memos")).body).toContain(">Not verified<");
   });
 });
 
@@ -558,18 +568,18 @@ describe("forms", () => {
   test("a post from another site is refused before anything runs", async () => {
     const ada = await site.signIn("user_ada");
     const page = await html("/account/plugins/session-badges", ada);
-    const response = await post("/account/plugins/session-badges/versions/1.2.1/withdraw", ada, { csrf: tokenOf(page.body) }, "https://evil.example");
+    const response = await post("/account/plugins/session-badges/versions/1.2.1/yank", ada, { csrf: tokenOf(page.body) }, "https://evil.example");
     expect(response.status).toBe(403);
-    expect(stateOf((await html("/account/plugins/session-badges", ada)).body, "1.2.1")).toBe("In review");
+    expect(stateOf((await html("/account/plugins/session-badges", ada)).body, "1.2.1")).toBe("Listed");
   });
 
   test("a post without the session's token changes nothing", async () => {
     const ada = await site.signIn("user_ada");
-    const response = await post("/account/plugins/session-badges/versions/1.2.1/withdraw", ada, { csrf: "not-the-token" });
+    const response = await post("/account/plugins/session-badges/versions/1.2.1/yank", ada, { csrf: "not-the-token" });
     expect(response.status).toBe(303);
     const after = await html("/account/plugins/session-badges", `${ada}; ${flashOf(response)}`);
     expect(after.body).toContain("The page was open too long. Try again.");
-    expect(stateOf(after.body, "1.2.1")).toBe("In review");
+    expect(stateOf(after.body, "1.2.1")).toBe("Listed");
   });
 
   test("a confirm page names the plugin in the app's words; someone else's plugin is the 404", async () => {
@@ -589,80 +599,112 @@ describe("forms", () => {
     expect(body).toMatch(/Your plugins<span class="title-count"> · 0<\/span>/);
   });
 
-  test("one plugin: a version's one action in its column; six states, six tones; keys short, the gone ones apart", async () => {
+  test("one plugin: where each version stands and whether it's verified; a version's one action in its column", async () => {
     const { body } = await html("/account/plugins/worst-case-listing-at-every-limit-xyz12", await site.signIn("user_ada"));
     const states = Object.fromEntries(["1.5.0", "1.4.0", "1.3.0", "1.2.0", "1.1.0", "1.0.0"].map((v) => [v, stateOf(body, v)]));
-    expect(states).toEqual({ "1.5.0": "In review", "1.4.0": "Not approved", "1.3.0": "Withdrawn", "1.2.0": "Taken down", "1.1.0": "No new installs", "1.0.0": "Approved" });
-    // Each state's tone its own.
-    const tones = [...body.matchAll(/<span class="line"><span class="badge sm ?([a-z]*)">/g)].map((m) => m[1]);
-    expect(new Set(tones).size).toBe(6);
-    // Exactly one action where one can be taken, none where none can.
-    const actions = [...body.matchAll(/data-dialog="(withdraw|yank|unyank)-([\d_]+)"/g)].map((m) => `${m[1]} ${m[2]}`);
-    expect(actions).toEqual(["withdraw 1_5_0", "unyank 1_1_0", "yank 1_0_0"]);
-    // A reviewer's words in full, never cut.
-    expect(body).toContain("Until then it can&#39;t be listed, and nobody else can install it.”");
-    // Keys: seven working, three gone in their group with their count, each shown the one short way.
-    expect(body.match(/data-dialog="revoke-/g)).toHaveLength(7);
-    expect(body).toMatch(/<details class="gone"><summary>Revoked keys · 3/);
+    // (Amendment 45: 1.4.0, declined, was superseded by 1.5.0; 1.2.0 taken down, 1.3.0 removed, 1.1.0 yanked by its author.)
+    expect(states).toEqual({ "1.5.0": "Listed", "1.4.0": "No new installs", "1.3.0": "Removed", "1.2.0": "Taken down", "1.1.0": "No new installs", "1.0.0": "Listed" });
+    expect(verifiedOf(body, "1.5.0")).toBe("Not verified yet");
+    expect(verifiedOf(body, "1.4.0")).toBe("Not verified");
+    expect(verifiedOf(body, "1.0.0")).toBe("Verified");
+    // A superseded version says why it takes no new installs, and can't be allowed again by its author.
+    expect(body).toContain("Replaced by 1.5.0 before it was verified: no new installs. Those who have it keep it working; verifying it would allow installs again.");
+    const actions = [...body.matchAll(/data-dialog="(yank|unyank)-([\d_]+)"/g)].map((m) => `${m[1]} ${m[2]}`);
+    expect(actions).toEqual(["yank 1_5_0", "unyank 1_1_0", "yank 1_0_0"]);
+    // A reviewer's words in full, never cut; staff's reason for a take-down beside it.
+    expect(body).toContain("Until then this one stays listed, not verified.”");
+    expect(body).toContain("Taken down: it sent the open chat&#39;s text to a host its README doesn&#39;t name.");
+    // Its keys are the account's now: the tab is a way to them.
+    expect(body).toContain('<a href="/account/keys">Deploy keys</a>');
+  });
+
+  test("in public, a version that takes no new installs says why: replaced before it was verified, or stopped by its author", async () => {
+    const superseded = await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0");
+    expect(superseded.body).toContain("Replaced by 1.5.0 before it was verified: no new installs. Those who have it keep it working.");
+    // (The app's sentence, its newest verified listed version a link to it: 1.0.0, its author having stopped 1.1.0.)
+    expect(superseded.body).toContain('<b>1.4.0 isn&#39;t verified yet. <a href="/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.0.0">1.0.0</a> is.</b>');
+    // (Never the reviewer's reason: that is its author's to read.)
+    expect(superseded.body).not.toContain("Until then this one stays listed");
+    expect((await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.1.0")).body).toContain("Its author stopped new installs of it.");
+  });
+
+  test("the account's deploy keys: each with what it may publish; keys short, the gone ones apart", async () => {
+    const { body } = await html("/account/keys", await site.signIn("user_ada"));
+    // Eight working (one Ada made for focus-timer, seven of the worst case's), four gone in their group.
+    expect(body.match(/data-dialog="revoke-/g)).toHaveLength(8);
+    expect(body).toMatch(/<details class="gone"><summary>Revoked keys · 4/);
     for (const m of body.matchAll(/<span class="line key" title="([^"]+)">([^<]+)<\/span>/g)) expect(m[2]).toBe(`${m[1]!.slice(0, 6)}…${m[1]!.slice(-4)}`);
-    // Ending within 14 days: the warning's ink and its days in words (three of them), never colour alone.
-    const soon = [...body.matchAll(/<span class="line soon" title="Ends in (\d+) days?">.*?<span class="sr-only">, Ends in \1 days?<\/span>/g)];
-    expect(soon).toHaveLength(3);
-    // Its parts are tabs that are addresses; New key… opens a sheet that is one too.
-    expect(body).toMatch(/<a href="#versions" aria-current="page">Versions <span class="count">6<\/span><\/a><a href="#keys">Deploy keys <span class="count">7<\/span><\/a>/);
+    // What each may publish: all of yours, or the plugins it names, by their names.
+    expect(body).toContain("May publish: All your plugins, those you publish later too");
+    expect(body).toContain('<a href="/account/plugins/focus-timer">Focus timer</a>');
+    // Ending within 14 days: the warning's ink and its days in words, never colour alone.
+    expect([...body.matchAll(/<span class="line soon" title="Ends in (\d+) days?">.*?<span class="sr-only">, Ends in \1 days?<\/span>/g)].length).toBeGreaterThan(0);
     expect(body).toContain('<dialog class="sheet" id="new-key"');
-    expect(body).toContain("<code tabindex=\"0\">zeron plugin key create worst-case-listing-at-every-limit-xyz12</code>");
+  });
+
+  test("revoking a key asks first, then the key stops", async () => {
+    const ada = await site.signIn("user_ada");
+    const key = "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq";
+    const ask = await html(`/account/keys/${key}`, ada);
+    expect(ask.body).toContain("Revoke GitHub Actions?");
+    const response = await post(`/account/keys/${key}`, ada, { csrf: tokenOf(ask.body) });
+    expect(response.headers.get("location")).toBe("/account/keys");
+    expect(flashOf(response)).toBe("__Host-zeron_flash=key_revoked");
+    expect((await html(`/account/keys/${key}`, ada)).response.status).toBe(404);
   });
 
   test("a confirm page asks first; the post does it once and says so once", async () => {
     const ada = await site.signIn("user_ada");
-    const ask = await html("/account/plugins/session-badges/versions/1.2.1/withdraw", ada);
+    const ask = await html("/account/plugins/session-badges/versions/1.2.1/yank", ada);
     expect(ask.response.status).toBe(200);
-    expect(ask.body).toContain("Withdraw Session badges 1.2.1?");
-    const response = await post("/account/plugins/session-badges/versions/1.2.1/withdraw", ada, { csrf: tokenOf(ask.body) });
+    expect(ask.body).toContain("Stop new installs of Session badges 1.2.1?");
+    const response = await post("/account/plugins/session-badges/versions/1.2.1/yank", ada, { csrf: tokenOf(ask.body) });
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe("/account/plugins/session-badges");
-    expect(response.headers.getSetCookie().find((c) => c.startsWith("__Host-zeron_flash="))).toMatch(/^__Host-zeron_flash=withdrawn; .*Secure/);
+    expect(response.headers.getSetCookie().find((c) => c.startsWith("__Host-zeron_flash="))).toMatch(/^__Host-zeron_flash=yanked; .*Secure/);
     const cookie = `${ada}; ${flashOf(response)}`;
     const after = await html("/account/plugins/session-badges", cookie);
-    expect(after.body).toContain("Withdrawn from review.");
-    expect(stateOf(after.body, "1.2.1")).toBe("Withdrawn");
+    expect(after.body).toContain("New installs stopped.");
+    expect(stateOf(after.body, "1.2.1")).toBe("No new installs");
+    // (Withdraw is gone with amendment 45: nothing waits to be listed.)
+    expect((await html("/account/plugins/session-badges/versions/1.2.1/withdraw", ada)).response.status).toBe(404);
     // (Said once: the page that shows it clears it.)
     expect(after.response.headers.getSetCookie().join("\n")).toMatch(/__Host-zeron_flash=[^;]*;.*(Max-Age=0|Expires=Thu, 01 Jan 1970)/);
   });
 
-  test("an admin approves a first submission and it's listed", async () => {
+  test("a first version is listed at once, not verified; an admin verifies it and the public page says so", async () => {
     const grace = await site.signIn("user_grace");
-    expect((await html("/plugins/voice-memos")).response.status).toBe(404);
+    expect((await html("/plugins/voice-memos")).body).toContain("<b>No version of this plugin is verified yet.</b>");
     const page = await html("/admin/plugins/voice-memos/0.1.0", grace);
-    expect(page.body).toContain("First listing");
-    const response = await post("/admin/plugins/voice-memos/0.1.0/approve", grace, { csrf: tokenOf(page.body) });
+    const response = await post("/admin/plugins/voice-memos/0.1.0/verify", grace, { csrf: tokenOf(page.body) });
     expect(response.status).toBe(303);
-    expect(response.headers.get("set-cookie")).toMatch(/zeron_flash=approved/);
-    expect((await html("/plugins/voice-memos")).response.status).toBe(200);
-    expect((await html("/admin/audit", grace)).body).toMatch(/Approved\s*<a href="\/admin\/plugins\/voice-memos\/0\.1\.0"/);
+    expect(response.headers.get("set-cookie")).toMatch(/zeron_flash=verified/);
+    const after = (await html("/plugins/voice-memos", await site.signIn("user_kai"))).body;
+    expect(after).not.toContain("No version of this plugin is verified yet.");
+    expect(after).toContain(">Verified<");
+    expect((await html("/admin/audit", grace)).body).toMatch(/Verified\s*<a href="\/admin\/plugins\/voice-memos\/0\.1\.0"/);
   });
 
   test("an admin whose session ended keeps what they typed through signing in again", async () => {
     const expired = "__Host-zeron_session=ended-long-ago";
     const fields = { csrf: "stale", reason: "listing", message: "Say what <it> does, & why." };
-    const response = await post("/admin/plugins/focus-timer/1.3.0-beta.1/reject", expired, fields);
+    const response = await post("/admin/plugins/focus-timer/1.3.0-beta.1/decline", expired, fields);
     expect(response.status).toBe(303);
     const location = new URL(response.headers.get("location")!, "https://zeron.sh");
     expect(location.pathname).toBe("/auth/web/login");
     const back = location.searchParams.get("return_to")!;
-    expect(back).toBe("/admin/plugins/focus-timer/1.3.0-beta.1/reject?reason=listing&message=Say+what+%3Cit%3E+does%2C+%26+why.");
+    expect(back).toBe("/admin/plugins/focus-timer/1.3.0-beta.1/decline?reason=listing&message=Say+what+%3Cit%3E+does%2C+%26+why.");
     // Signed in again, the question comes back with the answer as typed (and nothing was done meanwhile).
     const page = await html(back, await site.signIn("user_grace"));
     expect(page.body).toContain(">Say what &lt;it&gt; does, &amp; why.</textarea>");
     expect(page.body).toMatch(/<option value="listing" selected/);
-    expect((await html("/admin/plugins/focus-timer/1.3.0-beta.1", await site.signIn("user_grace"))).body).toContain("In review");
+    expect((await html("/admin/plugins/focus-timer/1.3.0-beta.1", await site.signIn("user_grace"))).body).toContain("Not verified yet");
   });
 
   test("a non-admin's post, signed in or not, is the 404 page and nothing more", async () => {
     const notFound = readFileSync(new URL("../dist/client/404.html", import.meta.url), "utf8");
     for (const cookie of [await site.signIn("user_ada"), "theme=dark"]) {
-      for (const path of ["/admin/plugins/focus-timer/1.3.0-beta.1/reject", "/admin/reports/rep_1", "/admin/reservations"]) {
+      for (const path of ["/admin/plugins/focus-timer/1.3.0-beta.1/decline", "/admin/reports/rep_1", "/admin/reservations"]) {
         const response = await post(path, cookie, { csrf: "x", reason: "listing", message: "m", resolution: "dismissed", id: "abc" });
         expect(response.status, path).toBe(404);
         expect(response.headers.get("location"), path).toBeNull();
@@ -716,12 +758,12 @@ describe("forms", () => {
 
   test("a decision's page says what is decided, and says so when the visit came from elsewhere", async () => {
     const grace = await site.signIn("user_grace");
-    const plain = await html("/admin/plugins/session-badges/1.2.1/approve", grace);
+    const plain = await html("/admin/plugins/session-badges/1.2.1/verify", grace);
     expect(plain.body).toContain("Session badges");
-    expect(plain.body).toContain("Update from");
+    expect(plain.body).toContain("its newest verified version");
     expect(plain.body).toContain("Read it first");
     expect(plain.body).not.toContain("You followed a link from somewhere else");
-    const lured = await site.fetch("/admin/plugins/session-badges/1.2.1/approve", { headers: { cookie: grace, "sec-fetch-site": "cross-site" } });
+    const lured = await site.fetch("/admin/plugins/session-badges/1.2.1/verify", { headers: { cookie: grace, "sec-fetch-site": "cross-site" } });
     expect(await lured.text()).toContain("You followed a link from somewhere else");
   });
 
@@ -748,14 +790,15 @@ describe("forms", () => {
     expect((await html("/admin/audit", grace)).body).toMatch(/Freed\s*<a href="\/admin\/reservations"/);
   });
 
-  test("rejecting needs a reason and words for the author", async () => {
+  test("not verifying needs a reason and words for the author; the version stays listed", async () => {
     const grace = await site.signIn("user_grace");
     const page = await html("/admin/plugins/focus-timer/1.3.0-beta.1", grace);
     const csrf = tokenOf(page.body);
-    const missing = await post("/admin/plugins/focus-timer/1.3.0-beta.1/reject", grace, { csrf, reason: "listing" });
+    const missing = await post("/admin/plugins/focus-timer/1.3.0-beta.1/decline", grace, { csrf, reason: "listing" });
     expect(missing.headers.get("set-cookie")).toMatch(/zeron_flash=bad_input/);
-    const done = await post("/admin/plugins/focus-timer/1.3.0-beta.1/reject", grace, { csrf, reason: "listing", message: "Say what <b>it</b> does." });
-    expect(done.headers.get("set-cookie")).toMatch(/zeron_flash=rejected/);
+    const done = await post("/admin/plugins/focus-timer/1.3.0-beta.1/decline", grace, { csrf, reason: "listing", message: "Say what <b>it</b> does." });
+    expect(done.headers.get("set-cookie")).toMatch(/zeron_flash=declined/);
+    expect((await site.fetch("/plugins/focus-timer/files/1.3.0-beta.1/icon.svg")).status).toBe(200);
     const author = await html("/account/plugins/focus-timer", await site.signIn("user_ada"));
     expect(author.body).toContain("Say what &lt;b&gt;it&lt;/b&gt; does.");
   });
@@ -824,24 +867,31 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     return tbody.split("<tr").slice(1);
   };
 
-  test("the queue: a table, the longest waiting first, its count in the title; a badge only where a row needs a look", async () => {
+  test("the queue: a table, reported first, then the longest waiting, its count in the title; a badge only where a row needs a look", async () => {
     const grace = await site.signIn("user_grace");
     const { body } = await html("/admin/plugins", grace);
     const rows = rowsOf(body, "comfortable queue");
     const total = Number(body.match(/Queue<span class="title-count"> · (\d+)<\/span>/)![1]);
     expect(rows).toHaveLength(total);
-    const sent = rows.map((r) => Date.parse(r.match(/<time datetime="([^"]+)"/)![1]!));
-    expect(sent).toEqual([...sent].sort((a, b) => a - b));
+    // (Amendment 45: plugins with open reports first, then the oldest.)
+    const reported = rows.map((r) => /title="Open reports on this plugin/.test(r));
+    expect(reported.some(Boolean)).toBe(true);
+    expect(reported).toEqual([...reported].sort((a, b) => Number(b) - Number(a)));
+    for (const part of [rows.filter((_, i) => reported[i]), rows.filter((_, i) => !reported[i])]) {
+      const sent = part.map((r) => Date.parse(r.match(/<time datetime="([^"]+)"/)![1]!));
+      expect(sent).toEqual([...sent].sort((a, b) => a - b));
+    }
     // An update that asks for more (here a far-reaching ask among them): the danger's badge.
     const worst = rows.find((r) => r.includes("worst-case-listing-at-every-limit-xyz12"))!;
     expect(worst).toContain("Update");
-    expect(worst).toMatch(/<span class="badge sm bad" title="New since 1\.0\.0: [^"]*messages\.send[^"]*">Asks for more<\/span>/);
+    // (Against its newest verified version, 1.1.0: verified, then stopped by its author.)
+    expect(worst).toMatch(/<span class="badge sm bad" title="New since 1\.1\.0: [^"]*messages\.send[^"]*">Asks for more<\/span>/);
     // Nothing new, but a host swapped inside an ask it had: "Asks changed".
     const xss = rows.find((r) => r.includes(">xss-probe<"))!;
     expect(xss).toMatch(/<span class="badge sm warn" title="What it asks for changed inside since 1\.0\.0">Asks changed<\/span>/);
     // A new plugin asks for everything it asks for: said by its kind, not a badge.
     const first = rows.find((r) => r.includes(">first-light<"))!;
-    expect(first).toContain("New plugin");
+    expect(first).toContain("None verified yet");
     expect(first).not.toContain("badge");
   });
 
@@ -850,7 +900,7 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     try {
       await site.queueAs("empty");
       const empty = await html("/admin/plugins", grace);
-      expect(empty.body).toContain("Nothing is waiting");
+      expect(empty.body).toContain("Nothing to verify");
       expect(empty.body).toMatch(/Queue<span class="title-count"> · 0<\/span>/);
       await site.queueAs(40);
       const forty = await html("/admin/plugins", grace);
@@ -861,9 +911,9 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     }
   });
 
-  test("a submission: what it asks for against the last approved version, what moved first, the risky in the danger's ink", async () => {
+  test("a version to verify: what it asks for against the newest verified version, what moved first, the risky in the danger's ink", async () => {
     const { body } = await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", await site.signIn("user_grace"));
-    expect(body).toContain("Against 1.0.0, the last approved version: 2 new asks, 2 asks changed inside, its MCP server, its service and a setting that grants changed.");
+    expect(body).toContain("Against 1.1.0, the newest verified version: 2 new asks, 2 asks changed inside, its MCP server, its service and a setting that grants changed.");
     const rows = body.slice(body.indexOf('class="weigh"'), body.indexOf('id="checks"')).split('class="weigh-row').slice(1);
     const titles = rows.map((r) => r.match(/<p class="title">([^<]+)/)![1]!.trim());
     expect(titles.slice(0, 4)).toEqual(["Send you notifications", "Connect to these places", "Run python3, git, jq, bash on your computer as you", "Send messages to your agents as you"]);
@@ -882,33 +932,48 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     expect(rows.slice(7).every((r) => r.startsWith(" same"))).toBe(true);
   });
 
-  test("the decision: Approve, the one primary, asks once with what there is to weigh; Don't approve asks for a reason and words, showing the author's view; an approved version's is Take down", async () => {
+  test("the decision: Verify, the one primary, asks once with what there is to weigh; Don't verify asks for a reason and words, showing the author's view; Take down and Remove ask why; a verified version's are only those two", async () => {
     const grace = await site.signIn("user_grace");
     const pending = (await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", grace)).body;
     const rail = pending.slice(pending.indexOf('<aside class="decide'), pending.indexOf("</aside>"));
     expect(rail.match(/btn primary/g)).toHaveLength(1);
-    expect(rail).toContain('<a class="btn primary" href="/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0/approve" data-dialog="approve">Approve…</a>');
+    expect(rail).toContain('<a class="btn primary" href="/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0/verify" data-dialog="approve">Verify…</a>');
     const ask = pending.slice(pending.indexOf('<dialog class="dialog sm" id="approve"'), pending.indexOf("</dialog>", pending.indexOf('id="approve"')));
-    expect(ask).toContain("Anyone can install it once approved.");
+    expect(ask).toContain("Everyone installing it sees it&#39;s verified");
     expect(ask).toContain('<p class="weigh-line bad">2 new asks · 2 asks changed · Its MCP server, its service and a setting that grants changed · 1 check to look at</p>');
-    // (Approve has the focus: a clean update is a click, then Enter.)
-    expect(ask).toContain('<button class="btn primary" type="submit" autofocus>Approve</button>');
+    // (Verify has the focus: a clean update is a click, then Enter.)
+    expect(ask).toContain('<button class="btn primary" type="submit" autofocus>Verify</button>');
     expect(rail).toContain("<dt>This author</dt><dd>");
-    expect(rail).toContain('data-dialog="reject">Don\'t approve…</a>');
-    expect(rail).not.toContain("Take down");
+    expect(rail).toContain('data-dialog="reject">Don\'t verify…</a>');
+    // (Listed already: a harmful or misplaced one is taken down or removed whether or not it's decided.)
+    expect(rail).toContain('data-dialog="take-down">Take down…</a>');
+    expect(rail).toContain('data-dialog="remove">Remove…</a>');
     expect(pending).toContain('<select id="reject-reason" name="reason" required>');
     expect(pending).toContain('<option value="" disabled selected>Choose a reason</option>');
     expect(pending).toContain("What @ada reads");
     // (The raw manifest, folded.)
     expect(pending).toMatch(/<details class="fold">\s*<summary>/);
-    const approved = (await html("/admin/plugins/focus-timer/1.2.0", grace)).body;
-    const approvedRail = approved.slice(approved.indexOf('<aside class="decide'), approved.indexOf("</aside>"));
-    expect(approvedRail).toContain('data-dialog="take-down">Take down…</a>');
-    expect(approvedRail).not.toContain("/approve");
+    const verified = (await html("/admin/plugins/focus-timer/1.2.0", grace)).body;
+    const verifiedRail = verified.slice(verified.indexOf('<aside class="decide'), verified.indexOf("</aside>"));
+    expect(verifiedRail).toContain('data-dialog="take-down">Take down…</a>');
+    expect(verifiedRail).toContain('data-dialog="remove">Remove…</a>');
+    expect(verifiedRail).not.toContain("/verify");
+    expect(verifiedRail).not.toContain("/decline");
     // Without the script, the same question as a page, the author's view on it too.
-    const page = await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0/reject", grace);
-    expect(page.body).toContain("Don&#39;t approve Averyveryverylongpluginnamewithoutanyspacesatallthatkeepsgoing64 1.5.0?");
+    const page = await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0/decline", grace);
+    expect(page.body).toContain("Don&#39;t verify Averyveryverylongpluginnamewithoutanyspacesatallthatkeepsgoing64 1.5.0?");
     expect(page.body).toContain("What @ada reads");
+  });
+
+  test("a version taken down is restored by staff, and says so", async () => {
+    const grace = await site.signIn("user_grace");
+    const before = (await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.2.0", grace)).body;
+    const rail = before.slice(before.indexOf('<aside class="decide'), before.indexOf("</aside>"));
+    expect(rail).toContain("/1.2.0/restore");
+    expect(rail).not.toContain("/verify");
+    const response = await post("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.2.0/restore", grace, { csrf: tokenOf(before), reason: "Its author fixed the host." });
+    expect(response.headers.get("location")).toBe("/admin/plugins/worst-case-listing-at-every-limit-xyz12");
+    expect(response.headers.get("set-cookie")).toMatch(/zeron_flash=version_restored/);
   });
 });
 
@@ -940,10 +1005,10 @@ describe("the review of the web store: what it found, held", () => {
       expect(response.status, view).toBe(200);
       expect(ms, view).toBeLessThan(4_000);
       // (Its README past what it may keep; its notes, a table filling 64 cells a row, past what it may write.)
-      expect(body, view).toMatch(/<li class="fail">.*?This README is too long to lay out: it(?:'|&#39;)s shown as plain text\. That alone is a reason not to approve it\./s);
+      expect(body, view).toMatch(/<li class="fail">.*?This README is too long to lay out: it(?:'|&#39;)s shown as plain text\. That alone is a reason not to verify it\./s);
       expect(body, view).toMatch(/<li class="fail">.*?Its notes for 1\.2\.0 are too long to lay out/s);
     }
-    // (Approve's line counts them among what failed.)
+    // (Verify's line counts them among what failed.)
     expect((await html("/admin/plugins/slow-words/1.2.0", grace)).body).toMatch(/<p class="weigh-line bad">[^<]*2 checks failed/);
   });
 

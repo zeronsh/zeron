@@ -1,8 +1,11 @@
 ---
-// The review queue: every version waiting for a reviewer, the longest
-// waiting first, as a table (styles/app.css .queue). Its other states, the
-// ones not approved and those withdrawn, a segment each. Admins only; to
-// anyone else this address is the site's 404, signed in or not.
+// The queue (amendment 45): versions to verify, the ones no reviewer has
+// decided, at most two rows a plugin (its newest undecided release, and its
+// newest undecided pre-release when newer; each says how many it superseded), plugins with open reports first, then the longest waiting, as a
+// table (styles/app.css .queue). Every version is listed already; a
+// reviewer verifies it, or doesn't. Verified, Not verified and All, a
+// segment each. Admins only; to anyone else this address is the site's 404,
+// signed in or not.
 import PluginTile from "../../../components/store/PluginTile.astro";
 import Toast from "../../../components/kit/Toast.astro";
 import Glyph from "../../../components/ui/Glyph.astro";
@@ -13,7 +16,7 @@ import { privatePage } from "../../../lib/store/http.ts";
 import { pagerOf, placeOf } from "../../../lib/store/paging.ts";
 import { RISKY_ASKS } from "../../../lib/store/review.ts";
 import { adminSession } from "../../../lib/store/session.ts";
-import type { QueueItem } from "../../../lib/store/types.ts";
+import type { QueueItem, QueueState } from "../../../lib/store/types.ts";
 
 export const prerender = false;
 
@@ -22,34 +25,37 @@ if (!session) return new Response(null, { status: 404 });
 privatePage(Astro);
 const toast = takeFlash(Astro.cookies);
 
-const VIEWS = { pending: "Waiting", rejected: "Not approved", withdrawn: "Withdrawn" } as const;
-type View = keyof typeof VIEWS;
-const asked = Astro.url.searchParams.get("status");
-const status: View = asked && Object.hasOwn(VIEWS, asked) ? (asked as View) : "pending";
-const waiting = status === "pending";
-const keep: Record<string, string> = waiting ? {} : { status };
+const VIEWS: Record<QueueState, string> = { undecided: "To verify", verified: "Verified", declined: "Not verified", all: "All" };
+type View = QueueState;
+const asked = Astro.url.searchParams.get("state");
+const status: View = asked && Object.hasOwn(VIEWS, asked) ? (asked as View) : "undecided";
+const waiting = status === "undecided";
+const keep: Record<string, string> = waiting ? {} : { state: status };
 const place = placeOf(Astro.url);
 const result = await Astro.locals.edge.queue(status, place.cursor);
 // A cursor from another list (or an old one): back to its first page.
-if (!result.ok && result.error === "bad_cursor") return Astro.redirect(waiting ? "/admin/plugins" : `/admin/plugins?status=${status}`, 303);
+if (!result.ok && result.error === "bad_cursor") return Astro.redirect(waiting ? "/admin/plugins" : `/admin/plugins?state=${status}`, 303);
 const items = result.ok ? result.data.items : [];
 const pager = result.ok ? pagerOf("/admin/plugins", keep, place, result.data, items.length) : null;
-const viewHref = (v: View) => (v === "pending" ? "/admin/plugins" : `/admin/plugins?status=${v}`);
+const viewHref = (v: View) => (v === "undecided" ? "/admin/plugins" : `/admin/plugins?state=${v}`);
 const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent(item.plugin.id)}/${encodeURIComponent(item.version)}`;
 
 /**
- * A badge only where a row needs a look (amendment 40): checks that failed;
- * an update that asks for more (in the danger's ink when what it adds
- * reaches far), or whose asks changed inside. A row with none asks for
- * exactly what the approved version did.
+ * A badge only where a row needs a look (amendment 40): open reports on the
+ * plugin; checks that failed; an update that asks for more than its last
+ * verified version (in the danger's ink when what it adds reaches far), or
+ * whose asks changed inside; earlier undecided versions this row stands for.
+ * A row with none asks for exactly what the verified version did.
  */
 const flags = (item: QueueItem): { label: string; tone: string; title?: string }[] => [
+  ...(item.reports > 0 ? [{ label: item.reports === 1 ? "Reported" : `${item.reports} reports`, tone: "bad", title: "Open reports on this plugin: it's shown first" }] : []),
   ...(item.checks.fail > 0 ? [{ label: item.checks.fail === 1 ? "A check failed" : `${item.checks.fail} checks failed`, tone: "bad" }] : []),
   ...(item.base && item.new_asks.length > 0
     ? [{ label: "Asks for more", tone: item.new_asks.some((a) => RISKY_ASKS.has(a)) ? "bad" : "warn", title: `New since ${item.base}: ${item.new_asks.join(", ")}` }]
     : item.base && item.asks_changed
       ? [{ label: "Asks changed", tone: "warn", title: `What it asks for changed inside since ${item.base}` }]
       : []),
+  ...(item.earlier_undecided > 0 ? [{ label: `+${item.earlier_undecided} earlier`, tone: "", title: `It superseded ${item.earlier_undecided} earlier ${item.earlier_undecided === 1 ? "version" : "versions"} no reviewer decided: they take no new installs, and each still opens from the plugin's page` }] : []),
 ];
 ---
 
@@ -73,8 +79,8 @@ const flags = (item: QueueItem): { label: string; tone: string; title?: string }
         <div class="empty">
           <span class="tile"><Glyph name={waiting ? "check-circle" : "inbox"} size={20} /></span>
           <div class="words">
-            <h2>{waiting ? "Nothing is waiting" : "Nothing here yet"}</h2>
-            <p>{waiting ? "New versions show here as they're sent, the longest waiting first." : `Versions ${status === "rejected" ? "not approved" : "withdrawn by their authors"} show here, the newest first.`}</p>
+            <h2>{waiting ? "Nothing to verify" : "Nothing here yet"}</h2>
+            <p>{waiting ? "New versions show here as they're published, the longest waiting first." : status === "all" ? "Every listed version shows here." : `Versions ${status === "verified" ? "verified" : "a reviewer didn't verify"} show here.`}</p>
           </div>
         </div>
       </div>
@@ -82,21 +88,22 @@ const flags = (item: QueueItem): { label: string; tone: string; title?: string }
       <>
         <div class="panel">
           <table class="table comfortable queue">
-            <caption class="sr-only">{VIEWS[status]}, {waiting ? "the longest waiting first" : "the newest first"}</caption>
+            <caption class="sr-only">{VIEWS[status]}, {waiting ? "reported first, then the longest waiting" : "the oldest first"}</caption>
             <colgroup><col /><col class="version" /><col class="author" /><col class="kind" /><col class="flags" /><col class="waited" /></colgroup>
             <thead>
               <tr>
                 <th scope="col">Plugin</th>
                 <th scope="col">Version</th>
-                <th scope="col">Sent by</th>
+                <th scope="col">Published by</th>
                 <th scope="col">Kind</th>
                 <th scope="col"><span class="sr-only">Needs a look</span></th>
-                <th scope="col" class="end">{waiting ? "Waited" : "Sent"}</th>
+                <th scope="col" class="end">{waiting ? "Waited" : "Published"}</th>
               </tr>
             </thead>
             <tbody>
               {items.map((item) => {
-                const kind = item.base ? "Update" : "New plugin";
+                // (Weighed against its newest verified version; with none, it's the first to verify.)
+                const kind = item.base ? "Update" : "None verified yet";
                 const who = item.publisher?.username ? `@${item.publisher.username}` : null;
                 const when = waiting ? waitedFor(item.submitted_at) : day(item.submitted_at);
                 const marks = flags(item);
@@ -118,7 +125,7 @@ const flags = (item: QueueItem): { label: string; tone: string; title?: string }
                         </span>
                       </span>
                     </td>
-                    <td class="version" title={item.base ? `Update from ${item.base}` : undefined}>{item.version}</td>
+                    <td class="version" title={item.base ? `Weighed against ${item.base}, its newest verified version` : undefined}>{item.version}</td>
                     <td class="author">{who ?? <span class="faint">No username</span>}</td>
                     <td class="kind" title={item.base ? `From ${item.base}` : undefined}>{kind}</td>
                     <td><span class="flags-cell">{marks.map((m) => <span class:list={["badge sm", m.tone]} title={m.title}>{m.label}</span>)}</span></td>

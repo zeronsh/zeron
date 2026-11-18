@@ -81,7 +81,7 @@ const kept = (body: string, state: "done" | "attempting", seconds: number, cut: 
   });
 
 export interface Drawing {
-  /** Keep the result (a listed version's, the public page): or only record the try (a version in review is no one's to keep). */
+  /** Keep the result (a listed version's, the public page): or only record the try (the review page's: a reviewer's look is no one's to keep). */
   keep: boolean;
   /** The Worker's waitUntil: the try is finished under it, whether or not the visitor stays. */
   waitUntil?: (promise: Promise<unknown>) => void;

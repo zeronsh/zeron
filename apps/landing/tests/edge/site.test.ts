@@ -147,7 +147,7 @@ describe("signing in on the web", () => {
 });
 
 describe("review", () => {
-  test("the queue lists what was submitted, and each submission's views open", async () => {
+  test("the queue lists what was published and isn't verified, and each version's views open", async () => {
     const queue = await grace.get("/admin/plugins");
     expect(queue.response.status).toBe(200);
     for (const id of ["focus-timer", "theme-sync", "pr-review"]) expect(queue.body).toContain(`/admin/plugins/${id}/`);
@@ -190,24 +190,39 @@ describe("review", () => {
     expect(browser.rotations).toBe(1);
   });
 
-  test("approving lists it", async () => {
+  test("published, it's listed at once, not verified; verifying says so on its page", async () => {
+    // (Amendment 45: a version that passes the automatic checks is listed; a reviewer verifies it.)
+    const before = await new Browser().get("/plugins/focus-timer");
+    expect(before.response.status).toBe(200);
+    expect(before.body).toContain("No version of this plugin is verified yet.");
     const csrf = await grace.token("/admin/plugins/focus-timer/1.0.0");
-    const approved = await grace.post("/admin/plugins/focus-timer/1.0.0/approve", { csrf });
-    expect(approved.status).toBe(303);
-    expect(approved.headers.get("location")).toBe("/admin/plugins/focus-timer/1.0.0");
-    expect(grace.flash()).toBe("approved");
-    await grace.post("/admin/plugins/pr-review/0.3.0/approve", { csrf: await grace.token("/admin/plugins/pr-review/0.3.0") });
-    expect(grace.flash()).toBe("approved");
+    const verified = await grace.post("/admin/plugins/focus-timer/1.0.0/verify", { csrf });
+    expect(verified.status).toBe(303);
+    expect(verified.headers.get("location")).toBe("/admin/plugins/focus-timer/1.0.0");
+    expect(grace.flash()).toBe("verified");
+    await grace.post("/admin/plugins/pr-review/0.3.0/verify", { csrf: await grace.token("/admin/plugins/pr-review/0.3.0") });
+    expect(grace.flash()).toBe("verified");
+    // (Signed in: the public page is kept by shared caches, a minute at most; a signed-in visit reads it fresh.)
+    const after = await adaOnWeb.get("/plugins/focus-timer");
+    expect(after.body).not.toContain("No version of this plugin is verified yet.");
+    expect(after.body).toContain(">Verified<");
+    expect((await grace.get("/admin/plugins")).body).not.toContain("/admin/plugins/focus-timer/1.0.0");
   });
 
-  test("rejecting tells the author why", async () => {
+  test("not verifying tells the author why, and the version stays listed", async () => {
     const csrf = await grace.token("/admin/plugins/theme-sync/0.1.0");
-    const rejected = await grace.post("/admin/plugins/theme-sync/0.1.0/reject", { csrf, reason: "listing", message: "Add a screenshot of a theme." });
-    expect(rejected.status).toBe(303);
-    expect(grace.flash()).toBe("rejected");
+    const declined = await grace.post("/admin/plugins/theme-sync/0.1.0/decline", { csrf, reason: "listing", message: "Add a screenshot of a theme." });
+    expect(declined.status).toBe(303);
+    expect(grace.flash()).toBe("declined");
     const mine = await adaOnWeb.get("/account/plugins/theme-sync");
     expect(mine.response.status).toBe(200);
     expect(mine.body).toContain("Add a screenshot of a theme.");
+    expect(mine.body).toContain(">Not verified<");
+    // The public reads only that it isn't verified: never the reason.
+    const page = await new Browser().get("/plugins/theme-sync");
+    expect(page.response.status).toBe(200);
+    expect(page.body).toContain("No version of this plugin is verified yet.");
+    expect(page.body).not.toContain("Add a screenshot of a theme.");
   });
 });
 
@@ -239,8 +254,8 @@ describe("an author's words, from a real package", () => {
       expect(response.status, view).toBe(200);
       inert(body);
     }
-    await grace.post("/admin/plugins/probe/1.0.0/approve", { csrf: await grace.token("/admin/plugins/probe/1.0.0") });
-    expect(grace.flash()).toBe("approved");
+    await grace.post("/admin/plugins/probe/1.0.0/verify", { csrf: await grace.token("/admin/plugins/probe/1.0.0") });
+    expect(grace.flash()).toBe("verified");
     for (const path of ["/plugins", "/plugins/all", "/plugins/probe", "/plugins/all?q=probe"]) {
       const { response, body } = await new Browser().get(path);
       expect(response.status, path).toBe(200);
@@ -255,14 +270,18 @@ describe("an author's words, from a real package", () => {
 });
 
 describe("the catalog, from the edge's real listing", () => {
-  test("lists what's approved, and only that", async () => {
+  test("lists what's published; Verified only narrows it to what a reviewer verified", async () => {
     for (const path of ["/plugins", "/plugins/all"]) {
       const { response, body } = await new Browser().get(path);
       expect(response.status, path).toBe(200);
       expect(body, path).toContain('href="/plugins/focus-timer"');
       expect(body, path).toContain('href="/plugins/pr-review"');
-      expect(body, path).not.toContain('href="/plugins/theme-sync"');
     }
+    expect((await new Browser().get("/plugins/all")).body).toContain('href="/plugins/theme-sync"');
+    const verified = await new Browser().get("/plugins/all?verified=1");
+    expect(verified.response.status).toBe(200);
+    expect(verified.body).toContain('href="/plugins/focus-timer"');
+    expect(verified.body).not.toContain('href="/plugins/theme-sync"');
     // The count is the edge's total (amendment 38): exact, the public list's.
     expect((await new Browser().get("/plugins/all")).body).toMatch(/All plugins<span class="title-count"> · \d+<\/span>/);
     expect((await new Browser().get("/plugins/all?q=zzzzqqq")).body).toContain('<span class="title-count"> · 0</span>');
@@ -301,14 +320,18 @@ describe("the catalog, from the edge's real listing", () => {
       expect(refused.status, path).toBe(404);
       expect(refused.headers.get("content-security-policy"), path).toContain("sandbox");
     }
-    // A version still in review has no public files.
-    expect((await edge.site("/plugins/theme-sync/files/0.1.0/icon.svg")).status).toBe(404);
+    // A listed version not verified shows its pictures too: it's the store's as much as any.
+    expect((await edge.site("/plugins/theme-sync/files/0.1.0/icon.svg")).status).toBe(200);
   });
 });
 
-describe("a version in review's pictures", () => {
+describe("a version taken down: its pictures", () => {
   test("its owner and the admins see them through the site, kept by no one; anyone else gets the sandboxed 404", async () => {
     await ada.publish("pending-pics", "0.1.0");
+    const taken = await grace.post("/admin/plugins/pending-pics/0.1.0/take_down", { csrf: await grace.token("/admin/plugins/pending-pics/0.1.0"), reason: "Taken down in a test." });
+    expect(taken.status).toBe(303);
+    expect(taken.headers.get("location")).toBe("/admin/plugins/pending-pics");
+    expect(grace.flash()).toBe("taken_down");
     const path = "/plugins/pending-pics/files/0.1.0/shots/one.png";
     const kai = await signInOnTheWeb("user_kai");
     for (const [who, browser] of [["the owner", adaOnWeb], ["an admin", grace]] as const) {
@@ -329,17 +352,25 @@ describe("a version in review's pictures", () => {
 });
 
 describe("an author's pages", () => {
-  test("their plugins, each with its versions and keys", async () => {
+  test("their plugins, each with its versions; the account's deploy keys, each with what it may publish", async () => {
     const account = await adaOnWeb.get("/account");
     expect(account.body).toContain('href="/account/plugins/focus-timer"');
-    const key = await ada.deployKey("focus-timer", "ci");
     const page = await adaOnWeb.get("/account/plugins/focus-timer");
     expect(page.response.status).toBe(200);
     expect(page.body).toContain("1.0.0");
-    expect(page.body).toContain(`/account/plugins/focus-timer/keys/${key}`);
-    const csrf = await adaOnWeb.token("/account/plugins/focus-timer");
-    expect((await adaOnWeb.post(`/account/plugins/focus-timer/keys/${key}`, { csrf })).status).toBe(303);
+    // (Amendment 44: keys are the account's, with a scope.)
+    const key = await ada.deployKey(["focus-timer", "pr-review"], "ci");
+    const keys = await adaOnWeb.get("/account/keys");
+    expect(keys.response.status).toBe(200);
+    expect(keys.body).toContain(`/account/keys/${key}`);
+    // (What it may publish, by the plugins' own names: the package's.)
+    expect(keys.body).toMatch(/May publish:\s*<a href="\/account\/plugins\/focus-timer">focus timer<\/a>, <a href="\/account\/plugins\/pr-review">/);
+    const csrf = await adaOnWeb.token("/account/keys");
+    const revoked = await adaOnWeb.post(`/account/keys/${key}`, { csrf });
+    expect(revoked.status).toBe(303);
+    expect(revoked.headers.get("location")).toBe("/account/keys");
     expect(adaOnWeb.flash()).toBe("key_revoked");
+    expect((await adaOnWeb.get("/account/keys")).body).toMatch(/Revoked keys · 1/);
   });
 
   test("stop new installs of a version, and allow them again", async () => {
@@ -350,23 +381,34 @@ describe("an author's pages", () => {
     expect(adaOnWeb.flash()).toBe("unyanked");
   });
 
-  test("withdraw a version from review", async () => {
+  test("a version published is listed and waits to be verified; there's nothing to withdraw", async () => {
     await ada.publish("focus-timer", "1.1.0");
-    const csrf = await adaOnWeb.token("/account/plugins/focus-timer");
-    expect((await adaOnWeb.post("/account/plugins/focus-timer/versions/1.1.0/withdraw", { csrf })).status).toBe(303);
-    expect(adaOnWeb.flash()).toBe("withdrawn");
-    expect((await grace.get("/admin/plugins")).body).not.toContain("/admin/plugins/focus-timer/1.1.0");
+    const page = await adaOnWeb.get("/account/plugins/focus-timer");
+    expect(page.body).toMatch(/<span class="line version">1\.1\.0<\/span><\/td><td><span class="line"><span class="badge sm ok">Listed<\/span><span class="badge sm info">Not verified yet<\/span>/);
+    expect(page.body).not.toContain("/withdraw");
+    expect((await grace.get("/admin/plugins")).body).toContain("/admin/plugins/focus-timer/1.1.0");
   });
 });
 
 describe("an update", () => {
-  test("the reviewer sees what changed and what it newly asks for; approved, it's the one offered", async () => {
+  test("the reviewer sees what changed since the newest verified version and what it newly asks for; the one it superseded says why; verified, it's the one offered", async () => {
     await ada.publish("focus-timer", "1.2.0", {
       manifest: { permissions: ["ui.add", "messages.send", "service"], service: "service.luau" },
       files: { "init.luau": 'return "focus-timer 1.2.0, now with breaks"', "service.luau": "return {}" },
     });
+    // (1.1.0, not verified, is superseded by 1.2.0: no new installs, and its author reads why.)
+    const mine = await adaOnWeb.get("/account/plugins/focus-timer");
+    expect(mine.body).toContain("Replaced by 1.2.0 before it was verified: no new installs. Those who have it keep it working; verifying it would allow installs again.");
+    expect(mine.body).not.toContain("/versions/1.1.0/unyank");
+    const queue = await grace.get("/admin/plugins");
+    expect(queue.body).not.toContain("/admin/plugins/focus-timer/1.1.0");
+    expect(queue.body).toContain("+1 earlier");
+    // In public too, from an edge that says why (dc45c3606 on); an older one says only that it takes none.
+    const publicly = await new Browser().get("/plugins/focus-timer/versions/1.1.0");
+    expect(publicly.response.status).toBe(200);
+    expect(publicly.body).toMatch(process.env.E2E_OLD_EDGE ? /It takes no new installs\./ : /Replaced by 1\.2\.0 before it was verified: no new installs\. Those who have it keep it working\./);
     const overview = await grace.get("/admin/plugins/focus-timer/1.2.0");
-    expect(overview.body).toContain("Update from 1.0.0");
+    expect(overview.body).toContain("Update from 1.0.0, its newest verified version");
     expect(overview.body).toContain("New or changed since 1.0.0");
     expect(overview.body).toMatch(/Send messages to your agents as you\s*<span class="badge sm info">New<\/span>/);
     // What it binds past its asks, from the edge's diff (amendment 41): a service where there was none.
@@ -382,8 +424,8 @@ describe("an update", () => {
     const files = await grace.get("/admin/plugins/focus-timer/1.2.0?view=files");
     expect(files.body).toMatch(/<p class="file-head"[^>]*><code[^>]*>zeron-plugin.json<\/code>/);
     expect(files.body).toMatch(/(&quot;|")entry(&quot;|")/);
-    await grace.post("/admin/plugins/focus-timer/1.2.0/approve", { csrf: await grace.token("/admin/plugins/focus-timer/1.2.0") });
-    expect(grace.flash()).toBe("approved");
+    await grace.post("/admin/plugins/focus-timer/1.2.0/verify", { csrf: await grace.token("/admin/plugins/focus-timer/1.2.0") });
+    expect(grace.flash()).toBe("verified");
     const page = await new Browser().get("/plugins/focus-timer");
     expect(page.body).toContain("1.2.0");
     expect(page.body).toContain("Send messages to your agents as you");
@@ -430,6 +472,8 @@ describe("a plugin's admin page", () => {
     expect(removed.status).toBe(303);
     expect(grace.flash()).toBe("removed");
     expect((await new Browser().get("/plugins")).body).not.toContain('href="/plugins/pr-review"');
+    // Its owner reads why: since the transfer above, @gracehop.
+    expect((await grace.get("/account/plugins/pr-review")).body).toContain("Removed in a test.");
   });
 });
 
@@ -473,14 +517,18 @@ describe("Newest, from the edge's cards", () => {
 });
 
 describe("every page, with what the real edge holds", () => {
-  const PUBLIC = ["/plugins", "/plugins/all", "/plugins/all?category=productivity", "/plugins/all?keyword=focus", "/plugins/all?sort=new", "/plugins/focus-timer", "/plugins/probe", "/plugins/sitemap.xml"];
-  const MEMBER = ["/account", "/account/plugins/focus-timer", "/account/plugins/theme-sync", "/account/plugins/focus-timer/versions/1.0.0/yank", "/plugins/focus-timer/report"];
+  const PUBLIC = ["/plugins", "/plugins/all", "/plugins/all?category=productivity", "/plugins/all?keyword=focus", "/plugins/all?sort=new", "/plugins/all?verified=1", "/plugins/focus-timer", "/plugins/focus-timer/versions", "/plugins/focus-timer/versions/1.1.0", "/plugins/probe", "/plugins/sitemap.xml"];
+  const MEMBER = ["/account", "/account/keys", "/account/plugins/focus-timer", "/account/plugins/theme-sync", "/account/plugins/focus-timer/versions/1.0.0/yank", "/plugins/focus-timer/report"];
   const STAFF = [
     "/admin/plugins",
     "/admin/plugins/focus-timer",
     "/admin/plugins/theme-sync",
     "/admin/plugins/theme-sync/0.1.0",
     "/admin/plugins/focus-timer/1.0.0/remove",
+    "/admin/plugins/focus-timer/1.0.0/take_down",
+    "/admin/plugins/pending-pics/0.1.0/restore",
+    "/admin/plugins?state=verified",
+    "/admin/plugins?state=all",
     "/admin/plugins/focus-timer/actions/suspend",
     "/admin/plugins/focus-timer/actions/transfer",
     "/admin/reports",
@@ -515,7 +563,9 @@ describe("every page, with what the real edge holds", () => {
     const { body } = await new Browser().get("/plugins/sitemap.xml");
     expect(body).toContain("<loc>https://zeron.sh/plugins/focus-timer</loc>");
     expect(body).toContain("<loc>https://zeron.sh/plugins/probe</loc>");
-    expect(body).not.toContain("theme-sync</loc>");
+    expect(body).toContain("<loc>https://zeron.sh/plugins/theme-sync</loc>");
+    // (Nothing of the plugin taken down: pending-pics had one version.)
+    expect(body).not.toContain("pending-pics</loc>");
   });
 });
 

@@ -174,16 +174,20 @@ export class Publisher {
   }
 
   /** A deploy key for `id`, as `zeron plugin key create` makes one (a fresh sign-in's ticket with it). */
-  async deployKey(id: string, name: string): Promise<string> {
+  /** Make a deploy key, the account's (amendment 44), for the plugins named (sorted), as Zeron makes one on the author's machine. */
+  async deployKey(plugins: string[], name: string): Promise<string> {
     const exchanged = await json(fetch(`${this.edge}/auth/exchange`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: `code:${this.userId}` }) }));
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
     const key = publicKey.export({ format: "jwk" }).x as string;
-    const proof = b64url(sign(null, Buffer.from(`zeron-deploy-key:v1:${id}:${key}`), privateKey));
-    await json(fetch(`${this.edge}/store/v1/plugins/${id}/keys`, { method: "POST", headers: { authorization: `Bearer ${this.bearer}`, "content-type": "application/json" }, body: JSON.stringify({ key, name, proof, stepUp: (exchanged.stepUp as { token: string }).token }) }));
+    // (The proof binds the account, the key's lifetime and its scope: "zeron-deploy-key:v2:" + publisher id + ":never:" + its ids + ":" + key.)
+    const publisher = `pub_${createHash("sha256").update(`zeron-publisher:v1:${this.userId}`).digest("hex").slice(0, 32)}`;
+    const ids = [...plugins].sort();
+    const proof = b64url(sign(null, Buffer.from(`zeron-deploy-key:v2:${publisher}:never:${ids.join(",")}:${key}`), privateKey));
+    await json(fetch(`${this.edge}/store/v1/me/keys`, { method: "POST", headers: { authorization: `Bearer ${this.bearer}`, "content-type": "application/json" }, body: JSON.stringify({ key, name, scope: { plugins: ids }, proof, stepUp: (exchanged.stepUp as { token: string }).token }) }));
     return key;
   }
 
-  /** Submit a version (it lands in review). */
+  /** Publish a version (listed at once, not verified: amendment 45). */
   async publish(id: string, version: string, o: PackageOptions = {}): Promise<void> {
     const response = await fetch(`${this.edge}/store/v1/plugins/${id}/versions`, { method: "POST", headers: { authorization: `Bearer ${this.bearer}` }, body: await this.package(id, version, o) });
     if (response.status !== 201) throw new Error(`publishing ${id} ${version}: ${response.status} ${await response.text()}`);

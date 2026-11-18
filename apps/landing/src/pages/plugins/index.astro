@@ -13,7 +13,7 @@ import { count, day } from "../../lib/store/format.ts";
 import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
 import type { PluginCard } from "../../lib/store/types.ts";
 import { pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
-import { store } from "../../lib/store/words.ts";
+import { EMPTY_BODY, store } from "../../lib/store/words.ts";
 
 export const prerender = false;
 
@@ -60,7 +60,7 @@ const published: Measure = { head: "Published", cell: (p) => (p.listed_at === nu
 const installs: Measure = { head: "Installs", cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
 ---
 
-<App title="Plugins · Zeron" description="Plugins for Zeron: panels, commands, tools for your agents and more. Each one is reviewed before it's listed." canonical="/plugins" current="discover">
+<App title="Plugins · Zeron" description="Plugins for Zeron: panels, commands, tools for your agents and more, each saying whether a reviewer verified it." canonical="/plugins" current="discover">
   <h1 slot="title" class="t-title">Discover</h1>
 
   {
@@ -76,7 +76,7 @@ const installs: Measure = { head: "Installs", cell: (p) => count(p.installs), fo
       <div class="panel">
         <div class="empty">
           <span class="tile"><Glyph name="widget" size={20} /></span>
-          <div class="words"><h2 class="t-heading">{store("plugins.store.empty_title")}</h2><p>{store("plugins.store.empty_body")}</p></div>
+          <div class="words"><h2 class="t-heading">{store("plugins.store.empty_title")}</h2><p>{EMPTY_BODY}</p></div>
           <div class="actions"><a class="btn secondary sm" href="/plugins/publishing">Publishing guide</a></div>
         </div>
       </div>

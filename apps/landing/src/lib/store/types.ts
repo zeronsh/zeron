@@ -1,5 +1,8 @@
 // The edge's store contract, as the site reads it
-// (docs/plans/2026-11-17-plugin-store.md, "Contract (edge HTTP)"). The names
+// (docs/plans/2026-11-17-plugin-store.md, "Contract (edge HTTP)", and since
+// amendments 44 and 45, docs/plans/2026-11-19-store-shapes-44-45.md, as the
+// edge built it at b467e6299:
+// publishing is immediate, review verifies; keys belong to the account). The names
 // the plan fixes are kept exactly; the fields the lanes fill in are marked
 // optional where an older edge may not send them yet. Times are ms since the
 // epoch.
@@ -28,6 +31,9 @@ export type ErrorWord =
   | "too_large"
   | "conflict"
   | "invalid_state"
+  | "invalid_scope"
+  | "not_owner"
+  | "not_verified"
   | "unauthenticated"
   | "bad_cursor"
   | "bad_path"
@@ -68,8 +74,12 @@ export interface PluginCard {
   author: Author;
   categories: string[];
   keywords: string[];
-  /** The latest approved version (null while it has none). */
+  /** The newest listed version, a release before a pre-release, verified or not (null while it has none). */
   version: string | null;
+  /** Whether `version` is verified (amendment 45). */
+  verified: boolean;
+  /** The newest verified listed version, or null. */
+  verified_version: string | null;
   updated_at: number;
   /**
    * When it was first listed: what Newest sorts by (amendment 39). Set once,
@@ -102,11 +112,19 @@ export interface Permissions {
   tools?: { name: string; description?: string }[];
 }
 
-export type VersionStatus = "pending" | "approved" | "rejected" | "withdrawn" | "yanked" | "removed";
+/**
+ * A version's state (amendment 45): listed (anyone can see and install it),
+ * yanked (its author stopped new installs), taken_down (staff: harmful, and
+ * turned off on devices), removed (staff: not harmful, not turned off). The
+ * public sees listed and yanked only.
+ */
+export type VersionStatus = "listed" | "yanked" | "taken_down" | "removed";
 
+/** A reviewer's decision on a version, as its author and staff see it (the public never sees "declined"). */
 export interface Review {
-  state: VersionStatus;
-  /** Why, as a stable word (rejected or removed). */
+  decided: boolean;
+  decision: "verified" | "declined" | null;
+  /** Why, as a stable word (declined). */
   reason?: string;
   /** What the reviewer wrote for the author. */
   message?: string;
@@ -124,15 +142,16 @@ export interface Check {
 export interface VersionInfo {
   version: string;
   status: VersionStatus;
-  /** When it was submitted. */
-  submitted_at: number;
-  /** When it was approved (or later decided); null before. */
-  published_at: number | null;
+  /** When it was published (and listed: at once). */
+  published_at: number;
+  /** Whether a reviewer verified it, and when. */
+  verified: boolean;
+  verified_at: number | null;
   prerelease?: boolean;
   /** Taken down and turned off on the devices that have it. */
   blocked?: boolean;
   /** How it was published: from a device, or by a deploy key. */
-  via?: string;
+  via?: "device" | "deploy_key";
   /** This version's section of CHANGELOG.md (markdown), or null. */
   notes: string | null;
   engines: { zeron?: string } | null;
@@ -145,6 +164,20 @@ export interface VersionInfo {
   /** The owner's and an admin's view. */
   review?: Review;
   checks?: Check[];
+  /** The deploy key that published it (owner and staff; null when a device did). */
+  deploy_key?: { key: string; name: string } | null;
+  /** Why staff took it down or removed it, and when (owner and staff). */
+  removal?: { at: number; reason: string | null };
+  /**
+   * Who stopped its new installs (owner and staff; in public too after e3daa69b4, edge dc45c3606): its author, or the store,
+   * when a newer version was published while it was unverified (amendment 45:
+   * "superseded"; its author can't allow installs again, verifying it does).
+   */
+  yanked_by?: "author" | "superseded" | null;
+  /** When it was superseded and by which version, or null (owner and staff). */
+  superseded?: { at: number; by: string } | null;
+  /** The version that superseded it, in public (edge dc45c3606 on). */
+  superseded_by?: string | null;
 }
 
 export interface PackageInfo {
@@ -165,9 +198,25 @@ export interface PluginDetail extends PluginCard {
   homepage: string | null;
   repository: string | null;
   license: string | null;
-  /** The latest few. */
+  /** The first page of its versions (5), newest first; `versions_next_cursor` for the rest. */
   versions: VersionInfo[];
+  versions_next_cursor?: string;
+  /** `version`'s package. */
   package: PackageInfo;
+}
+
+/** A page of a plugin's versions: listed and yanked, newest first. */
+export interface VersionsPage {
+  versions: VersionInfo[];
+  total: number;
+  next_cursor?: string;
+  prev_cursor?: string;
+}
+
+/** The store's totals. */
+export interface Stats {
+  plugins: number;
+  verified: number;
 }
 
 export interface CatalogPage {
@@ -186,6 +235,8 @@ export interface CatalogPage {
 export interface Category {
   id: string;
   name: string;
+  /** How many listed plugins it holds. */
+  count?: number;
 }
 
 // ── The signed-in web session (/auth/web/session) ───────────────────────
@@ -210,13 +261,20 @@ export interface MyPlugin extends PluginCard {
   versions: VersionInfo[];
 }
 
+/** What a deploy key may publish (amendment 44): all the account's plugins, or the ones named (sorted). */
+export type KeyScope = { all: true } | { plugins: string[] };
+
+/** A deploy key, the account's (amendment 44). */
 export interface DeployKey {
   /** The public key (base64url). */
   key: string;
   name: string;
+  scope: KeyScope;
   created_at: number;
-  last_used_at?: number | null;
-  expires_at?: number | null;
+  last_used_at: number | null;
+  /** The plugin it last published a version of. */
+  last_used_plugin: string | null;
+  expires_at: number | null;
   revoked_at?: number | null;
 }
 
@@ -225,22 +283,36 @@ export type ReportReason = (typeof REPORT_REASONS)[number];
 
 // ── Admin ───────────────────────────────────────────────────────────────
 
+/** The staff queue's view (amendment 45): versions no reviewer has decided, or those verified, or declined, or all. */
+export type QueueState = "undecided" | "verified" | "declined" | "all";
+
+/**
+ * One row of the queue: oldest first, versions with open reports first; in
+ * the undecided view, at most two a plugin (its newest undecided release,
+ * and its newest undecided pre-release when that is newer).
+ */
 export interface QueueItem {
   plugin: { id: string; name: string };
   version: string;
+  review: Review;
+  /** Open reports on the plugin. */
+  reports: number;
+  /** How many earlier undecided versions it superseded (each still opens from the plugin's staff page). */
+  earlier_undecided: number;
+  published_at?: number;
   /** This version's icon, its path in the package, as a card's (amendment 40). */
   icon: string | null;
   status: VersionStatus;
   prerelease: boolean;
   submitted_at: number;
   publisher: { id: string; username: string | null } | null;
-  /** The version it would replace (none for a first listing). */
+  /** The newest verified other version, which it is compared with (none when there is none). */
   base?: string;
-  /** Permissions it asks for that the last approved version didn't. */
+  /** Permissions it asks for that the base didn't. */
   new_asks: string[];
   /**
-   * Anything inside an ask it already had differs from the last approved
-   * version (a host, a program, a place), a tool says or takes something
+   * Anything inside an ask it already had differs from the base (a host, a
+   * program, a place), a tool says or takes something
    * else, or its MCP server, service or a granting setting changed
    * (amendments 40, 41); false for a first version.
    */
@@ -263,8 +335,9 @@ export interface Publisher {
   id?: string;
   username: string | null;
   created_at: Created;
-  decisions: { approved: number; rejected: number };
-  recent: { plugin_id: string; version: string; status: VersionStatus; submitted_at?: number; reason?: string | null }[];
+  /** Reviewers' decisions on this publisher's versions. */
+  decisions: { verified: number; declined: number };
+  recent: { plugin_id: string; version: string; status: VersionStatus; verified: boolean; published_at?: number; reason?: string | null }[];
 }
 
 export interface PackageFile {
@@ -275,7 +348,7 @@ export interface PackageFile {
   binary: boolean;
 }
 
-/** What changed in what it asks since the last approved version (the edge's consentDiff). */
+/** What changed in what it asks since the newest verified other version (the edge's consentDiff). */
 export interface PermissionsDiff {
   added?: string[];
   removed?: string[];
@@ -313,8 +386,10 @@ export interface Submission {
   manifest: Record<string, unknown>;
   permissions: Permissions;
   files: PackageFile[];
-  /** The last approved version, which the diff is against, when there is one. */
+  /** The newest verified other version, which the diff is against, when there is one. */
   base?: { version: string; manifest: Record<string, unknown> } | null;
+  /** When this version was superseded and by which, or null. */
+  superseded?: { at: number; by: string } | null;
   /** The base's files. */
   base_files: PackageFile[];
   permissions_diff: PermissionsDiff | null;
@@ -369,7 +444,7 @@ export interface AuditEntry {
   seq: number;
   at: number;
   actor: { id?: string | null; username: string | null; user_id: string };
-  /** `version.approve`, `plugin.suspend`, `report.dismissed`, `reservation.set`, … */
+  /** `version.verify`, `version.decline`, `plugin.suspend`, `report.dismissed`, `reservation.set`, … */
   action: string;
   plugin_id?: string | null;
   version?: string | null;

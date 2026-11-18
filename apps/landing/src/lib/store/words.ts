@@ -8,29 +8,38 @@
 import type { ReportReason, VersionStatus } from "./types.ts";
 
 export const STORE_WORDS = {
+  // The store's mark beside a version a reviewer verified (amendment 45), and the list's filter for them.
+  "plugins.store.verified": "Verified",
+  "plugins.store.verified_only": "Verified only",
+  // The list's order, named.
+  "plugins.store.order_label": "Order",
+  // A version not verified, and what the plugin's page says of it (amendment 45).
+  "plugins.store.not_verified": "Not verified",
+  "plugins.store.not_verified_line": "{version} isn't verified yet. {verified} is.",
+  "plugins.store.none_verified": "No version of this plugin is verified yet.",
+  "plugins.store.verified_on": "Verified on {date}",
   // A version's state.
-  "plugins.store.status.pending": "In review",
-  "plugins.store.status.approved": "Approved",
-  "plugins.store.status.rejected": "Not approved",
-  "plugins.store.status.withdrawn": "Withdrawn",
   "plugins.store.status.yanked": "No new installs",
-  "plugins.store.status.removed": "Taken down",
+  "plugins.store.status.taken_down": "Taken down",
+  "plugins.store.status.removed": "Removed",
+  // Why a version takes no new installs, when a newer one replaced it unverified (amendment 45); and one waiting.
+  "plugins.store.superseded": "Replaced by {version} before it was verified: no new installs",
+  "plugins.store.review.waiting": "Waiting for a reviewer",
+  // The account's deploy keys (amendment 44).
+  "plugins.store.keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each key publishes the plugins chosen when it's made.",
+  "plugins.store.key.scope.all": "All your plugins",
+  "plugins.store.key.last_used_on": "Last used {date} on {plugin}",
   // What its author can do to it, and the question each asks first.
-  "plugins.store.action.withdraw": "Withdraw",
   "plugins.store.action.yank": "Stop new installs",
   "plugins.store.action.unyank": "Allow installs again",
-  "plugins.store.confirm.withdraw.title": "Withdraw {name} {version}?",
-  "plugins.store.confirm.withdraw.body": "It leaves the review queue. A version once sent keeps its number: send the next one under a new version.",
   "plugins.store.confirm.yank.title": "Stop new installs of {name} {version}?",
   "plugins.store.confirm.yank.body": "Nobody can install it anymore. Those who have it keep it working. You can allow installs again later.",
   "plugins.store.confirm.unyank.title": "Allow installs of {name} {version}?",
   "plugins.store.confirm.unyank.body": "It can be installed again.",
   // Deploy keys.
   "plugins.store.keys": "Deploy keys",
-  "plugins.store.keys_body": "A deploy key lets a CI job, such as a GitHub Action, send new versions of this plugin without your session; each still waits for review.",
   "plugins.store.keys_none": "No keys yet.",
-  "plugins.store.keys_failed": "Couldn't see its keys",
-  "plugins.store.keys_publish_first": "Send its first version from your computer; a deploy key can send the ones after it.",
+  "plugins.store.keys_failed": "Couldn't see your keys",
   "plugins.store.key.new": "New key…",
   "plugins.store.key.new_title": "New deploy key",
   "plugins.store.key.name": "Name",
@@ -79,7 +88,6 @@ export const STORE_WORDS = {
   "plugins.store.try_another": "Try other words, or fewer filters.",
   "plugins.store.clear": "Clear search",
   "plugins.store.empty_title": "No plugins in the store yet",
-  "plugins.store.empty_body": "Plugins people share appear here once they're reviewed.",
   "plugins.store.failed_title": "The plugin store didn't answer",
   "plugins.store.failed_body": "Your installed plugins still work. Try again in a moment.",
   "plugins.store.try_again": "Try again",
@@ -108,8 +116,31 @@ export function store(key: StoreKey, args?: Record<string, string | number>): st
   return plural.replace(/\{(\w+)\}/g, (whole, name: string) => (args && name in args ? String(args[name]) : whole));
 }
 
-/** A version's state, named as the app names it. */
-export const statusWords = (status: VersionStatus): string => store(`plugins.store.status.${status}`);
+/**
+ * Words the site says before the app does (amendments 44 and 45: states,
+ * verification and the account's keys are new to both). Not compared with
+ * the app's en.json until it has them; then each moves to STORE_WORDS.
+ */
+/** An empty list's words (the app's own still says plugins appear once reviewed; since amendment 45 they're listed at once). */
+export const EMPTY_BODY = "Plugins people publish appear here.";
+
+export const SITE_WORDS = {
+  "status.listed": "Listed",
+  "undecided": "Not verified yet",
+} as const;
+
+/**
+ * One of the store's sentences around one of its values (a link, a time),
+ * so the page can draw that value as markup: the words before it and after.
+ */
+export function storeAround(key: StoreKey, args: Record<string, string | number>, slot: string): [string, string] {
+  const said = store(key, { ...args, [slot]: "\u0000" });
+  const at = said.indexOf("\u0000");
+  return at < 0 ? [said, ""] : [said.slice(0, at), said.slice(at + 1)];
+}
+
+/** A version's state, named as the app names it (or the site, for the states the app doesn't name yet). */
+export const statusWords = (status: VersionStatus): string => (status === "listed" ? SITE_WORDS["status.listed"] : store(`plugins.store.status.${status}`));
 
 /** A report's reason, as the app's report sheet lists it. */
 export const reportReasonWords = (reason: ReportReason): string => store(`plugins.store.report.reason.${reason}`);

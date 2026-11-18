@@ -218,7 +218,7 @@ for (const dialog of document.querySelectorAll<HTMLDialogElement>("dialog.dialog
   });
 }
 
-// ── Don't approve: the author's view, as it's written ─────────────────
+// ── Don't verify: the author's view, as it's written ──────────────────
 // (components/kit/Decline.astro: their Versions row, the words in quotes,
 // the reason's label.)
 for (const part of document.querySelectorAll<HTMLElement>("[data-decline]")) {

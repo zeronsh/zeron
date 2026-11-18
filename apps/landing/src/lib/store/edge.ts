@@ -15,11 +15,14 @@ import type {
   MyPlugin,
   PluginDetail,
   QueuePage,
+  QueueState,
   ReportsPage,
   Reservation,
   Sort,
+  Stats,
   Submission,
   VersionInfo,
+  VersionsPage,
   WebSession,
 } from "./types.ts";
 import { ADMIN_PAGE } from "./paging.ts";
@@ -30,7 +33,7 @@ const ERROR_WORDS = new Set<string>([
   "not_found", "signed_out", "forbidden", "bad_request", "bad_csrf", "rate_limited", "suspended",
   "needs_username", "id_taken", "id_reserved", "not_semver", "version_exists", "not_newer", "bad_package",
   "bad_signature", "key_not_allowed", "missing_readme", "missing_listing", "too_large", "conflict", "invalid_state",
-  "unauthenticated", "bad_cursor", "bad_path", "site_id",
+  "unauthenticated", "bad_cursor", "bad_path", "site_id", "invalid_scope", "not_owner", "not_verified",
 ]);
 
 /** A binding: what `env.EDGE` is, and what a test hands in instead. */
@@ -46,6 +49,10 @@ export interface CatalogQuery {
   cursor?: string;
   limit?: number;
   featured?: boolean;
+  /** Only plugins whose newest version is verified (amendment 45: a filter, never a sort). */
+  verified?: boolean;
+  /** One publisher's plugins, by username. */
+  author?: string;
 }
 
 /** One visitor's view of the edge: built per request from what they sent. */
@@ -83,6 +90,8 @@ export class Edge {
     if (query.cursor) params.set("cursor", query.cursor);
     if (query.limit) params.set("limit", String(query.limit));
     if (query.featured) params.set("featured", "true");
+    if (query.verified) params.set("verified", "1");
+    if (query.author) params.set("author", query.author);
     const search = params.size ? `?${params}` : "";
     return this.#json(`/store/v1/plugins${search}`);
   }
@@ -91,8 +100,22 @@ export class Edge {
     return this.#json(`/store/v1/plugins/${segment(id)}`);
   }
 
-  versions(id: string): Promise<Result<{ versions: VersionInfo[] }>> {
-    return this.#json(`/store/v1/plugins/${segment(id)}/versions`);
+  /** A page of a plugin's versions, listed and yanked, newest first (amendment 45: every one can be seen and installed). */
+  versions(id: string, cursor?: string, limit?: number): Promise<Result<VersionsPage>> {
+    const params = new URLSearchParams();
+    if (cursor) params.set("cursor", cursor);
+    if (limit) params.set("limit", String(limit));
+    return this.#json(`/store/v1/plugins/${segment(id)}/versions${params.size ? `?${params}` : ""}`);
+  }
+
+  /** One version of a plugin, listed or yanked. */
+  version(id: string, version: string): Promise<Result<VersionInfo>> {
+    return this.#json(`/store/v1/plugins/${segment(id)}/versions/${segment(version)}`);
+  }
+
+  /** The store's totals: plugins listed, and how many of them are verified. */
+  stats(): Promise<Result<Stats>> {
+    return this.#json(`/store/v1/stats`);
   }
 
   /** The latest Zeron released (the edge's /releases/latest.txt), or null when it can't be had. */
@@ -114,7 +137,7 @@ export class Edge {
   /**
    * A file of a version's package, as the edge answers (the caller decides
    * what of it goes to the browser). `signedIn` sends the visitor's cookie:
-   * a pending version's files are its owner's and admins' only.
+   * a version taken down or removed is its owner's and staff's only.
    */
   async file(id: string, version: string, path: string, signedIn: boolean): Promise<Response> {
     let url: string;
@@ -141,16 +164,17 @@ export class Edge {
     return this.#json("/store/v1/me/plugins", { signedIn: true });
   }
 
-  keys(id: string): Promise<Result<{ keys: DeployKey[] }>> {
-    return this.#json(`/store/v1/plugins/${segment(id)}/keys`, { signedIn: true });
+  /** The account's deploy keys (amendment 44: the account's, each with its scope). */
+  keys(): Promise<Result<{ keys: DeployKey[] }>> {
+    return this.#json("/store/v1/me/keys", { signedIn: true });
   }
 
-  versionAction(id: string, version: string, action: "withdraw" | "yank" | "unyank", csrf: string): Promise<Result<unknown>> {
+  versionAction(id: string, version: string, action: "yank" | "unyank", csrf: string): Promise<Result<unknown>> {
     return this.#json(`/store/v1/plugins/${segment(id)}/versions/${segment(version)}/${action}`, { method: "POST", csrf, body: {} });
   }
 
-  revokeKey(id: string, key: string, csrf: string): Promise<Result<unknown>> {
-    return this.#json(`/store/v1/plugins/${segment(id)}/keys/${segment(key)}`, { method: "DELETE", csrf });
+  revokeKey(key: string, csrf: string): Promise<Result<unknown>> {
+    return this.#json(`/store/v1/me/keys/${segment(key)}`, { method: "DELETE", csrf });
   }
 
   report(id: string, body: { reason: string; text: string }, csrf: string): Promise<Result<unknown>> {
@@ -159,14 +183,16 @@ export class Edge {
 
   // ── Admin ─────────────────────────────────────────────────────────────
 
-  queue(status: string, cursor?: string): Promise<Result<QueuePage>> {
-    const params = new URLSearchParams({ status, limit: String(ADMIN_PAGE) });
+  /** The versions to verify (undecided, the default), or those verified, or declined, or all: oldest first. */
+  queue(state: QueueState, cursor?: string): Promise<Result<QueuePage>> {
+    const params = new URLSearchParams({ state, limit: String(ADMIN_PAGE) });
     if (cursor) params.set("cursor", cursor);
     return this.#json(`/store/v1/admin/queue?${params}`, { signedIn: true });
   }
 
+  /** One version, as staff review it. */
   submission(id: string, version: string): Promise<Result<Submission>> {
-    return this.#json(`/store/v1/admin/submissions/${segment(id)}/${segment(version)}`, { signedIn: true });
+    return this.#json(`/store/v1/admin/versions/${segment(id)}/${segment(version)}`, { signedIn: true });
   }
 
   adminPlugin(id: string): Promise<Result<AdminPlugin>> {
