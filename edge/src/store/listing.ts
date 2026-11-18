@@ -346,7 +346,7 @@ export const checkListing = (
   // Two paths that are one file on a Mac or a Windows machine (the
   // manifest's own name among them), or a file where another path needs
   // a folder of that name there (amendment 42): each at the later path, in
-  // code point order.
+  // code point order; a path with a problem is never recorded.
   const folded = new Map<string, string>([[foldPath(MANIFEST_FILE), MANIFEST_FILE]]);
   const folders = new Map<string, string>();
   for (const rel of [...files.keys()].sort(byCodePoint)) {
@@ -362,13 +362,14 @@ export const checkListing = (
       continue;
     }
     const parts = key.split("/");
-    let clash: string | undefined;
-    for (let end = 1; end < parts.length; end++) {
-      const folder = parts.slice(0, end).join("/");
-      clash ??= folded.get(folder);
-      if (!folders.has(folder)) folders.set(folder, rel);
+    const parents = parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
+    const clash = parents.map((folder) => folded.get(folder)).find((file) => file !== undefined);
+    if (clash !== undefined) {
+      problems.push(problem("bad_listing", "files", `"${clash}" is a file where "${rel}" needs a folder of that name on macOS and Windows`, rel));
+      continue;
     }
-    if (clash !== undefined) problems.push(problem("bad_listing", "files", `"${clash}" is a file where "${rel}" needs a folder of that name on macOS and Windows`, rel));
+    // (Only a path with no problem is recorded, as the engine's `clashes`.)
+    for (const folder of parents) if (!folders.has(folder)) folders.set(folder, rel);
     folded.set(key, rel);
   }
 

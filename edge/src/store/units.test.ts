@@ -145,6 +145,9 @@ describe("store listing", () => {
     expect(problems({}, { UI: "a", "ui/x.luau": "b" })).toEqual([["bad_listing", "files", "ui/x.luau"]]);
     expect(problems({}, { "zeron-plugin.json/x.luau": "b" })).toEqual([["bad_listing", "files", "zeron-plugin.json/x.luau"]]);
     expect(problems({}, { "lib/a.luau": "a", "lib/b.luau": "b", "libs": "c" })).toEqual([]);
+    // A path with a problem isn't recorded (the engine's `clashes`): one
+    // problem, at `Ui`, not a second at `ui/b`.
+    expect(problems({}, { "UI/a": "a", Ui: "b", "ui/b": "c" })).toEqual([["bad_listing", "files", "Ui"]]);
     expect(problems({ name: "Focus\u202e" })).toEqual([["bad_listing", "name", null]]);
     expect(problems({ description: "Fo\u200bcus." })).toEqual([["bad_listing", "description", null]]);
     expect(problems({ description: "Tab\there." })).toEqual([["bad_listing", "description", null]]);
