@@ -537,3 +537,12 @@ Agreed after the plan was first written. Newest last.
 39. **A `PluginCard` carries `listed_at`**, when the plugin was first listed
     (ms; null only on a submission's card for a plugin never listed), beside
     `updated_at`. A list sorted Newest shows it.
+40. **A queue item carries `icon` and `asks_changed`.** `icon` is the
+    version's icon as a package path (null when it has none), as on a
+    `PluginCard`, so the queue draws the tile a reviewer will see on the
+    submission. `asks_changed` is true when, against the last approved
+    version, anything inside an existing ask differs (a host or a program
+    added or dropped) or any tool's description or input changed; false for
+    a first version. `new_asks` stays as it is. The queue flags a row on
+    either, so an update with no flag asks for exactly what the approved
+    version did.
