@@ -21,7 +21,9 @@ export class TooLarge extends Error {}
  * would capture a stack whose frames hold the rendering's state, kept by
  * the engine until another error replaces it (16 MB and more, measured).
  */
-export const TOO_LARGE = new TooLarge("too large to lay out");
+export const TOO_LARGE = new TooLarge("more to write than its bound");
+/** The one TooLarge thrown when a rendering would keep more than KEEP_MOST. */
+export const TOO_MUCH = new TooLarge("more to keep than KEEP_MOST");
 
 export interface Meter {
   /** Characters read, each time one is looked at. */
@@ -54,7 +56,7 @@ export const NODE = 128;
 
 /** Counts `bytes` as kept, and stops rather than pass KEEP_MOST (before what they are for is made). */
 export function keep(m: Meter, bytes: number): void {
-  if (m.kept + bytes > KEEP_MOST) throw TOO_LARGE;
+  if (m.kept + bytes > KEEP_MOST) throw TOO_MUCH;
   m.kept += bytes;
   if (m.kept > m.peak) m.peak = m.kept;
 }

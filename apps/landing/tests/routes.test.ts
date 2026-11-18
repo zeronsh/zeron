@@ -925,7 +925,7 @@ describe("the review of the web store: what it found, held", () => {
     const first = await timed("/plugins/slow-words");
     expect(first.response.status).toBe(200);
     expect(first.ms).toBeLessThan(4_000);
-    // (The README, 131,072 headings, would write more than its bound; the notes are drawn.)
+    // (The README, a new list on every line, would keep more than its bound; the notes are drawn.)
     expect(first.body).toContain(`<p class="as-text">Shown as plain text: it's too long to lay out.</p>`);
     expect(first.body).toContain("<blockquote>");
     // (Kept, so the next visit draws nothing again.)
@@ -939,12 +939,12 @@ describe("the review of the web store: what it found, held", () => {
       const { response, body, ms } = await timed(`/admin/plugins/slow-words/1.2.0${view}`, grace);
       expect(response.status, view).toBe(200);
       expect(ms, view).toBeLessThan(4_000);
-      expect(body, view).toMatch(/<li class="fail">.*?This README could not be drawn within the limit/s);
-      // (Its notes, 16,384 headings, are drawn: linear in their text, within the bound.)
-      expect(body, view).not.toContain("Its notes for 1.2.0 could not be drawn within the limit");
+      // (Its README past what it may keep; its notes, a table filling 64 cells a row, past what it may write.)
+      expect(body, view).toMatch(/<li class="fail">.*?This README is too long to lay out: it(?:'|&#39;)s shown as plain text\. That alone is a reason not to approve it\./s);
+      expect(body, view).toMatch(/<li class="fail">.*?Its notes for 1\.2\.0 are too long to lay out/s);
     }
-    // (Approve's line counts it among what failed.)
-    expect((await html("/admin/plugins/slow-words/1.2.0", grace)).body).toMatch(/<p class="weigh-line bad">[^<]*1 check failed/);
+    // (Approve's line counts them among what failed.)
+    expect((await html("/admin/plugins/slow-words/1.2.0", grace)).body).toMatch(/<p class="weigh-line bad">[^<]*2 checks failed/);
   });
 
   test("a file built to break the highlighter is shown as text, and the reviewer told, in Files and in Changes", async () => {

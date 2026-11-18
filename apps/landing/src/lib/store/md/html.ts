@@ -349,14 +349,14 @@ function writeRow(w: Writing, tag: "th" | "td", cells: string[], align: Align[])
   w.out.line();
 }
 
-/** What a document shown as its text says first. */
-export const AS_TEXT = "Shown as plain text: it's too long to lay out.";
+/** What a document shown as its text says first: too long, or it couldn't be drawn (it failed, or a try at it never finished). */
+export const AS_TEXT = { long: "Shown as plain text: it's too long to lay out.", failed: "Shown as plain text: it couldn't be laid out." } as const;
 
 /** A document as its text, said so (every character escaped). */
-export function asText(markdown: string): string {
+export function asText(markdown: string, why: keyof typeof AS_TEXT = "long"): string {
   const out = new Html(Infinity);
   out.open("p", [["class", "as-text"]]);
-  out.text(AS_TEXT);
+  out.text(AS_TEXT[why]);
   out.close("p");
   out.open("pre", [["class", "plain"], ["tabindex", "0"]]);
   out.text(markdown);
