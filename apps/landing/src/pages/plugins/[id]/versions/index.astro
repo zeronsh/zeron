@@ -12,7 +12,7 @@ import { isPluginId, isPrerelease } from "../../../../lib/store/names.ts";
 import { pagerOf, placeOf, ADMIN_PAGE } from "../../../../lib/store/paging.ts";
 import { stoppedWhy } from "../../../../lib/store/states.ts";
 import { pluginUrl } from "../../../../lib/store/urls.ts";
-import { SITE_WORDS, statusWords, store } from "../../../../lib/store/words.ts";
+import { statusWords, store } from "../../../../lib/store/words.ts";
 
 export const prerender = false;
 
@@ -63,7 +63,7 @@ const versionUrl = (v: string) => `${pluginUrl(id)}/versions/${encodeURIComponen
                     {isPrerelease(v.version) && <span class="badge sm info">Pre-release</span>}
                     {v.yanked && <span class="badge sm warn" title={stoppedWhy(v)}>{statusWords("yanked")}</span>}
                   </td>
-                  <td><span class="line">{v.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{SITE_WORDS.undecided}</span>}</span></td>
+                  <td><span class="line">{v.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{store("plugins.store.review.waiting")}</span>}</span></td>
                   <td class="words">{firstLine(v.notes) || "No notes"}</td>
                   <td class="end"><span class="line muted"><time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at)}</time></span></td>
                 </tr>

@@ -25,7 +25,7 @@ export const STORE_WORDS = {
   "plugins.store.status.removed": "Removed",
   // Why a version takes no new installs, when a newer one replaced it unverified (amendment 45); and one waiting.
   "plugins.store.superseded": "Replaced by {version} before it was verified: no new installs",
-  "plugins.store.review.waiting": "Waiting for a reviewer",
+  "plugins.store.review.waiting": "Not verified yet",
   // The account's deploy keys (amendment 44).
   "plugins.store.keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each key publishes the plugins chosen when it's made.",
   "plugins.store.key.scope.all": "All your plugins",
@@ -89,6 +89,7 @@ export const STORE_WORDS = {
   "plugins.store.try_another": "Try other words, or fewer filters.",
   "plugins.store.clear": "Clear search",
   "plugins.store.empty_title": "No plugins in the store yet",
+  "plugins.store.empty_body": "Plugins people publish appear here.",
   "plugins.store.failed_title": "The plugin store didn't answer",
   "plugins.store.failed_body": "Your installed plugins still work. Try again in a moment.",
   "plugins.store.try_again": "Try again",
@@ -122,12 +123,11 @@ export function store(key: StoreKey, args?: Record<string, string | number>): st
  * verification and the account's keys are new to both). Not compared with
  * the app's en.json until it has them; then each moves to STORE_WORDS.
  */
-/** An empty list's words (the app's own still says plugins appear once reviewed; since amendment 45 they're listed at once). */
-export const EMPTY_BODY = "Plugins people publish appear here.";
+/** An empty list's words (the app's, since it says plugins appear at once: amendment 45). */
+export const EMPTY_BODY = store("plugins.store.empty_body");
 
 export const SITE_WORDS = {
   "status.listed": "Listed",
-  "undecided": "Not verified yet",
 } as const;
 
 /**

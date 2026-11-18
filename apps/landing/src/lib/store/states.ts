@@ -3,7 +3,7 @@
 // a version says, never one: where it stands (listed, no new installs,
 // taken down, removed) and whether a reviewer verified it.
 import type { Listing, PluginStatus, Review, VersionInfo } from "./types.ts";
-import { SITE_WORDS, statusWords, store } from "./words.ts";
+import { statusWords, store } from "./words.ts";
 
 /** A badge's tone: its ink on its wash (app.css .badge, by toneClass). */
 export type Tone = "neutral" | "accent" | "info" | "success" | "warning" | "danger";
@@ -43,8 +43,9 @@ export function versionState(v: Pick<VersionInfo, "status"> & Pick<Partial<Versi
 export function verificationState(v: Pick<VersionInfo, "verified"> & { review?: Review }): State {
   if (v.verified) return { label: store("plugins.store.verified"), tone: "success", about: "Zeron verified this version." };
   if (v.review?.decision === "declined") return { label: store("plugins.store.not_verified"), tone: "warning", about: "Zeron didn't verify it: the reviewer's note is below. It stays listed." };
-  if (v.review && !v.review.decided) return { label: SITE_WORDS.undecided, tone: "info", about: `${store("plugins.store.review.waiting")}.` };
-  return { label: SITE_WORDS.undecided, tone: "neutral", about: "Zeron hasn't verified this version yet." };
+  // (The app's word for the state; the site's own line for who it waits for: the contract's "Who does what, in words".)
+  if (v.review && !v.review.decided) return { label: store("plugins.store.review.waiting"), tone: "info", about: "Waiting for a reviewer." };
+  return { label: store("plugins.store.review.waiting"), tone: "neutral", about: "Zeron hasn't verified this version yet." };
 }
 
 /** The app's sentence for a superseded version (its replacer from the public field or the owner's). */
