@@ -1169,7 +1169,7 @@ pub(crate) mod tests {
         }
         let (mut m, files) = listed();
         m["name"] = serde_json::json!("Focus \u{2714}");
-        m["description"] = serde_json::json!("The official board.");
+        m["description"] = serde_json::json!("The official plugin.");
         let (problems, _) = check(&Manifest::from_value(m).unwrap(), &files);
         let said: Vec<(&str, Option<&str>)> = problems.iter().map(|p| (p.rule, p.field)).collect();
         assert_eq!(said, [(rule::BAD_LISTING, Some("name")), (rule::BAD_LISTING, Some("description"))]);

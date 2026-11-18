@@ -84,18 +84,26 @@ pub struct OtherWord {
     /// Refused only in a text that also holds kana: Japanese 公式 is
     /// "official", Chinese 公式 "formula".
     pub with_kana: bool,
+    /// Refused in a name only directly before one of these (a space
+    /// allowed): Korean 공식 is "official" before 플러그인, else also
+    /// "formula". Empty: anywhere.
+    pub before: &'static [&'static str],
 }
 
 const fn w(word: &'static str) -> OtherWord {
-    OtherWord { word, description: InDescription::Folded, with_kana: false }
+    OtherWord { word, description: InDescription::Folded, with_kana: false, before: &[] }
 }
 
 const fn accent(word: &'static str) -> OtherWord {
-    OtherWord { word, description: InDescription::Accented, with_kana: false }
+    OtherWord { word, description: InDescription::Accented, with_kana: false, before: &[] }
 }
 
 const fn name_only(word: &'static str) -> OtherWord {
-    OtherWord { word, description: InDescription::NameOnly, with_kana: false }
+    OtherWord { word, description: InDescription::NameOnly, with_kana: false, before: &[] }
+}
+
+const fn with_kana(word: &'static str) -> OtherWord {
+    OtherWord { word, description: InDescription::NameOnly, with_kana: true, before: &[] }
 }
 
 /// The mark's words in the store's other languages: `(language, substring,
@@ -137,12 +145,23 @@ pub const OTHER_LANGUAGES: &[(&str, bool, &[OtherWord])] = &[
     ]),
     // 官方 "official"; 已验证 "verified". Not 已认证 (also "authenticated").
     ("zh", true, &[w("\u{5b98}\u{65b9}"), w("\u{5df2}\u{9a8c}\u{8bc1}"), w("\u{5df2}\u{9a57}\u{8b49}")]),
-    // 公式 only beside kana; 検証済 "verified"; オフィシャル "official". Not
-    // 認証済み ("authenticated") nor 確認済み ("checked").
-    ("ja", true, &[OtherWord { word: "\u{516c}\u{5f0f}", description: InDescription::Folded, with_kana: true }, w("\u{691c}\u{8a3c}\u{6e08}"), w("\u{30aa}\u{30d5}\u{30a3}\u{30b7}\u{30e3}\u{30eb}")]),
-    // 검증됨 "verified". Not 공식 (also "formula"), 인증됨 ("authenticated"),
-    // 확인됨 ("checked").
-    ("ko", true, &[w("\u{ac80}\u{c99d}\u{b428}")]),
+    // In a name, 公式 and 公認 only beside kana (Chinese 公式 is "formula");
+    // 検証済 "verified"; オフィシャル "official". Not 認証済み
+    // ("authenticated") nor 確認済み ("checked"). In a description 公式 and
+    // 公認 count near a word for the plugin ([`AMBIGUOUS`]).
+    ("ja", true, &[with_kana("\u{516c}\u{5f0f}"), with_kana("\u{516c}\u{8a8d}"), w("\u{691c}\u{8a3c}\u{6e08}"), w("\u{30aa}\u{30d5}\u{30a3}\u{30b7}\u{30e3}\u{30eb}")]),
+    // 검증됨 "verified"; in a name 공식 only before 플러그인, 앱, 패키지, 확장,
+    // 버전 (else also "formula"). Not 공인 (공인인증서 is an ordinary term),
+    // 인증됨 ("authenticated"), 확인됨 ("checked").
+    ("ko", true, &[
+        w("\u{ac80}\u{c99d}\u{b428}"),
+        OtherWord {
+            word: "\u{acf5}\u{c2dd}",
+            description: InDescription::NameOnly,
+            with_kana: false,
+            before: &["\u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{c571}", "\u{d328}\u{d0a4}\u{c9c0}", "\u{d655}\u{c7a5}", "\u{bc84}\u{c804}"],
+        },
+    ]),
 ];
 
 /// Words beside which "zeron" claims standing though alone they're not the
@@ -151,6 +170,87 @@ pub const OTHER_LANGUAGES: &[(&str, bool, &[OtherWord])] = &[
 pub const STANDING_OTHER: &[&str] = &[
     "\u{516c}\u{5f0f}", "\u{acf5}\u{c2dd}", "\u{8ba4}\u{8bc1}", "\u{8a8d}\u{8b49}", "\u{8a8d}\u{8a3c}", "\u{c778}\u{c99d}",
     "\u{5df2}\u{8ba4}\u{8bc1}", "\u{5df2}\u{8a8d}\u{8b49}", "\u{8a8d}\u{8a3c}\u{6e08}", "\u{c778}\u{c99d}\u{b428}", "\u{78ba}\u{8a8d}\u{6e08}", "\u{d655}\u{c778}\u{b428}",
+    "\u{516c}\u{8a8d}", "\u{acf5}\u{c778}",
+];
+
+/// In a description, the words that alone aren't the mark but say it near a
+/// word for the plugin (rule 2: "已认证插件", "認証済みプラグイン", "공식
+/// 플러그인"): [`STANDING_OTHER`]'s.
+pub const AMBIGUOUS: &[&str] = STANDING_OTHER;
+
+/// Words for the plugin itself, by language (rule 2), folded as the text
+/// is: whole words where words are spaced (a phrase's words in order), and
+/// substrings in Chinese, Japanese and Korean.
+pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
+    ("en", false, &[
+        "plugin", "plugins", "plug-in", "extension", "extensions", "add-on", "add-ons", "addon", "addons", "integration", "integrations", "client",
+        "app", "apps", "tool", "tools", "theme", "themes", "package", "packages", "version", "versions", "release", "releases", "build", "builds",
+    ]),
+    ("es", false, &["complemento", "complementos", "extensi\u{f3}n", "extensiones", "cliente", "aplicaci\u{f3}n", "herramienta", "herramientas", "tema", "temas", "paquete", "versi\u{f3}n", "integraci\u{f3}n"]),
+    ("fr", false, &["module", "modules", "outil", "outils", "th\u{e8}me", "th\u{e8}mes", "paquet", "int\u{e9}gration", "application"]),
+    ("de", false, &["erweiterung", "erweiterungen", "anwendung", "werkzeug", "paket", "pakete"]),
+    ("it", false, &["estensione", "estensioni", "applicazione", "strumento", "strumenti", "pacchetto", "versione", "integrazione"]),
+    ("pt", false, &["extens\u{e3}o", "extens\u{f5}es", "aplicativo", "ferramenta", "ferramentas", "pacote", "vers\u{e3}o", "integra\u{e7}\u{e3}o"]),
+    ("ru", false, &[
+        "\u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}", "\u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{430}", "\u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{44b}",
+        "\u{440}\u{430}\u{441}\u{448}\u{438}\u{440}\u{435}\u{43d}\u{438}\u{435}", "\u{440}\u{430}\u{441}\u{448}\u{438}\u{440}\u{435}\u{43d}\u{438}\u{44f}",
+        "\u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}", "\u{43f}\u{440}\u{438}\u{43b}\u{43e}\u{436}\u{435}\u{43d}\u{438}\u{435}", "\u{438}\u{43d}\u{441}\u{442}\u{440}\u{443}\u{43c}\u{435}\u{43d}\u{442}",
+        "\u{442}\u{435}\u{43c}\u{430}", "\u{43f}\u{430}\u{43a}\u{435}\u{442}", "\u{432}\u{435}\u{440}\u{441}\u{438}\u{44f}", "\u{438}\u{43d}\u{442}\u{435}\u{433}\u{440}\u{430}\u{446}\u{438}\u{44f}",
+    ]),
+    ("zh", true, &["\u{63d2}\u{4ef6}", "\u{6269}\u{5c55}", "\u{64f4}\u{5c55}", "\u{5ba2}\u{6237}\u{7aef}", "\u{5ba2}\u{6236}\u{7aef}", "\u{5e94}\u{7528}", "\u{61c9}\u{7528}", "\u{5de5}\u{5177}", "\u{4e3b}\u{9898}", "\u{4e3b}\u{984c}", "\u{7248}\u{672c}", "\u{96c6}\u{6210}"]),
+    ("ja", true, &["\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{62e1}\u{5f35}", "\u{30a2}\u{30d7}\u{30ea}", "\u{30af}\u{30e9}\u{30a4}\u{30a2}\u{30f3}\u{30c8}", "\u{30c4}\u{30fc}\u{30eb}", "\u{30c6}\u{30fc}\u{30de}", "\u{30d1}\u{30c3}\u{30b1}\u{30fc}\u{30b8}", "\u{30d0}\u{30fc}\u{30b8}\u{30e7}\u{30f3}", "\u{9023}\u{643a}"]),
+    ("ko", true, &["\u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{d655}\u{c7a5}", "\u{c571}", "\u{d074}\u{b77c}\u{c774}\u{c5b8}\u{d2b8}", "\u{b3c4}\u{ad6c}", "\u{d14c}\u{b9c8}", "\u{d328}\u{d0a4}\u{c9c0}", "\u{bc84}\u{c804}", "\u{d1b5}\u{d569}"]),
+];
+
+/// Words that say a mark word of the subject when it follows them directly
+/// (rule 3: "is verified", "now official"). Not Italian "è" nor
+/// Portuguese "é": folded, both are "e", "and".
+pub const SUBJECT_WORDS: &[&str] = &[
+    "is", "are", "was", "were", "be", "been", "now", "fully", "officially",
+    "es", "son", "est\u{e1}", "est\u{e1}n", "fue", "ahora", "totalmente", "oficialmente",
+    "est", "sont", "\u{e9}t\u{e9}", "maintenant", "enti\u{e8}rement", "officiellement",
+    "ist", "sind", "wurde", "jetzt", "vollst\u{e4}ndig",
+    "sono", "stato", "stata", "ora", "ufficialmente", "completamente",
+    "s\u{e3}o", "foi", "agora",
+    "\u{442}\u{435}\u{43f}\u{435}\u{440}\u{44c}", "\u{43f}\u{43e}\u{43b}\u{43d}\u{43e}\u{441}\u{442}\u{44c}\u{44e}", "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}", "\u{44f}\u{432}\u{43b}\u{44f}\u{435}\u{442}\u{441}\u{44f}",
+    "\u{662f}", "\u{5df2}\u{7ecf}", "\u{5df2}\u{7d93}", "\u{73b0}\u{5728}", "\u{73fe}\u{5728}", "\u{5b8c}\u{5168}", "\u{6b63}\u{5f0f}",
+];
+
+/// A negation directly before a mark word lifts rules 1 to 3 ("not
+/// official", "cliente no oficial", "非官方客户端", "비공식"); in a script
+/// that doesn't space words, directly before it inside its word too.
+pub const NEGATIONS: &[&str] = &[
+    "not", "no", "non", "n\u{e3}o", "nicht", "kein", "keine", "keiner", "pas", "\u{43d}\u{435}", "\u{43d}\u{435}\u{442}", "\u{975e}", "\u{4e0d}", "\u{672a}", "\u{be44}", "\u{bbf8}",
+];
+
+/// Where a sentence ends (rules 1 and 2): . ! ? ; and their full-width
+/// forms, and a line break.
+pub const SENTENCE_ENDS: &[char] = &['.', '!', '?', ';', '\u{3002}', '\u{ff01}', '\u{ff1f}', '\u{ff1b}', '\n'];
+
+/// A mark word beside one of these is said of the store or Zeron (rule 4):
+/// no negation lifts it. ("By …" directly after it is beside too:
+/// "verified by the store".)
+pub const STORE_WORDS: &[&str] = &["zeron", "the store", "the plugin store", "by zeron", "by the store", "by the plugin store"];
+
+/// Saying the plugin is part of Zeron: in a name with "zeron", any of these
+/// anywhere; in a description, one directly before "(with | in | into | to
+/// | for | of) zeron" ("ships with Zeron", "part of Zeron"; a word that
+/// ends in one of those is directly before "zeron").
+pub const BELONGING: &[&str] = &[
+    "built-in", "builtin", "built in", "built into", "bundled", "included", "preinstalled", "pre-installed", "ships", "shipped", "comes with", "native",
+    "default", "stock", "core", "first-party", "part of",
+];
+
+/// The words that join a word of [`BELONGING`] to "zeron".
+pub const BELONGING_JOINS: &[&str] = &["with", "in", "into", "to", "for", "of"];
+
+/// [`BELONGING`] in Chinese: 内置 "built-in", 自带 "comes with", 预装
+/// "preinstalled", 默认 "default", 原生 "native", and the traditional forms.
+/// In a description, directly before 于, 在 or 到 "zeron" ("内置于
+/// Zeron"), or after 随 "zeron" ("随 Zeron 自带"); "Zeron 内置终端" ("Zeron's
+/// built-in terminal") says nothing.
+pub const BELONGING_ZH: &[&str] = &[
+    "\u{5185}\u{7f6e}", "\u{5167}\u{7f6e}", "\u{81ea}\u{5e26}", "\u{81ea}\u{5e36}", "\u{9884}\u{88c5}", "\u{9810}\u{88dd}", "\u{9ed8}\u{8ba4}", "\u{9ed8}\u{8a8d}", "\u{539f}\u{751f}",
 ];
 
 /// The brand: a listing may say it only about Zeron, never as Zeron, unless
@@ -176,8 +276,12 @@ pub const ORIGIN_WORDS: &[&str] = &["by", "from", "by the", "made by", "built by
 /// In a description, "zeron" right before or after one of these (or its
 /// possessive, "zeron's team") reads as its standing.
 pub const STANDING_WORDS: &[&str] = &[
-    "team", "labs", "inc", "hq", "staff", "approved", "certified", "endorsed", "recommended", "made", "built", "own", "\u{5b98}\u{65b9}", "\u{516c}\u{5f0f}", "\u{acf5}\u{c2dd}",
+    "team", "labs", "inc", "hq", "staff", "approved", "certified", "endorsed", "recommended", "own", "\u{5b98}\u{65b9}", "\u{516c}\u{5f0f}", "\u{acf5}\u{c2dd}",
 ];
+
+/// Standing only directly after a bare "zeron" ("Zeron-made", "Zeron
+/// built"), never after "zeron's" and never as "built-in" / "built in".
+pub const STANDING_AFTER_ZERON: &[&str] = &["made", "built"];
 
 /// `text` as the rules read it before ignorables go: Unicode NFKC (so
 /// 𝐯𝐞𝐫𝐢𝐟𝐢𝐞𝐝 and ｖｅｒｉｆｉｅｄ are "verified"), lowercased, then NFKD
@@ -338,8 +442,16 @@ fn unspaced(text: &[char]) -> Vec<char> {
 
 /// What in `text` claims the store's mark, if anything: one of
 /// [`MARK_GLYPHS`], the [`MARK_WORDS`] word it spells, or a word of
-/// [`OTHER_LANGUAGES`] as a name (`in_name`) or a description reads it.
+/// [`OTHER_LANGUAGES`]: in a name (`in_name`) anywhere ([`name_mark`]); in
+/// a description only when said of the plugin itself
+/// ([`description_mark`]).
 pub fn mark_claim(text: &str, in_name: bool) -> Option<String> {
+    if in_name { name_mark(text) } else { description_mark(text) }
+}
+
+/// A name's mark: any glyph, any mark word, each of [`OTHER_LANGUAGES`]
+/// folded (with its kana and `before` conditions).
+fn name_mark(text: &str) -> Option<String> {
     let folded = folded(text);
     if let Some(glyph) = folded.iter().find(|c| MARK_GLYPHS.contains(c)) {
         return Some(glyph.to_string());
@@ -358,31 +470,264 @@ pub fn mark_claim(text: &str, in_name: bool) -> Option<String> {
         return Some((*word).to_owned());
     }
     // In the store's other languages.
-    let kana = text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}'));
-    let accents = kept_accents(text);
-    let accented_readings = [accents.clone(), unspaced(&accents)];
+    let kana = has_kana(text);
     OTHER_LANGUAGES.iter().flat_map(|(_, substring, words)| words.iter().map(move |w| (*substring, w))).find_map(|(substring, word)| {
         if word.with_kana && !kana {
             return None;
         }
-        let (wanted, readings) = match (in_name, word.description) {
-            (true, _) | (false, InDescription::Folded) => (folded_word(word.word), &readings),
-            (false, InDescription::Accented) => (kept_accents(word.word), &accented_readings),
-            (false, InDescription::NameOnly) => return None,
-        };
-        found(readings, &wanted, substring).then(|| word.word.to_owned())
+        let wanted = folded_word(word.word);
+        let said = readings.iter().any(|reading| {
+            spans(reading, &wanted, substring).into_iter().any(|(_, end)| {
+                word.before.is_empty() || {
+                    let rest: Vec<char> = reading[end..].iter().copied().skip_while(|c| separator(*c)).collect();
+                    word.before.iter().any(|b| rest.starts_with(&folded_word(b)))
+                }
+            })
+        });
+        said.then(|| word.word.to_owned())
     })
 }
 
-/// Whether `wanted` is in one of `readings`: anywhere (`substring`), or as
-/// a whole word, no letter or digit of any script right before or after.
-fn found(readings: &[Vec<char>], wanted: &[char], substring: bool) -> bool {
+fn has_kana(text: &str) -> bool {
+    text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}'))
+}
+
+/// A Han ideograph: a word by itself (Chinese and Japanese don't space
+/// their words).
+fn han(c: char) -> bool {
+    matches!(c, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{20000}'..='\u{3134F}')
+}
+
+/// The words of `text`, `(start, end)`: each run of characters that aren't
+/// separators, each Han ideograph a word by itself.
+fn words_of(text: &[char]) -> Vec<(usize, usize)> {
+    let mut words = Vec::new();
+    let mut start: Option<usize> = None;
+    for (at, c) in text.iter().enumerate() {
+        if separator(*c) || han(*c) {
+            if let Some(from) = start.take() {
+                words.push((from, at));
+            }
+            if han(*c) {
+                words.push((at, at + 1));
+            }
+        } else if start.is_none() {
+            start = Some(at);
+        }
+    }
+    if let Some(from) = start {
+        words.push((from, text.len()));
+    }
+    words
+}
+
+/// Where `wanted` is in `text`: anywhere (`substring`), or whole (no letter
+/// or digit of any script right before or after).
+fn spans(text: &[char], wanted: &[char], substring: bool) -> Vec<(usize, usize)> {
     let any_word = |c: Option<&char>| c.is_some_and(|c| matches!(c.general_category_group(), GeneralCategoryGroup::Letter | GeneralCategoryGroup::Number));
-    readings.iter().any(|reading| {
-        (0..reading.len()).any(|at| {
-            reading[at..].starts_with(wanted) && (substring || (!any_word(at.checked_sub(1).and_then(|b| reading.get(b))) && !any_word(reading.get(at + wanted.len()))))
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    (0..text.len())
+        .filter(|at| {
+            text[*at..].starts_with(wanted)
+                && (substring || (!any_word(at.checked_sub(1).and_then(|b| text.get(b))) && !any_word(text.get(at + wanted.len()))))
         })
-    })
+        .map(|at| (at, at + wanted.len()))
+        .collect()
+}
+
+/// A reading of a description: its text, its words, and how a listed word
+/// is put in its form.
+struct Reading {
+    text: Vec<char>,
+    words: Vec<(usize, usize)>,
+    form: fn(&str) -> Vec<char>,
+}
+
+impl Reading {
+    fn new(text: Vec<char>, form: fn(&str) -> Vec<char>) -> Self {
+        let words = words_of(&text);
+        Reading { text, words, form }
+    }
+
+    /// The words a span covers: (first, last).
+    fn covers(&self, (start, end): (usize, usize)) -> Option<(usize, usize)> {
+        let first = self.words.iter().position(|w| w.1 > start)?;
+        let last = self.words.iter().rposition(|w| w.0 < end)?;
+        (first <= last).then_some((first, last))
+    }
+
+    fn sentence_end_in(&self, from: usize, to: usize) -> bool {
+        from < to && self.text[from..to].iter().any(|c| SENTENCE_ENDS.contains(c))
+    }
+
+    /// Whether the words `at - n .. at` (directly before word `at`, nothing
+    /// ending a sentence between) read as `phrase`.
+    fn before_is(&self, at: usize, phrase: &str) -> bool {
+        let wanted = words_of(&(self.form)(phrase)).len();
+        let phrase_text: Vec<char> = (self.form)(phrase);
+        let phrase_words: Vec<Vec<char>> = words_of(&phrase_text).iter().map(|(a, b)| phrase_text[*a..*b].to_vec()).collect();
+        if wanted == 0 || at < wanted || self.sentence_end_in(self.words[at - wanted].0, self.words[at].0) {
+            return false;
+        }
+        (0..wanted).all(|n| {
+            let (a, b) = self.words[at - wanted + n];
+            same_word(&self.text[a..b], &phrase_words[n])
+        })
+    }
+
+    /// Whether the words directly after word `at` read as `phrase`.
+    fn after_is(&self, at: usize, phrase: &str) -> bool {
+        let phrase_text: Vec<char> = (self.form)(phrase);
+        let phrase_words: Vec<Vec<char>> = words_of(&phrase_text).iter().map(|(a, b)| phrase_text[*a..*b].to_vec()).collect();
+        let wanted = phrase_words.len();
+        if wanted == 0 || at + wanted >= self.words.len() || self.sentence_end_in(self.words[at].1, self.words[at + wanted].1) {
+            return false;
+        }
+        (0..wanted).all(|n| {
+            let (a, b) = self.words[at + 1 + n];
+            same_word(&self.text[a..b], &phrase_words[n])
+        })
+    }
+
+    /// Whether a mark word at `span` is said of the plugin itself (or of
+    /// the store, or Zeron). `ambiguous`: a word that alone isn't the mark
+    /// (rule 2 and 4 only).
+    fn said_of_plugin(&self, span: (usize, usize), ambiguous: bool) -> bool {
+        let Some((first, last)) = self.covers(span) else { return false };
+        // 4: beside "zeron", "the store", "the plugin store". No negation
+        // lifts it.
+        if STORE_WORDS.iter().any(|w| self.before_is(first, w) || self.after_is(last, w)) {
+            return true;
+        }
+        // A negation directly before lifts 1 to 3: the word before, or (in
+        // a script that doesn't space words) inside this word.
+        let inside: Vec<char> = self.text[self.words[first].0..span.0].to_vec();
+        if NEGATIONS.iter().any(|n| self.before_is(first, n) || (!inside.is_empty() && inside.ends_with(&(self.form)(n)))) {
+            return false;
+        }
+        if !ambiguous {
+            // 1: the text's first word, or alone as a sentence.
+            if first == 0 {
+                return true;
+            }
+            let from = self.text[..span.0].iter().rposition(|c| SENTENCE_ENDS.contains(c)).map_or(0, |at| at + 1);
+            let to = self.text[span.1..].iter().position(|c| SENTENCE_ENDS.contains(c)).map_or(self.text.len(), |at| span.1 + at);
+            let alone = self.words.iter().enumerate().filter(|(_, w)| w.0 >= from && w.1 <= to).all(|(n, _)| (first..=last).contains(&n));
+            if alone {
+                return true;
+            }
+            // 3: directly after a word that says it of the subject.
+            if SUBJECT_WORDS.iter().any(|w| self.before_is(first, w)) {
+                return true;
+            }
+        }
+        // 2: within two words of a word for the plugin, nothing ending a
+        // sentence between.
+        PLUGIN_WORDS.iter().any(|(_, substring, words)| {
+            words.iter().any(|word| {
+                let wanted = (self.form)(word);
+                let found: Vec<(usize, usize)> = if *substring {
+                    spans(&self.text, &wanted, true)
+                } else {
+                    self.phrase_spans(&wanted)
+                };
+                found.into_iter().any(|other| {
+                    let Some((o_first, o_last)) = self.covers(other) else { return false };
+                    let (gap, from, to) = if o_first > last {
+                        (o_first - last - 1, span.1, other.0)
+                    } else if first > o_last {
+                        (first - o_last - 1, other.1, span.0)
+                    } else {
+                        (0, 0, 0)
+                    };
+                    gap <= 2 && !self.sentence_end_in(from, to)
+                })
+            })
+        })
+    }
+
+    /// Where a word or phrase of spaced words is, whole word by word.
+    fn phrase_spans(&self, phrase: &[char]) -> Vec<(usize, usize)> {
+        let parts: Vec<Vec<char>> = words_of(phrase).iter().map(|(a, b)| phrase[*a..*b].to_vec()).collect();
+        if parts.is_empty() || parts.len() > self.words.len() {
+            return Vec::new();
+        }
+        (0..=self.words.len() - parts.len())
+            .filter(|at| {
+                parts.iter().enumerate().all(|(n, part)| {
+                    let (a, b) = self.words[at + n];
+                    same_word(&self.text[a..b], part)
+                }) && !self.sentence_end_in(self.words[*at].0, self.words[at + parts.len() - 1].1)
+            })
+            .map(|at| (self.words[at].0, self.words[at + parts.len() - 1].1))
+            .collect()
+    }
+}
+
+/// Whether a word of a text is `word`: the same, or (for "zeron") spelled
+/// with look-alikes.
+fn same_word(text: &[char], word: &[char]) -> bool {
+    if text == word {
+        return true;
+    }
+    let zeron: Vec<char> = ZERON.chars().collect();
+    word == zeron.as_slice() && spell_end(text, 0, &zeron) == Some(text.len())
+}
+
+/// A description's mark: a glyph anywhere; a mark word only when said of the
+/// plugin itself (the text's first word or alone as a sentence; within two
+/// words of a word for the plugin; directly after a word that says it of
+/// the subject; beside "zeron" or the store), unless a negation is directly
+/// before it (not for the last).
+fn description_mark(text: &str) -> Option<String> {
+    let folded_text = folded(text);
+    if let Some(glyph) = folded_text.iter().find(|c| MARK_GLYPHS.contains(c)) {
+        return Some(glyph.to_string());
+    }
+    let folded_readings = [Reading::new(folded_text.clone(), folded_word), Reading::new(unspaced(&folded_text), folded_word)];
+    for reading in &folded_readings {
+        for word in MARK_WORDS {
+            let spelling: Vec<char> = mark_text(word).chars().collect();
+            let found = (0..reading.text.len())
+                .filter(|at| !ascii_word(at.checked_sub(1).and_then(|b| reading.text.get(b))))
+                .filter_map(|at| spell_end(&reading.text, at, &spelling).map(|end| (at, end)));
+            if found.into_iter().any(|span| reading.said_of_plugin(span, false)) {
+                return Some((*word).to_owned());
+            }
+        }
+        for (_, substring, words) in OTHER_LANGUAGES {
+            for word in words.iter().filter(|w| w.description == InDescription::Folded) {
+                if spans(&reading.text, &folded_word(word.word), *substring).into_iter().any(|span| reading.said_of_plugin(span, false)) {
+                    return Some(word.word.to_owned());
+                }
+            }
+        }
+        // Not the mark alone, but near a word for the plugin (or beside
+        // the store): 已认证插件, 公式プラグイン, 공식 플러그인.
+        let ambiguous = OTHER_LANGUAGES
+            .iter()
+            .flat_map(|(_, _, words)| words.iter().filter(|w| w.description == InDescription::NameOnly && (w.with_kana || !w.before.is_empty())).map(|w| w.word))
+            .chain(AMBIGUOUS.iter().copied());
+        for word in ambiguous {
+            if spans(&reading.text, &folded_word(word), true).into_iter().any(|span| reading.said_of_plugin(span, true)) {
+                return Some(word.to_owned());
+            }
+        }
+    }
+    // Words refused only as written with their accents.
+    let kept = kept_accents(text);
+    for reading in [Reading::new(kept.clone(), kept_accents), Reading::new(unspaced(&kept), kept_accents)] {
+        for (_, substring, words) in OTHER_LANGUAGES {
+            for word in words.iter().filter(|w| w.description == InDescription::Accented) {
+                if spans(&reading.text, &kept_accents(word.word), *substring).into_iter().any(|span| reading.said_of_plugin(span, false)) {
+                    return Some(word.word.to_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `text` folded but keeping its accents: NFKC and lowercase, ignorables
@@ -430,17 +775,40 @@ pub fn zeron_phrases() -> Vec<String> {
 
 /// Whether a name says "zeron" other than as the object of one of
 /// [`NAME_FORMS`] ("Themes for Zeron" may; "Zeron Labs", "Git by Zeron"
-/// may not): `Some("zeron")` if it does. Read as the mark's words are.
+/// may not), or says it beside a word of [`BELONGING`] anywhere ("Default
+/// Git for Zeron"): `Some("zeron")` if it does. Read as the mark's words are.
 pub fn claims_zeron_in_name(text: &str) -> Option<String> {
     let folded = folded(text);
     let forms = name_forms();
     [folded.clone(), unspaced(&folded)]
         .iter()
         .any(|reading| {
+            let zerons = ends(reading, ZERON);
             let allowed: BTreeSet<usize> = forms.iter().flat_map(|form| ends(reading, form)).collect();
-            ends(reading, ZERON).iter().any(|end| !allowed.contains(end))
+            let belonging = || BELONGING.iter().chain(BELONGING_ZH).any(|b| !ends(reading, b).is_empty());
+            zerons.iter().any(|end| !allowed.contains(end)) || (!zerons.is_empty() && belonging())
         })
         .then(|| ZERON.to_owned())
+}
+
+/// The spellings that say the plugin is part of Zeron, in a description.
+fn belonging_phrases() -> Vec<String> {
+    let mut phrases = Vec::new();
+    for word in BELONGING {
+        if BELONGING_JOINS.iter().any(|join| word.ends_with(&format!(" {join}"))) {
+            phrases.push(format!("{word} {ZERON}"));
+        } else {
+            phrases.extend(BELONGING_JOINS.iter().map(|join| format!("{word} {join} {ZERON}")));
+        }
+    }
+    for word in BELONGING_ZH {
+        for join in ["\u{4e8e}", "\u{65bc}", "\u{5728}", "\u{5230}"] {
+            phrases.push(format!("{word}~{join}~{ZERON}"));
+        }
+        phrases.push(format!("\u{968f}~{ZERON}~{word}"));
+        phrases.push(format!("\u{96a8}~{ZERON}~{word}"));
+    }
+    phrases
 }
 
 /// Which of [`zeron_phrases`] a description says, if any, read as the
@@ -452,7 +820,24 @@ pub fn claims_zeron_in_name(text: &str) -> Option<String> {
 pub fn claims_zeron(text: &str) -> Option<String> {
     let folded = folded(text);
     let readings = [folded.clone(), unspaced(&folded)];
-    zeron_phrases().into_iter().find(|phrase| readings.iter().any(|reading| spelled(reading, phrase))).map(|phrase| phrase.replace('~', " "))
+    if let Some(phrase) = zeron_phrases().into_iter().chain(belonging_phrases()).find(|phrase| readings.iter().any(|reading| spelled(reading, phrase))) {
+        return Some(phrase.replace('~', " "));
+    }
+    // "made", "built" only directly after a bare "zeron", never as
+    // "built-in" or "built in".
+    let in_word: Vec<char> = "in".chars().collect();
+    STANDING_AFTER_ZERON
+        .iter()
+        .find(|word| {
+            readings.iter().any(|reading| {
+                ends(reading, &format!("{ZERON} {word}")).into_iter().any(|end| {
+                    let next: Vec<char> = reading[end..].iter().copied().skip_while(|c| separator(*c)).collect();
+                    let gap = reading.len() - end - next.len();
+                    !(gap > 0 && (next.starts_with(&in_word) && !ascii_word(next.get(2))))
+                })
+            })
+        })
+        .map(|word| format!("{ZERON} {word}"))
 }
 
 /// What a keyword says that it may not, if anything: read as a name is,
@@ -624,7 +1009,7 @@ mod tests {
         // (text, in a name, in a description)
         for (text, name, description) in [
             ("Cliente oficial", Some("oficial"), Some("oficial")),
-            ("No oficial", Some("oficial"), Some("oficial")),
+            ("No oficial", Some("oficial"), None),
             ("Extension officielle", Some("officielle"), Some("officielle")),
             ("Th\u{e8}me v\u{e9}rifi\u{e9}", Some("v\u{e9}rifi\u{e9}"), Some("v\u{e9}rifi\u{e9}")),
             // Folded, "vérifie" ("checks") reads as "vérifié": a name only.
@@ -638,7 +1023,7 @@ mod tests {
             ("\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}", Some("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}"), Some("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}")),
             ("\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}: 5 \u{444}\u{430}\u{439}\u{43b}\u{43e}\u{432}", Some("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}"), None),
             ("\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", Some("\u{5b98}\u{65b9}"), Some("\u{5b98}\u{65b9}")),
-            ("\u{975e}\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", Some("\u{5b98}\u{65b9}"), Some("\u{5b98}\u{65b9}")),
+            ("\u{975e}\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", Some("\u{5b98}\u{65b9}"), None),
             ("\u{5df2}\u{9a8c}\u{8bc1}\u{7684}\u{7b14}\u{8bb0}", Some("\u{5df2}\u{9a8c}\u{8bc1}"), Some("\u{5df2}\u{9a8c}\u{8bc1}")),
             ("\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", Some("\u{516c}\u{5f0f}"), Some("\u{516c}\u{5f0f}")),
             ("\u{691c}\u{8a3c}\u{6e08}\u{307f}\u{306e}\u{30e1}\u{30e2}", Some("\u{691c}\u{8a3c}\u{6e08}"), Some("\u{691c}\u{8a3c}\u{6e08}")),
@@ -661,6 +1046,50 @@ mod tests {
         for text in ["Zeron \u{516c}\u{5f0f}", "\u{acf5}\u{c2dd} Zeron", "Zeron \u{8ba4}\u{8bc1}", "\u{c778}\u{c99d} Zeron", "Zeron officiel", "Zeron verifiziert", "\u{7531} Zeron \u{5236}\u{4f5c}", "\u{6765}\u{81ea}Zeron"] {
             assert!(claims_zeron(text).is_some(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_description_says_the_mark_only_of_the_plugin_itself() {
+        for text in [
+            // 1: first word, or alone as a sentence.
+            "Official Git tools.", "Notes, kept tidy. Verified.", "VERIFIED Focus board.",
+            // 2: within two words of a word for the plugin.
+            "A verified plugin for notes.", "The official Git extension.", "Cliente oficial para Git.",
+            "\u{516c}\u{5f0f} Git \u{62e1}\u{5f35}\u{3002}", "\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{acf5}\u{c2dd} Git \u{d50c}\u{b7ec}\u{adf8}\u{c778}",
+            "\u{5df2}\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}", "\u{8a8d}\u{8a3c}\u{6e08}\u{307f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "A board, the official version.",
+            // 3: directly after a word that says it of the subject.
+            "This board is verified.", "Now official: boards for everyone.", "Fully verified and signed.", "Der Client ist offizielle Software.",
+            // 4: beside Zeron or the store; no negation lifts it.
+            "Boards, Zeron verified.", "Not Zeron official.", "Checked: verified by the store.",
+            // Look-alikes and spacing count as anywhere.
+            "Notes. V.E.R.I.F.I.E.D.", "A v3rified plugin.",
+        ] {
+            assert!(description_mark(text).is_some(), "{text}");
+        }
+        for text in [
+            "Opens the official Rust documentation.", "Shows GitHub's verified badge next to commits.", "Not official, just useful.",
+            "An unofficial client for Git.", "A non official client for Git.", "Cliente no oficial de Git.", "\u{975e}\u{5b98}\u{65b9}\u{5ba2}\u{6237}\u{7aef}",
+            "\u{c774} \u{d50c}\u{b7ec}\u{adf8}\u{c778}\u{c740} \u{be44}\u{acf5}\u{c2dd} \u{d074}\u{b77c}\u{c774}\u{c5b8}\u{d2b8}\u{c785}\u{b2c8}\u{b2e4}",
+            "Lists your verified email addresses.", "Links to the official site. A tool for boards.", "Adds a button to Zeron's built-in terminal.",
+            "V\u{e9}rifie la syntaxe de vos fichiers", "Verifiziert Signaturen.", "Das Plugin verifiziert Signaturen.", "Eingaben werden gepr\u{fc}ft.",
+            "\u{6570}\u{5b66}\u{516c}\u{5f0f}\u{7f16}\u{8f91}\u{5668}", "\u{c218}\u{d559} \u{acf5}\u{c2dd}", "\u{8eab}\u{4efd}\u{8ba4}\u{8bc1}", "\u{8a8d}\u{8a3c}\u{30c8}\u{30fc}\u{30af}\u{30f3}", "\u{c778}\u{c99d} \u{d1a0}\u{d070}",
+        ] {
+            assert_eq!(description_mark(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn saying_a_plugin_is_part_of_zeron() {
+        for text in ["Ships with Zeron.", "Included in Zeron.", "Part of Zeron.", "Comes with Zeron.", "Built into Zeron.", "Zeron-made boards.", "Zeron built.", "\u{5185}\u{7f6e}\u{4e8e}Zeron\u{3002}"] {
+            assert!(claims_zeron(text).is_some(), "{text}");
+        }
+        for text in ["Adds a button to Zeron's built-in terminal.", "Zeron built-in terminal tools.", "Uses Zeron's made-up names.", "Zeron\u{5185}\u{7f6e}\u{7ec8}\u{7aef}\u{7684}\u{6309}\u{94ae}"] {
+            assert_eq!(claims_zeron(text), None, "{text}");
+        }
+        for name in ["Built-in Zeron Git", "Default Git for Zeron", "Native notes for Zeron"] {
+            assert!(claims_zeron_in_name(name).is_some(), "{name}");
+        }
+        assert_eq!(claims_zeron_in_name("Themes for Zeron"), None);
     }
 
     #[test]
