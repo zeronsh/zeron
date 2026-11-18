@@ -86,6 +86,10 @@ pub mod reason {
     pub const UP_TO_DATE: &str = "up_to_date";
     /// Reinstalling: where it came from isn't known, or is gone.
     pub const NO_SOURCE: &str = "no_source";
+    /// Its `engines.zeron` leaves this Zeron out (or can't be read).
+    pub const INCOMPATIBLE: &str = "incompatible";
+    // The store's words (`store::client::reason`): `store_unreachable`,
+    // `not_in_store`, `store_error`, `store_mismatch`; and the edge's own.
 }
 
 /// `"<reason>: <words>"`.
@@ -111,7 +115,7 @@ pub const WORDS: Words = Words {
 /// Where a plugin came from (`.source.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Source {
-    /// `file`, `link`, `release` or `git`.
+    /// `file`, `link`, `release`, `git` or `store`.
     pub kind: String,
     /// The link, the repository (`release`, `git`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +133,40 @@ pub struct Source {
     pub version: String,
     #[serde(default)]
     pub installed_at: i64,
+    /// The store's record of what was installed (`store`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<StoreSource>,
+}
+
+/// What the store said of a version installed from it: what the device
+/// trusts for a store install (who published it, and the content it
+/// vouched for), kept beside the plugin's files.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StoreSource {
+    /// Its store id (the manifest's id).
+    pub id: String,
+    /// Who owns the id in the store: the username its listing reads "by".
+    pub publisher: String,
+    /// Who owns it, as the store's stable, opaque id for that account
+    /// (`pub_…`, amendment 33): what consent is bound to, so a username an
+    /// operator moves can never carry another account's decisions.
+    #[serde(default)]
+    pub publisher_id: String,
+    /// The content hash the store's record names (`signing::content_hash`).
+    pub hash: String,
+    /// The key that signed it, as the store's record names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl StoreSource {
+    /// What a decision about a store plugin is bound to: who owns it in
+    /// the store (their stable id, never the username), not the key it was
+    /// signed with (an author's deploy key and device keys sign the same
+    /// plugin). A new owner asks again.
+    pub fn binding(&self) -> String {
+        format!("store:{}", self.publisher_id)
+    }
 }
 
 impl Source {
@@ -147,9 +185,21 @@ impl Source {
         if let Some(r) = &self.git_ref {
             value["ref"] = json!(r);
         }
+        if let Some(store) = &self.store {
+            value["id"] = json!(store.id);
+            value["publisher"] = json!(store.publisher);
+        }
         value
     }
+
+    /// The store's record, when it came from the store.
+    pub fn store(&self) -> Option<&StoreSource> {
+        self.store.as_ref().filter(|_| self.kind == STORE)
+    }
 }
+
+/// A [`Source`]'s kind for a plugin installed from the store.
+pub const STORE: &str = "store";
 
 /// A plugin package, verified.
 #[derive(Debug, Clone)]
@@ -266,6 +316,24 @@ pub fn newer(candidate: &str, installed: &str) -> bool {
     a > b
 }
 
+/// Whether a plugin is for this Zeron, by its `engines.zeron` (none: any):
+/// `Err` is the `incompatible` failure saying why not. Every source's
+/// install and update is checked.
+pub fn compatible(manifest: &Manifest) -> Result<(), String> {
+    let range = super::listing::zeron_range(&manifest.raw).map_err(|e| failure(reason::INCOMPATIBLE, e))?;
+    super::version::accepts(range.as_deref(), &super::version::zeron()).map_err(|e| failure(reason::INCOMPATIBLE, e))
+}
+
+/// Whether `candidate` is later than `installed` as the store says it: by
+/// precedence, build metadata ignored (`version::newer`), when both are
+/// strict versions (a store version always is); else as [`newer`] does.
+pub fn newer_by_precedence(candidate: &str, installed: &str) -> bool {
+    match (super::version::Version::parse(candidate), super::version::Version::parse(installed)) {
+        (Ok(a), Ok(b)) => super::version::newer(&a, &b),
+        _ => newer(candidate, installed),
+    }
+}
+
 pub fn not_newer(candidate: &str, installed: &str) -> String {
     failure(reason::NOT_NEWER, format!("Version {candidate} isn't later than the {installed} installed, so it won't replace it"))
 }
@@ -322,7 +390,9 @@ pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_f
         }
         // Signed downgrades (or a different build under the same version)
         // are refused: an old version's holes stay closed.
-        if replaced.hash != package.hash && !newer(&package.manifest.version, &replaced.version) {
+        // (From the store, by precedence: a build of the same version isn't later.)
+        let later = if source.store().is_some() { newer_by_precedence } else { newer };
+        if replaced.hash != package.hash && !later(&package.manifest.version, &replaced.version) {
             return Err(not_newer(&package.manifest.version, &replaced.version));
         }
         Some(replaced)
@@ -718,7 +788,7 @@ pub async fn fetch(origin: &Origin, scratch: &Path) -> Result<(Package, Source),
     let (raw, source) = match origin {
         Origin::Link(url) => (
             download(url).await?,
-            Source { kind: "link".into(), url: Some(url.clone()), path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0 },
+            Source { kind: "link".into(), url: Some(url.clone()), path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: None },
         ),
         Origin::Release { repo, tag } => {
             let asset = release_asset(repo, tag.as_deref()).await?;
@@ -732,6 +802,7 @@ pub async fn fetch(origin: &Origin, scratch: &Path) -> Result<(Package, Source),
                     commit: None,
                     version: String::new(),
                     installed_at: 0,
+                    store: None,
                 },
             )
         }
@@ -739,7 +810,7 @@ pub async fn fetch(origin: &Origin, scratch: &Path) -> Result<(Package, Source),
             let (raw, commit) = from_git(url, git_ref.as_deref(), path.as_deref(), scratch).await?;
             (
                 raw,
-                Source { kind: "git".into(), url: Some(url.clone()), path: path.clone(), git_ref: git_ref.clone(), commit: Some(commit), version: String::new(), installed_at: 0 },
+                Source { kind: "git".into(), url: Some(url.clone()), path: path.clone(), git_ref: git_ref.clone(), commit: Some(commit), version: String::new(), installed_at: 0, store: None },
             )
         }
     };
@@ -815,7 +886,7 @@ pub async fn fetch_again(source: &Source, scratch: &Path) -> Result<Option<(Pack
 // ── Updates found ───────────────────────────────────────────────────────────
 
 /// An update found for an installed plugin (`.updates/<id>.json`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Found {
     /// The installed plugin's hash this was found against (a plugin that
     /// changed since has to be checked again).
@@ -842,6 +913,17 @@ pub struct Found {
     /// asks you again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub new_key: bool,
+    /// From the store: its id has another owner now, so installing it asks
+    /// you again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_owner: bool,
+    /// From the store: your own version, still in review (offered to your
+    /// devices alone).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_review: bool,
+    /// From the store: what's new in it (its CHANGELOG.md section).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
 }
 
 impl Found {
@@ -856,6 +938,15 @@ impl Found {
         }
         if self.new_key {
             value["new_key"] = json!(true);
+        }
+        if self.new_owner {
+            value["new_owner"] = json!(true);
+        }
+        if self.in_review {
+            value["in_review"] = json!(true);
+        }
+        if !self.notes.is_empty() {
+            value["notes"] = json!(self.notes);
         }
         value
     }
@@ -931,7 +1022,7 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, sam
     } else if !newer(&fetched.manifest.version, version) {
         Some(not_newer(&fetched.manifest.version, version))
     } else {
-        None
+        compatible(&fetched.manifest).err()
     };
     let diff = super::capability::diff(allowed, &super::capability::record(&fetched.manifest));
     Some(Found {
@@ -944,6 +1035,9 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, sam
         source: Some(source),
         digest_diff: diff.grew().then(|| diff.to_value()),
         new_key: fetched.key != key,
+        new_owner: false,
+        in_review: false,
+        notes: String::new(),
     })
 }
 
@@ -970,7 +1064,7 @@ pub(crate) mod tests {
         let raw = signed_package(&key, "focus", "1.0.0", &["ui.add"], "return 1");
         let package = parse(raw.clone()).unwrap();
         assert_eq!((package.id(), package.key.as_str()), ("focus", key.public().as_str()));
-        let source = Source { kind: "file".into(), url: None, path: Some("/x.zeron-plugin".into()), git_ref: None, commit: None, version: "1.0.0".into(), installed_at: 1 };
+        let source = Source { kind: "file".into(), url: None, path: Some("/x.zeron-plugin".into()), git_ref: None, commit: None, version: "1.0.0".into(), installed_at: 1, store: None };
         assert!(install(dir.path(), &package, &source, None).unwrap().is_none());
         let installed = scan::inspect(&dir.path().join("focus"), true);
         assert_eq!(installed.sig, SigCheck::Valid(key.public()));
@@ -1038,7 +1132,7 @@ pub(crate) mod tests {
         let (key, _) = SigningKey::generate().unwrap();
         let (eve, _) = SigningKey::generate().unwrap();
         let installed = parse(signed_package(&key, "focus", "1.0.0", &["ui.add"], "return 1")).unwrap();
-        let source = Source { kind: "link".into(), url: Some("https://e/x.zeron-plugin".into()), path: None, git_ref: None, commit: None, version: "1.0.0".into(), installed_at: 0 };
+        let source = Source { kind: "link".into(), url: Some("https://e/x.zeron-plugin".into()), path: None, git_ref: None, commit: None, version: "1.0.0".into(), installed_at: 0, store: None };
         let perms = installed.manifest.permissions.clone();
         let record = crate::plugins::capability::record(&installed.manifest);
         let key_public = key.public();
@@ -1109,6 +1203,38 @@ pub(crate) mod tests {
         assert_eq!(reason_of(&forbidden), Some(reason::DOWNLOAD_FAILED), "{forbidden}");
     }
 
+    /// Two paths that are one file on a disk that ignores case (macOS's,
+    /// Windows'): sideloading doesn't refuse such a package (the store's
+    /// rules do: `listing::fold_path`), so what installing it ends as is
+    /// pinned here. On a disk that keeps case, both files, as signed. On
+    /// one that ignores it, the second write lands on the first, the folder
+    /// no longer matches what was signed, and it's refused before it takes
+    /// its place: nothing is installed and nothing is left half-way.
+    #[test]
+    fn a_package_whose_paths_collide_on_a_case_blind_disk_never_half_installs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("probe"), b"x").unwrap();
+        let ignores_case = dir.path().join("PROBE").exists();
+        std::fs::remove_file(dir.path().join("probe")).unwrap();
+        let (key, _) = SigningKey::generate().unwrap();
+        let mut files = BTreeMap::new();
+        files.insert("init.luau".to_string(), b"return 1".to_vec());
+        files.insert("ui/Badge.luau".to_string(), b"return 'upper'".to_vec());
+        files.insert("ui/badge.luau".to_string(), b"return 'lower'".to_vec());
+        let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&files));
+        let package = parse(package::pack(FORMAT, &manifest, &files).unwrap()).unwrap();
+        let source = Source { kind: "file".into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: None };
+        let installed = install(dir.path(), &package, &source, None);
+        if ignores_case {
+            assert_eq!(installed.unwrap_err(), "It changed while it was being installed");
+            assert!(!dir.path().join("focus").exists());
+        } else {
+            installed.unwrap();
+            assert_eq!(scan::inspect(&dir.path().join("focus"), true).sig, SigCheck::Valid(key.public()));
+        }
+        assert_eq!(std::fs::read_dir(dir.path().join(INCOMING_DIR)).unwrap().count(), 0, "nothing left half-way");
+    }
+
     /// R23: an update was any package with another hash under the same key,
     /// so the author's key (or whoever holds it) could roll a plugin back to
     /// an older, vulnerable version.
@@ -1118,7 +1244,7 @@ pub(crate) mod tests {
         assert!(!newer("1.0.0", "1.0.0") && !newer("0.9", "1.0") && !newer("1", "1.0.0") && !newer("tomorrow", "1"));
         let dir = tempfile::tempdir().unwrap();
         let (key, _) = SigningKey::generate().unwrap();
-        let source = Source { kind: "file".into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0 };
+        let source = Source { kind: "file".into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: None };
         let v2 = parse(signed_package(&key, "focus", "2.0.0", &[], "return 2")).unwrap();
         install(dir.path(), &v2, &source, None).unwrap();
         let v1 = parse(signed_package(&key, "focus", "1.0.0", &[], "return 1")).unwrap();

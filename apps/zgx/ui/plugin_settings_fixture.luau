@@ -67,6 +67,12 @@ local model = {
 	scenes_stored = {} :: { [string]: any },
 	-- Backdrops: someone else's plugin that offers a wallpaper too.
 	backdrops = false,
+	-- Greeter draws a page of its own too (`zeron.settings_page`), after
+	-- its declared rows: what search finds it by, and why its last build
+	-- failed, if it did.
+	greeter_page = nil :: { keywords: { string }, problem: string? }?,
+	-- Tally: a plugin with a page of its own and nothing declared.
+	tally = false,
 }
 
 -- Parallax scenes' settings (plugins-builtin/parallax-scenes/zeron-plugin.json's).
@@ -99,10 +105,9 @@ local function publish()
 		local v = model.stored[s.id]
 		values[s.id] = if v == nil then s.default else v
 	end
-	pstate.now:set({
-		state = "ready",
-		dirs = { plugins = "/tmp/plugins", templates = "/tmp/templates" },
-		list = {
+	-- (Built in turn, so no entry is a hole in the list.)
+	local rows: { any } = {}
+	for _, row in {
 			{
 				id = "settings-demo",
 				name = "Greeter",
@@ -145,11 +150,35 @@ local function publish()
 					hash = "backdrops-1",
 				}
 				else nil,
-		} :: { any },
+		} :: { any } do
+		table.insert(rows, row)
+	end
+	if model.tally then
+		table.insert(rows, {
+			id = "tally",
+			name = "Tally",
+			version = "1.0.0",
+			description = "Counters for the day.",
+			author = { kind = "you" },
+			status = "on",
+			permissions = {},
+			allowed = {},
+			ask = {},
+			hash = "tally-1",
+			own = true,
+		})
+	end
+	pstate.now:set({
+		state = "ready",
+		dirs = { plugins = "/tmp/plugins", templates = "/tmp/templates" },
+		list = rows,
 	})
 	local list: { any } = {}
 	if model.on then
-		table.insert(list, { plugin = "settings-demo", name = "Greeter", settings = model.settings, values = values, status = model.status })
+		table.insert(list, { plugin = "settings-demo", name = "Greeter", settings = model.settings, values = values, status = model.status, page = model.greeter_page })
+	end
+	if model.tally then
+		table.insert(list, { plugin = "tally", name = "Tally", settings = {}, values = {}, status = {}, page = { keywords = { "counters", "ledger" } } })
 	end
 	if model.snapper then
 		table.insert(list, {
@@ -311,6 +340,62 @@ ui.command {
 	title = "Backdrops, another plugin with a wallpaper, is on",
 	run = function()
 		model.backdrops = true
+		publish()
+	end,
+}
+ui.command {
+	id = "greeter_page",
+	title = "Greeter draws a page of its own",
+	run = function()
+		model.greeter_page = { keywords = { "postcards", "welcome" } }
+		publish()
+	end,
+}
+ui.command {
+	id = "greeter_page_words",
+	title = "Greeter's page is found by other words now",
+	run = function()
+		model.greeter_page = { keywords = { "salutations" }, problem = if model.greeter_page then model.greeter_page.problem else nil }
+		publish()
+	end,
+}
+ui.command {
+	id = "greeter_page_fails",
+	title = "Greeter's page failed to build",
+	run = function()
+		model.greeter_page = { keywords = { "postcards", "welcome" }, problem = "init.luau:12: attempt to index nil with 'count'" }
+		publish()
+	end,
+}
+ui.command {
+	id = "greeter_page_builds",
+	title = "Greeter's page built again",
+	run = function()
+		model.greeter_page = { keywords = { "postcards", "welcome" } }
+		publish()
+	end,
+}
+ui.command {
+	id = "greeter_page_gone",
+	title = "Greeter's new version draws no page of its own",
+	run = function()
+		model.greeter_page = nil
+		publish()
+	end,
+}
+ui.command {
+	id = "tally_on",
+	title = "Tally, with a page of its own and nothing declared, is on",
+	run = function()
+		model.tally = true
+		publish()
+	end,
+}
+ui.command {
+	id = "tally_off",
+	title = "Tally is turned off",
+	run = function()
+		model.tally = false
 		publish()
 	end,
 }

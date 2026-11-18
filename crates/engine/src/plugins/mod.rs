@@ -22,6 +22,7 @@ pub mod guides;
 pub mod install;
 pub mod keys;
 mod lifecycle;
+pub mod listing;
 pub mod manifest;
 pub mod package;
 pub mod reviews;
@@ -31,10 +32,12 @@ pub mod service;
 pub mod signing;
 pub mod snapshot;
 pub mod status;
+pub mod store;
 pub mod template_packages;
 pub mod templates;
 pub mod themes;
 pub mod uploads;
+pub mod version;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -176,6 +179,7 @@ pub fn handles(method: &str) -> bool {
             | methods::PLUGIN_STATUS
             | methods::WATCH_THEMES
     ) || lifecycle::handles(method)
+        || store::handles(method)
         || themes::handles(method)
 }
 
@@ -289,6 +293,9 @@ struct Inner {
     /// When this device's own key was last looked up on a peer's word
     /// (`CheckPluginKey`): at most every few seconds.
     own_key_checked: Mutex<Option<Instant>>,
+    /// The plugin store (the edge's `/store/v1`) and the session it's
+    /// spoken to as (`store::device`).
+    store: Mutex<Option<store::StoreHandle>>,
 }
 
 type StepUpFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
@@ -331,6 +338,9 @@ struct NewParams {
     description: Option<String>,
     #[serde(default)]
     permissions: Vec<String>,
+    /// Start it with a settings page of its own (`zeron.settings_page`).
+    #[serde(default)]
+    settings_page: bool,
 }
 
 #[derive(Deserialize)]
@@ -553,6 +563,7 @@ impl Plugins {
                 new_keys: Mutex::new(Vec::new()),
                 key_notices: Mutex::new(Vec::new()),
                 own_key_checked: Mutex::new(None),
+                store: Mutex::new(None),
             }),
         };
         plugins.inner.services.set_hooks(Arc::new(ServiceHooks {
@@ -623,6 +634,9 @@ impl Plugins {
     /// Follow `auth`: the account for lookups, and on every sign-in change a
     /// key registration and a rescan.
     pub fn attach_auth(&self, auth: crate::Auth) {
+        // The store is at the edge it signs in against, spoken to as the
+        // session signed in (public reads when nobody is).
+        self.set_store(store::client::StoreClient::new(auth.edge_url()), Some(Arc::new(auth.clone())));
         let for_account = auth.clone();
         self.set_account(move || for_account.user_id());
         let for_step_up = auth.clone();
@@ -1048,7 +1062,7 @@ impl Plugins {
         };
         let registered = keys::Registration::load(&self.inner.data_dir).covers(&key, &account);
         *lock(&self.inner.own_key_checked) = Some(Instant::now());
-        let revoked = match directory.lookup(&key).await {
+        let revoked = match directory.lookup(&key, None).await {
             // Revoked on this account (whatever this device's file says).
             Ok(keys::Lookup::Found { revoked: true, mine: true, .. }) => true,
             // Registered here, and now gone or someone else's.
@@ -1073,7 +1087,7 @@ impl Plugins {
         let cached = {
             let mut cache = lock(&self.inner.cache);
             if let Some(account) = self.account() {
-                cache.0.insert(key.to_owned(), keys::CachedKey::from_lookup(&keys::Lookup::Unknown, &account, now_secs()));
+                cache.insert(key, None, keys::CachedKey::from_lookup(&keys::Lookup::Unknown, &account, now_secs(), None));
             }
             cache.clone()
         };
@@ -1167,7 +1181,7 @@ impl Plugins {
 
     // ── Scanning ────────────────────────────────────────────────────────────
 
-    fn scan_blocking(&self) -> (Vec<Entry>, Vec<String>, bool) {
+    fn scan_blocking(&self) -> (Vec<Entry>, Vec<(String, Option<String>)>, bool) {
         #[cfg(test)]
         self.inner.scans.fetch_add(1, Ordering::SeqCst);
         self.prune_state();
@@ -1184,14 +1198,25 @@ impl Plugins {
             .map(|dir| {
                 let inspected = scan::inspect(&dir, true);
                 let own = state.own.contains(&inspected.folder);
+                // From the store, and what it vouched for: by its owner
+                // there, its decision bound to that owner.
+                let store = (!own).then(|| scan::store_record(&inspected)).flatten();
+                if let Some(store) = store {
+                    let binding = Some(store.binding());
+                    return scan::entry_bound(inspected, scan::store_author(&store), binding, Some(store), &state);
+                }
+                // A key vouches for the plugin it signed: looked up about it
+                // (a deploy key reads as its author's for its own plugin alone).
+                let plugin = inspected.id().to_owned();
                 let author = match inspected.signature_author() {
                     _ if own => Author::You,
                     Ok(author) => author,
                     Err(key) => {
-                        let gave_up = !can_look_up || failed.contains_key(&key);
+                        let gave_up = !can_look_up || failed.contains_key(&keys::cache_key(&key, Some(&plugin)));
                         match keys::resolve_cached(
                             &cache,
                             &key,
+                            Some(&plugin),
                             own_key.as_deref(),
                             account.as_deref(),
                             now,
@@ -1199,7 +1224,7 @@ impl Plugins {
                         ) {
                             Ok(author) => author,
                             Err(author) => {
-                                owed.push(key);
+                                owed.push((key, Some(plugin)));
                                 author
                             }
                         }
@@ -1378,53 +1403,58 @@ impl Plugins {
         });
     }
 
-    fn spawn_lookups(&self, keys_owed: Vec<String>) {
+    /// Look up each owed `(key, plugin)` in the background.
+    fn spawn_lookups(&self, keys_owed: Vec<(String, Option<String>)>) {
         let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
             return;
         };
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        for key in keys_owed {
+        for (key, plugin) in keys_owed {
+            let cached = keys::cache_key(&key, plugin.as_deref());
             let recently_failed = lock(&self.inner.lookup_failed)
-                .get(&key)
+                .get(&cached)
                 .is_some_and(|at| at.elapsed() < LOOKUP_RETRY);
-            if recently_failed || !lock(&self.inner.lookups).insert(key.clone()) {
+            if recently_failed || !lock(&self.inner.lookups).insert(cached.clone()) {
                 continue;
             }
             let this = self.clone();
             let directory = directory.clone();
             let account = account.clone();
             runtime.spawn(async move {
-                this.look_up(directory.as_ref(), &key, &account).await;
-                lock(&this.inner.lookups).remove(&key);
+                this.look_up(directory.as_ref(), &key, plugin.as_deref(), &account).await;
+                lock(&this.inner.lookups).remove(&cached);
                 this.kick(Kick::Rescan);
             });
         }
     }
 
-    /// One lookup; the result lands in the cache (or the failure list).
+    /// One lookup of `key` about `plugin`; the result lands in the cache
+    /// (or the failure list).
     async fn look_up(
         &self,
         directory: &dyn KeyDirectory,
         key: &str,
+        plugin: Option<&str>,
         account: &str,
     ) -> Option<CachedKey> {
-        match directory.lookup(key).await {
+        let cached = keys::cache_key(key, plugin);
+        match directory.lookup(key, plugin).await {
             Ok(lookup) => {
-                let entry = CachedKey::from_lookup(&lookup, account, now_secs());
+                let entry = CachedKey::from_lookup(&lookup, account, now_secs(), plugin);
                 let cache = {
                     let mut cache = lock(&self.inner.cache);
-                    cache.0.insert(key.to_owned(), entry.clone());
+                    cache.insert(key, plugin, entry.clone());
                     cache.clone()
                 };
                 cache.save(&self.inner.data_dir);
-                lock(&self.inner.lookup_failed).remove(key);
+                lock(&self.inner.lookup_failed).remove(&cached);
                 Some(entry)
             }
             Err(error) => {
                 tracing::debug!(%error, "plugins: key lookup failed");
-                lock(&self.inner.lookup_failed).insert(key.to_owned(), Instant::now());
+                lock(&self.inner.lookup_failed).insert(cached, Instant::now());
                 None
             }
         }
@@ -1441,9 +1471,11 @@ impl Plugins {
         let gave_up = self.directory().is_none()
             || account.is_none()
             || lock(&self.inner.lookup_failed).contains_key(key);
-        let resolved = keys::resolve_cached(&cache, key, own_key.as_deref(), account.as_deref(), now_secs(), gave_up);
+        // (A template's: no plugin to ask about, so a deploy key vouches
+        // for none.)
+        let resolved = keys::resolve_cached(&cache, key, None, own_key.as_deref(), account.as_deref(), now_secs(), gave_up);
         if resolved.is_err() {
-            self.spawn_lookups(vec![key.to_owned()]);
+            self.spawn_lookups(vec![(key.to_owned(), None)]);
         }
         // What a template's install is decided by: stale or unchecked is
         // Unknown, never the last author known.
@@ -1491,7 +1523,9 @@ impl Plugins {
         reply
     }
 
-    async fn resolve_now(&self, key: &str) -> Author {
+    /// Who signed `plugin` with `key`, waiting (briefly) on the edge if
+    /// need be.
+    async fn resolve_now(&self, key: &str, plugin: Option<&str>) -> Author {
         let own_key = signing::load_key(&self.inner.data_dir).map(|k| k.public());
         let account = self.account();
         let cached = {
@@ -1499,6 +1533,7 @@ impl Plugins {
             keys::resolve_cached(
                 &cache,
                 key,
+                plugin,
                 own_key.as_deref(),
                 account.as_deref(),
                 now_secs(),
@@ -1513,7 +1548,7 @@ impl Plugins {
         };
         match tokio::time::timeout(
             LOOKUP_NOW_TIMEOUT,
-            self.look_up(directory.as_ref(), key, &account),
+            self.look_up(directory.as_ref(), key, plugin, &account),
         )
         .await
         {
@@ -1524,11 +1559,12 @@ impl Plugins {
         }
     }
 
-    /// Whether `new` is another live key of the account that signed with
-    /// `old` ([`keys::same_account`]), asked of the edge now (never the
-    /// cache: a key revoked a minute ago mustn't take a plugin over).
-    /// Offline, signed out or slow: no.
-    pub(super) async fn same_account(&self, old: &str, new: &str) -> bool {
+    /// Whether `new` is another live key of the account that signed
+    /// `plugin` with `old` ([`keys::same_account`]), asked of the edge now
+    /// about `plugin` (never the cache: a key revoked a minute ago mustn't
+    /// take a plugin over; a deploy key made for another plugin vouches for
+    /// nothing here). Offline, signed out or slow: no.
+    pub(super) async fn same_account(&self, old: &str, new: &str, plugin: &str) -> bool {
         if old == new {
             return false;
         }
@@ -1537,7 +1573,7 @@ impl Plugins {
         };
         let look = |key: &str| {
             let (directory, account, key) = (directory.clone(), account.clone(), key.to_owned());
-            async move { tokio::time::timeout(LOOKUP_NOW_TIMEOUT, self.look_up(directory.as_ref(), &key, &account)).await.ok().flatten() }
+            async move { tokio::time::timeout(LOOKUP_NOW_TIMEOUT, self.look_up(directory.as_ref(), &key, Some(plugin), &account)).await.ok().flatten() }
         };
         let (Some(old), Some(new)) = (look(old).await, look(new).await) else {
             return false;
@@ -1621,6 +1657,7 @@ impl Plugins {
         let what = match kind {
             reviews::Kind::Plugin => "Allowing a plugin",
             reviews::Kind::Template => "Allowing a template",
+            reviews::Kind::Publish => "Publishing a plugin",
         };
         let origin = reviews::Origin::of(&zeron_rpc::caller()).ok_or_else(|| reviews::needed(what))?;
         if kind == reviews::Kind::Template && origin != reviews::Origin::Local {
@@ -1748,11 +1785,14 @@ impl Plugins {
                 }
                 // Allowed for who made it as known now: a stale or offline
                 // lookup is Unknown, and what was shown must still hold.
+                // (A store plugin's author is the store's record of it, kept
+                // beside it: nothing to look up.)
                 if p.allow
                     && !entry.item.own
                     && !entry.item.builtin
+                    && entry.store.is_none()
                     && let Some(key) = entry.key()
-                    && self.resolve_now(key).await != entry.item.author
+                    && self.resolve_now(key, Some(&p.id)).await != entry.item.author
                 {
                     self.rescan().await;
                     return Err(failed("Who made it couldn't be confirmed just now; review it again"));
@@ -1760,6 +1800,11 @@ impl Plugins {
                 let decision = entry.facts().record(p.allow);
                 self.update_state(|state| {
                     state.decisions.insert(p.id.clone(), decision);
+                    // Allowing a version the store blocked: the person's
+                    // call, which later checks leave be.
+                    if p.allow {
+                        unblock(state, &p.id);
+                    }
                 })?;
                 self.rescan().await;
                 self.item(&p.id)
@@ -1808,6 +1853,11 @@ impl Plugins {
                 decision.off = p.off;
                 self.update_state(|state| {
                     state.decisions.insert(p.id.clone(), decision);
+                    // Turned back on though the store blocked it: it's
+                    // theirs, and later checks leave it on.
+                    if !p.off {
+                        unblock(state, &p.id);
+                    }
                 })?;
                 self.rescan().await;
                 self.item(&p.id)
@@ -1881,6 +1931,7 @@ impl Plugins {
                         p.name.trim(),
                         p.description.as_deref().unwrap_or(""),
                         &p.permissions,
+                        p.settings_page,
                     )?;
                     // Its README, linking the guide (signed with the rest).
                     let (guide, _) = guides::ensure(&this.inner.data_dir);
@@ -2289,6 +2340,13 @@ impl Plugins {
                     id: String,
                     #[serde(default)]
                     snapshot: bool,
+                    /// `"settings"`: its settings page, as Settings shows it.
+                    #[serde(default)]
+                    page: Option<String>,
+                    /// Open Settings on that page to picture it (else the
+                    /// window is never moved).
+                    #[serde(default)]
+                    open: bool,
                 }
                 let p: StatusParams = parse_params(params)?;
                 self.rescan().await;
@@ -2319,7 +2377,7 @@ impl Plugins {
                 match self
                     .inner
                     .tools
-                    .call(&entry.item.id, tool, serde_json::json!({}), None, STATUS_TIMEOUT)
+                    .call(&entry.item.id, tool, serde_json::json!({ "page": p.page, "open": p.open }), None, STATUS_TIMEOUT)
                     .await
                 {
                     Ok(window) => {
@@ -2394,7 +2452,7 @@ impl Plugins {
                     }
                     lock(&self.inner.new_keys).retain(|row| row.key != revoke);
                     // Plugins it signed are checked again: no longer verified.
-                    lock(&self.inner.cache).0.remove(&revoke);
+                    lock(&self.inner.cache).forget(&revoke);
                     self.kick(Kick::Rescan);
                     return RpcReply::value(&serde_json::json!({ "revoked": revoke }));
                 }
@@ -2432,6 +2490,7 @@ impl Plugins {
                 RpcReply::value(&reply)
             }
             method if lifecycle::handles(method) => self.lifecycle(method, params).await,
+            method if store::handles(method) => self.store_method(method, params).await,
             _ => Err(RpcError::UnknownMethod(method.to_owned())),
         }
     }
@@ -2455,7 +2514,7 @@ impl Plugins {
         let author = match inspected.signature_author() {
             _ if own => Author::You,
             Ok(author) => author,
-            Err(key) => self.resolve_now(&key).await,
+            Err(key) => self.resolve_now(&key, Some(inspected.id())).await,
         };
         let status = match (&inspected.error, &inspected.sig) {
             (Some(_), _) => "broken",
@@ -2674,7 +2733,13 @@ impl Plugins {
         if here == there {
             return true;
         }
-        let (a, b) = futures::join!(self.resolve_now(&here), self.resolve_now(&there));
+        // A store plugin's owner is no key to look up: only the same owner
+        // is the same author.
+        if here.starts_with("store:") || there.starts_with("store:") {
+            return false;
+        }
+        let plugin = Some(entry.item.id.as_str());
+        let (a, b) = futures::join!(self.resolve_now(&here, plugin), self.resolve_now(&there, plugin));
         same_account(&a, &b)
     }
 }
@@ -3238,6 +3303,14 @@ pub fn same_account(a: &Author, b: &Author) -> bool {
     }
 }
 
+/// The store's block on plugin `id` overridden by the person (kept, so
+/// it's still said; later checks leave it on).
+fn unblock(state: &mut State, id: &str) {
+    if let Some(blocked) = state.blocked.get_mut(id) {
+        blocked.overridden = true;
+    }
+}
+
 /// What a device that isn't vouched for is called (`from`).
 pub const UNKNOWN_DEVICE: &str = "unknown";
 
@@ -3247,7 +3320,9 @@ fn author_identity(entry: &Entry) -> Option<String> {
     if entry.item.builtin {
         return Some(BUILTIN_AUTHOR.to_owned());
     }
-    entry.key().map(str::to_owned)
+    // (A store plugin's is its owner there: the same plugin on two devices,
+    // whichever of the owner's keys signed each version.)
+    entry.binding().map(str::to_owned)
 }
 
 impl Plugins {
@@ -3291,6 +3366,8 @@ fn watch_stream(rx: watch::Receiver<serde_json::Value>) -> BoxStream<'static, se
     .boxed()
 }
 
+#[cfg(test)]
+mod vectors;
 #[cfg(test)]
 mod authority_tests;
 #[cfg(test)]

@@ -717,6 +717,61 @@ pub mod methods {
     /// (absolute), else `<data dir>/plugin-exports`. Only this device's own
     /// app or CLI names `to`: an agent's export goes to plugin-exports.
     pub const EXPORT_PLUGIN: &str = "ExportPlugin";
+
+    // ── The plugin store (engine `plugins/store`) ──────────────────────
+    // A plugin from the store installs with `InstallPlugin {store, version?}`
+    // and updates with `CheckPluginUpdates` / `UpdatePlugin` as any other.
+
+    /// `{q?, category?, keyword?, sort?, cursor?, limit?}` → `{items:
+    /// [PluginCard + installed?: {version, status, store}], next_cursor?}`.
+    pub const STORE_SEARCH: &str = "StoreSearch";
+    /// `{id, versions?, for_zeron?}` → the store's `PluginDetail` (with every
+    /// version the caller may see when `versions`), `installed?: {version,
+    /// hash, status, store, update?, blocked?}` and `compatible`
+    /// (`incompatible?`: why not), judged for Zeron `for_zeron` (another
+    /// device's version), else this one.
+    pub const STORE_PLUGIN: &str = "StorePlugin";
+    /// `{}` → `{categories: [{id, name}]}`.
+    pub const STORE_CATEGORIES: &str = "StoreCategories";
+    /// `{id, version, path}` → `{file, type, bytes}`: one file of a store
+    /// version (a README's picture, a screenshot, the icon), fetched once
+    /// into this device's cache; `file` is its path here.
+    pub const STORE_FILE: &str = "StoreFile";
+    /// `{id, on}` → the plugin's item: whether this device takes the
+    /// store plugin's pre-releases.
+    pub const SET_PLUGIN_PRERELEASES: &str = "SetPluginPrereleases";
+    /// `{id}` → `{id, name, version, description, hash, ok, problems,
+    /// warnings, listing, notes, package: {files, bytes}, ticket?}`: one of
+    /// your own plugins checked against the store's rules, each problem
+    /// `{rule, field?, path?, words}`. `ticket` (only to this device's app or
+    /// CLI, only when `ok`) is what [`PUBLISH_PLUGIN`] needs, good once, for
+    /// it as checked (`hash`).
+    pub const PREPARE_PLUGIN_PUBLISH: &str = "PreparePluginPublish";
+    /// `{id, hash, ticket}` → `{ok: true, id, version, status, checks}`, or
+    /// `{ok: false, error, message}` (the store's word): your plugin, as
+    /// checked, signed with this device's key and sent to the store with
+    /// your session. The person's act alone: never an agent's.
+    pub const PUBLISH_PLUGIN: &str = "PublishPlugin";
+    /// `{}` → the store's `/me/plugins`: your plugins there, every version
+    /// with its review state and reason.
+    pub const STORE_MY_PLUGINS: &str = "StoreMyPlugins";
+    /// `{id, version, action: "withdraw" | "yank" | "unyank"}` → the
+    /// store's answer.
+    pub const STORE_VERSION_ACTION: &str = "StoreVersionAction";
+    /// `{id}` → `{keys: [...]}`: a plugin's deploy keys (never a secret).
+    pub const LIST_DEPLOY_KEYS: &str = "ListDeployKeys";
+    /// `{id, name, expires?}` → `{ok: true, key, secret}` (the secret,
+    /// `zpk_…`, shown this once and kept nowhere), or `{ok: false, error,
+    /// message}`: `step_up_required` (run [`STEP_UP`], then again), or the
+    /// store's word.
+    pub const CREATE_DEPLOY_KEY: &str = "CreateDeployKey";
+    /// `{id, key}` → `{revoked: key}`.
+    pub const REVOKE_DEPLOY_KEY: &str = "RevokeDeployKey";
+    /// `{id, reason, text?}` → `{ok: true, …}` or `{ok: false, error,
+    /// message}`: a listed plugin reported to the store's reviewers, by the
+    /// signed-in person. `reason` is `malware`, `misleading`, `broken`,
+    /// `copyright` or `other`.
+    pub const STORE_REPORT: &str = "StoreReport";
     /// `{source, title, body, session?}` → `{outcome: "posted" | "off" |
     /// "held" | "paced" | "unavailable"}`: a banner asked for (a plugin's),
     /// shown as the engine's own are, under the same Settings, at most a few
@@ -782,6 +837,21 @@ pub fn local_only(method: &str) -> bool {
             | methods::SET_BUILTIN_PLUGINS
             | methods::POST_NOTIFICATION
             | methods::EXPORT_PLUGIN
+            // The store: browsing and publishing are this device's app's and
+            // CLI's (your session, this device's key); deploy keys too.
+            | methods::STORE_SEARCH
+            | methods::STORE_PLUGIN
+            | methods::STORE_CATEGORIES
+            | methods::STORE_FILE
+            | methods::SET_PLUGIN_PRERELEASES
+            | methods::PREPARE_PLUGIN_PUBLISH
+            | methods::PUBLISH_PLUGIN
+            | methods::STORE_MY_PLUGINS
+            | methods::STORE_VERSION_ACTION
+            | methods::LIST_DEPLOY_KEYS
+            | methods::CREATE_DEPLOY_KEY
+            | methods::REVOKE_DEPLOY_KEY
+            | methods::STORE_REPORT
             // What a Cloud chat reaches: this device's app sets it, never
             // another device (a Cloud machine among them) and never an agent.
             | methods::CLOUD_SET_REACH
@@ -878,6 +948,14 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::WATCH_PLUGIN_TOOLS
             | methods::CALL_PLUGIN_TOOL
             | methods::DESCRIBE_ELEMENTS
+            // The store: searching and reading it, and checking one of the
+            // person's plugins against its rules (no ticket: submitting is
+            // the person's, `PublishPlugin`, never here). Installing from it
+            // is `InstallPlugin {store}` (lands waiting for the person).
+            | methods::STORE_SEARCH
+            | methods::STORE_PLUGIN
+            | methods::STORE_CATEGORIES
+            | methods::PREPARE_PLUGIN_PUBLISH
             // Templates: authoring and switching (the app shows an
             // unapproved one as a preview until the person keeps it), and
             // importing (lands waiting for the person).

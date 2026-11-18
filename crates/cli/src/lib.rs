@@ -155,6 +155,74 @@ pub enum PluginCommand {
         #[arg(long, value_name = "PATH", value_parser = absolute_path)]
         to: Option<std::path::PathBuf>,
     },
+    /// Check a plugin against the store's rules (README, listing, version,
+    /// files): every problem, before anything is sent. Needs no Zeron
+    /// running and no sign-in. Exits 1 when it doesn't meet them.
+    Check {
+        /// The plugin's folder, or the id of one in Zeron's plugins folder.
+        target: String,
+    },
+    /// Submit a plugin to the store for review. In CI, set ZERON_DEPLOY_KEY
+    /// to a deploy key's secret (never pass it as an argument): the folder is
+    /// checked, signed with that key and sent, with no Zeron running and no
+    /// sign-in. Without it, your own plugin goes through the running Zeron,
+    /// signed with this device's key and sent with your session. Exits 0 when
+    /// submitted, 1 when it doesn't meet the store's rules, 2 for a usage or
+    /// set-up problem, 3 when the store refuses the key or the account, 4
+    /// when the store can't be reached (try again).
+    Publish {
+        /// The plugin's folder (with ZERON_DEPLOY_KEY), or the id of your
+        /// plugin in Zeron's plugins folder.
+        target: String,
+        /// Check, sign and pack it, but don't send it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Your plugins in the store: each version's review state and the
+    /// reviewer's reason. With ZERON_DEPLOY_KEY, the plugin that key is for
+    /// (and no Zeron needs to be running).
+    Status {
+        /// Only this plugin.
+        id: Option<String>,
+    },
+    /// Deploy keys: what a CI job publishes with, one plugin's each. Made,
+    /// listed and revoked through the running Zeron, with your session (never
+    /// with a deploy key); a plugin's first version comes from your machine.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
+    /// Stop new installs of a version (installed copies keep working).
+    /// Through the running Zeron, with your session: never a deploy key's.
+    Yank { id: String, version: String },
+    /// Undo `yank`.
+    Unyank { id: String, version: String },
+    /// Take back a version still in review.
+    Withdraw { id: String, version: String },
+}
+
+#[derive(Subcommand)]
+pub enum KeyCommand {
+    /// Make a deploy key for a plugin: its secret is shown this once (Zeron
+    /// keeps no copy). Making one needs a fresh sign-in, which this asks for.
+    Create {
+        /// The plugin's id.
+        id: String,
+        /// What it's for, like "GitHub Actions".
+        #[arg(long)]
+        name: String,
+        /// Stop it working after this many days.
+        #[arg(long, value_name = "DAYS")]
+        expires_in_days: Option<u32>,
+    },
+    /// List a plugin's deploy keys (never their secrets).
+    List { id: String },
+    /// Revoke a deploy key: it publishes nothing from now on.
+    Revoke {
+        id: String,
+        /// The key, as `zeron plugin key list` shows it.
+        key: String,
+    },
 }
 
 /// A path as given, made absolute against the current folder (the engine
@@ -437,6 +505,15 @@ mod tests {
             &["mcp"],
             &["plugin", "new"],
             &["plugin", "export"],
+            &["plugin", "check"],
+            &["plugin", "publish"],
+            &["plugin", "status"],
+            &["plugin", "key", "create"],
+            &["plugin", "key", "list"],
+            &["plugin", "key", "revoke"],
+            &["plugin", "yank"],
+            &["plugin", "unyank"],
+            &["plugin", "withdraw"],
             &["template", "use"],
             &["daemon", "install"],
             &["update"],

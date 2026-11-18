@@ -69,6 +69,10 @@ export type PageProps = {
 	-- is about). Short of room, it goes under the title either way.
 	trail: Node?,
 	trail_top: boolean?,
+	-- Its header (the title, the line under it, what's at its end) out of
+	-- plugins' reach (`hook = false`), what's under it left as it's given
+	-- (a page some of which a plugin draws: Settings, a plugin's own).
+	private_head: boolean?,
 	-- Something that stands beside the page's groups (a profile's card, a
 	-- preview of what the fields make): a column of `aside_w` at the right,
 	-- its top on the first group's; `aside_top`, over the groups instead,
@@ -137,6 +141,7 @@ function M.Page(props: PageProps): Node
 		max_w = ui.theme.get("zeron.settings.measure") :: number?,
 		gap = "$space.6",
 		ui.row {
+			hook = if props.private_head then false else nil,
 			-- Inset to the rows' text, as a section's title is: the page's
 			-- words line up down one edge, the cards hang past it.
 			px = M.inset(),
@@ -173,8 +178,10 @@ function M.Page(props: PageProps): Node
 end
 
 export type SectionProps = {
-	title: (string | Message)?,
-	description: (string | Message)?,
+	-- (A function of either follows what it reads: a title that's an
+	-- item's name as it's renamed.)
+	title: (string | Message | () -> string)?,
+	description: (string | Message | () -> string)?,
 	trail: Node?,
 	[number]: Child,
 }

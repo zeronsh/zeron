@@ -3765,7 +3765,8 @@
         "off": "Open new chats on what {name} draws. Appearance's wallpaper comes back when this is off.",
         "instead_of": "{other} is the wallpaper now. Turning this on uses {name} instead.",
         "terms": "wallpaper background new chat effect"
-      }
+      },
+      "page_failed": "{name}'s settings couldn't be shown"
     },
     "init": {
       "waiting": "{name} is waiting for you to allow it",
