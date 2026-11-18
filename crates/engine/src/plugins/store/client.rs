@@ -384,9 +384,20 @@ impl StoreClient {
     }
 
     /// Version `version`'s package file, up to the largest a package may be.
-    pub async fn package(&self, id: &str, version: &str, caller: &Caller) -> Result<Vec<u8>, String> {
+    /// Read no further than `bytes`, the size the store's record says (a
+    /// package can be): anything longer isn't it.
+    pub async fn package(&self, id: &str, version: &str, caller: &Caller, bytes: u64) -> Result<Vec<u8>, String> {
+        if bytes == 0 || bytes > MAX_PACKAGE_BYTES {
+            return Err(failure(reason::STORE_MISMATCH, "The store's record doesn't give a size a package can be, so nothing was fetched"));
+        }
         let path = format!("/store/v1/plugins/{}/versions/{}/package", segment(id), segment(version));
-        self.send(reqwest::Method::GET, &path, None, caller, MAX_PACKAGE_BYTES).await
+        self.send(reqwest::Method::GET, &path, None, caller, bytes).await.map_err(|error| {
+            if install::reason_of(&error) == Some(install::reason::TOO_BIG) {
+                failure(reason::STORE_MISMATCH, "What the store sent is bigger than its record says, so it wasn't installed")
+            } else {
+                error
+            }
+        })
     }
 
     /// One file of version `version`'s package, at most `limit` bytes.

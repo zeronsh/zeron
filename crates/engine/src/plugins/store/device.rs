@@ -644,7 +644,7 @@ impl Plugins {
             // plugins in the store say it, for your devices alone.
             None => self.own_record(&client, id, wanted, installed).await.map_err(failed)?,
         };
-        let raw = client.package(id, &version, &caller).await.map_err(failed)?;
+        let raw = client.package(id, &version, &caller, record.bytes).await.map_err(failed)?;
         let (id_owned, version_owned) = (id.to_owned(), version.clone());
         let (package, store) = tokio::task::spawn_blocking(move || super::verify(raw, &id_owned, &version_owned, &record, &publisher))
             .await
@@ -810,7 +810,7 @@ impl Plugins {
             let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()) };
             (package, store)
         } else {
-            let raw = client.package(&c.id, &offer.version, caller).await?;
+            let raw = client.package(&c.id, &offer.version, caller, record.bytes).await?;
             tokio::task::spawn_blocking(move || super::verify(raw, &id, &version, &record, &publisher))
                 .await
                 .map_err(|_| "Couldn't read it".to_string())??

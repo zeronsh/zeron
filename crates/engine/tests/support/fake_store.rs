@@ -73,6 +73,13 @@ pub struct State {
     pub reports: Vec<(String, Value)>,
     /// Blocks sent whatever the device asked (a hostile store).
     pub blocked_anyway: Vec<Value>,
+    /// Records sent without their package's size (`bytes: null`).
+    pub without_bytes: bool,
+}
+
+/// A version's package size as the store's records give it.
+fn bytes_of(state: &State, v: &StoredVersion) -> Value {
+    if state.without_bytes { Value::Null } else { json!(v.raw.len()) }
 }
 
 /// Who sent a request: a username, and the plugin a deploy key is for.
@@ -269,7 +276,7 @@ impl FakeStore {
                     "id": id, "name": id, "version": v.version,
                     "author": p.author(),
                     "engines": { "zeron": v.engines },
-                    "package": { "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(), "key": v.key },
+                    "package": { "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v), "key": v.key },
                 }))
             }
             ("GET", ["store", "v1", "plugins", id, "versions"]) => {
@@ -282,7 +289,7 @@ impl FakeStore {
                     .filter(|v| mine || matches!(v.status.as_str(), "approved" | "yanked"))
                     .map(|v| json!({
                         "version": v.version, "status": v.status, "yanked": v.status == "yanked", "notes": v.notes,
-                        "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(), "key": v.key,
+                        "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v), "key": v.key,
                     }))
                     .collect();
                 json_reply(200, json!({ "versions": versions }))
@@ -353,7 +360,7 @@ impl FakeStore {
                         .max_by(|a, b| Version::parse(&a.version).unwrap().cmp(&Version::parse(&b.version).unwrap()));
                     if let Some(v) = best {
                         updates.push(json!({
-                            "id": id, "version": v.version, "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(),
+                            "id": id, "version": v.version, "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v),
                             "key": v.key, "publisher": p.owner, "publisher_id": publisher_id(p.account()), "notes": v.notes, "added": [], "removed": [],
                             "in_review": v.status == "pending",
                         }));
@@ -415,7 +422,7 @@ impl FakeStore {
                         "id": id, "author": p.author(),
                         "versions": p.versions.iter().map(|v| json!({
                             "version": v.version, "status": v.status, "yanked": v.status == "yanked",
-                            "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(), "key": v.key,
+                            "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v), "key": v.key,
                         })).collect::<Vec<_>>(),
                     }))
                     .collect();

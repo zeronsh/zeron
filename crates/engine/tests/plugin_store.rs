@@ -260,6 +260,40 @@ async fn a_new_owner_asks_again() {
     assert_eq!(d.allow("focus").await["status"], "on");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_package_is_read_no_further_than_its_record_says() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "approved", "");
+    let d = device(&store, Some("bob"));
+    // 60 MB where the record says a few hundred bytes: refused at the size,
+    // not read to the end and hashed.
+    store.state.lock().unwrap().serve_instead.insert(("focus".into(), "1.0.0".into()), vec![b' '; 60 * 1024 * 1024]);
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_mismatch");
+    assert!(refused.contains("bigger than its record says"), "{refused}");
+
+    // A record that doesn't say the size: nothing is fetched.
+    store.state.lock().unwrap().serve_instead.clear();
+    store.state.lock().unwrap().without_bytes = true;
+    let packages = || store.state.lock().unwrap().requests.iter().filter(|(_, path, _)| path.ends_with("/package")).count();
+    let before = packages();
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_mismatch", "{refused}");
+    assert_eq!(packages(), before, "nothing fetched for a record without its size");
+
+    // Nor for an update.
+    store.state.lock().unwrap().without_bytes = false;
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "approved", "");
+    store.state.lock().unwrap().without_bytes = true;
+    let before = packages();
+    let checked = d.check().await;
+    assert_eq!(checked["updates"], json!([]), "{checked}");
+    assert!(word(checked["errors"][0]["error"].as_str().unwrap()) == "store_mismatch", "{checked}");
+    assert_eq!(packages(), before);
+}
+
 #[tokio::test]
 async fn a_package_that_isn_t_the_store_s_record_is_refused() {
     let store = FakeStore::start().await;
