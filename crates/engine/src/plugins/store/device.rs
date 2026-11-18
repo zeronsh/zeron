@@ -1282,12 +1282,11 @@ fn not_owner(ids: &[&str]) -> Value {
     value
 }
 
-/// The account's publisher id, as `/me/plugins` gives it (at its top, or
-/// as the author of each of its plugins).
+/// The account's publisher id, as `/me/plugins` gives it at its top,
+/// plugins or none.
 fn own_publisher_id(mine: &Value) -> Option<String> {
     mine["publisher_id"]
         .as_str()
-        .or_else(|| mine["plugins"].as_array()?.iter().find_map(|plugin| plugin["author"]["id"].as_str()))
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned)
 }
