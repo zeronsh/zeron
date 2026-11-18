@@ -447,3 +447,14 @@ Agreed after the plan was first written. Newest last.
     username) beside `key`, `hash`, `sha256` and `bytes`, so a device can
     tell a changed owner and ask again. An offer without it is refused by
     the device as `store_mismatch`.
+26. **A signed request also sends `X-Zeron-Content-SHA256: <hex>`**, the
+    same body hash that is in the signing string (the string is unchanged).
+    The edge checks key, signature and replay before it reads any body, then
+    refuses a body that does not hash to that value. Nothing is read or
+    allocated for a request that is not authentic.
+27. **Admin is by web session only.** Admin routes do not accept a bearer:
+    a bearer skips the staff session's short lifetime, rotation and CSRF
+    checks, and any local process an engine hands its token to holds one.
+28. **After a transfer**, a former owner's deploy key no longer reads as
+    verified for the plugin (verified needs the key's maker to own the
+    plugin now), and the current owner can list and revoke every key of it.
