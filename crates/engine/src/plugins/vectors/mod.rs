@@ -862,32 +862,86 @@ fn listing_cases() -> Value {
         m[field] = json!(value);
         cases.push((name.into(), m, files.clone()));
     }
-    // The mark's words in the store's other languages.
-    for (name, value) in [
-        ("the mark: Spanish oficial", "Cliente oficial"),
-        ("the mark: Spanish no oficial", "Cliente no oficial"),
-        ("the mark: French v\u{e9}rifi\u{e9}", "Th\u{e8}me v\u{e9}rifi\u{e9}"),
-        ("the mark: French officielle", "Extension officielle"),
-        ("the mark: German offizieller", "Offizieller Client"),
-        ("the mark: German gepr\u{fc}fte", "Gepr\u{fc}fte Notizen"),
-        ("the mark: Italian ufficiale", "Client ufficiale"),
-        ("the mark: Portuguese verificado", "Tema verificado"),
-        ("the mark: Russian official", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}"),
-        ("the mark: Russian verified", "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e} \u{441}\u{43e}\u{43e}\u{431}\u{449}\u{435}\u{441}\u{442}\u{432}\u{43e}\u{43c}"),
-        ("the mark: Chinese official", "\u{5b98}\u{65b9}\u{63d2}\u{4ef6}"),
-        ("the mark: Chinese not official", "\u{975e}\u{5b98}\u{65b9}\u{63d2}\u{4ef6}"),
-        ("the mark: Chinese verified", "\u{5df2}\u{9a8c}\u{8bc1}\u{7684}\u{7b14}\u{8bb0}"),
-        ("the mark: Japanese official", "\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}"),
-        ("the mark: Korean official", "\u{acf5}\u{c2dd} \u{d50c}\u{b7ec}\u{adf8}\u{c778}"),
-        ("the mark: Spanish oficina is fine", "Oficina de notas"),
-        ("the mark: French officier is fine", "Officier de garde"),
-        ("the mark: Russian unofficial in one word is fine", "\u{43d}\u{435}\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}"),
-        ("the mark: Chinese notes are fine", "\u{7b14}\u{8bb0}\u{677f}"),
-        ("the mark: Japanese notes are fine", "\u{30e1}\u{30e2}\u{5e33}"),
-        ("the mark: Korean notes are fine", "\u{ba54}\u{baa8}\u{c7a5}"),
+    // The mark's words in the store's other languages: never an ordinary
+    // word. (name or description, text)
+    for (name, field, value) in [
+        ("the mark: Spanish oficial", "name", "Cliente oficial"),
+        ("the mark: Spanish no oficial", "description", "Cliente no oficial."),
+        ("the mark: French v\u{e9}rifi\u{e9} in a description", "description", "Th\u{e8}me v\u{e9}rifi\u{e9}."),
+        ("the mark: French v\u{e9}rifie in a name, folded", "name", "V\u{e9}rifie la syntaxe"),
+        ("the mark: French officielle", "name", "Extension officielle"),
+        ("the mark: German offizieller", "description", "Offizieller Client."),
+        ("the mark: German verifiziert in a name", "name", "Verifiziert"),
+        ("the mark: German offiziell in a name", "name", "Offiziell"),
+        ("the mark: Italian ufficiale", "name", "Client ufficiale"),
+        ("the mark: Portuguese verificado", "description", "Tema verificado."),
+        ("the mark: Russian official", "name", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}"),
+        ("the mark: Russian verified in a name", "name", "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}"),
+        ("the mark: Chinese official", "name", "\u{5b98}\u{65b9}\u{63d2}\u{4ef6}"),
+        ("the mark: Chinese not official", "description", "\u{975e}\u{5b98}\u{65b9}\u{63d2}\u{4ef6}\u{3002}"),
+        ("the mark: Chinese verified", "name", "\u{5df2}\u{9a8c}\u{8bc1}\u{7684}\u{7b14}\u{8bb0}"),
+        ("the mark: Japanese official beside kana", "name", "\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}"),
+        ("the mark: Japanese verified", "description", "\u{691c}\u{8a3c}\u{6e08}\u{307f}\u{306e}\u{30e1}\u{30e2}\u{3002}"),
+        ("the mark: Korean verified", "name", "\u{ac80}\u{c99d}\u{b428} \u{d50c}\u{b7ec}\u{adf8}\u{c778}"),
+        ("the mark: French v\u{e9}rifie in a description is fine", "description", "V\u{e9}rifie la syntaxe de vos fichiers"),
+        ("the mark: German verifiziert in a description is fine", "description", "Verifiziert Signaturen."),
+        ("the mark: German offiziell in a description is fine", "description", "Offiziell unterst\u{fc}tzt."),
+        ("the mark: German gepr\u{fc}ft in a description is fine", "description", "Eingaben werden gepr\u{fc}ft."),
+        ("the mark: Russian checked in a description is fine", "description", "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}: 5 \u{444}\u{430}\u{439}\u{43b}\u{43e}\u{432}."),
+        ("the mark: Italian verifica is fine", "name", "Verifica la sintassi"),
+        ("the mark: Spanish verifica is fine", "name", "Verifica tus archivos"),
+        ("the mark: German inoffizieller is fine", "name", "Inoffizieller Client"),
+        ("the mark: Chinese formula is fine", "name", "\u{6570}\u{5b66}\u{516c}\u{5f0f}\u{7f16}\u{8f91}\u{5668}"),
+        ("the mark: Korean formula is fine", "name", "\u{c218}\u{d559} \u{acf5}\u{c2dd}"),
+        ("the mark: Chinese authentication is fine", "name", "\u{8eab}\u{4efd}\u{8ba4}\u{8bc1}"),
+        ("the mark: Japanese authentication token is fine", "name", "\u{8a8d}\u{8a3c}\u{30c8}\u{30fc}\u{30af}\u{30f3}"),
+        ("the mark: Korean authentication token is fine", "name", "\u{c778}\u{c99d} \u{d1a0}\u{d070}"),
+        ("the mark: Spanish oficina is fine", "name", "Oficina de notas"),
+        ("the mark: French officier is fine", "name", "Officier de garde"),
+        ("the mark: Russian unofficial in one word is fine", "name", "\u{43d}\u{435}\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}"),
+        ("the mark: Chinese notes are fine", "name", "\u{7b14}\u{8bb0}\u{677f}"),
+        ("the mark: Japanese notes are fine", "name", "\u{30e1}\u{30e2}\u{5e33}"),
+        ("the mark: Korean notes are fine", "name", "\u{ba54}\u{baa8}\u{c7a5}"),
     ] {
         let mut m = base.clone();
-        m["name"] = json!(value);
+        m[field] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // Beside "zeron", each is a claim; and Chinese words of origin.
+    for (name, value) in [
+        ("claims_zeron: Zeron beside Japanese official", "Zeron \u{516c}\u{5f0f}\u{306e}\u{30e1}\u{30e2}\u{3002}"),
+        ("claims_zeron: Zeron beside Korean official", "\u{acf5}\u{c2dd} Zeron \u{d50c}\u{b7ec}\u{adf8}\u{c778}."),
+        ("claims_zeron: Zeron beside Chinese certified", "Zeron \u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}\u{3002}"),
+        ("claims_zeron: Zeron beside French officiel", "Le th\u{e8}me Zeron officiel."),
+        ("claims_zeron: by Zeron in Chinese", "\u{7531} Zeron \u{5236}\u{4f5c}\u{3002}"),
+        ("claims_zeron: from Zeron in Chinese", "\u{6765}\u{81ea}Zeron\u{7684}\u{7b14}\u{8bb0}\u{3002}"),
+    ] {
+        let mut m = base.clone();
+        m["description"] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // Keywords: neither the mark (any language a keyword can write, a part
+    // or its parts joined) nor "zeron"; no badge lifts it.
+    for (name, keyword) in [
+        ("keywords: verified", "verified"),
+        ("keywords: veri-fied joined", "veri-fied"),
+        ("keywords: a digit for O", "0fficial"),
+        ("keywords: Spanish oficial", "oficial"),
+        ("keywords: French verifie, folded", "verifie"),
+        ("keywords: zeron", "zeron"),
+        ("keywords: zeron as a part", "zeron-themes"),
+        ("keywords: zeron after a space", "themes zeron"),
+        ("keywords: zer0n", "zer0n"),
+        ("keywords: 2eron", "2eron"),
+        ("keywords: ze-ron joined", "ze-ron"),
+        ("keywords: themes are fine", "themes"),
+        ("keywords: zero is fine", "zero"),
+        ("keywords: heron is fine", "heron"),
+        ("keywords: verify is fine", "verify"),
+        ("keywords: zeronaut is fine", "zeronaut"),
+    ] {
+        let mut m = base.clone();
+        m["keywords"] = json!(["focus", keyword]);
         cases.push((name.into(), m, files.clone()));
     }
     cases.push(("a binary file (a warning)".into(), base.clone(), with_file("bin/tool.wasm", b"\0asm\x01\0\0\0".to_vec())));
@@ -1100,7 +1154,7 @@ fn data() -> Value {
         },
         "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version. A publish must be later than every version the plugin has had, in any state, pre-releases included.",
         "mark_claims": {
-            "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or of claims_zeron's phrases, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs) and the digit 3 for e. Then, in the store's other languages: any of languages[lang].words, folded the same way, in either reading, as a substring where substring is true (Chinese, Japanese, Korean), else whole (no character of General_Category L* or N* right before or after it). The listing cases named 'the mark:' hold both sides to it.",
+            "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or of claims_zeron's phrases, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs), the digit 3 for e and the digit 2 for z. Then, in the store's other languages: each of languages[lang].words, in either reading, as a substring where substring is true (Chinese, Japanese, Korean), else whole (no character of General_Category L* or N* right before or after it). In a name, every word, folded the same way. In a description, a word whose description is 'folded' the same way; 'accented' read with accents kept (NFKC, lowercase, ignorables and Me gone, on both the text and the word; French 'vérifié', whose folded form is also 'vérifie', checks); 'never' not at all (it's also an ordinary word there). A word with with_kana is refused only in a text that also holds kana (U+3040–30FF, U+31F0–31FF, U+FF66–FF9F): Japanese 公式 is official, Chinese 公式 a formula. The listing cases named 'the mark:' hold both sides to it.",
             "words": listing::MARK_WORDS,
             "glyphs": listing::MARK_GLYPHS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
             "lookalikes": super::mark::LOOKALIKES.iter().map(|(letter, chars)| (letter.to_string(), json!(chars.chars().map(|c| c.to_string()).collect::<Vec<_>>()))).collect::<serde_json::Map<_, _>>(),
@@ -1108,15 +1162,41 @@ fn data() -> Value {
             "pairs": super::mark::PAIRS.iter().map(|(letter, pair)| (letter.to_string(), json!([pair]))).collect::<serde_json::Map<_, _>>(),
             "max_spacing": super::mark::MAX_SPACING,
             "source": { "name": super::mark::SOURCE, "version": super::mark::SOURCE_VERSION, "sha256": super::mark::SOURCE_SHA256 },
-            "languages": super::mark::OTHER_LANGUAGES.iter().map(|(lang, substring, words)| (lang.to_string(), json!({ "substring": substring, "words": words }))).collect::<serde_json::Map<_, _>>(),
+            "languages": super::mark::OTHER_LANGUAGES
+                .iter()
+                .map(|(lang, substring, words)| {
+                    let words: Vec<Value> = words
+                        .iter()
+                        .map(|w| {
+                            let description = match w.description {
+                                super::mark::InDescription::Folded => "folded",
+                                super::mark::InDescription::Accented => "accented",
+                                super::mark::InDescription::NameOnly => "never",
+                            };
+                            let mut word = json!({ "word": w.word, "description": description });
+                            if w.with_kana {
+                                word["with_kana"] = json!(true);
+                            }
+                            word
+                        })
+                        .collect();
+                    (lang.to_string(), json!({ "substring": substring, "words": words }))
+                })
+                .collect::<serde_json::Map<_, _>>(),
         },
         "unseen": "A name or description may hold no character drawn as nothing (bad_listing): a control or format character (General_Category Cc, Cf), any other Default_Ignorable_Code_Point (the Hangul fillers among them), any Variation_Selector but U+FE0F, and U+FE0F only directly after a character with the Emoji property. Keywords are ASCII. The listing cases named 'unseen:' hold both sides to it.",
         "claims_zeron": {
             "about": "A name or description may not say the plugin is Zeron's own unless its publisher is (the maintainer badge). Every spelling below is read as mark_claims reads its words: in the folded text, or in it with its spaced runs read as words, whole (no ASCII letter or digit right before or after it), each letter itself or one of mark_claims' lookalikes (interchangeable and pairs too), an apostrophe any of ' U+2019 U+02BC, a space a run of one or more separators (White_Space, U+FEFF, General_Category P*) but an apostrophe, and between a word in a script that doesn't space its words and the next a run of none or more. Name: each whole word's end at which word is spelled must also be the end of '<form> word' for a form of name.allowed_before (any language); one that isn't is claims_zeron. Description: any of '<origin> word' (description.origin_before), '<standing> word', 'word <standing>' and, for a standing word in ASCII, 'word's <standing>' (description.standing) is claims_zeron. The edge refuses a publish 400 claims_zeron unless the publisher carries maintainer; a device, which can't know the publisher, gives the warning claims_zeron on that field. The listing cases named 'claims_zeron:' hold both sides to it (warnings).",
             "word": super::mark::ZERON,
             "name": { "allowed_before": super::mark::NAME_FORMS.iter().map(|(lang, forms)| (lang.to_string(), json!(forms))).collect::<serde_json::Map<_, _>>() },
-            "description": { "origin_before": super::mark::ORIGIN_WORDS, "standing": super::mark::STANDING_WORDS },
+            "description": {
+                "origin_before": super::mark::ORIGIN_WORDS,
+                "standing": super::mark::STANDING_WORDS,
+                "standing_other": super::mark::STANDING_OTHER,
+                "standing_other_about": "Standing too: standing_other, and every word of mark_claims.languages (any language, any description reading), beside the word.",
+            },
         },
+        "keyword_claims": "A keyword (already lowercase letters, digits, dashes and single spaces) is refused (bad_listing, field keywords) when, its parts split at '-' and ' ' and each folded as mark_claims folds, a part or all its parts joined spells, whole, with mark_claims' lookalikes (interchangeable and pairs too): one of mark_claims.words; a word of mark_claims.languages whose folded form is ASCII (any description reading); or claims_zeron.word. No badge lifts it. The listing cases named 'keywords:' hold both sides to it.",
         "categories": CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
         "builtin_ids": listing::BUILTIN_IDS,
         "reserved_ids": manifest::RESERVED_IDS,

@@ -62,38 +62,95 @@ pub const PAIRS: &[(char, &str)] = &[('d', "cl")];
 /// read as one word.
 pub const MAX_SPACING: usize = 3;
 
+/// Where a word of [`OTHER_LANGUAGES`] is refused in a description (a name
+/// refuses every one, folded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InDescription {
+    /// Folded, as a name reads it.
+    Folded,
+    /// Only as written with its accents (French "vérifié", whose folded
+    /// form is also "vérifie", "checks").
+    Accented,
+    /// Never: as written it's also an ordinary word (German "verifiziert",
+    /// "verifies"; "offiziell", "officially").
+    NameOnly,
+}
+
+/// A word of [`OTHER_LANGUAGES`].
+#[derive(Debug, Clone, Copy)]
+pub struct OtherWord {
+    pub word: &'static str,
+    pub description: InDescription,
+    /// Refused only in a text that also holds kana: Japanese 公式 is
+    /// "official", Chinese 公式 "formula".
+    pub with_kana: bool,
+}
+
+const fn w(word: &'static str) -> OtherWord {
+    OtherWord { word, description: InDescription::Folded, with_kana: false }
+}
+
+const fn accent(word: &'static str) -> OtherWord {
+    OtherWord { word, description: InDescription::Accented, with_kana: false }
+}
+
+const fn name_only(word: &'static str) -> OtherWord {
+    OtherWord { word, description: InDescription::NameOnly, with_kana: false }
+}
+
 /// The mark's words in the store's other languages: `(language, substring,
 /// words)`, each folded as the text is; whole words (no letter or digit of
 /// any script right before or after) where words are spaced, substrings in
-/// Chinese, Japanese and Korean. "No oficial" and "非官方" are refused as
-/// "not official" is: the author rewords.
-pub const OTHER_LANGUAGES: &[(&str, bool, &[&str])] = &[
-    ("es", false, &["verificado", "verificada", "verificados", "verificadas", "oficial", "oficiales"]),
-    ("fr", false, &["v\u{e9}rifi\u{e9}", "v\u{e9}rifi\u{e9}e", "v\u{e9}rifi\u{e9}s", "v\u{e9}rifi\u{e9}es", "officiel", "officielle", "officiels", "officielles"]),
+/// Chinese, Japanese and Korean. A word is here only when its matched form
+/// has no common other meaning in text about software, or with the narrower
+/// reading it needs ([`InDescription`], `with_kana`). "No oficial" and
+/// "非官方" are refused as "not official" is: the author rewords.
+pub const OTHER_LANGUAGES: &[(&str, bool, &[OtherWord])] = &[
+    ("es", false, &[w("verificado"), w("verificada"), w("verificados"), w("verificadas"), w("oficial"), w("oficiales")]),
+    ("fr", false, &[
+        accent("v\u{e9}rifi\u{e9}"), accent("v\u{e9}rifi\u{e9}e"), accent("v\u{e9}rifi\u{e9}s"), accent("v\u{e9}rifi\u{e9}es"),
+        w("officiel"), w("officielle"), w("officiels"), w("officielles"),
+    ]),
     ("de", false, &[
-        "verifiziert", "verifizierte", "verifizierter", "verifiziertes", "verifizierten",
-        "gepr\u{fc}ft", "gepr\u{fc}fte", "gepr\u{fc}fter", "gepr\u{fc}ftes", "gepr\u{fc}ften",
-        "offiziell", "offizielle", "offizieller", "offizielles", "offiziellen",
+        // "verifiziert" is also "verifies"; "geprüft" also "checked" (as
+        // inputs are); "offiziell" also "officially".
+        name_only("verifiziert"), w("verifizierte"), w("verifizierter"), w("verifiziertes"), w("verifizierten"),
+        name_only("gepr\u{fc}ft"), name_only("gepr\u{fc}fte"), name_only("gepr\u{fc}fter"), name_only("gepr\u{fc}ftes"), name_only("gepr\u{fc}ften"),
+        name_only("offiziell"), w("offizielle"), w("offizieller"), w("offizielles"), w("offiziellen"),
     ]),
-    ("it", false, &["verificato", "verificata", "verificati", "verificate", "ufficiale", "ufficiali"]),
-    ("pt", false, &["verificado", "verificada", "verificados", "verificadas", "oficial", "oficiais"]),
+    ("it", false, &[w("verificato"), w("verificata"), w("verificati"), w("verificate"), w("ufficiale"), w("ufficiali")]),
+    ("pt", false, &[w("verificado"), w("verificada"), w("verificados"), w("verificadas"), w("oficial"), w("oficiais")]),
     ("ru", false, &[
-        "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}",
-        "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{439}",
-        "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{430}\u{44f}",
-        "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{43e}\u{435}",
-        "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{435}",
-        "\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}",
-        "\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}\u{43d}\u{44b}\u{439}",
-        "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}",
-        "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{430}\u{44f}",
-        "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{435}",
-        "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{435}",
-        "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}",
+        // "проверено", "проверенный" are also "checked", "proven" (a
+        // proven way).
+        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}"),
+        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{439}"),
+        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{430}\u{44f}"),
+        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{43e}\u{435}"),
+        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{435}"),
+        w("\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}"),
+        w("\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}\u{43d}\u{44b}\u{439}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{430}\u{44f}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{435}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{435}"),
     ]),
-    ("zh", true, &["\u{5b98}\u{65b9}", "\u{5df2}\u{9a8c}\u{8bc1}", "\u{5df2}\u{9a57}\u{8b49}", "\u{5df2}\u{8ba4}\u{8bc1}", "\u{5df2}\u{8a8d}\u{8b49}"]),
-    ("ja", true, &["\u{516c}\u{5f0f}", "\u{8a8d}\u{8a3c}\u{6e08}", "\u{691c}\u{8a3c}\u{6e08}", "\u{30aa}\u{30d5}\u{30a3}\u{30b7}\u{30e3}\u{30eb}"]),
-    ("ko", true, &["\u{acf5}\u{c2dd}", "\u{c778}\u{c99d}\u{b428}", "\u{c778}\u{c99d}\u{b41c}", "\u{ac80}\u{c99d}\u{b428}", "\u{ac80}\u{c99d}\u{b41c}"]),
+    // 官方 "official"; 已验证 "verified". Not 已认证 (also "authenticated").
+    ("zh", true, &[w("\u{5b98}\u{65b9}"), w("\u{5df2}\u{9a8c}\u{8bc1}"), w("\u{5df2}\u{9a57}\u{8b49}")]),
+    // 公式 only beside kana; 検証済 "verified"; オフィシャル "official". Not
+    // 認証済み ("authenticated") nor 確認済み ("checked").
+    ("ja", true, &[OtherWord { word: "\u{516c}\u{5f0f}", description: InDescription::Folded, with_kana: true }, w("\u{691c}\u{8a3c}\u{6e08}"), w("\u{30aa}\u{30d5}\u{30a3}\u{30b7}\u{30e3}\u{30eb}")]),
+    // 검증됨 "verified". Not 공식 (also "formula"), 인증됨 ("authenticated"),
+    // 확인됨 ("checked").
+    ("ko", true, &[w("\u{ac80}\u{c99d}\u{b428}")]),
+];
+
+/// Words beside which "zeron" claims standing though alone they're not the
+/// mark (each of [`OTHER_LANGUAGES`] is too): 公式, 공식, 认证, 認證, 認証,
+/// 인증 and their "done" forms, 確認済み, 확인됨.
+pub const STANDING_OTHER: &[&str] = &[
+    "\u{516c}\u{5f0f}", "\u{acf5}\u{c2dd}", "\u{8ba4}\u{8bc1}", "\u{8a8d}\u{8b49}", "\u{8a8d}\u{8a3c}", "\u{c778}\u{c99d}",
+    "\u{5df2}\u{8ba4}\u{8bc1}", "\u{5df2}\u{8a8d}\u{8b49}", "\u{8a8d}\u{8a3c}\u{6e08}", "\u{c778}\u{c99d}\u{b428}", "\u{78ba}\u{8a8d}\u{6e08}", "\u{d655}\u{c778}\u{b428}",
 ];
 
 /// The brand: a listing may say it only about Zeron, never as Zeron, unless
@@ -114,7 +171,7 @@ pub const NAME_FORMS: &[(&str, &[&str])] = &[
 ];
 
 /// In a description, "zeron" right after one of these reads as its maker.
-pub const ORIGIN_WORDS: &[&str] = &["by", "from", "by the", "made by", "built by", "von", "par", "de", "da", "di", "del", "van"];
+pub const ORIGIN_WORDS: &[&str] = &["by", "from", "by the", "made by", "built by", "von", "par", "de", "da", "di", "del", "van", "\u{7531}", "\u{6765}\u{81ea}"];
 
 /// In a description, "zeron" right before or after one of these (or its
 /// possessive, "zeron's team") reads as its standing.
@@ -280,8 +337,9 @@ fn unspaced(text: &[char]) -> Vec<char> {
 }
 
 /// What in `text` claims the store's mark, if anything: one of
-/// [`MARK_GLYPHS`], or the [`MARK_WORDS`] word it spells.
-pub fn mark_claim(text: &str) -> Option<String> {
+/// [`MARK_GLYPHS`], the [`MARK_WORDS`] word it spells, or a word of
+/// [`OTHER_LANGUAGES`] as a name (`in_name`) or a description reads it.
+pub fn mark_claim(text: &str, in_name: bool) -> Option<String> {
     let folded = folded(text);
     if let Some(glyph) = folded.iter().find(|c| MARK_GLYPHS.contains(c)) {
         return Some(glyph.to_string());
@@ -300,17 +358,43 @@ pub fn mark_claim(text: &str) -> Option<String> {
         return Some((*word).to_owned());
     }
     // In the store's other languages.
-    let any_word = |c: Option<&char>| c.is_some_and(|c| matches!(c.general_category_group(), GeneralCategoryGroup::Letter | GeneralCategoryGroup::Number));
-    OTHER_LANGUAGES.iter().flat_map(|(_, substring, words)| words.iter().map(move |w| (*substring, *w))).find_map(|(substring, word)| {
-        let wanted: Vec<char> = folded_word(word);
-        let found = readings.iter().any(|reading| {
-            (0..reading.len()).any(|at| {
-                reading[at..].starts_with(&wanted)
-                    && (substring || (!any_word(at.checked_sub(1).and_then(|b| reading.get(b))) && !any_word(reading.get(at + wanted.len()))))
-            })
-        });
-        found.then(|| word.to_owned())
+    let kana = text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}'));
+    let accents = kept_accents(text);
+    let accented_readings = [accents.clone(), unspaced(&accents)];
+    OTHER_LANGUAGES.iter().flat_map(|(_, substring, words)| words.iter().map(move |w| (*substring, w))).find_map(|(substring, word)| {
+        if word.with_kana && !kana {
+            return None;
+        }
+        let (wanted, readings) = match (in_name, word.description) {
+            (true, _) | (false, InDescription::Folded) => (folded_word(word.word), &readings),
+            (false, InDescription::Accented) => (kept_accents(word.word), &accented_readings),
+            (false, InDescription::NameOnly) => return None,
+        };
+        found(readings, &wanted, substring).then(|| word.word.to_owned())
     })
+}
+
+/// Whether `wanted` is in one of `readings`: anywhere (`substring`), or as
+/// a whole word, no letter or digit of any script right before or after.
+fn found(readings: &[Vec<char>], wanted: &[char], substring: bool) -> bool {
+    let any_word = |c: Option<&char>| c.is_some_and(|c| matches!(c.general_category_group(), GeneralCategoryGroup::Letter | GeneralCategoryGroup::Number));
+    readings.iter().any(|reading| {
+        (0..reading.len()).any(|at| {
+            reading[at..].starts_with(wanted) && (substring || (!any_word(at.checked_sub(1).and_then(|b| reading.get(b))) && !any_word(reading.get(at + wanted.len()))))
+        })
+    })
+}
+
+/// `text` folded but keeping its accents: NFKC and lowercase, ignorables
+/// and enclosing marks gone (how a description is read for a word that's
+/// refused only as written with them).
+fn kept_accents(text: &str) -> Vec<char> {
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfkc()
+        .normalize(text)
+        .to_lowercase()
+        .chars()
+        .filter(|c| !DefaultIgnorableCodePoint::for_char(*c) && c.general_category() != GeneralCategory::EnclosingMark)
+        .collect()
 }
 
 /// A word of a list, folded as the text is.
@@ -321,7 +405,7 @@ fn folded_word(word: &str) -> Vec<char> {
 /// `a` then `b`, as a spelling: apart by a space, or by `~` (none or more
 /// separators) when either is in a script that doesn't space its words.
 fn joined(a: &str, b: &str) -> String {
-    if a.is_ascii() && b.is_ascii() { format!("{a} {b}") } else { format!("{a}~{b}") }
+    if mark_text(a).is_ascii() && mark_text(b).is_ascii() { format!("{a} {b}") } else { format!("{a}~{b}") }
 }
 
 /// The spellings that make a name's "zeron" the object of a form.
@@ -333,10 +417,11 @@ fn name_forms() -> Vec<String> {
 /// or beside a word of standing.
 pub fn zeron_phrases() -> Vec<String> {
     let mut phrases: Vec<String> = ORIGIN_WORDS.iter().map(|o| joined(o, ZERON)).collect();
-    for standing in STANDING_WORDS {
+    let other = OTHER_LANGUAGES.iter().flat_map(|(_, _, words)| words.iter().map(|w| w.word));
+    for standing in STANDING_WORDS.iter().copied().chain(STANDING_OTHER.iter().copied()).chain(other) {
         phrases.push(joined(ZERON, standing));
         phrases.push(joined(standing, ZERON));
-        if standing.is_ascii() {
+        if mark_text(standing).is_ascii() {
             phrases.push(format!("{ZERON}'s {standing}"));
         }
     }
@@ -370,6 +455,25 @@ pub fn claims_zeron(text: &str) -> Option<String> {
     zeron_phrases().into_iter().find(|phrase| readings.iter().any(|reading| spelled(reading, phrase))).map(|phrase| phrase.replace('~', " "))
 }
 
+/// What a keyword says that it may not, if anything: read as a name is,
+/// "-" and " " between its parts, a part (or its parts joined) that is one
+/// of the mark's words in any language a keyword's letters can write, or
+/// that is "zeron" ("ze-ron" as "veri-fied"). No badge lifts it: every plugin here is for Zeron,
+/// so the word says nothing in a keyword and only ever serves a claim.
+pub fn keyword_claim(keyword: &str) -> Option<String> {
+    let parts: Vec<Vec<char>> = keyword.split(['-', ' ']).filter(|p| !p.is_empty()).map(|p| folded(p)).collect();
+    let joined: Vec<char> = parts.concat();
+    let whole = |text: &[char], word: &str| {
+        let spelling: Vec<char> = mark_text(word).chars().collect();
+        spell_end(text, 0, &spelling) == Some(text.len())
+    };
+    if parts.iter().chain([&joined]).any(|part| whole(part, ZERON)) {
+        return Some(ZERON.to_owned());
+    }
+    let ascii_words = OTHER_LANGUAGES.iter().flat_map(|(_, _, words)| words.iter().map(|w| w.word)).filter(|w| mark_text(w).is_ascii());
+    MARK_WORDS.iter().copied().chain(ascii_words).find(|word| parts.iter().chain([&joined]).any(|part| whole(part, word))).map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,7 +498,7 @@ mod tests {
             ("Officially fun", None),
             ("Focus Board", None),
         ] {
-            assert_eq!(mark_claim(text).as_deref(), claim, "{text}");
+            assert_eq!(mark_claim(text, false).as_deref(), claim, "{text}");
         }
     }
 
@@ -433,7 +537,7 @@ mod tests {
             "\u{1f185}\u{1f174}\u{1f181}\u{1f178}\u{1f175}\u{1f178}\u{1f174}\u{1f173} Focus",
             "\u{1f1fb} \u{1f1ea} \u{1f1f7} \u{1f1ee} \u{1f1eb} \u{1f1ee} \u{1f1ea} \u{1f1e9}",
         ] {
-            assert!(mark_claim(text).is_some(), "{text}");
+            assert!(mark_claim(text, false).is_some(), "{text}");
         }
         for text in [
             "Unv\u{435}rified Links",
@@ -456,7 +560,7 @@ mod tests {
             "Civil filed",
             "Stars \u{2b50}\u{fe0f}",
         ] {
-            assert_eq!(mark_claim(text), None, "{text}");
+            assert_eq!(mark_claim(text, false), None, "{text}");
         }
     }
 
@@ -516,28 +620,59 @@ mod tests {
     }
 
     #[test]
-    fn the_mark_s_words_in_other_languages() {
-        for (text, claim) in [
-            ("Cliente oficial", "oficial"),
-            ("No oficial", "oficial"),
-            ("Th\u{e8}me officiel", "officiel"),
-            ("Th\u{e8}me v\u{e9}rifi\u{e9}", "v\u{e9}rifi\u{e9}"),
-            ("Offizieller Client", "offizieller"),
-            ("Gepr\u{fc}fte Notizen", "gepr\u{fc}fte"),
-            ("Client ufficiale", "ufficiale"),
-            ("\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}", "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}"),
-            ("\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", "\u{5b98}\u{65b9}"),
-            ("\u{975e}\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", "\u{5b98}\u{65b9}"),
-            ("\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{516c}\u{5f0f}"),
-            ("\u{acf5}\u{c2dd} \u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{acf5}\u{c2dd}"),
+    fn the_mark_s_words_in_other_languages_but_never_an_ordinary_word() {
+        // (text, in a name, in a description)
+        for (text, name, description) in [
+            ("Cliente oficial", Some("oficial"), Some("oficial")),
+            ("No oficial", Some("oficial"), Some("oficial")),
+            ("Extension officielle", Some("officielle"), Some("officielle")),
+            ("Th\u{e8}me v\u{e9}rifi\u{e9}", Some("v\u{e9}rifi\u{e9}"), Some("v\u{e9}rifi\u{e9}")),
+            // Folded, "vérifie" ("checks") reads as "vérifié": a name only.
+            ("V\u{e9}rifie la syntaxe de vos fichiers", Some("v\u{e9}rifi\u{e9}"), None),
+            ("Offizieller Client", Some("offizieller"), Some("offizieller")),
+            ("Verifiziert Signaturen", Some("verifiziert"), None),
+            ("Offiziell unterst\u{fc}tzt", Some("offiziell"), None),
+            ("Eingaben werden gepr\u{fc}ft", Some("gepr\u{fc}ft"), None),
+            ("Client ufficiale", Some("ufficiale"), Some("ufficiale")),
+            ("Tema verificado", Some("verificado"), Some("verificado")),
+            ("\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}", Some("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}"), Some("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}")),
+            ("\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}: 5 \u{444}\u{430}\u{439}\u{43b}\u{43e}\u{432}", Some("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}"), None),
+            ("\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", Some("\u{5b98}\u{65b9}"), Some("\u{5b98}\u{65b9}")),
+            ("\u{975e}\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", Some("\u{5b98}\u{65b9}"), Some("\u{5b98}\u{65b9}")),
+            ("\u{5df2}\u{9a8c}\u{8bc1}\u{7684}\u{7b14}\u{8bb0}", Some("\u{5df2}\u{9a8c}\u{8bc1}"), Some("\u{5df2}\u{9a8c}\u{8bc1}")),
+            ("\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", Some("\u{516c}\u{5f0f}"), Some("\u{516c}\u{5f0f}")),
+            ("\u{691c}\u{8a3c}\u{6e08}\u{307f}\u{306e}\u{30e1}\u{30e2}", Some("\u{691c}\u{8a3c}\u{6e08}"), Some("\u{691c}\u{8a3c}\u{6e08}")),
+            ("\u{ac80}\u{c99d}\u{b428} \u{d50c}\u{b7ec}\u{adf8}\u{c778}", Some("\u{ac80}\u{c99d}\u{b428}"), Some("\u{ac80}\u{c99d}\u{b428}")),
         ] {
-            assert_eq!(mark_claim(text).as_deref(), Some(claim), "{text}");
+            assert_eq!(mark_claim(text, true).as_deref(), name, "{text} (name)");
+            assert_eq!(mark_claim(text, false).as_deref(), description, "{text} (description)");
         }
+        // Ordinary words: never.
         for text in [
-            "Ofici\u{f3} de notas", "Oficina", "Officier de garde", "Neoficiale", "\u{43d}\u{435}\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}",
+            "\u{6570}\u{5b66}\u{516c}\u{5f0f}\u{7f16}\u{8f91}\u{5668}", "\u{c218}\u{d559} \u{acf5}\u{c2dd}", "\u{8eab}\u{4efd}\u{8ba4}\u{8bc1}", "\u{8a8d}\u{8a3c}\u{30c8}\u{30fc}\u{30af}\u{30f3}",
+            "\u{c778}\u{c99d} \u{d1a0}\u{d070}", "Oficina de notas", "Officier de garde", "Verifica la sintassi", "Verifica tus archivos",
+            "\u{43d}\u{435}\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}", "Inoffizieller Client",
             "\u{7b14}\u{8bb0}\u{677f}", "\u{30e1}\u{30e2}\u{5e33}", "\u{ba54}\u{baa8}\u{c7a5}",
         ] {
-            assert_eq!(mark_claim(text), None, "{text}");
+            assert_eq!(mark_claim(text, true), None, "{text} (name)");
+            assert_eq!(mark_claim(text, false), None, "{text} (description)");
+        }
+        // Beside "zeron", each is still a claim.
+        for text in ["Zeron \u{516c}\u{5f0f}", "\u{acf5}\u{c2dd} Zeron", "Zeron \u{8ba4}\u{8bc1}", "\u{c778}\u{c99d} Zeron", "Zeron officiel", "Zeron verifiziert", "\u{7531} Zeron \u{5236}\u{4f5c}", "\u{6765}\u{81ea}Zeron"] {
+            assert!(claims_zeron(text).is_some(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_keyword_says_neither_the_mark_nor_zeron() {
+        for (keyword, claim) in [
+            ("verified", "verified"), ("veri-fied", "verified"), ("0fficial", "official"), ("of-ficial", "official"), ("oficial", "oficial"), ("verifie", "v\u{e9}rifi\u{e9}"),
+            ("zeron", "zeron"), ("zeron-themes", "zeron"), ("themes zeron", "zeron"), ("zer0n", "zeron"), ("2eron", "zeron"), ("ze-ron", "zeron"),
+        ] {
+            assert_eq!(keyword_claim(keyword).as_deref(), Some(claim), "{keyword}");
+        }
+        for keyword in ["themes", "zero", "heron", "verify", "officer", "zeronaut", "notes board"] {
+            assert_eq!(keyword_claim(keyword), None, "{keyword}");
         }
     }
 
@@ -614,6 +749,8 @@ mod tests {
             }
         }
         add('e', "3");
+        // (The usernames' digit fold: 2 for z.)
+        add('z', "2");
         let escape = |c: char| if c.is_ascii_alphanumeric() { c.to_string() } else { format!("\\u{{{:x}}}", c as u32) };
         let rows: Vec<String> = table.iter().map(|(l, set)| format!("    ('{l}', \"{}\"),", set.iter().map(|c| escape(*c)).collect::<String>())).collect();
         format!(

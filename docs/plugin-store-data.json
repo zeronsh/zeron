@@ -54,7 +54,9 @@
         "da",
         "di",
         "del",
-        "van"
+        "van",
+        "由",
+        "来自"
       ],
       "standing": [
         "team",
@@ -72,7 +74,22 @@
         "官方",
         "公式",
         "공식"
-      ]
+      ],
+      "standing_other": [
+        "公式",
+        "공식",
+        "认证",
+        "認證",
+        "認証",
+        "인증",
+        "已认证",
+        "已認證",
+        "認証済",
+        "인증됨",
+        "確認済",
+        "확인됨"
+      ],
+      "standing_other_about": "Standing too: standing_other, and every word of mark_claims.languages (any language, any description reading), beside the word."
     },
     "name": {
       "allowed_before": {
@@ -209,6 +226,7 @@
   },
   "format": "zeron-plugin-store-data:v1",
   "key_proof_prefix": "zeron-plugin-key:v1:",
+  "keyword_claims": "A keyword (already lowercase letters, digits, dashes and single spaces) is refused (bad_listing, field keywords) when, its parts split at '-' and ' ' and each folded as mark_claims folds, a part or all its parts joined spells, whole, with mark_claims' lookalikes (interchangeable and pairs too): one of mark_claims.words; a word of mark_claims.languages whose folded form is ASCII (any description reading); or claims_zeron.word. No badge lifts it. The listing cases named 'keywords:' hold both sides to it.",
   "limits": {
     "max_bytes": 52428800,
     "max_categories": 2,
@@ -242,7 +260,7 @@
     ]
   },
   "mark_claims": {
-    "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or of claims_zeron's phrases, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs) and the digit 3 for e. Then, in the store's other languages: any of languages[lang].words, folded the same way, in either reading, as a substring where substring is true (Chinese, Japanese, Korean), else whole (no character of General_Category L* or N* right before or after it). The listing cases named 'the mark:' hold both sides to it.",
+    "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or of claims_zeron's phrases, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs), the digit 3 for e and the digit 2 for z. Then, in the store's other languages: each of languages[lang].words, in either reading, as a substring where substring is true (Chinese, Japanese, Korean), else whole (no character of General_Category L* or N* right before or after it). In a name, every word, folded the same way. In a description, a word whose description is 'folded' the same way; 'accented' read with accents kept (NFKC, lowercase, ignorables and Me gone, on both the text and the word; French 'vérifié', whose folded form is also 'vérifie', checks); 'never' not at all (it's also an ordinary word there). A word with with_kana is refused only in a text that also holds kana (U+3040–30FF, U+31F0–31FF, U+FF66–FF9F): Japanese 公式 is official, Chinese 公式 a formula. The listing cases named 'the mark:' hold both sides to it.",
     "glyphs": [
       "✓",
       "✔",
@@ -264,113 +282,283 @@
       "de": {
         "substring": false,
         "words": [
-          "verifiziert",
-          "verifizierte",
-          "verifizierter",
-          "verifiziertes",
-          "verifizierten",
-          "geprüft",
-          "geprüfte",
-          "geprüfter",
-          "geprüftes",
-          "geprüften",
-          "offiziell",
-          "offizielle",
-          "offizieller",
-          "offizielles",
-          "offiziellen"
+          {
+            "description": "never",
+            "word": "verifiziert"
+          },
+          {
+            "description": "folded",
+            "word": "verifizierte"
+          },
+          {
+            "description": "folded",
+            "word": "verifizierter"
+          },
+          {
+            "description": "folded",
+            "word": "verifiziertes"
+          },
+          {
+            "description": "folded",
+            "word": "verifizierten"
+          },
+          {
+            "description": "never",
+            "word": "geprüft"
+          },
+          {
+            "description": "never",
+            "word": "geprüfte"
+          },
+          {
+            "description": "never",
+            "word": "geprüfter"
+          },
+          {
+            "description": "never",
+            "word": "geprüftes"
+          },
+          {
+            "description": "never",
+            "word": "geprüften"
+          },
+          {
+            "description": "never",
+            "word": "offiziell"
+          },
+          {
+            "description": "folded",
+            "word": "offizielle"
+          },
+          {
+            "description": "folded",
+            "word": "offizieller"
+          },
+          {
+            "description": "folded",
+            "word": "offizielles"
+          },
+          {
+            "description": "folded",
+            "word": "offiziellen"
+          }
         ]
       },
       "es": {
         "substring": false,
         "words": [
-          "verificado",
-          "verificada",
-          "verificados",
-          "verificadas",
-          "oficial",
-          "oficiales"
+          {
+            "description": "folded",
+            "word": "verificado"
+          },
+          {
+            "description": "folded",
+            "word": "verificada"
+          },
+          {
+            "description": "folded",
+            "word": "verificados"
+          },
+          {
+            "description": "folded",
+            "word": "verificadas"
+          },
+          {
+            "description": "folded",
+            "word": "oficial"
+          },
+          {
+            "description": "folded",
+            "word": "oficiales"
+          }
         ]
       },
       "fr": {
         "substring": false,
         "words": [
-          "vérifié",
-          "vérifiée",
-          "vérifiés",
-          "vérifiées",
-          "officiel",
-          "officielle",
-          "officiels",
-          "officielles"
+          {
+            "description": "accented",
+            "word": "vérifié"
+          },
+          {
+            "description": "accented",
+            "word": "vérifiée"
+          },
+          {
+            "description": "accented",
+            "word": "vérifiés"
+          },
+          {
+            "description": "accented",
+            "word": "vérifiées"
+          },
+          {
+            "description": "folded",
+            "word": "officiel"
+          },
+          {
+            "description": "folded",
+            "word": "officielle"
+          },
+          {
+            "description": "folded",
+            "word": "officiels"
+          },
+          {
+            "description": "folded",
+            "word": "officielles"
+          }
         ]
       },
       "it": {
         "substring": false,
         "words": [
-          "verificato",
-          "verificata",
-          "verificati",
-          "verificate",
-          "ufficiale",
-          "ufficiali"
+          {
+            "description": "folded",
+            "word": "verificato"
+          },
+          {
+            "description": "folded",
+            "word": "verificata"
+          },
+          {
+            "description": "folded",
+            "word": "verificati"
+          },
+          {
+            "description": "folded",
+            "word": "verificate"
+          },
+          {
+            "description": "folded",
+            "word": "ufficiale"
+          },
+          {
+            "description": "folded",
+            "word": "ufficiali"
+          }
         ]
       },
       "ja": {
         "substring": true,
         "words": [
-          "公式",
-          "認証済",
-          "検証済",
-          "オフィシャル"
+          {
+            "description": "folded",
+            "with_kana": true,
+            "word": "公式"
+          },
+          {
+            "description": "folded",
+            "word": "検証済"
+          },
+          {
+            "description": "folded",
+            "word": "オフィシャル"
+          }
         ]
       },
       "ko": {
         "substring": true,
         "words": [
-          "공식",
-          "인증됨",
-          "인증된",
-          "검증됨",
-          "검증된"
+          {
+            "description": "folded",
+            "word": "검증됨"
+          }
         ]
       },
       "pt": {
         "substring": false,
         "words": [
-          "verificado",
-          "verificada",
-          "verificados",
-          "verificadas",
-          "oficial",
-          "oficiais"
+          {
+            "description": "folded",
+            "word": "verificado"
+          },
+          {
+            "description": "folded",
+            "word": "verificada"
+          },
+          {
+            "description": "folded",
+            "word": "verificados"
+          },
+          {
+            "description": "folded",
+            "word": "verificadas"
+          },
+          {
+            "description": "folded",
+            "word": "oficial"
+          },
+          {
+            "description": "folded",
+            "word": "oficiais"
+          }
         ]
       },
       "ru": {
         "substring": false,
         "words": [
-          "проверено",
-          "проверенный",
-          "проверенная",
-          "проверенное",
-          "проверенные",
-          "верифицирован",
-          "верифицированный",
-          "официальный",
-          "официальная",
-          "официальное",
-          "официальные",
-          "официально"
+          {
+            "description": "never",
+            "word": "проверено"
+          },
+          {
+            "description": "never",
+            "word": "проверенный"
+          },
+          {
+            "description": "never",
+            "word": "проверенная"
+          },
+          {
+            "description": "never",
+            "word": "проверенное"
+          },
+          {
+            "description": "never",
+            "word": "проверенные"
+          },
+          {
+            "description": "folded",
+            "word": "верифицирован"
+          },
+          {
+            "description": "folded",
+            "word": "верифицированный"
+          },
+          {
+            "description": "folded",
+            "word": "официальный"
+          },
+          {
+            "description": "folded",
+            "word": "официальная"
+          },
+          {
+            "description": "folded",
+            "word": "официальное"
+          },
+          {
+            "description": "folded",
+            "word": "официальные"
+          }
         ]
       },
       "zh": {
         "substring": true,
         "words": [
-          "官方",
-          "已验证",
-          "已驗證",
-          "已认证",
-          "已認證"
+          {
+            "description": "folded",
+            "word": "官方"
+          },
+          {
+            "description": "folded",
+            "word": "已验证"
+          },
+          {
+            "description": "folded",
+            "word": "已驗證"
+          }
         ]
       }
     },
@@ -1382,6 +1570,7 @@
         "🇾"
       ],
       "z": [
+        "2",
         "Ƶ",
         "ƶ",
         "Ȥ",

@@ -258,7 +258,7 @@ pub fn store_link(url: &str) -> Option<String> {
 
 /// What a listing's name or description may not say: the store's mark,
 /// or that it's Zeron's own (`mark.rs`).
-pub use super::mark::{MARK_GLYPHS, MARK_WORDS, claims_zeron, claims_zeron_in_name, mark_claim, mark_text};
+pub use super::mark::{MARK_GLYPHS, MARK_WORDS, claims_zeron, claims_zeron_in_name, keyword_claim, mark_claim, mark_text};
 
 /// Whether `text` has a character drawn as nothing, which what a listing
 /// shows may not (amendment 31): a control or format character, any other
@@ -495,7 +495,7 @@ pub fn check(
             Some("name"),
             "Its name has a control or invisible formatting character",
         ));
-    } else if let Some(claim) = mark_claim(&manifest.name) {
+    } else if let Some(claim) = mark_claim(&manifest.name, true) {
         problems.push(Problem::new(
             BAD_LISTING,
             Some("name"),
@@ -558,7 +558,7 @@ pub fn check(
             Some("description"),
             "Its description has a control or invisible formatting character",
         ));
-    } else if let Some(claim) = mark_claim(description) {
+    } else if let Some(claim) = mark_claim(description, false) {
         problems.push(Problem::new(
             BAD_LISTING,
             Some("description"),
@@ -665,6 +665,13 @@ pub fn check(
                         "Keyword \"{}\" must be lowercase letters, digits, dashes and single spaces, at most {MAX_KEYWORD_LEN} characters",
                         bad.unwrap_or("?")
                     ),
+                ));
+            } else if let Some((keyword, claim)) = words.iter().flatten().find_map(|w| keyword_claim(w).map(|claim| (w, claim))) {
+                // (No badge lifts this: every plugin here is for Zeron.)
+                problems.push(Problem::new(
+                    BAD_LISTING,
+                    Some("keywords"),
+                    format!("Keyword \"{keyword}\" says \"{claim}\": a keyword may say neither the store's mark nor Zeron"),
                 ));
             }
         }
@@ -1158,7 +1165,7 @@ pub(crate) mod tests {
             ("VER\u{130}F\u{130}ED", Some("verified")),
             ("Focus Board", None),
         ] {
-            assert_eq!(mark_claim(text).as_deref(), claim, "{text}");
+            assert_eq!(mark_claim(text, false).as_deref(), claim, "{text}");
         }
         let (mut m, files) = listed();
         m["name"] = serde_json::json!("Focus \u{2714}");
