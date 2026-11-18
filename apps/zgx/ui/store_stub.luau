@@ -17,7 +17,7 @@
 --   store_stub.no_total    lists come without `total` (how many match)
 --   store_stub.few_categories  the store has three categories (before Browse opens)
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
---   store_stub.html_and_footnote  your plugin's README has HTML, its CHANGELOG a footnote (advice)
+--   store_stub.html_and_footnote  your plugin's README has HTML and math, its CHANGELOG a footnote (advice)
 --   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
 --   store_stub.many_keys   Pomodoro clock has ten deploy keys: names of every length,
 --                          one ending today, one tomorrow, one in five days
@@ -35,7 +35,8 @@ local overlap = false
 -- The engine's notes on your plugin's folder (its changelog has nothing for
 -- the version); `store_stub.no_notes`, none.
 local notes = true
--- Its README's HTML and its CHANGELOG's footnote said (`store_stub.html_and_footnote`).
+-- Its README's HTML and math, and its CHANGELOG's footnote, said
+-- (`store_stub.html_and_footnote`).
 local typed = false
 -- Lists without `total`, as a store from before it counted them.
 local no_total = false
@@ -580,6 +581,7 @@ stub.prepare = function(id: string): any
 				if typed then
 					table.insert(out, { rule = "raw_html", path = "README.md", words = "README.md line 3 has HTML; the store shows it as text. Use Markdown for pictures and headings." })
 					table.insert(out, { rule = "footnote", path = "CHANGELOG.md", words = "CHANGELOG.md line 7 has a footnote; the store shows it as text. Write the note into the text instead." })
+					table.insert(out, { rule = "math", path = "README.md", words = "README.md line 12 has math; the store's website shows it as typed (Zeron itself draws it)." })
 				end
 				return out
 			end)(),
@@ -792,7 +794,7 @@ ui.command {
 }
 ui.command {
 	id = "store_stub.html_and_footnote",
-	title = "Store: your plugin's README has HTML, its CHANGELOG a footnote",
+	title = "Store: your plugin's README has HTML and math, its CHANGELOG a footnote",
 	run = function()
 		typed = true
 	end,

@@ -9,7 +9,7 @@ local REASONS = {
 	"store_unreachable", "not_in_store", "store_mismatch", "store_error", "rate_limited",
 	"signed_out", "review", "changed", "not_published", "step_up_required",
 	"bad_package", "id_reserved", "not_semver", "missing_readme", "missing_listing", "bad_listing", "too_large",
-	"binary_file", "no_notes", "raw_html", "footnote", "needs_username", "id_taken", "version_exists", "suspended",
+	"binary_file", "no_notes", "raw_html", "footnote", "math", "needs_username", "id_taken", "version_exists", "suspended",
 	"key_not_allowed", "key_revoked", "key_expired", "invalid_signature", "unauthenticated", "forbidden",
 	"stale_request", "replayed_request", "body_mismatch",
 	"too_many_keys", "key_taken", "invalid_name", "invalid_expiry", "invalid_proof", "bad_csrf",

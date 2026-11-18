@@ -339,7 +339,7 @@ test("signed out before Yours is read, its versions say to sign in", function()
 	end
 end)
 
-test("HTML in its README and a footnote in its CHANGELOG are advice under the checks, in Zeron's words, and Submit still sends", function()
+test("HTML and math in its README and a footnote in its CHANGELOG are advice under the checks, in Zeron's words, and Submit still sends", function()
 	local app = publishing()
 	app:command("store_stub.fixed")
 	app:command("store_stub.html_and_footnote")
@@ -348,6 +348,7 @@ test("HTML in its README and a footnote in its CHANGELOG are advice under the ch
 	local checks = app:tree("#publish-checks")
 	expect(checks).to_contain("It has HTML, which the store shows as typed.")
 	expect(checks).to_contain("It has a footnote, which the store shows as typed.")
+	expect(checks).to_contain("It has math, which the store's website shows as typed.")
 	expect(checks).to_contain("README.md")
 	expect(checks).to_contain("CHANGELOG.md")
 	-- (Never the engine's English as it came.)

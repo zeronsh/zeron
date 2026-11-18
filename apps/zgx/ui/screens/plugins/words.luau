@@ -619,6 +619,7 @@ local FAILURES: { [string]: boolean } = {
 	no_notes = true,
 	raw_html = true,
 	footnote = true,
+	math = true,
 	needs_username = true,
 	id_taken = true,
 	version_exists = true,
