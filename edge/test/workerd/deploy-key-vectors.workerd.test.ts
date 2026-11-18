@@ -1,8 +1,9 @@
 /**
- * The engine's deploy-key vector (docs/plugin-package-vectors.json), end to
- * end at the edge: its key registered with its own proof, then its exact
- * request (bytes, path, timestamp, Authorization header) accepted as a
- * deploy key's publish of its plugin, on the edge's clock at that moment.
+ * The engine's deploy-key vectors (docs/plugin-package-vectors.json), end to
+ * end at the edge: the key registered with its own proof, then its exact
+ * requests (method, path, headers, body), the publish and the signed read
+ * of `GET /store/v1/me/plugins`, each accepted once as that plugin's deploy
+ * key, on the edge's clock at the vector's moment.
  */
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
@@ -13,17 +14,20 @@ import { verifySignedRequest } from "../../src/store/identity/signed-request";
 import { person, setOwner, stepUp } from "./identity-helpers";
 
 const v = vectors.deploy_key;
-const body = Uint8Array.from(atob(v.request.body_b64), (c) => c.charCodeAt(0));
+const bodyOf = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
-const vectorRequest = () =>
-  new Request(`https://edge.test${v.request.path}`, {
-    method: v.request.method,
-    headers: { authorization: v.request.authorization, "x-zeron-content-sha256": v.request.body_sha256 },
-    body
+/** The vector's request exactly: its method, path, headers and body. */
+const vectorRequest = (r: typeof v.request | typeof v.get) =>
+  new Request(`https://edge.test${r.path}`, {
+    method: r.method,
+    headers: r.headers,
+    body: r.method === "GET" ? undefined : bodyOf(r.body_b64)
   });
 
+const verify = (request: Request, at: number) => verifySignedRequest(request, env as unknown as Env, new URL(request.url), at);
+
 describe("the engine's deploy-key vector at the edge", () => {
-  it("registers with its proof and publishes with its exact request", async () => {
+  it("registers with its proof, then publishes and reads with its exact requests, each once", async () => {
     const owner = await person();
     await setOwner("focus", owner);
     const registered = await SELF.fetch("https://edge.test/store/v1/plugins/focus/keys", {
@@ -33,16 +37,15 @@ describe("the engine's deploy-key vector at the edge", () => {
     });
     expect(registered.status).toBe(201);
 
-    const request = vectorRequest();
-    const caller = await verifySignedRequest(request, env as unknown as Env, new URL(request.url), v.request.ts);
-    expect(caller).toEqual({ userId: owner, username: null, key: v.public, pluginId: "focus" });
-    expect(await readBody(request)).toEqual(body);
-    // Once only, and never outside the clock skew.
-    const again = vectorRequest();
-    const replayed = (await verifySignedRequest(again, env as unknown as Env, new URL(again.url), v.request.ts)) as Response;
-    expect(((await replayed.json()) as { error: string }).error).toBe("replayed_request");
-    const late = vectorRequest();
-    const stale = (await verifySignedRequest(late, env as unknown as Env, new URL(late.url), v.request.ts + v.max_skew_ms + 1)) as Response;
-    expect(((await stale.json()) as { error: string }).error).toBe("stale_request");
+    for (const r of [v.request, v.get]) {
+      const request = vectorRequest(r);
+      expect(await verify(request, r.ts), r.method).toEqual({ userId: owner, username: null, key: v.public, pluginId: "focus" });
+      expect(await readBody(request)).toEqual(bodyOf(r.body_b64));
+      // Once only, and never outside the clock skew.
+      const replayed = (await verify(vectorRequest(r), r.ts)) as Response;
+      expect(((await replayed.json()) as { error: string }).error).toBe("replayed_request");
+      const stale = (await verify(vectorRequest(r), r.ts + v.max_skew_ms + 1)) as Response;
+      expect(((await stale.json()) as { error: string }).error).toBe("stale_request");
+    }
   });
 });

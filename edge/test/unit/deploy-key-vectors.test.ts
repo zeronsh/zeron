@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import vectors from "../../../docs/plugin-package-vectors.json";
 import { b64urlDecode, b64urlEncode, verifyEd25519 } from "../../src/cloud/crypto";
 import {
+  CONTENT_SHA256_HEADER,
   MAX_REQUEST_SKEW_MS,
   deployKeyProofMessage,
   deployKeyRoute,
@@ -18,25 +19,35 @@ import {
 } from "../../src/store/identity/signing";
 
 const v = vectors.deploy_key;
-const body = Uint8Array.from(atob(v.request.body_b64), (c) => c.charCodeAt(0));
+const cases = { publish: v.request, read: v.get } as const;
+const bodyOf = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
 describe("deploy-key vectors", () => {
-  it("hash the body as the edge does", async () => {
-    expect(await sha256Hex(body)).toBe(v.request.body_sha256);
+  it("name the edge's content-hash header", () => {
+    expect(v.content_sha256_header.toLowerCase()).toBe(CONTENT_SHA256_HEADER);
   });
 
-  it("sign exactly the edge's signing string", () => {
-    expect(publishSigningString(v.request.method, v.request.path, v.request.body_sha256, String(v.request.ts))).toBe(v.request.message);
-  });
+  for (const [name, r] of Object.entries(cases)) {
+    describe(name, () => {
+      it("hash the body as the edge does, and send that hash in the header", async () => {
+        expect(await sha256Hex(bodyOf(r.body_b64))).toBe(r.body_sha256);
+        expect(r.headers[CONTENT_SHA256_HEADER as keyof typeof r.headers]).toBe(r.body_sha256);
+      });
 
-  it("send an Authorization header the edge parses, and a signature it verifies", async () => {
-    const parsed = parseZeronKeyAuthorization(v.request.authorization);
-    expect(parsed).toEqual({ key: v.public, ts: String(v.request.ts), sig: expect.stringMatching(/^[A-Za-z0-9_-]{86}$/) });
-    expect(await verifyEd25519(v.public, v.request.message, parsed!.sig)).toBe(true);
-    // Not for anything else.
-    expect(await verifyEd25519(v.public, v.request.message.replace("focus", "focus2"), parsed!.sig)).toBe(false);
-    expect(deployKeyRoute(v.request.method, v.request.path)).toEqual({ pluginId: "focus" });
-  });
+      it("sign exactly the edge's signing string", () => {
+        expect(publishSigningString(r.method, r.path, r.body_sha256, String(r.ts))).toBe(r.message);
+      });
+
+      it("send an Authorization header the edge parses, a signature it verifies, on a route a key may use", async () => {
+        const parsed = parseZeronKeyAuthorization(r.headers.authorization);
+        expect(parsed).toEqual({ key: v.public, ts: String(r.ts), sig: expect.stringMatching(/^[A-Za-z0-9_-]{86}$/) });
+        expect(await verifyEd25519(v.public, r.message, parsed!.sig)).toBe(true);
+        // Not for anything else.
+        expect(await verifyEd25519(v.public, r.message.replace(/\n\d+$/, "\n1"), parsed!.sig)).toBe(false);
+        expect(deployKeyRoute(r.method, r.path)).toEqual({ pluginId: name === "publish" ? "focus" : null });
+      });
+    });
+  }
 
   it("prove possession with the edge's proof message", async () => {
     expect(deployKeyProofMessage("focus", v.public)).toBe(v.proof_message);
