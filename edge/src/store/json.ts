@@ -46,6 +46,32 @@ export class JsonNumber {
 }
 
 export type Json = null | boolean | string | JsonNumber | Json[] | JsonObject;
+
+/**
+ * A string left in the input as a byte range (`parseJson`'s `raw` option):
+ * one of at least `RAW_MIN` bytes, all ASCII, with no escapes, so its text
+ * is exactly those bytes. A package's file data is read this way, straight
+ * from the request's bytes, never copied into a string first.
+ */
+export class RawString {
+  constructor(
+    readonly bytes: Uint8Array,
+    readonly start: number,
+    readonly end: number
+  ) {}
+
+  get length(): number {
+    return this.end - this.start;
+  }
+
+  text(): string {
+    let out = "";
+    for (let i = this.start; i < this.end; i += 8192) out += String.fromCharCode(...this.bytes.subarray(i, Math.min(i + 8192, this.end)));
+    return out;
+  }
+}
+
+export const RAW_MIN = 64;
 /** Insertion order is irrelevant: serde_json's map is sorted. */
 export type JsonObject = Map<string, Json>;
 
@@ -73,7 +99,12 @@ const hexValue = (b: number): number => {
 
 class Parser {
   at = 0;
-  constructor(private readonly bytes: Uint8Array) {}
+  constructor(
+    private readonly bytes: Uint8Array,
+    /** Leave long plain strings as `RawString`s (typed as strings: only
+     * `parsePackageJson`'s callers see them). */
+    private readonly raw = false
+  ) {}
 
   fail(why: string): never {
     throw new JsonError(`${why} at byte ${this.at}`);
@@ -148,7 +179,8 @@ class Parser {
   objectKey(): string {
     this.skipWhitespace();
     if (this.bytes[this.at] !== 0x22) this.fail(this.bytes[this.at] === 0x7d ? "trailing comma" : "key must be a string");
-    const key = this.string();
+    // (Keys are always strings: a duplicate must find its first.)
+    const key = this.string(false);
     this.skipWhitespace();
     if (this.bytes[this.at] !== 0x3a) this.fail("expected `:`");
     this.at++;
@@ -217,9 +249,23 @@ class Parser {
     return JsonNumber.float(value);
   }
 
-  string(): string {
+  string(mayStayRaw = true): string {
     const bytes = this.bytes;
     this.at++; // the opening quote
+    if (this.raw && mayStayRaw) {
+      // A long run of plain ASCII up to the closing quote stays in place.
+      const start = this.at;
+      let end = start;
+      for (;;) {
+        const b = bytes[end];
+        if (b === undefined || b === 0x22 || b === 0x5c || b < 0x20 || b >= 0x80) break;
+        end++;
+      }
+      if (bytes[end] === 0x22 && end - start >= RAW_MIN) {
+        this.at = end + 1;
+        return new RawString(bytes, start, end) as unknown as string;
+      }
+    }
     let out = "";
     let runStart = this.at;
     let runAscii = true;
@@ -317,8 +363,30 @@ class Parser {
 }
 
 /** The JSON in `bytes`, as serde_json's `from_slice` reads it. */
-export const parseJson = (bytes: Uint8Array): Json => {
-  const parser = new Parser(bytes);
+export const parseJson = (bytes: Uint8Array): Json => parse(bytes, false);
+
+/** `parseJson`, with long plain strings left as `RawString`s: a value or key
+ * typed as a string may be one. Turn a subtree into plain JSON with
+ * `materialize` before anything else reads it. */
+export const parsePackageJson = (bytes: Uint8Array): Json => parse(bytes, true);
+
+const isRaw = (value: unknown): value is RawString => value instanceof RawString;
+export { isRaw as isRawString };
+
+/** `value` with every `RawString` made a string. */
+export const materialize = (value: Json): Json => {
+  if (isRaw(value)) return value.text();
+  if (Array.isArray(value)) return value.map(materialize);
+  if (value instanceof Map) {
+    const out: JsonObject = new Map();
+    for (const [key, item] of value) out.set(isRaw(key) ? (key as RawString).text() : key, materialize(item));
+    return out;
+  }
+  return value;
+};
+
+const parse = (bytes: Uint8Array, raw: boolean): Json => {
+  const parser = new Parser(bytes, raw);
   const value = parser.value();
   parser.skipWhitespace();
   if (parser.at !== bytes.length) parser.fail("trailing characters");

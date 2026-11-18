@@ -33,7 +33,8 @@ import { isPrerelease, preKey, precedenceText } from "./semver";
  * The largest package the store takes, in bytes. Measured, not guessed:
  * scripts/store-package-limit.mjs publishes packages of growing size to a
  * local workerd and records its peak memory and CPU per publish
- * (docs/plugin-store-limits.md). Below the engine's own 50 MB of files.
+ * (docs/plugin-store-limits.md): about 60 MB at its peak, 0.3 s of CPU.
+ * Below the engine's own 50 MB of files.
  */
 export const STORE_MAX_PACKAGE_BYTES = 20 * 1024 * 1024;
 

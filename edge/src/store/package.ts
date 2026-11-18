@@ -19,7 +19,7 @@
  * Then the content hash: sha256 of `canonical(manifest without signature) +
  * "\n" + canonical(file hashes)`.
  */
-import { type Json, type JsonObject, JsonError, canonicalJson, isObject, parseJson } from "./json";
+import { type Json, type JsonObject, JsonError, canonicalJson, isObject, isRawString, materialize, parsePackageJson } from "./json";
 import { MANIFEST_FILE, type Manifest, idProblem, readManifest } from "./manifest";
 import { plainPath } from "./paths";
 
@@ -111,14 +111,21 @@ const URL_SAFE_TABLE = table(URL_SAFE);
  * nothing but the alphabet is taken (no whitespace). Answers the bytes
  * written, or -1 if `text` isn't base64. `out` needs `decodedBound` room.
  */
-export const decodeBase64Into = (text: string, padded: boolean, out: Uint8Array, at: number): number => {
+export const decodeBase64Into = (text: string, padded: boolean, out: Uint8Array, at: number): number =>
+  decodeSymbols((i) => text.charCodeAt(i), text.length, padded, out, at);
+
+/** `decodeBase64Into` over the ASCII bytes `src[start, end)`. */
+export const decodeBase64BytesInto = (src: Uint8Array, start: number, end: number, padded: boolean, out: Uint8Array, at: number): number =>
+  decodeSymbols((i) => src[start + i]!, end - start, padded, out, at);
+
+const decodeSymbols = (code: (index: number) => number, textLength: number, padded: boolean, out: Uint8Array, at: number): number => {
   const lookup = padded ? STANDARD_TABLE : URL_SAFE_TABLE;
-  let length = text.length;
+  let length = textLength;
   if (padded) {
     if (length % 4 !== 0) return -1;
-    if (length > 0 && text.charCodeAt(length - 1) === 0x3d) {
+    if (length > 0 && code(length - 1) === 0x3d) {
       length--;
-      if (text.charCodeAt(length - 1) === 0x3d) length--;
+      if (code(length - 1) === 0x3d) length--;
     }
   }
   const remainder = length % 4;
@@ -126,7 +133,7 @@ export const decodeBase64Into = (text: string, padded: boolean, out: Uint8Array,
   let o = at;
   let i = 0;
   const symbol = (index: number): number => {
-    const c = text.charCodeAt(index);
+    const c = code(index);
     return c < 128 ? lookup[c]! : -1;
   };
   for (; i + 4 <= length; i += 4) {
@@ -157,7 +164,7 @@ export const decodeBase64Into = (text: string, padded: boolean, out: Uint8Array,
 };
 
 /** The most bytes `text` can decode to. */
-export const decodedBound = (text: string): number => Math.ceil(text.length / 4) * 3;
+export const decodedBound = (text: { readonly length: number }): number => Math.ceil(text.length / 4) * 3;
 
 export const decodeBase64 = (text: string, padded: boolean): Uint8Array | undefined => {
   const out = new Uint8Array(decodedBound(text));
@@ -243,16 +250,19 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   if (raw.length > maxBytes) refuse("too_big");
   let value: Json;
   try {
-    value = parseJson(raw);
+    // File data stays in `raw` as byte ranges, decoded straight into the
+    // files buffer: no string copy of a package's bulk is ever made.
+    value = parsePackageJson(raw);
   } catch (e) {
     if (e instanceof JsonError) return refuse("not_a_package");
     throw e;
   }
   if (!isObject(value) || value.get("format") !== FORMAT) refuse("not_a_package");
   const top = value as JsonObject;
-  const manifestValue = top.get("manifest");
+  const manifestRaw = top.get("manifest");
   const filesValueRaw = top.get("files");
-  if (!isObject(filesValueRaw) || !isObject(manifestValue)) return refuse("not_a_package");
+  if (!isObject(filesValueRaw) || !isObject(manifestRaw)) return refuse("not_a_package");
+  const manifestValue = materialize(manifestRaw) as JsonObject;
   if (filesValueRaw.size > MAX_FILES) refuse("too_big");
   const paths = [...filesValueRaw.keys()].sort(byCodePoint);
   // Every file decodes into one buffer, in path order: the files are views
@@ -260,7 +270,7 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   let bound = 0;
   for (const rel of paths) {
     const data = filesValueRaw.get(rel);
-    if (typeof data === "string") bound += decodedBound(data);
+    if (isRawString(data) || typeof data === "string") bound += decodedBound(data as { length: number });
   }
   const blob = new Uint8Array(bound);
   const files = new Map<string, Uint8Array>();
@@ -268,7 +278,11 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   for (const rel of paths) {
     if (!plainPath(rel) || rel === MANIFEST_FILE) refuse("bad_file", JSON.stringify(rel));
     const data = filesValueRaw.get(rel);
-    const written = typeof data === "string" ? decodeBase64Into(data, true, blob, total) : -1;
+    const written = isRawString(data)
+      ? decodeBase64BytesInto(data.bytes, data.start, data.end, true, blob, total)
+      : typeof data === "string"
+        ? decodeBase64Into(data, true, blob, total)
+        : -1;
     if (written < 0) return refuse("bad_file", JSON.stringify(rel));
     files.set(rel, blob.subarray(total, total + written));
     total += written;

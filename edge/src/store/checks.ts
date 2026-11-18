@@ -5,7 +5,7 @@
  * `ok` and `warn`: the things a reviewer should look at.
  */
 import { type ConsentItem, RISKY_ASKS, consentDiff, fullControl } from "./consent";
-import { decodeText, pictureType } from "./listing";
+import { pictureType } from "./listing";
 import type { Listing } from "./listing";
 import { riskyHost } from "./manifest";
 import type { VerifiedPackage } from "./package";
@@ -22,15 +22,45 @@ export type FileKind = "png" | "jpeg" | "svg" | "text" | "binary";
 /** Extensions that are code a device could load natively or as bytecode. */
 const NATIVE_EXTENSIONS = /\.(wasm|node|dylib|so|dll|exe|bin|pyc|pyo|class|jar|luac|o|a|lib|com|msi|app|deb|rpm|dmg|pkg|zip|tar|gz|tgz|7z|rar|bz2|xz)$/i;
 
+/** Whether `bytes` is UTF-8 text (RFC 3629: no overlong forms, surrogates
+ * or code points past U+10FFFF) without a NUL: checked in place, never
+ * decoded into a string. */
+export const isText = (bytes: Uint8Array): boolean => {
+  const n = bytes.length;
+  let i = 0;
+  while (i < n) {
+    const b = bytes[i]!;
+    if (b < 0x80) {
+      if (b === 0) return false;
+      i++;
+      continue;
+    }
+    let need: number;
+    let min: number;
+    let cp: number;
+    if (b >= 0xc2 && b <= 0xdf) [need, min, cp] = [1, 0x80, b & 0x1f];
+    else if (b >= 0xe0 && b <= 0xef) [need, min, cp] = [2, 0x800, b & 0x0f];
+    else if (b >= 0xf0 && b <= 0xf4) [need, min, cp] = [3, 0x10000, b & 0x07];
+    else return false;
+    for (let k = 1; k <= need; k++) {
+      const c = bytes[i + k];
+      if (c === undefined || (c & 0xc0) !== 0x80) return false;
+      cp = (cp << 6) | (c & 0x3f);
+    }
+    if (cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return false;
+    i += need + 1;
+  }
+  return true;
+};
+
 export const fileKind = (path: string, bytes: Uint8Array): FileKind => {
   const picture = pictureType(bytes);
   if (picture === "image/png") return "png";
   if (picture === "image/jpeg") return "jpeg";
   if (NATIVE_EXTENSIONS.test(path)) return "binary";
-  const text = decodeText(bytes);
-  if (text === undefined || text.includes("\u0000")) return "binary";
   // Lua bytecode starts ESC "Lua"; it's never text.
-  if (text.startsWith("\u001bLua")) return "binary";
+  if (bytes[0] === 0x1b && bytes[1] === 0x4c && bytes[2] === 0x75 && bytes[3] === 0x61) return "binary";
+  if (!isText(bytes)) return "binary";
   return /\.svg$/i.test(path) ? "svg" : "text";
 };
 

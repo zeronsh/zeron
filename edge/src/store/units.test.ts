@@ -5,7 +5,8 @@ import { formatFloat, parseJsonText } from "./json";
 import type { JsonObject } from "./json";
 import { changelogSection, readListing } from "./listing";
 import { readManifest } from "./manifest";
-import { decodeBase64 } from "./package";
+import { PAYLOAD_PREFIX, decodeBase64, sha256Hex, signaturePayload, verifyPackage } from "./package";
+import { isText } from "./checks";
 import { comparePrecedence, parseRange, parseVersion, preKey, precedenceText, satisfies } from "./semver";
 
 const v = (text: string) => {
@@ -172,5 +173,58 @@ describe("store consent item", () => {
       network_named: ["api.example.com"],
       tools: [{ name: "count", description: "Counts." }]
     });
+  });
+});
+
+describe("store package fast path", () => {
+  const encoder = new TextEncoder();
+  const b64url = (b: Uint8Array) => Buffer.from(b).toString("base64url");
+  /** A signed package whose JSON text is written by `write`, so its
+   * strings can be spelled any way JSON allows. */
+  const signed = async (files: Record<string, Uint8Array>, extra: Record<string, string>, write: (data: Record<string, string>, manifest: string) => string) => {
+    const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
+    const key = b64url(new Uint8Array((await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer));
+    const hashes = Object.fromEntries(await Promise.all(Object.entries(files).map(async ([p, b]) => [p, await sha256Hex(b)] as const)));
+    const manifest = { id: "fast", name: "Fast", version: "1.0.0", entry: "init.luau", ...extra };
+    const payload = signaturePayload(PAYLOAD_PREFIX, parseJsonText(JSON.stringify(manifest)) as JsonObject, key, new Map(Object.entries(hashes)));
+    const sig = b64url(new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, pair.privateKey, encoder.encode(payload))));
+    const data = Object.fromEntries(Object.entries(files).map(([p, b]) => [p, Buffer.from(b).toString("base64")]));
+    return encoder.encode(write(data, JSON.stringify({ ...manifest, signature: { key, files: hashes, sig } })));
+  };
+  const plain = (data: Record<string, string>, manifest: string) => JSON.stringify({ format: "zeron-plugin:v1", manifest: JSON.parse(manifest), files: data });
+  const long = new Uint8Array(300).map((_, i) => (i * 7) & 0xff);
+
+  it("reads long file data in place, and long manifest text as text", async () => {
+    const pkg = await signed({ "init.luau": encoder.encode("return 1"), "data.bin": long }, { description: "d".repeat(200) }, plain);
+    const v = await verifyPackage(pkg);
+    expect(v.files.get("data.bin")).toEqual(long);
+    expect(v.manifest.description).toBe("d".repeat(200));
+  });
+
+  it("still unescapes long data written with escapes, as serde_json does", async () => {
+    const pkg = await signed({ "init.luau": encoder.encode("return 1"), "data.bin": long }, {}, (data, manifest) =>
+      plain(data, manifest).replace(data["data.bin"]!, data["data.bin"]!.replaceAll("/", "\\/").replace(/^./, (c) => `\\u00${c.charCodeAt(0).toString(16)}`))
+    );
+    expect((await verifyPackage(pkg)).files.get("data.bin")).toEqual(long);
+  });
+
+  it("refuses long data that isn't canonical base64", async () => {
+    const pkg = await signed({ "init.luau": encoder.encode("return 1"), "data.bin": long.subarray(0, 100) }, {}, (data, manifest) =>
+      plain({ ...data, "data.bin": data["data.bin"]!.replace(/.=$/, "R=").replace(/==$/, "R=") }, manifest)
+    );
+    await expect(verifyPackage(pkg)).rejects.toMatchObject({ code: "bad_file" });
+    const nonAscii = await signed({ "init.luau": encoder.encode("return 1"), "data.bin": long }, {}, (data, manifest) =>
+      plain({ ...data, "data.bin": `${data["data.bin"]!.slice(0, -4)}é===` }, manifest)
+    );
+    await expect(verifyPackage(nonAscii)).rejects.toMatchObject({ code: "bad_file" });
+  });
+
+  it("tells text from binary in place", () => {
+    const b = (...bytes: number[]) => new Uint8Array(bytes);
+    expect(isText(encoder.encode("plain, ünïcödé, 😀, 中文"))).toBe(true);
+    expect(isText(b())).toBe(true);
+    for (const bad of [b(0), b(0xc0, 0x80), b(0xe0, 0x80, 0x80), b(0xed, 0xa0, 0x80), b(0xf4, 0x90, 0x80, 0x80), b(0xe4, 0xb8), b(0x80), b(0xff)]) {
+      expect(isText(bad), [...bad].join(",")).toBe(false);
+    }
   });
 });
