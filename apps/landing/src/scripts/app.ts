@@ -117,3 +117,53 @@ if (list) {
   // (Back to this page from the next: whole again.)
   addEventListener("pageshow", () => list.removeAttribute("aria-busy"));
 }
+
+// ── A page's own tabs (a plugin's Overview, Changelog, Permissions) ────
+// Without this, each tab is a link to its part (#changelog) and the part
+// named in the address shows (CSS :target). With it, the same, but the
+// page stays where it is, and any link to a part opens its tab.
+const tabNav = document.querySelector<HTMLElement>("[data-tabs]");
+const tabPanels = document.querySelector<HTMLElement>(".tab-panels");
+if (tabNav && tabPanels) {
+  tabPanels.classList.add("js-tabs");
+  const panels = [...tabPanels.querySelectorAll<HTMLElement>(":scope > .tab-panel")];
+  const tabs = [...tabNav.querySelectorAll<HTMLAnchorElement>("a[href^='#']")];
+  const show = (id: string | null) => {
+    const panel = panels.find((p) => p.id === id) ?? panels[0]!;
+    for (const p of panels) p.classList.toggle("is-shown", p === panel);
+    for (const tab of tabs) {
+      if (tab.hash === `#${panel.id}`) tab.setAttribute("aria-current", "page");
+      else tab.removeAttribute("aria-current");
+    }
+  };
+  show(location.hash.slice(1) || null);
+  document.addEventListener("click", (event) => {
+    const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href^='#']") : null;
+    if (!link || !panels.some((p) => `#${p.id}` === link.hash)) return;
+    event.preventDefault();
+    show(link.hash.slice(1));
+    history.replaceState(null, "", link.hash);
+    // (From elsewhere on the page, to the tabs.)
+    if (!tabNav.contains(link)) tabNav.scrollIntoView({ block: "start" });
+  });
+  addEventListener("hashchange", () => show(location.hash.slice(1) || null));
+}
+
+// ── Notes that run long: ten lines, then Show more ─────────────────────
+for (const notes of document.querySelectorAll<HTMLElement>("[data-clamp]")) {
+  const LIMIT = 240;
+  const measure = () => notes.scrollHeight > LIMIT + 24;
+  if (!measure()) continue;
+  notes.classList.add("is-clamped");
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "btn ghost sm notes-more";
+  more.textContent = "Show more";
+  more.setAttribute("aria-expanded", "false");
+  more.addEventListener("click", () => {
+    const open = notes.classList.toggle("is-clamped") === false;
+    more.textContent = open ? "Show less" : "Show more";
+    more.setAttribute("aria-expanded", String(open));
+  });
+  notes.after(more);
+}

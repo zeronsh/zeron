@@ -1,0 +1,80 @@
+---
+// What a plugin asks for, in the app's words and order (the consent sheet,
+// apps/zgx/ui/screens/plugins/consent.luau): each ask with its glyph, the
+// risky ones last and in the danger's ink. `short` (the rail): the asks
+// alone. `full` (the Permissions tab): each with its line, what it names
+// exactly, and where in Zeron it reaches.
+import { details, lines } from "../../lib/store/permissions.ts";
+import type { Permissions } from "../../lib/store/types.ts";
+import Glyph from "../ui/Glyph.astro";
+
+interface Props {
+  permissions: Permissions;
+  /** Who made it, to say whom to trust. */
+  author?: string;
+  mode: "short" | "full";
+}
+const { permissions, author, mode } = Astro.props;
+const shown = lines(permissions);
+const risky = shown.filter((l) => l.risky).length;
+const more = mode === "full" ? details(permissions) : [];
+const trust = author ? `Install it only if you trust @${author}.` : "Allow it only if you trust who made it.";
+---
+
+<div class:list={["asks", mode]}>
+  {
+    risky > 0 && (
+      <p class="asks-warning">
+        <Glyph name="danger-triangle" size={16} />
+        <span>
+          {risky === 1 ? "One thing it asks for gives it a lot of reach." : "Some of what it asks for gives it a lot of reach."} {trust}
+        </span>
+      </p>
+    )
+  }
+  {
+    shown.length === 0 ? (
+      <p class="asks-nothing">It asks for nothing beyond running in its own space.</p>
+    ) : (
+      <ul class="asks-lines" role="list">
+        {shown.map((line) => (
+          <li class:list={["asks-line", { risky: line.risky }]}>
+            <Glyph name={line.icon} size={16} />
+            <div class="asks-words">
+              <p class="asks-title">
+                {line.title}
+                {line.risky && <span class="sr-only"> (gives it a lot of reach)</span>}
+              </p>
+              {mode === "full" && line.detail && <p class="asks-detail">{line.detail}</p>}
+              {mode === "full" && line.literal && (
+                <ul class="asks-literal" role="list">
+                  {line.literal.map((v) => <li>{v}</li>)}
+                </ul>
+              )}
+              {mode === "full" && line.items && (
+                <ul class="asks-items" role="list">
+                  {line.items.map((item) => (
+                    <li>
+                      <code>{item.name}</code>
+                      {item.description && <p>{item.description}</p>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    )
+  }
+  {
+    more.map((group) => (
+      <div class="asks-group">
+        <p class="asks-heading">{group.title}</p>
+        <ul class="asks-literal" role="list">
+          {group.list.map((v) => <li>{v}</li>)}
+        </ul>
+      </div>
+    ))
+  }
+</div>

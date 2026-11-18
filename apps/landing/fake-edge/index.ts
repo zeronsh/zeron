@@ -224,7 +224,8 @@ function catalog(url: URL): Response {
     }
   }
   const page = all.slice(start, start + limit);
-  const body: { items: unknown[]; next_cursor?: string; prev_cursor?: string } = { items: page.map((x) => card(x.p)) };
+  // (total: what the query matches, every page of it: amendment 38.)
+  const body: { items: unknown[]; total: number; next_cursor?: string; prev_cursor?: string } = { items: page.map((x) => card(x.p)), total: all.length };
   if (start + limit < all.length && page.length) body.next_cursor = encode({ dir: "after", key: page.at(-1)!.key, sort, q });
   if (start > 0 && page.length) body.prev_cursor = encode({ dir: "before", key: page[0]!.key, sort, q });
   return json(body, 200, { "cache-control": "public, max-age=30" });

@@ -18,6 +18,10 @@ export const count = (n: number) => WHOLE.format(n);
 /** "Nov 9, 2026". */
 export const date = (ms: number) => DATE.format(ms);
 
+const MONTH_DAY = new Intl.DateTimeFormat("en", { month: "short", day: "numeric", timeZone: "UTC" });
+/** A day as the app says it in a list (ds/locale `month_day`, `date`): "Oct 29" this year, "Oct 29, 2025" another. */
+export const day = (ms: number, now = Date.now()) => (new Date(ms).getUTCFullYear() === new Date(now).getUTCFullYear() ? MONTH_DAY.format(ms) : DATE.format(ms));
+
 /** "Nov 9, 2026, 18:00 UTC". */
 export const dateTime = (ms: number) => DATE_TIME.format(ms);
 

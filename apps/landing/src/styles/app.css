@@ -290,7 +290,9 @@ a.account:hover { background: var(--hover); }
   .topbar .spacer { flex: 1; }
   .page-head { position: static; padding: 16px; border-radius: 0; background: transparent; border-bottom: 0; }
   .head-row { flex-wrap: wrap; }
-  .page-head .tools { width: 100%; }
+  /* (Only a sort takes the phone's width; other tools keep beside the title.) */
+  .page-head .tools:has(> .segmented) { width: 100%; }
+  .head-row:not(:has(.segmented)) { flex-wrap: nowrap; }
   /* (The sort across the phone, its segments sharing it; past its width it scrolls.) */
   .page-head .tools > .segmented { flex: 1; overflow-x: auto; scrollbar-width: none; }
   .page-head .tools > .segmented > * { flex: 1 0 auto; justify-content: center; }
@@ -408,6 +410,11 @@ a.account:hover { background: var(--hover); }
 .badge.info { background: var(--info-wash); color: var(--info-ink); }
 .badge.accent { background: var(--accent-wash); color: var(--accent-ink); }
 
+/* A tag: a word that leads to its list, on the quiet wash, 24 high (the
+   xs control's: a target big enough to touch), 12 / 16, 8 in, corner 6. */
+.tag { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: 6px; background: var(--wash); color: var(--text-2); font-size: 12px; line-height: 16px; }
+.tag:hover { background: var(--secondary-hover); color: var(--text); }
+
 /* An icon tile: a mark on the quiet wash. Its corner as the app's
    (ds/tile.luau): 4 under 32, 6 from 32, 12 from 56. */
 .tile { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 6px; background: var(--wash); color: var(--text); }
@@ -490,9 +497,10 @@ a.row:focus-visible { outline-offset: -2px; }
 @keyframes breathe { 50% { background: var(--pressed); } }
 @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
 
-/* Pagination: Previous and Next, and where you are. */
-.pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; }
-.pager .where { color: var(--text-3); font-size: 12px; line-height: 16px; }
+/* Pagination, the one everywhere: where you are in the middle ("26–50 of
+   128", tabular), Previous and Next 12 either side of it, 12 under the list. */
+.pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 12px; }
+.pager .where { min-width: 96px; text-align: center; color: var(--text-2); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
 
 /* A dialog (ds/dialog): 460 wide, a 16 corner, 24 in, 24 between its parts;
    a sheet: 400 from the right, the window's height. */
@@ -525,7 +533,7 @@ a.row:focus-visible { outline-offset: -2px; }
 .plugins { table-layout: fixed; }
 .plugins col.by { width: 160px; }
 .plugins col.category { width: 144px; }
-.plugins col.installs { width: 96px; }
+.plugins col.installs { width: 112px; } /* (a count, or a day: "Oct 29, 2025") */
 .plugins tbody tr { position: relative; }
 .plugins .cell-main { gap: 12px; }
 .plugins .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -537,6 +545,9 @@ a.row:focus-visible { outline-offset: -2px; }
 .plugins .name-link::after { content: ""; position: absolute; inset: 0; }
 .plugins .name-link:focus-visible { outline: 0; }
 .plugins .name-link:focus-visible::after { outline: 2px solid var(--ring); outline-offset: -2px; }
+/* (The last row's ring follows the panel's corners: concentric, its
+   outside on the panel's 12, so it never cuts across the curve.) */
+.plugins .rows tr:last-child .name-link::after { border-radius: 0 0 12px 12px; }
 .plugins .tile-wrap { display: contents; }
 /* Loading the next page: its rows' places held, the same heights. */
 .plugins .sk-tile { width: 32px; height: 32px; border-radius: 6px; flex: none; }
@@ -549,8 +560,8 @@ a.row:focus-visible { outline-offset: -2px; }
 .skeleton-rows { display: none; }
 [aria-busy="true"] .skeleton-rows { display: table-row-group; }
 
-/* The count beside the title, on its baseline. */
-.count-line { color: var(--text-3); font-size: 13px; line-height: 18px; white-space: nowrap; }
+/* The count, the title's own line: "All plugins · 128". */
+.title-count { color: var(--text-3); font-weight: 400; }
 
 @media (max-width: 899px) {
   /* A phone's list, as the app's: a 40 tile, the name at 15, its line at 13,
@@ -564,4 +575,240 @@ a.row:focus-visible { outline-offset: -2px; }
   .plugins .meta { display: block; font-size: 12px; line-height: 16px; color: var(--text-3); }
   .plugins .cell-words { gap: 2px; }
   .plugins .sk-line { width: 200px; }
+}
+
+/* ── Reading: a README, a version's notes ──────────────────────────────── */
+
+/* The app's transcript (zeron.prose): 15 / 24; headings, a step down from
+   the page's own (the README's h1 drawn as an h2 at 18 / 26), never larger
+   than the page's title; code 13 / 20. 12 between blocks, 24 over a heading. */
+.prose { font-size: 15px; line-height: 24px; color: var(--text); overflow-wrap: anywhere; }
+.prose > :first-child { margin-top: 0; }
+.prose :where(p, ul, ol, blockquote, pre, .table-scroll, hr, img) { margin-top: 12px; }
+.prose :where(h2, h3, h4, h5, h6) { margin-top: 24px; font-weight: 600; scroll-margin-top: 80px; }
+.prose h2 { font-size: 18px; line-height: 26px; }
+.prose :where(h3, h4, h5, h6) { font-size: 15px; line-height: 24px; }
+.prose :where(h2, h3, h4, h5, h6) + * { margin-top: 8px; }
+.prose strong { font-weight: 600; }
+.prose em { font-style: italic; }
+.prose del { color: var(--text-3); }
+.prose a { text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.prose a:hover { text-decoration-color: var(--text); }
+.prose ul { padding-left: 24px; list-style: disc; }
+.prose ol { padding-left: 24px; list-style: decimal; }
+.prose li + li, .prose li > :where(ul, ol) { margin-top: 4px; }
+.prose li::marker { color: var(--text-3); }
+.prose .contains-task-list { padding-left: 0; list-style: none; }
+.prose .task-list-item { display: flex; gap: 8px; align-items: baseline; }
+.prose .task-list-item input { accent-color: var(--accent); }
+.prose blockquote { padding-left: 16px; border-left: 2px solid var(--line-strong); color: var(--text-2); }
+.prose hr { height: 1px; border: 0; background: var(--line-faint); margin-block: 24px; }
+.prose img { max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 0 0 1px var(--line-faint); display: inline-block; vertical-align: middle; }
+.prose p > img:only-child { display: block; }
+.prose :not(pre) > code { padding: 0 4px; font-size: 13px; border-radius: 4px; background: var(--wash); }
+.prose pre { padding: 12px 16px; overflow-x: auto; font-size: 13px; line-height: 20px; border-radius: 8px; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-faint); tab-size: 2; }
+.prose pre code { font-size: inherit; }
+.prose .table-scroll { overflow-x: auto; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--line-faint); }
+.prose table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; line-height: 18px; }
+.prose th, .prose td { padding: 8px 12px; text-align: left; vertical-align: top; }
+.prose tr + tr td, .prose tbody tr:first-child td { border-top: 1px solid var(--line-faint); }
+.prose th { font-weight: 500; color: var(--text-2); font-size: 12px; line-height: 16px; }
+.prose [align="center"] { text-align: center; }
+.prose [align="right"] { text-align: right; }
+.prose .footnotes { margin-top: 24px; padding-top: 12px; border-top: 1px solid var(--line-faint); font-size: 13px; line-height: 20px; }
+.prose sup { font-size: 11px; line-height: 0; }
+.prose sup a { text-decoration: none; }
+.prose :focus-visible { outline-offset: 2px; }
+
+/* Code's colours (zeron.syntax). */
+.hljs { color: var(--code-text); }
+.hljs-keyword, .hljs-selector-tag, .hljs-doctag, .hljs-section { color: var(--code-keyword); }
+.hljs-title.function_, .hljs-title, .hljs-function .hljs-title { color: var(--code-function); }
+.hljs-type, .hljs-title.class_, .hljs-built_in { color: var(--code-type); }
+.hljs-string, .hljs-meta .hljs-string { color: var(--code-string); }
+.hljs-number, .hljs-literal { color: var(--code-number); }
+.hljs-attr, .hljs-property { color: var(--code-property); }
+.hljs-attribute, .hljs-selector-attr, .hljs-selector-class, .hljs-selector-id { color: var(--code-attribute); }
+.hljs-name, .hljs-tag { color: var(--code-tag); }
+.hljs-comment, .hljs-quote { color: var(--code-comment); font-style: italic; }
+.hljs-punctuation, .hljs-operator { color: var(--code-punct); }
+.hljs-addition { color: var(--diff-added); }
+.hljs-deletion { color: var(--diff-removed); }
+
+/* ── A plugin's page ───────────────────────────────────────────────────── */
+
+/* Where it is, in the header: All plugins › its category › its name. */
+.crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; line-height: 18px; }
+.crumbs a { color: var(--text-2); white-space: nowrap; }
+.crumbs a:hover { color: var(--text); }
+.crumbs .glyph { color: var(--text-3); }
+.crumbs [aria-current="page"] { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* Its head: a 56 tile, the name (wrapping whole) over one line of facts,
+   Install at the right; the tile's top on the name's. */
+.plugin-head { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 16px; align-items: center; }
+.plugin-head .who { display: grid; gap: 4px; min-width: 0; }
+.plugin-head h1 { overflow-wrap: anywhere; }
+.plugin-head .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--text-2); font-size: 13px; line-height: 18px; }
+.plugin-head .meta a { color: var(--text); }
+.plugin-head .meta a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.plugin-head .meta .dot { color: var(--text-3); }
+
+/* Install, and what it says under it. */
+.install { position: relative; display: grid; justify-items: end; gap: 6px; align-self: start; padding-top: 4px; }
+.install .btn .mark { width: 16px; height: 9.5px; fill: currentColor; }
+.install-help > summary { list-style: none; cursor: pointer; color: var(--text-3); font-size: 12px; line-height: 16px; }
+.install-help > summary::-webkit-details-marker { display: none; }
+.install-help > summary:hover, .install-help[open] > summary { color: var(--text); }
+.install-card {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 5;
+  display: grid;
+  gap: 8px;
+  width: min(320px, calc(100vw - 32px));
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--overlay);
+  box-shadow: 0 0 0 1px var(--line), 0 20px 56px #00000052;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 20px;
+}
+.install-card ol { display: grid; gap: 4px; padding-left: 16px; list-style: decimal; }
+.install-card b { color: var(--text); font-weight: 500; }
+.install-card a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.install-card .glyph { display: inline-block; vertical-align: -2px; }
+
+/* The pictures: one fills the column (to 480 high), two share it, three or
+   more show two whole and 48 of the third. Each on the quiet wash, the
+   cards' 12 corner. */
+.strip ul { display: flex; gap: 12px; }
+.strip li { flex: 1 1 0; min-width: 0; }
+.strip .shot { display: block; overflow: hidden; border-radius: 12px; background: var(--wash); box-shadow: inset 0 0 0 1px var(--line-faint); }
+.strip .shot img { display: block; width: 100%; height: 100%; object-fit: contain; color: transparent; } /* (a picture that won't load: the frame, not its words) */
+.strip.one .shot img { height: auto; max-height: 480px; }
+.strip.two .shot, .strip.many .shot { aspect-ratio: 16 / 10; }
+.strip.many ul { overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+.strip.many li { flex: 0 0 calc((100% - 12px - 48px) / 2); scroll-snap-align: start; }
+.strip .shot:focus-visible { outline-offset: 2px; }
+@media (max-width: 899px) {
+  /* (A phone: one whole, the next peeking.) */
+  .strip.two ul { overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+  .strip.two li, .strip.many li { flex: 0 0 calc(100% - 48px); scroll-snap-align: start; }
+}
+
+/* A picture, large (ds/lightbox): its scrim, 40 from the window's edges. */
+.lightbox { position: fixed; inset: 0; width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 40px; border: 0; background: #060607e0; color: var(--text); }
+.lightbox::backdrop { background: transparent; }
+.lightbox[open] { display: grid; place-items: center; }
+.lightbox figure { display: grid; justify-items: center; gap: 12px; max-width: 100%; max-height: 100%; }
+.lightbox img { max-width: calc(100vw - 160px); max-height: calc(100dvh - 120px); border-radius: 12px; object-fit: contain; }
+.lightbox figcaption { color: var(--text-2); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.lightbox-close { position: absolute; top: 16px; right: 16px; }
+.lightbox-step { position: absolute; top: 50%; translate: 0 -50%; }
+.lightbox-step.prev { left: 16px; }
+.lightbox-step.next { right: 16px; }
+@media (max-width: 899px) { .lightbox { padding: 16px; } .lightbox img { max-width: calc(100vw - 32px); } .lightbox-step { top: auto; bottom: 16px; translate: none; } }
+
+/* The page under them: the work at the left under its tabs, the rail at
+   the right (304). The README keeps to 720 inside its column. */
+/* (Its head, its pictures, the rest: 24 apart, none wider than the column.) */
+.plugin { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
+.plugin-body { display: grid; grid-template-columns: minmax(0, 1fr) 304px; gap: 32px; align-items: start; }
+.plugin-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; min-width: 0; }
+.plugin-main .prose, .plugin-main .lead { max-width: 720px; }
+.plugin-main .lead { color: var(--text-2); font-size: 15px; line-height: 24px; margin-bottom: 12px; }
+/* Tabs that are the page's own parts: without the script, the part named in
+   the address; with it, the same, kept in the address. */
+.tab-panels > .tab-panel { display: none; }
+.tab-panels > .tab-panel:first-child { display: block; }
+.tab-panels:has(> .tab-panel:target) > .tab-panel { display: none; }
+.tab-panels > .tab-panel:target { display: block; }
+.tab-panel { scroll-margin-top: 80px; }
+/* (With the script, the shown part is its own, not the address's.) */
+.js .tab-panels.js-tabs > .tab-panel { display: none; }
+.js .tab-panels.js-tabs > .tab-panel.is-shown { display: block; }
+.plugin-main > .tabs { scroll-margin-top: 80px; }
+
+/* The rail: what it asks for, in short; the facts; where else it lives. */
+.rail { display: grid; gap: 24px; min-width: 0; }
+.rail-part { display: grid; gap: 12px; }
+.rail-part + .rail-part { padding-top: 24px; border-top: 1px solid var(--line-faint); }
+.rail h2 { font-size: 13px; line-height: 18px; font-weight: 500; }
+/* (Its first heading on the tabs' row: 36 high, its hairline on theirs.) */
+.rail > .rail-part:first-child > h2 { display: flex; align-items: center; height: 36px; border-bottom: 1px solid var(--line-faint); }
+.rail .facts > div { min-height: 32px; }
+.rail .more { justify-self: start; color: var(--text-2); font-size: 12px; line-height: 16px; }
+.rail .more:hover { color: var(--text); }
+.rail .out { display: grid; gap: 2px; }
+.rail .out a { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px; margin: 0 -8px; border-radius: 6px; color: var(--text-2); }
+.rail .out a:hover { background: var(--hover); color: var(--text); }
+.rail .out a .end { margin-left: auto; color: var(--text-3); }
+.rail .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.rail .tags a { color: var(--text-2); }
+.rail .tags a:hover { color: var(--text); }
+
+/* What it asks for (components/kit/Asks.astro). */
+.asks { display: grid; gap: 12px; }
+.asks-warning { display: flex; gap: 8px; color: var(--bad-ink); font-size: 12px; line-height: 16px; }
+.asks.full .asks-warning { padding: 12px; border-radius: 8px; background: var(--bad-wash); font-size: 13px; line-height: 20px; }
+.asks-warning .glyph { margin-top: 0; flex: none; }
+.asks.full .asks-warning .glyph { margin-top: 2px; }
+.asks-nothing { color: var(--text-2); font-size: 13px; line-height: 20px; }
+.asks-lines { display: grid; gap: 8px; }
+.asks.full .asks-lines { gap: 16px; }
+.asks-line { display: flex; gap: 8px; align-items: flex-start; }
+.asks.full .asks-line { gap: 12px; }
+.asks-line > .glyph { margin-top: 1px; color: var(--text-2); }
+.asks-words { display: grid; gap: 2px; min-width: 0; }
+.asks-title { font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
+.asks-line.risky .asks-title, .asks-line.risky > .glyph { color: var(--bad-ink); }
+.asks-detail { color: var(--text-2); font-size: 12px; line-height: 16px; }
+.asks-literal { display: grid; gap: 2px; margin-top: 4px; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
+.asks-items { display: grid; gap: 8px; margin-top: 4px; }
+.asks-items code { font-size: 12px; line-height: 16px; }
+.asks-items p { color: var(--text-2); font-size: 12px; line-height: 16px; }
+.asks-group { display: grid; gap: 4px; }
+.tab-panel .asked { margin-top: 16px; }
+.asks-heading { color: var(--text-2); font-size: 12px; line-height: 16px; font-weight: 500; }
+
+/* Its versions, bounded: the latest's notes to 240 (ten lines) and Show
+   more; the older ones a row each (number, the first line, the day),
+   opening in place. */
+.versions { display: grid; gap: 24px; }
+.version-latest { display: grid; gap: 12px; }
+.version-head { display: flex; align-items: center; gap: 8px; }
+.version-head .num { font-family: var(--mono); font-size: 15px; line-height: 20px; font-weight: 500; }
+.version-head time { margin-left: auto; color: var(--text-3); font-size: 12px; line-height: 16px; }
+.js .notes.is-clamped { max-height: 240px; overflow: hidden; mask-image: linear-gradient(#000 calc(100% - 48px), transparent); }
+.notes-more { justify-self: start; }
+.older { display: grid; }
+.older > details + details { border-top: 1px solid var(--line-faint); }
+.older summary { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto 16px; align-items: center; gap: 12px; min-height: 40px; padding: 0 16px; cursor: pointer; list-style: none; }
+.older summary::-webkit-details-marker { display: none; }
+.older summary:hover { background: var(--hover); }
+.older summary:focus-visible { outline-offset: -2px; }
+.older .num { font-family: var(--mono); font-size: 12px; line-height: 16px; }
+.older .first { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.older time { color: var(--text-3); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.older summary .glyph { color: var(--text-3); transition: rotate 0.15s; }
+.older details[open] summary .glyph { rotate: 180deg; }
+.older .notes { padding: 0 16px 16px 124px; }
+.older details:last-child[open] summary:focus-visible, .older details:last-child summary:focus-visible { border-radius: 0 0 12px 12px; }
+
+@media (max-width: 899px) {
+  .plugin-head { grid-template-columns: 40px minmax(0, 1fr); gap: 12px; }
+  .plugin-head .plugin-tile { width: 40px; height: 40px; }
+  .plugin-head { align-items: start; }
+  /* (The day it was updated is in its facts: one line of meta on a phone.) */
+  .plugin-head .meta .updated { display: none; }
+  .plugin-head .install { grid-column: 1 / -1; justify-items: stretch; padding-top: 4px; }
+  .plugin-head .install .btn { height: 40px; font-size: 15px; line-height: 20px; }
+  .install-help > summary { text-align: center; }
+  .install-card { left: 0; right: auto; width: 100%; }
+  .plugin-body { grid-template-columns: minmax(0, 1fr); }
+  .older summary { grid-template-columns: 72px minmax(0, 1fr) auto 16px; }
+  .older .notes { padding-left: 16px; }
 }

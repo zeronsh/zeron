@@ -204,3 +204,25 @@ describe("references", () => {
     expect(target(reference)).toEqual(expected);
   });
 });
+
+describe("the README never outweighs the page", () => {
+  const file = (p: string) => `/f/${p}`;
+  test("a first heading that is the plugin's name, said again, is not drawn; any other is, a step down", () => {
+    expect(renderMarkdown("# Focus timer\n\nIt keeps time.", { file, demote: true, title: "Focus timer" }).trim()).toBe("<p>It keeps time.</p>");
+    expect(renderMarkdown("#  focus   TIMER \n\nIt keeps time.", { file, demote: true, title: "Focus timer" }).trim()).toBe("<p>It keeps time.</p>");
+    expect(renderMarkdown("# Getting started\n\nIt keeps time.", { file, demote: true, title: "Focus timer" })).toContain('<h2 id="user-content-getting-started">Getting started</h2>');
+    // (Only the first thing, only a top-level heading.)
+    expect(renderMarkdown("Intro.\n\n# Focus timer", { file, demote: true, title: "Focus timer" })).toContain("<h2");
+    expect(renderMarkdown("## Focus timer\n\nx", { file, demote: true, title: "Focus timer" })).toContain("<h3");
+  });
+});
+
+describe("a version's notes in one line", () => {
+  test("the first line that says something, without its markdown", async () => {
+    const { firstLine } = await import("./markdown.ts");
+    expect(firstLine("## 1.2.0\n\n- Fixed **the** timer, see [the issue](https://x)")).toBe("1.2.0");
+    expect(firstLine("\n\n- Fixed **the** `timer`, see [the issue](https://x)")).toBe("Fixed the timer, see the issue");
+    expect(firstLine("1. First\n2. Second")).toBe("First");
+    expect(firstLine(null)).toBe("");
+  });
+});

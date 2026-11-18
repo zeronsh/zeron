@@ -79,7 +79,7 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
   ["the screenshots", "/plugins/focus-timer", undefined, async (page) => {
-    await page.getByRole("link", { name: /Screenshot 1 of/ }).first().click();
+    await page.getByRole("link", { name: /Picture 1 of/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
   ["Install in Zeron's help", "/plugins/focus-timer", undefined, async (page) => {
@@ -215,9 +215,9 @@ describe("by keyboard", () => {
   test("a screenshot opens large; arrows move between them; Escape closes", async () => {
     const { page, context } = await open("/plugins/focus-timer");
     try {
-      await page.getByRole("link", { name: "Screenshot 1 of 2, larger" }).focus();
+      await page.getByRole("link", { name: "Picture 1 of 2, larger" }).focus();
       await page.keyboard.press("Enter");
-      const box = page.getByRole("dialog", { name: "Focus timer screenshots" });
+      const box = page.getByRole("dialog", { name: "Focus timer, pictures" });
       await expect.poll(() => box.isVisible()).toBe(true);
       expect(await box.locator("figcaption").textContent()).toBe("1 of 2");
       await page.keyboard.press("ArrowRight");
@@ -284,7 +284,7 @@ describe("by keyboard", () => {
       await page.keyboard.type("timer");
       await page.keyboard.press("Enter");
       await page.waitForURL(/\/plugins\/all\?q=timer$/);
-      expect(await page.getByRole("heading", { level: 1 }).textContent()).toBe("Results for “timer”");
+      expect(await page.getByRole("heading", { level: 1 }).textContent()).toMatch(/^Results for “timer” · \d+$/);
     } finally {
       await context.close();
     }

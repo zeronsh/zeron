@@ -123,6 +123,27 @@ describe("All plugins (/plugins/all)", () => {
     expect(listed((await html(previous!)).body)).toEqual(listed(first.body));
   });
 
+  test("the last column is what the list is sorted by, its head naming it", async () => {
+    const head = (body: string) => /<th scope="col" class="end">([^<]+)<\/th>/.exec(body)?.[1];
+    expect(head((await html("/plugins/all")).body)).toBe("Installs");
+    expect(head((await html("/plugins/all?q=timer")).body)).toBe("Installs");
+    const updated = await html("/plugins/all?sort=updated");
+    expect(head(updated.body)).toBe("Updated");
+    expect(updated.body).toMatch(/<td class="installs end">[A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/td>/);
+    expect(updated.body).toMatch(/<span class="meta">@[a-z-]+ · Updated [A-Z][a-z]{2} \d/);
+    // (Newest: the day first listed, once the edge's cards carry it; until then, the day updated, said so.)
+    expect(head((await html("/plugins/all?sort=new")).body)).toBe("Updated");
+  });
+
+  test("the pager: Previous, where you are of how many, Next", async () => {
+    const first = await html("/plugins/all");
+    const total = Number(/<span class="title-count"> · ([\d,]+)<\/span>/.exec(first.body)![1]!.replace(",", ""));
+    expect(first.body).toContain(`<span class="where">1–24 of ${total}</span>`);
+    const next = /href="([^"]+)" rel="next"/.exec(first.body)![1]!.replaceAll("&amp;", "&");
+    expect(next).toMatch(/&page=2$/);
+    expect((await html(next)).body).toMatch(new RegExp(`<span class="where">25–\\d+ of ${total}</span>`));
+  });
+
   test("the sort is a row of real addresses, the chosen one marked; a search adds Best match", async () => {
     const { body } = await html("/plugins/all");
     expect(body).toMatch(/<a href="\/plugins\/all" aria-current="page">Most installed<\/a><a href="\/plugins\/all\?sort=updated">Recently updated<\/a><a href="\/plugins\/all\?sort=new">Newest<\/a>/);
@@ -134,13 +155,14 @@ describe("All plugins (/plugins/all)", () => {
     const timer = await html("/plugins/all?q=timer");
     expect(listed(timer.body)).toContain("focus-timer");
     expect(timer.body).toContain("Results for “timer”");
-    expect(timer.body).toMatch(/class="count-line">\d+ plugins?</);
+    // The title and the count, always (amendment 38's total).
+    expect(timer.body).toMatch(/Results for “timer”<span class="title-count"> · \d+<\/span><\/h1>/);
     // (The field keeps the words.)
     expect(timer.body).toContain('name="q" value="timer"');
     const empty = await html("/plugins/all?q=zzzzqqq");
     expect(empty.body).toContain("Nothing matches “zzzzqqq”");
     expect(empty.body).toContain('href="/plugins/all">Clear search</a>');
-    expect(empty.body).not.toContain("count-line");
+    expect(empty.body).toContain('<span class="title-count"> · 0</span>');
     const git = await html("/plugins/all?category=git");
     expect(listed(git.body)).toContain("pr-radar");
     expect(listed(git.body)).not.toContain("token-meter");
@@ -175,6 +197,27 @@ describe("a plugin's page", () => {
     expect(body).toContain('<h3 id="user-content-what-it-does">What it does</h3>');
     expect(body).toContain('"@type":"SoftwareApplication"');
     expect(hasInlineScript(body)).toBe(false);
+  });
+
+  test("the page's rules: one primary button, pictures by their number, the README under the page, its parts as tabs", async () => {
+    const { body } = await html("/plugins/focus-timer");
+    // One action slot, one style: Install the page's one primary button; what else is said, in words.
+    expect(body.match(/class="btn primary/g)).toHaveLength(1);
+    expect(body).toContain("<summary>Nothing happened?</summary>");
+    // Two pictures share the column.
+    expect(body).toContain('class="strip two"');
+    expect((await html("/plugins/pr-radar")).body).toMatch(/class="strip (one|two|many)"/);
+    // The README doesn't say the name again, and nothing in it outweighs the title.
+    expect(body.match(/<h[1-6][^>]*>Focus timer<\/h[1-6]>/g)).toEqual(['<h1 class="t-title">Focus timer</h1>']);
+    expect(body).not.toMatch(/<div class="prose"[^>]*>[^]*?<h1/);
+    // Its parts are tabs that are addresses; Report is always in the header.
+    expect(body).toMatch(/<a href="#overview" aria-current="page">Overview<\/a><a href="#changelog">Changelog <span class="count">\d+<\/span><\/a><a href="#permissions">Permissions <span class="count">\d+<\/span><\/a>/);
+    expect(body).toMatch(/<a slot="tools"|class="tools"><a class="btn ghost sm" href="\/plugins\/focus-timer\/report">/);
+    // Older versions are rows that open in place; the latest's notes are there to clamp.
+    expect(body).toContain("data-clamp");
+    expect(body).toMatch(/<details><summary><span class="num">1\.1\.0<\/span>/);
+    // A risky ask, in the rail and the tab, in the danger's ink.
+    expect((await html("/plugins/pr-radar")).body).toMatch(/<li class="asks-line risky">/);
   });
 
   test("a hostile plugin's words are only words", async () => {

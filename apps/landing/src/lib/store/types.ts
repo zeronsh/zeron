@@ -71,6 +71,8 @@ export interface PluginCard {
   /** The latest approved version (null while it has none). */
   version: string | null;
   updated_at: number;
+  /** When it was first listed: what Newest sorts by (proposed; read when present). */
+  listed_at?: number;
   installs: number;
   featured: boolean;
 }
@@ -166,6 +168,11 @@ export interface PluginDetail extends PluginCard {
 
 export interface CatalogPage {
   items: PluginCard[];
+  /**
+   * How many plugins the query matches, every page of them (amendment 38).
+   * (Read when present until the edge sends it, then always.)
+   */
+  total?: number;
   next_cursor?: string;
   /** The cursor back to the page before this one, when there is one. */
   prev_cursor?: string;

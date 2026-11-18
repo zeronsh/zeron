@@ -11,7 +11,7 @@ interface Props {
   /** The icon: the edge's address for it, or its path in the package and the version it's from. */
   icon: string | null | undefined;
   version: string | null;
-  size: 32 | 40 | 48 | 64 | 80;
+  size: 32 | 40 | 48 | 56 | 64 | 80;
   class?: string;
 }
 const { id, name, icon, version, size, class: className } = Astro.props;
@@ -45,6 +45,7 @@ const src = pictureUrl(id, version, icon);
   .s32 { width: 32px; height: 32px; font-size: 14px; }
   .s40 { width: 40px; height: 40px; font-size: 17px; }
   .s48 { width: 48px; height: 48px; font-size: 20px; }
+  .s56 { width: 56px; height: 56px; font-size: 24px; }
   .s64 { width: 64px; height: 64px; font-size: 27px; }
   .s80 { width: 80px; height: 80px; font-size: 33px; }
   .sm { border-radius: var(--radius-sm); }

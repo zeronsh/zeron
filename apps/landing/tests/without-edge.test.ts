@@ -28,10 +28,10 @@ for (const edge of ["missing", "broken"] as const) {
     });
 
     test("the store's pages say it can't be reached, and are never kept", async () => {
-      for (const path of ["/plugins", "/plugins/focus-timer"]) {
+      for (const [path, words] of [["/plugins", /can't be reached/], ["/plugins/focus-timer", /The plugin store didn(&#39;|')t answer/]] as const) {
         const response = await site.fetch(path);
         expect(response.status, path).toBe(503);
-        expect(await response.text(), path).toContain("can't be reached");
+        expect(await response.text(), path).toMatch(words);
         expect(response.headers.get("cloudflare-cdn-cache-control") ?? "", path).not.toMatch(/public/);
       }
       // All plugins says it in the app's words, and offers to try again.

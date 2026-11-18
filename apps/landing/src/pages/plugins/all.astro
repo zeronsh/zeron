@@ -6,11 +6,11 @@
 import PluginTile from "../../components/store/PluginTile.astro";
 import Glyph from "../../components/ui/Glyph.astro";
 import App from "../../layouts/App.astro";
-import { canonicalSearch, catalogHref, effectiveSort, PAGE_SIZE, pageHref, readCatalog } from "../../lib/store/catalog.ts";
-import { count } from "../../lib/store/format.ts";
+import { canonicalSearch, catalogHref, effectiveSort, PAGE_SIZE, pageHref, range, readCatalog } from "../../lib/store/catalog.ts";
+import { count, day } from "../../lib/store/format.ts";
 import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
 import { CATEGORIES } from "../../lib/store/nav.ts";
-import type { Sort } from "../../lib/store/types.ts";
+import type { PluginCard, Sort } from "../../lib/store/types.ts";
 import { pluginUrl } from "../../lib/store/urls.ts";
 import { store } from "../../lib/store/words.ts";
 
@@ -38,10 +38,25 @@ else Astro.response.status = page.error === "bad_request" ? 400 : 503;
 const categoryName = (id: string) => CATEGORIES.find((c) => c.id === id)?.label ?? categories.find((c) => c.id === id)?.name ?? id;
 const items = page.ok ? page.data.items : [];
 const next = page.ok ? pageHref(state, page.data.next_cursor) : null;
-const previous = page.ok ? (page.data.prev_cursor ? pageHref(state, page.data.prev_cursor) : state.cursor ? catalogHref({ ...state, cursor: null }) : null) : null;
-// The count, when the list says it exactly (one page of it): the edge gives no total.
-// (None at all, the empty state says so instead.)
-const exact = page.ok && !state.cursor && !page.data.next_cursor && page.data.items.length > 0;
+const previous = page.ok ? (page.data.prev_cursor ? pageHref(state, page.data.prev_cursor, -1) : state.cursor ? catalogHref({ ...state, cursor: null, page: null }) : null) : null;
+// How many the query matches (amendment 38's total; until the edge sends
+// it, only what one whole page says exactly), and which of them this page is.
+const total = page.ok ? (page.data.total ?? (!state.cursor && !page.data.next_cursor ? items.length : undefined)) : undefined;
+const shown = page.ok ? range(state, items.length) : null;
+
+/**
+ * The last column is what the list is sorted by, its head naming it:
+ * installs for Most installed (and Best match), the day it was updated for
+ * Recently updated, the day it was first listed for Newest (while the edge's
+ * cards don't carry that, the day updated, and the head says so).
+ */
+const published = sort === "new" && items.every((p) => typeof p.listed_at === "number");
+const measure: { head: string; cell: (p: PluginCard) => string; folded: (p: PluginCard) => string } =
+  sort === "updated" || (sort === "new" && !published)
+    ? { head: "Updated", cell: (p) => day(p.updated_at), folded: (p) => `Updated ${day(p.updated_at)}` }
+    : sort === "new"
+      ? { head: "Published", cell: (p) => day(p.listed_at!), folded: (p) => `Published ${day(p.listed_at!)}` }
+      : { head: store("plugins.store.fact.installs"), cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
 
 const sorts = (["relevance", "popular", "updated", "new"] as Sort[]).filter((s) => s !== "relevance" || state.q);
 const heading = state.q ? `Results for “${state.q}”` : state.category ? categoryName(state.category) : state.keyword ? `Tagged “${state.keyword}”` : "All plugins";
@@ -55,10 +70,7 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
 ---
 
 <App title={title} description={description} noindex={noindex} canonical={catalogHref({ category: state.category })} current={state.category ?? (state.q || state.keyword ? null : "all")} query={state.q}>
-  <Fragment slot="title">
-    <h1 class="t-title">{heading}</h1>
-    {exact && <span class="count-line">{items.length === 1 ? "1 plugin" : `${count(items.length)} plugins`}</span>}
-  </Fragment>
+  <h1 slot="title" class="t-title">{heading}{total !== undefined && <span class="title-count"> · {count(total)}</span>}</h1>
   {
     page.ok && items.length > 0 && (
       <nav slot="tools" class="segmented" aria-label={store("plugins.store.sort_label")}>
@@ -103,7 +115,7 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
             <caption class="sr-only">{heading}</caption>
             <colgroup><col /><col class="by" /><col class="category" /><col class="installs" /></colgroup>
             <thead>
-              <tr><th scope="col">Plugin</th><th scope="col">{store("plugins.store.fact.by")}</th><th scope="col">{store("plugins.store.fact.category")}</th><th scope="col" class="end">{store("plugins.store.fact.installs")}</th></tr>
+              <tr><th scope="col">Plugin</th><th scope="col">{store("plugins.store.fact.by")}</th><th scope="col">{store("plugins.store.fact.category")}</th><th scope="col" class="end">{measure.head}</th></tr>
             </thead>
             <tbody class="rows">
               {items.map((p) => (
@@ -114,13 +126,13 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
                       <span class="cell-words">
                         <a class="name name-link" href={pluginUrl(p.id)}>{p.name}</a>
                         <span class="line">{p.summary}</span>
-                        <span class="meta">{p.author.username ? `@${p.author.username}` : "Unnamed author"} · {count(p.installs)} installs</span>
+                        <span class="meta">{p.author.username ? `@${p.author.username}` : "Unnamed author"} · {measure.folded(p)}</span>
                       </span>
                     </span>
                   </td>
                   <td class="by">{p.author.username ? `@${p.author.username}` : "—"}</td>
                   <td class="category">{p.categories[0] ? categoryName(p.categories[0]) : "—"}</td>
-                  <td class="installs end">{count(p.installs)}</td>
+                  <td class="installs end">{measure.cell(p)}</td>
                 </tr>
               ))}
             </tbody>
@@ -138,8 +150,9 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
         </div>
         {(previous || next) && (
           <nav class="pager" aria-label="Pages">
-            {previous ? <a class="btn secondary sm" href={previous} rel="prev" data-loads><Glyph name="alt-arrow-left" size={14} />Previous</a> : <span class="btn secondary sm" aria-disabled="true"><Glyph name="alt-arrow-left" size={14} />Previous</span>}
-            {next ? <a class="btn secondary sm" href={next} rel="next" data-loads>Next<Glyph name="alt-arrow-right" size={14} /></a> : <span class="btn secondary sm" aria-disabled="true">Next<Glyph name="alt-arrow-right" size={14} /></span>}
+            {previous ? <a class="btn secondary sm" href={previous} rel="prev"><Glyph name="alt-arrow-left" size={14} />Previous</a> : <span class="btn secondary sm" aria-disabled="true"><Glyph name="alt-arrow-left" size={14} />Previous</span>}
+            <span class="where">{shown ? `${count(shown.from)}–${count(shown.to)}` : ""}{shown && total !== undefined ? " of " : ""}{total !== undefined ? count(total) : ""}</span>
+            {next ? <a class="btn secondary sm" href={next} rel="next">Next<Glyph name="alt-arrow-right" size={14} /></a> : <span class="btn secondary sm" aria-disabled="true">Next<Glyph name="alt-arrow-right" size={14} /></span>}
           </nav>
         )}
       </>

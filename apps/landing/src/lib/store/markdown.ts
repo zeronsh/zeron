@@ -35,7 +35,16 @@ export interface RenderOptions {
   file: (path: string) => string;
   /** The page's own heading is an h1: the document's start a level under it. */
   demote?: boolean;
+  /**
+   * The plugin's name, said by the page already: a leading top-level
+   * heading that only says it again is not drawn (the README never
+   * outweighs the page; the app's plugin page does the same).
+   */
+  title?: string;
 }
+
+/** A heading's words, for comparing with a name: spaces made one, case set aside. */
+const headingWords = (text: string) => text.replace(/\s+/g, " ").trim().toLocaleLowerCase("en");
 
 /** Pictures a README may show from its package, by extension (what the store serves inline). */
 const PICTURES = /\.(png|jpe?g|svg)$/i;
@@ -265,6 +274,12 @@ function picture(node: Element, options: RenderOptions): ElementContent[] {
 // ── finish ─────────────────────────────────────────────────────────────
 
 function finish(tree: Root, options: RenderOptions): void {
+  // A first heading that is the plugin's name, said again: not drawn.
+  if (options.title) {
+    const first = tree.children.findIndex((node) => !(node.type === "text" && node.value.trim() === ""));
+    const node = tree.children[first];
+    if (node?.type === "element" && node.tagName === "h1" && headingWords(toText(node)) === headingWords(options.title)) tree.children.splice(first, 1);
+  }
   const slugger = new GithubSlugger();
   visit(tree, "element", (node, index, parent) => {
     const level = /^h([1-6])$/.exec(node.tagName)?.[1];
@@ -316,4 +331,20 @@ function highlight(code: Element): void {
 /** An anchor's id, as GitHub slugs a heading (without the de-duplication). */
 function slug(value: string): string {
   return GithubSlugger.prototype.slug.call(new GithubSlugger(), value);
+}
+
+/**
+ * A version's notes in one line, for its row (the first line that says
+ * something, without its markdown): "- Fixed **the** timer" → "Fixed the timer".
+ */
+export function firstLine(markdown: string | null | undefined): string {
+  for (const raw of (markdown ?? "").split("\n")) {
+    const line = raw
+      .replace(/^\s*(#{1,6}\s+|[-*+]\s+(\[[ xX]\]\s+)?|\d+[.)]\s+|>\s*)/, "")
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/(\*\*|__|\*|_|~~|`)/g, "")
+      .trim();
+    if (line) return line;
+  }
+  return "";
 }

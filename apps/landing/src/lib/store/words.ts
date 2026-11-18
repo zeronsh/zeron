@@ -72,6 +72,9 @@ export const STORE_WORDS = {
   "plugins.store.fact.by": "By",
   "plugins.store.fact.installs": "Installs",
   "plugins.store.fact.category": "Category",
+  "plugins.store.fact.works_with": "Works with",
+  "plugins.store.fact.license": "License",
+  "plugins.store.fact.version": "Version",
   // A plugin's facts.
   "plugins.store.fact.homepage": "Website",
   "plugins.store.fact.repository": "Source",

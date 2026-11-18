@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { canonicalSearch, catalogHref, effectiveSort, isFront, pageHref, readCatalog } from "./catalog.ts";
+import { canonicalSearch, catalogHref, effectiveSort, isFront, pageHref, range, readCatalog } from "./catalog.ts";
 
 const CATEGORIES = [{ id: "git", name: "Git" }, { id: "agents", name: "Agents" }];
 const read = (search: string) => readCatalog(new URLSearchParams(search), CATEGORIES);
@@ -7,7 +7,7 @@ const read = (search: string) => readCatalog(new URLSearchParams(search), CATEGO
 describe("reading the catalog's address", () => {
   test("the front page", () => {
     const state = read("");
-    expect(state).toEqual({ q: "", category: null, keyword: null, sort: null, cursor: null });
+    expect(state).toEqual({ q: "", category: null, keyword: null, sort: null, cursor: null, page: null });
     expect(effectiveSort(state)).toBe("popular");
     expect(isFront(state)).toBe(true);
   });
@@ -60,7 +60,31 @@ describe("the catalog's addresses", () => {
 
   test("Previous and Next keep the search and carry the cursor", () => {
     const state = read("q=timer&category=git");
-    expect(pageHref(state, "NEXT")).toBe("/plugins/all?q=timer&category=git&cursor=NEXT");
+    expect(pageHref(state, "NEXT")).toBe("/plugins/all?q=timer&category=git&cursor=NEXT&page=2");
     expect(pageHref(state, undefined)).toBeNull();
+  });
+});
+
+describe("which page, for the pager's range", () => {
+  const read = (search: string) => readCatalog(new URLSearchParams(search), null);
+  test("a page number rides with its cursor, and only with it", () => {
+    expect(read("cursor=c&page=3").page).toBe(3);
+    expect(read("page=3").page).toBeNull();
+    expect(read("cursor=c&page=1").page).toBeNull();
+    expect(read("cursor=c&page=x").page).toBeNull();
+    expect(catalogHref({ cursor: "c", page: 3 })).toBe("/plugins/all?cursor=c&page=3");
+    expect(catalogHref({ page: 3 })).toBe("/plugins/all");
+  });
+  test("Next counts up; Previous counts down, and its first page has no cursor", () => {
+    expect(pageHref(read(""), "N")).toBe("/plugins/all?cursor=N&page=2");
+    expect(pageHref(read("cursor=c&page=2"), "N")).toBe("/plugins/all?cursor=N&page=3");
+    expect(pageHref(read("cursor=c&page=2"), "P", -1)).toBe("/plugins/all");
+    expect(pageHref(read("cursor=c&page=3"), "P", -1)).toBe("/plugins/all?cursor=P&page=2");
+  });
+  test("the range: the first page's, a later one's, unknown without a page", () => {
+    expect(range(read(""), 24)).toEqual({ from: 1, to: 24 });
+    expect(range(read("cursor=c&page=2"), 24)).toEqual({ from: 25, to: 48 });
+    expect(range(read("cursor=c"), 24)).toBeNull();
+    expect(range(read(""), 0)).toBeNull();
   });
 });
