@@ -22,9 +22,10 @@ export function versionState(v: Pick<VersionInfo, "status" | "review">): { label
   }
 }
 
-export function listingState(listing: Listing | PluginStatus): { label: string; tone: Tone } {
+export function listingState(listing: Listing | PluginStatus | "active"): { label: string; tone: Tone } {
   switch (listing) {
     case "listed":
+    case "active":
       return { label: "Listed", tone: "success" };
     case "unlisted":
       return { label: "Not listed yet", tone: "neutral" };

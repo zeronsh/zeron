@@ -68,20 +68,28 @@ const userOf = (id: string) => USERS.find((u) => u.id === id)!;
 const latest = (p: FakePlugin) => p.versions.find((v) => v.status === "approved");
 const listed = (p: FakePlugin) => p.status === "listed" && latest(p) !== undefined;
 
+/** Where the edge serves a packaged file (its cards and details give these, not paths). */
+const edgeFile = (id: string, version: string, path: string) => `/store/v1/plugins/${id}/files/${encodeURIComponent(version)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+
+const author = (userId: string) => {
+  const u = userOf(userId);
+  return { id: `pub_${hash(u.id).slice(0, 32)}`, username: u.username, badges: u.badges };
+};
+
 function card(p: FakePlugin, version: FakeVersion | undefined = latest(p)) {
+  const listedVersion = latest(p);
   const v = version ?? p.versions[0]!;
   const m = v.manifest;
-  const owner = userOf(p.owner);
   return {
     id: p.id,
     name: String(m.name),
     summary: String(m.description),
-    icon: typeof m.icon === "string" ? m.icon : null,
-    author: { id: `pub_${hash(owner.id).slice(0, 32)}`, username: owner.username ?? "", badges: owner.badges },
+    icon: listedVersion && typeof m.icon === "string" ? edgeFile(p.id, listedVersion.version, m.icon) : null,
+    author: author(p.owner),
     categories: (m.categories as string[]) ?? [],
     keywords: (m.keywords as string[]) ?? [],
-    version: v.version,
-    updated_at: v.published_at,
+    version: listedVersion?.version ?? null,
+    updated_at: (listedVersion ?? v).published_at,
     installs: p.installs,
     featured: p.featured,
   };
@@ -107,18 +115,21 @@ function permissions(m: Record<string, unknown>) {
 
 function versionInfo(v: FakeVersion, full: boolean) {
   const bytes = Object.values(v.files).reduce((n, f) => n + f.length, 0);
+  const decided = v.status === "approved" || v.status === "yanked" || v.status === "removed";
   return {
     version: v.version,
     status: v.status,
-    published_at: v.published_at,
+    published_at: decided ? (v.review?.decided_at ?? v.published_at) : null,
+    submitted_at: v.published_at,
     notes: v.notes,
     engines: v.engines,
     yanked: v.status === "yanked",
+    prerelease: v.version.includes("-"),
     key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq",
     hash: `b3:${hash(v.version + bytes)}`,
     sha256: hash(JSON.stringify(v.manifest)).slice(0, 64),
     bytes,
-    ...(full ? { checks: v.checks, ...(v.review ? { review: v.review } : {}) } : {}),
+    ...(full ? { review: { state: v.status, ...(v.review ?? {}) }, checks: v.checks, blocked: v.blocked === true, via: "session" } : {}),
   };
 }
 
@@ -129,7 +140,7 @@ function detail(p: FakePlugin) {
   return {
     ...card(p, v),
     readme: v.files["README.md"] ?? "",
-    screenshots: (m.screenshots as string[]) ?? [],
+    screenshots: ((m.screenshots as string[]) ?? []).map((path) => edgeFile(p.id, v.version, path)),
     permissions: permissions(m),
     engines: v.engines,
     homepage: (m.homepage as string) ?? null,
@@ -159,7 +170,7 @@ function score(p: FakePlugin, terms: string[]): number {
     [c.name.toLowerCase(), 5],
     [c.summary.toLowerCase(), 3],
     [c.keywords.join(" ").toLowerCase(), 3],
-    [c.author.username, 2],
+    [c.author.username ?? "", 2],
     [(latest(p)!.files["README.md"] ?? "").toLowerCase(), 1],
   ];
   let total = 0;
@@ -290,8 +301,8 @@ function adminWriter(request: Request): { user: FakeUser } | Response {
 
 const person = (id: string) => ({ user_id: id, username: userOf(id).username });
 
-function log(actor: FakeUser, action: string, plugin: string | null, version: string | null, detail: string | null) {
-  state.audit.unshift({ id: `aud_${state.audit.length + 1}_${Date.now()}`, at: Date.now(), actor: actor.id, action, plugin_id: plugin, version, detail });
+function log(actor: FakeUser, action: string, plugin: string | null, version: string | null, detail: Record<string, unknown> | null) {
+  state.audit.unshift({ seq: (state.audit[0]?.seq ?? 0) + 1, at: Date.now(), actor: actor.id, action, plugin_id: plugin, version, detail });
 }
 
 function queue(url: URL): Response {
@@ -303,16 +314,20 @@ function queue(url: URL): Response {
         const base = p.versions.find((x) => x.status === "approved" && x !== v && x.published_at < v.published_at);
         const asked = (v.manifest.permissions as string[]) ?? [];
         const had = (base?.manifest.permissions as string[]) ?? [];
+        void base;
+        void asked;
+        void had;
+        // (As the edge sends them today: no base, new asks or full check counts yet.)
         return {
-          id: p.id,
-          name: String(v.manifest.name),
+          plugin: { id: p.id, name: String(v.manifest.name) },
           version: v.version,
           status: v.status,
+          prerelease: v.version.includes("-"),
           submitted_at: v.published_at,
-          publisher: person(p.owner),
-          base: base?.version ?? null,
-          checks: { ok: v.checks.filter((c) => c.level === "ok").length, warn: v.checks.filter((c) => c.level === "warn").length, fail: v.checks.filter((c) => c.level === "fail").length },
-          new_asks: asked.filter((a) => !had.includes(a)),
+          decided_at: v.review?.decided_at ?? null,
+          publisher: { id: author(p.owner).id, username: userOf(p.owner).username },
+          via: "session",
+          warnings: v.checks.filter((c) => c.level === "warn").length,
         };
       }),
   );
@@ -332,29 +347,41 @@ function submission(id: string, version: string): Response {
   const permissionsNow = permissions(v.manifest);
   const permissionsBase = base ? permissions(base.manifest) : null;
   const added = <T,>(now: T[], then: T[] | undefined) => now.filter((x) => !(then ?? []).includes(x));
+  const m = v.manifest;
   return json({
-    plugin: card(p, v),
-    version: versionInfo(v, true),
+    // (As the edge sends it today; the contract asks for a card.)
+    plugin: { id: p.id, status: p.status === "suspended" ? "suspended" : "active", listed_version: latest(p)?.version ?? null, owner: { id: author(p.owner).id, username: owner.username } },
+    version: { ...versionInfo(v, true), name: String(m.name), summary: String(m.description), icon: typeof m.icon === "string" ? m.icon : null, readme: v.files["README.md"] ?? "", screenshots: (m.screenshots as string[]) ?? [] },
     publisher: {
+      id: author(p.owner).id,
       username: owner.username,
-      created_at: owner.created_at,
+      // (An ISO date, as the edge sends it today.)
+      created_at: new Date(owner.created_at).toISOString(),
       decisions: { approved: decided.filter((d) => d.status === "approved" || d.status === "yanked").length, rejected: decided.filter((d) => d.status === "rejected").length },
-      recent: decided.filter((d) => d.status !== "pending").slice(0, 6),
+      recent: state.plugins.filter((x) => x.owner === p.owner).flatMap((x) => x.versions.map((y) => ({ plugin_id: x.id, version: y.version, status: y.status, submitted_at: y.published_at, reason: y.review?.reason ?? null }))).sort((a, b) => b.submitted_at - a.submitted_at).slice(0, 10),
     },
     manifest: v.manifest,
     permissions: permissionsNow,
     files: files(v),
     base: base ? { version: base.version, manifest: base.manifest } : null,
     base_files: base ? files(base) : [],
-    permissions_diff: permissionsBase
-      ? {
-          asks_added: added(permissionsNow.asks, permissionsBase.asks),
-          asks_removed: added(permissionsBase.asks, permissionsNow.asks),
-          added_commands: added(permissionsNow.commands, permissionsBase.commands),
-          network_added: added(permissionsNow.network_hosts, permissionsBase.network_hosts),
-          tools_added: permissionsNow.tools.filter((t) => !permissionsBase.tools.some((b) => b.name === t.name)),
-        }
-      : null,
+    // (The edge's consentDiff, against nothing for a first listing.)
+    permissions_diff: (() => {
+      const was = permissionsBase ?? { asks: [] as string[], commands: [] as string[], network_hosts: [] as string[], tools: [] as { name: string }[], ui: undefined };
+      const ui = (x: { ui?: { change?: string[]; replace?: string[] } }) => ({ change: x.ui?.change ?? [], replace: x.ui?.replace ?? [] });
+      return {
+        added: added(permissionsNow.asks, was.asks),
+        removed: added(was.asks, permissionsNow.asks),
+        added_commands: added(permissionsNow.commands, was.commands),
+        removed_commands: added(was.commands, permissionsNow.commands),
+        network_added: added(permissionsNow.network_hosts, was.network_hosts),
+        network_removed: added(was.network_hosts, permissionsNow.network_hosts),
+        tools_added: added(permissionsNow.tools.map((t) => t.name), was.tools.map((t) => t.name)),
+        tools_removed: added(was.tools.map((t) => t.name), permissionsNow.tools.map((t) => t.name)),
+        ui_change_added: added(ui(permissionsNow).change, ui(was).change),
+        ui_replace_added: added(ui(permissionsNow).replace, ui(was).replace),
+      };
+    })(),
     checks: v.checks,
   });
 }
@@ -389,14 +416,14 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
       v.status = "approved";
       v.review = { state: "approved", decided_at: Date.now() };
       if (p.status === "unlisted") p.status = "listed";
-      log(who.user, "approve", p.id, v.version, null);
+      log(who.user, "version.approve", p.id, v.version, null);
       return json(versionInfo(v, true));
     }
     if (parts[3] === "reject") {
       if (!text("reason") || !text("message")) return fail(400, "bad_request", "A reason and a message for the author are needed.");
       v.status = "rejected";
       v.review = { state: "rejected", reason: text("reason"), message: text("message"), decided_at: Date.now() };
-      log(who.user, "reject", p.id, v.version, text("reason"));
+      log(who.user, "version.reject", p.id, v.version, { reason: text("reason") });
       return json(versionInfo(v, true));
     }
     return notFound();
@@ -411,27 +438,29 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
       if (!text("reason")) return fail(400, "bad_request", "A reason is needed.");
       v.status = "removed";
       v.review = { state: "removed", reason: text("reason"), decided_at: Date.now() };
-      log(who.user, input.block === true ? "remove_block" : "remove", p.id, v.version, text("reason"));
+      log(who.user, "version.remove", p.id, v.version, { reason: text("reason"), block: input.block === true });
+      v.blocked = input.block === true;
       return json(versionInfo(v, true));
     }
     switch (parts[2]) {
       case "suspend":
         if (!text("reason")) return fail(400, "bad_request", "A reason is needed.");
         p.status = "suspended";
-        log(who.user, "suspend", p.id, null, text("reason"));
+        log(who.user, "plugin.suspend", p.id, null, { reason: text("reason") });
+        p.suspend_reason = text("reason");
         return json({ status: p.status });
       case "restore":
         p.status = latest(p) ? "listed" : "unlisted";
-        log(who.user, "restore", p.id, null, null);
+        log(who.user, "plugin.restore", p.id, null, null);
         return json({ status: p.status });
       case "feature":
         p.featured = input.featured === true;
-        log(who.user, p.featured ? "feature" : "unfeature", p.id, null, null);
+        log(who.user, p.featured ? "plugin.feature" : "plugin.unfeature", p.id, null, null);
         return json({ featured: p.featured });
       case "transfer": {
         const to = USERS.find((u) => u.username === text("to_username"));
         if (!to) return fail(404, "not_found", "No account has that username.");
-        log(who.user, "transfer", p.id, null, `@${userOf(p.owner).username} → @${to.username}`);
+        log(who.user, "plugin.transfer", p.id, null, { from: userOf(p.owner).username, to: to.username });
         p.owner = to.id;
         return json({ owner: person(to.id) });
       }
@@ -450,18 +479,18 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
     const note = text("note") || null;
     state.reservations = state.reservations.filter((r) => r.id !== id);
     state.reservations.push({ id, user, note, created_at: Date.now() });
-    log(who.user, "reservation.set", id, null, user ? `for @${userOf(user).username}` : "for nobody");
+    log(who.user, "reservation.set", id, null, { to: user ? userOf(user).username : null, note });
     return json({ id, to: user ? { username: userOf(user).username } : null, note, released: false });
   }
   // reports/:id/resolve
   if (parts[0] === "reports" && parts[2] === "resolve") {
-    const r = state.reports.find((x) => x.id === parts[1]);
+    const r = state.reports.find((x) => String(x.id) === parts[1]);
     if (!r) return notFound();
     const resolution = text("resolution");
     if (resolution !== "dismissed" && resolution !== "actioned") return fail(400, "bad_request");
     r.status = resolution;
     r.note = text("note") || null;
-    log(who.user, `report_${resolution}`, r.plugin_id, r.version, r.note);
+    log(who.user, `report.${resolution}`, r.plugin_id, null, { report: r.id, note: r.note });
     return json({ status: r.status });
   }
   return notFound();
@@ -571,7 +600,7 @@ async function route(request: Request): Promise<Response> {
     const reason = String(input.reason ?? "");
     if (!["malware", "misleading", "broken", "copyright", "other"].includes(reason)) return fail(400, "bad_request", "Pick a reason.");
     const text = String(input.text ?? "").trim().slice(0, 2000);
-    state.reports.unshift({ id: `rep_${Date.now()}`, plugin_id: p.id, version: latest(p)!.version, reason: reason as "other", text, reporter: who.user.id, created_at: Date.now(), status: "open", note: null });
+    state.reports.unshift({ id: (state.reports.reduce((n, r) => Math.max(n, r.id), 0) + 1), plugin_id: p.id, version: latest(p)!.version, reason: reason as "other", text, reporter: who.user.id, created_at: Date.now(), status: "open", note: null });
     return json({ ok: true }, 201);
   }
   if (a === "me" && b === "plugins" && method === "GET") {
@@ -596,13 +625,14 @@ async function route(request: Request): Promise<Response> {
     if (b === "plugins" && c) {
       const p = state.plugins.find((x) => x.id === c);
       if (!p) return notFound();
+      // (As the edge sends it today: its own status words, raw report rows, an ISO date.)
       return json({
-        plugin: card(p),
-        featured: p.featured,
-        status: p.status,
-        owner: { ...person(p.owner), created_at: userOf(p.owner).created_at },
+        plugin: { ...card(p), listed_version: latest(p)?.version ?? null, created_at: p.created_at, suspend_reason: p.suspend_reason ?? null },
+        owner: { id: author(p.owner).id, username: userOf(p.owner).username, user_id: p.owner, created_at: new Date(userOf(p.owner).created_at).toISOString() },
         versions: p.versions.map((v) => versionInfo(v, true)),
-        reports: state.reports.filter((r) => r.plugin_id === p.id).map(reportView),
+        reports: state.reports.filter((r) => r.plugin_id === p.id).map(({ id, version, reason, text, status, created_at, note }) => ({ id, version, reason, text, status, created_at, resolved_at: null, note })),
+        featured: p.featured,
+        status: p.status === "suspended" ? "suspended" : "active",
       });
     }
     if (b === "reports") {
@@ -612,7 +642,10 @@ async function route(request: Request): Promise<Response> {
     if (b === "reservations" && c === undefined) {
       return json({ reservations: [...state.reservations].sort((x, y) => x.id.localeCompare(y.id)).map((r) => ({ id: r.id, to: r.user ? { username: userOf(r.user).username } : null, note: r.note, created_at: r.created_at })) });
     }
-    if (b === "audit") return json(paged(state.audit.map((x) => ({ ...x, actor: person(x.actor) })), url, "entries"));
+    if (b === "audit") {
+      const plugin = url.searchParams.get("plugin");
+      return json(paged(state.audit.filter((x) => !plugin || x.plugin_id === plugin).map((x) => ({ ...x, actor: { id: author(x.actor).id, username: userOf(x.actor).username, user_id: x.actor } })), url, "entries"));
+    }
   }
   return notFound();
 }
@@ -631,7 +664,8 @@ function paged<T>(all: T[], url: URL, field: string, limit = 20): Record<string,
 
 function reportView(r: (typeof state.reports)[number]) {
   const p = state.plugins.find((x) => x.id === r.plugin_id);
-  return { ...r, plugin_name: p ? String(p.versions[0]!.manifest.name) : r.plugin_id, reporter: person(r.reporter) };
+  const { plugin_id: _, reporter, ...rest } = r;
+  return { ...rest, plugin: { id: r.plugin_id, name: p ? String(p.versions[0]!.manifest.name) : null }, reporter: { id: author(reporter).id, username: userOf(reporter).username }, resolved_by: null, resolved_at: null };
 }
 
 export default {

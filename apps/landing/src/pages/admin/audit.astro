@@ -5,6 +5,8 @@ import Pagination from "../../components/ui/Pagination.astro";
 import Store from "../../layouts/Store.astro";
 import { dateTime } from "../../lib/store/format.ts";
 import { privatePage } from "../../lib/store/http.ts";
+import { reasonLabel } from "../../lib/store/admin.ts";
+import { isPluginId } from "../../lib/store/names.ts";
 import { adminSession } from "../../lib/store/session.ts";
 
 export const prerender = false;
@@ -13,31 +15,54 @@ const session = await adminSession(Astro);
 if (!session) return new Response(null, { status: 404 });
 privatePage(Astro);
 const cursor = Astro.url.searchParams.get("cursor");
-const result = await Astro.locals.edge.audit(cursor && /^[A-Za-z0-9_-]{1,512}$/.test(cursor) ? cursor : undefined);
+const asked = Astro.url.searchParams.get("plugin");
+const pluginFilter = isPluginId(asked) ? asked : null;
+const result = await Astro.locals.edge.audit(cursor && /^[A-Za-z0-9_-]{1,512}$/.test(cursor) ? cursor : undefined, pluginFilter ?? undefined);
+const auditHref = (c?: string) => {
+  const params = new URLSearchParams();
+  if (pluginFilter) params.set("plugin", pluginFilter);
+  if (c) params.set("cursor", c);
+  return `/admin/audit${params.size ? `?${params}` : ""}`;
+};
+if (!result.ok && result.error === "bad_cursor") return Astro.redirect(pluginFilter ? `/admin/audit?plugin=${pluginFilter}` : "/admin/audit", 303);
 const entries = result.ok ? result.data.entries : [];
 
+/** The edge's words for what was done, as a person says them. */
 const ACTIONS: Record<string, string> = {
-  approve: "Approved",
-  reject: "Rejected",
-  remove: "Took down",
-  remove_block: "Took down and turned off",
-  suspend: "Suspended",
-  restore: "Restored",
-  feature: "Featured",
-  unfeature: "Stopped featuring",
-  transfer: "Moved",
-  report_dismissed: "Dismissed a report on",
-  report_actioned: "Acted on a report on",
+  "version.approve": "Approved",
+  "version.reject": "Didn't approve",
+  "version.remove": "Took down",
+  "version.withdraw": "Withdrew",
+  "version.yank": "Stopped offering",
+  "version.unyank": "Offered again",
+  "plugin.suspend": "Suspended",
+  "plugin.restore": "Restored",
+  "plugin.feature": "Featured",
+  "plugin.unfeature": "Stopped featuring",
+  "plugin.transfer": "Moved",
+  "plugin.release": "Released the id of",
+  "report.dismissed": "Dismissed a report on",
+  "report.actioned": "Acted on a report on",
   "reservation.set": "Reserved",
   "reservation.release": "Freed",
 };
+
+/** What else an entry recorded, said plainly: "reason: …, block: yes". */
+function detailText(detail: unknown): string {
+  if (detail === null || detail === undefined) return "";
+  if (typeof detail !== "object") return String(detail);
+  return Object.entries(detail as Record<string, unknown>)
+    .filter(([, v]) => v !== null && v !== undefined && v !== "")
+    .map(([k, v]) => `${k.replace(/_/g, " ")}: ${k === "reason" && typeof v === "string" ? reasonLabel(v) : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "object" ? JSON.stringify(v) : String(v)}`)
+    .join(" · ");
+}
 ---
 
-<Store title="Audit log · Zeron" description="What admins did." noindex tool>
+<Store title="Audit log · Zeron" description="What was done to the store's plugins." noindex tool>
   <div class="wrap audit">
     <AccountBar session={session} current="audit">
       <h1>Audit log</h1>
-      <p class="lead">Everything an admin did to the store, newest first.</p>
+      <p class="lead">{pluginFilter ? <>Everything done to <code>{pluginFilter}</code>, newest first. <a href="/admin/audit">The whole log</a></> : "Everything done to the store's plugins, by reviewers and by their authors, newest first."}</p>
     </AccountBar>
     {
       !result.ok ? (
@@ -70,7 +95,7 @@ const ACTIONS: Record<string, string> = {
                       </a>
                     )}
                   </td>
-                  <td class="detail">{e.detail ?? ""}</td>
+                  <td class="detail">{detailText(e.detail)}</td>
                 </tr>
               ))}
             </tbody>
@@ -78,7 +103,7 @@ const ACTIONS: Record<string, string> = {
         </div>
       )
     }
-    {result.ok && <Pagination label="More of the log" next={result.data.next_cursor ? `/admin/audit?cursor=${encodeURIComponent(result.data.next_cursor)}` : null} previous={result.data.prev_cursor ? `/admin/audit?cursor=${encodeURIComponent(result.data.prev_cursor)}` : cursor ? "/admin/audit" : null} />}
+    {result.ok && <Pagination label="More of the log" next={result.data.next_cursor ? auditHref(result.data.next_cursor) : null} previous={result.data.prev_cursor ? auditHref(result.data.prev_cursor) : cursor ? auditHref() : null} />}
   </div>
 </Store>
 

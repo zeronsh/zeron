@@ -15,13 +15,11 @@ import { isPluginId, isVersion, packagePath } from "../../../../../lib/store/nam
 
 export const prerender = false;
 
+/** What the edge shows inline (amendments 14, 22): PNG and JPEG pictures, and the SVG icon. */
 const PICTURES = new Map([
   ["png", "image/png"],
   ["jpg", "image/jpeg"],
   ["jpeg", "image/jpeg"],
-  ["gif", "image/gif"],
-  ["webp", "image/webp"],
-  ["avif", "image/avif"],
   ["svg", "image/svg+xml"],
 ]);
 

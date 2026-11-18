@@ -43,6 +43,8 @@ if (!result.ok && result.error === "not_found") return new Response(null, { stat
 privatePage(Astro);
 const toast = takeFlash(Astro.cookies);
 const s = result.ok ? result.data : null;
+/** Its name: the plugin's (a card), else what this version lists. */
+const name = s?.plugin.name ?? s?.version.name ?? (typeof s?.manifest.name === "string" ? s.manifest.name : id);
 
 const VIEWS = { overview: "Overview", readme: "README", files: "Files", changes: "Changes" } as const;
 type View = keyof typeof VIEWS;
@@ -124,10 +126,10 @@ const failing = checks.filter((c) => c.level === "fail").length;
       ) : (
         <>
           <header class="head">
-            <PluginTile id={s.plugin.id} name={s.plugin.name} icon={s.plugin.icon} version={version} size={64} />
+            <PluginTile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size={64} />
             <div class="identity">
               <h1>
-                {s.plugin.name} <span class="v num">{version}</span>
+                {name} <span class="v num">{version}</span>
               </h1>
               <p class="meta">
                 {state && <Badge tone={state.tone} size="sm">{state.label}</Badge>}
@@ -137,7 +139,7 @@ const failing = checks.filter((c) => c.level === "fail").length;
                   <code>{id}</code>
                 </a>
                 <span>·</span>
-                <span>submitted {ago(s.version.published_at)}</span>
+                <span>submitted {ago(s.version.submitted_at)}</span>
               </p>
             </div>
             {pending && (
@@ -245,8 +247,8 @@ const failing = checks.filter((c) => c.level === "fail").length;
                     <ul class="recent" role="list">
                       {s.publisher.recent.map((r) => (
                         <li>
-                          <a href={`/admin/plugins/${encodeURIComponent(r.id)}/${encodeURIComponent(r.version)}`}>
-                            <code>{r.id}</code> <span class="num">{r.version}</span>
+                          <a href={`/admin/plugins/${encodeURIComponent(r.plugin_id)}/${encodeURIComponent(r.version)}`}>
+                            <code>{r.plugin_id}</code> <span class="num">{r.version}</span>
                           </a>
                           <Badge tone={versionState({ status: r.status }).tone} size="sm">{versionState({ status: r.status }).label}</Badge>
                         </li>
@@ -340,11 +342,11 @@ const failing = checks.filter((c) => c.level === "fail").length;
 
           {pending && (
             <>
-              <Dialog id="approve" title={`Approve ${s.plugin.name} ${version}?`}>
+              <Dialog id="approve" title={`Approve ${name} ${version}?`}>
                 <p>It's listed at once, and offered to everyone who has it at their next update check.</p>
                 <ConfirmForm action={`${here}/approve`} csrf={session.csrf} confirm="Approve" mode="dialog" back={here} />
               </Dialog>
-              <Dialog id="reject" title={`Reject ${s.plugin.name} ${version}?`} tone="danger">
+              <Dialog id="reject" title={`Reject ${name} ${version}?`} tone="danger">
                 <p>The author reads your reason and your words, in Zeron and on the web. They can publish a new version.</p>
                 <ConfirmForm action={`${here}/reject`} csrf={session.csrf} confirm="Reject" tone="danger" mode="dialog" back={here}>
                   <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} field />

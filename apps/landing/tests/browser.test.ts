@@ -101,21 +101,25 @@ describe("a package's pictures can't run", () => {
     }
   });
 
-  test("a picture that is also a script won't load as one, even from the site's own page", async () => {
+  test("a picture won't load as a script, even from the site's own page: its type forbids it", async () => {
     const { page, context } = await open("/plugins/theme-sync");
+    const refusals: string[] = [];
+    page.on("console", (message) => refusals.push(message.text()));
     try {
       const outcome = await page.evaluate(
         () =>
           new Promise<string>((resolve) => {
             const script = document.createElement("script");
-            script.src = "/plugins/theme-sync/files/1.0.0/shots/polyglot.gif";
+            script.src = "/plugins/theme-sync/files/1.0.0/shots/script.svg";
             script.onload = () => resolve("loaded");
             script.onerror = () => resolve("refused");
             document.body.append(script);
           }),
       );
       expect(outcome).toBe("refused");
-      expect(await page.evaluate(() => (window as { __ran?: string }).__ran)).toBeUndefined();
+      // (Refused for what it is, not because it's missing.)
+      expect(refusals.join("\n")).toMatch(/MIME type \('image\/svg\+xml'\) is not executable/);
+      expect(await page.evaluate(() => document.documentElement.getAttribute("data-ran"))).toBeNull();
     } finally {
       await context.close();
     }

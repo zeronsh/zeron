@@ -24,7 +24,7 @@ const category = plugin.categories.map((id) => categories.get(id)).find(Boolean)
     <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={40} />
     <div class="title">
       <Heading class="name"><a class="follow" href={pluginUrl(plugin.id)}>{plugin.name}</a></Heading>
-      <p class="by">by @{plugin.author.username}</p>
+      {plugin.author.username && <p class="by">by @{plugin.author.username}</p>}
     </div>
   </div>
   <p class="summary">{plugin.summary}</p>

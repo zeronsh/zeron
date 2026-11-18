@@ -111,7 +111,7 @@ describe("places", () => {
 describe("what grew since the last approved version", () => {
   test("new asks, then what grew inside the ones it had, risky last", () => {
     const now = p({ asks: ["ui.add", "network", "commands"], commands: ["gh", "bash"], commands_anything: ["gh", "bash"], commands_full_control: ["bash"], network_hosts: ["a.example", "b.example"] });
-    const out = grew(now, { asks_added: ["ui.add"], added_commands: ["bash"], network_added: ["b.example"] });
+    const out = grew(now, { added: ["ui.add"], added_commands: ["bash"], network_added: ["b.example"] });
     expect(out.map((l) => l.title)).toEqual(["Add things to Zeron's interface", "Connect to more places", "Run more programs as you"]);
     expect(out[2]!.literal).toEqual(["It can run bash, which gives it full control of your computer."]);
   });

@@ -188,7 +188,7 @@ describe("package files", () => {
   });
 
   test("pictures that aren't what they say are still only pictures: typed by name, sandboxed, never sniffed", async () => {
-    for (const [file, type] of [["script.svg", "image/svg+xml"], ["polyglot.gif", "image/gif"]]) {
+    for (const [file, type] of [["script.svg", "image/svg+xml"]]) {
       const response = await site.fetch(`/plugins/theme-sync/files/1.0.0/shots/${file}`);
       expect(response.status, file).toBe(200);
       expect(response.headers.get("content-type"), file).toBe(type);
@@ -208,7 +208,7 @@ describe("package files", () => {
     expect(attached.headers.get("content-security-policy")).toContain("sandbox");
     expect(attached.headers.get("x-content-type-options")).toBe("nosniff");
     // Anything else in a package is never served from here, whatever it's called.
-    for (const file of ["page.html", "x.js", "x.htm", "x.xml", "x.svgz", "x.json", "x"]) {
+    for (const file of ["polyglot.gif", "page.html", "x.js", "x.htm", "x.xml", "x.svgz", "x.json", "x.webp", "x"]) {
       expect((await site.fetch(`/plugins/theme-sync/files/1.0.0/shots/${file}`)).status, file).toBe(404);
     }
   });

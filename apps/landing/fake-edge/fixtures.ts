@@ -15,11 +15,11 @@ export interface FakeUser {
   username: string | null;
   roles: string[];
   created_at: number;
-  badges: { id: string; name: string; description?: string }[];
+  badges: { id: string; name: string; icon: string | null }[];
 }
 
 export const USERS: FakeUser[] = [
-  { id: "user_ada", name: "Ada Lovelace", username: "ada", roles: [], created_at: NOW - 400 * DAY, badges: [{ id: "v3-beta", name: "V3 BETA", description: "Claimed a card before 2026-11-05 01:00 PST." }] },
+  { id: "user_ada", name: "Ada Lovelace", username: "ada", roles: [], created_at: NOW - 400 * DAY, badges: [{ id: "v3-beta", name: "V3 BETA", icon: null }] },
   { id: "user_grace", name: "Grace Hopper", username: "grace", roles: ["admin"], created_at: NOW - 900 * DAY, badges: [] },
   { id: "user_lin", name: "Lin", username: null, roles: [], created_at: NOW - 2 * DAY, badges: [] },
   { id: "user_kai", name: "Kai Moreno", username: "kai", roles: [], created_at: NOW - 30 * DAY, badges: [] },
@@ -50,12 +50,15 @@ export interface FakeVersion {
   checks: { id: string; level: "ok" | "warn" | "fail"; message: string }[];
   manifest: Record<string, unknown>;
   files: Record<string, string>;
+  /** Taken down and turned off on devices. */
+  blocked?: boolean;
 }
 
 export interface FakePlugin {
   id: string;
   owner: string;
   status: "listed" | "unlisted" | "suspended" | "removed";
+  suspend_reason?: string;
   featured: boolean;
   installs: number;
   created_at: number;
@@ -547,11 +550,11 @@ for (const [i, [id, name, summary, icon, categories]] of MORE.entries()) {
 }
 
 export function plugins(): FakePlugin[] {
-  return SPECS.map(build);
+  return SPECS.map(build).map((p) => (p.id === "crypto-ticker" ? { ...p, suspend_reason: "Sends what you type to a third party." } : p));
 }
 
 export interface FakeReport {
-  id: string;
+  id: number;
   plugin_id: string;
   version: string | null;
   reason: "malware" | "misleading" | "broken" | "copyright" | "other";
@@ -564,27 +567,28 @@ export interface FakeReport {
 
 export function reports(): FakeReport[] {
   return [
-    { id: "rep_1", plugin_id: "shell-runner", version: "1.0.0", reason: "misleading", text: "It says it runs saved commands, but it asks to run bash, which can run anything.", reporter: "user_ada", created_at: NOW - 2 * DAY, status: "open", note: null },
-    { id: "rep_2", plugin_id: "xss-probe", version: "1.0.0", reason: "malware", text: `Its name is <script>alert("report")</script>, which can't be good.`, reporter: "user_kai", created_at: NOW - 1 * DAY, status: "open", note: null },
-    { id: "rep_3", plugin_id: "focus-timer", version: "1.1.0", reason: "broken", text: "Doesn't stop when the chat closes.", reporter: "user_mo", created_at: NOW - 30 * DAY, status: "actioned", note: "Fixed in 1.2.0." },
+    { id: 1, plugin_id: "shell-runner", version: "1.0.0", reason: "misleading", text: "It says it runs saved commands, but it asks to run bash, which can run anything.", reporter: "user_ada", created_at: NOW - 2 * DAY, status: "open", note: null },
+    { id: 2, plugin_id: "xss-probe", version: "1.0.0", reason: "malware", text: `Its name is <script>alert("report")</script>, which can't be good.`, reporter: "user_kai", created_at: NOW - 1 * DAY, status: "open", note: null },
+    { id: 3, plugin_id: "focus-timer", version: "1.1.0", reason: "broken", text: "Doesn't stop when the chat closes.", reporter: "user_mo", created_at: NOW - 30 * DAY, status: "actioned", note: "Fixed in 1.2.0." },
   ];
 }
 
 export interface FakeAudit {
-  id: string;
+  seq: number;
   at: number;
   actor: string;
+  /** The edge's words: version.approve, plugin.suspend, report.dismissed, reservation.set, … */
   action: string;
   plugin_id: string | null;
   version: string | null;
-  detail: string | null;
+  detail: Record<string, unknown> | null;
 }
 
 export function audit(): FakeAudit[] {
   return [
-    { id: "aud_3", at: NOW - 4 * DAY, actor: "user_grace", action: "reject", plugin_id: "session-badges", version: "1.2.0", detail: "asks_too_much" },
-    { id: "aud_2", at: NOW - 9 * DAY, actor: "user_grace", action: "approve", plugin_id: "focus-timer", version: "1.2.0", detail: null },
-    { id: "aud_1", at: NOW - 20 * DAY, actor: "user_grace", action: "suspend", plugin_id: "crypto-ticker", version: null, detail: "Sends what you type to a third party." },
+    { seq: 3, at: NOW - 4 * DAY, actor: "user_grace", action: "version.reject", plugin_id: "session-badges", version: "1.2.0", detail: { reason: "asks_too_much" } },
+    { seq: 2, at: NOW - 9 * DAY, actor: "user_grace", action: "version.approve", plugin_id: "focus-timer", version: "1.2.0", detail: null },
+    { seq: 1, at: NOW - 20 * DAY, actor: "user_grace", action: "plugin.suspend", plugin_id: "crypto-ticker", version: null, detail: { reason: "Sends what you type to a third party." } },
   ];
 }
 

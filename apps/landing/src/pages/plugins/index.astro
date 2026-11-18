@@ -47,6 +47,8 @@ if (featured?.ok) {
 const names = new Map(categories.map((c) => [c.id, c.name]));
 const categoryName = state.category ? names.get(state.category) : null;
 
+// A cursor from another search, or an old one: this search's first page.
+if (!page.ok && page.error === "bad_cursor") return Astro.redirect(catalogHref({ ...state, cursor: null }), 303);
 if (page.ok) publicPage(Astro, [CATALOG_TAG]);
 else Astro.response.status = page.error === "bad_request" ? 400 : 503;
 

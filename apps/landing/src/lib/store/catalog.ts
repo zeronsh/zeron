@@ -36,7 +36,8 @@ export function effectiveSort(state: Pick<CatalogState, "q" | "sort">): Sort {
 export function readCatalog(params: URLSearchParams, categories: readonly Category[] | null): CatalogState {
   const q = clean(params.get("q") ?? "").slice(0, 100);
   const category = params.get("category");
-  const keyword = clean(params.get("keyword") ?? "").toLowerCase().slice(0, 40);
+  // (A keyword is 1 to 32 characters: amendment 22.)
+  const keyword = clean(params.get("keyword") ?? "").toLowerCase().slice(0, 32);
   const sort = params.get("sort");
   const cursor = params.get("cursor");
   return {

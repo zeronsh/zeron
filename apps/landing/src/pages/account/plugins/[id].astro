@@ -94,6 +94,7 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
                         <td>
                           <div class="state">
                             <Badge tone={state.tone} size="sm">{state.label}</Badge>
+                            {v.blocked && <span class="about">It was turned off on the devices that had it.</span>}
                             <span class="about">{state.about}</span>
                             {v.review?.message && (
                               <blockquote class="said">
@@ -116,7 +117,7 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
                           </div>
                         </td>
                         <td class="when" data-label="Submitted">
-                          <time datetime={new Date(v.published_at).toISOString()} title={date(v.published_at)}>{ago(v.published_at)}</time>
+                          <time datetime={new Date(v.submitted_at).toISOString()} title={date(v.submitted_at)}>{ago(v.submitted_at)}</time>
                         </td>
                         <td class="do">
                           {action && ask && (

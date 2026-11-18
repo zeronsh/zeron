@@ -27,6 +27,9 @@ export type ErrorWord =
   | "too_large"
   | "conflict"
   | "invalid_state"
+  | "unauthenticated"
+  | "bad_cursor"
+  | "bad_path"
   | "unknown";
 
 export interface EdgeError {
@@ -39,6 +42,7 @@ export type Sort = "relevance" | "popular" | "updated" | "new";
 export interface Badge {
   id: string;
   name: string;
+  icon?: string | null;
   description?: string;
 }
 
@@ -49,7 +53,8 @@ export interface Badge {
  */
 export interface Author {
   id: string;
-  username: string;
+  /** (Null only for an account since deleted.) */
+  username: string | null;
   badges: Badge[];
 }
 
@@ -57,13 +62,17 @@ export interface PluginCard {
   id: string;
   name: string;
   summary: string;
-  /** The icon's path in the package (an SVG), or null. */
+  /**
+   * The icon (an SVG): the edge's address for the file
+   * (/store/v1/plugins/<id>/files/<version>/<path>), or its path in the
+   * package. urls.ts `pictureUrl` takes either. Null when there's none.
+   */
   icon: string | null;
   author: Author;
   categories: string[];
   keywords: string[];
-  /** The latest approved version. */
-  version: string;
+  /** The latest approved version (null while it has none). */
+  version: string | null;
   updated_at: number;
   installs: number;
   featured: boolean;
@@ -112,7 +121,15 @@ export interface Check {
 export interface VersionInfo {
   version: string;
   status: VersionStatus;
-  published_at: number;
+  /** When it was submitted. */
+  submitted_at: number;
+  /** When it was approved (or later decided); null before. */
+  published_at: number | null;
+  prerelease?: boolean;
+  /** Taken down and turned off on the devices that have it. */
+  blocked?: boolean;
+  /** How it was published: from a device, or by a deploy key. */
+  via?: string;
   /** This version's section of CHANGELOG.md (markdown), or null. */
   notes: string | null;
   engines: { zeron?: string } | null;
@@ -138,7 +155,7 @@ export interface PackageInfo {
 export interface PluginDetail extends PluginCard {
   /** README.md, markdown. */
   readme: string;
-  /** Pictures' paths in the package. */
+  /** Pictures: the edge's addresses for them, or their paths in the package (see `icon`). */
   screenshots: string[];
   permissions: Permissions;
   engines: { zeron?: string } | null;
@@ -200,17 +217,20 @@ export type ReportReason = (typeof REPORT_REASONS)[number];
 // ── Admin ───────────────────────────────────────────────────────────────
 
 export interface QueueItem {
-  id: string;
-  name: string;
+  plugin: { id: string; name: string };
   version: string;
   status: VersionStatus;
+  prerelease?: boolean;
   submitted_at: number;
-  publisher: { username: string | null; user_id: string };
-  /** The version this one would replace, or null for a first listing. */
-  base: string | null;
-  checks: { ok: number; warn: number; fail: number };
-  /** Permissions it asks for that the last approved version didn't. */
-  new_asks: string[];
+  decided_at?: number | null;
+  publisher: { id?: string; username: string | null } | null;
+  via?: string;
+  /** Checks it raised to look at. */
+  warnings: number;
+  /** (Asked of the edge: the version it would replace, what it newly asks, every check's count.) */
+  base?: string | null;
+  new_asks?: string[];
+  checks?: { ok: number; warn: number; fail: number };
 }
 
 export interface QueuePage {
@@ -219,11 +239,15 @@ export interface QueuePage {
   prev_cursor?: string;
 }
 
+/** An account's age, as the edge gives it: ms since the epoch, or an ISO date. */
+export type Created = number | string | null;
+
 export interface Publisher {
+  id?: string;
   username: string | null;
-  created_at: number;
+  created_at: Created;
   decisions: { approved: number; rejected: number };
-  recent: { id: string; version: string; status: VersionStatus; decided_at: number | null }[];
+  recent: { plugin_id: string; version: string; status: VersionStatus; submitted_at?: number; reason?: string | null }[];
 }
 
 export interface PackageFile {
@@ -234,21 +258,27 @@ export interface PackageFile {
   binary: boolean;
 }
 
-/** What grew since the last approved version, as the app's `digest_diff`. */
+/** What changed in what it asks since the last approved version (the edge's consentDiff). */
 export interface PermissionsDiff {
-  asks_added?: string[];
-  asks_removed?: string[];
+  added?: string[];
+  removed?: string[];
   added_commands?: string[];
+  removed_commands?: string[];
   network_added?: string[];
-  tools_added?: { name: string; description?: string }[];
+  network_removed?: string[];
+  /** Tools by name (or with their words). */
+  tools_added?: (string | { name: string; description?: string })[];
+  tools_removed?: string[];
   tools_changed?: { name: string; description_after?: string }[];
   ui_replace_added?: string[];
   ui_change_added?: string[];
 }
 
 export interface Submission {
-  plugin: PluginCard;
-  version: VersionInfo;
+  /** The plugin (a card, per the contract; the edge sends its id, status and owner today). */
+  plugin: Partial<PluginCard> & { id: string; owner?: { id?: string; username: string | null } };
+  /** The version, with what it lists: its name, icon, README and more. */
+  version: VersionInfo & { name?: string; summary?: string; icon?: string | null; readme?: string; screenshots?: string[] };
   publisher: Publisher;
   /** The signed manifest, as submitted. */
   manifest: Record<string, unknown>;
@@ -265,26 +295,41 @@ export interface Submission {
 export type PluginStatus = "listed" | "unlisted" | "suspended" | "removed";
 
 export interface AdminPlugin {
-  plugin: PluginCard;
-  status: PluginStatus;
+  plugin: PluginCard & { listed_version?: string | null; created_at?: number; suspend_reason?: string | null };
+  /** A listing word, or the edge's own (active, suspended). */
+  status: PluginStatus | "active";
   featured: boolean;
-  owner: { user_id: string; username: string | null; created_at: number };
+  owner: { id?: string; user_id: string; username: string | null; created_at: Created };
   versions: VersionInfo[];
-  reports: Report[];
+  reports: PluginReport[];
+}
+
+/** A report as the plugin's admin view lists it. */
+export interface PluginReport {
+  id: number | string;
+  version?: string | null;
+  reason: ReportReason;
+  text: string;
+  status: ReportStatus;
+  created_at: number;
+  resolved_at?: number | null;
+  note?: string | null;
+  reporter?: { username: string | null } | null;
 }
 
 export type ReportStatus = "open" | "dismissed" | "actioned";
 
 export interface Report {
-  id: string;
-  plugin_id: string;
-  plugin_name?: string;
+  id: number | string;
+  plugin: { id: string; name: string | null };
   version?: string | null;
   reason: ReportReason;
   text: string;
-  reporter: { username: string | null; user_id: string };
+  reporter: { id?: string; username: string | null } | null;
   created_at: number;
   status: ReportStatus;
+  resolved_by?: { username: string | null } | null;
+  resolved_at?: number | null;
   note?: string | null;
 }
 
@@ -303,13 +348,15 @@ export interface Reservation {
 }
 
 export interface AuditEntry {
-  id: string;
+  seq: number;
   at: number;
-  actor: { username: string | null; user_id: string };
+  actor: { id?: string | null; username: string | null; user_id: string };
+  /** `version.approve`, `plugin.suspend`, `report.dismissed`, `reservation.set`, … */
   action: string;
   plugin_id?: string | null;
   version?: string | null;
-  detail?: string | null;
+  /** What else it recorded (the edge's JSON). */
+  detail?: unknown;
 }
 
 export interface AuditPage {

@@ -42,8 +42,20 @@ export function bytes(n: number): string {
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
 }
 
-/** An account's age, plainly: "2 days old", "1 year old". */
-export function age(created: number, now = Date.now()): string {
+/** A time the edge gives as ms since the epoch or as an ISO date, in ms (null if it's neither). */
+export function toMs(value: number | string | null | undefined): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
+}
+
+/** An account's age, plainly: "2 days old", "1 year old" ("" when it isn't known). */
+export function age(createdAt: number | string | null | undefined, now = Date.now()): string {
+  const created = toMs(createdAt);
+  if (created === null) return "";
   const days = Math.max(0, Math.floor((now - created) / 86_400_000));
   if (days < 1) return "New today";
   if (days < 60) return `${days} ${days === 1 ? "day" : "days"} old`;

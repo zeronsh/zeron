@@ -47,7 +47,7 @@ const facts = s
       { label: s.publisher.username ? `by @${s.publisher.username}` : "No username" },
       { label: s.base ? `Update from ${s.base.version}` : "First listing" },
       failing ? { label: `${failing} checks failed`, tone: "danger" as const } : warnings ? { label: `${warnings} checks to look at`, tone: "warning" as const } : { label: "Checks passed", tone: "success" as const },
-      ...(s.permissions_diff?.asks_added ?? []).map((a) => ({ label: `asks ${a}`, tone: "danger" as const })),
+      ...(s.permissions_diff?.added ?? []).map((a: string) => ({ label: `asks ${a}`, tone: "danger" as const })),
     ]
   : [];
 

@@ -3,19 +3,19 @@
 // ink filter (StoreLayout's defs), so an SVG its author drew in any colour
 // shows in the text's, as the app tints it.
 import { corner, hue, initial } from "../../lib/store/tile.ts";
-import { fileUrl } from "../../lib/store/urls.ts";
+import { pictureUrl } from "../../lib/store/urls.ts";
 
 interface Props {
   id: string;
   name: string;
-  /** The icon's path in the package, and the version it's from. */
-  icon: string | null;
-  version: string;
+  /** The icon: the edge's address for it, or its path in the package and the version it's from. */
+  icon: string | null | undefined;
+  version: string | null;
   size: 32 | 40 | 48 | 64 | 80;
   class?: string;
 }
 const { id, name, icon, version, size, class: className } = Astro.props;
-const src = icon ? fileUrl(id, version, icon) : null;
+const src = pictureUrl(id, version, icon);
 ---
 
 {

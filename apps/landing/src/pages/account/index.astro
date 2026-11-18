@@ -72,7 +72,7 @@ const plugins = result.ok ? result.data.plugins : [];
                     <span class="newest">
                       <span class="num">{newest.version}</span>
                       {newest.status !== "approved" && <Badge tone={state.tone} size="sm">{state.label}</Badge>}
-                      <span class="when">{ago(newest.published_at)}</span>
+                      <span class="when">{ago(newest.submitted_at)}</span>
                     </span>
                   )}
                 </div>

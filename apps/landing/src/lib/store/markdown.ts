@@ -37,8 +37,8 @@ export interface RenderOptions {
   demote?: boolean;
 }
 
-/** Pictures a README may show from its package, by extension. */
-const PICTURES = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
+/** Pictures a README may show from its package, by extension (what the store serves inline). */
+const PICTURES = /\.(png|jpe?g|svg)$/i;
 
 /** The prefix every id the document makes carries, so none can clobber the page's. */
 const PREFIX = "user-content-";

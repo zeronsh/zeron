@@ -13,7 +13,7 @@ import { ago, bytes, compatibility, count, date } from "../../lib/store/format.t
 import { pluginTag, publicPage } from "../../lib/store/http.ts";
 import { renderedOnce } from "../../lib/store/rendered.ts";
 import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
-import { fileUrl, memberUrl, pluginUrl } from "../../lib/store/urls.ts";
+import { fileUrl, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
 import type { VersionInfo } from "../../lib/store/types.ts";
 
 export const prerender = false;
@@ -30,7 +30,9 @@ if (!result.ok) {
   if (result.error === "not_found") return new Response(null, { status: 404 });
   Astro.response.status = 503;
 }
-const plugin = result.ok ? result.data : null;
+// (A listed plugin always has a version; one without is not the public's.)
+if (result.ok && !result.data.version) return new Response(null, { status: 404 });
+const plugin = result.ok ? { ...result.data, version: result.data.version! } : null;
 
 /** Versions whose notes the page shows (each is rendered once, then kept). */
 const NOTED = 8;
@@ -59,7 +61,7 @@ const structured = plugin
       operatingSystem: "macOS, Windows, Linux",
       softwareVersion: plugin.version,
       dateModified: new Date(plugin.updated_at).toISOString(),
-      author: { "@type": "Person", name: `@${plugin.author.username}`, url: new URL(memberUrl(plugin.author.username), Astro.site).href },
+      ...(plugin.author.username ? { author: { "@type": "Person", name: `@${plugin.author.username}`, url: new URL(memberUrl(plugin.author.username), Astro.site).href } } : {}),
       url: new URL(pluginUrl(plugin.id), Astro.site).href,
       offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
     }).replace(/</g, "\\u003c")
@@ -85,9 +87,11 @@ const structured = plugin
             <div class="identity">
               <h1>{plugin.name}</h1>
               <p class="author">
-                <span>
-                  by <a href={memberUrl(plugin.author.username)}>@{plugin.author.username}</a>
-                </span>
+                {plugin.author.username && (
+                  <span>
+                    by <a href={memberUrl(plugin.author.username)}>@{plugin.author.username}</a>
+                  </span>
+                )}
                 {plugin.author.badges.map((b) => <Badge size="sm" title={b.description}>{b.name}</Badge>)}
               </p>
               <p class="summary">{plugin.summary}</p>
@@ -97,7 +101,7 @@ const structured = plugin
             </div>
           </header>
 
-          <Screenshots name={plugin.name} pictures={plugin.screenshots.map((s) => fileUrl(plugin.id, plugin.version, s))} />
+          <Screenshots name={plugin.name} pictures={plugin.screenshots.map((s) => pictureUrl(plugin.id, plugin.version, s)).filter((s): s is string => s !== null)} />
 
           <div class="columns">
             <div class="main">
@@ -113,7 +117,7 @@ const structured = plugin
                         {v.version === plugin.version && <Badge tone="success" size="sm">Latest</Badge>}
                         {isPrerelease(v.version) && <Badge tone="accent" size="sm">Pre-release</Badge>}
                         {v.yanked && <Badge tone="warning" size="sm" title="Its author stopped offering it. Anyone who has it can keep it.">No longer offered</Badge>}
-                        <time datetime={new Date(v.published_at).toISOString()} title={date(v.published_at)}>{ago(v.published_at)}</time>
+                        <time datetime={new Date(v.published_at ?? v.submitted_at).toISOString()} title={date(v.published_at ?? v.submitted_at)}>{ago(v.published_at ?? v.submitted_at)}</time>
                       </div>
                       {v.html ? <div class="readme notes" set:html={v.html} /> : <p class="no-notes">No notes for this version.</p>}
                     </li>
@@ -131,7 +135,7 @@ const structured = plugin
                           <div class="version-head">
                             <h3 class="num">{v.version}</h3>
                             {v.yanked && <Badge tone="warning" size="sm">No longer offered</Badge>}
-                            <time datetime={new Date(v.published_at).toISOString()}>{date(v.published_at)}</time>
+                            <time datetime={new Date(v.published_at ?? v.submitted_at).toISOString()}>{date(v.published_at ?? v.submitted_at)}</time>
                           </div>
                           {v.html && <div class="readme notes" set:html={v.html} />}
                         </li>
@@ -145,7 +149,7 @@ const structured = plugin
             <aside class="side">
               <section class="panel" aria-labelledby="asks-heading">
                 <h2 id="asks-heading">What it asks for</h2>
-                <PermissionList permissions={plugin.permissions} author={plugin.author.username} />
+                <PermissionList permissions={plugin.permissions} author={plugin.author.username ?? undefined} />
                 <p class="asked">Zeron asks you to allow these when you install it, and again if an update asks for more.</p>
               </section>
 

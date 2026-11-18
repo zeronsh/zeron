@@ -3,7 +3,7 @@
 // at the foot and running off the card, as the home page shows the app.
 import type { PluginCard } from "../../lib/store/types.ts";
 import { installs } from "../../lib/store/format.ts";
-import { fileUrl, pluginUrl } from "../../lib/store/urls.ts";
+import { pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
 import PluginTile from "./PluginTile.astro";
 
 interface Props {
@@ -19,15 +19,15 @@ const { plugin, screenshot } = Astro.props;
       <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={40} />
       <div class="title">
         <h3 class="name"><a class="follow" href={pluginUrl(plugin.id)}>{plugin.name}</a></h3>
-        <p class="by">by @{plugin.author.username} · <span class="num">{installs(plugin.installs)}</span></p>
+        <p class="by">{plugin.author.username && <>by @{plugin.author.username} · </>}<span class="num">{installs(plugin.installs)}</span></p>
       </div>
     </div>
     <p class="summary">{plugin.summary}</p>
   </div>
   {
-    screenshot && (
+    screenshot && pictureUrl(plugin.id, plugin.version, screenshot) && (
       <div class="visual" aria-hidden="true">
-        <img src={fileUrl(plugin.id, plugin.version, screenshot)} alt="" width="1280" height="800" loading="lazy" decoding="async" />
+        <img src={pictureUrl(plugin.id, plugin.version, screenshot)!} alt="" width="1280" height="800" loading="lazy" decoding="async" />
       </div>
     )
   }

@@ -29,6 +29,7 @@ const ERROR_WORDS = new Set<string>([
   "not_found", "signed_out", "forbidden", "bad_request", "bad_csrf", "rate_limited", "suspended",
   "needs_username", "id_taken", "id_reserved", "not_semver", "version_exists", "not_newer", "bad_package",
   "bad_signature", "key_not_allowed", "missing_readme", "missing_listing", "too_large", "conflict", "invalid_state",
+  "unauthenticated", "bad_cursor", "bad_path",
 ]);
 
 /** A binding: what `env.EDGE` is, and what a test hands in instead. */
@@ -157,9 +158,10 @@ export class Edge {
     return this.#json(`/store/v1/admin/reports?${params}`, { signedIn: true });
   }
 
-  audit(cursor?: string): Promise<Result<AuditPage>> {
+  audit(cursor?: string, plugin?: string): Promise<Result<AuditPage>> {
     const params = new URLSearchParams();
     if (cursor) params.set("cursor", cursor);
+    if (plugin) params.set("plugin", plugin);
     return this.#json(`/store/v1/admin/audit${params.size ? `?${params}` : ""}`, { signedIn: true });
   }
 

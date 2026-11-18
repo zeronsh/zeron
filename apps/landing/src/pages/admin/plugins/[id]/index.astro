@@ -68,6 +68,10 @@ const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
             )}
           </header>
 
+          {a.status === "suspended" && a.plugin.suspend_reason && (
+            <p class="suspended"><b>Suspended:</b> {a.plugin.suspend_reason}</p>
+          )}
+
           <section class="panel actions" aria-label="What can be done">
             <form method="post" action={act(a.plugin.featured ? "unfeature" : "feature")}>
               <input type="hidden" name="csrf" value={session.csrf} />
@@ -105,10 +109,11 @@ const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
                       <td>
                         <span class="state">
                           <Badge tone={versionState(v).tone} size="sm">{versionState(v).label}</Badge>
+                          {v.blocked && <Badge tone="danger" size="sm">Turned off on devices</Badge>}
                           {v.review?.reason && <span class="reason">{reasonWords(v.review.reason)}</span>}
                         </span>
                       </td>
-                      <td class="when" data-label="Submitted"><time datetime={new Date(v.published_at).toISOString()} title={date(v.published_at)}>{ago(v.published_at)}</time></td>
+                      <td class="when" data-label="Submitted"><time datetime={new Date(v.submitted_at).toISOString()} title={date(v.submitted_at)}>{ago(v.submitted_at)}</time></td>
                       <td class="do">
                         {removable(v.status) && (
                           <a class="act danger small" href={`${here}/${encodeURIComponent(v.version)}/remove`} data-dialog={vid(v.version)}>
@@ -134,7 +139,7 @@ const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
                     <p class="report-head">
                       <Badge tone={r.status === "open" ? "warning" : "neutral"} size="sm">{r.status === "open" ? "Open" : r.status === "actioned" ? "Acted on" : "Dismissed"}</Badge>
                       <b>{reasonWords(r.reason)}</b>
-                      <span class="quiet">from {r.reporter.username ? `@${r.reporter.username}` : "someone with no username"} · {ago(r.created_at)}{r.version ? ` · about ${r.version}` : ""}</span>
+                      <span class="quiet">from {r.reporter?.username ? `@${r.reporter.username}` : "someone"} · {ago(r.created_at)}{r.version ? ` · about ${r.version}` : ""}</span>
                     </p>
                     {r.text && <p class="report-text">{r.text}</p>}
                   </li>
@@ -142,6 +147,7 @@ const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
               </ul>
             )}
             {a.reports.some((r) => r.status === "open") && <a class="quiet-link" href="/admin/reports">Resolve them in Reports</a>}
+            <a class="quiet-link" href={`/admin/audit?plugin=${encodeURIComponent(a.plugin.id)}`}>Its history in the audit log</a>
           </section>
 
           <Dialog id="suspend" title={`Suspend ${a.plugin.name}?`} tone="danger">
@@ -184,6 +190,8 @@ const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
   .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13.5px; color: var(--text-3); }
   .meta a { color: var(--text-2); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
   .meta a:hover { color: var(--text); }
+  .suspended { padding: 12px 14px; font-size: 14px; color: var(--text-2); background: var(--tone-danger-wash); border-radius: var(--radius-lg); }
+  .suspended b { font-weight: 500; color: var(--tone-danger); }
   .quiet-link { display: inline-flex; align-items: center; gap: 6px; justify-self: start; font-size: 14px; font-weight: 500; color: var(--text-2); transition: color 0.12s; }
   .quiet-link:hover { color: var(--text); }
   .panel.actions { display: flex; flex-wrap: wrap; gap: 8px; }

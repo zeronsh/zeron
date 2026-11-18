@@ -10,7 +10,7 @@ interface Props {
   id: string;
   name: string;
   icon: string | null;
-  version: string;
+  version: string | null;
   lines: { label: string; tone?: Tone }[];
   /** Where to read it all first. */
   read: string;
@@ -32,7 +32,7 @@ const { id, name, icon, version, lines, read, fromElsewhere } = Astro.props;
   <div class="what">
     <PluginTile id={id} name={name} icon={icon} version={version} size={40} />
     <div class="words">
-      <p class="name">{name} <span class="num">{version}</span></p>
+      <p class="name">{name} {version && <span class="num">{version}</span>}</p>
       <p class="facts">{lines.map((l) => <Badge tone={l.tone ?? "neutral"} size="sm">{l.label}</Badge>)}</p>
     </div>
   </div>

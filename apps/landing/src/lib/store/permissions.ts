@@ -432,8 +432,8 @@ export function details(p: Permissions): { title: string; list: string[] }[] {
  */
 export function grew(p: Permissions, diff: PermissionsDiff | null): Line[] {
   if (!diff) return [];
-  const out: Line[] = (diff.asks_added ?? []).map((name) => permission(p, name));
-  const asked = new Set(diff.asks_added ?? []);
+  const out: Line[] = (diff.added ?? []).map((name) => permission(p, name));
+  const asked = new Set(diff.added ?? []);
   if (!asked.has("commands") && (diff.added_commands?.length ?? 0) > 0) {
     out.push(line(true, "terminal", say("plugins.words.diff.commands"), undefined, { literal: programs(diff.added_commands!, p.commands_anything, p.commands_full_control).list }));
   }
@@ -441,7 +441,9 @@ export function grew(p: Permissions, diff: PermissionsDiff | null): Line[] {
     out.push(line(true, "danger-triangle", say("plugins.words.diff.ui_replace", { places: places(diff.ui_replace_added) }), say("plugins.words.permission.ui_replace.detail"), { literal: literal(diff.ui_replace_added) }));
   }
   if (!asked.has("tools") && (diff.tools_added?.length ?? 0) > 0) {
-    out.push(line(false, "magic-stick", say("plugins.words.diff.tools_added"), undefined, { items: tools(diff.tools_added) }));
+    // (Named, with what each tells agents: from the diff, or the version's own list.)
+    const added = diff.tools_added!.map((t) => (typeof t === "string" ? (p.tools ?? []).find((x) => x.name === t) ?? { name: t } : t));
+    out.push(line(false, "magic-stick", say("plugins.words.diff.tools_added"), undefined, { items: tools(added) }));
   }
   if ((diff.tools_changed?.length ?? 0) > 0) {
     const items = diff.tools_changed!.map((t) => (t.description_after ? { name: t.name, description: t.description_after } : { name: t.name }));
