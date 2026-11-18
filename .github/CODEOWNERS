@@ -12,7 +12,6 @@
 
 # Release packaging: these run in the jobs that hold the Apple signing and
 # notarization credentials, and produce the artifacts users install.
-/scripts/package-macos.sh @SinaKhalili @wingleeio
 /scripts/package-linux.sh @SinaKhalili @wingleeio
 /scripts/package-windows.ps1 @SinaKhalili @wingleeio
 /scripts/ios/ @SinaKhalili @wingleeio
