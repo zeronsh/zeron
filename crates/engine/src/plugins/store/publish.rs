@@ -160,8 +160,8 @@ pub fn newer_problem(version: &str, versions: &[Value]) -> Option<Problem> {
                 words: format!("Version {version} was submitted already: a version is submitted once, so give this one a new number"),
             });
         }
-        let counts = !matches!(v["status"].as_str(), Some("rejected" | "withdrawn")) && (mine.is_prerelease() || !theirs.is_prerelease());
-        if counts && above.as_ref().is_none_or(|a| &theirs > a) {
+        // (Every version the plugin has had counts, in any state: amendment 45.)
+        if above.as_ref().is_none_or(|a| &theirs > a) {
             above = Some(theirs);
         }
     }
@@ -253,14 +253,15 @@ mod tests {
     fn a_version_is_newer_as_the_store_counts_it() {
         let have = |list: &[(&str, &str)]| -> Vec<Value> { list.iter().map(|(v, s)| json!({ "version": v, "status": s })).collect() };
         let rule = |version: &str, list: &[(&str, &str)]| newer_problem(version, &have(list)).map(|p| p.rule);
-        let store = [("1.0.0", "approved"), ("1.1.0", "rejected"), ("1.2.0-beta.1", "pending")];
-        assert_eq!(rule("1.0.1", &store), None, "a release above every release that counts (1.1.0 was rejected)");
-        assert_eq!(rule("0.9.0", &store), Some("not_newer"));
-        assert_eq!(rule("1.1.0", &store), Some("version_exists"), "rejected, it's still submitted");
+        // Every version the plugin has had counts, in any state (amendment 45).
+        let store = [("1.0.0", "listed"), ("1.1.0", "taken_down"), ("1.2.0-beta.1", "yanked"), ("0.9.0", "removed")];
+        assert_eq!(rule("1.2.0-beta.2", &store), None, "above every version, the pre-release included");
+        assert_eq!(rule("1.1.5", &store), Some("not_newer"), "1.2.0-beta.1 is above it, yanked or not");
+        assert_eq!(rule("1.0.1", &store), Some("not_newer"), "1.1.0 counts though it was taken down");
+        assert_eq!(rule("1.1.0", &store), Some("version_exists"), "taken down, it's still had");
+        assert_eq!(rule("0.9.0", &store), Some("version_exists"), "removed, it's still had");
         assert_eq!(rule("1.0.0+build.2", &store), Some("version_exists"), "build metadata isn't a new version");
-        assert_eq!(rule("1.2.0-beta.0", &store), Some("not_newer"), "a pre-release is above every version that counts");
-        assert_eq!(rule("1.2.0-beta.2", &store), None);
-        assert_eq!(rule("1.1.5", &[("1.1.0", "withdrawn"), ("1.0.0", "approved")]), None);
+        assert_eq!(rule("1.2.0", &store), None);
         assert_eq!(rule("1.0.0", &[]), None, "a first version");
     }
 

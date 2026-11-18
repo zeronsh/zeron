@@ -29,6 +29,9 @@ use super::{Plugins, failed, lock, now_secs};
 /// The first check after the engine starts, then how often.
 pub(super) const FIRST_CHECK: Duration = Duration::from_secs(90);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+/// How often the store's take-down feed is read (a take-down reaches a
+/// device within this and the feed's 60 s of cache).
+const TAKEDOWN_EVERY: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Deserialize)]
 struct InstallParams {
@@ -73,6 +76,10 @@ struct CheckParams {
 #[derive(Deserialize)]
 struct UpdateParams {
     id: String,
+    /// One of many ("update all"): a store update Zeron hasn't verified is
+    /// refused (`not_verified`), never taken this way.
+    #[serde(default)]
+    verified_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -187,7 +194,7 @@ impl Plugins {
             }
             methods::UPDATE_PLUGIN => {
                 let p: UpdateParams = parse_params(params)?;
-                self.update(&p.id).await
+                self.update(&p.id, p.verified_only).await
             }
             methods::EXPORT_PLUGIN => {
                 let p: ExportParams = parse_params(params)?;
@@ -323,6 +330,10 @@ impl Plugins {
             None => self.resolve_now(&package.key, Some(&id)).await,
         };
         let from_store = source.store().is_some();
+        // A store version Zeron hasn't verified (by the record fetched for
+        // this install): taking it always asks you, even when it asks for
+        // nothing new (amendment 45).
+        let unverified = source.store().is_some_and(|s| !s.verified);
         let version = package.manifest.version.clone();
         let plugins_dir = self.inner.plugins_dir.clone();
         let staged = package.clone();
@@ -391,6 +402,15 @@ impl Plugins {
                 }
             }
         })?;
+        if replaced.is_some() && unverified {
+            self.update_state(|state| {
+                if let Some(d) = state.decisions.get_mut(&id)
+                    && d.allowed
+                {
+                    d.reask = true;
+                }
+            })?;
+        }
         self.update_state(|state| {
             // A block was for the version it replaced.
             if state.blocked.get(&id).is_some_and(|b| b.version != version) {
@@ -546,7 +566,7 @@ impl Plugins {
         json!({ "updates": updates, "errors": errors })
     }
 
-    async fn update(&self, id: &str) -> Result<RpcReply, RpcError> {
+    async fn update(&self, id: &str, verified_only: bool) -> Result<RpcReply, RpcError> {
         self.rescan().await;
         let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
         if entry.item.builtin {
@@ -571,10 +591,21 @@ impl Plugins {
         if package.hash != found.hash {
             return Err(failed("The update changed since it was found; check again"));
         }
-        let source = found
+        let mut source = found
             .source
             .or_else(|| Source::load(Path::new(&entry.item.dir)))
             .ok_or_else(|| failed("Where it came from isn't known"))?;
+        // From the store: whether it's verified is the store's record's,
+        // asked now, never what the check remembered (unknown: not).
+        if let Some(store) = source.store.as_mut().filter(|_| source.kind == install::STORE) {
+            store.verified = self.verified_now(id, &found.version, &package.hash).await;
+            if verified_only && !store.verified {
+                return Err(failed(install::failure(
+                    install::reason::NOT_VERIFIED,
+                    format!("{} {} isn't verified by Zeron: an update that isn't is taken on its own, from its sheet", entry.item.name, found.version),
+                )));
+            }
+        }
         self.install_package(package, source).await
     }
 
@@ -663,6 +694,16 @@ impl Plugins {
             }
         });
         lock(&self.inner.tasks).push(task);
+        let weak = std::sync::Arc::downgrade(&self.inner);
+        let feed = runtime.spawn(async move {
+            tokio::time::sleep(FIRST_CHECK).await;
+            loop {
+                let Some(inner) = weak.upgrade() else { return };
+                Plugins { inner }.check_takedowns().await;
+                tokio::time::sleep(TAKEDOWN_EVERY).await;
+            }
+        });
+        lock(&self.inner.tasks).push(feed);
     }
 }
 

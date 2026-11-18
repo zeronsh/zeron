@@ -140,7 +140,7 @@
   "deploy_key": {
     "content_sha256_header": "X-Zeron-Content-SHA256",
     "max_skew_ms": 300000,
-    "proof_prefix": "zeron-deploy-key:v1:",
+    "proof_prefix": "zeron-deploy-key:v2:",
     "request_prefix": "zeron-plugin-publish:v1\n",
     "secret_prefix": "zpk_"
   },
@@ -178,7 +178,7 @@
       "jpeg"
     ]
   },
-  "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version.",
+  "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version. A publish must be later than every version the plugin has had, in any state, pre-releases included.",
   "package_format": "zeron-plugin:v1",
   "payload_prefix": "zeron-plugin:v1\n",
   "report_reasons": [

@@ -14,7 +14,7 @@ use std::process::Output;
 use fake_store::FakeStore;
 use serde_json::json;
 use zeron_engine::plugins::install;
-use zeron_engine::plugins::store::deploy_key::DeployKey;
+use zeron_engine::plugins::store::deploy_key::{DeployKey, Scope};
 
 const ICON: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><circle cx=\"8\" cy=\"8\" r=\"6\"/></svg>";
 
@@ -76,7 +76,8 @@ async fn ci_checks_and_publishes_with_a_deploy_key() {
     let folder_arg = folder.display().to_string();
     let key = DeployKey::from_seed([11; 32]).unwrap();
     let secret = key.secret();
-    store.add_deploy_key(&key.public(), "focus-board", "ada");
+    store.claim("focus-board", "ada");
+    store.add_deploy_key(&key.public(), Scope::plugins(&["focus-board".into()]).unwrap(), "ada");
 
     // check: no key, no Zeron, no sign-in.
     let checked = run.zeron(&store, None, &["check", &folder_arg]).await;
@@ -92,7 +93,8 @@ async fn ci_checks_and_publishes_with_a_deploy_key() {
     // Published: signed with the deploy key, the request signed with it too.
     let published = run.zeron(&store, Some(&secret), &["publish", &folder_arg]).await;
     assert_eq!(published.status.code(), Some(0), "{}", text(&published));
-    assert!(text(&published).contains("Submitted focus-board 1.0.0: pending"));
+    assert!(text(&published).contains("Published focus-board 1.0.0: live now, not yet verified."), "{}", text(&published));
+    assert!(text(&published).contains("/plugins/focus-board"), "its page: {}", text(&published));
     let (id, raw, via) = store.state.lock().unwrap().submitted[0].clone();
     assert_eq!((id.as_str(), via.as_str()), ("focus-board", "deploy_key"));
     let package = install::parse(raw).unwrap();
@@ -114,12 +116,11 @@ async fn ci_checks_and_publishes_with_a_deploy_key() {
     // status and yank, as the deploy key.
     let status = run.zeron(&store, Some(&secret), &["status"]).await;
     assert_eq!(status.status.code(), Some(0), "{}", text(&status));
-    assert!(text(&status).contains("focus-board\n  1.0.0  pending"), "{}", text(&status));
-    // A deploy key publishes and reads status, nothing else: yank, unyank,
-    // withdraw and keys are the signed-in person's (2, said plainly).
-    store.set_status("focus-board", "1.0.0", "approved");
+    assert!(text(&status).contains("focus-board\n  1.0.0  listed  not verified"), "{}", text(&status));
+    // A deploy key publishes and reads status, nothing else: yank, unyank
+    // and keys are the signed-in person's (2, said plainly).
     let requests = store.state.lock().unwrap().requests.len();
-    for args in [&["yank", "focus-board", "1.0.0"][..], &["unyank", "focus-board", "1.0.0"], &["withdraw", "focus-board", "1.0.0"], &["key", "list", "focus-board"]] {
+    for args in [&["yank", "focus-board", "1.0.0"][..], &["unyank", "focus-board", "1.0.0"], &["key", "list"]] {
         let out = run.zeron(&store, Some(&secret), args).await;
         assert_eq!(out.status.code(), Some(2), "{args:?}: {}", text(&out));
         assert!(text(&out).contains("a deploy key only publishes and reads status"), "{}", text(&out));
@@ -135,7 +136,8 @@ async fn each_failure_has_one_line_and_its_exit_code() {
     plugin(&folder, "1.0");
     let folder_arg = folder.display().to_string();
     let key = DeployKey::from_seed([12; 32]).unwrap();
-    store.add_deploy_key(&key.public(), "focus-board", "ada");
+    store.claim("focus-board", "ada");
+    store.add_deploy_key(&key.public(), Scope::plugins(&["focus-board".into()]).unwrap(), "ada");
 
     // The store's rules, before anything is sent (1).
     let checked = run.zeron(&store, None, &["check", &folder_arg]).await;
@@ -165,7 +167,7 @@ async fn each_failure_has_one_line_and_its_exit_code() {
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     assert!(text(&out).contains("key_not_allowed"));
     let other = DeployKey::from_seed([14; 32]).unwrap();
-    store.add_deploy_key(&other.public(), "another-plugin", "ada");
+    store.add_deploy_key(&other.public(), Scope::plugins(&["another-plugin".into()]).unwrap(), "ada");
     let out = run.zeron(&store, Some(&other.secret()), &["publish", &folder_arg]).await;
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
 

@@ -198,7 +198,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: INSTALL_PLUGIN,
-            description: "Install someone's Zeron plugin from the store (`store`, its id, from search_plugins; `version` for one other than the latest), a .zeron-plugin file (`path`) or a link (`url`): a link to a .zeron-plugin file, a GitHub release (…/releases/latest or …/releases/tag/<tag>, its .zeron-plugin asset), or a git repository (owner/repo, its GitHub page, …/tree/<branch>/<folder>, or any https git URL; `ref` a branch or tag, `folder` where the plugin is in it). Zeron checks the signature over every file first (and, from the store, that it's exactly what the store reviewed): an unsigned or changed plugin is refused, and so is one made for another version of Zeron (`incompatible`). Whatever you install waits for the person to allow it in Zeron's window, which shows who made it and what it asks: you can't allow it for them (`waiting` says so). Installing over a plugin already installed is an update, and only when the same author made both; one installed from the store you can't update or move to its pre-releases (`needs_person`): that's the person's, in Zeron's window, and check_plugin_updates tells them there's one.",
+            description: "Install someone's Zeron plugin from the store (`store`, its id, from search_plugins), a .zeron-plugin file (`path`) or a link (`url`): a link to a .zeron-plugin file, a GitHub release (…/releases/latest or …/releases/tag/<tag>, its .zeron-plugin asset), or a git repository (owner/repo, its GitHub page, …/tree/<branch>/<folder>, or any https git URL; `ref` a branch or tag, `folder` where the plugin is in it). From the store, an agent can install versions Zeron has verified; a person installs the rest from the plugin's page: with no `version`, you get its newest verified version (`verified_version` in search_plugins), and a `version` you name must be verified too, else it's refused (`needs_person`). Zeron checks the signature over every file first (and, from the store, that it's exactly what the store's record says): an unsigned or changed plugin is refused, and so is one made for another version of Zeron (`incompatible`). Whatever you install waits for the person to allow it in Zeron's window, which shows who made it and what it asks: you can't allow it for them (`waiting` says so). Installing over a plugin already installed is an update, and only when the same author made both; one installed from the store you can't update or move to its pre-releases (`needs_person`): that's the person's, in Zeron's window, and check_plugin_updates tells them there's one.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -235,7 +235,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: SEARCH_PLUGINS,
-            description: "Search the Zeron plugin store: plugins made by people, each reviewed by Zeron before it's listed. Each result has its id (what install_plugin's `store` takes), name, summary, author (by @username), categories, keywords, latest version and installs, and `installed` when it's on this device already. Filter by `category` or `keyword`, or `featured` for only the ones Zeron features; `sort` is relevance (with a query), popular, updated or new. Page with `cursor` (the reply's next_cursor). Read one's page with get_store_plugin before suggesting it.",
+            description: "Search the Zeron plugin store: plugins made by people, live as soon as they're published, marked verified once Zeron has read a version. Each result has its id (what install_plugin's `store` takes), name, summary, author (by @username), categories, keywords, its newest version and whether that's `verified`, `verified_version` (the newest Zeron verified, or null: install_plugin installs that one for you), installs, and `installed` when it's on this device already. Filter by `category`, `keyword` or `author` (a username), `verified` for only plugins whose newest version is verified, or `featured` for the ones Zeron features; `sort` is relevance (with a query), popular, updated or new. Page with `cursor` (the reply's next_cursor). Read one's page with get_store_plugin before suggesting it.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -243,6 +243,8 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "category": { "type": "string", "description": "One of the store's categories (agents, appearance, chat, developer-tools, git, integrations, productivity, utilities)." },
                     "keyword": { "type": "string" },
                     "featured": { "type": "boolean", "description": "Only the plugins Zeron features." },
+                    "verified": { "type": "boolean", "description": "Only plugins whose newest version Zeron has verified." },
+                    "author": { "type": "string", "description": "One publisher's plugins, by username." },
                     "sort": { "type": "string", "enum": ["relevance", "popular", "updated", "new"] },
                     "cursor": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
@@ -251,7 +253,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: GET_STORE_PLUGIN,
-            description: "A plugin's page in the Zeron plugin store: its README, what it asks for (permissions, grouped as the person's consent sheet shows them), its versions and their notes, its author, links (homepage, repository, license), whether it works with this Zeron (`compatible`), and `installed` when it's on this device. Say what it asks for before suggesting it; installing is install_plugin { store = id }, and it waits for the person to allow it.",
+            description: "A plugin's page in the Zeron plugin store: its README, what it asks for (permissions, grouped as the person's consent sheet shows them), its newest versions and their notes, each `verified` or not, `verified_version` (the newest Zeron verified, or null), its author, links (homepage, repository, license), whether it works with this Zeron (`compatible`), and `installed` when it's on this device. Say what it asks for, and whether it's verified, before suggesting it; installing is install_plugin { store = id }, which takes the newest verified version (none: only a person can install it, from its page), and it waits for the person to allow it.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -262,7 +264,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: CHECK_PLUGIN,
-            description: "Check one of the person's own plugins (made on this device, by its id) against the store's rules before it's published: every problem, each with a `rule` (missing_readme, missing_listing, bad_listing, not_semver, id_reserved, bad_package, too_large), the `field` or `path` it's about and words to fix it by, plus warnings that don't block it (binary files, no CHANGELOG.md section for its version, raw HTML or footnotes in README.md or CHANGELOG.md, which the store shows as typed, and display math, which its website shows as typed), its listing as the store will show it, and this version's notes. Fix and check again until `ok`. Submitting it to the store is the person's: they publish it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish <id>`. No tool here submits it and Zeron never gives you what does (the check's ticket), so don't run `zeron plugin publish` yourself unless they ask you to. The store needs README.md (its page), a one-line `description`, an `icon` (an SVG file in it), one or two `categories`, and a strict semver `version`; see the guide's \"Publishing to the store\".",
+            description: "Check one of the person's own plugins (made on this device, by its id) against the store's rules before it's published: every problem, each with a `rule` (missing_readme, missing_listing, bad_listing, not_semver, id_reserved, bad_package, too_large), the `field` or `path` it's about and words to fix it by, plus warnings that don't block it (binary files, no CHANGELOG.md section for its version, raw HTML or footnotes in README.md or CHANGELOG.md, which the store shows as typed, and display math, which its website shows as typed), its listing as the store will show it, and this version's notes. Fix and check again until `ok`. Publishing it is the person's: they publish it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish <id>`, and it's live for everyone at once, marked verified once Zeron has read it. No tool here submits it and Zeron never gives you what does (the check's ticket), so don't run `zeron plugin publish` yourself unless they ask you to. The store needs README.md (its page), a one-line `description`, an `icon` (an SVG file in it), one or two `categories`, and a strict semver `version`; see the guide's \"Publishing to the store\".",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -724,6 +726,8 @@ impl Tools {
             category: Option<String>,
             keyword: Option<String>,
             featured: Option<bool>,
+            verified: Option<bool>,
+            author: Option<String>,
             sort: Option<String>,
             cursor: Option<String>,
             limit: Option<u32>,
@@ -731,7 +735,7 @@ impl Tools {
         let args: Args = parse(args)?;
         let params = json!({
             "q": args.query, "category": args.category, "keyword": args.keyword, "featured": args.featured,
-            "sort": args.sort, "cursor": args.cursor, "limit": args.limit,
+            "verified": args.verified, "author": args.author, "sort": args.sort, "cursor": args.cursor, "limit": args.limit,
         });
         let reply = self.zeron.call_rpc(methods::STORE_SEARCH, params).await.map_err(plain)?;
         let plugins: Vec<Value> = reply["items"]
@@ -740,7 +744,7 @@ impl Tools {
             .flatten()
             .map(|card| {
                 let mut out = json!({});
-                for key in ["id", "name", "summary", "author", "categories", "keywords", "version", "installs", "installed"] {
+                for key in ["id", "name", "summary", "author", "categories", "keywords", "version", "verified", "verified_version", "installs", "installed"] {
                     if let Some(value) = card.get(key).filter(|v| !v.is_null()) {
                         out[key] = value.clone();
                     }
@@ -755,7 +759,8 @@ impl Tools {
         Ok(out)
     }
 
-    /// `get_store_plugin`: the engine's `StorePlugin`, every version.
+    /// `get_store_plugin`: the engine's `StorePlugin` (its first page of
+    /// versions, each verified or not).
     pub(super) async fn get_store_plugin(&self, args: Value) -> Result<Value, String> {
         #[derive(Deserialize)]
         struct Args {
@@ -767,7 +772,7 @@ impl Tools {
         };
         let mut reply = self
             .zeron
-            .call_rpc(methods::STORE_PLUGIN, json!({ "id": id.trim(), "versions": true }))
+            .call_rpc(methods::STORE_PLUGIN, json!({ "id": id.trim() }))
             .await
             .map_err(plain)?;
         // (Its package's hashes are for the device that checks them.)
@@ -799,7 +804,7 @@ impl Tools {
         }
         reply["next"] = json!(if reply["ok"] == json!(true) {
             format!(
-                "It meets the store's rules. Publishing is the person's: they submit it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish {}`. No tool here submits it, and Zeron never gives you what does: don't run that command yourself unless they ask you to. Every version is reviewed before others see it.",
+                "It meets the store's rules. Publishing is the person's: they submit it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish {}`. No tool here submits it, and Zeron never gives you what does: don't run that command yourself unless they ask you to. A version is live for everyone as soon as it's published, and marked verified once Zeron has read it.",
                 id.trim()
             )
         } else {
@@ -1049,7 +1054,7 @@ mod tests {
 
         let page = tools.call(GET_STORE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
         assert_eq!((page["readme"].as_str(), page.get("package")), (Some("# Focus"), None));
-        assert_eq!(last_call(&engine), (methods::STORE_PLUGIN.to_owned(), json!({ "id": "focus", "versions": true })));
+        assert_eq!(last_call(&engine), (methods::STORE_PLUGIN.to_owned(), json!({ "id": "focus" })));
 
         let checked = tools.call(CHECK_PLUGIN, json!({ "id": "focus" })).await.unwrap();
         assert_eq!(checked["ok"], true);

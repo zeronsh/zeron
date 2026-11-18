@@ -162,14 +162,16 @@ pub enum PluginCommand {
         /// The plugin's folder, or the id of one in Zeron's plugins folder.
         target: String,
     },
-    /// Submit a plugin to the store for review. In CI, set ZERON_DEPLOY_KEY
-    /// to a deploy key's secret (never pass it as an argument): the folder is
-    /// checked, signed with that key and sent, with no Zeron running and no
-    /// sign-in. Without it, your own plugin goes through the running Zeron,
-    /// signed with this device's key and sent with your session. Exits 0 when
-    /// submitted, 1 when it doesn't meet the store's rules, 2 for a usage or
-    /// set-up problem, 3 when the store refuses the key or the account, 4
-    /// when the store can't be reached (try again).
+    /// Publish a plugin to the store: it's live at once, for anyone to
+    /// install, and marked verified once a reviewer has read it. In CI, set
+    /// ZERON_DEPLOY_KEY to a deploy key's secret (never pass it as an
+    /// argument): the folder is checked, signed with that key and sent, with
+    /// no Zeron running and no sign-in. Without it, your own plugin goes
+    /// through the running Zeron, signed with this device's key and sent
+    /// with your session. Exits 0 when published, 1 when it doesn't meet the
+    /// store's rules, 2 for a usage or set-up problem, 3 when the store
+    /// refuses the key or the account, 4 when the store can't be reached
+    /// (try again).
     Publish {
         /// The plugin's folder (with ZERON_DEPLOY_KEY), or the id of your
         /// plugin in Zeron's plugins folder.
@@ -178,16 +180,19 @@ pub enum PluginCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Your plugins in the store: each version's review state and the
-    /// reviewer's reason. With ZERON_DEPLOY_KEY, the plugin that key is for
-    /// (and no Zeron needs to be running).
+    /// Your plugins in the store: each version, whether Zeron has verified
+    /// it, and a reviewer's reason when it declined to. With
+    /// ZERON_DEPLOY_KEY, the plugins that key may publish (and no Zeron
+    /// needs to be running).
     Status {
         /// Only this plugin.
         id: Option<String>,
     },
-    /// Deploy keys: what a CI job publishes with, one plugin's each. Made,
-    /// listed and revoked through the running Zeron, with your session (never
-    /// with a deploy key); a plugin's first version comes from your machine.
+    /// Deploy keys: what a CI job publishes with. Each is your account's,
+    /// for the plugins you name or all of yours, fixed when it's made. Made,
+    /// listed and revoked through the running Zeron, with your session
+    /// (never with a deploy key); a plugin's first version comes from your
+    /// machine.
     Key {
         #[command(subcommand)]
         command: KeyCommand,
@@ -197,29 +202,32 @@ pub enum PluginCommand {
     Yank { id: String, version: String },
     /// Undo `yank`.
     Unyank { id: String, version: String },
-    /// Take back a version still in review.
-    Withdraw { id: String, version: String },
 }
 
 #[derive(Subcommand)]
 pub enum KeyCommand {
-    /// Make a deploy key for a plugin: its secret is shown this once (Zeron
-    /// keeps no copy). Making one needs a fresh sign-in, which this asks for.
+    /// Make a deploy key: its secret is shown this once (Zeron keeps no
+    /// copy). Name the plugins it publishes (`--plugins a,b`), or `--all` of
+    /// yours, those you first publish later included; that can't change
+    /// afterwards. Making one needs a fresh sign-in, which this asks for.
     Create {
-        /// The plugin's id.
-        id: String,
         /// What it's for, like "GitHub Actions".
         #[arg(long)]
         name: String,
+        /// The plugins it publishes, by id (yours in the store already).
+        #[arg(long, value_delimiter = ',', value_name = "IDS", required_unless_present = "all", conflicts_with = "all")]
+        plugins: Vec<String>,
+        /// Every plugin of yours, those you first publish later included.
+        #[arg(long)]
+        all: bool,
         /// Stop it working after this many days.
         #[arg(long, value_name = "DAYS")]
         expires_in_days: Option<u32>,
     },
-    /// List a plugin's deploy keys (never their secrets).
-    List { id: String },
+    /// List your deploy keys and what each publishes (never their secrets).
+    List,
     /// Revoke a deploy key: it publishes nothing from now on.
     Revoke {
-        id: String,
         /// The key, as `zeron plugin key list` shows it.
         key: String,
     },
@@ -513,7 +521,6 @@ mod tests {
             &["plugin", "key", "revoke"],
             &["plugin", "yank"],
             &["plugin", "unyank"],
-            &["plugin", "withdraw"],
             &["template", "use"],
             &["daemon", "install"],
             &["update"],

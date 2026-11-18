@@ -724,21 +724,34 @@ pub mod methods {
     // A plugin from the store installs with `InstallPlugin {store, version?}`
     // and updates with `CheckPluginUpdates` / `UpdatePlugin` as any other.
 
-    /// `{q?, category?, keyword?, featured?, sort?, cursor?, limit?}` →
+    /// `{q?, category?, keyword?, featured?, verified?, author?, sort?,
+    /// cursor?, limit?}` →
     /// `{items: [PluginCard + installed?: {version, status, store}],
     /// next_cursor?, total}`. `featured: true` lists only the plugins staff
     /// feature, in the store's order; false or absent lists every one.
+    /// `verified: true` only plugins whose newest version is verified;
+    /// `author` one publisher's (a username). Each card says `verified` and
+    /// `verified_version` (amendment 45).
     /// `total` is how many plugins the search matches across all its pages
     /// (the same on each page; 0 for none), as the store counts them.
     pub const STORE_SEARCH: &str = "StoreSearch";
-    /// `{id, versions?, for_zeron?}` → the store's `PluginDetail` (with every
-    /// version the caller may see when `versions`), `installed?: {version,
-    /// hash, status, store, update?, blocked?}` and `compatible`
-    /// (`incompatible?`: why not), judged for Zeron `for_zeron` (another
-    /// device's version), else this one.
+    /// `{id, for_zeron?}` → the store's `PluginDetail` (its first page of
+    /// versions, `versions_next_cursor?`; `verified`, `verified_version`),
+    /// `installed?: {version, hash, status, store, verified?, update?,
+    /// blocked?}` and `compatible` (`incompatible?`: why not), judged for
+    /// Zeron `for_zeron` (another device's version), else this one.
     pub const STORE_PLUGIN: &str = "StorePlugin";
-    /// `{}` → `{categories: [{id, name}]}`.
+    /// `{id, cursor?, limit?}` → `{versions: [Version], total,
+    /// next_cursor?, prev_cursor?}`: a page of a plugin's listed and yanked
+    /// versions, newest first, each `verified` or not.
+    pub const STORE_VERSIONS: &str = "StoreVersions";
+    /// `{id, version}` → that `Version` as the store records it.
+    pub const STORE_VERSION: &str = "StoreVersion";
+    /// `{}` → `{categories: [{id, name, count?}]}` (offline: the fixed list).
     pub const STORE_CATEGORIES: &str = "StoreCategories";
+    /// `{}` → `{plugins, verified}`: how many plugins the store lists, and
+    /// how many of them have a newest version that's verified.
+    pub const STORE_STATS: &str = "StoreStats";
     /// `{id, version, path}` → `{file, type, bytes}`: one file of a store
     /// version (a README's picture, a screenshot, the icon), fetched once
     /// into this device's cache; `file` is its path here.
@@ -746,6 +759,13 @@ pub mod methods {
     /// `{id, on}` → the plugin's item: whether this device takes the
     /// store plugin's pre-releases.
     pub const SET_PLUGIN_PRERELEASES: &str = "SetPluginPrereleases";
+    /// `{id?, prefer: "newest" | "verified" | null}` → `{prefer, device}`:
+    /// which store update this device stages, for plugin `id` (null: as the
+    /// device does) or for every plugin (`id` left out; null: the default,
+    /// `newest`). `newest`: the newest version, marked when it isn't
+    /// verified, the newest verified beside it; `verified`: the newest
+    /// verified. Taking an unverified version always asks.
+    pub const SET_PLUGIN_UPDATES: &str = "SetPluginUpdates";
     /// `{id}` → `{id, name, version, description, hash, ok, problems,
     /// warnings, listing, notes, package: {files, bytes}, ticket?}`: one of
     /// your own plugins checked against the store's rules, each problem
@@ -761,19 +781,25 @@ pub mod methods {
     /// your session. The person's act alone: never an agent's.
     pub const PUBLISH_PLUGIN: &str = "PublishPlugin";
     /// `{}` → the store's `/me/plugins`: your plugins there, every version
-    /// with its review state and reason.
+    /// `verified` or not, with its `review` (a decline's reason and words are
+    /// yours alone).
     pub const STORE_MY_PLUGINS: &str = "StoreMyPlugins";
-    /// `{id, version, action: "withdraw" | "yank" | "unyank"}` → the
-    /// store's answer.
+    /// `{id, version, action: "yank" | "unyank"}` → `{ok: true, …}` or
+    /// `{ok: false, error, message}`.
     pub const STORE_VERSION_ACTION: &str = "StoreVersionAction";
-    /// `{id}` → `{keys: [...]}`: a plugin's deploy keys (never a secret).
+    /// `{}` → `{keys: [{key, name, scope, created_at, last_used_at,
+    /// last_used_plugin, expires_at, revoked_at?}]}`: the account's deploy
+    /// keys (never a secret).
     pub const LIST_DEPLOY_KEYS: &str = "ListDeployKeys";
-    /// `{id, name, expires?}` → `{ok: true, key, secret}` (the secret,
+    /// `{name, scope: {all: true} | {plugins: [id…]}, expires?}` →
+    /// `{ok: true, key, secret}` (the secret,
     /// `zpk_…`, shown this once and kept nowhere), or `{ok: false, error,
     /// message}`: `step_up_required` (run [`STEP_UP`] `{for: "deploy_key"}`,
-    /// then again: each key takes a step-up of its own), or the store's word.
+    /// then again: each key takes a step-up of its own), `not_owner` with
+    /// `ids` (plugins not yours in the store), `invalid_scope`, or the
+    /// store's word. The scope is fixed: another scope is another key.
     pub const CREATE_DEPLOY_KEY: &str = "CreateDeployKey";
-    /// `{id, key}` → `{revoked: key}`.
+    /// `{key}` → `{revoked: key}`.
     pub const REVOKE_DEPLOY_KEY: &str = "RevokeDeployKey";
     /// `{id, reason, text?}` → `{ok: true, …}` or `{ok: false, error,
     /// message}`: a listed plugin reported to the store's reviewers, by the
@@ -852,7 +878,10 @@ pub fn local_only(method: &str) -> bool {
             // across your devices as any plugin is.
             | methods::STORE_SEARCH
             | methods::STORE_PLUGIN
+            | methods::STORE_VERSIONS
+            | methods::STORE_VERSION
             | methods::STORE_CATEGORIES
+            | methods::STORE_STATS
             | methods::STORE_FILE
             | methods::PREPARE_PLUGIN_PUBLISH
             | methods::PUBLISH_PLUGIN
@@ -966,7 +995,10 @@ pub fn agent_allowed(method: &str) -> bool {
             // is `InstallPlugin {store}` (lands waiting for the person).
             | methods::STORE_SEARCH
             | methods::STORE_PLUGIN
+            | methods::STORE_VERSIONS
+            | methods::STORE_VERSION
             | methods::STORE_CATEGORIES
+            | methods::STORE_STATS
             | methods::PREPARE_PLUGIN_PUBLISH
             // Templates: authoring and switching (the app shows an
             // unapproved one as a preview until the person keeps it), and
@@ -1230,18 +1262,19 @@ mod tests {
         // pre-releases here (Settings → Plugins' device switcher); reading
         // the catalog, publishing, versions, reports and deploy keys are
         // this device's own, and never an agent's but to read and check.
-        for method in [methods::INSTALL_PLUGIN, methods::CHECK_PLUGIN_UPDATES, methods::UPDATE_PLUGIN, methods::SET_PLUGIN_OFF, methods::SET_PLUGIN_PRERELEASES] {
+        for method in [methods::INSTALL_PLUGIN, methods::CHECK_PLUGIN_UPDATES, methods::UPDATE_PLUGIN, methods::SET_PLUGIN_OFF, methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES] {
             assert!(!local_only(method), "{method}");
         }
         assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({ "store": "focus" })));
         for method in [
-            methods::STORE_SEARCH, methods::STORE_PLUGIN, methods::STORE_CATEGORIES, methods::STORE_FILE, methods::PREPARE_PLUGIN_PUBLISH,
+            methods::STORE_SEARCH, methods::STORE_PLUGIN, methods::STORE_VERSIONS, methods::STORE_VERSION, methods::STORE_CATEGORIES,
+            methods::STORE_STATS, methods::STORE_FILE, methods::PREPARE_PLUGIN_PUBLISH,
             methods::PUBLISH_PLUGIN, methods::STORE_MY_PLUGINS, methods::STORE_VERSION_ACTION, methods::STORE_REPORT,
             methods::LIST_DEPLOY_KEYS, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY,
         ] {
             assert!(local_only(method), "{method}");
         }
-        for method in [methods::PUBLISH_PLUGIN, methods::STORE_VERSION_ACTION, methods::STORE_REPORT, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY, methods::LIST_DEPLOY_KEYS, methods::SET_PLUGIN_PRERELEASES] {
+        for method in [methods::PUBLISH_PLUGIN, methods::STORE_VERSION_ACTION, methods::STORE_REPORT, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY, methods::LIST_DEPLOY_KEYS, methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES] {
             assert!(!agent_allowed(method), "{method}");
         }
         assert!(!local_only(methods::PLUGIN_DELIVER));

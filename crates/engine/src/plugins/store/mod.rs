@@ -49,7 +49,9 @@ pub fn vouched(publisher: &Publisher) -> Result<(String, String), String> {
 /// The package `raw`, verified and checked against the store's record of
 /// `id` at `version` (`record`), published by `publisher`: the package and
 /// the store's record to keep beside it.
-pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: &Publisher) -> Result<(Package, StoreSource), String> {
+/// `verified`: the version's record says Zeron verified it (fetched with
+/// `record`, at install time).
+pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: &Publisher, verified: bool) -> Result<(Package, StoreSource), String> {
     let mismatch = |what: &str| failure(reason::STORE_MISMATCH, format!("What the store sent isn't what its record says ({what}), so it wasn't installed"));
     let (publisher, publisher_id) = vouched(publisher)?;
     if record.sha256.is_empty() || record.hash.is_empty() || record.bytes == 0 {
@@ -74,7 +76,7 @@ pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, pub
     if record.key.as_deref().is_some_and(|key| key != package.key) {
         return Err(mismatch("who signed it"));
     }
-    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()) };
+    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified };
     Ok((package, store))
 }
 
@@ -100,14 +102,14 @@ mod tests {
         let raw = signed_package(&key, "focus", "1.2.0", &["ui.add"], "return 1");
         let package = install::parse(raw.clone()).unwrap();
         let good = record(&raw, &package);
-        let (verified, store) = verify(raw.clone(), "focus", "1.2.0", &good, &ada()).unwrap();
+        let (verified, store) = verify(raw.clone(), "focus", "1.2.0", &good, &ada(), true).unwrap();
         assert_eq!(verified.hash, package.hash);
-        assert_eq!(store, StoreSource { id: "focus".into(), publisher: "ada".into(), publisher_id: ADA.into(), hash: package.hash.clone(), key: Some(key.public()) });
+        assert_eq!(store, StoreSource { id: "focus".into(), publisher: "ada".into(), publisher_id: ADA.into(), hash: package.hash.clone(), key: Some(key.public()), verified: true });
         assert_eq!(store.binding(), format!("store:{ADA}"), "bound to the owner's id, never the username");
 
         let refused = |raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: Option<&str>| {
             let publisher = Publisher { id: Some(ADA.into()), username: publisher.map(str::to_owned), verified: true };
-            let error = verify(raw, id, version, record, &publisher).unwrap_err();
+            let error = verify(raw, id, version, record, &publisher, true).unwrap_err();
             install::reason_of(&error).map(str::to_owned).unwrap_or(error)
         };
         // Another plugin, version, file, content or key than the record's.
@@ -137,11 +139,11 @@ mod tests {
         assert_eq!(refused(tampered, "focus", "1.2.0", &tampered_record, Some("ada")), "tampered");
         // The record's key is optional; its hashes compare in any case.
         let loose = PackageRecord { key: None, sha256: good.sha256.to_uppercase(), ..good.clone() };
-        assert!(verify(raw.clone(), "focus", "1.2.0", &loose, &ada()).is_ok());
+        assert!(verify(raw.clone(), "focus", "1.2.0", &loose, &ada(), true).is_ok());
         // A record without the owner's id, or one that isn't one.
         for id in [None, Some("ada"), Some("pub_XYZ"), Some("pub_0123456789abcdef0123456789ABCDEF")] {
             let publisher = Publisher { id: id.map(str::to_owned), username: Some("ada".into()), verified: true };
-            assert_eq!(install::reason_of(&verify(raw.clone(), "focus", "1.2.0", &good, &publisher).unwrap_err()), Some("store_mismatch"), "{id:?}");
+            assert_eq!(install::reason_of(&verify(raw.clone(), "focus", "1.2.0", &good, &publisher, true).unwrap_err()), Some("store_mismatch"), "{id:?}");
         }
     }
 }

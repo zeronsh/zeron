@@ -31,6 +31,55 @@ pub struct State {
     /// Store plugins this device takes pre-releases of.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub prerelease: BTreeSet<String>,
+    /// Which store update this device stages (amendment 45); `None`: the
+    /// default, [`DEFAULT_UPDATES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_updates: Option<UpdatePreference>,
+    /// The same for one plugin, over the device's.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub store_updates_for: BTreeMap<String, UpdatePreference>,
+    /// The last take-down feed event applied here (its `seq`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takedowns_after: Option<u64>,
+}
+
+/// Which store update a device stages when the newest isn't verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePreference {
+    /// The newest version, marked when it isn't verified, the newest
+    /// verified beside it.
+    Newest,
+    /// The newest verified version.
+    Verified,
+}
+
+impl UpdatePreference {
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "newest" => Some(Self::Newest),
+            "verified" => Some(Self::Verified),
+            _ => None,
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Newest => "newest",
+            Self::Verified => "verified",
+        }
+    }
+}
+
+/// What a device stages until someone chooses otherwise: the newest version
+/// (review is a mark, not a gate). The one place it's decided.
+pub const DEFAULT_UPDATES: UpdatePreference = UpdatePreference::Newest;
+
+impl State {
+    /// The update preference for plugin `id` here.
+    pub fn updates_for(&self, id: &str) -> UpdatePreference {
+        self.store_updates_for.get(id).copied().or(self.store_updates).unwrap_or(DEFAULT_UPDATES)
+    }
 }
 
 /// A store plugin's installed version, blocked by the store.
@@ -65,8 +114,9 @@ pub struct Decision {
     /// before records were kept, which allowed its permissions alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grants: Option<serde_json::Value>,
-    /// Updated since it was allowed and bound to content (an Unknown
-    /// author's): waits for you again, whatever it asks.
+    /// Waits for you again, whatever it asks: updated since it was allowed
+    /// and bound to content (an Unknown author's), or a store version that
+    /// isn't verified (taken, or restored after a take-down).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reask: bool,
 }
@@ -102,7 +152,13 @@ impl State {
         self.decisions.retain(|id, _| present.contains(id));
         self.blocked.retain(|id, _| present.contains(id));
         self.prerelease.retain(|id| present.contains(id));
-        own != self.own.len() || decisions != self.decisions.len() || blocked != self.blocked.len() || prerelease != self.prerelease.len()
+        let preferences = self.store_updates_for.len();
+        self.store_updates_for.retain(|id, _| present.contains(id));
+        own != self.own.len()
+            || decisions != self.decisions.len()
+            || blocked != self.blocked.len()
+            || prerelease != self.prerelease.len()
+            || preferences != self.store_updates_for.len()
     }
 }
 

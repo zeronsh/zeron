@@ -770,12 +770,29 @@ fn deploy_key_cases() -> Value {
             "headers": headers(key.authorization(method, path, body, ts), &body_sha256),
         })
     };
+    // Proof of possession, v2: one account's key (its publisher id), one
+    // lifetime (`expires_at`, or never), one scope (`*`, or the ids sorted
+    // and joined with `,`), the key last.
+    let publisher_id = "pub_0123456789abcdef0123456789abcdef";
+    let proofs: Vec<Value> = [
+        (deploy_key::Scope::All, None),
+        (deploy_key::Scope::plugins(&["git".into(), "focus".into()]).unwrap(), Some(1_800_000_000_000_i64)),
+    ]
+    .iter()
+    .map(|(scope, expires_at)| {
+        json!({
+            "publisher_id": publisher_id, "expires_at": expires_at,
+            "scope": scope.to_value(), "scope_text": scope.text(),
+            "message": deploy_key::proof_message(publisher_id, *expires_at, scope, &key.public()),
+            "proof": key.proof(publisher_id, *expires_at, scope),
+        })
+    })
+    .collect();
     json!({
         "secret_prefix": deploy_key::SECRET_PREFIX,
         "secret": key.secret(),
         "public": key.public(),
-        "proof_message": deploy_key::proof_message("focus", &key.public()),
-        "proof": key.proof("focus"),
+        "proofs": proofs,
         "max_skew_ms": deploy_key::MAX_SKEW_MS,
         "content_sha256_header": deploy_key::CONTENT_SHA256_HEADER,
         "request": request("POST", "/store/v1/plugins/focus/versions", br#"{"format":"zeron-plugin:v1"}"#, 1_763_000_000_000),
@@ -882,7 +899,7 @@ fn data() -> Value {
             "screenshot_types": listing::SCREENSHOT_TYPES,
             "max_update_plugins": super::store::MAX_UPDATE_PLUGINS,
         },
-        "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version.",
+        "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version. A publish must be later than every version the plugin has had, in any state, pre-releases included.",
         "categories": CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
         "builtin_ids": listing::BUILTIN_IDS,
         "reserved_ids": manifest::RESERVED_IDS,

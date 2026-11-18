@@ -126,6 +126,12 @@ pub struct Search {
     /// every listed plugin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub featured: Option<bool>,
+    /// Only plugins whose newest version is verified (`verified=1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+    /// One publisher's plugins, by username.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +148,8 @@ impl Search {
             ("category", self.category.as_deref()),
             ("keyword", self.keyword.as_deref()),
             ("featured", (self.featured == Some(true)).then_some("true")),
+            ("verified", (self.verified == Some(true)).then_some("1")),
+            ("author", self.author.as_deref()),
             ("sort", self.sort.as_deref()),
             ("cursor", self.cursor.as_deref()),
             ("limit", limit.as_deref()),
@@ -194,17 +202,31 @@ pub struct Detail {
     pub author: Publisher,
     #[serde(default, deserialize_with = "nullable")]
     pub package: PackageRecord,
+    /// Its `version` is verified.
+    #[serde(default, deserialize_with = "nullable")]
+    pub verified: bool,
+    /// The newest verified listed version, if any (installed through the
+    /// one-version route).
+    #[serde(default, deserialize_with = "nullable")]
+    pub verified_version: Option<String>,
 }
 
-/// One version, as `GET /store/v1/plugins/:id/versions` lists it.
+/// One version, as `GET /store/v1/plugins/:id/versions` lists it and
+/// `…/versions/:version` answers it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VersionRecord {
     #[serde(default, deserialize_with = "nullable")]
     pub version: String,
+    /// `listed` or `yanked` (what the public sees).
     #[serde(default, deserialize_with = "nullable")]
     pub status: String,
     #[serde(default, deserialize_with = "nullable")]
     pub yanked: bool,
+    /// A reviewer verified it. Required: a version that doesn't say isn't
+    /// read.
+    pub verified: bool,
+    #[serde(default, deserialize_with = "nullable")]
+    pub verified_at: Option<i64>,
     #[serde(default, deserialize_with = "nullable")]
     pub hash: String,
     #[serde(default, deserialize_with = "nullable")]
@@ -257,10 +279,43 @@ pub struct Offer {
     pub added: Vec<String>,
     #[serde(default, deserialize_with = "nullable")]
     pub removed: Vec<String>,
-    /// The caller's own version, still in review (offered to its author's
-    /// devices alone).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub in_review: bool,
+    #[serde(default, deserialize_with = "nullable")]
+    pub prerelease: bool,
+    /// A reviewer verified it. Required: an offer that doesn't say is
+    /// unreadable.
+    pub verified: bool,
+    #[serde(default, deserialize_with = "nullable")]
+    pub verified_at: Option<i64>,
+    /// When this offer isn't verified: the newest verified version newer
+    /// than the one installed, if there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_update: Option<Box<Offer>>,
+}
+
+/// The take-down feed (`GET /store/v1/takedowns?after=<seq>`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Takedowns {
+    #[serde(default, deserialize_with = "nullable")]
+    pub events: Vec<TakedownEvent>,
+    /// The last `seq` there is: where to continue from after a reset.
+    #[serde(default, deserialize_with = "nullable")]
+    pub head: u64,
+    /// The device's place is gone (or it had none): run the full update
+    /// check, then continue from `head`.
+    #[serde(default, deserialize_with = "nullable")]
+    pub reset: bool,
+}
+
+/// A version taken down or restored, in the order the store did it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TakedownEvent {
+    pub seq: u64,
+    /// `take_down` or `restore`.
+    pub kind: String,
+    pub id: String,
+    pub version: String,
+    #[serde(default, deserialize_with = "nullable")]
+    pub reason: String,
 }
 
 /// A version taken down and blocked: devices turn it off.
@@ -338,6 +393,21 @@ impl StoreClient {
 
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// Plugin `id`'s page on the store's website: the site beside this edge
+    /// (`edge.zeron.sh` → `zeron.sh`), at `/plugins/<id>`.
+    pub fn page_url(&self, id: &str) -> String {
+        let site = url::Url::parse(&self.base)
+            .ok()
+            .map(|mut url| {
+                if let Some(host) = url.host_str().and_then(|h| h.strip_prefix("edge.")).map(str::to_owned) {
+                    let _ = url.set_host(Some(&host));
+                }
+                url.as_str().trim_end_matches('/').to_owned()
+            })
+            .unwrap_or_else(|| self.base.clone());
+        format!("{site}/plugins/{}", segment(id))
     }
 
     /// `method path` (path from `/store/v1`, query included) with `body`,
@@ -420,10 +490,39 @@ impl StoreClient {
         Ok((value, detail))
     }
 
-    pub async fn versions(&self, id: &str, caller: &Caller) -> Result<(Value, Vec<VersionRecord>), String> {
-        let value = self.json(reqwest::Method::GET, &format!("/store/v1/plugins/{}/versions", segment(id)), None, caller).await?;
-        let versions = Self::typed(value.get("versions").cloned().unwrap_or(Value::Array(Vec::new())))?;
-        Ok((value, versions))
+    /// One page of `id`'s listed and yanked versions, newest first:
+    /// `{versions, total, next_cursor?, prev_cursor?}`, as the store wrote it.
+    pub async fn versions(&self, id: &str, cursor: Option<&str>, limit: Option<u32>, caller: &Caller) -> Result<Value, String> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor.map(str::trim).filter(|c| !c.is_empty()) {
+            query.push(format!("cursor={}", segment(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={}", limit.clamp(1, 50)));
+        }
+        let query = if query.is_empty() { String::new() } else { format!("?{}", query.join("&")) };
+        self.json(reqwest::Method::GET, &format!("/store/v1/plugins/{}/versions{query}", segment(id)), None, caller).await
+    }
+
+    /// Version `version` of `id`, as the store records it (listed or
+    /// yanked): what a device installs a named version by.
+    pub async fn version(&self, id: &str, version: &str, caller: &Caller) -> Result<(Value, VersionRecord), String> {
+        let path = format!("/store/v1/plugins/{}/versions/{}", segment(id), segment(version));
+        let value = self.json(reqwest::Method::GET, &path, None, caller).await?;
+        let record = Self::typed(value.clone())?;
+        Ok((value, record))
+    }
+
+    /// The take-down feed after `after` (none: from the start, which the
+    /// store answers with a reset).
+    pub async fn takedowns(&self, after: Option<u64>) -> Result<Takedowns, String> {
+        let path = after.map_or_else(|| "/store/v1/takedowns".to_owned(), |seq| format!("/store/v1/takedowns?after={seq}"));
+        Self::typed(self.json(reqwest::Method::GET, &path, None, &Caller::Anonymous).await?)
+    }
+
+    /// The store's totals, `{plugins, verified}`.
+    pub async fn stats(&self) -> Result<Value, String> {
+        self.json(reqwest::Method::GET, "/store/v1/stats", None, &Caller::Anonymous).await
     }
 
     /// Version `version`'s package file, up to the largest a package may be.
@@ -468,23 +567,23 @@ impl StoreClient {
         self.json(reqwest::Method::GET, "/store/v1/me/plugins", None, caller).await
     }
 
-    /// `withdraw`, `yank` or `unyank` version `version` of `id`.
+    /// `yank` or `unyank` version `version` of `id`.
     pub async fn version_action(&self, id: &str, version: &str, action: &str, caller: &Caller) -> Result<Value, String> {
         let path = format!("/store/v1/plugins/{}/versions/{}/{}", segment(id), segment(version), segment(action));
         self.json(reqwest::Method::POST, &path, None, caller).await
     }
 
-    pub async fn keys(&self, id: &str, caller: &Caller) -> Result<Value, String> {
-        self.json(reqwest::Method::GET, &format!("/store/v1/plugins/{}/keys", segment(id)), None, caller).await
+    /// The account's deploy keys (amendment 44).
+    pub async fn keys(&self, caller: &Caller) -> Result<Value, String> {
+        self.json(reqwest::Method::GET, "/store/v1/me/keys", None, caller).await
     }
 
-    pub async fn add_key(&self, id: &str, body: Value, caller: &Caller) -> Result<Value, String> {
-        self.json(reqwest::Method::POST, &format!("/store/v1/plugins/{}/keys", segment(id)), Some(body), caller).await
+    pub async fn add_key(&self, body: Value, caller: &Caller) -> Result<Value, String> {
+        self.json(reqwest::Method::POST, "/store/v1/me/keys", Some(body), caller).await
     }
 
-    pub async fn revoke_key(&self, id: &str, key: &str, caller: &Caller) -> Result<Value, String> {
-        let path = format!("/store/v1/plugins/{}/keys/{}", segment(id), segment(key));
-        self.json(reqwest::Method::DELETE, &path, None, caller).await
+    pub async fn revoke_key(&self, key: &str, caller: &Caller) -> Result<Value, String> {
+        self.json(reqwest::Method::DELETE, &format!("/store/v1/me/keys/{}", segment(key)), None, caller).await
     }
 
     /// Report a listed plugin (`reason`: malware, misleading, broken,
@@ -581,7 +680,7 @@ mod tests {
     async fn revoking_dot_dot_sends_nothing() {
         // (A closed port: had it been sent, the word would be store_unreachable.)
         let client = StoreClient::new("http://127.0.0.1:9");
-        let error = client.revoke_key("focus", "..", &Caller::Anonymous).await.unwrap_err();
+        let error = client.revoke_key("..", &Caller::Anonymous).await.unwrap_err();
         assert_eq!(install::reason_of(&error), Some(reason::NOT_IN_STORE), "{error}");
     }
 
@@ -620,13 +719,20 @@ mod tests {
         }))
         .unwrap();
         assert_eq!((detail.id.as_str(), detail.author.username.as_deref(), detail.package.bytes), ("focus", Some("ada"), 9));
-        let versions: Vec<VersionRecord> = StoreClient::typed(json!([{ "version": "1.2.0", "status": "approved", "hash": "h", "listed_at": 1, "asks_changed": true }])).unwrap();
-        assert_eq!(versions[0].status, "approved");
+        let versions: Vec<VersionRecord> = StoreClient::typed(json!([{ "version": "1.2.0", "status": "listed", "hash": "h", "verified": true, "via": "device", "listed_at": 1, "asks_changed": true }])).unwrap();
+        assert_eq!((versions[0].status.as_str(), versions[0].verified), ("listed", true));
         let updates = Updates::read(&json!({
-            "updates": [{ "id": "focus", "version": "1.3.0", "hash": "h", "listed_at": 1, "icon": "icon.svg" }],
+            "updates": [{ "id": "focus", "version": "1.3.0", "hash": "h", "verified": false, "listed_at": 1, "icon": "icon.svg",
+                          "verified_update": { "id": "focus", "version": "1.2.5", "hash": "g", "verified": true, "later": 1 } }],
             "blocked": [{ "id": "old", "version": "1.0.0", "reason": "r", "blocked_at": 1 }],
             "total": 2,
         }));
         assert_eq!((updates.updates.len(), updates.blocked.len(), updates.unreadable.len()), (1, 1, 0));
+        assert_eq!(updates.updates[0].verified_update.as_ref().map(|v| (v.version.as_str(), v.verified)), Some(("1.2.5", true)));
+        // `verified` is required: a version or an offer that doesn't say is
+        // never read as either.
+        assert!(StoreClient::typed::<VersionRecord>(json!({ "version": "1.2.0", "status": "listed", "hash": "h" })).is_err());
+        let silent = Updates::read(&json!({ "updates": [{ "id": "focus", "version": "1.3.0", "hash": "h" }] }));
+        assert_eq!((silent.updates.len(), silent.unreadable.clone()), (0, vec![Some("focus".to_owned())]));
     }
 }

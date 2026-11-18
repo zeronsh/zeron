@@ -96,6 +96,9 @@ pub mod reason {
     /// Replacing an installed store plugin's code is the person's to do
     /// (an update they click), never an agent's.
     pub const NEEDS_PERSON: &str = "needs_person";
+    /// An update asked for as one of many (`verified_only`) isn't
+    /// verified: taken on its own, with its own question.
+    pub const NOT_VERIFIED: &str = "not_verified";
     // The store's words (`store::client::reason`): `store_unreachable`,
     // `not_in_store`, `store_error`, `store_mismatch`; and the edge's own.
 }
@@ -165,6 +168,16 @@ pub struct StoreSource {
     /// The key that signed it, as the store's record names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The version installed was verified (amendment 45), as the record it
+    /// was installed from said, fetched at install time: never a card, a
+    /// remembered offer, the manifest or a caller's word. (An install from
+    /// before reads as verified: then, every store version was reviewed.)
+    #[serde(default = "verified_before")]
+    pub verified: bool,
+}
+
+fn verified_before() -> bool {
+    true
 }
 
 impl StoreSource {
@@ -184,6 +197,13 @@ impl Source {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     }
 
+    /// Written back to the plugin folder `dir` (a dot file: never part of
+    /// what's signed).
+    pub fn save(&self, dir: &Path) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(self).map_err(|_| "Couldn't say where it came from".to_string())?;
+        std::fs::write(dir.join(SOURCE_FILE), bytes).map_err(|_| "Couldn't say where it came from".to_string())
+    }
+
     /// What the app is shown: never a local path.
     pub fn shown(&self) -> Value {
         let mut value = json!({ "kind": self.kind });
@@ -196,6 +216,7 @@ impl Source {
         if let Some(store) = &self.store {
             value["id"] = json!(store.id);
             value["publisher"] = json!(store.publisher);
+            value["verified"] = json!(store.verified);
         }
         value
     }
@@ -942,13 +963,21 @@ pub struct Found {
     /// you again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub new_owner: bool,
-    /// From the store: your own version, still in review (offered to your
-    /// devices alone).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub in_review: bool,
     /// From the store: what's new in it (its CHANGELOG.md section).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// From the store: this update is verified, as the store said when it
+    /// was found (for its sheet; taking it asks the store's record again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_verified: Option<bool>,
+    /// From the store: the version installed was verified (the sheet says
+    /// "the version you have was verified; this one is not").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_verified: Option<bool>,
+    /// From the store, when this update isn't verified: the newest verified
+    /// version newer than the one installed, offered beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_alternative: Option<String>,
 }
 
 impl Found {
@@ -967,8 +996,14 @@ impl Found {
         if self.new_owner {
             value["new_owner"] = json!(true);
         }
-        if self.in_review {
-            value["in_review"] = json!(true);
+        if let Some(verified) = self.store_verified {
+            value["verified"] = json!(verified);
+        }
+        if let Some(verified) = self.installed_verified {
+            value["installed_verified"] = json!(verified);
+        }
+        if let Some(version) = &self.verified_alternative {
+            value["verified_alternative"] = json!({ "version": version });
         }
         if !self.notes.is_empty() {
             value["notes"] = json!(self.notes);
@@ -1061,8 +1096,10 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, sam
         digest_diff: diff.grew().then(|| diff.to_value()),
         new_key: fetched.key != key,
         new_owner: false,
-        in_review: false,
         notes: String::new(),
+        store_verified: None,
+        installed_verified: None,
+        verified_alternative: None,
     })
 }
 
