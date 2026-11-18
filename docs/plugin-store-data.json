@@ -323,7 +323,15 @@
         "oder",
         "e",
         "и",
-        "или"
+        "или",
+        "but",
+        "pero",
+        "mais",
+        "aber",
+        "ma",
+        "mas",
+        "но",
+        "但"
       ],
       "list_marks": [
         "、",
@@ -488,7 +496,8 @@
             "strumenti",
             "pacchetto",
             "versione",
-            "integrazione"
+            "integrazione",
+            "pannello"
           ]
         },
         "ja": {
@@ -531,7 +540,8 @@
             "ferramentas",
             "pacote",
             "versão",
-            "integração"
+            "integração",
+            "painel"
           ]
         },
         "ru": {

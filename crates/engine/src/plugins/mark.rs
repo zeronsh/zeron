@@ -218,8 +218,8 @@ pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
     ("es", false, &["complemento", "complementos", "extensi\u{f3}n", "extensiones", "cliente", "aplicaci\u{f3}n", "herramienta", "herramientas", "tema", "temas", "paquete", "versi\u{f3}n", "integraci\u{f3}n"]),
     ("fr", false, &["module", "modules", "outil", "outils", "th\u{e8}me", "th\u{e8}mes", "paquet", "int\u{e9}gration", "application", "panneau"]),
     ("de", false, &["erweiterung", "erweiterungen", "anwendung", "werkzeug", "paket", "pakete"]),
-    ("it", false, &["estensione", "estensioni", "applicazione", "strumento", "strumenti", "pacchetto", "versione", "integrazione"]),
-    ("pt", false, &["extens\u{e3}o", "extens\u{f5}es", "aplicativo", "ferramenta", "ferramentas", "pacote", "vers\u{e3}o", "integra\u{e7}\u{e3}o"]),
+    ("it", false, &["estensione", "estensioni", "applicazione", "strumento", "strumenti", "pacchetto", "versione", "integrazione", "pannello"]),
+    ("pt", false, &["extens\u{e3}o", "extens\u{f5}es", "aplicativo", "ferramenta", "ferramentas", "pacote", "vers\u{e3}o", "integra\u{e7}\u{e3}o", "painel"]),
     ("ru", false, &[
         "\u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}*", "\u{440}\u{430}\u{441}\u{448}\u{438}\u{440}\u{435}\u{43d}\u{438}*", "\u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}*",
         "\u{43f}\u{440}\u{438}\u{43b}\u{43e}\u{436}\u{435}\u{43d}\u{438}*", "\u{438}\u{43d}\u{441}\u{442}\u{440}\u{443}\u{43c}\u{435}\u{43d}\u{442}*", "\u{43f}\u{430}\u{43a}\u{435}\u{442}*",
@@ -303,7 +303,12 @@ pub const AUTHORITIES: &[&str] = &[
 
 /// Joining words: ending a sentence after one, a mark word says it of the
 /// subject ("Safe, fast and verified.").
-pub const CONJUNCTIONS: &[&str] = &["and", "or", "y", "et", "ou", "und", "oder", "e", "\u{438}", "\u{438}\u{43b}\u{438}"];
+pub const CONJUNCTIONS: &[&str] = &[
+    "and", "or", "y", "et", "ou", "und", "oder", "e", "\u{438}", "\u{438}\u{43b}\u{438}",
+    // But ("Jira, but verified."). (Not a colon among the list marks:
+    // "Shows each commit's signature status: verified." is honest.)
+    "but", "pero", "mais", "aber", "ma", "mas", "\u{43d}\u{43e}", "\u{4f46}",
+];
 
 /// After one of these at a sentence's end, a word that alone isn't the mark
 /// is ("快速、安全、已认证。", "安全・高速・公式。").
