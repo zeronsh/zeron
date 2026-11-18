@@ -147,6 +147,19 @@ export interface Env {
   /** Browser Run, which draws a card's picture from its player page. Unset ⇒
    * pictures not yet in CARD_IMAGES answer 404. */
   BROWSER?: Fetcher;
+
+  // ── Plugin store (src/store/, docs/plans/2026-11-17-plugin-store.md).
+  //    Unset ⇒ every /store/v1 route answers 503 `unavailable`.
+  /** The catalog: plugins, versions, search, reviews, audit (migrations/store). */
+  STORE_DB?: D1Database;
+  /** Packages (`pkg/…`) and each version's unpacked files (`files/…`). */
+  PLUGIN_STORE?: R2Bucket;
+  /** Public store reads per client IP, and store writes per account. Unset ⇒ unlimited. */
+  STORE_READS?: RateLimit;
+  STORE_WRITES?: RateLimit;
+  /** Test only, until the `admin` role lands (store/principal.ts): user ids
+   * that hold it, separated by spaces or commas. */
+  STORE_ADMIN_USERS?: string;
 }
 
 /** APNs settings, when push is set up for this deployment. */

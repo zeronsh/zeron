@@ -21,5 +21,8 @@ declare module "cloudflare:test" {
     ADMIN_TOKEN: string;
     RUNNER_JWT_PUBLIC_KEY: string;
     RUNNER_JWT_PRIVATE_KEY: string;
+    STORE_DB: D1Database;
+    STORE_MIGRATIONS: import("cloudflare:test").D1Migration[];
+    PLUGIN_STORE: R2Bucket;
   }
 }
