@@ -133,8 +133,10 @@ const readmeText = s ? (s.version.readme ?? (await (async () => {
 // is held), shown on the overview. Nothing is kept: a version in review is
 // no one's to keep.
 const origin = Astro.url.origin;
-const readmeDrawn = readmeText.trim() ? await drawn(origin, id, version, "readme", readmeText, { file, demote: true, title: name }, { keep: false }) : null;
-const notesDrawn = s?.version.notes ? await drawn(origin, id, version, "notes", s.version.notes, { file, demote: true }, { keep: false }) : null;
+const cf = (Astro.locals as { cfContext?: { waitUntil(p: Promise<unknown>): void } }).cfContext;
+const reviewing = { keep: false, waitUntil: cf ? (p: Promise<unknown>) => cf.waitUntil(p) : undefined };
+const readmeDrawn = readmeText.trim() ? await drawn(origin, id, version, "readme", readmeText, { file, demote: true, title: name }, reviewing) : null;
+const notesDrawn = s?.version.notes ? await drawn(origin, id, version, "notes", s.version.notes, { file, demote: true }, reviewing) : null;
 const notes = overview ? (notesDrawn?.html ?? "") : "";
 const readme = overview ? (readmeDrawn?.html ?? "") : "";
 // Shown as its text, for any cause, the reviewer is told, loudly, on every

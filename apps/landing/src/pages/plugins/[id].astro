@@ -16,7 +16,7 @@ import { lines } from "../../lib/store/permissions.ts";
 import { CATEGORIES } from "../../lib/store/nav.ts";
 import { satisfies } from "../../lib/store/semver.ts";
 import { pluginTag, publicPage } from "../../lib/store/http.ts";
-import { renderedOnce } from "../../lib/store/rendered.ts";
+import { drawn, keepable, type Drawn } from "../../lib/store/rendered.ts";
 import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
 import { fileUrl, httpsUrl, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
 import type { VersionInfo } from "../../lib/store/types.ts";
@@ -48,18 +48,31 @@ const NOTED = 8;
 let readme = "";
 let versions: (VersionInfo & { html: string | null })[] = [];
 if (plugin) {
-  publicPage(Astro, [pluginTag(plugin.id)]);
   const file = (version: string) => (path: string) => fileUrl(plugin.id, version, path);
   const origin = Astro.url.origin;
+  // Each try finished whether or not the visitor stays (rendered.ts).
+  const cf = (Astro.locals as { cfContext?: { waitUntil(p: Promise<unknown>): void } }).cfContext;
+  const drawing = { keep: true, waitUntil: cf ? (p: Promise<unknown>) => cf.waitUntil(p) : undefined };
+  const shown: Drawn[] = [];
+  const draw = async (...args: Parameters<typeof drawn> extends [...infer A, unknown] ? A : never) => {
+    const out = await drawn(...args, drawing);
+    shown.push(out);
+    return out.html;
+  };
   // The README, then each version's notes, newest first, each drawn once
   // and kept by its text (markdown.ts: linear in its text, so none can
   // sink the page). (A first heading that only says its name again isn't drawn: the page says it.)
-  readme = await renderedOnce(origin, plugin.id, plugin.version, "readme", plugin.readme, { file: file(plugin.version), demote: true, title: plugin.name });
+  readme = await draw(origin, plugin.id, plugin.version, "readme", plugin.readme, { file: file(plugin.version), demote: true, title: plugin.name });
   // The notes of the latest few versions are shown; older versions are listed by number and date.
   const all = (versionsResult?.ok ? versionsResult.data.versions : plugin.versions).slice(0, NOTED + 20);
   for (const [i, v] of all.entries()) {
-    versions.push({ ...v, html: v.notes && i < NOTED ? await renderedOnce(origin, plugin.id, v.version, "notes", v.notes, { file: file(v.version), demote: true }) : null });
+    versions.push({ ...v, html: v.notes && i < NOTED ? await draw(origin, plugin.id, v.version, "notes", v.notes, { file: file(v.version), demote: true }) : null });
   }
+  // Kept by shared caches only when what it shows is what it will show: a
+  // document held (a try that never finished) or failed is not, so the
+  // page that shows it as text isn't kept either.
+  if (keepable(shown)) publicPage(Astro, [pluginTag(plugin.id)]);
+  else Astro.response.headers.set("cache-control", "no-store");
 }
 // An author's links, parsed: https only, never the text as given.
 const homepage = httpsUrl(plugin?.homepage);

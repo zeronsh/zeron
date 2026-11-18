@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { PIPELINE, render as renderWithin, RENDERER, type Rendered, type RenderOptions } from "./markdown.ts";
-import { drawn, HOLDS, renderedOnce, type Keeper } from "./rendered.ts";
+import { drawn, HOLDS, keepable, renderedOnce, type Keeper } from "./rendered.ts";
 
 /** A cache in memory, as the Worker's keeps responses: each until its max-age, by a clock the test moves. */
 const memory = (): Keeper & { size(): number; clock: { now: number } } => {
@@ -177,5 +177,78 @@ describe("a try is recorded before it is made", () => {
     await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, keep: false });
     expect(renders).toBe(2);
     expect(store.size()).toBe(0);
+  });
+});
+
+describe("a try is the request's to finish, not the visitor's", () => {
+  const options = { file: (p: string) => `/plugins/a/files/1.0.0/${p}`, demote: true };
+
+  test("a visitor who goes away at once can't hold an honest README: the try finishes under waitUntil, and the next visit is drawn", async () => {
+    const store = memory();
+    let renders = 0;
+    const render = (md: string, o: RenderOptions): Rendered => (renders++, renderWithin(md, o));
+    const pending: Promise<unknown>[] = [];
+    const waitUntil = (p: Promise<unknown>) => void pending.push(p);
+    // (The visitor's request is dropped: no one awaits what it returns. The platform still finishes what waitUntil holds.)
+    void drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, keep: true, waitUntil });
+    // (Held from the moment the try begins: before it, the key's hash and the look for a kept one record nothing.)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(pending).toHaveLength(1);
+    await Promise.all(pending);
+    const next = await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, keep: true });
+    expect(next.cut).toBe(null);
+    expect(next.html).toContain("Hi");
+    expect(renders).toBe(1);
+    // (Three dropped visits in a row still leave it drawn, and no count of deaths behind.)
+    for (let i = 0; i < 3; i++) void drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Other", options, { store, render, keep: true, waitUntil });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await Promise.all(pending);
+    expect((await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Other", options, { store, render, keep: true })).cut).toBe(null);
+    expect(store.size()).toBe(2);
+  });
+
+  test("a result that can't be written takes its record and count away: the next visit draws again, and isn't held", async () => {
+    const store = memory();
+    const put = store.put;
+    // (The fault: the cache refuses the result's write, after a rendering that succeeded.)
+    store.put = async (r, response) => {
+      if (response.headers.get("x-drawn") === "done") throw new Error("the cache refused it");
+      return put(r, response);
+    };
+    let renders = 0;
+    const render = (md: string, o: RenderOptions): Rendered => (renders++, renderWithin(md, o));
+    expect((await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, keep: true })).cut).toBe(null);
+    expect((await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, keep: true })).cut).toBe(null);
+    expect(renders).toBe(2);
+    // (Nothing left: no record, no count. A death now would be held five minutes, its first.)
+    expect(store.size()).toBe(0);
+    const dies = (): Rendered => {
+      throw new Error("killed");
+    };
+    await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render: dies, keep: true });
+    store.clock.now += HOLDS[0];
+    expect((await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, keep: true })).cut).toBe(null);
+  });
+
+  test("the review page's tries are its own: they never stand in for, or take away, the public page's", async () => {
+    const store = memory();
+    const md = "# Listed, and opened in review";
+    const shown = await drawn("https://zeron.sh", "a", "1.0.0", "readme", md, options, { store, keep: true });
+    expect(shown.cut).toBe(null);
+    // A review try that never finishes: the public page still finds its rendering.
+    void drawn("https://zeron.sh", "a", "1.0.0", "readme", md, options, { store, keep: false, render: () => new Promise<Rendered>(() => {}) });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect((await drawn("https://zeron.sh", "a", "1.0.0", "readme", md, options, { store, keep: true, render: () => { throw new Error("not drawn again"); } })).cut).toBe(null);
+    // A review try that finishes takes away only its own record.
+    store.clock.now += HOLDS[0];
+    await drawn("https://zeron.sh", "a", "1.0.0", "readme", md, options, { store, keep: false });
+    expect((await drawn("https://zeron.sh", "a", "1.0.0", "readme", md, options, { store, keep: true, render: () => { throw new Error("not drawn again"); } })).cut).toBe(null);
+  });
+
+  test("a page showing a held or failed document isn't kept by shared caches; one drawn, or too long, is", () => {
+    const as = (cut: Rendered["cut"] | "attempt") => ({ html: "", cut });
+    expect(keepable([as(null), as("size"), as("keep")])).toBe(true);
+    expect(keepable([as(null), as("attempt")])).toBe(false);
+    expect(keepable([as("error")])).toBe(false);
   });
 });
