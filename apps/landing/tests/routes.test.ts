@@ -603,7 +603,9 @@ describe("forms", () => {
     const lin = await site.signIn("user_lin");
     const refused = await post("/auth/web/logout", lin, {});
     expect(refused.status).toBe(403);
-    expect(await refused.json()).toMatchObject({ error: "bad_csrf" });
+    const said = (await refused.json()) as Record<string, unknown>;
+    expect(said).toMatchObject({ error: "bad_csrf", message: expect.any(String) });
+    expect(said).not.toHaveProperty("reason");
     expect((await site.fetch("/account", { headers: { cookie: lin } })).status).toBe(200);
   });
 

@@ -490,7 +490,9 @@ describe("signing out", () => {
     const browser = await signInOnTheWeb("user_ada");
     const refused = await browser.post("/auth/web/logout", {});
     expect(refused.status).toBe(403);
-    expect(await refused.json()).toMatchObject({ error: "bad_csrf" });
+    const said = (await refused.json()) as Record<string, unknown>;
+    expect(said).toMatchObject({ error: "bad_csrf", message: expect.any(String) });
+    expect(said).not.toHaveProperty("reason");
     expect((await browser.get("/account")).response.status).toBe(200);
   });
 
