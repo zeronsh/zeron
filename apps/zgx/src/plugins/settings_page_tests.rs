@@ -90,7 +90,7 @@ impl Rig {
         let (b, s, h, its) = (book.clone(), said.clone(), heard.clone(), items.clone());
         let app = TestApp::new(move |runtime| {
             let host = super::lend_design_system(ScriptHost::new(runtime, path.clone()), &path);
-            host.shared("zgx.window.size", zgx_script::window_size_value(1200., 900.));
+            host.shared("zgx.window.size", zgx_script::window_size_value(1200., 1400.));
             host.action("zeron.open", |_| {});
             host.action("close", |_| {});
             expose_surface(&host);
@@ -169,7 +169,7 @@ impl Rig {
             host.set_plugins(plugins);
             host
         });
-        app.ui.scene.borrow_mut().resize(1200., 900.);
+        app.ui.scene.borrow_mut().resize(1200., 1400.);
         let rig = Rig { app, book, said, heard, items };
         // Settings → Plugins' list (who made each), and Settings' own list.
         let rows: Vec<Json> = rig.items.iter().map(|i| json!({ "id": i.id(), "name": i.name(), "status": "on", "author": { "kind": "you" }, "own": true, "permissions": i.permissions(), "allowed": i.permissions(), "ask": [] })).collect();
@@ -256,6 +256,12 @@ fn snippets_draws_its_own_page_after_its_declared_rows_and_fills_its_room() {
     let card = rig.app.bounds(&format!("{PAGE} >> role:group \"Message box\""));
     assert!((drawn.width - card.width).abs() < 1. && (drawn.x - card.x).abs() < 1., "{card:?} {drawn:?}");
     assert!(own.height >= drawn.height, "its box holds it: {own:?} {drawn:?}");
+    // Its sections apart at the page's rhythm, as Zeron's are ($space.6).
+    let (first, editor) = (rig.app.bounds(&format!("{PAGE} >> role:group \"Snippets\"")), rig.app.bounds("#snippets-editor"));
+    assert!((editor.y - (first.y + first.height) - 32.).abs() < 0.5, "{first:?} then {editor:?}");
+    // And the first a section's gap under Zeron's last card.
+    let declared = rig.app.bounds(&format!("{PAGE} >> role:group \"Message box\""));
+    assert!((first.y - (declared.y + declared.height) - 32.).abs() < 0.5, "{declared:?} then {first:?}");
     // It said how it built: well, found by its words.
     assert_eq!(rig.book.borrow().page_problem("settings-page"), Some(None));
     assert_eq!(rig.book.borrow().list()[0]["page"]["keywords"], json!(["snippets", "templates", "text", "message box"]));
@@ -574,4 +580,97 @@ ui.contribute { target = "#plugin-settings-page", replace = ui.text { id = "host
     assert!(rig.app.error().is_some_and(|e| e.starts_with("hostile:") && e.contains("decision")), "{:?}", rig.app.error());
     assert!(rig.app.find("#snippets-list >> role:button \"Standup\"").is_some(), "{}", rig.tree());
     assert!(rig.app.find("role:button \"New snippet\"").is_some());
+}
+
+/// A plugin started with a settings page of its own (`create_plugin {
+/// settings_page = true }`: the engine's scaffold writes plugins-sdk's
+/// settings_page.luau, named for it, and its words).
+fn scaffolded() -> PathBuf {
+    let page = include_str!("../../plugins-sdk/settings_page.luau").replace("PLUGIN_ID", "ledger").replace("PLUGIN_NAME", "Ledger");
+    let dir = written(
+        "ledger",
+        json!({ "id": "ledger", "name": "Ledger", "version": "0.1.0", "entry": "init.luau", "permissions": [] }),
+        "local zeron = require(\"./zeron\")(\"ledger\")\nrequire(\"./settings_page\")\n",
+    );
+    std::fs::write(dir.join("settings_page.luau"), page).unwrap();
+    std::fs::create_dir_all(dir.join("locales")).unwrap();
+    std::fs::write(dir.join("locales/en.json"), include_str!("../../plugins-sdk/settings_page.en.json")).unwrap();
+    dir
+}
+
+#[test]
+fn a_scaffolded_settings_page_is_right_from_the_start() {
+    let dir = scaffolded();
+    // Nothing in it off the design system, as in the example to copy.
+    assert_eq!(super::surfaces::style_hints(&dir), (vec![], 0));
+    assert_eq!(super::surfaces::style_hints(&example("settings-page")), (vec![], 0), "the example is on the system throughout");
+    let mut rig = Rig::new(&[dir]);
+    rig.open("Ledger");
+    assert_eq!(rig.app.error(), None);
+    assert_eq!(rig.book.borrow().page_problem("ledger"), Some(None), "it built");
+    // Its words, its empty state in the card's place, its action at the
+    // section title's end; an item added is its row.
+    let tree = rig.tree();
+    assert!(tree.contains("heading \"Items\"") || tree.contains("\"Items\""), "{tree}");
+    assert!(tree.contains("No items yet"), "{tree}");
+    rig.app.click("role:button \"Add item\"");
+    rig.frames(20);
+    assert!(rig.tree().contains("New item 1"), "{}", rig.tree());
+    assert!(rig.app.find("role:button \"Remove New item 1\"").is_some());
+    rig.app.click("role:button \"Remove New item 1\"");
+    rig.frames(20);
+    assert!(rig.tree().contains("No items yet"));
+}
+
+/// The guide's model page (docs/plugins.md, "A model page"), as it's
+/// written there.
+fn guides_model_page() -> PathBuf {
+    let guide = include_str!("../../docs/plugins.md");
+    let from = guide.find("### A model page").expect("the guide has a model page");
+    let code = &guide[from..];
+    let start = code.find("```lua\n").unwrap() + "```lua\n".len();
+    let code = &code[start..start + code[start..].find("```").unwrap()];
+    written(
+        "feeds",
+        json!({ "id": "feeds", "name": "Feeds", "version": "1.0.0", "entry": "init.luau", "permissions": [],
+                "settings": [{ "id": "every", "kind": "number", "label": "Check every", "min": 5, "max": 120, "unit": "minutes", "default": 15 }] }),
+        code,
+    )
+}
+
+#[test]
+fn the_guide_s_model_page_works_as_written() {
+    let dir = guides_model_page();
+    assert_eq!(super::surfaces::style_hints(&dir), (vec![], 0), "on the system throughout");
+    let mut rig = Rig::new(&[dir]);
+    rig.open("Feeds");
+    assert_eq!(rig.app.error(), None);
+    assert_eq!(rig.book.borrow().page_problem("feeds"), Some(None), "it built");
+    assert!(rig.app.find(&format!("{PAGE} >> role:textbox \"Check every\"")).is_some(), "its declared row first");
+    assert!(rig.tree().contains("No feeds yet"));
+    // Added: its row, and it open under the list.
+    rig.app.click("role:button \"Add feed\"");
+    rig.frames(20);
+    assert!(rig.app.find("#feed-editor").is_some(), "{}", rig.tree());
+    assert!(rig.tree().contains("No address yet."));
+    // A wrong address is said, and not kept; a right one is.
+    rig.app.fill("#feed-editor >> role:textbox \"Address\"", "http://example.com/feed");
+    rig.app.keys("enter");
+    rig.frames(10);
+    assert!(rig.tree().contains("It starts with https://."));
+    rig.app.fill("#feed-editor >> role:textbox \"Address\"", "https://example.com/feed");
+    rig.app.keys("enter");
+    rig.frames(10);
+    assert!(rig.tree().contains("https://example.com/feed"), "its row says it");
+    // Quiet hours: a row comes with the switch, and goes with it.
+    assert!(!rig.tree().contains("Overnight"));
+    rig.app.click("#feed-editor >> role:switch \"Quiet hours\"");
+    rig.frames(10);
+    assert!(rig.tree().contains("Overnight"));
+    // Removed: the list empty again.
+    rig.app.click("#feed-editor >> role:button \"Remove\"");
+    rig.frames(20);
+    assert!(rig.app.find("#feed-editor").is_none());
+    assert!(rig.tree().contains("No feeds yet"));
+    assert_eq!(rig.app.error(), None);
 }

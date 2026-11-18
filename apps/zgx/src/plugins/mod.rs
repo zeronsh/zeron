@@ -2161,6 +2161,11 @@ impl Bridge {
         }
         // An agent asking where the plugin's nodes are (`plugin_status`).
         if let Some(tool @ ("@status" | "@snapshot")) = call["tool"].as_str() {
+            // (`page = "settings"`: its settings page, as Settings shows it.)
+            if call["args"]["page"] == "settings" {
+                self.settings_status(&plugin, id, tool == "@snapshot");
+                return;
+            }
             self.status_call(&plugin, id, tool == "@snapshot");
             return;
         }
@@ -3196,6 +3201,92 @@ impl Bridge {
             return;
         }
         self.push_call(plugin, id, "where", vec![("snapshot", Value::from(snapshot))]);
+    }
+
+    /// An agent's `plugin_status { page = "settings" }`: the host's part,
+    /// what its Luau uses off the design system (hints, never a block), and,
+    /// with `snapshot`, a picture of its settings page as Settings shows it,
+    /// Zeron's header and rows over what it draws, to set beside Zeron's
+    /// own pages. Settings is opened on the page first if it isn't (the
+    /// answer says so).
+    fn settings_status(&self, plugin: &str, id: String, snapshot: bool) {
+        let mut out = self.host_status(plugin);
+        let page = format!("plugin-{plugin}");
+        if let Some(dir) = self.item(plugin).and_then(|i| i.json["snapshot"].as_str().map(PathBuf::from)) {
+            let (hints, more) = surfaces::style_hints(&dir);
+            out["hints"] = json!(hints);
+            if more > 0 {
+                out["hints_more"] = json!(more);
+            }
+        }
+        let listed = self.settings.borrow().list().as_array().into_iter().flatten().any(|e| e["plugin"] == plugin);
+        if !listed {
+            out["snapshot_error"] = json!("It has no settings page now: declare settings in its manifest, or draw a page with zeron.settings_page (and it must be on).");
+            answer_tool(id, true, out, String::new());
+            return;
+        }
+        if !snapshot {
+            answer_tool(id, true, out, String::new());
+            return;
+        }
+        let route = value_json(&self.host.shared("zeron.route", Value::Nil).signal().with_untracked(Value::clone));
+        let shown = route["name"] == "settings" && route["page"] == page.as_str();
+        if !shown {
+            self.request("open", "", json_value(&json!({ "settings": page })));
+            out["opened"] = json!(format!("Settings opened on its page ({page}) to picture it"));
+        }
+        // (Pictured once it has shown and its plugin has drawn: a moment.)
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            zgx::timer::sleep(Duration::from_millis(if shown { 50 } else { 700 })).await;
+            let Some(b) = me.upgrade() else { return };
+            match b.picture_settings_page(&page) {
+                Ok(said) => {
+                    for (k, v) in said.as_object().into_iter().flatten() {
+                        out[k] = v.clone();
+                    }
+                }
+                Err(why) => out["snapshot_error"] = json!(why),
+            }
+            answer_tool(id, true, out, String::new());
+        });
+    }
+
+    /// The settings page open (`page`) as the window shows it, saved for the
+    /// agent: the page's column, cut to what of it the window shows.
+    fn picture_settings_page(&self, page: &str) -> Result<Json, String> {
+        let route = value_json(&self.host.shared("zeron.route", Value::Nil).signal().with_untracked(Value::clone));
+        if route["name"] != "settings" || route["page"] != page {
+            return Err("Settings didn't open on its page".into());
+        }
+        let ui = self.ui.upgrade().ok_or("The window is closed")?;
+        let node = self.view.borrow().as_ref().and_then(|v| v.find("settings-page")).ok_or("Settings isn't showing")?;
+        let root = ui.root();
+        let image = ui.snapshot(root, SNAPSHOT_WIDTH).ok_or("The window isn't showing")?;
+        let (window, column) = {
+            let scene = ui.scene.borrow();
+            (scene.bounds(root), scene.bounds(node))
+        };
+        if window.width <= 0. {
+            return Err("The window isn't laid out".into());
+        }
+        let scale = image.width() as f32 / window.width;
+        let found = [surfaces::Region { x: column.x, y: column.y, w: column.width, h: column.height }];
+        let region = surfaces::around(&found, 0., window.width, window.height).ok_or("Its page isn't in the window")?;
+        let (w, h, pixels) = surfaces::crop(image.pixels(), image.width(), image.height(), region, scale);
+        let plugin = page.trim_start_matches("plugin-");
+        let dir = engine::data_dir().ok_or("Zeron's data folder isn't known")?.join("plugins").join(".snapshots");
+        let path = dir.join(format!("{plugin}.settings.png"));
+        surfaces::save_png(&path, w, h, &pixels)?;
+        let mut out = json!({
+            "snapshot": path.display().to_string(),
+            "snapshot_region": { "x": region.x, "y": region.y, "w": region.w, "h": region.h },
+            "snapshot_note": "Its settings page as Settings shows it: Zeron's header and rows, then what it draws. Set it beside one of Zeron's own pages (Settings → Notifications, say) and match them.",
+        });
+        if column.height > region.h + 0.5 {
+            out["snapshot_note"] = json!(format!("Its settings page as Settings shows it, the top {:.0} of its {:.0} points (the rest is past the window's foot). Zeron's header and rows, then what it draws.", region.h, column.height));
+        }
+        Ok(out)
     }
 
     /// The plugin's account of where it is, with the host's, and a picture

@@ -881,8 +881,10 @@ return function(id: string): any
 	-- finds it by the plugin's name and `keywords` (text, or `zeron.t(…)`).
 	--   zeron.settings_page {
 	--     keywords = { "accounts", "rules" },
-	--     build = function(page) return Settings.Section { … } end,
+	--     build = function(page) return { Settings.Section { … }, Settings.Section { … } } end,
 	--   }
+	-- `build` returns a node, or a list of sections, laid out apart as
+	-- Zeron's are.
 	-- `page` is { plugin, bind(id, opts?), choose_folder(id) }: `bind`, in
 	-- the build, is a declared setting as a state a control takes (`Switch
 	-- { value = page.bind("show") }`), following the value and setting it
@@ -978,6 +980,11 @@ return function(id: string): any
 			spent("settings page", (os.clock() - started) * 1000)
 			if ok and node ~= nil then
 				ui.invoke(`{prefix}.settings_page`, { op = "built" })
+				-- A list of sections, apart at the page's own rhythm, as
+				-- Zeron's sections are (`Settings.Page`'s gap).
+				if type(node) == "table" and getmetatable(node :: any) == nil then
+					return ui.column { ref = page_here, w_full = true, gap = "$space.6", table.unpack(node :: { any }) }
+				end
 				return ui.column { ref = page_here, w_full = true, node }
 			end
 			ui.invoke(`{prefix}.settings_page`, { op = "built", error = if ok then "Its build returned nothing" else tostring(node) })

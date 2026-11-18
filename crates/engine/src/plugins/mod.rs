@@ -331,6 +331,9 @@ struct NewParams {
     description: Option<String>,
     #[serde(default)]
     permissions: Vec<String>,
+    /// Start it with a settings page of its own (`zeron.settings_page`).
+    #[serde(default)]
+    settings_page: bool,
 }
 
 #[derive(Deserialize)]
@@ -1881,6 +1884,7 @@ impl Plugins {
                         p.name.trim(),
                         p.description.as_deref().unwrap_or(""),
                         &p.permissions,
+                        p.settings_page,
                     )?;
                     // Its README, linking the guide (signed with the rest).
                     let (guide, _) = guides::ensure(&this.inner.data_dir);
@@ -2289,6 +2293,9 @@ impl Plugins {
                     id: String,
                     #[serde(default)]
                     snapshot: bool,
+                    /// `"settings"`: its settings page, as Settings shows it.
+                    #[serde(default)]
+                    page: Option<String>,
                 }
                 let p: StatusParams = parse_params(params)?;
                 self.rescan().await;
@@ -2319,7 +2326,7 @@ impl Plugins {
                 match self
                     .inner
                     .tools
-                    .call(&entry.item.id, tool, serde_json::json!({}), None, STATUS_TIMEOUT)
+                    .call(&entry.item.id, tool, serde_json::json!({ "page": p.page }), None, STATUS_TIMEOUT)
                     .await
                 {
                     Ok(window) => {

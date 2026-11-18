@@ -329,7 +329,7 @@ zeron.settings_page {
 							icon = "document-add",
 							title = "No snippets yet",
 							body = "Keep text you use often, and put it in the message box with a click.",
-							action = { label = "New snippet", on_click = new_snippet },
+							action = { label = "Add your first snippet", on_click = new_snippet },
 						},
 					},
 				}),
@@ -338,7 +338,7 @@ zeron.settings_page {
 				if id == "" then
 					return ui.div {}
 				end
-				return Editor { id = id }
+				return ui.column { id = "snippets-editor", w_full = true, Editor { id = id } }
 			end, { w_full = true }),
 		}
 	end,
