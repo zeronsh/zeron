@@ -3804,7 +3804,12 @@
       "not_newer": "That version isn't later than the one installed, so it won't replace it.",
       "different_plugin": "The new version is a different plugin.",
       "up_to_date": "It's up to date.",
-      "no_source": "Where it came from isn't known any more, so it can't be installed again from there. Remove it, then install it again."
+      "no_source": "Where it came from isn't known any more, so it can't be installed again from there. Remove it, then install it again.",
+      "incompatible": "This version doesn't work with this version of Zeron.",
+      "store_unreachable": "Zeron can't reach the plugin store right now. Try again in a moment.",
+      "not_in_store": "This plugin, or this version of it, isn't in the plugin store.",
+      "store_mismatch": "What came isn't what the plugin store reviewed, so it wasn't installed.",
+      "blocked": "Zeron took this version down from the plugin store."
     },
     "store": {
       "browse": "Browse",

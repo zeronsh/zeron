@@ -3804,7 +3804,12 @@
       "not_newer": "该版本并不比已安装的版本新，因此不会替换它。",
       "different_plugin": "新版本是另一个插件。",
       "up_to_date": "已是最新版本。",
-      "no_source": "已无法确定它的来源，因此无法从原处重新安装。请先移除它，再重新安装。"
+      "no_source": "已无法确定它的来源，因此无法从原处重新安装。请先移除它，再重新安装。",
+      "incompatible": "这个版本不支持当前版本的 Zeron。",
+      "store_unreachable": "Zeron 暂时无法连接插件商店。请稍后再试。",
+      "not_in_store": "插件商店里没有这个插件或这个版本。",
+      "store_mismatch": "收到的内容与插件商店审核过的不一致，所以没有安装。",
+      "blocked": "Zeron 已将这个版本从插件商店下架。"
     },
     "store": {
       "browse": "浏览",

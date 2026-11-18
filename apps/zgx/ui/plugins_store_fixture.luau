@@ -71,6 +71,17 @@ local function find(id: string): any
 	return nil
 end
 
+-- What a toast says, noted (there's no toast host here).
+local stub_toast = ds.toast :: any
+local shown_toast = stub_toast.show
+stub_toast.show = function(t: any): any
+	local body = if type(t.body) == "table" and t.body.get then t.body:get() else t.body
+	if type(body) == "string" then
+		stub.note(`toast:{body}`)
+	end
+	return shown_toast(t)
+end
+
 -- What the page asks, answered here.
 local s = state :: any
 local open_install: any = nil
@@ -145,7 +156,7 @@ ui.command {
 		local p = open_install
 		open_install = nil
 		if p then
-			p.err({ message = "hash_mismatch: the package isn't the one the store reviewed" })
+			p.err({ message = "store_mismatch: the package's hash isn't the store's record" })
 		end
 	end,
 }

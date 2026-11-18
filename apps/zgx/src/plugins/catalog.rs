@@ -8,9 +8,9 @@
 //!
 //!   plugins.store.search { q?, category?, keyword?, sort?, cursor?, limit?, featured? }
 //!                                     StoreSearch
-//!   plugins.store.detail(id)          StorePlugin { id, versions: true }:
-//!                                     the detail, its versions, `compatible`
-//!                                     (`incompatible`: why not)
+//!   plugins.store.detail(id)          StorePlugin { id }: the detail, its
+//!                                     versions, `compatible`
+//!                                     (`incompatible_reason`: why not)
 //!   plugins.store.categories          StoreCategories
 //!   plugins.store.picture { id, version, path }  StoreFile: `{ src }`, the
 //!                                     file the engine keeps (a picture only)
@@ -78,7 +78,7 @@ pub(super) fn install(host: &ScriptHost, me: std::rc::Weak<super::Bridge>) {
     });
     host.async_action("plugins.store.detail", |id| async move {
         let id = store_id(&text(&id)).ok_or("not_found")?;
-        engine("StorePlugin", json!({ "id": id, "versions": true })).await
+        engine("StorePlugin", json!({ "id": id })).await
     });
     host.async_action("plugins.store.categories", |_| async move { engine("StoreCategories", json!({})).await });
     host.async_action("plugins.store.picture", |arg| async move {

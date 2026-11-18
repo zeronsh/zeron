@@ -594,6 +594,12 @@ local FAILURES: { [string]: boolean } = {
 	different_plugin = true,
 	up_to_date = true,
 	no_source = true,
+	-- (The plugin store's, as the engine says them.)
+	incompatible = true,
+	store_unreachable = true,
+	not_in_store = true,
+	store_mismatch = true,
+	blocked = true,
 }
 
 function M.failure(message: string): string

@@ -143,7 +143,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		return d().compatible ~= false
 	end
 	local function incompatible(): string
-		local why = d().incompatible
+		local why = d().incompatible_reason or d().incompatible
 		return if type(why) == "string" and why ~= "" then why else ui.t("plugins.store.needs_other_zeron"):get()
 	end
 	-- Taken down by Zeron, and not turned back on.

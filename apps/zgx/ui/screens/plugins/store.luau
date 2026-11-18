@@ -44,7 +44,8 @@
 --   Detail  Card + { readme, screenshots = { path }, permissions (the consent
 --             sheet's item: { asks, ui, commands, network_hosts, tools… }),
 --             engines, homepage?, repository?, license?, versions = { Version },
---             package, compatible, incompatible? (why not, in words) }
+--             package, compatible, incompatible_reason? (why not, in words),
+--             installed? }
 --   Version { version, status, published_at, notes?, engines?, yanked?,
 --             review? = { state, reason?, message?, decided_at? } }
 --   Key     { key, name, created_at, last_used_at?, expires_at?, revoked_at? }

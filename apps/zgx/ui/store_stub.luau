@@ -249,7 +249,7 @@ end
 -- One that needs a later Zeron: the engine says so, in its words.
 by_id["cost-meter"].detail.engines = { zeron = ">=9.0.0" }
 by_id["cost-meter"].detail.compatible = false
-by_id["cost-meter"].detail.incompatible = "Needs Zeron 9.0.0 or later; this device has 0.4.2."
+by_id["cost-meter"].detail.incompatible_reason = "Needs Zeron 9.0.0 or later; this device has 0.4.2."
 
 
 local function card_of(e: Entry): store.Card
@@ -537,7 +537,7 @@ ui.command {
 	run = function()
 		local f = by_id["focus-timer"]
 		f.detail.compatible = false
-		f.detail.incompatible = "Needs Zeron 0.3.0 or later; this device has 0.2.0."
+		f.detail.incompatible_reason = "Needs Zeron 0.3.0 or later; this device has 0.2.0."
 	end,
 }
 
