@@ -370,8 +370,9 @@ async fn key(client: &zeron_rpc::RpcClient, command: KeyCommand) -> anyhow::Resu
             }
             let mut reply = call(methods::CREATE_DEPLOY_KEY, params.clone()).await?;
             if reply["error"] == "step_up_required" {
-                // A new key needs a fresh sign-in: asked for, then waited on.
-                let url = call(methods::STEP_UP, json!({})).await?;
+                // A new key needs a fresh sign-in begun for it (each key its
+                // own): asked for, then waited on.
+                let url = call(methods::STEP_UP, json!({ "for": "deploy_key" })).await?;
                 eprintln!("Making a deploy key needs a fresh sign-in. Open this to confirm it's you:\n\n  {}\n", url["url"].as_str().unwrap_or(""));
                 let started = std::time::Instant::now();
                 while reply["error"] == "step_up_required" && started.elapsed() < STEP_UP_WAIT {

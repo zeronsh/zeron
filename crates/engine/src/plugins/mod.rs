@@ -283,6 +283,9 @@ struct Inner {
     /// The ticket of the sign-in just made (`Auth::step_up`), which
     /// registering a new key needs.
     step_up: Mutex<Option<StepUpFn>>,
+    /// The ticket of a step-up begun to make a deploy key, taken once
+    /// (`Auth::take_step_up`).
+    deploy_key_step_up: Mutex<Option<StepUpFn>>,
     /// Signing keys added on the account's other devices that this device
     /// noticed (`PluginSigningKey`'s `new_keys`).
     new_keys: Mutex<Vec<keys::KeyRow>>,
@@ -557,6 +560,7 @@ impl Plugins {
                 notifier: Mutex::new(None),
                 folders: Mutex::new(None),
                 step_up: Mutex::new(None),
+                deploy_key_step_up: Mutex::new(None),
                 new_keys: Mutex::new(Vec::new()),
                 key_notices: Mutex::new(Vec::new()),
                 own_key_checked: Mutex::new(None),
@@ -638,6 +642,9 @@ impl Plugins {
         self.set_account(move || for_account.user_id());
         let for_step_up = auth.clone();
         *lock(&self.inner.step_up) = Some(Arc::new(move || for_step_up.step_up()));
+        let for_deploy_key = auth.clone();
+        *lock(&self.inner.deploy_key_step_up) =
+            Some(Arc::new(move || for_deploy_key.take_step_up(crate::StepUpFor::DeployKey)));
         // Signed in on an engine with no edge of its own (local mode, where
         // the first sign-in happens): its keys are looked up and registered
         // with the edge it signs in against.

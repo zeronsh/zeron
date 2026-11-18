@@ -796,7 +796,7 @@ Every refusal from the store, or from Zeron about the store, reads `"<word>: <wo
 | `review` | publishing needs the check Zeron's window or the CLI made, for the plugin as it was checked |
 | `changed` | the plugin changed since it was checked: check it again |
 | `not_published` | a deploy key is for a plugin you already have in the store |
-| `step_up_required` | making a deploy key needs a fresh sign-in |
+| `step_up_required` | making a deploy key needs a fresh sign-in begun for it (`StepUp {for: "deploy_key"}`): each key its own, and no other sign-in's |
 | `bad_package`, `id_reserved`, `not_semver`, `missing_readme`, `missing_listing`, `bad_listing`, `too_large` | the store's rules (`check_plugin`); `binary_file` and `no_notes` are warnings |
 | `needs_username`, `id_taken`, `version_exists`, `suspended` | the store refused the submission |
 | `key_not_allowed`, `key_revoked`, `key_expired`, `invalid_signature`, `unauthenticated` | the store refused the deploy key |

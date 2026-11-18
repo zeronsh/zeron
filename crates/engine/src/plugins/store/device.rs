@@ -510,9 +510,11 @@ impl Plugins {
             Ok(_) => return not_published(&p.id),
             Err(error) => return not_ok(&error),
         }
-        let step_up = lock(&self.inner.step_up).clone().and_then(|f| f());
+        // A step-up begun for this (`StepUp {for: "deploy_key"}`), used up
+        // here: a sign-in's ticket, or one already spent, isn't one.
+        let step_up = lock(&self.inner.deploy_key_step_up).clone().and_then(|f| f());
         let Some(step_up) = step_up else {
-            return not_ok(&failure("step_up_required", "Making a deploy key needs a fresh sign-in"));
+            return not_ok(&failure("step_up_required", "Making a deploy key needs a fresh sign-in for it"));
         };
         let key = match DeployKey::generate() {
             Ok(key) => key,

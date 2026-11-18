@@ -176,8 +176,11 @@ impl Env {
 
     /// A fresh sign-in on `device` as `user` (`StepUp`): the browser it opens,
     /// played here, lands on the engine's own loopback callback.
-    async fn step_up(&self, device: &Device, user: &str) {
-        let url = device.call(methods::STEP_UP, json!({})).await.unwrap();
+    /// A fresh sign-in through the device's loopback, begun for `action`
+    /// (`StepUp {for}`; `None`: for nothing in particular).
+    async fn step_up(&self, device: &Device, user: &str, action: Option<&str>) {
+        let params = action.map_or_else(|| json!({}), |a| json!({ "for": a }));
+        let url = device.call(methods::STEP_UP, params).await.unwrap();
         let url = url["url"].as_str().unwrap();
         let redirect = query(url, "redirect_uri").unwrap();
         let state = query(url, "state").unwrap();
@@ -460,15 +463,21 @@ async fn wait_for(what: &str, mut ready: impl AsyncFnMut() -> bool) -> bool {
     true
 }
 
-/// A deploy key made on `device` for `id`, through its real step-up: the
-/// secret, as shown once.
+/// A deploy key made on `device` for `id`, through a step-up begun for it:
+/// the secret, as shown once. Neither the device's sign-in nor a step-up
+/// for nothing in particular makes one, and each key takes its own.
 async fn deploy_key_on(e: &Env, device: &Device, user: &str, id: &str, name: &str) -> String {
-    let mut made = device.call(methods::CREATE_DEPLOY_KEY, json!({ "id": id, "name": name })).await.unwrap();
-    if made["error"] == "step_up_required" {
-        e.step_up(device, user).await;
-        made = device.call(methods::CREATE_DEPLOY_KEY, json!({ "id": id, "name": name })).await.unwrap();
-    }
-    e.must("4", &format!("{user} makes a deploy key for {id} through a fresh sign-in"), made["ok"] == true, &made);
+    let create = || device.call(methods::CREATE_DEPLOY_KEY, json!({ "id": id, "name": name }));
+    let refused = create().await.unwrap();
+    e.check("4", &format!("{user}'s sign-in alone doesn't make a deploy key"), refused["error"] == "step_up_required", &refused);
+    e.step_up(device, user, None).await;
+    let refused = create().await.unwrap();
+    e.check("4", "nor a step-up for nothing in particular", refused["error"] == "step_up_required", &refused);
+    e.step_up(device, user, Some("deploy_key")).await;
+    let made = create().await.unwrap();
+    e.must("4", &format!("{user} makes a deploy key for {id} through a step-up for it"), made["ok"] == true, &made);
+    let again = create().await.unwrap();
+    e.check("4", "and the next key takes a step-up of its own", again["error"] == "step_up_required", &again);
     made["secret"].as_str().unwrap().to_owned()
 }
 
