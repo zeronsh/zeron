@@ -1249,6 +1249,31 @@ pub(crate) fn settings_on(
     (on, stopped)
 }
 
+/// What an agent's `plugin_status` asks of the window (the engine's
+/// `@status` / `@snapshot` call's args): where its nodes are, or (`page =
+/// "settings"`) its settings page, opening Settings on it only with `open`.
+#[derive(Debug, PartialEq)]
+pub(crate) enum StatusAsk {
+    Window,
+    Settings { open: bool },
+}
+
+/// `args` as the window takes them, or why not: a page is `"settings"` or
+/// none, and `open` goes with that page alone (it moves the person's window
+/// to Settings: only where the docs say it does). As the MCP tool and the
+/// engine check them.
+pub(crate) fn status_ask(args: &Json) -> Result<StatusAsk, String> {
+    let open = args["open"].as_bool().unwrap_or(false);
+    match &args["page"] {
+        Json::Null => match open {
+            true => Err("open goes with page: \"settings\"".into()),
+            false => Ok(StatusAsk::Window),
+        },
+        page if page == "settings" => Ok(StatusAsk::Settings { open }),
+        _ => Err("page is \"settings\" (its settings page), or left out".into()),
+    }
+}
+
 /// What a plugin needed, as a person would say it: "a session".
 /// What Settings → Plugins says of a plugin's node that couldn't show at
 /// `at`: what it needed that the place doesn't give, or its error.
@@ -2165,12 +2190,11 @@ impl Bridge {
         }
         // An agent asking where the plugin's nodes are (`plugin_status`).
         if let Some(tool @ ("@status" | "@snapshot")) = call["tool"].as_str() {
-            // (`page = "settings"`: its settings page, as Settings shows it.)
-            if call["args"]["page"] == "settings" {
-                self.settings_status(&plugin, id, tool == "@snapshot", call["args"]["open"] == true);
-                return;
+            match status_ask(&call["args"]) {
+                Ok(StatusAsk::Settings { open }) => self.settings_status(&plugin, id, tool == "@snapshot", open),
+                Ok(StatusAsk::Window) => self.status_call(&plugin, id, tool == "@snapshot"),
+                Err(why) => answer_tool(id, false, Json::Null, why),
             }
-            self.status_call(&plugin, id, tool == "@snapshot");
             return;
         }
         let loaded = self.loaded.borrow().iter().any(|p| p.name == plugin && plugin != "templates");
