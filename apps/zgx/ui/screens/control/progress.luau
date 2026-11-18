@@ -181,6 +181,9 @@ end
 -- Every chat at work now that isn't archived: a row drawn from its session.
 -- (Worked out again each minute too: a chat made lately stops counting as
 -- made for its task as it ages.)
+-- (Each chat's row as it stood: the same table again while what it's made
+-- of is the same, so the rows' own comparison finds it at once.)
+local stood_was: { [string]: any } = {}
 local stood_in = derived(function(): ...any
 	return sessions.now:get(), timeline:get(), minute:get()
 end, function(now: any, lines: any): { [string]: any }
@@ -190,11 +193,17 @@ end, function(now: any, lines: any): { [string]: any }
 		-- reset, its clock running.)
 		local state = STATE[c.status or ""] or (if type(c.limited) == "table" then "waiting" else nil)
 		if state then
+			local started = stretch_start(c, lines or {})
+			local was = stood_was[c.id]
+			if was and was.device_id == c.device and was.state == state and was.started == started and was.updated == c.updated then
+				out[c.id] = was
+				return
+			end
 			out[c.id] = {
 				chat_id = c.id,
 				device_id = c.device,
 				state = state,
-				started = stretch_start(c, lines or {}),
+				started = started,
 				stalled = false,
 				refreshing = false,
 				updated = c.updated,
@@ -213,6 +222,7 @@ end, function(now: any, lines: any): { [string]: any }
 			end
 		end
 	end
+	stood_was = out
 	return out
 end)
 

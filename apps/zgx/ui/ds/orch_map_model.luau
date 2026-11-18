@@ -137,7 +137,7 @@ function M.visibility(world: any): (Visibility.Ctx, number)
 	return Visibility.context(world.now, world.show, nil, world.read_at, world.dismissed), world.clock or os.time()
 end
 
-function M.fleet(world: any): Fleet
+local function fleet_full(world: any, seen: { [string]: { verdict: string, opacity: number } }, orphans: { [string]: boolean }): Fleet
 	local now = world.now or {}
 	local chats = world.chats or {}
 	local here = world.here
@@ -288,6 +288,7 @@ function M.fleet(world: any): Fleet
 			if chats[id] == nil and Visibility.missing(t.joined, clock, ctx) == "hide" then
 				verdict = "hide"
 			end
+			seen[id] = { verdict = verdict, opacity = opacity }
 			if verdict == "hide" then
 				threads[id] = nil
 			else
@@ -369,7 +370,101 @@ function M.fleet(world: any): Fleet
 			m.count += 1
 		end
 	end
+	for id in orphaned do
+		orphans[id] = true
+	end
 	return { machines = machines, threads = threads, orchestrators = orchestrators }
+end
+
+-- What a chat's row says that the fleet takes in as it stands (its name,
+-- its place, whether it shows at all); every other field (its status, its
+-- activity, its todo, when it moved) reaches the fleet only through the
+-- Map's "Show chats" verdict and fade.
+local STRUCT = { "title", "name", "parent", "project", "device", "archived", "child_kind", "started_by" }
+local function same_parts(a: any, b: any, depth: number): boolean
+	if rawequal(a, b) then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" or depth <= 0 then
+		return false
+	end
+	for k, v in a do
+		if not same_parts(v, b[k], depth - 1) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+
+-- The fleet last worked out, what it was worked out from, and each chat's
+-- verdict and fade then.
+local last: any = nil
+
+-- The fleet `world` makes: the one before, kept, when all a push changed is
+-- chats' rows in fields the fleet doesn't take in and no verdict or fade
+-- moved (a status, an activity: the common push), else worked out anew.
+-- (`M.fleet_builds`: how many times it was, for tests.)
+M.fleet_builds = 0
+function M.fleet(world: any): Fleet
+	local chats = world.chats or {}
+	local l = last
+	if l and rawequal(l.now, world.now) and l.here == world.here and l.clock == (world.clock or os.time())
+		and same_parts(l.projects, world.projects, 4) and same_parts(l.devices, world.devices, 4)
+		and same_parts(l.show, world.show, 3) and same_parts(l.read_at, world.read_at, 2) and same_parts(l.dismissed, world.dismissed, 2)
+	then
+		local ctx, clock = M.visibility(world)
+		local ok = true
+		local n = 0
+		for id, c in chats do
+			n += 1
+			local o = l.chats[id]
+			if o == nil or l.orphans[id] then
+				ok = false
+				break
+			end
+			if not rawequal(o, c) then
+				for _, f in STRUCT do
+					if not same_parts(o[f], c[f], 3) then
+						ok = false
+						break
+					end
+				end
+				if not ok then
+					break
+				end
+				local was = l.seen[id]
+				if was then
+					local verdict, opacity = Visibility.visible(c, clock, ctx)
+					if verdict ~= was.verdict or opacity ~= was.opacity then
+						ok = false
+						break
+					end
+				end
+			end
+		end
+		if ok and n == l.n then
+			l.chats = chats
+			return l.fleet
+		end
+	end
+	M.fleet_builds += 1
+	local seen, orphans = {}, {}
+	local fleet = fleet_full(world, seen, orphans)
+	local n = 0
+	for _ in chats do
+		n += 1
+	end
+	last = {
+		fleet = fleet, chats = chats, n = n, seen = seen, orphans = orphans,
+		now = world.now, here = world.here, clock = world.clock or os.time(),
+		projects = world.projects, devices = world.devices, show = world.show, read_at = world.read_at, dismissed = world.dismissed,
+	}
+	return fleet
 end
 
 export type Provenance = {

@@ -47,6 +47,42 @@ local MARKED: { [string]: string } = { testing = "working", building = "working"
 -- The states a thread is listed under its machine in.
 local LISTED: { [string]: boolean } = { working = true, connecting = true, waiting = true, input = true, approval = true }
 
+-- Each machine's running chats, worked out once a push for every machine
+-- (each card filtered all the chats itself before): by device, each list
+-- in its order (the longest at it first). Given back as it was for the
+-- same chats, "Show chats" and minute.
+local by_device_last: any = nil
+local function running_by_device(chats: { [string]: any }, mode: any, t: number): { [string]: { any } }
+	local l = by_device_last
+	if l and rawequal(l.chats, chats) and l.mode == mode and l.t == t then
+		return l.out
+	end
+	local ctx = Visibility.context(nil, mode)
+	local out: { [string]: { any } } = {}
+	for _, c in chats do
+		if c.device and c.status and LISTED[c.status] and Visibility.visible(c, t, ctx) ~= "hide" then
+			local list = out[c.device]
+			if not list then
+				list = {}
+				out[c.device] = list
+			end
+			table.insert(list, c)
+		end
+	end
+	for _, list in out do
+		table.sort(list, function(a: any, b: any): boolean
+			local sa = (a.activity and a.activity.since) or a.updated or 0
+			local sb = (b.activity and b.activity.since) or b.updated or 0
+			if sa ~= sb then
+				return sa < sb
+			end
+			return a.id < b.id
+		end)
+	end
+	by_device_last = { chats = chats, mode = mode, t = t, out = out }
+	return out
+end
+
 -- Each device's marks so far, by what made them (a thread's activity
 -- starting, a thread failing): kept for the window, so one stays on the
 -- line after its thread moves on.
@@ -186,25 +222,10 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 		return row:get().online ~= false and (l == nil or l.online ~= false)
 	end
 	local running = ui.computed(function(): { any }
-		local out = {}
 		-- (Running chats only, and those the Map's "Show chats" shows: the
 		-- one rule every view of the fleet keeps, ds/orch_map_visibility.)
-		local ctx = Visibility.context(nil, Visibility.mode:get())
-		local t = Visibility.now()
-		for _, c in props.chats() or {} do
-			if c.device == id() and c.status and LISTED[c.status] and Visibility.visible(c, t, ctx) ~= "hide" then
-				table.insert(out, c)
-			end
-		end
-		table.sort(out, function(a: any, b: any): boolean
-			local sa = (a.activity and a.activity.since) or a.updated or 0
-			local sb = (b.activity and b.activity.since) or b.updated or 0
-			if sa ~= sb then
-				return sa < sb
-			end
-			return a.id < b.id
-		end)
-		return out
+		local all = running_by_device(props.chats() or {}, Visibility.mode:get(), Visibility.now())
+		return all[id()] or {}
 	end)
 	-- Its marks: each loud activity's start, each failure, as they're seen.
 	local events = ui.computed(function(): { Spark.Event }

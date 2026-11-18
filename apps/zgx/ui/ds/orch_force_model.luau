@@ -74,10 +74,46 @@ export type Model = {
 -- an orchestrator's own too, hangs off its machine, coloured by its
 -- orchestrator's hue).
 M.MACHINE = "machine:"
+-- The web last built and what from: the same fleet (model.fleet keeps it
+-- through a push that moved nothing it shows), messages and pivot give it
+-- back, while no node's todo or agent says otherwise.
+local last_build: any = nil
+-- (How many times a web was built, not given back: for tests.)
+M.builds = 0
+
 function M.build(world: any, comms: { any }?, now: number?, pivot: string?): Model
 	local fleet = model.fleet(world)
 	local chats = world.chats or {}
 	local t = now or os.time()
+	local lb = last_build
+	if lb and rawequal(lb.fleet, fleet) and rawequal(lb.comms, comms) and lb.pivot == pivot and lb.t == t then
+		local same = true
+		for _, n in lb.model.nodes do
+			if n.kind == "chat" or n.kind == "orchestrator" then
+				local c = chats[n.id]
+				if provider(c) ~= n.provider then
+					same = false
+					break
+				end
+				-- (A chat's todo on its node; an orchestrator's node has none.)
+				if n.kind == "chat" then
+					local td = c and c.todo
+					local d, tot = 0, 0
+					if type(td) == "table" then
+						d, tot = td.done or 0, td.total or 0
+					end
+					if d ~= n.done or tot ~= n.total then
+						same = false
+						break
+					end
+				end
+			end
+		end
+		if same then
+			return lb.model
+		end
+	end
+	M.builds += 1
 	local out: Model = { nodes = {}, index = {}, links = {}, arcs = {}, machines = {}, sig = "" }
 	local sig = {}
 	local function add(n: Node)
@@ -292,6 +328,7 @@ function M.build(world: any, comms: { any }?, now: number?, pivot: string?): Mod
 		weak(out.index[r.from], out.index[r.to])
 	end
 	out.sig = table.concat(sig, "|")
+	last_build = { fleet = fleet, comms = comms, pivot = pivot, t = t, model = out }
 	return out
 end
 
