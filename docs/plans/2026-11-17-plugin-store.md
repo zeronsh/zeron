@@ -572,3 +572,59 @@ Agreed after the plan was first written. Newest last.
     (`StepUp {for: "deploy_key"}`), once. A store record without `bytes`
     is refused; `bytes` is the read limit. The store client follows no
     redirect.
+
+### Wing's redirect, Nov 19 (amendments 44 and 45 replace earlier text where they differ)
+
+44. **A deploy key belongs to an account and carries a scope.** It is no
+    longer made for one plugin.
+    - A key has a name, a public key, an expiry (or none), and a scope fixed
+      when it is made: either a list of plugin ids the account owns (one or
+      more), or **all** of the account's plugins, those it publishes later
+      included. A scope is never edited; a different scope is a new key.
+    - No key ever claims a new id: a plugin's first version comes from a
+      signed-in device. A key publishes new versions of plugins in its scope
+      that its account owns, reads `GET /store/v1/me/plugins`, and nothing
+      else. A plugin that leaves the account leaves every scope.
+    - `GET /plugin-keys/:key?plugin=<id>` still answers per plugin: verified
+      only for a plugin in the key's scope.
+    - Routes move from `/store/v1/plugins/:id/keys` to the account:
+      `GET|POST /store/v1/me/keys`, `DELETE /store/v1/me/keys/:key`. Each
+      key answers `{ key, name, scope: { all: true } | { plugins: [id…] },
+      created_at, last_used_at, last_used_plugin, expires_at }`.
+    - Making a key still needs a step-up begun for it (`for: "deploy_key"`),
+      once; the secret is still made on the device, shown once, never sent.
+    - The app lists and makes keys in one place for the account (not on each
+      plugin's Publish page); the web lists them the same way.
+45. **Publishing is immediate; review verifies.** A version that passes the
+    store's automatic checks is listed and installable by everyone at once.
+    A reviewer's decision no longer gates it: it marks the version verified.
+    - A version carries `verification`: `unverified` (no decision yet, or a
+      reviewer declined to verify it) or `verified`, with `verified_at`.
+      A declined version keeps the reviewer's reason and words for its
+      author and for staff; the public sees only that it is not verified.
+    - Version states are now: `listed`, `yanked` (its author stopped new
+      installs), `taken_down` (staff: harmful; blocked on devices as today),
+      `removed`. `pending`, `approved`, `rejected` and `withdrawn` go.
+    - A `PluginCard` gains `verified` (its newest listed version is
+      verified) and `verified_version` (the newest verified listed version,
+      or null). `version` is the newest listed version, verified or not.
+      Every version record and every update offer carries `verified`.
+    - The catalog lists every listed plugin. `verified=1` narrows it to
+      plugins whose newest version is verified. Featured plugins are staff's
+      choice and must have a verified version.
+    - Every listed version of a plugin can be seen and installed, not only
+      the newest: the detail's `versions` lists them all (paged), and the
+      package route serves any listed version.
+    - Updates are offered at once, verified or not, each saying which.
+    - The staff queue is the unverified versions no reviewer has decided,
+      oldest first: Verify, Don't verify (a reason and words to the author;
+      the version stays listed), Take down.
+    - An author's own versions need no private path any more: there is no
+      version only its author can install.
+    - Devices: the store's record says `verified`; the plugin page, the
+      consent sheet and the update sheet say plainly when a version is not
+      verified, and offer the newest verified version where there is one.
+      Installing or updating to an unverified version always asks, even
+      when it asks for nothing new.
+    - Unchanged: the automatic checks at publish, the rate limits, id
+      ownership and release, reports, blocks, the trust anchor.
