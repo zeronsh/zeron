@@ -178,6 +178,21 @@
       "jpeg"
     ]
   },
+  "mark_claims": {
+    "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). The text is read as Unicode NFKC, lowercased (full Unicode lowercase, as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General Category Mn) dropped; it claims the mark when it has any of glyphs anywhere, or any of words as a whole word: an occurrence with no ASCII letter or digit right before or after it. The listing cases named 'the mark' hold both sides to it. The edge also reads the name and description through its confusables skeleton before the word check, which a device does not: the cases marked '(edge only)' carry edge_problems, the edge's answer, where problems is the device's.",
+    "glyphs": [
+      "✓",
+      "✔",
+      "☑",
+      "✅",
+      "🗸",
+      "🗹"
+    ],
+    "words": [
+      "verified",
+      "official"
+    ]
+  },
   "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version. A publish must be later than every version the plugin has had, in any state, pre-releases included.",
   "package_format": "zeron-plugin:v1",
   "payload_prefix": "zeron-plugin:v1\n",
