@@ -503,7 +503,18 @@ function M.Feature(props: FeatureProps): Node
 			focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 },
 			on_click = props.on_click,
 			if props.cover
-				then ui.div { class = "settings-feature-cover", w_full = true, aspect = M.COVER, overflow = "hidden", shrink = 0, props.cover }
+				then ui.div {
+					class = "settings-feature-cover",
+					w_full = true,
+					aspect = M.COVER,
+					-- (Clipped to the card's top corners on its own box, so
+					-- the picture's corners are the card's.)
+					overflow = "hidden",
+					rounded_tl = ui.raw(control.nest("$radius.xl", 1), "the card's corner less its edge"),
+					rounded_tr = ui.raw(control.nest("$radius.xl", 1), "the card's corner less its edge"),
+					shrink = 0,
+					props.cover,
+				}
 				else nil,
 			ui.column {
 			w_full = true,

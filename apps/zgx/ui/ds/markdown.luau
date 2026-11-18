@@ -130,6 +130,18 @@ export type Props = {
 	-- every link is drawn as a link, never as one of Zeron's own chips (a
 	-- chat, a file, a picture, a skill), whatever its target says.
 	foreign: boolean?,
+	-- A document shown under a page's own title (a store plugin's README):
+	-- its headings drawn `heading_step` levels down, its `#` as a `##` is
+	-- (and said so to assistive technology), so none outweighs the page's
+	-- title; the third level's size is the least.
+	heading_step: number?,
+	-- Handed the words of a top-level heading that opens the text: `true`
+	-- leaves it out (a README's `# Name`, on a page that has just said the
+	-- name). Not with a `find`, which counts the blocks as written.
+	drop_title: ((words: string) -> boolean)?,
+	-- Its pictures' corner (a token, `"$radius.lg"`): each clipped to it,
+	-- as a page's other pictures are. Square without.
+	picture_radius: string?,
 }
 export type FindAt = { key: string, block: number, k: number }
 export type Find = {
@@ -305,6 +317,9 @@ type Ctx = {
 	source: (() -> string)?,
 	-- Props' `foreign`: links are links, never chips.
 	foreign: boolean?,
+	-- Props' `heading_step` and `picture_radius`.
+	heading_step: number?,
+	picture_radius: string?,
 }
 
 -- A reply's pictures in the order it wrote them, by its group (each of its
@@ -1220,7 +1235,7 @@ end)
 -- size is its file's header's (`ui.image_size`); a picture from the web
 -- says it as it loads (`on_load`, a point-sized stand-in), and zgx asks
 -- for one that failed again by itself.
-local Picture = ui.component(function(props: { src: string, name: string, w: number?, h: number? }): Node
+local Picture = ui.component(function(props: { src: string, name: string, w: number?, h: number?, radius: string? }): Node
 	local ok, iw, ih = pcall(ui.image_size, props.src)
 	local header = ok and type(iw) == "number" and type(ih) == "number" and iw > 0 and ih > 0
 	local natural = ui.use_state(if header then { w = iw :: number, h = ih :: number } else { w = 0, h = 0 })
@@ -1272,6 +1287,10 @@ local Picture = ui.component(function(props: { src: string, name: string, w: num
 					local n = natural:get()
 					return if n.h > 0 then n.w / n.h else 1
 				end,
+				-- (Its corner, when it has one: the box is the picture's own
+				-- shape, so the clip is the picture's.)
+				rounded = props.radius,
+				overflow = if props.radius then "hidden" else nil,
 				cursor = "zoom_in",
 				-- (A button by the keys too, Enter or Space, and to
 				-- assistive technology: what it does, the picture's name in
@@ -1409,13 +1428,15 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 		end
 		return runs(b.s, style, ctx)
 	elseif b.t == "h" then
-		local level = math.min(b.l, 3)
+		-- (Stepped down under a page's title: `heading_step`.)
+		local step = if ctx and ctx.heading_step then math.max(0, math.floor(ctx.heading_step)) else 0
+		local level = math.min(b.l + step, 3)
 		local key = `zeron.prose.h{level}`
 		-- (Set small, a heading keeps the prose's size: a thought's heading
 		-- is a title in the margin, not a chapter's.)
 		local small = ctx ~= nil and ctx.small == true
 		return runs(b.s, {
-			heading = b.l,
+			heading = math.min(b.l + step, 6),
 			weight = "$font.weight.semibold",
 			text_size = if small then SMALL_SIZE else `${key}.size`,
 			line_height = if small then SMALL_LINE else `${key}.line`,
@@ -1628,7 +1649,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			if ctx.image_size then
 				w, h = ctx.image_size(wanted)
 			end
-			return Picture { src = src, name = name, w = w, h = h }
+			return Picture { src = src, name = name, w = w, h = h, radius = ctx.picture_radius }
 		end),
 		}
 	end
@@ -1778,9 +1799,34 @@ end
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.foreign
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small, foreign = props.foreign }
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.foreign or props.heading_step or props.picture_radius
+		then {
+			image = props.image,
+			image_size = props.image_size,
+			open = props.open,
+			link_menu = props.link_menu,
+			link_chip = props.link_chip,
+			attached = props.attached,
+			task = props.task,
+			tasks = {},
+			pictures = props.pictures,
+			group = props.group,
+			small = props.small,
+			foreign = props.foreign,
+			heading_step = props.heading_step,
+			picture_radius = props.picture_radius,
+		}
 		else nil
+	-- The text's blocks, less a title the caller has already said
+	-- (`drop_title`), and how many were left out of its start.
+	local drop_title = props.drop_title
+	local function untitled(list: { MarkdownBlock }): ({ MarkdownBlock }, number)
+		local b: any = list[1]
+		if not drop_title or not b or b.t ~= "h" or b.l ~= 1 or not drop_title(MarkdownFind.words(b.s)) then
+			return list, 0
+		end
+		return table.move(list, 2, #list, 1, table.create(#list - 1)), 1
+	end
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).
 	if type(text) == "function" then
@@ -2079,14 +2125,15 @@ return function(props: Props): Node
 				local c = find.current()
 				opts.first = if c and c.key == window.key then c.block else nil
 			end
-			local list = parse(text(), opts)
+			local parsed = parse(text(), opts)
+			local list, cut = untitled(parsed)
 			if ctx and ctx.task then
 				ctx.tasks = {}
 				number_tasks(list, ctx.tasks)
 			end
 			-- The first block that may differ from those shown: past those
 			-- the parse kept from the last (its very tables), the rest looked at.
-			local from = math.min(MarkdownFind.settled(list), #shown_blocks) + 1
+			local from = math.min(math.max(0, MarkdownFind.settled(parsed) - cut), #shown_blocks) + 1
 			if from > 1 and shown_blocks[from - 1] ~= list[from - 1] then
 				from = 1
 			end
@@ -2173,7 +2220,7 @@ return function(props: Props): Node
 		end
 	elseif track then
 		local out: { Node } = {}
-		local list = parse(text, opts)
+		local list = untitled(parse(text, opts))
 		if ctx and ctx.task then
 			number_tasks(list, ctx.tasks)
 		end
@@ -2182,7 +2229,7 @@ return function(props: Props): Node
 		end
 		column[1] = out
 	else
-		local list = parse(text, opts)
+		local list = untitled(parse(text, opts))
 		if ctx and ctx.task then
 			number_tasks(list, ctx.tasks)
 		end

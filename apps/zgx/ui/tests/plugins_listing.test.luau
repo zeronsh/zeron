@@ -123,6 +123,55 @@ test("Install asks the engine for the store's version on the device shown; the c
 	expect(app:tree("#store-offer")).to_contain("Installed")
 end)
 
+test("the head's one slot is the same primary button in every state, its words saying which, where it stands under it", function()
+	local app = page("Focus timer")
+	local function one(label: string)
+		expect(app:count("#store-slot >> role:button")).to_be(1)
+		expect(app:count("#store-slot >> .store-action")).to_be(1)
+		expect(app:has(`#store-slot >> role:button "{label}"`)).to_be(true)
+	end
+	local function said(words: string)
+		expect(app:tree("#store-state")).to_contain(words)
+	end
+	-- (The item as the engine would send it next, changed by `change`.)
+	local function item(change: (p: any) -> ())
+		local now = app:state("plugins")
+		local list = {}
+		for _, p in now.list do
+			local q = table.clone(p)
+			if q.id == "focus-timer" then
+				change(q)
+			end
+			table.insert(list, q)
+		end
+		app:set_state("plugins", { state = now.state, list = list })
+		settle(app)
+	end
+	one("Install")
+	expect(app:has("#store-state")).to_be(false)
+	app:click('#store-slot >> role:button "Install"')
+	app:command("store.install_done")
+	settle(app)
+	one("Review")
+	said("It's waiting for you to allow it.")
+	app:command("store.allowed")
+	settle(app)
+	-- Installed: said, never a button of its own.
+	said("Installed")
+	expect(app:count("#store-slot >> role:button") <= 1).to_be(true)
+	expect(app:count("#store-slot >> role:button")).to_be(app:count("#store-slot >> .store-action"))
+	app:command("store.update_found")
+	settle(app)
+	one("Update to 1.3.0")
+	said("You have 1.2.0")
+	item(function(p: any)
+		p.update = nil
+		p.status = "off"
+	end)
+	one("Turn on")
+	said("It's turned off.")
+end)
+
 test("an install that fails says why, and Install is there to try again", function()
 	local app = page("Focus timer")
 	app:click('#store-offer >> role:button "Install"')
@@ -353,7 +402,7 @@ test("a README of the store's whole 512 KB opens with its first piece, the rest 
 	local y = tonumber((app:tree("#store-readme-more"):match(" %-?[%d.]+,(%-?[%d.]+) "))) or 0
 	app:scroll("#fixture-scroll", y - 400)
 	app:frames(10)
-	app:click("#store-readme-more")
+	app:click('#store-readme-more >> role:button "Show more"')
 	settle(app, 300)
 	expect(height() > before + 1000).to_be(true)
 	expect(app:error()).to_be_nil()

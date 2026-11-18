@@ -12,10 +12,13 @@
 --   Review                waiting for you to allow it
 --   Turn on               allowed, and off
 --   Open settings         on, here, with settings of its own
---   Installed             there, and nothing to do
--- A version Zeron took down says why, and can be turned back on (it's
--- yours); one made for a later Zeron says which it needs, and doesn't
--- install. Nothing installs unless the person asks here.
+--   (none)                there, and nothing to do
+-- each the page's one primary button, its state said in one line under it
+-- (installed, the version here, waiting for you, off, the device away). A
+-- version Zeron took down says why, and can be turned back on (it's
+-- yours); one made for another Zeron, or a plugin from elsewhere with its
+-- id, says so in a callout under its summary, and doesn't install.
+-- Nothing installs unless the person asks here.
 --
 -- The README is drawn as the app draws Markdown, from the words its author
 -- signed and the store reviewed: its pictures only from its own package
@@ -28,6 +31,7 @@
 --                               its outcomes (`settled`, `failed`)
 
 local ds = require("@ds")
+local FoldButton = require("@ds/fold_button").FoldButton
 local Lightbox = require("@ds/lightbox")
 local Links = require("@ds/links")
 local Markdown = require("@ds/markdown")
@@ -132,6 +136,145 @@ local function said(node: Node): Node
 	return ui.column { w_full = true, py = "$space.6", px = "$space.4", node }
 end
 
+-- A version's notes (its changelog, the store takes 64 KB of it), kept to
+-- `lines` lines of the small prose while folded, their foot fading, with
+-- Show more under them when there's more; open, the whole of it, and Show
+-- less. Folded, only its start is drawn: enough for the lines it shows,
+-- each piece ending at a line's end, so a long one costs what shows. One
+-- line folded is its first line's words alone (an older version's).
+local VERSIONS_FIRST = 3
+local NOTES_LINES = 10
+local NOTES_MOST = 64 * 1024
+-- (About ten lines' worth of the source: what the fold shows, and more.)
+local NOTES_START = 2048
+local FADE_LINES = 1.5
+
+-- A text's start: up to `most` bytes, ended at a line's end where it can
+-- be; and whether that's all of it.
+local function start_of(text: string, most: number): (string, boolean)
+	if #text <= most then
+		return text, true
+	end
+	local cut = string.sub(text, 1, most)
+	local at = string.match(cut, "^.*()\n")
+	return if at and at > 1 then string.sub(cut, 1, at - 1) else cut, false
+end
+
+-- A line's words without its Markdown marks: a heading's #s, a list's
+-- marker, emphasis and code ticks, a link's target.
+local function words_of(line: string): string
+	local w = string.gsub(line, "^%s*#+%s*", "")
+	w = string.gsub(w, "^%s*[-*+]%s+", "")
+	w = string.gsub(w, "^%s*%d+[.)]%s+", "")
+	w = string.gsub(w, "!?%[([^%]]*)%]%([^)]*%)", "%1")
+	w = string.gsub(w, "[*_`]+", "")
+	return (string.gsub(w, "^%s+", ""))
+end
+local function first_line(text: string): string
+	for line in string.gmatch(text, "[^\n]+") do
+		local w = words_of(line)
+		if string.match(w, "%S") then
+			return w
+		end
+	end
+	return ""
+end
+
+local Notes = ui.component(function(props: { text: () -> string, lines: number }): Node
+	local open = ui.use_state(false)
+	local line = (ui.theme.get("zeron.prose.small.line") :: number?) or 20
+	local folded_h = props.lines * line
+	local body_h = ui.use_state(0)
+	local function start(): (string, boolean)
+		return start_of(props.text(), NOTES_START)
+	end
+	-- Whether there's more than the fold shows.
+	local function more(): boolean
+		local _, whole = start()
+		if props.lines == 1 then
+			local text = props.text()
+			local rest = string.gsub(text, "^%s*[^\n]*", "", 1)
+			return string.match(rest, "%S") ~= nil
+		end
+		return not whole or body_h:get() > folded_h + 0.5
+	end
+	local function folded(): boolean
+		return not open:get() and more()
+	end
+	local body: Node
+	if props.lines == 1 then
+		-- (An older version's: its first line's words, then the whole.)
+		body = ui.presence(function(): string
+			return if open:get() then "open" else "line"
+		end, function(key: string): Node
+			if key == "line" then
+				return ui.text {
+					function(): string
+						return first_line(props.text())
+					end,
+					w_full = true,
+					lines = 1,
+					truncate = true,
+					text_size = "$zeron.prose.small.size",
+					line_height = "$zeron.prose.small.line",
+					color = "$text.secondary",
+				}
+			end
+			return Markdown { text = props.text, small = true, foreign = true }
+		end, { w_full = true })
+	else
+		body = ui.column {
+			w_full = true,
+			overflow = "hidden",
+			max_h = function(): number
+				return if folded() then folded_h else 1e7
+			end,
+			fade = function(): { number }
+				return { 0, if folded() then line * FADE_LINES else 0 }
+			end,
+			ui.column {
+				w_full = true,
+				on_resize = function(size: { w: number, h: number })
+					if math.abs(size.h - body_h:peek()) >= 0.5 then
+						body_h:set(size.h)
+					end
+				end,
+				Markdown {
+					text = function(): string
+						if open:get() then
+							return props.text()
+						end
+						return (start())
+					end,
+					small = true,
+					foreign = true,
+				},
+			},
+		}
+	end
+	return ui.column {
+		class = "store-notes",
+		w_full = true,
+		gap = "$space.2",
+		body,
+		ui.show(function(): boolean
+			return open:get() or more()
+		end, FoldButton {
+			label = function(): string
+				return if open:get() then ui.t("plugins.store.show_less"):get() else ui.t("plugins.store.readme_more"):get()
+			end,
+			open = function(): boolean
+				return open:get()
+			end,
+			on_click = function()
+				open:set(not open:peek())
+			end,
+			class = "store-notes-more",
+			place = { self = "start" },
+		}),
+	}
+end)
+
 -- The page itself, its detail read.
 local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local id, here = props.plugin, props.here
@@ -172,14 +315,12 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		return false
 	end
 	-- Whether it works with this Zeron, as the engine judges it (its
-	-- `engines.zeron` against the Zeron it runs), and why not in its words.
+	-- `engines.zeron` against the Zeron it runs), and why not in its words
+	-- (the page is built again as either changes: its key).
 	local function compatible(): boolean
 		return d().compatible ~= false
 	end
-	local function incompatible(): string
-		local why = d().incompatible
-		return if type(why) == "string" and why ~= "" then why else ui.t("plugins.store.needs_other_zeron"):get()
-	end
+	local why_not: string? = if type(first.incompatible) == "string" and first.incompatible ~= "" then string.sub(first.incompatible, 1, 500) else nil
 	-- Taken down by Zeron, and not turned back on.
 	local function blocked(): any?
 		local it: any = item()
@@ -275,13 +416,20 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end)
 	end
 
-	-- The one button, by what it does now.
-	local function action(kind: string): Node
+	-- (Every one of them the same button: the page's primary, small, as a
+	-- row's controls are.)
+	local function primary(props: { [any]: any }): Node
+		props.tone, props.size, props.class = "primary", "sm", "store-action"
+		return ds.Button(props :: any)
+	end
+	-- The one button, by what it does now: the page's one primary action,
+	-- its words saying which. None when there's nothing to do (installed,
+	-- without settings of its own; taken down, which its callout turns back
+	-- on).
+	local function action(kind: string): Node?
 		if kind == "install" or kind == "incompatible" or kind == "away" or kind == "other" then
-			return ds.Button {
+			return primary {
 				id = "store-install",
-				tone = "primary",
-				size = "sm",
 				disabled = kind ~= "install",
 				busy = function(): boolean
 					return busy:get()
@@ -294,10 +442,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				end,
 			}
 		elseif kind == "update" then
-			return ds.Button {
+			return primary {
 				id = "store-update",
-				tone = "primary",
-				size = "sm",
 				busy = function(): boolean
 					return updating:get()
 				end,
@@ -313,67 +459,144 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				end,
 			}
 		elseif kind == "review" then
-			return ds.Button {
+			return primary {
 				id = "store-review",
-				tone = "accent",
-				size = "sm",
 				on_click = function()
 					state.review(id, here.device(), if here.device() then here.device_name() else nil)
 				end,
 				ui.t("plugins.page.review"),
 			}
 		elseif kind == "off" then
-			return ds.Button { id = "store-turn-on", tone = "primary", size = "sm", on_click = turn_on, ui.t("plugins.store.turn_on") }
+			return primary { id = "store-turn-on", on_click = turn_on, ui.t("plugins.store.turn_on") }
 		elseif kind == "settings" then
-			return ds.Button {
+			return primary {
 				id = "store-settings",
-				tone = "secondary",
-				size = "sm",
 				on_click = function()
 					plugin_settings.open(id)
 				end,
 				ui.t("plugins.store.open_settings"),
 			}
-		elseif kind == "blocked" then
-			return ui.div {}
 		end
+		return nil
+	end
+
+	-- Where it stands, in one line under the button (or in its place when
+	-- there's none): what's here, what waits, why it can't install now.
+	-- The plain Install says nothing: what it asks for says it's asked.
+	local function said_here(plain: string, on: string): () -> string
+		return function(): string
+			return if here.device()
+				then ui.t(on, { device = here.device_name() }):get()
+				else ui.t(plain):get()
+		end
+	end
+	local function state_words(kind: string): (() -> string)?
+		if kind == "installed" or kind == "settings" then
+			return said_here("plugins.store.installed", "plugins.store.installed_on")
+		elseif kind == "update" then
+			return function(): string
+				local it: any = item()
+				local v = if it and type(it.version) == "string" then it.version else ""
+				return if here.device()
+					then ui.t("plugins.store.has_version_on", { device = here.device_name(), version = v }):get()
+					else ui.t("plugins.store.has_version", { version = v }):get()
+			end
+		elseif kind == "review" then
+			return function(): string
+				return ui.t("plugins.store.review_note"):get()
+			end
+		elseif kind == "off" then
+			return function(): string
+				return ui.t("plugins.store.off_note"):get()
+			end
+		elseif kind == "away" then
+			return function(): string
+				return ui.t("plugins.store.away_note", { device = here.device_name() }):get()
+			end
+		end
+		return nil
+	end
+	local function state_line(kind: string): Node?
+		local said = state_words(kind)
+		if not said then
+			return nil
+		end
+		local there = kind == "installed" or kind == "settings"
 		return ui.row {
-			id = "store-installed",
+			id = "store-state",
+			min_w = 0,
 			gap = "$space.1",
 			items = "center",
-			color = "$zeron.tone.success.ink",
-			ds.Icon { name = "check-circle", size = 16 },
+			color = "$text.secondary",
+			-- (There: the check, the small type's glyph.)
+			if there then ds.Icon { name = "check-circle", size = 14, aria_hidden = true } else nil,
 			ui.text {
-				function(): string
-					return if here.device()
-						then ui.t("plugins.store.installed_on", { device = here.device_name() }):get()
-						else ui.t("plugins.store.installed"):get()
-				end,
-				text_size = "$font.size.md",
-				line_height = "$font.line.md",
-				weight = "$font.weight.medium",
+				said,
+				min_w = 0,
+				shrink = 1,
+				lines = 1,
+				truncate = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
 			},
 		}
 	end
-
-	-- What's said beside the button: what installing does, why it can't,
-	-- or nothing.
-	local function note(): string
-		local k = standing()
-		if k == "install" then
-			return ui.t("plugins.store.install_note"):get()
-		elseif k == "incompatible" then
-			return incompatible()
-		elseif k == "away" then
-			return ui.t("plugins.store.device_away", { device = here.device_name() }):get()
-		elseif k == "other" then
-			return ui.t("plugins.store.other_installed"):get()
-		elseif k == "update" then
-			return ui.t("plugins.store.update_note"):get()
-		elseif k == "review" then
-			return ui.t("plugins.store.review_note"):get()
+	-- The slot at the head's right: the button, its centre on the name's
+	-- first line, and the line under it, both ending on the content edge;
+	-- the line in the button's place when there's none. No wider than a
+	-- row's control, so a long device name ends in "…" there.
+	local function slot(kind: string): Node
+		local button = action(kind)
+		local line = state_line(kind)
+		local top = button or line
+		if not top then
+			return ui.div {}
 		end
-		return ""
+		return ui.column {
+			id = "store-slot",
+			shrink = 0,
+			max_w = ui.theme.get("zeron.settings.control") :: number?,
+			items = "end",
+			gap = "$space.1",
+			ui.row { min_w = 0, max_w = "100%", min_h = ui.theme.get("font.line.xl") :: number?, items = "center", top },
+			if button and line then line else nil,
+		}
+	end
+
+	-- Why it can't install, where it takes more than a line: made for
+	-- another Zeron (in the engine's words, when it gives them), or another
+	-- plugin with its id installed from elsewhere, with the way to it.
+	local function cannot(): Node
+		local function kind(): string
+			local k = standing()
+			return if k == "incompatible" or k == "other" then k else ""
+		end
+		return ui.show(function(): boolean
+			return kind() ~= ""
+		end, ui.div {
+			id = "store-cannot",
+			w_full = true,
+			ui.switch(kind, {
+				incompatible = ds.Callout {
+					tone = "warning",
+					title = ui.t("plugins.store.needs_other_zeron"),
+					body = why_not,
+				},
+				other = ds.Callout {
+					tone = "warning",
+					title = ui.t("plugins.store.other_title"),
+					body = ui.t("plugins.store.other_body"),
+					action = {
+						label = ui.t("plugins.store.show_installed"),
+						on_click = function()
+							nav.tab:set("installed")
+							nav.back()
+						end,
+					},
+				},
+				[""] = ui.div {},
+			}),
+		})
 	end
 
 	-- Its keywords: each one narrows Browse to it.
@@ -486,24 +709,19 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					color = "$text.tertiary",
 				},
 			},
-			-- (Its centre on the name's first line.)
-			ui.row {
-				shrink = 0,
-				min_h = ui.theme.get("font.line.xl") :: number?,
-				items = "center",
-				ui.switch(standing, {
-					install = action("install"),
-					incompatible = action("incompatible"),
-					away = action("away"),
-					other = action("other"),
-					update = action("update"),
-					review = action("review"),
-					off = action("off"),
-					settings = action("settings"),
-					installed = action("installed"),
-					blocked = action("blocked"),
-				}),
-			},
+			-- (The name's column ends a section's gap, 16, before it.)
+			ui.switch(standing, {
+				install = slot("install"),
+				incompatible = slot("incompatible"),
+				away = slot("away"),
+				other = slot("other"),
+				update = slot("update"),
+				review = slot("review"),
+				off = slot("off"),
+				settings = slot("settings"),
+				installed = slot("installed"),
+				blocked = slot("blocked"),
+			}),
 		},
 		ui.show(function(): boolean
 			local summary = d().summary
@@ -521,36 +739,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			color = "$text.secondary",
 		}),
 		keywords(),
-		ui.show(function(): boolean
-			return note() ~= ""
-		end, ui.text {
-			id = "store-note",
-			note,
-			px = ds.Settings.inset(),
-			w_full = true,
-			wrap = true,
-			text_size = "$font.size.sm",
-			line_height = "$font.line.sm",
-			-- (What keeps Install off, in the warning's ink, whichever it is.)
-			color = function(): string
-				local k = standing()
-				return if k == "incompatible" or k == "other" or k == "away" then "$zeron.tone.warning.ink" else "$text.tertiary"
-			end,
-		}),
-		-- The other plugin with its id: where it is, to remove it.
-		ui.show(function(): boolean
-			return standing() == "other"
-		end, ui.row {
-			px = ds.Settings.inset(),
-			ds.Link {
-				ui.t("plugins.store.show_installed"),
-				size = "sm",
-				on_click = function()
-					nav.tab:set("installed")
-					nav.back()
-				end,
-			},
-		}),
+		cannot(),
 		-- A version Zeron took down: why, and the way back.
 		ui.show(function(): boolean
 			return standing() == "blocked"
@@ -700,6 +889,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end
 		return store.picture_src(id, version, path :: string)
 	end
+	-- Whether a heading's words are the plugin's name (its case and spaces
+	-- aside).
+	local function plain(text: string): string
+		return string.lower((string.gsub(string.gsub(text, "%s+", " "), "^ ?(.-) ?$", "%1")))
+	end
+	local function same_name(heading: string): boolean
+		return plain(heading) == plain(d().name or id)
+	end
 	local function readme(): Node
 		local list = ui.computed(function(): { number }
 			local out = {}
@@ -723,6 +920,13 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 							foreign = true,
 							text = pieces[i],
 							image = picture,
+							-- (Under the page's own title: its headings a level
+							-- down, none larger than the name; a `# Name` that
+							-- opens it, the name again, left out; its pictures
+							-- with the page's corner.)
+							heading_step = 1,
+							drop_title = if i == 1 then same_name else nil,
+							picture_radius = "$radius.lg",
 						}
 					end, {
 						key = function(i: number): number
@@ -732,14 +936,19 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					ui.show(function(): boolean
 						return shown_pieces:get() < #pieces
 					end, ui.row {
-						ds.Button {
-							id = "store-readme-more",
-							tone = "secondary",
-							size = "sm",
+						id = "store-readme-more",
+						-- (The page's one way to open more of a text in place,
+						-- as a version's notes do.)
+						FoldButton {
+							label = function(): string
+								return ui.t("plugins.store.readme_more"):get()
+							end,
+							open = function(): boolean
+								return false
+							end,
 							on_click = function()
 								shown_pieces:set(shown_pieces:peek() + 1)
 							end,
-							ui.t("plugins.store.readme_more"),
 						},
 					}),
 				},
@@ -747,10 +956,12 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		}
 	end
 
-	-- Its screenshots, side by side, each opening the set in the lightbox:
-	-- 16:10 thumbnails as wide as two and a bit fill the page's column, so
-	-- the next one shows at its edge to say there are more; the strip as
-	-- tall as they are, its first at the cards' edge.
+	-- Its screenshots, each opening the set in the lightbox: 16:10, with
+	-- the cards' corner, the strip's first at the cards' edge. Decided by how
+	-- many: one fills the column (no taller than a reply's picture,
+	-- `zeron.prose.picture.h`, 420); two share it, 12 apart; three or more
+	-- show two whole and the third at the column's end, to say there are
+	-- more, as wide as two and a bit of the column as it's laid out.
 	local function shots(): Node
 		local list: { string } = {}
 		for _, s in (if type(first.screenshots) == "table" then first.screenshots else {}) :: { any } do
@@ -761,10 +972,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		if #list == 0 then
 			return ui.div {}
 		end
-		local measure = (ui.theme.get("zeron.settings.measure") :: number?) or 640
 		local gap = (ui.theme.get("space.3") :: number?) or 12
-		local w = math.floor((measure - 2 * gap) / 2.4)
-		local h = math.floor(w * 10 / 16)
 		local radius = (ui.theme.get("radius.lg") :: number?) or 12
 		local function items(): { any }
 			local out = {}
@@ -776,14 +984,15 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			end
 			return out
 		end
-		local thumbs: { Node } = {}
-		for _, path in list do
-			table.insert(thumbs, ui.presence(function(): string
+		-- One picture in the box it's given: its wash while it comes, then
+		-- it, clipped to the corner with the hairline a picture has.
+		local function picture_in(path: string): Node
+			return ui.presence(function(): string
 				local src = store.picture_src(id, version, path)
 				return if src == false then "\0none" else (src or "")
 			end, function(src: string): Node
 				if src == "" then
-					return ds.Skeleton { w = w, h = h, rounded = "$radius.lg" }
+					return ui.div { w_full = true, h_full = true, rounded = "$radius.lg", overflow = "hidden", ds.Skeleton { fill = true } }
 				elseif src == "\0none" then
 					return ui.div {}
 				end
@@ -798,19 +1007,66 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					index = index,
 					items = items,
 					radius = radius,
-					w = w,
-					h = h,
-					ui.image { src = src, w_full = true, h_full = true, fit = "cover", aria_hidden = true },
+					w_full = true,
+					h_full = true,
+					rounded = "$radius.lg",
+					ui.overlay {
+						w_full = true,
+						h_full = true,
+						rounded = "$radius.lg",
+						overflow = "hidden",
+						border = 1,
+						border_color = "$border",
+						border_over = true,
+						bg = "$hover",
+						ui.image { src = src, w_full = true, h_full = true, fit = "cover", aria_hidden = true },
+					},
 				}
-			end))
+			end, { w_full = true, h_full = true })
 		end
-		return ui.scroll_x {
-			id = "store-shots",
+		if #list == 1 then
+			return ui.div {
+				id = "store-shots",
+				class = "store-shot",
+				w_full = true,
+				aspect = 1.6,
+				max_h = ui.theme.get("zeron.prose.picture.h") :: number?,
+				picture_in(list[1]),
+			}
+		elseif #list == 2 then
+			local pair: { Node } = {}
+			for _, path in list do
+				table.insert(pair, ui.div { class = "store-shot", grow = 1, basis = 0, min_w = 0, aspect = 1.6, picture_in(path) })
+			end
+			return ui.row { id = "store-shots", w_full = true, gap = "$space.3", table.unpack(pair) }
+		end
+		-- (The column's width as it's laid out; the measure until then.)
+		local column_w = ui.use_state((ui.theme.get("zeron.settings.measure") :: number?) or 640)
+		local function w(): number
+			return math.floor((column_w:get() - 2 * gap) / 2.4)
+		end
+		local function h(): number
+			return math.floor(w() / 1.6)
+		end
+		local thumbs: { Node } = {}
+		for _, path in list do
+			table.insert(thumbs, ui.div { class = "store-shot", w = w, h = h, shrink = 0, picture_in(path) })
+		end
+		return ui.div {
 			w_full = true,
-			h = h,
-			fade = { 12, 12 },
-			fade_overflow = true,
-			ui.row { gap = "$space.3", table.unpack(thumbs) },
+			on_resize = function(size: { w: number, h: number })
+				if math.abs(size.w - column_w:peek()) >= 0.5 then
+					column_w:set(size.w)
+				end
+			end,
+			ui.scroll_x {
+				id = "store-shots",
+				w_full = true,
+				h = h,
+				fade = { 12, 12 },
+				fade_overflow = true,
+				ui.row { gap = "$space.3", table.unpack(thumbs) },
+			},
 		}
 	end
 
@@ -845,7 +1101,10 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end)
 	end
 
-	-- Its versions, newest first: each one's date and what changed.
+	-- Its versions, newest first: each one's date and what changed, kept to
+	-- a bound so Report is always near. The latest's notes to about ten
+	-- lines, Show more opening the rest in place; each older one's first
+	-- line, opening whole in place; the latest few, Show all the rest.
 	local versions = ui.computed(function(): { store.Version }
 		local out: { store.Version } = {}
 		for _, v in (if type(d().versions) == "table" then d().versions else {}) :: { any } do
@@ -855,7 +1114,20 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end
 		return out
 	end)
+	local all_versions = ui.use_state(false)
+	local listed = ui.computed(function(): { store.Version }
+		local all = versions:get()
+		if all_versions:get() or #all <= VERSIONS_FIRST then
+			return all
+		end
+		return table.move(all, 1, VERSIONS_FIRST, 1, {})
+	end)
 	local function version_row(first_v: store.Version, _i: number, now: State<store.Version>): Node
+		local latest = (versions:peek()[1] or {}).version == first_v.version
+		local function notes(): string
+			local n = now:get().notes
+			return if type(n) == "string" then string.sub(n, 1, NOTES_MOST) else ""
+		end
 		return ds.Settings.Row {
 			label = function(): string
 				return now:get().version
@@ -869,27 +1141,34 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			end,
 			stacked = true,
 			control = ui.show(function(): boolean
-				local n = now:get().notes
-				return type(n) == "string" and n ~= ""
-			end, ui.column {
-				w_full = true,
-				Markdown {
-					text = function(): string
-						return string.sub(now:get().notes or "", 1, 64 * 1024)
-					end,
-					small = true,
-					foreign = true,
-				},
-			}),
+				return notes() ~= ""
+			end, Notes { text = notes, lines = if latest then NOTES_LINES else 1 }),
 		}
 	end
 	local function history(): Node
 		return ds.Settings.Section {
 			title = ui.t("plugins.store.versions"),
-			ds.Settings.Each(versions, version_row, {
+			ds.Settings.Each(listed, version_row, {
 				key = function(v: store.Version): string
 					return v.version
 				end,
+			}),
+			ui.show(function(): boolean
+				return not all_versions:get() and #versions:get() > VERSIONS_FIRST
+			end, ui.row {
+				px = ds.Settings.inset(),
+				FoldButton {
+					label = function(): string
+						return ui.t("plugins.store.all_versions", { n = #versions:get() }):get()
+					end,
+					open = function(): boolean
+						return all_versions:get()
+					end,
+					on_click = function()
+						all_versions:set(true)
+					end,
+					class = "store-all-versions",
+				},
 			}),
 		}
 	end
@@ -1205,7 +1484,8 @@ M.Page = ui.component(function(props: { plugin: string, here: Here }): Node
 				local v = found.version
 				-- (And whether it works here: another device chosen may say
 				-- otherwise, which the head and the facts say.)
-				return `found:{if type(v) == "string" then v else ""}:{tostring(found.compatible ~= false)}`
+				local why = if type(found.incompatible) == "string" then found.incompatible else ""
+				return `found:{if type(v) == "string" then v else ""}:{tostring(found.compatible ~= false)}:{why}`
 			end
 			return p
 		end, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),

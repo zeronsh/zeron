@@ -3858,7 +3858,6 @@
       "install_on": "安装到{device}",
       "turn_on": "打开",
       "open_settings": "打开设置",
-      "all_categories": "所有类别",
       "category_label": "类别",
       "sort_label": "排序",
       "sort": {
@@ -3899,11 +3898,8 @@
         "homepage": "网站",
         "repository": "源代码"
       },
-      "install_note": "Zeron 会检查签名者，然后请你允许它需要的权限。",
-      "update_note": "有新版本可用。",
       "review_note": "它在等你允许。",
       "needs_other_zeron": "它不支持这个版本的 Zeron。",
-      "device_away": "{device}不在线，暂时无法安装。",
       "blocked_title": "Zeron 关闭了{name}",
       "blocked_title_version": "Zeron 关闭了{name} {version}",
       "blocked_body": "这个版本已从商店下架。它是你的：你可以重新打开它。",
@@ -3960,7 +3956,7 @@
       "fix": {
         "missing_readme": "在它的文件夹里添加 README.md：这是它在商店里的页面。",
         "not_semver": "在 zeron-plugin.json 里给它一个由三个数字组成的版本号，例如 1.2.0。",
-        "id_reserved": "这个名字被 Zeron 或他人保留了。请换一个 id 复制这个插件。",
+        "id_reserved": "这个 id 已被保留：Zeron 把它留给自己、插件商店自己的页面或他人。请换一个 id 复制这个插件。",
         "too_large": "它超出了商店允许的大小。去掉不需要的内容。",
         "binary_file": "它包含一个既不是文本也不是图片的文件：审核人员会仔细查看。",
         "no_notes": "CHANGELOG.md 里没有这个版本的内容：更新时大家看不到说明。",
@@ -4073,7 +4069,6 @@
         "revoke_body": "用它发布的流程会立即停止。它已经发送的版本保持不变。",
         "revoke_failed": "无法吊销密钥"
       },
-      "other_installed": "这里已安装了另一个同 id 的插件（来自别处）。在“已安装”中移除它后才能安装这个。",
       "unblock_title": "重新打开{name}？",
       "unblock_body": "Zeron 已将这个版本从商店下架。它会按你之前的允许在这里再次运行。",
       "unblock_body_reason": "Zeron 已将这个版本从商店下架：{reason} 它会按你之前的允许在这里再次运行。",
@@ -4086,7 +4081,16 @@
       "readme_more": "显示更多",
       "version_meta": "版本 {version} · {date} · {n, plural, other {# 次安装}}",
       "details": "详细信息",
-      "all": "全部"
+      "all": "全部",
+      "has_version": "你已安装 {version}",
+      "has_version_on": "{device} 已安装 {version}",
+      "off_note": "它已关闭。",
+      "away_note": "{device} 不在线",
+      "other_title": "已安装另一个使用此 ID 的插件",
+      "other_body": "它来自别处。在“已安装”中移除它，即可安装这个。",
+      "show_less": "收起",
+      "all_versions": "显示全部 {n} 个版本",
+      "count": "{n, plural, other {# 个插件}}"
     }
   },
   "templates": {

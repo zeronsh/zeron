@@ -12,6 +12,9 @@
 --   store_stub.fail_next   the next search, page or plugin's page fails with the store's words
 --   store_stub.bump        Focus timer gets 1.3.0 in the catalog (in place)
 --   store_stub.overlap     each later page repeats the last five of the one before
+--   store_stub.one_shot    Focus timer has one screenshot (store_stub.three_shots: three)
+--   store_stub.id_reserved the plugin's id is one the store keeps (its site's pages)
+--   store_stub.no_total    lists come without `total` (how many match)
 
 local store = require("@app/screens/plugins/store")
 
@@ -22,6 +25,8 @@ local fail_next = false
 -- Each later page starts five before where the last ended, as a store
 -- whose order moved under the reader would.
 local overlap = false
+-- Lists without `total`, as a store from before it counted them.
+local no_total = false
 
 -- A promise as the host's: settled a beat later, from one clock the script
 -- keeps; or, held, once released. `await` works in a task (ui.paged's load).
@@ -190,7 +195,8 @@ end
 
 -- The store's listing limits, each at its worst (plan amendment 22): a
 -- name of 64 with no spaces, a description of 300, two categories, eight
--- keywords of 32, eight screenshots, a README of 512 KB, notes of 64 KB.
+-- keywords of 32, eight screenshots, a README of 512 KB, twelve versions
+-- with notes of 64 KB each.
 do
 	local name = string.sub("Superlongpluginnamewithnospacesanywhereatalljusttokeepgoingonandon", 1, 64)
 	local summary = string.sub(string.rep("Every word of this description is here to fill all three hundred characters the store allows. ", 4), 1, 300)
@@ -239,10 +245,11 @@ do
 			repository = "https://github.com/averylongusernamex/" .. name,
 			package = { bytes = 49_000_000, sha256 = string.rep("b", 64), hash = "extremes-hash" },
 		},
-		versions = {
-			{ version = "10.20.30", status = "approved", published_at = NOW, notes = notes },
-		},
+		versions = {},
 	}
+	for i = 0, 11 do
+		table.insert(e.versions, { version = `10.20.{30 - i}`, status = "approved", published_at = NOW - i * DAY, notes = notes })
+	end
 	table.insert(entries, 1, e)
 	by_id.extremes = e
 end
@@ -309,6 +316,12 @@ do
 		"",
 		"- Counts down from 25 minutes.",
 		"- Says when it's done.",
+		"",
+		"# Questions",
+		"",
+		"### Does it ring?",
+		"",
+		"Once, softly.",
 	}, "\n")
 	f.detail.screenshots = { "shots/header.png", "shots/done.png" }
 	f.detail.permissions = { asks = { "ui.add", "notifications", "network" }, network_hosts = { "api.example.com" } }
@@ -376,7 +389,8 @@ local function search(q: store.Query): any
 	for i = from + 1, math.min(from + limit, #out) do
 		table.insert(items, card_of(out[i]))
 	end
-	return { items = items, next_cursor = if from + limit < #out then tostring(from + limit) else nil }
+	-- (`total`: how many the query matches, as the store counts them.)
+	return { items = items, next_cursor = if from + limit < #out then tostring(from + limit) else nil, total = if no_total then nil else #out }
 end
 
 local function entry(id: string): Entry
@@ -625,6 +639,14 @@ ui.command {
 		table.insert(problems, { rule = "not_newer", field = "version", words = "1.2.0 isn't newer than 1.3.0" })
 	end,
 }
+-- (An id the store keeps for its site's own pages, as the engine refuses it.)
+ui.command {
+	id = "store_stub.id_reserved",
+	title = "Store: your plugin's id is one the store keeps",
+	run = function()
+		table.insert(problems, { rule = "id_reserved", field = "id", words = "\"all\" is kept for the store's own pages: pick another id" })
+	end,
+}
 ui.command {
 	id = "store_stub.fixed",
 	title = "Store: your plugin's folder has all the store needs",
@@ -696,6 +718,27 @@ ui.command {
 	title = "Store: later pages overlap",
 	run = function()
 		overlap = true
+	end,
+}
+ui.command {
+	id = "store_stub.no_total",
+	title = "Store: lists don't say how many match",
+	run = function()
+		no_total = true
+	end,
+}
+ui.command {
+	id = "store_stub.one_shot",
+	title = "Store: Focus timer has one screenshot",
+	run = function()
+		by_id["focus-timer"].detail.screenshots = { "shots/header.png" }
+	end,
+}
+ui.command {
+	id = "store_stub.three_shots",
+	title = "Store: Focus timer has three screenshots",
+	run = function()
+		by_id["focus-timer"].detail.screenshots = { "shots/header.png", "shots/done.png", "shots/break.png" }
 	end,
 }
 ui.command {

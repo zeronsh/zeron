@@ -36,6 +36,10 @@ local sort = ui.state("store_sort", "")
 local wanted = ui.state("store_wanted", false)
 -- A first page that didn't come: "offline", or the store's words.
 local failed = ui.state("store_failed", nil :: string?)
+-- How many plugins what's asked matches, as the store counts them (its
+-- lists' `total`), from the first page's answer: kept until the next
+-- answers, as the rows are; none from a store that doesn't say.
+local total = ui.state("store_total", nil :: number?)
 local settled = ui.debounced(query, 250)
 
 local function trimmed(s: string): string
@@ -89,11 +93,18 @@ listing = ui.paged(function(cursor: string?): any
 	if not ok then
 		if cursor == nil then
 			failed:set(reason(page))
+			total:set(nil)
 		end
 		error(page, 0)
 	end
 	if cursor == nil and failed:peek() ~= nil then
 		failed:set(nil)
+	end
+	if cursor == nil then
+		local n = if type(page) == "table" and type(page.total) == "number" and page.total >= 0 then math.floor(page.total) else nil
+		if total:peek() ~= n then
+			total:set(n)
+		end
 	end
 	local items: { store.Card } = {}
 	local seen: { [string]: boolean } = {}
@@ -320,8 +331,8 @@ end
 
 -- What narrows the list, one quiet row under the search: the store's
 -- categories as the app's quiet tabs (All first), running sideways with
--- the edge's fade when they don't fit, and the order, a compact dropdown at
--- its own width, at the row's end. The categories' words start on the
+-- the edge's fade when they don't fit, then how many it matches and the
+-- order, a compact dropdown at its own width, at the row's end. The categories' words start on the
 -- rows' text edge, the order's trigger ends on their controls' edge; the
 -- row's top and bottom are the search row's inset.
 local function filters(): Node
@@ -394,6 +405,23 @@ local function filters(): Node
 			fade_overflow = true,
 			tabs,
 		},
+		-- How many it matches, before the order that ranks them: said of
+		-- the list under it (none while unknown, or when nothing matches,
+		-- which the card says).
+		ui.show(function(): boolean
+			local n = total:get()
+			return n ~= nil and n > 0
+		end, ui.text {
+			id = "store-total",
+			function(): string
+				return ui.t("plugins.store.count", { n = total:get() or 0 }):get()
+			end,
+			shrink = 0,
+			tabular = true,
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			color = "$text.tertiary",
+		}),
 		ui.div {
 			shrink = 0,
 			ds.Dropdown {

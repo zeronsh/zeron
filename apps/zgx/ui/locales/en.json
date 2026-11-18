@@ -3858,7 +3858,6 @@
       "install_on": "Install on {device}",
       "turn_on": "Turn on",
       "open_settings": "Open settings",
-      "all_categories": "All categories",
       "category_label": "Category",
       "sort_label": "Order",
       "sort": {
@@ -3899,11 +3898,8 @@
         "homepage": "Website",
         "repository": "Source"
       },
-      "install_note": "Zeron checks who signed it, then asks you to allow what it needs.",
-      "update_note": "A newer version is ready.",
       "review_note": "It's waiting for you to allow it.",
       "needs_other_zeron": "It doesn't work with this version of Zeron.",
-      "device_away": "It can't be installed while {device} is away.",
       "blocked_title": "Zeron turned off {name}",
       "blocked_title_version": "Zeron turned off {name} {version}",
       "blocked_body": "This version was taken down from the store. It's yours: you can turn it back on.",
@@ -3960,7 +3956,7 @@
       "fix": {
         "missing_readme": "Add README.md to its folder: it's the plugin's page in the store.",
         "not_semver": "Give it a version of three numbers, like 1.2.0, in zeron-plugin.json.",
-        "id_reserved": "Zeron keeps this name for itself or someone else. Copy the plugin under another id.",
+        "id_reserved": "This id is taken: Zeron keeps it for itself, for the plugin store's own pages, or for someone else. Copy the plugin under another id.",
         "too_large": "It's bigger than the store takes. Leave out what it doesn't need.",
         "binary_file": "It holds a file that isn't text or a picture: the reviewer looks at it closely.",
         "no_notes": "CHANGELOG.md has nothing for this version: people see no notes for the update.",
@@ -4073,7 +4069,6 @@
         "revoke_body": "Anything publishing with it stops working at once. Versions it already sent stay as they are.",
         "revoke_failed": "Couldn't revoke the key"
       },
-      "other_installed": "A different plugin with this id is installed here, from somewhere else. Remove it in Installed to install this one.",
       "unblock_title": "Turn {name} back on?",
       "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",
       "unblock_body_reason": "Zeron took this version down from the store: {reason} It runs again here, as you allowed it.",
@@ -4086,7 +4081,16 @@
       "readme_more": "Show more",
       "version_meta": "Version {version} · {date} · {n, plural, one {# install} other {# installs}}",
       "details": "Details",
-      "all": "All"
+      "all": "All",
+      "has_version": "You have {version}",
+      "has_version_on": "{device} has {version}",
+      "off_note": "It's turned off.",
+      "away_note": "{device} is away",
+      "other_title": "A different plugin with this id is installed",
+      "other_body": "It came from somewhere else. Remove it in Installed to install this one.",
+      "show_less": "Show less",
+      "all_versions": "Show all {n} versions",
+      "count": "{n, plural, one {# plugin} other {# plugins}}"
     }
   },
   "templates": {

@@ -8,6 +8,7 @@
 -- a plugin opens a page under it (`Settings.SubPage`, `Settings.Back`).
 
 local ds = require("@ds")
+local Markdown = require("@ds/markdown")
 local kit = require("@demos/example_kit")
 
 local tab = ui.state("ex_pl_tab", "installed")
@@ -121,6 +122,17 @@ local function browse(): Node
 						options = { { value = "", label = "All" }, { value = "integrations", label = "Integrations" }, { value = "developer-tools", label = "Developer tools" }, { value = "productivity", label = "Productivity" } },
 					},
 				},
+				-- (How many it matches, before the order.)
+				ui.text {
+					function(): string
+						return `{#found:get()} plugins`
+					end,
+					shrink = 0,
+					tabular = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+				},
 				ui.div {
 					shrink = 0,
 					ds.Dropdown {
@@ -187,6 +199,28 @@ local function listing(id: string): Node
 				},
 			},
 			ui.row { w_full = true, justify = "end", ds.Button { "Install", tone = "primary" } },
+			-- Its README as a document under the page's title (ds/markdown's
+			-- `heading_step`, `drop_title`, `picture_radius`): its `# Name`
+			-- not drawn again, its headings a level down, none larger than
+			-- the page's name.
+			ds.Settings.Section {
+				title = "About",
+				ds.Settings.Group {
+					ui.column {
+						w_full = true,
+						p = "$space.4",
+						Markdown {
+							text = `# {p.name}\n\n{p.about}\n\n# Getting started\n\nSign in once, then ask for it by name in any chat.\n\n## Settings\n\nNone: it reads what you already allowed.`,
+							foreign = true,
+							heading_step = 1,
+							drop_title = function(words: string): boolean
+								return string.lower(words) == string.lower(p.name)
+							end,
+							picture_radius = "$radius.lg",
+						},
+					},
+				},
+			},
 		},
 	}
 end
