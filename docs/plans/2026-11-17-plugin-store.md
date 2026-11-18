@@ -402,7 +402,8 @@ Agreed after the plan was first written. Newest last.
     and only known picture types inline.
 15. **CLI names**: `zeron plugin key create|list|revoke <id>`.
 16. **Deploy keys and sideloading.** `GET /plugin-keys/:key` for a deploy
-    key adds `kind: "deploy"`, `plugin`, `expires_at`, `expired`, and
+    key adds `kind: "deploy"`, `plugin`, `expiresAt`, `expired` (that
+    endpoint keeps its existing camelCase), and
     answers `verified: true` only when the lookup names that key's plugin
     (`?plugin=<id>`). Without it, or revoked, or expired: `verified: false`.
     So a leaked deploy key for one plugin can never vouch for an update to
