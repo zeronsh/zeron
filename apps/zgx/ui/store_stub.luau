@@ -526,9 +526,21 @@ local store_checked = true
 local force_problem = ui.state("store_stub_force_problem", false)
 local signed_in_again = false
 
+-- (Tests: your own account's calls, yours, a version sent, a plugin's keys,
+-- failing with this word as the engine gives it, alone: a session that
+-- ended says `unauthenticated` or `forbidden`.)
+local account_fails = ui.state("store_stub_account_fails", "")
+local function refused_as_you()
+	local word = account_fails:peek()
+	if word ~= "" then
+		error({ message = word }, 0)
+	end
+end
+
 stub.mine = function(): any
 	note("mine")
 	return answer(function(): any
+		refused_as_you()
 		local out = {}
 		for _, p in mine do
 			table.insert(out, p)
@@ -568,6 +580,7 @@ end
 stub.publish = function(id: string, hash: string, ticket: string): any
 	note(`publish:{id}:{hash}:{ticket}`)
 	return answer(function(): any
+		refused_as_you()
 		local p = mine[id]
 		if not p then
 			p = { id = id, name = "Pomodoro clock", version = prepared_version, versions = {} }
@@ -592,6 +605,7 @@ end
 stub.keys = function(id: string): any
 	note(`keys:{id}`)
 	return answer(function(): any
+		refused_as_you()
 		return { keys = table.clone(keys[id] or {}) }
 	end)
 end

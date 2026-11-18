@@ -1254,12 +1254,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				ui.column {
 					w_full = true,
 					gap = "$space.4",
-					-- A new publisher, by name (asked again after it updates),
-					-- and a version still in review (offered only to its author).
+					-- A new publisher, by name (asked again after it updates), a
+					-- version signed with another key than yours (said, never in
+					-- the way: the store took it), and a version still in review
+					-- (offered only to its author).
 					ui.show(function(): boolean
 						local it: any = item()
 						local u = if it then it.update else nil
-						return type(u) == "table" and (u.new_owner == true or u.in_review == true)
+						return type(u) == "table" and (u.new_owner == true or u.new_key == true or u.in_review == true)
 					end, ui.column {
 						w_full = true,
 						gap = "$space.2",
@@ -1275,6 +1277,13 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 									then ui.t("plugins.store.update_new_owner", { username = name }):get()
 									else ui.t("plugins.store.update_new_owner_unnamed"):get()
 							end,
+						}),
+						ui.show(function(): boolean
+							local it: any = item()
+							return it ~= nil and type(it.update) == "table" and it.update.new_key == true
+						end, ds.Callout {
+							tone = "warning",
+							title = ui.t("plugins.store.update_new_key"),
 						}),
 						ui.show(function(): boolean
 							local it: any = item()

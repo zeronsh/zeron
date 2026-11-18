@@ -158,6 +158,20 @@ M.REPORT_REASONS = { "broken", "misleading", "malware", "copyright", "other" }
 
 -- A store id, as plugin ids are (the engine's manifest rule,
 -- `^[a-z0-9][a-z0-9-]{1,39}$`): what a link may name, and nothing else.
+-- Whether a failure says you aren't signed in to the store now: no session
+-- on this device (`signed_out`), or one the store no longer takes (a 401
+-- or 403 with nothing more, `unauthenticated` / `forbidden`): most often a
+-- session that ended while the page was open.
+local SIGNED_OUT = { signed_out = true, unauthenticated = true, forbidden = true }
+function M.signed_out(message: any): boolean
+	local m = if type(message) == "table" then message.message else message
+	if type(m) ~= "string" then
+		return false
+	end
+	local word = string.match(m, "^([%l_]+): ") or string.match(m, "^([%l_]+)$")
+	return word ~= nil and SIGNED_OUT[word] == true
+end
+
 function M.valid_id(id: any): boolean
 	return type(id) == "string" and #id >= 2 and #id <= 40 and string.match(id, "^[a-z0-9][a-z0-9%-]*$") ~= nil
 end
@@ -177,7 +191,7 @@ M.PICTURES_MOST = 24
 -- just that it can't come now.
 local function lasting(err: any): boolean
 	local m = if type(err) == "table" then err.message else err
-	return m ~= "offline" and m ~= "signed_out" and not (type(m) == "string" and string.match(m, "^rate_limited"))
+	return m ~= "offline" and not M.signed_out(m) and not (type(m) == "string" and string.match(m, "^rate_limited"))
 end
 
 function M.picture_src(id: string, version: string, path: string): (string | false)?

@@ -190,6 +190,15 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "store.update_new_key",
+	title = "A newer Focus timer, signed with a different key",
+	run = function()
+		local p = find("focus-timer")
+		p.update = { version = "1.3.0", added = {}, removed = {}, notes = "- Longer breaks.", new_key = true }
+		publish()
+	end,
+}
+ui.command {
 	id = "store.branch_update",
 	title = "A newer Branch badge is found",
 	run = function()

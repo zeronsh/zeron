@@ -139,7 +139,25 @@ function M.failure(message: any): string
 	if m == "offline" then
 		return ui.t("plugins.store.offline_title"):get()
 	end
+	-- (However the store said it: you, signed out.)
+	if store.signed_out(m) then
+		return words.failure("signed_out")
+	end
 	return words.failure(m)
+end
+
+-- What your versions and a plugin's keys show for you signed out (no
+-- session, or one that ended while the page was open), in place of what
+-- couldn't be read: what to sign in for, why, and a way to look again.
+-- (Publish's checks never fail on the store: the engine checks without it
+-- and says so; Submit says to sign in, in its own line.)
+function M.sign_in_callout(title: Message, again: () -> ()): Node
+	return ds.Callout {
+		tone = "neutral",
+		title = title,
+		body = words.failure("signed_out"),
+		action = { label = ui.t("plugins.store.try_again"), on_click = again },
+	}
 end
 
 -- One line of the checks, a Settings row (its own heights: 52, or 60 with
@@ -504,7 +522,7 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 				if s == "ready" then
 					return if #versions:get() > 0 then "list" else "none"
 				end
-				return s
+				return if store.signed_out(s) then "signed_out" else s
 			end, function(key: string): Node
 				if key == "list" then
 					return ds.Settings.Each(versions, version_row, {
@@ -534,10 +552,13 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 						end,
 					}
 				end
+				if key == "signed_out" then
+					return M.sign_in_callout(ui.t("plugins.store.sign_in_to_see"), M.load)
+				end
 				return ds.Callout {
 					tone = "neutral",
 					icon = if key == "offline" then "wifi-off" else nil,
-					title = if key == "signed_out" then ui.t("plugins.store.sign_in_to_see") else ui.t("plugins.store.versions_failed"),
+					title = ui.t("plugins.store.versions_failed"),
 					body = M.failure(key),
 					action = { label = ui.t("plugins.store.try_again"), on_click = M.load },
 				}

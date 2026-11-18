@@ -231,17 +231,19 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 				end,
 			}
 		end
+		local publish = require("@app/screens/plugins/publish")
+		local function again()
+			phase:set("loading")
+			load()
+		end
+		if store.signed_out(key) then
+			return publish.sign_in_callout(ui.t("plugins.store.sign_in_to_see_keys"), again)
+		end
 		return ds.Callout {
 			tone = "neutral",
 			title = ui.t("plugins.store.keys_failed"),
-			body = require("@app/screens/plugins/publish").failure(key),
-			action = {
-				label = ui.t("plugins.store.try_again"),
-				on_click = function()
-					phase:set("loading")
-					load()
-				end,
-			},
+			body = publish.failure(key),
+			action = { label = ui.t("plugins.store.try_again"), on_click = again },
 		}
 	end
 
