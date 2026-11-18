@@ -22,7 +22,7 @@ import { inlinesOf, plainText } from "./md/inlines.ts";
 export { target, type RenderOptions, type Target } from "./md/html.ts";
 
 /** Bump when the HTML this makes changes, so kept renderings are made again. */
-export const RENDERER = 7;
+export const RENDERER = 8;
 
 /** What a rendering may write: past it, the document is shown as its text. */
 export const BOUNDS = { html: 2 * 1024 * 1024 } as const;
@@ -67,7 +67,17 @@ export function renderMarkdown(markdown: string, options: RenderOptions): string
  * something, without its markdown): "- Fixed **the** timer" → "Fixed the timer".
  */
 export function firstLine(markdown: string | null | undefined): string {
-  const { blocks, definitions } = blocksOf(markdown ?? "");
+  try {
+    return firstLineOf(markdown ?? "");
+  } catch (error) {
+    if (!(error instanceof TooLarge)) throw error;
+    // (Notes too large to read stand as their first line, as written.)
+    return (markdown ?? "").split("\n", 64).find((l) => l.trim() !== "")?.trim() ?? "";
+  }
+}
+
+function firstLineOf(markdown: string): string {
+  const { blocks, definitions } = blocksOf(markdown);
   // (Depth first: a list's first item, a quote's first paragraph.)
   const stack = [...blocks].reverse();
   while (stack.length > 0) {

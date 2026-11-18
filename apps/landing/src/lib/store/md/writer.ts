@@ -5,6 +5,9 @@
 // written. No imports: md/html.ts and highlight.ts both write with it.
 
 import type { Root, RootContent } from "hast";
+import { TOO_LARGE, TooLarge, type Meter } from "./meter.ts";
+
+export { TooLarge };
 
 /** Every tag written, and the attributes each may carry. */
 export const TAGS: Readonly<Record<string, readonly string[]>> = {
@@ -42,36 +45,71 @@ export const TAGS: Readonly<Record<string, readonly string[]>> = {
 
 const VOID = new Set(["br", "hr", "img", "input"]);
 
-/** A rendering past this many characters is not written (the text is shown instead). */
-export class TooLarge extends Error {}
 
 /** A text as HTML: `&`, `<`, `>` and `"` escaped. */
 export const escapeText = (s: string) => s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 
-/** Writes HTML from the allowed tags alone, and stops at `most` characters. */
+/** A chunk of what is written, in UTF-16 code units: one buffer, not a string for every piece. */
+const CHUNK = 16 * 1024;
+const decoder = new TextDecoder("utf-16le");
+
+/**
+ * Writes HTML from the allowed tags alone, and stops at `most` characters.
+ * What it writes is copied, escaped as it goes, into a buffer of code units
+ * turned into a string a chunk at a time: what it keeps is what it wrote,
+ * not an object for every tag and text.
+ */
 export class Html {
-  private readonly parts: string[] = [];
+  private readonly chunks: string[] = [];
+  private buffer = new Uint16Array(CHUNK);
+  private at = 0;
   private size = 0;
   private readonly most: number;
-  constructor(most: number) {
+  private readonly meter: Meter | null;
+  /** Writes at most `most` characters (each counted on `meter`, when given), and stops past them. */
+  constructor(most: number, meter: Meter | null = null) {
     this.most = most;
+    this.meter = meter;
   }
 
-  private add(s: string) {
-    this.size += s.length;
-    if (this.size > this.most) throw new TooLarge();
-    this.parts.push(s);
+  private flush() {
+    this.chunks.push(decoder.decode(this.buffer.subarray(0, this.at)));
+    this.at = 0;
+  }
+
+  private unit(code: number) {
+    if (this.at === CHUNK) this.flush();
+    this.buffer[this.at++] = code;
+    this.size++;
+  }
+
+  /** `s` as it is (`escape`: `&`, `<`, `>`, `"` as references). */
+  private add(s: string, escape = false) {
+    for (let i = 0; i < s.length; i++) {
+      const code = s.charCodeAt(i);
+      if (escape && (code === 38 || code === 60 || code === 62 || code === 34)) {
+        const ref = code === 38 ? "&amp;" : code === 60 ? "&lt;" : code === 62 ? "&gt;" : "&quot;";
+        for (let k = 0; k < ref.length; k++) this.unit(ref.charCodeAt(k));
+      } else this.unit(code);
+    }
+    if (this.meter) this.meter.written = this.size;
+    if (this.size > this.most) throw TOO_LARGE;
   }
 
   open(tag: string, attributes: [string, string | true][] = []) {
     const allowed = TAGS[tag];
     if (!allowed) throw new Error(`not a tag this writes: ${tag}`);
-    let out = `<${tag}`;
+    this.add(`<${tag}`);
     for (const [name, value] of attributes) {
       if (!allowed.includes(name)) throw new Error(`not an attribute this writes: ${tag} ${name}`);
-      out += value === true ? ` ${name}` : ` ${name}="${escapeText(value)}"`;
+      if (value === true) this.add(` ${name}`);
+      else {
+        this.add(` ${name}="`);
+        this.add(value, true);
+        this.add(`"`);
+      }
     }
-    this.add(`${out}>`);
+    this.add(">");
   }
 
   close(tag: string) {
@@ -80,7 +118,7 @@ export class Html {
   }
 
   text(s: string) {
-    if (s) this.add(escapeText(s));
+    if (s) this.add(s, true);
   }
 
   /** A line end between blocks (as CommonMark's own HTML has). */
@@ -89,7 +127,8 @@ export class Html {
   }
 
   toString() {
-    return this.parts.join("");
+    if (this.at > 0) this.flush();
+    return this.chunks.join("");
   }
 }
 

@@ -11,7 +11,7 @@
 
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
-import { blocksOf, type Block, type Definition } from "./blocks.ts";
+import { blocksOf, cells, type Block, type Definition } from "./blocks.ts";
 import { inlinesOf, type Inline } from "./inlines.ts";
 
 const FIXTURES = ["focus-timer.md", "screenshot-tray.md", "short.md", "notes.md", "extremes.md", "subset.md"];
@@ -93,7 +93,10 @@ function blocks(list: Block[], d: Map<string, Definition>, out: string[], depth:
       case "table": {
         const sub: string[] = [];
         out.push(`${pad}table ${listed(b.head.map((c) => words(c, sub)))} align ${listed(b.align.map((a) => a ?? "left"))}`);
-        for (const row of b.rows) out.push(`${pad}  row ${listed(row.map((c) => words(c, sub)))}`);
+        for (const text of b.rows) {
+          const row = cells(text, b.head.length);
+          out.push(`${pad}  row ${listed(b.head.map((_, i) => words(row[i] ?? "", sub)))}`);
+        }
         out.push(...sub);
         break;
       }

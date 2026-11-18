@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { Definition } from "./blocks.ts";
 import { inlinesOf, plainText, unescape, type Inline } from "./inlines.ts";
+import { meter, TooLarge } from "./meter.ts";
 
 const none = new Map<string, Definition>();
 const parse = (s: string, d = none) => inlinesOf(s, d).inlines;
@@ -92,7 +93,8 @@ describe("the inline pass", () => {
   });
 
   test("emphasis nested as deep as its text is long builds without recursion", () => {
-    const n = 50_000;
+    // (Ten thousand deep: far past any stack, within what a text may keep.)
+    const n = 10_000;
     const out = parse(`${"*a ".repeat(n)}${"a* ".repeat(n)}`);
     let depth = 0;
     let node: Inline | undefined = out[0];
@@ -125,8 +127,14 @@ describe("the inline pass", () => {
     ];
     for (const shape of shapes) {
       const text = shape.repeat(Math.ceil((256 * 1024) / shape.length));
-      const { work } = inlinesOf(text, none);
-      expect(work / text.length, JSON.stringify(shape)).toBeLessThan(16);
+      const m = meter();
+      try {
+        inlinesOf(text, none, m);
+      } catch (error) {
+        // (Stopped by what it may keep: what it read until then is held to the same bound.)
+        expect(error).toBeInstanceOf(TooLarge);
+      }
+      expect(m.read / text.length, JSON.stringify(shape)).toBeLessThan(16);
     }
   });
 });

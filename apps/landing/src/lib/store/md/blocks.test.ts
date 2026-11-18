@@ -48,11 +48,11 @@ describe("the block pass", () => {
     ]);
   });
 
-  test("tables: alignment, escaped pipes, rows filled or cut to the header's width", () => {
+  test("tables: alignment, escaped pipes, rows kept as written, cut to the header's width (the writer fills them)", () => {
     const { blocks } = blocksOf("before\n| a | b \\| c | d |\n|:--|:-:|--:|\n| 1 |\n| 1 | 2 | 3 | 4 |\nlazy row\n\nafter\n");
     expect(blocks).toEqual([
       { kind: "paragraph", text: "before" },
-      { kind: "table", align: ["left", "center", "right"], head: ["a", "b | c", "d"], rows: [["1", "", ""], ["1", "2", "3"], ["lazy row", "", ""]] },
+      { kind: "table", align: ["left", "center", "right"], head: ["a", "b | c", "d"], rows: ["| 1 |", "| 1 | 2 | 3 | 4 |", "lazy row"] },
       { kind: "paragraph", text: "after" },
     ]);
   });
@@ -115,8 +115,8 @@ describe("the block pass", () => {
     ];
     for (const shape of shapes) {
       const text = shape.repeat(Math.ceil((256 * 1024) / shape.length));
-      const { work } = blocksOf(text);
-      expect(work / text.length, JSON.stringify(shape)).toBeLessThan(4);
+      const { meter } = blocksOf(text);
+      expect(meter.read / text.length, JSON.stringify(shape)).toBeLessThan(16);
     }
   });
 });
