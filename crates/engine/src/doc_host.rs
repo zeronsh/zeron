@@ -77,6 +77,12 @@ const WAKE_BOOT_MARGIN_MS: i64 = 60 * 60 * 1000;
 /// price until reopening is cheap of its own accord.
 const WARM_DOC_CAP: usize = 12;
 
+/// A stored transcript this large (its snapshot's bytes) takes a while to
+/// read whole: ~3 ms a MB (an 80 MB chat's 250 ms, M5 Max). A viewer holding
+/// its rows is sent what changed among its newest entries first
+/// ([`ChatDocHandle::transcript_is_long`]).
+const LONG_TRANSCRIPT_BYTES: usize = 1 << 20;
+
 /// Resident-memory estimate per compressed snapshot byte. Loro snapshots are
 /// columnar+compressed; the in-memory doc plus mirror runs well above the blob
 /// size. A rough multiplier is enough here — the budget is a safety ceiling,
@@ -1272,6 +1278,20 @@ impl ChatDocHandle {
         } else {
             self.publish_messages_locked();
         }
+    }
+
+    /// Whether this chat's transcript is long enough that what goes with all
+    /// of it takes a while: reading it whole (a doc just opened, or one
+    /// nobody has watched since it changed, reads every entry from the doc),
+    /// and even with its entries kept, summing each to tell a reader what
+    /// changed. A viewer holding rows is sent what changed among the newest
+    /// entries first (`WatchDocMessages`).
+    pub(crate) fn transcript_is_long(&self) -> bool {
+        let bytes = self
+            .snapshot_bytes
+            .load(Ordering::Relaxed)
+            .max(self.persistence.as_ref().map_or(0, |p| p.snapshot_bytes()));
+        bytes >= LONG_TRANSCRIPT_BYTES
     }
 
     /// Rough resident cost for the LRU budget.
