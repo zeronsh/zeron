@@ -150,7 +150,9 @@ describe("the store with the edge's identity", () => {
     // Its account's plugins in its scope, and nothing else.
     const mine = await signed(k, "GET", "/store/v1/me/plugins");
     expect(mine.status).toBe(200);
-    expect((await json<{ plugins: { id: string }[] }>(mine)).plugins.map((p) => p.id)).toEqual([id]);
+    const read = await json<{ publisher_id: string; plugins: { id: string }[] }>(mine);
+    expect(read.publisher_id).toBe(await publisherId(a.userId));
+    expect(read.plugins.map((p) => p.id)).toEqual([id]);
     const fresh = uniqueId();
     for (const [method, path, what] of [
       ["POST", `/store/v1/plugins/${id}/versions/1.0.0/yank`, "a yank"],

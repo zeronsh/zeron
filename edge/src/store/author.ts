@@ -1,7 +1,7 @@
 /**
  * What an author and a signed-in person do:
  *
- *   GET  /store/v1/me/plugins                         → { plugins: [PluginCard & { listing, versions }] }
+ *   GET  /store/v1/me/plugins                         → { publisher_id, plugins: [PluginCard & { listing, versions }] }
  *   POST /store/v1/plugins/:id/versions/:version/{yank|unyank}
  *   POST /store/v1/plugins/:id/installed              → { counted }
  *   POST /store/v1/plugins/:id/reports { reason, text, version? } → { id }
@@ -19,11 +19,13 @@
  * with its review (a declined one's reason and words are its author's to
  * read), how it was published (`via`, the signing `key`, and the deploy key
  * by its name then), so a device can raise a notice for each publish it
- * didn't make (amendment 44), and why a yank or a removal happened.
+ * didn't make (amendment 44), and why a yank or a removal happened. It
+ * names the account's `publisher_id` too, plugins or none: what a device's
+ * proof for a new deploy key binds (amendment 44, proof v2).
  */
 import type { Env } from "../env";
 import { STORE_DATA } from "./data";
-import { authorCard, authorsOf, listingState, ownerCard, versionInfo } from "./cards";
+import { authorCard, authorsOf, listingState, ownerCard, publisherId, versionInfo } from "./cards";
 import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, rateLimited, refusedBody } from "./http";
 import { authenticatePublisher, keyInScope, readBody } from "./principal";
@@ -52,6 +54,7 @@ export const handleMyPlugins = async (request: Request, env: Env, db: D1Database
   const authors = await authorsOf(env, [publisher.userId]);
   const author = authorCard(authors[publisher.userId]!);
   return answer({
+    publisher_id: await publisherId(publisher.userId),
     plugins: plugins.map((p) => {
       const own = versions.filter((v) => v.plugin_id === p.id);
       return {

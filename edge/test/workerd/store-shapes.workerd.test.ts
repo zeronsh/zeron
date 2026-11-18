@@ -5,6 +5,7 @@
  */
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { publisherId } from "../../src/store/cards";
 import { adminCall, author, call, listed, makePackage, publish, uniqueId } from "./store-helpers";
 
 /** A time's key: `at`, or anything `…_at`. */
@@ -72,6 +73,20 @@ describe("what a device reads (amendment 43)", () => {
       expect([res.status >= 300 && res.status < 400, res.headers.get("location")], `${method} ${path}`).toEqual([false, null]);
       await res.arrayBuffer();
     }
+  });
+});
+
+describe("an author's own view", () => {
+  it("names the account's publisher id, with plugins or none, to a session and to its deploy key alike", async () => {
+    const a = await author();
+    const none = (await (await call(a.userId, "GET", "/store/v1/me/plugins")).json()) as any;
+    expect(none).toEqual({ publisher_id: await publisherId(a.userId), plugins: [] });
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    const some = (await (await call(a.userId, "GET", "/store/v1/me/plugins")).json()) as any;
+    // The same id a card's author carries.
+    expect(some.publisher_id).toBe(none.publisher_id);
+    expect(some.plugins[0].author.id).toBe(none.publisher_id);
   });
 });
 
