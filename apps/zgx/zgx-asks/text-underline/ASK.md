@@ -1,28 +1,31 @@
-# Ask: a plain text draws its underline
+# Ask: a text's underline is drawn past its line box, as CSS's is
 
 **Who needs it:** every inline link in Zeron's rows (Installed's Update,
-Yours' Publish…): `ui.text { …, underline = true, underline_offset = 4 }`.
-Seen on paint by Zeron's capture lane on zgx `7f66d42fb` (Zeron's pin),
-Linux and macOS: no line is drawn under the words, at rest or under the
-pointer, so a link reads as bold words.
+Yours' Publish…), and any small text underlined clear of its descenders: a
+13 pt text on a 16 pt line with `underline = true, underline_offset = 4`.
+Seen on paint by Zeron's capture lane on zgx `7f66d42fb` (Zeron's pin).
 
-**What fails today:** a plain `ui.text` takes `underline` and
-`underline_offset`, and they reach its font (`compose_style.rs`'s
-`TextUnderline`, inherited as CSS's `text-decoration` is), but nothing paints
-them: reading the source, only a rich text turns an underline into a drawn
-line (`compose.rs`, a paragraph's underline reaching its runs, and each
-span's own). The same props on a `ui.rich` span draw the line. (zgx tests
-see no paint, so this is read from the code and the pictures, not from a
-test.)
+**What fails today:** the underline is clipped by the text's own line box.
+At `underline_offset = 4` on a 16 pt line the line lands at about +16, the
+box's bottom edge, and nothing is drawn, at rest or under the pointer; at
+offset 2 (+14) or 0 it shows; offset 4 on a 24 pt line shows (+20.5), as
+Markdown's links do. Plain texts and rich spans alike. So a link's
+underline can only sit where its line box has room, which for a small
+line is nearer the glyphs than a link's underline should be.
 
-**The ask:** a plain text with `underline = true` draws its underline as a
-rich text's span does: `underline_offset` below the baseline (a tenth of the
-size unset), in the text's ink, through `hover`'s changes.
+(Measured on paint: zgx tests see none. An earlier reading of this ask,
+that a plain text never paints its underline, was wrong: case 5 below
+paints.)
 
-**Repro:** [`repro/`](repro/app.luau): `zgx run zgx-asks/text-underline/repro`. The
-first two lines (plain texts) show no line under them; the third (a rich
-text's span) does.
+**The ask:** a text's underline (and a span's) is drawn where its offset
+puts it, past the line box if need be, as CSS's `text-underline-offset`
+draws past the line, not clipped to the text's own box (a clip round the
+text from an ancestor still applies).
 
-**Today's workaround in Zeron:** the row's one inline link
-(`ds.Settings.InlineLink`) draws its words as a rich span, which paints its
-underline.
+**Repro:** [`repro/`](repro/app.luau): `zgx run zgx-asks/text-underline/repro`.
+Its first line (offset 4 on a 16 line) shows no line; the second (offset 2)
+and the third (offset 4 on a 24 line) do.
+
+**Today's workaround in Zeron:** a row's inline link
+(`ds.Settings.InlineLink`) underlines 2 under the baseline, which fits its
+16 pt line.

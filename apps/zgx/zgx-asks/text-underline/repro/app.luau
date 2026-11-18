@@ -1,15 +1,12 @@
--- The same words underlined two ways. The first, a plain text with
--- `underline = true` (and an offset), draws no line under it; the second, a
--- rich text's span with the same props, does.
+-- The same words underlined three ways. The first, offset 4 on a 16 pt
+-- line, draws no line (it falls on the box's bottom edge and is clipped);
+-- the second, offset 2 on the same line, and the third, offset 4 on a 24 pt
+-- line, draw theirs.
 
 return ui.column {
 	p = 24,
 	gap = 24,
-	ui.text { "Publish… (a plain text, underline = true)", underline = true, underline_offset = 4, text_size = 13, line_height = 16 },
-	ui.text { "Publish… (a plain text, underline = true, no offset)", underline = true, text_size = 13, line_height = 16 },
-	ui.rich {
-		text_size = 13,
-		line_height = 16,
-		ui.span { "Publish… (a rich text's span, underline = true)", underline = true, underline_offset = 4 },
-	},
+	ui.text { "Publish… (offset 4, a 16 line: no line)", underline = true, underline_offset = 4, text_size = 13, line_height = 16 },
+	ui.text { "Publish… (offset 2, a 16 line: a line)", underline = true, underline_offset = 2, text_size = 13, line_height = 16 },
+	ui.text { "Publish… (offset 4, a 24 line: a line)", underline = true, underline_offset = 4, text_size = 13, line_height = 24 },
 }
