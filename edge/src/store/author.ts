@@ -18,20 +18,17 @@
 import type { Env } from "../env";
 import { STORE_DATA } from "./data";
 import { firstPageKeys } from "./catalog";
-import { authorCard, authorsOf, pluginCard, versionInfo } from "./cards";
+import { authorCard, authorsOf, listingState, ownerCard, versionInfo } from "./cards";
 import { cacheKey, purge } from "./cache";
 import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, parseList, pluginRow, relist, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, rateLimited, refusedBody } from "./http";
-import { authenticatePublisher, optionalUser, readBody } from "./principal";
+import { authenticatePublisher, readBody } from "./principal";
 import { allowWrite } from "./publish";
 import { decodeSegment, versionFileKeys } from "./serve";
 
 export const REPORT_REASONS: readonly string[] = STORE_DATA.report_reasons;
 export const MAX_REPORT_TEXT = 2000;
 export const REPORTS_PER_DAY = 10;
-
-const listingOf = (p: PluginRow): "listed" | "unlisted" | "suspended" =>
-  p.status === "suspended" ? "suspended" : p.listed_version ? "listed" : "unlisted";
 
 export const handleMyPlugins = async (request: Request, env: Env, db: D1Database): Promise<Response> => {
   const publisher = await authenticatePublisher(request, env);
@@ -55,17 +52,10 @@ export const handleMyPlugins = async (request: Request, env: Env, db: D1Database
   return answer({
     plugins: plugins.map((p) => {
       const own = versions.filter((v) => v.plugin_id === p.id);
-      // Never listed: the card shows its newest submission.
-      const shown: PluginRow = p.listed_version
-        ? p
-        : own[0]
-          ? { ...p, name: own[0].name, summary: own[0].summary, icon: own[0].icon, categories: own[0].categories, keywords: own[0].keywords }
-          : p;
-      const card = pluginCard(shown, author);
       return {
-        ...card,
-        icon: p.listed_version ? card.icon : null,
-        listing: listingOf(p),
+        // Never listed: the card shows its highest submission.
+        ...ownerCard(p, own[0], author),
+        listing: listingState(p),
         versions: own.map((v) => versionInfo(v, true))
       };
     })
@@ -118,9 +108,20 @@ export const handleAuthorAction = async (request: Request, env: Env, db: D1Datab
   return answer({ version: versionInfo(updated!, true) });
 };
 
+/**
+ * The signed-in person a write is from: the app's bearer, or the web
+ * session's cookie with the site's Origin and CSRF token (else `403
+ * bad_csrf`). Never `optionalUser`, which is for reads; never a deploy key.
+ */
+const writer = async (request: Request, env: Env): Promise<{ userId: string } | Response> => {
+  const caller = await authenticatePublisher(request, env);
+  if (caller instanceof Response) return caller;
+  return caller.via === "session" ? caller : fail(403, "key_not_allowed", "A deploy key can't do this.");
+};
+
 export const handleInstalled = async (request: Request, env: Env, db: D1Database, id: string): Promise<Response> => {
-  const caller = await optionalUser(request, env);
-  if (!caller) return fail(401, "unauthenticated", "Sign in to do this.");
+  const caller = await writer(request, env);
+  if (caller instanceof Response) return caller;
   if (!(await allowWrite(env, caller.userId))) return rateLimited();
   const results = await db.batch([
     db
@@ -140,8 +141,8 @@ export const handleInstalled = async (request: Request, env: Env, db: D1Database
 };
 
 export const handleReport = async (request: Request, env: Env, db: D1Database, id: string): Promise<Response> => {
-  const caller = await optionalUser(request, env);
-  if (!caller) return fail(401, "unauthenticated", "Sign in to report a plugin.");
+  const caller = await writer(request, env);
+  if (caller instanceof Response) return caller;
   if (!(await allowWrite(env, caller.userId))) return rateLimited();
   const raw = await readBody(request, 8 * 1024);
   if (typeof raw === "string") return refusedBody(raw);

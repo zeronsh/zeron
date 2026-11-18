@@ -127,15 +127,21 @@ export const collectOrphans = async (db: D1Database, bucket: R2Bucket, now: numb
   const rows = (await db.prepare("SELECT key FROM object_orphans WHERE at < ? ORDER BY at LIMIT ?").bind(now - ORPHAN_GRACE_MS, PURGE_BATCH).all<{ key: string }>()).results;
   let deleted = 0;
   for (const { key } of rows) {
+    // Claimed first, while it's still old: a publish of these bytes that
+    // started since refreshed the record (publish.ts `recordObjects`, before
+    // its R2 writes), and then the object is its, not the sweep's.
+    const claimed = await db.prepare("DELETE FROM object_orphans WHERE key = ? AND at < ?").bind(key, now - ORPHAN_GRACE_MS).run();
+    if ((claimed.meta.changes ?? 0) === 0) continue;
     const names = keyNames(key);
     const named =
       names !== undefined &&
       (await db.prepare("SELECT 1 FROM versions WHERE plugin_id = ? AND version = ? AND package_sha256 = ?").bind(names.id, names.version, names.sha256).first()) !== null;
-    if (!named) {
+    // (A fresh record now means a publish began after the claim: keep it.)
+    const fresh = (await db.prepare("SELECT 1 FROM object_orphans WHERE key = ?").bind(key).first()) !== null;
+    if (!named && !fresh) {
       await bucket.delete(key);
       deleted++;
     }
-    await db.prepare("DELETE FROM object_orphans WHERE key = ? AND at < ?").bind(key, now - ORPHAN_GRACE_MS).run();
   }
   return deleted;
 };

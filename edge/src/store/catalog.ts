@@ -15,7 +15,7 @@
  */
 import type { Env } from "../env";
 import { LIST_TTL, cacheKey, throughCache } from "./cache";
-import { authorCard, authorsOf, fileUrl, packageUrl, permissionsOf, pluginCard, versionInfo } from "./cards";
+import { authorCard, authorsOf, packageUrl, permissionsOf, pluginCard, versionInfo } from "./cards";
 import { LISTED, PUBLIC_STATUSES, type PluginRow, VERSION_ORDER, type VersionRow, parseList, pluginRow } from "./db";
 import { answer, fail, notFound } from "./http";
 import { CATEGORIES, isCategory } from "./listing";
@@ -173,7 +173,7 @@ const pluginDetail = async (env: Env, db: D1Database, id: string): Promise<Respo
     {
       ...pluginCard(p, authorCard(authors[p.owner_id]!)),
       readme: listed.readme,
-      screenshots: parseList(listed.screenshots).map((s) => fileUrl(id, listed.version, s)),
+      screenshots: parseList(listed.screenshots),
       permissions: permissionsOf(listed),
       engines: listed.engines_zeron === null ? null : { zeron: listed.engines_zeron },
       homepage: listed.homepage,

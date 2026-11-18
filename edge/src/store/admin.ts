@@ -28,8 +28,8 @@ import type { Env } from "../env";
 import { userDirectoryStub } from "../user-directory";
 import { pluginCacheKeys } from "./author";
 import { purge } from "./cache";
-import { authorCard, authorsOf, pluginCard, versionInfo, parseStoredJson } from "./cards";
-import { type ConsentItem, consentDiff } from "./consent";
+import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, versionInfo } from "./cards";
+import { type ConsentItem, consentDiff, toolInputs } from "./consent";
 import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
 import { readBody, requireAdmin, revokeDeployKeys } from "./principal";
@@ -126,46 +126,59 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   if (after === null) return fail(400, "bad_cursor", "That cursor isn't from this list.");
   const limit = limitOf(url);
   if (limit === null) return fail(400, "bad_request", `limit is 1 to ${PAGE}.`);
-  // The queue reads oldest first; any other state, newest first.
+  // The queue reads oldest first; any other state, newest first. Each item
+  // with what a reviewer triages by (amendment 35): the version it would
+  // replace, what it newly asks for since, and its checks by level.
   const ks = keysetSql("v.submitted_at", "v.rowid", status === "pending", after);
   const rows = (
     await db
       .prepare(
-        `SELECT v.rowid AS rid, v.plugin_id, v.version, v.status, v.submitted_at, v.decided_at, v.publisher_id, v.via, v.checks,
-                v.name, v.is_release
-         FROM versions v
+        `SELECT v.rowid AS rid, v.plugin_id, v.version, v.status, v.submitted_at, v.publisher_id, v.checks, v.permissions,
+                v.name, v.is_release, b.version AS base_version, b.permissions AS base_permissions
+         FROM versions v LEFT JOIN versions b ON b.rowid = (${baseSql("v")})
          WHERE (? = 'all' OR v.status = ?) ${ks.where}
          ORDER BY ${ks.order} LIMIT ?`
       )
       .bind(status, status, ...ks.binds, limit + 1)
-      .all<{ rid: number; plugin_id: string; version: string; status: string; submitted_at: number; decided_at: number | null; publisher_id: string; via: string; checks: string; name: string; is_release: number }>()
+      .all<{
+        rid: number; plugin_id: string; version: string; status: string; submitted_at: number; publisher_id: string; checks: string; permissions: string;
+        name: string; is_release: number; base_version: string | null; base_permissions: string | null;
+      }>()
   ).results;
   const { page, links } = pageOf(rows, limit, after, (r) => [r.submitted_at, r.rid]);
   const names = await people(env, page.map((r) => r.publisher_id));
   return answer({
     items: page.map((r) => {
       const checks = parseStoredJson<{ level: string }[]>(r.checks, []);
+      const asks = parseStoredJson<ConsentItem | null>(r.permissions, null);
+      const count = (level: string) => checks.filter((c) => c.level === level).length;
       return {
         plugin: { id: r.plugin_id, name: r.name },
         version: r.version,
         status: r.status,
         prerelease: r.is_release === 0,
         submitted_at: r.submitted_at,
-        decided_at: r.decided_at,
         publisher: names[r.publisher_id] ?? null,
-        via: r.via,
-        warnings: checks.filter((c) => c.level === "warn").length
+        ...(r.base_version !== null ? { base: r.base_version } : {}),
+        new_asks: asks ? consentDiff(parseStoredJson<ConsentItem | null>(r.base_permissions, null), asks).added : [],
+        checks: { ok: count("ok"), warn: count("warn"), fail: count("fail") }
       };
     }),
     ...links
   });
 };
 
+/** The rowid of the version a submission of `alias` (a `versions` row in
+ * the outer query) is compared with: its plugin's highest approved or
+ * yanked version other than itself. */
+const baseSql = (alias: string): string =>
+  `SELECT rowid FROM versions WHERE plugin_id = ${alias}.plugin_id AND version != ${alias}.version AND status IN ('approved', 'yanked') ORDER BY ${VERSION_ORDER} LIMIT 1`;
+
 const submission = async (env: Env, db: D1Database, id: string, versionText: string): Promise<Response> => {
   const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, versionText)]);
   if (!plugin || !v) return notFound();
   const base = await db
-    .prepare(`SELECT * FROM versions WHERE plugin_id = ? AND version != ? AND status IN ('approved', 'yanked') ORDER BY ${VERSION_ORDER} LIMIT 1`)
+    .prepare(`SELECT b.* FROM versions v JOIN versions b ON b.rowid = (${baseSql("v")}) WHERE v.plugin_id = ? AND v.version = ?`)
     .bind(id, v.version)
     .first<VersionRow>();
   const files = (q: VersionRow) =>
@@ -195,7 +208,8 @@ const submission = async (env: Env, db: D1Database, id: string, versionText: str
   const permissions = parseStoredJson<ConsentItem | null>(v.permissions, null);
   const basePermissions = base ? parseStoredJson<ConsentItem | null>(base.permissions, null) : null;
   return answer({
-    plugin: { id: plugin.id, status: plugin.status, listed_version: plugin.listed_version, owner: { id: owner.id, username: owner.username } },
+    // (A PluginCard, amendment 35; never listed: this submission's.)
+    plugin: ownerCard(plugin, v, authorCard(owner)),
     version: { ...versionInfo(v, true), name: v.name, summary: v.summary, icon: v.icon, readme: v.readme, homepage: v.homepage, repository: v.repository, license: v.license, categories: parseStoredJson(v.categories, []), keywords: parseStoredJson(v.keywords, []), screenshots: parseStoredJson(v.screenshots, []) },
     publisher: {
       id: publisher.id,
@@ -210,7 +224,9 @@ const submission = async (env: Env, db: D1Database, id: string, versionText: str
     base_files: baseFiles,
     checks: parseStoredJson(v.checks, []),
     permissions,
-    permissions_diff: permissions ? consentDiff(basePermissions, permissions) : null
+    permissions_diff: permissions
+      ? consentDiff(basePermissions, permissions, { before: toolInputs(base?.manifest), after: toolInputs(v.manifest) })
+      : null
   });
 };
 
@@ -368,20 +384,61 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
 const adminPlugin = async (env: Env, db: D1Database, id: string): Promise<Response> => {
   const plugin = await pluginRow(db, id);
   if (!plugin) return notFound();
-  const [versions, reports, authors] = await Promise.all([
+  const [versions, reportRows, authors] = await Promise.all([
     db.prepare(`SELECT * FROM versions WHERE plugin_id = ? ORDER BY ${VERSION_ORDER}`).bind(id).all<VersionRow>(),
-    db.prepare("SELECT id, version, reason, text, status, created_at, resolved_at, note FROM reports WHERE plugin_id = ? ORDER BY id DESC LIMIT 100").bind(id).all(),
+    db.prepare(`SELECT ${REPORT_COLUMNS} FROM reports r LEFT JOIN plugins p ON p.id = r.plugin_id WHERE r.plugin_id = ? ORDER BY r.id DESC LIMIT 100`).bind(id).all<ReportRow>(),
     authorsOf(env, [plugin.owner_id])
   ]);
   const owner = authors[plugin.owner_id]!;
   return answer({
-    plugin: { ...pluginCard(plugin, authorCard(owner)), listed_version: plugin.listed_version, created_at: plugin.created_at, suspend_reason: plugin.suspend_reason },
+    plugin: {
+      ...ownerCard(plugin, versions.results[0], authorCard(owner)),
+      listed_version: plugin.listed_version,
+      created_at: plugin.created_at,
+      suspend_reason: plugin.suspend_reason
+    },
     owner: { id: owner.id, username: owner.username, user_id: plugin.owner_id, created_at: owner.createdAt },
     versions: versions.results.map((v) => versionInfo(v, true)),
-    reports: reports.results,
+    // As /admin/reports gives them.
+    reports: await reportItems(env, reportRows.results),
     featured: plugin.featured_at !== null,
-    status: plugin.status
+    // The /me/plugins words (amendment 35).
+    status: listingState(plugin)
   });
+};
+
+const REPORT_COLUMNS = "r.id, r.plugin_id, p.name AS plugin_name, r.version, r.reporter_id, r.reason, r.text, r.created_at, r.status, r.resolved_by, r.resolved_at, r.note";
+interface ReportRow {
+  readonly id: number;
+  readonly plugin_id: string;
+  readonly plugin_name: string | null;
+  readonly version: string | null;
+  readonly reporter_id: string;
+  readonly reason: string;
+  readonly text: string;
+  readonly created_at: number;
+  readonly status: string;
+  readonly resolved_by: string | null;
+  readonly resolved_at: number | null;
+  readonly note: string | null;
+}
+
+/** Reports as admin views give them: with the plugin and the people. */
+const reportItems = async (env: Env, rows: readonly ReportRow[]) => {
+  const names = await people(env, [...rows.map((r) => r.reporter_id), ...rows.flatMap((r) => (r.resolved_by ? [r.resolved_by] : []))]);
+  return rows.map((r) => ({
+    id: r.id,
+    plugin: { id: r.plugin_id, name: r.plugin_name },
+    version: r.version,
+    reporter: names[r.reporter_id] ?? null,
+    reason: r.reason,
+    text: r.text,
+    created_at: r.created_at,
+    status: r.status,
+    resolved_by: r.resolved_by ? (names[r.resolved_by] ?? null) : null,
+    resolved_at: r.resolved_at,
+    note: r.note
+  }));
 };
 
 const reports = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
@@ -395,30 +452,14 @@ const reports = async (env: Env, db: D1Database, url: URL): Promise<Response> =>
   const rows = (
     await db
       .prepare(
-        `SELECT r.*, p.name AS plugin_name FROM reports r LEFT JOIN plugins p ON p.id = r.plugin_id
+        `SELECT ${REPORT_COLUMNS} FROM reports r LEFT JOIN plugins p ON p.id = r.plugin_id
          WHERE (? = 'all' OR r.status = ?) ${ks.where} ORDER BY ${ks.order} LIMIT ?`
       )
       .bind(status, status, ...ks.binds, limit + 1)
-      .all<{ id: number; plugin_id: string; plugin_name: string | null; version: string | null; reporter_id: string; reason: string; text: string; created_at: number; status: string; resolved_by: string | null; resolved_at: number | null; note: string | null }>()
+      .all<ReportRow>()
   ).results;
   const { page, links } = pageOf(rows, limit, after, (r) => [r.id, r.id]);
-  const names = await people(env, [...page.map((r) => r.reporter_id), ...page.flatMap((r) => (r.resolved_by ? [r.resolved_by] : []))]);
-  return answer({
-    reports: page.map((r) => ({
-      id: r.id,
-      plugin: { id: r.plugin_id, name: r.plugin_name },
-      version: r.version,
-      reporter: names[r.reporter_id] ?? null,
-      reason: r.reason,
-      text: r.text,
-      created_at: r.created_at,
-      status: r.status,
-      resolved_by: r.resolved_by ? (names[r.resolved_by] ?? null) : null,
-      resolved_at: r.resolved_at,
-      note: r.note
-    })),
-    ...links
-  });
+  return answer({ reports: await reportItems(env, page), ...links });
 };
 
 const resolveReport = async (db: D1Database, adminId: string, reportId: number, body: Record<string, unknown> | undefined): Promise<Response> => {

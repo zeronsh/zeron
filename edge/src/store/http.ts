@@ -21,11 +21,14 @@ export const rateLimited = (): Response =>
   });
 
 /** A body `readBody` refused: past its cap, or (a deploy key's signed
- * request) not the body that was signed. */
+ * request) not the body that was signed: `400 body_mismatch` (amendment
+ * 36). The signature over the claimed hash verified; the bytes changed on
+ * the way, so a client sends it again. (A signature that doesn't verify is
+ * `401 invalid_signature`, from signed-request.ts.) */
 export const refusedBody = (reason: "too_large" | "body_mismatch"): Response =>
   reason === "too_large"
     ? fail(413, "too_large", "The request body is too large.")
-    : fail(401, "invalid_signature", "The body isn't the one that was signed.");
+    : fail(400, "body_mismatch", "The body isn't the one that was signed.");
 
 /** A JSON body that is an object, or undefined. */
 export const objectBody = (bytes: Uint8Array | undefined): Record<string, unknown> | undefined => {

@@ -406,9 +406,10 @@ describe("cookie-authenticated store routes", () => {
     const other = await webSignIn(await person());
     const path = "/store/v1/plugins/demo/versions";
     const refused: [string, Record<string, string>, string][] = [
-      ["no Origin", { "x-csrf-token": browser.csrf }, "forbidden"],
-      ["foreign Origin", { origin: "https://evil.example", "x-csrf-token": browser.csrf }, "forbidden"],
-      ["the edge's origin", { origin: "https://edge.test", "x-csrf-token": browser.csrf }, "forbidden"],
+      // (A wrong Origin is bad_csrf too on a store route: amendment 35.)
+      ["no Origin", { "x-csrf-token": browser.csrf }, "bad_csrf"],
+      ["foreign Origin", { origin: "https://evil.example", "x-csrf-token": browser.csrf }, "bad_csrf"],
+      ["the edge's origin", { origin: "https://edge.test", "x-csrf-token": browser.csrf }, "bad_csrf"],
       ["no token", { origin: SITE }, "bad_csrf"],
       ["another session's token", { origin: SITE, "x-csrf-token": other.csrf }, "bad_csrf"],
       ["a guessed token", { origin: SITE, "x-csrf-token": "A".repeat(43) }, "bad_csrf"]

@@ -25,12 +25,12 @@
 
 import { type Json, type JsonObject, JsonError, canonicalJson, isObject, parseJson } from "./json";
 import { MANIFEST_FILE, type Manifest, idProblem, readManifest } from "./manifest";
-import { LIMITS } from "./data";
+import { LIMITS, STORE_DATA } from "./data";
 import { plainPath } from "./paths";
 import { Scanner, decodeBase64String, decodedBound as spanBound, stringIs, stringText } from "./scan";
 
-export const FORMAT = "zeron-plugin:v1";
-export const PAYLOAD_PREFIX = "zeron-plugin:v1\n";
+export const FORMAT: string = STORE_DATA.package_format;
+export const PAYLOAD_PREFIX: string = STORE_DATA.payload_prefix;
 export const MAX_FILES = LIMITS.max_files;
 export const MAX_BYTES = LIMITS.max_bytes;
 /** package.rs `MAX_PACKAGE_BYTES`: the engine's own ceiling. */

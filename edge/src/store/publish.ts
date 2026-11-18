@@ -148,9 +148,9 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   if (await overRate(db, publisher.userId, now)) return fail(429, "rate_limited", "Too many versions submitted lately. Try again later.");
 
   const base = await db
-    .prepare(`SELECT version, permissions FROM versions WHERE plugin_id = ? AND status IN ('approved', 'yanked') ORDER BY ${VERSION_ORDER} LIMIT 1`)
+    .prepare(`SELECT version, permissions, manifest FROM versions WHERE plugin_id = ? AND status IN ('approved', 'yanked') ORDER BY ${VERSION_ORDER} LIMIT 1`)
     .bind(id)
-    .first<{ version: string; permissions: string }>();
+    .first<{ version: string; permissions: string; manifest: string }>();
   const previous = await db
     .prepare(`SELECT version FROM versions WHERE plugin_id = ? AND status NOT IN ('rejected', 'withdrawn') ORDER BY ${VERSION_ORDER} LIMIT 1`)
     .bind(id)
@@ -164,7 +164,7 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     kinds,
     via: publisher.via,
     consent,
-    base: base ? { version: base.version, consent: JSON.parse(base.permissions) as ConsentItem } : null,
+    base: base ? { version: base.version, consent: JSON.parse(base.permissions) as ConsentItem, manifest: base.manifest } : null,
     previous: previous?.version ?? null
   });
 
@@ -173,6 +173,13 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   // R2 first (content-addressed: harmless if this publish loses), then the
   // one D1 batch that decides. Whatever throws in between, nothing written
   // here is left behind unless a version row names it.
+  //
+  // Before the objects are written, their orphan records are made fresh:
+  // the sweep (release.ts `collectOrphans`) never deletes an object whose
+  // record is younger than its grace, so a retry of bytes an earlier attempt
+  // left behind can't lose them to it while its batch is on the way. The
+  // batch clears the records once a row names the objects.
+  await recordObjects(db, [pkgKey, blobKey]);
   try {
     await Promise.all([
       bucket.put(pkgKey, body, { sha256: pkg.sha256, httpMetadata: { contentType: "application/octet-stream" } }),
@@ -212,7 +219,11 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
       db
         .prepare("DELETE FROM id_claims WHERE user_id = ? AND plugin_id = ? AND at = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)")
         .bind(publisher.userId, id, now, id),
-      db.prepare("DELETE FROM plugins WHERE id = ? AND owner_id = ? AND created_at = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)").bind(id, publisher.userId, now, id)
+      db.prepare("DELETE FROM plugins WHERE id = ? AND owner_id = ? AND created_at = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)").bind(id, publisher.userId, now, id),
+      // Named by a row now: no longer anyone's to sweep.
+      db
+        .prepare("DELETE FROM object_orphans WHERE key IN (?, ?) AND EXISTS (SELECT 1 FROM versions WHERE plugin_id = ? AND version = ? AND package_sha256 = ?)")
+        .bind(pkgKey, blobKey, id, version.text, pkg.sha256)
     ];
     await db.batch(statements);
   } catch (e) {
@@ -244,6 +255,10 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   const later = await notNewerThan(db, id, order);
   return fail(409, "not_newer", `Version ${version.text} isn't later than ${later ?? "a version submitted just now"}.`);
 };
+
+/** Record (or refresh) `keys` as objects no row may name yet, now. */
+const recordObjects = (db: D1Database, keys: readonly string[]): Promise<unknown> =>
+  Promise.all(keys.map((key) => db.prepare("INSERT INTO object_orphans (key, at) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET at = excluded.at").bind(key, Date.now()).run()));
 
 /** Record R2 keys a publish wrote but may not need (release.ts
  * `collectOrphans` deletes each after a grace period, if no version row

@@ -11,7 +11,7 @@ import vectors from "../../../docs/plugin-package-vectors.json";
 import { b64urlEncode } from "../../src/cloud/crypto";
 import { deployKeyProofMessage, publishSigningString, sha256Hex } from "../../src/store/identity/signing";
 import { SITE, grantAdmin, person, sessionHeader, setCookies, stepUp, webSignIn } from "./identity-helpers";
-import { type Signer, adminCall, author, call, makePackage, publish, uniqueId } from "./store-helpers";
+import { type Signer, adminCall, author, call, makePackage, newSigner, publish, registerKey, uniqueId, uniqueName } from "./store-helpers";
 
 const json = async <T = Record<string, unknown>>(res: Response) => (await res.json()) as T;
 
@@ -111,7 +111,8 @@ describe("the store with the edge's identity", () => {
     expect(row).toEqual({ via: "deploy_key", signer_key: k.key, publisher_id: a.userId });
     // The same bytes again, signed anew: the same answer, as any retry.
     expect((await signed(k, "POST", `/store/v1/plugins/${id}/versions`, pkg)).status).toBe(201);
-    // A body other than the one signed: refused before it's read.
+    // A body other than the one signed: refused before it's read, as a body
+    // changed on the way (amendment 36), not as a bad signature.
     const ts = String(Date.now());
     const other = await makePackage({ id, version: "1.2.0", signer: k.signer });
     const sig = await k.signText(publishSigningString("POST", `/store/v1/plugins/${id}/versions`, await sha256Hex(pkg), ts));
@@ -120,7 +121,14 @@ describe("the store with the edge's identity", () => {
       headers: { authorization: `ZeronKey key=${k.key}, ts=${ts}, sig=${sig}`, "x-zeron-content-sha256": await sha256Hex(pkg) },
       body: other
     });
-    expect([mismatch.status, ((await mismatch.json()) as { error: string }).error]).toEqual([401, "invalid_signature"]);
+    expect([mismatch.status, ((await mismatch.json()) as { error: string }).error]).toEqual([400, "body_mismatch"]);
+    // A signature that doesn't verify stays 401 invalid_signature.
+    const forged = await SELF.fetch(`https://edge.test/store/v1/plugins/${id}/versions`, {
+      method: "POST",
+      headers: { authorization: `ZeronKey key=${k.key}, ts=${ts}, sig=${"A".repeat(86)}`, "x-zeron-content-sha256": await sha256Hex(pkg) },
+      body: pkg
+    });
+    expect([forged.status, ((await forged.json()) as { error: string }).error]).toEqual([401, "invalid_signature"]);
 
     // Its plugin's state, for that plugin only.
     const mine = await signed(k, "GET", "/store/v1/me/plugins");
@@ -166,5 +174,59 @@ describe("the store with the edge's identity", () => {
     }
     const browser = await webSignIn(staffId);
     expect((await SELF.fetch(`${SITE}/store/v1/admin/queue`, { headers: { cookie: browser.cookie } })).status).toBe(200);
+  });
+
+  it("rotates a fresh staff session's token on its first use of a real store route, and sends the cookie on a 404 too", async () => {
+    const staffId = await person();
+    await grantAdmin(staffId);
+    for (const [path, status] of [
+      ["/store/v1/admin/queue", 200],
+      ["/store/v1/admin/plugins/nope-not-here", 404]
+    ] as const) {
+      const browser = await webSignIn(staffId);
+      const res = await SELF.fetch(`${SITE}${path}`, { headers: { cookie: browser.cookie } });
+      expect(res.status, path).toBe(status);
+      const rotated = setCookies(res).get("__Host-zeron_session");
+      expect(rotated, path).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(rotated).not.toBe(browser.token);
+      // The new token is the session from now on.
+      expect((await SELF.fetch(`${SITE}/store/v1/admin/queue`, { headers: { cookie: sessionHeader(rotated!) } })).status).toBe(200);
+    }
+  });
+
+  it("lets an owner read a pending version's package and files with a web session, privately, leaving nothing cached", async () => {
+    const userId = await person(uniqueName());
+    const signer = await newSigner();
+    await registerKey(userId, signer);
+    const id = uniqueId();
+    expect((await publish(userId, id, await makePackage({ id, version: "1.0.0", signer }))).status).toBe(201);
+    const browser = await webSignIn(userId);
+    for (const path of [`/store/v1/plugins/${id}/versions/1.0.0/package`, `/store/v1/plugins/${id}/files/1.0.0/init.luau`, `/store/v1/plugins/${id}/files/1.0.0/icon.svg`]) {
+      const own = await SELF.fetch(`${SITE}${path}`, { headers: { cookie: browser.cookie } });
+      expect(own.status, path).toBe(200);
+      expect(own.headers.get("cache-control"), path).toBe("private, no-store");
+      await own.arrayBuffer();
+      // Nobody else gets it, from the cache or otherwise, twice over.
+      for (let i = 0; i < 2; i++) expect((await call(undefined, "GET", path)).status, `${path} anonymous`).toBe(404);
+    }
+  });
+
+  it("takes an admin's approval through the site's service binding", async () => {
+    const a = await author();
+    const id = uniqueId();
+    expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    const staffId = await person();
+    await grantAdmin(staffId);
+    const browser = await webSignIn(staffId);
+    const approve = await env.SITE.fetch(`${SITE}/store/v1/admin/submissions/${id}/1.0.0/approve`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { cookie: browser.cookie, origin: SITE, "x-csrf-token": browser.csrf }
+    });
+    expect(approve.status, await approve.clone().text()).toBe(200);
+    expect((await json<{ version: { status: string } }>(approve)).version.status).toBe("approved");
+    // The rotated cookie comes back through the binding for the browser.
+    expect(setCookies(approve).get("__Host-zeron_session")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect((await call(undefined, "GET", `/store/v1/plugins/${id}`)).status).toBe(200);
   });
 });

@@ -24,7 +24,8 @@ describe("store catalog", () => {
       id,
       version: "1.0.0",
       summary: `The ${id} plugin.`,
-      icon: `/store/v1/plugins/${id}/files/1.0.0/icon.svg`,
+      // A path in the card's version's package (amendment 35), never a URL.
+      icon: "icon.svg",
       author: { id: await publisherId(a.userId), username: a.username, badges: [] },
       categories: ["productivity"],
       keywords: [tag],
@@ -35,7 +36,7 @@ describe("store catalog", () => {
     expect(detail).toMatchObject({
       id,
       readme: expect.stringContaining("It does a thing"),
-      screenshots: [`/store/v1/plugins/${id}/files/1.0.0/shots/one.png`],
+      screenshots: ["shots/one.png"],
       permissions: { asks: ["ui.add"], commands: [], network_hosts: [], tools: [] },
       engines: null,
       versions: [{ version: "1.0.0", status: "approved", yanked: false, notes: "- What changed in 1.0.0.", key: a.signer.key }],

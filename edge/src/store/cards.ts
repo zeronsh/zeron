@@ -30,9 +30,17 @@ export const publisherId = async (userId: string): Promise<string> => {
   return `pub_${[...digest].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32)}`;
 };
 
+/** An ISO time (the user directory keeps WorkOS's) as ms since the epoch,
+ * as every time in a store answer is (amendment 35); null if it isn't one. */
+export const epochMs = (iso: string | null | undefined): number | null => {
+  const ms = iso ? Date.parse(iso) : Number.NaN;
+  return Number.isFinite(ms) ? ms : null;
+};
+
 /** What the store shows of each of `userIds`: one entry for every one, a
- * deleted account's without a username. */
-export const authorsOf = async (env: Env, userIds: readonly string[]): Promise<Record<string, Author & { readonly createdAt: string | null }>> => {
+ * deleted account's without a username. `createdAt`: when the account was
+ * made, ms since the epoch. */
+export const authorsOf = async (env: Env, userIds: readonly string[]): Promise<Record<string, Author & { readonly createdAt: number | null }>> => {
   const unique = [...new Set(userIds)];
   const directory = userDirectoryStub(env);
   const found: Record<string, StoreAuthor> = directory && unique.length ? await directory.storeAuthors(unique) : {};
@@ -40,7 +48,7 @@ export const authorsOf = async (env: Env, userIds: readonly string[]): Promise<R
   return Object.fromEntries(
     unique.map((userId, i) => [
       userId,
-      { id: ids[i]!, username: found[userId]?.username ?? null, badges: found[userId]?.badges ?? [], createdAt: found[userId]?.createdAt ?? null }
+      { id: ids[i]!, username: found[userId]?.username ?? null, badges: found[userId]?.badges ?? [], createdAt: epochMs(found[userId]?.createdAt) }
     ])
   );
 };
@@ -48,18 +56,19 @@ export const authorsOf = async (env: Env, userIds: readonly string[]): Promise<R
 /** The card's author: never the user id. */
 export const authorCard = (found: Author): Author => ({ id: found.id, username: found.username, badges: found.badges });
 
-/** Where a packaged file is served (relative to the edge). */
-export const fileUrl = (id: string, version: string, path: string): string =>
-  `/store/v1/plugins/${id}/files/${encodeURIComponent(version)}/${path.split("/").map(encodeURIComponent).join("/")}`;
-
 export const packageUrl = (id: string, version: string): string =>
   `/store/v1/plugins/${id}/versions/${encodeURIComponent(version)}/package`;
 
+/**
+ * A plugin's card. `icon` (like a detail's `screenshots`) is a path in the
+ * package of the card's `version` (amendment 35), fetched through the files
+ * route with that version; never a URL. No version, no icon.
+ */
 export const pluginCard = (p: PluginRow, author: Author) => ({
   id: p.id,
   name: p.name,
   summary: p.summary,
-  icon: p.listed_version && p.icon ? fileUrl(p.id, p.listed_version, p.icon) : null,
+  icon: p.listed_version ? p.icon : null,
   author,
   categories: parseList(p.categories),
   keywords: parseList(p.keywords),
@@ -102,6 +111,21 @@ export const versionInfo = (v: VersionRow, full = false) => ({
       }
     : {})
 });
+
+/**
+ * The card an owner or an admin sees of plugin `p`: its listed card, or,
+ * never listed, `shown`'s name, summary, categories and keywords (a
+ * submission's), with no version and so no icon.
+ */
+export const ownerCard = (p: PluginRow, shown: VersionRow | undefined, author: Author) =>
+  pluginCard(
+    p.listed_version || !shown ? p : { ...p, name: shown.name, summary: shown.summary, icon: null, categories: shown.categories, keywords: shown.keywords },
+    author
+  );
+
+/** `/me/plugins`' and the admin view's word for where plugin `p` stands. */
+export const listingState = (p: PluginRow): "listed" | "unlisted" | "suspended" =>
+  p.status === "suspended" ? "suspended" : p.listed_version ? "listed" : "unlisted";
 
 export const permissionsOf = (v: VersionRow): unknown => parseJson(v.permissions, null);
 export { parseJson as parseStoredJson };

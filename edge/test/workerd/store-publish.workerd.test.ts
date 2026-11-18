@@ -95,6 +95,37 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/versions/1.0.0/package`)).status).toBe(200);
   });
 
+  it("never lets the sweep take a retry's objects while its batch is on the way", async () => {
+    const a = await author();
+    const id = uniqueId("retry");
+    const pkg = await makePackage({ id, version: "1.0.0", signer: a.signer });
+    const request = () => new Request(`https://edge.test/store/v1/plugins/${id}/versions`, { method: "POST", headers: { authorization: `Bearer ${a.userId}` }, body: pkg });
+    const failing = new Proxy(env.STORE_DB, {
+      get: (target, prop) => (prop === "batch" ? () => Promise.reject(new Error("D1 is down")) : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target))
+    }) as D1Database;
+    // An attempt failed and left its objects, recorded, an hour and more ago.
+    await expect(handlePublish(request(), env as never, failing, env.PLUGIN_STORE, id)).rejects.toThrow("D1 is down");
+    await env.STORE_DB.prepare("UPDATE object_orphans SET at = ? WHERE key LIKE ?").bind(Date.now() - 2 * ORPHAN_GRACE_MS, `%/${id}/%`).run();
+    // Its retry: the hourly sweep runs after its objects are written and
+    // before its batch lands.
+    let swept = -1;
+    const slow = new Proxy(env.STORE_DB, {
+      get: (target, prop) =>
+        prop === "batch"
+          ? async (statements: D1PreparedStatement[]) => {
+              swept = await collectOrphans(env.STORE_DB, env.PLUGIN_STORE, Date.now());
+              return target.batch(statements);
+            }
+          : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target)
+    }) as D1Database;
+    expect((await handlePublish(request(), env as never, slow, env.PLUGIN_STORE, id)).status).toBe(201);
+    expect(swept).toBe(0);
+    expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/versions/1.0.0/package`)).status).toBe(200);
+    expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/files/1.0.0/init.luau`)).status).toBe(200);
+    // Named by its row, the records are gone: no later sweep looks at them.
+    expect(await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM object_orphans WHERE key LIKE ?").bind(`%/${id}/%`).first("n")).toBe(0);
+  });
+
   it("keeps an orphan record for its grace, and deletes what no row names after it", async () => {
     const key = `pkg/${uniqueId("gone")}/1.0.0/${"0".repeat(64)}.zeron-plugin`;
     await env.PLUGIN_STORE.put(key, "x");

@@ -4,7 +4,7 @@
  * 12). What fails a check is refused at publish, so a stored list holds
  * `ok` and `warn`: the things a reviewer should look at.
  */
-import { type ConsentItem, RISKY_ASKS, consentDiff, fullControl } from "./consent";
+import { type ConsentItem, RISKY_ASKS, consentDiff, fullControl, toolInputs } from "./consent";
 import { pictureType } from "./listing";
 import type { Listing, Problem } from "./listing";
 import { riskyHost } from "./manifest";
@@ -131,7 +131,7 @@ export interface CheckInput {
   readonly via: "session" | "deploy_key";
   readonly consent: ConsentItem;
   /** The last approved version's, the diff base; null for a first version. */
-  readonly base: { readonly version: string; readonly consent: ConsentItem } | null;
+  readonly base: { readonly version: string; readonly consent: ConsentItem; readonly manifest: string } | null;
   /** The highest earlier version this one had to be newer than, if any. */
   readonly previous: string | null;
 }
@@ -177,12 +177,13 @@ export const runChecks = (input: CheckInput): Check[] => {
   if (consent.asks.includes("network") && consent.network_hosts.length === 0) add("hosts", "warn", "Reaches any public host.");
 
   if (base) {
-    const diff = consentDiff(base.consent, consent);
+    const diff = consentDiff(base.consent, consent, { before: toolInputs(base.manifest), after: toolInputs(pkg.manifest.raw) });
     const grew = [
       diff.added.length ? `asks ${list(diff.added)}` : "",
       diff.added_commands.length ? `runs ${list(diff.added_commands)}` : "",
       diff.network_added.length ? `reaches ${list(diff.network_added)}` : "",
-      diff.tools_added.length ? `adds tools ${list(diff.tools_added)}` : "",
+      diff.tools_added.length ? `adds tools ${list(diff.tools_added.map((t) => t.name))}` : "",
+      diff.tools_changed.length ? `changes tools ${list(diff.tools_changed.map((t) => t.name))}` : "",
       diff.ui_change_added.length ? `changes ${list(diff.ui_change_added)}` : "",
       diff.ui_replace_added.length ? `replaces ${list(diff.ui_replace_added)}` : ""
     ].filter(Boolean);

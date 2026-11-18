@@ -17,7 +17,8 @@ import {
   listingOf
 } from "./listing";
 import { idProblem, readManifest } from "./manifest";
-import { PackageRefusal, checkSignature, contentHash, signaturePayload, verifyPackage } from "./package";
+import { MAX_MANIFEST_JSON, MAX_MANIFEST_VALUES, PackageRefusal, checkSignature, contentHash, signaturePayload, verifyPackage } from "./package";
+import { MAX_PUBLISH_BODY_BYTES } from "./identity/body";
 import { plainPath } from "./paths";
 import { comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
 import { STORE_DATA } from "./data";
@@ -54,6 +55,16 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
   it("is the file the engine makes, beside its data file", () => {
     expect(v.format).toBe("zeron-plugin-package-vectors:v1");
     expect([STORE_DATA.format, STORE_DATA.package_format, STORE_DATA.payload_prefix]).toEqual(["zeron-plugin-store-data:v1", "zeron-plugin:v1", "zeron-plugin:v1\n"]);
+  });
+
+  it("the store's own measured bounds are the data file's", () => {
+    // (Kept as constants where they're used, and held to the file here: a
+    // different value in the engine's next file fails this.)
+    expect([MAX_PUBLISH_BODY_BYTES, MAX_MANIFEST_JSON, MAX_MANIFEST_VALUES]).toEqual([
+      STORE_DATA.limits.max_publish_body_bytes,
+      STORE_DATA.limits.max_manifest_json_bytes,
+      STORE_DATA.limits.max_manifest_values
+    ]);
   });
 
   it("canonical JSON", () => {

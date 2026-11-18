@@ -5,10 +5,12 @@
  * docs/plugin-store-limits.md.
  */
 import { describe, expect, it } from "vitest";
+import { LIMITS } from "./data";
 import { verifyPackage } from "./package";
 
 /** The store's body cap (principal.ts MAX_PUBLISH_BODY_BYTES, amendment 34). */
-const SIZE = 20 * 1024 * 1024;
+/** The store's publish body limit, from the data file. */
+const SIZE = LIMITS.max_publish_body_bytes;
 const fill = (head: string, unit: string, tail: string): Uint8Array => {
   const n = Math.floor((SIZE - head.length - tail.length) / unit.length);
   return new TextEncoder().encode(head + unit.repeat(n) + tail);

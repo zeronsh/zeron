@@ -52,7 +52,8 @@ export const cookieSession = async (
   const session = await resolveWebSession(request, env);
   if (!session) return undefined;
   const refusal = crossSiteRefusal(request, env, session.csrf, (await requestCsrf(request)).csrf);
-  if (refusal === "bad_origin") return forbidden("This request didn't come from the Zeron site.");
+  // Both `403 bad_csrf` on every store route (contract amendment 35).
+  if (refusal === "bad_origin") return jsonError(403, "bad_csrf", "This request didn't come from the Zeron site.");
   if (refusal) return jsonError(403, "bad_csrf", "This page is out of date. Reload it and try again.");
   return privileged ? resolveWebSession(request, env, true) : session;
 };
