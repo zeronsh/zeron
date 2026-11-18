@@ -75,6 +75,8 @@ pub struct State {
     pub blocked_anyway: Vec<Value>,
     /// Records sent without their package's size (`bytes: null`).
     pub without_bytes: bool,
+    /// Answer the next package download with a 302 to this URL.
+    pub redirect_package: Option<String>,
 }
 
 /// A version's package size as the store's records give it.
@@ -127,7 +129,13 @@ impl FakeStore {
                         return;
                     }
                     let (status, content_type, reply) = store.answer(&method, &path, &headers, &body);
-                    let head = format!("HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", reply.len());
+                    let head = if content_type == "redirect" {
+                        let location = String::from_utf8_lossy(&reply);
+                        format!("HTTP/1.1 {status} X\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    } else {
+                        format!("HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", reply.len())
+                    };
+                    let reply = if content_type == "redirect" { Vec::new() } else { reply };
                     let _ = socket.write_all(head.as_bytes()).await;
                     let _ = socket.write_all(&reply).await;
                 });
@@ -298,6 +306,9 @@ impl FakeStore {
                 let mut state = self.state.lock().unwrap();
                 if let Some(raw) = state.serve_instead.remove(&((*id).to_owned(), (*version).to_owned())) {
                     return (200, "application/octet-stream", raw);
+                }
+                if let Some(location) = state.redirect_package.take() {
+                    return (302, "redirect", location.into_bytes());
                 }
                 let Some(p) = state.plugins.get(*id) else { return not_found() };
                 let mine = caller.as_deref() == Some(p.owner.as_str());

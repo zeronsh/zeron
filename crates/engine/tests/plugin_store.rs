@@ -297,6 +297,24 @@ async fn a_package_is_read_no_further_than_its_record_says() {
 }
 
 #[tokio::test]
+async fn a_store_answer_that_redirects_is_never_followed() {
+    let store = FakeStore::start().await;
+    let elsewhere = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let raw = package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({}));
+    store.add("ada", &raw, "approved", "");
+    elsewhere.add("ada", &raw, "approved", "");
+    store.state.lock().unwrap().redirect_package = Some(format!("{}/store/v1/plugins/focus/versions/1.0.0/package", elsewhere.url));
+    let d = device(&store, Some("bob"));
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_error", "{refused}");
+    assert!(refused.contains("(302)"), "{refused}");
+    assert!(elsewhere.state.lock().unwrap().requests.is_empty(), "the other origin was never asked");
+    // (Without the redirect, it installs.)
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+}
+
+#[tokio::test]
 async fn a_package_that_isn_t_the_store_s_record_is_refused() {
     let store = FakeStore::start().await;
     let (key, _) = SigningKey::generate().unwrap();

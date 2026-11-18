@@ -291,6 +291,9 @@ impl StoreClient {
             http: reqwest::Client::builder()
                 .timeout(TIMEOUT)
                 .user_agent(concat!("Zeron/", env!("CARGO_PKG_VERSION")))
+                // Nothing in the store's contract redirects: a misroute
+                // fails here, loudly, rather than being followed elsewhere.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -483,6 +486,7 @@ fn refusal(status: u16, body: &[u8]) -> String {
         (None, 404) => failure(reason::NOT_IN_STORE, "The store has no such plugin"),
         (None, 429) => failure(install::reason::RATE_LIMITED, "The store is turning away requests from here for now; try again later"),
         (None, 500..) => failure(reason::STORE_UNREACHABLE, format!("The store couldn't answer just now ({status})")),
+        (None, 300..=399) => failure(reason::STORE_ERROR, format!("The store sent it elsewhere ({status}), which it never does: nothing was fetched")),
         (None, _) => failure(reason::STORE_ERROR, format!("The store refused it ({status})")),
     }
 }
