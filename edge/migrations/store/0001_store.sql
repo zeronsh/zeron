@@ -1,13 +1,23 @@
--- The plugin store's catalog (edge/src/store/, docs/plans/2026-11-17-plugin-store.md).
+-- The plugin store's catalog (edge/src/store/; docs/plans/2026-11-17-plugin-store.md,
+-- amendments 44 and 45; docs/plans/2026-11-19-store-shapes-44-45.md).
 -- Times are ms since the epoch. User ids are WorkOS ids; usernames live in
 -- the users1 Durable Object and are copied here only for search.
+--
+-- This file replaces 0001_init.sql and 0002_audit_plugin.sql (no database
+-- ever held data under them). Its new name is on purpose: a database that
+-- applied the old files runs this one too and fails loudly ("table plugins
+-- already exists") rather than drifting silently. Drop and recreate one.
 
--- One row per store id, from its first submission on.
+-- One row per store id, from its first publish on.
 CREATE TABLE plugins (
   seq INTEGER PRIMARY KEY,                       -- stable sort tiebreak and FTS rowid
   id TEXT NOT NULL UNIQUE,                       -- the manifest id
   kind TEXT NOT NULL DEFAULT 'plugin' CHECK (kind IN ('plugin')),
   owner_id TEXT NOT NULL,
+  -- When the owner came to own it: its claim (= created_at), or its last
+  -- transfer. A deploy key scoped to `all` holds a plugin owned when the key
+  -- was made, or claimed by the account and never moved (amendment 44).
+  owner_since INTEGER NOT NULL,
   -- username.ts `skeleton` of the id: a new id that looks like an existing one is refused.
   skeleton TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
@@ -15,9 +25,13 @@ CREATE TABLE plugins (
   featured_at INTEGER,
   installs INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
-  -- The listed version (see store/db.ts `relist`) and what the card shows of it;
-  -- null while nothing is listed.
+  -- The card (store/db.ts `relist`): its newest listed version (a release
+  -- before a pre-release), verified or not, and what the card shows of it;
+  -- null while nothing is listed. `verified`: that version is verified.
+  -- `verified_version`: the newest verified listed version.
   listed_version TEXT,
+  verified INTEGER NOT NULL DEFAULT 0 CHECK (verified IN (0, 1)),
+  verified_version TEXT,
   name TEXT,
   summary TEXT,
   icon TEXT,
@@ -25,14 +39,14 @@ CREATE TABLE plugins (
   keywords TEXT,                                 -- JSON array
   author_username TEXT,                          -- for search only
   listed_at INTEGER,                             -- first listed ("new")
-  updated_at INTEGER                             -- listed version last changed ("updated")
+  updated_at INTEGER                             -- the card's version published ("updated")
 );
 CREATE INDEX plugins_owner ON plugins (owner_id);
 CREATE INDEX plugins_popular ON plugins (installs DESC, seq DESC) WHERE listed_version IS NOT NULL AND status = 'active';
 CREATE INDEX plugins_updated ON plugins (updated_at DESC, seq DESC) WHERE listed_version IS NOT NULL AND status = 'active';
 CREATE INDEX plugins_new ON plugins (listed_at DESC, seq DESC) WHERE listed_version IS NOT NULL AND status = 'active';
 
--- Every version ever submitted. A version belongs to its content for good.
+-- Every version ever published. A version belongs to its content for good.
 -- Its R2 objects are written before its row, so a row means they exist.
 CREATE TABLE versions (
   plugin_id TEXT NOT NULL REFERENCES plugins (id),
@@ -43,11 +57,34 @@ CREATE TABLE versions (
   patch INTEGER NOT NULL,
   is_release INTEGER NOT NULL CHECK (is_release IN (0, 1)),
   pre_key TEXT NOT NULL,                         -- semver.ts `preKey`
-  status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'withdrawn', 'yanked', 'removed')),
-  blocked INTEGER NOT NULL DEFAULT 0,
-  block_reason TEXT,
+  -- listed: public, installable; yanked: its author stopped new installs;
+  -- taken_down: staff, harmful, blocked on devices; removed: staff, not
+  -- harmful, not blocked.
+  status TEXT NOT NULL CHECK (status IN ('listed', 'yanked', 'taken_down', 'removed')),
+  -- Who yanked it: its author (who may unyank it), or a newer version's
+  -- publish, superseding an unverified one (which nobody unyanks).
+  yanked_by TEXT CHECK (yanked_by IN ('author', 'superseded')),
+  removed_at INTEGER,                            -- taken down or removed: when, by whom, why
+  removed_by TEXT,
+  removal_reason TEXT,
+  -- A reviewer's mark: verified, or declined (still unverified, with a reason
+  -- and words for its author and staff), or neither yet (undecided).
+  verification TEXT NOT NULL DEFAULT 'unverified' CHECK (verification IN ('unverified', 'verified')),
+  verified_at INTEGER,
+  verified_by TEXT,
+  declined_at INTEGER,
+  declined_by TEXT,
+  decline_reason TEXT,
+  decline_message TEXT,
+  -- An unverified version a newer one superseded (amendment 45: a release
+  -- supersedes older releases and pre-releases, a pre-release older
+  -- pre-releases): when, and by which version. It is yanked by it, and leaves
+  -- the review queue.
+  superseded_at INTEGER,
+  superseded_by TEXT,
   publisher_id TEXT NOT NULL,
-  via TEXT NOT NULL CHECK (via IN ('session', 'deploy_key')),
+  via TEXT NOT NULL CHECK (via IN ('device', 'deploy_key')),
+  deploy_key_name TEXT,                          -- the key's name when it published, if one did
   signer_key TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   package_sha256 TEXT NOT NULL,
@@ -69,17 +106,28 @@ CREATE TABLE versions (
   readme TEXT NOT NULL,
   notes TEXT,
   checks TEXT NOT NULL,                          -- checks.ts list, JSON
-  submitted_at INTEGER NOT NULL,
-  decided_at INTEGER,
-  decided_by TEXT,
-  reason TEXT,                                   -- a rejection's or removal's reason word
-  message TEXT,                                  -- what the author reads
+  published_at INTEGER NOT NULL,
   PRIMARY KEY (plugin_id, version),
   UNIQUE (plugin_id, precedence)
 );
 CREATE INDEX versions_order ON versions (plugin_id, major, minor, patch, is_release, pre_key);
-CREATE INDEX versions_queue ON versions (status, submitted_at);
-CREATE INDEX versions_publisher ON versions (publisher_id, submitted_at);
+CREATE INDEX versions_publisher ON versions (publisher_id, published_at);
+-- The staff queue: a plugin's newest undecided version, oldest first.
+CREATE INDEX versions_undecided ON versions (published_at)
+  WHERE verification = 'unverified' AND declined_at IS NULL AND superseded_at IS NULL AND status IN ('listed', 'yanked');
+
+-- The take-down feed (GET /store/v1/takedowns?after=<seq>): each take-down
+-- and restore, numbered in commit order by the same write that made it
+-- (AUTOINCREMENT: a number is never reused after the 30-day prune).
+CREATE TABLE takedown_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK (kind IN ('take_down', 'restore')),
+  plugin_id TEXT NOT NULL,
+  version TEXT NOT NULL,
+  reason TEXT,
+  at INTEGER NOT NULL
+);
+CREATE INDEX takedown_events_at ON takedown_events (at);
 
 -- Each file of a version: where its bytes start in the version's files
 -- object in R2 (files/<id>/<version>/<package sha256>.bin), and how many.
@@ -139,7 +187,7 @@ CREATE UNIQUE INDEX reports_one_open ON reports (plugin_id, reporter_id) WHERE s
 CREATE INDEX reports_plugin ON reports (plugin_id, id);
 CREATE INDEX reports_reporter ON reports (reporter_id, created_at);
 
--- Every admin action, written in the same transaction as the change.
+-- Every change of note, written in the same transaction as the change.
 CREATE TABLE audit (
   seq INTEGER PRIMARY KEY,
   at INTEGER NOT NULL,
@@ -149,6 +197,7 @@ CREATE TABLE audit (
   version TEXT,
   detail TEXT                                    -- JSON
 );
+CREATE INDEX audit_plugin ON audit (plugin_id, seq);
 
 -- Every new id an account claimed, kept when the id is released again: an
 -- account claims at most 5 in any 7 days (amendment 30).
@@ -159,18 +208,12 @@ CREATE TABLE id_claims (
 );
 CREATE INDEX id_claims_user ON id_claims (user_id, at);
 
--- What a release (store/release.ts) still owes after its rows went, in the
--- same transaction: R2 objects to delete, and a plugin's deploy keys to
--- revoke. Each sweep finishes these first, so a release interrupted midway
--- is completed by the next one.
+-- R2 objects a release (store/release.ts) still owes a delete after its rows
+-- went, in the same transaction: each sweep finishes these first, so a
+-- release interrupted midway is completed by the next one.
 CREATE TABLE object_purges (
   key TEXT PRIMARY KEY,
   at INTEGER NOT NULL
-);
-CREATE TABLE key_revocations (
-  plugin_id TEXT NOT NULL,
-  at INTEGER NOT NULL,
-  PRIMARY KEY (plugin_id, at)
 );
 
 -- R2 objects a publish wrote and may not need: one that threw before or

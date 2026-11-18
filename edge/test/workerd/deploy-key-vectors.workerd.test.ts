@@ -1,9 +1,11 @@
 /**
  * The engine's deploy-key vectors (docs/plugin-package-vectors.json), end to
- * end at the edge: the key registered with its own proof, then its exact
- * requests (method, path, headers, body), the publish and the signed read
- * of `GET /store/v1/me/plugins`, each accepted once as that plugin's deploy
- * key, on the edge's clock at the vector's moment.
+ * end at the edge: the key registered to an account with the vector's
+ * scope, then its exact requests (method, path, headers, body), the publish
+ * and the signed read of `GET /store/v1/me/plugins`, each accepted once as
+ * that account's deploy key, on the edge's clock at the vector's moment.
+ * (A v2 proof binds a publisher id no test account has, so its message and
+ * signature are the unit test's; here the key is bound directly.)
  */
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
@@ -11,7 +13,8 @@ import vectors from "../../../docs/plugin-package-vectors.json";
 import type { Env } from "../../src/env";
 import { readBody } from "../../src/store/identity/body";
 import { verifySignedRequest } from "../../src/store/identity/signed-request";
-import { person, setOwner, stepUp } from "./identity-helpers";
+import { stepUpHash } from "../../src/step-up";
+import { directory, person, setOwner, stepUp } from "./identity-helpers";
 
 const v = vectors.deploy_key;
 const bodyOf = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -30,16 +33,12 @@ describe("the engine's deploy-key vector at the edge", () => {
   it("registers with its proof, then publishes and reads with its exact requests, each once", async () => {
     const owner = await person();
     await setOwner("focus", owner);
-    const registered = await SELF.fetch("https://edge.test/store/v1/plugins/focus/keys", {
-      method: "POST",
-      headers: { authorization: `Bearer ${owner}`, "content-type": "application/json" },
-      body: JSON.stringify({ key: v.public, name: "vector", proof: v.proof, stepUp: await stepUp(owner) })
-    });
-    expect(registered.status).toBe(201);
+    const scope = v.proofs.find((p) => "plugins" in p.scope)!.scope as { plugins: string[] };
+    expect(await directory().registerDeployKey(owner, v.public, "vector", null, scope, await stepUpHash(await stepUp(owner)))).toBe("registered");
 
     for (const r of [v.request, v.get]) {
       const request = vectorRequest(r);
-      expect(await verify(request, r.ts), r.method).toEqual({ userId: owner, username: null, key: v.public, pluginId: "focus" });
+      expect(await verify(request, r.ts), r.method).toEqual({ userId: owner, username: null, key: v.public, name: "vector", scope, createdAt: expect.any(Number) });
       expect(await readBody(request)).toEqual(bodyOf(r.body_b64));
       // Once only, and never outside the clock skew.
       const replayed = (await verify(vectorRequest(r), r.ts)) as Response;

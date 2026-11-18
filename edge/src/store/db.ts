@@ -2,20 +2,24 @@
  * The store's D1 catalog (migrations/store): reads and the statements that
  * keep a plugin's listing in step with its versions.
  *
- * A plugin is listed while it is `active` and has an approved version. Its
- * listed version is its highest approved release, or its highest approved
- * pre-release when it has no release. `relist` recomputes that, the card
- * fields copied from it, its search row and its filter rows; it is
- * idempotent, so every change that can move the listing ends its batch
- * with it.
+ * A version is listed the moment it is published (amendment 45); a review
+ * only marks it verified. A plugin is listed while it is `active` and has a
+ * listed version. Its card shows its newest listed version, verified or
+ * not: its highest listed release, or its highest listed pre-release when it
+ * has no release; and beside it the newest verified one. `relist`
+ * recomputes those, the card fields copied from it, its search row and its
+ * filter rows; it is idempotent, so every change that can move the listing
+ * ends its batch with it.
  */
 import type { Env } from "../env";
+import type { PluginOwnership } from "../user-directory";
 
 export interface PluginRow {
   readonly seq: number;
   readonly id: string;
   readonly kind: string;
   readonly owner_id: string;
+  readonly owner_since: number;
   readonly skeleton: string;
   readonly status: "active" | "suspended";
   readonly suspend_reason: string | null;
@@ -23,6 +27,8 @@ export interface PluginRow {
   readonly installs: number;
   readonly created_at: number;
   readonly listed_version: string | null;
+  readonly verified: number;
+  readonly verified_version: string | null;
   readonly name: string | null;
   readonly summary: string | null;
   readonly icon: string | null;
@@ -33,7 +39,7 @@ export interface PluginRow {
   readonly updated_at: number | null;
 }
 
-export type VersionStatus = "pending" | "approved" | "rejected" | "withdrawn" | "yanked" | "removed";
+export type VersionStatus = "listed" | "yanked" | "taken_down" | "removed";
 
 export interface VersionRow {
   readonly plugin_id: string;
@@ -45,10 +51,22 @@ export interface VersionRow {
   readonly is_release: number;
   readonly pre_key: string;
   readonly status: VersionStatus;
-  readonly blocked: number;
-  readonly block_reason: string | null;
+  readonly yanked_by: "author" | "superseded" | null;
+  readonly removed_at: number | null;
+  readonly removed_by: string | null;
+  readonly removal_reason: string | null;
+  readonly verification: "unverified" | "verified";
+  readonly verified_at: number | null;
+  readonly verified_by: string | null;
+  readonly declined_at: number | null;
+  readonly declined_by: string | null;
+  readonly decline_reason: string | null;
+  readonly decline_message: string | null;
+  readonly superseded_at: number | null;
+  readonly superseded_by: string | null;
   readonly publisher_id: string;
-  readonly via: "session" | "deploy_key";
+  readonly via: "device" | "deploy_key";
+  readonly deploy_key_name: string | null;
   readonly signer_key: string;
   readonly content_hash: string;
   readonly package_sha256: string;
@@ -70,11 +88,7 @@ export interface VersionRow {
   readonly readme: string;
   readonly notes: string | null;
   readonly checks: string;
-  readonly submitted_at: number;
-  readonly decided_at: number | null;
-  readonly decided_by: string | null;
-  readonly reason: string | null;
-  readonly message: string | null;
+  readonly published_at: number;
 }
 
 /** Highest precedence first. */
@@ -84,7 +98,11 @@ const LISTING_ORDER = "is_release DESC, major DESC, minor DESC, patch DESC, pre_
 /** Where a plugin shows to the public. */
 export const LISTED = "p.status = 'active' AND p.listed_version IS NOT NULL";
 /** Versions anyone may see and download. */
-export const PUBLIC_STATUSES = ["approved", "yanked"] as const;
+export const PUBLIC_STATUSES = ["listed", "yanked"] as const;
+/** The same, as SQL for a `versions` row (unqualified, or with `alias.`). */
+export const publicVersion = (alias = ""): string => `${alias}status IN ('listed', 'yanked')`;
+/** A version no reviewer has decided yet (verified or declined). */
+export const undecided = (alias = ""): string => `${alias}verification = 'unverified' AND ${alias}declined_at IS NULL`;
 
 /** R2 keys: `<prefix><id>/<version>/<sha256><suffix>`, a package's and a
  * version's files object's. */
@@ -99,12 +117,13 @@ export const pluginRow = (db: D1Database, id: string): Promise<PluginRow | null>
 export const versionRow = (db: D1Database, id: string, version: string): Promise<VersionRow | null> =>
   db.prepare("SELECT * FROM versions WHERE plugin_id = ? AND version = ?").bind(id, version).first<VersionRow>();
 
-/** Who owns store id `id`, if anyone does yet (for the identity lane: a
- * deploy key is made only for a plugin its account owns, amendment 17). */
-export const pluginOwner = async (env: Pick<Env, "STORE_DB">, id: string): Promise<string | null> => {
+/** Who owns store id `id`, since when, and when it was first claimed (for
+ * the identity lane: a deploy key's scope is judged by it, amendment 44),
+ * or null when no one has claimed it. */
+export const pluginOwner = async (env: Pick<Env, "STORE_DB">, id: string): Promise<PluginOwnership | null> => {
   if (!env.STORE_DB) return null;
-  const row = await env.STORE_DB.prepare("SELECT owner_id FROM plugins WHERE id = ?").bind(id).first<{ owner_id: string }>();
-  return row?.owner_id ?? null;
+  const row = await env.STORE_DB.prepare("SELECT owner_id, owner_since, created_at FROM plugins WHERE id = ?").bind(id).first<{ owner_id: string; owner_since: number; created_at: number }>();
+  return row ? { owner: row.owner_id, ownerSince: row.owner_since, createdAt: row.created_at } : null;
 };
 
 /**
@@ -116,18 +135,22 @@ export const relist = (db: D1Database, id: string, author: string | null): D1Pre
   db
     .prepare(
       `WITH best AS (
-         SELECT * FROM versions WHERE plugin_id = ?1 AND status = 'approved' ORDER BY ${LISTING_ORDER} LIMIT 1
+         SELECT * FROM versions WHERE plugin_id = ?1 AND status = 'listed' ORDER BY ${LISTING_ORDER} LIMIT 1
+       ), vetted AS (
+         SELECT version FROM versions WHERE plugin_id = ?1 AND status = 'listed' AND verification = 'verified' ORDER BY ${LISTING_ORDER} LIMIT 1
        )
        UPDATE plugins SET
          listed_version = (SELECT version FROM best),
+         verified = COALESCE((SELECT verification = 'verified' FROM best), 0),
+         verified_version = (SELECT version FROM vetted),
          name = (SELECT name FROM best),
          summary = (SELECT summary FROM best),
          icon = (SELECT icon FROM best),
          categories = (SELECT categories FROM best),
          keywords = (SELECT keywords FROM best),
          author_username = COALESCE(?2, author_username),
-         listed_at = COALESCE(listed_at, (SELECT decided_at FROM best)),
-         updated_at = (SELECT decided_at FROM best)
+         listed_at = COALESCE(listed_at, (SELECT published_at FROM best)),
+         updated_at = (SELECT published_at FROM best)
        WHERE id = ?1`
     )
     .bind(id, author),

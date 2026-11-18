@@ -7,16 +7,20 @@
 import { createPrivateKey, createPublicKey } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import vectors from "../../../docs/plugin-package-vectors.json";
+import data from "../../../docs/plugin-store-data.json";
 import { b64urlDecode, b64urlEncode, verifyEd25519 } from "../../src/cloud/crypto";
 import {
   CONTENT_SHA256_HEADER,
+  DEPLOY_KEY_PROOF_PREFIX,
   MAX_REQUEST_SKEW_MS,
   deployKeyProofMessage,
   deployKeyRoute,
   parseZeronKeyAuthorization,
   publishSigningString,
+  scopeText,
   sha256Hex
 } from "../../src/store/identity/signing";
+import type { DeployKeyScope } from "../../src/user-directory";
 
 const v = vectors.deploy_key;
 const cases = { publish: v.request, read: v.get } as const;
@@ -25,6 +29,13 @@ const bodyOf = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0
 describe("deploy-key vectors", () => {
   it("name the edge's content-hash header", () => {
     expect(v.content_sha256_header.toLowerCase()).toBe(CONTENT_SHA256_HEADER);
+  });
+
+  it("agree with the data file's prefixes (amendment 44: proof v2)", () => {
+    expect(data.deploy_key.proof_prefix).toBe(DEPLOY_KEY_PROOF_PREFIX);
+    expect(data.deploy_key.secret_prefix).toBe(v.secret_prefix);
+    expect(data.deploy_key.max_skew_ms).toBe(MAX_REQUEST_SKEW_MS);
+    expect(data.deploy_key.content_sha256_header).toBe(v.content_sha256_header);
   });
 
   for (const [name, r] of Object.entries(cases)) {
@@ -49,10 +60,21 @@ describe("deploy-key vectors", () => {
     });
   }
 
-  it("prove possession with the edge's proof message", async () => {
-    expect(deployKeyProofMessage("focus", v.public)).toBe(v.proof_message);
-    expect(await verifyEd25519(v.public, v.proof_message, v.proof)).toBe(true);
-  });
+  for (const p of v.proofs) {
+    it(`prove possession for scope ${p.scope_text}, expiry ${p.expires_at ?? "never"}, with the edge's proof message`, async () => {
+      expect(scopeText(p.scope as DeployKeyScope)).toBe(p.scope_text);
+      expect(deployKeyProofMessage(p.publisher_id, p.expires_at, p.scope_text, v.public)).toBe(p.message);
+      expect(await verifyEd25519(v.public, p.message, p.proof)).toBe(true);
+      // Good for that account, expiry and scope only.
+      for (const other of [
+        deployKeyProofMessage("pub_ffffffffffffffffffffffffffffffff", p.expires_at, p.scope_text, v.public),
+        deployKeyProofMessage(p.publisher_id, (p.expires_at ?? 0) + 1, p.scope_text, v.public),
+        deployKeyProofMessage(p.publisher_id, p.expires_at, p.scope_text === "*" ? "focus" : "*", v.public)
+      ]) {
+        expect(await verifyEd25519(v.public, other, p.proof), other).toBe(false);
+      }
+    });
+  }
 
   it("allow the edge's clock skew", () => {
     expect(v.max_skew_ms).toBe(MAX_REQUEST_SKEW_MS);

@@ -5,6 +5,7 @@ import {
   deployKeyRoute,
   parseZeronKeyAuthorization,
   publishSigningString,
+  scopeText,
   sha256Hex
 } from "./signing";
 
@@ -68,8 +69,16 @@ describe("the signing string", () => {
     expect(await verifyEd25519(key, publishSigningString("POST", "/store/v1/plugins/git/versions", body, "2"), sig)).toBe(false);
   });
 
-  it("names the plugin in a deploy key's proof", () => {
-    expect(deployKeyProofMessage("git", "KEY")).toBe("zeron-deploy-key:v1:git:KEY");
+  it("binds a deploy key's proof to its account, expiry and scope (amendment 44)", () => {
+    const pub = "pub_0123456789abcdef0123456789abcdef";
+    expect(deployKeyProofMessage(pub, null, "*", "KEY")).toBe(`zeron-deploy-key:v2:${pub}:never:*:KEY`);
+    expect(deployKeyProofMessage(pub, 1_800_000_000_000, scopeText({ plugins: ["git", "focus"] })!, "KEY")).toBe(`zeron-deploy-key:v2:${pub}:1800000000000:focus,git:KEY`);
+    // Sorted by code unit; a repeat or a non-id is no scope.
+    expect(scopeText({ plugins: ["b-x", "a", "A1"] })).toBeUndefined();
+    expect(scopeText({ plugins: ["b-x", "ab", "a1"] })).toBe("a1,ab,b-x");
+    expect(scopeText({ plugins: ["git", "git"] })).toBeUndefined();
+    expect(scopeText({ plugins: [] })).toBeUndefined();
+    expect(scopeText({ all: true })).toBe("*");
   });
 });
 
@@ -94,7 +103,7 @@ describe("the routes a deploy key may use", () => {
       ["POST", "/store/v1/me/plugins"],
       ["GET", "/store/v1/me/plugins/"],
       ["GET", "/store/v1/me"],
-      ["POST", "/store/v1/admin/submissions/git/1.0.0/approve"],
+      ["POST", "/store/v1/admin/versions/git/1.0.0/verify"],
       ["POST", "/store/v1/plugins/git/versions/"],
       ["POST", "/store/v1/plugins/Git/versions"],
       ["POST", "/store/v1/plugins/git%2Fx/versions"],

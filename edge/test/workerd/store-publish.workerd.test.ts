@@ -7,19 +7,19 @@ import { author, call, makePackage, member, newSigner, publish, uniqueId, adminC
 const json = async (res: Response) => (await res.json()) as Record<string, unknown>;
 
 describe("POST /store/v1/plugins/:id/versions", () => {
-  it("takes a signed package as a pending version, with its checks, and stores it", async () => {
+  it("lists a signed package at once, unverified, with its checks, and stores it", async () => {
     const a = await author();
     const id = uniqueId("focus");
     const pkg = await makePackage({ id, version: "1.0.0", signer: a.signer });
     const res = await publish(a.userId, id, pkg);
     expect(res.status, await res.clone().text()).toBe(201);
     const body = await json(res);
-    expect(body).toMatchObject({ id, version: "1.0.0", status: "pending" });
+    expect(body).toMatchObject({ id, version: "1.0.0", status: "listed", verified: false, superseded: [] });
     const checks = body.checks as { id: string; level: string }[];
     expect(checks.map((c) => c.id)).toEqual(expect.arrayContaining(["signature", "manifest", "size", "version", "newer", "readme", "binary_file", "asks"]));
     expect(checks.every((c) => c.level === "ok" || c.level === "warn")).toBe(true);
     const row = await env.STORE_DB.prepare("SELECT * FROM versions WHERE plugin_id = ?").bind(id).first<Record<string, unknown>>();
-    expect(row).toMatchObject({ status: "pending", publisher_id: a.userId, via: "session", signer_key: a.signer.key, package_bytes: pkg.length });
+    expect(row).toMatchObject({ status: "listed", verification: "unverified", publisher_id: a.userId, via: "device", signer_key: a.signer.key, package_bytes: pkg.length });
     const objects = await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` });
     expect(objects.objects).toHaveLength(1);
     expect(new Uint8Array(await (await env.PLUGIN_STORE.get(objects.objects[0]!.key))!.arrayBuffer())).toEqual(pkg);
@@ -31,8 +31,13 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       { path: "init.luau", kind: "text" },
       { path: "shots/one.png", kind: "png" }
     ]);
-    // Pending: not in the catalog.
-    expect((await call(undefined, "GET", `/store/v1/plugins/${id}`)).status).toBe(404);
+    // Public at once (amendment 45): in the catalog, marked not verified.
+    const detail = await call(undefined, "GET", `/store/v1/plugins/${id}`);
+    expect(detail.status).toBe(200);
+    expect(await json(detail)).toMatchObject({ id, version: "1.0.0", verified: false, verified_version: null });
+    // In the log, as its author's act.
+    const logged = await env.STORE_DB.prepare("SELECT actor_id, action, detail FROM audit WHERE plugin_id = ?").bind(id).first<{ actor_id: string; action: string; detail: string }>();
+    expect({ ...logged, detail: JSON.parse(logged!.detail) }).toEqual({ actor_id: a.userId, action: "version.publish", detail: { via: "device", key: a.signer.key } });
   });
 
   it("answers the same bytes again as the first time, and refuses other bytes for that version", async () => {
@@ -42,7 +47,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     expect((await publish(a.userId, id, pkg)).status).toBe(201);
     const again = await publish(a.userId, id, pkg);
     expect(again.status).toBe(201);
-    expect(await json(again)).toMatchObject({ id, version: "1.0.0", status: "pending" });
+    expect(await json(again)).toMatchObject({ id, version: "1.0.0", status: "listed", verified: false });
     const other = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer, files: { "init.luau": "return 2" } }));
     expect(other.status).toBe(409);
     expect((await json(other)).error).toBe("version_exists");
@@ -192,7 +197,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     const pkg = await makePackage({ id, version: "1.0.0", signer: a.signer });
     const answers = await Promise.all([publish(a.userId, id, pkg), publish(a.userId, id, pkg), publish(a.userId, id, pkg)]);
     expect(answers.map((r) => r.status)).toEqual([201, 201, 201]);
-    for (const r of answers) expect(await r.json()).toMatchObject({ id, version: "1.0.0", status: "pending" });
+    for (const r of answers) expect(await r.json()).toMatchObject({ id, version: "1.0.0", status: "listed" });
     const rows = await env.STORE_DB.prepare("SELECT package_sha256 FROM versions WHERE plugin_id = ?").bind(id).all<{ package_sha256: string }>();
     expect(rows.results).toHaveLength(1);
     const sha = rows.results[0]!.package_sha256;
@@ -337,7 +342,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     }
   });
 
-  it("refuses a version not later than those before it; a release only follows releases", async () => {
+  it("refuses a version not later than every version the plugin has, in any state", async () => {
     const a = await author();
     const id = uniqueId();
     const go = async (version: string) => publish(a.userId, id, await makePackage({ id, version, signer: a.signer }));
@@ -345,17 +350,17 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     const older = await go("1.9.9");
     expect([older.status, (await json(older)).error]).toEqual([409, "not_newer"]);
     expect((await go("2.1.0-beta.1")).status).toBe(201);
-    // A release while a later beta is out: it follows the releases.
-    expect((await go("2.0.1")).status).toBe(201);
-    // A pre-release follows everything.
-    expect((await json(await go("2.0.2-rc.1"))).error).toBe("not_newer");
+    // A release below a later pre-release: not later than every version.
+    expect((await json(await go("2.0.1"))).error).toBe("not_newer");
     expect((await go("2.1.0-beta.2")).status).toBe(201);
-    // A rejected version doesn't stand in the way, but its number stays taken.
-    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/2.1.0-beta.2/reject`, { reason: "broken", message: "It crashes." })).status).toBe(200);
+    // A taken-down version's number stays taken, and stays in the way.
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/2.1.0-beta.2/take-down`, { reason: "It sends your files away." })).status).toBe(200);
     const same = await go("2.1.0-beta.2");
-    expect([same.status, (await json(same)).status]).toEqual([201, "rejected"]);
+    // (The same bytes again answer that version's state now.)
+    expect([same.status, (await json(same)).status]).toEqual([201, "taken_down"]);
     const changed = await publish(a.userId, id, await makePackage({ id, version: "2.1.0-beta.2", signer: a.signer, files: { "init.luau": "return 3" } }));
     expect((await json(changed)).error).toBe("version_exists");
+    expect((await json(await go("2.1.0-beta.1+again"))).error).toBe("version_exists");
     expect((await go("2.1.0-beta.3")).status).toBe(201);
   });
 

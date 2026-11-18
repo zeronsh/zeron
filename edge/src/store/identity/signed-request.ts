@@ -17,13 +17,15 @@
  * - Replay: the directory remembers what each accepted request signed for
  *   longer than its `ts` is accepted (`DEPLOY_REPLAY_WINDOW_MS`), so the
  *   same request is never accepted twice; once forgotten, its `ts` is stale.
- * - Scope: a deploy key belongs to one plugin, and does only what
- *   `deployKeyRoute` allows: submit a version of that plugin, and read that
- *   plugin's state (`GET /store/v1/me/plugins`, a GET signing the hash of an
- *   empty body). Anything else: 403 `key_not_allowed`.
+ * - Scope: a deploy key belongs to an account and carries a scope
+ *   (amendment 44), and does only what `deployKeyRoute` allows: publish a
+ *   version of a plugin its scope holds, and read its account's plugins in
+ *   its scope (`GET /store/v1/me/plugins`, a GET signing the hash of an
+ *   empty body). Anything else: 403 `key_not_allowed`. A listed scope is
+ *   checked here; the rule for `all`, and the account owning the plugin
+ *   now, are the store's checks (principal.ts `keyInScope`).
  * - The key must be live: registered, not revoked, not expired, its owner's
- *   account not deleted. Its owner owning the plugin is the store's check,
- *   as it is for any publisher.
+ *   account not deleted.
  *
  * Errors: 401 `unauthenticated` (malformed, unknown key, query string, no
  * body hash), `invalid_signature`, `stale_request`, `replayed_request`,
@@ -32,7 +34,7 @@
 import { verifyEd25519 } from "../../cloud/crypto";
 import type { Env } from "../../env";
 import { jsonError } from "../../http";
-import { userDirectoryStub, type DeployKeyRefusal } from "../../user-directory";
+import { userDirectoryStub, type DeployKeyRefusal, type DeployKeyScope } from "../../user-directory";
 import { expectBodyHash } from "./body";
 import {
   CONTENT_SHA256_HEADER,
@@ -48,7 +50,10 @@ export interface DeployKeyCaller {
   readonly userId: string;
   readonly username: string | null;
   readonly key: string;
-  readonly pluginId: string;
+  /** The key's name, scope and when it was made (amendment 44). */
+  readonly name: string;
+  readonly scope: DeployKeyScope;
+  readonly createdAt: number;
 }
 
 const unauthenticated = (message: string): Response => jsonError(401, "unauthenticated", message);
@@ -89,7 +94,7 @@ export const verifySignedRequest = async (
   if ("error" in used) return deployKeyRefusal(used.error);
   // Whichever way the route reads the body, it gets this one or nothing.
   expectBodyHash(request, bodyHash);
-  return { userId: used.userId, username: used.username, key: auth.key, pluginId: used.pluginId };
+  return { userId: used.userId, username: used.username, key: auth.key, name: used.name, scope: used.scope, createdAt: used.createdAt };
 };
 
 const deployKeyRefusal = (error: DeployKeyRefusal | "replayed_request"): Response => {
@@ -101,7 +106,7 @@ const deployKeyRefusal = (error: DeployKeyRefusal | "replayed_request"): Respons
     case "key_expired":
       return jsonError(401, "key_expired", "This deploy key has expired.");
     case "key_not_allowed":
-      return jsonError(403, "key_not_allowed", "This deploy key belongs to another plugin.");
+      return jsonError(403, "key_not_allowed", "This deploy key's scope doesn't hold this plugin.");
     case "replayed_request":
       return jsonError(401, "replayed_request", "This request was already made. Sign each request afresh.");
   }

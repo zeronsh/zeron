@@ -7,8 +7,8 @@
  * writes per account (STORE_WRITES, in each route). Anything that throws is
  * one plain 500, with no detail.
  *
- * `/store/v1/plugins/:id/keys` (deploy keys) is the identity lane's, mounted
- * before this; here it is not found.
+ * `/store/v1/me/keys` (deploy keys, amendment 44) is the identity lane's,
+ * mounted before this; here it is not found.
  */
 import type { Env } from "../env";
 import { handleAdmin } from "./admin";
@@ -58,7 +58,7 @@ const route = async (request: Request, env: Env, db: D1Database, bucket: R2Bucke
   if (sub === "versions" && parts.length === 7) {
     const action = parts[6];
     if (action === "package" && read) return servePackage(request, env, db, bucket, id, parts[5]!);
-    if ((action === "withdraw" || action === "yank" || action === "unyank") && method === "POST") {
+    if ((action === "yank" || action === "unyank") && method === "POST") {
       return handleAuthorAction(request, env, db, id, parts[5]!, action);
     }
   }
@@ -70,7 +70,8 @@ export const handleStoreRoute = async (request: Request, env: Env, url: URL): Pr
   // Raw segments (empty ones kept, so `a//b` is no path), the leading one dropped.
   const parts = url.pathname.split("/").slice(1);
   if (parts[0] !== "store" || parts[1] !== "v1") return undefined;
-  if (parts[2] === "plugins" && parts[4] === "keys") return undefined;
+  // (`/store/v1/me/keys` is the identity lane's, mounted before this.)
+  if (parts[2] === "me" && parts[3] === "keys") return undefined;
   const db = env.STORE_DB;
   const bucket = env.PLUGIN_STORE;
   if (!db || !bucket) return withSessionCookie(request, fail(503, "unavailable", "The plugin store isn't set up on this server."));

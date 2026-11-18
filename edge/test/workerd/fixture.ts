@@ -153,19 +153,24 @@ const json = (value: unknown, status = 200) =>
 /**
  * `POST /__test/owner {pluginId, userId}`: make `userId` own store id
  * `pluginId` in the real catalog (null: no one), so the identity tests'
- * deploy keys meet the store's own `pluginOwner`. A plugin made here has no
+ * deploy keys meet the store's own `pluginOwner`: claimed now, or moved to
+ * them now (`owner_since` as the store's transfer sets it), or at `at`. A plugin made here has no
  * version; its skeleton is its id behind a prefix no real id has, so it
  * never stands in a real publish's lookalike check.
  */
-const setTestOwner = async (env: Env, pluginId: string, userId: string | null): Promise<void> => {
+const setTestOwner = async (env: Env, pluginId: string, userId: string | null, at = Date.now()): Promise<void> => {
   const db = env.STORE_DB!;
   if (userId === null) {
     await db.prepare("DELETE FROM plugins WHERE id = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)").bind(pluginId, pluginId).run();
     return;
   }
   await db
-    .prepare("INSERT INTO plugins (id, owner_id, skeleton, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id")
-    .bind(pluginId, userId, `__test:${pluginId}`, Date.now())
+    .prepare(
+      `INSERT INTO plugins (id, owner_id, owner_since, skeleton, created_at) VALUES (?1, ?2, ?3, ?4, ?3)
+       ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id, owner_since = MAX(?3, plugins.created_at + 1, plugins.owner_since + 1)
+       WHERE plugins.owner_id <> excluded.owner_id`
+    )
+    .bind(pluginId, userId, at, `__test:${pluginId}`)
     .run();
 };
 
@@ -229,11 +234,11 @@ export default {
     if (webAuth) return webAuth;
     const roles = await handleRoleAdminRoute(request, env, url);
     if (roles) return roles;
-    const deployKeyAdmin = await handleDeployKeyAdminRoute(request, env, url);
+    const deployKeyAdmin = await handleDeployKeyAdminRoute(request, env, url, pluginOwner);
     if (deployKeyAdmin) return deployKeyAdmin;
     if (url.pathname === "/__test/owner" && request.method === "POST") {
-      const { pluginId, userId } = (await request.json()) as { pluginId: string; userId: string | null };
-      await setTestOwner(env, pluginId, userId);
+      const { pluginId, userId, at } = (await request.json()) as { pluginId: string; userId: string | null; at?: number };
+      await setTestOwner(env, pluginId, userId, at);
       return json({ ok: true });
     }
     const deployKeys = await handleDeployKeyRoute(request, env, url, pluginOwner);

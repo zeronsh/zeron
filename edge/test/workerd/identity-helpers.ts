@@ -139,7 +139,9 @@ export const newSigner = async (): Promise<Signer> => {
   };
 };
 
-export const setOwner = (pluginId: string, userId: string | null) =>
-  SELF.fetch("https://edge.test/__test/owner", { method: "POST", body: JSON.stringify({ pluginId, userId }) });
+/** Make `userId` own store plugin `pluginId` (null: no one), claimed or
+ * moved to them now, or at `at` (epoch ms). */
+export const setOwner = (pluginId: string, userId: string | null, at?: number) =>
+  SELF.fetch("https://edge.test/__test/owner", { method: "POST", body: JSON.stringify({ pluginId, userId, at }) });
 
 export const errorOf = async (res: Response) => ((await res.json()) as { error: string }).error;

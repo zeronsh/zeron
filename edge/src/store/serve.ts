@@ -4,10 +4,11 @@
  *   GET /store/v1/plugins/:id/versions/:version/package
  *   GET /store/v1/plugins/:id/files/:version/*path
  *
- * Who may read: an approved or yanked version of an active plugin's package
- * and its pictures (PNG and JPEG that image-check.ts takes) and icon, by
- * anyone; anything else (any file, a pending, rejected, withdrawn or removed
- * version) by its owner or an admin. To anyone else it doesn't exist (404).
+ * Who may read: a listed or yanked version of an active plugin's package
+ * (a yanked one for the devices that have it) and its pictures (PNG and
+ * JPEG that image-check.ts takes) and icon, by anyone; anything else (any
+ * other file, a taken-down or removed version, a suspended plugin's) by its
+ * owner or an admin. To anyone else it doesn't exist (404).
  *
  * A packaged file is never active content on our origin (amendment 14):
  * every answer is `nosniff` with `Content-Security-Policy: sandbox;
@@ -79,7 +80,7 @@ interface PackageState {
 export const packageStateKey = (id: string, version: string): string => cacheKey(["state", "package", id, version]);
 export const packageBytesKey = (sha256: string): string => cacheKey(["bytes", "package", sha256]);
 
-const PUBLIC_SQL = "p.status = 'active' AND v.status IN ('approved', 'yanked')";
+const PUBLIC_SQL = "p.status = 'active' AND v.status IN ('listed', 'yanked')";
 
 export const servePackage = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string, segment: string): Promise<Response> => {
   const versionText = versionSegment(segment);

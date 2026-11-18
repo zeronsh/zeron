@@ -73,6 +73,9 @@ export const pluginCard = (p: PluginRow, author: Author) => ({
   categories: parseList(p.categories),
   keywords: parseList(p.keywords),
   version: p.listed_version,
+  // Its `version` is verified, and the newest verified listed version (amendment 45).
+  verified: p.listed_version !== null && p.verified === 1,
+  verified_version: p.verified_version,
   updated_at: p.updated_at,
   // First listed, what "new" sorts by (amendment 39); null only on an owner's
   // or admin's card of a plugin never listed.
@@ -90,13 +93,26 @@ const parseJson = <T>(text: string | null, fallback: T): T => {
   }
 };
 
-/** A version as the public sees it; `full` adds the owner's and admins'
- * review state and checks. */
+/**
+ * A reviewer's decision on version `v`, as its owner and staff read it
+ * (amendment 45): verified, declined (still unverified, with the reason and
+ * the words for its author), or not decided yet. The public sees only
+ * `verified`.
+ */
+export const reviewOf = (v: VersionRow) =>
+  v.verification === "verified"
+    ? { decided: true, decision: "verified" as const, decided_at: v.verified_at ?? undefined }
+    : v.declined_at !== null
+      ? { decided: true, decision: "declined" as const, reason: v.decline_reason ?? undefined, message: v.decline_message ?? undefined, decided_at: v.declined_at }
+      : { decided: false, decision: null };
+
+/** A version as the public sees it (the contract's `VersionInfo`); `full`
+ * adds what its owner and staff read: the review, the checks, the deploy
+ * key that published it, and why staff took it down or removed it. */
 export const versionInfo = (v: VersionRow, full = false) => ({
   version: v.version,
   status: v.status,
-  published_at: v.status === "approved" || v.status === "yanked" || v.status === "removed" ? v.decided_at : null,
-  submitted_at: v.submitted_at,
+  published_at: v.published_at,
   notes: v.notes,
   engines: v.engines_zeron === null ? null : { zeron: v.engines_zeron },
   yanked: v.status === "yanked",
@@ -105,12 +121,17 @@ export const versionInfo = (v: VersionRow, full = false) => ({
   hash: v.content_hash,
   sha256: v.package_sha256,
   bytes: v.package_bytes,
+  verified: v.verification === "verified",
+  verified_at: v.verification === "verified" ? v.verified_at : null,
+  via: v.via,
   ...(full
     ? {
-        review: { state: v.status, reason: v.reason ?? undefined, message: v.message ?? undefined, decided_at: v.decided_at ?? undefined },
+        review: reviewOf(v),
         checks: parseJson(v.checks, []),
-        blocked: v.blocked === 1,
-        via: v.via
+        // Which of the owner's deploy keys published it, by its name then
+        // (a notice on the author's own devices; amendment 44).
+        deploy_key: v.via === "deploy_key" ? { key: v.signer_key, name: v.deploy_key_name } : null,
+        ...(v.status === "taken_down" || v.status === "removed" ? { removal: { at: v.removed_at, reason: v.removal_reason } } : {})
       }
     : {})
 });

@@ -129,10 +129,39 @@ export const ROLES = ["admin"] as const;
 export type Role = (typeof ROLES)[number];
 export const isRole = (value: unknown): value is Role => (ROLES as readonly unknown[]).includes(value);
 
-/** Deploy keys: live at once per plugin, new per plugin and per user in 24 hours. */
-export const MAX_LIVE_DEPLOY_KEYS_PER_PLUGIN = 10;
-export const DEPLOY_KEYS_PER_PLUGIN_PER_DAY = 10;
-export const DEPLOY_KEYS_PER_USER_PER_DAY = 20;
+/** Deploy keys (amendment 44): live at once per account, and new per
+ * account in 24 hours. A key's scope lists at most this many plugins. */
+export const MAX_LIVE_DEPLOY_KEYS = 20;
+export const DEPLOY_KEYS_PER_DAY = 10;
+export const MAX_DEPLOY_KEY_PLUGINS = 50;
+
+/** What a deploy key may publish, fixed when it is made: every plugin of
+ * its account (owned then, or first published by it later; never one
+ * transferred in: the store decides that, by when its owner came to own
+ * it), or the listed ids, sorted and unique. */
+export type DeployKeyScope = { readonly all: true } | { readonly plugins: readonly string[] };
+
+/** A store plugin as a key's scope is judged against it: who owns it, since
+ * when, and when it was first claimed (the store's D1). */
+export interface PluginOwnership {
+  readonly owner: string;
+  readonly ownerSince: number;
+  readonly createdAt: number;
+}
+
+/** Whether a deploy key made at `keyCreatedAt` with `scope`, by account
+ * `userId`, holds `pluginId` (owned as `plugin` says): its account owns it
+ * now, and either the key lists it and the account has held it since
+ * before the key was made, or the key is for `all` and the account held it
+ * then or claimed it itself and never moved it. So a plugin that leaves the
+ * account leaves every scope for good, by the data alone: coming back (a
+ * transfer back, a release and a new claim) gives it a later `ownerSince`,
+ * and one transferred in never joins. */
+export const scopeHoldsPlugin = (userId: string, scope: DeployKeyScope, keyCreatedAt: number, pluginId: string, plugin: PluginOwnership | null | undefined): boolean => {
+  if (!plugin || plugin.owner !== userId) return false;
+  if (!("all" in scope)) return scope.plugins.includes(pluginId) && plugin.ownerSince <= keyCreatedAt;
+  return plugin.ownerSince <= keyCreatedAt || plugin.ownerSince === plugin.createdAt;
+};
 /** How long a signed request is remembered: past the clock skew both ways,
  * so its timestamp is refused before its record is forgotten. */
 export const DEPLOY_REPLAY_WINDOW_MS = 11 * 60_000;
@@ -342,8 +371,8 @@ export interface PluginKeyLookup {
   readonly revokedAt: number | null;
   /** Deploy keys only (absent on a device's key, as before). */
   readonly kind?: "deploy";
-  /** The one plugin a deploy key may publish. */
-  readonly plugin?: string;
+  /** What a deploy key may publish. */
+  readonly scope?: DeployKeyScope;
   readonly expiresAt?: number | null;
   readonly expired?: boolean;
 }
@@ -358,23 +387,37 @@ export type DeployKeyRegistration =
   | "too_many_keys"
   | "step_up_required";
 
-/** One of a plugin's deploy keys, as its owner sees it: never a secret (the
- * edge never has one). Times are epoch ms. */
+/** One of an account's deploy keys, as its owner sees it: never a secret
+ * (the edge never has one). Times are epoch ms. */
 export interface DeployKeyRow {
   readonly key: string;
   readonly fingerprint: string;
   readonly name: string;
+  readonly scope: DeployKeyScope;
   readonly createdAt: number;
   readonly lastUsedAt: number | null;
+  readonly lastUsedPlugin: string | null;
   readonly expiresAt: number | null;
   readonly revokedAt: number | null;
 }
 
+/** A live deploy key, as a request it signed is checked: whose, what it
+ * may publish, its name and when it was made. */
+export interface DeployKeyHolder {
+  readonly userId: string;
+  readonly username: string | null;
+  readonly name: string;
+  readonly scope: DeployKeyScope;
+  readonly createdAt: number;
+}
+
 /** `useDeployKey`: whose key signed a request, or why it may not. */
 export type DeployKeyRefusal = "unknown_key" | "key_revoked" | "key_expired" | "key_not_allowed";
-export type DeployKeyUse =
-  | { readonly userId: string; readonly username: string | null; readonly pluginId: string }
-  | { readonly error: DeployKeyRefusal | "replayed_request" };
+export type DeployKeyUse = DeployKeyHolder | { readonly error: DeployKeyRefusal | "replayed_request" };
+
+/** `signingKeyLive`: a live key of the account's that may sign this
+ * plugin's package (the store applies an `all` scope's rule). */
+export type SigningKey = { readonly kind: "device" } | { readonly kind: "deploy"; readonly scope: DeployKeyScope; readonly createdAt: number };
 
 /** A live web session, as `webSession` reads it. */
 export interface WebSessionRead {
@@ -519,6 +562,14 @@ export class UserDirectory extends DurableObject<Env> {
     if (!keyColumns.includes("last_used_at")) this.ctx.storage.sql.exec("ALTER TABLE plugin_keys ADD COLUMN last_used_at INTEGER");
     if (!keyColumns.includes("expires_at")) this.ctx.storage.sql.exec("ALTER TABLE plugin_keys ADD COLUMN expires_at INTEGER");
     this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS plugin_keys_plugin ON plugin_keys(plugin_id) WHERE plugin_id IS NOT NULL");
+    // Account deploy keys (amendment 44): `scope_all` 1 for every plugin of
+    // the account; otherwise `deploy_key_plugins` lists them. A plugin that
+    // leaves the account leaves every list for good.
+    if (!keyColumns.includes("scope_all")) this.ctx.storage.sql.exec("ALTER TABLE plugin_keys ADD COLUMN scope_all INTEGER");
+    if (!keyColumns.includes("last_used_plugin")) this.ctx.storage.sql.exec("ALTER TABLE plugin_keys ADD COLUMN last_used_plugin TEXT");
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS deploy_key_plugins (
+      key TEXT NOT NULL, plugin_id TEXT NOT NULL, PRIMARY KEY (key, plugin_id))`);
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS deploy_key_plugins_plugin ON deploy_key_plugins(plugin_id)");
     // Each signed request a deploy key made, by the hash of what it signed.
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS deploy_key_uses (
       request_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)`);
@@ -1250,15 +1301,15 @@ export class UserDirectory extends DurableObject<Env> {
    * it, so it reads as unknown to every engine, old ones included. Read
    * straight from storage on every call, so a revocation shows at once.
    *
-   * A deploy key also answers its kind, plugin and expiry, and reads as
-   * verified only when the lookup names its plugin (`forPlugin`), it hasn't
-   * expired, and whoever made it still owns that plugin (`pluginOwner`, the
-   * store's answer; a key outlives no transfer): it vouches for that one
-   * plugin, never for its owner's others. Engines that don't name a plugin
-   * see it unverified. */
-  async pluginKey(key: string, viewerId: string, forPlugin?: string, pluginOwner?: string | null): Promise<PluginKeyLookup | undefined> {
+   * A deploy key also answers its kind, scope and expiry, and reads as
+   * verified only when the lookup names a plugin (`forPlugin`) its scope
+   * holds, it hasn't expired, and its account owns that plugin now
+   * (`plugin`, the store's answer): it vouches for that plugin, never for
+   * the account's others. Engines that don't name a plugin see it
+   * unverified. */
+  async pluginKey(key: string, viewerId: string, forPlugin?: string, plugin?: PluginOwnership | null): Promise<PluginKeyLookup | undefined> {
     const [row] = this.ctx.storage.sql
-      .exec("SELECT user_id, kind, plugin_id, created_at, revoked_at, expires_at FROM plugin_keys WHERE key = ?", key)
+      .exec("SELECT user_id, kind, scope_all, created_at, revoked_at, expires_at FROM plugin_keys WHERE key = ?", key)
       .toArray();
     if (!row) return undefined;
     const username = this.username(row.user_id as string);
@@ -1278,11 +1329,13 @@ export class UserDirectory extends DurableObject<Env> {
     if (row.kind !== "deploy") return base;
     const expiresAt = row.expires_at as number | null;
     const expired = expiresAt !== null && expiresAt <= Date.now();
+    const scope = this.deployScope(key, row.scope_all);
     return {
       ...base,
-      verified: base.verified && !expired && forPlugin === row.plugin_id && pluginOwner === row.user_id,
+      verified:
+        base.verified && !expired && forPlugin !== undefined && scopeHoldsPlugin(row.user_id as string, scope, row.created_at as number, forPlugin, plugin),
       kind: "deploy",
-      plugin: row.plugin_id as string,
+      scope,
       expiresAt,
       expired
     };
@@ -1373,55 +1426,72 @@ export class UserDirectory extends DurableObject<Env> {
 
   // ── deploy keys (store/identity/deploy-keys.ts) ──────────────────────────
 
-  /** Bind a deploy key (proof already checked) to `userId`, scoped to
-   * `pluginId`, which the caller has checked they own. A new key uses up a
-   * step-up ticket. The same live key again for the same user and plugin is
-   * a no-op that succeeds without one (a retry whose answer was lost). */
+  /** Deploy key `key`'s scope (it must be one). */
+  private deployScope(key: string, scopeAll: unknown): DeployKeyScope {
+    if (scopeAll === 1) return { all: true };
+    const plugins = this.ctx.storage.sql
+      .exec("SELECT plugin_id FROM deploy_key_plugins WHERE key = ? ORDER BY plugin_id", key)
+      .toArray()
+      .map((r) => r.plugin_id as string);
+    return { plugins };
+  }
+
+  /** Whether `scope` may hold plugin `pluginId` as far as the directory
+   * knows: a listed one, or anything for `all` (the store then applies the
+   * rule for `all`: owned when the key was made, or first published since). */
+  private static scopeHolds(scope: DeployKeyScope, pluginId: string): boolean {
+    return "all" in scope || scope.plugins.includes(pluginId);
+  }
+
+  /** Bind a deploy key (proof already checked) to `userId`'s account, with
+   * `scope` (each listed plugin checked by the caller as theirs now). A new
+   * key uses up a step-up ticket. The same live key again for the same
+   * account and scope is a no-op that succeeds without one (a retry whose
+   * answer was lost). */
   registerDeployKey(
     userId: string,
-    pluginId: string,
     key: string,
     name: string,
     expiresAt: number | null,
+    scope: DeployKeyScope,
     stepUpHash: string | undefined
   ): DeployKeyRegistration {
     return this.ctx.storage.transactionSync((): DeployKeyRegistration => {
-      const [row] = this.ctx.storage.sql.exec("SELECT user_id, kind, plugin_id, revoked_at FROM plugin_keys WHERE key = ?", key).toArray();
+      const [row] = this.ctx.storage.sql.exec("SELECT user_id, kind, scope_all, revoked_at FROM plugin_keys WHERE key = ?", key).toArray();
       if (row) {
-        if (row.user_id !== userId || row.kind !== "deploy" || row.plugin_id !== pluginId) return "key_taken";
+        if (row.user_id !== userId || row.kind !== "deploy" || JSON.stringify(this.deployScope(key, row.scope_all)) !== JSON.stringify(scope)) return "key_taken";
         return row.revoked_at === null ? "registered" : "key_revoked";
       }
       if (this.userRefusal(userId) === "deleted_user") return "deleted_user";
       const now = Date.now();
       const count = (where: string, ...args: unknown[]) =>
-        this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM plugin_keys WHERE kind = 'deploy' AND ${where}`, ...args).one().n as number;
-      if (count("user_id = ? AND created_at > ?", userId, now - 86_400_000) >= DEPLOY_KEYS_PER_USER_PER_DAY) return "rate_limited";
-      if (count("plugin_id = ? AND created_at > ?", pluginId, now - 86_400_000) >= DEPLOY_KEYS_PER_PLUGIN_PER_DAY) return "rate_limited";
-      const live = count("plugin_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", pluginId, now);
-      if (live >= MAX_LIVE_DEPLOY_KEYS_PER_PLUGIN) return "too_many_keys";
+        this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM plugin_keys WHERE kind = 'deploy' AND user_id = ? AND ${where}`, userId, ...args).one().n as number;
+      if (count("created_at > ?", now - 86_400_000) >= DEPLOY_KEYS_PER_DAY) return "rate_limited";
+      if (count("revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", now) >= MAX_LIVE_DEPLOY_KEYS) return "too_many_keys";
       if (!this.useStepUp(userId, stepUpHash)) return "step_up_required";
       this.ctx.storage.sql.exec(
-        "INSERT INTO plugin_keys (key, user_id, device_id, created_at, kind, plugin_id, name, expires_at) VALUES (?, ?, NULL, ?, 'deploy', ?, ?, ?)",
+        "INSERT INTO plugin_keys (key, user_id, device_id, created_at, kind, plugin_id, name, expires_at, scope_all) VALUES (?, ?, NULL, ?, 'deploy', NULL, ?, ?, ?)",
         key,
         userId,
         now,
-        pluginId,
         name,
-        expiresAt
+        expiresAt,
+        "all" in scope ? 1 : 0
       );
+      if (!("all" in scope)) {
+        for (const pluginId of scope.plugins) this.ctx.storage.sql.exec("INSERT INTO deploy_key_plugins (key, plugin_id) VALUES (?, ?)", key, pluginId);
+      }
       return "registered";
     });
   }
 
-  /** Every deploy key of `pluginId`, whoever made it (a former owner's
-   * too, for its owner now to see and revoke), oldest first, revoked and
-   * expired ones included. The caller checks who owns the plugin. */
-  async deployKeys(pluginId: string): Promise<DeployKeyRow[]> {
+  /** `userId`'s deploy keys, oldest first, revoked and expired ones included. */
+  async deployKeys(userId: string): Promise<DeployKeyRow[]> {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT key, name, created_at, last_used_at, expires_at, revoked_at FROM plugin_keys
-         WHERE kind = 'deploy' AND plugin_id = ? ORDER BY created_at, key`,
-        pluginId
+        `SELECT key, name, scope_all, created_at, last_used_at, last_used_plugin, expires_at, revoked_at FROM plugin_keys
+         WHERE kind = 'deploy' AND user_id = ? ORDER BY created_at, key`,
+        userId
       )
       .toArray();
     return Promise.all(
@@ -1429,38 +1499,54 @@ export class UserDirectory extends DurableObject<Env> {
         key: row.key as string,
         fingerprint: await pluginKeyFingerprint(row.key as string),
         name: row.name as string,
+        scope: this.deployScope(row.key as string, row.scope_all),
         createdAt: row.created_at as number,
         lastUsedAt: row.last_used_at as number | null,
+        lastUsedPlugin: row.last_used_plugin as string | null,
         expiresAt: row.expires_at as number | null,
         revokedAt: row.revoked_at as number | null
       }))
     );
   }
 
-  /** Revoke one of `pluginId`'s deploy keys, whoever made it (the first
-   * revocation's time stays). The caller checks who owns the plugin. False
-   * when there's no such key. */
-  revokeDeployKey(pluginId: string, key: string): boolean {
+  /** Revoke one of `userId`'s deploy keys (the first revocation's time
+   * stays). False when they have no such key. */
+  revokeDeployKey(userId: string, key: string): boolean {
     return (
       this.ctx.storage.sql
         .exec(
           `UPDATE plugin_keys SET revoked_at = COALESCE(revoked_at, ?)
-           WHERE key = ? AND kind = 'deploy' AND plugin_id = ? RETURNING key`,
+           WHERE key = ? AND kind = 'deploy' AND user_id = ? RETURNING key`,
           Date.now(),
           key,
-          pluginId
+          userId
         )
         .toArray().length > 0
     );
   }
 
-  /** Revoke every live deploy key of `pluginId`, whoever registered it (the
-   * plugin changed hands, or was taken down). Answers how many. */
-  revokeDeployKeys(pluginId: string): number {
+  /** Plugin `pluginId` left `userId`'s account (a transfer, a release): it
+   * leaves every one of their keys' lists, for good. Answers how many. */
+  dropFromDeployKeys(userId: string, pluginId: string): number {
     return this.ctx.storage.sql
       .exec(
-        "UPDATE plugin_keys SET revoked_at = ? WHERE kind = 'deploy' AND plugin_id = ? AND revoked_at IS NULL RETURNING key",
+        `DELETE FROM deploy_key_plugins WHERE plugin_id = ?
+           AND key IN (SELECT key FROM plugin_keys WHERE kind = 'deploy' AND user_id = ?) RETURNING key`,
+        pluginId,
+        userId
+      )
+      .toArray().length;
+  }
+
+  /** Revoke every live deploy key of `userId` whose scope may hold
+   * `pluginId` (an operator's, for a leaked key). Answers how many. */
+  revokeDeployKeysFor(userId: string, pluginId: string): number {
+    return this.ctx.storage.sql
+      .exec(
+        `UPDATE plugin_keys SET revoked_at = ? WHERE kind = 'deploy' AND user_id = ? AND revoked_at IS NULL
+           AND (scope_all = 1 OR key IN (SELECT key FROM deploy_key_plugins WHERE plugin_id = ?)) RETURNING key`,
         Date.now(),
+        userId,
         pluginId
       )
       .toArray().length;
@@ -1484,11 +1570,11 @@ export class UserDirectory extends DurableObject<Env> {
       .one().n as number;
   }
 
-  /** A deploy key's signed request (signature already checked) for
-   * `pluginId`, or for its own plugin when that's null: whose it is and for
-   * which plugin, or why it may not. Each request is accepted once:
-   * `requestHash` (what it signed) is remembered for
-   * `DEPLOY_REPLAY_WINDOW_MS`, longer than its timestamp is accepted. */
+  /** A deploy key's signed request (signature already checked), to publish
+   * `pluginId` (null: to read its account's plugins): whose key it is, or why
+   * it may not. Each request is accepted once: `requestHash` (what it
+   * signed) is remembered for `DEPLOY_REPLAY_WINDOW_MS`, longer than its
+   * timestamp is accepted. A publish records the plugin it was for. */
   useDeployKey(key: string, pluginId: string | null, requestHash: string): DeployKeyUse {
     return this.ctx.storage.transactionSync((): DeployKeyUse => {
       const now = Date.now();
@@ -1503,34 +1589,39 @@ export class UserDirectory extends DurableObject<Env> {
         )
         .toArray().length;
       if (!fresh) return { error: "replayed_request" };
-      this.ctx.storage.sql.exec("UPDATE plugin_keys SET last_used_at = ? WHERE key = ?", now, key);
-      return { userId: status.userId, username: this.username(status.userId), pluginId: status.pluginId };
+      this.ctx.storage.sql.exec("UPDATE plugin_keys SET last_used_at = ?, last_used_plugin = COALESCE(?, last_used_plugin) WHERE key = ?", now, pluginId, key);
+      return status;
     });
   }
 
-  /** Whether a deploy key may act on `pluginId` (null: on its own plugin)
-   * now, and whose it is. Nothing recorded. */
-  deployKeyStatus(key: string, pluginId: string | null): { readonly userId: string; readonly pluginId: string } | { readonly error: DeployKeyRefusal } {
+  /** Whether a deploy key may act now, on `pluginId` when it names one, and
+   * whose it is. Nothing recorded. */
+  deployKeyStatus(key: string, pluginId: string | null): DeployKeyHolder | { readonly error: DeployKeyRefusal } {
     const [row] = this.ctx.storage.sql
-      .exec("SELECT user_id, plugin_id, revoked_at, expires_at FROM plugin_keys WHERE key = ? AND kind = 'deploy'", key)
+      .exec("SELECT user_id, name, scope_all, created_at, revoked_at, expires_at FROM plugin_keys WHERE key = ? AND kind = 'deploy'", key)
       .toArray();
     if (!row || this.userRefusal(row.user_id as string) === "deleted_user") return { error: "unknown_key" };
     if (row.revoked_at !== null) return { error: "key_revoked" };
     if (row.expires_at !== null && (row.expires_at as number) <= Date.now()) return { error: "key_expired" };
-    if (pluginId !== null && row.plugin_id !== pluginId) return { error: "key_not_allowed" };
-    return { userId: row.user_id as string, pluginId: row.plugin_id as string };
+    const scope = this.deployScope(key, row.scope_all);
+    if (pluginId !== null && !UserDirectory.scopeHolds(scope, pluginId)) return { error: "key_not_allowed" };
+    const userId = row.user_id as string;
+    return { userId, username: this.username(userId), name: row.name as string, scope, createdAt: row.created_at as number };
   }
 
-  /** Whether `key` may sign a package of `pluginId` that `userId` submits
+  /** Whether `key` may sign a package of `pluginId` that `userId` publishes
    * (`signingKeyAllowed`, principal.ts): a live key of theirs, either a
-   * device's or a deploy key for that plugin. */
-  signingKeyLive(userId: string, key: string, pluginId: string): boolean {
+   * device's, or a deploy key whose scope may hold that plugin (the store
+   * applies an `all` scope's rule with what it knows of the plugin). */
+  signingKeyLive(userId: string, key: string, pluginId: string): SigningKey | undefined {
     const [row] = this.ctx.storage.sql
-      .exec("SELECT kind, plugin_id, expires_at FROM plugin_keys WHERE key = ? AND user_id = ? AND revoked_at IS NULL", key, userId)
+      .exec("SELECT kind, scope_all, created_at, expires_at FROM plugin_keys WHERE key = ? AND user_id = ? AND revoked_at IS NULL", key, userId)
       .toArray();
-    if (!row || this.userRefusal(userId) === "deleted_user") return false;
-    if (row.kind === "device") return true;
-    return row.kind === "deploy" && row.plugin_id === pluginId && (row.expires_at === null || (row.expires_at as number) > Date.now());
+    if (!row || this.userRefusal(userId) === "deleted_user") return undefined;
+    if (row.kind === "device") return { kind: "device" };
+    if (row.kind !== "deploy" || (row.expires_at !== null && (row.expires_at as number) <= Date.now())) return undefined;
+    const scope = this.deployScope(key, row.scope_all);
+    return UserDirectory.scopeHolds(scope, pluginId) ? { kind: "deploy", scope, createdAt: row.created_at as number } : undefined;
   }
 
   // ── roles (roles.ts) ─────────────────────────────────────────────────────

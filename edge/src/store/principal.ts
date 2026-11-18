@@ -5,9 +5,9 @@
  * route accepts is here.
  *
  * - Publisher routes: a session bearer, a web session's cookie, or a deploy
- *   key's signed request (only to publish its plugin's versions and read its
- *   plugin's state: identity/signing.ts `deployKeyRoute`; the store answers
- *   `GET /store/v1/me/plugins` for `pluginScope` alone).
+ *   key's signed request (only to publish versions of plugins in its scope
+ *   and read its account's plugins in its scope: identity/signing.ts
+ *   `deployKeyRoute`, `keyInScope` below).
  * - Admin routes: a web session's cookie only (contract amendment 27), of an
  *   account holding the edge's `admin` role (roles.ts); never a bearer or a
  *   deploy key.
@@ -21,12 +21,12 @@
  */
 import type { Env } from "../env";
 import { SESSION_COOKIE, sendsCookie } from "../web-cookies";
-import { userDirectoryStub } from "../user-directory";
+import { type DeployKeyScope, scopeHoldsPlugin, userDirectoryStub } from "../user-directory";
 import { bearerUser, cookieSession, forbidden, headerBearer, unauthenticated } from "./identity/callers";
 import { verifySignedRequest } from "./identity/signed-request";
 
 export { BodyRefused, MAX_PUBLISH_BODY_BYTES, bodyStream, readBody } from "./identity/body";
-export { revokeDeployKeys } from "./identity/deploy-keys";
+export { dropFromDeployKeys } from "./identity/deploy-keys";
 export { withSessionCookie } from "../web-session";
 
 /**
@@ -44,9 +44,36 @@ export type Publisher = {
   userId: string;
   username: string | null;
   via: "session" | "deploy_key";
+  /** A deploy key's: the key, its name, its scope and when it was made. */
   key?: string;
-  pluginScope?: string;
+  keyName?: string;
+  scope?: DeployKeyScope;
+  keyCreatedAt?: number;
 };
+
+/** A plugin as a scope is judged against it (the store's row). */
+export interface ScopedPlugin {
+  readonly id: string;
+  readonly owner_id: string;
+  readonly owner_since: number;
+  readonly created_at: number;
+}
+
+/**
+ * Whether `publisher` may act on `plugin` (amendment 44): a signed-in
+ * person, on any plugin (ownership is the route's check); a deploy key, only
+ * on a plugin its account owns now that its scope holds (`all`: owned when
+ * the key was made, or claimed by the account and never moved).
+ */
+export const keyInScope = (publisher: Publisher, plugin: ScopedPlugin): boolean =>
+  publisher.via === "session" ||
+  (publisher.scope !== undefined &&
+    publisher.keyCreatedAt !== undefined &&
+    scopeHoldsPlugin(publisher.userId, publisher.scope, publisher.keyCreatedAt, plugin.id, {
+      owner: plugin.owner_id,
+      ownerSince: plugin.owner_since,
+      createdAt: plugin.created_at
+    }));
 
 const usernameOf = async (env: Env, userId: string): Promise<string | null> =>
   (await userDirectoryStub(env)?.username(userId)) ?? null;
@@ -57,7 +84,15 @@ export const authenticatePublisher = async (req: Request, env: Env): Promise<Pub
     if (/^ZeronKey\s/i.test(header)) {
       const caller = await verifySignedRequest(req, env, new URL(req.url));
       if (caller instanceof Response) return caller;
-      return { userId: caller.userId, username: caller.username, via: "deploy_key", key: caller.key, pluginScope: caller.pluginId };
+      return {
+        userId: caller.userId,
+        username: caller.username,
+        via: "deploy_key",
+        key: caller.key,
+        keyName: caller.name,
+        scope: caller.scope,
+        keyCreatedAt: caller.createdAt
+      };
     }
     const token = headerBearer(req);
     if (!token) return unauthenticated();
@@ -95,16 +130,18 @@ export const optionalUser = async (req: Request, env: Env): Promise<{ userId: st
 };
 
 /**
- * Whether `publisher` may submit a package of plugin `id` signed by `key`
- * (contract amendment 24). With a session: `key` is one of the caller's live
- * device keys, or the caller's live deploy key for `id`. With a deploy key:
- * `key` is that very key, and `id` its plugin. Revoked and expired keys sign
- * nothing; a deleted account's keys are all revoked.
+ * Whether `publisher` may publish a package of plugin `id` (the store's row,
+ * null for a new id) signed by `key` (amendments 24 and 44). With a
+ * session: `key` is one of the caller's live device keys, or one of their
+ * live deploy keys whose scope holds `id`. With a deploy key: `key` is that
+ * very key. A deploy key never signs a new id. Revoked and expired keys
+ * sign nothing; a deleted account's keys are all revoked.
  */
-export const signingKeyAllowed = async (env: Env, publisher: Publisher, id: string, key: string): Promise<boolean> => {
-  if (publisher.via === "deploy_key") {
-    if (publisher.key !== key || publisher.pluginScope !== id) return false;
-  }
+export const signingKeyAllowed = async (env: Env, publisher: Publisher, id: string, key: string, plugin: ScopedPlugin | null): Promise<boolean> => {
+  if (publisher.via === "deploy_key" && publisher.key !== key) return false;
   const directory = userDirectoryStub(env);
-  return directory ? directory.signingKeyLive(publisher.userId, key, id) : false;
+  const signing = directory ? await directory.signingKeyLive(publisher.userId, key, id) : undefined;
+  if (!signing) return false;
+  if (signing.kind === "device") return true;
+  return plugin !== null && scopeHoldsPlugin(publisher.userId, signing.scope, signing.createdAt, id, { owner: plugin.owner_id, ownerSince: plugin.owner_since, createdAt: plugin.created_at });
 };

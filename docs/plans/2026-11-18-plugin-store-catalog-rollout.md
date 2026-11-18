@@ -67,6 +67,13 @@ applying a migration first is always safe.
 Migrations are additive, never edited once applied. A new schema change is
 a new numbered file in `edge/migrations/store/`.
 
+Until the first deploy applies them, nothing has, so the schema is one
+file, `0001_store.sql` (amendments 44 and 45 folded into it; it replaced
+`0001_init.sql` and `0002_audit_plugin.sql`). A database that had those
+two applied by hand (a local `.wrangler/state`, or a staging trial) is
+recreated, not migrated: delete it and apply again. From the first deploy
+on, the rule above holds.
+
 ## 3. Check after the deploy
 
 Run each check on staging before production. Mind `STORE_WRITES`: 30
@@ -90,14 +97,16 @@ binding is missing from that environment.
 
 1. Make a test plugin from the app (or `zeron plugin new`) under an
    account with a username. Publish it (`zeron plugin publish`, or the
-   app's Publish…). It answers `pending`, with the checks.
-2. The owner's `GET EDGE/store/v1/me/plugins` (app bearer) lists it as
-   `unlisted`, with the version `pending`.
-3. An admin, signed in on the web, sees it in the site's review queue with
-   `checks` counts and `new_asks`. They open it, read the files and
-   approve it.
-4. Within 60 s it lists: `GET EDGE/store/v1/plugins/<id>` gives the card
-   and the detail. `icon` and `screenshots` are package paths, fetched as
+   app's Publish…). It answers `listed`, `verified: false`, with the
+   checks: publishing is immediate (amendment 45).
+2. At once, `GET EDGE/store/v1/plugins/<id>` gives the card and the
+   detail, `verified: false`. The owner's `GET EDGE/store/v1/me/plugins`
+   (app bearer) lists the version.
+3. An admin, signed in on the web, sees it in the site's review queue
+   (`state=undecided`) with `checks` counts and `new_asks`. They open it
+   (`/admin/versions/<id>/<version>`), read the files and verify it.
+4. Within 60 s the card says `verified: true` and `verified_version`, and
+   `?verified=1` lists it. `icon` and `screenshots` are package paths, fetched as
    `GET EDGE/store/v1/plugins/<id>/files/<version>/<path>`. The icon is
    served as `image/svg+xml` with `Content-Security-Policy: sandbox;
    default-src 'none'`.
@@ -107,14 +116,20 @@ binding is missing from that environment.
 
 ### c. Updates, a yank, a takedown
 
-1. Publish 1.0.1 and approve it. The first device's update check offers it,
-   with its notes and any permission it adds.
-2. The owner yanks 1.0.1. It isn't offered to new installs, and a device
+1. Publish 1.0.1. The first device's update check offers it at once,
+   `verified: false`, with its notes and any permission it adds, and
+   `verified_update` naming 1.0.0 if that one was verified.
+2. Publish 1.0.2 without verifying 1.0.1: 1.0.1 becomes `yanked`,
+   `yanked_by: "superseded"` (unless verified), and the queue shows 1.0.2
+   alone, with `earlier_undecided`.
+3. The owner yanks 1.0.2. It isn't offered to new installs, and a device
    that has it keeps it. Then unyank it.
-3. An admin removes 1.0.1 with a block and a reason. Within 60 s, a
-   device's update check lists it under `blocked` with the reason, and the
-   device turns it off. Lists and details can be up to 60 s stale; the
-   package and files routes check the state on every request.
+4. An admin takes 1.0.2 down with a reason. Within 60 s, a device's update
+   check lists it under `blocked` with the reason, and the device turns it
+   off; `GET EDGE/store/v1/takedowns?after=0` has the event, with its
+   `seq`. Restore it: a `restore` event follows, and the version comes back
+   unverified. Lists and details can be up to 60 s stale; the package and
+   files routes check the state on every request.
 
 ### d. A report
 
@@ -124,13 +139,14 @@ The audit log has `report.dismissed` or `report.actioned`.
 
 ### e. The hourly sweep
 
-The cron at `:17` runs one sweep, in three parts:
-- it finishes what earlier releases still owe (R2 deletes, key
-  revocations);
+The cron at `:17` runs one sweep, in four parts:
+- it finishes what earlier releases still owe (R2 deletes);
 - it deletes R2 objects that publishes recorded but that no version names,
   an hour after they were recorded;
-- it releases ids that were claimed and never used for 90 days. An id
-  reserved for an account is never released.
+- it drops take-down feed events older than 30 days, always keeping the
+  newest (a device behind that gets `reset: true`);
+- it releases ids that were claimed and never published to for 90 days.
+  An id reserved for an account is never released.
 
 To see it ran, watch `npx wrangler tail [--env staging]` across a `:17`.
 Each run logs one line:
@@ -145,7 +161,7 @@ because all of its work is recorded in D1 first. Afterwards:
 ```sh
 npx wrangler d1 execute STORE_DB --remote --command \
   "SELECT (SELECT COUNT(*) FROM object_orphans WHERE at < (unixepoch() - 7200) * 1000) AS stale_orphans,
-          (SELECT COUNT(*) FROM object_purges) + (SELECT COUNT(*) FROM key_revocations) AS owed"
+          (SELECT COUNT(*) FROM object_purges) AS owed"
 #   both 0 once a sweep has run (or close to it, while one is still catching up)
 ```
 
@@ -202,8 +218,8 @@ suspended, or its versions removed. On staging, leave it.
   - `store: couldn't record possibly orphaned objects` (only garbage left in
     R2; the sweep can't see it).
 - D1: `npx wrangler d1 execute STORE_DB --remote --command "SELECT status,
-  COUNT(*) FROM versions GROUP BY status"` gives the queue's size at a
-  glance.
+  verification, COUNT(*) FROM versions GROUP BY 1, 2"` gives the queue's
+  size at a glance (`listed`/`yanked` and `unverified`).
 - R2: objects are content-addressed (`pkg/<id>/<version>/<sha256>…`,
   `files/…`) and never overwritten. A version's objects stay while any row
   names them.
@@ -211,8 +227,8 @@ suspended, or its versions removed. On staging, leave it.
 ## 5. Incidents
 
 - **A harmful plugin**:
-  - remove the version with `block: true` and a reason (devices turn it
-    off at their next update check);
+  - take the version down with a reason (devices turn it off at their
+    next update check, and the take-down feed has it at once);
   - suspend the plugin, which takes it out of every list;
   - then revoke its deploy keys (identity notes, step 5).
 - **A leaked account**: suspend its plugins; the identity notes cover its

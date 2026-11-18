@@ -89,23 +89,27 @@ describe("store answers", () => {
       answers.push([what, r]);
     };
 
-    // Owner: a publish, the owner's list, an author action.
+    // Owner: a publish, one that supersedes it, the owner's list, the keys.
     await take("publish", publish(a.userId, id, await makePackage({ id, version: "1.1.0", signer: a.signer, manifest: { permissions: ["ui.add", "links.open"] } })));
     await take("publish again", publish(a.userId, id, await makePackage({ id, version: "1.2.0", signer: a.signer })));
-    await take("withdraw", call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.2.0/withdraw`));
     await take("me/plugins", call(a.userId, "GET", "/store/v1/me/plugins"));
-    // Admin.
-    await take("queue", adminCall("GET", "/store/v1/admin/queue?status=all"));
-    await take("submission", adminCall("GET", `/store/v1/admin/submissions/${id}/1.1.0`));
-    await take("approve", adminCall("POST", `/store/v1/admin/submissions/${id}/1.1.0/approve`));
-    await take("yank", call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.1.0/yank`));
-    await take("unyank", call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.1.0/unyank`));
+    await take("me/keys", call(a.userId, "GET", "/store/v1/me/keys"));
+    // Admin: the queue, a version, the marks.
+    await take("queue", adminCall("GET", "/store/v1/admin/queue"));
+    await take("queue, all", adminCall("GET", "/store/v1/admin/queue?state=all"));
+    await take("version view", adminCall("GET", `/store/v1/admin/versions/${id}/1.1.0`));
+    await take("decline", adminCall("POST", `/store/v1/admin/versions/${id}/1.1.0/decline`, { reason: "broken", message: "It crashes on start." }));
+    await take("verify", adminCall("POST", `/store/v1/admin/versions/${id}/1.2.0/verify`));
+    await take("yank", call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.2.0/yank`));
+    await take("unyank", call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.2.0/unyank`));
     // Public.
     await take("list", call(undefined, "GET", "/store/v1/plugins?sort=new"));
     await take("search", call(undefined, "GET", `/store/v1/plugins?q=${encodeURIComponent(id)}`));
     await take("detail", call(undefined, "GET", `/store/v1/plugins/${id}`));
     await take("versions", call(undefined, "GET", `/store/v1/plugins/${id}/versions`));
+    await take("one version", call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.2.0`));
     await take("categories", call(undefined, "GET", "/store/v1/categories"));
+    await take("stats", call(undefined, "GET", "/store/v1/stats"));
     const hash = (await env.STORE_DB.prepare("SELECT content_hash FROM versions WHERE plugin_id = ? AND version = '1.0.0'").bind(id).first<string>("content_hash"))!;
     await take("updates", call(reader.userId, "POST", "/store/v1/updates", { zeron: "0.4.0", plugins: [{ id, version: "1.0.0", hash }] }));
     // A signed-in person.
@@ -120,7 +124,10 @@ describe("store answers", () => {
     await take("feature", adminCall("POST", `/store/v1/admin/plugins/${id}/feature`, { featured: true }));
     await take("suspend", adminCall("POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "Looking." }));
     await take("restore", adminCall("POST", `/store/v1/admin/plugins/${id}/restore`));
-    await take("remove", adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/remove`, { block: true, reason: "It sends your files away." }));
+    await take("take-down", adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/take-down`, { reason: "It sends your files away." }));
+    await take("takedowns", call(undefined, "GET", "/store/v1/takedowns?after=0"));
+    await take("restore a version", adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/restore`, { reason: "It was a mistake." }));
+    await take("remove", adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/remove`, { reason: "A copyright claim." }));
     await take("transfer", adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: newOwner.username }));
     await take("audit", adminCall("GET", `/store/v1/admin/audit?plugin=${id}`));
     const reserved = uniqueId();

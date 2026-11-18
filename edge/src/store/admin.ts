@@ -1,38 +1,44 @@
 /**
- * Review and moderation (contract "Admin", amendment 12). Every route needs
- * a signed-in caller holding `admin` (principal.ts `requireAdmin`).
+ * Review and moderation (amendments 12 and 45; contract
+ * 2026-11-19-store-shapes-44-45). Every route needs a staff web session
+ * (principal.ts `requireAdmin`).
  *
- *   GET  /store/v1/admin/queue?status&cursor
- *   GET  /store/v1/admin/submissions/:id/:version        (with its diff base)
- *   POST /store/v1/admin/submissions/:id/:version/approve
- *   POST /store/v1/admin/submissions/:id/:version/reject { reason, message }
+ *   GET  /store/v1/admin/queue?state=undecided|verified|declined|all&cursor&limit
+ *   GET  /store/v1/admin/versions/:id/:version                (with its review base)
+ *   POST /store/v1/admin/versions/:id/:version/verify
+ *   POST /store/v1/admin/versions/:id/:version/decline { reason, message }
  *   GET  /store/v1/admin/plugins/:id
  *   POST /store/v1/admin/plugins/:id/suspend { reason } | restore | feature { featured } | transfer { to_username }
- *   POST /store/v1/admin/plugins/:id/versions/:version/remove { block, reason }
+ *   POST /store/v1/admin/plugins/:id/versions/:version/take-down { reason }
+ *   POST /store/v1/admin/plugins/:id/versions/:version/remove { reason }
+ *   POST /store/v1/admin/plugins/:id/versions/:version/restore { reason }
  *   GET  /store/v1/admin/reports?status&cursor   POST /store/v1/admin/reports/:id/resolve { resolution, note? }
  *   GET  /store/v1/admin/audit?cursor
  *   GET  /store/v1/admin/reservations   POST /store/v1/admin/reservations { id, to_username?, note? }
  *   DELETE /store/v1/admin/reservations/:id
  *
- * The state machine. A version: pending → approved | rejected (admin) |
- * withdrawn (author); approved → yanked (author) | removed (admin);
- * yanked → approved (author) | removed (admin). Nothing leaves rejected,
- * withdrawn or removed. A plugin: active ↔ suspended. Anything else is 409
- * `invalid_state`.
+ * A version is listed when it is published; review only marks it. The
+ * mark: undecided → verified | declined (still unverified, listed);
+ * declined → verified. A verified version stays verified until a take-down.
+ * Its state: listed ↔ yanked (its author; or yanked for good by a newer
+ * version superseding it unverified, which verifying it undoes);
+ * listed | yanked → taken_down (blocked) | removed (staff); taken_down →
+ * listed | yanked (restored, unverified). A plugin: active ↔ suspended.
+ * Anything else is 409 `invalid_state`.
  *
  * Every change is one D1 batch: the UPDATE guarded by the state it leaves,
- * then the audit row (written only if the UPDATE changed a row), then the
- * listing's statements. Then this data center's cache is purged.
+ * then the audit row (written only if the UPDATE changed a row), then a
+ * take-down feed event where there is one, then the listing's statements.
+ * Then this data center's cache is purged (purge.ts).
  */
 import type { Env } from "../env";
 import { userDirectoryStub } from "../user-directory";
-import { pluginCacheKeys } from "./author";
-import { purge } from "./cache";
-import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, versionInfo } from "./cards";
+import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, reviewOf, versionInfo } from "./cards";
 import { ASK_PATHS, type ConsentItem, askParts, askPartsOf, asksChanged, consentDiff } from "./consent";
 import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
-import { readBody, requireAdmin, revokeDeployKeys } from "./principal";
+import { dropFromDeployKeys, readBody, requireAdmin } from "./principal";
+import { purgeCatalog, purgeTakedowns } from "./purge";
 import { isUnused, releaseId } from "./release";
 import { SITE_IDS } from "./listing";
 import { decodeSegment } from "./serve";
@@ -43,7 +49,6 @@ const PAGE = 50;
 const REASON_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const MAX_MESSAGE = 2000;
 const ID_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
-const VERSION_STATUSES = ["pending", "approved", "rejected", "withdrawn", "yanked", "removed"] as const;
 
 const b64 = (value: unknown): string => btoa(JSON.stringify(value)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 const unb64 = (text: string | null): unknown => {
@@ -127,38 +132,68 @@ const people = async (env: Env, ids: readonly string[]): Promise<Record<string, 
 
 // ── the queue and a submission ───────────────────────────────────────────────
 
+/** The queue's states (amendment 45): `undecided` (no reviewer decided it
+ * yet, nor did a newer version supersede it), `verified`, `declined`. */
+const QUEUE_STATES = ["undecided", "verified", "declined", "all"] as const;
+type QueueState = (typeof QUEUE_STATES)[number];
+
+const QUEUE_WHERE: Record<QueueState, string> = {
+  undecided: `v.verification = 'unverified' AND v.declined_at IS NULL AND v.superseded_at IS NULL AND v.status IN ('listed', 'yanked')`,
+  verified: "v.verification = 'verified'",
+  declined: "v.verification = 'unverified' AND v.declined_at IS NOT NULL",
+  all: "1 = 1"
+};
+
+/** Open reports on version `alias` (naming it, or no version). */
+const reportsSql = (alias: string): string =>
+  `(SELECT COUNT(*) FROM reports r WHERE r.plugin_id = ${alias}.plugin_id AND r.status = 'open' AND (r.version IS NULL OR r.version = ${alias}.version))`;
+
+/** Earlier undecided versions of `alias`'s plugin that it, or one before
+ * it, superseded: on its line (a release's, any; a pre-release's, older
+ * pre-releases). */
+const earlierSql = (alias: string): string =>
+  `(SELECT COUNT(*) FROM versions e WHERE e.plugin_id = ${alias}.plugin_id AND e.verification = 'unverified' AND e.declined_at IS NULL
+      AND e.superseded_at IS NOT NULL AND e.published_at < ${alias}.published_at AND (${alias}.is_release = 1 OR e.is_release = 0))`;
+
 const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
-  const status = url.searchParams.get("status") ?? "pending";
-  if (status !== "all" && !(VERSION_STATUSES as readonly string[]).includes(status)) return fail(400, "bad_request", "status is a version state or all.");
+  const state = (url.searchParams.get("state") ?? "undecided") as QueueState;
+  if (!QUEUE_STATES.includes(state)) return fail(400, "bad_request", "state is undecided, verified, declined or all.");
   const after = keyset(url.searchParams.get("cursor"));
   if (after === null) return fail(400, "bad_cursor", "That cursor isn't from this list.");
   const limit = limitOf(url);
   if (limit === null) return fail(400, "bad_request", `limit is 1 to ${PAGE}.`);
-  // The queue reads oldest first; any other state, newest first. Each item
-  // with what a reviewer triages by (amendment 35): the version it would
-  // replace, what it newly asks for since, and its checks by level.
-  const ks = keysetSql("v.submitted_at", "v.rowid", status === "pending", after);
-  const all = status === "all";
+  // The undecided read oldest first, versions with open reports before the
+  // rest (their key is the publish time, or that plus 10^14 when nothing is
+  // reported); every other state, newest first. The undecided hold at most
+  // two rows a plugin: its newest undecided release, and its newest
+  // undecided pre-release when that is newer (the superseding rule yanked
+  // the rest, which a reviewer can still open from the plugin's page).
+  const undecided = state === "undecided";
+  const sortKey = undecided ? `(CASE WHEN ${reportsSql("v")} > 0 THEN 0 ELSE 100000000000000 END + v.published_at)` : "v.published_at";
+  const ks = keysetSql("sort_key", "rid", undecided, after);
   const { rows, total } = await withTotal<{
-    rid: number; plugin_id: string; version: string; status: string; submitted_at: number; publisher_id: string; checks: string; permissions: string;
-    name: string; icon: string | null; is_release: number; parts: string | null;
+    rid: number; sort_key: number; plugin_id: string; version: string; status: string; published_at: number; publisher_id: string; checks: string;
+    permissions: string; name: string; icon: string | null; is_release: number; parts: string | null; reports: number; earlier: number;
+    verification: "unverified" | "verified"; verified_at: number | null; declined_at: number | null; decline_reason: string | null; decline_message: string | null;
     base_version: string | null; base_permissions: string | null; base_parts: string | null;
   }>(
     db,
     db
       .prepare(
-        `SELECT v.rowid AS rid, v.plugin_id, v.version, v.status, v.submitted_at, v.publisher_id, v.checks, v.permissions,
-                v.name, v.icon, v.is_release, ${partsSql("v")} AS parts,
-                b.version AS base_version, b.permissions AS base_permissions, ${partsSql("b")} AS base_parts
-         FROM versions v LEFT JOIN versions b ON b.rowid = (${baseSql("v")})
-         WHERE (? = 'all' OR v.status = ?) ${ks.where}
+        `SELECT * FROM (
+           SELECT v.rowid AS rid, ${sortKey} AS sort_key, v.plugin_id, v.version, v.status, v.published_at, v.publisher_id, v.checks, v.permissions,
+                  v.name, v.icon, v.is_release, ${partsSql("v")} AS parts, ${reportsSql("v")} AS reports, ${earlierSql("v")} AS earlier,
+                  v.verification, v.verified_at, v.declined_at, v.decline_reason, v.decline_message,
+                  b.version AS base_version, b.permissions AS base_permissions, ${partsSql("b")} AS base_parts
+           FROM versions v LEFT JOIN versions b ON b.rowid = (${baseSql("v")})
+           WHERE ${QUEUE_WHERE[state]}
+         ) WHERE 1 = 1 ${ks.where}
          ORDER BY ${ks.order} LIMIT ?`
       )
-      .bind(status, status, ...ks.binds, limit + 1),
-    // (versions_queue serves a state's count.)
-    all ? db.prepare("SELECT COUNT(*) AS n FROM versions") : db.prepare("SELECT COUNT(*) AS n FROM versions WHERE status = ?").bind(status)
+      .bind(...ks.binds, limit + 1),
+    db.prepare(`SELECT COUNT(*) AS n FROM versions v WHERE ${QUEUE_WHERE[state]}`)
   );
-  const { page, links } = pageOf(rows, limit, after, (r) => [r.submitted_at, r.rid]);
+  const { page, links } = pageOf(rows, limit, after, (r) => [r.sort_key, r.rid]);
   const names = await people(env, page.map((r) => r.publisher_id));
   return answer({
     items: page.map((r) => {
@@ -172,18 +207,22 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
         version: r.version,
         status: r.status,
         prerelease: r.is_release === 0,
-        submitted_at: r.submitted_at,
+        submitted_at: r.published_at,
+        published_at: r.published_at,
         publisher: names[r.publisher_id] ?? null,
         // The version's icon, a path in its package (as a card's), fetched
         // through the files route with this version.
         icon: r.icon,
+        // Against the newest version a reviewer verified (none: a first look).
         ...(r.base_version !== null ? { base: r.base_version } : {}),
         new_asks: diff?.added ?? [],
         // Anything else that moved in what it asks, all of it named in the
-        // submission's permissions_diff (amendments 40, 41); false for a
-        // first version.
+        // version's permissions_diff (amendments 40, 41); false for a first look.
         asks_changed: diff !== null && baseAsks !== null && asksChanged(diff),
-        checks: { ok: count("ok"), warn: count("warn"), fail: count("fail") }
+        checks: { ok: count("ok"), warn: count("warn"), fail: count("fail") },
+        review: reviewOf({ verification: r.verification, verified_at: r.verified_at, declined_at: r.declined_at, decline_reason: r.decline_reason, decline_message: r.decline_message } as VersionRow),
+        reports: r.reports,
+        earlier_undecided: r.earlier
       };
     }),
     total,
@@ -195,13 +234,12 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
  * a few paths, extracted in D1. */
 const partsSql = (alias: string): string => `json_extract(${alias}.manifest, ${ASK_PATHS.map((p) => `'${p}'`).join(", ")})`;
 
-/** The rowid of the version a submission of `alias` (a `versions` row in
- * the outer query) is compared with: its plugin's highest approved or
- * yanked version other than itself. */
+/** The rowid of the version `alias` (a `versions` row in the outer query) is
+ * reviewed against: its plugin's newest verified version other than itself. */
 const baseSql = (alias: string): string =>
-  `SELECT rowid FROM versions WHERE plugin_id = ${alias}.plugin_id AND version != ${alias}.version AND status IN ('approved', 'yanked') ORDER BY ${VERSION_ORDER} LIMIT 1`;
+  `SELECT rowid FROM versions WHERE plugin_id = ${alias}.plugin_id AND version != ${alias}.version AND verification = 'verified' ORDER BY ${VERSION_ORDER} LIMIT 1`;
 
-const submission = async (env: Env, db: D1Database, id: string, versionText: string): Promise<Response> => {
+const versionView = async (env: Env, db: D1Database, id: string, versionText: string): Promise<Response> => {
   const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, versionText)]);
   if (!plugin || !v) return notFound();
   const base = await db
@@ -219,15 +257,15 @@ const submission = async (env: Env, db: D1Database, id: string, versionText: str
     base ? files(base) : Promise.resolve([]),
     db
       .prepare(
-        `SELECT SUM(status IN ('approved', 'yanked', 'removed')) AS approved, SUM(status = 'rejected') AS rejected
+        `SELECT SUM(verification = 'verified') AS verified, SUM(verification = 'unverified' AND declined_at IS NOT NULL) AS declined
          FROM versions WHERE publisher_id = ?`
       )
       .bind(v.publisher_id)
-      .first<{ approved: number | null; rejected: number | null }>(),
+      .first<{ verified: number | null; declined: number | null }>(),
     db
-      .prepare("SELECT plugin_id, version, status, submitted_at, reason FROM versions WHERE publisher_id = ? ORDER BY submitted_at DESC LIMIT 10")
+      .prepare("SELECT plugin_id, version, status, verification, published_at FROM versions WHERE publisher_id = ? ORDER BY published_at DESC LIMIT 10")
       .bind(v.publisher_id)
-      .all<{ plugin_id: string; version: string; status: string; submitted_at: number; reason: string | null }>(),
+      .all<{ plugin_id: string; version: string; status: string; verification: string; published_at: number }>(),
     authorsOf(env, [v.publisher_id, plugin.owner_id])
   ]);
   const publisher = authors[v.publisher_id]!;
@@ -235,15 +273,22 @@ const submission = async (env: Env, db: D1Database, id: string, versionText: str
   const permissions = parseStoredJson<ConsentItem | null>(v.permissions, null);
   const basePermissions = base ? parseStoredJson<ConsentItem | null>(base.permissions, null) : null;
   return answer({
-    // (A PluginCard, amendment 35; never listed: this submission's.)
+    // (A PluginCard, amendment 35; nothing listed: this version's.)
     plugin: ownerCard(plugin, v, authorCard(owner)),
-    version: { ...versionInfo(v, true), name: v.name, summary: v.summary, icon: v.icon, readme: v.readme, homepage: v.homepage, repository: v.repository, license: v.license, categories: parseStoredJson(v.categories, []), keywords: parseStoredJson(v.keywords, []), screenshots: parseStoredJson(v.screenshots, []) },
+    version: {
+      ...versionInfo(v, true),
+      yanked_by: v.status === "yanked" ? v.yanked_by : null,
+      superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null,
+      name: v.name, summary: v.summary, icon: v.icon, readme: v.readme, homepage: v.homepage, repository: v.repository, license: v.license,
+      categories: parseStoredJson(v.categories, []), keywords: parseStoredJson(v.keywords, []), screenshots: parseStoredJson(v.screenshots, [])
+    },
+    superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null,
     publisher: {
       id: publisher.id,
       username: publisher.username,
       created_at: publisher.createdAt,
-      decisions: { approved: decisions?.approved ?? 0, rejected: decisions?.rejected ?? 0 },
-      recent: recent.results
+      decisions: { verified: decisions?.verified ?? 0, declined: decisions?.declined ?? 0 },
+      recent: recent.results.map((r) => ({ ...r, verified: r.verification === "verified" }))
     },
     manifest: parseStoredJson(v.manifest, null),
     ...(base ? { base: { version: base.version, manifest: parseStoredJson(base.manifest, null) } } : {}),
@@ -259,83 +304,201 @@ const submission = async (env: Env, db: D1Database, id: string, versionText: str
 
 // ── changes ─────────────────────────────────────────────────────────────────
 
-/** Run a guarded change: its UPDATE, the audit row, the listing; 409 if the
- * UPDATE found nothing in the state it leaves. */
+/** Run a guarded change: its UPDATE, the audit row, anything after it, the
+ * listing; 409 if the UPDATE found nothing in the state it leaves. */
 const change = async (
   db: D1Database,
   update: D1PreparedStatement,
   audit: D1PreparedStatement,
   id: string,
   author: string | null,
-  conflict: string
+  conflict: string,
+  then: readonly D1PreparedStatement[] = []
 ): Promise<Response | undefined> => {
-  const results = await db.batch([update, audit, ...relist(db, id, author)]);
+  const results = await db.batch([update, audit, ...then, ...relist(db, id, author)]);
   return (results[0]?.meta.changes ?? 0) === 0 ? fail(409, "invalid_state", conflict) : undefined;
 };
 
 const ownerUsername = async (env: Env, ownerId: string): Promise<string | null> => (await authorsOf(env, [ownerId]))[ownerId]!.username;
 
-const reviewVersion = async (env: Env, db: D1Database, adminId: string, id: string, versionText: string, action: "approve" | "reject", body: Record<string, unknown> | undefined): Promise<Response> => {
-  const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, versionText)]);
-  if (!plugin || !v) return notFound();
-  let reason: string | null = null;
-  let message: string | null = null;
-  if (action === "reject") {
-    if (typeof body?.reason !== "string" || !REASON_RE.test(body.reason)) return fail(400, "bad_request", "reason is a short word (malware, broken, misleading, …).");
-    if (typeof body.message !== "string" || body.message.trim() === "" || body.message.length > MAX_MESSAGE) {
-      return fail(400, "bad_request", `message is what the author reads, at most ${MAX_MESSAGE} characters.`);
-    }
-    reason = body.reason;
-    message = body.message.trim();
-  }
-  if (v.status !== "pending") return fail(409, "invalid_state", `Version ${v.version} is ${v.status}: only a pending version can be reviewed.`);
-  const now = Date.now();
-  const to = action === "approve" ? "approved" : "rejected";
-  const conflict = await change(
-    db,
-    db
-      .prepare("UPDATE versions SET status = ?, decided_at = ?, decided_by = ?, reason = ?, message = ? WHERE plugin_id = ? AND version = ? AND status = 'pending'")
-      .bind(to, now, adminId, reason, message, id, v.version),
-    auditIfChanged(db, now, adminId, `version.${action}`, id, v.version, reason ? { reason, message } : undefined),
-    id,
-    await ownerUsername(env, plugin.owner_id),
-    "The version changed meanwhile: look again."
-  );
-  if (conflict) return conflict;
-  if (action === "approve") await purge(await pluginCacheKeys(db, plugin, [v.version]));
-  return answer({ version: versionInfo((await versionRow(db, id, v.version))!, true) });
+const changed = async (db: D1Database, id: string, version: string): Promise<Response> => {
+  await purgeCatalog(db, id, [version]);
+  return answer({ version: versionInfo((await versionRow(db, id, version))!, true) });
 };
 
-const removeVersion = async (db: D1Database, adminId: string, id: string, versionText: string, body: Record<string, unknown> | undefined): Promise<Response> => {
-  const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, versionText)]);
-  if (!plugin || !v) return notFound();
-  if (typeof body?.block !== "boolean") return fail(400, "bad_request", "block is true (turn it off on devices) or false.");
-  if (typeof body.reason !== "string" || body.reason.trim() === "" || body.reason.length > MAX_MESSAGE) {
-    return fail(400, "bad_request", `reason is what people read, at most ${MAX_MESSAGE} characters.`);
-  }
-  if (v.status !== "approved" && v.status !== "yanked") return fail(409, "invalid_state", `Version ${v.version} is ${v.status}: only an approved or yanked version can be removed.`);
+const reasonOf = (body: Record<string, unknown> | undefined, what: string): string | Response =>
+  typeof body?.reason !== "string" || body.reason.trim() === "" || body.reason.length > MAX_MESSAGE
+    ? fail(400, "bad_request", `reason is ${what}, at most ${MAX_MESSAGE} characters.`)
+    : body.reason.trim();
+
+/** Verify a version (from undecided or declined): the mark is one-way, and
+ * only a take-down ends it. A version the superseding rule yanked is
+ * listed again: every verified version stays installable. */
+const verify = async (db: D1Database, adminId: string, id: string, v: VersionRow): Promise<Response> => {
+  if (v.verification === "verified") return fail(409, "invalid_state", `Version ${v.version} is verified already.`);
+  if (v.status !== "listed" && v.status !== "yanked") return fail(409, "invalid_state", `Version ${v.version} is ${v.status}: only a listed or yanked version can be verified.`);
   const now = Date.now();
-  const reason = body.reason.trim();
   const conflict = await change(
     db,
     db
       .prepare(
-        `UPDATE versions SET status = 'removed', blocked = ?, block_reason = ?, decided_at = ?, decided_by = ?, reason = 'removed', message = ?
-         WHERE plugin_id = ? AND version = ? AND status IN ('approved', 'yanked')`
+        `UPDATE versions SET verification = 'verified', verified_at = ?, verified_by = ?,
+           status = CASE WHEN yanked_by = 'superseded' THEN 'listed' ELSE status END,
+           yanked_by = CASE WHEN yanked_by = 'superseded' THEN NULL ELSE yanked_by END
+         WHERE plugin_id = ? AND version = ? AND verification = 'unverified' AND status IN ('listed', 'yanked')`
       )
-      .bind(body.block ? 1 : 0, body.block ? reason : null, now, adminId, reason, id, v.version),
-    auditIfChanged(db, now, adminId, "version.remove", id, v.version, { block: body.block, reason }),
+      .bind(now, adminId, id, v.version),
+    auditIfChanged(db, now, adminId, "version.verify", id, v.version, undefined),
     id,
     null,
     "The version changed meanwhile: look again."
   );
-  if (conflict) return conflict;
-  await purge(await pluginCacheKeys(db, plugin, [v.version]));
-  return answer({ version: versionInfo((await versionRow(db, id, v.version))!, true) });
+  return conflict ?? changed(db, id, v.version);
 };
 
-const listedVersions = async (db: D1Database, id: string): Promise<string[]> =>
-  (await db.prepare("SELECT version FROM versions WHERE plugin_id = ? AND status IN ('approved', 'yanked')").bind(id).all<{ version: string }>()).results.map((r) => r.version);
+/** Decline to verify an undecided version: it stays listed, unverified; its
+ * author reads why (the public sees only that it isn't verified). */
+const decline = async (db: D1Database, adminId: string, id: string, v: VersionRow, body: Record<string, unknown> | undefined): Promise<Response> => {
+  if (typeof body?.reason !== "string" || !REASON_RE.test(body.reason)) return fail(400, "bad_request", "reason is a short word (malware, broken, misleading, …).");
+  if (typeof body.message !== "string" || body.message.trim() === "" || body.message.length > MAX_MESSAGE) {
+    return fail(400, "bad_request", `message is what the author reads, at most ${MAX_MESSAGE} characters.`);
+  }
+  if (v.verification === "verified" || v.declined_at !== null) return fail(409, "invalid_state", `Version ${v.version} is decided already.`);
+  if (v.status !== "listed" && v.status !== "yanked") return fail(409, "invalid_state", `Version ${v.version} is ${v.status}.`);
+  const now = Date.now();
+  const reason = body.reason;
+  const message = body.message.trim();
+  const conflict = await change(
+    db,
+    db
+      .prepare(
+        `UPDATE versions SET declined_at = ?, declined_by = ?, decline_reason = ?, decline_message = ?
+         WHERE plugin_id = ? AND version = ? AND verification = 'unverified' AND declined_at IS NULL AND status IN ('listed', 'yanked')`
+      )
+      .bind(now, adminId, reason, message, id, v.version),
+    auditIfChanged(db, now, adminId, "version.decline", id, v.version, { reason, message }),
+    id,
+    null,
+    "The version changed meanwhile: look again."
+  );
+  return conflict ?? changed(db, id, v.version);
+};
+
+/** A take-down's or a restore's event in the feed, numbered by this same
+ * write (after its audit row, so only when the change landed). */
+const takedownEvent = (db: D1Database, kind: "take_down" | "restore", id: string, version: string, reason: string, at: number): D1PreparedStatement =>
+  db
+    .prepare("INSERT INTO takedown_events (kind, plugin_id, version, reason, at) SELECT ?, ?, ?, ?, ? WHERE changes() > 0")
+    .bind(kind, id, version, reason, at);
+
+const afterEvent = async (db: D1Database, id: string, version: string): Promise<Response> => {
+  const seq = await db.prepare("SELECT MAX(seq) AS n FROM takedown_events").first<number>("n");
+  if (seq) await purgeTakedowns(seq);
+  return changed(db, id, version);
+};
+
+/** Take a listed or yanked version down (harmful): blocked on devices, its
+ * mark ended, an event in the take-down feed. Nothing it superseded comes
+ * back; its author publishes again. */
+const takeDown = async (db: D1Database, adminId: string, id: string, v: VersionRow, body: Record<string, unknown> | undefined): Promise<Response> => {
+  const reason = reasonOf(body, "what people read");
+  if (reason instanceof Response) return reason;
+  if (v.status !== "listed" && v.status !== "yanked") return fail(409, "invalid_state", `Version ${v.version} is ${v.status}: only a listed or yanked version can be taken down.`);
+  const now = Date.now();
+  const conflict = await change(
+    db,
+    db
+      .prepare(
+        `UPDATE versions SET status = 'taken_down', removed_at = ?, removed_by = ?, removal_reason = ?, yanked_by = NULL,
+           verification = 'unverified', verified_at = NULL, verified_by = NULL
+         WHERE plugin_id = ? AND version = ? AND status IN ('listed', 'yanked')`
+      )
+      .bind(now, adminId, reason, id, v.version),
+    auditIfChanged(db, now, adminId, "version.take_down", id, v.version, { reason }),
+    id,
+    null,
+    "The version changed meanwhile: look again.",
+    [takedownEvent(db, "take_down", id, v.version, reason, now)]
+  );
+  return conflict ?? afterEvent(db, id, v.version);
+};
+
+/** Remove a listed or yanked version (not harmful: copyright, broken): no
+ * longer served or offered, not blocked. */
+const remove = async (db: D1Database, adminId: string, id: string, v: VersionRow, body: Record<string, unknown> | undefined): Promise<Response> => {
+  const reason = reasonOf(body, "what people read");
+  if (reason instanceof Response) return reason;
+  if (v.status !== "listed" && v.status !== "yanked") return fail(409, "invalid_state", `Version ${v.version} is ${v.status}: only a listed or yanked version can be removed.`);
+  const now = Date.now();
+  const conflict = await change(
+    db,
+    db
+      .prepare(
+        `UPDATE versions SET status = 'removed', removed_at = ?, removed_by = ?, removal_reason = ?, yanked_by = NULL
+         WHERE plugin_id = ? AND version = ? AND status IN ('listed', 'yanked')`
+      )
+      .bind(now, adminId, reason, id, v.version),
+    auditIfChanged(db, now, adminId, "version.remove", id, v.version, { reason }),
+    id,
+    null,
+    "The version changed meanwhile: look again."
+  );
+  return conflict ?? changed(db, id, v.version);
+};
+
+/** Restore a taken-down version: unverified and undecided again, and
+ * straight to yanked by the superseding rule when anything newer on its
+ * line is listed (a release's line: newer releases; a pre-release's: any
+ * newer version); the block lifts (an event in the feed). */
+const restore = async (db: D1Database, adminId: string, id: string, v: VersionRow, body: Record<string, unknown> | undefined): Promise<Response> => {
+  const reason = reasonOf(body, "why it comes back");
+  if (reason instanceof Response) return reason;
+  if (v.status !== "taken_down") return fail(409, "invalid_state", `Version ${v.version} is ${v.status}: only a taken-down version can be restored.`);
+  const now = Date.now();
+  const newer = await db
+    .prepare(
+      `SELECT version FROM versions WHERE plugin_id = ? AND status = 'listed' AND (? = 0 OR is_release = 1)
+         AND (major, minor, patch, is_release, pre_key) > (?, ?, ?, ?, ?) ORDER BY ${VERSION_ORDER} LIMIT 1`
+    )
+    .bind(id, v.is_release, v.major, v.minor, v.patch, v.is_release, v.pre_key)
+    .first<string>("version");
+  const conflict = await change(
+    db,
+    db
+      .prepare(
+        `UPDATE versions SET status = ?, yanked_by = ?, superseded_at = ?, superseded_by = ?, removed_at = NULL, removed_by = NULL, removal_reason = NULL,
+           verification = 'unverified', verified_at = NULL, verified_by = NULL,
+           declined_at = NULL, declined_by = NULL, decline_reason = NULL, decline_message = NULL
+         WHERE plugin_id = ? AND version = ? AND status = 'taken_down'`
+      )
+      .bind(newer ? "yanked" : "listed", newer ? "superseded" : null, newer ? now : null, newer ?? null, id, v.version),
+    auditIfChanged(db, now, adminId, "version.restore", id, v.version, { reason, ...(newer ? { superseded_by: newer } : {}) }),
+    id,
+    null,
+    "The version changed meanwhile: look again.",
+    [takedownEvent(db, "restore", id, v.version, reason, now)]
+  );
+  return conflict ?? afterEvent(db, id, v.version);
+};
+
+const versionAction = async (db: D1Database, adminId: string, id: string, versionText: string, action: string, body: Record<string, unknown> | undefined): Promise<Response> => {
+  const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, versionText)]);
+  if (!plugin || !v) return notFound();
+  switch (action) {
+    case "verify":
+      return verify(db, adminId, id, v);
+    case "decline":
+      return decline(db, adminId, id, v, body);
+    case "take-down":
+      return takeDown(db, adminId, id, v, body);
+    case "remove":
+      return remove(db, adminId, id, v, body);
+    case "restore":
+      return restore(db, adminId, id, v, body);
+    default:
+      return notFound();
+  }
+};
 
 const pluginAction = async (env: Env, db: D1Database, adminId: string, id: string, action: string, body: Record<string, unknown> | undefined): Promise<Response> => {
   const plugin = await pluginRow(db, id);
@@ -369,10 +532,14 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
       break;
     case "feature": {
       if (typeof body?.featured !== "boolean") return fail(400, "bad_request", "featured is true or false.");
+      // Featured is the vetted shelf: only a plugin whose newest version is verified.
+      if (body.featured && !(plugin.listed_version && plugin.verified === 1)) {
+        return fail(409, "not_verified", "Only a plugin whose newest version is verified can be featured.");
+      }
       conflict = await change(
         db,
         body.featured
-          ? db.prepare("UPDATE plugins SET featured_at = ? WHERE id = ? AND featured_at IS NULL").bind(now, id)
+          ? db.prepare("UPDATE plugins SET featured_at = ? WHERE id = ? AND featured_at IS NULL AND verified = 1").bind(now, id)
           : db.prepare("UPDATE plugins SET featured_at = NULL WHERE id = ? AND featured_at IS NOT NULL").bind(id),
         auditIfChanged(db, now, adminId, body.featured ? "plugin.feature" : "plugin.unfeature", id, null, undefined),
         id,
@@ -389,20 +556,27 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
       if (to === plugin.owner_id) return fail(409, "invalid_state", "They already own it.");
       conflict = await change(
         db,
-        db.prepare("UPDATE plugins SET owner_id = ? WHERE id = ? AND owner_id = ?").bind(to, id, plugin.owner_id),
+        // Its new owner holds it from now (a deploy key's `all` never takes it
+        // in), and always later than it was claimed or last moved, even in the
+        // same millisecond: a moved plugin never reads as never moved.
+        db
+          .prepare("UPDATE plugins SET owner_id = ?, owner_since = MAX(?, created_at + 1, owner_since + 1) WHERE id = ? AND owner_id = ?")
+          .bind(to, now, id, plugin.owner_id),
         auditIfChanged(db, now, adminId, "plugin.transfer", id, null, { from: plugin.owner_id, to, to_username: username }),
         id,
         username!,
         "It changed hands meanwhile: look again."
       );
-      if (!conflict) await revokeDeployKeys(env, id);
+      // It leaves the old owner's deploy keys' lists (their scopes hold it no
+      // more in any case: its owner and `owner_since` changed).
+      if (!conflict) await dropFromDeployKeys(env, plugin.owner_id, id).catch((e) => console.error("store: couldn't drop a transferred plugin from deploy keys", id, String(e)));
       break;
     }
     default:
       return notFound();
   }
   if (conflict) return conflict;
-  await purge(await pluginCacheKeys(db, plugin, action === "feature" ? [] : await listedVersions(db, id)));
+  await purgeCatalog(db, id);
   return adminPlugin(env, db, id);
 };
 
@@ -425,7 +599,11 @@ const adminPlugin = async (env: Env, db: D1Database, id: string): Promise<Respon
       suspend_reason: plugin.suspend_reason
     },
     owner: { id: owner.id, username: owner.username, user_id: plugin.owner_id, created_at: owner.createdAt },
-    versions: versions.results.map((v) => versionInfo(v, true)),
+    versions: versions.results.map((v) => ({
+      ...versionInfo(v, true),
+      yanked_by: v.status === "yanked" ? v.yanked_by : null,
+      superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null
+    })),
     // As /admin/reports gives them.
     reports: await reportItems(env, reportRows.results),
     featured: plugin.featured_at !== null,
@@ -611,18 +789,18 @@ export const handleAdmin = async (request: Request, env: Env, db: D1Database, bu
   }
 
   if (section === "queue" && parts.length === 2 && get) return queue(env, db, url);
-  if (section === "submissions" && a && b) {
+  if (section === "versions" && a && b) {
     const versionText = decodeSegment(b);
     if (!versionText || !ID_RE.test(a)) return notFound();
-    if (parts.length === 4 && get) return submission(env, db, a, versionText);
-    if (parts.length === 5 && post && (c === "approve" || c === "reject")) return reviewVersion(env, db, admin.userId, a, versionText, c, body);
+    if (parts.length === 4 && get) return versionView(env, db, a, versionText);
+    if (parts.length === 5 && post && (c === "verify" || c === "decline")) return versionAction(db, admin.userId, a, versionText, c, body);
   }
   if (section === "plugins" && a && ID_RE.test(a)) {
     if (parts.length === 3 && get) return adminPlugin(env, db, a);
     if (parts.length === 4 && post && b) return pluginAction(env, db, admin.userId, a, b, body);
-    if (parts.length === 6 && post && b === "versions" && c && d === "remove") {
+    if (parts.length === 6 && post && b === "versions" && c && (d === "take-down" || d === "remove" || d === "restore")) {
       const versionText = decodeSegment(c);
-      return versionText ? removeVersion(db, admin.userId, a, versionText, body) : notFound();
+      return versionText ? versionAction(db, admin.userId, a, versionText, d, body) : notFound();
     }
   }
   if (section === "reports") {
