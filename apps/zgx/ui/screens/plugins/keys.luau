@@ -3,8 +3,8 @@
 -- what a CI job (a GitHub Action) publishes its new versions with instead
 -- of your session. A section with New key… on its title's line; each key a
 -- row: its name on a line of its own (wrapping, as a row's name does), when
--- it was last used and when it ends under it (or, within 14 days of its
--- end, that alone, in the warning's ink), and at the row's end the key
+-- it was last used and when it ends under it (within 14 days of its end,
+-- how soon, the line in the warning's ink), and at the row's end the key
 -- shortened (`M.short`, as the store's site shows it) in the code face, a
 -- column down the rows, then Revoke. Revoked keys aren't listed. A new one is made by the
 -- engine (`CreateDeployKey`) after a fresh sign-in in the browser when the
@@ -142,21 +142,24 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 			end,
 			description = function(): string
 				local k = now:get()
-				-- About to end: that alone, before anything else it might say.
-				local n = soon()
-				if n then
-					return if n == 0
-						then ui.t("plugins.store.key.ends_today"):get()
-						elseif n == 1 then ui.t("plugins.store.key.ends_tomorrow"):get()
-						else ui.t("plugins.store.key.ends_in", { n = n }):get()
-				end
 				local used = day_of(k.last_used_at)
 				local ends = day_of(k.expires_at)
+				-- About to end: how soon, after whether it's still in use (so
+				-- whether it must be replaced first).
+				local n = soon()
+				local ending = if n == nil
+					then (if ends then ui.t("plugins.store.key.ends", { date = ends }):get() else ui.t("plugins.store.key.no_end"):get())
+					elseif n == 0 then ui.t("plugins.store.key.ends_today"):get()
+					elseif n == 1 then ui.t("plugins.store.key.ends_tomorrow"):get()
+					else ui.t("plugins.store.key.ends_in", { n = n }):get()
 				return table.concat({
 					if used then ui.t("plugins.store.key.last_used", { date = used }):get() else ui.t("plugins.store.key.not_used"):get(),
-					if ends then ui.t("plugins.store.key.ends", { date = ends }):get() else ui.t("plugins.store.key.no_end"):get(),
+					ending,
 				}, " · ")
 			end,
+			-- (About to end, the line is in the warning's ink, one status
+			-- line; only its "Ends…" once the line can be a rich one:
+			-- zgx-asks/rich-span-boundary-break.)
 			description_ink = function(): string
 				return if soon() then "$zeron.tone.warning.ink" else "$text.tertiary"
 			end,
