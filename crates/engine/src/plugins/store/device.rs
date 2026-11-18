@@ -142,7 +142,8 @@ struct Candidate {
     name: String,
     version: String,
     hash: String,
-    publisher: String,
+    /// Its owner's stable id in the store.
+    publisher_id: String,
     permissions: Vec<String>,
     allowed: Value,
     prerelease: bool,
@@ -524,7 +525,9 @@ impl Plugins {
             return Err("That isn't a file in a plugin".into());
         }
         let cache = self.inner.data_dir.join(CACHE_DIR).join(&p.id);
-        let version_dir = cache.join(&p.version);
+        // Named by the version's exact text, hashed: `1.0.0-RC` and
+        // `1.0.0-rc` are two versions, also on a disk that ignores case.
+        let version_dir = cache.join(&signing::sha256_hex(p.version.as_bytes())[..32]);
         let path = zeron_plugin_guard::path::join(&version_dir, &p.path)?;
         let shown = |path: &Path, bytes: u64| json!({ "file": path.display().to_string(), "type": media_type(&p.path), "bytes": bytes });
         if let Ok(meta) = std::fs::metadata(&path)
@@ -589,7 +592,7 @@ impl Plugins {
         // What the store lists, to everyone.
         let listed = match client.plugin(id, &caller).await {
             Ok((_, detail)) => match wanted {
-                None => (!detail.version.is_empty()).then(|| (detail.version.clone(), detail.package.clone(), detail.author.username.clone())),
+                None => (!detail.version.is_empty()).then(|| (detail.version.clone(), detail.package.clone(), detail.author.clone())),
                 Some(wanted) => {
                     let (_, versions) = client.versions(id, &caller).await.map_err(failed)?;
                     let found = versions.into_iter().find(|v| v.version == wanted);
@@ -600,7 +603,7 @@ impl Plugins {
                                 return Err(failed(failure(client::reason::NOT_IN_STORE, format!("Version {wanted} of {id} can't be installed any more"))));
                             }
                             let record = PackageRecord { hash: found.hash, sha256: found.sha256, bytes: found.bytes, key: found.key };
-                            Some((found.version, record, detail.author.username.clone()))
+                            Some((found.version, record, detail.author.clone()))
                         }
                         None => None,
                     }
@@ -617,7 +620,7 @@ impl Plugins {
         };
         let raw = client.package(id, &version, &caller).await.map_err(failed)?;
         let (id_owned, version_owned) = (id.to_owned(), version.clone());
-        let (package, store) = tokio::task::spawn_blocking(move || super::verify(raw, &id_owned, &version_owned, &record, publisher.as_deref()))
+        let (package, store) = tokio::task::spawn_blocking(move || super::verify(raw, &id_owned, &version_owned, &record, &publisher))
             .await
             .map_err(|_| failed("Couldn't read it"))?
             .map_err(failed)?;
@@ -629,7 +632,7 @@ impl Plugins {
     /// plugins in the store (`/me/plugins`): its version, its record, and
     /// you as its publisher. `not_in_store` when it isn't yours, or there's
     /// no such version to install.
-    async fn own_record(&self, client: &StoreClient, id: &str, wanted: Option<&str>, installed: bool) -> Result<(String, PackageRecord, Option<String>), String> {
+    async fn own_record(&self, client: &StoreClient, id: &str, wanted: Option<&str>, installed: bool) -> Result<(String, PackageRecord, client::Publisher), String> {
         let missing = || failure(client::reason::NOT_IN_STORE, format!("The store has no {id}{} for you", wanted.map(|w| format!(" {w}")).unwrap_or_default()));
         let Ok((_, caller)) = self.store_as_person().await else {
             return Err(missing());
@@ -655,7 +658,7 @@ impl Plugins {
                 .map(|(_, v)| v),
         };
         let found = chosen.ok_or_else(missing)?;
-        let publisher = plugin["author"]["username"].as_str().map(str::to_owned);
+        let publisher: client::Publisher = serde_json::from_value(plugin["author"].clone()).unwrap_or_default();
         let record = PackageRecord { hash: found.hash, sha256: found.sha256, bytes: found.bytes, key: found.key };
         Ok((found.version, record, publisher))
     }
@@ -677,7 +680,7 @@ impl Plugins {
                     name: e.item.name.clone(),
                     version: e.item.version.clone(),
                     hash: e.item.hash.clone(),
-                    publisher: store.publisher.clone(),
+                    publisher_id: store.publisher_id.clone(),
                     permissions: e.item.permissions.clone(),
                     allowed,
                     prerelease: prerelease.contains(&e.item.id),
@@ -762,23 +765,21 @@ impl Plugins {
         let kept_path = install::found_package_path(&plugins_dir, &c.id);
         let kept = install::found(&plugins_dir, &c.id, &c.hash)
             .filter(|f| f.refused.is_none() && f.hash == offer.hash && f.version == offer.version && kept_path.is_file());
-        let (id, version, publisher) = (c.id.clone(), offer.version.clone(), offer.publisher.clone());
+        let (id, version, publisher) = (c.id.clone(), offer.version.clone(), offer.publisher());
         let (package, store) = if kept.is_some() {
             // Verified when it was found; read back as any kept update is.
             let package = tokio::task::spawn_blocking(move || package::read(&kept_path, &install::WORDS).and_then(install::parse))
                 .await
                 .map_err(|_| "Couldn't read it".to_string())??;
-            let publisher = publisher.map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()).ok_or_else(|| {
-                failure(client::reason::STORE_MISMATCH, "The store's record doesn't say who published it")
-            })?;
+            let (publisher, publisher_id) = super::vouched(&publisher)?;
             if package.hash != offer.hash || offer.key.as_deref().is_some_and(|k| k != package.key) {
                 return Err(failure(client::reason::STORE_MISMATCH, "The update kept isn't the store's"));
             }
-            let store = install::StoreSource { id: c.id.clone(), publisher, hash: package.hash.clone(), key: Some(package.key.clone()) };
+            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()) };
             (package, store)
         } else {
             let raw = client.package(&c.id, &offer.version, caller).await?;
-            tokio::task::spawn_blocking(move || super::verify(raw, &id, &version, &record, publisher.as_deref()))
+            tokio::task::spawn_blocking(move || super::verify(raw, &id, &version, &record, &publisher))
                 .await
                 .map_err(|_| "Couldn't read it".to_string())??
         };
@@ -789,7 +790,9 @@ impl Plugins {
         };
         let change = install::grant_change(&c.permissions, &package.manifest.permissions);
         let diff = capability::diff(&c.allowed, &capability::record(&package.manifest));
-        let new_owner = !store.publisher.eq_ignore_ascii_case(c.publisher.trim());
+        // (By the owner's id: a username moved to another account is
+        // another owner.)
+        let new_owner = store.publisher_id != c.publisher_id;
         let found = Found {
             from: c.hash.clone(),
             version: package.manifest.version.clone(),

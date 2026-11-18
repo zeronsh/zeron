@@ -41,7 +41,11 @@ pub struct StoredVersion {
 
 #[derive(Clone, Debug, Default)]
 pub struct StoredPlugin {
+    /// The owner's username.
     pub owner: String,
+    /// The owner's account (its user id: what their publisher id is made
+    /// from). Empty: the account named as the username.
+    pub owner_account: String,
     pub versions: Vec<StoredVersion>,
     pub installs: u32,
 }
@@ -76,6 +80,21 @@ pub struct FakeStore {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// An account's publisher id, as the edge makes it (amendment 33).
+pub fn publisher_id(account: &str) -> String {
+    format!("pub_{}", &sha256_hex(format!("zeron-publisher:v1:{account}").as_bytes())[..32])
+}
+
+impl StoredPlugin {
+    fn account(&self) -> &str {
+        if self.owner_account.is_empty() { &self.owner } else { &self.owner_account }
+    }
+
+    fn author(&self) -> Value {
+        json!({ "id": publisher_id(self.account()), "username": self.owner, "badges": [] })
+    }
 }
 
 impl FakeStore {
@@ -138,7 +157,16 @@ impl FakeStore {
     }
 
     pub fn transfer(&self, id: &str, to: &str) {
-        self.state.lock().unwrap().plugins.get_mut(id).unwrap().owner = to.to_owned();
+        let mut state = self.state.lock().unwrap();
+        let plugin = state.plugins.get_mut(id).unwrap();
+        plugin.owner = to.to_owned();
+        plugin.owner_account = String::new();
+    }
+
+    /// An operator gives the owner's username to another account, which
+    /// then owns the plugin: the same name, another publisher.
+    pub fn move_username(&self, id: &str, account: &str) {
+        self.state.lock().unwrap().plugins.get_mut(id).unwrap().owner_account = account.to_owned();
     }
 
     pub fn add_deploy_key(&self, public: &str, id: &str, owner: &str) {
@@ -211,7 +239,7 @@ impl FakeStore {
                     .iter()
                     .filter_map(|(id, p)| {
                         let v = p.versions.iter().rev().find(|v| v.status == "approved")?;
-                        Some(json!({ "id": id, "name": id, "version": v.version, "author": { "username": p.owner, "verified": true } }))
+                        Some(json!({ "id": id, "name": id, "version": v.version, "author": p.author() }))
                     })
                     .collect();
                 json_reply(200, json!({ "items": items }))
@@ -222,7 +250,7 @@ impl FakeStore {
                 let Some(v) = p.versions.iter().rev().find(|v| v.status == "approved") else { return not_found() };
                 json_reply(200, json!({
                     "id": id, "name": id, "version": v.version,
-                    "author": { "username": p.owner, "verified": true },
+                    "author": p.author(),
                     "engines": { "zeron": v.engines },
                     "package": { "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(), "key": v.key },
                 }))
@@ -262,6 +290,16 @@ impl FakeStore {
                 self.state.lock().unwrap().reports.push(((*id).to_owned(), body));
                 json_reply(201, json!({ "reported": true }))
             }
+            ("GET", ["store", "v1", "plugins", id, "files", version, rest @ ..]) => {
+                let state = self.state.lock().unwrap();
+                let Some(v) = state.plugins.get(*id).and_then(|p| p.versions.iter().find(|v| v.version == *version)) else { return not_found() };
+                let package: Value = serde_json::from_slice(&v.raw).unwrap();
+                let path = rest.join("/");
+                match package["files"][path.as_str()].as_str() {
+                    Some(b64) => (200, "application/octet-stream", base64::engine::general_purpose::STANDARD.decode(b64).unwrap()),
+                    None => not_found(),
+                }
+            }
             ("POST", ["store", "v1", "plugins", id, "installed"]) => {
                 if caller.is_none() {
                     return json_reply(401, json!({ "error": "unauthorized", "message": "Sign in." }));
@@ -299,7 +337,7 @@ impl FakeStore {
                     if let Some(v) = best {
                         updates.push(json!({
                             "id": id, "version": v.version, "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(),
-                            "key": v.key, "publisher": p.owner, "notes": v.notes, "added": [], "removed": [],
+                            "key": v.key, "publisher": p.owner, "publisher_id": publisher_id(p.account()), "notes": v.notes, "added": [], "removed": [],
                             "in_review": v.status == "pending",
                         }));
                     }
@@ -356,7 +394,7 @@ impl FakeStore {
                     .iter()
                     .filter(|(id, p)| p.owner == owner && scope.as_deref().is_none_or(|s| s == id.as_str()))
                     .map(|(id, p)| json!({
-                        "id": id, "author": { "username": p.owner, "badges": [] },
+                        "id": id, "author": p.author(),
                         "versions": p.versions.iter().map(|v| json!({
                             "version": v.version, "status": v.status, "yanked": v.status == "yanked",
                             "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(), "key": v.key,

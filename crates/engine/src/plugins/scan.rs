@@ -278,6 +278,7 @@ pub fn store_record(inspected: &Inspected) -> Option<StoreSource> {
     let store = source.store()?.clone();
     let key = inspected.key()?;
     let vouched = !store.publisher.trim().is_empty()
+        && super::store::publisher_id(&store.publisher_id)
         && !inspected.hash.is_empty()
         && store.hash == inspected.hash
         && store.id == inspected.folder

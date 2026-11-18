@@ -131,6 +131,9 @@ pub struct PackageRecord {
 /// Who published a plugin (`PluginCard.author`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Publisher {
+    /// The owner's stable, opaque id (`pub_…`).
+    #[serde(default, deserialize_with = "nullable")]
+    pub id: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
     pub username: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
@@ -203,6 +206,9 @@ pub struct Offer {
     /// Who owns the id now (its username).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
+    /// And their stable id (`pub_…`): what a changed owner is told by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_id: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
     pub notes: String,
     #[serde(default, deserialize_with = "nullable")]
@@ -234,6 +240,13 @@ pub struct Updates {
     /// Offers or blocks that couldn't be read, each as the store sent it
     /// (its `id`, when it had one).
     pub unreadable: Vec<Option<String>>,
+}
+
+impl Offer {
+    /// Who the store says owns the plugin now.
+    pub fn publisher(&self) -> Publisher {
+        Publisher { id: self.publisher_id.clone(), username: self.publisher.clone(), verified: false }
+    }
 }
 
 impl Updates {

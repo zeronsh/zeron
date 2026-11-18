@@ -18,7 +18,7 @@ pub mod publish;
 
 use super::install::{self, Package, StoreSource, failure};
 use super::signing;
-use client::{PackageRecord, reason};
+use client::{PackageRecord, Publisher, reason};
 
 pub use device::handles;
 pub(in crate::plugins) use device::StoreHandle;
@@ -28,14 +28,29 @@ pub fn username(name: &str) -> bool {
     (1..=40).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+/// Whether `id` reads as a publisher's id: `pub_` and 32 lowercase hex
+/// characters (amendment 33).
+pub fn publisher_id(id: &str) -> bool {
+    id.strip_prefix("pub_").is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
+/// Who the store says published a plugin, `(username, id)`, when both read
+/// as they must: else what the store sent isn't a record to install by.
+pub fn vouched(publisher: &Publisher) -> Result<(String, String), String> {
+    let mismatch = || failure(reason::STORE_MISMATCH, "What the store sent isn't what its record says (who published it), so it wasn't installed");
+    // A username: what "by @…" shows, so nothing a store could dress up
+    // (spaces, control or direction characters).
+    let name = publisher.username.as_deref().map(str::trim).filter(|p| username(p)).ok_or_else(mismatch)?;
+    let id = publisher.id.as_deref().map(str::trim).filter(|id| publisher_id(id)).ok_or_else(mismatch)?;
+    Ok((name.to_owned(), id.to_owned()))
+}
+
 /// The package `raw`, verified and checked against the store's record of
 /// `id` at `version` (`record`), published by `publisher`: the package and
 /// the store's record to keep beside it.
-pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: Option<&str>) -> Result<(Package, StoreSource), String> {
+pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: &Publisher) -> Result<(Package, StoreSource), String> {
     let mismatch = |what: &str| failure(reason::STORE_MISMATCH, format!("What the store sent isn't what its record says ({what}), so it wasn't installed"));
-    // A username: what "by @…" shows and consent is bound to, so nothing a
-    // store could dress up (spaces, control or direction characters).
-    let publisher = publisher.map(str::trim).filter(|p| username(p)).ok_or_else(|| mismatch("who published it"))?;
+    let (publisher, publisher_id) = vouched(publisher)?;
     if record.sha256.is_empty() || record.hash.is_empty() {
         return Err(mismatch("its record is incomplete"));
     }
@@ -58,7 +73,7 @@ pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, pub
     if record.key.as_deref().is_some_and(|key| key != package.key) {
         return Err(mismatch("who signed it"));
     }
-    let store = StoreSource { id: id.to_owned(), publisher: publisher.to_owned(), hash: package.hash.clone(), key: Some(package.key.clone()) };
+    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()) };
     Ok((package, store))
 }
 
@@ -67,6 +82,12 @@ mod tests {
     use super::*;
     use crate::plugins::install::tests::signed_package;
     use crate::plugins::signing::SigningKey;
+
+    const ADA: &str = "pub_0123456789abcdef0123456789abcdef";
+
+    fn ada() -> Publisher {
+        Publisher { id: Some(ADA.into()), username: Some("ada".into()), verified: true }
+    }
 
     fn record(raw: &[u8], package: &Package) -> PackageRecord {
         PackageRecord { hash: package.hash.clone(), sha256: signing::sha256_hex(raw), bytes: raw.len() as u64, key: Some(package.key.clone()) }
@@ -78,13 +99,14 @@ mod tests {
         let raw = signed_package(&key, "focus", "1.2.0", &["ui.add"], "return 1");
         let package = install::parse(raw.clone()).unwrap();
         let good = record(&raw, &package);
-        let (verified, store) = verify(raw.clone(), "focus", "1.2.0", &good, Some("ada")).unwrap();
+        let (verified, store) = verify(raw.clone(), "focus", "1.2.0", &good, &ada()).unwrap();
         assert_eq!(verified.hash, package.hash);
-        assert_eq!(store, StoreSource { id: "focus".into(), publisher: "ada".into(), hash: package.hash.clone(), key: Some(key.public()) });
-        assert_eq!(store.binding(), "store:ada");
+        assert_eq!(store, StoreSource { id: "focus".into(), publisher: "ada".into(), publisher_id: ADA.into(), hash: package.hash.clone(), key: Some(key.public()) });
+        assert_eq!(store.binding(), format!("store:{ADA}"), "bound to the owner's id, never the username");
 
         let refused = |raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: Option<&str>| {
-            let error = verify(raw, id, version, record, publisher).unwrap_err();
+            let publisher = Publisher { id: Some(ADA.into()), username: publisher.map(str::to_owned), verified: true };
+            let error = verify(raw, id, version, record, &publisher).unwrap_err();
             install::reason_of(&error).map(str::to_owned).unwrap_or(error)
         };
         // Another plugin, version, file, content or key than the record's.
@@ -113,6 +135,11 @@ mod tests {
         assert_eq!(refused(tampered, "focus", "1.2.0", &tampered_record, Some("ada")), "tampered");
         // The record's key is optional; its hashes compare in any case.
         let loose = PackageRecord { key: None, sha256: good.sha256.to_uppercase(), ..good.clone() };
-        assert!(verify(raw, "focus", "1.2.0", &loose, Some("ada")).is_ok());
+        assert!(verify(raw.clone(), "focus", "1.2.0", &loose, &ada()).is_ok());
+        // A record without the owner's id, or one that isn't one.
+        for id in [None, Some("ada"), Some("pub_XYZ"), Some("pub_0123456789abcdef0123456789ABCDEF")] {
+            let publisher = Publisher { id: id.map(str::to_owned), username: Some("ada".into()), verified: true };
+            assert_eq!(install::reason_of(&verify(raw.clone(), "focus", "1.2.0", &good, &publisher).unwrap_err()), Some("store_mismatch"), "{id:?}");
+        }
     }
 }

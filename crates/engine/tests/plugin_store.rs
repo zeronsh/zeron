@@ -191,7 +191,7 @@ async fn a_version_for_another_zeron_is_never_installed() {
     assert_eq!(d.check().await["updates"], json!([]));
     let package = install::parse(future.clone()).unwrap();
     store.state.lock().unwrap().offer_anyway.push(json!({
-        "id": "focus", "version": "2.0.0", "hash": package.hash, "sha256": sha256(&future), "bytes": future.len(), "key": package.key, "publisher": "ada",
+        "id": "focus", "version": "2.0.0", "hash": package.hash, "sha256": sha256(&future), "bytes": future.len(), "key": package.key, "publisher": "ada", "publisher_id": fake_store::publisher_id("ada"),
     }));
     let checked = d.check().await;
     let refused = checked["updates"][0]["refused"].as_str().unwrap_or_default();
@@ -256,7 +256,7 @@ async fn a_package_that_isn_t_the_store_s_record_is_refused() {
     let older_package = install::parse(older.clone()).unwrap();
     store.state.lock().unwrap().serve_instead.insert(("focus".into(), "0.9.0".into()), older.clone());
     let offer = |version: &str, raw: &[u8], hash: &str, publisher: Option<&str>| {
-        json!({ "id": "focus", "version": version, "hash": hash, "sha256": sha256(raw), "bytes": raw.len(), "publisher": publisher })
+        json!({ "id": "focus", "version": version, "hash": hash, "sha256": sha256(raw), "bytes": raw.len(), "publisher": publisher, "publisher_id": fake_store::publisher_id("ada") })
     };
     store.state.lock().unwrap().offer_anyway.push(offer("0.9.0", &older, &older_package.hash, Some("ada")));
     let checked = d.check().await;
@@ -353,7 +353,7 @@ async fn an_offer_the_device_can_t_read_hides_nothing_else() {
         let mut state = store.state.lock().unwrap();
         // (Offered only as the hostile shape below.)
         state.plugins.get_mut("board").unwrap().versions.retain(|v| v.version != "1.1.0");
-        state.offer_anyway.push(json!({ "id": "board", "version": "1.1.0", "hash": package.hash, "sha256": sha256(&next), "bytes": next.len(), "key": package.key, "publisher": "ada", "notes": null, "added": [], "removed": [] }));
+        state.offer_anyway.push(json!({ "id": "board", "version": "1.1.0", "hash": package.hash, "sha256": sha256(&next), "bytes": next.len(), "key": package.key, "publisher": "ada", "publisher_id": fake_store::publisher_id("ada"), "notes": null, "added": [], "removed": [] }));
         state.offer_anyway.push(json!({ "id": "focus", "version": "2.0.0", "publisher": "ada" }));
         state.serve_instead.insert(("board".into(), "1.1.0".into()), next.clone());
     }
@@ -393,4 +393,45 @@ async fn reports_compatibility_for_another_zeron_and_deploy_keys_for_owned_plugi
 fn version_at_least(v: &str) -> bool {
     use zeron_engine::plugins::version::{Version, zeron};
     zeron() >= Version::parse(v).unwrap()
+}
+
+#[tokio::test]
+async fn a_store_file_is_fetched_once_and_only_from_inside_its_plugin() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &[], "return 1", json!({})), "approved", "");
+    let d = device(&store, None);
+    let shown = d.call(methods::STORE_FILE, json!({ "id": "focus", "version": "1.0.0", "path": "init.luau" })).await.unwrap();
+    assert_eq!(std::fs::read_to_string(shown["file"].as_str().unwrap()).unwrap(), "return 1");
+    assert_eq!(shown["bytes"], 8);
+    let asked = store.state.lock().unwrap().requests.len();
+    let again = d.call(methods::STORE_FILE, json!({ "id": "focus", "version": "1.0.0", "path": "init.luau" })).await.unwrap();
+    assert_eq!(again["file"], shown["file"]);
+    assert_eq!(store.state.lock().unwrap().requests.len(), asked, "from the cache");
+    for (version, path) in [("1.0.0", "../../escape"), ("1.0.0", "zeron-plugin.json"), ("1.0.0", "/etc/passwd"), ("../1.0.0", "init.luau"), ("1.0.0", ".git/config")] {
+        assert!(d.call(methods::STORE_FILE, json!({ "id": "focus", "version": version, "path": path })).await.is_err(), "{version} {path}");
+    }
+    assert_eq!(store.state.lock().unwrap().requests.len(), asked, "nothing asked for outside the plugin");
+}
+
+/// Consent is bound to the owner's stable id, never the username: an
+/// operator moving "ada" to another account (which then owns the plugin)
+/// is a new owner, and asks again, though every name reads the same.
+#[tokio::test]
+async fn the_same_username_on_another_account_asks_again() {
+    let store = FakeStore::start().await;
+    let (ada, _) = SigningKey::generate().unwrap();
+    let (other, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&ada, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "approved", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+
+    store.move_username("focus", "someone-else");
+    store.add("ada", &package_of(&other, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "approved", "");
+    let checked = d.check().await;
+    assert_eq!(checked["updates"][0]["new_owner"], true, "{checked}");
+    let updated = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
+    assert_eq!(updated["plugin"]["author"]["username"], "ada", "the name people read is the same");
+    assert_eq!(updated["plugin"]["status"], "pending", "but it's another account: asked again");
 }

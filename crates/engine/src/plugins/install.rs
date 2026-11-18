@@ -147,6 +147,11 @@ pub struct StoreSource {
     pub id: String,
     /// Who owns the id in the store: the username its listing reads "by".
     pub publisher: String,
+    /// Who owns it, as the store's stable, opaque id for that account
+    /// (`pub_…`, amendment 33): what consent is bound to, so a username an
+    /// operator moves can never carry another account's decisions.
+    #[serde(default)]
+    pub publisher_id: String,
     /// The content hash the store's record names (`signing::content_hash`).
     pub hash: String,
     /// The key that signed it, as the store's record names it.
@@ -156,10 +161,11 @@ pub struct StoreSource {
 
 impl StoreSource {
     /// What a decision about a store plugin is bound to: who owns it in
-    /// the store, not the key it was signed with (an author's deploy key
-    /// and device keys sign the same plugin). A new owner asks again.
+    /// the store (their stable id, never the username), not the key it was
+    /// signed with (an author's deploy key and device keys sign the same
+    /// plugin). A new owner asks again.
     pub fn binding(&self) -> String {
-        format!("store:{}", self.publisher.trim().to_ascii_lowercase())
+        format!("store:{}", self.publisher_id)
     }
 }
 
