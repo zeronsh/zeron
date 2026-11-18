@@ -321,6 +321,11 @@ pub fn expose_surface(host: &ScriptHost) {
     // (replacing is "ui.change"'s, an OverrideElement of the selector as
     // written).
     host.require_contribution_capability(Capability::Named(grants::UI_ADD.into()));
+    // But a plugin's own settings page (`zeron.settings_page`), which needs
+    // no permission, as settings don't: zgx shows what a plugin gives
+    // `plugin_page` only in that plugin's own sealed box on its Settings
+    // page (`ui.plugin_page`), nowhere else, so it reaches nothing of Zeron's.
+    host.expose_hook(format!("slot:{}", grants::SETTINGS_PAGE_SLOT), None);
     // What a file or a reply's block is, as an element gives it: a token
     // (`tokens`), never the path or the text.
     tokens::install(host);
@@ -1492,6 +1497,17 @@ impl Bridge {
         if !self.first_load.get() {
             self.reload();
         }
+        // Each plugin has said again, as it loaded, whether it draws a
+        // settings page of its own: one a new version no longer draws goes.
+        // (After this turn, as what they said is taken: in that order.)
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            let Some(b) = me.upgrade() else { return };
+            let went = b.settings.borrow_mut().settle();
+            if went {
+                b.publish_settings(true, &[]);
+            }
+        });
     }
 
     fn reload(&self) {
@@ -2012,6 +2028,12 @@ impl Bridge {
             problem.field("need").map(text).as_deref(),
             &problem.field("error").map(text).unwrap_or_default(),
         );
+        self.say_problem(plugin, words);
+    }
+
+    /// `words`, a plugin's problem, on its row (once, as of its version).
+    fn say_problem(&self, plugin: &str, words: String) {
+        let Some(item) = self.item(plugin) else { return };
         let mut problems = self.problems.borrow_mut();
         if problems.get(plugin).is_some_and(|(hash, said)| hash == item.hash() && *said == words) {
             return;
@@ -2418,6 +2440,67 @@ impl Bridge {
                 }
             }
         });
+        // Its page of its own in Settings (`zeron.settings_page`): declared,
+        // with the words search finds it by, and how each build went.
+        host.action(format!("plugin.{id}.settings_page"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                if let Some(b) = me.upgrade() {
+                    // (Told from a load or a build: taken after it.)
+                    let (me, plugin, asked) = (Rc::downgrade(&b), plugin.clone(), value_json(&asked));
+                    b.tasks.spawn(async move {
+                        if let Some(b) = me.upgrade() {
+                            b.settings_page(&plugin, &asked);
+                        }
+                    });
+                }
+            }
+        });
+        // One of its own settings, set from its page: checked as Zeron's
+        // page checks it, kept, and told to it as any change is. A promise
+        // of the value it holds now, or why not.
+        host.async_action(format!("plugin.{id}.setting_set"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                async move {
+                    let b = me.upgrade().ok_or("The window closed")?;
+                    let asked = value_json(&asked);
+                    let id = asked["id"].as_str().unwrap_or_default().to_string();
+                    let changed = b.settings.borrow_mut().set_own(&plugin, &id, &asked["value"])?;
+                    if changed {
+                        b.publish_settings(true, std::slice::from_ref(&plugin));
+                    }
+                    let now = b.settings.borrow().values(&plugin).get(&id).cloned().unwrap_or(Json::Null);
+                    Ok(json_value(&now))
+                }
+            }
+        });
+        // One of its folder settings, chosen by the person in the window's
+        // dialog (a plugin never sets a folder itself). A promise of the
+        // folder chosen, or nil.
+        host.async_action(format!("plugin.{id}.setting_folder"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                async move {
+                    let asked = value_json(&asked);
+                    let id = asked["id"].as_str().unwrap_or_default().to_string();
+                    let (dialogs, title) = {
+                        let b = me.upgrade().ok_or("The window closed")?;
+                        let label = b.settings.borrow().folder_label(&plugin, &id)?;
+                        let name = b.item(&plugin).map(|i| i.name().to_string()).unwrap_or_else(|| plugin.clone());
+                        (b.dialogs.clone(), format!("{name}: {label}"))
+                    };
+                    let chosen = dialogs.open_folder(zgx_desktop::FileDialogOptions::new(title)).await.map_err(|e| e.to_string())?;
+                    let Some(path) = chosen else { return Ok(Value::Nil) };
+                    let path = path.to_string_lossy().to_string();
+                    let b = me.upgrade().ok_or("The window closed")?;
+                    b.setting_set(&json!({ "plugin": plugin, "id": id, "value": path }))?;
+                    Ok(Value::from(path.as_str()))
+                }
+            }
+        });
         host.action(format!("plugin.{id}.store_set"), {
             let (me, plugin) = (me.clone(), plugin.clone());
             move |asked| {
@@ -2756,6 +2839,42 @@ impl Bridge {
         }
     }
 
+    /// What a plugin's SDK says of its page of its own in Settings:
+    /// `{ op = "declare", keywords }` as it loads, `{ op = "built", error? }`
+    /// after each build. A failed build is said in the page's place, on its
+    /// row and to `plugin_status`; one that builds again clears what it said.
+    fn settings_page(&self, plugin: &str, asked: &Json) {
+        let Some(item) = self.item(plugin) else { return };
+        let changed = match asked["op"].as_str() {
+            Some("declare") => self.settings.borrow_mut().declare_page(plugin, &asked["keywords"]),
+            Some("built") => {
+                let error = asked["error"].as_str().filter(|e| !e.trim().is_empty());
+                let changed = self.settings.borrow_mut().page_built(plugin, error.map(recovery::first_line).as_deref());
+                let words = |e: &str| format!("{}'s settings page couldn't be shown: {}", item.name(), recovery::first_line(e));
+                match error {
+                    Some(e) if changed => {
+                        eprintln!("zeron-zgx: plugin {plugin}: its settings page failed: {e}");
+                        self.say_problem(plugin, words(e));
+                    }
+                    // (Built again: what its row said of the page goes.)
+                    None if changed => {
+                        let ours = self.problems.borrow().get(plugin).is_some_and(|(_, said)| said.starts_with(&format!("{}'s settings page", item.name())));
+                        if ours {
+                            self.problems.borrow_mut().remove(plugin);
+                            self.publish_page();
+                        }
+                    }
+                    _ => {}
+                }
+                changed
+            }
+            _ => false,
+        };
+        if changed {
+            self.publish_settings(true, &[]);
+        }
+    }
+
     /// One of a plugin's settings set from its page (null: its default).
     fn setting_set(&self, asked: &Json) -> Result<(), String> {
         let plugin = asked["plugin"].as_str().unwrap_or_default();
@@ -3007,6 +3126,14 @@ impl Bridge {
         }
         if let Some(pages) = self.pages.borrow().get(plugin) {
             out["pages"] = json!(pages);
+        }
+        // Its settings page of its own (`zeron.settings_page`): how it last
+        // built, and where Settings lists it.
+        if let Some(problem) = self.settings.borrow().page_problem(plugin) {
+            out["settings_page"] = json!({ "page": format!("plugin-{plugin}"), "built": problem.is_none() });
+            if let Some(problem) = problem {
+                out["settings_page"]["problem"] = json!(problem);
+            }
         }
         // Each of its contributions, as zgx counts it now.
         let contributions: Vec<Json> = self

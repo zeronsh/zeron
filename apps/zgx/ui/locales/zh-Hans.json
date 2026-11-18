@@ -3764,7 +3764,9 @@
         "off": "让新建对话显示 {name} 绘制的内容。关闭后恢复“外观”中的墙纸。",
         "instead_of": "当前墙纸来自 {other}。开启后改用 {name}。",
         "terms": "墙纸 背景 新建对话 效果 wallpaper background new chat effect"
-      }
+      },
+      "page_failed": "无法显示 {name} 的设置",
+      "page_label": "由 {name} 绘制的设置"
     },
     "init": {
       "waiting": "{name}正在等待你的授权",

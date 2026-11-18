@@ -119,8 +119,14 @@
 --   zeron.settings()           its settings' values by id (declared in
 --       zeron-plugin.json's "settings"; Zeron draws their page in Settings,
 --       under Plugins, while the plugin is on), followed where read
---   zeron.setting(id)          one of them: :get() (followed), :peek()
+--   zeron.setting(id)          one of them: :get() (followed), :peek(), and
+--       :set(value) from your settings page (a promise; checked as Zeron's
+--       row checks it, so the two are one value)
 --   zeron.on_setting(function(id, value, was) end)  told as one changes
+--   zeron.settings_page { build = function(page) return <node> end, keywords? }
+--       a settings page you draw, under Zeron's header and your declared
+--       rows (no permission); `page.bind(id)` is a declared setting as a
+--       state for a control, `page.choose_folder(id)` asks the person
 --   zeron.set_status(id, { badge, tone?, text? })  what Zeron says of one
 --       beside its control: a short badge in a tone ("neutral", "success",
 --       "warning", "danger") and words in its description's place, plain
@@ -837,12 +843,19 @@ return function(id: string): any
 
 	-- Its settings: declared in zeron-plugin.json's "settings", each
 	-- `{ id, kind, label, description?, default? }` (kinds: switch, choice,
-	-- text, number, shortcut, folder). Zeron draws their page and keeps
-	-- what the person sets, for this plugin alone; a setting never touched
-	-- reads its default. Read only here: only the person sets them.
+	-- text, number, shortcut, folder). Zeron draws their rows and keeps what
+	-- the person sets, for this plugin alone; a setting never touched reads
+	-- its default.
 	--   zeron.settings().tone      every value, followed where it's read
 	--   zeron.setting("tone"):get()
+	--   zeron.setting("tone"):set("dry")   from its own settings page
 	--   zeron.on_setting(function(id, value, was) … end)
+	-- `:set` is for the plugin's own settings page (`settings_page`): Zeron
+	-- checks the value as its row does (an option of a choice, a number in
+	-- its bounds), keeps it and tells the plugin as any change is told, so a
+	-- control of the page's own and the declared row are one value. A
+	-- promise of the value held then, or why not (a folder is the person's
+	-- to choose: `page.choose_folder`). Nil goes back to its default.
 	local settings_now = ui.shared(`{prefix}.settings`, {} :: any)
 	function M.settings(): { [string]: any }
 		return table.clone(settings_now:get() or {})
@@ -855,7 +868,122 @@ return function(id: string): any
 		function box.peek(_self: any): any
 			return (settings_now:peek() or {})[key]
 		end
+		function box.set(_self: any, value: any): any
+			return ui.call(`{prefix}.setting_set`, { id = key, value = if value == nil then ui.null else value })
+		end
 		return box
+	end
+
+	-- A settings page of its own (no permission): drawn by `build` under
+	-- the header Zeron draws (its icon, name, description) and its declared
+	-- rows, in Settings, under Plugins, while it's on, in a box of its own
+	-- that only it fills and nothing it draws gets out of. Settings search
+	-- finds it by the plugin's name and `keywords` (text, or `zeron.t(…)`).
+	--   zeron.settings_page {
+	--     keywords = { "accounts", "rules" },
+	--     build = function(page) return Settings.Section { … } end,
+	--   }
+	-- `page` is { plugin, bind(id, opts?), choose_folder(id) }: `bind`, in
+	-- the build, is a declared setting as a state a control takes (`Switch
+	-- { value = page.bind("show") }`), following the value and setting it
+	-- (`{ wait = 600 }`: once it has stood that long, for a text field);
+	-- `choose_folder` asks the person for a folder setting's folder (a
+	-- promise of it, or nil). A build that fails draws nothing, and Zeron
+	-- says so in its place, with your declared rows still there.
+	local page_declared = false
+	local page_build: ((page: any) -> Node)? = nil
+	local page_here = ui.ref()
+	local function bind(key: string, opts: { wait: number? }?): State<any>
+		local box = M.setting(key)
+		local now = ui.use_state(box:peek())
+		local wait = opts and opts.wait
+		local pending: (() -> ())? = nil
+		local function send(v: any)
+			local asked: any = box:set(v)
+			if asked ~= nil and asked.after then
+				-- (Refused: back to what's held.)
+				asked:after(nil, function(why: any)
+					print(`{id}: {key} wasn't set: {why}`)
+					if now:peek() ~= box:peek() then
+						now:set(box:peek())
+					end
+				end)
+			end
+		end
+		ui.effect(function()
+			local held = box:get()
+			if held ~= nil and pending == nil and now:peek() ~= held then
+				now:set(held)
+			end
+		end)
+		ui.effect(function()
+			local v = now:get()
+			if v == nil or v == box:peek() then
+				return
+			end
+			if not wait then
+				send(v)
+				return
+			end
+			if pending then
+				pending()
+			end
+			pending = ui.after(wait, function()
+				pending = nil
+				if now:peek() ~= box:peek() then
+					send(now:peek())
+				end
+			end)
+		end)
+		return now
+	end
+	local function said_keywords(keywords: { any }?): { string }
+		local out: { string } = {}
+		for _, k in keywords or {} do
+			local word = if type(k) == "function" then k() else k
+			if type(word) == "string" then
+				table.insert(out, word)
+			end
+		end
+		return out
+	end
+	function M.settings_page(spec: { build: (page: any) -> Node, keywords: { any }? })
+		assert(type(spec) == "table" and type(spec.build) == "function", "zeron.settings_page { build = function(page) … end }")
+		page_build = spec.build
+		-- (Said as it loads, and again as its words change: a language.)
+		local said: string? = nil
+		ui.effect(function()
+			local words = said_keywords(spec.keywords)
+			local key = table.concat(words, "\0")
+			if key ~= said then
+				said = key
+				ui.invoke(`{prefix}.settings_page`, { op = "declare", keywords = words })
+			end
+		end)
+		if page_declared then
+			return
+		end
+		page_declared = true
+		table.insert(placed, { at = "settings page", how = "page", ref = page_here })
+		local Page = ui.component(function(): Node
+			local page = {
+				plugin = id,
+				bind = bind,
+				choose_folder = function(key: string): any
+					return ui.call(`{prefix}.setting_folder`, { id = key })
+				end,
+			}
+			local started = os.clock()
+			local ok, node = pcall(page_build :: (page: any) -> Node, page)
+			spent("settings page", (os.clock() - started) * 1000)
+			if ok and node ~= nil then
+				ui.invoke(`{prefix}.settings_page`, { op = "built" })
+				return ui.column { ref = page_here, w_full = true, node }
+			end
+			ui.invoke(`{prefix}.settings_page`, { op = "built", error = if ok then "Its build returned nothing" else tostring(node) })
+			return ui.div {}
+		end)
+		ui.contribute("plugin_page", Page {})
 	end
 	-- Told of each change as it comes (not of the values it starts with).
 	local setting_listeners: { (id: string, value: any, was: any) -> () } = {}

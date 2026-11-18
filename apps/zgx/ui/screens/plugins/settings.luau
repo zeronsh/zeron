@@ -25,6 +25,14 @@
 -- What's set goes to the host (`M.set`, `M.choose_folder`: a fixture
 -- answers them itself), which keeps it for that plugin alone and tells
 -- the plugin (`plugin.<id>.settings`). Each page is in Settings search.
+--
+-- `page` says the plugin draws a page of its own too (its SDK's
+-- `zeron.settings_page`): `{ keywords, problem? }`. It's drawn after the
+-- declared rows, in a sealed region (zgx's `ui.sealed`) holding the
+-- plugin's own box (`ui.plugin_page`): no plugin reaches into the region or
+-- over it, only this plugin fills its box, and nothing it draws gets out of
+-- it. A build that failed (`problem`) is said over it, in Zeron's words,
+-- the declared rows still there. Search finds it by `keywords` too.
 
 local ds = require("@ds")
 local shell = require("@app/screens/shell/settings")
@@ -66,6 +74,9 @@ export type Entry = {
 	-- What its page says under its title (the manifest's
 	-- `settings_description`, plain); none, Zeron's own line.
 	description: string?,
+	-- A page it draws itself, after its declared rows: what search finds it
+	-- by, and why its last build failed, if it did.
+	page: { keywords: { string }?, problem: string? }?,
 }
 
 M.list = ui.shared("plugins.settings", {} :: { Entry })
@@ -436,7 +447,39 @@ local function shape(e: Entry?): string
 		end
 		table.insert(parts, table.concat({ s.id, s.kind, s.label or "", s.permission or "", s.description or "", s.section or "", s.style or "", s.unit or "", s.placeholder or "", table.concat(opts, ",") }, "\1"))
 	end
-	return table.concat(parts, "\0")
+	-- (A page of its own coming or going is another page too; its words and
+	-- how it built never are.)
+	return table.concat(parts, "\0") .. (if e.page then "\2page" else "")
+end
+
+-- What a plugin draws on its page itself, after its declared rows: its box
+-- in a sealed region, and over it, while its last build failed, Zeron's
+-- word of it.
+local function own_page(plugin: string, name: string): Node
+	local function problem(): string?
+		local e = M.of(plugin)
+		local p = if e and e.page then e.page.problem else nil
+		return if type(p) == "string" and p ~= "" then p else nil
+	end
+	return ui.column {
+		id = "plugin-settings-page",
+		w_full = true,
+		gap = "$space.4",
+		ui.show(function(): boolean
+			return problem() ~= nil
+		end, ds.Callout {
+			tone = "warning",
+			title = ui.t("plugins.settings.page_failed", { name = name }),
+			body = function(): string
+				return problem() or ""
+			end,
+		}),
+		ui.sealed {
+			label = ui.t("plugins.settings.page_label", { name = name }):get(),
+			w_full = true,
+			ui.plugin_page { plugin = plugin, w_full = true },
+		},
+	}
 end
 
 -- A plugin's wallpaper (a `wallpaper` row, Zeron's words): used as a new
@@ -578,6 +621,10 @@ local function view(plugin: string): Node
 					ds.Settings.Group(rows :: any),
 				})
 			end
+			-- What it draws itself, after what it declares.
+			if e.page then
+				table.insert(out, own_page(plugin, e.name))
+			end
 			return ui.column { w_full = true, gap = "$space.6", table.unpack(out) }
 		end, { w_full = true }),
 	}
@@ -633,7 +680,17 @@ ui.effect(function()
 				else s.description
 			table.insert(rows, { key = s.id, title = label_of(s), section = s.section, terms = terms })
 		end
-		search.index(page, e.name, ui.t("plugins.settings.terms"), rows)
+		-- A page of its own: found by its words too, landing on the page.
+		local words: { string } = {}
+		for _, k in (if e.page then e.page.keywords else nil) or {} do
+			if type(k) == "string" then
+				table.insert(words, k)
+			end
+		end
+		local terms: search.Words = if #words > 0
+			then `{ui.t("plugins.settings.terms"):get()} {table.concat(words, " ")}`
+			else ui.t("plugins.settings.terms")
+		search.index(page, e.name, terms, rows)
 	end
 	local unindex = (search :: any).unindex
 	for page in indexed do

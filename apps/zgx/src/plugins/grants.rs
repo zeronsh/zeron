@@ -80,9 +80,15 @@ pub const ACTIONS: &[(&str, &str)] = &[
 pub const NEVER_REPLACED: &[&str] = &["@app/screens/plugins", "@app/screens/shell/settings"];
 
 /// Each plugin's own actions (`plugin.<id>.<name>`).
-pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "open_url", "notify", "cost", "run", "db", "service_call", "agents", "menu_run", "compose_comment", "draft", "draft_of", "file", "block"];
+pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "setting_set", "setting_folder", "settings_page", "open_url", "notify", "cost", "run", "db", "service_call", "agents", "menu_run", "compose_comment", "draft", "draft_of", "file", "block"];
 /// Each plugin's own shared state, to read (`plugin.<id>.<name>`).
 pub const OWN_SHARED: &[&str] = &["calls", "inbox", "records", "github", "store", "settings", "locales", "menu_items", "composed", "drafts"];
+
+/// The slot a plugin gives its own settings page to (zgx's: what
+/// `ui.plugin_page` shows in a sealed region, that plugin's alone). Open to
+/// every plugin, as settings need no permission: nothing given there shows
+/// anywhere but its own box on its own Settings page.
+pub const SETTINGS_PAGE_SLOT: &str = "plugin_page";
 
 /// The capability naming plugin `id`'s own calls and actions.
 pub fn own(id: &str) -> Capability {

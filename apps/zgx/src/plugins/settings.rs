@@ -42,8 +42,18 @@
 //! engine's `RemovePlugin`, and the app's Remove).
 //!
 //! The plugin reads its values (with defaults) from `plugin.<id>.settings`,
-//! its own and read only; only Zeron's page sets them (`plugins.setting_set`,
-//! an action no plugin reaches).
+//! its own and read only. Zeron's page sets them (`plugins.setting_set`, an
+//! action no plugin reaches), and so may the plugin's own page, its own
+//! values alone (`plugin.<id>.setting_set`, [`Book::set_own`]), each checked
+//! as the page's are: a custom control and a declared row are one value. A
+//! folder is the person's to choose, in Zeron's dialog, never the plugin's to
+//! set (a folder it may be pointed at counts toward what it's allowed).
+//!
+//! A plugin may also draw a page of its own there (`zeron.settings_page`):
+//! under Zeron's header and its declared rows, in a sealed box only it fills
+//! (zgx's `ui.plugin_page`). Its SDK declares it ([`Book::declare_page`],
+//! with the words Settings search finds it by) and says how each build went
+//! ([`Book::page_built`]): one that failed is said in the page's place.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -77,6 +87,41 @@ const MAX_BADGE: usize = 24;
 const MAX_STATUS_TEXT: usize = 200;
 /// The most characters a page's own description says.
 pub const MAX_PAGE_DESCRIPTION: usize = 200;
+
+/// The most words a page of its own is found by in Settings search.
+pub const MAX_KEYWORDS: usize = 16;
+const MAX_KEYWORD: usize = 40;
+/// The most a failed build's words say.
+const MAX_PROBLEM: usize = 200;
+
+/// A page a plugin draws itself (`zeron.settings_page`), as its SDK said.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Custom {
+    /// What Settings search finds it by, beside the plugin's name.
+    keywords: Vec<String>,
+    /// Its last build failed: why, in plain words.
+    problem: Option<String>,
+    /// Said again by the plugin since it last changed (a new version reloads
+    /// it): one that isn't, once the reload is done, went (`Book::settle`).
+    confirmed: bool,
+}
+
+/// `asked`'s words as a page is found by them: text, one line each, at most
+/// [`MAX_KEYWORD`] characters, each once, [`MAX_KEYWORDS`] at most.
+fn keywords(asked: &Json) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for k in asked.as_array().into_iter().flatten() {
+        let Some(k) = k.as_str() else { continue };
+        let k = plain(k, MAX_KEYWORD);
+        if !k.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(&k)) {
+            out.push(k);
+        }
+        if out.len() == MAX_KEYWORDS {
+            break;
+        }
+    }
+    out
+}
 
 /// What a manifest says under its page's title (`settings_description`),
 /// plain, or none.
@@ -393,6 +438,9 @@ struct Held {
 pub struct Book {
     dir: Option<PathBuf>,
     held: BTreeMap<String, Held>,
+    /// The pages plugins draw themselves, by plugin: declared as it loads,
+    /// which may be before or after it's followed here, and gone with it.
+    custom: BTreeMap<String, Custom>,
 }
 
 /// A plugin on now, as `Book::sync` follows it.
@@ -419,7 +467,7 @@ pub struct Changed {
 impl Book {
     /// Settings kept under `dir` (`.storage`; none: nowhere, nothing kept).
     pub fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir, held: BTreeMap::new() }
+        Self { dir, held: BTreeMap::new(), custom: BTreeMap::new() }
     }
 
     /// Follows the plugins on now (`(id, name, hash)`), returning what
@@ -429,13 +477,22 @@ impl Book {
     pub fn sync(&mut self, on: &[On], read: impl Fn(&str) -> Option<Json>) -> Changed {
         let mut changed = Changed::default();
         let keep: HashMap<&str, ()> = on.iter().map(|o| (o.id.as_str(), ())).collect();
-        let before = self.held.len();
+        let before = (self.held.len(), self.custom.len());
         self.held.retain(|id, _| keep.contains_key(id.as_str()));
-        changed.list |= self.held.len() != before;
+        // (A page of its own goes with it: back on, it's declared again.)
+        self.custom.retain(|id, _| keep.contains_key(id.as_str()));
+        changed.list |= (self.held.len(), self.custom.len()) != before;
         for On { id, name, hash, builtin } in on {
             let same = self.held.get(id).is_some_and(|h| h.hash == *hash && h.name == *name);
             if same {
                 continue;
+            }
+            // Another version: its page stands until the reload says
+            // whether it still draws one (`settle`).
+            if self.held.get(id).is_some_and(|h| h.hash != *hash)
+                && let Some(custom) = self.custom.get_mut(id)
+            {
+                custom.confirmed = false;
             }
             let manifest = read(id);
             let declared = manifest.as_ref().map(|m| declared(id, m, *builtin)).unwrap_or_default();
@@ -495,6 +552,72 @@ impl Book {
         Ok(())
     }
 
+    /// Plugin `plugin` sets its own setting `id` from its page (null: back to
+    /// its default), checked as Zeron's page checks it; says why not. A
+    /// folder isn't the plugin's to set: the person chooses it in Zeron's
+    /// dialog. Whether its value changed.
+    pub fn set_own(&mut self, plugin: &str, id: &str, value: &Json) -> Result<bool, String> {
+        let held = self.held.get(plugin).ok_or("That plugin isn't on")?;
+        let setting = held.declared.iter().find(|s| s.id == id).ok_or_else(|| format!("It declares no setting {id}"))?;
+        match setting.kind.as_str() {
+            "folder" => return Err(format!("{id} is a folder: the person chooses it (page.choose_folder)")),
+            kind if zeron_s(kind) => return Err(format!("{id} is Zeron's row and has no value")),
+            _ => {}
+        }
+        if !value.is_null() && fit(setting, value).is_none() {
+            return Err(format!("That doesn't fit {id} (a {})", setting.kind));
+        }
+        let was = self.values(plugin).get(id).cloned();
+        self.set(plugin, id, value)?;
+        Ok(self.values(plugin).get(id) != was.as_ref())
+    }
+
+    /// The label of plugin `plugin`'s folder setting `id` (what its dialog
+    /// is titled by), or why it has none.
+    pub fn folder_label(&self, plugin: &str, id: &str) -> Result<String, String> {
+        let held = self.held.get(plugin).ok_or("That plugin isn't on")?;
+        let setting = held.declared.iter().find(|s| s.id == id && s.kind == "folder").ok_or_else(|| format!("It declares no folder setting {id}"))?;
+        Ok(setting.json["label"].as_str().unwrap_or(id).to_string())
+    }
+
+    /// Plugin `plugin` draws a page of its own here, found by `keywords`
+    /// (its SDK's `zeron.settings_page`). Whether what Settings shows
+    /// changed.
+    pub fn declare_page(&mut self, plugin: &str, asked: &Json) -> bool {
+        let keywords = keywords(asked);
+        let existed = self.custom.contains_key(plugin);
+        let custom = self.custom.entry(plugin.to_string()).or_default();
+        let changed = !existed || custom.keywords != keywords;
+        custom.keywords = keywords;
+        custom.confirmed = true;
+        // (Listed only once the plugin is followed, `list`.)
+        changed
+    }
+
+    /// How plugin `plugin`'s page last built: well (none), or why not, said
+    /// in its place. Whether that changed.
+    pub fn page_built(&mut self, plugin: &str, problem: Option<&str>) -> bool {
+        let Some(custom) = self.custom.get_mut(plugin) else { return false };
+        let problem = problem.map(|p| plain(p, MAX_PROBLEM)).map(|p| if p.is_empty() { "It failed".to_string() } else { p });
+        let changed = custom.problem != problem;
+        custom.problem = problem;
+        changed
+    }
+
+    /// Whether plugin `id` draws a page of its own, and how it last built
+    /// (`Some(None)`: well).
+    pub fn page_problem(&self, id: &str) -> Option<Option<String>> {
+        self.custom.get(id).map(|c| c.problem.clone())
+    }
+
+    /// The window reloaded: a page a plugin's new version no longer declares
+    /// goes. Whether any went.
+    pub fn settle(&mut self) -> bool {
+        let before = self.custom.len();
+        self.custom.retain(|_, c| c.confirmed);
+        self.custom.len() != before
+    }
+
     /// Plugin `plugin` reports a status for its setting `id` (null, or an
     /// empty one: cleared); says why not. Whether anything changed.
     pub fn set_status(&mut self, plugin: &str, id: &str, asked: &Json) -> Result<bool, String> {
@@ -512,27 +635,37 @@ impl Book {
     /// Plugin `id`'s settings let go of, on disk too (it was removed).
     pub fn forget(&mut self, id: &str) {
         self.held.remove(id);
+        self.custom.remove(id);
         if let Some(dir) = &self.dir {
             forget_in(dir, id);
         }
     }
 
-    /// The plugins on with settings, by name (then id), each with what it
-    /// declares and its values: what Settings draws a page of each from.
+    /// The plugins on with settings (declared, or a page of their own), by
+    /// name (then id), each with what it declares, its values, and its own
+    /// page (`page`: `{ keywords, problem? }`): what Settings draws a page of
+    /// each from.
     pub fn list(&self) -> Json {
-        let mut list: Vec<(&String, &Held)> = self.held.iter().filter(|(_, h)| !h.declared.is_empty()).collect();
+        let mut list: Vec<(&String, &Held)> = self.held.iter().filter(|(id, h)| !h.declared.is_empty() || self.custom.contains_key(*id)).collect();
         list.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()).then_with(|| a.0.cmp(b.0)));
         Json::Array(
             list.into_iter()
                 .map(|(id, h)| {
-                    json!({
+                    let mut entry = json!({
                         "plugin": id,
                         "name": h.name,
                         "settings": h.declared.iter().map(|s| s.json.clone()).collect::<Vec<_>>(),
                         "values": values(&h.declared, &h.stored),
                         "status": h.status,
                         "description": h.description,
-                    })
+                    });
+                    if let Some(custom) = self.custom.get(id) {
+                        entry["page"] = json!({ "keywords": custom.keywords });
+                        if let Some(problem) = &custom.problem {
+                            entry["page"]["problem"] = json!(problem);
+                        }
+                    }
+                    entry
                 })
                 .collect(),
         )
@@ -793,6 +926,97 @@ mod tests {
         // The shortcut's registration, as Appshots would report it.
         assert!(book.set_status("appshots", "shortcut", &json!({ "badge": "Set up", "tone": "warning", "text": "This shortcut is unavailable. Choose a different key combination." })).unwrap());
         assert!(book.set_status("appshots", "screen-recording", &json!({ "badge": "Ready" })).is_err(), "a permission's status is Zeron's");
+    }
+
+    #[test]
+    fn a_plugin_sets_its_own_values_from_its_page_as_the_page_checks_them() {
+        let dir = scratch("own-set");
+        let mut book = Book::new(Some(dir.clone()));
+        let mut other = manifest();
+        other["name"] = json!("Another");
+        sync(&mut book, &[("demo", "Demo", "h1", manifest()), ("another", "Another", "h1", other)]);
+        // One value with the declared row: kept, published, changed once.
+        assert_eq!(book.set_own("demo", "tone", &json!("dry")), Ok(true));
+        assert_eq!(book.set_own("demo", "tone", &json!("dry")), Ok(false), "the same again changes nothing");
+        assert_eq!(book.values("demo")["tone"], "dry");
+        let kept: Json = serde_json::from_str(&std::fs::read_to_string(dir.join("demo.settings.json")).unwrap()).unwrap();
+        assert_eq!(kept, json!({ "tone": "dry" }));
+        assert_eq!(book.set_own("demo", "every", &json!(9000)), Ok(true));
+        assert_eq!(book.values("demo")["every"], 600.0, "kept within its bounds, as the row keeps it");
+        // What doesn't fit, isn't declared, or isn't the plugin's to set.
+        assert!(book.set_own("demo", "tone", &json!("loud")).unwrap_err().contains("doesn't fit"));
+        assert!(book.set_own("demo", "keys", &json!("shift+k")).is_err());
+        assert!(book.set_own("demo", "nope", &json!(true)).unwrap_err().contains("no setting nope"));
+        assert!(book.set_own("demo", "out", &json!("/")).unwrap_err().contains("the person chooses it"), "a folder is the person's");
+        assert!(book.set_own("off", "tone", &json!("dry")).is_err(), "one that's off");
+        // Its own alone: another plugin's values are untouched.
+        assert_eq!(book.values("another")["tone"], "warm");
+        // Back to its default.
+        assert_eq!(book.set_own("demo", "tone", &Json::Null), Ok(true));
+        assert_eq!(book.values("demo")["tone"], "warm");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_page_of_its_own_is_listed_with_its_words_and_goes_with_the_plugin() {
+        let mut book = Book::new(None);
+        // A plugin with no declared settings, but a page of its own.
+        let bare = json!({ "id": "bare" });
+        sync(&mut book, &[("bare", "Bare", "h1", bare.clone()), ("demo", "Demo", "h1", manifest())]);
+        assert_eq!(book.list().as_array().unwrap().len(), 1, "only Demo declares any");
+        assert!(book.declare_page("bare", &json!(["Accounts", "rules", "accounts", "", 7, "two\nlines"])));
+        assert!(!book.declare_page("bare", &json!(["Accounts", "rules", "two lines"])), "the same again changes nothing");
+        let list = book.list();
+        assert_eq!(list[0]["plugin"], "bare");
+        assert_eq!(list[0]["page"], json!({ "keywords": ["Accounts", "rules", "two lines"] }), "plain, each once");
+        assert_eq!(list[0]["settings"], json!([]));
+        assert!(list[1].get("page").is_none(), "Demo draws none");
+        // At most 16 words, each 40 characters at most.
+        book.declare_page("bare", &json!((0..30).map(|i| format!("{i}{}", "x".repeat(60))).collect::<Vec<_>>()));
+        let words = book.list()[0]["page"]["keywords"].as_array().unwrap().clone();
+        assert_eq!(words.len(), MAX_KEYWORDS);
+        assert!(words.iter().all(|w| w.as_str().unwrap().chars().count() == MAX_KEYWORD));
+        // A build that failed is said, plainly; a good one clears it.
+        assert!(book.page_built("bare", Some("init.luau:4: attempt to index nil\n  stack…")));
+        assert_eq!(book.list()[0]["page"]["problem"], "init.luau:4: attempt to index nil stack…");
+        assert_eq!(book.page_problem("bare"), Some(Some("init.luau:4: attempt to index nil stack…".into())));
+        assert!(!book.page_built("bare", Some("init.luau:4: attempt to index nil\n  stack…")));
+        assert!(book.page_built("bare", None));
+        assert!(book.list()[0]["page"].get("problem").is_none());
+        assert!(!book.page_built("demo", Some("x")), "one that declared none has nothing to report");
+        // Off: gone, the page and the entry. Back on: none until it says so.
+        assert!(sync(&mut book, &[("demo", "Demo", "h1", manifest())]).list);
+        assert_eq!(book.list().as_array().unwrap().len(), 1);
+        assert_eq!(book.page_problem("bare"), None);
+        sync(&mut book, &[("bare", "Bare", "h1", bare.clone()), ("demo", "Demo", "h1", manifest())]);
+        assert_eq!(book.list().as_array().unwrap().len(), 1);
+        // Removed: gone too.
+        book.declare_page("bare", &json!([]));
+        book.forget("bare");
+        assert_eq!(book.page_problem("bare"), None);
+    }
+
+    #[test]
+    fn a_new_version_keeps_its_page_only_if_it_draws_one_again() {
+        let mut book = Book::new(None);
+        let bare = json!({ "id": "bare" });
+        sync(&mut book, &[("bare", "Bare", "h1", bare.clone())]);
+        book.declare_page("bare", &json!(["one"]));
+        // The same version reloaded (another plugin changed): it stands.
+        sync(&mut book, &[("bare", "Bare", "h1", bare.clone())]);
+        assert!(!book.settle());
+        assert_eq!(book.list().as_array().unwrap().len(), 1);
+        // A new version that says it again, while it reloads: it stands
+        // throughout, never gone in between.
+        sync(&mut book, &[("bare", "Bare", "h2", bare.clone())]);
+        assert_eq!(book.list().as_array().unwrap().len(), 1, "shown while the reload runs");
+        book.declare_page("bare", &json!(["two"]));
+        assert!(!book.settle());
+        assert_eq!(book.list()[0]["page"]["keywords"], json!(["two"]));
+        // A new version that doesn't: gone once the reload is done.
+        sync(&mut book, &[("bare", "Bare", "h3", bare)]);
+        assert!(book.settle());
+        assert_eq!(book.list(), json!([]));
     }
 
     #[test]
