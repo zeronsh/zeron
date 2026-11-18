@@ -937,3 +937,24 @@ async fn with_the_store_unreachable_nothing_unverified_gets_through() {
     let taken = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
     assert_eq!((taken["plugin"]["source"]["verified"].as_bool(), taken["plugin"]["status"].as_str()), (Some(false), Some("pending")), "{taken}");
 }
+
+#[tokio::test]
+async fn a_plugin_transferred_in_brings_no_notice_of_its_former_owner_s_versions() {
+    let store = FakeStore::start().await;
+    let (laptop, _) = SigningKey::generate().unwrap();
+    let (zeds, _) = SigningKey::generate().unwrap();
+    store.add("ann", &package_of(&laptop, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("ann"));
+    d.plugins.check_publishes().await;
+    // Published by its former owner after this device last looked, then
+    // transferred: not ann's publishes.
+    store.add("zed", &package_of(&zeds, "moved", "1.0.0", &["ui.add"], "return 1", json!({})), "listed", "");
+    store.transfer("moved", "ann");
+    d.plugins.check_publishes().await;
+    let ids = |list: Value| list["store_notices"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert!(ids(d.call(methods::LIST_PLUGINS, json!({})).await.unwrap()).is_empty());
+    // Hers, from another device: noticed.
+    store.add("ann", &package_of(&laptop, "moved", "1.1.0", &["ui.add"], "return 2", json!({})), "listed", "");
+    d.plugins.check_publishes().await;
+    assert_eq!(ids(d.call(methods::LIST_PLUGINS, json!({})).await.unwrap()), ["moved@1.1.0"]);
+}

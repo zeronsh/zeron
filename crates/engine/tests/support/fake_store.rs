@@ -50,6 +50,9 @@ pub struct StoredVersion {
     /// Yanked because a newer version was listed while this one wasn't
     /// verified: the newer version (the author can't unyank it).
     pub superseded_by: Option<String>,
+    /// The account that published it (fixed at publish: a transfer leaves
+    /// it the former owner's).
+    pub publisher_account: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -292,7 +295,10 @@ impl FakeStore {
             deploy_key: None,
             published_at,
             superseded_by: None,
+            publisher_account: String::new(),
         });
+        let account = plugin.account().to_owned();
+        plugin.versions.last_mut().unwrap().publisher_account = account;
         if state != "yanked" {
             plugin.supersede(&package.manifest.version);
         }
@@ -672,7 +678,10 @@ impl FakeStore {
                     deploy_key,
                     published_at,
                     superseded_by: None,
+                    publisher_account: String::new(),
                 });
+                let account = plugin.account().to_owned();
+                plugin.versions.last_mut().unwrap().publisher_account = account;
                 let before: Vec<String> = plugin.versions.iter().filter(|v| v.superseded_by.is_some()).map(|v| v.version.clone()).collect();
                 plugin.supersede(&package.manifest.version);
                 let superseded: Vec<String> = plugin.versions.iter().filter(|v| v.superseded_by.is_some() && !before.contains(&v.version)).map(|v| v.version.clone()).collect();
@@ -690,7 +699,8 @@ impl FakeStore {
                         "id": id, "author": p.author(),
                         "versions": p.versions.iter().map(|v| {
                             let mut info = version_info(&state, v);
-                            // (Which key sent it: the publish notice's.)
+                            // (Who and which key sent it: the publish notice's.)
+                            info["publisher_id"] = json!(publisher_id(&v.publisher_account));
                             info["deploy_key"] = v.deploy_key.as_ref().map_or(Value::Null, |(key, name)| json!({ "key": key, "name": name }));
                             info["yanked_by"] = match (v.status.as_str(), &v.superseded_by) {
                                 ("yanked", Some(_)) => json!("superseded"),
