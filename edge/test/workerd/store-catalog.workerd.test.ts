@@ -200,6 +200,11 @@ describe("store catalog", () => {
     expect(first.headers.get("cache-control")).toBe("public, max-age=60");
     const signedIn = await call(a.userId, "GET", `/store/v1/plugins/${id}`);
     expect(signedIn.headers.get("cache-control")).toBe("private, no-store");
+    // A public page carries no owner-only field, cached or not, whoever asks.
+    for (const res of [first, signedIn, await call(undefined, "GET", `/store/v1/plugins/${id}`)]) {
+      const detail = (await res.json()) as { versions: Record<string, unknown>[] };
+      for (const version of detail.versions) for (const field of ["review", "checks", "blocked", "via"]) expect(version, field).not.toHaveProperty(field);
+    }
   });
 });
 
@@ -217,6 +222,8 @@ describe("store packages and files", () => {
     expect(own.status).toBe(200);
     expect(own.headers.get("cache-control")).toBe("private, no-store");
     expect(new Uint8Array(await own.arrayBuffer())).toEqual(pkg);
+    // The owner's answer was never cached: to anyone else it still isn't there.
+    expect((await call(undefined, "GET", path)).status).toBe(404);
     expect((await adminCall("GET", path)).status).toBe(200);
     expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.0.0/approve`)).status).toBe(200);
     const pub = await call(undefined, "GET", path);
