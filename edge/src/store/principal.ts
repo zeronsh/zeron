@@ -20,6 +20,7 @@
  * request with a user must not be cached.
  */
 import type { Env } from "../env";
+import { SESSION_COOKIE, sendsCookie } from "../web-cookies";
 import { userDirectoryStub } from "../user-directory";
 import { bearerUser, cookieSession, forbidden, headerBearer, unauthenticated } from "./identity/callers";
 import { verifySignedRequest } from "./identity/signed-request";
@@ -27,6 +28,15 @@ import { verifySignedRequest } from "./identity/signed-request";
 export { BodyRefused, MAX_PUBLISH_BODY_BYTES, bodyStream, readBody } from "./identity/body";
 export { revokeDeployKeys } from "./identity/deploy-keys";
 export { withSessionCookie } from "../web-session";
+
+/**
+ * Whether the request carries credentials of any kind: an `Authorization`
+ * header, or the web session's cookie (live or not). The store's cache
+ * neither reads nor stores for such a request, so nobody's answer is ever
+ * served to anyone else. Decided from the request alone, with no lookup.
+ */
+export const hasCredentials = (req: Request): boolean =>
+  req.headers.get("authorization") !== null || sendsCookie(req, SESSION_COOKIE);
 
 export type Publisher = {
   userId: string;

@@ -447,14 +447,18 @@ describe("cookie-authenticated store routes", () => {
   it("answer optionalUser: the user on a read, nobody on a change without the token", async () => {
     const userId = await person();
     const browser = await webSignIn(userId);
-    expect(await (await fetchSite("/store/v1/public", { cookie: browser.cookie })).json()).toEqual({ user: { userId } });
-    expect(await (await fetchSite("/store/v1/public", { method: "POST", cookie: browser.cookie })).json()).toEqual({ user: null });
-    expect(await (await siteChange("/store/v1/public", browser)).json()).toEqual({ user: { userId } });
-    expect(await (await fetchSite("/store/v1/public")).json()).toEqual({ user: null });
+    expect(await (await fetchSite("/store/v1/public", { cookie: browser.cookie })).json()).toEqual({ user: { userId }, credentials: true });
+    expect(await (await fetchSite("/store/v1/public", { method: "POST", cookie: browser.cookie })).json()).toEqual({ user: null, credentials: true });
+    expect(await (await siteChange("/store/v1/public", browser)).json()).toEqual({ user: { userId }, credentials: true });
+    expect(await (await fetchSite("/store/v1/public")).json()).toEqual({ user: null, credentials: false });
     expect(
       await (await SELF.fetch(`${SITE}/store/v1/public`, { headers: { authorization: "Bearer runner:user_y@org1:cloud-1" } })).json()
-    ).toEqual({ user: null });
-    expect(await (await SELF.fetch(`${SITE}/store/v1/public`, { headers: { authorization: `Bearer ${userId}` } })).json()).toEqual({ user: { userId } });
+    ).toEqual({ user: null, credentials: true });
+    expect(await (await SELF.fetch(`${SITE}/store/v1/public`, { headers: { authorization: `Bearer ${userId}` } })).json()).toEqual({ user: { userId }, credentials: true });
+    // hasCredentials needs no lookup: a dead cookie, or one among others, counts; a look-alike doesn't.
+    expect(await (await fetchSite("/store/v1/public", { cookie: sessionHeader("A".repeat(43)) })).json()).toEqual({ user: null, credentials: true });
+    expect(await (await fetchSite("/store/v1/public", { cookie: `theme=dark; ${browser.cookie}` })).json()).toMatchObject({ credentials: true });
+    expect(await (await fetchSite("/store/v1/public", { cookie: "theme=dark; x__Host-zeron_session=1" })).json()).toEqual({ user: null, credentials: false });
   });
 
   it("admit an admin's session only while the edge says admin", async () => {

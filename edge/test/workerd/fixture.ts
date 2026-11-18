@@ -28,7 +28,7 @@ import { handleWebAuthRoute } from "../../src/web-auth-routes";
 import { handleRoleAdminRoute } from "../../src/roles";
 import { handleDeployKeyRoute } from "../../src/store/identity/deploy-keys";
 import { sha256Hex } from "../../src/store/identity/signing";
-import { BodyRefused, authenticatePublisher, bodyStream, optionalUser, readBody, requireAdmin, withSessionCookie } from "../../src/store/principal";
+import { BodyRefused, authenticatePublisher, hasCredentials, bodyStream, optionalUser, readBody, requireAdmin, withSessionCookie } from "../../src/store/principal";
 export { DeviceRoom } from "../../src/device-room";
 export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
@@ -165,7 +165,7 @@ const storeStandIn = async (request: Request, env: Env, url: URL): Promise<Respo
     const admin = await requireAdmin(request, env);
     return admin instanceof Response ? admin : json({ admin });
   }
-  if (path === "/store/v1/public") return json({ user: await optionalUser(request, env) });
+  if (path === "/store/v1/public") return json({ user: await optionalUser(request, env), credentials: hasCredentials(request) });
   if (path === "/store/v1/me/plugins" || /^\/store\/v1\/plugins\/[^/]+\/versions(\/[^/]+\/[a-z]+)?$/.test(path)) {
     const publisher = await authenticatePublisher(request, env);
     if (publisher instanceof Response) return publisher;
