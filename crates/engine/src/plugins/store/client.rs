@@ -506,10 +506,13 @@ impl StoreClient {
 
     /// Version `version` of `id`, as the store records it (listed or
     /// yanked): what a device installs a named version by.
+    /// A record that can't be read (one without `verified`, say: readers
+    /// require it) is `store_mismatch`: nothing is installed by it.
     pub async fn version(&self, id: &str, version: &str, caller: &Caller) -> Result<(Value, VersionRecord), String> {
         let path = format!("/store/v1/plugins/{}/versions/{}", segment(id), segment(version));
         let value = self.json(reqwest::Method::GET, &path, None, caller).await?;
-        let record = Self::typed(value.clone())?;
+        let record = serde_json::from_value(value.clone())
+            .map_err(|_| failure(reason::STORE_MISMATCH, format!("The store's record of {id} {version} can't be read (it doesn't say all a record says), so it wasn't installed")))?;
         Ok((value, record))
     }
 

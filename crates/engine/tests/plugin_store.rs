@@ -797,3 +797,52 @@ async fn every_publish_not_made_here_is_noticed_once_and_kept_until_the_app_has_
         RpcReply::Stream(_) => unreachable!(),
     }), ["focus@1.2.0"]);
 }
+
+#[tokio::test]
+async fn a_record_that_doesn_t_say_verified_never_reads_as_verified() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    let agent = || zeron_rpc::Caller::Agent { chat: Some("c1".into()) };
+
+    // The install record: refused as unreadable, for the person and an agent.
+    store.state.lock().unwrap().records_without_verified = true;
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_mismatch", "{refused}");
+    let refused = d.call_as(agent(), methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_mismatch", "{refused}");
+    assert!(d.item("focus").await.is_null(), "nothing installed");
+
+    // Installed from a good record; then the update's record, fetched again
+    // as it's taken, doesn't say: the update is refused.
+    store.state.lock().unwrap().records_without_verified = false;
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "verified", "");
+    assert_eq!(d.check().await["updates"][0]["version"], "1.1.0");
+    store.state.lock().unwrap().records_without_verified = true;
+    let refused = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_mismatch", "{refused}");
+    assert_eq!(d.item("focus").await["version"], "1.0.0");
+    store.state.lock().unwrap().records_without_verified = false;
+
+    // An offer that doesn't say: not offered, said as an error.
+    store.state.lock().unwrap().offers_without_verified = true;
+    let checked = d.check().await;
+    assert_eq!(checked["updates"], json!([]), "{checked}");
+    assert!(checked["errors"].as_array().is_some_and(|e| e.iter().any(|e| e["id"] == "focus")), "{checked}");
+    store.state.lock().unwrap().offers_without_verified = false;
+
+    // An install whose .source.json doesn't say reads unverified, and its
+    // row says so.
+    let dir = std::path::PathBuf::from(d.item("focus").await["dir"].as_str().unwrap());
+    let path = dir.join(".source.json");
+    let mut source: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(source["store"]["verified"], true, "{source}");
+    source["store"].as_object_mut().unwrap().remove("verified");
+    std::fs::write(&path, serde_json::to_vec(&source).unwrap()).unwrap();
+    let page = d.call(methods::STORE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
+    assert_eq!(page["installed"]["verified"], false, "{page}");
+    assert_eq!(d.item("focus").await["source"]["verified"], false);
+}

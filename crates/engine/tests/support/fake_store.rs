@@ -109,6 +109,11 @@ pub struct State {
     pub feed_floor: u64,
     /// The last time the store's clock gave (`State::tick`).
     pub clock: i64,
+    /// Version records answered without `verified` (a broken or hostile
+    /// store: readers require it).
+    pub records_without_verified: bool,
+    /// Update offers answered without `verified`.
+    pub offers_without_verified: bool,
 }
 
 /// `card` with the store's `card_extra` laid over it.
@@ -488,7 +493,11 @@ impl FakeStore {
                 if !matches!(v.status.as_str(), "listed" | "yanked") {
                     return not_found();
                 }
-                json_reply(200, version_info(&state, v))
+                let mut info = version_info(&state, v);
+                if state.records_without_verified {
+                    info.as_object_mut().unwrap().remove("verified");
+                }
+                json_reply(200, info)
             }
             ("GET", ["store", "v1", "plugins", id, "versions", version, "package"]) => {
                 let mut state = self.state.lock().unwrap();
@@ -583,6 +592,9 @@ impl FakeStore {
                     let best = if asked["verified_only"] == true { newer.iter().find(|v| v.verified) } else { newer.first() };
                     if let Some(best) = best {
                         let mut item = offer(best);
+                        if state.offers_without_verified {
+                            item.as_object_mut().unwrap().remove("verified");
+                        }
                         if !best.verified
                             && let Some(verified) = newer.iter().find(|v| v.verified)
                         {

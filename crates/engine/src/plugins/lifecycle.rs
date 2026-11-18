@@ -607,7 +607,7 @@ impl Plugins {
         // From the store: whether it's verified is the store's record's,
         // asked now, never what the check remembered (unknown: not).
         if let Some(store) = source.store.as_mut().filter(|_| source.kind == install::STORE) {
-            store.verified = self.verified_now(id, &found.version, &package.hash).await;
+            store.verified = self.verified_now(id, &found.version, &package.hash).await.map_err(failed)?;
             if verified_only && !store.verified {
                 return Err(failed(install::failure(
                     install::reason::NOT_VERIFIED,

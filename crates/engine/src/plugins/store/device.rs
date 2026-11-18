@@ -843,14 +843,18 @@ impl Plugins {
         Ok((package, source))
     }
 
-    /// Whether the store's record says version `version` of `id` is
-    /// verified, asked now (an update about to be taken): `false` when it
-    /// can't be asked, so taking it asks you.
-    pub(in crate::plugins) async fn verified_now(&self, id: &str, version: &str, hash: &str) -> bool {
-        let Ok((client, caller)) = self.store_reader() else { return false };
+    /// Whether the store's record says version `version` of `id` (content
+    /// `hash`) is verified, asked now (an update about to be taken): `false`
+    /// when the store can't be reached, so taking it asks you. A record that
+    /// can't be read, names other content, or is gone refuses the update:
+    /// it never fails open.
+    pub(in crate::plugins) async fn verified_now(&self, id: &str, version: &str, hash: &str) -> Result<bool, String> {
+        let Ok((client, caller)) = self.store_reader() else { return Ok(false) };
         match client.version(id, version, &caller).await {
-            Ok((_, record)) => record.verified && record.hash.eq_ignore_ascii_case(hash),
-            Err(_) => false,
+            Ok((_, record)) if record.hash.eq_ignore_ascii_case(hash) => Ok(record.verified),
+            Ok(_) => Err(failure(client::reason::STORE_MISMATCH, format!("The store's record of {id} {version} names other content than the update found, so it wasn't taken"))),
+            Err(error) if install::reason_of(&error) == Some(client::reason::STORE_UNREACHABLE) => Ok(false),
+            Err(error) => Err(error),
         }
     }
 

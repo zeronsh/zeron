@@ -170,14 +170,10 @@ pub struct StoreSource {
     pub key: Option<String>,
     /// The version installed was verified (amendment 45), as the record it
     /// was installed from said, fetched at install time: never a card, a
-    /// remembered offer, the manifest or a caller's word. (An install from
-    /// before reads as verified: then, every store version was reviewed.)
-    #[serde(default = "verified_before")]
+    /// remembered offer, the manifest or a caller's word. A record here
+    /// without it reads as not verified: it never fails open.
+    #[serde(default)]
     pub verified: bool,
-}
-
-fn verified_before() -> bool {
-    true
 }
 
 impl StoreSource {
