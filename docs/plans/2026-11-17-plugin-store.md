@@ -443,3 +443,7 @@ Agreed after the plan was first written. Newest last.
     package's key is a live device key of the caller, or the caller's live
     deploy key for that plugin; with a deploy key, the package's key is that
     key and its scope is that plugin.
+25. **`updates[]` entries carry `publisher`** (the current owner's
+    username) beside `key`, `hash`, `sha256` and `bytes`, so a device can
+    tell a changed owner and ask again. An offer without it is refused by
+    the device as `store_mismatch`.
