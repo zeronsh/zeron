@@ -53,7 +53,8 @@ const MARKS = STORE_DATA.mark_claims as unknown as {
     readonly list_marks: readonly string[];
     readonly negations: readonly string[];
     readonly negations_after: readonly string[];
-    readonly platform_words: readonly string[];
+    readonly authorities: readonly string[];
+    readonly object_words: readonly string[];
     readonly plugin_words: Readonly<Record<string, WordList>>;
     readonly predicate_before: readonly string[];
     readonly relation_after: readonly string[];
@@ -62,7 +63,6 @@ const MARKS = STORE_DATA.mark_claims as unknown as {
     readonly sentence_ends: readonly string[];
     readonly store_words: readonly string[];
     readonly subject_words: readonly string[];
-    readonly verified_stems: readonly string[];
   };
 };
 const ZERONS = STORE_DATA.claims_zeron as unknown as {
@@ -97,12 +97,13 @@ const BY_WORDS = MARKS.description.by_words;
 const CONJUNCTIONS = MARKS.description.conjunctions;
 const LIST_MARKS = new Set(MARKS.description.list_marks);
 const NEGATIONS_AFTER = MARKS.description.negations_after;
-const PLATFORM_WORDS = MARKS.description.platform_words;
+const OBJECT_WORDS = MARKS.description.object_words;
+const AUTHORITIES = MARKS.description.authorities;
 const PREDICATE_BEFORE = MARKS.description.predicate_before;
 const RELATION_AFTER = MARKS.description.relation_after;
 const RELATION_BEFORE_ZH = MARKS.description.relation_before_zh;
 const RELATION_WORDS = MARKS.description.relation_words;
-const VERIFIED_STEMS = MARKS.description.verified_stems;
+
 const ZERON = ZERONS.word;
 const NAME_FORMS: readonly string[] = Object.values(ZERONS.name.allowed_before).flat();
 const ORIGIN_WORDS = ZERONS.description.origin_before;
@@ -429,27 +430,6 @@ class Reading {
     ) {
       return false;
     }
-    // A "verified" word checked with a platform: a changelog line.
-    const said = [...markText(this.text.slice(span[0], span[1]).join(""))];
-    const verified = VERIFIED_STEMS.some((stem) => {
-      const st = [...markText(stem)];
-      return startsWith(said, 0, st) || spans(said, st, true).length > 0;
-    });
-    if (verified && last + 1 < this.words.length && inSentence(last + 1) && this.wordIs(last + 1, PLATFORM_WORDS)) return false;
-    // Alone as a sentence: any of them.
-    if (this.alone(covered, span)) return true;
-    const afterConjunction = first > 0 && inSentence(first - 1) && this.wordIs(first - 1, CONJUNCTIONS);
-    let listedBefore = false;
-    for (let n = span[0] - 1; n >= from; n--) {
-      const c = this.text[n]!;
-      if (WHITE_SPACE.test(c)) continue;
-      listedBefore = LIST_MARKS.has(c);
-      break;
-    }
-    const predicateBefore =
-      afterConjunction || listedBefore || (first > 0 && inSentence(first - 1) && (this.wordIs(first - 1, PREDICATE_BEFORE) || this.wordIs(first - 1, SUBJECT_WORDS)));
-    let atEnd = true;
-    for (let n = last + 1; n < this.words.length; n++) if (inSentence(n)) atEnd = false;
     const pluginBefore =
       first > 0 &&
       inSentence(first - 1) &&
@@ -464,7 +444,31 @@ class Reading {
           })
         );
       })();
-    const byAfter = last + 1 < this.words.length && inSentence(last + 1) && this.wordIs(last + 1, BY_WORDS);
+    // A word that gives it an object ("verified against Node 22"), or "by"
+    // and someone other than the publisher or an authority ("verified by
+    // GitHub"): a test, or someone else's thing. (Not after a word for the
+    // plugin: "Cliente oficial para Git": "para Git" is the client's.)
+    const next = last + 1 < this.words.length && inSentence(last + 1) && !pluginBefore ? last + 1 : undefined;
+    if (next !== undefined && this.wordIs(next, OBJECT_WORDS)) return false;
+    if (next !== undefined && this.wordIs(next, BY_WORDS)) {
+      let who = next + 1;
+      while (who < this.words.length && inSentence(who) && this.wordIs(who, ARTICLES)) who++;
+      return who < this.words.length && inSentence(who) && this.wordIs(who, AUTHORITIES);
+    }
+    // Alone as a sentence: any of them.
+    if (this.alone(covered, span)) return true;
+    const afterConjunction = first > 0 && inSentence(first - 1) && this.wordIs(first - 1, CONJUNCTIONS);
+    let listedBefore = false;
+    for (let n = span[0] - 1; n >= from; n--) {
+      const c = this.text[n]!;
+      if (WHITE_SPACE.test(c)) continue;
+      listedBefore = LIST_MARKS.has(c);
+      break;
+    }
+    const predicateBefore =
+      afterConjunction || listedBefore || (first > 0 && inSentence(first - 1) && (this.wordIs(first - 1, PREDICATE_BEFORE) || this.wordIs(first - 1, SUBJECT_WORDS)));
+    let atEnd = true;
+    for (let n = last + 1; n < this.words.length; n++) if (inSentence(n)) atEnd = false;
     const subject = first > 0 && inSentence(first - 1) && SUBJECT_WORDS.some((w) => this.beforeIs(first, w));
     let firstInText = true;
     for (let n = 0; n < first; n++) {
@@ -474,9 +478,8 @@ class Reading {
     switch (kind) {
       case "mark":
         // Ending its sentence ("Safe, fast and verified."), first (articles
-        // and symbols aside), after a word that says it of the subject, or
-        // after "and" with "by …" after it.
-        return (atEnd && predicateBefore) || (firstWord && firstInText) || subject || (afterConjunction && byAfter) || this.nearPlugin(covered, span, false);
+        // and symbols aside), or after a word that says it of the subject.
+        return (atEnd && predicateBefore) || (firstWord && firstInText) || subject || this.nearPlugin(covered, span, false);
       case "name_only": {
         // Also an ordinary word: only where that can't be.
         const conjunctionAfter = last + 1 < this.words.length && inSentence(last + 1) && this.wordIs(last + 1, CONJUNCTIONS);

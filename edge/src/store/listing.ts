@@ -255,7 +255,7 @@ export const checkListing = (
   else if (UNSEEN.test(manifest.name)) problems.push(problem("bad_listing", "name", "Its name has a control or invisible formatting character"));
   else {
     const claim = markClaim(manifest.name, true);
-    if (claim !== undefined) problems.push(problem("bad_listing", "name", `Its name says "${claim}": only the store marks a plugin verified`));
+    if (claim !== undefined) problems.push(problem("bad_listing", "name", `Its name says "${claim}": only the store marks a plugin verified or official. Name it for what it does, without that word`));
     else if (claimsZeronInName(manifest.name)) {
       warnings.push(problem("claims_zeron", "name", 'Its name says "Zeron" other than as what it\'s for ("for Zeron", "in Zeron"): only Zeron\'s own plugins may, and the store refuses it from anyone else'));
     }
@@ -278,7 +278,7 @@ export const checkListing = (
   else {
     const claim = markClaim(description, false);
     const zeron = claim === undefined ? claimsZeron(description) : undefined;
-    if (claim !== undefined) problems.push(problem("bad_listing", "description", `Its description says "${claim}": only the store marks a plugin verified`));
+    if (claim !== undefined) problems.push(problem("bad_listing", "description", `Its description says "${claim}" of the plugin itself: only the store marks a plugin verified or official. Say what it does instead, or say whose thing it is ("works with the official Slack app")`));
     else if (zeron !== undefined) warnings.push(problem("claims_zeron", "description", `Its description says "${zeron}": only Zeron's own plugins may, and the store refuses it from anyone else`));
   }
   const icon = raw.get("icon");
@@ -317,7 +317,7 @@ export const checkListing = (
       for (const w of words as string[]) {
         const claim = keywordClaim(w);
         if (claim === undefined) continue;
-        problems.push(problem("bad_listing", "keywords", `Keyword "${w}" says "${claim}": a keyword may say neither the store's mark nor Zeron`));
+        problems.push(problem("bad_listing", "keywords", `Keyword "${w}" says "${claim}": a keyword may say neither the store's mark nor Zeron. Drop it, or use a word for what the plugin does`));
         break;
       }
     }
