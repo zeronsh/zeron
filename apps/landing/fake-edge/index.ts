@@ -21,6 +21,8 @@ const state = {
   /** session id → user id, csrf */
   /** `rotated`: a staff session already replaced on its first privileged use. */
   sessions: new Map<string, { user: string; csrf: string; rotated?: boolean }>(),
+  /** The queue as a screenshot asks for it (POST /_fake/queue, astro dev's /_dev/queue): empty, or this long. Null: as it is. */
+  queueAs: null as null | "empty" | number,
 };
 
 // Programs the host rates (crates/plugin-guard/src/commands.rs), enough for the fixtures.
@@ -346,9 +348,33 @@ function queue(url: URL): Response {
         };
       }),
   );
+  if (status === "pending" && state.queueAs === "empty") items.length = 0;
+  if (status === "pending" && typeof state.queueAs === "number") items.push(...filler(state.queueAs - items.length));
   // Oldest waiting first.
   items.sort((a, b) => a.submitted_at - b.submitted_at);
   return json(paged(items, url, "items"));
+}
+
+/** Submissions that fill a long queue for its picture: made up, each a plausible one (none opens). */
+function filler(n: number) {
+  const NAMES = ["Commit coach", "Diff digest", "Branch tidy", "Standup bot", "Tab groups", "Prompt shelf", "Log lens", "Issue triage", "Cron watch", "Snippet box", "Focus music", "Daily notes", "Review buddy", "Docker peek", "Env check", "Port finder", "Token budget", "Release notes", "Sprint board", "Lint on save", "Model picker", "Chat export", "Quiet hours", "Time zones", "PR labels", "Test runner", "Changelog bot", "Rate limits", "Spell check", "Code owners", "Weekly recap", "Icon pack", "Pair mode", "Night owl", "Ticket links", "Build badge", "Gist share", "Error lens", "Merge queue", "Inbox zero"];
+  const PEOPLE = ["ada", "kai", "mo-dev", "noor", null];
+  return Array.from({ length: Math.max(0, n) }, (_, i) => {
+    const name = NAMES[i % NAMES.length]!;
+    const update = i % 3 !== 0;
+    const username = PEOPLE[i % PEOPLE.length]!;
+    return {
+      plugin: { id: name.toLowerCase().replace(/ /g, "-"), name },
+      version: update ? `1.${(i % 4) + 1}.${i % 3}` : "0.1.0",
+      status: "pending" as const,
+      prerelease: false,
+      submitted_at: NOW - (i * 5.5 + 1) * 3_600_000,
+      publisher: { id: `pub_${i}`, username },
+      ...(update ? { base: `1.${i % 4}.0` } : {}),
+      new_asks: update && i % 5 === 1 ? (i % 2 ? ["commands"] : ["network"]) : [],
+      checks: { ok: 6, warn: i % 4 === 0 ? 1 : 0, fail: 0 },
+    };
+  });
 }
 
 function submission(id: string, version: string): Response {
@@ -575,6 +601,12 @@ async function route(request: Request): Promise<Response> {
   }
   // The release the installer and the site offer (the edge's /releases/*).
   if (parts[0] === "releases" && parts[1] === "latest.txt" && method === "GET") return new Response("0.3.4\n", { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" } });
+  // (The fake's own: the queue as a screenshot needs it.)
+  if (parts[0] === "_fake" && parts[1] === "queue" && method === "POST") {
+    const as = url.searchParams.get("as");
+    state.queueAs = as === "empty" ? "empty" : as && /^\d{1,3}$/.test(as) ? Number(as) : null;
+    return json({ queue: state.queueAs });
+  }
   if (parts[0] !== "store" || parts[1] !== "v1") return notFound();
   const [, , a, b, c, d, e] = parts;
 
@@ -664,7 +696,10 @@ async function route(request: Request): Promise<Response> {
 }
 
 /** A page of an admin list, with cursors both ways (amendment 29). */
-function paged<T>(all: T[], url: URL, field: string, limit = 20): Record<string, unknown> {
+function paged<T>(all: T[], url: URL, field: string): Record<string, unknown> {
+  // (`limit`: 1 to 50, the edge's own most and default; 20 here unasked, so a short list still has pages.)
+  const asked = Number(url.searchParams.get("limit"));
+  const limit = Number.isInteger(asked) && asked >= 1 && asked <= 50 ? asked : 20;
   const cursor = url.searchParams.get("cursor");
   const start = cursor ? Math.max(0, Number(atob(cursor.replace(/-/g, "+").replace(/_/g, "/"))) || 0) : 0;
   const at = (n: number) => btoa(String(n)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

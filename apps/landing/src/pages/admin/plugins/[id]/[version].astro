@@ -1,34 +1,33 @@
 ---
-// One submission, as a reviewer reads it: who sent it, what it asks for
-// (what's new since the last approved version first), the automated
-// checks, the README as it will show, every file, and what changed line by
-// line. Then approve, or say why not. Admins only; anyone else gets the
-// site's 404.
-import AccountBar from "../../../../components/store/AccountBar.astro";
+// One submission, as a reviewer weighs it, in that order: the public page's
+// head; what it asks for, marked against the last approved version; what
+// changed (its notes, its files); its listing as visitors will see it; the
+// raw manifest, folded. Beside it, the decision, which never scrolls away:
+// Approve, Don't approve (a reason, words, and the author's view of them),
+// or, for an approved version, Take down. Its files and its changes line by
+// line are views of their own. Admins only; anyone else gets the site's 404.
+import Decline from "../../../../components/kit/Decline.astro";
+import Strip from "../../../../components/kit/Strip.astro";
+import TakeDown from "../../../../components/kit/TakeDown.astro";
+import Toast from "../../../../components/kit/Toast.astro";
 import CodeView from "../../../../components/store/CodeView.astro";
-import ConfirmForm from "../../../../components/store/ConfirmForm.astro";
 import DiffView from "../../../../components/store/DiffView.astro";
 import FileTree from "../../../../components/store/FileTree.astro";
-import PermissionList from "../../../../components/store/PermissionList.astro";
 import PluginTile from "../../../../components/store/PluginTile.astro";
-import Badge from "../../../../components/ui/Badge.astro";
-import Dialog from "../../../../components/ui/Dialog.astro";
-import Field from "../../../../components/ui/Field.astro";
 import Glyph from "../../../../components/ui/Glyph.astro";
-import Select from "../../../../components/ui/Select.astro";
-import Tabs from "../../../../components/ui/Tabs.astro";
-import Store from "../../../../layouts/Store.astro";
-import { REJECT_REASONS } from "../../../../lib/store/admin.ts";
+import App from "../../../../layouts/App.astro";
+import { reasonLabel, versionAsk } from "../../../../lib/store/admin.ts";
 import { takeFlash } from "../../../../lib/store/flash.ts";
-import { age, ago, bytes } from "../../../../lib/store/format.ts";
+import { age, bytes, count, dateTime, day, unbidi, waitedFor } from "../../../../lib/store/format.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
 import { renderMarkdown } from "../../../../lib/store/markdown.ts";
 import { isPluginId, isVersion } from "../../../../lib/store/names.ts";
-import { grew } from "../../../../lib/store/permissions.ts";
+import { compared } from "../../../../lib/store/permissions.ts";
 import { changedFiles, countRows, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, pictureType, readText, type DiffRow } from "../../../../lib/store/review.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
-import { reasonWords, versionState } from "../../../../lib/store/states.ts";
-import { fileUrl, memberUrl } from "../../../../lib/store/urls.ts";
+import { toneClass, versionState } from "../../../../lib/store/states.ts";
+import { fileUrl, memberUrl, pluginUrl } from "../../../../lib/store/urls.ts";
+import type { PackageFile } from "../../../../lib/store/types.ts";
 
 export const prerender = false;
 
@@ -46,28 +45,24 @@ const s = result.ok ? result.data : null;
 /** Its name: the plugin's (a card), else what this version lists. */
 const name = s?.plugin.name ?? s?.version.name ?? (typeof s?.manifest.name === "string" ? s.manifest.name : id);
 
-const VIEWS = { overview: "Overview", readme: "README", files: "Files", changes: "Changes" } as const;
+// Its views: the submission, its files, its changes (an update's alone).
+// (The README had a view of its own; it's the listing's part now.)
+const VIEWS = { overview: "Overview", files: "Files", changes: "Changes" } as const;
 type View = keyof typeof VIEWS;
 const askedView = Astro.url.searchParams.get("view");
-const view: View = askedView && Object.hasOwn(VIEWS, askedView) ? (askedView as View) : "overview";
+const view: View = askedView && Object.hasOwn(VIEWS, askedView) && (askedView !== "changes" || s?.base) ? (askedView as View) : "overview";
 const here = `/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(version)}`;
 const viewHref = (v: View, extra: Record<string, string> = {}) => `${here}${v === "overview" && !Object.keys(extra).length ? "" : `?${new URLSearchParams({ view: v, ...extra })}`}`;
 
-// Its files, with its manifest among them as the reviewer reads it.
+// Its files, with its manifest among them as the reviewer reads it; against
+// the base's, what was added, changed or taken out (from the edge's hashes).
 const manifest = s ? manifestText(s.manifest) : "";
 const baseManifest = s?.base ? manifestText(s.base.manifest) : "";
 const files = s ? [await manifestFile(manifest), ...s.files] : [];
 const changes = s?.base ? changedFiles(files, [await manifestFile(baseManifest), ...s.base_files]) : [];
 const changeOf = new Map(changes.map((c) => [c.path, c.change]));
-
-// README, as it will show in the store (its pictures through the file
-// route, which lets an admin see a pending version's).
-let readme = "";
-if (s && view === "readme") {
-  const file = await readText(await edge.file(id, version, "README.md", true));
-  // (Rendered each time: a version in review is no one's to keep.)
-  readme = file && "text" in file ? renderMarkdown(file.text, { file: (p) => fileUrl(id, version, p), demote: true }) : "";
-}
+const unchanged = s?.base ? files.filter((f) => !changeOf.has(f.path)) : [];
+const CHANGE = { added: { label: "New", tone: "ok" }, modified: { label: "Changed", tone: "warn" }, removed: { label: "Removed", tone: "bad" } } as const;
 
 // The file viewer: exactly the file asked for (one of the edge's list, by
 // its own path: never another in its place), else the manifest. A picture
@@ -75,15 +70,15 @@ if (s && view === "readme") {
 /** A file's text, from the edge (the manifest from what came with the submission). */
 const textOf = async (at: string, path: string, manifestAt: string) => (path === MANIFEST_FILE ? { text: manifestAt } : readText(await edge.file(id, at, path, true)));
 type Content = { text: string } | { binary: true } | { tooBig: true } | null;
-let viewing: { path: string; picture: string | null; content: Content | { missing: true } | "picture" } | null = null;
+let viewing: { file: PackageFile | null; path: string; picture: string | null; content: Content | { missing: true } | "picture" } | null = null;
 if (s && view === "files") {
   const asked = Astro.url.searchParams.get("path");
   const file = asked === null ? files[0] : files.find((f) => f.path === asked);
-  if (!file) viewing = { path: asked ?? "", picture: null, content: { missing: true } };
+  if (!file) viewing = { file: null, path: asked ?? "", picture: null, content: { missing: true } };
   else {
     const type = pictureType(file.path);
     const picture = type ? fileUrl(id, version, file.path) : null;
-    viewing = { path: file.path, picture, content: type && type !== "image/svg+xml" ? "picture" : file.binary ? { binary: true } : await textOf(version, file.path, manifest) };
+    viewing = { file, path: file.path, picture, content: type && type !== "image/svg+xml" ? "picture" : file.binary ? { binary: true } : await textOf(version, file.path, manifest) };
   }
 }
 
@@ -93,7 +88,7 @@ const DIFF_FILES = 40;
 /** The most time the page spends diffing, all files together. */
 const PAGE_BUDGET_MS = 1500;
 const started = Date.now();
-let diffs: { path: string; change: string; rows: DiffRow[] | null; note?: string }[] = [];
+let diffs: { path: string; change: keyof typeof CHANGE; rows: DiffRow[] | null; note?: string }[] = [];
 if (s?.base && view === "changes") {
   const base = s.base.version;
   diffs = await Promise.all(
@@ -115,363 +110,392 @@ if (s?.base && view === "changes") {
   );
 }
 
-// Its notes, as they'll show on its page (reviewed like the README).
-const notes = s?.version.notes && view === "overview" ? renderMarkdown(s.version.notes, { file: (p) => fileUrl(id, version, p), demote: true }) : "";
+// The overview's parts. (Rendered each time: a version in review is no one's to keep.)
+const overview = s && view === "overview";
+const file = (p: string) => fileUrl(id, version, p);
+const notes = overview && s.version.notes ? renderMarkdown(s.version.notes, { file, demote: true }) : "";
+let readme = "";
+if (overview) {
+  const text = s.version.readme ?? (await (async () => {
+    const got = await readText(await edge.file(id, version, "README.md", true));
+    return got && "text" in got ? got.text : "";
+  })());
+  readme = text.trim() ? renderMarkdown(text, { file, demote: true, title: name }) : "";
+}
+const pictures = (s?.version.screenshots ?? []).map(file);
+const weighed = s ? compared(s.permissions, s.base ? s.permissions_diff : null) : { lines: [], dropped: [] };
+const moved = weighed.lines.filter((l) => l.change);
+const same = weighed.lines.filter((l) => !l.change);
+const checks = s?.checks ?? [];
+const toLook = checks.filter((c) => c.level !== "ok");
+const failed = checks.filter((c) => c.level === "fail").length;
+const passed = checks.length - toLook.length;
+const manifestMoved = s?.base ? manifestChanges(s.manifest, s.base.manifest).map((m) => m.key) : [];
+
 const state = s ? versionState(s.version) : null;
 const pending = s?.version.status === "pending";
-const newLines = s ? grew(s.permissions, s.permissions_diff) : [];
-const manifestDiff = s?.base ? manifestChanges(s.manifest, s.base.manifest) : [];
-const checks = s?.checks ?? [];
-const failing = checks.filter((c) => c.level === "fail").length;
+const removable = s?.version.status === "approved" || s?.version.status === "yanked";
+const review = s?.version.review;
+const decided = review?.decided_at ?? s?.version.published_at ?? null;
+const author = s?.publisher.username ?? null;
+const reject = versionAsk("reject", name, version);
+const remove = versionAsk("remove", name, version);
+const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n === 1 ? one : many}`;
 ---
 
-<Store title={`${s?.plugin.name ?? id} ${version} · Review · Zeron`} description="A submission in review." noindex tool toast={toast}>
-  <div class="wrap review">
-    <AccountBar session={session} current="queue">
-      <a class="back" href="/admin/plugins"><Glyph name="alt-arrow-left" size={12} />Review</a>
-    </AccountBar>
-    {
-      !s ? (
-        <p class="unreachable">This submission can't be loaded right now. Try again in a minute.</p>
-      ) : (
-        <>
-          <header class="head">
-            <PluginTile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size={64} />
-            <div class="identity">
-              <h1>
-                <span>{name}</span> <span class="v num">{version}</span>
-              </h1>
-              <p class="meta">
-                {state && <Badge tone={state.tone} size="sm">{state.label}</Badge>}
-                <span>{s.base ? `Update from ${s.base.version}` : "First listing"}</span>
-                <span>·</span>
-                <a href={`/admin/plugins/${encodeURIComponent(id)}`}>
-                  <code>{id}</code>
-                </a>
-                <span>·</span>
-                <span>submitted {ago(s.version.submitted_at)}</span>
-              </p>
-            </div>
-            {pending && (
-              <div class="decide">
-                <a class="decide-link reject" href={`${here}/reject`} data-dialog="reject">
-                  Reject…
-                </a>
-                <a class="decide-link approve" href={`${here}/approve`} data-dialog="approve">
-                  <Glyph name="check" size={14} />
-                  Approve…
-                </a>
-              </div>
-            )}
-          </header>
+<App title={`${name} ${version} · Review · Zeron`} description="A submission in review." noindex current="queue" session={session}>
+  <nav slot="title" class="crumbs" aria-label="Where this is">
+    <a href="/admin/plugins">Queue</a><Glyph name="alt-arrow-right" size={12} />
+    {view === "overview" ? <span aria-current="page">{unbidi(name)} {version}</span> : <><a href={here}>{unbidi(name)} {version}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{VIEWS[view]}</span></>}
+  </nav>
+  {
+    s && (
+      <nav slot="tools" class="segmented" aria-label="What to read">
+        <a href={viewHref("overview")} aria-current={view === "overview" ? "page" : undefined}>Overview</a>
+        <a href={viewHref("files")} aria-current={view === "files" ? "page" : undefined}>Files <span class="t-3">{count(files.length)}</span></a>
+        {s.base && <a href={viewHref("changes")} aria-current={view === "changes" ? "page" : undefined}>Changes <span class="t-3">{count(changes.length)}</span></a>}
+      </nav>
+    )
+  }
 
-          {s.version.review?.message && (
-            <p class="decided">
-              <b>{s.version.review.reason ? reasonWords(s.version.review.reason) : "Decided"}:</b> {s.version.review.message}
+  {
+    !s ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h2>This submission can't be loaded right now</h2><p>Try again in a moment.</p></div>
+          <div class="actions"><a class="btn secondary sm" href={Astro.url.pathname + Astro.url.search}>Try again</a></div>
+        </div>
+      </div>
+    ) : (
+      <div class="review">
+        <header class="review-head">
+          <PluginTile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size={56} class="plugin-tile" />
+          <div class="who">
+            <h1 class="t-title"><span>{unbidi(name)}</span> <span class="v">{version}</span></h1>
+            <p class="meta">
+              <span>by {author ? <a href={memberUrl(author)}>@{author}</a> : "an account with no username"}</span>
+              <span class="dot" aria-hidden="true">·</span>
+              <span>{s.base ? `Update from ${s.base.version}` : "First listing"}</span>
+              {s.version.prerelease && <span class="badge sm">Pre-release</span>}
+              <span class="dot" aria-hidden="true">·</span>
+              <a href={`/admin/plugins/${encodeURIComponent(id)}`}><code>{id}</code></a>
+            </p>
+          </div>
+        </header>
+
+        <aside class="decide panel" aria-label="Decision">
+          <p class="state">
+            {state && <span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>}
+            {pending ? (
+              <span>waited <time datetime={new Date(s.version.submitted_at).toISOString()} title={dateTime(s.version.submitted_at)}>{waitedFor(s.version.submitted_at)}</time></span>
+            ) : (
+              decided && <span><time datetime={new Date(decided).toISOString()} title={dateTime(decided)}>{day(decided)}</time></span>
+            )}
+          </p>
+          {review?.message && (
+            <p class="said">
+              “{review.message}”
+              <span class="who">{[review.reason && reasonLabel(review.reason), review.decided_at && `${s.version.status === "removed" ? "taken down" : "reviewed"} ${day(review.decided_at)}`].filter(Boolean).join(" · ")}</span>
             </p>
           )}
+          {(pending || removable) && (
+            <div class="buttons">
+              {pending && (
+                <>
+                  <form method="post" action={`${here}/approve`}>
+                    <input type="hidden" name="csrf" value={session.csrf} />
+                    <button class="btn primary" type="submit">Approve</button>
+                  </form>
+                  <a class="btn secondary" href={`${here}/reject`} data-dialog="reject">Don't approve…</a>
+                </>
+              )}
+              {removable && <a class="btn secondary" href={`${here}/remove`} data-dialog="take-down">Take down…</a>}
+            </div>
+          )}
+          <dl class="facts">
+            <div><dt>Sent by</dt><dd>{author ? <a href={memberUrl(author)}>@{author}</a> : "No username"}</dd></div>
+            <div><dt>Account</dt><dd>{age(s.publisher.created_at) || "Deleted"}</dd></div>
+            <div><dt>Before this</dt><dd>{count(s.publisher.decisions.approved)} approved · {count(s.publisher.decisions.rejected)} not</dd></div>
+            <div>
+              <dt>Checks</dt>
+              <dd>
+                <a href={`${viewHref("overview")}#checks`} class:list={{ bad: failed > 0, warn: failed === 0 && toLook.length > 0 }}>
+                  {failed > 0 ? `${count(failed)} failed` : toLook.length > 0 ? `${count(toLook.length)} to look at` : "All passed"}
+                </a>
+              </dd>
+            </div>
+          </dl>
+        </aside>
 
-          <Tabs
-            label="What to read"
-            tabs={(Object.keys(VIEWS) as View[])
-              .filter((v) => v !== "changes" || s.base)
-              .map((v) => ({ href: viewHref(v), label: VIEWS[v], current: v === view, count: v === "changes" ? changes.length : v === "files" ? files.length : undefined }))}
-          />
-
+        <div class="review-main">
           {view === "overview" && (
-            <div class="overview">
-              <div class="col">
-                {s.base && (
-                  <section class="panel" aria-labelledby="new-heading">
-                    <h2 id="new-heading">New since {s.base.version}</h2>
-                    {newLines.length === 0 ? (
-                      <p class="quiet">It asks for nothing it didn't already.</p>
-                    ) : (
-                      <PermissionList permissions={s.permissions} only={newLines} heading="It now also asks to:" />
-                    )}
-                    {manifestDiff.length > 0 && (
-                      <div class="manifest">
-                        <p class="label">Manifest changes</p>
-                        <dl>
-                          {manifestDiff.map((m) => (
-                            <div>
-                              <dt>
-                                <code>{m.key}</code>
-                                {m.reach && <span class="reach">decides what it can reach</span>}
-                              </dt>
-                              <dd>
-                                {m.added && m.removed ? (
-                                  <ul class="items" role="list">
-                                    {m.added.map((i) => (
-                                      <li class:list={["added", { risky: i.risky }]}>
-                                        <span class="sign" aria-hidden="true">+</span>
-                                        <code>{i.item}</code>
-                                        <span class="sr-only">added</span>
-                                        {i.risky && <Badge tone="danger" size="sm" icon="danger-triangle">More reach</Badge>}
-                                      </li>
-                                    ))}
-                                    {m.removed.map((i) => (
-                                      <li class="removed">
-                                        <span class="sign" aria-hidden="true">−</span>
-                                        <code>{i.item}</code>
-                                        <span class="sr-only">removed</span>
-                                      </li>
-                                    ))}
-                                    {m.added.length === 0 && m.removed.length === 0 && <li class="same">Same items, in another order</li>}
-                                  </ul>
-                                ) : null}
-                                <details class="raw" open={!(m.added && m.removed)}>
-                                  <summary>Before and after</summary>
-                                  {m.before !== null ? <code class="was">{m.before}</code> : <span class="none">Not there before</span>}
-                                  {m.after !== null ? <code class="now">{m.after}</code> : <span class="none">Taken out</span>}
-                                </details>
-                              </dd>
-                            </div>
-                          ))}
-                        </dl>
-                      </div>
-                    )}
-                  </section>
-                )}
-                <section class="panel" aria-labelledby="asks-heading">
-                  <h2 id="asks-heading">What it asks for</h2>
-                  <PermissionList permissions={s.permissions} author={s.publisher.username ?? undefined} />
-                </section>
-                <section class="panel" aria-labelledby="notes-heading">
-                  <h2 id="notes-heading">Notes for {version}</h2>
-                  {notes ? <div class="readme notes" set:html={notes} /> : <p class="quiet">No notes for this version.</p>}
-                </section>
-              </div>
-              <div class="col">
-                <section class="panel" aria-labelledby="publisher-heading">
-                  <h2 id="publisher-heading">Publisher</h2>
-                  <p class="who">
-                    {s.publisher.username ? <a href={memberUrl(s.publisher.username)}>@{s.publisher.username}</a> : <span>No username</span>}
-                    <span class="faint">{age(s.publisher.created_at)}</span>
-                  </p>
-                  <dl class="facts">
-                    <div><dt>Approved</dt><dd class="num">{s.publisher.decisions.approved}</dd></div>
-                    <div><dt>Not approved</dt><dd class="num">{s.publisher.decisions.rejected}</dd></div>
-                  </dl>
-                  {s.publisher.recent.length > 0 && (
-                    <ul class="recent" role="list">
-                      {s.publisher.recent.map((r) => (
-                        <li>
-                          <a href={`/admin/plugins/${encodeURIComponent(r.plugin_id)}/${encodeURIComponent(r.version)}`}>
-                            <code>{r.plugin_id}</code> <span class="num">{r.version}</span>
-                          </a>
-                          <Badge tone={versionState({ status: r.status }).tone} size="sm">{versionState({ status: r.status }).label}</Badge>
-                        </li>
+            <>
+              <section class="section" id="asks" aria-labelledby="asks-heading">
+                <div class="section-head">
+                  <div class="words">
+                    <h2 id="asks-heading">What it asks for</h2>
+                    <p>{s.base ? (moved.length || weighed.dropped.length ? `Against ${s.base.version}, the last approved version: ${[moved.filter((l) => l.change === "new").length && `${plural(moved.filter((l) => l.change === "new").length, "new ask")}`, moved.filter((l) => l.change === "changed").length && `${plural(moved.filter((l) => l.change === "changed").length, "ask")} changed inside`, weighed.dropped.length && `${plural(weighed.dropped.length, "ask")} dropped`].filter(Boolean).join(", ")}.` : `Nothing new since ${s.base.version}, the last approved version.`) : "Its first version: everything it asks for is new."}</p>
+                  </div>
+                </div>
+                <div class="panel">
+                  {weighed.lines.length === 0 ? (
+                    <p class="panel-pad t-text t-2">It asks for nothing beyond running in its own space.</p>
+                  ) : (
+                    <div class="weigh">
+                      {s.base && moved.length > 0 && <p class="weigh-group">New or changed since {s.base.version}</p>}
+                      {(s.base ? moved : weighed.lines).map((l) => (
+                        <div class:list={["weigh-row", { risky: l.risky }]}>
+                          <Glyph name={l.icon} size={16} />
+                          <p class="title">
+                            {l.title}
+                            {l.change && <span class="badge sm info">{l.change === "new" ? "New" : "Changed"}</span>}
+                            {l.risky && <span class="sr-only"> (gives it a lot of reach)</span>}
+                          </p>
+                          {l.detail && <p class="detail">{l.detail}</p>}
+                          {l.change === "changed" ? (
+                            <ul class="moved" role="list">
+                              {l.added?.map((x) => <li><span class="plus" aria-hidden="true">+</span><span>{x}<span class="sr-only"> (new)</span></span></li>)}
+                              {l.altered?.map((x) => <li><span class="tilde" aria-hidden="true">~</span><span>{x}<span class="t-3"> tells agents something else</span></span></li>)}
+                              {l.removed?.map((x) => <li><span class="minus" aria-hidden="true">−</span><span class="t-3">{x}<span class="sr-only"> (dropped)</span></span></li>)}
+                            </ul>
+                          ) : (
+                            (l.literal || l.items) && (
+                              <ul class="named" role="list">
+                                {l.literal?.map((x) => <li>{x}</li>)}
+                                {l.items?.map((x) => <li>{x.name}{x.description && <span class="t-3"> · {x.description}</span>}</li>)}
+                              </ul>
+                            )
+                          )}
+                        </div>
                       ))}
-                    </ul>
+                      {s.base && same.length > 0 && <p class="weigh-group">As in {s.base.version}</p>}
+                      {s.base && same.map((l) => (
+                        <div class:list={["weigh-row same", { risky: l.risky }]}>
+                          <Glyph name={l.icon} size={16} />
+                          <p class="title">{l.title}{l.risky && <span class="sr-only"> (gives it a lot of reach)</span>}</p>
+                          {(l.literal || l.items) && (
+                            <ul class="named" role="list">
+                              {l.literal?.map((x) => <li>{x}</li>)}
+                              {l.items?.map((x) => <li>{x.name}{x.description && <span class="t-3"> · {x.description}</span>}</li>)}
+                            </ul>
+                          )}
+                        </div>
+                      ))}
+                      {weighed.dropped.length > 0 && <p class="weigh-group">No longer asks</p>}
+                      {weighed.dropped.map((l) => (
+                        <div class="weigh-row same">
+                          <Glyph name={l.icon} size={16} />
+                          <p class="title"><del>{l.title}</del></p>
+                        </div>
+                      ))}
+                    </div>
                   )}
-                </section>
-                <section class="panel" aria-labelledby="checks-heading">
-                  <h2 id="checks-heading">Checks {failing > 0 && <Badge tone="danger" size="sm">{failing} failed</Badge>}</h2>
-                  <ul class="check-list" role="list">
-                    {checks.map((c) => (
+                </div>
+              </section>
+
+              <section class="section" id="checks" aria-labelledby="checks-heading">
+                <div class="section-head">
+                  <div class="words">
+                    <h2 id="checks-heading">What the checks found</h2>
+                    <p>{toLook.length === 0 ? `All ${count(checks.length)} passed.` : `${count(passed)} passed; ${failed > 0 ? `${count(failed)} failed` : ""}${failed > 0 && toLook.length > failed ? ", " : ""}${toLook.length > failed ? `${count(toLook.length - failed)} to look at` : ""}.`}</p>
+                  </div>
+                </div>
+                {toLook.length > 0 && (
+                  <ul class="panel checks-list" role="list">
+                    {toLook.map((c) => (
                       <li class={c.level}>
-                        <Glyph name={c.level === "ok" ? "check-circle" : c.level === "warn" ? "danger-triangle" : "close-circle"} size={16} />
-                        <span>
-                          {c.message}
-                          <span class="sr-only"> ({c.level === "ok" ? "passed" : c.level === "warn" ? "to look at" : "failed"})</span>
-                        </span>
+                        <Glyph name={c.level === "warn" ? "danger-triangle" : "close-circle"} size={16} />
+                        <span>{c.message}<span class="sr-only"> ({c.level === "warn" ? "to look at" : "failed"})</span></span>
                       </li>
                     ))}
                   </ul>
-                </section>
-              </div>
-            </div>
+                )}
+              </section>
+
+              <section class="section" id="changed" aria-labelledby="changed-heading">
+                <div class="section-head">
+                  <div class="words">
+                    <h2 id="changed-heading">What changed</h2>
+                    <p>{s.base ? (changes.length === 0 ? `No file changed since ${s.base.version}.` : `Since ${s.base.version}: ${plural(changes.length, "file")} added, changed or taken out.`) : "Its first version: every file is new."}</p>
+                  </div>
+                  {s.base && changes.length > 0 && <a class="btn secondary sm" href={viewHref("changes")}>Read the changes</a>}
+                </div>
+                <div class="panel panel-pad notes-panel">
+                  <h3 class="t-label">Notes for {version}</h3>
+                  {notes ? <div class="prose notes" set:html={notes} /> : <p class="t-text t-3">No notes for this version.</p>}
+                </div>
+                <div class="panel">
+                  <table class="table files-table">
+                    <caption class="sr-only">Its files{s.base ? `, against ${s.base.version}` : ""}</caption>
+                    <colgroup><col />{s.base && <col class="change" />}<col class="size" /></colgroup>
+                    <thead><tr><th scope="col">File</th>{s.base && <th scope="col">Since {s.base.version}</th>}<th scope="col" class="end">Size</th></tr></thead>
+                    <tbody>
+                      {(s.base ? changes.map((c) => ({ path: c.path, bytes: (c.now ?? c.before)!.bytes, change: c.change as keyof typeof CHANGE | null, binary: (c.now ?? c.before)!.binary })) : files.map((f) => ({ path: f.path, bytes: f.bytes, change: null, binary: f.binary }))).map((f) => (
+                        <tr class:list={{ removed: f.change === "removed" }}>
+                          <td class="path"><a href={f.change ? `${viewHref("changes")}#change-${encodeURIComponent(f.path)}` : viewHref("files", { path: f.path })}>{f.path}</a>{f.binary && <span class="badge sm warn">Not text</span>}</td>
+                          {s.base && <td>{f.change && <span class:list={["badge sm", CHANGE[f.change].tone]}>{CHANGE[f.change].label}</span>}</td>}
+                          <td class="end size">{bytes(f.bytes)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {unchanged.length > 0 && (
+                    <details class="unchanged">
+                      <summary>{plural(unchanged.length, "file")} as in {s.base!.version}<Glyph name="alt-arrow-down" size={12} /></summary>
+                      <table class="table files-table">
+                        <caption class="sr-only">Files as in {s.base!.version}</caption>
+                        <colgroup><col /><col class="change" /><col class="size" /></colgroup>
+                        <tbody>
+                          {unchanged.map((f) => (
+                            <tr>
+                              <td class="path"><a href={viewHref("files", { path: f.path })}>{f.path}</a>{f.binary && <span class="badge sm warn">Not text</span>}</td>
+                              <td />
+                              <td class="end size">{bytes(f.bytes)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </details>
+                  )}
+                </div>
+              </section>
+
+              <section class="section" id="listing" aria-labelledby="listing-heading">
+                <div class="section-head">
+                  <div class="words">
+                    <h2 id="listing-heading">Its listing</h2>
+                    <p>As visitors will see it on its page.</p>
+                  </div>
+                  {s.plugin.version && <a class="btn ghost sm" href={pluginUrl(id)}>Its page now<Glyph name="arrow-up-right" size={12} /></a>}
+                </div>
+                <div class="review-listing">
+                  {s.version.summary && <p class="summary">{s.version.summary}</p>}
+                  <Strip name={name} pictures={pictures} />
+                  {readme ? <div class="prose" set:html={readme} /> : <p class="notice warn"><Glyph name="danger-triangle" size={16} /><span>It has no README the store can show.</span></p>}
+                </div>
+              </section>
+
+              <section class="section" id="manifest" aria-labelledby="manifest-heading">
+                <h2 id="manifest-heading" class="sr-only">Its manifest</h2>
+                <details class="fold">
+                  <summary>
+                    <span>{MANIFEST_FILE}</span>
+                    <span class="what">As signed · {bytes(files[0]!.bytes)}{manifestMoved.length > 0 && ` · changed since ${s.base!.version}: ${manifestMoved.join(", ")}`}</span>
+                    <Glyph name="alt-arrow-down" size={14} />
+                  </summary>
+                  <CodeView text={manifest} language="json" label={MANIFEST_FILE} />
+                </details>
+              </section>
+            </>
           )}
 
-          {view === "readme" && (
-            <section class="readme-view" aria-label="README as it will show">
-              <p class="quiet">As it will show on its page.</p>
-              {readme ? <div class="readme" set:html={readme} /> : <p class="flag"><Glyph name="danger-triangle" size={16} />It has no README.md the store can show.</p>}
-            </section>
-          )}
-
-          {view === "files" && (
-            <div class="files">
-              <nav class="tree-pane" aria-label="Files">
-                <FileTree nodes={fileTree(files)} current={viewing?.path ?? null} href={(p) => viewHref("files", { path: p })} changes={changeOf} />
+          {view === "files" && viewing && (
+            <div class="files-view">
+              <nav class="panel tree-pane" aria-label="Files">
+                <FileTree nodes={fileTree(files)} current={viewing.path} href={(p) => viewHref("files", { path: p })} changes={changeOf} />
               </nav>
-              <section class="viewer" aria-label={viewing ? viewing.path : "File"}>
-                {viewing && (
-                  <>
-                    <p class="file-head">
-                      <code>{viewing.path}</code>
-                      <span class="faint num">{bytes(files.find((f) => f.path === viewing!.path)?.bytes ?? 0)}</span>
-                      {changeOf.get(viewing.path) && (
-                        <a href={`${viewHref("changes")}#change-${encodeURIComponent(viewing.path)}`}>See its changes</a>
-                      )}
-                    </p>
-                    {viewing.picture && <img class="picture" src={viewing.picture} alt={viewing.path} />}
-                    {viewing.content === "picture" ? null : viewing.content === null ? (
-                      <p class="quiet">It couldn't be read.</p>
-                    ) : "missing" in viewing.content ? (
-                      <p class="quiet">This version has no file at that path.</p>
-                    ) : "binary" in viewing.content ? (
-                      <p class="flag"><Glyph name="danger-triangle" size={16} />Not text, so not shown. Binary files can hold code: ask what it's for.</p>
-                    ) : "tooBig" in viewing.content ? (
-                      <p class="quiet">Too big to show here.</p>
-                    ) : (
-                      <CodeView text={viewing.content.text} language={languageOf(viewing.path)} label={viewing.path} />
-                    )}
-                  </>
+              <section class="viewer" aria-label={viewing.path || "File"}>
+                <p class="file-head">
+                  <code>{viewing.path}</code>
+                  {viewing.file && <span class="num">{bytes(viewing.file.bytes)}</span>}
+                  {changeOf.get(viewing.path) && <a href={`${viewHref("changes")}#change-${encodeURIComponent(viewing.path)}`}>See its changes</a>}
+                </p>
+                {viewing.picture && <img class="file-picture" src={viewing.picture} alt={viewing.path} />}
+                {viewing.content === "picture" ? null : viewing.content === null ? (
+                  <p class="t-text t-3">It couldn't be read.</p>
+                ) : "missing" in viewing.content ? (
+                  <p class="t-text t-3">This version has no file at that path.</p>
+                ) : "binary" in viewing.content ? (
+                  <p class="notice warn"><Glyph name="danger-triangle" size={16} /><span>Not text, so not shown. Binary files can hold code: ask what it's for.</span></p>
+                ) : "tooBig" in viewing.content ? (
+                  <p class="t-text t-3">Too big to show here.</p>
+                ) : (
+                  <CodeView text={viewing.content.text} language={languageOf(viewing.path)} label={viewing.path} />
                 )}
               </section>
             </div>
           )}
 
           {view === "changes" && s.base && (
-            <section class="changes" aria-label={`Changes since ${s.base.version}`}>
-              <p class="quiet">
-                {changes.length === 0 ? `No file changed since ${s.base.version}.` : `${changes.length} ${changes.length === 1 ? "file" : "files"} changed since ${s.base.version}.`}
-              </p>
+            <section class="changes-view" aria-label={`Changes since ${s.base.version}`}>
+              <p class="t-text t-2">{changes.length === 0 ? `No file changed since ${s.base.version}.` : `${plural(changes.length, "file")} changed since ${s.base.version}.`}</p>
               {diffs.map((d) => {
                 const n = d.rows ? countRows(d.rows) : null;
                 return (
-                  <article class="change" id={`change-${encodeURIComponent(d.path)}`}>
-                    <header>
-                      <Badge tone={d.change === "added" ? "success" : d.change === "removed" ? "danger" : "warning"} size="sm">
-                        {d.change === "added" ? "Added" : d.change === "removed" ? "Removed" : "Changed"}
-                      </Badge>
-                      <a href={viewHref("files", { path: d.path })}><code>{d.path}</code></a>
+                  <article class="change-block" id={`change-${encodeURIComponent(d.path)}`}>
+                    <header class="change-head">
+                      <span class:list={["badge sm", CHANGE[d.change].tone]}>{CHANGE[d.change].label}</span>
+                      <a href={viewHref("files", { path: d.path })}>{d.path}</a>
                       {n && (
                         <span class="counts num">
                           <span class="plus">+{n.added}</span> <span class="minus">−{n.removed}</span>
                         </span>
                       )}
                     </header>
-                    {d.rows ? d.rows.length > 0 ? <DiffView rows={d.rows} language={languageOf(d.path)} /> : <p class="quiet">Only its bytes changed.</p> : <p class="quiet">{d.note}</p>}
+                    {d.rows ? d.rows.length > 0 ? <DiffView rows={d.rows} language={languageOf(d.path)} /> : <p class="t-text t-3">Only its bytes changed.</p> : <p class="t-text t-3">{d.note}</p>}
                   </article>
                 );
               })}
             </section>
           )}
-
-          {pending && (
-            <>
-              <Dialog id="approve" title={`Approve ${name} ${version}?`}>
-                <p>It's listed at once, and offered to everyone who has it at their next update check.</p>
-                <ConfirmForm action={`${here}/approve`} csrf={session.csrf} confirm="Approve" mode="dialog" back={here} />
-              </Dialog>
-              <Dialog id="reject" title={`Reject ${name} ${version}?`} tone="danger">
-                <p>The author reads your reason and your words, in Zeron and on the web. They can publish a new version.</p>
-                <ConfirmForm action={`${here}/reject`} csrf={session.csrf} confirm="Reject" tone="danger" mode="dialog" back={here}>
-                  <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} field />
-                  <Field name="message" label="For the author" multiline required maxlength={2000} hint="Say what to change, plainly. They'll read it as you write it." />
-                </ConfirmForm>
-              </Dialog>
-            </>
-          )}
-        </>
-      )
-    }
-  </div>
-</Store>
-
-<style>
-  .review { display: grid; gap: 24px; }
-  .back { display: inline-flex; align-items: center; gap: 6px; justify-self: start; height: 28px; font-size: 14px; font-weight: 500; color: var(--text-3); transition: color 0.12s; }
-  .back:hover { color: var(--text); }
-  .head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 20px; }
-  .identity { display: grid; gap: 6px; min-width: 0; }
-  .identity h1 { font-size: clamp(24px, 2.8vw, 32px); overflow-wrap: anywhere; }
-  .v { font-weight: 500; color: var(--text-3); }
-  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13.5px; color: var(--text-3); }
-  .meta a { color: var(--text-2); transition: color 0.12s; }
-  .meta a:hover { color: var(--text); }
-  .decide { display: flex; gap: 8px; }
-  .decide-link { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px; font-size: 14px; font-weight: 500; border-radius: var(--radius-lg); transition: background-color 0.12s, color 0.12s; }
-  .reject { color: var(--tone-danger); background: var(--secondary-bg); }
-  .reject:hover { background: var(--tone-danger-wash); }
-  .approve { color: var(--primary-text); background: var(--primary-bg); }
-  .approve:hover { background: var(--primary-hover); }
-  .approve:active { background: var(--primary-active); }
-  .decided { padding: 12px 14px; font-size: 14px; color: var(--text-2); background: var(--surface); border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); }
-  .decided b { font-weight: 500; color: var(--text); }
-
-  .overview { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; align-items: start; }
-  .col { display: grid; gap: 16px; }
-  .panel { display: grid; gap: 14px; padding: 20px; background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
-  .panel h2 { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
-  .quiet { font-size: 14px; color: var(--text-3); }
-  .faint { color: var(--text-3); }
-  .label { font-size: 13px; font-weight: 500; color: var(--text-2); }
-  .manifest { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
-  .manifest dl { display: grid; gap: 14px; }
-  .manifest dl > div { display: grid; gap: 6px; }
-  .manifest dt { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
-  .reach { font-size: 12px; color: var(--text-3); }
-  .manifest dd { display: grid; gap: 6px; }
-  .items { display: grid; gap: 2px; }
-  .items li { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 0 8px; font-size: 12.5px; border-radius: var(--radius-sm); }
-  .items .sign { width: 10px; font-family: var(--mono); font-weight: 600; }
-  .items code { overflow-wrap: anywhere; }
-  .items .added { color: var(--text); background: var(--diff-added-wash); }
-  .items .added .sign { color: var(--diff-added); }
-  .items .added.risky { background: var(--tone-danger-wash); }
-  .items .added.risky .sign, .items .added.risky code { color: var(--tone-danger); }
-  .items .removed { color: var(--text-3); }
-  .items .removed .sign { color: var(--diff-removed); }
-  .items .same { color: var(--text-3); }
-  .raw summary { font-size: 12px; color: var(--text-3); cursor: pointer; }
-  .raw summary:hover { color: var(--text-2); }
-  .raw[open] { display: grid; gap: 2px; }
-  .raw[open] summary { margin-bottom: 4px; }
-  .raw code { display: block; padding: 4px 8px; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; border-radius: var(--radius-sm); }
-  .raw .none { font-size: 12px; color: var(--text-3); }
-  .was { color: var(--text-2); background: var(--diff-removed-wash); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--diff-removed) 60%, transparent); }
-  .now { color: var(--text); background: var(--diff-added-wash); }
-  .who { display: flex; align-items: baseline; gap: 10px; font-size: 15px; }
-  .who a { font-weight: 600; color: var(--text); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
-  .who a:hover { color: var(--accent-soft); }
-  .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-  .facts > div { display: grid; gap: 2px; padding: 10px 12px; background: var(--surface); border-radius: var(--radius-lg); }
-  .facts dt { font-size: 12px; color: var(--text-3); }
-  .facts dd { font-size: 18px; font-weight: 600; }
-  .recent { display: grid; gap: 6px; font-size: 13px; }
-  .recent li { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .recent a { color: var(--text-2); }
-  .recent a:hover { color: var(--text); }
-  .check-list { display: grid; gap: 10px; font-size: 14px; line-height: 1.45; }
-  .check-list li { display: flex; gap: 10px; align-items: flex-start; color: var(--text-2); }
-  /* (A check names keys and hashes: long, with nowhere to break.) */
-  .check-list li > span { min-width: 0; overflow-wrap: anywhere; }
-  .check-list :global(.glyph) { margin-top: 1px; }
-  .check-list .ok :global(.glyph) { color: var(--tone-success); }
-  .check-list .warn { color: var(--tone-warning); }
-  .check-list .fail { color: var(--tone-danger); }
-
-  .readme-view { display: grid; gap: 16px; max-width: 760px; }
-  .notes { font-size: 14.5px; }
-
-  .files { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 20px; align-items: start; }
-  .tree-pane { position: sticky; top: 24px; max-height: calc(100dvh - 48px); overflow: auto; padding: 8px; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
-  .viewer { display: grid; gap: 12px; min-width: 0; }
-  .file-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 13.5px; }
-  .file-head code { color: var(--text); }
-  .file-head a { margin-left: auto; color: var(--accent-soft); }
-  .picture { max-width: 100%; border-radius: 12px; box-shadow: 0 0 0 1px var(--line); background: repeating-conic-gradient(#ffffff08 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
-  .flag { display: flex; gap: 10px; padding: 12px 14px; font-size: 14px; color: var(--tone-warning); background: var(--tone-warning-wash); border-radius: var(--radius-lg); }
-
-  .changes { display: grid; gap: 24px; }
-  .change { display: grid; gap: 10px; scroll-margin-top: 24px; }
-  .change header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 13.5px; }
-  .change header a { color: var(--text); }
-  .change header a:hover { color: var(--accent-soft); }
-  .counts { margin-left: auto; font-family: var(--mono); font-size: 12.5px; }
-  .plus { color: var(--diff-added); }
-  .minus { color: var(--diff-removed); }
-  .unreachable { padding: 40px 0; color: var(--text-2); }
-
-  @media (max-width: 900px) {
-    .overview { grid-template-columns: minmax(0, 1fr); }
-    .files { grid-template-columns: minmax(0, 1fr); }
-    .tree-pane { position: static; max-height: 320px; }
-    .head { grid-template-columns: auto minmax(0, 1fr); }
-    .decide { grid-column: 1 / -1; }
+        </div>
+      </div>
+    )
   }
-</style>
+
+  {
+    s && (pending || removable) && (
+      <div class="decide-bar">
+        {pending && (
+          <>
+            <a class="btn secondary" href={`${here}/reject`} data-dialog="reject">Don't approve…</a>
+            <form method="post" action={`${here}/approve`}>
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <button class="btn primary" type="submit">Approve</button>
+            </form>
+          </>
+        )}
+        {removable && <a class="btn secondary" href={`${here}/remove`} data-dialog="take-down">Take down…</a>}
+      </div>
+    )
+  }
+
+  {
+    s && pending && (
+      <dialog class="dialog" id="reject" aria-labelledby="reject-title" closedby="any">
+        <form method="post" action={`${here}/reject`}>
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <div class="head">
+            <h2 id="reject-title">{unbidi(reject.title)}</h2>
+            {reject.words.map((w) => <p>{w}</p>)}
+          </div>
+          <Decline id="reject" version={version} author={author} />
+          <div class="answers">
+            <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+            <button class="btn danger" type="submit">{reject.confirm}</button>
+          </div>
+        </form>
+      </dialog>
+    )
+  }
+  {
+    s && removable && (
+      <dialog class="dialog" id="take-down" aria-labelledby="take-down-title" closedby="any">
+        <form method="post" action={`${here}/remove`}>
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <div class="head">
+            <h2 id="take-down-title">{unbidi(remove.title)}</h2>
+            {remove.words.map((w) => <p>{w}</p>)}
+          </div>
+          <TakeDown id="take-down" />
+          <div class="answers">
+            <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+            <button class="btn danger" type="submit">{remove.confirm}</button>
+          </div>
+        </form>
+      </dialog>
+    )
+  }
+  <Toast toast={toast} />
+</App>

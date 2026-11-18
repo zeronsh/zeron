@@ -353,8 +353,8 @@ describe("an update", () => {
     });
     const overview = await grace.get("/admin/plugins/focus-timer/1.2.0");
     expect(overview.body).toContain("Update from 1.0.0");
-    expect(overview.body).toContain("It now also asks to:");
-    expect(overview.body).toContain("Send messages to your agents as you");
+    expect(overview.body).toContain("New or changed since 1.0.0");
+    expect(overview.body).toMatch(/Send messages to your agents as you\s*<span class="badge sm info">New<\/span>/);
     const changes = await grace.get("/admin/plugins/focus-timer/1.2.0?view=changes");
     expect(changes.response.status).toBe(200);
     expect(changes.body).toContain("init.luau");

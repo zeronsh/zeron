@@ -33,6 +33,17 @@ export function ago(ms: number, now = Date.now()): string {
   return "just now";
 }
 
+/** How long since, said as a length ("5 hours", "3 days"): how long something has waited. */
+export function waitedFor(ms: number, now = Date.now()): string {
+  const seconds = Math.max(0, (now - ms) / 1000);
+  const units: [string, number][] = [["week", 604_800], ["day", 86_400], ["hour", 3_600], ["minute", 60]];
+  for (const [unit, size] of units) {
+    const n = Math.floor(seconds / size);
+    if (n >= 1) return `${n} ${unit}${n === 1 ? "" : "s"}`;
+  }
+  return "Under a minute";
+}
+
 /**
  * A deploy key's public half, short, the one way it is shown everywhere:
  * its first 6 and last 4 characters ("k5Yh3x…g2Wq"), in mono, the whole key

@@ -1,0 +1,22 @@
+---
+// Take down: why (its author reads it, and so does anyone whose device
+// turns it off), and whether the devices that have it turn it off too.
+interface Props {
+  id: string;
+  reason?: string;
+  block?: boolean;
+}
+const { id, reason = "", block = false } = Astro.props;
+---
+
+<div class="body">
+  <div>
+    <label class="field-label" for={`${id}-reason`}>Why</label>
+    <div class="field area"><textarea id={`${id}-reason`} name="reason" required maxlength="2000" rows="3">{reason}</textarea></div>
+    <p class="field-hint">Its author reads this, and so does anyone whose device turns it off.</p>
+  </div>
+  <label class="check-row">
+    <input type="checkbox" name="block" checked={block} />
+    <span>Also turn it off on the devices that have it. People can turn it back on; it's theirs.</span>
+  </label>
+</div>

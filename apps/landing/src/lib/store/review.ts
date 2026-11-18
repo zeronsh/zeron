@@ -102,7 +102,8 @@ const REACH = new Set(["permissions", "commands", "network", "mcp", "service", "
 /** Written by signing, and different every time: not a change anyone made. */
 const IGNORED = new Set(["signature", "version"]);
 /** Permissions that let it act beyond its own space (the consent sheet's risky asks). */
-const RISKY_ASKS = new Set(["ui.replace", "commands", "native", "service", "accounts.switch", "accounts.pin", "models.set", "messages.send", "devices"]);
+/** Asks that reach past Zeron itself: said in the danger's ink wherever a reviewer meets them. */
+export const RISKY_ASKS: ReadonlySet<string> = new Set(["ui.replace", "commands", "native", "service", "accounts.switch", "accounts.pin", "models.set", "messages.send", "devices"]);
 
 /** A field as items, when it is a list (or an object of lists, or a list of named things); else null. */
 function items(key: string, value: unknown): string[] | null {

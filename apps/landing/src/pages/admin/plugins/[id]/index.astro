@@ -1,21 +1,20 @@
 ---
-// One plugin, for an admin: its place in the store, its owner, every
-// version in every state, its reports, and what can be done to it.
-import AccountBar from "../../../../components/store/AccountBar.astro";
-import ConfirmForm from "../../../../components/store/ConfirmForm.astro";
+// One plugin, for its reviewers: its place in the store and its owner;
+// what can be done to it (feature, move, suspend or restore); every version
+// in every state, each to its submission, an approved one's Take down in
+// the action column; its reports; its history in the audit log.
+import TakeDown from "../../../../components/kit/TakeDown.astro";
+import Toast from "../../../../components/kit/Toast.astro";
 import PluginTile from "../../../../components/store/PluginTile.astro";
-import Action from "../../../../components/ui/Action.astro";
-import Badge from "../../../../components/ui/Badge.astro";
-import Dialog from "../../../../components/ui/Dialog.astro";
-import Field from "../../../../components/ui/Field.astro";
 import Glyph from "../../../../components/ui/Glyph.astro";
-import Store from "../../../../layouts/Store.astro";
+import App from "../../../../layouts/App.astro";
+import { pluginAsk, reasonLabel, versionAsk } from "../../../../lib/store/admin.ts";
 import { takeFlash } from "../../../../lib/store/flash.ts";
-import { age, ago, count, date } from "../../../../lib/store/format.ts";
+import { age, count, dateTime, day, unbidi } from "../../../../lib/store/format.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
 import { isPluginId } from "../../../../lib/store/names.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
-import { listingState, reasonWords, versionState } from "../../../../lib/store/states.ts";
+import { listingState, reasonWords, toneClass, versionState } from "../../../../lib/store/states.ts";
 import { memberUrl, pluginUrl } from "../../../../lib/store/urls.ts";
 
 export const prerender = false;
@@ -33,196 +32,180 @@ const here = `/admin/plugins/${encodeURIComponent(id)}`;
 const act = (action: string) => `${here}/actions/${action}`;
 const removable = (status: string) => status === "approved" || status === "yanked";
 const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
+const name = a ? unbidi(a.plugin.name) : id;
+const listing = a ? listingState(a.status) : null;
+const suspend = pluginAsk("suspend", name);
+const transfer = pluginAsk("transfer", name);
+const REPORT = { open: { label: "Open", tone: "warn" }, actioned: { label: "Acted on", tone: "" }, dismissed: { label: "Dismissed", tone: "" } } as const;
 ---
 
-<Store title={`${a?.plugin.name ?? id} · Review · Zeron`} description="A plugin, for its reviewers." noindex tool toast={toast}>
-  <div class="wrap one">
-    <AccountBar session={session} current="queue">
-      <a class="back" href="/admin/plugins"><Glyph name="alt-arrow-left" size={12} />Review</a>
-    </AccountBar>
-    {
-      !a ? (
-        <p class="quiet">This plugin can't be loaded right now. Try again in a minute.</p>
-      ) : (
-        <>
-          <header class="head">
-            <PluginTile id={a.plugin.id} name={a.plugin.name} icon={a.plugin.icon} version={a.plugin.version} size={64} />
-            <div class="identity">
-              <h1>{a.plugin.name}</h1>
-              <p class="meta">
-                <Badge tone={listingState(a.status).tone} size="sm">{listingState(a.status).label}</Badge>
-                {a.plugin.featured && <Badge tone="accent" size="sm" icon="star">Featured</Badge>}
-                <code>{a.plugin.id}</code>
-                <span>·</span>
-                <span>
-                  by {a.owner.username ? <a href={memberUrl(a.owner.username)}>@{a.owner.username}</a> : "an account with no username"} ({age(a.owner.created_at).toLowerCase()})
-                </span>
-                <span>·</span>
-                <span class="num">{count(a.plugin.installs)} installs</span>
-              </p>
-            </div>
-            {a.status === "listed" && (
-              <a class="quiet-link" href={pluginUrl(a.plugin.id)}>
-                Its page<Glyph name="arrow-up-right" size={12} />
-              </a>
-            )}
-          </header>
+<App title={`${name} · Review · Zeron`} description="A plugin, for its reviewers." noindex current="queue" session={session}>
+  <nav slot="title" class="crumbs" aria-label="Where this is">
+    <a href="/admin/plugins">Queue</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{name}</span>
+  </nav>
+  {
+    a && (
+      <div slot="tools" class="tools-row">
+        <form method="post" action={act(a.plugin.featured ? "unfeature" : "feature")}>
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <button class="btn secondary sm" type="submit"><Glyph name="star" size={14} />{a.plugin.featured ? "Stop featuring" : "Feature"}</button>
+        </form>
+        <a class="btn secondary sm" href={act("transfer")} data-dialog="transfer">Move…</a>
+        {a.status === "suspended" ? (
+          <form method="post" action={act("restore")}>
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <button class="btn secondary sm" type="submit">Restore</button>
+          </form>
+        ) : (
+          <a class="btn secondary sm" href={act("suspend")} data-dialog="suspend">Suspend…</a>
+        )}
+      </div>
+    )
+  }
 
-          {a.status === "suspended" && a.plugin.suspend_reason && (
-            <p class="suspended"><b>Suspended:</b> {a.plugin.suspend_reason}</p>
-          )}
+  {
+    !a ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h2>This plugin can't be loaded right now</h2><p>Try again in a moment.</p></div>
+          <div class="actions"><a class="btn secondary sm" href={here}>Try again</a></div>
+        </div>
+      </div>
+    ) : (
+      <div class="mine-body">
+        <header class="mine-head">
+          <PluginTile id={a.plugin.id} name={name} icon={a.plugin.icon} version={a.plugin.version} size={56} class="plugin-tile" />
+          <div class="who">
+            <h1 class="t-title">{name}</h1>
+            <p class="meta t-text t-2">
+              <span class="t-mono t-3">{a.plugin.id}</span>
+              {listing && a.status !== "listed" && <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>}
+              {a.plugin.featured && <span class="badge sm accent">Featured</span>}
+              <span>by {a.owner.username ? <a href={memberUrl(a.owner.username)}>@{a.owner.username}</a> : "an account with no username"}{a.owner.created_at ? ` (${age(a.owner.created_at).toLowerCase()})` : ""}</span>
+              <span class="t-3" aria-hidden="true">·</span>
+              <span class="num">{count(a.plugin.installs)} {a.plugin.installs === 1 ? "install" : "installs"}</span>
+            </p>
+          </div>
+          {a.status === "listed" && <a class="see" href={pluginUrl(a.plugin.id)}>Its page<Glyph name="arrow-up-right" size={12} /></a>}
+        </header>
 
-          <section class="panel actions" aria-label="What can be done">
-            <form method="post" action={act(a.plugin.featured ? "unfeature" : "feature")}>
-              <input type="hidden" name="csrf" value={session.csrf} />
-              <Action tone="secondary" size="md"><Glyph name="star" size={14} />{a.plugin.featured ? "Stop featuring" : "Feature"}</Action>
-            </form>
-            <a class="act" href={act("transfer")} data-dialog="transfer">Move to another account…</a>
-            {a.status === "suspended" ? (
-              <form method="post" action={act("restore")}>
-                <input type="hidden" name="csrf" value={session.csrf} />
-                <Action tone="secondary" size="md">Restore</Action>
-              </form>
-            ) : (
-              <a class="act danger" href={act("suspend")} data-dialog="suspend">Suspend…</a>
-            )}
-          </section>
+        {a.status === "suspended" && a.plugin.suspend_reason && (
+          <p class="notice warn"><Glyph name="danger-triangle" size={16} /><span><b>Suspended.</b> {a.plugin.suspend_reason}</span></p>
+        )}
 
-          <section class="block" aria-labelledby="versions-heading">
-            <h2 id="versions-heading">Versions</h2>
-            <div class="table-wrap">
-              <table class="stack-table">
-                <thead>
-                  <tr>
-                    <th scope="col">Version</th>
-                    <th scope="col">State</th>
-                    <th scope="col">Submitted</th>
-                    <th scope="col"><span class="sr-only">What can be done</span></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {a.versions.map((v) => (
+        <section class="section" aria-labelledby="versions-heading">
+          <div class="section-head"><div class="words"><h2 id="versions-heading">Versions <span class="title-count">· {count(a.versions.length)}</span></h2></div></div>
+          <div class="panel">
+            <table class="table wrapping staff-versions">
+              <caption class="sr-only">Its versions, the newest first</caption>
+              <colgroup><col class="version" /><col class="state" /><col /><col class="when" /><col class="action" /></colgroup>
+              <thead><tr><th scope="col">Version</th><th scope="col">State</th><th scope="col">What was said</th><th scope="col">Sent</th><th scope="col"><span class="sr-only">What can be done</span></th></tr></thead>
+              <tbody>
+                {a.versions.map((v) => {
+                  const st = versionState(v);
+                  const decided = v.review?.decided_at;
+                  return (
                     <tr>
-                      <th scope="row">
-                        <a href={`${here}/${encodeURIComponent(v.version)}`} class="num">{v.version}</a>
-                      </th>
-                      <td>
-                        <span class="state">
-                          <Badge tone={versionState(v).tone} size="sm">{versionState(v).label}</Badge>
-                          {v.blocked && <Badge tone="danger" size="sm">Turned off on devices</Badge>}
-                          {v.review?.reason && <span class="reason">{reasonWords(v.review.reason)}</span>}
-                        </span>
+                      <td><span class="line version"><a href={`${here}/${encodeURIComponent(v.version)}`}>{v.version}</a></span></td>
+                      <td><span class="line"><span class:list={["badge sm", toneClass(st.tone)]}>{st.label}</span>{v.blocked && <span class="badge sm bad" title="Turned off on the devices that had it">Off</span>}</span></td>
+                      <td class="words">
+                        {v.review?.message ? <span class="said">“{v.review.message}”</span> : <span>{v.status === "pending" ? "Waiting for a reviewer." : st.about}</span>}
+                        {(v.review?.reason || decided) && <span class="who">{[v.review?.reason && reasonLabel(v.review.reason), decided && `${v.status === "removed" ? "taken down" : "decided"} ${day(decided)}`].filter(Boolean).join(" · ")}</span>}
                       </td>
-                      <td class="when" data-label="Submitted"><time datetime={new Date(v.submitted_at).toISOString()} title={date(v.submitted_at)}>{ago(v.submitted_at)}</time></td>
-                      <td class="do">
-                        {removable(v.status) && (
-                          <a class="act danger small" href={`${here}/${encodeURIComponent(v.version)}/remove`} data-dialog={vid(v.version)}>
-                            Take down…
-                          </a>
-                        )}
+                      <td><span class="line t-2"><time datetime={new Date(v.submitted_at).toISOString()} title={dateTime(v.submitted_at)}>{day(v.submitted_at)}</time></span></td>
+                      <td class="end"><span class="line end">{removable(v.status) && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/remove`} data-dialog={vid(v.version)}>Take down…</a>}</span></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="section" aria-labelledby="reports-heading">
+          <div class="section-head">
+            <div class="words"><h2 id="reports-heading">Reports <span class="title-count">· {count(a.reports.length)}</span></h2></div>
+            <a class="btn ghost sm" href={`/admin/audit?plugin=${encodeURIComponent(a.plugin.id)}`}>Its history<Glyph name="alt-arrow-right" size={12} /></a>
+          </div>
+          {a.reports.length === 0 ? (
+            <p class="t-text t-3">No one has reported it.</p>
+          ) : (
+            <div class="panel">
+              <table class="table wrapping reports-table">
+                <caption class="sr-only">Its reports, the newest first</caption>
+                <colgroup><col class="when" /><col class="reason" /><col /><col class="when" /><col class="action" /></colgroup>
+                <thead><tr><th scope="col">State</th><th scope="col">Reason</th><th scope="col">What they said</th><th scope="col">Sent</th><th scope="col"><span class="sr-only">What can be done</span></th></tr></thead>
+                <tbody>
+                  {a.reports.map((r) => (
+                    <tr>
+                      <td><span class="line">{r.status === "open" ? <span class="badge sm warn">Open</span> : <span class="t-2">{REPORT[r.status].label}</span>}</span></td>
+                      <td><span class:list={["line", { "t-2": r.reason !== "malware" }]}>{r.reason === "malware" ? <span class="badge sm bad">{reasonWords(r.reason)}</span> : reasonWords(r.reason)}</span></td>
+                      <td class="words">
+                        {r.text ? <span class="said">{r.text}</span> : <span class="t-3">No words given.</span>}
+                        <span class="who">from {r.reporter?.username ? `@${r.reporter.username}` : "someone"}{r.version ? ` · about ${r.version}` : ""}</span>
                       </td>
+                      <td><span class="line t-2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span></td>
+                      <td class="end"><span class="line end">{r.status === "open" && <a class="btn ghost sm" href={`/admin/reports#close-${r.id}`}>Close it…</a>}</span></td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          </section>
+          )}
+        </section>
 
-          <section class="block" aria-labelledby="reports-heading">
-            <h2 id="reports-heading">Reports</h2>
-            {a.reports.length === 0 ? (
-              <p class="quiet">No one has reported it.</p>
-            ) : (
-              <ul class="reports" role="list">
-                {a.reports.map((r) => (
-                  <li>
-                    <p class="report-head">
-                      <Badge tone={r.status === "open" ? "warning" : "neutral"} size="sm">{r.status === "open" ? "Open" : r.status === "actioned" ? "Acted on" : "Dismissed"}</Badge>
-                      <b>{reasonWords(r.reason)}</b>
-                      <span class="quiet">from {r.reporter?.username ? `@${r.reporter.username}` : "someone"} · {ago(r.created_at)}{r.version ? ` · about ${r.version}` : ""}</span>
-                    </p>
-                    {r.text && <p class="report-text">{r.text}</p>}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {a.reports.some((r) => r.status === "open") && <a class="quiet-link" href="/admin/reports">Resolve them in Reports</a>}
-            <a class="quiet-link" href={`/admin/audit?plugin=${encodeURIComponent(a.plugin.id)}`}>Its history in the audit log</a>
-          </section>
-
-          <Dialog id="suspend" title={`Suspend ${a.plugin.name}?`} tone="danger">
-            <p>It's gone from the store at once: no page, no installs, no updates. Anyone who has it keeps it. You can restore it.</p>
-            <ConfirmForm action={act("suspend")} csrf={session.csrf} confirm="Suspend" tone="danger" mode="dialog" back={here}>
-              <Field name="reason" id="suspend-reason" label="Why" multiline required maxlength={2000} hint="Its author reads this." />
-            </ConfirmForm>
-          </Dialog>
-          <Dialog id="transfer" title={`Move ${a.plugin.name} to another account?`} tone="danger">
-            <p>Its new owner publishes its versions from now on. Its current owner can't, and their deploy keys for it stop working.</p>
-            <ConfirmForm action={act("transfer")} csrf={session.csrf} confirm="Move it" tone="danger" mode="dialog" back={here}>
-              <Field name="to_username" id="transfer-to" label="New owner's username" required maxlength={21} placeholder="@username" />
-            </ConfirmForm>
-          </Dialog>
-          {a.versions.filter((v) => removable(v.status)).map((v) => (
-            <Dialog id={vid(v.version)} title={`Take down ${a.plugin.name} ${v.version}?`} tone="danger">
-              <p>Nobody can install it from the store again. Choose whether the devices that have it turn it off too.</p>
-              <ConfirmForm action={`${here}/${encodeURIComponent(v.version)}/remove`} csrf={session.csrf} confirm="Take down" tone="danger" mode="dialog" back={here}>
-                <Field name="reason" id={`${vid(v.version)}-reason`} label="Why" multiline required maxlength={2000} hint="Its author reads this, and so does anyone whose device turns it off." />
-                <label class="check">
-                  <input type="checkbox" name="block" />
-                  <span>Also turn it off on the devices that have it. People can turn it back on; it's theirs.</span>
-                </label>
-              </ConfirmForm>
-            </Dialog>
-          ))}
-        </>
-      )
-    }
-  </div>
-</Store>
-
-<style>
-  .one { display: grid; gap: 24px; }
-  .back { display: inline-flex; align-items: center; gap: 6px; justify-self: start; height: 28px; font-size: 14px; font-weight: 500; color: var(--text-3); transition: color 0.12s; }
-  .back:hover { color: var(--text); }
-  .head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 20px; }
-  .identity { display: grid; gap: 6px; min-width: 0; }
-  .identity h1 { font-size: clamp(24px, 2.8vw, 32px); overflow-wrap: anywhere; }
-  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13.5px; color: var(--text-3); }
-  .meta a { color: var(--text-2); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
-  .meta a:hover { color: var(--text); }
-  .suspended { padding: 12px 14px; font-size: 14px; color: var(--text-2); background: var(--tone-danger-wash); border-radius: var(--radius-lg); }
-  .suspended b { font-weight: 500; color: var(--tone-danger); }
-  .quiet-link { display: inline-flex; align-items: center; gap: 6px; justify-self: start; font-size: 14px; font-weight: 500; color: var(--text-2); transition: color 0.12s; }
-  .quiet-link:hover { color: var(--text); }
-  .panel.actions { display: flex; flex-wrap: wrap; gap: 8px; }
-  .act { display: inline-flex; align-items: center; height: 32px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-lg); transition: background-color 0.12s; }
-  .act:hover { background: var(--secondary-hover); }
-  .act.danger { color: var(--tone-danger); }
-  .act.danger:hover { background: var(--tone-danger-wash); }
-  .act.small { height: 28px; margin-top: -4px; padding: 0 10px; font-size: 13px; border-radius: var(--radius-md); }
-  .block { display: grid; gap: 14px; }
-  .block h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.015em; }
-  .quiet { font-size: 14px; color: var(--text-3); }
-  .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.5; }
-  th, td { padding: 14px 16px; text-align: left; vertical-align: top; }
-  thead th { padding-block: 10px; font-size: 12.5px; font-weight: 500; color: var(--text-3); border-bottom: 1px solid var(--line); }
-  tbody tr + tr > * { border-top: 1px solid var(--line); }
-  tbody th a { font-weight: 600; color: var(--text); }
-  tbody th a:hover { color: var(--accent-soft); }
-  .state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
-  .reason { font-size: 13px; color: var(--text-3); }
-  .when { color: var(--text-2); white-space: nowrap; }
-  .do { text-align: right; }
-  .reports { display: grid; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
-  .reports li { display: grid; gap: 6px; padding: 14px 16px; }
-  .reports li + li { border-top: 1px solid var(--line); }
-  .report-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 14px; }
-  .report-head b { font-weight: 500; }
-  .report-text { font-size: 14px; line-height: 1.55; color: var(--text-2); white-space: pre-line; overflow-wrap: anywhere; }
-  .check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 1.5; color: var(--text-2); cursor: pointer; }
-  .check input { margin-top: 3px; accent-color: var(--destructive-bg); }
-  @media (max-width: 640px) {
-    .head { grid-template-columns: auto minmax(0, 1fr); }
+        <dialog class="dialog sm" id="suspend" aria-labelledby="suspend-title" closedby="any">
+          <form method="post" action={act("suspend")}>
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <div class="head"><h2 id="suspend-title">{suspend.title}</h2>{suspend.words.map((w) => <p>{w}</p>)}</div>
+            <div class="body">
+              <div>
+                <label class="field-label" for="suspend-reason">Why</label>
+                <div class="field area"><textarea id="suspend-reason" name="reason" required maxlength="2000" rows="3" /></div>
+                <p class="field-hint">Its author reads this.</p>
+              </div>
+            </div>
+            <div class="answers">
+              <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+              <button class="btn danger" type="submit">{suspend.confirm}</button>
+            </div>
+          </form>
+        </dialog>
+        <dialog class="dialog sm" id="transfer" aria-labelledby="transfer-title" closedby="any">
+          <form method="post" action={act("transfer")}>
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <div class="head"><h2 id="transfer-title">{transfer.title}</h2>{transfer.words.map((w) => <p>{w}</p>)}</div>
+            <div class="body">
+              <div>
+                <label class="field-label" for="transfer-to">New owner's username</label>
+                <div class="field"><input id="transfer-to" name="to_username" required maxlength="21" placeholder="@username" autocomplete="off" /></div>
+              </div>
+            </div>
+            <div class="answers">
+              <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+              <button class="btn danger" type="submit">{transfer.confirm}</button>
+            </div>
+          </form>
+        </dialog>
+        {a.versions.filter((v) => removable(v.status)).map((v) => {
+          const remove = versionAsk("remove", name, v.version);
+          return (
+            <dialog class="dialog" id={vid(v.version)} aria-labelledby={`${vid(v.version)}-title`} closedby="any">
+              <form method="post" action={`${here}/${encodeURIComponent(v.version)}/remove`}>
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <div class="head"><h2 id={`${vid(v.version)}-title`}>{remove.title}</h2>{remove.words.map((w) => <p>{w}</p>)}</div>
+                <TakeDown id={vid(v.version)} />
+                <div class="answers">
+                  <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+                  <button class="btn danger" type="submit">{remove.confirm}</button>
+                </div>
+              </form>
+            </dialog>
+          );
+        })}
+      </div>
+    )
   }
-</style>
+  <Toast toast={toast} />
+</App>

@@ -393,7 +393,8 @@ const SPECS: Spec[] = [
       { version: "1.2.0", status: "removed", ago: 8, review: { state: "removed", reason: "unsafe", message: "Taken down: it sent the open chat's text to a host its README doesn't name. Anyone who has it has had it turned off.", decided_at: NOW - 7 * DAY } },
       { version: "1.3.0", status: "withdrawn", ago: 6 },
       { version: "1.4.0", status: "rejected", ago: 4, review: { state: "rejected", reason: "asks_too_much", message: "It asks to run python3, git and jq and to reach any site at all, but nothing in the README or the listing says what it runs them for or what it sends where. Name the hosts it needs and drop the wildcard, say in the README what each program is run for, and send it again: a reviewer will look at the new version the same day. Until then it can't be listed, and nobody else can install it.", decided_at: NOW - 3 * DAY } },
-      { version: "1.5.0", status: "pending", ago: 1, notes: "Names the hosts it reaches; says what it runs and why." },
+      // (The worst to weigh: two new asks, a program more, hosts named in place of the wildcard.)
+      { version: "1.5.0", status: "pending", ago: 1, notes: "Names the hosts it reaches; says what it runs and why.", permissions: ["ui.add", "network", "commands", "tools", "messages.send", "notifications"], commands: ["python3", "git", "jq", "bash"], network: ["api.averyveryverylongsubdomainname.example.com", "localhost:8080", "uploads.averyveryverylongsubdomainname.example.com"] },
     ],
   },
   {

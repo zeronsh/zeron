@@ -1,19 +1,18 @@
 ---
 // Ids held back from first-come claims (plan, amendment 19): each for one
-// account, or for nobody. Reserve one here, or free it. Admins only.
-import { adminSession } from "../../../lib/store/session.ts";
-import AccountBar from "../../../components/store/AccountBar.astro";
-import ConfirmForm from "../../../components/store/ConfirmForm.astro";
-import Action from "../../../components/ui/Action.astro";
-import Dialog from "../../../components/ui/Dialog.astro";
-import Field from "../../../components/ui/Field.astro";
-import Store from "../../../layouts/Store.astro";
+// account, or for nobody, as a table; reserve one under it, or free one
+// from its row. Admins only.
+import Toast from "../../../components/kit/Toast.astro";
+import Glyph from "../../../components/ui/Glyph.astro";
+import App from "../../../layouts/App.astro";
+import { freeAsk } from "../../../lib/store/admin.ts";
 import { takeFlash } from "../../../lib/store/flash.ts";
-import { ago, date } from "../../../lib/store/format.ts";
+import { count, dateTime, day } from "../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId, isUsername, SITE_IDS } from "../../../lib/store/names.ts";
 import { resumed } from "../../../lib/store/resume.ts";
+import { adminSession } from "../../../lib/store/session.ts";
 
 export const prerender = false;
 
@@ -40,41 +39,40 @@ const reservations = result.ok ? result.data.reservations : [];
 const dialogId = (id: string) => `free-${id}`;
 ---
 
-<Store title="Reserved ids · Zeron" description="Plugin ids held back from first-come claims." noindex tool toast={toast}>
-  <div class="wrap reserved">
-    <AccountBar session={session} current="reservations">
-      <h1>Reserved ids</h1>
-      <p class="lead">An id here can't be claimed by whoever submits it first: it's held for the account named, or for nobody.</p>
-    </AccountBar>
+<App title="Reserved ids · Review · Zeron" description="Plugin ids held back from first-come claims." noindex current="reserved" session={session}>
+  <h1 slot="title" class="t-title">Reserved ids{result.ok && <span class="title-count"> · {count(reservations.length)}</span>}</h1>
 
-
+  <div class="mine-body">
     {
       !result.ok ? (
-        <p class="quiet">Reserved ids can't be loaded right now. Try again in a minute.</p>
+        <div class="panel">
+          <div class="empty" role="status">
+            <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+            <div class="words"><h2>Reserved ids can't be loaded right now</h2><p>Try again in a moment.</p></div>
+            <div class="actions"><a class="btn secondary sm" href={here}>Try again</a></div>
+          </div>
+        </div>
       ) : reservations.length === 0 ? (
-        <p class="quiet">No ids are reserved.</p>
+        <div class="panel">
+          <div class="empty">
+            <span class="tile"><Glyph name="tag" size={20} /></span>
+            <div class="words"><h2>No ids are reserved</h2><p>An id reserved here can't be claimed by whoever sends it first.</p></div>
+          </div>
+        </div>
       ) : (
-        <div class="table-wrap">
-          <table class="stack-table">
-            <thead>
-              <tr>
-                <th scope="col">Id</th>
-                <th scope="col">For</th>
-                <th scope="col">Why</th>
-                <th scope="col">Since</th>
-                <th scope="col"><span class="sr-only">What can be done</span></th>
-              </tr>
-            </thead>
+        <div class="panel">
+          <table class="table wrapping reserved-table">
+            <caption class="sr-only">Reserved ids</caption>
+            <colgroup><col class="id-col" /><col class="for" /><col /><col class="when" /><col class="action" /></colgroup>
+            <thead><tr><th scope="col">Id</th><th scope="col">For</th><th scope="col">Why</th><th scope="col">Since</th><th scope="col"><span class="sr-only">What can be done</span></th></tr></thead>
             <tbody>
               {reservations.map((r) => (
                 <tr>
-                  <th scope="row"><code>{r.id}</code></th>
-                  <td data-label="For">{r.to ? `@${r.to.username}` : <span class="quiet">Nobody</span>}</td>
-                  <td class="note">{r.note ?? ""}</td>
-                  <td class="when" data-label="Since"><time datetime={new Date(r.created_at).toISOString()} title={date(r.created_at)}>{ago(r.created_at)}</time></td>
-                  <td class="do">
-                    <a class="free" href={`${here}/${encodeURIComponent(r.id)}`} data-dialog={dialogId(r.id)}>Free…</a>
-                  </td>
+                  <td><span class="line"><code class="id">{r.id}</code></span></td>
+                  <td><span class="line">{r.to ? `@${r.to.username}` : <span class="t-3">Nobody</span>}</span></td>
+                  <td class="words">{r.note ?? ""}</td>
+                  <td><span class="line t-2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span></td>
+                  <td class="end"><span class="line end"><a class="btn ghost sm" href={`${here}/${encodeURIComponent(r.id)}`} data-dialog={dialogId(r.id)}>Free…</a></span></td>
                 </tr>
               ))}
             </tbody>
@@ -83,48 +81,52 @@ const dialogId = (id: string) => `free-${id}`;
       )
     }
 
-    <section class="panel" aria-labelledby="reserve-heading">
-      <h2 id="reserve-heading">Reserve an id</h2>
-      <form method="post" action={here} class="reserve">
+    <section class="section" aria-labelledby="reserve-heading">
+      <div class="section-head">
+        <div class="words">
+          <h2 id="reserve-heading">Reserve an id</h2>
+          <p>Held for the account named, or for nobody. An id in use moves by a transfer instead.</p>
+        </div>
+      </div>
+      <form method="post" action={here} class="panel reserve-form">
         <input type="hidden" name="csrf" value={session.csrf} />
-        <Field name="id" label="Plugin id" required maxlength={40} value={resumed(Astro.url, "id", 40)} placeholder="an-id" hint="2 to 40 lowercase letters, digits and dashes. An id in use moves by a transfer instead." />
+        <div>
+          <label class="field-label" for="reserve-id">Plugin id</label>
+          <div class="field"><input id="reserve-id" name="id" required maxlength="40" placeholder="an-id" autocomplete="off" value={resumed(Astro.url, "id", 40) || undefined} /></div>
+          <p class="field-hint">2 to 40 lowercase letters, digits and dashes.</p>
+        </div>
+        <div>
+          <label class="field-label" for="reserve-for">For</label>
+          <div class="field"><input id="reserve-for" name="to_username" maxlength="21" placeholder="@username" autocomplete="off" value={resumed(Astro.url, "to_username", 21) || undefined} /></div>
+          <p class="field-hint">Empty: held for nobody.</p>
+        </div>
+        <div>
+          <label class="field-label" for="reserve-note">Why</label>
+          <div class="field"><input id="reserve-note" name="note" maxlength="500" autocomplete="off" value={resumed(Astro.url, "note", 500) || undefined} /></div>
+          <p class="field-hint">For the other reviewers.</p>
+        </div>
         <p class="site-ids">The site's own page words can't be reserved: no plugin can have them. <span class="words">{SITE_IDS.join(", ")}</span></p>
-        <Field name="to_username" label="For" maxlength={21} value={resumed(Astro.url, "to_username", 21)} placeholder="@username" hint="Leave it empty to hold the id for nobody." />
-        <Field name="note" label="Why" maxlength={500} value={resumed(Astro.url, "note", 500)} hint="For the other reviewers." />
-        <div class="answers"><Action tone="primary">Reserve</Action></div>
+        <div class="answers"><button class="btn primary sm" type="submit">Reserve</button></div>
       </form>
     </section>
 
     {
-      reservations.map((r) => (
-        <Dialog id={dialogId(r.id)} title={`Free “${r.id}”?`} tone="danger">
-          <p>Anyone can claim it then, first come. If someone claimed it and never used it, their claim goes too.</p>
-          <ConfirmForm action={`${here}/${encodeURIComponent(r.id)}`} csrf={session.csrf} confirm="Free it" tone="danger" mode="dialog" back={here} />
-        </Dialog>
-      ))
+      reservations.map((r) => {
+        const ask = freeAsk(r.id);
+        return (
+          <dialog class="dialog sm" id={dialogId(r.id)} aria-labelledby={`${dialogId(r.id)}-title`} closedby="any">
+            <form method="post" action={`${here}/${encodeURIComponent(r.id)}`}>
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <div class="head"><h2 id={`${dialogId(r.id)}-title`}>{ask.title}</h2>{ask.words.map((w) => <p>{w}</p>)}</div>
+              <div class="answers">
+                <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+                <button class="btn danger" type="submit">{ask.confirm}</button>
+              </div>
+            </form>
+          </dialog>
+        );
+      })
     }
   </div>
-</Store>
-
-<style>
-  .reserved { display: grid; gap: 24px; }
-  .lead { max-width: 40em; font-size: 16px; }
-  .panel { display: grid; gap: 16px; max-width: 640px; padding: 20px; background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
-  .panel h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
-  .reserve { display: grid; gap: 14px; }
-  .site-ids { font-size: 13px; line-height: 20px; color: var(--text-2); }
-  .site-ids .words { display: block; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-3); }
-  .answers { display: flex; justify-content: flex-end; }
-  .quiet { font-size: 14px; color: var(--text-3); }
-  .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.5; }
-  th, td { padding: 14px 16px; text-align: left; vertical-align: top; }
-  thead th { padding-block: 10px; font-size: 12.5px; font-weight: 500; color: var(--text-3); border-bottom: 1px solid var(--line); white-space: nowrap; }
-  tbody tr + tr > * { border-top: 1px solid var(--line); }
-  tbody th code { font-size: 13.5px; color: var(--text); }
-  .note { color: var(--text-2); overflow-wrap: anywhere; }
-  .when { color: var(--text-2); white-space: nowrap; }
-  .do { text-align: right; }
-  .free { display: inline-flex; align-items: center; margin-top: -4px; height: 28px; padding: 0 10px; font-size: 13px; font-weight: 500; color: var(--tone-danger); background: var(--secondary-bg); border-radius: var(--radius-md); transition: background-color 0.12s; }
-  .free:hover { background: var(--tone-danger-wash); }
-</style>
+  <Toast toast={toast} />
+</App>

@@ -1,11 +1,13 @@
 ---
 // Free a reserved id. A post does it; a visit asks first.
-import { adminSession } from "../../../lib/store/session.ts";
-import ConfirmPage from "../../../components/store/ConfirmPage.astro";
-import Store from "../../../layouts/Store.astro";
+import Confirm from "../../../components/kit/Confirm.astro";
+import Glyph from "../../../components/ui/Glyph.astro";
+import App from "../../../layouts/App.astro";
+import { freeAsk } from "../../../lib/store/admin.ts";
 import { done, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId } from "../../../lib/store/names.ts";
+import { adminSession } from "../../../lib/store/session.ts";
 
 export const prerender = false;
 
@@ -15,22 +17,21 @@ if (!isPluginId(id)) return new Response(null, { status: 404 });
 const session = await adminSession(Astro);
 if (!session) return new Response(null, { status: 404 });
 const back = "/admin/reservations";
+const ask = freeAsk(id);
 
 if (Astro.request.method === "POST") {
   const form = await formOf(Astro.request);
   if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
   const result = await Astro.locals.edge.releaseReservation(id, session.csrf);
-  return done(Astro, flashFor(result, "reservation_released"), back);
+  return done(Astro, flashFor(result, ask.flash), back);
 }
 if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
 privatePage(Astro);
-const title = `Free “${id}”?`;
 ---
 
-<Store title={`${title} · Zeron`} description={title} noindex tool>
-  <div class="wrap">
-    <ConfirmPage title={title} action={Astro.url.pathname} csrf={session.csrf} confirm="Free it" tone="danger" back={back}>
-      <p slot="words">Anyone can claim it then, first come. If someone claimed it and never used it, their claim goes too.</p>
-    </ConfirmPage>
-  </div>
-</Store>
+<App title={`${ask.title} · Zeron`} description={ask.title} noindex current="reserved" session={session}>
+  <nav slot="title" class="crumbs" aria-label="Where this is">
+    <a href={back}>Reserved ids</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{id}</span>
+  </nav>
+  <Confirm ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
+</App>

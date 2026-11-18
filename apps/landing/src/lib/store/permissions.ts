@@ -425,31 +425,57 @@ export function details(p: Permissions): { title: string; list: string[] }[] {
   return out;
 }
 
+/** One ask's line, beside the last approved version's: new, changed inside, or as it was. */
+export interface Compared extends Line {
+  /** The permission, as the manifest names it. */
+  name: string;
+  /** Null: as before (or nothing to compare with, a first version). */
+  change: "new" | "changed" | null;
+  /** Inside an ask it had, what it now names that it didn't (programs, hosts, tools, places)… */
+  added?: string[];
+  /** …what changed in place (a tool that says something else to agents)… */
+  altered?: string[];
+  /** …and what it no longer names. */
+  removed?: string[];
+}
+
 /**
- * What a version asks for that the last approved one didn't, for a
- * reviewer: its new permissions' lines, then what grew inside the ones it
- * already had. The risky ones last.
+ * What a version asks for, as a reviewer weighs it against the last
+ * approved one (the edge's consentDiff): each ask marked new, changed
+ * inside (what it now names, changed or dropped), or as before; those that
+ * moved first, the risky ones last within each; and the asks it dropped.
+ * Without a diff (a first version) nothing is marked: all of it is new.
  */
-export function grew(p: Permissions, diff: PermissionsDiff | null): Line[] {
-  if (!diff) return [];
-  const out: Line[] = (diff.added ?? []).map((name) => permission(p, name));
-  const asked = new Set(diff.added ?? []);
-  if (!asked.has("commands") && (diff.added_commands?.length ?? 0) > 0) {
-    out.push(line(true, "terminal", say("plugins.words.diff.commands"), undefined, { literal: programs(diff.added_commands!, p.commands_anything, p.commands_full_control).list }));
-  }
-  if (!asked.has("ui.replace") && (diff.ui_replace_added?.length ?? 0) > 0) {
-    out.push(line(true, "danger-triangle", say("plugins.words.diff.ui_replace", { places: places(diff.ui_replace_added) }), say("plugins.words.permission.ui_replace.detail"), { literal: literal(diff.ui_replace_added) }));
-  }
-  if (!asked.has("tools") && (diff.tools_added?.length ?? 0) > 0) {
-    out.push(line(false, "magic-stick", say("plugins.words.diff.tools_added"), undefined, { items: tools(diff.tools_added) }));
-  }
-  if ((diff.tools_changed?.length ?? 0) > 0) {
-    const items = diff.tools_changed!.map((t) => (t.description_after ? { name: t.name, description: t.description_after } : { name: t.name }));
-    out.push(line(false, "magic-stick", say("plugins.words.diff.tools_changed"), undefined, { items }));
-  }
-  if (!asked.has("network") && (diff.network_added?.length ?? 0) > 0) {
-    const listed = hosts(diff.network_added!, p.network_local);
-    out.push(line(listed.near, "global", say("plugins.words.diff.network"), undefined, { literal: listed.list }));
-  }
-  return [...out.filter((l) => !l.risky), ...out.filter((l) => l.risky)];
+export function compared(p: Permissions, diff: PermissionsDiff | null): { lines: Compared[]; dropped: Line[] } {
+  const added = new Set(diff?.added ?? []);
+  const inside = (name: string): Pick<Compared, "added" | "altered" | "removed"> => {
+    if (!diff) return {};
+    switch (name) {
+      case "commands":
+        return { added: diff.added_commands, removed: diff.removed_commands };
+      case "network":
+        return { added: diff.network_added, removed: diff.network_removed };
+      case "tools":
+        return { added: diff.tools_added?.map((t) => t.name), altered: diff.tools_changed?.map((t) => t.name), removed: diff.tools_removed };
+      case "ui.replace":
+        return { added: diff.ui_replace_added };
+      case "ui.change":
+        return { added: diff.ui_change_added };
+    }
+    return {};
+  };
+  const all = p.asks.map((name): Compared => {
+    const out: Compared = { ...permission(p, name), name, change: null };
+    if (!diff) return out;
+    if (added.has(name)) return { ...out, change: "new" };
+    const moved = inside(name);
+    for (const key of ["added", "altered", "removed"] as const) if (moved[key]?.length) out[key] = moved[key];
+    if (out.added || out.altered || out.removed) out.change = "changed";
+    return out;
+  });
+  const order = (list: Compared[]) => [...list.filter((l) => !l.risky), ...list.filter((l) => l.risky)];
+  return {
+    lines: [...order(all.filter((l) => l.change)), ...order(all.filter((l) => !l.change))],
+    dropped: (diff?.removed ?? []).map((name) => permission({ asks: [] }, name)),
+  };
 }

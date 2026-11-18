@@ -1,12 +1,14 @@
 ---
-// Everything an admin did, newest first. Admins only.
-import AccountBar from "../../components/store/AccountBar.astro";
-import Pagination from "../../components/ui/Pagination.astro";
-import Store from "../../layouts/Store.astro";
-import { dateTime } from "../../lib/store/format.ts";
-import { privatePage } from "../../lib/store/http.ts";
+// Everything done to the store's plugins, by reviewers and by their
+// authors, newest first, as a table; or one plugin's, from its page.
+// Admins only.
+import Glyph from "../../components/ui/Glyph.astro";
+import App from "../../layouts/App.astro";
 import { reasonLabel } from "../../lib/store/admin.ts";
+import { count, dateTime, day } from "../../lib/store/format.ts";
+import { privatePage } from "../../lib/store/http.ts";
 import { isPluginId } from "../../lib/store/names.ts";
+import { pagerOf, placeOf } from "../../lib/store/paging.ts";
 import { adminSession } from "../../lib/store/session.ts";
 
 export const prerender = false;
@@ -14,18 +16,13 @@ export const prerender = false;
 const session = await adminSession(Astro);
 if (!session) return new Response(null, { status: 404 });
 privatePage(Astro);
-const cursor = Astro.url.searchParams.get("cursor");
+const place = placeOf(Astro.url);
 const asked = Astro.url.searchParams.get("plugin");
 const pluginFilter = isPluginId(asked) ? asked : null;
-const result = await Astro.locals.edge.audit(cursor && /^[A-Za-z0-9_-]{1,512}$/.test(cursor) ? cursor : undefined, pluginFilter ?? undefined);
-const auditHref = (c?: string) => {
-  const params = new URLSearchParams();
-  if (pluginFilter) params.set("plugin", pluginFilter);
-  if (c) params.set("cursor", c);
-  return `/admin/audit${params.size ? `?${params}` : ""}`;
-};
+const result = await Astro.locals.edge.audit(place.cursor, pluginFilter ?? undefined);
 if (!result.ok && result.error === "bad_cursor") return Astro.redirect(pluginFilter ? `/admin/audit?plugin=${pluginFilter}` : "/admin/audit", 303);
 const entries = result.ok ? result.data.entries : [];
+const pager = result.ok ? pagerOf("/admin/audit", pluginFilter ? { plugin: pluginFilter } : {}, place, result.data, entries.length) : null;
 
 /** The edge's words for what was done, as a person says them. */
 const ACTIONS: Record<string, string> = {
@@ -56,68 +53,76 @@ function detailText(detail: unknown): string {
     .map(([k, v]) => `${k.replace(/_/g, " ")}: ${k === "reason" && typeof v === "string" ? reasonLabel(v) : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "object" ? JSON.stringify(v) : String(v)}`)
     .join(" · ");
 }
+const CLOCK = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "UTC" });
 ---
 
-<Store title="Audit log · Zeron" description="What was done to the store's plugins." noindex tool>
-  <div class="wrap audit">
-    <AccountBar session={session} current="audit">
-      <h1>Audit log</h1>
-      <p class="lead">{pluginFilter ? <>Everything done to <code>{pluginFilter}</code>, newest first. <a href="/admin/audit">The whole log</a></> : "Everything done to the store's plugins, by reviewers and by their authors, newest first."}</p>
-    </AccountBar>
-    {
-      !result.ok ? (
-        <p class="quiet">The log can't be loaded right now. Try again in a minute.</p>
-      ) : entries.length === 0 ? (
-        <p class="quiet">Nothing yet.</p>
-      ) : (
-        <div class="table-wrap">
-          <table class="stack-table">
-            <thead>
-              <tr>
-                <th scope="col">When</th>
-                <th scope="col">Who</th>
-                <th scope="col">What</th>
-                <th scope="col">Detail</th>
-              </tr>
-            </thead>
+<App title="Audit log · Review · Zeron" description="What was done to the store's plugins." noindex current="audit" session={session}>
+  <h1 slot="title" class="t-title">Audit log{result.ok && <span class="title-count"> · {count(result.data.total)}</span>}</h1>
+  {
+    pluginFilter && (
+      <div slot="tools" class="tools-row">
+        <span class="t-text t-2">For <code>{pluginFilter}</code></span>
+        <a class="btn ghost sm" href="/admin/audit">The whole log</a>
+      </div>
+    )
+  }
+
+  {
+    !result.ok ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h2>The log can't be loaded right now</h2><p>Try again in a moment.</p></div>
+          <div class="actions"><a class="btn secondary sm" href={Astro.url.pathname + Astro.url.search}>Try again</a></div>
+        </div>
+      </div>
+    ) : entries.length === 0 ? (
+      <div class="panel">
+        <div class="empty">
+          <span class="tile"><Glyph name="clock-circle" size={20} /></span>
+          <div class="words"><h2>Nothing yet</h2><p>What reviewers and authors do to a plugin is written here as it's done.</p></div>
+        </div>
+      </div>
+    ) : (
+      <>
+        <div class="panel">
+          <table class="table wrapping audit-table">
+            <caption class="sr-only">The audit log{pluginFilter ? ` for ${pluginFilter}` : ""}, the newest first</caption>
+            <colgroup><col class="when" /><col class="who" /><col class="what" /><col /></colgroup>
+            <thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">What</th><th scope="col">Detail</th></tr></thead>
             <tbody>
               {entries.map((e) => (
                 <tr>
-                  <td class="when"><time datetime={new Date(e.at).toISOString()}>{dateTime(e.at)}</time></td>
-                  <td data-label="By">{e.actor.username ? `@${e.actor.username}` : e.actor.user_id}</td>
-                  <td>
-                    {Object.hasOwn(ACTIONS, e.action) ? ACTIONS[e.action] : e.action}{" "}
-                    {e.plugin_id && e.action.startsWith("reservation.") && <a href="/admin/reservations"><code>{e.plugin_id}</code></a>}
-                    {e.plugin_id && !e.action.startsWith("reservation.") && (
-                      <a href={e.version ? `/admin/plugins/${encodeURIComponent(e.plugin_id)}/${encodeURIComponent(e.version)}` : `/admin/plugins/${encodeURIComponent(e.plugin_id)}`}>
-                        <code>{e.plugin_id}</code>
-                        {e.version && <span class="num"> {e.version}</span>}
-                      </a>
-                    )}
+                  <td><span class="line when-line"><time datetime={new Date(e.at).toISOString()} title={dateTime(e.at)}>{day(e.at)}, {CLOCK.format(e.at)}</time></span></td>
+                  <td><span class="line">{e.actor.username ? `@${e.actor.username}` : <span class="t-mono t-3">{e.actor.user_id}</span>}</span></td>
+                  <td class="what">
+                    <span class="line">
+                      <span>
+                        {Object.hasOwn(ACTIONS, e.action) ? ACTIONS[e.action] : e.action}{" "}
+                        {e.plugin_id && e.action.startsWith("reservation.") && <a href="/admin/reservations"><code class="t-mono">{e.plugin_id}</code></a>}
+                        {e.plugin_id && !e.action.startsWith("reservation.") && (
+                          <a href={e.version ? `/admin/plugins/${encodeURIComponent(e.plugin_id)}/${encodeURIComponent(e.version)}` : `/admin/plugins/${encodeURIComponent(e.plugin_id)}`}>
+                            <code class="t-mono">{e.plugin_id}</code>
+                            {e.version && <span class="t-mono t-2"> {e.version}</span>}
+                          </a>
+                        )}
+                      </span>
+                    </span>
                   </td>
-                  <td class="detail">{detailText(e.detail)}</td>
+                  <td class="words detail">{detailText(e.detail)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      )
-    }
-    {result.ok && <Pagination label="More of the log" next={result.data.next_cursor ? auditHref(result.data.next_cursor) : null} previous={result.data.prev_cursor ? auditHref(result.data.prev_cursor) : cursor ? auditHref() : null} />}
-  </div>
-</Store>
-
-<style>
-  .audit { display: grid; gap: 24px; }
-  .lead { max-width: 36em; font-size: 16px; }
-  .quiet { color: var(--text-3); }
-  .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.5; }
-  th, td { padding: 12px 16px; text-align: left; vertical-align: top; }
-  thead th { padding-block: 10px; font-size: 12.5px; font-weight: 500; color: var(--text-3); border-bottom: 1px solid var(--line); }
-  tbody tr + tr > * { border-top: 1px solid var(--line); }
-  .when { color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
-  td a { color: var(--text); }
-  td a:hover { color: var(--accent-soft); }
-  .detail { color: var(--text-2); overflow-wrap: anywhere; }
-</style>
+        {pager && (pager.previous || pager.next) && (
+          <nav class="pager" aria-label="Pages">
+            {pager.previous ? <a class="btn secondary sm" href={pager.previous} rel="prev"><Glyph name="alt-arrow-left" size={14} />Previous</a> : <span class="btn secondary sm" aria-disabled="true"><Glyph name="alt-arrow-left" size={14} />Previous</span>}
+            <span class="where">{pager.where}</span>
+            {pager.next ? <a class="btn secondary sm" href={pager.next} rel="next">Next<Glyph name="alt-arrow-right" size={14} /></a> : <span class="btn secondary sm" aria-disabled="true">Next<Glyph name="alt-arrow-right" size={14} /></span>}
+          </nav>
+        )}
+      </>
+    )
+  }
+</App>

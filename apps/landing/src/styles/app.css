@@ -81,6 +81,12 @@
   /* (What components/store/PluginTile.astro reads, under these names.) */
   --secondary-bg: var(--wash);
   --border-subtle: var(--line-faint);
+  /* (…and what the review's code, diff and file tree read: components/store/CodeView, DiffView, FileTree.) */
+  --border: var(--line-faint);
+  --field-bg: var(--sunken);
+  --tone-accent: var(--accent-ink);
+  --tone-accent-wash: var(--accent-wash);
+  --tone-warning: var(--warn-ink);
   --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px; --radius-xl: 12px;
 
   --sans: var(--font-sans);
@@ -1000,3 +1006,271 @@ dialog.sheet:target { display: block; }
 /* Toasts: at the window's foot, 16 from its edges (the page card's), over everything. */
 .toasts { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: grid; gap: 8px; }
 @media (max-width: 899px) { .toasts { left: 16px; right: 16px; justify-items: center; } }
+
+/* ── Review: the staff's side ──────────────────────────────────────────── */
+
+/* The queue: a table, the longest waiting first, a submission a row (the
+   row its link). The plugin (a 32 tile, its name over its id in mono)
+   takes what is left; the version in mono 128; who sent it 144; new or an
+   update 112; a badge only where a row needs a look 152; how long it has
+   waited 112, the last column, so at the right. 52 a row. */
+.queue { table-layout: fixed; }
+.queue col.version { width: 128px; }
+.queue col.author { width: 144px; }
+.queue col.kind { width: 112px; }
+.queue col.flags { width: 152px; }
+.queue col.waited { width: 112px; }
+.queue tbody tr { position: relative; }
+.queue .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue .name-link::after { content: ""; position: absolute; inset: 0; }
+.queue .name-link:focus-visible { outline: 0; }
+.queue .name-link:focus-visible::after { outline: 2px solid var(--ring); outline-offset: -2px; }
+.queue tbody tr:last-child .name-link::after { border-radius: 0 0 12px 12px; }
+.queue .id, .queue td.version { font-family: var(--mono); font-size: 12px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue .id { color: var(--text-3); }
+.queue td.author, .queue td.kind { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue .flags-cell { display: flex; gap: 4px; overflow: hidden; }
+.queue .meta { display: none; }
+
+/* One submission, as a reviewer weighs it: the main column, and the
+   decision's rail beside it, 288 wide, 32 apart. The rail holds still
+   (24 under the page's header) while the column scrolls: what decides is
+   never scrolled away. */
+.review { display: grid; grid-template-columns: minmax(0, 1fr) 288px; gap: 32px; align-items: start; }
+.review > .review-head { grid-column: 1; grid-row: 1; }
+.review > .review-main { grid-column: 1; grid-row: 2; }
+.review > .decide { grid-column: 2; grid-row: 1 / span 2; }
+.review-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 32px; min-width: 0; }
+.review-main > .section { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.review-head { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 16px; align-items: center; }
+.review-head .who { display: grid; gap: 4px; min-width: 0; }
+.review-head h1 { overflow-wrap: anywhere; }
+.review-head h1 .v { font-family: var(--mono); font-size: 15px; line-height: 20px; font-weight: 400; color: var(--text-2); }
+.review-head .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--text-2); font-size: 13px; line-height: 18px; }
+.review-head .meta .dot { color: var(--text-3); }
+.review-head .meta a { color: var(--text-2); }
+.review-head .meta a:hover { color: var(--text); }
+.review-head .meta code { font-size: 12px; color: var(--text-3); }
+
+/* The rail: one card (a panel, 16 in): its state, then Approve (the one
+   primary) and Don't approve, full width, 8 apart; then who sent it and
+   what the checks found, as facts. */
+.decide { position: sticky; top: calc(var(--head-h) + 1px + 24px); display: grid; gap: 16px; padding: 16px; }
+.decide .state { display: flex; align-items: center; gap: 8px; min-height: 20px; font-size: 12px; line-height: 16px; color: var(--text-2); }
+.decide .buttons { display: grid; gap: 8px; }
+.decide .buttons form, .decide .buttons .btn { width: 100%; }
+.decide .said { font-size: 13px; line-height: 20px; color: var(--text-2); overflow-wrap: anywhere; }
+.decide .said .who { display: block; margin-top: 4px; color: var(--text-3); font-size: 12px; line-height: 16px; }
+.decide .facts { margin: -8px 0; }
+.decide .facts dd a { color: var(--text); }
+.decide .facts dd a:hover { text-decoration: underline; }
+.decide .facts .warn { color: var(--warn-ink); }
+.decide .facts .bad { color: var(--bad-ink); }
+/* (On a phone, a bar at the window's foot carries the buttons.) */
+.decide-bar { display: none; }
+
+/* What it asks for, beside the last approved version: each ask a row, its
+   16 glyph on its first line; new or changed, a badge after its words and
+   what moved under them in mono, + added, − dropped; risky, the danger's
+   ink. Then those as before, quieter, and what it no longer asks. */
+.weigh { display: grid; }
+.weigh-row { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 4px 12px; padding: 12px 16px; }
+.weigh-row + .weigh-row { border-top: 1px solid var(--line-faint); }
+.weigh-row > .glyph { margin-top: 1px; color: var(--text-2); }
+.weigh-row .title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 13px; line-height: 18px; font-weight: 500; }
+.weigh-row.risky > .glyph, .weigh-row.risky .title { color: var(--bad-ink); }
+.weigh-row .detail { grid-column: 2; color: var(--text-2); font-size: 13px; line-height: 20px; }
+.weigh-row .moved, .weigh-row .named { grid-column: 2; display: grid; gap: 2px; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
+/* (Its sign held beside its item: a long host wraps within itself, never away from it.) */
+.weigh-row .moved li { display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 6px; }
+.weigh-row .moved .plus { color: var(--diff-added); }
+.weigh-row .moved .minus { color: var(--text-3); }
+.weigh-row .moved .tilde { color: var(--warn-ink); }
+.weigh-row.same { padding-block: 8px; }
+.weigh-row.same .title { font-weight: 400; color: var(--text-2); }
+.weigh-row.same.risky .title { color: var(--bad-ink); }
+.weigh-group { display: flex; align-items: center; height: 32px; padding: 0 16px; border-top: 1px solid var(--line-faint); color: var(--text-3); font-size: 12px; line-height: 16px; font-weight: 500; }
+.weigh-group:first-child { border-top: 0; }
+
+/* What the checks found: the ones to look at, each a line with its glyph
+   in its tone; those that passed counted. */
+.checks-list { display: grid; gap: 8px; padding: 12px 16px; }
+.checks-list li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 12px; font-size: 13px; line-height: 20px; color: var(--text-2); overflow-wrap: anywhere; }
+.checks-list .glyph { margin-top: 2px; }
+.checks-list .warn .glyph { color: var(--warn-ink); }
+.checks-list .fail, .checks-list .fail .glyph { color: var(--bad-ink); }
+.checks-list .ok .glyph { color: var(--ok-ink); }
+
+/* Its files: the path in mono (the row its link: to the file, or to its
+   change), what changed as a badge 96, its size 96 at the right. 40 a row.
+   Those unchanged folded under their count. */
+.files-table { table-layout: fixed; }
+.files-table col.change { width: 96px; }
+.files-table col.size { width: 96px; }
+.files-table tbody tr { position: relative; }
+.files-table .path { font-family: var(--mono); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
+.files-table .path a::after { content: ""; position: absolute; inset: 0; }
+.files-table .path a:focus-visible { outline: 0; }
+.files-table .path a:focus-visible::after { outline: 2px solid var(--ring); outline-offset: -2px; }
+.files-table td { height: 40px; padding-top: 8px; padding-bottom: 8px; }
+.files-table td.size { color: var(--text-2); }
+.files-table tr.removed .path { color: var(--text-3); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.unchanged > summary { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border-top: 1px solid var(--line-faint); cursor: pointer; list-style: none; color: var(--text-2); font-size: 12px; line-height: 16px; font-weight: 500; }
+.unchanged > summary::-webkit-details-marker { display: none; }
+.unchanged > summary:hover { color: var(--text); }
+.unchanged > summary .glyph { transition: rotate 0.15s; }
+.unchanged[open] > summary .glyph { rotate: 180deg; }
+.unchanged:last-child > summary:focus-visible { border-radius: 0 0 12px 12px; }
+.unchanged .files-table tbody tr:first-child td { border-top: 1px solid var(--line-faint); }
+
+/* Its notes for this version: their label, then the notes 8 under. */
+.notes-panel { display: grid; gap: 8px; }
+
+/* The listing as visitors see it: its summary, its pictures, its README,
+   in the public page's measure (720). */
+.review-listing { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; max-width: 720px; }
+.review-listing .summary { font-size: 15px; line-height: 24px; color: var(--text-2); }
+
+/* The raw manifest, folded: one row, 40 high, that opens on the code. */
+.fold { border-radius: 12px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line-faint); }
+.fold > summary { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 10px 16px; cursor: pointer; list-style: none; font-size: 13px; line-height: 18px; font-weight: 500; }
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary .what { flex: 1; min-width: 0; color: var(--text-2); font-weight: 400; overflow-wrap: anywhere; }
+.fold > summary .glyph { color: var(--text-3); transition: rotate 0.15s; }
+.fold[open] > summary .glyph { rotate: 180deg; }
+.fold > summary:focus-visible { border-radius: 12px; }
+.fold > :not(summary) { margin: 0 16px 16px; }
+
+/* Its files and its changes, each its own view: the tree 216, the file
+   what is left, 16 apart; a change a head and its lines, 24 apart. */
+.files-view { display: grid; grid-template-columns: 216px minmax(0, 1fr); gap: 16px; align-items: start; }
+.files-view .tree-pane { position: sticky; top: calc(var(--head-h) + 1px + 24px); max-height: calc(100dvh - var(--head-h) - 64px); overflow: auto; padding: 4px; }
+.files-view .viewer { display: grid; gap: 12px; min-width: 0; }
+.file-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 28px; font-size: 13px; line-height: 18px; color: var(--text-2); }
+.file-head code { color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.file-head a { margin-left: auto; color: var(--text-2); }
+.file-head a:hover { color: var(--text); }
+.file-picture { max-width: 100%; border-radius: 12px; outline: 1px solid var(--line-faint); outline-offset: -1px; background: repeating-conic-gradient(#ffffff08 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
+.changes-view { display: grid; gap: 24px; }
+.change-block { display: grid; gap: 8px; scroll-margin-top: calc(var(--head-h) + 24px); }
+.change-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-height: 28px; font-size: 13px; line-height: 18px; }
+.change-head a { font-family: var(--mono); font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.change-head a:hover { text-decoration: underline; }
+.change-head .counts { margin-left: auto; font-family: var(--mono); font-size: 12px; }
+.change-head .plus { color: var(--diff-added); }
+.change-head .minus { color: var(--diff-removed); }
+
+/* Don't approve: the reason, the words, and the author's view of them as
+   they'll read it (their Versions row), live as it's written. */
+.author-view { display: grid; gap: 8px; }
+.author-view .preview { display: grid; gap: 4px; padding: 12px 16px; }
+.author-view .line { display: flex; align-items: center; gap: 8px; min-height: 20px; }
+.author-view .line .t-mono { font-size: 12px; line-height: 16px; }
+.author-view .said { font-size: 13px; line-height: 20px; color: var(--text); white-space: pre-line; overflow-wrap: anywhere; }
+.author-view .said.is-empty { color: var(--text-3); }
+.author-view .who { color: var(--text-3); font-size: 12px; line-height: 16px; }
+.check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 20px; color: var(--text-2); cursor: pointer; }
+.check-row input { margin-top: 3px; accent-color: var(--danger); }
+/* What is being decided, on a decision's page: the tile, the name, its facts. */
+.deciding { display: grid; gap: 12px; padding: 12px 16px; border-radius: 8px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line-faint); }
+.deciding .what { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.deciding .words { display: grid; gap: 2px; min-width: 0; }
+.deciding .name { font-size: 13px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; }
+.deciding .name .t-mono { font-weight: 400; color: var(--text-2); }
+.deciding .facts-line { font-size: 12px; line-height: 16px; color: var(--text-2); }
+.deciding .read { justify-self: start; display: inline-flex; align-items: center; gap: 4px; font-size: 13px; line-height: 18px; color: var(--text-2); }
+.deciding .read:hover { color: var(--text); }
+.deciding .elsewhere { display: flex; gap: 8px; font-size: 13px; line-height: 20px; color: var(--warn-ink); }
+.deciding .elsewhere .glyph { flex: none; margin-top: 2px; }
+.cut { color: var(--warn-ink); font-size: 13px; line-height: 20px; }
+
+/* Reports, the audit log, reserved ids: tables on the same system. Words
+   wrap (never cut); a date is at the left unless it ends the row; the one
+   action in the 176 column. */
+.reports-table, .audit-table, .reserved-table, .staff-versions { table-layout: fixed; }
+.reports-table col.plugin-col { width: 224px; }
+.reports-table col.reason { width: 184px; } /* (the longest reason's badge, "It does something harmful", 4 + 152 + 4, with room) */
+.reports-table col.when, .audit-table col.when, .reserved-table col.when, .staff-versions col.when { width: 112px; }
+.reports-table col.action, .reserved-table col.action, .staff-versions col.action { width: 176px; }
+.reports-table .plugin-name, .audit-table .what a, .reserved-table .id { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
+.reports-table .plugin-name:hover, .audit-table .what a:hover { text-decoration: underline; }
+.reports-table .t-mono, .audit-table .t-mono, .reserved-table .id { font-family: var(--mono); font-size: 12px; line-height: 16px; font-weight: 400; }
+.reports-table td.end .btn, .reserved-table td.end .btn, .staff-versions td.end .btn { margin-right: -10px; }
+.audit-table col.who { width: 128px; }
+.audit-table col.what { width: 320px; }
+.audit-table .when-line { color: var(--text-2); white-space: nowrap; }
+.audit-table td.detail { color: var(--text-2); }
+.reserved-table col.for { width: 144px; }
+.reserved-table col.id-col { width: 224px; }
+.staff-versions col.version { width: 128px; }
+.staff-versions col.state { width: 136px; }
+.staff-versions .version a { font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text); }
+.staff-versions .version a:hover { text-decoration: underline; }
+.reserve-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; padding: 16px; }
+.reserve-form .site-ids { grid-column: 1 / -1; font-size: 12px; line-height: 16px; color: var(--text-3); }
+.reserve-form .site-ids .words { display: block; margin-top: 4px; font-family: var(--mono); }
+.reserve-form .answers { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+/* A page's own actions in its header, 8 apart (a plugin's, for its reviewers). */
+.tools-row { display: flex; align-items: center; gap: 8px; }
+/* (A question in a dialog, opened by its address without the script.) */
+dialog.dialog:target { display: block; position: fixed; inset: 0; height: fit-content; z-index: 40; }
+
+@media (max-width: 899px) {
+  /* A phone's queue: each a row of its own lines, the tile 40, its name at
+     15; the version, who, new or an update and how long, at 12 under. */
+  .queue thead, .queue colgroup, .queue td:not(:first-child) { display: none; }
+  .queue tbody td { height: auto; padding: 12px 16px; }
+  .queue .cell-main { align-items: flex-start; }
+  .queue .plugin-tile { width: 40px; height: 40px; }
+  .queue .name { font-size: 15px; line-height: 20px; }
+  .queue .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; color: var(--text-2); font-size: 12px; line-height: 16px; }
+  .queue .meta .t-mono { font-size: 12px; }
+  /* One submission: the column alone; the rail's card after the head, its
+     buttons in a bar at the window's foot (48 + 8 + 8, over the page), so
+     the page ends 64 higher. */
+  .review { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .review-main { gap: 24px; }
+  .review-head { grid-template-columns: 40px minmax(0, 1fr); gap: 12px; align-items: start; }
+  .review-head .plugin-tile { width: 40px; height: 40px; }
+  .review > .review-head, .review > .review-main, .review > .decide { grid-column: auto; grid-row: auto; }
+  .review > .decide { position: static; }
+  .decide .buttons { display: none; }
+  .decide-bar { display: flex; gap: 8px; position: fixed; left: 0; right: 0; bottom: 0; z-index: 15; padding: 8px 16px calc(8px + env(safe-area-inset-bottom)); background: var(--window); border-top: 1px solid var(--line-faint); }
+  .decide-bar > *, .decide-bar form .btn { flex: 1; width: 100%; }
+  .decide-bar form { display: flex; flex: 1; }
+  .decide-bar .btn { height: 40px; font-size: 15px; line-height: 20px; }
+  body:has(.decide-bar) .page-body { padding-bottom: 96px; }
+  body:has(.decide-bar) .toasts { bottom: 72px; }
+  .files-view { grid-template-columns: minmax(0, 1fr); }
+  .files-view .tree-pane { position: static; max-height: 320px; }
+  .reserve-form { grid-template-columns: minmax(0, 1fr); }
+  /* Reports, the log, reserved ids and versions: rows of their cells' lines. */
+  .reports-table tbody tr { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "plugin reason" "words words" "when action"; }
+  .reports-table td:nth-child(1) { grid-area: plugin; }
+  .reports-table td:nth-child(2) { grid-area: reason; }
+  .reports-table td:nth-child(3) { grid-area: words; }
+  .reports-table td:nth-child(4) { grid-area: when; align-self: center; }
+  .reports-table td:nth-child(5) { grid-area: action; align-self: center; }
+  .audit-table tbody tr { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "what what" "detail detail" "who when"; }
+  .audit-table td:nth-child(1) { grid-area: when; }
+  .audit-table td:nth-child(2) { grid-area: who; }
+  .audit-table td:nth-child(3) { grid-area: what; }
+  .audit-table td:nth-child(4) { grid-area: detail; }
+  .reserved-table tbody tr { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "id for" "words words" "when action"; }
+  .reserved-table td:nth-child(1) { grid-area: id; }
+  .reserved-table td:nth-child(2) { grid-area: for; }
+  .reserved-table td:nth-child(3) { grid-area: words; }
+  .reserved-table td:nth-child(4) { grid-area: when; align-self: center; }
+  .reserved-table td:nth-child(5) { grid-area: action; align-self: center; }
+  .staff-versions tbody tr { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "version state" "words words" "when action"; }
+  .staff-versions td:nth-child(1) { grid-area: version; }
+  .staff-versions td:nth-child(2) { grid-area: state; }
+  .staff-versions td:nth-child(3) { grid-area: words; }
+  .staff-versions td:nth-child(4) { grid-area: when; align-self: center; }
+  .staff-versions td:nth-child(5) { grid-area: action; align-self: center; }
+  .wrapping td.end .btn { margin-right: -10px; }
+  .wrapping .line.end { justify-content: flex-end; }
+  /* (A page's own actions take the phone's width, under its title.) */
+  .head-row:has(.tools-row) { flex-wrap: wrap; }
+  .page-head .tools:has(> .tools-row) { width: 100%; }
+}

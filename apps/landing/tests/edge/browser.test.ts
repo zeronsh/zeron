@@ -97,7 +97,7 @@ const overflowing = (page: Page) =>
   });
 
 describe("a reviewer, start to finish", () => {
-  test("signs in, sees the rotated session arrive, approves in the dialog, signs out", async () => {
+  test("signs in, sees the rotated session arrive, approves, signs out", async () => {
     const { context, page } = await visitor("user_grace");
     try {
       // Signed out, the admin pages aren't there; signing in comes back to where it was asked.
@@ -115,10 +115,8 @@ describe("a reviewer, start to finish", () => {
       await expect.poll(() => page.getByRole("link", { name: /focus timer/i }).first().isVisible()).toBe(true);
 
       await page.goto(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
-      await page.getByRole("link", { name: "Approve" }).click();
-      const dialog = page.getByRole("dialog", { name: "Approve focus timer 1.0.0?" });
-      await expect.poll(() => dialog.isVisible()).toBe(true);
-      await dialog.getByRole("button", { name: "Approve" }).click();
+      // (Approve is the decision's one primary, a post: Take down is the undoing, and it asks first.)
+      await page.getByRole("complementary", { name: "Decision" }).getByRole("button", { name: "Approve" }).click();
       await page.waitForURL(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
       await expect.poll(() => page.getByText("Approved. It's listed now.").isVisible()).toBe(true);
 

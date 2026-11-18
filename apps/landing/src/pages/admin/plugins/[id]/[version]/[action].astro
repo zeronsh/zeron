@@ -1,17 +1,20 @@
 ---
-// Approve, reject or take down a version. A post does it; a visit (no
-// script to open the dialog) is the same question as a page.
-import { adminSession } from "../../../../../lib/store/session.ts";
-import ConfirmPage from "../../../../../components/store/ConfirmPage.astro";
-import Deciding from "../../../../../components/store/Deciding.astro";
-import Field from "../../../../../components/ui/Field.astro";
-import Select from "../../../../../components/ui/Select.astro";
-import Store from "../../../../../layouts/Store.astro";
-import { isVersionAction, REJECT_REASONS, VERSION_FLASH, versionRequest } from "../../../../../lib/store/admin.ts";
+// Approve, don't approve, or take down a version. A post does it; a visit
+// (no script to open the dialog, or a link from elsewhere) is the same
+// question as a page, with what is being decided above it.
+import Confirm from "../../../../../components/kit/Confirm.astro";
+import Deciding from "../../../../../components/kit/Deciding.astro";
+import Decline from "../../../../../components/kit/Decline.astro";
+import TakeDown from "../../../../../components/kit/TakeDown.astro";
+import Glyph from "../../../../../components/ui/Glyph.astro";
+import App from "../../../../../layouts/App.astro";
+import { isVersionAction, VERSION_FLASH, versionAsk, versionRequest } from "../../../../../lib/store/admin.ts";
+import { unbidi } from "../../../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, fromElsewhere, tokenMatches } from "../../../../../lib/store/forms.ts";
 import { privatePage, purge } from "../../../../../lib/store/http.ts";
 import { isPluginId, isVersion } from "../../../../../lib/store/names.ts";
 import { resumed, wasCut } from "../../../../../lib/store/resume.ts";
+import { adminSession } from "../../../../../lib/store/session.ts";
 
 export const prerender = false;
 
@@ -38,58 +41,34 @@ privatePage(Astro);
 const record = await Astro.locals.edge.submission(id, version);
 if (!record.ok && record.error === "not_found") return new Response(null, { status: 404 });
 const s = record.ok ? record.data : null;
+const name = s?.plugin.name ?? s?.version.name ?? (typeof s?.manifest.name === "string" ? s.manifest.name : id);
 const failing = s?.checks.filter((c) => c.level === "fail").length ?? 0;
 const warnings = s?.checks.filter((c) => c.level === "warn").length ?? 0;
 const facts = s
   ? [
-      { label: s.publisher.username ? `by @${s.publisher.username}` : "No username" },
-      { label: s.base ? `Update from ${s.base.version}` : "First listing" },
-      failing ? { label: `${failing} checks failed`, tone: "danger" as const } : warnings ? { label: `${warnings} checks to look at`, tone: "warning" as const } : { label: "Checks passed", tone: "success" as const },
-      ...(s.permissions_diff?.added ?? []).map((a: string) => ({ label: `asks ${a}`, tone: "danger" as const })),
+      s.publisher.username ? `by @${s.publisher.username}` : "No username",
+      s.base ? `Update from ${s.base.version}` : "First listing",
+      failing ? `${failing} checks failed` : warnings ? `${warnings} checks to look at` : "Checks passed",
+      ...(s.permissions_diff?.added?.length && s.base ? [`asks for more: ${s.permissions_diff.added.join(", ")}`] : []),
     ]
   : [];
-
-const ASK = {
-  approve: { title: `Approve ${id} ${version}?`, words: "It's listed at once, and offered to everyone who has it at their next update check.", confirm: "Approve", tone: "primary" },
-  reject: { title: `Reject ${id} ${version}?`, words: "The author reads your reason and your words, in Zeron and on the web. They can publish a new version.", confirm: "Reject", tone: "danger" },
-  remove: { title: `Take down ${id} ${version}?`, words: "Nobody can install it from the store again. Choose whether the devices that have it turn it off too.", confirm: "Take down", tone: "danger" },
-} as const;
-const ask = ASK[action];
+const ask = versionAsk(action, name, version);
 ---
 
-<Store title={`${ask.title} · Zeron`} description={ask.title} noindex tool>
-  <div class="wrap">
-    <ConfirmPage title={ask.title} action={Astro.url.pathname} csrf={session.csrf} confirm={ask.confirm} tone={ask.tone} back={back}>
-      <Fragment slot="words">
-        {s && <Deciding id={id} name={String(s.manifest.name ?? id)} icon={typeof s.manifest.icon === "string" ? s.manifest.icon : null} version={version} lines={facts} read={submission} fromElsewhere={fromElsewhere(Astro.request)} />}
-        <p>{ask.words}</p>
-        {wasCut(Astro.url) && <p class="cut">You signed in again. What you wrote was longer than could be kept through that, so its end is missing: check it before you send it.</p>}
-      </Fragment>
-      {
-        action === "reject" && (
-          <>
-            <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} value={resumed(Astro.url, "reason")} field />
-            <Field name="message" label="For the author" multiline required maxlength={2000} value={resumed(Astro.url, "message")} hint="Say what to change, plainly. They'll read it as you write it." />
-          </>
-        )
-      }
-      {
-        action === "remove" && (
-          <>
-            <Field name="reason" label="Why" multiline required maxlength={2000} value={resumed(Astro.url, "reason")} hint="Its author reads this, and so does anyone whose device turns it off." />
-            <label class="check">
-              <input type="checkbox" name="block" checked={resumed(Astro.url, "block") === "on"} />
-              <span>Also turn it off on the devices that have it. People can turn it back on; it's theirs.</span>
-            </label>
-          </>
-        )
-      }
-    </ConfirmPage>
-  </div>
-</Store>
-
-<style>
-  .cut { color: var(--tone-warning); }
-  .check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 1.5; color: var(--text-2); cursor: pointer; }
-  .check input { margin-top: 3px; accent-color: var(--destructive-bg); }
-</style>
+<App title={`${ask.title} · Zeron`} description={ask.title} noindex current="queue" session={session}>
+  <nav slot="title" class="crumbs" aria-label="Where this is">
+    <a href="/admin/plugins">Queue</a><Glyph name="alt-arrow-right" size={12} /><a href={submission}>{unbidi(name)} {version}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{ask.confirm}</span>
+  </nav>
+  <Confirm ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={submission} size={action === "approve" ? "sm" : "md"}>
+    {
+      (s || wasCut(Astro.url)) && (
+        <div class="body">
+          {s && <Deciding id={id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} facts={facts} read={submission} fromElsewhere={fromElsewhere(Astro.request)} />}
+          {wasCut(Astro.url) && <p class="cut">You signed in again. What you wrote was longer than could be kept through that, so its end is missing: check it before you send it.</p>}
+        </div>
+      )
+    }
+    {action === "reject" && <Decline id="reject" version={version} author={s?.publisher.username ?? null} reason={resumed(Astro.url, "reason")} message={resumed(Astro.url, "message")} />}
+    {action === "remove" && <TakeDown id="take-down" reason={resumed(Astro.url, "reason")} block={resumed(Astro.url, "block") === "on"} />}
+  </Confirm>
+</App>

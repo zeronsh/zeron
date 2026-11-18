@@ -49,7 +49,11 @@ const PAGES: [string, string | undefined][] = [
   ["/admin/plugins/session-badges", "user_grace"],
   ["/admin/plugins/crypto-ticker", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1", "user_grace"],
-  ["/admin/plugins/session-badges/1.2.1?view=readme", "user_grace"],
+  ["/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", "user_grace"],
+  ["/admin/plugins/voice-memos/0.1.0", "user_grace"],
+  ["/admin/plugins/focus-timer/1.2.0", "user_grace"],
+  ["/admin/plugins/session-badges/1.2.1/remove", "user_grace"],
+  ["/admin/reservations/linear", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1?view=files", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1?view=files&path=init.luau", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1?view=changes", "user_grace"],
@@ -60,18 +64,23 @@ const PAGES: [string, string | undefined][] = [
   ["/admin/reports", "user_grace"],
   ["/admin/reports?status=actioned", "user_grace"],
   ["/admin/reservations", "user_grace"],
-  ["/admin/reservations/linear", "user_grace"],
   ["/admin/audit", "user_grace"],
 ];
 
 /** The states a page opens into: each must be as clean as the page. */
 const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>][] = [
-  ["the approve dialog", "/admin/plugins/session-badges/1.2.1", "user_grace", async (page) => {
-    await page.getByRole("link", { name: "Approve" }).first().click();
+  ["Don't approve, written", "/admin/plugins/session-badges/1.2.1", "user_grace", async (page) => {
+    await page.getByRole("link", { name: "Don't approve…" }).first().click();
+    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
+    await page.getByRole("dialog").getByLabel("Reason").selectOption("listing");
+    await page.getByRole("dialog").getByLabel("For the author").fill("Say what each panel shows.");
+  }],
+  ["Take down", "/admin/plugins/focus-timer/1.2.0", "user_grace", async (page) => {
+    await page.getByRole("link", { name: "Take down…" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
-  ["the reject dialog", "/admin/plugins/session-badges/1.2.1", "user_grace", async (page) => {
-    await page.getByRole("link", { name: "Reject" }).first().click();
+  ["closing a report", "/admin/reports", "user_grace", async (page) => {
+    await page.getByRole("link", { name: "Close it…" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
   ["the withdraw dialog", "/account/plugins/session-badges", "user_ada", async (page) => {

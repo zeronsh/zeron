@@ -1,6 +1,7 @@
 // The reviewer's actions: what each asks, what it sends, and what it says
 // after. Every one is a post with the session's token; the destructive
 // ones ask first.
+import type { Ask } from "./actions.ts";
 import type { FlashWord } from "./flash.ts";
 
 /** Why a version isn't approved: the words the author reads beside the reviewer's own. */
@@ -24,6 +25,45 @@ export const isPluginAction = (v: unknown): v is PluginAction => v === "suspend"
 
 export const VERSION_FLASH: Record<VersionAction, FlashWord> = { approve: "approved", reject: "rejected", remove: "removed" };
 export const PLUGIN_FLASH: Record<PluginAction, FlashWord> = { suspend: "suspended", restore: "restored", feature: "featured", unfeature: "unfeatured", transfer: "transferred" };
+
+/** What a reviewer's action on one version asks first: in its dialog, and as a page. */
+export function versionAsk(action: VersionAction, name: string, version: string): Ask {
+  const flash = VERSION_FLASH[action];
+  switch (action) {
+    case "approve":
+      return { title: `Approve ${name} ${version}?`, words: ["It's listed at once, and offered to everyone who has it at their next update check."], confirm: "Approve", tone: "primary", flash };
+    case "reject":
+      return { title: `Don't approve ${name} ${version}?`, words: ["Its author reads your reason and your words, in Zeron and on the web, and can send a new version."], confirm: "Don't approve", tone: "danger", flash };
+    case "remove":
+      return { title: `Take down ${name} ${version}?`, words: ["Nobody can install it from the store again. Choose whether the devices that have it turn it off too."], confirm: "Take down", tone: "danger", flash };
+  }
+}
+
+/** Freeing a reserved id: what it asks first. */
+export const freeAsk = (id: string): Ask => ({
+  title: `Free “${id}”?`,
+  words: ["Anyone can claim it then, first come. If someone claimed it and never used it, their claim goes too."],
+  confirm: "Free it",
+  tone: "danger",
+  flash: "reservation_released",
+});
+
+/** What a reviewer's action on a whole plugin asks first. */
+export function pluginAsk(action: PluginAction, name: string): Ask {
+  const flash = PLUGIN_FLASH[action];
+  switch (action) {
+    case "suspend":
+      return { title: `Suspend ${name}?`, words: ["It's gone from the store at once: no page, no installs, no updates. Anyone who has it keeps it. You can restore it."], confirm: "Suspend", tone: "danger", flash };
+    case "restore":
+      return { title: `Restore ${name}?`, words: ["It's back in the store with its approved versions."], confirm: "Restore", tone: "primary", flash };
+    case "feature":
+      return { title: `Feature ${name}?`, words: ["It shows in the store's featured row."], confirm: "Feature", tone: "primary", flash };
+    case "unfeature":
+      return { title: `Stop featuring ${name}?`, words: ["It leaves the featured row."], confirm: "Stop featuring", tone: "primary", flash };
+    case "transfer":
+      return { title: `Move ${name} to another account?`, words: ["Its new owner publishes its versions from now on. Its current owner can't, and their deploy keys for it stop working."], confirm: "Move it", tone: "danger", flash };
+  }
+}
 
 /** The edge path and body for a version's action, from the form's fields; null when one is missing. */
 export function versionRequest(id: string, version: string, action: VersionAction, form: { get(name: string): string }): { path: string; body: Record<string, unknown> } | null {

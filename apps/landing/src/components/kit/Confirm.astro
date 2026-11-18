@@ -10,11 +10,13 @@ interface Props {
   action: string;
   csrf: string;
   back: string;
+  /** The dialog's width: small (380), or its own 460 for a question with fields. */
+  size?: "sm" | "md";
 }
-const { ask, action, csrf, back } = Astro.props;
+const { ask, action, csrf, back, size = "sm" } = Astro.props;
 ---
 
-<form method="post" action={action} class="dialog sm confirm-card">
+<form method="post" action={action} class:list={["dialog", size === "sm" && "sm", "confirm-card"]}>
   <input type="hidden" name="csrf" value={csrf} />
   <div class="head">
     <h2>{unbidi(ask.title)}</h2>

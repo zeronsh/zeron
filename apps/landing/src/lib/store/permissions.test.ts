@@ -3,7 +3,7 @@
 // wording follows the consent sheet's rules (words.luau).
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
-import { details, grew, lines, ON_THE_WEB, permission, place, places, WORDS } from "./permissions.ts";
+import { compared, details, lines, ON_THE_WEB, permission, place, places, WORDS } from "./permissions.ts";
 import type { Permissions } from "./types.ts";
 
 const en = JSON.parse(readFileSync(new URL("../../../../zgx/ui/locales/en.json", import.meta.url), "utf8")) as Record<string, unknown>;
@@ -108,16 +108,26 @@ describe("places", () => {
   });
 });
 
-describe("what grew since the last approved version", () => {
-  test("new asks, then what grew inside the ones it had, risky last", () => {
-    const now = p({ asks: ["ui.add", "network", "commands"], commands: ["gh", "bash"], commands_anything: ["gh", "bash"], commands_full_control: ["bash"], network_hosts: ["a.example", "b.example"] });
-    const out = grew(now, { added: ["ui.add"], added_commands: ["bash"], network_added: ["b.example"] });
-    expect(out.map((l) => l.title)).toEqual(["Add things to Zeron's interface", "Connect to more places", "Run more programs as you"]);
-    expect(out[2]!.literal).toEqual(["It can run bash, which gives it full control of your computer."]);
+describe("against the last approved version", () => {
+  const now = p({ asks: ["commands", "ui.add", "network", "sessions.read"], commands: ["gh", "bash"], commands_anything: ["gh", "bash"], commands_full_control: ["bash"], network_hosts: ["a.example", "b.example"] });
+
+  test("new asks and asks changed inside first, risky last within each; then the rest as before", () => {
+    const { lines: out, dropped } = compared(now, { added: ["ui.add"], removed: ["clipboard"], added_commands: ["bash"], network_added: ["b.example"], network_removed: ["c.example"] });
+    expect(out.map((l) => [l.name, l.change])).toEqual([["ui.add", "new"], ["network", "changed"], ["commands", "changed"], ["sessions.read", null]]);
+    expect(out[1]).toMatchObject({ added: ["b.example"], removed: ["c.example"] });
+    expect(out[2]).toMatchObject({ added: ["bash"], risky: true });
+    expect(out[2]).not.toHaveProperty("removed");
+    expect(dropped.map((l) => l.title)).toEqual(["Read and change your clipboard"]);
   });
 
-  test("nothing grew, nothing said", () => {
-    expect(grew(p(), null)).toEqual([]);
-    expect(grew(p(), {})).toEqual([]);
+  test("a tool that now tells agents something else is changed in place", () => {
+    const { lines: out } = compared(p({ asks: ["tools"], tools: [{ name: "search" }] }), { tools_changed: [{ name: "search", description_before: "a", description_after: "b" }] });
+    expect(out[0]).toMatchObject({ change: "changed", altered: ["search"] });
+  });
+
+  test("a first version: nothing to weigh it against, nothing marked", () => {
+    const { lines: out, dropped } = compared(now, null);
+    expect(out.every((l) => l.change === null)).toBe(true);
+    expect(dropped).toEqual([]);
   });
 });

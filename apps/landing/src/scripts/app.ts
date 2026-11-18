@@ -180,12 +180,46 @@ document.addEventListener("click", (event) => {
   event.preventDefault();
   dialog.showModal();
 });
+// A question named in the address (a link from another page, as Close it…
+// on a plugin's report), or one the page came back to (data-open: what was
+// typed before signing in again): opened as its opener would, the address
+// let go of it, so closing it closes it (CSS :target shows it without the
+// script).
+{
+  const named = location.hash.length > 1 ? document.getElementById(decodeURIComponent(location.hash.slice(1))) : null;
+  const question = named instanceof HTMLDialogElement ? named : document.querySelector<HTMLDialogElement>("dialog[data-open]");
+  if (question?.matches("dialog.dialog, dialog.sheet") && typeof question.showModal === "function") {
+    if (question === named) history.replaceState(history.state, "", location.pathname + location.search);
+    question.showModal();
+  }
+}
 // (A click on the dim closes it, where `closedby` isn't known yet.)
 for (const dialog of document.querySelectorAll<HTMLDialogElement>("dialog.dialog, dialog.sheet")) {
   if (typeof (dialog as { closedBy?: unknown }).closedBy === "string") continue;
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   });
+}
+
+// ── Don't approve: the author's view, as it's written ─────────────────
+// (components/kit/Decline.astro: their Versions row, the words in quotes,
+// the reason's label.)
+for (const part of document.querySelectorAll<HTMLElement>("[data-decline]")) {
+  const reason = part.querySelector<HTMLSelectElement>("select[name=reason]");
+  const message = part.querySelector<HTMLTextAreaElement>("textarea[name=message]");
+  const said = part.querySelector<HTMLElement>("[data-said]");
+  const label = part.querySelector<HTMLElement>("[data-reason-label]");
+  if (!reason || !message || !said || !label) continue;
+  const show = () => {
+    const words = message.value.trim();
+    said.textContent = words ? `\u201c${words}\u201d` : (said.dataset.empty ?? "");
+    said.classList.toggle("is-empty", !words);
+    const chosen = reason.selectedOptions[0];
+    label.textContent = chosen?.value ? (chosen.textContent ?? "") : (label.dataset.empty ?? "");
+  };
+  reason.addEventListener("change", show);
+  message.addEventListener("input", show);
+  show();
 }
 
 // ── Copy ───────────────────────────────────────────────────────────────

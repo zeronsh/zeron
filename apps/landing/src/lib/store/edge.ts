@@ -22,6 +22,7 @@ import type {
   VersionInfo,
   WebSession,
 } from "./types.ts";
+import { ADMIN_PAGE } from "./paging.ts";
 
 export type Result<T> = { ok: true; data: T } | { ok: false; status: number; error: ErrorWord; message?: string };
 
@@ -159,7 +160,7 @@ export class Edge {
   // ── Admin ─────────────────────────────────────────────────────────────
 
   queue(status: string, cursor?: string): Promise<Result<QueuePage>> {
-    const params = new URLSearchParams({ status });
+    const params = new URLSearchParams({ status, limit: String(ADMIN_PAGE) });
     if (cursor) params.set("cursor", cursor);
     return this.#json(`/store/v1/admin/queue?${params}`, { signedIn: true });
   }
@@ -173,16 +174,16 @@ export class Edge {
   }
 
   reports(status: string, cursor?: string): Promise<Result<ReportsPage>> {
-    const params = new URLSearchParams({ status });
+    const params = new URLSearchParams({ status, limit: String(ADMIN_PAGE) });
     if (cursor) params.set("cursor", cursor);
     return this.#json(`/store/v1/admin/reports?${params}`, { signedIn: true });
   }
 
   audit(cursor?: string, plugin?: string): Promise<Result<AuditPage>> {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ limit: String(ADMIN_PAGE) });
     if (cursor) params.set("cursor", cursor);
     if (plugin) params.set("plugin", plugin);
-    return this.#json(`/store/v1/admin/audit${params.size ? `?${params}` : ""}`, { signedIn: true });
+    return this.#json(`/store/v1/admin/audit?${params}`, { signedIn: true });
   }
 
   reservations(): Promise<Result<{ reservations: Reservation[] }>> {

@@ -756,3 +756,84 @@ describe("forms", () => {
     expect((await site.fetch("/account", { headers: { cookie: lin } })).status).toBe(303);
   });
 });
+
+describe("the staff's side: the queue, a submission, the decision", () => {
+  /** The rows of a table, each its cells' text. */
+  const rowsOf = (body: string, table: string) => {
+    const at = body.indexOf(`class="table ${table}`);
+    const tbody = body.slice(body.indexOf("<tbody>", at), body.indexOf("</tbody>", at));
+    return tbody.split("<tr").slice(1);
+  };
+
+  test("the queue: a table, the longest waiting first, its count in the title; a badge only where a row needs a look", async () => {
+    const grace = await site.signIn("user_grace");
+    const { body } = await html("/admin/plugins", grace);
+    const rows = rowsOf(body, "comfortable queue");
+    const total = Number(body.match(/Queue<span class="title-count"> · (\d+)<\/span>/)![1]);
+    expect(rows).toHaveLength(total);
+    const sent = rows.map((r) => Date.parse(r.match(/<time datetime="([^"]+)"/)![1]!));
+    expect(sent).toEqual([...sent].sort((a, b) => a - b));
+    // An update that asks for more (here a far-reaching ask among them): the danger's badge.
+    const worst = rows.find((r) => r.includes("worst-case-listing-at-every-limit-xyz12"))!;
+    expect(worst).toContain("Update");
+    expect(worst).toMatch(/<span class="badge sm bad" title="New since 1\.0\.0: [^"]*messages\.send[^"]*">Asks for more<\/span>/);
+    // A new plugin asks for everything it asks for: said by its kind, not a badge.
+    const first = rows.find((r) => r.includes(">first-light<"))!;
+    expect(first).toContain("New plugin");
+    expect(first).not.toContain("badge");
+  });
+
+  test("an empty queue says so; forty fit one page, with no pager", async () => {
+    const grace = await site.signIn("user_grace");
+    try {
+      await site.queueAs("empty");
+      const empty = await html("/admin/plugins", grace);
+      expect(empty.body).toContain("Nothing is waiting");
+      expect(empty.body).toMatch(/Queue<span class="title-count"> · 0<\/span>/);
+      await site.queueAs(40);
+      const forty = await html("/admin/plugins", grace);
+      expect(rowsOf(forty.body, "comfortable queue")).toHaveLength(40);
+      expect(forty.body).not.toContain('class="pager"');
+    } finally {
+      await site.queueAs(null);
+    }
+  });
+
+  test("a submission: what it asks for against the last approved version, what moved first, the risky in the danger's ink", async () => {
+    const { body } = await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", await site.signIn("user_grace"));
+    expect(body).toContain("Against 1.0.0, the last approved version: 2 new asks, 2 asks changed inside.");
+    const rows = body.slice(body.indexOf('class="weigh"'), body.indexOf('id="checks"')).split('class="weigh-row').slice(1);
+    const titles = rows.map((r) => r.match(/<p class="title">([^<]+)/)![1]!.trim());
+    expect(titles.slice(0, 4)).toEqual(["Send you notifications", "Connect to these places", "Run python3, git, jq, bash on your computer as you", "Send messages to your agents as you"]);
+    expect(rows[0]).toContain('<span class="badge sm info">New</span>');
+    expect(rows[2]).toMatch(/^ risky"/);
+    expect(rows[2]).toContain('<span class="badge sm info">Changed</span>');
+    expect(rows[2]).toMatch(/<span class="plus" aria-hidden="true">\+<\/span><span>bash/);
+    expect(rows[1]).toMatch(/<span class="minus" aria-hidden="true">−<\/span><span class="t-3">\*/);
+    // Then what is as before, quieter.
+    expect(rows.slice(4).every((r) => r.startsWith(" same"))).toBe(true);
+  });
+
+  test("the decision: Approve, the one primary, a post; Don't approve asks for a reason and words, showing the author's view; an approved version's is Take down", async () => {
+    const grace = await site.signIn("user_grace");
+    const pending = (await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", grace)).body;
+    const rail = pending.slice(pending.indexOf('<aside class="decide'), pending.indexOf("</aside>"));
+    expect(rail.match(/btn primary/g)).toHaveLength(1);
+    expect(rail).toMatch(/<form method="post" action="\/admin\/plugins\/worst-case-listing-at-every-limit-xyz12\/1\.5\.0\/approve">/);
+    expect(rail).toContain('data-dialog="reject">Don\'t approve…</a>');
+    expect(rail).not.toContain("Take down");
+    expect(pending).toContain('<select id="reject-reason" name="reason" required>');
+    expect(pending).toContain('<option value="" disabled selected>Choose a reason</option>');
+    expect(pending).toContain("What @ada reads");
+    // (The raw manifest, folded.)
+    expect(pending).toMatch(/<details class="fold">\s*<summary>/);
+    const approved = (await html("/admin/plugins/focus-timer/1.2.0", grace)).body;
+    const approvedRail = approved.slice(approved.indexOf('<aside class="decide'), approved.indexOf("</aside>"));
+    expect(approvedRail).toContain('data-dialog="take-down">Take down…</a>');
+    expect(approvedRail).not.toContain("/approve");
+    // Without the script, the same question as a page, the author's view on it too.
+    const page = await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0/reject", grace);
+    expect(page.body).toContain("Don&#39;t approve Averyveryverylongpluginnamewithoutanyspacesatallthatkeepsgoing64 1.5.0?");
+    expect(page.body).toContain("What @ada reads");
+  });
+});
