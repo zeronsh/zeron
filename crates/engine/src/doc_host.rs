@@ -68,15 +68,14 @@ const WAKE_BOOT_MARGIN_MS: i64 = 60 * 60 * 1000;
 
 /// Warm-doc LRU: how many unwatched, run-less docs stay fully open. Everything
 /// beyond this (and beyond [`zeron_doc::DOC_LRU_BYTE_BUDGET`]) is evicted
-/// oldest-access-first — reopening from the SQLite snapshot measured within
-/// ~11ms of a warm doc, so the cap trades no perceptible open latency: the
-/// interface shows a chat it opens from the rows it keeps itself, the same
-/// frame, either way (M5 Max, six chats switched through three rounds: rows in
-/// the switch's frame at 9-12 ms, with 12 kept or 3). Each kept doc held about
-/// 0.9 MB past twenty chats (engine footprint 59 MB with 12, 49 with 3, 46
-/// with 1, over ademark's twenty threads), so few are kept: the chats just
-/// left, for one coming straight back.
-const WARM_DOC_CAP: usize = 3;
+/// oldest-access-first. A real chat's doc is large (a long one 15-80 MB, 3-24M
+/// ops), and reopening one from its SQLite snapshot reads its whole state:
+/// 45 ms for 15 MB, 280 ms for 80 MB (M5 Max, 2026-11-17), past the 400 ms
+/// that shows a skeleton on slower Macs. Three kept (0.3.8) made switching
+/// among a few chats freeze and show skeletons; the interface shows a chat
+/// from its own rows only while it keeps them. Each kept doc's memory is the
+/// price until reopening is cheap of its own accord.
+const WARM_DOC_CAP: usize = 12;
 
 /// Resident-memory estimate per compressed snapshot byte. Loro snapshots are
 /// columnar+compressed; the in-memory doc plus mirror runs well above the blob
