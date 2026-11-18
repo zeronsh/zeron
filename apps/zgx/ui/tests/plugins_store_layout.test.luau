@@ -271,9 +271,18 @@ test("more categories than fit: a chevron at the hiding edge pages them on and b
 	expect(app:has(".pager-more")).to_be(true)
 	expect(app:has(".pager-back")).to_be(false)
 	expect(shown("Utilities")).to_be(false)
+	-- (The run's view stops short of the chevron: no word under it.)
+	local function view_box(): { x: number, y: number, w: number, h: number }
+		local line = app:tree("#store-categories"):match("[^\n]+\n([^\n]+)") or ""
+		local x, y, w, h = line:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
+		return { x = tonumber(x) or 0, y = tonumber(y) or 0, w = tonumber(w) or 0, h = tonumber(h) or 0 }
+	end
+	expect(view_box().x + view_box().w <= box(app, 'role:button "More categories"').x).to_be(true)
 	app:click('role:button "More categories"')
 	settle(app)
 	expect(app:has(".pager-back")).to_be(true)
+	local back = box(app, 'role:button "Earlier categories"')
+	expect(view_box().x >= back.x + back.w).to_be(true)
 	app:click('role:button "Earlier categories"')
 	settle(app)
 	expect(app:has(".pager-back")).to_be(false)

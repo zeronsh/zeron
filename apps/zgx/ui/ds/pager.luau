@@ -1,9 +1,10 @@
 --!strict
 -- A run wider than its room (a row of tabs in a narrow pane, or in a longer
--- language), scrolled sideways: each edge that hides some of it fades, and
--- over the fade a small chevron button pages it on, so that there's more
--- is said by a control, never by where a word happens to be cut. Neither
--- shows while the run fits. The keys go through the run's own controls
+-- language), scrolled sideways: each edge that hides some of it stops short
+-- of a small chevron button that pages it on, the run fading into that
+-- edge, so that there's more is said by a control, never by where a word
+-- happens to be cut, and no word runs under the chevron. Neither shows
+-- while the run fits. The keys go through the run's own controls
 -- (a focused one off its edge scrolls into view, as zgx scrolls any), so
 -- the chevrons are the pointer's alone: no Tab stop of their own.
 --
@@ -16,8 +17,11 @@ local M = {}
 
 -- How much of the room a page moves (the rest stays, to keep one's place).
 local PAGE = 0.8
--- The fade under each chevron: its button (22) and the room round it.
+-- The fade at an edge that hides some of the run.
 local FADE = 32
+-- The room a chevron stands in, past the run's view: its button (22) and
+-- 2 (`$space.5`).
+local ROOM = "$space.5"
 
 export type Props = {
 	id: string?,
@@ -75,6 +79,14 @@ M.Pager = ui.component(function(props: Props): Node
 		relative = true,
 		w_full = true,
 		min_w = 0,
+		-- (The run's view stopping short of a chevron while it shows: the
+		-- chevron stands in this room, placed on the box's own edge.)
+		pl = function(): any
+			return if hidden_before() then ROOM else 0
+		end,
+		pr = function(): any
+			return if hidden_after() then ROOM else 0
+		end,
 		ui.scroll_x {
 			ref = view,
 			offset = offset,
