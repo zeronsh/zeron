@@ -805,7 +805,7 @@ test("an unverified update is said on its row, and its Update stages it for the 
 	settle(app)
 	app:click('role:tab "Installed"')
 	settle(app)
-	expect(app:tree()).to_contain("1.3.0 is out, not verified yet.")
+	expect(app:tree()).to_contain("Update available: 1.3.0, not verified yet.")
 	-- (A question follows: "Update…".)
 	app:click('role:button "Update…"')
 	settle(app, 600)

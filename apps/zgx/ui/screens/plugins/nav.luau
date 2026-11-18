@@ -9,7 +9,8 @@
 --   nav.open_listing(id)    a store plugin's page (Browse its way back);
 --                           `by_link`: a link opened it (`nav.linked()`),
 --                           `version` the one the link chose
---                           (`nav.linked_version(id)`, tracked)
+--                           (`nav.linked_version(id)`, tracked;
+--                           `nav.drop_linked_version()` lets it go)
 --   nav.open_publish(id)    publishing one of yours (Yours its way back)
 --   nav.back()              the tabs again
 --   nav.show_browse()       Browse, wherever a page was opened from (what
@@ -58,6 +59,11 @@ end
 -- Whether a link opened plugin `id`'s page (read as the page shows).
 function M.linked(id: string): boolean
 	return linked:peek() == id
+end
+
+-- The page of the newest again: the link's choice of a version dropped.
+function M.drop_linked_version()
+	linked_version:set(nil)
 end
 
 -- The version a link chose on plugin `id`'s page, or nil (read as the

@@ -437,19 +437,27 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			end
 		end)
 	end)
-	-- The version Install acts on: the chosen one, else (nil) the page's.
+	-- The version the page speaks of and Install acts on: the chosen one
+	-- while its record is coming or read, else (nil) the newest. One the
+	-- store hasn't, or couldn't say, leaves the plugin's ordinary page.
 	local function chosen_version(): string?
-		return chosen:get().version
+		local c = chosen:get()
+		return if c.version and (c.state == "ok" or c.state == "loading") then c.version else nil
 	end
-	-- Whether Install may act: nothing chosen, or the chosen one read and
-	-- listed.
+	-- Whether Install may act: nothing chosen, or one the store hasn't
+	-- (the ordinary page); a chosen one once read and listed. Until its
+	-- record is read, or when it couldn't be, Install waits.
 	local function chosen_installable(): boolean
 		local c = chosen:get()
-		return c.version == nil or (c.state == "ok" and browse.version_state(c.record) == "listed")
+		if c.version == nil or c.state == "missing" then
+			return true
+		end
+		return c.state == "ok" and browse.version_state(c.record) == "listed"
 	end
-	-- Why the chosen one can't be installed, or "" (none chosen, still
-	-- being read, or it can).
-	local function chosen_why(): string
+	-- The sentence under the summary about the version a link chose, or
+	-- "": where the person is (a version not the newest), why it takes no
+	-- installs, or that the store hasn't it (or couldn't say).
+	local function chosen_said(): string
 		local c = chosen:get()
 		local v = c.version
 		if v == nil or c.state == "loading" then
@@ -469,18 +477,20 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			return ui.t("plugins.store.link_version_taken_down", { version = v }):get()
 		elseif st == "removed" then
 			return ui.t("plugins.store.link_version_removed", { version = v }):get()
+		elseif v ~= d().version then
+			return ui.t("plugins.store.link_version_for", { version = v, newest = d().version or "" }):get()
 		end
 		return ""
 	end
 	-- The version the head speaks of, and whether the store verified it
-	-- (nil: nothing to say of it, a chosen one that can't be installed
-	-- saying why under Install instead).
+	-- (nil: nothing to say of it: a chosen one still being read, or one
+	-- that takes no installs, its sentence saying why).
 	local function head_version(): string
 		return chosen_version() or d().version or ""
 	end
 	local function head_verified(): boolean?
 		local c = chosen:get()
-		if c.version then
+		if chosen_version() then
 			if c.state ~= "ok" or browse.version_state(c.record) ~= "listed" then
 				return nil
 			end
@@ -656,7 +666,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				-- the store hasn't.)
 				function(): string
 					local v = chosen_version()
-					if v and chosen:get().state ~= "missing" then
+					if v then
 						return if here.device()
 							then ui.t("plugins.store.install_version_on", { version = v, device = here.device_name() }):get()
 							else ui.t("plugins.store.install_version", { version = v }):get()
@@ -742,9 +752,6 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			return function(): string
 				return ui.t("plugins.store.away_note", { device = here.device_name() }):get()
 			end
-		elseif kind == "install" then
-			-- (A chosen version that can't be installed: why.)
-			return chosen_why
 		end
 		return nil
 	end
@@ -785,11 +792,6 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local function slot(kind: string): Node
 		local button = action(kind)
 		local line = state_line(kind)
-		if kind == "install" and line then
-			line = ui.show(function(): boolean
-				return chosen_why() ~= ""
-			end, line)
-		end
 		local top = button or line
 		if not top then
 			return ui.div { class = "store-slot-room", w = SLOT, shrink = 0 }
@@ -883,6 +885,37 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local function verified_version(): string?
 		local v = d().verified_version
 		return if type(v) == "string" and v ~= "" and v ~= head_version() then v else nil
+	end
+	-- The sentence about the version a link chose, under the summary where
+	-- the page's other sentences about a version are, and the way back to
+	-- the newest (dropping the choice) wherever it isn't the newest.
+	local function chosen_line(): Node
+		return ui.show(function(): boolean
+			return chosen_said() ~= ""
+		end, ui.row {
+			id = "store-chosen-line",
+			w_full = true,
+			px = ds.Settings.inset(),
+			flex_wrap = true,
+			items = "center",
+			gap = "$space.2",
+			ui.text {
+				chosen_said,
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
+			},
+			ui.show(function(): boolean
+				return chosen_version() ~= nil
+			end, ds.Settings.InlineLink {
+				role = "button",
+				label = ui.t("plugins.store.show_newest"),
+				on_click = function()
+					nav.drop_linked_version()
+				end,
+			}),
+		})
 	end
 	local function verified_line(): Node
 		return ui.show(function(): boolean
@@ -1037,8 +1070,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						-- (The mark from the version it speaks of: a chosen one's
 						-- own record.)
 						browse.badges(function(): any
-							local c = chosen:get()
-							if c.version == nil then
+							if chosen_version() == nil then
 								return d()
 							end
 							return { verified = head_verified() == true, author = d().author }
@@ -1050,9 +1082,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						function(): string
 							local n = d().installs
 							local count = if type(n) == "number" then math.max(0, math.floor(n)) else 0
-							local version = d().version or ""
+							-- (A version a link chose: its own number and day.)
+							local version = head_version()
 							local at: number? = nil
-							for _, v in (if type(d().versions) == "table" then d().versions else {}) :: { any } do
+							local c = chosen:get()
+							if chosen_version() and c.state == "ok" and type(c.record.published_at) == "number" then
+								at = c.record.published_at
+							end
+							for _, v in (if at == nil and type(d().versions) == "table" then d().versions else {}) :: { any } do
 								if type(v) == "table" and v.version == version and type(v.published_at) == "number" then
 									at = v.published_at
 								end
@@ -1115,6 +1152,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			line_height = 20,
 			color = "$text.secondary",
 		}),
+		chosen_line(),
 		verified_line(),
 		keywords(),
 		cannot(),

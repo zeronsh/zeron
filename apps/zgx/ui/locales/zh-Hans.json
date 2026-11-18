@@ -3617,7 +3617,7 @@
         "added": "它还请求{list}；将先征求你的许可。",
         "removed": "它不再请求{list}。",
         "held": "{version} 正在等待：它只接受已验证的更新。",
-        "unverified": "{version} 已推出，尚未验证。",
+        "unverified": "有可用更新：{version}，尚未验证。",
         "held_plugin": "{version} 正在等待：这个插件只接受已验证的更新。",
         "held_computer": "{version} 正在等待：这台电脑只接受已验证的更新。"
       },
@@ -3881,6 +3881,8 @@
       "link_version_yanked": "{version} 不再接受新安装。",
       "link_version_taken_down": "Zeron 已下架 {version}。",
       "link_version_removed": "{version} 已从商店移除。",
+      "link_version_for": "这个链接指向 {version}。最新版本是 {newest}。",
+      "show_newest": "查看最新版本",
       "turn_on": "打开",
       "open_settings": "打开设置",
       "category_label": "类别",

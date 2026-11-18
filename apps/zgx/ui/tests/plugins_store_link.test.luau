@@ -191,6 +191,16 @@ test("a link that chooses a version opens the page with Install acting on it, na
 	-- (1.0.0 is verified: no line saying it isn't.)
 	expect(app:has(`{PAGE} >> #store-verified-line`)).to_be(false)
 	expect(calls(app)).never.to_contain("install")
+	-- The head speaks of it: its number in the version line, and where
+	-- the person is under the summary, with the way to the newest.
+	expect(app:tree(`{PAGE} >> #store-header`)).to_contain("1.0.0")
+	expect(app:tree(`{PAGE} >> #store-chosen-line`)).to_contain("This link is for 1.0.0. The newest is 1.2.0.")
+	app:click(`{PAGE} >> #store-chosen-line >> role:button "Show the newest"`)
+	app:frames(20)
+	expect(app:has(`{PAGE} >> #store-chosen-line`)).to_be(false)
+	expect(app:tree(`{PAGE} >> #store-offer`)).to_contain('button "Install"')
+	expect(app:tree(`{PAGE} >> #store-offer`)).never.to_contain("Install 1.0.0")
+	expect(app:tree(`{PAGE} >> #store-header`)).to_contain("1.2.0")
 end)
 
 -- The page says the chosen version's state: an unverified one its line,
@@ -200,6 +210,8 @@ test("a link to a version the store hasn't verified says so of that version", fu
 	app:command("store_stub.bump")
 	versioned(app, 1, "focus-timer", "1.3.0")
 	expect(app:tree(`{PAGE} >> #store-offer`)).to_contain('button "Install 1.3.0"')
+	-- (The newest itself: nothing to say of where the person is.)
+	expect(app:has(`{PAGE} >> #store-chosen-line`)).to_be(false)
 	expect(app:tree(`{PAGE} >> #store-verified-line`)).to_contain("1.3.0 isn't verified yet")
 	expect(app:has(`{PAGE} >> #store-verified-line >> role:button "Install 1.2.0 instead"`)).to_be(true)
 end)
@@ -209,15 +221,20 @@ test("a link to a version that takes no new installs, or one the store hasn't, l
 	versioned(app, 1, "focus-timer", "1.1.0")
 	expect(app:tree(`{PAGE} >> #store-install`)).to_contain("disabled")
 	expect(app:tree(`{PAGE} >> #store-offer`)).to_contain('button "Install 1.1.0"')
-	expect(app:tree(`{PAGE} >> #store-state`)).to_contain("1.1.0 takes no new installs: replaced by 1.2.0 before it was")
+	-- (Under the summary, where the page's other sentences about a version
+	-- are, with the way to the newest; nothing under the button.)
+	expect(app:tree(`{PAGE} >> #store-chosen-line`)).to_contain("1.1.0 takes no new installs: replaced by 1.2.0 before it was")
+	expect(app:has(`{PAGE} >> #store-chosen-line >> role:button "Show the newest"`)).to_be(true)
+	expect(app:has(`{PAGE} >> #store-state`)).to_be(false)
 	-- One the store hasn't: asked of it, and said.
 	versioned(app, 2, "focus-timer", "9.9.9")
-	app:wait(`{PAGE} >> "The store has no version 9.9.9 of it."`, { timeout_ms = 3000 })
+	app:wait(`{PAGE} >> #store-chosen-line >> "The store has no version 9.9.9 of it."`, { timeout_ms = 3000 })
 	expect(calls(app)).to_contain("version:focus-timer:9.9.9")
-	expect(app:tree(`{PAGE} >> #store-install`)).to_contain("disabled")
-	-- (Never naming a version the store hasn't.)
+	-- The plugin's ordinary page: the newest, its plain Install, on.
 	expect(app:tree(`{PAGE} >> #store-offer`)).to_contain('button "Install"')
 	expect(app:tree(`{PAGE} >> #store-offer`)).never.to_contain("Install 9.9.9")
+	expect(app:tree(`{PAGE} >> #store-install`)).never.to_contain("disabled")
+	expect(app:has(`{PAGE} >> #store-chosen-line >> role:button "Show the newest"`)).to_be(false)
 end)
 
 test("a link whose version doesn't read as one opens the page as if it chose none", function()
