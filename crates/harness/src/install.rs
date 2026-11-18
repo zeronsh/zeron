@@ -49,6 +49,7 @@ enum Method {
 // https://cursor.com/docs/cli/installation
 // https://opencode.ai/docs/
 // https://pi.dev/docs/latest
+// https://github.com/can1357/oh-my-pi/blob/v18.11.1/README.md (checked 2026-10-16)
 // https://docs.x.ai/developers/release-notes and https://docs.x.ai/build/enterprise
 // https://hermes-agent.nousresearch.com/docs/getting-started/installation
 // https://cli.devin.ai/
@@ -92,6 +93,9 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
             Shell("curl -fsSL https://pi.dev/install.sh | sh", "sh"),
             Npm("@earendil-works/pi-coding-agent", true),
         ],
+        // The npm package needs the Bun runtime; the script falls back to a verified binary.
+        Omp if windows => vec![PowerShell("irm https://omp.sh/install.ps1 | iex")],
+        Omp => vec![Shell("curl -fsSL https://omp.sh/install | sh", "sh")],
         Grok if windows => vec![Npm("@xai-official/grok", false)],
         Grok => vec![
             Shell("curl -fsSL https://x.ai/cli/install.sh | bash", "bash"),
@@ -166,6 +170,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         Cursor => "curl https://cursor.com/install -fsS | bash",
         Opencode => "npm install -g @opencode/cli",
         Pi => "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+        Omp => "curl -fsSL https://omp.sh/install | sh",
         Grok => "npm install -g @xai-official/grok",
         Hermes => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
         Devin => "curl -fsSL https://cli.devin.ai/install.sh | bash",
@@ -183,6 +188,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Cursor => ("cursor-agent", "~/.local/bin or ~/.cursor/bin"),
         Opencode => ("opencode", "~/.opencode/bin or the npm global bin"),
         Pi => ("pi", "the npm global bin"),
+        Omp => ("omp", "~/.local/bin or ~/.bun/bin"),
         Grok => ("grok", "~/.grok/bin or the npm global bin"),
         Hermes => ("hermes", "~/.local/bin or ~/.hermes/bin"),
         Devin => ("devin", "~/.local/bin"),
@@ -202,6 +208,7 @@ pub fn installed(id: HarnessId) -> bool {
         Cursor => crate::CursorHarness::new().installed(),
         Opencode => crate::OpencodeHarness::new().installed(),
         Pi => crate::PiHarness::new().installed(),
+        Omp => crate::OmpHarness::new().installed(),
         Grok => crate::AcpHarness::grok().installed(),
         Hermes => crate::AcpHarness::hermes().installed(),
         Devin => crate::AcpHarness::devin().installed(),
@@ -473,12 +480,13 @@ async fn run(
 mod tests {
     use super::*;
 
-    const IDS: [HarnessId; 11] = [
+    const IDS: [HarnessId; 12] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
         HarnessId::Opencode,
         HarnessId::Pi,
+        HarnessId::Omp,
         HarnessId::Grok,
         HarnessId::Hermes,
         HarnessId::Fx,
@@ -523,7 +531,7 @@ mod tests {
     /// bash script piped to it fails on its first bashism (Muse Code's
     /// `set -o pipefail`), though macOS's `sh` is bash and runs it. Muse's,
     /// Claude Code's, Cursor's, OpenCode's, Grok's, Hermes', Devin's and fx's
-    /// are bash scripts; only Codex's and Pi's are POSIX `sh`.
+    /// are bash scripts; only Codex's, Pi's and Oh My Pi's are POSIX `sh`.
     #[test]
     fn each_script_is_piped_to_the_shell_it_requires() {
         for id in IDS {
@@ -531,7 +539,7 @@ mod tests {
                 for method in methods(id, platform) {
                     if let Method::Shell(script, shell) = method {
                         assert!(script.ends_with(&format!("| {shell}")), "{id:?}: `{script}` isn't run by {shell}");
-                        let posix = matches!(id, HarnessId::Codex | HarnessId::Pi);
+                        let posix = matches!(id, HarnessId::Codex | HarnessId::Pi | HarnessId::Omp);
                         assert_eq!(shell, if posix { "sh" } else { "bash" }, "{id:?}");
                     }
                 }
