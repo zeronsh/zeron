@@ -438,6 +438,42 @@ pub(crate) fn encode_path(value: &str) -> String {
     encode(value)
 }
 
+/// A public call to the edge, as no one (what anyone may read, cached at
+/// the edge: the plugin store's catalog): its status and JSON body, or
+/// "offline". No session goes with it.
+pub(crate) async fn edge_public(path: String) -> Result<(u16, Json), Outcome> {
+    let url = format!("{}{path}", endpoint().edge);
+    match off_thread(move || request("GET", &url, None, None)).await.unwrap_or(Http::Offline) {
+        Http::Ok(json) => Ok((200, json)),
+        Http::Status(status, json) => Ok((status, json)),
+        Http::Offline => Err("offline"),
+    }
+}
+
+/// A public file from the edge, at most `most` bytes: its status, its
+/// content type and its bytes ("too_large" past `most`, "offline").
+pub(crate) async fn edge_public_file(path: String, most: u64) -> Result<(u16, String, Vec<u8>), Outcome> {
+    let url = format!("{}{path}", endpoint().edge);
+    off_thread(move || {
+        let agent = ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).user_agent("zeron-zgx").build();
+        let res = match agent.get(&url).call() {
+            Ok(res) => res,
+            Err(ureq::Error::Status(status, res)) => return Ok((status, res.content_type().to_string(), Vec::new())),
+            Err(ureq::Error::Transport(_)) => return Err("offline"),
+        };
+        let kind = res.content_type().to_string();
+        let mut bytes = Vec::new();
+        use std::io::Read as _;
+        res.into_reader().take(most + 1).read_to_end(&mut bytes).map_err(|_| "offline")?;
+        if bytes.len() as u64 > most {
+            return Err("too_large");
+        }
+        Ok((200, kind, bytes))
+    })
+    .await
+    .unwrap_or(Err("offline"))
+}
+
 /// Whether the engine keeps a session, without reading it: a launch signed
 /// in skips the intro.
 pub fn session_exists() -> bool {

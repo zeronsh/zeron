@@ -41,6 +41,7 @@ pub mod records;
 pub mod surfaces;
 pub mod github;
 pub mod store;
+pub mod catalog;
 pub mod commands;
 pub mod db;
 pub mod settings;
@@ -3239,6 +3240,17 @@ impl Bridge {
                         }
                         (Some(path), _) => json!({ "path": path }),
                         (None, Some(url)) => json!({ "url": url }),
+                        // A plugin of the store, by its id (and the version
+                        // its page showed): the engine fetches it from the
+                        // store and verifies it against the store's record.
+                        (None, None) if given("store").is_some() => {
+                            let id = given("store").and_then(|id| catalog::store_id(&id)).ok_or("not_found")?;
+                            let mut store = json!({ "id": id });
+                            if let Some(v) = given("version").filter(|v| v.len() <= 64) {
+                                store["version"] = json!(v);
+                            }
+                            json!({ "store": store })
+                        }
                         _ => return Err("Choose a plugin file or paste a link".into()),
                     };
                     let reply = call_on(&me, device, "InstallPlugin", params).await?;
@@ -3296,6 +3308,9 @@ impl Bridge {
                 }
             }
         });
+        // The plugin store: its catalog, your own plugins in it, and what
+        // the engine does for it (src/plugins/catalog.rs).
+        catalog::install(host, me.clone());
         host.action("plugins.menu", {
             let me = me.clone();
             move |arg| {
@@ -3565,7 +3580,7 @@ async fn template_call(method: &str, params: Json) -> Result<Json, String> {
     crate::auth::after_setup(|| call(method, params.clone())).await
 }
 
-async fn call(method: &str, params: Json) -> Result<Json, String> {
+pub(super) async fn call(method: &str, params: Json) -> Result<Json, String> {
     engine::get().call(method, params).await.map_err(|e| {
         // The engine's own words where it gave some; "offline" as the app says it.
         if e == "offline" || e == "closed" { engine::outcome(&e).to_string() } else { e }
@@ -3593,7 +3608,7 @@ fn set_off_action(host: &ScriptHost, me: Weak<Bridge>) {
     });
 }
 
-async fn call_on(me: &Weak<Bridge>, device: Option<String>, method: &str, params: Json) -> Result<Json, String> {
+pub(super) async fn call_on(me: &Weak<Bridge>, device: Option<String>, method: &str, params: Json) -> Result<Json, String> {
     let Some(device) = device else { return call(method, params).await };
     call(method, remote::addressed(Some(&device), params)).await.map_err(|error| {
         if !remote::unreachable(&error) {
