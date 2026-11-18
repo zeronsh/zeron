@@ -252,8 +252,30 @@ pub fn store_link(url: &str) -> Option<String> {
 /// direction overrides, invisible joiners), which what a listing shows may
 /// not (amendment 31).
 fn unseen(text: &str) -> bool {
+    text.chars().any(unseen_char)
+}
+
+/// Whether `c` is a control or format character (Unicode Cc or Cf): a
+/// newline, an escape sequence's ESC, a direction override, an invisible
+/// joiner.
+pub fn unseen_char(c: char) -> bool {
     use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
-    text.chars().any(|c| matches!(c.general_category(), GeneralCategory::Control | GeneralCategory::Format))
+    matches!(c.general_category(), GeneralCategory::Control | GeneralCategory::Format)
+}
+
+/// `text` for a terminal or a CI log, as one line: each control or format
+/// character written out (`\u{1b}`), so words from a plugin or the store
+/// can't start a line of their own, colour one, or reorder it.
+pub fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if unseen_char(c) {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// A path as macOS and Windows compare it: Unicode NFC, then

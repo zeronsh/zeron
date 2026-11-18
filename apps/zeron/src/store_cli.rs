@@ -22,8 +22,19 @@ use zeron_engine::plugins::install;
 use zeron_engine::plugins::store::client::{Caller, StoreClient};
 use zeron_engine::plugins::store::deploy_key::{self, DeployKey};
 use zeron_engine::plugins::store::publish::{self, Prepared};
-use zeron_engine::plugins::{PLUGINS_DIR, manifest};
+use zeron_engine::plugins::{PLUGINS_DIR, listing, manifest};
 use zeron_rpc::methods;
+
+/// `println!`, the line [`listing::escaped`]: words from a plugin or the
+/// store can't start a line of their own, colour one, or reorder it.
+macro_rules! out {
+    ($($t:tt)*) => { println!("{}", listing::escaped(&format!($($t)*))) };
+}
+
+/// `eprintln!`, escaped as [`out!`].
+macro_rules! note {
+    ($($t:tt)*) => { eprintln!("{}", listing::escaped(&format!($($t)*))) };
+}
 
 /// A command that ends with an exit code of its own, and one line saying why.
 #[derive(Debug)]
@@ -50,8 +61,9 @@ pub const REFUSED: i32 = 3;
 /// The store can't be reached, or is busy: try again later.
 pub const UNREACHABLE: i32 = 4;
 
+/// (Its line [`listing::escaped`]: it may carry a plugin's or the store's words.)
 fn exit(code: i32, message: impl Into<String>) -> anyhow::Error {
-    Exit { code, message: message.into() }.into()
+    Exit { code, message: listing::escaped(&message.into()) }.into()
 }
 
 /// The exit code for a failure's word (`"<word>: <words>"`).
@@ -115,7 +127,7 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
         if !prepared.ok() {
             return Err(exit(RULES, problems_line(&prepared)));
         }
-        println!("{} {} meets the store's rules.", prepared.manifest.id, prepared.manifest.version);
+        out!("{} {} meets the store's rules.", prepared.manifest.id, prepared.manifest.version);
         return Ok(None);
     }
     let needs_store = matches!(command, PluginCommand::Publish { .. } | PluginCommand::Status { .. });
@@ -154,7 +166,7 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
             let raw = prepared.pack(key.signing_key()).map_err(|e| failed(&e))?;
             let what = format!("{} {}", prepared.manifest.id, prepared.manifest.version);
             if dry_run {
-                println!("{what} is ready: {} files, {}, signed with deploy key {}. Not sent (--dry-run).", prepared.files.len(), size(raw.len() as u64), key.public());
+                out!("{what} is ready: {} files, {}, signed with deploy key {}. Not sent (--dry-run).", prepared.files.len(), size(raw.len() as u64), key.public());
                 return Ok(None);
             }
             let reply = store.publish(&prepared.manifest.id, raw, &caller).await.map_err(|e| failed(&e))?;
@@ -223,10 +235,10 @@ fn read(dir: &Path) -> anyhow::Result<Prepared> {
 /// Every problem and warning, one line each, on stderr.
 fn say(prepared: &Prepared) {
     for line in publish::lines(&prepared.warnings) {
-        eprintln!("warning: {line}");
+        note!("warning: {line}");
     }
     for line in publish::lines(&prepared.problems) {
-        eprintln!("error: {line}");
+        note!("error: {line}");
     }
 }
 
@@ -243,25 +255,34 @@ fn problems_line(prepared: &Prepared) -> String {
 
 fn submitted(what: &str, reply: &Value) {
     let status = reply["status"].as_str().unwrap_or("pending");
-    println!("Submitted {what}: {status}. It's reviewed before anyone else sees it; your own devices are offered it now.");
+    out!("Submitted {what}: {status}. It's reviewed before anyone else sees it; your own devices are offered it now.");
 }
 
 /// `zeron plugin status`'s lines: each plugin, then each version's state.
 fn print_status(reply: &Value, only: Option<&str>) {
+    for line in status_lines(reply, only) {
+        println!("{line}");
+    }
+}
+
+/// [`print_status`]'s lines, each [`listing::escaped`] (the store's words).
+fn status_lines(reply: &Value, only: Option<&str>) -> Vec<String> {
     let plugins: Vec<&Value> = reply["plugins"].as_array().into_iter().flatten().filter(|p| only.is_none_or(|id| p["id"] == id)).collect();
+    let mut lines = Vec::new();
     if plugins.is_empty() {
-        println!("{}", if only.is_some() { "That plugin isn't yours in the store." } else { "You have no plugins in the store yet." });
+        lines.push(if only.is_some() { "That plugin isn't yours in the store." } else { "You have no plugins in the store yet." }.to_owned());
     }
     for plugin in plugins {
-        println!("{}", plugin["id"].as_str().unwrap_or("?"));
+        lines.push(listing::escaped(plugin["id"].as_str().unwrap_or("?")));
         for version in plugin["versions"].as_array().into_iter().flatten() {
             let mut line = format!("  {}  {}", version["version"].as_str().unwrap_or("?"), version["status"].as_str().unwrap_or("?"));
             if let Some(reason) = version["reason"].as_str().or(version["message"].as_str()).filter(|r| !r.is_empty()) {
                 line.push_str(&format!(": {reason}"));
             }
-            println!("{line}");
+            lines.push(listing::escaped(&line));
         }
     }
+    lines
 }
 
 /// `512 bytes`, `12.3 KB`, `4.1 MB`.
@@ -294,7 +315,7 @@ pub async fn through_zeron(command: PluginCommand, data_dir: &Path, client: &zer
             for (kind, key) in [("warning", "warnings"), ("error", "problems")] {
                 for p in prepared[key].as_array().into_iter().flatten() {
                     let at = p["path"].as_str().or(p["field"].as_str()).map(|a| format!(" ({a})")).unwrap_or_default();
-                    eprintln!("{kind}: {}{at}: {}", p["rule"].as_str().unwrap_or("?"), p["words"].as_str().unwrap_or(""));
+                    note!("{kind}: {}{at}: {}", p["rule"].as_str().unwrap_or("?"), p["words"].as_str().unwrap_or(""));
                 }
             }
             let what = format!("{id} {}", prepared["version"].as_str().unwrap_or(""));
@@ -303,7 +324,7 @@ pub async fn through_zeron(command: PluginCommand, data_dir: &Path, client: &zer
                 return Err(exit(RULES, format!("{what} doesn't meet the store's rules ({n} problem{}): fix and try again", if n == 1 { "" } else { "s" })));
             }
             if dry_run {
-                println!("{what} is ready to publish. Not sent (--dry-run).");
+                out!("{what} is ready to publish. Not sent (--dry-run).");
                 return Ok(());
             }
             let reply = call(methods::PUBLISH_PLUGIN, json!({ "id": id, "hash": prepared["hash"], "ticket": prepared["ticket"] })).await?;
@@ -332,7 +353,7 @@ fn answered(reply: &Value) -> anyhow::Result<()> {
 async fn action(client: &zeron_rpc::RpcClient, id: &str, version: &str, action: &str) -> anyhow::Result<()> {
     let reply = ask(client, methods::STORE_VERSION_ACTION, json!({ "id": id, "version": version, "action": action })).await?;
     answered(&reply)?;
-    println!("{}", acted(id, version, action, &reply));
+    out!("{}", acted(id, version, action, &reply));
     Ok(())
 }
 
@@ -373,7 +394,7 @@ async fn key(client: &zeron_rpc::RpcClient, command: KeyCommand) -> anyhow::Resu
                 // A new key needs a fresh sign-in begun for it (each key its
                 // own): asked for, then waited on.
                 let url = call(methods::STEP_UP, json!({ "for": "deploy_key" })).await?;
-                eprintln!("Making a deploy key needs a fresh sign-in. Open this to confirm it's you:\n\n  {}\n", url["url"].as_str().unwrap_or(""));
+                eprintln!("Making a deploy key needs a fresh sign-in. Open this to confirm it's you:\n\n  {}\n", listing::escaped(url["url"].as_str().unwrap_or("")));
                 let started = std::time::Instant::now();
                 while reply["error"] == "step_up_required" && started.elapsed() < STEP_UP_WAIT {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -382,7 +403,7 @@ async fn key(client: &zeron_rpc::RpcClient, command: KeyCommand) -> anyhow::Resu
             }
             answered(&reply)?;
             let public = reply["key"]["key"].as_str().unwrap_or("");
-            println!("Made deploy key \"{name}\" for {id}{}.", if public.is_empty() { String::new() } else { format!(" ({public})") });
+            out!("Made deploy key \"{name}\" for {id}{}.", if public.is_empty() { String::new() } else { format!(" ({public})") });
             println!("Its secret, shown this once (Zeron keeps no copy):\n");
             println!("  {}\n", reply["secret"].as_str().unwrap_or(""));
             println!("Add it to your CI's secrets as {}. `zeron plugin publish <folder>` reads it from there.", deploy_key::ENV);
@@ -391,19 +412,19 @@ async fn key(client: &zeron_rpc::RpcClient, command: KeyCommand) -> anyhow::Resu
             let reply = call(methods::LIST_DEPLOY_KEYS, json!({ "id": id })).await?;
             let keys = reply["keys"].as_array().cloned().unwrap_or_default();
             if keys.is_empty() {
-                println!("{id} has no deploy keys. Make one with `zeron plugin key create {id} --name <what it's for>`.");
+                out!("{id} has no deploy keys. Make one with `zeron plugin key create {id} --name <what it's for>`.");
             }
             for k in keys {
                 let mut line = format!("{}  {}", k["key"].as_str().unwrap_or("?"), k["name"].as_str().unwrap_or(""));
                 if k["revokedAt"].is_number() || k["revoked_at"].is_number() {
                     line.push_str("  revoked");
                 }
-                println!("{line}");
+                out!("{line}");
             }
         }
         KeyCommand::Revoke { id, key } => {
             call(methods::REVOKE_DEPLOY_KEY, json!({ "id": id, "key": key })).await?;
-            println!("Revoked {key}: it publishes nothing for {id} from now on.");
+            out!("Revoked {key}: it publishes nothing for {id} from now on.");
         }
     }
     Ok(())
@@ -446,5 +467,41 @@ mod tests {
             let said = failed(&format!("{word}: the store's own words")).to_string();
             assert!(said.starts_with(&format!("{word}: ")) && !said.contains('\n') && !said.contains("the store's own words"), "{said}");
         }
+    }
+
+    /// No control or format character a plugin or the store sent reaches a
+    /// terminal or a CI log raw.
+    const HOSTILE: &str = "a\nerror: fake line\u{1b}[2J\u{202e}";
+
+    fn raw_free(line: &str) -> bool {
+        !line.chars().any(listing::unseen_char)
+    }
+
+    #[test]
+    fn a_manifest_s_id_is_never_printed_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = json!({ "id": HOSTILE, "name": "Focus", "version": "1.0.0", "entry": "init.luau", "permissions": [] });
+        std::fs::write(dir.path().join("zeron-plugin.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        std::fs::write(dir.path().join("init.luau"), "return {}").unwrap();
+        let prepared = read(dir.path()).unwrap();
+        let line = exit(RULES, problems_line(&prepared)).to_string();
+        assert!(raw_free(&line) && line.contains("\\u{a}") && line.contains("\\u{1b}"), "{line}");
+        for line in publish::lines(&prepared.problems).iter().map(|l| listing::escaped(l)) {
+            assert!(raw_free(&line), "{line}");
+        }
+        assert!(publish::lines(&prepared.problems).iter().any(|l| l.contains('\n')), "(the engine's words do carry it: the CLI escapes them)");
+    }
+
+    #[test]
+    fn the_store_s_words_in_status_are_never_printed_raw() {
+        let reply = json!({ "plugins": [{ "id": HOSTILE, "versions": [
+            { "version": "1.0.0\u{1b}[31m", "status": "rejected", "reason": HOSTILE },
+            { "version": "1.1.0", "status": "pending", "message": "fine\r\nerror: forged" },
+        ] }] });
+        let lines = status_lines(&reply, None);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines.iter().all(|l| raw_free(l)), "{lines:?}");
+        assert!(lines[1].contains("rejected: a\\u{a}error: fake line\\u{1b}[2J\\u{202e}"), "{lines:?}");
+        assert!(lines[2].ends_with("fine\\u{d}\\u{a}error: forged"), "{lines:?}");
     }
 }
