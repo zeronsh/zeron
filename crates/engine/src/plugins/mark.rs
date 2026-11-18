@@ -105,7 +105,12 @@ pub const ZERON: &str = "zeron";
 /// "Zeron Git", "Zeron's git", "Zeron-made") reads as ours.
 pub const NAME_FORMS: &[(&str, &[&str])] = &[
     ("en", &["for", "in", "with", "on", "to"]),
-    ("zh", &["\u{9002}\u{7528}\u{4e8e}", "\u{9069}\u{7528}\u{65bc}", "\u{7528}\u{4e8e}", "\u{7528}\u{65bc}", "\u{4e3a}", "\u{70ba}", "\u{7ed9}", "\u{7d66}", "\u{5728}", "\u{4e0e}", "\u{8207}", "\u{548c}"]),
+    // (As the app's zh-Hans strings say them: 为 Zeron, 在 Zeron, 使用 Zeron;
+    // with 适用于/用于 "made for", 给 "for", 与/和 "with", and their
+    // traditional forms. Never 由 "by".)
+    ("zh", &[
+        "\u{4e3a}", "\u{70ba}", "\u{5728}", "\u{4f7f}\u{7528}", "\u{9002}\u{7528}\u{4e8e}", "\u{9069}\u{7528}\u{65bc}", "\u{7528}\u{4e8e}", "\u{7528}\u{65bc}", "\u{7ed9}", "\u{7d66}", "\u{4e0e}", "\u{8207}", "\u{548c}",
+    ]),
 ];
 
 /// In a description, "zeron" right after one of these reads as its maker.
@@ -471,12 +476,13 @@ mod tests {
             "Zeron Labs", "Team Zeron", "Zeron Git", "Zeron's git", "Zeron-made", "Git by Zeron", "Git by Zer0n", "Git by Z\u{435}ron",
             "Git by \u{1d22}\u{1d07}\u{280}\u{1d0f}\u{274}", "Z.E.R.O.N. approved", "z e r o n approved", "Zeron notes", "Zeron\u{63d2}\u{4ef6}",
             "Themes for Zeron, by Zeron",
+            "\u{7531}Zeron\u{5236}\u{4f5c}\u{7684}\u{7b14}\u{8bb0}",
         ] {
             assert_eq!(claims_zeron_in_name(name).as_deref(), Some("zeron"), "{name}");
         }
         for name in [
             "Themes for Zeron", "Git in Zeron", "Notes with Zeron", "Tabs on Zeron", "Send to Zeron", "Zeronaut", "Lazeron", "A board by Zenon",
-            "\u{9002}\u{7528}\u{4e8e}Zeron\u{7684}\u{4e3b}\u{9898}", "\u{4e3a} Zeron \u{505a}\u{7684}\u{7b14}\u{8bb0}", "Focus Board",
+            "\u{9002}\u{7528}\u{4e8e}Zeron\u{7684}\u{4e3b}\u{9898}", "\u{4e3a} Zeron \u{505a}\u{7684}\u{7b14}\u{8bb0}", "\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}", "Focus Board", "Heron",
         ] {
             assert_eq!(claims_zeron_in_name(name), None, "{name}");
         }
@@ -503,7 +509,7 @@ mod tests {
         }
         for text in [
             "Adds a panel to Zeron's sidebar.", "Themes for Zeron.", "Works with Zeron.", "Made for Zeron.", "Built with Zeron in mind.",
-            "Zeronaut tools", "by zeronaut", "A board by Zenon", "Lazeron approved", "from zero n", "Zeron notes",
+            "Zeronaut tools", "by zeronaut", "A board by Zenon", "Lazeron approved", "from zero n", "Zeron notes", "a zero-noise timer", "Heron",
         ] {
             assert_eq!(claims_zeron(text), None, "{text}");
         }
