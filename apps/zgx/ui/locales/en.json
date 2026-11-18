@@ -3827,6 +3827,9 @@
       "too_large": "It's bigger than the store takes.",
       "binary_file": "It holds a file that isn't text or a picture.",
       "no_notes": "CHANGELOG.md has nothing for this version.",
+      "raw_html": "It has HTML, which the store shows as typed.",
+      "footnote": "It has a footnote, which the store shows as typed.",
+      "math": "It has math, which the store's website shows as typed.",
       "needs_username": "Claim a username first: every plugin in the store is by @someone.",
       "id_taken": "Someone else already publishes a plugin with this id.",
       "version_exists": "You've sent this version already. Give it a new one.",
@@ -3962,6 +3965,9 @@
         "too_large": "It's bigger than the store takes. Leave out what it doesn't need.",
         "binary_file": "It holds a file that isn't text or a picture: the reviewer looks at it closely.",
         "no_notes": "CHANGELOG.md has nothing for this version: people see no notes for the update.",
+        "raw_html": "It has HTML, which the store shows as typed. Use Markdown for pictures and headings.",
+        "footnote": "It has a footnote, which the store shows as typed. Write the note into the text instead.",
+        "math": "It has math, which the store's website shows as typed. Zeron itself draws it.",
         "other": "Something here isn't what the store takes.",
         "missing_listing": {
           "icon": "Add an SVG icon and name it in zeron-plugin.json (\"icon\").",
@@ -3999,6 +4005,7 @@
       "no_versions": "Nothing sent yet.",
       "versions_failed": "Couldn't see your versions",
       "sign_in_to_see": "Sign in to see your versions",
+      "at_line": "{path}, line {line}",
       "sign_in_to_see_keys": "Sign in to see its keys",
       "status": {
         "pending": "In review",

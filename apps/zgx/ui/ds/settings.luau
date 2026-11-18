@@ -796,7 +796,10 @@ function M.Row(props: RowProps): Node
 				-- this wants: zgx-asks/rich-span-boundary-break. Meanwhile the
 				-- sentence and its link are two boxes: the link a word's space
 				-- after the sentence when it fits there, else on the next line
-				-- at the sentence's start, as a word that doesn't fit goes.)
+				-- at the sentence's start, as a word that doesn't fit goes.
+				-- The break is headless-only, zgx's fallback layout wrapping by
+				-- grapheme; once the pin carries its word wrap this may become
+				-- the one rich paragraph.)
 				then ui.row {
 					w_full = true,
 					flex_wrap = true,

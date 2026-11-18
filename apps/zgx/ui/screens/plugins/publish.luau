@@ -126,10 +126,22 @@ local function fix_of(p: any): string
 	local rule, field = p.rule, p.field
 	if (rule == "missing_listing" or rule == "bad_listing") and type(field) == "string" and FIELDS[field] then
 		return ui.t(`plugins.store.fix.{rule}.{field}`):get()
-	elseif rule == "missing_readme" or rule == "not_semver" or rule == "id_reserved" or rule == "too_large" or rule == "binary_file" or rule == "no_notes" or rule == "not_newer" or rule == "version_exists" then
+	elseif rule == "missing_readme" or rule == "not_semver" or rule == "id_reserved" or rule == "too_large" or rule == "binary_file" or rule == "no_notes" or rule == "raw_html" or rule == "footnote" or rule == "math" or rule == "not_newer" or rule == "version_exists" then
 		return ui.t(`plugins.store.fix.{rule}`):get()
 	end
 	return if type(p.words) == "string" and p.words ~= "" then string.sub(p.words, 1, 400) else ui.t("plugins.store.fix.other"):get()
+end
+
+-- Where a problem or a warning is: its file, and its line when it's about
+-- one ("README.md, line 3"); nil when it's about neither.
+local function where_of(p: any): string?
+	if type(p.path) ~= "string" or p.path == "" then
+		return nil
+	end
+	if type(p.line) == "number" and p.line >= 1 and p.line % 1 == 0 then
+		return ui.t("plugins.store.at_line", { path = p.path, line = p.line }):get()
+	end
+	return p.path
 end
 
 -- What went wrong, in Zeron's words (screens/plugins/words `failure`: the
@@ -316,13 +328,13 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 		-- Anything else in the way, in the engine's words.
 		for _, pr in problems do
 			if type(pr) == "table" and not used[pr] then
-				add(check_row(false, fix_of(pr), if type(pr.path) == "string" then pr.path else nil))
+				add(check_row(false, fix_of(pr), where_of(pr)))
 			end
 		end
 		-- What's worth knowing and in nobody's way, under them.
 		for _, w in (if type(r.warnings) == "table" then r.warnings else {}) :: { any } do
 			if type(w) == "table" then
-				add(check_row("note", fix_of(w), if type(w.path) == "string" then w.path else nil))
+				add(check_row("note", fix_of(w), where_of(w)))
 			end
 		end
 		-- Its last row: what Submit sends (or what's in the way), and Submit,

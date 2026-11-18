@@ -1,5 +1,11 @@
 # Ask: a rich paragraph breaks at a span's boundary as it breaks between words
 
+**Headless only** (the zgx coordinator, Nov 18): it's zgx's fallback text
+layout, the one `zgx test` runs with no renderer, wrapping by grapheme
+rather than by word (the 62 below is 8 × its fixed 7.75 advance). With
+the real shaper the app wraps a rich paragraph at a span's boundary as it
+should. zgx's text lane is making the fallback wrap by word (UAX #14).
+
 **Who needs it:** Settings → Plugins → Yours. Each of your plugins says where
 it stands in the store in one sentence, and "Publish…" is that sentence's own
 link: it should follow the sentence's last word, wrapping with it. That's
@@ -36,5 +42,7 @@ control, passes.
 sentence and its link as two boxes in a wrapping row for now: the link a
 word's space after the sentence when it fits on that line, else on the next
 line at its start. One line, that's the same picture; when the sentence
-itself wraps, the link goes under it rather than after its last word. It
-becomes the one rich paragraph when this lands.
+itself wraps, the link goes under it rather than after its last word.
+Correct in both the app and the tests (confirmed on paint), it's kept as
+it is; once the pin carries the fallback's word wrap it may become the one
+rich paragraph.
