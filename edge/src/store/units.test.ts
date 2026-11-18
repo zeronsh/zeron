@@ -274,8 +274,12 @@ describe("store listing: Zeron in a name, and the mark in other languages (58fc1
       expect(markClaim(text, true), text).toBeUndefined();
       expect(markClaim(text, false), text).toBeUndefined();
     }
-    // (But Zeron verifying is the store's mark itself.)
+    // (But Zeron verifying is the store's mark itself, and a mark word beside
+    // Zeron or the store says it of them: rule 4, whole again, 49f57f6fb.)
     expect(markClaim("Verified by Zeron.", false)).toBe("verified");
+    for (const text of ["Zeron verified.", "Zeron-verified.", "Officially Zeron-verified.", "Zeron official.", "Not Zeron official.", "Verified by the store."]) {
+      expect(markClaim(text, false), text).toBeDefined();
+    }
   });
 
   it("refuses the mark's words in the store's other languages: whole where words are spaced, anywhere in CJK", () => {
