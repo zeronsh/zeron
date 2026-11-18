@@ -1208,6 +1208,43 @@ pub(crate) fn forget_state(host: &ScriptHost, id: &str) {
     }
 }
 
+/// The plugins Settings follows the settings of (`settings::Book::sync`):
+/// those loading now, and one that failed and is withdrawn (`failed` says
+/// why) while it drew a settings page of its own (`draws_own`): its page
+/// stays, Zeron's rows on it, and why it stopped said in its box's place.
+/// (Each withdrawn one, with why, is the second list.)
+pub(crate) fn settings_on(
+    items: &[Item],
+    loading: &HashSet<String>,
+    mut failed: impl FnMut(&Item) -> Option<String>,
+    draws_own: impl Fn(&str) -> bool,
+) -> (Vec<settings::On>, Vec<(String, String)>) {
+    let (mut on, mut stopped) = (Vec::new(), Vec::new());
+    for i in items {
+        let followed = if loading.contains(i.id()) {
+            true
+        } else if i.status() == "on" && draws_own(i.id())
+            && let Some(why) = failed(i)
+        {
+            stopped.push((i.id().to_string(), why));
+            true
+        } else {
+            false
+        };
+        if followed {
+            on.push(settings::On {
+                id: i.id().to_string(),
+                name: i.name().to_string(),
+                hash: i.hash().to_string(),
+                // Zeron's own, as the engine says (shipped in the app,
+                // allowed as it ships, never edited).
+                builtin: i.json["builtin"].as_bool() == Some(true),
+            });
+        }
+    }
+    (on, stopped)
+}
+
 /// What a plugin needed, as a person would say it: "a session".
 /// What Settings → Plugins says of a plugin's node that couldn't show at
 /// `at`: what it needed that the place doesn't give, or its error.
@@ -2799,23 +2836,19 @@ impl Bridge {
     /// published as they change (with no borrow held: plugins' effects and
     /// the sidebar's run at once).
     fn sync_settings(&self, items: &[Item], loading: &HashSet<String>) {
-        let on: Vec<settings::On> = items
-            .iter()
-            .filter(|i| loading.contains(i.id()))
-            .map(|i| settings::On {
-                id: i.id().to_string(),
-                name: i.name().to_string(),
-                hash: i.hash().to_string(),
-                // Zeron's own, as the engine says (shipped in the app,
-                // allowed as it ships, never edited).
-                builtin: i.json["builtin"].as_bool() == Some(true),
-            })
-            .collect();
+        let (on, stopped) = {
+            let mut failed = self.failed_plugins.borrow_mut();
+            let book = self.settings.borrow();
+            settings_on(items, loading, |i| failed.holds(i.id(), i.hash()).then(|| failed.why(i.id()).unwrap_or_default().to_string()), |id| book.page_problem(id).is_some())
+        };
         let snapshots: HashMap<String, PathBuf> = items
             .iter()
             .filter_map(|i| Some((i.id().to_string(), PathBuf::from(i.json["snapshot"].as_str()?))))
             .collect();
-        let changed = self.settings.borrow_mut().sync(&on, |id| snapshots.get(id).and_then(|s| settings::manifest_in(s)));
+        let mut changed = self.settings.borrow_mut().sync(&on, |id| snapshots.get(id).and_then(|s| settings::manifest_in(s)));
+        for (id, why) in &stopped {
+            changed.list |= self.settings.borrow_mut().page_built(id, Some(why));
+        }
         self.publish_settings(changed.list, &changed.values);
     }
 
@@ -3928,6 +3961,8 @@ mod tests {
 mod loading_tests;
 #[cfg(test)]
 mod examples_tests;
+#[cfg(test)]
+mod settings_page_tests;
 #[cfg(test)]
 mod hotkeys_tests;
 #[cfg(test)]
