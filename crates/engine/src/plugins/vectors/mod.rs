@@ -908,12 +908,12 @@ fn listing_cases() -> Value {
         m[field] = json!(value);
         cases.push((name.into(), m, files.clone()));
     }
-    // Once claims beside "zeron", and Chinese words of origin: fine.
+    // Chinese words of origin: fine. A mark word beside "zeron" is rule 4.
     for (name, value) in [
-        ("zeron: Zeron beside Japanese official is fine", "Zeron \u{516c}\u{5f0f}\u{306e}\u{30e1}\u{30e2}\u{3002}"),
+        ("description: beside Zeron, Japanese official", "Zeron \u{516c}\u{5f0f}\u{306e}\u{30e1}\u{30e2}\u{3002}"),
         ("the mark: Korean official near plugin, Zeron between", "\u{acf5}\u{c2dd} Zeron \u{d50c}\u{b7ec}\u{adf8}\u{c778}."),
         ("zeron: Zeron beside Chinese certified is fine", "Zeron \u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}\u{3002}"),
-        ("zeron: Zeron beside French officiel is fine", "Le th\u{e8}me Zeron officiel."),
+        ("description: beside Zeron, French officiel", "Le th\u{e8}me Zeron officiel."),
         ("zeron: by Zeron in Chinese is fine", "\u{7531} Zeron \u{5236}\u{4f5c}\u{3002}"),
         ("zeron: from Zeron in Chinese is fine", "\u{6765}\u{81ea}Zeron\u{7684}\u{7b14}\u{8bb0}\u{3002}"),
     ] {
@@ -923,8 +923,8 @@ fn listing_cases() -> Value {
     }
     // In a description, the mark only when said of the plugin itself:
     // 1 first word or alone; 2 near a word for the plugin; 3 after a word
-    // that says it of the subject; 4 beside the store (no negation lifts
-    // it); a negation directly before lifts 1 to 3.
+    // that says it of the subject; 4 beside Zeron or the store (no
+    // negation lifts it); a negation directly before lifts 1 to 3.
     for (name, value) in [
         ("description: the first word", "Official Git tools."),
         ("description: alone as a sentence", "Notes, kept tidy. Verified."),
@@ -940,8 +940,12 @@ fn listing_cases() -> Value {
         ("description: after now", "Now official: boards for everyone."),
         ("description: after fully", "Fully verified and signed."),
         ("description: German after ist", "Der Client ist offizielle Software."),
-        ("description: beside Zeron is no longer rule 4, so is fine", "Boards, Zeron verified."),
-        ("description: not Zeron official is fine", "Not Zeron official."),
+        ("description: beside Zeron", "Boards, Zeron verified."),
+        ("description: beside Zeron, a negation doesn't lift it", "Not Zeron official."),
+        ("description: Zeron verified alone", "Zeron verified."),
+        ("description: Zeron-verified, hyphened", "Zeron-verified."),
+        ("description: officially Zeron-verified", "Officially Zeron-verified."),
+        ("description: Zeron official", "Zeron official."),
         ("description: verified by Zeron, an authority", "Checked: verified by Zeron."),
         ("description: by the store", "Checked: verified by the store."),
         ("description: spaced capitals alone", "Notes. V.E.R.I.F.I.E.D."),

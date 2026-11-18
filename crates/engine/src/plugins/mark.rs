@@ -329,10 +329,12 @@ pub const NEGATIONS: &[&str] = &[
 /// forms, and a line break.
 pub const SENTENCE_ENDS: &[char] = &['.', '!', '?', ';', '\u{3002}', '\u{ff01}', '\u{ff1f}', '\u{ff1b}', '\n'];
 
-/// A mark word beside one of these is said of the store (rule 4): no
+/// A mark word directly beside one of these, in either order, is said of
+/// the store's own seal (rule 4: "Zeron verified.", "Zeron-verified."): no
 /// negation lifts it. ("By …" directly after it is beside too: "verified by
-/// the store", which the "by" rule would otherwise lift.)
-pub const STORE_WORDS: &[&str] = &["the store", "the plugin store", "by the store", "by the plugin store"];
+/// the store", which the "by" rule would otherwise lift.) Not name
+/// policing: "Zeron Git" and "Git by Zeron" say nothing of the mark.
+pub const STORE_WORDS: &[&str] = &["zeron", "the store", "the plugin store", "by zeron", "by the store", "by the plugin store"];
 
 /// `text` as the rules read it before ignorables go: Unicode NFKC (so
 /// 𝐯𝐞𝐫𝐢𝐟𝐢𝐞𝐝 and ｖｅｒｉｆｉｅｄ are "verified"), lowercased, then NFKD
@@ -782,7 +784,7 @@ impl Reading {
     }
 
     /// Whether a mark word at `span` is said of the plugin itself (or of
-    /// the store).
+    /// the store's own seal).
     fn said_of_plugin(&self, span: (usize, usize), ambiguous: bool) -> bool {
         self.said_of(span, if ambiguous { Kind::Ambiguous } else { Kind::Mark }, !ambiguous)
     }
@@ -807,7 +809,8 @@ impl Reading {
         let Some((first, last)) = self.covers(span) else { return false };
         let (from, to) = self.sentence(span);
         let in_sentence = |n: usize| self.words[n].0 >= from && self.words[n].1 <= to;
-        // 4: beside "the store", "the plugin store". No negation lifts it.
+        // 4: beside "zeron", "the store", "the plugin store". No negation
+        // lifts it.
         if STORE_WORDS.iter().any(|w| self.before_is(first, w) || self.after_is(last, w)) {
             return true;
         }
@@ -985,7 +988,7 @@ fn same_word(text: &[char], word: &[char]) -> bool {
 /// A description's mark: a glyph anywhere; a mark word only when said of the
 /// plugin itself (the text's first word or alone as a sentence; within two
 /// words of a word for the plugin; directly after a word that says it of
-/// the subject; beside the store), unless a negation is directly
+/// the subject; beside "zeron" or the store), unless a negation is directly
 /// before it (not for the last).
 fn description_mark(text: &str) -> Option<String> {
     let folded_text = folded(text);
