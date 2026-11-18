@@ -7,7 +7,7 @@ import { describe, expect, test } from "vitest";
 import { ON_THE_WEB } from "./permissions.ts";
 import { AUTHOR_ACTIONS, revokeAsk } from "./actions.ts";
 import { versionState } from "./states.ts";
-import { STORE_WORDS } from "./words.ts";
+import { store, STORE_WORDS } from "./words.ts";
 import type { VersionStatus } from "./types.ts";
 
 const source = process.env.APP_EN_JSON ?? new URL("../../../../zgx/ui/locales/en.json", import.meta.url);
@@ -37,3 +37,11 @@ describe("the site says them where they belong", () => {
     expect(revokeAsk("GitHub Actions")).toMatchObject({ title: "Revoke GitHub Actions?", confirm: "Revoke" });
   });
 });
+
+describe("the app's plural, as its en.json writes it", () => {
+  test("one, and other with its count", () => {
+    expect(store("plugins.store.key.ends_in", { n: 1 })).toBe("Ends in 1 day");
+    expect(store("plugins.store.key.ends_in", { n: 11 })).toBe("Ends in 11 days");
+  });
+});
+

@@ -73,7 +73,7 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
   <h1 slot="title" class="t-title">{heading}{total !== undefined && <span class="title-count"> · {count(total)}</span>}</h1>
   {
     page.ok && items.length > 0 && (
-      <nav slot="tools" class="segmented" aria-label={store("plugins.store.sort_label")}>
+      <nav slot="tools" class="segmented" aria-label="Order">
         {sorts.map((s) => (
           <a href={catalogHref({ ...state, sort: s, cursor: null })} aria-current={s === sort ? "page" : undefined}>{store(`plugins.store.sort.${s}`)}</a>
         ))}

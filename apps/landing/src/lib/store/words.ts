@@ -27,18 +27,22 @@ export const STORE_WORDS = {
   "plugins.store.confirm.unyank.body": "It can be installed again.",
   // Deploy keys.
   "plugins.store.keys": "Deploy keys",
-  "plugins.store.keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions without your session. It publishes this plugin alone, and every version still waits for review.",
+  "plugins.store.keys_body": "A deploy key lets a CI job, such as a GitHub Action, send new versions of this plugin without your session; each still waits for review.",
   "plugins.store.keys_none": "No keys yet.",
   "plugins.store.keys_failed": "Couldn't see its keys",
   "plugins.store.keys_publish_first": "Send its first version from your computer; a deploy key can send the ones after it.",
   "plugins.store.key.new": "New key…",
   "plugins.store.key.new_title": "New deploy key",
   "plugins.store.key.name": "Name",
-  "plugins.store.key.never_used": "never used",
+  "plugins.store.key.not_used": "Not used yet",
+  "plugins.store.key.no_end": "Doesn't expire",
+  "plugins.store.key.ends_in": "{n, plural, one {Ends in # day} other {Ends in # days}}",
+  "plugins.store.key.ends_today": "Ends today",
+  "plugins.store.key.ends_tomorrow": "Ends tomorrow",
   "plugins.store.key.expiry_label": "Ends",
   "plugins.store.key.expiry.never": "Never",
   "plugins.store.your_versions": "Versions you've sent",
-  "plugins.store.no_versions": "Nothing sent yet",
+  "plugins.store.no_versions": "Nothing sent yet.",
   "plugins.store.key.revoke": "Revoke",
   "plugins.store.key.revoke_title": "Revoke {name}?",
   "plugins.store.key.revoke_body": "Anything publishing with it stops working at once. Versions it already sent stay as they are.",
@@ -65,7 +69,6 @@ export const STORE_WORDS = {
   "plugins.store.category.integrations": "Integrations",
   "plugins.store.category.productivity": "Productivity",
   "plugins.store.category.utilities": "Utilities",
-  "plugins.store.sort_label": "Order",
   "plugins.store.sort.relevance": "Best match",
   "plugins.store.sort.popular": "Most installed",
   "plugins.store.sort.updated": "Recently updated",
@@ -97,7 +100,12 @@ export type StoreKey = keyof typeof STORE_WORDS;
 
 /** The app's words for `key`, with `{name}`-style places filled. */
 export function store(key: StoreKey, args?: Record<string, string | number>): string {
-  return STORE_WORDS[key].replace(/\{(\w+)\}/g, (whole, name: string) => (args && name in args ? String(args[name]) : whole));
+  // (The app's plural, as its en.json writes it: "{n, plural, one {… # …} other {… # …}}".)
+  const plural = STORE_WORDS[key].replace(/\{(\w+), plural, one \{([^{}]*)\} other \{([^{}]*)\}\}/g, (whole, name: string, one: string, other: string) => {
+    const n = args?.[name];
+    return typeof n === "number" ? (n === 1 ? one : other).replaceAll("#", String(n)) : whole;
+  });
+  return plural.replace(/\{(\w+)\}/g, (whole, name: string) => (args && name in args ? String(args[name]) : whole));
 }
 
 /** A version's state, named as the app names it. */

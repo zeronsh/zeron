@@ -4,7 +4,7 @@
 import type { Ask } from "./actions.ts";
 import type { FlashWord } from "./flash.ts";
 import { count } from "./format.ts";
-import { compared } from "./permissions.ts";
+import { compared, together } from "./permissions.ts";
 import type { Submission } from "./types.ts";
 
 /** Why a version isn't approved: the words the author reads beside the reviewer's own. */
@@ -117,19 +117,24 @@ export function pluginRequest(id: string, action: PluginAction, form: { get(name
  * Against the last approved version for an update; for a first version,
  * its far-reaching asks.
  */
+const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
 export function toWeigh(s: Pick<Submission, "permissions" | "permissions_diff" | "base" | "checks">): { text: string; tone: "warn" | "bad" } | null {
   const { lines } = compared(s.permissions, s.base ? s.permissions_diff : null);
   const fresh = lines.filter((l) => l.change === "new");
-  const changed = lines.filter((l) => l.change === "changed");
-  const far = s.base ? [...fresh, ...changed].filter((l) => l.risky) : lines.filter((l) => l.risky);
+  const changed = lines.filter((l) => l.change === "changed" && !l.bound);
+  const bound = lines.filter((l) => l.bound).map((l) => l.bound!);
+  const far = s.base ? [...fresh, ...changed].filter((l) => l.risky).length + bound.length : lines.filter((l) => l.risky).length;
   const failed = s.checks.filter((c) => c.level === "fail").length;
   const warned = s.checks.filter((c) => c.level === "warn").length;
   const say = (n: number, one: string, many: string) => (n ? [`${count(n)} ${n === 1 ? one : many}`] : []);
   const parts = [
-    ...(s.base ? [...say(fresh.length, "new ask", "new asks"), ...say(changed.length, "ask changed", "asks changed")] : say(far.length, "ask that reaches far", "asks that reach far")),
+    ...(s.base
+      ? [...say(fresh.length, "new ask", "new asks"), ...say(changed.length, "ask changed", "asks changed"), ...(bound.length ? [`${capital(together(bound))} changed`] : [])]
+      : say(far, "ask that reaches far", "asks that reach far")),
     ...say(failed, "check failed", "checks failed"),
     ...say(warned, "check to look at", "checks to look at"),
   ];
-  return parts.length ? { text: parts.join(" · "), tone: failed || far.length ? "bad" : "warn" } : null;
+  return parts.length ? { text: parts.join(" · "), tone: failed || far ? "bad" : "warn" } : null;
 }
 

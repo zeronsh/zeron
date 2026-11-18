@@ -1064,6 +1064,8 @@ dialog.sheet:target { display: block; }
 .feature .name { font-size: 13px; line-height: 18px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .feature .by { font-size: 12px; line-height: 16px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .feature-summary { margin: 8px 16px 16px; /* (margin, not padding: a clamped line would show in the padding) */ font-size: 13px; line-height: 20px; color: var(--text-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* (Compact, when one has no picture: no cover; a 40 tile, 16 in at the top.) */
+.featured-row.compact .feature-words { padding-top: 16px; }
 .feature-link::after { content: ""; position: absolute; inset: 0; border-radius: 12px; }
 .feature-link:focus-visible { outline: 0; }
 .feature-link:focus-visible::after { outline: 2px solid var(--ring); outline-offset: -2px; }
@@ -1152,6 +1154,13 @@ dialog.sheet:target { display: block; }
 .weigh-row .moved .plus { color: var(--diff-added); }
 .weigh-row .moved .minus { color: var(--text-3); }
 .weigh-row .moved .tilde { color: var(--warn-ink); }
+/* (What it binds, whole: Before and After, each a label 12 / 16 over its
+   lines in mono, the two side by side, 16 apart; one over the other on a phone.) */
+.weigh-row .before-after { grid-column: 2; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 4px; }
+.weigh-row .before-after dt { font-size: 12px; line-height: 16px; color: var(--text-3); }
+.weigh-row .before-after dd { display: grid; gap: 2px; margin-top: 2px; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
+.weigh-row .before-after div + div dd { color: var(--text); }
+@media (max-width: 899px) { .weigh-row .before-after { grid-template-columns: minmax(0, 1fr); gap: 8px; } }
 .weigh-row.same { padding-block: 8px; }
 .weigh-row.same .title { font-weight: 400; color: var(--text-2); }
 .weigh-row.same.risky .title { color: var(--bad-ink); }

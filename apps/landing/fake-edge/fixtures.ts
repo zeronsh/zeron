@@ -92,7 +92,7 @@ interface Spec {
   featured?: boolean;
   age: number;
   /** Older versions first; the last is the newest. Default: one approved 1.0.0. */
-  history?: { version: string; status: Status; ago: number; notes?: string; review?: FakeVersion["review"]; engines?: string; permissions?: string[]; commands?: string[]; network?: string[] }[];
+  history?: { version: string; status: Status; ago: number; notes?: string; review?: FakeVersion["review"]; engines?: string; permissions?: string[]; commands?: string[]; network?: string[]; mcp?: { command: string; args?: string[]; env?: Record<string, string> }; service?: string; settings?: Record<string, unknown>[] }[];
   readme?: string;
   screenshots?: number;
   /** More files in every version's package. */
@@ -170,6 +170,9 @@ function build(spec: Spec): FakePlugin {
       ...((h.commands ?? spec.commands) ? { commands: h.commands ?? spec.commands } : {}),
       ...((h.network ?? spec.network) ? { network: { hosts: h.network ?? spec.network } } : {}),
       ...(spec.tools ? { tools: spec.tools.map((t) => ({ ...t, input: { type: "object" } })) } : {}),
+      ...(h.mcp ? { mcp: h.mcp } : {}),
+      ...(h.service ? { service: h.service } : {}),
+      ...(h.settings ? { settings: h.settings } : {}),
       ...(spec.homepage ? { homepage: spec.homepage } : {}),
       ...(spec.repository ? { repository: spec.repository } : {}),
       ...(spec.license ? { license: spec.license } : {}),
@@ -388,13 +391,14 @@ const SPECS: Spec[] = [
     age: 12,
     // A version in every state, a reviewer's reason as long as they write them.
     history: [
-      { version: "1.0.0", status: "approved", ago: 12 },
+      { version: "1.0.0", status: "approved", ago: 12, mcp: { command: "node", args: ["server.js"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com" } }, service: "service.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }] },
       { version: "1.1.0", status: "yanked", ago: 10, notes: "Moved the panel; stopped offering it after the sidebar changed under it." },
       { version: "1.2.0", status: "removed", ago: 8, review: { state: "removed", reason: "unsafe", message: "Taken down: it sent the open chat's text to a host its README doesn't name. Anyone who has it has had it turned off.", decided_at: NOW - 7 * DAY } },
       { version: "1.3.0", status: "withdrawn", ago: 6 },
       { version: "1.4.0", status: "rejected", ago: 4, review: { state: "rejected", reason: "asks_too_much", message: "It asks to run python3, git and jq and to reach any site at all, but nothing in the README or the listing says what it runs them for or what it sends where. Name the hosts it needs and drop the wildcard, say in the README what each program is run for, and send it again: a reviewer will look at the new version the same day. Until then it can't be listed, and nobody else can install it.", decided_at: NOW - 3 * DAY } },
-      // (The worst to weigh: two new asks, a program more, hosts named in place of the wildcard.)
-      { version: "1.5.0", status: "pending", ago: 1, notes: "Names the hosts it reaches; says what it runs and why.", permissions: ["ui.add", "network", "commands", "tools", "messages.send", "notifications"], commands: ["python3", "git", "jq", "bash"], network: ["api.averyveryverylongsubdomainname.example.com", "localhost:8080", "uploads.averyveryverylongsubdomainname.example.com"] },
+      // (The worst to weigh: two new asks, a program more, hosts named in place
+      // of the wildcard, its MCP server and service changed, a setting that grants.)
+      { version: "1.5.0", status: "pending", ago: 1, notes: "Names the hosts it reaches; says what it runs and why.", permissions: ["ui.add", "network", "commands", "tools", "messages.send", "notifications"], commands: ["python3", "git", "jq", "bash"], network: ["api.averyveryverylongsubdomainname.example.com", "localhost:8080", "uploads.averyveryverylongsubdomainname.example.com"], mcp: { command: "node", args: ["server.js", "--listen", "0.0.0.0:7777"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com", UPLOAD_TOKEN: "set-on-first-run" } }, service: "services/sync.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }, { key: "share", kind: "permission", label: "Share notes with agents" }] },
     ],
   },
   {

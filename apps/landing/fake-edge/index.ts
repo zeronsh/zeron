@@ -25,6 +25,8 @@ const state = {
   queueAs: null as null | "empty" | number,
   /** The store as if it were down (POST /_fake/down?on=1): every /store/v1 read and write a 503. */
   down: false,
+  /** A plugin shown with no pictures (POST /_fake/bare?id=…, empty for none): Featured with one that has none. */
+  bare: null as string | null,
 };
 
 // Programs the host rates (crates/plugin-guard/src/commands.rs), enough for the fixtures.
@@ -146,7 +148,7 @@ function detail(p: FakePlugin) {
   return {
     ...card(p, v),
     readme: v.files["README.md"] ?? "",
-    screenshots: (m.screenshots as string[]) ?? [],
+    screenshots: state.bare === p.id ? [] : ((m.screenshots as string[]) ?? []),
     permissions: permissions(m),
     engines: v.engines,
     homepage: (m.homepage as string) ?? null,
@@ -345,7 +347,8 @@ function queue(url: URL): Response {
         const now = permissions(v.manifest);
         const was = base ? permissions(base.manifest) : null;
         const sorted = (list: string[]) => [...list].sort();
-        const asksChanged = was !== null && (!same(sorted(now.commands), sorted(was.commands)) || !same(sorted(now.network_hosts), sorted(was.network_hosts)) || !same(now.tools, was.tools) || !same(now.ui ?? null, was.ui ?? null));
+        const bound = base ? binds(base.manifest, v.manifest) : null;
+        const asksChanged = was !== null && (!same(sorted(now.commands), sorted(was.commands)) || !same(sorted(now.network_hosts), sorted(was.network_hosts)) || !same(now.tools, was.tools) || !same(now.ui ?? null, was.ui ?? null) || bound!.mcp_changed !== null || bound!.service_changed !== null || bound!.settings_changed);
         return {
           plugin: { id: p.id, name: String(v.manifest.name) },
           version: v.version,
@@ -366,6 +369,27 @@ function queue(url: URL): Response {
   // Oldest waiting first.
   items.sort((a, b) => a.submitted_at - b.submitted_at);
   return json(paged(items, url, "items"));
+}
+
+/**
+ * Amendment 41, as the edge has it (capability.rs Diff): the MCP server and
+ * the service, before and after when they differ, and whether a setting
+ * that grants (a permission or a folder) is new or different.
+ */
+function binds(was: Record<string, unknown> | null, now: Record<string, unknown>) {
+  const mcp = (m: Record<string, unknown> | null) => {
+    const spec = m?.mcp as { command?: string; args?: string[]; env?: Record<string, string> } | undefined;
+    return spec?.command ? { command: spec.command, args: spec.args ?? [], env: Object.fromEntries(Object.entries(spec.env ?? {}).sort(([a], [b]) => (a < b ? -1 : 1))) } : null;
+  };
+  const service = (m: Record<string, unknown> | null) => (typeof m?.service === "string" ? m.service : null);
+  const granting = (m: Record<string, unknown> | null) => ((m?.settings as { kind?: string }[] | undefined) ?? []).filter((x) => x.kind === "permission" || x.kind === "folder").map((x) => JSON.stringify(x));
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const before = granting(was);
+  return {
+    mcp_changed: same(mcp(was), mcp(now)) ? null : { before: mcp(was), after: mcp(now) },
+    service_changed: same(service(was), service(now)) ? null : { before: service(was), after: service(now) },
+    settings_changed: granting(now).some((x) => !before.includes(x)),
+  };
 }
 
 /** Submissions that fill a long queue for its picture: made up, each a plausible one (none opens). */
@@ -438,6 +462,7 @@ function submission(id: string, version: string): Response {
         }),
         ui_change_added: added(ui(permissionsNow).change, ui(was).change),
         ui_replace_added: added(ui(permissionsNow).replace, ui(was).replace),
+        ...binds(base?.manifest ?? null, v.manifest),
       };
     })(),
     checks: v.checks,
@@ -621,6 +646,10 @@ async function route(request: Request): Promise<Response> {
     const as = url.searchParams.get("as");
     state.queueAs = as === "empty" ? "empty" : as && /^\d{1,3}$/.test(as) ? Number(as) : null;
     return json({ queue: state.queueAs });
+  }
+  if (parts[0] === "_fake" && parts[1] === "bare" && method === "POST") {
+    state.bare = url.searchParams.get("id") || null;
+    return json({ bare: state.bare });
   }
   if (parts[0] === "_fake" && parts[1] === "down" && method === "POST") {
     state.down = url.searchParams.get("on") === "1";

@@ -20,6 +20,8 @@ export interface Site {
   signIn(user: string): Promise<string>;
   /** Shape the fake's queue (its /_fake/queue): empty, this long, or as it is (null). The fake's only. */
   queueAs(as: "empty" | number | null): Promise<void>;
+  /** Flip one of the fake's own switches (POST /_fake/<what>?<params>). The fake's only. */
+  fake(what: string, params?: Record<string, string>): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -72,6 +74,11 @@ export async function startSite(options: { edge?: "fake" | "missing" | "broken" 
       const cookie = response.headers.get("set-cookie");
       if (!cookie) throw new Error(`no session for ${user}: ${response.status}`);
       return cookie.split(";")[0]!;
+    },
+    async fake(what, params = {}) {
+      if (edgeKind !== "fake") throw new Error("only the fake edge has switches");
+      const worker = await mf.getWorker("comet-native-edge");
+      await worker.fetch(`https://edge.invalid/_fake/${what}?${new URLSearchParams(params)}`, { method: "POST" });
     },
     async queueAs(as) {
       if (edgeKind !== "fake") throw new Error("only the fake edge has a queue to shape");

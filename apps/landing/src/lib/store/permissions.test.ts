@@ -108,11 +108,13 @@ describe("places", () => {
   });
 });
 
+const NONE_BOUND = { mcp_changed: null, service_changed: null, settings_changed: false };
+
 describe("against the last approved version", () => {
   const now = p({ asks: ["commands", "ui.add", "network", "sessions.read"], commands: ["gh", "bash"], commands_anything: ["gh", "bash"], commands_full_control: ["bash"], network_hosts: ["a.example", "b.example"] });
 
   test("new asks and asks changed inside first, risky last within each; then the rest as before", () => {
-    const { lines: out, dropped } = compared(now, { added: ["ui.add"], removed: ["clipboard"], added_commands: ["bash"], network_added: ["b.example"], network_removed: ["c.example"] });
+    const { lines: out, dropped } = compared(now, { ...NONE_BOUND, added: ["ui.add"], removed: ["clipboard"], added_commands: ["bash"], network_added: ["b.example"], network_removed: ["c.example"] });
     expect(out.map((l) => [l.name, l.change])).toEqual([["ui.add", "new"], ["network", "changed"], ["commands", "changed"], ["sessions.read", null]]);
     expect(out[1]).toMatchObject({ added: ["b.example"], removed: ["c.example"] });
     expect(out[2]).toMatchObject({ added: ["bash"], risky: true });
@@ -121,8 +123,27 @@ describe("against the last approved version", () => {
   });
 
   test("a tool that now tells agents something else is changed in place", () => {
-    const { lines: out } = compared(p({ asks: ["tools"], tools: [{ name: "search" }] }), { tools_changed: [{ name: "search", description_before: "a", description_after: "b" }] });
+    const { lines: out } = compared(p({ asks: ["tools"], tools: [{ name: "search" }] }), { ...NONE_BOUND, tools_changed: [{ name: "search", description_before: "a", description_after: "b" }] });
     expect(out[0]).toMatchObject({ change: "changed", altered: ["search"] });
+  });
+
+  test("its MCP server, service and a granting setting, changed: after the asks that moved, risky, before and after whole", () => {
+    const { lines: out } = compared(p({ asks: ["ui.add"] }), {
+      ...NONE_BOUND,
+      added: ["ui.add"],
+      mcp_changed: { before: { command: "node", args: ["a.js"], env: { B: "2", A: "1" } }, after: null },
+      service_changed: { before: null, after: "service.luau" },
+      settings_changed: true,
+    });
+    expect(out.map((l) => [l.title, l.change, l.risky])).toEqual([
+      ["Add things to Zeron's interface", "new", false],
+      ["Its MCP server changed", "changed", true],
+      ["Its service changed", "changed", true],
+      ["A setting that grants access changed", "changed", true],
+    ]);
+    expect(out[1]).toMatchObject({ was: ["node a.js", "B=2", "A=1"], now: ["none"] });
+    expect(out[2]).toMatchObject({ was: ["none"], now: ["service.luau"] });
+    expect(out[3]).not.toHaveProperty("was");
   });
 
   test("a first version: nothing to weigh it against, nothing marked", () => {

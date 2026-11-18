@@ -424,8 +424,8 @@ describe("who is signed in, for a public page's list (account/me.json)", () => {
   test("always 200, never kept; signed out, a member, staff", async () => {
     const answers: [string | undefined, Record<string, unknown>][] = [
       [undefined, { signed_in: false }],
-      [await site.signIn("user_ada"), { signed_in: true, name: "@ada", staff: false }],
-      [await site.signIn("user_grace"), { signed_in: true, name: "@grace", staff: true }],
+      [await site.signIn("user_ada"), { signed_in: true, name: "@ada", staff: false, csrf: expect.any(String) }],
+      [await site.signIn("user_grace"), { signed_in: true, name: "@grace", staff: true, csrf: expect.any(String) }],
     ];
     for (const [cookie, expected] of answers) {
       const response = await site.fetch("/account/me.json", cookie ? { headers: { cookie } } : {});
@@ -587,7 +587,7 @@ describe("forms", () => {
     expect(body).toMatch(/<details class="gone"><summary>Revoked keys · 3/);
     for (const m of body.matchAll(/<span class="line key" title="([^"]+)">([^<]+)<\/span>/g)) expect(m[2]).toBe(`${m[1]!.slice(0, 6)}…${m[1]!.slice(-4)}`);
     // Ending within 14 days: the warning's ink and its days in words (three of them), never colour alone.
-    const soon = [...body.matchAll(/<span class="line soon" title="Ends in (\d+) days?">.*?<span class="sr-only">, ends in \1 days?<\/span>/g)];
+    const soon = [...body.matchAll(/<span class="line soon" title="Ends in (\d+) days?">.*?<span class="sr-only">, Ends in \1 days?<\/span>/g)];
     expect(soon).toHaveLength(3);
     // Its parts are tabs that are addresses; New key… opens a sheet that is one too.
     expect(body).toMatch(/<a href="#versions" aria-current="page">Versions <span class="count">6<\/span><\/a><a href="#keys">Deploy keys <span class="count">7<\/span><\/a>/);
@@ -775,6 +775,28 @@ describe("forms", () => {
   });
 });
 
+describe("Discover", () => {
+  test("Featured draws covers only when every featured plugin has a picture; one without, and the row is compact, one height", async () => {
+    const withCovers = (await html("/plugins")).body;
+    expect(withCovers).toContain('<ul class="featured-row" role="list">');
+    expect(withCovers.match(/<img class="feature-picture"/g)).toHaveLength(3);
+    try {
+      await site.fake("bare", { id: "pr-radar" });
+      // (A minute's cache: another address of the same page, a fresh one.)
+      const { body } = await html("/plugins", await site.signIn("user_kai"));
+      expect(body).toContain('<ul class="featured-row compact" role="list">');
+      expect(body).not.toContain("feature-picture");
+    } finally {
+      await site.fake("bare");
+    }
+  });
+
+  test("its lists say See all the one way", async () => {
+    const { body } = await html("/plugins");
+    expect(body.match(/>See all<span class="glyph/g)).toHaveLength(2);
+  });
+});
+
 describe("the staff's side: the queue, a submission, the decision", () => {
   /** The rows of a table, each its cells' text. */
   const rowsOf = (body: string, table: string) => {
@@ -822,7 +844,7 @@ describe("the staff's side: the queue, a submission, the decision", () => {
 
   test("a submission: what it asks for against the last approved version, what moved first, the risky in the danger's ink", async () => {
     const { body } = await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", await site.signIn("user_grace"));
-    expect(body).toContain("Against 1.0.0, the last approved version: 2 new asks, 2 asks changed inside.");
+    expect(body).toContain("Against 1.0.0, the last approved version: 2 new asks, 2 asks changed inside, its MCP server, its service and a setting that grants changed.");
     const rows = body.slice(body.indexOf('class="weigh"'), body.indexOf('id="checks"')).split('class="weigh-row').slice(1);
     const titles = rows.map((r) => r.match(/<p class="title">([^<]+)/)![1]!.trim());
     expect(titles.slice(0, 4)).toEqual(["Send you notifications", "Connect to these places", "Run python3, git, jq, bash on your computer as you", "Send messages to your agents as you"]);
@@ -831,8 +853,14 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     expect(rows[2]).toContain('<span class="badge sm info">Changed</span>');
     expect(rows[2]).toMatch(/<span class="plus" aria-hidden="true">\+<\/span><span>bash/);
     expect(rows[1]).toMatch(/<span class="minus" aria-hidden="true">−<\/span><span class="t-3">\*/);
+    // Then what it binds past its asks (amendment 41), risky, its MCP server and service whole, before and after.
+    expect(titles.slice(4, 7)).toEqual(["Its MCP server changed", "Its service changed", "A setting that grants access changed"]);
+    expect(rows.slice(4, 7).every((r) => r.startsWith(" risky"))).toBe(true);
+    expect(rows[4]).toMatch(/<dt>Before<\/dt><dd><span>node server\.js<\/span><span>API_URL=https:\/\/api\.[^<]+<\/span><\/dd>/);
+    expect(rows[4]).toContain("<span>node server.js --listen 0.0.0.0:7777</span>");
+    expect(rows[5]).toContain("<dd><span>services/sync.luau</span></dd>");
     // Then what is as before, quieter.
-    expect(rows.slice(4).every((r) => r.startsWith(" same"))).toBe(true);
+    expect(rows.slice(7).every((r) => r.startsWith(" same"))).toBe(true);
   });
 
   test("the decision: Approve, the one primary, asks once with what there is to weigh; Don't approve asks for a reason and words, showing the author's view; an approved version's is Take down", async () => {
@@ -843,7 +871,7 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     expect(rail).toContain('<a class="btn primary" href="/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0/approve" data-dialog="approve">Approve…</a>');
     const ask = pending.slice(pending.indexOf('<dialog class="dialog sm" id="approve"'), pending.indexOf("</dialog>", pending.indexOf('id="approve"')));
     expect(ask).toContain("Anyone can install it once approved.");
-    expect(ask).toContain('<p class="weigh-line bad">2 new asks · 2 asks changed · 1 check to look at</p>');
+    expect(ask).toContain('<p class="weigh-line bad">2 new asks · 2 asks changed · Its MCP server, its service and a setting that grants changed · 1 check to look at</p>');
     // (Approve has the focus: a clean update is a click, then Enter.)
     expect(ask).toContain('<button class="btn primary" type="submit" autofocus>Approve</button>');
     expect(rail).toContain("<dt>This author</dt><dd>");

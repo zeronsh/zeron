@@ -22,7 +22,7 @@ import { age, bytes, count, dateTime, day, unbidi, waitedFor } from "../../../..
 import { privatePage } from "../../../../lib/store/http.ts";
 import { renderMarkdown } from "../../../../lib/store/markdown.ts";
 import { isPluginId, isVersion } from "../../../../lib/store/names.ts";
-import { compared } from "../../../../lib/store/permissions.ts";
+import { compared, together } from "../../../../lib/store/permissions.ts";
 import { changedFiles, countRows, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, pictureType, readText, type DiffRow } from "../../../../lib/store/review.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
 import { toneClass, versionState } from "../../../../lib/store/states.ts";
@@ -234,7 +234,7 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
                 <div class="section-head">
                   <div class="words">
                     <h2 id="asks-heading">What it asks for</h2>
-                    <p>{s.base ? (moved.length || weighed.dropped.length ? `Against ${s.base.version}, the last approved version: ${[moved.filter((l) => l.change === "new").length && `${plural(moved.filter((l) => l.change === "new").length, "new ask")}`, moved.filter((l) => l.change === "changed").length && `${plural(moved.filter((l) => l.change === "changed").length, "ask")} changed inside`, weighed.dropped.length && `${plural(weighed.dropped.length, "ask")} dropped`].filter(Boolean).join(", ")}.` : `Nothing new since ${s.base.version}, the last approved version.`) : "Its first version: everything it asks for is new."}</p>
+                    <p>{s.base ? (moved.length || weighed.dropped.length ? `Against ${s.base.version}, the last approved version: ${[moved.filter((l) => l.change === "new").length && `${plural(moved.filter((l) => l.change === "new").length, "new ask")}`, moved.filter((l) => l.change === "changed" && !l.bound).length && `${plural(moved.filter((l) => l.change === "changed" && !l.bound).length, "ask")} changed inside`, weighed.dropped.length && `${plural(weighed.dropped.length, "ask")} dropped`, moved.some((l) => l.bound) && `${together(moved.filter((l) => l.bound).map((l) => l.bound!))} changed`].filter(Boolean).join(", ")}.` : `Nothing new since ${s.base.version}, the last approved version.`) : "Its first version: everything it asks for is new."}</p>
                   </div>
                 </div>
                 <div class="panel">
@@ -252,7 +252,12 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
                             {l.risky && <span class="sr-only"> (gives it a lot of reach)</span>}
                           </p>
                           {l.detail && <p class="detail">{l.detail}</p>}
-                          {l.change === "changed" ? (
+                          {l.was || l.now ? (
+                            <dl class="before-after">
+                              <div><dt>Before</dt><dd>{l.was?.map((x) => <span>{x}</span>)}</dd></div>
+                              <div><dt>After</dt><dd>{l.now?.map((x) => <span>{x}</span>)}</dd></div>
+                            </dl>
+                          ) : l.change === "changed" && (l.added || l.altered || l.removed) ? (
                             <ul class="moved" role="list">
                               {l.added?.map((x) => <li><span class="plus" aria-hidden="true">+</span><span>{x}<span class="sr-only"> (new)</span></span></li>)}
                               {l.altered?.map((x) => <li><span class="tilde" aria-hidden="true">~</span><span>{x}<span class="t-3"> tells agents something else</span></span></li>)}

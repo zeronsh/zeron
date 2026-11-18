@@ -79,6 +79,7 @@ interface Me {
   signed_in: boolean;
   name?: string;
   staff?: boolean;
+  csrf?: string;
 }
 
 const account = document.querySelector<HTMLAnchorElement>("[data-account].is-pending");
@@ -92,6 +93,13 @@ if (account) {
       name.textContent = me.name;
       face.textContent = me.name.replace(/^@/, "").charAt(0).toUpperCase();
       account.href = "/account";
+      // (The chip is the same on every page: its Sign out too.)
+      const signOut = document.querySelector<HTMLFormElement>("form[data-signout]");
+      const token = signOut?.querySelector<HTMLInputElement>("input[name=csrf]");
+      if (signOut && token && me.csrf) {
+        token.value = me.csrf;
+        signOut.hidden = false;
+      }
       if (me.staff) document.querySelector<HTMLElement>("[data-staff]")?.removeAttribute("hidden");
     })
     .catch(() => undefined)

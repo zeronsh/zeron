@@ -47,6 +47,10 @@ if (featured.ok) {
   }
 }
 
+// Covers only when every featured plugin has a picture: one without, and
+// the whole row is drawn compact (tile, name, who, two lines), one height;
+// never a placeholder band, never cards of two heights.
+const covers = featuredItems.length > 0 && featuredItems.every((f) => f.picture);
 const ok = newest.ok && popular.ok;
 if (ok) publicPage(Astro, [CATALOG_TAG]);
 else Astro.response.status = 503;
@@ -81,12 +85,12 @@ const installs: Measure = { head: "Installs", cell: (p) => count(p.installs), fo
         {featuredItems.length > 0 && (
           <section class="section" aria-labelledby="featured-heading">
             <div class="section-head"><div class="words"><h2 id="featured-heading">{store("plugins.store.featured")}</h2><p>Chosen by the store's reviewers.</p></div></div>
-            <ul class="featured-row" role="list">
+            <ul class:list={["featured-row", { compact: !covers }]} role="list">
               {featuredItems.map(({ plugin, picture }) => (
                 <li class="panel feature">
-                  {picture ? <img class="feature-picture" src={picture} alt="" width="1280" height="800" loading="lazy" decoding="async" /> : <span class="feature-picture none" aria-hidden="true" />}
+                  {covers && <img class="feature-picture" src={picture!} alt="" width="1280" height="800" loading="lazy" decoding="async" />}
                   <div class="feature-words">
-                    <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={32} class="plugin-tile" />
+                    <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={covers ? 32 : 40} class="plugin-tile" />
                     <div class="cell-words">
                       <a class="name feature-link" href={pluginUrl(plugin.id)}>{plugin.name}</a>
                       <span class="by">{plugin.author.username ? `@${plugin.author.username}` : "Unnamed author"} · {count(plugin.installs)} {plugin.installs === 1 ? "install" : "installs"}</span>
@@ -110,7 +114,7 @@ const installs: Measure = { head: "Installs", cell: (p) => count(p.installs), fo
         <section class="section" aria-labelledby="popular-heading">
           <div class="section-head">
             <div class="words"><h2 id="popular-heading">{store("plugins.store.sort.popular")}</h2></div>
-            <a class="btn ghost sm" href="/plugins/all">See all {count(popular.data.total)}<Glyph name="alt-arrow-right" size={12} /></a>
+            <a class="btn ghost sm" href="/plugins/all">See all<Glyph name="alt-arrow-right" size={12} /></a>
           </div>
           <div class="panel"><PluginRows items={popular.data.items.slice(0, SHORT)} caption={store("plugins.store.sort.popular")} measure={installs} names={names} /></div>
         </section>

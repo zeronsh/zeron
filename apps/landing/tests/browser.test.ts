@@ -209,6 +209,30 @@ describe("an author's words stay in their place", () => {
   });
 });
 
+describe("the account chip is the same on every page", () => {
+  test("signed in, a public page's chip has its name and Sign out, with the session's token", async () => {
+    const { page, context } = await open("/plugins", { as: "user_ada" });
+    try {
+      await expect.poll(() => page.locator(".sidebar-foot .account .name").textContent()).toBe("@ada");
+      const signOut = page.locator("form[data-signout]");
+      expect(await signOut.isVisible()).toBe(true);
+      expect(await signOut.locator("input[name=csrf]").inputValue()).not.toBe("");
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("signed out, it says Sign in, and no Sign out", async () => {
+    const { page, context } = await open("/plugins");
+    try {
+      await expect.poll(() => page.locator(".sidebar-foot .account").evaluate((a) => a.classList.contains("is-pending"))).toBe(false);
+      expect(await page.locator("form[data-signout]").isVisible()).toBe(false);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 describe("by keyboard", () => {
   test("a destructive action asks in a dialog that starts on Cancel and closes on Escape, back where it was", async () => {
     const { page, context } = await open("/account/plugins/session-badges", { as: "user_ada" });

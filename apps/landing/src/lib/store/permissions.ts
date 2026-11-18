@@ -7,7 +7,7 @@
 // from anywhere, so it says "your computer".
 
 import type icons from "../../data/icons.json";
-import type { Permissions, PermissionsDiff } from "./types.ts";
+import type { McpRecord, Permissions, PermissionsDiff } from "./types.ts";
 
 export type IconName = keyof typeof icons;
 
@@ -437,13 +437,37 @@ export interface Compared extends Line {
   altered?: string[];
   /** …and what it no longer names. */
   removed?: string[];
+  /** What it binds that isn't an ask (amendment 41: its MCP server, its service), whole, before and after, in mono. */
+  was?: string[];
+  now?: string[];
+  /** Not an ask but what it binds (amendment 41), said by name: "its MCP server", "its service", "a setting that grants". */
+  bound?: string;
+}
+
+/** An MCP server, as lines to read: the command with its arguments, then each env NAME=value; "none" for none. */
+const mcpLines = (m: McpRecord | null): string[] => (m ? [[m.command, ...m.args].join(" "), ...Object.entries(m.env).map(([k, v]) => `${k}=${v}`)] : ["none"]);
+
+/**
+ * What a version binds past its asks that changed (amendment 41, the
+ * engine's capability record): its MCP server and its service, before and
+ * after; a setting that grants, said plainly (the engine records no more).
+ * Each reaches far by nature: risky. In the reviewer's order of weight.
+ */
+function bound(diff: PermissionsDiff): Compared[] {
+  const out: Compared[] = [];
+  if (diff.mcp_changed) out.push({ ...line(true, "plug-circle", "Its MCP server changed"), name: "mcp", bound: "its MCP server", change: "changed", was: mcpLines(diff.mcp_changed.before), now: mcpLines(diff.mcp_changed.after) });
+  if (diff.service_changed) out.push({ ...line(true, "action-play", "Its service changed"), name: "service", bound: "its service", change: "changed", was: [diff.service_changed.before ?? "none"], now: [diff.service_changed.after ?? "none"] });
+  if (diff.settings_changed) out.push({ ...line(true, "tuning", "A setting that grants access changed"), name: "settings", bound: "a setting that grants", change: "changed" });
+  return out;
 }
 
 /**
  * What a version asks for, as a reviewer weighs it against the last
  * approved one (the edge's consentDiff): each ask marked new, changed
  * inside (what it now names, changed or dropped), or as before; those that
- * moved first, the risky ones last within each; and the asks it dropped.
+ * moved first, the risky ones last within each, then what it binds past
+ * its asks that changed (its MCP server, service, granting settings); and
+ * the asks it dropped.
  * Without a diff (a first version) nothing is marked: all of it is new.
  */
 export function compared(p: Permissions, diff: PermissionsDiff | null): { lines: Compared[]; dropped: Line[] } {
@@ -475,7 +499,11 @@ export function compared(p: Permissions, diff: PermissionsDiff | null): { lines:
   });
   const order = (list: Compared[]) => [...list.filter((l) => !l.risky), ...list.filter((l) => l.risky)];
   return {
-    lines: [...order(all.filter((l) => l.change)), ...order(all.filter((l) => !l.change))],
+    lines: [...order(all.filter((l) => l.change)), ...(diff ? bound(diff) : []), ...order(all.filter((l) => !l.change))],
     dropped: (diff?.removed ?? []).map((name) => permission({ asks: [] }, name)),
   };
 }
+
+/** Names said as one: "a", "a and b", "a, b and c". */
+export const together = (names: readonly string[]): string => (names.length < 2 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`);
+

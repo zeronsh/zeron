@@ -45,9 +45,10 @@ const gone = keys?.filter((k) => !working(k)) ?? [];
 const anyExpired = gone.some((k) => !k.revoked_at);
 /** Ending within 14 days: said in the warning's ink, and in words. */
 const soon = (k: DeployKey) => k.expires_at != null && k.expires_at - now < 14 * 86_400_000;
+/** When it ends, in the app's words: "Ends today", "Ends tomorrow", "Ends in 11 days". */
 const endsIn = (k: DeployKey) => {
   const days = Math.max(0, Math.ceil((k.expires_at! - now) / 86_400_000));
-  return days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`;
+  return days === 0 ? store("plugins.store.key.ends_today") : days === 1 ? store("plugins.store.key.ends_tomorrow") : store("plugins.store.key.ends_in", { n: days });
 };
 /** A key can be made once the plugin has a version (its first is sent from a computer). */
 const sent = plugin?.versions.some((v) => v.status === "approved" || v.status === "yanked" || v.status === "pending") ?? false;
@@ -177,12 +178,12 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                             <td><span class="line"><span class="key-name" title={k.name}>{k.name}</span></span></td>
                             <td><span class="line key" title={k.key}>{shortKey(k.key)}</span></td>
                             <td data-label="Made"><span class="line muted">{day(k.created_at)}</span></td>
-                            <td data-label="Last used"><span class="line muted">{k.last_used_at ? day(k.last_used_at) : store("plugins.store.key.expiry.never")}</span></td>
+                            <td data-label="Last used"><span class="line muted">{k.last_used_at ? day(k.last_used_at) : store("plugins.store.key.not_used")}</span></td>
                             <td data-label="Ends">
                               {soon(k) ? (
-                                <span class="line soon" title={`Ends ${endsIn(k)}`}>{day(k.expires_at!)}<span class="in-days" aria-hidden="true">{" · "}{endsIn(k)}</span><span class="sr-only">, ends {endsIn(k)}</span></span>
+                                <span class="line soon" title={endsIn(k)}>{day(k.expires_at!)}<span class="in-days" aria-hidden="true">{" · "}{endsIn(k)}</span><span class="sr-only">, {endsIn(k)}</span></span>
                               ) : (
-                                <span class="line muted">{k.expires_at ? day(k.expires_at) : store("plugins.store.key.expiry.never")}</span>
+                                <span class="line muted">{k.expires_at ? day(k.expires_at) : store("plugins.store.key.no_end")}</span>
                               )}
                             </td>
                             <td class="end"><span class="line end"><a class="btn ghost sm" href={`${here}/keys/${encodeURIComponent(k.key)}`} data-dialog={`revoke-${k.key}`}>{revokeAsk(k.name).confirm}</a></span></td>
@@ -206,7 +207,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                               <td><span class="line"><span class="key-name" title={k.name}>{k.name}</span></span></td>
                               <td><span class="line key" title={k.key}>{shortKey(k.key)}</span></td>
                               <td data-label="Made"><span class="line">{day(k.created_at)}</span></td>
-                              <td data-label="Last used"><span class="line">{k.last_used_at ? day(k.last_used_at) : store("plugins.store.key.expiry.never")}</span></td>
+                              <td data-label="Last used"><span class="line">{k.last_used_at ? day(k.last_used_at) : store("plugins.store.key.not_used")}</span></td>
                               <td data-label="Stopped"><span class="line">{day(k.revoked_at ?? k.expires_at!)}</span></td>
                               <td class="end"><span class="line end">{k.revoked_at ? "Revoked" : "Expired"}</span></td>
                             </tr>

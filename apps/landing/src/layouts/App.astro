@@ -106,10 +106,19 @@ const row = (item: NavItem) => ({ ...item, on: item.id === current });
                 </form>
               </div>
             ) : (
-              <a class:list={["account", { "is-pending": isPublic }]} href={signInUrl(here)} data-account>
-                <span class="avatar" aria-hidden="true"><Glyph name="user-rounded" size={14} /></span>
-                <span class="name">Sign in</span>
-              </a>
+              <div class="account-row">
+                <a class:list={["account", { "is-pending": isPublic }]} href={signInUrl(here)} data-account>
+                  <span class="avatar" aria-hidden="true"><Glyph name="user-rounded" size={14} /></span>
+                  <span class="name">Sign in</span>
+                </a>
+                {/* (Signed in, the chip is the chip: scripts/app.ts gives this its token and shows it.) */}
+                {isPublic && (
+                  <form method="post" action="/auth/web/logout" data-signout hidden>
+                    <input type="hidden" name="csrf" value="" />
+                    <button class="btn ghost xs" type="submit">Sign out</button>
+                  </form>
+                )}
+              </div>
             )
           }
           <p class="colophon"><a href="/">zeron.sh</a><span aria-hidden="true">·</span><a href="/privacy">Privacy</a><span aria-hidden="true">·</span><a href="/#downloads">Download</a></p>

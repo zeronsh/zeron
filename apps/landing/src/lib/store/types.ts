@@ -228,8 +228,8 @@ export type ReportReason = (typeof REPORT_REASONS)[number];
 export interface QueueItem {
   plugin: { id: string; name: string };
   version: string;
-  /** This version's icon, its path in the package, as a card's (amendment 40; optional until the edge's commit). */
-  icon?: string | null;
+  /** This version's icon, its path in the package, as a card's (amendment 40). */
+  icon: string | null;
   status: VersionStatus;
   prerelease: boolean;
   submitted_at: number;
@@ -240,10 +240,11 @@ export interface QueueItem {
   new_asks: string[];
   /**
    * Anything inside an ask it already had differs from the last approved
-   * version (a host, a program, a place), or a tool says or takes something
-   * else (amendment 40; optional until the edge's commit).
+   * version (a host, a program, a place), a tool says or takes something
+   * else, or its MCP server, service or a granting setting changed
+   * (amendments 40, 41); false for a first version.
    */
-  asks_changed?: boolean;
+  asks_changed: boolean;
   checks: { ok: number; warn: number; fail: number };
 }
 
@@ -287,6 +288,19 @@ export interface PermissionsDiff {
   tools_changed?: { name: string; description_before?: string; description_after?: string; input_changed?: boolean }[];
   ui_replace_added?: string[];
   ui_change_added?: string[];
+  /** The MCP server, before and after (each null when there was none), or null when unchanged (amendment 41; the engine's `digest_diff`). */
+  mcp_changed: { before: McpRecord | null; after: McpRecord | null } | null;
+  /** The service's path, before and after, or null when unchanged (amendment 41). */
+  service_changed: { before: string | null; after: string | null } | null;
+  /** A setting that grants (a permission or a folder) is new or different (amendment 41; the engine records no more). */
+  settings_changed: boolean;
+}
+
+/** An MCP server as the engine's capability record holds it: env's names sorted, its values as sent. */
+export interface McpRecord {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
 }
 
 export interface Submission {
