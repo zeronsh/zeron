@@ -71,6 +71,24 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     expect(pkgs.map((o) => o.key)).toEqual([`pkg/${id}/2.0.0/${row.results[0]!.package_sha256}.zeron-plugin`]);
   });
 
+  it("lets two publishes of the same bytes at once both succeed, and neither deletes what the other stored", async () => {
+    const a = await author();
+    const id = uniqueId();
+    const pkg = await makePackage({ id, version: "1.0.0", signer: a.signer });
+    const answers = await Promise.all([publish(a.userId, id, pkg), publish(a.userId, id, pkg), publish(a.userId, id, pkg)]);
+    expect(answers.map((r) => r.status)).toEqual([201, 201, 201]);
+    for (const r of answers) expect(await r.json()).toMatchObject({ id, version: "1.0.0", status: "pending" });
+    const rows = await env.STORE_DB.prepare("SELECT package_sha256 FROM versions WHERE plugin_id = ?").bind(id).all<{ package_sha256: string }>();
+    expect(rows.results).toHaveLength(1);
+    const sha = rows.results[0]!.package_sha256;
+    // Both content-addressed objects are there, and are these bytes.
+    const stored = await env.PLUGIN_STORE.get(`pkg/${id}/1.0.0/${sha}.zeron-plugin`);
+    expect(new Uint8Array(await stored!.arrayBuffer())).toEqual(pkg);
+    expect(await env.PLUGIN_STORE.head(`files/${id}/1.0.0/${sha}.bin`)).not.toBeNull();
+    // And the version reads back: its files are served from that object.
+    expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/files/1.0.0/init.luau`)).status).toBe(200);
+  });
+
   it("gives a new id to the first account and refuses it to anyone else", async () => {
     const a = await author();
     const b = await author();
