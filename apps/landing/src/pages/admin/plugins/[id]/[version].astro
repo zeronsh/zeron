@@ -24,7 +24,7 @@ import { privatePage } from "../../../../lib/store/http.ts";
 import { drawingChecks } from "../../../../lib/store/drawing.ts";
 import { drawn } from "../../../../lib/store/rendered.ts";
 import { HighlightBudget } from "../../../../lib/store/highlight.ts";
-import { isPluginId, isVersion } from "../../../../lib/store/names.ts";
+import { isPluginId, isVersion, versionParam } from "../../../../lib/store/names.ts";
 import { compared, together } from "../../../../lib/store/permissions.ts";
 import { changedFiles, countRows, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, pictureType, readText, type DiffRow } from "../../../../lib/store/review.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
@@ -34,7 +34,8 @@ import type { Check, PackageFile } from "../../../../lib/store/types.ts";
 
 export const prerender = false;
 
-const { id, version } = Astro.params;
+const { id } = Astro.params;
+const version = versionParam(Astro.params.version);
 if (!isPluginId(id) || !isVersion(version)) return new Response(null, { status: 404 });
 const session = await adminSession(Astro);
 if (!session) return new Response(null, { status: 404 });

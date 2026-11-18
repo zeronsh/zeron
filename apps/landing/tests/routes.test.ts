@@ -582,6 +582,48 @@ describe("the admin pages can't be told from pages that don't exist", () => {
     // (Its newest's page: the plain link.)
     expect((await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.5.0")).body).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install-link');
   });
+
+  test("a version's page says only what the store's record names: a crafted address puts no words in its mouth", async () => {
+    const crafted = "1.0.0-verified.by.zeron.call.us";
+    const path = `/plugins/focus-timer/versions/${crafted}`;
+    // (Its words: the page's text and title, not the addresses it links to, which are this one.)
+    const words = (body: string) => body.replace(/="[^"]*"/g, "");
+    try {
+      // (An edge that answers with another version's record: the version isn't in the store.)
+      await site.fake("loose", { on: "1" });
+      const other = await html(path);
+      expect(other.response.status).toBe(404);
+      expect(words(other.body)).not.toContain("call.us");
+      await site.fake("loose");
+      // (A store that doesn't answer: its page, naming no version.)
+      await site.fake("down", { on: "1" });
+      const down = await html(path);
+      expect(down.response.status).toBe(503);
+      expect(words(down.body)).not.toContain("call.us");
+    } finally {
+      await site.fake("loose");
+      await site.fake("down");
+    }
+    expect((await html(path)).response.status).toBe(404);
+  });
+
+  test("a version the link can't name is never named on its button: Open in Zeron, and the app chooses", async () => {
+    // (33 characters and a "+": the app's link carries 32 at most.)
+    const long = "1.0.0-rc.1+build.20261118.0123456";
+    try {
+      await site.fake("rename", { id: "worst-case-listing-at-every-limit-xyz12", from: "1.0.0", to: long });
+      const cookie = await site.signIn("user_kai");
+      const page = (await html("/plugins/worst-case-listing-at-every-limit-xyz12", cookie)).body;
+      expect(page).not.toContain(`Install ${long} instead`);
+      expect(page).not.toContain("?version=");
+      const older = (await html(`/plugins/worst-case-listing-at-every-limit-xyz12/versions/${encodeURIComponent(long)}`, cookie)).body;
+      expect(older).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install-link');
+      expect(older).toContain("Open in Zeron");
+      expect(older).not.toContain(`Install ${long} in Zeron`);
+    } finally {
+      await site.fake("rename", { id: "worst-case-listing-at-every-limit-xyz12", from: long, to: "1.0.0" });
+    }
+  });
 });
 
 describe("forms", () => {

@@ -7,12 +7,13 @@ import App from "../../../../../../layouts/App.astro";
 import { AUTHOR_ACTIONS, isAuthorAction } from "../../../../../../lib/store/actions.ts";
 import { done, flashFor, formOf, tokenMatches } from "../../../../../../lib/store/forms.ts";
 import { privatePage, purge } from "../../../../../../lib/store/http.ts";
-import { isPluginId, isVersion } from "../../../../../../lib/store/names.ts";
+import { isPluginId, isVersion, versionParam } from "../../../../../../lib/store/names.ts";
 import { requireSession } from "../../../../../../lib/store/session.ts";
 
 export const prerender = false;
 
-const { id, version, action } = Astro.params;
+const { id, action } = Astro.params;
+const version = versionParam(Astro.params.version);
 if (!isPluginId(id) || !isVersion(version) || !isAuthorAction(action)) return new Response(null, { status: 404 });
 const session = await requireSession(Astro);
 if (session instanceof Response) return session;

@@ -19,7 +19,7 @@ import { pluginTag, publicPage } from "../../lib/store/http.ts";
 import { drawn, keepable, type Drawn } from "../../lib/store/rendered.ts";
 import { stoppedWhy } from "../../lib/store/states.ts";
 import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
-import { appUrl, fileUrl, httpsUrl, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
+import { appUrl, fileUrl, httpsUrl, linkable, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
 import type { VersionInfo } from "../../lib/store/types.ts";
 
 export const prerender = false;
@@ -170,7 +170,8 @@ const structured = plugin
               {/* (The app's sentence, its verified version a link; then what that means, the web's.) */}
               <b>{plugin.verified_version ? <>{before}<a href={versionUrl(plugin.verified_version)}>{plugin.verified_version}</a>{after}</> : store("plugins.store.none_verified")}</b>{" "}
               It's listed as its author published it, and Zeron asks before it installs it.
-              {plugin.verified_version && <>{" "}<a href={appUrl(plugin.id, plugin.verified_version)}>{store("plugins.store.install_instead", { version: plugin.verified_version })}</a></>}
+              {/* (Named only when the link can name it: else Zeron's page chooses.) */}
+              {plugin.verified_version && linkable(plugin.verified_version) && <>{" "}<a href={appUrl(plugin.id, plugin.verified_version)}>{store("plugins.store.install_instead", { version: plugin.verified_version })}</a></>}
             </span>
           </p>
         )}

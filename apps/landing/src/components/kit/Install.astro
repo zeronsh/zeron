@@ -4,7 +4,7 @@
 // installs by itself). What else there is to say is said in words under it,
 // never as a second button: "Nothing happened?" opens how to get it, and
 // opens itself when the page sees the link went nowhere.
-import { appUrl } from "../../lib/store/urls.ts";
+import { appUrl, linkable } from "../../lib/store/urls.ts";
 import Glyph from "../ui/Glyph.astro";
 import Mark from "../ui/Mark.astro";
 
@@ -17,15 +17,17 @@ interface Props {
   version?: string;
 }
 const { id, name, off = false, version } = Astro.props;
-const label = version ? `Install ${version} in Zeron` : "Install in Zeron";
+// (A version the link can't name isn't named here either: Zeron's page chooses.)
+const named = version && linkable(version) ? version : undefined;
+const label = named ? `Install ${named} in Zeron` : version ? "Open in Zeron" : "Install in Zeron";
 ---
 
 <div class="install" data-install>
-  {off ? <span class="btn primary" aria-disabled="true"><Mark />{label}</span> : <a class="btn primary" href={appUrl(id, version)} data-install-link><Mark />{label}</a>}
+  {off ? <span class="btn primary" aria-disabled="true"><Mark />{label}</span> : <a class="btn primary" href={appUrl(id, named)} data-install-link><Mark />{label}</a>}
   <details class="install-help" data-install-help hidden={off}>
     <summary>Nothing happened?</summary>
     <div class="install-card" role="status" aria-live="polite">
-      <p>{label} opens Zeron on your computer at this plugin, ready to install{version ? ` ${version}` : ""}. If nothing opened:</p>
+      <p>{label} opens Zeron on your computer at this plugin, ready to install{named ? ` ${named}` : ""}. If nothing opened:</p>
       <ol>
         <li><a href="/#downloads">Download Zeron</a> for your computer, open it, and press {label} again.</li>
         <li>Or, in Zeron, open <b>Settings</b> <Glyph name="alt-arrow-right" size={12} /> <b>Plugins</b> <Glyph name="alt-arrow-right" size={12} /> <b>Browse</b> and search for <b>{name}</b>.</li>
