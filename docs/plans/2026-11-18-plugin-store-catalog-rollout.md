@@ -58,7 +58,11 @@ npx wrangler d1 migrations apply STORE_DB --remote
 ```
 Add `--env staging` for staging. The coordinator adds it at the final
 merge. It is idempotent: an applied migration is skipped, so it runs on
-every deploy. Then deploy the edge, then the site.
+every deploy.
+
+The order is migrations, then the edge, then the site. New code needs the
+tables. Old code still running during the deploy never reads them, so
+applying a migration first is always safe.
 
 Migrations are additive, never edited once applied. A new schema change is
 a new numbered file in `edge/migrations/store/`.
@@ -120,12 +124,72 @@ The audit log has `report.dismissed` or `report.actioned`.
 
 ### e. The hourly sweep
 
-After the next `:17`, watch `npx wrangler tail [--env staging]`: there is
-no `store: …` error. The sweep releases ids claimed and never used for 90
-days (a reservation is always kept), and deletes R2 objects that publishes
-recorded but no version names, an hour after.
+The cron at `:17` runs one sweep, in three parts:
+- it finishes what earlier releases still owe (R2 deletes, key
+  revocations);
+- it deletes R2 objects that publishes recorded but that no version names,
+  an hour after they were recorded;
+- it releases ids that were claimed and never used for 90 days. An id
+  reserved for an account is never released.
 
-### f. Clean up
+To see it ran, watch `npx wrangler tail [--env staging]` across a `:17`.
+Each run logs one line:
+
+```
+store: sweep: released 0 unused ids, deleted 0 orphaned objects, 0 owed left
+```
+
+`store: the sweep failed …` means it threw. The next hour retries,
+because all of its work is recorded in D1 first. Afterwards:
+
+```sh
+npx wrangler d1 execute STORE_DB --remote --command \
+  "SELECT (SELECT COUNT(*) FROM object_orphans WHERE at < (unixepoch() - 7200) * 1000) AS stale_orphans,
+          (SELECT COUNT(*) FROM object_purges) + (SELECT COUNT(*) FROM key_revocations) AS owed"
+#   both 0 once a sweep has run (or close to it, while one is still catching up)
+```
+
+A released id is in the audit log as `plugin.release`, with the versions
+it had.
+
+### f. Seed the reserved ids
+
+The tree already holds back some ids:
+- the built-in plugins' ids and the engine's reserved names
+  (`docs/plugin-store-data.json`, `builtin_ids` and `reserved_ids`);
+- the username rules' brand, staff and lookalike words
+  (`edge/src/username.ts`);
+- any id too close to one already taken.
+
+A reservation decides before the first two: one naming an account lets
+that account take even a held-back id.
+
+Reservations cover the rest: names held for a partner or for Zeron's own
+later plugins. For each one, an admin's web session (cookie and `csrf` from
+`SITE/auth/web/session`, as in the identity notes, step 3d) calls:
+
+```sh
+curl -s -X POST "EDGE/store/v1/admin/reservations" \
+  -H "cookie: __Host-zeron_session=$COOKIE" -H "origin: SITE" -H "x-csrf-token: $CSRF" \
+  -H "content-type: application/json" \
+  -d '{"id":"<plugin-id>","to_username":"<their username, or leave out to hold it for no one>","note":"<why>"}'
+#   {"id":"…","to":{"username":"…"}|null,"note":"…","released":false}
+```
+
+- A reserved id can be claimed only by the account it names. With no
+  account, no one can claim it.
+- An id someone claimed and never used is released for the reservation
+  (`"released": true`). An id in use is refused with `409`: move it with a
+  transfer instead.
+- `GET EDGE/store/v1/admin/reservations` lists them, and
+  `DELETE …/reservations/<id>` frees one.
+- Each change is in the audit log (`reservation.set`,
+  `reservation.release`).
+- The staff session rotates its cookie on first use. Take the new
+  `__Host-zeron_session` from each answer's `Set-Cookie`. The old one works
+  for a minute.
+
+### g. Clean up
 
 An admin can't delete a plugin. A test plugin on production can be
 suspended, or its versions removed. On staging, leave it.
@@ -162,8 +226,12 @@ suspended, or its versions removed. On staging, leave it.
 
 - Older edge code has no store routes: they answer 404. The app and site
   show the store as unreachable. Installed plugins are unaffected.
-- D1 and R2 are left as they are. Rolling forward again resumes where it
-  was, and an applied migration is never re-run.
+- D1 and R2 are left as they are: every table, row and object. Rolling
+  forward again resumes where it was.
+- **Migrations are never undone.** There are no down migrations, and none
+  is needed. Older code doesn't read the store's tables, and the next
+  deploy of this code finds them applied and skips them. Dropping them
+  would only lose the catalog.
 - A bad data change can be undone with D1 Time Travel:
   `npx wrangler d1 time-travel restore zeron-store --timestamp <before>`.
   It restores the whole database to that moment. R2 objects are never

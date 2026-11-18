@@ -1,5 +1,5 @@
 import { SELF, env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CLAIMS_PER_WEEK } from "../../src/store/publish";
 import { publisherId } from "../../src/store/cards";
 import { releaseRows } from "../../src/store/release";
@@ -479,8 +479,12 @@ describe("store ids: claiming and release (amendment 30)", () => {
     const later = Date.now() + 91 * 86_400_000;
     // Not yet: 90 days haven't passed.
     expect(await releaseUnusedIds(env as never, Date.now())).toBe(0);
+    const logged = vi.spyOn(console, "log");
     const released = await releaseUnusedIds(env as never, later);
     expect(released).toBeGreaterThanOrEqual(1);
+    // Each run says so, for an operator watching the logs.
+    expect(logged).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`^store: sweep: released ${released} unused ids, deleted \\d+ orphaned objects, 0 owed left$`)));
+    logged.mockRestore();
     expect(await env.STORE_DB.prepare("SELECT 1 FROM plugins WHERE id = ?").bind(quiet).first()).toBeNull();
     expect(await env.STORE_DB.prepare("SELECT 1 FROM versions WHERE plugin_id = ?").bind(quiet).first()).toBeNull();
     expect((await env.PLUGIN_STORE.list({ prefix: `pkg/${quiet}/` })).objects).toEqual([]);

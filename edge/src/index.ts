@@ -513,6 +513,6 @@ export default {
    * release of ids unused for 90 days (store/release.ts). */
   scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
     ctx.waitUntil(runCloudCron(env, controller.scheduledTime));
-    ctx.waitUntil(releaseUnusedIds(env, controller.scheduledTime));
+    ctx.waitUntil(releaseUnusedIds(env, controller.scheduledTime).catch((e) => console.error("store: the sweep failed", String(e))));
   }
 } satisfies ExportedHandler<Env>;

@@ -154,7 +154,7 @@ export const releaseUnusedIds = async (env: Env, now: number): Promise<number> =
   const bucket = env.PLUGIN_STORE;
   if (!db || !bucket) return 0;
   await finishReleases(env, db, bucket);
-  await collectOrphans(db, bucket, now);
+  const orphans = await collectOrphans(db, bucket, now);
   const before = now - UNUSED_ID_DAYS * DAY;
   const stale = await db
     .prepare(
@@ -169,6 +169,11 @@ export const releaseUnusedIds = async (env: Env, now: number): Promise<number> =
   let released = 0;
   for (const { id } of stale.results) if (await releaseRows(db, id, before, "system", true)) released++;
   if (released) await finishReleases(env, db, bucket);
+  // One line an hour, so an operator sees it ran (`wrangler tail`).
+  const owed = await db
+    .prepare("SELECT (SELECT COUNT(*) FROM object_purges) + (SELECT COUNT(*) FROM key_revocations) AS n")
+    .first<number>("n");
+  console.log(`store: sweep: released ${released} unused ids, deleted ${orphans} orphaned objects, ${owed ?? 0} owed left`);
   return released;
 };
 
