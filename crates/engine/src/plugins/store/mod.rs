@@ -23,12 +23,19 @@ use client::{PackageRecord, reason};
 pub use device::handles;
 pub(in crate::plugins) use device::StoreHandle;
 
+/// Whether `name` reads as a username: 1 to 40 letters, digits, `_` and `-`.
+pub fn username(name: &str) -> bool {
+    (1..=40).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// The package `raw`, verified and checked against the store's record of
 /// `id` at `version` (`record`), published by `publisher`: the package and
 /// the store's record to keep beside it.
 pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: Option<&str>) -> Result<(Package, StoreSource), String> {
     let mismatch = |what: &str| failure(reason::STORE_MISMATCH, format!("What the store sent isn't what its record says ({what}), so it wasn't installed"));
-    let publisher = publisher.map(str::trim).filter(|p| !p.is_empty()).ok_or_else(|| mismatch("who published it"))?;
+    // A username: what "by @…" shows and consent is bound to, so nothing a
+    // store could dress up (spaces, control or direction characters).
+    let publisher = publisher.map(str::trim).filter(|p| username(p)).ok_or_else(|| mismatch("who published it"))?;
     if record.sha256.is_empty() || record.hash.is_empty() {
         return Err(mismatch("its record is incomplete"));
     }
@@ -90,6 +97,8 @@ mod tests {
         // A record that names no publisher, or no hashes.
         assert_eq!(refused(raw.clone(), "focus", "1.2.0", &good, None), "store_mismatch");
         assert_eq!(refused(raw.clone(), "focus", "1.2.0", &good, Some(" ")), "store_mismatch");
+        assert_eq!(refused(raw.clone(), "focus", "1.2.0", &good, Some("ada\u{202e}evil")), "store_mismatch");
+        assert_eq!(refused(raw.clone(), "focus", "1.2.0", &good, Some("ada lovelace")), "store_mismatch");
         assert_eq!(refused(raw.clone(), "focus", "1.2.0", &PackageRecord { hash: String::new(), ..good.clone() }, Some("ada")), "store_mismatch");
         // A package whose content isn't the record's, though its file is (the
         // store's record names another build of the same version).

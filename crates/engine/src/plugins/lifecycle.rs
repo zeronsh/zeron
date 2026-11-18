@@ -286,7 +286,7 @@ impl Plugins {
                         &entry.item.author,
                         Author::Verified { username: Some(name), .. } if name.trim().eq_ignore_ascii_case(store.publisher.trim())
                     ),
-                    _ => self.same_account(key, &package.key).await,
+                    _ => self.same_account(key, &package.key, &id).await,
                 };
                 if takes_over {
                     rotated_from = Some(key.to_owned());
@@ -298,7 +298,7 @@ impl Plugins {
         let local = zeron_rpc::caller().is_local();
         let author = match source.store() {
             Some(store) => super::scan::store_author(store),
-            None => self.resolve_now(&package.key).await,
+            None => self.resolve_now(&package.key, Some(&id)).await,
         };
         let from_store = source.store().is_some();
         let version = package.manifest.version.clone();
@@ -463,7 +463,7 @@ impl Plugins {
                     &installed,
                     &fetched,
                     source,
-                    fetched.key != c.key && self.same_account(&c.key, &fetched.key).await,
+                    fetched.key != c.key && self.same_account(&c.key, &fetched.key, &c.id).await,
                 ) {
                     Some(found) => {
                         let keep = found.refused.is_none().then_some(&fetched);

@@ -59,8 +59,11 @@ pub fn code(word: &str) -> i32 {
     match word {
         "not_semver" | "version_exists" | "not_newer" | "missing_readme" | "missing_listing" | "bad_listing" | "bad_package" | "bad_manifest"
         | "too_large" | "too_big" | "id_reserved" | "changed" | "not_a_package" | "unsigned" | "tampered" | "bad_file" => RULES,
-        "store_unreachable" | "rate_limited" | "store_error" | "unavailable" => UNREACHABLE,
-        "no_manifest" | "invalid" | "not_a_secret" | "damaged" => SETUP,
+        // (A request already made, or changed on its way: sending it again
+        // is the fix.)
+        "store_unreachable" | "rate_limited" | "store_error" | "unavailable" | "body_mismatch" | "replayed_request" => UNREACHABLE,
+        // (The runner's clock is more than five minutes out.)
+        "no_manifest" | "invalid" | "not_a_secret" | "damaged" | "stale_request" => SETUP,
         _ => REFUSED,
     }
 }
@@ -83,8 +86,10 @@ fn deploy_key() -> anyhow::Result<Option<DeployKey>> {
 }
 
 /// Run `command` here when it needs no running Zeron: `check` always, and
-/// with `ZERON_DEPLOY_KEY` set, `publish`, `status`, `yank`, `unyank` and
-/// `withdraw`. `Ok(Some(command))` hands it back for the running Zeron.
+/// with `ZERON_DEPLOY_KEY` set, `publish` and `status`: all a deploy key may
+/// do (contract amendment 6), so a leaked one can add a pending version,
+/// which review stops, and nothing else. `Ok(Some(command))` hands it back
+/// for the running Zeron and its signed-in session.
 pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Result<Option<PluginCommand>> {
     if let PluginCommand::Check { target } = &command {
         let prepared = read(&folder(target, data_dir)?)?;
@@ -95,10 +100,7 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
         println!("{} {} meets the store's rules.", prepared.manifest.id, prepared.manifest.version);
         return Ok(None);
     }
-    let needs_store = matches!(
-        command,
-        PluginCommand::Publish { .. } | PluginCommand::Status { .. } | PluginCommand::Yank { .. } | PluginCommand::Unyank { .. } | PluginCommand::Withdraw { .. }
-    );
+    let needs_store = matches!(command, PluginCommand::Publish { .. } | PluginCommand::Status { .. });
     if !needs_store {
         return Ok(Some(command));
     }
@@ -123,18 +125,31 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
             submitted(&what, &reply);
         }
         PluginCommand::Status { id } => print_status(&store.my_plugins(&caller).await.map_err(|e| failed(&e))?, id.as_deref()),
-        PluginCommand::Yank { id, version } => version_action(&store, &caller, &id, &version, "yank").await?,
-        PluginCommand::Unyank { id, version } => version_action(&store, &caller, &id, &version, "unyank").await?,
-        PluginCommand::Withdraw { id, version } => version_action(&store, &caller, &id, &version, "withdraw").await?,
-        _ => unreachable!("only the store's commands get here"),
+        _ => unreachable!("only publish and status get here"),
     }
     Ok(None)
 }
 
-async fn version_action(store: &StoreClient, caller: &Caller, id: &str, version: &str, action: &str) -> anyhow::Result<()> {
-    let reply = store.version_action(id, version, action, caller).await.map_err(|e| failed(&e))?;
-    println!("{}", acted(id, version, action, &reply));
-    Ok(())
+/// Why `command` can't run without the running Zeron, when it can't: one
+/// line for a CI log.
+pub fn needs_zeron(command: &PluginCommand) -> String {
+    let what = match command {
+        PluginCommand::Yank { .. } => "yank",
+        PluginCommand::Unyank { .. } => "unyank",
+        PluginCommand::Withdraw { .. } => "withdraw",
+        PluginCommand::Key { .. } => "key",
+        _ => "publish",
+    };
+    if what != "publish" && std::env::var(deploy_key::ENV).is_ok_and(|s| !s.trim().is_empty()) {
+        format!(
+            "`zeron plugin {what}` needs Zeron running here and signed in: a deploy key only publishes and reads status ({} can't do this)",
+            deploy_key::ENV
+        )
+    } else if what == "publish" {
+        format!("Zeron isn't running here. From CI, set {} to a deploy key's secret (`zeron plugin key create`).", deploy_key::ENV)
+    } else {
+        format!("`zeron plugin {what}` needs Zeron running here and signed in. Open it, or start it with `zeron headless`.")
+    }
 }
 
 fn acted(id: &str, version: &str, action: &str, reply: &Value) -> String {

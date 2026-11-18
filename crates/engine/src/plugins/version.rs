@@ -390,6 +390,13 @@ fn expand(op: &str, v: Version) -> Vec<Comparator> {
     }
 }
 
+/// Whether `candidate` is a later version than `installed`, as the store
+/// says it: by precedence, build metadata ignored (a version that differs
+/// only in its build is the same version).
+pub fn newer(candidate: &Version, installed: &Version) -> bool {
+    candidate > installed
+}
+
 /// This Zeron's version, as `engines.zeron` is matched against.
 pub fn zeron() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 0, 0))

@@ -318,6 +318,16 @@ pub fn compatible(manifest: &Manifest) -> Result<(), String> {
     super::version::accepts(range.as_deref(), &super::version::zeron()).map_err(|e| failure(reason::INCOMPATIBLE, e))
 }
 
+/// Whether `candidate` is later than `installed` as the store says it: by
+/// precedence, build metadata ignored (`version::newer`), when both are
+/// strict versions (a store version always is); else as [`newer`] does.
+pub fn newer_by_precedence(candidate: &str, installed: &str) -> bool {
+    match (super::version::Version::parse(candidate), super::version::Version::parse(installed)) {
+        (Ok(a), Ok(b)) => super::version::newer(&a, &b),
+        _ => newer(candidate, installed),
+    }
+}
+
 pub fn not_newer(candidate: &str, installed: &str) -> String {
     failure(reason::NOT_NEWER, format!("Version {candidate} isn't later than the {installed} installed, so it won't replace it"))
 }
@@ -374,7 +384,9 @@ pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_f
         }
         // Signed downgrades (or a different build under the same version)
         // are refused: an old version's holes stay closed.
-        if replaced.hash != package.hash && !newer(&package.manifest.version, &replaced.version) {
+        // (From the store, by precedence: a build of the same version isn't later.)
+        let later = if source.store().is_some() { newer_by_precedence } else { newer };
+        if replaced.hash != package.hash && !later(&package.manifest.version, &replaced.version) {
             return Err(not_newer(&package.manifest.version, &replaced.version));
         }
         Some(replaced)

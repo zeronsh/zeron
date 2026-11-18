@@ -315,10 +315,10 @@ async fn r13_a_stale_lookup_is_unknown_before_a_grant() {
     let f = fixture();
     let fake = Arc::new(FakeDirectory::default());
     let ada = known(&f, &fake, Some("ada"), false);
-    let entry = keys::CachedKey::from_lookup(&shim::found(Some("ada"), false), "user-1", now_secs() - keys::CACHE_TTL_SECS - 10);
-    lock(&f.plugins.inner.cache).0.insert(ada.public(), entry);
+    let entry = keys::CachedKey::from_lookup(&shim::found(Some("ada"), false), "user-1", now_secs() - keys::CACHE_TTL_SECS - 10, None);
+    lock(&f.plugins.inner.cache).insert(&ada.public(), None, entry);
     fake.unreachable.store(true, Ordering::SeqCst);
-    assert_eq!(f.plugins.resolve_now(&ada.public()).await, Author::unknown(keys::COULD_NOT_CHECK));
+    assert_eq!(f.plugins.resolve_now(&ada.public(), None).await, Author::unknown(keys::COULD_NOT_CHECK));
     assert_eq!(f.plugins.author_of(&ada.public()), Author::unknown(keys::COULD_NOT_CHECK));
 }
 
@@ -472,7 +472,7 @@ async fn r13_a_key_revoked_elsewhere_stops_counting_within_the_ttl() {
     assert_eq!(allow(&f.plugins, "focus").await["status"], "on");
     // Revoked on the edge; this device looked it up over an hour ago.
     fake.keys.lock().unwrap().insert(ada.public(), Lookup::Unknown);
-    lock(&f.plugins.inner.cache).0.get_mut(&ada.public()).unwrap().checked_at -= keys::CACHE_TTL_SECS + 1;
+    lock(&f.plugins.inner.cache).0.get_mut(&keys::cache_key(&ada.public(), Some("focus"))).unwrap().checked_at -= keys::CACHE_TTL_SECS + 1;
     assert_eq!(item(&f.plugins, "focus").await["status"], "on", "still on while it's checked again");
     tokio::time::sleep(Duration::from_millis(100)).await;
     let now = item(&f.plugins, "focus").await;
@@ -571,7 +571,7 @@ async fn r13_this_devices_key_revoked_elsewhere_stops_being_yours() {
     assert_eq!(signing::load_key(&f.data).unwrap().public(), old.public());
 
     // Revoked from another device, which tells this one (`CheckPluginKey`).
-    fake.keys.lock().unwrap().insert(old.public(), Lookup::Found { username: Some("me".into()), mine: true, revoked: true, verified: Some(false) });
+    fake.keys.lock().unwrap().insert(old.public(), Lookup::Found { username: Some("me".into()), mine: true, revoked: true, verified: Some(false), deploy: None });
     *lock(&f.plugins.inner.own_key_checked) = None;
     call(&f.plugins, methods::CHECK_PLUGIN_KEY, serde_json::json!({})).await.unwrap();
     let new = tokio::time::timeout(Duration::from_secs(5), async {
@@ -641,4 +641,84 @@ async fn signed_out_no_rescan_every_half_minute() {
     assert!(settled >= 1, "the start's own scan");
     tokio::time::sleep(std::time::Duration::from_secs(150)).await;
     assert_eq!(scans(), settled, "rescanned with nothing to look up");
+}
+
+// ── Deploy keys and sideloading (contract amendments 16, 28) ───────────────
+
+/// A deploy key known to the edge: `username`'s, made for `plugin`.
+fn deploy_key(f: &Fixture, fake: &Arc<FakeDirectory>, username: &str, plugin: &str, revoked: bool, expired: bool) -> SigningKey {
+    let key = known(f, fake, Some(username), false);
+    let deploy = keys::DeployKeyInfo { plugin: plugin.into(), expires_at: Some(1), expired };
+    fake.keys.lock().unwrap().insert(
+        key.public(),
+        Lookup::Found { username: Some(username.into()), mine: false, revoked, verified: Some(true), deploy: Some(deploy) },
+    );
+    key
+}
+
+/// A deploy key vouches for its own plugin alone, every lookup naming the
+/// plugin it's about; revoked or expired, for nothing. A leaked key for one
+/// of an author's plugins can't sign an update to another of theirs.
+#[tokio::test]
+async fn a_deploy_key_vouches_only_for_its_own_plugin() {
+    let f = fixture();
+    let fake = Arc::new(FakeDirectory::default());
+    let laptop = known(&f, &fake, Some("ada"), false);
+    let for_focus = deploy_key(&f, &fake, "ada", "focus", false, false);
+
+    // Its own plugin, sideloaded: by @ada, the lookup naming the plugin.
+    install(&f, "focus.zeron-plugin", &package(&for_focus, "focus", "1.0.0", serde_json::json!({}))).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(item(&f.plugins, "focus").await["author"], serde_json::json!({ "kind": "verified", "username": "ada" }));
+    assert!(fake.asked.lock().unwrap().contains(&(for_focus.public(), Some("focus".into()))));
+
+    // Another plugin by the same author, installed from her laptop's key:
+    // an update signed with focus's deploy key is someone else's.
+    install(&f, "board.zeron-plugin", &package(&laptop, "board", "1.0.0", serde_json::json!({}))).await.unwrap();
+    let refused = install(&f, "board-2.zeron-plugin", &package(&for_focus, "board", "1.1.0", serde_json::json!({}))).await.unwrap_err();
+    assert!(refused.starts_with("other_signer"), "{refused}");
+    assert_eq!(item(&f.plugins, "board").await["version"], "1.0.0");
+    // And a plugin it signed that isn't its own reads as unknown.
+    install(&f, "other.zeron-plugin", &package(&for_focus, "other", "1.0.0", serde_json::json!({}))).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(item(&f.plugins, "other").await["author"], serde_json::json!({ "kind": "unknown", "reason": keys::DEPLOY_KEY_ELSEWHERE }));
+
+    // Revoked, or expired: vouches for nothing, its own plugin included.
+    for (name, revoked, expired, reason) in [("revoked", true, false, keys::KEY_NOT_KNOWN), ("expired", false, true, keys::DEPLOY_KEY_EXPIRED)] {
+        let key = deploy_key(&f, &fake, "ada", name, revoked, expired);
+        install(&f, &format!("{name}.zeron-plugin"), &package(&key, name, "1.0.0", serde_json::json!({}))).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(item(&f.plugins, name).await["author"], serde_json::json!({ "kind": "unknown", "reason": reason }), "{name}");
+    }
+
+    // A device's key is asked about the plugin too, and answers as before.
+    assert_eq!(item(&f.plugins, "board").await["author"], serde_json::json!({ "kind": "verified", "username": "ada" }));
+    assert!(fake.asked.lock().unwrap().contains(&(laptop.public(), Some("board".into()))));
+}
+
+/// After a transfer, a former owner's deploy key no longer reads as
+/// verified for the plugin (the edge's answer), so an update it signs is
+/// someone else's, and what it signed before asks again.
+#[tokio::test]
+async fn a_former_owner_s_deploy_key_stops_vouching_after_a_transfer() {
+    let f = fixture();
+    let fake = Arc::new(FakeDirectory::default());
+    let old = deploy_key(&f, &fake, "ada", "focus", false, false);
+    install(&f, "focus.zeron-plugin", &package(&old, "focus", "1.0.0", serde_json::json!({ "permissions": ["ui.add"] }))).await.unwrap();
+    assert_eq!(allow(&f.plugins, "focus").await["status"], "on");
+    // Transferred: the edge stops verifying ada's key for focus.
+    fake.keys.lock().unwrap().insert(
+        old.public(),
+        Lookup::Found { username: Some("ada".into()), mine: false, revoked: false, verified: Some(false), deploy: None },
+    );
+    // (Looked up again: as the hour's cache running out would.)
+    lock(&f.plugins.inner.cache).forget(&old.public());
+    item(&f.plugins, "focus").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let now = item(&f.plugins, "focus").await;
+    assert_eq!(now["author"]["kind"], "unknown", "{now}");
+    assert_ne!(now["status"], "on");
+    let cy = known(&f, &fake, Some("cy"), false);
+    let refused = install(&f, "focus-2.zeron-plugin", &package(&cy, "focus", "1.1.0", serde_json::json!({}))).await.unwrap_err();
+    assert!(refused.starts_with("other_signer"), "{refused}");
 }

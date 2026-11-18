@@ -116,12 +116,12 @@ impl Search {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PackageRecord {
     /// The plugin's content hash (`signing::content_hash`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub hash: String,
     /// The package file's sha256.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub sha256: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub bytes: u64,
     /// The key that signed it, when the store says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -131,9 +131,9 @@ pub struct PackageRecord {
 /// Who published a plugin (`PluginCard.author`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Publisher {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub username: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub verified: bool,
 }
 
@@ -141,32 +141,32 @@ pub struct Publisher {
 /// detail is passed on as it came).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Detail {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub author: Publisher,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub package: PackageRecord,
 }
 
 /// One version, as `GET /store/v1/plugins/:id/versions` lists it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VersionRecord {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub status: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub yanked: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub hash: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub sha256: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub bytes: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub key: Option<String>,
 }
 
@@ -194,20 +194,20 @@ pub struct Offer {
     pub version: String,
     /// Its content hash.
     pub hash: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub sha256: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     /// Who owns the id now (its username).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub notes: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub added: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub removed: Vec<String>,
     /// The caller's own version, still in review (offered to its author's
     /// devices alone).
@@ -220,17 +220,49 @@ pub struct Offer {
 pub struct Block {
     pub id: String,
     pub version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub reason: String,
 }
 
-/// `POST /store/v1/updates`'s answer.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// `POST /store/v1/updates`'s answer: each offer and block read on its
+/// own, so one the device can't read (a field missing, the wrong shape)
+/// never hides the others, a block least of all.
+#[derive(Debug, Clone, Default)]
 pub struct Updates {
-    #[serde(default)]
     pub updates: Vec<Offer>,
-    #[serde(default)]
     pub blocked: Vec<Block>,
+    /// Offers or blocks that couldn't be read, each as the store sent it
+    /// (its `id`, when it had one).
+    pub unreadable: Vec<Option<String>>,
+}
+
+impl Updates {
+    fn read(value: &Value) -> Self {
+        let mut out = Updates::default();
+        let items = |key: &str| value.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+        for item in items("updates") {
+            match serde_json::from_value::<Offer>(item.clone()) {
+                Ok(offer) => out.updates.push(offer),
+                Err(_) => out.unreadable.push(item["id"].as_str().map(str::to_owned)),
+            }
+        }
+        for item in items("blocked") {
+            match serde_json::from_value::<Block>(item.clone()) {
+                Ok(block) => out.blocked.push(block),
+                Err(_) => out.unreadable.push(item["id"].as_str().map(str::to_owned)),
+            }
+        }
+        out
+    }
+}
+
+/// A field the store may send as `null` for "none": read as its default.
+fn nullable<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl StoreClient {
@@ -269,7 +301,9 @@ impl StoreClient {
                 let empty = Vec::new();
                 let signed = body.as_ref().map_or(&empty, |(bytes, _)| bytes);
                 let ts = chrono::Utc::now().timestamp_millis();
-                request = request.header("Authorization", key.authorization(method.as_str(), bare, signed, ts));
+                request = request
+                    .header("Authorization", key.authorization(method.as_str(), bare, signed, ts))
+                    .header(super::deploy_key::CONTENT_SHA256_HEADER, crate::plugins::signing::sha256_hex(signed));
             }
         }
         if let Some((bytes, content_type)) = body {
@@ -301,7 +335,7 @@ impl StoreClient {
         if bytes.is_empty() {
             return Ok(Value::Object(Default::default()));
         }
-        serde_json::from_slice(&bytes).map_err(|_| failure(reason::STORE_ERROR, "The store's answer couldn't be read"))
+        object(&bytes)
     }
 
     fn typed<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
@@ -346,7 +380,7 @@ impl StoreClient {
     /// The batched update check for every store-installed plugin.
     pub async fn updates(&self, ask: &UpdatesAsk, caller: &Caller) -> Result<Updates, String> {
         let body = serde_json::to_value(ask).unwrap_or_default();
-        Self::typed(self.json(reqwest::Method::POST, "/store/v1/updates", Some(body), caller).await?)
+        Ok(Updates::read(&self.json(reqwest::Method::POST, "/store/v1/updates", Some(body), caller).await?))
     }
 
     // ── Publisher ───────────────────────────────────────────────────────
@@ -355,7 +389,7 @@ impl StoreClient {
     pub async fn publish(&self, id: &str, package: Vec<u8>, caller: &Caller) -> Result<Value, String> {
         let path = format!("/store/v1/plugins/{}/versions", segment(id));
         let bytes = self.send(reqwest::Method::POST, &path, Some((package, "application/json")), caller, MAX_JSON_BYTES).await?;
-        serde_json::from_slice(&bytes).map_err(|_| failure(reason::STORE_ERROR, "The store's answer couldn't be read"))
+        object(&bytes)
     }
 
     pub async fn my_plugins(&self, caller: &Caller) -> Result<Value, String> {
@@ -381,9 +415,27 @@ impl StoreClient {
         self.json(reqwest::Method::DELETE, &path, None, caller).await
     }
 
+    /// Report a listed plugin (`reason`: malware, misleading, broken,
+    /// copyright or other).
+    pub async fn report(&self, id: &str, reason: &str, text: Option<&str>, caller: &Caller) -> Result<Value, String> {
+        let mut body = serde_json::json!({ "reason": reason });
+        if let Some(text) = text {
+            body["text"] = serde_json::json!(text);
+        }
+        self.json(reqwest::Method::POST, &format!("/store/v1/plugins/{}/reports", segment(id)), Some(body), caller).await
+    }
+
     /// Counted as installed (once per account, by the edge).
     pub async fn installed(&self, id: &str, caller: &Caller) -> Result<(), String> {
         self.json(reqwest::Method::POST, &format!("/store/v1/plugins/{}/installed", segment(id)), None, caller).await.map(drop)
+    }
+}
+
+/// A reply that must be a JSON object (anything else isn't the store's).
+fn object(bytes: &[u8]) -> Result<Value, String> {
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(value @ Value::Object(_)) => Ok(value),
+        _ => Err(failure(reason::STORE_ERROR, "The store's answer couldn't be read")),
     }
 }
 
@@ -393,6 +445,11 @@ fn refusal(status: u16, body: &[u8]) -> String {
     let word = value["error"].as_str().filter(|w| !w.is_empty() && w.len() <= 64 && w.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
     let message: String = value["message"].as_str().unwrap_or("").chars().filter(|c| !c.is_control()).take(500).collect();
     match (word, status) {
+        // The body changed on its way (a proxy, a broken connection): sending
+        // it again is the fix.
+        // (The edge's word for a plugin or version it doesn't show this caller.)
+        (Some("not_found"), 404) => failure(reason::NOT_IN_STORE, if message.is_empty() { "The store has no such plugin".to_owned() } else { message }),
+        (Some("body_mismatch"), _) => failure("body_mismatch", "What reached the store isn't what was signed (it changed on the way): send it again"),
         (Some(word), _) => failure(word, if message.is_empty() { format!("The store refused it ({status})") } else { message }),
         (None, 404) => failure(reason::NOT_IN_STORE, "The store has no such plugin"),
         (None, 429) => failure(install::reason::RATE_LIMITED, "The store is turning away requests from here for now; try again later"),

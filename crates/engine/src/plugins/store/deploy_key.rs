@@ -13,6 +13,8 @@
 //! key=<b64url>, ts=<ms>, sig=<b64url>`, where `sig` signs
 //! `"zeron-plugin-publish:v1\n" + method + "\n" + path + "\n" +
 //! sha256hex(body) + "\n" + ts`. `path` is the URL's path alone (no query).
+//! The body's hash also goes as `X-Zeron-Content-SHA256` (for a request
+//! without a body, the hash of nothing).
 
 use std::fmt;
 
@@ -33,6 +35,10 @@ pub const REQUEST_PREFIX: &str = "zeron-plugin-publish:v1\n";
 pub const SCHEME: &str = "ZeronKey";
 /// How far a signed request's time may be from the edge's.
 pub const MAX_SKEW_MS: i64 = 5 * 60 * 1000;
+/// The header a signed request carries its body's sha256 (hex) in, the
+/// same hash its signature covers, so the edge can refuse a body before
+/// reading it.
+pub const CONTENT_SHA256_HEADER: &str = "X-Zeron-Content-SHA256";
 
 const SEED_LEN: usize = 32;
 const CHECK_LEN: usize = 4;
@@ -146,6 +152,21 @@ pub fn request_message(method: &str, path: &str, body_sha256: &str, ts: i64) -> 
 mod tests {
     use super::*;
     use ring::signature::{ED25519, UnparsedPublicKey};
+
+    /// The edge's own expectations (edge-identity `signing.test.ts`), byte
+    /// for byte: the signing string, an empty body's hash, the proof.
+    #[test]
+    fn the_signing_string_is_the_edge_s() {
+        let body = signing::sha256_hex(&[1, 2, 3]);
+        assert_eq!(body, "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81");
+        assert_eq!(
+            request_message("POST", "/store/v1/plugins/git/versions", &body, 1_700_000_000_000),
+            format!("zeron-plugin-publish:v1\nPOST\n/store/v1/plugins/git/versions\n{body}\n1700000000000")
+        );
+        assert_eq!(signing::sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(proof_message("git", "KEY"), "zeron-deploy-key:v1:git:KEY");
+        assert_eq!(CONTENT_SHA256_HEADER, "X-Zeron-Content-SHA256");
+    }
 
     #[test]
     fn a_secret_round_trips_and_a_damaged_one_is_told_apart() {

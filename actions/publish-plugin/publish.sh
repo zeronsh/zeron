@@ -35,6 +35,13 @@ for tool in curl jq sha256sum tar; do
 done
 
 releases="${ZERON_RELEASES_URL:-https://zeron.sh/releases}"
+# https only, redirects included (a plain-http address on this machine is
+# allowed for testing the script).
+case "$releases" in
+  https://*) proto=(--proto '=https' --proto-redir '=https') ;;
+  http://127.0.0.1:* | http://localhost:*) proto=() ;;
+  *) fail "Zeron's releases are fetched over https." ;;
+esac
 version="${ZERON_VERSION:-latest}"
 case "$version" in
   latest) manifest_url="$releases/manifest.json" ;;
@@ -46,14 +53,14 @@ work="${RUNNER_TEMP:-$(mktemp -d)}/zeron-cli"
 rm -rf "$work"
 mkdir -p "$work/bin" "$work/data"
 
-manifest="$(curl -fsSL --retry 3 "$manifest_url")" || fail "Couldn't read Zeron's release manifest ($manifest_url)."
+manifest="$(curl -fsSL --retry 3 "${proto[@]}" "$manifest_url")" || fail "Couldn't read Zeron's release manifest ($manifest_url)."
 version="$(jq -r '.version // empty' <<<"$manifest")"
 [ -n "$version" ] || fail "Zeron's release manifest names no version."
 file="zeron-$version-linux-$arch.tar.gz"
 sha="$(jq -r --arg f "$file" '.files[$f].sha256 // empty' <<<"$manifest")"
 [ -n "$sha" ] || fail "Zeron $version has no $file."
 
-curl -fsSL --retry 3 "$releases/$file" -o "$work/$file" || fail "Couldn't download $file."
+curl -fsSL --retry 3 "${proto[@]}" "$releases/$file" -o "$work/$file" || fail "Couldn't download $file."
 echo "$sha  $work/$file" | sha256sum -c --quiet - || fail "$file isn't what Zeron's release manifest says (sha256)."
 tar -xzf "$work/$file" -C "$work/bin" --strip-components=1 --wildcards '*/zeron-engine' || fail "$file has no zeron-engine."
 zeron="$work/bin/zeron-engine"

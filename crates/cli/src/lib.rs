@@ -179,19 +179,21 @@ pub enum PluginCommand {
         dry_run: bool,
     },
     /// Your plugins in the store: each version's review state and the
-    /// reviewer's reason. With ZERON_DEPLOY_KEY, the plugin that key is for.
+    /// reviewer's reason. With ZERON_DEPLOY_KEY, the plugin that key is for
+    /// (and no Zeron needs to be running).
     Status {
         /// Only this plugin.
         id: Option<String>,
     },
-    /// Deploy keys: what a CI job publishes with, one plugin's each (through
-    /// the running Zeron, with your session).
+    /// Deploy keys: what a CI job publishes with, one plugin's each. Made,
+    /// listed and revoked through the running Zeron, with your session (never
+    /// with a deploy key); a plugin's first version comes from your machine.
     Key {
         #[command(subcommand)]
         command: KeyCommand,
     },
-    /// Stop new installs of a version (installed copies keep working). With
-    /// ZERON_DEPLOY_KEY, as that key.
+    /// Stop new installs of a version (installed copies keep working).
+    /// Through the running Zeron, with your session: never a deploy key's.
     Yank { id: String, version: String },
     /// Undo `yank`.
     Unyank { id: String, version: String },

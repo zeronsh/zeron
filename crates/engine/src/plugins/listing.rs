@@ -33,13 +33,17 @@ pub const MAX_CATEGORIES: usize = 2;
 pub const MAX_KEYWORDS: usize = 8;
 pub const MAX_KEYWORD_LEN: usize = 32;
 pub const MAX_SCREENSHOTS: usize = 8;
-pub const MAX_URL_LEN: usize = 300;
+pub const MAX_URL_LEN: usize = 2048;
 pub const MAX_LICENSE_LEN: usize = 64;
-pub const MAX_NAME_LEN: usize = 60;
-pub const MAX_DESCRIPTION_LEN: usize = 200;
+pub const MAX_NAME_LEN: usize = 64;
+pub const MAX_DESCRIPTION_LEN: usize = 300;
 /// An icon is an SVG at most this big (as `scan::icon_svg` reads one).
 pub const MAX_ICON_BYTES: usize = 32 * 1024;
-pub const SCREENSHOT_TYPES: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
+pub const MAX_README_BYTES: usize = 512 * 1024;
+/// A version's notes (its CHANGELOG.md section).
+pub const MAX_NOTES_BYTES: usize = 64 * 1024;
+/// Screenshots are PNG or JPEG pictures.
+pub const SCREENSHOT_TYPES: &[&str] = &["png", "jpg", "jpeg"];
 
 /// The store's categories: a fixed list (the edge serves the same one at
 /// `/store/v1/categories`), `(id, name)`.
@@ -217,8 +221,13 @@ fn keyword(k: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b' ')
 }
 
-/// Whether `path`'s bytes are a picture by their first bytes (PNG, JPEG,
-/// GIF, WebP).
+/// Whether bytes are a screenshot the store shows: a PNG or a JPEG, by its
+/// signature.
+fn is_screenshot(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(b"\xff\xd8\xff")
+}
+
+/// Whether bytes are a picture by their first bytes (PNG, JPEG, GIF, WebP).
 fn is_picture(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x89PNG\r\n\x1a\n")
         || bytes.starts_with(b"\xff\xd8\xff")
@@ -330,6 +339,12 @@ pub fn check(
 
     // Its page.
     match files.get(README) {
+        Some(bytes) if bytes.len() > MAX_README_BYTES => problems.push(Problem::at(
+            BAD_LISTING,
+            Some("readme"),
+            README,
+            format!("Its README.md is at most {} KB", MAX_README_BYTES / 1024),
+        )),
         Some(bytes) if std::str::from_utf8(bytes).is_ok_and(|t| !t.trim().is_empty()) => {}
         Some(_) => problems.push(Problem::at(
             MISSING_README,
@@ -515,14 +530,14 @@ pub fn check(
                 let typed = path.rsplit_once('.').is_some_and(|(_, ext)| {
                     SCREENSHOT_TYPES.contains(&ext.to_ascii_lowercase().as_str())
                 });
-                let there =
-                    package::plain_path(path) && files.get(*path).is_some_and(|b| is_picture(b));
+                let there = package::plain_path(path)
+                    && files.get(*path).is_some_and(|b| is_screenshot(b));
                 if !typed || !there {
                     problems.push(Problem::at(
                         BAD_LISTING,
                         Some("screenshots"),
                         path,
-                        "A screenshot must be a PNG, JPEG, WebP or GIF picture in it",
+                        "A screenshot must be a PNG or JPEG picture in it",
                     ));
                 }
             }
@@ -564,9 +579,23 @@ pub fn check(
             ));
         }
     }
-    if let Some(changelog) = files.get(CHANGELOG)
-        && changelog_notes(&String::from_utf8_lossy(changelog), &manifest.version).is_none()
+    let notes = files
+        .get(CHANGELOG)
+        .map(|log| changelog_notes(&String::from_utf8_lossy(log), &manifest.version));
+    if let Some(Some(notes)) = &notes
+        && notes.len() > MAX_NOTES_BYTES
     {
+        problems.push(Problem::at(
+            BAD_LISTING,
+            Some("changelog"),
+            CHANGELOG,
+            format!(
+                "This version's notes in CHANGELOG.md are at most {} KB",
+                MAX_NOTES_BYTES / 1024
+            ),
+        ));
+    }
+    if let Some(None) = notes {
         warnings.push(Problem::at(
             NO_NOTES,
             None,

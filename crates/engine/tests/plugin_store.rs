@@ -316,3 +316,81 @@ async fn a_store_plugin_changed_on_disk_is_told_by_its_signature_alone() {
 fn sha256(bytes: &[u8]) -> String {
     zeron_engine::plugins::signing::sha256_hex(bytes)
 }
+
+#[tokio::test]
+async fn the_owner_installs_a_plugin_nobody_else_sees_yet() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &[], "return 1", json!({})), "pending", "");
+    // Not listed to anyone yet: someone else's device can't have it.
+    let theirs = device(&store, Some("bob"));
+    assert_eq!(word(&theirs.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err()), "not_in_store");
+    // Its owner's other device can, from their plugins in the store.
+    let mine = device(&store, Some("ada"));
+    let installed = mine.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!((installed["plugin"]["version"].as_str(), installed["plugin"]["author"]["username"].as_str()), (Some("1.0.0"), Some("ada")));
+    assert_eq!(installed["waiting"], true, "installed from the store, it's asked about like anyone's");
+}
+
+#[tokio::test]
+async fn an_offer_the_device_can_t_read_hides_nothing_else() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "approved", "");
+    store.add("ada", &package_of(&key, "board", "1.0.0", &["ui.add"], "return 1", json!({})), "approved", "");
+    let next = package_of(&key, "board", "1.1.0", &["ui.add"], "return 2", json!({}));
+    store.add("ada", &next, "approved", "");
+    let d = device(&store, Some("bob"));
+    for id in ["focus", "board"] {
+        d.call(methods::INSTALL_PLUGIN, json!({ "store": id, "version": "1.0.0" })).await.unwrap();
+        d.allow(id).await;
+    }
+    // board's offer with `notes: null` (no CHANGELOG section), an offer
+    // with no hash, and focus's installed version blocked.
+    store.block("focus", "1.0.0", "Taken down.");
+    let package = install::parse(next.clone()).unwrap();
+    {
+        let mut state = store.state.lock().unwrap();
+        // (Offered only as the hostile shape below.)
+        state.plugins.get_mut("board").unwrap().versions.retain(|v| v.version != "1.1.0");
+        state.offer_anyway.push(json!({ "id": "board", "version": "1.1.0", "hash": package.hash, "sha256": sha256(&next), "bytes": next.len(), "key": package.key, "publisher": "ada", "notes": null, "added": [], "removed": [] }));
+        state.offer_anyway.push(json!({ "id": "focus", "version": "2.0.0", "publisher": "ada" }));
+        state.serve_instead.insert(("board".into(), "1.1.0".into()), next.clone());
+    }
+    let checked = d.check().await;
+    assert_eq!(d.item("focus").await["status"], "off", "the block still lands: {checked}");
+    let board = checked["updates"].as_array().unwrap().iter().find(|u| u["id"] == "board").cloned().unwrap();
+    assert_eq!(board["version"], "1.1.0");
+    assert!(board.get("notes").is_none(), "no notes: {board}");
+    assert!(checked["errors"].as_array().unwrap().iter().any(|e| e["id"] == "focus" && word(e["error"].as_str().unwrap()) == "store_error"), "{checked}");
+}
+
+#[tokio::test]
+async fn reports_compatibility_for_another_zeron_and_deploy_keys_for_owned_plugins_only() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &[], "return 1", json!({ "engines": { "zeron": ">=0.5.0" } })), "approved", "");
+    let d = device(&store, Some("bob"));
+    let here = d.call(methods::STORE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
+    let there = d.call(methods::STORE_PLUGIN, json!({ "id": "focus", "for_zeron": "0.5.1" })).await.unwrap();
+    assert_eq!(there["compatible"], true, "{there}");
+    assert_eq!(here["compatible"], version_at_least("0.5.0"), "{here}");
+    assert!(d.call(methods::STORE_PLUGIN, json!({ "id": "focus", "for_zeron": "soon" })).await.is_err());
+
+    let reported = d.call(methods::STORE_REPORT, json!({ "id": "focus", "reason": "malware", "text": "It sends\u{202e} my chats away." })).await.unwrap();
+    assert_eq!(reported["ok"], true);
+    let (id, body) = store.state.lock().unwrap().reports[0].clone();
+    assert_eq!((id.as_str(), body["reason"].as_str()), ("focus", Some("malware")));
+    assert!(!body["text"].as_str().unwrap().contains('\u{202e}'));
+    assert!(d.call(methods::STORE_REPORT, json!({ "id": "focus", "reason": "boring" })).await.is_err());
+
+    // bob owns no focus in the store: no deploy key for it.
+    let refused = d.call(methods::CREATE_DEPLOY_KEY, json!({ "id": "focus", "name": "CI" })).await.unwrap();
+    assert_eq!(refused["error"], "not_published", "{refused}");
+}
+
+/// Whether this Zeron is at least `v`.
+fn version_at_least(v: &str) -> bool {
+    use zeron_engine::plugins::version::{Version, zeron};
+    zeron() >= Version::parse(v).unwrap()
+}

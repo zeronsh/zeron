@@ -61,6 +61,10 @@ pub struct State {
     pub submitted: Vec<(String, Vec<u8>, String)>,
     /// Updates asks, as sent.
     pub asks: Vec<Value>,
+    /// Each signed request's `X-Zeron-Content-SHA256`.
+    pub content_sha256: Vec<Option<String>>,
+    /// Reports: `(id, body)`.
+    pub reports: Vec<(String, Value)>,
 }
 
 #[derive(Clone)]
@@ -158,6 +162,9 @@ impl FakeStore {
         let field = |name: &str| rest.split(", ").find_map(|kv| kv.strip_prefix(&format!("{name}="))).unwrap_or("").to_owned();
         let (key, ts, sig) = (field("key"), field("ts"), field("sig"));
         let bad = |why: &str| Err((401, json!({ "error": "bad_signature", "message": why })));
+        let claimed = headers.get("x-zeron-content-sha256").cloned();
+        self.state.lock().unwrap().content_sha256.push(claimed.clone());
+        let Some(claimed) = claimed else { return bad("no X-Zeron-Content-SHA256") };
         let Some((scope, owner)) = self.state.lock().unwrap().deploy_keys.get(&key).cloned() else {
             return Err((403, json!({ "error": "key_not_allowed", "message": "That key isn't registered." })));
         };
@@ -166,10 +173,21 @@ impl FakeStore {
             return bad("too old");
         }
         let bare = path.split('?').next().unwrap_or(path);
-        let message = format!("zeron-plugin-publish:v1\n{method}\n{bare}\n{}\n{ts}", sha256_hex(body));
+        // As the edge: the signature over the claimed hash first, then the
+        // body against it.
+        let message = format!("zeron-plugin-publish:v1\n{method}\n{bare}\n{claimed}\n{ts}");
         let (Ok(key_bytes), Ok(sig_bytes)) = (B64URL.decode(&key), B64URL.decode(&sig)) else { return bad("not base64url") };
         if UnparsedPublicKey::new(&ED25519, &key_bytes).verify(message.as_bytes(), &sig_bytes).is_err() {
             return bad("the signature doesn't check out");
+        }
+        if sha256_hex(body) != claimed {
+            return Err((400, json!({ "error": "body_mismatch", "message": "The body isn't what X-Zeron-Content-SHA256 says." })));
+        }
+        // Amendment 6: a deploy key publishes its plugin and reads its state.
+        let bare_parts: Vec<&str> = bare.trim_start_matches('/').split('/').collect();
+        let allowed = matches!((method, bare_parts.as_slice()), ("POST", ["store", "v1", "plugins", _, "versions"]) | ("GET", ["store", "v1", "me", "plugins"]));
+        if !allowed {
+            return Err((403, json!({ "error": "key_not_allowed", "message": "A deploy key publishes and reads status, nothing else." })));
         }
         Ok(Some((owner, Some(scope))))
     }
@@ -235,6 +253,14 @@ impl FakeStore {
                     Some(v) if v.status == "approved" || v.status == "yanked" || (mine && v.status == "pending") => (200, "application/octet-stream", v.raw.clone()),
                     _ => not_found(),
                 }
+            }
+            ("POST", ["store", "v1", "plugins", id, "reports"]) => {
+                if caller.is_none() {
+                    return json_reply(401, json!({ "error": "unauthorized", "message": "Sign in." }));
+                }
+                let body: Value = serde_json::from_slice(body).unwrap_or_default();
+                self.state.lock().unwrap().reports.push(((*id).to_owned(), body));
+                json_reply(201, json!({ "reported": true }))
             }
             ("POST", ["store", "v1", "plugins", id, "installed"]) => {
                 if caller.is_none() {
@@ -329,7 +355,13 @@ impl FakeStore {
                     .plugins
                     .iter()
                     .filter(|(id, p)| p.owner == owner && scope.as_deref().is_none_or(|s| s == id.as_str()))
-                    .map(|(id, p)| json!({ "id": id, "versions": p.versions.iter().map(|v| json!({ "version": v.version, "status": v.status })).collect::<Vec<_>>() }))
+                    .map(|(id, p)| json!({
+                        "id": id, "author": { "username": p.owner, "badges": [] },
+                        "versions": p.versions.iter().map(|v| json!({
+                            "version": v.version, "status": v.status, "yanked": v.status == "yanked",
+                            "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(), "key": v.key,
+                        })).collect::<Vec<_>>(),
+                    }))
                     .collect();
                 json_reply(200, json!({ "plugins": plugins }))
             }

@@ -1059,7 +1059,7 @@ impl Plugins {
         };
         let registered = keys::Registration::load(&self.inner.data_dir).covers(&key, &account);
         *lock(&self.inner.own_key_checked) = Some(Instant::now());
-        let revoked = match directory.lookup(&key).await {
+        let revoked = match directory.lookup(&key, None).await {
             // Revoked on this account (whatever this device's file says).
             Ok(keys::Lookup::Found { revoked: true, mine: true, .. }) => true,
             // Registered here, and now gone or someone else's.
@@ -1084,7 +1084,7 @@ impl Plugins {
         let cached = {
             let mut cache = lock(&self.inner.cache);
             if let Some(account) = self.account() {
-                cache.0.insert(key.to_owned(), keys::CachedKey::from_lookup(&keys::Lookup::Unknown, &account, now_secs()));
+                cache.insert(key, None, keys::CachedKey::from_lookup(&keys::Lookup::Unknown, &account, now_secs(), None));
             }
             cache.clone()
         };
@@ -1178,7 +1178,7 @@ impl Plugins {
 
     // ── Scanning ────────────────────────────────────────────────────────────
 
-    fn scan_blocking(&self) -> (Vec<Entry>, Vec<String>, bool) {
+    fn scan_blocking(&self) -> (Vec<Entry>, Vec<(String, Option<String>)>, bool) {
         #[cfg(test)]
         self.inner.scans.fetch_add(1, Ordering::SeqCst);
         self.prune_state();
@@ -1202,14 +1202,18 @@ impl Plugins {
                     let binding = Some(store.binding());
                     return scan::entry_bound(inspected, scan::store_author(&store), binding, Some(store), &state);
                 }
+                // A key vouches for the plugin it signed: looked up about it
+                // (a deploy key reads as its author's for its own plugin alone).
+                let plugin = inspected.id().to_owned();
                 let author = match inspected.signature_author() {
                     _ if own => Author::You,
                     Ok(author) => author,
                     Err(key) => {
-                        let gave_up = !can_look_up || failed.contains_key(&key);
+                        let gave_up = !can_look_up || failed.contains_key(&keys::cache_key(&key, Some(&plugin)));
                         match keys::resolve_cached(
                             &cache,
                             &key,
+                            Some(&plugin),
                             own_key.as_deref(),
                             account.as_deref(),
                             now,
@@ -1217,7 +1221,7 @@ impl Plugins {
                         ) {
                             Ok(author) => author,
                             Err(author) => {
-                                owed.push(key);
+                                owed.push((key, Some(plugin)));
                                 author
                             }
                         }
@@ -1396,53 +1400,58 @@ impl Plugins {
         });
     }
 
-    fn spawn_lookups(&self, keys_owed: Vec<String>) {
+    /// Look up each owed `(key, plugin)` in the background.
+    fn spawn_lookups(&self, keys_owed: Vec<(String, Option<String>)>) {
         let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
             return;
         };
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        for key in keys_owed {
+        for (key, plugin) in keys_owed {
+            let cached = keys::cache_key(&key, plugin.as_deref());
             let recently_failed = lock(&self.inner.lookup_failed)
-                .get(&key)
+                .get(&cached)
                 .is_some_and(|at| at.elapsed() < LOOKUP_RETRY);
-            if recently_failed || !lock(&self.inner.lookups).insert(key.clone()) {
+            if recently_failed || !lock(&self.inner.lookups).insert(cached.clone()) {
                 continue;
             }
             let this = self.clone();
             let directory = directory.clone();
             let account = account.clone();
             runtime.spawn(async move {
-                this.look_up(directory.as_ref(), &key, &account).await;
-                lock(&this.inner.lookups).remove(&key);
+                this.look_up(directory.as_ref(), &key, plugin.as_deref(), &account).await;
+                lock(&this.inner.lookups).remove(&cached);
                 this.kick(Kick::Rescan);
             });
         }
     }
 
-    /// One lookup; the result lands in the cache (or the failure list).
+    /// One lookup of `key` about `plugin`; the result lands in the cache
+    /// (or the failure list).
     async fn look_up(
         &self,
         directory: &dyn KeyDirectory,
         key: &str,
+        plugin: Option<&str>,
         account: &str,
     ) -> Option<CachedKey> {
-        match directory.lookup(key).await {
+        let cached = keys::cache_key(key, plugin);
+        match directory.lookup(key, plugin).await {
             Ok(lookup) => {
-                let entry = CachedKey::from_lookup(&lookup, account, now_secs());
+                let entry = CachedKey::from_lookup(&lookup, account, now_secs(), plugin);
                 let cache = {
                     let mut cache = lock(&self.inner.cache);
-                    cache.0.insert(key.to_owned(), entry.clone());
+                    cache.insert(key, plugin, entry.clone());
                     cache.clone()
                 };
                 cache.save(&self.inner.data_dir);
-                lock(&self.inner.lookup_failed).remove(key);
+                lock(&self.inner.lookup_failed).remove(&cached);
                 Some(entry)
             }
             Err(error) => {
                 tracing::debug!(%error, "plugins: key lookup failed");
-                lock(&self.inner.lookup_failed).insert(key.to_owned(), Instant::now());
+                lock(&self.inner.lookup_failed).insert(cached, Instant::now());
                 None
             }
         }
@@ -1459,9 +1468,11 @@ impl Plugins {
         let gave_up = self.directory().is_none()
             || account.is_none()
             || lock(&self.inner.lookup_failed).contains_key(key);
-        let resolved = keys::resolve_cached(&cache, key, own_key.as_deref(), account.as_deref(), now_secs(), gave_up);
+        // (A template's: no plugin to ask about, so a deploy key vouches
+        // for none.)
+        let resolved = keys::resolve_cached(&cache, key, None, own_key.as_deref(), account.as_deref(), now_secs(), gave_up);
         if resolved.is_err() {
-            self.spawn_lookups(vec![key.to_owned()]);
+            self.spawn_lookups(vec![(key.to_owned(), None)]);
         }
         // What a template's install is decided by: stale or unchecked is
         // Unknown, never the last author known.
@@ -1509,7 +1520,9 @@ impl Plugins {
         reply
     }
 
-    async fn resolve_now(&self, key: &str) -> Author {
+    /// Who signed `plugin` with `key`, waiting (briefly) on the edge if
+    /// need be.
+    async fn resolve_now(&self, key: &str, plugin: Option<&str>) -> Author {
         let own_key = signing::load_key(&self.inner.data_dir).map(|k| k.public());
         let account = self.account();
         let cached = {
@@ -1517,6 +1530,7 @@ impl Plugins {
             keys::resolve_cached(
                 &cache,
                 key,
+                plugin,
                 own_key.as_deref(),
                 account.as_deref(),
                 now_secs(),
@@ -1531,7 +1545,7 @@ impl Plugins {
         };
         match tokio::time::timeout(
             LOOKUP_NOW_TIMEOUT,
-            self.look_up(directory.as_ref(), key, &account),
+            self.look_up(directory.as_ref(), key, plugin, &account),
         )
         .await
         {
@@ -1542,11 +1556,12 @@ impl Plugins {
         }
     }
 
-    /// Whether `new` is another live key of the account that signed with
-    /// `old` ([`keys::same_account`]), asked of the edge now (never the
-    /// cache: a key revoked a minute ago mustn't take a plugin over).
-    /// Offline, signed out or slow: no.
-    pub(super) async fn same_account(&self, old: &str, new: &str) -> bool {
+    /// Whether `new` is another live key of the account that signed
+    /// `plugin` with `old` ([`keys::same_account`]), asked of the edge now
+    /// about `plugin` (never the cache: a key revoked a minute ago mustn't
+    /// take a plugin over; a deploy key made for another plugin vouches for
+    /// nothing here). Offline, signed out or slow: no.
+    pub(super) async fn same_account(&self, old: &str, new: &str, plugin: &str) -> bool {
         if old == new {
             return false;
         }
@@ -1555,7 +1570,7 @@ impl Plugins {
         };
         let look = |key: &str| {
             let (directory, account, key) = (directory.clone(), account.clone(), key.to_owned());
-            async move { tokio::time::timeout(LOOKUP_NOW_TIMEOUT, self.look_up(directory.as_ref(), &key, &account)).await.ok().flatten() }
+            async move { tokio::time::timeout(LOOKUP_NOW_TIMEOUT, self.look_up(directory.as_ref(), &key, Some(plugin), &account)).await.ok().flatten() }
         };
         let (Some(old), Some(new)) = (look(old).await, look(new).await) else {
             return false;
@@ -1774,7 +1789,7 @@ impl Plugins {
                     && !entry.item.builtin
                     && entry.store.is_none()
                     && let Some(key) = entry.key()
-                    && self.resolve_now(key).await != entry.item.author
+                    && self.resolve_now(key, Some(&p.id)).await != entry.item.author
                 {
                     self.rescan().await;
                     return Err(failed("Who made it couldn't be confirmed just now; review it again"));
@@ -2426,7 +2441,7 @@ impl Plugins {
                     }
                     lock(&self.inner.new_keys).retain(|row| row.key != revoke);
                     // Plugins it signed are checked again: no longer verified.
-                    lock(&self.inner.cache).0.remove(&revoke);
+                    lock(&self.inner.cache).forget(&revoke);
                     self.kick(Kick::Rescan);
                     return RpcReply::value(&serde_json::json!({ "revoked": revoke }));
                 }
@@ -2488,7 +2503,7 @@ impl Plugins {
         let author = match inspected.signature_author() {
             _ if own => Author::You,
             Ok(author) => author,
-            Err(key) => self.resolve_now(&key).await,
+            Err(key) => self.resolve_now(&key, Some(inspected.id())).await,
         };
         let status = match (&inspected.error, &inspected.sig) {
             (Some(_), _) => "broken",
@@ -2712,7 +2727,8 @@ impl Plugins {
         if here.starts_with("store:") || there.starts_with("store:") {
             return false;
         }
-        let (a, b) = futures::join!(self.resolve_now(&here), self.resolve_now(&there));
+        let plugin = Some(entry.item.id.as_str());
+        let (a, b) = futures::join!(self.resolve_now(&here, plugin), self.resolve_now(&there, plugin));
         same_account(&a, &b)
     }
 }

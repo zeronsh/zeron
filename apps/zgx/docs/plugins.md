@@ -702,8 +702,8 @@ The store lists plugins people made, on zeron.sh/plugins and in Settings → Plu
 
 ### What the store needs
 
-- **`README.md`** in the plugin's folder: its page. CommonMark and GitHub's tables, task lists and strikethrough. Raw HTML is dropped. Pictures are files in the plugin, by a relative path (`![Board](shots/board.png)`); a picture from elsewhere shows as a link, because what's shown is what was reviewed. Links open in the browser.
-- **`description`**: one line, at most 200 characters. It's the plugin's summary on its card.
+- **`README.md`** in the plugin's folder, at most 512 KB: its page. CommonMark and GitHub's tables, task lists and strikethrough. Raw HTML is dropped. Pictures are files in the plugin, by a relative path (`![Board](shots/board.png)`); a picture from elsewhere shows as a link, because what's shown is what was reviewed. Links open in the browser.
+- **`description`**: one line, at most 300 characters. It's the plugin's summary on its card. The `name` is at most 64.
 - **`icon`**: an SVG file in the plugin, at most 32 KB.
 - **`categories`**: one or two of `agents`, `appearance`, `chat`, `developer-tools`, `git`, `integrations`, `productivity`, `utilities`.
 - **`version`**: strict semver: `MAJOR.MINOR.PATCH`, optionally `-prerelease` and `+build` (`1.2.0`, `2.0.0-beta.1`). No `v`, no leading zeros.
@@ -724,10 +724,10 @@ The rest is optional:
 ```
 
 - `keywords`: up to 8, each lowercase letters, digits, dashes and single spaces, at most 32 characters.
-- `homepage`, `repository`: `https://` links.
-- `license`: a short name, like `MIT`.
-- `screenshots`: up to 8 pictures in the plugin (PNG, JPEG, WebP or GIF), shown on its page.
-- **`CHANGELOG.md`** gives each version's notes: the section under the heading that starts with that version (`## 1.2.0`, `## [1.2.0] - 2026-11-01`, `## v1.2.0`), up to the next heading as high. People see the notes when Zeron offers them the update.
+- `homepage`, `repository`: `https://` links, at most 2048 characters.
+- `license`: a short name, like `MIT`, at most 64 characters.
+- `screenshots`: up to 8 PNG or JPEG pictures in the plugin, shown on its page.
+- **`CHANGELOG.md`** gives each version's notes: the section under the heading that starts with that version (`## 1.2.0`, `## [1.2.0] - 2026-11-01`, `## v1.2.0`), up to the next heading as high, at most 64 KB. People see the notes when Zeron offers them the update.
 
 Files that aren't text or pictures (a compiled program, bytecode) are allowed, but reviewers look closely at them, and the check says which they are.
 
@@ -748,7 +748,7 @@ Files that aren't text or pictures (a compiled program, bytecode) are allowed, b
 Publishing is the person's act, in Zeron (Settings → Plugins → Yours → Publish…) or on the command line. An agent can check a plugin, but it can't submit one.
 
 - **From your machine:** `zeron plugin publish <id>`, with Zeron running and signed in. Your plugin is signed with this device's key and sent with your session. `--dry-run` checks it without sending it.
-- **From CI:** use a **deploy key**. It's a key made on your device for one plugin, registered to your account; making one asks you to sign in again. Its secret (`zpk_…`) is shown once, and Zeron keeps no copy. Put it in your CI's secrets as `ZERON_DEPLOY_KEY`, then run `zeron plugin publish <folder>`. No Zeron needs to be running and nobody needs to be signed in: the package is signed with the deploy key, and so is the request that sends it.
+- **From CI:** use a **deploy key**. It's a key made on your device for one plugin you already have in the store (its first version comes from your machine), registered to your account; making one asks you to sign in again. Its secret (`zpk_…`) is shown once, and Zeron keeps no copy. A deploy key submits new versions of its plugin and reads their review state (`zeron plugin status`), nothing else: yank, unyank, withdraw and keys are yours, from your machine. So if one leaks, the most it can do is add a version that waits for review. Put it in your CI's secrets as `ZERON_DEPLOY_KEY`, then run `zeron plugin publish <folder>`. No Zeron needs to be running and nobody needs to be signed in: the package is signed with the deploy key, and so is the request that sends it.
 
   ```sh
   zeron plugin key create focus-timer --name "GitHub Actions"   # once, on your machine
@@ -756,7 +756,7 @@ Publishing is the person's act, in Zeron (Settings → Plugins → Yours → Pub
   zeron plugin key revoke focus-timer <key>
   ```
 
-  `zeron plugin publish` reads the secret from the environment only, never from an argument. It exits 0 when the plugin is submitted, 1 when it doesn't meet the store's rules, 2 for a set-up problem (no plugin there, a damaged secret), 3 when the store refuses the key or the account, and 4 when the store can't be reached (try again). A revoked key publishes nothing; versions it published before stay in the store.
+  `zeron plugin publish` reads the secret from the environment only, never from an argument. It exits 0 when the plugin is submitted, 1 when it doesn't meet the store's rules, 2 for a set-up problem (no plugin there, a damaged secret, the runner's clock out by more than five minutes), 3 when the store refuses the key or the account, and 4 when the store can't be reached (try again). A revoked or expired key publishes nothing; versions it published before stay in the store. A plugin has a limited number of live keys (`too_many_keys`: revoke one first), and an account makes only so many a day (`rate_limited`).
 
 ### The GitHub Action
 
@@ -764,12 +764,38 @@ Publishing is the person's act, in Zeron (Settings → Plugins → Yours → Pub
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: zeronsh/zeron/actions/publish-plugin@main
+- uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
   with:
     key: ${{ secrets.ZERON_DEPLOY_KEY }}
 ```
 
-`path` names the plugin's folder when it isn't the repository's top, and `dry-run: true` checks it without submitting. Without `key` (a pull request from a fork gets no secrets), it only checks. Run it when you push a version's tag, after bumping `version` and adding its `CHANGELOG.md` section.
+Pin it to a Zeron release tag or a commit SHA, never a branch: the step holds your key. It runs on Linux runners (`ubuntu-*`, x86_64 or arm64). `path` names the plugin's folder when it isn't the repository's top, and `dry-run: true` checks it without submitting. Without `key` (a pull request from a fork gets no secrets), it only checks. Run it when you push a version's tag, after bumping `version` and adding its `CHANGELOG.md` section.
+
+### Reason words
+
+Every refusal from the store, or from Zeron about the store, reads `"<word>: <words>"` (or, from a method that answers rather than fails, `{ ok: false, error: "<word>", message }`). The word is stable; the words are English for whoever reads them raw.
+
+| word | when |
+|---|---|
+| `not_a_package`, `unsigned`, `tampered`, `bad_signature`, `too_big`, `bad_file` | the package itself is refused, as from a file |
+| `incompatible` | its `engines.zeron` leaves this Zeron out |
+| `other_signer`, `not_newer`, `different_plugin`, `up_to_date`, `no_source` | installing or updating, as from any source |
+| `store_unreachable` | the store didn't answer (offline, or busy): what's installed keeps running |
+| `not_in_store` | no such plugin or version, or not to you |
+| `store_mismatch` | what the store sent isn't what its record says: never installed |
+| `store_error` | the store's answer couldn't be read |
+| `rate_limited` | too many requests for now |
+| `signed_out` | it needs you signed in |
+| `review` | publishing needs the check Zeron's window or the CLI made, for the plugin as it was checked |
+| `changed` | the plugin changed since it was checked: check it again |
+| `not_published` | a deploy key is for a plugin you already have in the store |
+| `step_up_required` | making a deploy key needs a fresh sign-in |
+| `bad_package`, `id_reserved`, `not_semver`, `missing_readme`, `missing_listing`, `bad_listing`, `too_large` | the store's rules (`check_plugin`); `binary_file` and `no_notes` are warnings |
+| `needs_username`, `id_taken`, `version_exists`, `suspended` | the store refused the submission |
+| `key_not_allowed`, `key_revoked`, `key_expired`, `invalid_signature`, `unauthenticated` | the store refused the deploy key |
+| `stale_request` | the clock is more than five minutes out |
+| `replayed_request`, `body_mismatch` | the request was already made, or changed on its way: send it again |
+| `too_many_keys`, `key_taken`, `invalid_name`, `invalid_expiry`, `invalid_proof` | making a deploy key |
 
 ## Trust model
 

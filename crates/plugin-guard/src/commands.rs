@@ -76,7 +76,7 @@ pub enum Risk {
 
 /// Programs known to neither run others nor write files, by
 /// [`normalized`] name. Everything else is [`Risk::Anything`].
-const CONTAINED: &[&str] = &[
+pub const CONTAINED: &[&str] = &[
     "basename", "cat", "cksum", "cut", "date", "df", "dirname", "du", "echo", "false", "file", "grep", "head",
     "hostname", "id", "jq", "ls", "md5", "md5sum", "nproc", "printenv", "printf", "ps", "pwd", "readlink",
     "realpath", "sha1sum", "sha256sum", "shasum", "sleep", "stat", "sw_vers", "tail", "tr", "true", "uname",
@@ -96,7 +96,7 @@ pub fn any_can_do_anything(commands: &[String]) -> bool {
 /// Shells and interpreters, by [`normalized`] name without a version: naming
 /// one lets a plugin run anything at all, so the rules below hold nothing back
 /// and the words for it are plain.
-const FULL_CONTROL: &[&str] = &[
+pub const FULL_CONTROL: &[&str] = &[
     "ash", "bash", "bun", "cmd", "csh", "dash", "deno", "elixir", "erl", "fish", "ksh", "lua", "luajit", "node", "nodejs",
     "osascript", "perl", "php", "powershell", "pwsh", "python", "pypy", "ruby", "sh", "swift", "tclsh",
     "tcsh", "wscript", "cscript", "zsh",
@@ -118,11 +118,17 @@ pub fn held_to_its_own_rules(program: &str) -> bool {
     matches!(family(program), Family::Git | Family::Gh)
 }
 
+/// The extensions [`normalized`] takes off a program's name.
+pub const WINDOWS_EXTENSIONS: &[&str] = &[".exe", ".cmd", ".bat", ".com"];
+
+/// The programs [`held_to_its_own_rules`] names, by [`normalized`] name.
+pub const HELD_TO_ITS_OWN_RULES: &[&str] = &["git", "gh"];
+
 /// A program's name as the system finds it: lowercase (macOS and Windows
 /// find `Git` as `git`), without a Windows extension.
 pub fn normalized(program: &str) -> String {
     let lower = program.to_ascii_lowercase();
-    for ext in [".exe", ".cmd", ".bat", ".com"] {
+    for ext in WINDOWS_EXTENSIONS {
         if let Some(stem) = lower.strip_suffix(ext) {
             return stem.to_owned();
         }

@@ -99,6 +99,8 @@ async fn ci_checks_and_publishes_with_a_deploy_key() {
     assert_eq!(package.key, key.public(), "signed with the deploy key");
     let auth = store.state.lock().unwrap().requests.iter().rev().find(|r| r.0 == "POST").and_then(|r| r.2.clone()).unwrap();
     assert!(auth.starts_with(&format!("ZeronKey key={}, ts=", key.public())));
+    let sent = store.state.lock().unwrap().content_sha256.last().cloned().flatten().unwrap();
+    assert_eq!(sent, zeron_engine::plugins::signing::sha256_hex(&store.state.lock().unwrap().submitted[0].1), "X-Zeron-Content-SHA256 names the body");
     // The secret is never said back.
     for output in [&checked, &dry, &published] {
         assert!(!text(output).contains(&secret[4..]));
@@ -113,10 +115,16 @@ async fn ci_checks_and_publishes_with_a_deploy_key() {
     let status = run.zeron(&store, Some(&secret), &["status"]).await;
     assert_eq!(status.status.code(), Some(0), "{}", text(&status));
     assert!(text(&status).contains("focus-board\n  1.0.0  pending"), "{}", text(&status));
+    // A deploy key publishes and reads status, nothing else: yank, unyank,
+    // withdraw and keys are the signed-in person's (2, said plainly).
     store.set_status("focus-board", "1.0.0", "approved");
-    let yanked = run.zeron(&store, Some(&secret), &["yank", "focus-board", "1.0.0"]).await;
-    assert_eq!(yanked.status.code(), Some(0), "{}", text(&yanked));
-    assert!(text(&yanked).contains("yanked"));
+    let requests = store.state.lock().unwrap().requests.len();
+    for args in [&["yank", "focus-board", "1.0.0"][..], &["unyank", "focus-board", "1.0.0"], &["withdraw", "focus-board", "1.0.0"], &["key", "list", "focus-board"]] {
+        let out = run.zeron(&store, Some(&secret), args).await;
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", text(&out));
+        assert!(text(&out).contains("a deploy key only publishes and reads status"), "{}", text(&out));
+    }
+    assert_eq!(store.state.lock().unwrap().requests.len(), requests, "nothing was sent");
 }
 
 #[tokio::test(flavor = "multi_thread")]

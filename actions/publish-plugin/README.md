@@ -7,7 +7,11 @@ signed with the plugin's deploy key. It installs Zeron's Linux command line
 
 ## Set up
 
-1. Make a deploy key for the plugin, on your own machine with Zeron
+1. Publish the plugin's first version from your own machine, with Zeron
+   running and signed in (`zeron plugin publish <plugin-id>`, or Settings →
+   Plugins → Yours → Publish…). That makes the id yours in the store. A deploy
+   key is made for a plugin you already have there.
+2. Make a deploy key for the plugin, on your own machine with Zeron
    running: Settings → Plugins → Yours → the plugin → Deploy keys, or
 
    ```sh
@@ -15,17 +19,32 @@ signed with the plugin's deploy key. It installs Zeron's Linux command line
    ```
 
    Its secret (`zpk_…`) is shown once. Zeron keeps no copy.
-2. Add the secret to the repository: Settings → Secrets and variables →
+3. Add the secret to the repository: Settings → Secrets and variables →
    Actions → New repository secret, named `ZERON_DEPLOY_KEY`.
-3. Add the step to a workflow:
+4. Add the step to a workflow, pinned to a Zeron release tag (or a commit
+   SHA), never a branch, so the step that holds your key doesn't change
+   under you:
 
    ```yaml
-   - uses: zeronsh/zeron/actions/publish-plugin@main
+   - uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
      with:
        key: ${{ secrets.ZERON_DEPLOY_KEY }}
    ```
 
-For example, to publish each time you push a tag:
+A deploy key can submit a new version of its plugin and read its review
+state, nothing else: yanking, withdrawing and managing keys are yours, from
+your machine. If one leaks, the most it can do is add a version that waits
+for review; revoke it (`zeron plugin key revoke <plugin-id> <key>`).
+
+## Runners
+
+Linux only: GitHub's `ubuntu-*` runners (x86_64 and arm64), or a
+self-hosted Linux runner with `curl`, `jq`, `sha256sum` and `tar`. macOS and
+Windows runners aren't supported.
+
+## A whole workflow
+
+To publish each time you push a tag:
 
 ```yaml
 name: Publish plugin
@@ -37,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: zeronsh/zeron/actions/publish-plugin@main
+      - uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
         with:
           key: ${{ secrets.ZERON_DEPLOY_KEY }}
 ```
@@ -61,9 +80,9 @@ The job's log says why, one line per problem, and the step exits with:
 | code | meaning |
 |---|---|
 | 1 | The plugin doesn't meet the store's rules (a missing README, a version that isn't strict semver or was submitted already, …). Fix it and push again. |
-| 2 | Set-up: no plugin in that folder, or the secret is damaged. |
-| 3 | The store refused the key or the account: the key was revoked or is another plugin's, the account has no username yet, or the id is someone else's. |
-| 4 | The store couldn't be reached. Re-run the job. |
+| 2 | Set-up: no plugin in that folder, the secret is damaged, or the runner's clock is more than five minutes out. |
+| 3 | The store refused the key or the account: the key was revoked, has expired or is another plugin's, the account has no username yet, or the id is someone else's. |
+| 4 | The store couldn't be reached, or what it received was damaged on the way. Re-run the job. |
 
 Revoke a key you no longer use, or one that may have leaked, with
 `zeron plugin key revoke <plugin-id> <key>`. Versions it already published

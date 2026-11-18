@@ -152,15 +152,8 @@ pub async fn run(
     };
     let client = match connect(ipc_port, data_dir).await {
         Ok(client) => client,
-        Err(error) if crate::store_cli::is_store_command(&command) => {
-            return Err(crate::store_cli::Exit {
-                code: crate::store_cli::SETUP,
-                message: format!(
-                    "{error} (From CI, set {} to a deploy key's secret: `zeron plugin key create`.)",
-                    zeron_engine::plugins::store::deploy_key::ENV
-                ),
-            }
-            .into());
+        Err(_) if crate::store_cli::is_store_command(&command) => {
+            return Err(crate::store_cli::Exit { code: crate::store_cli::SETUP, message: crate::store_cli::needs_zeron(&command) }.into());
         }
         Err(error) => return Err(error),
     };

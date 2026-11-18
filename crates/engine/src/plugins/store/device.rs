@@ -23,7 +23,7 @@ use super::client::{self, Caller, Installed as Asked, Offer, PackageRecord, Sear
 use super::deploy_key::DeployKey;
 use super::publish;
 use crate::plugins::install::{self, Found, STORE, Source, failure};
-use crate::plugins::listing::CATEGORIES;
+use crate::plugins::listing::{self, CATEGORIES};
 use crate::plugins::status::Blocked;
 use crate::plugins::version::{self, Version};
 use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, package, reviews, signing};
@@ -32,6 +32,13 @@ use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, pack
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// Versions of a plugin whose files stay cached.
 const CACHED_VERSIONS: usize = 3;
+/// The most every store file cached here comes to: past it, the oldest
+/// versions' go.
+const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+/// The most plugins one update check asks about (the edge's limit).
+pub const MAX_UPDATE_PLUGINS: usize = 200;
+/// What a report may say it's about (contract amendment 13).
+pub const REPORT_REASONS: &[&str] = &["malware", "misleading", "broken", "copyright", "other"];
 pub const CACHE_DIR: &str = "store-cache";
 
 /// The store's methods (`InstallPlugin {store}` and the update checks are
@@ -51,6 +58,7 @@ pub fn handles(method: &str) -> bool {
             | methods::LIST_DEPLOY_KEYS
             | methods::CREATE_DEPLOY_KEY
             | methods::REVOKE_DEPLOY_KEY
+            | methods::STORE_REPORT
     )
 }
 
@@ -72,6 +80,17 @@ struct PluginParams {
     /// Every version the caller may see, not only the latest few.
     #[serde(default)]
     versions: bool,
+    /// Judged for this version of Zeron (another device's), not this one's.
+    #[serde(default)]
+    for_zeron: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReportParams {
+    id: String,
+    reason: String,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -136,10 +155,32 @@ fn not_ok(error: &str) -> Value {
     json!({ "ok": false, "error": word, "message": message })
 }
 
+/// Characters that change how the text around them reads (direction
+/// overrides, invisible joiners): never kept from the store's words.
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}')
+}
+
 /// Words from the store, made safe to keep and show: one line, no control
-/// characters, not too long.
+/// or direction-changing characters, not too long.
 fn plain(text: &str, max: usize) -> String {
-    text.chars().map(|c| if c.is_control() { ' ' } else { c }).take(max).collect::<String>().trim().to_owned()
+    text.chars()
+        .filter(|c| !invisible(*c))
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// A version's notes (markdown) from the store: [`plain`], its lines kept.
+fn notes(text: &str, max: usize) -> String {
+    text.chars()
+        .filter(|c| !invisible(*c) && (*c == '\n' || !c.is_control()))
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 /// Whether `a` and `b` name the same version (strict precedence, or the
@@ -154,10 +195,7 @@ fn same_version(a: &str, b: &str) -> bool {
 /// Whether `candidate` is later than `installed`: by strict precedence (a
 /// store version always is one), else as sideloading compares.
 fn later(candidate: &str, installed: &str) -> bool {
-    match (Version::parse(candidate), Version::parse(installed)) {
-        (Ok(a), Ok(b)) => a > b,
-        _ => install::newer(candidate, installed),
-    }
+    install::newer_by_precedence(candidate, installed)
 }
 
 /// A store file's media type, by its name.
@@ -228,8 +266,12 @@ impl Plugins {
                     let (versions, _) = client.versions(&p.id, &caller).await.map_err(failed)?;
                     reply["versions"] = versions.get("versions").cloned().unwrap_or(json!([]));
                 }
+                let zeron = match p.for_zeron.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                    Some(v) => Version::parse(v).map_err(failed)?,
+                    None => version::zeron(),
+                };
                 let range = reply["engines"]["zeron"].as_str().map(str::to_owned);
-                match version::accepts(range.as_deref(), &version::zeron()) {
+                match version::accepts(range.as_deref(), &zeron) {
                     Ok(()) => reply["compatible"] = json!(true),
                     Err(why) => {
                         reply["compatible"] = json!(false);
@@ -327,6 +369,22 @@ impl Plugins {
             methods::CREATE_DEPLOY_KEY => {
                 let p: CreateKeyParams = parse_params(params)?;
                 RpcReply::value(&self.create_deploy_key(p).await)
+            }
+            methods::STORE_REPORT => {
+                let p: ReportParams = parse_params(params)?;
+                manifest::check_id(&p.id).map_err(failed)?;
+                if !REPORT_REASONS.contains(&p.reason.as_str()) {
+                    return Err(failed(format!("The reason is one of {}", REPORT_REASONS.join(", "))));
+                }
+                let text = p.text.as_deref().map(|t| notes(t, 2000)).filter(|t| !t.is_empty());
+                let (client, caller) = self.store_as_person().await.map_err(failed)?;
+                RpcReply::value(&match client.report(&p.id, &p.reason, text.as_deref(), &caller).await {
+                    Ok(mut value) => {
+                        value["ok"] = json!(true);
+                        value
+                    }
+                    Err(error) => not_ok(&error),
+                })
             }
             methods::REVOKE_DEPLOY_KEY => {
                 let p: RevokeKeyParams = parse_params(params)?;
@@ -427,6 +485,13 @@ impl Plugins {
             Ok(store) => store,
             Err(error) => return not_ok(&error),
         };
+        // A deploy key is for a plugin you have in the store already (its
+        // first version comes from your machine; amendment 17).
+        match client.my_plugins(&caller).await {
+            Ok(mine) if mine["plugins"].as_array().into_iter().flatten().any(|plugin| plugin["id"] == p.id.as_str()) => {}
+            Ok(_) => return not_published(&p.id),
+            Err(error) => return not_ok(&error),
+        }
         let step_up = lock(&self.inner.step_up).clone().and_then(|f| f());
         let Some(step_up) = step_up else {
             return not_ok(&failure("step_up_required", "Making a deploy key needs a fresh sign-in"));
@@ -444,6 +509,8 @@ impl Plugins {
                 tracing::info!(plugin = %p.id, key = %key.public(), "store: a deploy key was made");
                 json!({ "ok": true, "key": registered, "secret": key.secret() })
             }
+            // (The edge's word for an id this account doesn't own.)
+            Err(error) if install::reason_of(&error) == Some("not_found") => not_published(&p.id),
             Err(error) => not_ok(&error),
         }
     }
@@ -517,27 +584,38 @@ impl Plugins {
     pub(in crate::plugins) async fn fetch_from_store(&self, id: &str, version: Option<&str>, installed: bool) -> Result<(install::Package, Source), RpcError> {
         manifest::check_id(id).map_err(failed)?;
         let (client, caller) = self.store_reader()?;
-        let (_, detail) = client.plugin(id, &caller).await.map_err(failed)?;
-        let (version, record) = match version.map(str::trim).filter(|v| !v.is_empty()) {
-            None => (detail.version.clone(), detail.package.clone()),
-            Some(wanted) => {
-                let (_, versions) = client.versions(id, &caller).await.map_err(failed)?;
-                let found = versions
-                    .into_iter()
-                    .find(|v| v.version == wanted)
-                    .ok_or_else(|| failed(failure(client::reason::NOT_IN_STORE, format!("The store has no version {wanted} of {id}"))))?;
-                let usable = matches!(found.status.as_str(), "approved" | "pending") || (installed && found.status == "yanked");
-                if (found.yanked && !installed) || !usable {
-                    return Err(failed(failure(client::reason::NOT_IN_STORE, format!("Version {wanted} of {id} can't be installed any more"))));
+        let wanted = version.map(str::trim).filter(|v| !v.is_empty());
+        let not_listed = |error: &str| install::reason_of(error) == Some(client::reason::NOT_IN_STORE);
+        // What the store lists, to everyone.
+        let listed = match client.plugin(id, &caller).await {
+            Ok((_, detail)) => match wanted {
+                None => (!detail.version.is_empty()).then(|| (detail.version.clone(), detail.package.clone(), detail.author.username.clone())),
+                Some(wanted) => {
+                    let (_, versions) = client.versions(id, &caller).await.map_err(failed)?;
+                    let found = versions.into_iter().find(|v| v.version == wanted);
+                    match found {
+                        Some(found) => {
+                            let usable = matches!(found.status.as_str(), "approved" | "pending") || (installed && found.status == "yanked");
+                            if (found.yanked && !installed) || !usable {
+                                return Err(failed(failure(client::reason::NOT_IN_STORE, format!("Version {wanted} of {id} can't be installed any more"))));
+                            }
+                            let record = PackageRecord { hash: found.hash, sha256: found.sha256, bytes: found.bytes, key: found.key };
+                            Some((found.version, record, detail.author.username.clone()))
+                        }
+                        None => None,
+                    }
                 }
-                (found.version, PackageRecord { hash: found.hash, sha256: found.sha256, bytes: found.bytes, key: found.key })
-            }
+            },
+            Err(error) if not_listed(&error) => None,
+            Err(error) => return Err(failed(error)),
         };
-        if version.is_empty() {
-            return Err(failed(failure(client::reason::NOT_IN_STORE, format!("{id} has no version to install yet"))));
-        }
+        let (version, record, publisher) = match listed {
+            Some(listed) => listed,
+            // Not listed to everyone (yet): your own, in review, as your
+            // plugins in the store say it, for your devices alone.
+            None => self.own_record(&client, id, wanted, installed).await.map_err(failed)?,
+        };
         let raw = client.package(id, &version, &caller).await.map_err(failed)?;
-        let publisher = detail.author.username.clone();
         let (id_owned, version_owned) = (id.to_owned(), version.clone());
         let (package, store) = tokio::task::spawn_blocking(move || super::verify(raw, &id_owned, &version_owned, &record, publisher.as_deref()))
             .await
@@ -545,6 +623,41 @@ impl Plugins {
             .map_err(failed)?;
         let source = Source { kind: STORE.into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: Some(store) };
         Ok((package, source))
+    }
+
+    /// Plugin `id`'s version `wanted` (none: its latest) among your own
+    /// plugins in the store (`/me/plugins`): its version, its record, and
+    /// you as its publisher. `not_in_store` when it isn't yours, or there's
+    /// no such version to install.
+    async fn own_record(&self, client: &StoreClient, id: &str, wanted: Option<&str>, installed: bool) -> Result<(String, PackageRecord, Option<String>), String> {
+        let missing = || failure(client::reason::NOT_IN_STORE, format!("The store has no {id}{} for you", wanted.map(|w| format!(" {w}")).unwrap_or_default()));
+        let Ok((_, caller)) = self.store_as_person().await else {
+            return Err(missing());
+        };
+        let mine = client.my_plugins(&caller).await?;
+        let Some(plugin) = mine["plugins"].as_array().into_iter().flatten().find(|p| p["id"] == id) else {
+            return Err(missing());
+        };
+        let versions: Vec<client::VersionRecord> = plugin["versions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
+        let usable = |v: &client::VersionRecord| matches!(v.status.as_str(), "approved" | "pending") || (installed && v.status == "yanked");
+        let chosen = match wanted {
+            Some(wanted) => versions.into_iter().find(|v| v.version == wanted && usable(v)),
+            None => versions
+                .into_iter()
+                .filter(|v| usable(v) && !v.yanked)
+                .filter_map(|v| Version::parse(&v.version).ok().map(|at| (at, v)))
+                .max_by(|a, b| a.0.cmp(&b.0))
+                .map(|(_, v)| v),
+        };
+        let found = chosen.ok_or_else(missing)?;
+        let publisher = plugin["author"]["username"].as_str().map(str::to_owned);
+        let record = PackageRecord { hash: found.hash, sha256: found.sha256, bytes: found.bytes, key: found.key };
+        Ok((found.version, record, publisher))
     }
 
     /// The batched check for every plugin installed from the store (or
@@ -579,37 +692,50 @@ impl Plugins {
             Ok(store) => store,
             Err(error) => return (Vec::new(), candidates.iter().map(|c| said(c, &error.to_string())).collect()),
         };
-        let ask = UpdatesAsk {
-            zeron: version::zeron().to_string(),
-            plugins: candidates
-                .iter()
-                .map(|c| Asked { id: c.id.clone(), version: c.version.clone(), hash: c.hash.clone(), prerelease: c.prerelease })
-                .collect(),
-        };
-        let reply = match client.updates(&ask, &caller).await {
-            Ok(reply) => reply,
-            // Offline: what's installed keeps running; the next check asks again.
-            Err(error) => return (Vec::new(), candidates.iter().map(|c| said(c, &error)).collect()),
-        };
         let by_id: HashMap<&str, &Candidate> = candidates.iter().map(|c| (c.id.as_str(), c)).collect();
-        for block in &reply.blocked {
+        let mut errors = Vec::new();
+        let mut offers: BTreeMap<String, Offer> = BTreeMap::new();
+        let mut blocks = Vec::new();
+        // At most the edge's limit per request.
+        for batch in candidates.chunks(MAX_UPDATE_PLUGINS) {
+            let ask = UpdatesAsk {
+                zeron: version::zeron().to_string(),
+                plugins: batch
+                    .iter()
+                    .map(|c| Asked { id: c.id.clone(), version: c.version.clone(), hash: c.hash.clone(), prerelease: c.prerelease })
+                    .collect(),
+            };
+            let reply = match client.updates(&ask, &caller).await {
+                Ok(reply) => reply,
+                // Offline: what's installed keeps running; the next check asks again.
+                Err(error) => {
+                    errors.extend(batch.iter().map(|c| said(c, &error)));
+                    continue;
+                }
+            };
+            for unreadable in reply.unreadable.iter().flatten() {
+                if let Some(c) = by_id.get(unreadable.as_str()) {
+                    errors.push(said(c, &failure(client::reason::STORE_ERROR, "The store's answer about it couldn't be read")));
+                }
+            }
+            blocks.extend(reply.blocked);
+            // One offer per plugin asked about; anything else the store says
+            // is none of this device's business.
+            for offer in reply.updates {
+                if by_id.contains_key(offer.id.as_str()) {
+                    offers.entry(offer.id.clone()).or_insert(offer);
+                }
+            }
+        }
+        for block in &blocks {
             if let Some(c) = by_id.get(block.id.as_str())
                 && same_version(&block.version, &c.version)
             {
-                self.block(c, &plain(&block.reason, 500));
-            }
-        }
-        // One offer per plugin asked about; anything else the store says is
-        // none of this device's business.
-        let mut offers: BTreeMap<String, Offer> = BTreeMap::new();
-        for offer in reply.updates {
-            if by_id.contains_key(offer.id.as_str()) {
-                offers.entry(offer.id.clone()).or_insert(offer);
+                self.block(c, &plain(&block.reason, 500)).await;
             }
         }
         let plugins_dir = self.inner.plugins_dir.clone();
         let mut updates = Vec::new();
-        let mut errors = Vec::new();
         for c in &candidates {
             let Some(offer) = offers.remove(&c.id) else {
                 install::forget_found(&plugins_dir, &c.id);
@@ -676,7 +802,7 @@ impl Plugins {
             new_key: false,
             new_owner,
             in_review: offer.in_review,
-            notes: plain(&offer.notes, 20_000),
+            notes: notes(&offer.notes, listing::MAX_NOTES_BYTES),
         };
         let keep = found.refused.is_none().then_some(&package);
         install::keep_found(&plugins_dir, &c.id, &found, keep)?;
@@ -685,7 +811,13 @@ impl Plugins {
 
     /// `c`'s installed version is blocked by the store: turned off, the
     /// reason kept, and you're told. Not again once you turned it back on.
-    fn block(&self, c: &Candidate, reason: &str) {
+    async fn block(&self, c: &Candidate, reason: &str) {
+        // Still the version the store blocked (not one installed while the
+        // check was out).
+        self.rescan().await;
+        if self.entry(&c.id).is_none_or(|e| e.item.version != c.version || e.item.hash != c.hash) {
+            return;
+        }
         let mut newly = false;
         let saved = self.update_state(|state| {
             if state.blocked.get(&c.id).is_some_and(|b| same_version(&b.version, &c.version)) {
@@ -719,17 +851,51 @@ impl Plugins {
     }
 }
 
-/// Keep the files of the newest few versions of a plugin cached.
-fn prune_cache(plugin_cache: &Path) {
-    let Ok(listed) = std::fs::read_dir(plugin_cache) else { return };
-    let mut versions: Vec<(std::time::SystemTime, PathBuf)> = listed
+/// `{ok: false, error: "not_published"}`: a deploy key is for a plugin you
+/// have in the store already.
+fn not_published(id: &str) -> Value {
+    not_ok(&failure(
+        "not_published",
+        format!("{id} isn't in the store as yours yet: publish its first version from this machine (`zeron plugin publish {id}`), then make a deploy key for it"),
+    ))
+}
+
+/// The bytes under `dir`.
+fn size_of(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .into_iter()
         .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|e| (e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), e.path()))
-        .collect();
-    versions.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, old) in versions.into_iter().skip(CACHED_VERSIONS) {
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => size_of(&e.path()),
+            _ => e.metadata().map(|m| m.len()).unwrap_or(0),
+        })
+        .sum()
+}
+
+/// Keep the files of the newest few versions of each plugin cached, and
+/// all of them under [`MAX_CACHE_BYTES`] (the oldest go first).
+fn prune_cache(plugin_cache: &Path) {
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+    let dirs = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).collect()
+    };
+    let mut versions = dirs(plugin_cache);
+    versions.sort_by_key(|p| std::cmp::Reverse(modified(p)));
+    for old in versions.into_iter().skip(CACHED_VERSIONS) {
         let _ = std::fs::remove_dir_all(old);
+    }
+    let Some(root) = plugin_cache.parent() else { return };
+    let mut all: Vec<(std::time::SystemTime, PathBuf, u64)> =
+        dirs(root).iter().flat_map(|plugin| dirs(plugin)).map(|v| (modified(&v), v.clone(), size_of(&v))).collect();
+    let mut total: u64 = all.iter().map(|(_, _, n)| n).sum();
+    all.sort_by_key(|(at, _, _)| *at);
+    for (_, old, bytes) in all {
+        if total <= MAX_CACHE_BYTES {
+            break;
+        }
+        let _ = std::fs::remove_dir_all(&old);
+        total = total.saturating_sub(bytes);
     }
 }
 

@@ -725,9 +725,11 @@ pub mod methods {
     /// `{q?, category?, keyword?, sort?, cursor?, limit?}` → `{items:
     /// [PluginCard + installed?: {version, status, store}], next_cursor?}`.
     pub const STORE_SEARCH: &str = "StoreSearch";
-    /// `{id}` → the store's `PluginDetail`, with `versions` (as the caller
-    /// may see them), `installed?: {version, hash, status, store, update?}`
-    /// and `compatible` (`incompatible?`: why not).
+    /// `{id, versions?, for_zeron?}` → the store's `PluginDetail` (with every
+    /// version the caller may see when `versions`), `installed?: {version,
+    /// hash, status, store, update?, blocked?}` and `compatible`
+    /// (`incompatible?`: why not), judged for Zeron `for_zeron` (another
+    /// device's version), else this one.
     pub const STORE_PLUGIN: &str = "StorePlugin";
     /// `{}` → `{categories: [{id, name}]}`.
     pub const STORE_CATEGORIES: &str = "StoreCategories";
@@ -765,6 +767,11 @@ pub mod methods {
     pub const CREATE_DEPLOY_KEY: &str = "CreateDeployKey";
     /// `{id, key}` → `{revoked: key}`.
     pub const REVOKE_DEPLOY_KEY: &str = "RevokeDeployKey";
+    /// `{id, reason, text?}` → `{ok: true, …}` or `{ok: false, error,
+    /// message}`: a listed plugin reported to the store's reviewers, by the
+    /// signed-in person. `reason` is `malware`, `misleading`, `broken`,
+    /// `copyright` or `other`.
+    pub const STORE_REPORT: &str = "StoreReport";
     /// `{source, title, body, session?}` → `{outcome: "posted" | "off" |
     /// "held" | "paced" | "unavailable"}`: a banner asked for (a plugin's),
     /// shown as the engine's own are, under the same Settings, at most a few
@@ -844,6 +851,7 @@ pub fn local_only(method: &str) -> bool {
             | methods::LIST_DEPLOY_KEYS
             | methods::CREATE_DEPLOY_KEY
             | methods::REVOKE_DEPLOY_KEY
+            | methods::STORE_REPORT
             // What a Cloud chat reaches: this device's app sets it, never
             // another device (a Cloud machine among them) and never an agent.
             | methods::CLOUD_SET_REACH

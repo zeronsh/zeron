@@ -68,6 +68,25 @@ fn sorted_unique<'a>(items: impl IntoIterator<Item = &'a String>) -> Vec<String>
 }
 
 /// The capability record of `manifest`, canonical (sorted, defaults filled).
+/// What a plugin asks for, as its consent sheet words it (and the store's
+/// pages, contract amendment 9): its permissions, what it changes and
+/// replaces, the programs it runs and the hosts it reaches, each rated
+/// (`zeron_plugin_guard::consent`), and its tools.
+pub fn consent_item(manifest: &Manifest) -> Value {
+    use zeron_plugin_guard::consent;
+    json!({
+        "asks": manifest.permissions,
+        "ui": { "change": manifest.ui.change, "replace": manifest.ui.replace },
+        "commands": manifest.commands,
+        "commands_anything": consent::anything(&manifest.commands),
+        "commands_full_control": consent::full_control(&manifest.commands),
+        "network_hosts": manifest.network_hosts,
+        "network_local": consent::local(&manifest.network_hosts),
+        "network_named": consent::named(&manifest.network_hosts),
+        "tools": manifest.tools.iter().map(|t| json!({ "name": t.name, "description": t.description })).collect::<Vec<_>>(),
+    })
+}
+
 pub fn record(manifest: &Manifest) -> Value {
     let mut tools: Vec<Value> = manifest
         .tools
