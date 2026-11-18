@@ -852,13 +852,25 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						gap = "$space.2",
 						items = "center",
 						flex_wrap = true,
-						ui.text {
-							function(): string
-								return browse.author(d())
-							end,
-							text_size = "$font.size.sm",
-							line_height = "$font.line.sm",
-							color = "$text.secondary",
+						-- (Who made it: a link to their plugins in Browse, as a
+						-- keyword narrows it to its own.)
+						ui.div {
+							id = "store-author",
+							ds.Link {
+								function(): string
+									return browse.author(d())
+								end,
+								size = "sm",
+								tone = "quiet",
+								on_click = function()
+									local a: any = d().author
+									local name = if type(a) == "table" and type(a.username) == "string" then a.username else ""
+									if name ~= "" then
+										browse.show_author(name)
+										nav.back()
+									end
+								end,
+							},
 						},
 						browse.badges(d),
 					},

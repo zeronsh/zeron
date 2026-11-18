@@ -6,7 +6,7 @@
 //! through MCP; this only carries its answers, as src/acp_registry.rs does
 //! the registry's. Method by method (crates/rpc `STORE_*`):
 //!
-//!   plugins.store.search { q?, category?, keyword?, sort?, cursor?, limit?, featured? }
+//!   plugins.store.search { q?, category?, keyword?, author?, sort?, cursor?, limit?, featured?, verified? }
 //!                                     StoreSearch
 //!   plugins.store.detail(id | { id, for_zeron })  StorePlugin { id,
 //!                                     versions: true, for_zeron? }: the
@@ -87,7 +87,7 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         let e = e.clone();
         async move {
             let mut params = json!({});
-            for key in ["q", "category", "keyword", "sort", "cursor"] {
+            for key in ["q", "category", "keyword", "author", "sort", "cursor"] {
                 if let Some(v) = arg.field(key).map(text).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
                     params[key] = json!(v);
                 }
@@ -100,6 +100,10 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             }
             if matches!(arg.field("featured"), Some(Value::Bool(true))) {
                 params["featured"] = json!(true);
+            }
+            // (Only plugins whose newest version the store has verified.)
+            if matches!(arg.field("verified"), Some(Value::Bool(true))) {
+                params["verified"] = json!(true);
             }
             ask(&e, "StoreSearch", params).await
         }

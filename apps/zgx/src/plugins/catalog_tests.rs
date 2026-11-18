@@ -117,6 +117,14 @@ fn a_search_sends_what_was_asked_and_nothing_empty() {
     );
     assert_eq!(asked[0].0, "StoreSearch");
     assert_eq!(asked[0].1, json!({ "q": "timer", "sort": "popular", "limit": 50, "featured": true }));
+    // A publisher's plugins, verified ones alone; false and empty are left out.
+    let (_, asked) = run(
+        r#"ui.call("plugins.store.search", { author = " ada ", verified = true, keyword = "" })"#,
+        json!({ "items": [] }),
+    );
+    assert_eq!(asked[0].1, json!({ "author": "ada", "verified": true }));
+    let (_, asked) = run(r#"ui.call("plugins.store.search", { verified = false })"#, json!({ "items": [] }));
+    assert_eq!(asked[0].1, json!({}));
 }
 
 #[test]

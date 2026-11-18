@@ -3866,6 +3866,9 @@
       "open_settings": "打开设置",
       "category_label": "类别",
       "all_categories": "所有类别",
+      "verified": "已验证",
+      "verified_only": "仅显示已验证",
+      "category_count": "{name}（{n}）",
       "order_label": "排序",
       "sort": {
         "relevance": "最相关",

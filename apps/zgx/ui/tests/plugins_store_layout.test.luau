@@ -243,12 +243,12 @@ test("the featured never wrap: three across while each keeps its least, else run
 	end
 end)
 
-test("the list's head holds its count, then the category and the order at its end; where they don't fit beside it, on a line of their own under it", function()
+test("the list's head holds its count, then Verified only, the category and the order at its end; where they don't fit beside it, on a line of their own under it", function()
 	local app = mounted()
 	app:click('role:tab "Browse"')
 	app:wait("#store-rows", { timeout_ms = 3000 })
 	settle(app, 500)
-	for _, width in { 1000, 560, 480 } do
+	for _, width in { 1000, 760, 560, 480 } do
 		app:resize(width, 900)
 		settle(app)
 		local title = box(app, '#store-list >> role:heading')
@@ -256,15 +256,23 @@ test("the list's head holds its count, then the category and the order at its en
 		local card = box(app, "#store-card")
 		-- (The order ends on the content edge either way.)
 		expect(`{width}: {math.abs(order.x + order.w - (card.x + card.w - INSET)) < 0.6}`).to_be(`{width}: true`)
-		if width >= 560 then
+		if width >= 760 then
 			-- One line: the count's words end before the category begins,
 			-- all centred on it.
 			expect(`{width}: {title.x + title.w <= category.x}`).to_be(`{width}: true`)
 			expect(`{width}: {math.abs((title.y + title.h / 2) - (order.y + order.h / 2)) < 0.6}`).to_be(`{width}: true`)
 		else
-			-- Two: the controls 8 under the count, the card 8 under them.
-			expect(`{width}: {category.y - (title.y + title.h)}`).to_be(`{width}: 8`)
-			expect(`{width}: {card.y - (order.y + order.h)}`).to_be(`{width}: 8`)
+			-- On a line of their own: 8 under the count, the card 8 under
+			-- them; narrower still, Verified only over the two Selects, each
+			-- line ending on the content edge.
+			local controls = box(app, "#store-head-controls")
+			expect(`{width}: {controls.y - (title.y + title.h)}`).to_be(`{width}: 8`)
+			expect(`{width}: {card.y - (controls.y + controls.h)}`).to_be(`{width}: 8`)
+			local check = box(app, "#store-verified-only")
+			if check.y < category.y then
+				expect(`{width}: {math.abs(check.x + check.w - (card.x + card.w - INSET)) < 0.6}`).to_be(`{width}: true`)
+			end
+			expect(`{width}: {category.y}`).to_be(`{width}: {order.y}`)
 		end
 	end
 	-- Choosing a category narrows the list, and All categories widens it.
@@ -272,7 +280,7 @@ test("the list's head holds its count, then the category and the order at its en
 	settle(app)
 	app:click("#store-category")
 	app:frames(10)
-	app:click('role:menuitem "Git"')
+	app:click('role:menuitem ~"Git ("')
 	settle(app)
 	expect(app:state("store_category")).to_be("git")
 	app:click("#store-category")

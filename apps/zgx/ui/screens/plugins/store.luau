@@ -69,6 +69,10 @@ export type Card = {
 	updated_at: number?,
 	installs: number?,
 	featured: boolean?,
+	-- Whether the store has verified `version` (its newest listed one), and
+	-- the newest version it has verified (nil: none yet).
+	verified: boolean?,
+	verified_version: string?,
 }
 export type Version = {
 	version: string,
@@ -84,6 +88,10 @@ export type Query = {
 	q: string?,
 	category: string?,
 	keyword: string?,
+	-- One publisher's plugins (a username), and whether only plugins whose
+	-- newest version is verified.
+	author: string?,
+	verified: boolean?,
 	sort: string?,
 	cursor: string?,
 	limit: number?,

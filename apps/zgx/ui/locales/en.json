@@ -3866,6 +3866,9 @@
       "open_settings": "Open settings",
       "category_label": "Category",
       "all_categories": "All categories",
+      "verified": "Verified",
+      "verified_only": "Verified only",
+      "category_count": "{name} ({n})",
       "order_label": "Order",
       "sort": {
         "relevance": "Best match",

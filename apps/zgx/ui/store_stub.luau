@@ -194,6 +194,10 @@ for i, name in WORDS do
 		updated_at = NOW - i * DAY,
 		installs = (80 - i) * 137 + (i % 7) * 3,
 		featured = i == 1 or i == 4 or i == 9,
+		-- (Two in three verified, the featured among them; of the rest, every
+		-- other has an older version that is.)
+		verified = i % 3 ~= 2,
+		verified_version = if i % 3 ~= 2 then `1.{i % 4}.0` elseif i % 2 == 0 then "1.0.0" else nil,
 	}
 	local e: Entry = {
 		card = card,
@@ -385,6 +389,12 @@ local function search(q: store.Query): any
 		if ok and q.featured then
 			ok = c.featured == true
 		end
+		if ok and q.verified then
+			ok = c.verified == true
+		end
+		if ok and q.author and q.author ~= "" then
+			ok = (c.author :: any).username == q.author
+		end
 		if ok then
 			table.insert(out, e)
 		end
@@ -427,7 +437,7 @@ end
 
 local stub = store :: any
 stub.search = function(q: store.Query): any
-	note(`search:q={q.q or ""},category={q.category or ""},keyword={q.keyword or ""},sort={q.sort or ""},cursor={q.cursor or ""}{if q.featured then ",featured" else ""}`)
+	note(`search:q={q.q or ""},category={q.category or ""},keyword={q.keyword or ""},sort={q.sort or ""},cursor={q.cursor or ""}{if q.featured then ",featured" else ""}{if q.author then `,author={q.author}` else ""}{if q.verified then ",verified" else ""}`)
 	local asked = table.clone(q)
 	return answer(function(): any
 		return search(asked)
@@ -461,7 +471,18 @@ end
 stub.categories = function(): any
 	note("categories")
 	return answer(function(): any
-		return { categories = CATEGORIES }
+		-- (Each with how many listed plugins it holds, as the store counts.)
+		local out = {}
+		for _, c in CATEGORIES do
+			local n = 0
+			for _, e in entries do
+				if table.find(e.card.categories or {}, c.id) then
+					n += 1
+				end
+			end
+			table.insert(out, { id = c.id, name = c.name, count = n })
+		end
+		return { categories = out }
 	end, true)
 end
 -- Pictures: the package's own, as files kept here (made-up: the app's own
