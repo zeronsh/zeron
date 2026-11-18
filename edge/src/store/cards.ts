@@ -74,6 +74,9 @@ export const pluginCard = (p: PluginRow, author: Author) => ({
   keywords: parseList(p.keywords),
   version: p.listed_version,
   updated_at: p.updated_at,
+  // First listed, what "new" sorts by (amendment 39); null only on an owner's
+  // or admin's card of a plugin never listed.
+  listed_at: p.listed_version ? p.listed_at : null,
   installs: p.installs,
   featured: p.featured_at !== null
 });

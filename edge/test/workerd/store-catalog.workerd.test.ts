@@ -135,6 +135,29 @@ describe("store catalog", () => {
     expect((await list(`q=zzzz${randomLetters(10)}`)).total).toBe(0);
   });
 
+  it("gives each card when it was first listed, the measure Newest sorts by", async () => {
+    const a = await author();
+    const tag = `t${randomLetters(8)}`;
+    const first = uniqueId();
+    const second = uniqueId();
+    await listed(a, first, "1.0.0", { manifest: { keywords: [tag] } });
+    await listed(a, second, "1.0.0", { manifest: { keywords: [tag] } });
+    // A later version moves updated_at, never listed_at.
+    const before = (await list(`keyword=${tag}&sort=new`)).items.find((c) => c.id === first) as Card & { listed_at: number; updated_at: number };
+    await listed(a, first, "1.1.0", { manifest: { keywords: [tag] } });
+    const page = (await list(`keyword=${tag}&sort=new`, a.userId)).items as (Card & { listed_at: number; updated_at: number })[];
+    expect(page.map((c) => c.id)).toEqual([second, first]);
+    expect(page[0]!.listed_at).toBeGreaterThanOrEqual(page[1]!.listed_at);
+    expect(page[1]!.listed_at).toBe(before.listed_at);
+    expect(page[1]!.updated_at).toBeGreaterThanOrEqual(before.updated_at);
+    // Never listed: the owner's card has none.
+    const quiet = uniqueId();
+    expect((await publish(a.userId, quiet, await makePackage({ id: quiet, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    const mine = (await json<{ plugins: { id: string; listed_at: number | null }[] }>(await call(a.userId, "GET", "/store/v1/me/plugins"))).plugins;
+    expect(mine.find((p) => p.id === quiet)!.listed_at).toBeNull();
+    expect(mine.find((p) => p.id === first)!.listed_at).toBe(before.listed_at);
+  });
+
   it("changes the total when a plugin is approved or taken down", async () => {
     const a = await author();
     const before = (await list("")).total;

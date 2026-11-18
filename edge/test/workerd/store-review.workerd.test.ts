@@ -99,6 +99,7 @@ describe("store admin routes", () => {
       keywords: expect.any(Array),
       version: "1.0.0",
       updated_at: expect.any(Number),
+      listed_at: expect.any(Number),
       installs: 0,
       featured: false
     });

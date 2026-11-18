@@ -82,7 +82,17 @@ describe("store answers", () => {
 
     const bad: string[] = [];
     const seen = { n: 0 };
-    for (const [what, res] of answers) walk(await res.json(), what, bad, seen);
+    const bodies: [string, any][] = [];
+    for (const [what, res] of answers) bodies.push([what, await res.json()]);
+    for (const [what, body] of bodies) walk(body, what, bad, seen);
+    // A listed plugin's card says when it was first listed (amendment 39).
+    const detail = bodies.find(([what]) => what === "detail")![1];
+    const listedAt = await env.STORE_DB.prepare("SELECT listed_at FROM plugins WHERE id = ?").bind(id).first<number>("listed_at");
+    expect(detail.listed_at).toBe(listedAt);
+    for (const what of ["list", "search"]) {
+      const card = bodies.find(([w]) => w === what)![1].items.find((c: { id: string }) => c.id === id);
+      expect(card, what).toMatchObject({ listed_at: listedAt, updated_at: expect.any(Number) });
+    }
     expect(bad).toEqual([]);
     // (The walk saw them: account ages, decisions, submissions, reports, the log.)
     expect(seen.n).toBeGreaterThan(60);
