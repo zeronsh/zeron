@@ -491,7 +491,7 @@ private fun AgentsPage(model: AppModel, cloudWithheld: Boolean) {
                 val active = cloud.activeAccount(agent)
                 CloudRow(
                     i, CloudStore.agents.size, agent.name,
-                    active?.let { it.email ?: it.displayName ?: if (it.kind == "key") agent.keyName else "Signed in" } ?: "Not signed in",
+                    active?.let { CloudStore.keyLine(it, agent) ?: it.email ?: it.displayName ?: "Signed in" } ?: "Not signed in",
                     leading = { AgentTile(agent.harness) },
                     trailing = {
                         when {
