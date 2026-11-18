@@ -306,8 +306,12 @@ function file(request: Request, id: string, version: string, path: string): Resp
 function mine(user: FakeUser) {
   return state.plugins
     .filter((p) => p.owner === user.id)
-    .map((p) => ({ ...card(p), listing: p.status === "suspended" ? "suspended" : listed(p) ? "listed" : "unlisted", versions: p.versions.map((v) => versionInfo(v, true)) }));
+    // (Each version's publisher_id is the account that published it: here always its owner, nothing being transferred in.)
+    .map((p) => ({ ...card(p), listing: p.status === "suspended" ? "suspended" : listed(p) ? "listed" : "unlisted", versions: p.versions.map((v) => ({ ...versionInfo(v, true), publisher_id: publisherOf(p.owner) })) }));
 }
+
+/** An account's opaque publisher id (amendment 33), as the edge spells one. */
+const publisherOf = (userId: string) => `pub_${[...userId].map((c) => c.charCodeAt(0).toString(16)).join("").padEnd(32, "0").slice(0, 32)}`;
 
 function versionAction(request: Request, id: string, version: string, action: string): Response {
   const who = writer(request);
@@ -802,7 +806,8 @@ async function route(request: Request): Promise<Response> {
   }
   if (a === "me" && b === "plugins" && method === "GET") {
     const s = session(request);
-    return s ? json({ plugins: mine(s.user) }) : fail(401, "signed_out");
+    // (`{publisher_id, plugins}`: the contract after e3daa69b4.)
+    return s ? json({ publisher_id: publisherOf(s.user.id), plugins: mine(s.user) }) : fail(401, "signed_out");
   }
   // The account's deploy keys (amendment 44): listed and revoked here; made only on a device.
   if (a === "me" && b === "keys") {

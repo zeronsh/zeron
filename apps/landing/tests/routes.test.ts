@@ -560,7 +560,27 @@ describe("the admin pages can't be told from pages that don't exist", () => {
     const page = await html("/account", ada);
     const response = await post("/admin/plugins/voice-memos/0.1.0/verify", ada, { csrf: tokenOf(page.body) });
     expect(response.status).toBe(404);
-    expect((await html("/plugins/voice-memos")).body).toContain(">Not verified<");
+    expect((await html("/plugins/voice-memos")).body).toContain(">Not verified yet<");
+  });
+
+  test("the public never reads a decline: a version a reviewer didn't verify is 'not verified yet' to anyone but its author and staff", async () => {
+    const page = (await html("/plugins/rough-draft")).body;
+    expect(page).toContain(">Not verified yet<");
+    expect(page).not.toContain(">Not verified<");
+    expect(page).not.toContain("The README is one line.");
+    expect((await html("/account/plugins/rough-draft", await site.signIn("user_ada"))).body).toContain(">Not verified<");
+  });
+
+  test("the app's link can name a version: 'Install 1.0.0 instead' beside an unverified newest, and a version's own page installs that version", async () => {
+    const page = (await html("/plugins/worst-case-listing-at-every-limit-xyz12")).body;
+    // (The newest by the plain link.)
+    expect(page).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install-link');
+    expect(page).toContain('<a href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12?version=1.0.0">Install 1.0.0 instead</a>');
+    const older = (await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.0.0")).body;
+    expect(older).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12?version=1.0.0" data-install-link');
+    expect(older).toContain("Install 1.0.0 in Zeron");
+    // (Its newest's page: the plain link.)
+    expect((await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.5.0")).body).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install-link');
   });
 });
 

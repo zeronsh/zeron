@@ -30,9 +30,10 @@ describe("the site says them where they belong", () => {
     expect(names).toEqual(["Listed", "No new installs", "Taken down", "Removed"]);
   });
 
-  test("whether it's verified: the public's two words, and the author's and staff's apart", () => {
+  test("whether it's verified: the public's two words, and a decline the author's and staff's alone", () => {
+    // (The contract's three states: a decline reads "Not verified" to its author only; the public reads "Not verified yet".)
     expect(verificationState({ verified: true }).label).toBe("Verified");
-    expect(verificationState({ verified: false }).label).toBe("Not verified");
+    expect(verificationState({ verified: false }).label).toBe("Not verified yet");
     expect(verificationState({ verified: false, review: { decided: false, decision: null } }).label).toBe("Not verified yet");
     expect(verificationState({ verified: false, review: { decided: true, decision: "declined", reason: "broken" } })).toMatchObject({ label: "Not verified", tone: "warning" });
   });

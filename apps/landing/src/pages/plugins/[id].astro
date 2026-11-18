@@ -2,7 +2,7 @@
 // A plugin's page: who made it, what it does (its README, as reviewed),
 // what it asks for, its versions, and Install in Zeron. The same for
 // everyone, so kept by the Worker cache for at most a minute.
-import { statusWords, store, storeAround } from "../../lib/store/words.ts";
+import { SITE_WORDS, statusWords, store, storeAround } from "../../lib/store/words.ts";
 import Asks from "../../components/kit/Asks.astro";
 import Install from "../../components/kit/Install.astro";
 import Strip from "../../components/kit/Strip.astro";
@@ -19,7 +19,7 @@ import { pluginTag, publicPage } from "../../lib/store/http.ts";
 import { drawn, keepable, type Drawn } from "../../lib/store/rendered.ts";
 import { stoppedWhy } from "../../lib/store/states.ts";
 import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
-import { fileUrl, httpsUrl, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
+import { appUrl, fileUrl, httpsUrl, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
 import type { VersionInfo } from "../../lib/store/types.ts";
 
 export const prerender = false;
@@ -154,7 +154,7 @@ const structured = plugin
               {plugin.author.badges.map((b) => <span class="badge sm" title={b.description}>{b.name}</span>)}
               <span class="dot" aria-hidden="true">·</span>
               <span class="num">{plugin.version}</span>
-              {plugin.verified ? <span class="badge sm ok" title="A reviewer checked this version.">{store("plugins.store.verified")}</span> : <span class="badge sm" title="No reviewer has verified this version yet.">{store("plugins.store.not_verified")}</span>}
+              {plugin.verified ? <span class="badge sm ok" title="Zeron verified this version.">{store("plugins.store.verified")}</span> : <span class="badge sm" title="Zeron hasn't verified this version yet.">{SITE_WORDS.undecided}</span>}
               <span class="dot" aria-hidden="true">·</span>
               <span class="num">{count(plugin.installs)} {plugin.installs === 1 ? "install" : "installs"}</span>
               <span class="dot updated" aria-hidden="true">·</span>
@@ -170,6 +170,7 @@ const structured = plugin
               {/* (The app's sentence, its verified version a link; then what that means, the web's.) */}
               <b>{plugin.verified_version ? <>{before}<a href={versionUrl(plugin.verified_version)}>{plugin.verified_version}</a>{after}</> : store("plugins.store.none_verified")}</b>{" "}
               It's listed as its author published it, and Zeron asks before it installs it.
+              {plugin.verified_version && <>{" "}<a href={appUrl(plugin.id, plugin.verified_version)}>{store("plugins.store.install_instead", { version: plugin.verified_version })}</a></>}
             </span>
           </p>
         )}
@@ -201,7 +202,7 @@ const structured = plugin
                       <div class="version-head">
                         <h2 class="num">{latest.version}</h2>
                         <span class="badge sm ok">Latest</span>
-                        {latest.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{store("plugins.store.not_verified")}</span>}
+                        {latest.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{SITE_WORDS.undecided}</span>}
                         {isPrerelease(latest.version) && <span class="badge sm info">Pre-release</span>}
                         {latest.yanked && <span class="badge sm warn" title={stoppedWhy(latest)}>{statusWords("yanked")}</span>}
                         <time datetime={new Date(when(latest)).toISOString()}>{day(when(latest))}</time>

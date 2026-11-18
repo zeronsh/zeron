@@ -24,6 +24,8 @@ test("sign in comes back only to a path here", () => {
 
 test("the app's link names only a store id", () => {
   expect(appUrl("focus-timer")).toBe("zeron://open/plugin/focus-timer");
+  // (The link can name a version: the contract's "The link can name a version".)
+  expect(appUrl("focus-timer", "1.2.0-beta.1")).toBe("zeron://open/plugin/focus-timer?version=1.2.0-beta.1");
 });
 
 test("a file's address encodes each part", () => {

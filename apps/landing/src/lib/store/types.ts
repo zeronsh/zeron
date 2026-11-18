@@ -34,6 +34,8 @@ export type ErrorWord =
   | "invalid_scope"
   | "not_owner"
   | "not_verified"
+  | "bad_listing"
+  | "claims_zeron"
   | "unauthenticated"
   | "bad_cursor"
   | "bad_path"
@@ -257,8 +259,14 @@ export type Listing = "listed" | "unlisted" | "suspended";
 
 export interface MyPlugin extends PluginCard {
   listing: Listing;
-  /** Every version, newest first. */
-  versions: VersionInfo[];
+  /** Every version, newest first; each with the account that published it (`publisher_id`, the owner's view). */
+  versions: (VersionInfo & { publisher_id?: string | null })[];
+}
+
+/** `GET /store/v1/me/plugins` (the contract after e3daa69b4, 227392be7): the account's publisher id, and its plugins. */
+export interface MyPlugins {
+  publisher_id?: string;
+  plugins: MyPlugin[];
 }
 
 /** What a deploy key may publish (amendment 44): all the account's plugins, or the ones named (sorted). */

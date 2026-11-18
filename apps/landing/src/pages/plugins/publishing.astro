@@ -26,11 +26,11 @@ const PARTS = [
 ] as const;
 ---
 
-<App title="Publishing guide · Plugins · Zeron" description="How to put a plugin in Zeron's store: what it needs, how to send it, and what a reviewer verifies." canonical="/plugins/publishing" current="guide" measure="prose">
+<App title="Publishing guide · Plugins · Zeron" description="How to put a plugin in Zeron's store: what it needs, how to send it, and how Zeron verifies it." canonical="/plugins/publishing" current="guide" measure="prose">
   <h1 slot="title" class="t-title">Publishing guide</h1>
 
   <article class="guide prose">
-    <p class="guide-lead">Anyone can share a Zeron plugin as a file or a link. The store is for the ones you want people to find: a version that passes the store's automatic checks is listed and installable the moment you send it, and a reviewer then reads it and marks it verified. Zeron says which versions are verified wherever it offers one.</p>
+    <p class="guide-lead">Anyone can share a Zeron plugin as a file or a link. The store is for the ones you want people to find: a version that passes the store's automatic checks is listed and installable the moment you send it, and Zeron verifies it once a reviewer has read it. Zeron says which versions are verified wherever it offers one.</p>
 
     <nav class="guide-parts" aria-label="On this page">
       <ol>
@@ -42,7 +42,7 @@ const PARTS = [
     <p>A plugin is a folder with its <code>zeron-plugin.json</code>. For the store, it also needs:</p>
     <ul>
       <li><strong><code>README.md</code></strong>, its page, at most 512 KB, in the store's Markdown (below). Pictures are files in the plugin, by a relative path (<code>![Board](shots/board.png)</code>). A picture from elsewhere shows as a link, because what is shown is what was reviewed.</li>
-      <li><strong><code>description</code></strong>: one line, at most 300 characters, its summary everywhere it's listed. Its <code>name</code> is at most 64. Neither may claim the store's mark: the words “verified” or “official”, or a check mark. The store refuses look-alike spellings too.</li>
+      <li><strong><code>description</code></strong>: one line, at most 300 characters, its summary everywhere it's listed. Its <code>name</code> is at most 64. Neither may claim Zeron's mark: the words “verified” or “official” in any spelling that reads as them (look-alike letters, letters spaced apart), or a check mark; nor hold a character drawn as nothing, but an emoji's own variation selector. A name or description that says the plugin is Zeron's own (“by Zeron”, “Zeron team”, “Zeron approved”) is refused from anyone but Zeron. <code>zeron plugin check</code> warns of it (<code>claims_zeron</code>).</li>
       <li><strong><code>icon</code></strong>: an SVG in the plugin, at most 32 KB. It's drawn in the text's colour, as Zeron draws its own.</li>
       <li><strong><code>categories</code></strong>: one or two of {CATEGORIES.map((c, i) => <>{i > 0 && (i === CATEGORIES.length - 1 ? " and " : ", ")}<code>{c.id}</code></>)}.</li>
       <li><strong><code>version</code></strong>: strict semver, <code>1.2.0</code> or <code>2.0.0-beta.1</code>. No <code>v</code>, no leading zeros.</li>
@@ -90,11 +90,11 @@ const PARTS = [
 
     <h2 id="review">Verification</h2>
     <p>Every version is listed once it passes the automatic checks: the package, its signature, its size, its version, new programs and hosts. A reviewer then reads it. They look at what it asks for (what's new since your last verified version first, and anything that reaches past Zeron most closely), what changed in its files, and its page as visitors will see it.</p>
-    <p>A version is verified, or not, with one of these reasons and the reviewer's own words:</p>
+    <p>Zeron verifies it, or doesn't, with one of these reasons and the reviewer's note:</p>
     <ul>
       {DECLINE_REASONS.map((r) => <li>{r.label}</li>)}
     </ul>
-    <p>A version that isn't verified stays listed: everyone sees only that it isn't verified, and installing it always asks first. You read the reason and the reviewer's words in Zeron, the command line and <a href="/account">Your plugins</a>; send the fix as a new version. Say plainly in the README what your plugin runs and where it connects; it's what a reviewer asks for most.</p>
+    <p>A version that isn't verified stays listed: everyone sees only that it isn't verified yet, and installing it always asks first. You read the reason and the reviewer's note in Zeron, the command line and <a href="/account">Your plugins</a>; send the fix as a new version. Say plainly in the README what your plugin runs and where it connects; it's what a reviewer asks for most.</p>
     <p>Anyone signed in can report a listed plugin. The reviewers can take a harmful version down, which turns it off on the devices that have it, or remove one that shouldn't be in the store; its author reads why.</p>
 
     <h2 id="versions">Versions</h2>

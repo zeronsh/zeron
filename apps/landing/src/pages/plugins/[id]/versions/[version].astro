@@ -13,7 +13,7 @@ import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
 import { isPluginId, isPrerelease, isVersion } from "../../../../lib/store/names.ts";
 import { drawn, keepable } from "../../../../lib/store/rendered.ts";
 import { fileUrl, pluginUrl } from "../../../../lib/store/urls.ts";
-import { statusWords, store, storeAround } from "../../../../lib/store/words.ts";
+import { SITE_WORDS, statusWords, store, storeAround } from "../../../../lib/store/words.ts";
 
 export const prerender = false;
 
@@ -61,7 +61,7 @@ const [onBefore, onAfter] = storeAround("plugins.store.verified_on", {}, "date")
           <div class="who">
             <h1 class="t-title">{name} <span class="num">{v.version}</span></h1>
             <p class="meta">
-              {v.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{store("plugins.store.not_verified")}</span>}
+              {v.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{SITE_WORDS.undecided}</span>}
               {isNewest && <span class="badge sm ok">Latest</span>}
               {isPrerelease(v.version) && <span class="badge sm info">Pre-release</span>}
               {v.yanked && <span class="badge sm warn">{statusWords("yanked")}</span>}
@@ -69,7 +69,8 @@ const [onBefore, onAfter] = storeAround("plugins.store.verified_on", {}, "date")
               {v.verified && v.verified_at && <span>{onBefore}<time datetime={new Date(v.verified_at).toISOString()}>{day(v.verified_at)}</time>{onAfter}</span>}
             </p>
           </div>
-          {!v.yanked && <Install id={id} name={name} off={false} />}
+          {/* (The newest by the plain link; any other by a link that names it.) */}
+          {!v.yanked && <Install id={id} name={name} off={false} version={isNewest ? undefined : v.version} />}
         </header>
         {v.yanked && <p class="notice warn" role="note"><Glyph name="danger-triangle" size={16} /><span>{stoppedWhy(v)}</span></p>}
         {!v.verified && (

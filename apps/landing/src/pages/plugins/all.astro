@@ -62,8 +62,8 @@ const sorts = (["relevance", "popular", "updated", "new"] as Sort[]).filter((s) 
 const heading = state.q ? `Results for “${state.q}”` : state.category ? categoryName(state.category) : state.keyword ? `Tagged “${state.keyword}”` : "All plugins";
 const title = state.q ? `“${state.q}” · Plugins · Zeron` : state.category ? `${categoryName(state.category)} plugins · Zeron` : "All plugins · Zeron";
 const description = state.category
-  ? `Plugins for Zeron in ${categoryName(state.category)}, each saying whether a reviewer verified it.`
-  : "Every plugin for Zeron: panels, commands, tools for your agents and more, each saying whether a reviewer verified it.";
+  ? `Plugins for Zeron in ${categoryName(state.category)}, each saying whether Zeron verified it.`
+  : "Every plugin for Zeron: panels, commands, tools for your agents and more, each saying whether Zeron verified it.";
 // Search results and later pages stay out of search engines; the list and its categories don't.
 const noindex = Boolean(state.q || state.cursor || state.keyword || state.verified);
 const here = `${Astro.url.pathname}${Astro.url.search}`;

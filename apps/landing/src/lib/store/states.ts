@@ -35,15 +35,16 @@ export function versionState(v: Pick<VersionInfo, "status"> & Pick<Partial<Versi
 }
 
 /**
- * Whether a reviewer verified it. The public reads Verified or Not verified;
- * its author and staff also read Not verified yet (no decision) apart from a
- * reviewer declining it (`review`, theirs only).
+ * Whether Zeron verified it (the contract's "Who does what, in words":
+ * Zeron verifies, a reviewer reads). Three states: Verified; Not verified
+ * yet (no decision, and all the public ever reads of one unverified); Not
+ * verified (declined: its author's and staff's, by `review`, only).
  */
 export function verificationState(v: Pick<VersionInfo, "verified"> & { review?: Review }): State {
-  if (v.verified) return { label: store("plugins.store.verified"), tone: "success", about: "A reviewer checked this version." };
-  if (v.review?.decision === "declined") return { label: store("plugins.store.not_verified"), tone: "warning", about: "A reviewer didn't verify it; their reason and words are below. It stays listed." };
+  if (v.verified) return { label: store("plugins.store.verified"), tone: "success", about: "Zeron verified this version." };
+  if (v.review?.decision === "declined") return { label: store("plugins.store.not_verified"), tone: "warning", about: "Zeron didn't verify it: the reviewer's note is below. It stays listed." };
   if (v.review && !v.review.decided) return { label: SITE_WORDS.undecided, tone: "info", about: `${store("plugins.store.review.waiting")}.` };
-  return { label: store("plugins.store.not_verified"), tone: "neutral", about: "No reviewer has verified this version." };
+  return { label: SITE_WORDS.undecided, tone: "neutral", about: "Zeron hasn't verified this version yet." };
 }
 
 /** The app's sentence for a superseded version (its replacer from the public field or the owner's). */

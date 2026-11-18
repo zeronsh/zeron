@@ -16,6 +16,7 @@ export const STORE_WORDS = {
   // A version not verified, and what the plugin's page says of it (amendment 45).
   "plugins.store.not_verified": "Not verified",
   "plugins.store.not_verified_line": "{version} isn't verified yet. {verified} is.",
+  "plugins.store.install_instead": "Install {version} instead",
   "plugins.store.none_verified": "No version of this plugin is verified yet.",
   "plugins.store.verified_on": "Verified on {date}",
   // A version's state.

@@ -12,7 +12,7 @@ import type {
   DeployKey,
   EdgeError,
   ErrorWord,
-  MyPlugin,
+  MyPlugins,
   PluginDetail,
   QueuePage,
   QueueState,
@@ -34,6 +34,7 @@ const ERROR_WORDS = new Set<string>([
   "needs_username", "id_taken", "id_reserved", "not_semver", "version_exists", "not_newer", "bad_package",
   "bad_signature", "key_not_allowed", "missing_readme", "missing_listing", "too_large", "conflict", "invalid_state",
   "unauthenticated", "bad_cursor", "bad_path", "site_id", "invalid_scope", "not_owner", "not_verified",
+  "bad_listing", "claims_zeron",
 ]);
 
 /** A binding: what `env.EDGE` is, and what a test hands in instead. */
@@ -160,7 +161,7 @@ export class Edge {
     return this.#session;
   }
 
-  myPlugins(): Promise<Result<{ plugins: MyPlugin[] }>> {
+  myPlugins(): Promise<Result<MyPlugins>> {
     return this.#json("/store/v1/me/plugins", { signedIn: true });
   }
 
