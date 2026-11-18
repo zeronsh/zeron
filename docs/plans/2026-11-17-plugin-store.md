@@ -358,3 +358,41 @@ Agreed after the plan was first written. Newest last.
    `paths`, `manifests`, `semver { parse, order, compare }`, `ranges`,
    `deploy_key { secret, public, proof_message, proof, request }`. The engine
    lane generates it; both sides' tests run every vector.
+8. **Web session**: `GET /auth/web/session` → `200 { user: { id, name,
+   avatar? }, username, roles, csrf, expires_at }` or `401 { error:
+   "signed_out" }`. `csrf` is the token forms carry; mutations take it as the
+   `X-CSRF-Token` header or a `csrf` form field (`POST /auth/web/logout` is a
+   plain form post). `return_to` is a same-site path or it is refused.
+9. **`PluginDetail.permissions` is the consent sheet's item**, ratings
+   included, so the web and the app say what a plugin asks for with one
+   wording: `{ asks, ui: { change, replace }, commands, commands_anything,
+   commands_full_control, network_hosts, network_local, network_named,
+   tools: [{ name, description }] }`. The edge computes it from the manifest
+   (never from anything the publisher sends). The tables behind the ratings
+   (`crates/plugin-guard`) are exported by the engine lane into the generated
+   vectors file as data, with `consent_items` vectors; the edge imports that
+   data, so there is one source and a test that holds both sides to it.
+10. **Catalog**: `featured=true` filters the featured row; `sort` is
+    `relevance | popular | updated | new`. An unknown or suspended plugin is
+    `404 { error: "not_found" }` to the public.
+11. **Owner and admin views**: `VersionInfo` gains `review?: { state,
+    reason?, message?, decided_at? }` and `checks?`. `/store/v1/me/plugins` →
+    `{ plugins: [PluginCard & { listing: "listed" | "unlisted" | "suspended",
+    versions: VersionInfo[] }] }`. Deploy keys list as `[{ key, name,
+    created_at, last_used_at?, expires_at?, revoked_at? }]`.
+12. **Admin**: `GET /store/v1/admin/plugins/:id` → `{ plugin, owner {
+    username, user_id, created_at }, versions (all states), reports,
+    featured, status }`. A submission is `{ plugin, version, publisher {
+    username, created_at, decisions { approved, rejected }, recent[] },
+    manifest, base? { version, manifest }, files [{ path, bytes, sha256,
+    binary }], base_files[], checks [{ id, level: "ok" | "warn" | "fail",
+    message }], permissions, permissions_diff }`. Bodies: transfer `{
+    to_username }`, feature `{ featured }`, suspend `{ reason }`, reports
+    resolve `{ resolution: "dismissed" | "actioned", note? }`. The site
+    fetches changed text files through the files route and computes line
+    diffs itself.
+13. **Report reasons**: `malware | misleading | broken | copyright | other`.
+14. **Packaged files are never active content**: the edge's file route sends
+    `Content-Security-Policy: sandbox; default-src 'none'` and `nosniff`,
+    and only known picture types inline.
+15. **CLI names**: `zeron plugin key create|list|revoke <id>`.
