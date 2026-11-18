@@ -2,7 +2,7 @@ import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GrantManyRequest, VaultProviderId } from "../../src/api";
 import { json, mockUpstream, nextTs, runnerCaller, setup, signedGrant, value, vault } from "./helpers";
-import type { TestDevice } from "../support";
+import { fakeJwt, type TestDevice } from "../support";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -174,5 +174,49 @@ describe("other sign-ins", () => {
     const ctx = await setup();
     await put(ctx, "ai-gateway-key", { key: "vck_gateway_000001" });
     expect(value(await vault().accounts(ctx.caller, "ai-gateway-key"))[0]).toMatchObject({ kind: "api-key", account: "…0001" });
+  });
+});
+
+describe("Hermes, Antigravity and Muse sign-ins", () => {
+  it("grants every login in one batch, refreshing Antigravity's at Google first", async () => {
+    const ctx = await setup();
+    const exp = (ms: number) => Math.floor(ms / 1000);
+    await put(ctx, "nous", {
+      nousAuth: {
+        access_token: fakeJwt({ exp: exp(Date.now() + 5 * HOUR), email: "ada@nous.example" }),
+        refresh_token: "nous-rt",
+        portal_base_url: "https://portal.nousresearch.com",
+        inference_base_url: "https://inference-api.nousresearch.com/v1"
+      }
+    });
+    await put(ctx, "xai-oauth", {
+      xaiOauth: { tokens: { access_token: fakeJwt({ exp: exp(Date.now() + 6 * HOUR), sub: "u1" }), refresh_token: "xai-rt" } }
+    });
+    await put(ctx, "antigravity", {
+      antigravityToken: {
+        client_id: "1071006060591-abc.apps.googleusercontent.com",
+        client_secret: "GOCSPX-test",
+        refresh_token: "1//google-rt",
+        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+        project_id: "proj-1"
+      }
+    });
+    await put(ctx, "muse", {
+      museAuth: { providers: { meta: { access_token: "meta-at", refresh_token: "meta-rt", expires_at: exp(Date.now() + 30 * 24 * HOUR) } } }
+    });
+    const upstream = mockUpstream({
+      "https://oauth2.googleapis.com/token": () => json({ access_token: "ya29.fresh", expires_in: 3599 })
+    });
+    const reply = value(
+      await vault().grantMany(ctx.caller, await batch(ctx.device, ctx.userId, ["antigravity", "muse", "nous", "xai-oauth"]))
+    );
+    expect(reply.missing).toEqual([]);
+    const by = Object.fromEntries(reply.grants.map((g) => [g.provider, g]));
+    expect(by.antigravity?.accessToken).toBe("ya29.fresh");
+    expect(by.nous?.settings?.portal_base_url).toBe("https://portal.nousresearch.com");
+    expect(JSON.parse(by.muse!.settings!.document!).providers.meta.refresh_token).toBe("");
+    expect(upstream.count("https://oauth2.googleapis.com/token")).toBe(1);
+    // Nothing a machine gets holds a refresh token.
+    expect(JSON.stringify(reply)).not.toMatch(/nous-rt|xai-rt|google-rt|meta-rt/);
   });
 });

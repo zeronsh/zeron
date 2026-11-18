@@ -2855,8 +2855,10 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
+        // (A Cloud machine's credential keys for this agent: crate::catalog_env.)
+        let env = crate::catalog_env::get(self.id());
         let (_scratch, mut child, stderr_tail, sign_in_prompted) = self
-            .spawn_agent(None, false, &[], None, &Default::default())
+            .spawn_agent(None, false, &[], None, &env)
             .await?;
         let (client, incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {

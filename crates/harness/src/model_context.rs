@@ -128,6 +128,8 @@ pub(crate) fn context(
         field(&mut hash, key.as_encoded_bytes());
         field(&mut hash, value.as_encoded_bytes());
     }
+    // A Cloud machine's credential keys for this agent (none elsewhere).
+    crate::catalog_env::hash_into(&mut hash, id);
     Ok(ModelContext {
         hash: format!("{:x}", hash.finalize()),
         binary_path: binary,

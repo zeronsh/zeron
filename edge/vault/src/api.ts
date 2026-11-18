@@ -19,7 +19,18 @@ export type VaultKeyProviderId =
   | "meta-key"
   | "cursor-key";
 
-export type VaultProviderId = "codex" | "claude" | "github" | "copilot" | "devin" | "grok" | VaultKeyProviderId;
+export type VaultProviderId =
+  | "codex"
+  | "claude"
+  | "github"
+  | "copilot"
+  | "devin"
+  | "grok"
+  | "xai-oauth"
+  | "nous"
+  | "antigravity"
+  | "muse"
+  | VaultKeyProviderId;
 
 export const VAULT_KEY_PROVIDERS: readonly VaultKeyProviderId[] = [
   "anthropic-key",
@@ -48,7 +59,11 @@ export const VAULT_PROVIDERS: readonly VaultProviderId[] = [
   "cursor-key",
   "copilot",
   "devin",
-  "grok"
+  "grok",
+  "xai-oauth",
+  "nous",
+  "antigravity",
+  "muse"
 ];
 
 /** What a client built before the providers above existed understands: a
@@ -241,6 +256,24 @@ export interface VaultStatusView {
  *   `grok login` writes (`key`, `refresh_token`, `expires_at`, `oidc_issuer`,
  *   `oidc_client_id`, identity fields) and its map key `{issuer}::{client_id}`.
  *   Refreshed by the vault at the issuer (an xAI host only).
+ * - `xai-oauth`: `{ xaiOauth }` — Hermes' `providers["xai-oauth"]` record
+ *   (`tokens: {access_token, refresh_token, id_token?, expires_in?,
+ *   token_type?}`, `discovery.token_endpoint?`) and optional `clientId`
+ *   (default Hermes' public xAI client). Refreshed at the token endpoint, an
+ *   `https` `x.ai` host only.
+ * - `nous`: `{ nousAuth }` — Hermes' `providers.nous` record (`access_token`,
+ *   `refresh_token`, `expires_at` ISO, `client_id`, `portal_base_url`,
+ *   `inference_base_url`, `scope`, `token_type`, …). Refreshed at
+ *   `{portal}/api/oauth/token` (an `https` `nousresearch.com` host only),
+ *   the refresh token in the `x-nous-refresh-token` header.
+ * - `antigravity`: `{ antigravityToken }` — Antigravity's `acp_token.json`
+ *   (`client_id`, `client_secret`, `refresh_token`, `token_uri`, `scopes`,
+ *   `project_id`). Refreshed at Google's token endpoint; Google refresh
+ *   tokens don't rotate.
+ * - `muse`: `{ museAuth }` — Muse's whole `auth.json` document; its
+ *   `providers.meta` login (`access_token`, `expires_at` Unix seconds) is
+ *   used until it expires (Muse refreshes nothing; it mints model keys from
+ *   the access token).
  * - `github`: not uploadable; use the device flow. The resulting user token
  *   stays in the vault: `github` grants are App installation tokens.
  */
@@ -251,7 +284,11 @@ export type VaultMaterial =
   | { readonly key: string; readonly expiresAt?: number }
   | { readonly copilotToken: string; readonly login: string }
   | { readonly devinCredentials: Record<string, unknown> }
-  | { readonly grokAuth: Record<string, unknown>; readonly scope: string };
+  | { readonly grokAuth: Record<string, unknown>; readonly scope: string }
+  | { readonly xaiOauth: Record<string, unknown>; readonly clientId?: string }
+  | { readonly nousAuth: Record<string, unknown> }
+  | { readonly antigravityToken: Record<string, unknown> }
+  | { readonly museAuth: Record<string, unknown> };
 
 export interface PutCredentialRequest {
   readonly material: VaultMaterial;
@@ -321,9 +358,14 @@ export interface Grant {
   readonly installationId?: number;
   /**
    * What the consumer needs beside the token to write the agent's own
-   * credential file, never secret: `devin`, the rest of `credentials.toml`
-   * (its server urls); `grok`, the `auth.json` entry's identity and issuer
-   * fields plus `scope` (its map key).
+   * credential file, never a refresh token: `devin`, the rest of
+   * `credentials.toml` (its server urls); `grok`, the `auth.json` entry's
+   * identity and issuer fields plus `scope` (its map key); `xai-oauth`,
+   * `token_endpoint`, `token_type`, `id_token`; `nous`, the record's
+   * non-token fields (`portal_base_url`, `inference_base_url`, `client_id`,
+   * `scope`, `token_type`); `antigravity`, `client_id`, `project_id`,
+   * `scopes` (space-separated); `muse`, `document` — the `auth.json` as
+   * uploaded, JSON-encoded, every `refresh_token` emptied.
    */
   readonly settings?: Readonly<Record<string, string>>;
   readonly generation: number;

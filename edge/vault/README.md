@@ -3,7 +3,8 @@
 The credential vault Worker (design: `docs/design/cloud-device.md`, "Credential vault"). It
 holds users' provider credentials encrypted, refreshes them, and hands enrolled devices
 short-lived **grants**: access tokens only, never refresh tokens. Providers: sign-ins `codex`,
-`claude`, `github`, `grok`, `copilot`, `devin`, and the user's own API keys (`anthropic-key`,
+`claude`, `github`, `grok`, `xai-oauth`, `nous`, `antigravity`, `muse`, `copilot`, `devin`, and
+the user's own API keys (`anthropic-key`,
 `openai-key`, `openrouter-key`, `gemini-key`, `xai-key`, `deepseek-key`, `ai-gateway-key`,
 `meta-key`, `cursor-key`). Which agent runs on which is `docs/design/cloud-device.md`,
 "Providers".
@@ -42,8 +43,10 @@ short-lived **grants**: access tokens only, never refresh tokens. Providers: sig
   The trade-off of not running an external KMS: secrets and DO storage are separate stores in
   the same Cloudflare account, so a storage dump alone decrypts nothing, but a compromise of
   the Cloudflare account itself could reach both.
-- **Refresh tokens go only to their issuer.** A Grok entry's issuer must be an `https` `x.ai`
-  host, checked at upload and again before every refresh; Devin's server urls must be Devin /
+- **Refresh tokens go only to their issuer.** Grok's and Hermes' xAI token endpoints must be
+  `https` `x.ai` hosts and Nous' portal an `https` `nousresearch.com` host, checked at upload and
+  again before every refresh; Antigravity refreshes at `oauth2.googleapis.com` whatever its file
+  names; Devin's server urls must be Devin /
   Windsurf / Codeium hosts. A grant's `settings` carry only those non-secret fields.
 - **One refresher per account.** Each `(user, provider)` is its own Durable Object, with a
   single-flight refresh gate. A new generation is persisted before any grant built from it is
@@ -109,14 +112,14 @@ the first 16 hex chars of SHA-256 of the key. Seals always use `VAULT_KEK`. Open
 
 ## Canary
 
-A daily cron (`0 6 * * *`) force-refreshes `CANARY_USER_ID`'s codex, claude, github and grok
-credentials through the same gate real grants use, and checks the GitHub App's credentials
+A daily cron (`0 6 * * *`) force-refreshes `CANARY_USER_ID`'s codex, claude, github, grok,
+xai-oauth, nous and antigravity credentials through the same gate real grants use, and checks the GitHub App's credentials
 (`GET /app` with an App JWT; status `app_valid` / `app_rejected`). For a Claude setup token, which cannot be
 refreshed, it checks that more than 30 days remain. Each result is stored in that account DO's
 `canary` table and logged as `{"event":"vault.canary","provider","ok","status"}`.
 
 To set it up, create a dedicated user, connect its credentials through the normal app flows
-(Grok included: until it is connected its canary reports `missing`), then set `CANARY_USER_ID`
+(each of the above: until one is connected its canary reports `missing`), then set `CANARY_USER_ID`
 to that user's id. Alert on `vault.canary` lines with `ok=false` in
 Workers observability. Statuses: `refreshed` / `valid` (ok); `missing`, `needs_reconnect`,
 `upstream`, `expiring`, `not_refreshable`, `error`.

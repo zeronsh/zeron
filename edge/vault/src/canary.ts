@@ -1,6 +1,7 @@
 /**
  * Daily canary (cron `0 6 * * *`): force one refresh of `CANARY_USER_ID`'s
- * credential for every refreshable provider (codex, claude, github, grok), through
+ * credential for every refreshable provider (codex, claude, github, grok,
+ * xai-oauth, nous, antigravity), through
  * the same per-account gate real grants use. A provider that changes its
  * refresh contract (new client id, new error shape, endpoint move) fails here
  * a day before users' grants start failing. A non-refreshable credential with

@@ -1613,7 +1613,7 @@ export class VaultAccount extends DurableObject<Env> {
   private async identityOf(secret: unknown, profile: VaultAccountProfile): Promise<string | undefined> {
     const value = (secret ?? {}) as Record<string, unknown>;
     const adapter = this.adapter();
-    if (adapter.identity) return adapter.identity(secret);
+    if (adapter.identity) return adapter.identity(secret, profile);
     if (isKeyProvider(this.provider)) {
       return typeof value.key === "string" ? `key:${await keyId(utf8(value.key))}` : undefined;
     }

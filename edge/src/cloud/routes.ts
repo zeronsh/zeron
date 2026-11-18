@@ -28,6 +28,7 @@
  *   POST   /runner/heartbeat               runner bearer
  *   POST   /runner/wake-timing             runner bearer: a wake's engine side
  *   POST   /runner/wake-stage              runner bearer: how far a wake has got
+ *   POST   /runner/models                  runner bearer: {harness, models, credential}, an agent's catalog
  *
  * Every route lands on the caller's OWN CloudAccount DO (`cloud1/{org}/{user}`,
  * org/user from the verified bearer — or, for the two pre-bearer runner
@@ -42,7 +43,7 @@ import type { CloudResult, RepoInput } from "./cloud-account";
 import type { SandboxMachine } from "./sandbox-provider";
 import { isEdgeOrigin } from "./install-script";
 import { DAY_MS, dayKey, isDayKey } from "./metering";
-import { CLOUD_MODELS } from "./models";
+import { MAX_PUBLISH_BODY, cloudModels, isCloudAgent, parsePublishedModels } from "./models";
 
 /** The longest range a usage read covers. */
 const MAX_USAGE_DAYS = 366;
@@ -319,6 +320,26 @@ export const handleCloudRoute = async (
     return rpc(() => accountStub(ns, runner.orgId, runner.userId).wakeStage(runner, parsed.stage));
   }
 
+  if (url.pathname === "/runner/models") {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+    if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
+      return jsonError(403, "forbidden", "Runner token required.");
+    }
+    const ns = env.CLOUD_ACCOUNTS;
+    if (!ns) return unavailable();
+    const body = await readJsonBody(request, MAX_PUBLISH_BODY);
+    if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
+    const { harness, credential } = body;
+    if (!isCloudAgent(harness)) return jsonError(400, "bad_request", "Unknown harness.");
+    if (typeof credential !== "string" || credential.length === 0 || credential.length > 512) {
+      return jsonError(400, "bad_request", "Expected credential: the catalog's credential fingerprint.");
+    }
+    const models = parsePublishedModels(body.models);
+    if (!models) return jsonError(400, "bad_request", "Expected models: a non-empty list of models.");
+    const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
+    return rpc(() => accountStub(ns, runner.orgId, runner.userId).publishModels(runner, harness, models, credential));
+  }
+
   if (url.pathname === "/runner/wake-timing") {
     if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
     if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
@@ -392,8 +413,18 @@ export const handleCloudRoute = async (
     return rpc(() => accountStub(ns, orgId, auth.userId).usage(caller, from, to));
   }
   if (rest.length === 1 && rest[0] === "models" && request.method === "GET") {
-    // Static (models.ts): readable whether or not this account turned Cloud on.
-    return json({ models: CLOUD_MODELS });
+    // The hand-kept lists (models.ts), readable whether or not this account
+    // turned Cloud on, and every other agent's catalog as a machine of this
+    // account last discovered it. A failure reading those still answers the
+    // hand-kept lists: the picker always has Claude Code's and Codex's.
+    if (!ns) return json({ models: cloudModels({}) });
+    let published = {};
+    try {
+      published = await accountStub(ns, orgId, auth.userId).publishedModels(caller);
+    } catch (e) {
+      console.error("cloud models: published catalogs unreadable", String(e));
+    }
+    return json({ models: cloudModels(published) });
   }
   if (rest[0] === "billing") {
     if (!ns) return unavailable();

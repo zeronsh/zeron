@@ -489,6 +489,7 @@ mod background;
 pub use background::{MarkOutcome, MarkRefused, OutputSource};
 pub mod bounded_file;
 mod catalog;
+pub mod catalog_env;
 mod catalog_failure;
 pub(crate) mod code_signature;
 /// Secret redaction, shared with the doc fold (command output tails).

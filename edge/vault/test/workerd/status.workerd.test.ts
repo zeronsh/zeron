@@ -137,7 +137,7 @@ describe("worker surface", () => {
 });
 
 describe("canary", () => {
-  it("force-refreshes codex, reports missing claude/github/grok, checks the GitHub App, records and logs results", async () => {
+  it("force-refreshes codex, reports missing logins, checks the GitHub App, records and logs results", async () => {
     const { userId, caller, device } = await setup();
     value(
       await vault().putCredential(caller, "codex", {
@@ -159,6 +159,9 @@ describe("canary", () => {
       { provider: "claude", ok: false, status: "missing" },
       { provider: "github", ok: false, status: "missing" },
       { provider: "grok", ok: false, status: "missing" },
+      { provider: "xai-oauth", ok: false, status: "missing" },
+      { provider: "nous", ok: false, status: "missing" },
+      { provider: "antigravity", ok: false, status: "missing" },
       { provider: "github", ok: true, status: "app_valid" }
     ]);
     expect(upstream.count(CODEX_TOKEN_URL)).toBe(1);
@@ -170,6 +173,9 @@ describe("canary", () => {
       { event: "vault.canary", provider: "claude", ok: false, status: "missing" },
       { event: "vault.canary", provider: "github", ok: false, status: "missing" },
       { event: "vault.canary", provider: "grok", ok: false, status: "missing" },
+      { event: "vault.canary", provider: "xai-oauth", ok: false, status: "missing" },
+      { event: "vault.canary", provider: "nous", ok: false, status: "missing" },
+      { event: "vault.canary", provider: "antigravity", ok: false, status: "missing" },
       { event: "vault.canary", provider: "github", ok: true, status: "app_valid" }
     ]);
     expect(value(await accountStub(env, userId, "codex").canaryLog(userId, "codex"))[0]).toMatchObject({

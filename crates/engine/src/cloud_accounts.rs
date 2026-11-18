@@ -219,12 +219,6 @@ fn no_cloud_sign_in(harness: HarnessId, provider: Option<&str>) -> RpcError {
         return not_cloud(harness);
     }
     let name = provider_name(harness);
-    if harness == HarnessId::Pi && provider == Some("anthropic") {
-        return RpcError::Failed(
-            "Pi's Claude sign-in isn't available on Cloud — add an Anthropic API key instead."
-                .into(),
-        );
-    }
     if cloud_login_options(harness).is_empty() {
         return RpcError::Failed(format!(
             "{name} on Cloud uses API keys — add one in Settings → Providers → Cloud."
@@ -387,6 +381,18 @@ fn to_agent_account(
     let label = account.account.as_deref();
     let label_is_email = label.is_some_and(|l| l.contains('@'));
     let vendor = provider.key_vendor();
+    // Only Claude's and Codex's logins name a plan when they carry no email;
+    // any other sign-in's label is who it is (a GitHub login, a key-like
+    // `…abcd`), else the kind of account it is.
+    let names_plan = matches!(provider, VaultProvider::Claude | VaultProvider::Codex);
+    let display_name = account.display_name.clone().or_else(|| {
+        if api_key || names_plan || label_is_email {
+            return None;
+        }
+        label
+            .map(str::to_string)
+            .or_else(|| login_name(provider).map(str::to_string))
+    });
     AgentAccount {
         id: format!("{}:{}", provider.as_str(), account.slot),
         harness,
@@ -413,8 +419,10 @@ fn to_agent_account(
                     }
                     _ => format!("API key {}", label.unwrap_or_default()),
                 })
-            } else {
+            } else if names_plan {
                 label.filter(|_| !label_is_email).map(plan_name)
+            } else {
+                None
             }
         }),
         active,
@@ -426,7 +434,7 @@ fn to_agent_account(
         } else {
             usage_error
         },
-        display_name: account.display_name.clone(),
+        display_name,
         organization: account.organization.clone(),
         auth_kind: Some(if api_key {
             AgentAuthKind::ApiKey
@@ -437,6 +445,20 @@ fn to_agent_account(
         saved_at: Some(account.updated_at),
         provider: group,
     }
+}
+
+/// What a sign-in of `provider` is, for a row with nothing better to show.
+fn login_name(provider: VaultProvider) -> Option<&'static str> {
+    Some(match provider {
+        VaultProvider::Grok => "Grok account",
+        VaultProvider::XaiOauth => "xAI account",
+        VaultProvider::Nous => "Nous Portal account",
+        VaultProvider::Antigravity => "Google account",
+        VaultProvider::Muse => "Meta account",
+        VaultProvider::Devin => "Devin account",
+        VaultProvider::Copilot => "GitHub Copilot account",
+        _ => return None,
+    })
 }
 
 /// A stored subscription type as the plan badge reads it (`max` → `Max`).
@@ -649,7 +671,12 @@ mod tests {
                 VaultConnectionStatus::Connected,
                 true
             )])),
-            vec![HarnessId::Codex, HarnessId::Pi]
+            vec![
+                HarnessId::Codex,
+                HarnessId::Hermes,
+                HarnessId::Pi,
+                HarnessId::Opencode
+            ]
         );
     }
 
@@ -666,7 +693,16 @@ mod tests {
             account_ref(HarnessId::Pi, "codex:a1").unwrap(),
             (VaultProvider::Codex, "a1")
         );
-        assert!(account_ref(HarnessId::Pi, "claude:a1").is_err());
+        // Pi's Claude is the Claude sign-in Claude Code runs on.
+        assert_eq!(
+            account_ref(HarnessId::Pi, "claude:a1").unwrap(),
+            (VaultProvider::Claude, "a1")
+        );
+        assert_eq!(
+            account_ref(HarnessId::Hermes, "nous:n1").unwrap(),
+            (VaultProvider::Nous, "n1")
+        );
+        assert!(account_ref(HarnessId::Opencode, "claude:a1").is_err());
         assert!(account_ref(HarnessId::Mock, "codex:a1").is_err());
     }
 
@@ -689,6 +725,19 @@ mod tests {
             login_stepping_aside(HarnessId::Fx, VaultProvider::AnthropicKey),
             None
         );
+        // Where a sign-in and a key fill one group, the key steps it aside.
+        assert_eq!(
+            login_stepping_aside(HarnessId::Antigravity, VaultProvider::GeminiKey),
+            Some(VaultProvider::Antigravity)
+        );
+        assert_eq!(
+            login_stepping_aside(HarnessId::Muse, VaultProvider::MetaKey),
+            Some(VaultProvider::Muse)
+        );
+        assert_eq!(
+            login_stepping_aside(HarnessId::Pi, VaultProvider::AnthropicKey),
+            Some(VaultProvider::Claude)
+        );
     }
 
     #[test]
@@ -697,9 +746,55 @@ mod tests {
             RpcError::Failed(message) => message,
             other => panic!("{other:?}"),
         };
-        assert!(message(HarnessId::Pi, Some("anthropic")).contains("Anthropic API key"));
-        assert!(message(HarnessId::Muse, None).contains("uses API keys"));
+        assert!(message(HarnessId::Fx, None).contains("uses API keys"));
+        assert!(message(HarnessId::Opencode, Some("anthropic")).contains("can't sign in to Anthropic"));
         assert!(message(HarnessId::Mock, None).contains("doesn't run on Cloud"));
+    }
+
+    #[test]
+    fn every_local_sign_in_has_a_cloud_card_row() {
+        let mut by: HashMap<VaultProvider, Vec<VaultAccount>> = HashMap::new();
+        let login = |slot: &str, label: Option<&str>| {
+            let mut account = vault(slot, "oauth", true);
+            account.email = None;
+            account.plan = None;
+            account.account = label.map(str::to_string);
+            account
+        };
+        by.insert(VaultProvider::Nous, vec![login("n1", None)]);
+        by.insert(VaultProvider::XaiOauth, vec![vault("x1", "oauth", true)]);
+        by.insert(VaultProvider::Codex, vec![vault("c1", "oauth", true)]);
+        by.insert(VaultProvider::Antigravity, vec![login("g1", None)]);
+        by.insert(VaultProvider::Muse, vec![login("m1", Some("Meta account"))]);
+        by.insert(VaultProvider::Claude, vec![vault("a1", "oauth", true)]);
+        let usages = HashMap::new();
+        let hermes = card(HarnessId::Hermes, &by, &usages);
+        let rows: Vec<_> = hermes
+            .iter()
+            .map(|a| (a.id.as_str(), a.provider.as_deref(), a.active))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("codex:c1", Some("openai-codex"), true),
+                ("nous:n1", Some("nous"), true),
+                ("xai-oauth:x1", Some("xai-oauth"), true),
+            ]
+        );
+        let nous = &hermes[1];
+        assert_eq!(nous.display_name.as_deref(), Some("Nous Portal account"));
+        assert_eq!(nous.plan_label, None);
+        assert_eq!(nous.auth_kind, Some(AgentAuthKind::Oauth));
+        let google = &card(HarnessId::Antigravity, &by, &usages)[0];
+        assert_eq!(google.display_name.as_deref(), Some("Google account"));
+        assert!(google.active);
+        let meta = &card(HarnessId::Muse, &by, &usages)[0];
+        assert_eq!(meta.display_name.as_deref(), Some("Meta account"));
+        // Pi's Anthropic group: the Claude sign-in Claude Code runs on.
+        let pi = card(HarnessId::Pi, &by, &usages);
+        assert!(pi.iter().any(|a| a.id == "claude:a1"
+            && a.provider.as_deref() == Some("anthropic")
+            && a.active));
     }
 
     #[test]

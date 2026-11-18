@@ -236,6 +236,16 @@ pub struct HarnessRegistry {
     account_environment: Mutex<Option<Arc<dyn RunEnvironment>>>,
     /// Credits Zeron in agents' commits ([`crate::commit_credit`]).
     commit_credit: std::sync::OnceLock<Arc<crate::commit_credit::CommitCredit>>,
+    /// Told of every run's prepared environment (Cloud runner only): it
+    /// keeps the account's model catalogs current on the edge.
+    catalog_publisher: std::sync::OnceLock<Arc<dyn CatalogPublisher>>,
+}
+
+/// Hears each run's prepared environment (the Cloud runner's catalog
+/// publisher, [`crate::model_publish`]). Must return at once: it is on the
+/// run's start path.
+pub trait CatalogPublisher: Send + Sync {
+    fn prepared(&self, harness: HarnessId, env: &std::collections::BTreeMap<String, String>);
 }
 
 impl Default for HarnessRegistry {
@@ -322,6 +332,7 @@ impl HarnessRegistry {
             run_environment_ready: tokio::sync::watch::channel(true).0,
             account_environment: Mutex::new(None),
             commit_credit: std::sync::OnceLock::new(),
+            catalog_publisher: std::sync::OnceLock::new(),
         }
     }
 
@@ -387,7 +398,15 @@ impl HarnessRegistry {
         if let Some(credit) = self.commit_credit.get() {
             credit.apply(&mut request.env);
         }
+        if let Some(publisher) = self.catalog_publisher.get() {
+            publisher.prepared(harness, &request.env);
+        }
         Ok(())
+    }
+
+    /// Install the catalog publisher (Cloud runner only; once).
+    pub fn set_catalog_publisher(&self, publisher: Arc<dyn CatalogPublisher>) {
+        let _ = self.catalog_publisher.set(publisher);
     }
 
     /// [`RunEnvironment::credential`] (`None` without a provider).

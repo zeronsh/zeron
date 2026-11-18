@@ -2023,24 +2023,43 @@ mod tests {
         assert!(keys.iter().all(|k| k.provider.ends_with("-key")));
     }
 
-    /// On Cloud, a per-provider agent's groups are what it runs on there: a
-    /// sign-in only where Cloud takes one, and no key added in the card.
+    /// On Cloud, a per-provider agent's groups are what it runs on there:
+    /// every sign-in it offers on a computer, and no key added in the card.
     #[test]
     fn cloud_groups_follow_what_cloud_runs() {
+        let named = |groups: &[Group]| -> Vec<(String, Option<String>)> {
+            groups.iter().map(|g| (g.provider.clone(), g.login.clone())).collect()
+        };
         let pi = zeron_proto::HarnessId::Pi;
         let groups = provider_groups_on(pi, &[json!({ "id": "codex:a", "harness": "pi", "provider": "openai-codex" })], true);
-        let named: Vec<(&str, Option<&str>, Option<&str>)> =
-            groups.iter().map(|g| (g.provider.as_str(), g.login.as_deref(), g.key.as_deref())).collect();
-        assert_eq!(named, [("openai-codex", Some("ChatGPT"), None), ("github-copilot", Some("GitHub Copilot"), None)]);
+        assert_eq!(
+            named(&groups),
+            [
+                ("openai-codex".to_string(), Some("ChatGPT".to_string())),
+                ("anthropic".to_string(), Some("Claude".to_string())),
+                ("github-copilot".to_string(), Some("GitHub Copilot".to_string())),
+            ]
+        );
+        assert!(groups.iter().all(|g| g.key.is_none()));
         assert_eq!(groups[0].rows, [0]);
-        // OpenCode on Cloud signs in to nothing: only groups with accounts show.
+        // OpenCode and Hermes: their own sign-ins first; a key-only group
+        // shows once it holds an account.
         let opencode = provider_groups_on(
             zeron_proto::HarnessId::Opencode,
             &[json!({ "id": "openrouter-key:k", "harness": "opencode", "provider": "openrouter" })],
             true,
         );
-        assert_eq!(opencode.len(), 1);
-        assert_eq!(opencode[0].name, "OpenRouter");
+        assert_eq!(
+            named(&opencode),
+            [
+                ("openai".to_string(), Some("ChatGPT".to_string())),
+                ("github-copilot".to_string(), Some("GitHub Copilot".to_string())),
+                ("openrouter".to_string(), None),
+            ]
+        );
+        let hermes = provider_groups_on(zeron_proto::HarnessId::Hermes, &[], true);
+        let logins: Vec<_> = hermes.iter().filter_map(|g| g.login.clone()).collect();
+        assert_eq!(logins, ["ChatGPT", "Nous Portal", "xAI"]);
     }
 
     /// A Cloud API key goes to the vault for the account's Cloud device:

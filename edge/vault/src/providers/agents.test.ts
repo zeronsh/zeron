@@ -57,7 +57,7 @@ describe("copilot", () => {
     const parsed = parseCopilotUpload({ copilotToken: "gho_abcdefghijklmnopqrstuvwxyz0123", login: "Octo-Cat" });
     if (!parsed.ok) throw new Error(parsed.message);
     expect(copilotAdapter.account(parsed.secret)).toBe("Octo-Cat");
-    expect(await copilotAdapter.identity!(parsed.secret)).toBe("login:octo-cat");
+    expect(await copilotAdapter.identity!(parsed.secret, {})).toBe("login:octo-cat");
     expect(copilotAdapter.grant(parsed.secret, NOW)).toEqual({
       accessToken: "gho_abcdefghijklmnopqrstuvwxyz0123",
       expiresAt: NOW + HOUR,
@@ -82,7 +82,7 @@ describe("devin", () => {
     const grant = devinAdapter.grant(parsed.secret, NOW);
     expect(grant.accessToken).toBe("devin-key-0123456789");
     expect(grant.settings).toEqual({ api_server_url: "https://server.codeium.com", auth_kind: "browser" });
-    expect(await devinAdapter.identity!(parsed.secret)).toMatch(/^key:[0-9a-f]{16}$/);
+    expect(await devinAdapter.identity!(parsed.secret, {})).toMatch(/^key:[0-9a-f]{16}$/);
   });
 
   it("refuses a server that isn't Devin's: the key would be sent there", () => {
@@ -122,7 +122,7 @@ describe("grok", () => {
       subscription_tier: "SUBSCRIPTION_TIER_SUPER_GROK_HEAVY"
     });
     expect(Object.values(grant.settings!)).not.toContain("xai-refresh-1");
-    expect(await grokAdapter.identity!(secret)).toBe("grok:user-1");
+    expect(await grokAdapter.identity!(secret, {})).toBe("grok:user-1");
   });
 
   it("refreshes ahead of expiry: half the token's life, at most 30 minutes", () => {

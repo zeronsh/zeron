@@ -646,15 +646,21 @@ secret later without touching records' format.
 | `codex` | ChatGPT OAuth token set from `codex login` (`id_token`, `access_token`, `refresh_token`, `account_id`) | `POST https://auth.openai.com/oauth/token` (`grant_type=refresh_token`, Codex public client id) |
 | `claude` | Claude Code credential blob from a sign-in through Claude's own OAuth flow (`claudeAiOauth`), or a long-lived `claude setup-token` token | `POST https://platform.claude.com/v1/oauth/token` (`grant_type=refresh_token`, Claude Code client id); setup tokens never refresh |
 | `github` | GitHub App user token + refresh token (never granted; see "GitHub") | `POST https://github.com/login/oauth/access_token` with `GITHUB_APP_CLIENT_ID/SECRET` (vault secrets) |
-| `grok` | The xAI OIDC token set `grok login --device-auth` writes to `auth.json` (`{grokAuth: entry, scope: "{issuer}::{client_id}"}`: `key`, `refresh_token`, `expires_at`, `oidc_issuer`, `oidc_client_id`, identity fields) | `POST {oidc_issuer}/oauth2/token` (form, `grant_type=refresh_token`, the entry's own `oidc_client_id`); the issuer must be an `https` `x.ai` host |
+| `grok` | The xAI OIDC token set `grok login --device-auth` writes to `auth.json` (`{grokAuth: entry, scope: "{issuer}::{client_id}"}`) | `POST {oidc_issuer}/oauth2/token` (form, `grant_type=refresh_token`, the entry's own `oidc_client_id`); the issuer must be an `https` `x.ai` host |
+| `xai-oauth` | Hermes' `providers["xai-oauth"]` record (`{xaiOauth}`: an xAI OAuth token set with Hermes' API scopes) | `POST {token_endpoint}` (default `https://auth.x.ai/oauth2/token`, an `x.ai` host only; Hermes' public client); kept ≥ 2 h (or half its life) from expiry, since Hermes refreshes an hour ahead itself |
+| `nous` | Hermes' `providers.nous` record (`{nousAuth}`) | `POST {portal}/api/oauth/token` (form `grant_type=refresh_token`, `client_id=hermes-cli`; refresh token in the `x-nous-refresh-token` header); portal an `https` `nousresearch.com` host. Single-use refresh tokens: reuse revokes the session |
+| `antigravity` | Antigravity's `acp_token.json` (`{antigravityToken}`: `client_id`, `client_secret`, `refresh_token`, `scopes`, `project_id`; no access token) | `POST https://oauth2.googleapis.com/token`; Google refresh tokens don't rotate; refreshed once < 50 min remain |
+| `muse` | Muse's whole `auth.json` (`{museAuth}`), its `providers.meta` login | none: Muse mints its model keys from the access token, which lasts until `expires_at`; then `needs_reconnect` |
 | `copilot` | `{copilotToken, login}`: the GitHub token of Copilot's editor app (device flow), which agents exchange for Copilot sessions themselves | none (does not expire; revoked on GitHub) |
 | `devin` | `{devinCredentials}`: Devin's `credentials.toml` as a table (`windsurf_api_key` and its server urls), written by Devin's own browser sign-in | none (long-lived) |
 | `cursor-key` | `{key, expiresAt?}`: a Cursor user API key, minted by Cursor's browser sign-in (named, expiring) or pasted | none; an expiring one turns `needs_reconnect` at its expiry |
 | `anthropic-key`, `openai-key`, `openrouter-key`, `gemini-key`, `xai-key`, `deepseek-key`, `ai-gateway-key`, `meta-key` | `{key}`: the user's own API key for that vendor | none (static) |
 
-API keys are per vendor, not per agent: one OpenRouter key serves every agent that reaches
-OpenRouter. Which agent runs on which credential is one table,
-`zeron_proto::providers::cloud_credentials`:
+Every sign-in an agent offers on a computer, it offers on Cloud (`cloud_login_options` =
+`login_options`). Logins and keys are per account, not per agent: one ChatGPT sign-in runs
+Codex, Pi, OpenCode and Hermes on Cloud; one Claude sign-in runs Claude Code and Pi; one Copilot
+sign-in runs Pi and OpenCode; one OpenRouter key serves every agent that reaches OpenRouter.
+Which agent runs on which credential is one table, `zeron_proto::providers::cloud_credentials`:
 
 | Agent | Cloud credentials (preference order within a group) | How the machine hands them over |
 | --- | --- | --- |
@@ -663,29 +669,25 @@ OpenRouter. Which agent runs on which credential is one table,
 | Cursor | `cursor-key` | `CURSOR_API_KEY` |
 | Devin | `devin` | `$XDG_DATA_HOME/devin/credentials.toml` (0600) |
 | Grok | `grok`, else `xai-key` | `~/.grok/auth.json` entry (empty refresh token, rewritten ahead of expiry), else `XAI_API_KEY` |
-| Pi | `codex` (ChatGPT), `copilot`, every vendor key | `auth.json` `openai-codex` entry (empty refresh token, under Pi's lock); `COPILOT_GITHUB_TOKEN`; each vendor's env var |
-| OpenCode | vendor keys | each vendor's env var |
-| Hermes | vendor keys | each vendor's env var |
+| Pi | `codex`, `claude`, `copilot`, every vendor key | `auth.json` `openai-codex` / `anthropic` entries (empty refresh token, under Pi's lock); `COPILOT_GITHUB_TOKEN`; vendor env vars |
+| OpenCode | `codex`, `copilot`, vendor keys | the logins through OpenCode's own credential API (`/api/credential`) when its server starts; keys as env vars |
+| Hermes | `codex`, `nous`, `xai-oauth`, vendor keys | `$HERMES_HOME/auth.json` `providers.*` records (empty refresh token, fresh `last_refresh`, under `auth.lock`); keys as env vars |
 | fx | `ai-gateway-key`, `openai-key`, `anthropic-key` | `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` |
-| Antigravity | `gemini-key` | `GEMINI_API_KEY` and `auth.type = gemini-api-key` in its `settings.json` |
-| Muse Code | `meta-key` | `META_API_KEY` |
+| Antigravity | `antigravity`, else `gemini-key` | `acp_token.json` (access token, empty refresh token; a runtime is replaced before its token runs out), else `GEMINI_API_KEY`; `settings.json` `auth.type` to match |
+| Muse Code | `muse`, else `meta-key` | its `auth.json` (refresh tokens emptied), else `META_API_KEY` |
 
-What stays off Cloud, and why: a login whose refresh only the agent itself can do and whose
-refresh token would have to be copied to every machine (two machines refreshing one rotating
-token sign each other out, and the vault would no longer be the only holder). That is
-Antigravity's Google sign-in, Muse's own sign-in, Hermes' credential-pool logins (ChatGPT, Nous
-Portal, xAI), and OpenCode's ChatGPT / Copilot sign-ins (OpenCode 2.x keeps them in its own
-database and refreshes them there). Each of those agents runs on Cloud with its vendor's API
-key instead. Claude subscriptions run in Claude Code alone (below), so Pi's Claude sign-in is
-not offered there either: Pi takes an Anthropic API key.
+Saving a key in Cloud's "API keys" list never signs a login out (a login is shared by several
+agents); within one card's group a machine runs the login first, and activating the key on that
+card is how to prefer it.
 
 **Claude subscriptions.** Anthropic's published Claude Code terms restrict third parties from
 storing or intermediating Claude.ai credentials "unless we've mutually agreed otherwise".
 Zeron holds Claude logins in the vault under its arrangement with Anthropic for running
 Claude Code on users' Cloud devices (confirmed by Wing, 2026-10-01; keep the written
-confirmation on file next to this doc). Scope it to that purpose: Claude grants are delivered
-only to the unmodified Claude Code CLI on the user's own devices, never to another harness or
-SDK, and sign-in always completes through Claude's own OAuth flow. Alternatives that need no
+confirmation on file next to this doc). Claude grants are delivered only to the user's own
+Cloud machines: to the unmodified Claude Code CLI, and — by Wing's decision of 2026-11-18 — to
+Pi's Claude provider, which signs in with the same Claude client; sign-in always completes
+through Claude's own OAuth flow. Alternatives that need no
 vault: the CLI's own `claude auth login` inside the Cloud device, or the user's own Anthropic
 API key (`anthropic-key`).
 
@@ -709,7 +711,13 @@ API key (`anthropic-key`).
   `XDG_DATA_HOME`; its `credentials.toml` is uploaded.
 - **GitHub Copilot** (Pi): GitHub's device flow with Copilot's editor app, run by the laptop's
   engine; the token is uploaded with its login.
-- **ChatGPT for Pi**: the Codex capture above; Codex and Pi share the one `codex` login.
+- **ChatGPT for Pi, OpenCode and Hermes**: the Codex capture above (one `codex` login); Claude
+  for Pi: the Claude capture (one `claude` login); Copilot for OpenCode: the Copilot capture.
+- **Hermes' Nous Portal and xAI**: `hermes auth add <provider>` (device code) into a throwaway
+  `HERMES_HOME`; its `providers.<id>` record is uploaded.
+- **Antigravity**: its ACP `authenticate` into a throwaway `GEMINI_HOME` with file storage
+  forced (`AGY_ACP_FORCE_FILE_STORAGE=1`); `acp_token.json` is uploaded.
+- **Muse**: its own sign-in into a throwaway config root, file-backed; `auth.json` is uploaded.
 - **API keys**: pasted on the laptop, uploaded once.
 
 The vault only refreshes. It owns each refresh token from upload on.
@@ -892,9 +900,11 @@ refresh contract changes is caught within a day, before users' grants start fail
   access token and an empty refresh token, rewritten before expiry), else the native sandbox
   login, else `anthropic-key`. Every other agent runs on what `cloud_credentials` lists for it
   (see "Providers"): its grants are drawn in one batched call, keys become its environment
-  variables, and its credential files (Grok's `auth.json` entry, Devin's `credentials.toml`,
-  Pi's `openai-codex` entry, Antigravity's `settings.json` auth type) are written with no
-  refresh token and rewritten ahead of expiry. A login the sandbox made itself (a real refresh
+  variables, and its logins go where the agent reads them (Grok's `auth.json` entry, Devin's
+  `credentials.toml`, Pi's `openai-codex` / `anthropic` entries, Hermes' `providers.*` records
+  under its `auth.lock`, Antigravity's `acp_token.json` and `settings.json` auth type, Muse's
+  `auth.json`, OpenCode's `/api/credential` through its harness), always with an empty refresh
+  token and rewritten ahead of expiry. A login the sandbox made itself (a real refresh
   token) is left alone. The first run of an agent whose CLI the machine lacks installs it (once;
   a failed install is retried after ten minutes). GitHub grants (App installation tokens for the session
   repository, requested with `repo`) are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
@@ -923,7 +933,13 @@ refresh contract changes is caught within a day, before users' grants start fail
   (`parentChatId`) whose parent runs on a session machine is hosted on that same machine. `ListHarnesses` / `ListModels` aimed at any Cloud
   device are answered by the asking engine (every built-in agent; models from the edge's list
   where it has one, else the asking device's own catalog), and anything else aimed at the
-  logical device fails fast — it has no engine.
+  logical device fails fast — it has no engine. The edge's list is Claude Code's and Codex's
+  kept by hand, and every other agent's as a Cloud machine last discovered it: after a run
+  prepares its credentials, the machine hands the agent's credential variables to its model
+  discovery (`zeron_harness::catalog_env`, part of the catalog's cache key), discovers, and
+  sends the catalog with the run's credential fingerprint (`POST /runner/models`; once per
+  agent and fingerprint per 10 minutes, at once for a new fingerprint). The account keeps the
+  last one per agent, so pickers list it while every machine sleeps.
 - **Laptop side**: `CloudStatus` / `CloudEnable` / `CloudDelete` / `CloudUsage`,
   `CloudSessions` / `CloudSessionWake` / `CloudSessionSleep` / `CloudSessionDelete`,
   `ListCloudBranches`, `VaultStatus`, `VaultConnectCodex` / `VaultConnectClaude`, `VaultPutApiKey`,
@@ -941,6 +957,7 @@ the bearer's `org_id`.
 
 | Route | Bearer | Body → reply |
 | --- | --- | --- |
+| `GET /cloud/{orgId}/models` | user | → `{models: {harness: Model[]}}`: Claude Code's and Codex's kept by hand, every other agent's as a machine last published it |
 | `GET /cloud/{orgId}` | user | → `CloudStatus` (account), with `machines: [{id, name, vcpu, memoryGB, diskGiB, creditMultiplier}]` and `machine` (the default) |
 | `POST /cloud/{orgId}/enable` | user | `{}` → `CloudStatus` (instant; mints the logical device id) |
 | `DELETE /cloud/{orgId}` | user | → `CloudStatus` (`deleting` → `off`; deletes every session sandbox after capturing usage) |
@@ -957,6 +974,7 @@ the bearer's `org_id`.
 | `POST /runner/token` | none | `{orgId, userId, deviceId, ts, sig}` → `{accessToken, expiresAt}` |
 | `POST /runner/wake-timing` | runner | `{sent?, token?, firstOutput?, version?, updateResult?, …}` (`EngineTiming`, `wake.ts`) → `{ok: true}`: its side of the wake, counted once |
 | `POST /runner/wake-stage` | runner | `{stage: "updating" \| null}` → `{ok: true}`: shown as `CloudSession.stage` |
+| `POST /runner/models` | runner | `{harness, models, credential}` → `{ok: true}`: the agent's catalog as this machine discovered it (≤ 400 models, unparseable ones dropped; never `claude-code`/`codex`'s, which stay hand-kept) |
 | `POST /runner/heartbeat` | runner | `{activeRuns, clients, backgroundRuns?, waitingRuns?, diskUsedBytes?, diskTotalBytes?}` → `{ok: true, diskCapacityGiB?}` (per session device) |
 | `GET /vault/{orgId}` | user | → `VaultStatusView`. Lists only the providers named in `x-zeron-vault-providers` (comma-separated); without the header, the original five (`codex`, `claude`, `github`, `anthropic-key`, `openai-key`). Every route answering a status filters it alike |
 | `PUT /vault/{orgId}/credentials/{provider}` | user | `PutCredentialRequest` → `VaultStatusView` |

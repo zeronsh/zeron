@@ -54,10 +54,10 @@ test("with Cloud on, Providers offers Cloud: its agents' accounts, no switch or 
 	expect(shows(app, PAGE, "Anthropic API key")).to_be(true)
 	expect(shows(app, PAGE, "OpenAI API key")).to_be(true)
 	expect(shows(app, PAGE, "Meta API key")).to_be(true)
-	-- An agent that runs on Cloud with a key alone: no sign-in, a note why.
+	-- Every agent signs in on Cloud as it does on a computer, Muse Code
+	-- included.
 	expect(shows(app, PAGE, "Muse Code")).to_be(true)
-	expect(shows(app, PAGE, "uses a Meta API key")).to_be(true)
-	expect(shows(app, PAGE, "Connect a Muse Code account")).to_be(false)
+	expect(shows(app, PAGE, "Connect a Muse Code account")).to_be(true)
 	expect(shows(app, PAGE, "Connect a Claude Code account")).to_be(true)
 	app:type(`{PAGE} >> role:textbox "OpenAI API key"`, "sk-test-123")
 	app:frames(5)

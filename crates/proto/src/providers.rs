@@ -290,6 +290,10 @@ pub enum CloudDelivery {
     /// and rewritten ahead of the access token's expiry (never with a
     /// refresh token: the vault is the only refresher).
     File,
+    /// Handed to the agent's own credential API when its server starts
+    /// (OpenCode 2.x keeps logins in its database, not a file), and again
+    /// with each new grant.
+    Api,
 }
 
 /// One vault credential an agent runs on, on Cloud.
@@ -318,13 +322,14 @@ const fn cloud(
 }
 
 /// The vault credentials `harness` runs on, on Cloud, in preference order
-/// (docs/design/cloud-device.md, "Providers"). Logins appear only where the
-/// vault can be their only refresher, or they never expire; anything else
-/// reaches Cloud as the vendor's API key. Claude subscription logins go to
-/// Claude Code alone. Pure.
+/// (docs/design/cloud-device.md, "Providers"): every login the agent signs
+/// in with on a computer, plus its vendors' API keys. The vault is each
+/// login's only refresher (or the login never expires); one login serves
+/// every agent that takes it (one ChatGPT sign-in runs Codex, Pi, OpenCode
+/// and Hermes). Pure.
 pub fn cloud_credentials(harness: HarnessId) -> &'static [CloudCredential] {
     use crate::VaultProvider as V;
-    use CloudDelivery::{Env, File};
+    use CloudDelivery::{Api, Env, File};
     const ANTHROPIC: &[&str] = &["ANTHROPIC_API_KEY"];
     const OPENAI: &[&str] = &["OPENAI_API_KEY"];
     const OPENROUTER: &[&str] = &["OPENROUTER_API_KEY"];
@@ -345,8 +350,14 @@ pub fn cloud_credentials(harness: HarnessId) -> &'static [CloudCredential] {
         cloud(V::Grok, "xai", File),
         cloud(V::XaiKey, "xai", Env(XAI)),
     ];
-    const MUSE: &[CloudCredential] = &[cloud(V::MetaKey, "meta", Env(&["META_API_KEY"]))];
-    const ANTIGRAVITY: &[CloudCredential] = &[cloud(V::GeminiKey, "gemini", File)];
+    const MUSE: &[CloudCredential] = &[
+        cloud(V::Muse, "meta", File),
+        cloud(V::MetaKey, "meta", Env(&["META_API_KEY"])),
+    ];
+    const ANTIGRAVITY: &[CloudCredential] = &[
+        cloud(V::Antigravity, "gemini", File),
+        cloud(V::GeminiKey, "gemini", File),
+    ];
     const FX: &[CloudCredential] = &[
         cloud(V::AiGatewayKey, "vercel", Env(GATEWAY)),
         cloud(V::OpenaiKey, "openai", Env(OPENAI)),
@@ -354,6 +365,7 @@ pub fn cloud_credentials(harness: HarnessId) -> &'static [CloudCredential] {
     ];
     const PI: &[CloudCredential] = &[
         cloud(V::Codex, "openai-codex", File),
+        cloud(V::Claude, "anthropic", File),
         cloud(V::Copilot, "github-copilot", Env(&["COPILOT_GITHUB_TOKEN"])),
         cloud(V::AnthropicKey, "anthropic", Env(ANTHROPIC)),
         cloud(V::OpenaiKey, "openai", Env(OPENAI)),
@@ -364,6 +376,8 @@ pub fn cloud_credentials(harness: HarnessId) -> &'static [CloudCredential] {
         cloud(V::AiGatewayKey, "vercel-ai-gateway", Env(GATEWAY)),
     ];
     const OPENCODE: &[CloudCredential] = &[
+        cloud(V::Codex, "openai", Api),
+        cloud(V::Copilot, "github-copilot", Api),
         cloud(V::AnthropicKey, "anthropic", Env(ANTHROPIC)),
         cloud(V::OpenaiKey, "openai", Env(OPENAI)),
         cloud(V::OpenrouterKey, "openrouter", Env(OPENROUTER)),
@@ -377,6 +391,9 @@ pub fn cloud_credentials(harness: HarnessId) -> &'static [CloudCredential] {
         cloud(V::AiGatewayKey, "vercel", Env(GATEWAY)),
     ];
     const HERMES: &[CloudCredential] = &[
+        cloud(V::Codex, "openai-codex", File),
+        cloud(V::Nous, "nous", File),
+        cloud(V::XaiOauth, "xai-oauth", File),
         cloud(V::AnthropicKey, "anthropic", Env(ANTHROPIC)),
         cloud(V::OpenaiKey, "openai-api", Env(OPENAI)),
         cloud(V::OpenrouterKey, "openrouter", Env(OPENROUTER)),
@@ -410,33 +427,14 @@ pub fn runs_on_cloud(harness: HarnessId) -> bool {
 }
 
 /// The sign-ins Cloud offers for `harness` (Settings → Providers with Cloud
-/// shown), in button order: each is captured on the user's own device and
-/// goes straight to the vault. The rest of an agent's logins have no place
-/// on Cloud (see [`cloud_note`]); their vendors' API keys do. Pure.
+/// shown), in button order: the same ones the agent offers on a computer
+/// ([`login_options`]), each captured on the user's own device and sent
+/// straight to the vault. Pure.
 pub fn cloud_login_options(harness: HarnessId) -> Vec<LoginOption> {
-    let only = |label| {
-        vec![LoginOption {
-            provider: None,
-            label,
-        }]
-    };
-    match harness {
-        HarnessId::ClaudeCode => only("Claude Code"),
-        HarnessId::Codex => only("Codex"),
-        HarnessId::Cursor => only("Cursor"),
-        HarnessId::Devin => only("Devin"),
-        HarnessId::Grok => only("Grok"),
-        HarnessId::Pi => vec![
-            LoginOption {
-                provider: Some("openai-codex"),
-                label: "ChatGPT",
-            },
-            LoginOption {
-                provider: Some("github-copilot"),
-                label: "GitHub Copilot",
-            },
-        ],
-        _ => Vec::new(),
+    if runs_on_cloud(harness) && signs_in(harness) {
+        login_options(harness)
+    } else {
+        Vec::new()
     }
 }
 
@@ -451,12 +449,19 @@ pub fn cloud_login_vault(
         .into_iter()
         .find(|o| o.provider == provider.filter(|p| !p.is_empty()))?;
     Some(match (harness, option.provider) {
-        (HarnessId::ClaudeCode, _) => V::Claude,
-        (HarnessId::Codex, _) | (HarnessId::Pi, Some("openai-codex")) => V::Codex,
+        (HarnessId::ClaudeCode, _) | (HarnessId::Pi, Some("anthropic")) => V::Claude,
+        (HarnessId::Codex, _)
+        | (HarnessId::Pi, Some("openai-codex"))
+        | (HarnessId::Opencode, Some("openai"))
+        | (HarnessId::Hermes, Some("openai-codex")) => V::Codex,
+        (HarnessId::Pi | HarnessId::Opencode, Some("github-copilot")) => V::Copilot,
+        (HarnessId::Hermes, Some("nous")) => V::Nous,
+        (HarnessId::Hermes, Some("xai-oauth")) => V::XaiOauth,
         (HarnessId::Cursor, _) => V::CursorKey,
         (HarnessId::Devin, _) => V::Devin,
         (HarnessId::Grok, _) => V::Grok,
-        (HarnessId::Pi, Some("github-copilot")) => V::Copilot,
+        (HarnessId::Antigravity, _) => V::Antigravity,
+        (HarnessId::Muse, _) => V::Muse,
         _ => return None,
     })
 }
@@ -474,25 +479,6 @@ pub fn cloud_key_providers(harness: HarnessId) -> Vec<crate::VaultProvider> {
 /// differs from the agent's own sign-ins. Pure.
 pub fn cloud_note(harness: HarnessId) -> Option<&'static str> {
     match harness {
-        HarnessId::Pi => Some(
-            "On Cloud, Pi uses your ChatGPT and GitHub Copilot sign-ins and your API keys. \
-             Claude subscriptions run in Claude Code only: add an Anthropic API key for Pi.",
-        ),
-        HarnessId::Opencode => Some(
-            "On Cloud, OpenCode uses your API keys. OpenCode keeps its sign-ins in its own \
-             database and refreshes them itself, so they stay on your devices.",
-        ),
-        HarnessId::Hermes => Some(
-            "On Cloud, Hermes uses your API keys. Hermes refreshes the sign-ins in its own \
-             pool itself, so they stay on your devices.",
-        ),
-        HarnessId::Antigravity => Some(
-            "On Cloud, Antigravity uses a Gemini API key. Its Google sign-in stays on your \
-             devices.",
-        ),
-        HarnessId::Muse => {
-            Some("On Cloud, Muse Code uses a Meta API key. Its own sign-in stays on your devices.")
-        }
         HarnessId::Fx => Some("On Cloud, fx uses your Vercel AI Gateway, OpenAI or Anthropic key."),
         _ => None,
     }
@@ -513,12 +499,15 @@ mod tests {
                 "{wire}"
             );
         }
-        // Claude subscriptions reach Claude Code alone.
-        for harness in HarnessId::ALL {
-            let claude = cloud_credentials(harness)
-                .iter()
-                .any(|c| c.vault == V::Claude);
-            assert_eq!(claude, harness == HarnessId::ClaudeCode, "{harness:?}");
+        // Every sign-in an agent offers on a computer, it offers on Cloud.
+        for harness in HarnessId::ALL.into_iter().filter(|h| runs_on_cloud(*h)) {
+            if signs_in(harness) {
+                assert_eq!(
+                    cloud_login_options(harness),
+                    login_options(harness),
+                    "{harness:?}"
+                );
+            }
         }
         // Every sign-in Cloud offers fills a credential the agent runs on.
         for harness in HarnessId::ALL {
@@ -545,7 +534,18 @@ mod tests {
                 }
             }
         }
-        assert_eq!(cloud_login_vault(HarnessId::Pi, Some("anthropic")), None);
+        assert_eq!(
+            cloud_login_vault(HarnessId::Pi, Some("anthropic")),
+            Some(V::Claude)
+        );
+        assert_eq!(
+            cloud_login_vault(HarnessId::Hermes, Some("nous")),
+            Some(V::Nous)
+        );
+        assert_eq!(
+            cloud_login_vault(HarnessId::Opencode, Some("anthropic")),
+            None
+        );
         assert_eq!(
             cloud_login_vault(HarnessId::Pi, Some("openai-codex")),
             Some(V::Codex)

@@ -746,6 +746,10 @@ struct ProbeEndpoints {
     openai_port: u16,
     /// The Nous portal (`/api/oauth/account`).
     nous_portal: String,
+    /// Google's token endpoint and `userinfo`: an Antigravity capture names
+    /// its account with them.
+    google_token: String,
+    google_userinfo: String,
     allow_slot_refresh: bool,
     /// Test seam: admit `http://127.0.0.1` for credential-DEFINED endpoints
     /// (Grok issuer, Devin server, …) so mock servers can stand in. Always
@@ -771,6 +775,8 @@ impl Default for ProbeEndpoints {
             openai_auth: oauth::OPENAI_AUTH.into(),
             openai_port: oauth::OPENAI_LOOPBACK_PORT,
             nous_portal: usage::NOUS_PORTAL.into(),
+            google_token: "https://oauth2.googleapis.com/token".into(),
+            google_userinfo: "https://openidconnect.googleapis.com/v1/userinfo".into(),
             allow_slot_refresh: true,
             allow_loopback_http: false,
         }
@@ -2097,21 +2103,33 @@ impl AgentAccounts {
     ) -> Result<AgentLoginStart, EngineError> {
         self.sweep_flows();
         let provider = provider.filter(|p| !p.is_empty());
+        // Logins several agents share go through one capture each: Pi's
+        // Claude is Claude Code's sign-in (the `claude` login), every agent's
+        // ChatGPT is Codex's (`codex`), every Copilot is Pi's editor-app
+        // device flow (`copilot`).
         let mut start = match (harness, provider) {
-            (HarnessId::ClaudeCode, _) => {
+            (HarnessId::ClaudeCode, _) | (HarnessId::Pi, Some("anthropic")) => {
                 self.reap_spawned_flows(HarnessId::ClaudeCode);
                 self.start_claude_login_with(Some(capture)).await
             }
-            (HarnessId::Codex, _) | (HarnessId::Pi, None | Some("openai-codex")) => {
+            (HarnessId::Codex, _)
+            | (HarnessId::Pi, None | Some("openai-codex"))
+            | (HarnessId::Opencode, None | Some("openai"))
+            | (HarnessId::Hermes, None | Some("openai-codex")) => {
                 self.start_codex_capture(capture).await?
             }
-            (HarnessId::Pi, Some("github-copilot")) => {
+            (HarnessId::Pi | HarnessId::Opencode, Some("github-copilot")) => {
                 self.start_copilot_login_with(HarnessId::Pi, Some(capture))
                     .await?
+            }
+            (HarnessId::Hermes, Some(which @ ("nous" | "xai-oauth"))) => {
+                self.start_hermes_capture(which, capture).await?
             }
             (HarnessId::Cursor, _) => self.start_cursor_capture(capture).await?,
             (HarnessId::Grok, _) => self.start_grok_capture(capture).await?,
             (HarnessId::Devin, _) => self.start_devin_login_with(None, Some(capture))?,
+            (HarnessId::Antigravity, _) => self.start_antigravity_capture(capture)?,
+            (HarnessId::Muse, _) => self.start_muse_capture(capture).await?,
             (other, _) => {
                 return Err(EngineError::Other(format!(
                     "{other:?} sign-ins can't be connected to Cloud"
@@ -2295,6 +2313,177 @@ impl AgentAccounts {
         .await
     }
 
+    /// Hermes half of [`Self::start_capture_login`] (`nous`, `xai-oauth`):
+    /// `hermes auth add <provider> --type oauth --no-browser` (a device code)
+    /// against a throwaway `HERMES_HOME` — and shared Nous store — so the
+    /// new grant lands there, never in this device's pool; its record goes
+    /// to `capture` as a `nous` / `xai-oauth` upload (the vault refreshes it
+    /// from then on).
+    async fn start_hermes_capture(
+        &self,
+        provider: &str,
+        capture: CaptureSink,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.reap_spawned_flows(HarnessId::Hermes);
+        let login_id = new_id();
+        let home = self.login_home(&login_id)?;
+        let shred = ShredOnDrop(home.clone());
+        let mut command = self
+            .cli_command(
+                HarnessId::Hermes,
+                &["auth", "add", provider, "--type", "oauth", "--no-browser"],
+            )
+            .await?;
+        command
+            .env("HERMES_HOME", &home)
+            .env("HERMES_SHARED_AUTH_DIR", home.join("shared"));
+        let read: fn(&Path) -> Result<Option<serde_json::Value>, String> = match provider {
+            "nous" => hermes_nous_capture,
+            _ => hermes_xai_capture,
+        };
+        self.start_file_capture(
+            HarnessId::Hermes,
+            login_id,
+            command,
+            shred,
+            stores::scan_hermes_url,
+            read,
+            capture,
+        )
+        .await
+    }
+
+    /// Antigravity half of [`Self::start_capture_login`]: its own Google
+    /// sign-in (ACP `authenticate`, `oauth-personal`) against a throwaway
+    /// `GEMINI_HOME`, its token stored as a file there whatever the OS
+    /// (`AGY_ACP_FORCE_FILE_STORAGE`), then uploaded as an `antigravity`
+    /// login. Google refresh tokens don't rotate, so the account's email is
+    /// looked up with a token minted from it first (best effort).
+    fn start_antigravity_capture(
+        &self,
+        capture: CaptureSink,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.reap_spawned_flows(HarnessId::Antigravity);
+        let acp = self
+            .acp_harness(HarnessId::Antigravity)
+            .ok_or_else(|| EngineError::Other("Antigravity has no sign-in".into()))?;
+        let login_id = new_id();
+        let home = self.login_home(&login_id)?;
+        let shred = ShredOnDrop(home.clone());
+        #[cfg(unix)]
+        let browser = self
+            .inner
+            .config
+            .private_root()
+            .ok()
+            .and_then(|root| ensure_noop_browser(&root));
+        #[cfg(not(unix))]
+        let browser = None;
+        let options = zeron_harness::acp::SignInOptions {
+            browser,
+            // Its Google sign-in, whatever method this device's own
+            // Antigravity is set to.
+            method: Some("oauth-personal".into()),
+            env: vec![
+                ("GEMINI_HOME".into(), home.clone().into()),
+                ("AGY_ACP_FORCE_FILE_STORAGE".into(), "1".into()),
+            ],
+            url_filter: None,
+        };
+        let state = Arc::new(Mutex::new(TaskLoginState::default()));
+        let task_state = state.clone();
+        let this = self.clone();
+        let handle = tokio::spawn(async move {
+            let progress_state = task_state.clone();
+            let signed_in = acp
+                .sign_in_with(options, move |progress| {
+                    if let zeron_harness::acp::SignInProgress::OpenBrowser(url) = progress {
+                        lock(&progress_state).url.get_or_insert(url);
+                    }
+                })
+                .await
+                .map_err(|e| e.to_string());
+            let found = signed_in.and_then(|()| {
+                antigravity_capture(&shred.0)?.ok_or_else(|| {
+                    "Antigravity reported a successful sign-in, but saved no Google login."
+                        .to_string()
+                })
+            });
+            // Off the disk before anything else.
+            drop(shred);
+            let outcome = match found {
+                Ok(mut upload) => {
+                    if let Some(email) = this.google_email(&upload["material"]["antigravityToken"]).await {
+                        upload["profile"] = serde_json::json!({ "email": email });
+                    }
+                    capture(upload).await
+                }
+                Err(message) => Err(message),
+            };
+            lock(&task_state).outcome = Some(outcome);
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness: HarnessId::Antigravity,
+                started_at: Instant::now(),
+                state,
+                handle,
+                home: Some(home),
+                port: None,
+            },
+        );
+        Ok(AgentLoginStart {
+            login_id,
+            url: String::new(),
+            mode: AgentLoginMode::Browser,
+            callback_port: None,
+        })
+    }
+
+    /// The Google account behind an Antigravity token blob: a token minted
+    /// from its refresh token (Google's don't rotate, so this costs the
+    /// login nothing), then `userinfo`. `None` on any failure — it only
+    /// names the account.
+    async fn google_email(&self, blob: &serde_json::Value) -> Option<String> {
+        let form = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", blob["refresh_token"].as_str()?),
+            ("client_id", blob["client_id"].as_str()?),
+            ("client_secret", blob["client_secret"].as_str().unwrap_or_default()),
+        ];
+        let endpoints = &self.inner.endpoints;
+        let token: serde_json::Value = self
+            .inner
+            .http
+            .post(&endpoints.google_token)
+            .form(&form)
+            .timeout(HTTP_TIMEOUT)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let info: serde_json::Value = self
+            .inner
+            .http
+            .get(&endpoints.google_userinfo)
+            .bearer_auth(token["access_token"].as_str()?)
+            .timeout(HTTP_TIMEOUT)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        str_field(&info, "email").filter(|email| email.contains('@'))
+    }
+
     /// A captured sign-in run by a CLI that writes its credential file under
     /// the throwaway home `shred` owns: polled until `read` finds a complete
     /// login there, which goes to `capture` once the home is shredded. The
@@ -2331,7 +2520,7 @@ impl AgentAccounts {
             ..Default::default()
         }));
         let task_state = state.clone();
-        let device_code = matches!(harness, HarnessId::Grok);
+        let device_code = matches!(harness, HarnessId::Grok | HarnessId::Hermes);
         let handle = tokio::spawn(async move {
             let home = shred.0.clone();
             let wait = async {
@@ -5122,6 +5311,124 @@ fn grok_capture(home: &Path) -> Result<Option<serde_json::Value>, String> {
     })))
 }
 
+/// The email a JWT names, if it is one with an `email` claim.
+fn jwt_email(token: Option<&str>) -> Option<String> {
+    let claims = jwt_claims(token?)?;
+    str_field(&claims, "email").filter(|email| email.contains('@'))
+}
+
+/// `profile` with the email, when there is one.
+fn email_profile(email: Option<String>) -> serde_json::Value {
+    match email {
+        Some(email) => serde_json::json!({ "email": email }),
+        None => serde_json::json!({}),
+    }
+}
+
+/// A captured Hermes Nous Portal sign-in, once `hermes auth add nous` wrote
+/// a complete token set to `home/auth.json` (`providers.nous`): `{provider:
+/// "nous", material: {nousAuth}, profile}`, refresh token included (the
+/// vault becomes its only refresher).
+fn hermes_nous_capture(home: &Path) -> Result<Option<serde_json::Value>, String> {
+    let Some(auth) = read_json(&home.join("auth.json")) else {
+        return Ok(None);
+    };
+    let record = &auth["providers"]["nous"];
+    if str_field(record, "access_token").is_none() || str_field(record, "refresh_token").is_none()
+    {
+        return Ok(None);
+    }
+    let email = jwt_email(record["access_token"].as_str());
+    Ok(Some(serde_json::json!({
+        "provider": "nous",
+        "material": { "nousAuth": record },
+        "profile": email_profile(email),
+    })))
+}
+
+/// A captured Hermes xAI sign-in (`providers["xai-oauth"]`, its `tokens`
+/// complete): `{provider: "xai-oauth", material: {xaiOauth}, profile}`.
+fn hermes_xai_capture(home: &Path) -> Result<Option<serde_json::Value>, String> {
+    let Some(auth) = read_json(&home.join("auth.json")) else {
+        return Ok(None);
+    };
+    let record = &auth["providers"]["xai-oauth"];
+    let tokens = &record["tokens"];
+    if str_field(tokens, "access_token").is_none() || str_field(tokens, "refresh_token").is_none()
+    {
+        return Ok(None);
+    }
+    let email = jwt_email(tokens["id_token"].as_str())
+        .or_else(|| jwt_email(tokens["access_token"].as_str()));
+    Ok(Some(serde_json::json!({
+        "provider": "xai-oauth",
+        "material": { "xaiOauth": record },
+        "profile": email_profile(email),
+    })))
+}
+
+/// A captured Antigravity Google sign-in, once its server saved the token
+/// file under the throwaway `GEMINI_HOME`: `{provider: "antigravity",
+/// material: {antigravityToken}}` (the blob names no account; the caller
+/// adds the profile it can look up).
+fn antigravity_capture(home: &Path) -> Result<Option<serde_json::Value>, String> {
+    let Some(blob) = read_json(&home.join("antigravity-acp").join("acp_token.json")) else {
+        return Ok(None);
+    };
+    if str_field(&blob, "refresh_token").is_none() || str_field(&blob, "client_id").is_none() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::json!({
+        "provider": "antigravity",
+        "material": { "antigravityToken": blob },
+    })))
+}
+
+/// A captured Muse sign-in: its whole `auth.json` once it holds a Meta
+/// login (`{provider: "muse", material: {museAuth}, profile}`). The record
+/// is found wherever Muse nests it (`providers.meta`), by its access token.
+pub(crate) fn muse_capture(file: &Path) -> Option<serde_json::Value> {
+    let auth = read_json(file)?;
+    let login = muse_login_record(&auth)?;
+    let mut profile = serde_json::Map::new();
+    if let Some(email) = str_field(login, "user_email").filter(|e| e.contains('@')) {
+        profile.insert("email".into(), serde_json::json!(email));
+    }
+    if let Some(name) = str_field(login, "user_full_name") {
+        profile.insert("displayName".into(), serde_json::json!(name));
+    }
+    Some(serde_json::json!({
+        "provider": "muse",
+        "material": { "museAuth": auth },
+        "profile": profile,
+    }))
+}
+
+/// Muse's Meta login inside its `auth.json`: `providers.meta` when it is
+/// there, else the first object holding an `access_token` (the nesting is
+/// Muse's to change).
+fn muse_login_record(auth: &serde_json::Value) -> Option<&serde_json::Value> {
+    let meta = &auth["providers"]["meta"];
+    if str_field(meta, "access_token").is_some() {
+        return Some(meta);
+    }
+    fn find(value: &serde_json::Value, depth: usize) -> Option<&serde_json::Value> {
+        let map = value.as_object()?;
+        if map
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| !t.is_empty())
+        {
+            return Some(value);
+        }
+        if depth == 0 {
+            return None;
+        }
+        map.values().find_map(|v| find(v, depth - 1))
+    }
+    find(auth, 3)
+}
+
 /// Kills a captured sign-in's CLI when its task ends or is aborted (cancel,
 /// a superseding sign-in, engine shutdown).
 struct KillOnDrop(Arc<Mutex<Option<zeron_harness::process::Child>>>);
@@ -7139,6 +7446,109 @@ mod login_tests {
         assert!(accounts.read_slots(HarnessId::Grok).is_empty());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hermes_capture_uploads_its_nous_login_and_leaves_this_device_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(config(tmp.path()));
+        let live = accounts.inner.config.hermes_home.join("auth.json");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(&live, r#"{"version":1,"providers":{}}"#).unwrap();
+        let auth = r#"{"version":1,"providers":{"nous":{"access_token":"nat","refresh_token":"nrt","expires_at":"2030-01-01T00:00:00Z","client_id":"hermes-cli","portal_base_url":"https://portal.nousresearch.com","inference_base_url":"https://inference-api.nousresearch.com/v1","scope":"inference:invoke"}}}"#;
+        accounts.override_cli(
+            HarnessId::Hermes,
+            fake_login_cli(
+                tmp.path(),
+                "fake-hermes",
+                "HERMES_HOME",
+                "https://portal.nousresearch.com/device",
+                auth,
+            ),
+        );
+        let (sink, captured) = recording_sink(None);
+        let start = accounts
+            .start_capture_login(HarnessId::Hermes, Some("nous"), sink)
+            .await
+            .unwrap();
+        let poll = poll_until_settled_slowly(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+        let captured = lock(&captured).clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["provider"], "nous");
+        assert_eq!(captured[0]["material"]["nousAuth"]["refresh_token"], "nrt");
+        assert_eq!(
+            captured[0]["material"]["nousAuth"]["portal_base_url"],
+            "https://portal.nousresearch.com"
+        );
+        // This device's own pool is untouched, and the throwaway home gone.
+        assert_eq!(
+            std::fs::read_to_string(&live).unwrap(),
+            r#"{"version":1,"providers":{}}"#
+        );
+        assert!(no_sign_in_homes_left(tmp.path()));
+    }
+
+    #[test]
+    fn hermes_xai_antigravity_and_muse_captures_are_their_own_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let claims = |claims: serde_json::Value| {
+            format!(
+                "h.{}.s",
+                BASE64_URL.encode(serde_json::to_vec(&claims).unwrap())
+            )
+        };
+        // Hermes' xAI: its tokens, complete.
+        assert_eq!(hermes_xai_capture(home), Ok(None));
+        let id_token = claims(serde_json::json!({ "email": "ada@x.ai" }));
+        let auth = serde_json::json!({ "providers": { "xai-oauth": {
+            "tokens": { "access_token": "xat", "refresh_token": "xrt", "id_token": id_token },
+            "auth_mode": "oauth_device_code",
+            "discovery": { "token_endpoint": "https://auth.x.ai/oauth2/token" },
+        } } });
+        std::fs::write(home.join("auth.json"), auth.to_string()).unwrap();
+        let xai = hermes_xai_capture(home).unwrap().unwrap();
+        assert_eq!(xai["provider"], "xai-oauth");
+        assert_eq!(xai["material"]["xaiOauth"]["tokens"]["refresh_token"], "xrt");
+        assert_eq!(xai["profile"]["email"], "ada@x.ai");
+        assert_eq!(hermes_nous_capture(home), Ok(None), "no Nous login there");
+        // Antigravity: the Google token blob, once it holds a refresh token.
+        assert_eq!(antigravity_capture(home), Ok(None));
+        let acp = home.join("antigravity-acp");
+        std::fs::create_dir_all(&acp).unwrap();
+        std::fs::write(
+            acp.join("acp_token.json"),
+            r#"{"client_id":"cid","client_secret":"cs","refresh_token":"grt","token_uri":"https://oauth2.googleapis.com/token","scopes":["openid"],"project_id":"p1"}"#,
+        )
+        .unwrap();
+        let google = antigravity_capture(home).unwrap().unwrap();
+        assert_eq!(google["provider"], "antigravity");
+        assert_eq!(google["material"]["antigravityToken"]["project_id"], "p1");
+        // Muse: the whole document, its Meta login found where it nests.
+        let muse = home.join("muse.json");
+        assert_eq!(muse_capture(&muse), None);
+        std::fs::write(
+            &muse,
+            r#"{"schema_version":2,"providers":{"meta":{"mechanism":"oauth","access_token":"mat","expires_at":1900000000,"user_email":"ada@meta.com","user_full_name":"Ada L"}}}"#,
+        )
+        .unwrap();
+        let meta = muse_capture(&muse).unwrap();
+        assert_eq!(meta["provider"], "muse");
+        assert_eq!(meta["material"]["museAuth"]["schema_version"], 2);
+        assert_eq!(meta["profile"]["email"], "ada@meta.com");
+        assert_eq!(meta["profile"]["displayName"], "Ada L");
+        std::fs::write(
+            &muse,
+            r#"{"schema_version":3,"accounts":{"default":{"meta":{"access_token":"mat2"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            muse_capture(&muse).unwrap()["material"]["museAuth"]["schema_version"],
+            3,
+            "found deeper, wherever Muse puts it"
+        );
+    }
+
     #[test]
     fn a_cursor_capture_is_its_key_and_expiry() {
         let tmp = tempfile::tempdir().unwrap();
@@ -7170,11 +7580,14 @@ mod login_tests {
         let tmp = tempfile::tempdir().unwrap();
         let accounts = AgentAccounts::new(config(tmp.path()));
         let (sink, _) = recording_sink(None);
+        // (Every agent's own sign-ins are offered on Cloud; these are not
+        // any agent's.)
         for (harness, provider) in [
-            (HarnessId::Hermes, None),
-            (HarnessId::Opencode, Some("openai")),
-            (HarnessId::Pi, Some("anthropic")),
-            (HarnessId::Muse, None),
+            (HarnessId::Hermes, Some("qwen-oauth")),
+            (HarnessId::Opencode, Some("anthropic")),
+            (HarnessId::Pi, Some("kimi-coding")),
+            (HarnessId::Fx, None),
+            (HarnessId::Mock, None),
         ] {
             assert!(
                 accounts

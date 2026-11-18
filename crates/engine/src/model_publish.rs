@@ -1,0 +1,413 @@
+//! Cloud runner only: keeps the account's model catalogs current on the
+//! edge (docs/design/cloud-device.md, "Engine changes"), so every device's
+//! model picker lists each Cloud agent's real models while all of Cloud's
+//! machines sleep.
+//!
+//! An agent's models depend on the credentials it runs on (Pi lists the
+//! models of every provider it's signed in to), and on Cloud those are the
+//! vault's, handed to each run by the credential broker. So after a run's
+//! environment is prepared, the agent's credential variables become its
+//! discovery environment ([`zeron_harness::catalog_env`]), the catalog is
+//! discovered with them, and it is sent to the edge (`POST /runner/models`)
+//! with the run's credential fingerprint. At most once per (agent,
+//! fingerprint) per [`REPUBLISH_AFTER`]; a new fingerprint (another account,
+//! a new key) publishes at once. Claude Code's and Codex's lists are kept on
+//! the edge by hand, so they are never published.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::time::{Duration, Instant};
+
+use zeron_proto::providers::{CloudDelivery, cloud_credentials, runs_on_cloud};
+use zeron_proto::{HarnessId, Model};
+
+use crate::registry::{CatalogPublisher, HarnessRegistry};
+
+/// The same catalog again after this, so a model the provider adds shows up.
+pub const REPUBLISH_AFTER: Duration = Duration::from_secs(10 * 60);
+
+/// Where a discovered catalog goes (the edge; a recorder in tests).
+#[async_trait::async_trait]
+pub trait CatalogSink: Send + Sync {
+    async fn publish(
+        &self,
+        harness: HarnessId,
+        models: &[Model],
+        credential: &str,
+    ) -> Result<(), String>;
+}
+
+/// `POST {edge}/runner/models` with the runner bearer.
+pub struct EdgeSink {
+    url: String,
+    tokens: Arc<dyn zeron_rpc::TokenSource>,
+    http: reqwest::Client,
+}
+
+impl EdgeSink {
+    pub fn new(edge_url: &str, tokens: Arc<dyn zeron_rpc::TokenSource>) -> Self {
+        Self {
+            url: format!("{}/runner/models", edge_url.trim_end_matches('/')),
+            tokens,
+            http: crate::runner::http_client(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CatalogSink for EdgeSink {
+    async fn publish(
+        &self,
+        harness: HarnessId,
+        models: &[Model],
+        credential: &str,
+    ) -> Result<(), String> {
+        let token = self.tokens.token().await.map_err(|e| e.to_string())?;
+        let body = serde_json::json!({
+            "harness": harness.as_str(),
+            "models": models,
+            "credential": credential,
+        });
+        let res = self
+            .http
+            .post(&self.url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(crate::http_error::describe_http_error)?;
+        match res.status().as_u16() {
+            200..=299 => Ok(()),
+            // An edge that predates the route: nothing to keep it in.
+            404 => {
+                tracing::debug!("model catalogs: the edge doesn't keep them yet");
+                Ok(())
+            }
+            status => Err(format!("the edge refused the catalog ({status})")),
+        }
+    }
+}
+
+struct Inner {
+    registry: Weak<HarnessRegistry>,
+    sink: Arc<dyn CatalogSink>,
+    /// The fingerprint each agent's catalog was last published with, and when.
+    published: Mutex<HashMap<HarnessId, (String, Instant)>>,
+    /// Agents whose catalog is being discovered now.
+    busy: Mutex<HashSet<HarnessId>>,
+}
+
+/// The runner's [`CatalogPublisher`]. Cheap to clone.
+#[derive(Clone)]
+pub struct ModelPublisher {
+    inner: Arc<Inner>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The variables of `env` that hold `harness`'s Cloud credentials: what
+/// its discovery needs, nothing else of the run's (its chat, git identity).
+pub fn credential_env(
+    harness: HarnessId,
+    env: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut names: HashSet<&str> = cloud_credentials(harness)
+        .iter()
+        .filter_map(|c| match c.delivery {
+            CloudDelivery::Env(names) => Some(names.to_vec()),
+            // Logins handed to an agent's own credential API (OpenCode's)
+            // ride one variable its harness installs on any server it boots,
+            // discovery's included.
+            CloudDelivery::Api => Some(vec![zeron_harness::opencode::CREDENTIALS_ENV]),
+            // A file is already where discovery reads it.
+            CloudDelivery::File => None,
+        })
+        .flatten()
+        .collect();
+    // Antigravity's Gemini key is a file setting AND this variable.
+    if harness == HarnessId::Antigravity {
+        names.insert("GEMINI_API_KEY");
+    }
+    env.iter()
+        .filter(|(key, _)| names.contains(key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+/// Whether this agent's catalog is published (the edge keeps Claude Code's
+/// and Codex's by hand; registry agents don't run on Cloud).
+fn publishes(harness: HarnessId) -> bool {
+    runs_on_cloud(harness) && !matches!(harness, HarnessId::ClaudeCode | HarnessId::Codex)
+}
+
+impl ModelPublisher {
+    pub fn new(registry: &Arc<HarnessRegistry>, sink: Arc<dyn CatalogSink>) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                registry: Arc::downgrade(registry),
+                sink,
+                published: Mutex::new(HashMap::new()),
+                busy: Mutex::new(HashSet::new()),
+            }),
+        }
+    }
+
+    /// Discover `harness`'s catalog and publish it, unless the same
+    /// fingerprint was published within [`REPUBLISH_AFTER`]. `true` when it
+    /// published.
+    pub async fn refresh(&self, harness: HarnessId) -> bool {
+        if !lock(&self.inner.busy).insert(harness) {
+            return false;
+        }
+        let published = self.refresh_now(harness).await;
+        lock(&self.inner.busy).remove(&harness);
+        published
+    }
+
+    async fn refresh_now(&self, harness: HarnessId) -> bool {
+        let Some(registry) = self.inner.registry.upgrade() else {
+            return false;
+        };
+        // Unknown (the vault out of reach) is no fingerprint to file it under.
+        let Some(credential) = registry.run_credential(harness, None).await else {
+            return false;
+        };
+        if credential == "none" {
+            return false;
+        }
+        if let Some((last, at)) = lock(&self.inner.published).get(&harness)
+            && *last == credential
+            && at.elapsed() < REPUBLISH_AFTER
+        {
+            return false;
+        }
+        let models = match registry.discover_models(harness).await {
+            Ok(models) if !models.is_empty() => models,
+            Ok(_) => return false,
+            Err(error) => {
+                tracing::info!(harness = harness.as_str(), %error, "model catalogs: discovery failed; not published");
+                return false;
+            }
+        };
+        match self.inner.sink.publish(harness, &models, &credential).await {
+            Ok(()) => {
+                tracing::info!(
+                    harness = harness.as_str(),
+                    models = models.len(),
+                    "model catalogs: published"
+                );
+                lock(&self.inner.published).insert(harness, (credential, Instant::now()));
+                true
+            }
+            Err(error) => {
+                tracing::warn!(harness = harness.as_str(), %error, "model catalogs: publish failed");
+                false
+            }
+        }
+    }
+}
+
+impl CatalogPublisher for ModelPublisher {
+    fn prepared(&self, harness: HarnessId, env: &BTreeMap<String, String>) {
+        if !publishes(harness) {
+            return;
+        }
+        // Discovery runs with this run's keys from now on, whoever asks.
+        zeron_harness::catalog_env::set(harness, credential_env(harness, env));
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.refresh(harness).await;
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::RunEnvironment;
+    use futures::stream::BoxStream;
+    use zeron_harness::{Harness, HarnessError, RunControls};
+    use zeron_proto::{AgentEvent, ReasoningLevel, RunRequest, SteeringMode};
+
+    /// An agent whose catalog names the key discovery ran with.
+    struct KeyedAgent;
+
+    #[async_trait::async_trait]
+    impl Harness for KeyedAgent {
+        fn id(&self) -> HarnessId {
+            HarnessId::Muse
+        }
+        fn display_name(&self) -> &str {
+            "keyed"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            let key = zeron_harness::catalog_env::get(HarnessId::Muse)
+                .remove("META_API_KEY")
+                .unwrap_or_default();
+            Ok(vec![Model {
+                id: format!("model-for-{key}"),
+                label: "M".into(),
+                description: None,
+                provider: None,
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+                default: false,
+            }])
+        }
+        async fn run(
+            &self,
+            _request: RunRequest,
+            _controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            Err(HarnessError::Protocol("not a runner".into()))
+        }
+    }
+
+    /// The run credential is the key's own generation.
+    struct Fingerprint(Arc<Mutex<String>>);
+
+    #[async_trait::async_trait]
+    impl RunEnvironment for Fingerprint {
+        async fn prepare(
+            &self,
+            _harness: HarnessId,
+            _chat_id: Option<&str>,
+            request: &mut RunRequest,
+        ) -> Result<(), String> {
+            let key = lock(&self.0).clone();
+            request.env.insert("META_API_KEY".into(), key);
+            request.env.insert(zeron_proto::ORIGIN_ENV.into(), "chat".into());
+            Ok(())
+        }
+        async fn credential(&self, _harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
+            Some(format!("meta-key:{}", lock(&self.0)))
+        }
+    }
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<(HarnessId, Vec<String>, String)>>);
+
+    #[async_trait::async_trait]
+    impl CatalogSink for Recorder {
+        async fn publish(
+            &self,
+            harness: HarnessId,
+            models: &[Model],
+            credential: &str,
+        ) -> Result<(), String> {
+            lock(&self.0).push((
+                harness,
+                models.iter().map(|m| m.id.clone()).collect(),
+                credential.into(),
+            ));
+            Ok(())
+        }
+    }
+
+    fn request() -> RunRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "hi",
+            "cwd": "/tmp",
+            "sandbox": "workspace-write",
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn publishes_what_the_runs_credentials_discover_once_per_fingerprint() {
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(KeyedAgent));
+        let key = Arc::new(Mutex::new("k1".to_string()));
+        registry.set_run_environment(Arc::new(Fingerprint(key.clone())));
+        let sink = Arc::new(Recorder::default());
+        let publisher = ModelPublisher::new(&registry, sink.clone());
+
+        let mut run = request();
+        registry
+            .prepare_run(HarnessId::Muse, None, &mut run)
+            .await
+            .unwrap();
+        // Only the credential variables reach discovery, never the chat's.
+        let discovery = credential_env(HarnessId::Muse, &run.env);
+        assert_eq!(discovery.keys().collect::<Vec<_>>(), ["META_API_KEY"]);
+        // Preparing a run publishes in the background.
+        publisher.prepared(HarnessId::Muse, &run.env);
+        assert_eq!(zeron_harness::catalog_env::get(HarnessId::Muse), discovery);
+        for _ in 0..200 {
+            if !lock(&sink.0).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            lock(&sink.0).clone(),
+            vec![(HarnessId::Muse, vec!["model-for-k1".to_string()], "meta-key:k1".to_string())]
+        );
+        // The same fingerprint again: not published.
+        assert!(!publisher.refresh(HarnessId::Muse).await);
+
+        // A new key: a new catalog, at once.
+        *lock(&key) = "k2".into();
+        let mut run = request();
+        registry
+            .prepare_run(HarnessId::Muse, None, &mut run)
+            .await
+            .unwrap();
+        zeron_harness::catalog_env::set(HarnessId::Muse, credential_env(HarnessId::Muse, &run.env));
+        assert!(publisher.refresh(HarnessId::Muse).await);
+        assert_eq!(
+            lock(&sink.0).last().cloned(),
+            Some((HarnessId::Muse, vec!["model-for-k2".to_string()], "meta-key:k2".to_string()))
+        );
+        zeron_harness::catalog_env::set(HarnessId::Muse, BTreeMap::new());
+    }
+
+    #[test]
+    fn claude_code_and_codex_are_never_published() {
+        assert!(!publishes(HarnessId::ClaudeCode));
+        assert!(!publishes(HarnessId::Codex));
+        assert!(!publishes(HarnessId::Mock));
+        assert!(publishes(HarnessId::Pi));
+        let env = BTreeMap::from([
+            ("OPENROUTER_API_KEY".to_string(), "or".to_string()),
+            ("GIT_AUTHOR_NAME".to_string(), "Ada".to_string()),
+            ("GEMINI_API_KEY".to_string(), "g".to_string()),
+        ]);
+        assert_eq!(
+            credential_env(HarnessId::Pi, &env).keys().collect::<Vec<_>>(),
+            ["GEMINI_API_KEY", "OPENROUTER_API_KEY"]
+        );
+        assert_eq!(
+            credential_env(HarnessId::Antigravity, &env).keys().collect::<Vec<_>>(),
+            ["GEMINI_API_KEY"]
+        );
+        // OpenCode's sign-ins ride its handoff variable into discovery too.
+        let mut env = env;
+        env.insert(
+            zeron_harness::opencode::CREDENTIALS_ENV.to_string(),
+            "[]".to_string(),
+        );
+        assert!(
+            credential_env(HarnessId::Opencode, &env)
+                .contains_key(zeron_harness::opencode::CREDENTIALS_ENV)
+        );
+        assert!(
+            !credential_env(HarnessId::Pi, &env)
+                .contains_key(zeron_harness::opencode::CREDENTIALS_ENV)
+        );
+    }
+}
