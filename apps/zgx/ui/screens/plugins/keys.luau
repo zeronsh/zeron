@@ -174,9 +174,10 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 						return M.short(now:get().key)
 					end,
 					class = "key-short",
+					-- (A key's short form as Settings shows a signing key's.)
 					font = "$font.mono",
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
+					text_size = "$font.size.xs",
+					line_height = "$font.line.xs",
 					color = "$text.tertiary",
 					-- (A row is its key's: the key never changes under it.)
 					tooltip = first.key,
@@ -257,21 +258,25 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 		ds.Settings.Section {
 			title = ui.t("plugins.store.keys"),
 			description = ui.t("plugins.store.keys_body"),
-			trail_on_line = true,
 			-- (The section's own action, at its title's end; a key sends the
 			-- versions after the first, which comes from this computer.)
-			trail = ds.Button {
-				id = "keys-new",
-				tone = "ghost",
-				size = "xs",
-				disabled = function(): boolean
-					return not props.published()
-				end,
-				on_click = function()
-					made_phase:set("idle")
-					making:set(true)
-				end,
-				ui.t("plugins.store.key.new"),
+			trail = ui.div {
+				-- (Its words on the content edge past its own padding, as
+				-- Settings' section actions.)
+				mr = ui.raw(-((ui.theme.get("zeron.space.snug") :: number?) or 10), "the ghost's own padding"),
+				ds.Button {
+					id = "keys-new",
+					tone = "ghost",
+					size = "sm",
+					disabled = function(): boolean
+						return not props.published()
+					end,
+					on_click = function()
+						made_phase:set("idle")
+						making:set(true)
+					end,
+					ui.t("plugins.store.key.new"),
+				},
 			},
 			ui.presence(function(): string
 				return phase:get()

@@ -279,8 +279,8 @@ function M.badges(card: () -> store.Card): Node
 				function(): string
 					return name
 				end,
+				-- (The app's badge: ink on its wash, as Devices' "This device".)
 				tone = "neutral",
-				look = "outline",
 				size = "sm",
 			}
 		end, {
@@ -349,20 +349,18 @@ local function category_tabs(): Node
 		return ds.Tabs {
 			value = category,
 			label = ui.t("plugins.store.category_label"),
-			look = "pill",
-			-- (The filter row's size: all nine of the store's at a pane's
-			-- full width.)
-			size = "xs",
+			-- (The app's tabs, underlined, as Settings' and a diff's are; the
+			-- card's own rule under them is their line.)
+			rule = false,
 			options = options,
 		}
 	end)
-	-- (An xs tab's words are 8 inside it, so 8 here puts the first's on the
-	-- rows' 16; 8 at the end as well.)
+	-- (A tab's words are 4 inside it, so 12 here puts the first's on the
+	-- rows' 16; 12 at the end as well. Its bar sits on the card's rule.)
 	return ui.row {
 		id = "store-filters",
 		w_full = true,
-		py = "$space.1",
-		px = "$space.2",
+		px = "$space.3",
 		ds.Pager {
 			id = "store-categories",
 			back = ui.t("plugins.store.categories_back"),
@@ -372,9 +370,8 @@ local function category_tabs(): Node
 	}
 end
 
--- The order the list is in: the list's section's own action at its title's
--- end, quiet (no fill at rest, so the chosen category is the one filled
--- thing above the rows), saying the order and opening the choice.
+-- The order the list is in: the list's section's own control at its
+-- title's end, saying the order and opening the choice.
 local function order_control(): Node
 	local function sort_items(): { any }
 		local out: { any } = {}
@@ -408,39 +405,19 @@ local function order_control(): Node
 			sort:set(v)
 		end
 	end)
-	return ds.Dropdown {
-		value = sort_value :: any,
-		items = sort_items,
-		search = false,
-		plain = true,
-		placement = { side = "bottom", align = "end" },
-		trigger = function(menu: any): Node
-			return ds.Button {
-				id = "store-order",
-				tone = "ghost",
-				size = "xs",
-				expanded = function(): boolean
-					return menu.open:get()
-				end,
-				on_click = menu.toggle,
-				ui.row {
-					gap = "$space.1",
-					items = "center",
-					ui.text {
-						function(): string
-							return ui.t(`plugins.store.sort.{shown_sort:get()}`):get()
-						end,
-					},
-					-- (Its ink, not its box, on the content edge: the down
-					-- chevron's stroke ends at 18.375 of its 24, so it moves
-					-- out by the rest, as a settings row's chevron does.)
-					ui.div {
-						x = ui.raw(14 * (1 - 18.375 / 24), "the down chevron's ink on the edge, not its box"),
-						ds.Icon { name = "alt-arrow-down", size = 14, aria_hidden = true },
-					},
-				},
-			}
-		end,
+	-- (The app's choice of a few words: a Select, small, as Settings'
+	-- smaller choices are.)
+	return ui.div {
+		id = "store-order",
+		ds.Select {
+			value = sort_value :: any,
+			options = sort_items,
+			size = "sm",
+			-- (As Settings' small choices: wide enough for the longest,
+			-- "Recently updated".)
+			w = 160,
+			name = ui.t("plugins.store.order_label"),
+		},
 	}
 end
 
@@ -697,8 +674,6 @@ M.View = ui.component(function(): Node
 				return if n and n > 0 then ui.t("plugins.store.count", { n = n }):get() else ui.t("plugins.store.list_title"):get()
 			end,
 			trail = order_control(),
-			-- (Order on the title's line, adding nothing to it.)
-			trail_on_line = true,
 			ds.Settings.CatalogCard {
 				id = "store-card",
 				search = { value = query, placeholder = ui.t("plugins.store.search") },
@@ -709,8 +684,6 @@ M.View = ui.component(function(): Node
 					function(): string
 						return keyword:get()
 					end :: any,
-					size = "sm",
-					selected = true,
 					on_remove = function()
 						keyword:set("")
 					end,

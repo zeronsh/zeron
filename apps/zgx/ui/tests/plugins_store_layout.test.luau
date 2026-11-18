@@ -154,16 +154,10 @@ test("Browse's list: its head's order on the content edge, the categories across
 	local card = box(app, "#store-card")
 	local text, content = card.x + INSET, card.x + card.w - INSET
 	local order = box(app, "#store-order")
-	-- (Order is a ghost: its last ink, the chevron's stroke, ends on the
-	-- content edge, its box and wash past it. The chevron's stroke ends at
-	-- 18.375 of its 24.)
-	local img = app:tree("#store-order"):match("[^\n]* img [^\n]*") or ""
-	local cx, cw = img:match("(%-?[%d.]+),%-?[%d.]+ ([%d.]+)x")
-	local chevron = { x = tonumber(cx) or 0, w = tonumber(cw) or 0 }
-	expect(math.abs(chevron.x + chevron.w * 18.375 / 24 - content) < 0.6).to_be(true)
-	expect(order.x + order.w > content).to_be(true)
-	-- (The head's action is the section actions' ghost, 24.)
-	expect(order.h).to_be(24)
+	-- (Order is the app's small Select, a field: its box is its edge, on
+	-- the content edge, as a row's control's is; Settings' small height.)
+	expect(math.abs(order.x + order.w - content) < 0.6).to_be(true)
+	expect(order.h).to_be(28)
 	local search_before = box(app, '#store-card >> role:textbox "Search plugins"').y
 	local bar_before = box(app, "#store-filters").h
 	local card_before = card.y
@@ -171,18 +165,18 @@ test("Browse's list: its head's order on the content edge, the categories across
 	settle(app, 500)
 	local all = app:tree('#store-filters >> role:tab "All"'):match("[^\n]+") or ""
 	local first_tab = box(app, '#store-filters >> role:tab "All"')
-	-- (A filter row's xs tab's words are 8 inside it.)
-	expect(math.abs(first_tab.x + 8 - text) < 0.6).to_be(true)
+	-- (A tab's words are 4 inside it.)
+	expect(math.abs(first_tab.x + 4 - text) < 0.6).to_be(true)
 	expect(box(app, "#store-filters").h).to_be(bar_before)
 	expect(box(app, '#store-card >> role:textbox "Search plugins"').y).to_be(search_before)
 	expect(box(app, "#store-card").y).to_be(card_before)
 	expect(all).never.to_contain("All categories")
 	-- The categories run the card's width, from edge to edge of its row.
 	local tabs = box(app, "#store-categories")
-	expect(math.abs(tabs.x - (card.x + 1 + 8)) < 0.6).to_be(true)
-	expect(math.abs(tabs.x + tabs.w - (card.x + card.w - 1 - 8)) < 0.6).to_be(true)
-	-- (The design system's xs, 24, as the head's Order is.)
-	expect(box(app, '#store-filters >> role:tab "All"').h).to_be(24)
+	expect(math.abs(tabs.x - (card.x + 1 + 12)) < 0.6).to_be(true)
+	expect(math.abs(tabs.x + tabs.w - (card.x + card.w - 1 - 12)) < 0.6).to_be(true)
+	-- (The app's tabs, as Settings' are: 36.)
+	expect(box(app, '#store-filters >> role:tab "All"').h).to_be(36)
 end)
 
 test("the featured hold their room as they come, one height each, and stand a section's step from the list", function()
@@ -637,7 +631,7 @@ test("a check is a Settings row: a passed one the row's own height, one with wha
 	expect(seen[60 + 1]).to_be(true)
 end)
 
-test("a section's action stands on its title's line: title to its sentence 4, title to its card 8, as a section without one", function()
+test("a section's action stands at its title's end as Settings' do: its line as tall as the action, the sentence 4 under it, the card 8", function()
 	local app = publishing()
 	app:scroll(SCROLL, 1e6)
 	settle(app)
@@ -645,12 +639,12 @@ test("a section's action stands on its title's line: title to its sentence 4, ti
 	local line = app:tree('role:group "Deploy keys"'):match("[^\n]*A deploy key lets[^\n]*") or ""
 	local sx, sy, sw, sh = line:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
 	local sentence = { x = tonumber(sx) or 0, y = tonumber(sy) or 0, w = tonumber(sw) or 0, h = tonumber(sh) or 0 }
-	expect(sentence.y - (title.y + title.h)).to_be(4)
-	-- (The action centred on the title's line.)
+	-- (The action centred on the title, the line as tall as the action.)
 	local action = box(app, "#keys-new")
 	expect(math.abs((action.y + action.h / 2) - (title.y + title.h / 2)) < 0.6).to_be(true)
-	local checks_title = box(app, 'role:group "What the store needs" >> role:heading')
-	expect(box(app, "#publish-checks").y - 1 - (checks_title.y + checks_title.h)).to_be(8)
+	expect(sentence.y - (action.y + action.h)).to_be(4)
+	local checks_action = box(app, "#publish-check-again")
+	expect(box(app, "#publish-checks").y - 1 - (checks_action.y + checks_action.h)).to_be(8)
 end)
 
 test("a key's short form is a column down its rows, ending before Revoke, at 1000 and in a narrow pane", function()
@@ -715,12 +709,12 @@ test("publishing's buttons and its versions' actions end on one edge, the conten
 		expect(`{target} {math.abs(b.x + b.w - content) < 0.6}`).to_be(`{target} true`)
 	end
 	-- A ghost trail's words end on it, its wash past by its end padding (a
-	-- ghost xs button's, 6): text lined up with text.
+	-- ghost sm button's, 10, `zeron.space.snug`): text lined up with text.
 	app:scroll(SCROLL, 1e6)
 	settle(app)
 	for _, target in { "#publish-check-again", "#keys-new" } do
 		local b = box(app, target)
-		expect(`{target} {math.abs(b.x + b.w - 6 - content) < 0.6}`).to_be(`{target} true`)
+		expect(`{target} {math.abs(b.x + b.w - 10 - content) < 0.6}`).to_be(`{target} true`)
 	end
 end)
 

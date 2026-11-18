@@ -69,7 +69,6 @@ local function browse(): Node
 			end,
 		}
 	end
-	local ORDERS = { popular = "Most installed", updated = "Recently updated", new = "Newest" }
 	return ui.column {
 		w_full = true,
 		gap = "$space.6",
@@ -94,41 +93,23 @@ local function browse(): Node
 				end,
 			},
 		}),
-		-- The list: a section, how many as its title, the order its quiet
-		-- action; the card's search, its categories (ds.Pager pages them
+		-- The list: a section, how many as its title, the order its
+		-- control; the card's search, its categories (ds.Pager pages them
 		-- when they don't fit), its rows.
 		ds.Settings.Section {
 			title = function(): string
 				return `{#found:get()} plugins`
 			end,
-			trail_on_line = true,
-			trail = ds.Dropdown {
-				value = order :: any,
-				search = false,
-				plain = true,
-				placement = { side = "bottom", align = "end" },
-				items = {
+			trail = ds.Select {
+				value = order,
+				size = "sm",
+				w = 160,
+				name = "Order",
+				options = {
 					{ value = "popular", label = "Most installed" },
 					{ value = "updated", label = "Recently updated" },
 					{ value = "new", label = "Newest" },
 				},
-				trigger = function(menu: any): Node
-					return ds.Button {
-						tone = "ghost",
-						size = "xs",
-						on_click = menu.toggle,
-						ui.row {
-							gap = "$space.1",
-							items = "center",
-							ui.text {
-								function(): string
-									return ORDERS[order:get()] or ""
-								end,
-							},
-							ds.Icon { name = "alt-arrow-down", size = 14, aria_hidden = true },
-						},
-					}
-				end,
 			},
 			ds.Settings.CatalogCard {
 				search = { value = query, placeholder = "Search plugins" },
@@ -138,26 +119,22 @@ local function browse(): Node
 					function(): string
 						return keyword:get()
 					end :: any,
-					size = "sm",
-					selected = true,
 					on_remove = function()
 						keyword:set("")
 					end,
 				}),
-				-- (An xs tab's words are 8 inside it, so 8 here puts the
-				-- first's on the rows' 16.)
+				-- (A tab's words are 4 inside it, so 12 here puts the
+				-- first's on the rows' 16; its bar on the card's rule.)
 				filters = ui.row {
 					w_full = true,
-					py = "$space.1",
-					px = "$space.2",
+					px = "$space.3",
 					ds.Pager {
 						back = "Earlier categories",
 						more = "More categories",
 						ds.Tabs {
 							value = category,
 							label = "Category",
-							look = "pill",
-							size = "xs",
+							rule = false,
 							options = {
 								{ value = "", label = "All" },
 								{ value = "agents", label = "Agents" },

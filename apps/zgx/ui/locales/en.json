@@ -3865,6 +3865,7 @@
       "turn_on": "Turn on",
       "open_settings": "Open settings",
       "category_label": "Category",
+      "order_label": "Order",
       "sort": {
         "relevance": "Best match",
         "popular": "Most installed",

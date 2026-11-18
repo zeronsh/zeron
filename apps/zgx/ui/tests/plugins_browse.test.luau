@@ -197,7 +197,7 @@ test("a category, the order and a keyword each ask the store again", function()
 	expect(app:has("#store-featured")).to_be(false)
 	app:click("#store-order")
 	app:frames(10)
-	app:click('role:option "Recently updated"')
+	app:click('role:menuitem "Recently updated"')
 	settle(app)
 	expect(calls(app)).to_contain("search:q=,category=git,keyword=,sort=updated,cursor=")
 	-- A keyword, from a plugin's page: one token beside the search, removable.
@@ -390,7 +390,7 @@ test("the list's head says how many what's asked matches, kept as a new search c
 	expect(head()).to_contain("75 plugins")
 	expect(head_h()).to_be(loading_h)
 	-- Order is the head's own action, at its end.
-	expect(app:tree("#store-list")).to_contain('#store-order button "Most installed"')
+	expect(app:tree("#store-order")).to_contain('text "Most installed"')
 	-- A search: the count of what it finds, the last one kept until it answers.
 	app:command("store_stub.hold")
 	app:type('#store-card >> role:textbox "Search plugins"', "timer")

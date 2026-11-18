@@ -3865,6 +3865,7 @@
       "turn_on": "打开",
       "open_settings": "打开设置",
       "category_label": "类别",
+      "order_label": "排序",
       "sort": {
         "relevance": "最相关",
         "popular": "安装最多",

@@ -599,16 +599,20 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 				-- again the section's own action at its title's end.
 				ds.Settings.Section {
 					title = ui.t("plugins.store.checks_title"),
-					trail_on_line = true,
-					trail = ds.Button {
-						id = "publish-check-again",
-						tone = "ghost",
-						size = "xs",
-						disabled = function(): boolean
-							return phase:get() == "checking"
-						end,
-						on_click = check,
-						ui.t("plugins.store.check_again"),
+					-- (The app's section action: a ghost, small, its words on
+					-- the content edge past its own padding, as Settings'.)
+					trail = ui.div {
+						mr = ui.raw(-((ui.theme.get("zeron.space.snug") :: number?) or 10), "the ghost's own padding"),
+						ds.Button {
+							id = "publish-check-again",
+							tone = "ghost",
+							size = "sm",
+							disabled = function(): boolean
+								return phase:get() == "checking"
+							end,
+							on_click = check,
+							ui.t("plugins.store.check_again"),
+						},
 					},
 					ui.presence(function(): string
 						local p = phase:get()
