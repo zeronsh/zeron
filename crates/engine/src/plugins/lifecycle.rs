@@ -699,7 +699,10 @@ impl Plugins {
             tokio::time::sleep(FIRST_CHECK).await;
             loop {
                 let Some(inner) = weak.upgrade() else { return };
-                Plugins { inner }.check_takedowns().await;
+                let plugins = Plugins { inner };
+                plugins.check_takedowns().await;
+                plugins.check_publishes().await;
+                drop(plugins);
                 tokio::time::sleep(TAKEDOWN_EVERY).await;
             }
         });

@@ -43,6 +43,13 @@ pub struct StoredVersion {
     pub blocked: Option<String>,
     /// `device` or `deploy_key`.
     pub via: String,
+    /// The deploy key that sent it: `(key, name)`.
+    pub deploy_key: Option<(String, String)>,
+    /// When the store took it (ms).
+    pub published_at: i64,
+    /// Yanked because a newer version was listed while this one wasn't
+    /// verified: the newer version (the author can't unyank it).
+    pub superseded_by: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -100,6 +107,8 @@ pub struct State {
     /// Events at or below this `seq` are forgotten (older than the feed
     /// keeps): asking after one answers a reset.
     pub feed_floor: u64,
+    /// The last time the store's clock gave (`State::tick`).
+    pub clock: i64,
 }
 
 /// `card` with the store's `card_extra` laid over it.
@@ -162,6 +171,43 @@ impl StoredPlugin {
     fn newest_verified(&self) -> Option<&StoredVersion> {
         self.listed().into_iter().find(|v| v.verified)
     }
+
+    /// As the store when version `newer` is listed: every older listed
+    /// version not verified is yanked, superseded by it (a release
+    /// supersedes older releases and pre-releases; a pre-release older
+    /// pre-releases only).
+    fn supersede(&mut self, newer: &str) {
+        let newer_v = Version::parse(newer).unwrap();
+        for v in &mut self.versions {
+            let older = Version::parse(&v.version).unwrap();
+            let on_its_line = !newer_v.is_prerelease() || older.is_prerelease();
+            if v.status == "listed" && !v.verified && older < newer_v && on_its_line {
+                v.status = "yanked".into();
+                v.superseded_by = Some(newer.to_owned());
+            }
+        }
+    }
+
+    /// Version `version` superseded by one listed now, if any is: the
+    /// newest such.
+    fn superseder_of(&self, version: &str) -> Option<String> {
+        let older = Version::parse(version).unwrap();
+        self.listed()
+            .into_iter()
+            .find(|v| {
+                let newer = Version::parse(&v.version).unwrap();
+                newer > older && (!newer.is_prerelease() || older.is_prerelease())
+            })
+            .map(|v| v.version.clone())
+    }
+}
+
+impl State {
+    /// The store's clock: now, and never the same twice.
+    fn tick(&mut self) -> i64 {
+        self.clock = (self.clock + 1).max(chrono_now());
+        self.clock
+    }
 }
 
 /// A version as the public sees it (`VersionInfo`).
@@ -171,6 +217,7 @@ fn version_info(state: &State, v: &StoredVersion) -> Value {
         "prerelease": Version::parse(&v.version).is_ok_and(|x| x.is_prerelease()), "notes": v.notes,
         "engines": { "zeron": v.engines }, "key": v.key, "hash": v.hash, "sha256": sha256_hex(&v.raw),
         "bytes": bytes_of(state, v), "verified": v.verified, "verified_at": v.verified.then_some(1), "via": v.via,
+        "published_at": v.published_at,
     })
 }
 
@@ -206,11 +253,13 @@ impl FakeStore {
     }
 
     /// Add version `raw` of its plugin, owned by `owner`: `verified` (listed
-    /// and verified), `listed` (not verified) or `yanked`.
+    /// and verified), `listed` (not verified) or `yanked`. Listed, it
+    /// supersedes older unverified versions, as a publish does.
     pub fn add(&self, owner: &str, raw: &[u8], state: &str, notes: &str) {
         let package = install::parse(raw.to_vec()).expect("a valid package");
         let engines = package.manifest.raw["engines"]["zeron"].as_str().map(str::to_owned);
         let mut all = self.state.lock().unwrap();
+        let published_at = all.tick();
         let plugin = all.plugins.entry(package.id().to_owned()).or_default();
         if plugin.owner.is_empty() {
             plugin.owner = owner.to_owned();
@@ -226,7 +275,13 @@ impl FakeStore {
             engines,
             blocked: None,
             via: "device".into(),
+            deploy_key: None,
+            published_at,
+            superseded_by: None,
         });
+        if state != "yanked" {
+            plugin.supersede(&package.manifest.version);
+        }
     }
 
     fn version_mut<'a>(state: &'a mut State, id: &str, version: &str) -> &'a mut StoredVersion {
@@ -237,9 +292,15 @@ impl FakeStore {
         Self::version_mut(&mut self.state.lock().unwrap(), id, version).status = status.to_owned();
     }
 
-    /// A reviewer verifies it.
+    /// A reviewer verifies it: a superseded yank lifts (every verified
+    /// version is installable); an author's own stays.
     pub fn verify(&self, id: &str, version: &str) {
-        Self::version_mut(&mut self.state.lock().unwrap(), id, version).verified = true;
+        let mut state = self.state.lock().unwrap();
+        let v = Self::version_mut(&mut state, id, version);
+        v.verified = true;
+        if v.superseded_by.take().is_some() {
+            v.status = "listed".into();
+        }
     }
 
     /// Staff take it down: blocked on devices, and an event in the feed.
@@ -256,9 +317,13 @@ impl FakeStore {
     /// Staff restore a version taken down: listed again, unverified.
     pub fn restore(&self, id: &str, version: &str) {
         let mut state = self.state.lock().unwrap();
+        let superseder = state.plugins[id].superseder_of(version);
         let v = Self::version_mut(&mut state, id, version);
-        v.status = "listed".into();
         v.blocked = None;
+        // Back unverified, and superseded at once when anything newer on its
+        // line is listed.
+        v.status = if superseder.is_some() { "yanked" } else { "listed" }.into();
+        v.superseded_by = superseder;
         let seq = state.events.last().map_or(1, |e| e.0 + 1);
         state.events.push((seq, "restore".into(), id.into(), version.into(), String::new()));
     }
@@ -543,6 +608,12 @@ impl FakeStore {
                     return json_reply(400, json!({ "error": "not_semver", "message": "Not a version." }));
                 }
                 let mut state = self.state.lock().unwrap();
+                let published_at = state.tick();
+                let deploy_key = scope.as_ref().and_then(|_| {
+                    let key = headers.get("authorization")?.split("key=").nth(1)?.split(',').next()?.to_owned();
+                    let name = state.deploy_keys.get(&key)?.name.clone();
+                    Some((key, name))
+                });
                 // A key publishes existing plugins its account owns, in its
                 // scope; never a new id.
                 if let Some(scope) = &scope {
@@ -570,7 +641,11 @@ impl FakeStore {
                     engines: None,
                     blocked: None,
                     via: via.into(),
+                    deploy_key,
+                    published_at,
+                    superseded_by: None,
                 });
+                plugin.supersede(&package.manifest.version);
                 state.submitted.push(((*id).to_owned(), body.to_vec(), via.to_owned()));
                 json_reply(201, json!({ "id": id, "version": package.manifest.version, "status": "listed", "verified": false, "checks": [] }))
             }
@@ -585,6 +660,8 @@ impl FakeStore {
                         "id": id, "author": p.author(),
                         "versions": p.versions.iter().map(|v| {
                             let mut info = version_info(&state, v);
+                            // (Which key sent it: the publish notice's.)
+                            info["deploy_key"] = v.deploy_key.as_ref().map_or(Value::Null, |(key, name)| json!({ "key": key, "name": name }));
                             info["review"] = json!({ "decided": v.verified, "decision": if v.verified { json!("verified") } else { Value::Null } });
                             info
                         }).collect::<Vec<_>>(),
@@ -663,6 +740,9 @@ impl FakeStore {
                     return json_reply(403, json!({ "error": "forbidden", "message": "Not yours." }));
                 }
                 let Some(v) = p.versions.iter_mut().find(|v| v.version == *version) else { return not_found() };
+                if v.superseded_by.is_some() {
+                    return json_reply(409, json!({ "error": "superseded", "message": "A newer version superseded this one before it was verified." }));
+                }
                 v.status = match *action {
                     "yank" => "yanked",
                     "unyank" => "listed",

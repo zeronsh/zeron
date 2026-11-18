@@ -293,6 +293,9 @@ struct Inner {
     /// another device, this device's revoked): `{id, kind, words}`, carried
     /// on the plugin list for the app's own strip, newest last.
     key_notices: Mutex<Vec<serde_json::Value>>,
+    /// When the account's publishes were last looked over
+    /// (`store::notices`), and whether it had any plugins then.
+    publishes_checked: Mutex<Option<(Instant, bool)>>,
     /// When this device's own key was last looked up on a peer's word
     /// (`CheckPluginKey`): at most every few seconds.
     own_key_checked: Mutex<Option<Instant>>,
@@ -563,6 +566,7 @@ impl Plugins {
                 deploy_key_step_up: Mutex::new(None),
                 new_keys: Mutex::new(Vec::new()),
                 key_notices: Mutex::new(Vec::new()),
+                publishes_checked: Mutex::new(None),
                 own_key_checked: Mutex::new(None),
                 store: Mutex::new(None),
             }),
@@ -1343,6 +1347,7 @@ impl Plugins {
     }
 
     fn list_value(&self) -> serde_json::Value {
+        let store_notices: Vec<serde_json::Value> = lock(&self.inner.state).publish_notices.iter().map(store::notices::PublishNotice::shown).collect();
         let entries = lock(&self.inner.entries);
         let items: Vec<&scan::PluginItem> = entries.iter().map(|e| &e.item).collect();
         let key_notices = lock(&self.inner.key_notices).clone();
@@ -1353,6 +1358,7 @@ impl Plugins {
             },
             "plugins": items,
             "key_notices": key_notices,
+            "store_notices": store_notices,
         })
     }
 

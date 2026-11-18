@@ -89,17 +89,21 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// The plugins named (`ids`, trimmed, sorted, unique), or `Err` when
-    /// there are none or more than [`MAX_SCOPE_PLUGINS`], or one isn't an id.
+    /// The plugins named (`ids`, trimmed and sorted by code unit), or `Err`
+    /// when there are none or more than [`MAX_SCOPE_PLUGINS`], one isn't an
+    /// id, or one is named twice: the store refuses a duplicate rather than
+    /// dropping it, so this does too.
     pub fn plugins(ids: &[String]) -> Result<Self, String> {
         let mut ids: Vec<String> = ids.iter().map(|id| id.trim().to_owned()).collect();
         ids.sort();
-        ids.dedup();
         if ids.is_empty() || ids.len() > MAX_SCOPE_PLUGINS {
             return Err(format!("A key is for 1 to {MAX_SCOPE_PLUGINS} plugins, or for all of yours"));
         }
         if let Some(bad) = ids.iter().find(|id| super::super::manifest::check_id(id).is_err()) {
             return Err(format!("\"{bad}\" isn't a plugin's id"));
+        }
+        if let Some(twice) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(format!("\"{}\" is named twice", twice[0]));
         }
         Ok(Self::Plugins(ids))
     }
@@ -241,10 +245,11 @@ mod tests {
         );
         assert_eq!(signing::sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
         assert_eq!(proof_message("pub_1", None, &Scope::All, "KEY"), "zeron-deploy-key:v2:pub_1:never:*:KEY");
-        let two = Scope::plugins(&["git".into(), " focus".into(), "git".into()]).unwrap();
+        let two = Scope::plugins(&["git".into(), " focus".into()]).unwrap();
         assert_eq!(proof_message("pub_1", Some(1_800_000_000_000), &two, "KEY"), "zeron-deploy-key:v2:pub_1:1800000000000:focus,git:KEY");
         assert_eq!(two.to_value(), serde_json::json!({ "plugins": ["focus", "git"] }));
         assert!(Scope::plugins(&[]).is_err() && Scope::plugins(&["Not An Id".into()]).is_err());
+        assert_eq!(Scope::plugins(&["git".into(), "focus".into(), " git".into()]), Err("\"git\" is named twice".to_owned()));
         assert!(Scope::plugins(&(0..51).map(|n| format!("p{n:02}")).collect::<Vec<_>>()).is_err());
         assert_eq!(CONTENT_SHA256_HEADER, "X-Zeron-Content-SHA256");
     }

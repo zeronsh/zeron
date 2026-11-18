@@ -529,7 +529,9 @@ pub mod methods {
     pub const LIST_CLOUD_BRANCHES: &str = "ListCloudBranches";
 
     // ── Plugins (the plugins contract; local IPC only but PluginDeliver) ──
-    /// `{}` → `{dirs: {plugins, templates}, plugins: PluginItem[]}`, by name.
+    /// `{}` → `{dirs: {plugins, templates}, plugins: PluginItem[],
+    /// key_notices, store_notices}`, by name (`store_notices`: see
+    /// [`ACK_STORE_NOTICES`]).
     pub const LIST_PLUGINS: &str = "ListPlugins";
     /// `{}` → stream of `ListPlugins`' reply: the current list at once, then
     /// each change.
@@ -766,6 +768,12 @@ pub mod methods {
     /// verified, the newest verified beside it; `verified`: the newest
     /// verified. Taking an unverified version always asks.
     pub const SET_PLUGIN_UPDATES: &str = "SetPluginUpdates";
+    /// `{ids}` → `{}`: the app has shown these of the plugin list's
+    /// `store_notices` (each `{id, plugin, version, name?, via: "device" |
+    /// "deploy_key", key_name?, at, words}`: a publish of one of the
+    /// account's plugins this device didn't make), so the engine lets them
+    /// go. Each is raised once per version, and kept until it's shown.
+    pub const ACK_STORE_NOTICES: &str = "AckStoreNotices";
     /// `{id}` → `{id, name, version, description, hash, ok, problems,
     /// warnings, listing, notes, package: {files, bytes}, ticket?}`: one of
     /// your own plugins checked against the store's rules, each problem
@@ -891,6 +899,7 @@ pub fn local_only(method: &str) -> bool {
             | methods::CREATE_DEPLOY_KEY
             | methods::REVOKE_DEPLOY_KEY
             | methods::STORE_REPORT
+            | methods::ACK_STORE_NOTICES
             // What a Cloud chat reaches: this device's app sets it, never
             // another device (a Cloud machine among them) and never an agent.
             | methods::CLOUD_SET_REACH
@@ -1270,11 +1279,11 @@ mod tests {
             methods::STORE_SEARCH, methods::STORE_PLUGIN, methods::STORE_VERSIONS, methods::STORE_VERSION, methods::STORE_CATEGORIES,
             methods::STORE_STATS, methods::STORE_FILE, methods::PREPARE_PLUGIN_PUBLISH,
             methods::PUBLISH_PLUGIN, methods::STORE_MY_PLUGINS, methods::STORE_VERSION_ACTION, methods::STORE_REPORT,
-            methods::LIST_DEPLOY_KEYS, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY,
+            methods::LIST_DEPLOY_KEYS, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY, methods::ACK_STORE_NOTICES,
         ] {
             assert!(local_only(method), "{method}");
         }
-        for method in [methods::PUBLISH_PLUGIN, methods::STORE_VERSION_ACTION, methods::STORE_REPORT, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY, methods::LIST_DEPLOY_KEYS, methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES] {
+        for method in [methods::PUBLISH_PLUGIN, methods::STORE_VERSION_ACTION, methods::STORE_REPORT, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY, methods::LIST_DEPLOY_KEYS, methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES, methods::ACK_STORE_NOTICES] {
             assert!(!agent_allowed(method), "{method}");
         }
         assert!(!local_only(methods::PLUGIN_DELIVER));

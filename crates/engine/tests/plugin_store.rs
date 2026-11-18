@@ -728,3 +728,66 @@ async fn the_same_username_on_another_account_asks_again() {
     assert_eq!(updated["plugin"]["author"]["username"], "ada", "the name people read is the same");
     assert_eq!(updated["plugin"]["status"], "pending", "but it's another account: asked again");
 }
+
+#[tokio::test]
+async fn a_newer_version_supersedes_an_unverified_one_until_zeron_verifies_it() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "listed", "");
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "listed", "");
+    let d = device(&store, Some("bob"));
+    // 1.0.0 was never read and a newer one is out: it takes no new installs.
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus", "version": "1.0.0" })).await.unwrap_err();
+    assert_eq!(word(&refused), "not_in_store", "{refused}");
+    let page = d.call(methods::STORE_VERSION, json!({ "id": "focus", "version": "1.0.0" })).await.unwrap();
+    assert_eq!((page["status"].as_str(), page["verified"].as_bool()), (Some("yanked"), Some(false)));
+    // Verified, it's installable again.
+    store.verify("focus", "1.0.0");
+    let installed = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus", "version": "1.0.0" })).await.unwrap();
+    assert_eq!((installed["plugin"]["version"].as_str(), installed["plugin"]["source"]["verified"].as_bool()), (Some("1.0.0"), Some(true)));
+    // The author can't unyank a superseded version.
+    let author = device(&store, Some("ada"));
+    store.add("ada", &package_of(&key, "focus", "1.2.0", &["ui.add"], "return 3", json!({})), "listed", "");
+    let unyank = author.call(methods::STORE_VERSION_ACTION, json!({ "id": "focus", "version": "1.1.0", "action": "unyank" })).await.unwrap();
+    assert_eq!(unyank["ok"], false, "{unyank}");
+}
+
+#[tokio::test]
+async fn every_publish_not_made_here_is_noticed_once_and_kept_until_the_app_has_shown_it() {
+    let store = FakeStore::start().await;
+    let (laptop, _) = SigningKey::generate().unwrap();
+    store.add("ann", &package_of(&laptop, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("ann"));
+    let notices = |list: Value| list["store_notices"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    // The first look: what was there before isn't news.
+    d.plugins.check_publishes().await;
+    assert!(notices(d.call(methods::LIST_PLUGINS, json!({})).await.unwrap()).is_empty());
+
+    // A deploy key publishes 1.1.0; the laptop 1.2.0; this device 1.3.0.
+    let ci = DeployKey::from_seed([9; 32]).unwrap();
+    store.add_deploy_key(&ci.public(), zeron_engine::plugins::store::deploy_key::Scope::All, "ann");
+    let by_key = StoreClient::new(&store.url).publish("focus", package_of(&laptop, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), &zeron_engine::plugins::store::client::Caller::DeployKey(Arc::new(ci))).await;
+    assert!(by_key.is_ok(), "{by_key:?}");
+    store.add("ann", &package_of(&laptop, "focus", "1.2.0", &["ui.add"], "return 3", json!({})), "listed", "");
+    let here = zeron_engine::plugins::signing::load_or_create_key(d._dir.path()).unwrap();
+    store.add("ann", &package_of(&here, "focus", "1.3.0", &["ui.add"], "return 4", json!({})), "listed", "");
+
+    d.plugins.check_publishes().await;
+    let list = d.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
+    assert_eq!(notices(list.clone()), ["focus@1.1.0", "focus@1.2.0"], "{list}");
+    let shown = &list["store_notices"];
+    assert_eq!((shown[0]["via"].as_str(), shown[0]["key_name"].as_str()), (Some("deploy_key"), Some("CI")), "{shown}");
+    assert_eq!(shown[1]["via"], "device");
+    assert!(shown[1]["words"].as_str().unwrap().contains("another of your devices"), "{shown}");
+
+    // Shown: let go, and never raised again.
+    d.call(methods::ACK_STORE_NOTICES, json!({ "ids": ["focus@1.1.0"] })).await.unwrap();
+    d.plugins.check_publishes().await;
+    assert_eq!(notices(d.call(methods::LIST_PLUGINS, json!({})).await.unwrap()), ["focus@1.2.0"]);
+    // Kept across a restart until it's shown.
+    let again = Plugins::new(d._dir.path(), "dev-1");
+    assert_eq!(notices(match again.dispatch(methods::LIST_PLUGINS, json!({})).await.unwrap() {
+        RpcReply::Value(v) => v,
+        RpcReply::Stream(_) => unreachable!(),
+    }), ["focus@1.2.0"]);
+}

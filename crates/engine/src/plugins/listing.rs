@@ -253,6 +253,49 @@ pub fn store_link(url: &str) -> Option<String> {
     plain.then(|| parsed.to_string())
 }
 
+/// Words a listing's name or description may not use: only the store
+/// marks a version verified (amendment 45). Matched as whole words of
+/// [`mark_text`].
+pub const MARK_WORDS: &[&str] = &["verified", "official"];
+
+/// Check marks a listing's name or description may not have, anywhere:
+/// ✓ ✔ ☑ ✅ 🗸 🗹.
+pub const MARK_GLYPHS: &[char] = &['\u{2713}', '\u{2714}', '\u{2611}', '\u{2705}', '\u{1F5F8}', '\u{1F5F9}'];
+
+/// `text` as the mark rule reads it: Unicode NFKC (so 𝐯𝐞𝐫𝐢𝐟𝐢𝐞𝐝 and
+/// ｖｅｒｉｆｉｅｄ are "verified"), lowercased, then NFKD without its
+/// nonspacing marks (so "vérified" and "VERİFİED", whose lowercase keeps a
+/// dot above, are too).
+pub fn mark_text(text: &str) -> String {
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+    let lower = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc().normalize(text).to_lowercase();
+    icu_normalizer::DecomposingNormalizerBorrowed::new_nfkd()
+        .normalize(&lower)
+        .chars()
+        .filter(|c| c.general_category() != GeneralCategory::NonspacingMark)
+        .collect()
+}
+
+/// What in `text` claims the store's mark, if anything does: one of
+/// [`MARK_GLYPHS`], or one of [`MARK_WORDS`] in [`mark_text`] as a whole
+/// word (not next to an ASCII letter or digit: "unofficial" and
+/// "verifiedly" don't claim it; "Verified!" and "verified_tools" do).
+pub fn mark_claim(text: &str) -> Option<String> {
+    let folded = mark_text(text);
+    if let Some(glyph) = folded.chars().find(|c| MARK_GLYPHS.contains(c)) {
+        return Some(glyph.to_string());
+    }
+    let word_char = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    MARK_WORDS
+        .iter()
+        .find(|word| {
+            folded.match_indices(**word).any(|(at, _)| {
+                !word_char(folded[..at].chars().next_back()) && !word_char(folded[at + word.len()..].chars().next())
+            })
+        })
+        .map(|word| (*word).to_owned())
+}
+
 /// Whether `text` has a control or format character (Unicode Cc or Cf:
 /// direction overrides, invisible joiners), which what a listing shows may
 /// not (amendment 31).
@@ -487,6 +530,12 @@ pub fn check(
             Some("name"),
             "Its name has a control or invisible formatting character",
         ));
+    } else if let Some(claim) = mark_claim(&manifest.name) {
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("name"),
+            format!("Its name says \"{claim}\": only the store marks a plugin verified"),
+        ));
     }
     if !manifest.entry.is_empty() && !files.contains_key(&manifest.entry) {
         problems.push(Problem::new(
@@ -537,6 +586,12 @@ pub fn check(
             BAD_LISTING,
             Some("description"),
             "Its description has a control or invisible formatting character",
+        ));
+    } else if let Some(claim) = mark_claim(description) {
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("description"),
+            format!("Its description says \"{claim}\": only the store marks a plugin verified"),
         ));
     }
     match raw.get("icon") {
@@ -1107,5 +1162,33 @@ pub(crate) mod tests {
         );
         assert!(zeron_range(&serde_json::json!({ "engines": { "zeron": 4 } })).is_err());
         assert!(zeron_range(&serde_json::json!({ "engines": [] })).is_err());
+    }
+
+    #[test]
+    fn a_name_or_description_claiming_the_store_s_mark_is_refused() {
+        for (text, claim) in [
+            ("Verified Focus", Some("verified")),
+            ("The OFFICIAL git plugin", Some("official")),
+            ("verified_tools", Some("verified")),
+            ("Focus \u{2713}", Some("\u{2713}")),
+            ("Focus \u{2705} board", Some("\u{2705}")),
+            ("\u{1d42f}\u{1d41e}\u{1d42b}\u{1d422}\u{1d41f}\u{1d422}\u{1d41e}\u{1d41d} Focus", Some("verified")),
+            ("\u{ff36}\u{ff25}\u{ff32}\u{ff29}\u{ff26}\u{ff29}\u{ff25}\u{ff24}", Some("verified")),
+            ("An unofficial client", None),
+            ("Unverified links, flagged", None),
+            ("Officially fun", None),
+            ("V\u{e9}rified", Some("verified")),
+            ("VER\u{130}F\u{130}ED", Some("verified")),
+            ("Focus Board", None),
+        ] {
+            assert_eq!(mark_claim(text).as_deref(), claim, "{text}");
+        }
+        let (mut m, files) = listed();
+        m["name"] = serde_json::json!("Focus \u{2714}");
+        m["description"] = serde_json::json!("The official board.");
+        let (problems, _) = check(&Manifest::from_value(m).unwrap(), &files);
+        let said: Vec<(&str, Option<&str>)> = problems.iter().map(|p| (p.rule, p.field)).collect();
+        assert_eq!(said, [(rule::BAD_LISTING, Some("name")), (rule::BAD_LISTING, Some("description"))]);
+        assert!(problems[1].words.contains("\"official\""), "{}", problems[1].words);
     }
 }

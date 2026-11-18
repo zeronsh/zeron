@@ -14,6 +14,7 @@
 pub mod client;
 pub mod deploy_key;
 mod device;
+pub mod notices;
 pub mod publish;
 pub mod text_notes;
 

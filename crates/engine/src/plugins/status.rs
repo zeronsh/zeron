@@ -41,6 +41,14 @@ pub struct State {
     /// The last take-down feed event applied here (its `seq`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub takedowns_after: Option<u64>,
+    /// Publishes of the account's plugins this device has looked over
+    /// (`store::notices`): none until it first looks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publishes: Option<super::store::notices::Seen>,
+    /// Publishes not made on this device that the app hasn't shown yet,
+    /// oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publish_notices: Vec<super::store::notices::PublishNotice>,
 }
 
 /// Which store update a device stages when the newest isn't verified.

@@ -691,6 +691,28 @@ fn listing_cases() -> Value {
         m[field] = value;
         cases.push((name.into(), m, files.clone()));
     }
+    // The store's mark is its alone (amendment 45): a name or description
+    // that claims it is refused, read as NFKC then lowercase, words whole.
+    for (name, field, value) in [
+        ("the mark: a name saying Verified", "name", "Verified Focus"),
+        ("the mark: a name saying OFFICIAL", "name", "OFFICIAL Focus"),
+        ("the mark: a name with a check mark", "name", "Focus \u{2714}"),
+        ("the mark: a name with a check mark emoji", "name", "\u{2705} Focus"),
+        ("the mark: a name saying verified in mathematical bold", "name", "\u{1d42f}\u{1d41e}\u{1d42b}\u{1d422}\u{1d41f}\u{1d422}\u{1d41e}\u{1d41d} Focus"),
+        ("the mark: a name saying verified in fullwidth letters", "name", "Focus \u{ff36}\u{ff25}\u{ff32}\u{ff29}\u{ff26}\u{ff29}\u{ff25}\u{ff24}"),
+        ("the mark: a name with verified before an underscore", "name", "verified_focus"),
+        ("the mark: a description saying official", "description", "The official board for focus."),
+        ("the mark: a description with a ballot box check", "description", "Boards \u{2611} done."),
+        ("the mark: a description saying verified in capital I with a dot", "description", "VER\u{130}F\u{130}ED boards."),
+        ("the mark: a name saying unofficial is fine", "name", "Unofficial Focus"),
+        ("the mark: a name saying unverified is fine", "name", "Unverified Links"),
+        ("the mark: a description saying officially is fine", "description", "Officially the best board."),
+        ("the mark: a description saying verifiedx is fine", "description", "Boards by verifiedx."),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
     cases.push(("a binary file (a warning)".into(), base.clone(), with_file("bin/tool.wasm", b"\0asm\x01\0\0\0".to_vec())));
     for (name, a, b) in [
         ("two paths differing in case", "README.md", "readme.md"),
@@ -900,6 +922,11 @@ fn data() -> Value {
             "max_update_plugins": super::store::MAX_UPDATE_PLUGINS,
         },
         "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version. A publish must be later than every version the plugin has had, in any state, pre-releases included.",
+        "mark_claims": {
+            "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). The text is read as Unicode NFKC, lowercased (full Unicode lowercase, as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General Category Mn) dropped; it claims the mark when it has any of glyphs anywhere, or any of words as a whole word: an occurrence with no ASCII letter or digit right before or after it. The listing cases named 'the mark' hold both sides to it.",
+            "words": listing::MARK_WORDS,
+            "glyphs": listing::MARK_GLYPHS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+        },
         "categories": CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
         "builtin_ids": listing::BUILTIN_IDS,
         "reserved_ids": manifest::RESERVED_IDS,

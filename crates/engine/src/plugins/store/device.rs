@@ -21,6 +21,7 @@ use zeron_rpc::{RpcError, RpcReply, methods, parse_params};
 
 use super::client::{self, Caller, Installed as Asked, Offer, PackageRecord, Search, StoreClient, UpdatesAsk};
 use super::deploy_key::{DeployKey, Scope};
+use super::notices;
 use super::publish;
 use crate::plugins::install::{self, Found, STORE, Source, failure};
 use crate::plugins::listing::{self, CATEGORIES};
@@ -37,6 +38,9 @@ const CACHED_VERSIONS: usize = 3;
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 /// The most pages of the take-down feed one check reads.
 const TAKEDOWN_PAGES: usize = 20;
+/// How often an account with no plugins has its publishes looked over (one
+/// with plugins: at each take-down check).
+const PUBLISHES_IDLE: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
 /// The most plugins one update check asks about (the edge's limit).
 pub const MAX_UPDATE_PLUGINS: usize = 200;
 /// What a report may say it's about (contract amendment 13).
@@ -65,6 +69,7 @@ pub fn handles(method: &str) -> bool {
             | methods::CREATE_DEPLOY_KEY
             | methods::REVOKE_DEPLOY_KEY
             | methods::STORE_REPORT
+            | methods::ACK_STORE_NOTICES
     )
 }
 
@@ -175,6 +180,11 @@ impl ScopeParams {
             _ => Err("A key's scope is all of your plugins ({all: true}) or the ones it names ({plugins: [...]})".into()),
         }
     }
+}
+
+#[derive(Deserialize)]
+struct AckNoticesParams {
+    ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -535,6 +545,12 @@ impl Plugins {
                     }
                     Err(error) => not_ok(&error),
                 })
+            }
+            methods::ACK_STORE_NOTICES => {
+                let p: AckNoticesParams = parse_params(params)?;
+                self.update_state(|state| state.publish_notices.retain(|n| !p.ids.contains(&n.id)))?;
+                self.publish_list();
+                RpcReply::value(&json!({}))
             }
             methods::REVOKE_DEPLOY_KEY => {
                 let p: RevokeKeyParams = parse_params(params)?;
@@ -920,6 +936,49 @@ impl Plugins {
             let _ = self.update_state(|state| state.takedowns_after = Some(last));
             if last >= feed.head {
                 return;
+            }
+        }
+    }
+
+    /// Look over the account's publishes (`/me/plugins`) for any this
+    /// device didn't make, and keep a notice of each for the app, with a
+    /// desktop banner: once per version. Signed out, nothing. An account
+    /// with no plugins is asked again only every few hours.
+    pub async fn check_publishes(&self) {
+        let Ok((client, caller)) = self.store_as_person().await else { return };
+        let idle = lock(&self.inner.publishes_checked).is_some_and(|(at, had)| !had && at.elapsed() < PUBLISHES_IDLE);
+        if idle {
+            return;
+        }
+        let mine = match client.my_plugins(&caller).await {
+            Ok(mine) => mine,
+            Err(error) => {
+                tracing::debug!(%error, "store: the account's publishes couldn't be read");
+                return;
+            }
+        };
+        let had = mine["plugins"].as_array().is_some_and(|plugins| !plugins.is_empty());
+        *lock(&self.inner.publishes_checked) = Some((std::time::Instant::now(), had));
+        let account = own_publisher_id(&mine).unwrap_or_default();
+        let own_key = signing::load_key(&self.inner.data_dir).map(|key| key.public()).unwrap_or_default();
+        let before = lock(&self.inner.state).publishes.clone().filter(|seen| seen.account == account);
+        let (mut seen, new) = notices::look(before.as_ref(), &mine, &own_key, |text| plain(text, 120));
+        seen.account = account;
+        if before.as_ref() == Some(&seen) && new.is_empty() {
+            return;
+        }
+        let banners: Vec<String> = new.iter().map(notices::PublishNotice::words).collect();
+        let _ = self.update_state(|state| {
+            state.publishes = Some(seen);
+            notices::add(&mut state.publish_notices, new);
+        });
+        if banners.is_empty() {
+            return;
+        }
+        self.publish_list();
+        if let Some(notify) = lock(&self.inner.notifier).clone() {
+            for words in banners {
+                notify("zeron", "Plugin published", &words, None);
             }
         }
     }
