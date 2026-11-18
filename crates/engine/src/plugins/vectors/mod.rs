@@ -55,8 +55,45 @@ fn files(list: &[(&str, &[u8])]) -> BTreeMap<String, Vec<u8>> {
     list.iter().map(|(k, v)| ((*k).to_owned(), v.to_vec())).collect()
 }
 
+/// Runs shorter than this are written out.
+const LONG_RUN: usize = 256;
+
+/// `text` as a case carries it: as written, or, when it holds a long run of
+/// one character (a size case's filler), `{parts: [before, {repeat, count},
+/// after]}`, which expands to exactly `text`.
+fn compact(text: &str) -> Value {
+    let mut best: Option<(usize, usize, char, usize)> = None; // (start, end, char, count)
+    let mut run: Option<(usize, char, usize)> = None;
+    for (at, c) in text.char_indices() {
+        run = match run {
+            Some((start, prev, n)) if prev == c => Some((start, c, n + 1)),
+            _ => Some((at, c, 1)),
+        };
+        let (start, c, n) = run.unwrap();
+        if n >= LONG_RUN && best.is_none_or(|b| n > b.3) {
+            best = Some((start, at + c.len_utf8(), c, n));
+        }
+    }
+    match best {
+        None => json!(text),
+        Some((start, end, c, n)) => json!({ "parts": [&text[..start], { "repeat": c.to_string(), "count": n }, &text[end..]] }),
+    }
+}
+
+/// Each file's bytes: base64, or (text with filler) `{parts}` of its text.
 fn files_b64(files: &BTreeMap<String, Vec<u8>>) -> Value {
-    Value::Object(files.iter().map(|(k, v)| (k.clone(), json!(B64.encode(v)))).collect())
+    Value::Object(
+        files
+            .iter()
+            .map(|(k, v)| {
+                let value = match std::str::from_utf8(v).map(compact) {
+                    Ok(parts @ Value::Object(_)) => parts,
+                    _ => json!(B64.encode(v)),
+                };
+                (k.clone(), value)
+            })
+            .collect(),
+    )
 }
 
 /// `value` as text, as a case carries it.
@@ -101,6 +138,11 @@ fn canonical_cases() -> Value {
         ("two documents are refused", "{} {}"),
     ];
     let mut cases: Vec<(String, String)> = own.iter().map(|(n, i)| ((*n).to_owned(), (*i).to_owned())).collect();
+    // Nesting: serde_json refuses a document nested deeper than 128.
+    for depth in DEPTHS {
+        cases.push((format!("an array nested {depth} deep in an object"), nested_member(depth)));
+        cases.push((format!("arrays nested {depth} deep"), format!("{}{}", "[".repeat(depth), "]".repeat(depth))));
+    }
     for c in corpus()["canonical_json"].as_array().unwrap() {
         cases.push((c["name"].as_str().unwrap().to_owned(), c["input"].as_str().unwrap().to_owned()));
     }
@@ -113,6 +155,20 @@ fn canonical_cases() -> Value {
             })
             .collect(),
     )
+}
+
+/// Depths around serde_json's nesting limit: a document nests at most 127
+/// containers deep, its outermost counted (so `{"x":` and 127 arrays is
+/// already one too many).
+const DEPTHS: [usize; 5] = [125, 126, 127, 128, 129];
+
+/// `{"x":` + `depth` arrays + `}`.
+fn nested_member(depth: usize) -> String {
+    format!("{{\"x\":{}{}}}", "[".repeat(depth), "]".repeat(depth))
+}
+
+fn nested_value(depth: usize) -> Value {
+    (0..depth).fold(json!([]), |inner, _| json!([inner])).as_array().unwrap()[0].clone()
 }
 
 // ── Content hashes ──────────────────────────────────────────────────────────
@@ -306,15 +362,39 @@ fn package_cases() -> Value {
         m[field] = value;
         cases.push((name.into(), packed(Some(&key), &m, &good)));
     }
+    // Nesting around serde_json's limit, in each of three places of a
+    // validly signed package: an unknown top-level member, inside its
+    // manifest (signed with it), inside a `files` value.
+    let valid_text = String::from_utf8(valid.clone()).unwrap();
+    for depth in DEPTHS {
+        let nest = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        assert!(valid_text.starts_with("{\"files\":{"));
+        cases.push((format!("an unknown member nested {depth} deep"), format!("{{\"x\":{nest},{}", &valid_text[1..]).into_bytes()));
+        let mut deep = manifest.clone();
+        deep["x"] = nested_value(depth);
+        cases.push((format!("a manifest member nested {depth} deep"), packed(Some(&key), &deep, &good)));
+        cases.push((format!("a files value nested {depth} deep"), valid_text.replacen("{\"files\":{", &format!("{{\"files\":{{\"zz\":{nest},"), 1).into_bytes()));
+    }
+    let mut out: Vec<Value> = Vec::new();
     for c in corpus()["packages"].as_array().unwrap() {
         cases.push((c["name"].as_str().unwrap().into(), B64.decode(c["package_b64"].as_str().unwrap()).unwrap()));
     }
-    Value::Array(
-        cases
-            .into_iter()
-            .map(|(name, raw)| json!({ "name": name, "package_b64": B64.encode(&raw), "result": package_result(raw) }))
-            .collect(),
-    )
+    for (name, raw) in cases {
+        out.push(json!({ "name": name, "package_b64": B64.encode(&raw), "result": package_result(raw) }));
+    }
+    // 2,001 copies of one 6,200-character file key (JSON keeps the last of
+    // a duplicate key): written as parts, a segment repeated.
+    let long_key = "a".repeat(6200);
+    let segment = format!("\"{long_key}\":\"eA==\",");
+    let tail = format!("\"{long_key}\":\"eA==\"}},\"format\":\"{FORMAT}\",\"manifest\":{}}}", text(&key.sign_manifest(&manifest, &package::hashes(&good))));
+    let head = "{\"files\":{";
+    let raw = format!("{head}{}{tail}", segment.repeat(2000)).into_bytes();
+    out.push(json!({
+        "name": "2,001 copies of a 6,200-character file key",
+        "package_parts": [head, { "repeat": segment, "count": 2000 }, tail],
+        "result": package_result(raw),
+    }));
+    Value::Array(out)
 }
 
 fn path_cases() -> Value {
@@ -514,10 +594,11 @@ fn listing_cases() -> Value {
         ("a name with a direction override", "name", json!("Focus\u{202e}draoB")),
         ("a name with a zero-width space", "name", json!("Focus\u{200b}Board")),
         ("a description with a direction isolate", "description", json!("A board\u{2066}.")),
-        ("a homepage without its path's slash", "homepage", json!("https://example.com")),
-        ("a homepage with a capital in its host", "homepage", json!("https://Example.com/x")),
-        ("a homepage written with a backslash", "homepage", json!("https:\\example.com/x")),
-        ("a homepage exactly as it parses", "homepage", json!("https://example.com/")),
+        ("a homepage without its path's slash (kept with it)", "homepage", json!("https://example.com")),
+        ("a homepage with a capital host and a dot segment (kept parsed)", "homepage", json!("https://Example.com/x/../y")),
+        ("a homepage written with a backslash", "homepage", json!("https:\\evil.com")),
+        ("a homepage with a user and password", "homepage", json!("https://user:pw@example.com/")),
+        ("a homepage with a space", "homepage", json!("https://exa mple.com/")),
         ("a repository with a query and a fragment", "repository", json!("https://github.com/a/b?x=1#y")),
     ];
     for (name, key, value) in changes {
@@ -538,9 +619,45 @@ fn listing_cases() -> Value {
     no_readme.remove(listing::README);
     cases.push(("no README.md".into(), base.clone(), no_readme));
     cases.push(("a WebP screenshot".into(), { let mut m = base.clone(); m["screenshots"] = json!(["shots/a.webp"]); m }, with_file("shots/a.webp", b"RIFF\0\0\0\0WEBPVP8 ".to_vec())));
-    // (The size limits themselves are data, in plugin-store-data.json, and
-    // the engine's own tests hold them: a case of each would carry
-    // megabytes of filler here.)
+    // Each size limit, one byte under and one over (written as `parts`).
+    for (name, bytes) in [("README.md at 512 KB", listing::MAX_README_BYTES), ("README.md one byte over 512 KB", listing::MAX_README_BYTES + 1)] {
+        cases.push((name.into(), base.clone(), with_file(listing::README, vec![b'x'; bytes])));
+    }
+    let older = "## 1.2.0\n\n- Boards.\n\n## 0.1.0\n\n";
+    for (name, bytes) in [("CHANGELOG.md at 512 KB", listing::MAX_CHANGELOG_BYTES), ("CHANGELOG.md one byte over 512 KB", listing::MAX_CHANGELOG_BYTES + 1)] {
+        cases.push((name.into(), base.clone(), with_file(listing::CHANGELOG, format!("{older}{}", "x".repeat(bytes - older.len())).into_bytes())));
+    }
+    for (name, bytes) in [("notes at 64 KB", listing::MAX_NOTES_BYTES), ("notes one byte over 64 KB", listing::MAX_NOTES_BYTES + 1)] {
+        cases.push((name.into(), base.clone(), with_file(listing::CHANGELOG, format!("## 1.2.0\n\n{}\n", "n".repeat(bytes)).into_bytes())));
+    }
+    let mut empty = base.clone();
+    empty["x-notes"] = json!("");
+    let around = signing::canonical_json(&empty).len();
+    for (name, bytes) in [("a manifest at 256 KB", listing::MAX_MANIFEST_BYTES), ("a manifest one byte over 256 KB", listing::MAX_MANIFEST_BYTES + 1)] {
+        let mut m = base.clone();
+        m["x-notes"] = json!("x".repeat(bytes - around));
+        assert_eq!(signing::canonical_json(&m).len(), bytes);
+        cases.push((name.into(), m, files.clone()));
+    }
+    let svg = |bytes: usize| {
+        let open = "<svg xmlns=\"http://www.w3.org/2000/svg\"><!--";
+        let close = "--></svg>";
+        format!("{open}{}{close}", "x".repeat(bytes - open.len() - close.len())).into_bytes()
+    };
+    for (name, bytes) in [("an icon at 32 KB", listing::MAX_ICON_BYTES), ("an icon one byte over 32 KB", listing::MAX_ICON_BYTES + 1)] {
+        cases.push((name.into(), base.clone(), with_file("icon.svg", svg(bytes))));
+    }
+    for (name, field, value) in [
+        ("a name of 64 characters", "name", json!("n".repeat(listing::MAX_NAME_LEN))),
+        ("a keyword of 32 characters", "keywords", json!(["k".repeat(listing::MAX_KEYWORD_LEN)])),
+        ("a keyword of 33 characters", "keywords", json!(["k".repeat(listing::MAX_KEYWORD_LEN + 1)])),
+        ("a license of 64 characters", "license", json!("L".repeat(listing::MAX_LICENSE_LEN))),
+        ("a license of 65 characters", "license", json!("L".repeat(listing::MAX_LICENSE_LEN + 1))),
+    ] {
+        let mut m = base.clone();
+        m[field] = value;
+        cases.push((name.into(), m, files.clone()));
+    }
     cases.push(("a binary file (a warning)".into(), base.clone(), with_file("bin/tool.wasm", b"\0asm\x01\0\0\0".to_vec())));
     for (name, a, b) in [
         ("two paths differing in case", "README.md", "readme.md"),
@@ -560,7 +677,10 @@ fn listing_cases() -> Value {
             .map(|(name, manifest, files)| {
                 let (problems, warnings) = listing::check(&Manifest::from_value(manifest.clone()).unwrap(), &files);
                 let said = |list: &[listing::Problem]| -> Value { list.iter().map(|p| json!({ "rule": p.rule, "field": p.field, "path": p.path })).collect() };
-                json!({ "name": name, "manifest": text(&manifest), "files_b64": files_b64(&files), "problems": said(&problems), "warnings": said(&warnings) })
+                json!({
+                    "name": name, "manifest": compact(&text(&manifest)), "files_b64": files_b64(&files),
+                    "problems": said(&problems), "warnings": said(&warnings), "listing": listing::Listing::of(&manifest),
+                })
             })
             .collect(),
     )
@@ -668,7 +788,7 @@ fn consent_item_cases() -> Value {
 fn data() -> Value {
     json!({
         "format": "zeron-plugin-store-data:v1",
-        "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
+        "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
         "package_format": FORMAT,
         "payload_prefix": PAYLOAD_PREFIX,
         "template_payload_prefix": TEMPLATE_PAYLOAD_PREFIX,
@@ -701,6 +821,9 @@ fn data() -> Value {
             "max_readme_bytes": listing::MAX_README_BYTES,
             "max_changelog_bytes": listing::MAX_CHANGELOG_BYTES,
             "max_manifest_bytes": listing::MAX_MANIFEST_BYTES,
+            "max_publish_body_bytes": listing::MAX_PUBLISH_BYTES,
+            "max_manifest_json_bytes": listing::MAX_MANIFEST_JSON_BYTES,
+            "max_manifest_values": listing::MAX_MANIFEST_VALUES,
             "max_notes_bytes": listing::MAX_NOTES_BYTES,
             "screenshot_types": listing::SCREENSHOT_TYPES,
             "max_update_plugins": super::store::MAX_UPDATE_PLUGINS,
@@ -718,7 +841,7 @@ fn data() -> Value {
 fn build() -> Value {
     json!({
         "format": "zeron-plugin-package-vectors:v1",
-        "about": "Made by crates/engine/src/plugins/vectors from the engine's own code; the edge's package verification must agree with every case. The constants and tables these cases hold to are in docs/plugin-store-data.json. JSON inputs are text (input, manifest), parsed as the engine parses them. Keys are ed25519, base64url without padding; hashes are lowercase hex sha256; package_b64 and files_b64 are standard base64 of the exact bytes.",
+        "about": "Made by crates/engine/src/plugins/vectors from the engine's own code; the edge's package verification must agree with every case. A string field written as {parts: [...]} is its parts concatenated, each a string or {repeat, count} (that string count times); a files_b64 value written so is that text's UTF-8 bytes, and package_parts is a package's bytes so. The constants and tables these cases hold to are in docs/plugin-store-data.json. JSON inputs are text (input, manifest), parsed as the engine parses them. Keys are ed25519, base64url without padding; hashes are lowercase hex sha256; package_b64 and files_b64 are standard base64 of the exact bytes.",
         "canonical_json": canonical_cases(),
         "content_hash": content_hash_cases(),
         "signatures": signature_cases(),
@@ -791,7 +914,8 @@ fn serde_json_writes_floats_as_the_vectors_say() {
 fn vectors_say_what_the_code_does() {
     let v = build();
     for case in v["packages"].as_array().unwrap() {
-        let raw = B64.decode(case["package_b64"].as_str().unwrap()).unwrap();
+        let Some(b64) = case["package_b64"].as_str() else { continue };
+        let raw = B64.decode(b64).unwrap();
         if case["result"]["ok"] == true {
             assert_eq!(case["result"]["sha256"].as_str().unwrap(), signing::sha256_hex(&raw));
         }
