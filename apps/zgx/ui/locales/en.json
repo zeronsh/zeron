@@ -3994,8 +3994,7 @@
       "submit_note": "{n, plural, one {# file is} other {# files are}} sent, signed as yours, exactly as checked.",
       "sent_toast": "Sent {name} {version} for review",
       "your_versions": "Versions you've sent",
-      "no_versions": "Nothing sent yet",
-      "no_versions_body": "Versions you send show here with where their review stands.",
+      "no_versions": "Nothing sent yet.",
       "versions_failed": "Couldn't see your versions",
       "sign_in_to_see": "Sign in to see your versions",
       "status": {
@@ -4069,7 +4068,10 @@
         "revoke_failed": "Couldn't revoke the key",
         "last_used": "Last used {date}",
         "not_used": "Not used yet",
-        "no_end": "Doesn't expire"
+        "no_end": "Doesn't expire",
+        "ends_today": "Ends today",
+        "ends_tomorrow": "Ends tomorrow",
+        "ends_in": "{n, plural, one {Ends in # day} other {Ends in # days}}"
       },
       "unblock_title": "Turn {name} back on?",
       "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",

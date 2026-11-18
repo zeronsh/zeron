@@ -142,30 +142,19 @@ function M.failure(message: any): string
 	return words.failure(m)
 end
 
-local function said(node: Node): Node
-	return ui.column { w_full = true, py = "$space.6", px = "$space.4", node }
-end
-
--- One line of the checks: a mark, what it is, and what to do. `ok`: passed,
+-- One line of the checks, a Settings row (its own heights: 52, or 60 with
+-- what to do under it): a mark, what it is, and what to do. `ok`: passed,
 -- not passed, "later" (the store says as it's sent), or "note" (worth
--- knowing, nothing in the way).
+-- knowing, nothing in the way: advice under the checks, in the secondary
+-- ink).
 local function check_row(ok: boolean | "later" | "note", title: string | Message, detail: (string | Message | () -> string)?): Node
 	local icon = if ok == true then "check-circle" elseif ok == "later" then "clock-circle" elseif ok == "note" then "info-circle" else "danger-triangle"
 	local tone = if ok == true then "$zeron.tone.success.ink" elseif ok == "later" or ok == "note" then "$text.tertiary" else "$zeron.tone.warning.ink"
-	return ui.row {
-		w_full = true,
-		px = "$space.4",
-		py = "$space.3",
-		gap = "$space.3",
-		items = "start",
-		ui.div { pt = "$zeron.space.hair", color = tone, ds.Icon { name = icon :: any, size = 16 } },
-		ui.column {
-			grow = 1,
-			min_w = 0,
-			gap = "$zeron.space.hair",
-			ui.text { title, text_size = "$font.size.md", line_height = "$font.line.md", color = "$text.primary", wrap = true },
-			if detail then ui.text { detail, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.secondary", wrap = true } else nil,
-		},
+	return ds.Settings.Row {
+		label = title :: any,
+		description = detail :: any,
+		quiet = ok == "note",
+		lead = ui.div { shrink = 0, color = tone, ds.Icon { name = icon :: any, size = 16 } },
 	}
 end
 
@@ -378,14 +367,28 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 		if key == "ready" then
 			return checks()
 		elseif key == "checking" then
+			-- (The checks are known before they run: a row for each, one
+			-- line high as a check that passes is, then the foot row; so the
+			-- card opens at the height it has when everything passes, and
+			-- only a problem's fix line moves what's under it.)
 			return ds.SkeletonWaiting {
 				build = function(still: boolean): Node
+					local rows: { Node } = {}
+					for i = 1, #CHECKS + 1 do
+						table.insert(rows, ds.SkeletonRow { lead = 16, title = if i % 2 == 0 then 110 else 150, line = 0, still = still })
+					end
+					table.insert(rows, ui.row {
+						w_full = true,
+						min_h = "$zeron.settings.row",
+						px = "$space.4",
+						py = "$space.3",
+						gap = "$space.3",
+						items = "center",
+						ui.div { grow = 1, ds.Skeleton { w = 240, h = 8, still = still } },
+						ds.Skeleton { w = 160, h = 28, rounded = "$radius.md", still = still },
+					})
 					-- (The card draws the hairlines between its rows.)
-					return ds.Settings.Group {
-						ds.SkeletonRow { lead = 16, title = 140, line = 0, still = still },
-						ds.SkeletonRow { lead = 16, title = 110, line = 0, still = still },
-						ds.SkeletonRow { lead = 16, title = 160, line = 0, still = still },
-					}
+					return ds.Settings.Group(rows :: any)
 				end,
 			}
 		end
@@ -510,7 +513,20 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 						end,
 					})
 				elseif key == "none" then
-					return ds.Settings.Group { said(ds.EmptyState { icon = "widget", title = ui.t("plugins.store.no_versions"), body = ui.t("plugins.store.no_versions_body"), size = "sm" }) }
+					-- (None yet: one quiet line in the card, as its keys' none.)
+					return ds.Settings.Group {
+						ui.text {
+							id = "versions-none",
+							ui.t("plugins.store.no_versions"),
+							w_full = true,
+							px = "$space.4",
+							py = "$space.3",
+							wrap = true,
+							text_size = "$font.size.sm",
+							line_height = "$font.line.sm",
+							color = "$text.secondary",
+						},
+					}
 				elseif key == "loading" or key == "idle" then
 					return ds.SkeletonWaiting {
 						build = function(still: boolean): Node
@@ -550,6 +566,7 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 				-- again the section's own action at its title's end.
 				ds.Settings.Section {
 					title = ui.t("plugins.store.checks_title"),
+					trail_on_line = true,
 					trail = ds.Button {
 						id = "publish-check-again",
 						tone = "ghost",

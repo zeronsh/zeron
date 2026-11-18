@@ -15,6 +15,9 @@
 --   store_stub.one_shot    Focus timer has one screenshot (store_stub.three_shots: three)
 --   store_stub.id_reserved the plugin's id is one the store keeps (its site's pages)
 --   store_stub.no_total    lists come without `total` (how many match)
+--   store_stub.no_notes    the engine has no notes on your plugin's folder
+--   store_stub.many_keys   Pomodoro clock has ten deploy keys: names of every length,
+--                          one ending today, one tomorrow, one in five days
 
 local store = require("@app/screens/plugins/store")
 
@@ -25,6 +28,9 @@ local fail_next = false
 -- Each later page starts five before where the last ended, as a store
 -- whose order moved under the reader would.
 local overlap = false
+-- The engine's notes on your plugin's folder (its changelog has nothing for
+-- the version); `store_stub.no_notes`, none.
+local notes = true
 -- Lists without `total`, as a store from before it counted them.
 local no_total = false
 
@@ -523,7 +529,7 @@ stub.prepare = function(id: string): any
 				end
 				return out
 			end)(),
-			warnings = { { rule = "no_notes", words = "CHANGELOG.md has no section for 1.2.0" } },
+			warnings = if notes then { { rule = "no_notes", words = "CHANGELOG.md has no section for 1.2.0" } } else {},
 			package = { files = 4, bytes = 9120 },
 			ticket = if ok then `ticket-{prepared_version}` else nil,
 			store_checked = store_checked,
@@ -718,6 +724,52 @@ ui.command {
 	title = "Store: later pages overlap",
 	run = function()
 		overlap = true
+	end,
+}
+ui.command {
+	id = "store_stub.no_notes",
+	title = "Store: nothing to note on your plugin's folder",
+	run = function()
+		notes = false
+	end,
+}
+ui.command {
+	id = "store_stub.many_keys",
+	title = "Store: ten deploy keys",
+	run = function()
+		local names = {
+			"GitHub Actions",
+			"CI",
+			"Release job on the build machine in the office",
+			string.sub(string.rep("Averylongnamewithnospacesatall", 3), 1, 64),
+			"Nightly",
+			"GitLab",
+			"Buildkite pipeline",
+			"Ends today",
+			"Ends tomorrow",
+			"Ends in five days",
+		}
+		local list = {}
+		for i, name in names do
+			-- (A key as the store names it: its public half, base64url.)
+			local key = string.sub(string.rep(string.format("k%02dAbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_", i), 2), 1, 43)
+			-- (Ends from this very day, as the page reads it: noon of today,
+			-- of tomorrow, of five days on.)
+			local t = os.date("*t") :: any
+			local noon = os.time({ year = t.year, month = t.month, day = t.day, hour = 12 }) * 1000
+			local ends: number? = nil
+			if name == "Ends today" then
+				ends = noon
+			elseif name == "Ends tomorrow" then
+				ends = noon + DAY
+			elseif name == "Ends in five days" then
+				ends = noon + 5 * DAY
+			elseif i % 3 == 0 then
+				ends = noon + 90 * DAY
+			end
+			table.insert(list, { key = key, name = name, created_at = NOW - i * DAY, last_used_at = if i % 2 == 0 then NOW - DAY else nil, expires_at = ends })
+		end
+		keys["pomodoro-clock"] = list
 	end,
 }
 ui.command {

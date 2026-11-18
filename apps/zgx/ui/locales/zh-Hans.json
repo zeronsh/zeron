@@ -3994,8 +3994,7 @@
       "submit_note": "{n, plural, other {将发送 # 个文件}}，以你的签名、与检查时完全一致。",
       "sent_toast": "已提交{name} {version}审核",
       "your_versions": "你发送过的版本",
-      "no_versions": "还没有发送过",
-      "no_versions_body": "你发送的版本会显示在这里，并附上审核进度。",
+      "no_versions": "还没有发送过版本。",
       "versions_failed": "无法查看你的版本",
       "sign_in_to_see": "登录后查看你的版本",
       "status": {
@@ -4069,7 +4068,10 @@
         "revoke_failed": "无法吊销密钥",
         "last_used": "上次使用 {date}",
         "not_used": "尚未使用",
-        "no_end": "永不过期"
+        "no_end": "永不过期",
+        "ends_today": "今天到期",
+        "ends_tomorrow": "明天到期",
+        "ends_in": "{n, plural, other {# 天后到期}}"
       },
       "unblock_title": "重新打开{name}？",
       "unblock_body": "Zeron 已将这个版本从商店下架。它会按你之前的允许在这里再次运行。",

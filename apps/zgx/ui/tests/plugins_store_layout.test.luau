@@ -408,6 +408,140 @@ test("twelve versions of 64 KB of notes each keep Report within a screen of Vers
 	expect(report.y - versions.y < 2 * 900).to_be(true)
 end)
 
+-- Publish… for Pomodoro clock, from Yours; `before` runs first (a stub's
+-- command), `held` keeps the checks from answering.
+local function publishing(before: ((app: any) -> ())?, held: boolean?): any
+	local app = mounted()
+	if before then
+		before(app)
+	end
+	app:click('role:tab "Yours"')
+	settle(app)
+	if held then
+		app:command("store_stub.hold")
+	end
+	app:click('role:link "Publish…"')
+	app:frames(20)
+	if not held then
+		app:wait("#publish-checks", { timeout_ms = 3000 })
+		settle(app, 500)
+	end
+	return app
+end
+
+test("the checks open at the height they have when all pass: a plugin that passes moves nothing under them", function()
+	local app = publishing(function(a: any)
+		a:command("store_stub.fixed")
+		a:command("store_stub.no_notes")
+	end, true)
+	local versions = box(app, 'role:group "Versions you\'ve sent"')
+	expect(app:has("#publish-checks")).to_be(false)
+	app:command("store_stub.release")
+	settle(app, 500)
+	expect(app:has("#publish-checks")).to_be(true)
+	expect(box(app, 'role:group "Versions you\'ve sent"').y).to_be(versions.y)
+end)
+
+-- The checks' rows: each one's height and its hairline, by where each
+-- row's name stands (12 inside its row's top, on the checks' words' 225).
+local function check_heights(app: any): { number }
+	local ys = {}
+	for line in app:tree("#publish-checks"):gmatch("[^\n]+") do
+		local x, y, h = line:match(" text \"[^\"]*\" ([%d.]+),([%d.]+) [%d.]+x([%d.]+)")
+		if x and tonumber(x) == 225 and tonumber(h) == 18 then
+			table.insert(ys, tonumber(y) :: number)
+		end
+	end
+	local foot = box(app, "#publish-foot").y
+	table.insert(ys, foot + 12)
+	local out = {}
+	for i = 2, #ys do
+		table.insert(out, ys[i] - ys[i - 1])
+	end
+	return out
+end
+
+test("a check is a Settings row: a passed one the row's own height, one with what to do the row's with a description", function()
+	local app = publishing(function(a: any)
+		a:command("store_stub.fixed")
+		a:command("store_stub.no_notes")
+	end)
+	-- (Each step from one hairline to the next: a row and its hairline. A
+	-- Settings.Row with no line under its name and no control is 42 today,
+	-- its words and its 12 above and below: zgx drops the 52 least it asks
+	-- for, zgx-asks/gap-axis-tokens; with a line under its name, 60.)
+	for _, h in check_heights(app) do
+		expect(h).to_be(42 + 1)
+	end
+	local fixing = publishing()
+	local seen: { [number]: boolean } = {}
+	for _, h in check_heights(fixing) do
+		seen[h] = true
+	end
+	expect(seen[42 + 1]).to_be(true)
+	expect(seen[60 + 1]).to_be(true)
+end)
+
+test("a section's action stands on its title's line: title to its sentence 4, title to its card 8, as a section without one", function()
+	local app = publishing()
+	app:scroll(SCROLL, 1e6)
+	settle(app)
+	local title = box(app, 'role:group "Deploy keys" >> role:heading')
+	local line = app:tree('role:group "Deploy keys"'):match("[^\n]*A deploy key lets[^\n]*") or ""
+	local sx, sy, sw, sh = line:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
+	local sentence = { x = tonumber(sx) or 0, y = tonumber(sy) or 0, w = tonumber(sw) or 0, h = tonumber(sh) or 0 }
+	expect(sentence.y - (title.y + title.h)).to_be(4)
+	-- (The action centred on the title's line.)
+	local action = box(app, "#keys-new")
+	expect(math.abs((action.y + action.h / 2) - (title.y + title.h / 2)) < 0.6).to_be(true)
+	local checks_title = box(app, 'role:group "What the store needs" >> role:heading')
+	expect(box(app, "#publish-checks").y - 1 - (checks_title.y + checks_title.h)).to_be(8)
+end)
+
+test("a key's short form is a column down its rows, ending before Revoke, at 1000 and in a narrow pane", function()
+	local app = publishing(function(a: any)
+		a:command("store_stub.many_keys")
+	end)
+	for _, width in { 1000, 560 } do
+		app:resize(width, 900)
+		settle(app)
+		app:scroll(SCROLL, 1e6)
+		settle(app)
+		local ends: { number } = {}
+		for line in app:tree("#fixture-scroll"):gmatch("[^\n]+") do
+			if line:find(" text ", 1, true) and line:find("…", 1, true) and line:match('"k%d%d') then
+				local x, w = line:match("(%-?[%d.]+),%-?[%d.]+ ([%d.]+)x")
+				table.insert(ends, (tonumber(x) :: number) + (tonumber(w) :: number))
+			end
+		end
+		expect(#ends).to_be(10)
+		for _, e in ends do
+			expect(math.abs(e - ends[1]) < 0.6).to_be(true)
+		end
+	end
+end)
+
+test("a key within 14 days of its end says how soon, in place of its dates", function()
+	local app = publishing(function(a: any)
+		a:command("store_stub.many_keys")
+	end)
+	local tree = app:tree()
+	expect(tree).to_contain('"Ends today"')
+	expect(tree).to_contain('"Ends tomorrow"')
+	expect(tree).to_contain('"Ends in 5 days"')
+	-- (Further off: its date, after when it was last used.)
+	expect(tree).to_contain("Not used yet · Doesn't expire")
+end)
+
+test("with nothing sent, its versions say so in one quiet line in their card, as its keys do", function()
+	local app = publishing(function(a: any)
+		a:command("store_stub.never_published")
+	end)
+	expect(app:has("#versions-none")).to_be(true)
+	expect(box(app, "#versions-none").h).to_be(16 + 2 * 12)
+	expect(box(app, "#keys-none").h).to_be(16 + 2 * 12)
+end)
+
 test("publishing's buttons and its versions' actions end on one edge, the content's", function()
 	local app = mounted()
 	app:click('role:tab "Yours"')

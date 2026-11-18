@@ -186,6 +186,11 @@ export type SectionProps = {
 	title: (string | Message | () -> string)?,
 	description: (string | Message | () -> string)?,
 	trail: Node?,
+	-- The trail centred on the title's line without adding to its height
+	-- (a 24 action beside a 14 title): title to description 4 and title
+	-- to card 8 with or without one (the plugin store's pages). Without it,
+	-- the title's row is as tall as its trail, as Settings' sections have it.
+	trail_on_line: boolean?,
 	[number]: Child,
 }
 
@@ -201,7 +206,22 @@ function M.Section(props: SectionProps): Node
 			-- title stands over what it names.
 			px = M.inset(),
 			gap = "$space.1",
-			if props.title then SectionTitle { props.title, trail = props.trail, heading = 2 } else nil,
+			if props.title
+				then SectionTitle {
+					props.title,
+					trail = if props.trail and props.trail_on_line
+						then ui.column {
+							-- (A line high, the trail centred in it, standing out
+							-- of it above and below alike.)
+							h = "$font.line.xs",
+							shrink = 0,
+							justify = "center",
+							props.trail,
+						}
+						else props.trail,
+					heading = 2,
+				}
+				else nil,
 			if props.description then Hint { props.description } else nil,
 		}
 	end
@@ -630,6 +650,12 @@ export type RowProps = {
 	disabled: Props_disabled,
 	-- The name in the danger's ink (Sign out, Delete account).
 	danger: boolean?,
+	-- The name in the secondary ink and the regular weight: a note among
+	-- rows (a store check's advice), not a thing of its own.
+	quiet: boolean?,
+	-- The description's ink, where not the tertiary (a key about to end,
+	-- in the warning's).
+	description_ink: (string | () -> string)?,
 	-- The name and its line under it each on one line, fading at the end
 	-- where they don't fit, and the control kept beside them (an address, a
 	-- path, a list of repositories): never wrapped under.
@@ -689,8 +715,8 @@ function M.Row(props: RowProps): Node
 					props.label,
 					text_size = "$font.size.md",
 					line_height = "$font.line.md",
-					weight = "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
+					weight = if props.quiet then "$font.weight.regular" else "$font.weight.medium",
+					color = if props.danger then "$zeron.tone.danger.ink" elseif props.quiet then "$text.secondary" else "$text.primary",
 					wrap = true,
 				},
 			props.badge,
@@ -711,7 +737,7 @@ function M.Row(props: RowProps): Node
 			elseif props.description and props.truncate
 			then FadeText { props.description, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
 			elseif props.description
-			then ui.text { props.description, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
+			then ui.text { props.description, text_size = "$font.size.sm", line_height = "$font.line.sm", color = props.description_ink or "$text.tertiary", wrap = true }
 			else nil,
 		if props.detail
 			then ui.show(function(): boolean

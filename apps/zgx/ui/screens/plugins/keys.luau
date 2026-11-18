@@ -1,10 +1,12 @@
 --!strict
 -- A plugin's deploy keys, on its publishing page (screens/plugins/publish):
 -- what a CI job (a GitHub Action) publishes its new versions with instead
--- of your session. A section with New key… at its title's end; each key a
--- row: its name, the key shortened (`M.short`, as the store's site shows
--- it) in the code face, when it was last used and when it ends, and Revoke
--- at the row's end. Revoked keys aren't listed. A new one is made by the
+-- of your session. A section with New key… on its title's line; each key a
+-- row: its name on a line of its own (wrapping, as a row's name does), when
+-- it was last used and when it ends under it (or, within 14 days of its
+-- end, that alone, in the warning's ink), and at the row's end the key
+-- shortened (`M.short`, as the store's site shows it) in the code face, a
+-- column down the rows, then Revoke. Revoked keys aren't listed. A new one is made by the
 -- engine (`CreateDeployKey`) after a fresh sign-in in the browser when the
 -- store asks for one; its secret is shown here once, to copy, and kept
 -- nowhere.
@@ -32,6 +34,19 @@ local EXPIRY: { { value: string, days: number? } } = {
 
 local function day_of(at: any): string?
 	return if type(at) == "number" and at > 0 then locale.date(at / 1000) else nil
+end
+
+-- How soon a key ends, in whole days from today (0: today), if it's within
+-- `SOON` of it; nil otherwise. (The store's site says the same.)
+local SOON = 14
+local function ends_in(at: any): number?
+	if type(at) ~= "number" or at <= 0 then
+		return nil
+	end
+	local now = os.date("*t") :: any
+	local today = os.time({ year = now.year, month = now.month, day = now.day, hour = 0 })
+	local days = math.floor((at / 1000 - today) / 86400)
+	return if days <= SOON then math.max(0, days) else nil
 end
 
 -- A key as it's shown everywhere it's shown short (the store's site too):
@@ -117,26 +132,24 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 	end
 
 	local function key_row(first: any, _i: number, now: State<any>): Node
+		local function soon(): number?
+			return ends_in(now:get().expires_at)
+		end
 		return ds.Settings.Row {
 			label = function(): string
 				local k = now:get()
 				return if type(k.name) == "string" and k.name ~= "" then k.name else M.short(k.key)
 			end,
-			-- (The key itself, short, in the code face after its name.)
-			badge = ui.text {
-				function(): string
-					return M.short(now:get().key)
-				end,
-				class = "key-short",
-				font = "$font.mono",
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
-				color = "$text.tertiary",
-				-- (A row is its key's: the key never changes under it.)
-				tooltip = first.key,
-			},
 			description = function(): string
 				local k = now:get()
+				-- About to end: that alone, before anything else it might say.
+				local n = soon()
+				if n then
+					return if n == 0
+						then ui.t("plugins.store.key.ends_today"):get()
+						elseif n == 1 then ui.t("plugins.store.key.ends_tomorrow"):get()
+						else ui.t("plugins.store.key.ends_in", { n = n }):get()
+				end
 				local used = day_of(k.last_used_at)
 				local ends = day_of(k.expires_at)
 				return table.concat({
@@ -144,15 +157,36 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 					if ends then ui.t("plugins.store.key.ends", { date = ends }):get() else ui.t("plugins.store.key.no_end"):get(),
 				}, " · ")
 			end,
-			-- (A row's action, as the versions' are.)
-			control = ds.Button {
-				tone = "secondary",
-				size = "sm",
-				on_click = function()
-					revoking:set(now:peek())
-					revoke_open:set(true)
-				end,
-				ui.t("plugins.store.key.revoke"),
+			description_ink = function(): string
+				return if soon() then "$zeron.tone.warning.ink" else "$text.tertiary"
+			end,
+			-- At the row's end: the key, short, a column down the rows (it
+			-- ends 12 before Revoke, which ends on the content edge), then
+			-- Revoke, a row's action as the versions' are.
+			control = ui.row {
+				gap = "$space.3",
+				items = "center",
+				ui.text {
+					function(): string
+						return M.short(now:get().key)
+					end,
+					class = "key-short",
+					font = "$font.mono",
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+					-- (A row is its key's: the key never changes under it.)
+					tooltip = first.key,
+				},
+				ds.Button {
+					tone = "secondary",
+					size = "sm",
+					on_click = function()
+						revoking:set(now:peek())
+						revoke_open:set(true)
+					end,
+					ui.t("plugins.store.key.revoke"),
+				},
 			},
 		}
 	end
@@ -218,6 +252,7 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 		ds.Settings.Section {
 			title = ui.t("plugins.store.keys"),
 			description = ui.t("plugins.store.keys_body"),
+			trail_on_line = true,
 			-- (The section's own action, at its title's end; a key sends the
 			-- versions after the first, which comes from this computer.)
 			trail = ds.Button {
