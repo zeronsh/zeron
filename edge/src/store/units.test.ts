@@ -212,7 +212,7 @@ describe("store listing: the mark (amendment 45)", () => {
       // Digits and symbols where the look-alikes don't spell a word.
       "Top 10 tools", "v1.0 verifier", "Notes | Files", "100% local", "Verifiedly 3D",
       // Single letters apart, and i and l for each other, where no mark word results.
-      "A B testing", "U.S. weather", "Notes - Files - Links", "V I M keys", "Oil fields", "Lift", "Civil filed",
+      "A B testing", "U.S. weather", "Notes - Files - Links", "V I M keys", "J. R. R. Tolkien notes", "Q & A board", "R·E·M songs", "Oil fields", "Lift", "Civil filed",
       // An emoji drawn with its variation selector.
       "Stars \u{2b50}\u{fe0f}"
     ]) {

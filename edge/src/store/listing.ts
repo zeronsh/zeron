@@ -142,10 +142,11 @@ const letterPattern = (letter: string): string => {
 const LOOKALIKE_WORDS: readonly (readonly [string, RegExp])[] = MARK_WORDS.map(
   (word) => [word, new RegExp(`(?<![A-Za-z0-9])${[...word].map(letterPattern).join("")}(?![A-Za-z0-9])`, "u")] as const
 );
-/** `text` with its runs of single characters, each apart by one space or
- * one `.`, `-` or `_`, read as one word ("V E R I F I E D", "V.E.R.I.F.I.E.D."). */
-const SPACED = /(?<![^\s._-])[^\s._-](?:[ ._-][^\s._-])+(?![^\s._-])/gu;
-const unspaced = (text: string): string => text.replace(SPACED, (run) => run.replace(/[ ._-]/g, ""));
+/** `text` with its runs of single characters, each apart by up to three
+ * spaces or punctuation marks, read as one word ("V E R I F I E D",
+ * "V.E.R.I.F.I.E.D.", "V. E. R. I. F. I. E. D.", "V·E·R·I·F·I·E·D"). */
+const SPACED = /(?<![^\s\p{P}])[^\s\p{P}](?:[\s\p{P}]{1,3}[^\s\p{P}])+(?![^\s\p{P}])/gu;
+const unspaced = (text: string): string => text.replace(SPACED, (run) => run.replace(/[\s\p{P}]/gu, ""));
 
 /** Ticks the shared glyphs leave out, refused on the edge: √ (used as one)
  * and 𐄂 AEGEAN CHECK MARK. */
