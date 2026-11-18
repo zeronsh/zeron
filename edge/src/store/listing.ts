@@ -88,13 +88,16 @@ const isControl = (ch: string): boolean => {
   return c <= 0x1f || (c >= 0x7f && c <= 0x9f);
 };
 
-/** A control or format character (Unicode Cc, Cf: bidi controls among
- * them), which `name`, `description` and `keywords` refuse (amendment 31);
- * on the edge, any other character Unicode says may be drawn as nothing
- * (Default_Ignorable_Code_Point: the Hangul fillers, which are letters,
- * among them), but for the variation selectors an emoji is drawn with. */
-const UNSEEN = /[\p{Cc}\p{Cf}]|(?!\p{Variation_Selector})\p{Default_Ignorable_Code_Point}/u;
-const IGNORABLE = /(?!\p{Variation_Selector})\p{Default_Ignorable_Code_Point}/gu;
+/** A character that may be drawn as nothing, which `name` and
+ * `description` refuse (amendment 31; `keywords` are ASCII): a control or
+ * format character (Cc, Cf: bidi controls among them), any other
+ * Default_Ignorable_Code_Point (the Hangul fillers, which are letters), and
+ * any variation selector but U+FE0F directly after a character with the
+ * Emoji property ("⭐️"). */
+const UNSEEN = /[\p{Cc}\p{Cf}]|(?!\p{Variation_Selector})\p{Default_Ignorable_Code_Point}|(?!\u{fe0f})\p{Variation_Selector}|(?<!\p{Emoji})\u{fe0f}/u;
+/** Every default-ignorable character, variation selectors included: gone
+ * before the mark's word test, so none can split a word. */
+const IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
 
 /**
  * The store's mark (amendment 45): a listing's name or description may not
@@ -159,14 +162,14 @@ const EDGE_GLYPHS: readonly string[] = ["\u{221a}", "\u{10102}"];
  * Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ", "VER1F1ED", "OFFlClAL", "V.E.R.I.F.I.E.D.").
  */
 export const markClaim = (text: string, lookalikes = true): string | undefined => {
-  const folded = markText(text);
+  // Nothing drawn between its letters splits a word.
+  const folded = markText(text).replace(IGNORABLE, "");
   const glyph = [...folded].find((ch) => MARK_GLYPHS.includes(ch) || (lookalikes && EDGE_GLYPHS.includes(ch)));
   if (glyph !== undefined) return glyph;
   const word = markWord(folded);
   if (word !== undefined || !lookalikes) return word;
-  // Nothing drawn between its letters, nor spaces between single ones.
-  const seen = folded.replace(IGNORABLE, "");
-  const readings = [seen, unspaced(seen)];
+  // Nor spaces between single letters.
+  const readings = [folded, unspaced(folded)];
   return LOOKALIKE_WORDS.find(([, re]) => readings.some((r) => re.test(r)))?.[0];
 };
 

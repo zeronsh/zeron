@@ -220,6 +220,30 @@ describe("store listing: the mark (amendment 45)", () => {
     }
   });
 
+  it("tests the mark's words with every default-ignorable character gone, variation selectors included", () => {
+    for (const text of ["Veri\u{fe0f}fied", "Veri\u{fe0e}fied", "Veri\u{e0100}fied", "Veri\u{3164}fied", "Veri\u{200b}fied", "Offi\u{115f}cial"]) {
+      expect(markClaim(text), JSON.stringify(text)).toBe(text.startsWith("Veri") ? "verified" : "official");
+    }
+  });
+
+  it("lets a name or description hold U+FE0F only after an emoji, and no other variation selector", () => {
+    const unseen = (fields: Record<string, unknown>) => {
+      const manifest = readManifest(parseJsonText(JSON.stringify({ id: "focus", name: "Focus", version: "1.0.0", entry: "", description: "Boards.", icon: "icon.svg", categories: ["productivity"], ...fields })) as JsonObject);
+      const files = new Map([["README.md", "# Focus"], ["icon.svg", "<svg/>"]].map(([k, v]) => [k!, new TextEncoder().encode(v)]));
+      return checkListing(manifest, files, isText).problems.filter((p) => p.rule === "bad_listing").map((p) => p.field);
+    };
+    // After an emoji: drawn as the emoji.
+    for (const ok of ["Stars \u{2b50}\u{fe0f}", "Hearts \u{2764}\u{fe0f}", "Keys 1\u{fe0f}\u{20e3}"]) {
+      expect(unseen({ name: ok }), ok).toEqual([]);
+      expect(unseen({ description: ok }), ok).toEqual([]);
+    }
+    // Anywhere else, or any other selector: refused.
+    for (const bad of ["Focus\u{fe0f}", "Fo\u{fe0f}cus", "Stars \u{2b50}\u{fe0f}\u{fe0f}", "Stars \u{2b50}\u{fe0e}", "Focus\u{fe00}", "Focus\u{e0100}", "Focus\u{3164}Board"]) {
+      expect(unseen({ name: bad }), JSON.stringify(bad)).toEqual(["name"]);
+      expect(unseen({ description: bad }), JSON.stringify(bad)).toEqual(["description"]);
+    }
+  });
+
   it("says what claimed it, and holds the name and the description to it", () => {
     expect(markClaim("Focus ✔")).toBe("✔");
     expect(markClaim("Vеrified Focus")).toBe("verified");
