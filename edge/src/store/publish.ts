@@ -254,6 +254,14 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   ];
   try {
     await Promise.all(writes.map(([, write]) => write()));
+    // The key that signed it may have been revoked while the objects were
+    // written: asked again, now, so the batch below runs only for a key
+    // live after the write. (The keys live in the user directory, which no
+    // D1 statement can read, so this is as close to the insert as it gets.)
+    if (!(await signingKeyAllowed(env, publisher, id, pkg.key, plugin))) {
+      await maybeOrphaned(db, [pkgKey, blobKey]);
+      return fail(403, "key_not_allowed", "The key that signed this package was revoked while it was being published.");
+    }
 
     const files: [string, number, number, string, FileKind][] = [];
     let at = 0;

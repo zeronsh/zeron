@@ -172,7 +172,7 @@
     "max_screenshots": 8,
     "max_update_plugins": 200,
     "max_url_len": 2048,
-    "max_version_len": 128,
+    "max_version_len": 32,
     "screenshot_types": [
       "png",
       "jpg",
