@@ -147,6 +147,8 @@ struct Candidate {
     permissions: Vec<String>,
     allowed: Value,
     prerelease: bool,
+    /// The key that signed the version installed.
+    key: Option<String>,
 }
 
 /// `{ok: false, error, message}` from a failure's `"<word>: <words>"`.
@@ -710,6 +712,7 @@ impl Plugins {
                     permissions: e.item.permissions.clone(),
                     allowed,
                     prerelease: prerelease.contains(&e.item.id),
+                    key: e.key().map(str::to_owned),
                 })
             })
             .collect();
@@ -834,7 +837,9 @@ impl Plugins {
             refused,
             source: Some(Source { kind: STORE.into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: Some(store) }),
             digest_diff: diff.grew().then(|| diff.to_value()),
-            new_key: false,
+            // (The store's record decides whose it is: shown, so the update
+            // can say its signing key changed.)
+            new_key: c.key.as_deref().is_some_and(|key| key != package.key),
             new_owner,
             in_review: offer.in_review,
             notes: notes(&offer.notes, listing::MAX_NOTES_BYTES),

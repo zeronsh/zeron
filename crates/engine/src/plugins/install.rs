@@ -912,8 +912,10 @@ pub struct Found {
     /// grows anything: installing it waits for you.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest_diff: Option<Value>,
-    /// Signed by another of its author's keys (a new machine): installing it
-    /// asks you again.
+    /// Signed by another key than the version installed: from elsewhere,
+    /// another of its author's (a new machine), and installing it asks you
+    /// again; from the store, where its owner's record decides, it's said
+    /// so the update can show its signing key changed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub new_key: bool,
     /// From the store: its id has another owner now, so installing it asks

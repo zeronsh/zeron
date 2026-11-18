@@ -114,6 +114,7 @@ async fn install_from_the_store_and_update_by_the_owners_other_key() {
     let update = &checked["updates"][0];
     assert_eq!((update["id"].as_str(), update["version"].as_str(), update["notes"].as_str()), (Some("focus"), Some("1.1.0"), Some("- Faster.")));
     assert!(update.get("new_owner").is_none() && update.get("in_review").is_none());
+    assert_eq!(update["new_key"], true, "signed on the owner's laptop: the update says its key changed");
     // One request for every store plugin, saying this Zeron's version.
     let ask = store.state.lock().unwrap().asks.last().cloned().unwrap();
     assert_eq!(ask["plugins"], json!([{ "id": "focus", "version": "1.0.0", "hash": item["hash"] }]));
@@ -147,6 +148,7 @@ async fn the_owner_s_own_devices_are_offered_their_pending_version() {
     let checked = mine.check().await;
     assert_eq!(checked["updates"][0]["version"], "1.1.0");
     assert_eq!(checked["updates"][0]["in_review"], true);
+    assert!(checked["updates"][0].get("new_key").is_none(), "signed by the key installed");
     assert_eq!(mine.item("focus").await["update"]["in_review"], true);
     let updated = mine.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
     assert_eq!(updated["plugin"]["version"], "1.1.0");
