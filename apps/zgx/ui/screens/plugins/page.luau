@@ -401,32 +401,21 @@ local UpdateLink = ui.component(function(props: { now: State<any> }): Node
 	return ui.show(function(): boolean
 		local it: any = now:get()
 		return type(it.update) == "table" and it.update.refused == nil and not it.builtin and kind(it) ~= "broken"
-	end, ui.row {
+	end, ds.Settings.InlineLink {
+		-- (A row's inline link, doing something here: a button.)
 		role = "button",
-		label = ui.t("plugins.page.update"),
+		label = function(): string
+			return if busy() then ui.t("plugins.page.updating"):get() else ui.t("plugins.page.update"):get()
+		end,
 		focusable = function(): boolean
 			return not busy()
 		end,
 		disabled = busy,
-		shrink = 0,
-		cursor = "pointer",
-		color = "$text.primary",
-		hover = { color = "$accent" },
 		on_click = function()
 			if not busy() then
 				update(now:peek().id, now:peek().name)
 			end
 		end,
-		ui.text {
-			function(): string
-				return if busy() then ui.t("plugins.page.updating"):get() else ui.t("plugins.page.update"):get()
-			end,
-			text_size = "$font.size.sm",
-			line_height = "$font.line.sm",
-			weight = "$font.weight.medium",
-			underline = true,
-			underline_offset = 4,
-		},
 	})
 end)
 

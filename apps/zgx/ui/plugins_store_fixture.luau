@@ -209,14 +209,14 @@ ui.command {
 }
 publish()
 
--- What the page says of each reason word a test names (`reason_probe`),
+-- What the page says of each reason word a test names (`reason_asked`),
 -- in `reason_said`: a word's message, as came and alone.
 local words = require("@app/screens/plugins/words")
-local probe = ui.state("reason_probe", {} :: { string })
+local asked = ui.state("reason_asked", {} :: { string })
 local said = ui.state("reason_said", {} :: { [string]: any })
 ui.effect(function()
 	local out: { [string]: any } = {}
-	for _, w in probe:get() do
+	for _, w in asked:get() do
 		out[w] = { came = words.failure(`{w}: the engine's English`), alone = words.failure(w) }
 	end
 	said:set(out)

@@ -611,6 +611,46 @@ function M.FeatureSkeleton(props: { still: boolean?, lead: number? }?): Node
 end
 
 
+-- A row's inline link (a sentence's own Publish…, a plugin's Update): its
+-- words in the small type, medium, the text's ink, underlined 4 under
+-- the baseline and the accent under the pointer, with the app's focus ring
+-- for the keys. The one look every row's link has (`detail_link`, and
+-- `detail_action`'s links: Installed's Update). (Its words a rich span:
+-- zgx paints a plain text's underline nowhere, zgx-asks/text-underline.)
+-- `role`: "link" to go somewhere (the default), "button" to do something.
+export type InlineLinkProps = {
+	label: string | Message | () -> string,
+	on_click: () -> (),
+	role: ("link" | "button")?,
+	focusable: (boolean | () -> boolean)?,
+	disabled: (boolean | () -> boolean)?,
+}
+function M.InlineLink(props: InlineLinkProps): Node
+	return ui.row {
+		class = "settings-inline-link",
+		role = props.role or "link",
+		label = props.label,
+		focusable = if props.focusable == nil then true else props.focusable,
+		disabled = props.disabled,
+		shrink = 0,
+		cursor = "pointer",
+		focus = control.ring,
+		on_click = props.on_click,
+		ui.rich {
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			weight = "$font.weight.medium",
+			color = "$text.primary",
+			ui.span {
+				props.label,
+				underline = true,
+				underline_offset = 4,
+				hover = { underline = true, color = "$accent" },
+			},
+		},
+	}
+end
+
 export type RowProps = {
 	label: string | Message | () -> string,
 	description: (string | Message | () -> string)?,
@@ -753,26 +793,7 @@ function M.Row(props: RowProps): Node
 						color = "$text.tertiary",
 						wrap = true,
 					},
-					ui.row {
-						role = "link",
-						label = props.detail_link.label,
-						focusable = true,
-						shrink = 0,
-						cursor = "pointer",
-						color = "$text.primary",
-						-- (As Installed's Update link: its ink, weight, underline,
-						-- hover and focus ring the same.)
-						hover = { color = "$accent" },
-						on_click = props.detail_link.on_click,
-						ui.text {
-							props.detail_link.label,
-							text_size = "$font.size.sm",
-							line_height = "$font.line.sm",
-							weight = "$font.weight.medium",
-							underline = true,
-							underline_offset = 4,
-						},
-					},
+					M.InlineLink { label = props.detail_link.label, on_click = props.detail_link.on_click },
 				}
 				else ui.row {
 					w_full = true,

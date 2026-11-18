@@ -20,7 +20,7 @@ local function said(): { [string]: any }
 	app:frames(3)
 	local asked = table.clone(REASONS)
 	table.insert(asked, "something_new")
-	app:set_state("reason_probe", asked)
+	app:set_state("reason_asked", asked)
 	app:frames(3)
 	return app:state("reason_said")
 end

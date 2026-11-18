@@ -283,6 +283,24 @@ test("more categories than fit: a chevron at the hiding edge pages them on and b
 	expect(app:has(".pager-back")).to_be(true)
 	local back = box(app, 'role:button "Earlier categories"')
 	expect(view_box().x >= back.x + back.w).to_be(true)
+	-- (The same in a narrow pane, a 496 column: both chevrons, the run
+	-- between them.)
+	app:resize(560, 900)
+	settle(app)
+	if app:has('role:button "More categories"') then
+		expect(view_box().x + view_box().w <= box(app, 'role:button "More categories"').x).to_be(true)
+		app:click('role:button "More categories"')
+		settle(app)
+	end
+	if app:has(".pager-more") then
+		expect(view_box().x + view_box().w <= box(app, 'role:button "More categories"').x).to_be(true)
+	end
+	if app:has(".pager-back") then
+		local b = box(app, 'role:button "Earlier categories"')
+		expect(view_box().x >= b.x + b.w).to_be(true)
+	end
+	app:resize(1000, 900)
+	settle(app)
 	app:click('role:button "Earlier categories"')
 	settle(app)
 	expect(app:has(".pager-back")).to_be(false)

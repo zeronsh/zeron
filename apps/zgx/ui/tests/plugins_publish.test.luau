@@ -252,3 +252,21 @@ test("a deploy key waits for the first version, sent from this computer", functi
 	expect(app:tree()).to_contain("Send its first version from this computer")
 	expect(app:tree("#keys-new")).to_contain("disabled")
 end)
+
+test("Publish…, a row's inline link, shows the app's focus ring when the keys reach it", function()
+	local app = yours()
+	app:click('role:textbox "Search plugins"')
+	app:frames(5)
+	local reached = false
+	for _ = 1, 30 do
+		app:key("Tab")
+		app:frames(3)
+		if app:tree('role:link "Publish…"'):find("focused", 1, true) then
+			reached = true
+			break
+		end
+	end
+	expect(reached).to_be(true)
+	expect(app:tree(".settings-inline-link")).to_contain('link "Publish…"')
+	expect(app:tree(".settings-inline-link")).to_contain("focused")
+end)
