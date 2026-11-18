@@ -749,7 +749,9 @@ pub mod methods {
     /// `{id}` → `{id, name, version, description, hash, ok, problems,
     /// warnings, listing, notes, package: {files, bytes}, ticket?}`: one of
     /// your own plugins checked against the store's rules, each problem
-    /// `{rule, field?, path?, words}`. `ticket` (only to this device's app or
+    /// `{rule, field?, path?, line?, words}` (`line`: of `path`, 1 the first,
+    /// when it's one line's, as the `raw_html`, `footnote` and `math`
+    /// warnings are). `ticket` (only to this device's app or
     /// CLI, only when `ok`) is what [`PUBLISH_PLUGIN`] needs, good once, for
     /// it as checked (`hash`).
     pub const PREPARE_PLUGIN_PUBLISH: &str = "PreparePluginPublish";

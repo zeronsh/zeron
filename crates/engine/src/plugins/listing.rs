@@ -122,6 +122,9 @@ pub struct Problem {
     pub field: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The line of `path` it's about (1 the first), when it's one line's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
     pub words: String,
 }
 
@@ -131,6 +134,7 @@ impl Problem {
             rule,
             field,
             path: None,
+            line: None,
             words: words.into(),
         }
     }
@@ -145,6 +149,7 @@ impl Problem {
             rule,
             field,
             path: Some(path.to_owned()),
+            line: None,
             words: words.into(),
         }
     }
