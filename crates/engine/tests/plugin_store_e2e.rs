@@ -799,6 +799,51 @@ async fn the_plugin_store_end_to_end() {
     let both = engine.len() == 2 && engine.contains(&ID.to_owned()) && engine.contains(&OTHER.to_owned()) && engine == edge;
     e.check("9", "a featured search lists both, in the edge's order", both, format!("engine {engine:?} / edge {edge:?}"));
 
+    // ── 10: a search's total; the site's own ids ──
+    let mut seen: Vec<String> = Vec::new();
+    let mut totals = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = phone.call(methods::STORE_SEARCH, json!({ "limit": 1, "cursor": cursor })).await.unwrap();
+        totals.push(page["total"].clone());
+        seen.extend(ids(&page));
+        match page["next_cursor"].as_str() {
+            Some(next) if seen.len() < 20 => cursor = Some(next.to_owned()),
+            _ => break,
+        }
+    }
+    let (_, whole) = e.get("/store/v1/plugins?limit=50", None).await;
+    let total = totals[0].as_u64().unwrap_or(u64::MAX);
+    let ok = total == seen.len() as u64 && totals.iter().all(|t| t == &totals[0]) && whole["total"] == totals[0] && ids(&whole) == seen;
+    e.check("10", "a search's total is what the edge lists across its pages, the same on each", ok, format!("totals {totals:?}, listed {seen:?}, edge {whole}"));
+    let featured_total = phone.call(methods::STORE_SEARCH, json!({ "featured": true })).await.unwrap();
+    e.check("10", "and a featured search's is the featured ones'", featured_total["total"] == 2, &featured_total["total"]);
+    let none = phone.call(methods::STORE_SEARCH, json!({ "q": "nothing-is-called-this" })).await.unwrap();
+    e.check("10", "a search that finds nothing is total 0", none["total"] == 0 && ids(&none).is_empty(), &none);
+    author_plugin(&bob_laptop, "all", "1.0.0", &["ui.add"]).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let out = e.cli_on(&bob_laptop, &["publish", "all"]);
+    e.check("10", "the CLI refuses to publish id all before upload (exit 1, id_reserved)", out.status.code() == Some(1) && text(&out).contains("id_reserved"), text(&out));
+    let (_, mine) = e.get("/store/v1/me/plugins", Some(&e.bearer(&bob_laptop).await)).await;
+    let sent = mine["plugins"].as_array().is_some_and(|p| p.iter().any(|p| p["id"] == "all"));
+    e.check("10", "and nothing reached the store", !sent, &mine);
+    let device_key = signing::load_key(&bob_laptop.data).expect("bob's laptop's signing key");
+    let forced = store_package(&device_key, "all", "1.0.0", json!({}), &[]);
+    let res = e
+        .http
+        .post(format!("{}/store/v1/plugins/all/versions", e.edge))
+        .bearer_auth(e.bearer(&bob_laptop).await)
+        .header("content-type", "application/json")
+        .body(forced)
+        .send()
+        .await
+        .unwrap();
+    let status = res.status().as_u16();
+    let answer: Value = res.json().await.unwrap_or_default();
+    e.check("10", "forced past the CLI, the edge refuses it as id_reserved", status == 403 && answer["error"] == "id_reserved", format!("{status} {answer}"));
+    let (status, answer) = e.admin(&staff, "reservations", json!({ "id": "all", "to_username": "bob-e2e" })).await;
+    e.check("10", "staff can't reserve it for anyone (site_id)", status == 400 && answer["error"] == "site_id", format!("{status} {answer}"));
+
     drop((laptop, desk, phone, bob_laptop));
     let failures = e.failures.lock().unwrap().clone();
     assert!(failures.is_empty(), "{} check(s) failed:\n{}", failures.len(), failures.join("\n"));
