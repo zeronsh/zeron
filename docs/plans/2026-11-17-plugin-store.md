@@ -324,3 +324,122 @@ addresses, deploy, grant the first admin).
   `zgx test ui` with a fixture per screen, site tests on the built pages.
 - Report to the coordinator: what is done, what is proven and how, what is
   open. Do not stop on a question that has a safe default: take it, say so.
+
+## Contract amendments
+
+Agreed after the plan was first written. Newest last.
+
+1. **The store's record names what was signed.** `VersionInfo`, each entry of
+   `updates[]` and `PluginDetail.package` carry `key` (the b64url public key
+   that signed the package), `hash` (content hash), `sha256` and `bytes` (of
+   the package file). A device checks id, version, content hash, sha256 and
+   key against the record. The owner is `author.username`; a device binds a
+   store install's consent to `store:<username>`, so a transfer asks again.
+2. **`engines.zeron` ranges** are an npm-style subset: `||` between sets,
+   whitespace between comparators, `>= > <= < = ^ ~`, a bare version meaning
+   exact, and `*`. Versions are full `x.y.z` (pre-release allowed), compared
+   by precedence; `^` and `~` as npm has them, 0.x included.
+3. **Strict semver limits**: each numeric part ≤ 2^53−1, a version at most
+   128 characters, build metadata ignored for precedence.
+4. **Categories** are one fixed list, embedded in the engine and carried in
+   `docs/plugin-package-vectors.json`; the edge seeds from that file:
+   `agents`, `appearance`, `chat`, `developer-tools`, `git`, `integrations`,
+   `productivity`, `utilities`.
+5. **Deploy-key registration proof** signs
+   `"zeron-deploy-key:v1:" + pluginId + ":" + key`, so a proof for one plugin
+   cannot register the key for another.
+6. **What a deploy key may do**: publish a version of its plugin, and read
+   its plugin's state (`GET /store/v1/me/plugins`, answered for that plugin
+   only), both with the signed `ZeronKey` header. Nothing else: withdraw,
+   yank, unyank and key management need a signed-in session, so a leaked key
+   can add a pending version (which review stops) and nothing more.
+7. **Vectors file shape** (`zeron-plugin-package-vectors:v1`): `limits`,
+   `categories`, `canonical_json`, `content_hash`, `signatures`, `packages`,
+   `paths`, `manifests`, `semver { parse, order, compare }`, `ranges`,
+   `deploy_key { secret, public, proof_message, proof, request }`. The engine
+   lane generates it; both sides' tests run every vector.
+8. **Web session**: `GET /auth/web/session` → `200 { user: { name, email,
+   avatar? }, username, roles, csrf, expires_at, fresh_sign_in }` or `401 {
+   error: "signed_out" }` (no user id). `csrf` is the token forms carry;
+   cookie-authenticated mutations take it as the `X-CSRF-Token` header or a
+   `csrf` form field (`POST /auth/web/logout` is a plain form post), and must
+   carry an `Origin` equal to the site's. `return_to` is a same-site path or
+   it is refused. Sessions live in `users1`, so deleting an account revokes
+   its sessions, roles and keys in one transaction. The site forwards
+   Cookie, Origin and the token to the edge over its service binding;
+   `zeron.sh/store/v1/*` is not routed to the edge.
+9. **`PluginDetail.permissions` is the consent sheet's item**, ratings
+   included, so the web and the app say what a plugin asks for with one
+   wording: `{ asks, ui: { change, replace }, commands, commands_anything,
+   commands_full_control, network_hosts, network_local, network_named,
+   tools: [{ name, description }] }`. The edge computes it from the manifest
+   (never from anything the publisher sends). The tables behind the ratings
+   (`crates/plugin-guard`) are exported by the engine lane into the generated
+   vectors file as data, with `consent_items` vectors; the edge imports that
+   data, so there is one source and a test that holds both sides to it.
+10. **Catalog**: `featured=true` filters the featured row; `sort` is
+    `relevance | popular | updated | new`. An unknown or suspended plugin is
+    `404 { error: "not_found" }` to the public.
+11. **Owner and admin views**: `VersionInfo` gains `review?: { state,
+    reason?, message?, decided_at? }` and `checks?`. `/store/v1/me/plugins` →
+    `{ plugins: [PluginCard & { listing: "listed" | "unlisted" | "suspended",
+    versions: VersionInfo[] }] }`. Deploy keys list as `[{ key, name,
+    created_at, last_used_at?, expires_at?, revoked_at? }]`.
+12. **Admin**: `GET /store/v1/admin/plugins/:id` → `{ plugin, owner {
+    username, user_id, created_at }, versions (all states), reports,
+    featured, status }`. A submission is `{ plugin, version, publisher {
+    username, created_at, decisions { approved, rejected }, recent[] },
+    manifest, base? { version, manifest }, files [{ path, bytes, sha256,
+    binary }], base_files[], checks [{ id, level: "ok" | "warn" | "fail",
+    message }], permissions, permissions_diff }`. Bodies: transfer `{
+    to_username }`, feature `{ featured }`, suspend `{ reason }`, reports
+    resolve `{ resolution: "dismissed" | "actioned", note? }`. The site
+    fetches changed text files through the files route and computes line
+    diffs itself.
+13. **Report reasons**: `malware | misleading | broken | copyright | other`.
+14. **Packaged files are never active content**: the edge's file route sends
+    `Content-Security-Policy: sandbox; default-src 'none'` and `nosniff`,
+    and only known picture types inline.
+15. **CLI names**: `zeron plugin key create|list|revoke <id>`.
+16. **Deploy keys and sideloading.** `GET /plugin-keys/:key` for a deploy
+    key adds `kind: "deploy"`, `plugin`, `expiresAt`, `expired` (that
+    endpoint keeps its existing camelCase), and
+    answers `verified: true` only when the lookup names that key's plugin
+    (`?plugin=<id>`). Without it, or revoked, or expired: `verified: false`.
+    So a leaked deploy key for one plugin can never vouch for an update to
+    another plugin by the same author, on new engines or old ones. The
+    engine passes `?plugin=` on every lookup.
+17. **A deploy key needs an owned plugin.** Keys can be made only for an id
+    its account already owns, so a plugin's first submission comes from the
+    author's machine and CI takes over after. A transfer revokes the
+    plugin's deploy keys.
+18. **Edge seams**: `principal.ts` exports `readBody(req, maxBytes)` (cached
+    per request, the only way a store route reads a body, since a signed
+    request's body is hashed before it is trusted); the store exports
+    `pluginOwner(env, id)`; identity exports `revokeDeployKeys(env, id)`.
+    Signed requests carry no query string. The store never serves or stores
+    a cached response for a request that has a signed-in caller.
+19. **Reserved ids**: the engine's reserved ids, the built-in plugins' ids,
+    anything `username.ts` reserves, and any id whose lookalike skeleton
+    matches an existing plugin's. An admin can grant a reserved id to one
+    account: `GET /store/v1/admin/reservations`, `POST
+    /store/v1/admin/reservations { id, to_username | null, note }`.
+20. **Author** on a card is `{ username, badges }`. There is no separate
+    `verified` flag: publishing needs a username, so every listing is by a
+    known account; badges (granted by operators, as today) say the rest.
+21. **Newer**: a release must be above every release that is not rejected
+    or withdrawn; a pre-release above every version that is not. Equal
+    precedence (build metadata ignored) is `version_exists`.
+22. **Listing limits**: description ≤ 300, name ≤ 64, 1–2 categories,
+    keywords ≤ 8 (1–32 characters, lowercase), screenshots ≤ 8 (valid PNG or
+    JPEG), icon an SVG ≤ 32 KB, README ≤ 512 KB, a version's notes ≤ 64 KB,
+    `homepage` / `repository` https ≤ 2048, license ≤ 64.
+23. **A takedown is prompt everywhere.** Lists and details may be up to 60 s
+    stale. A package or file is served only after the version's state is
+    checked (a state read may itself be cached for at most 60 s); the bytes
+    may be cached longer because they never change.
+24. **Signer rule at publish** lives in `principal.ts`
+    (`signingKeyAllowed(env, publisher, id, key)`): with a session, the
+    package's key is a live device key of the caller, or the caller's live
+    deploy key for that plugin; with a deploy key, the package's key is that
+    key and its scope is that plugin.
