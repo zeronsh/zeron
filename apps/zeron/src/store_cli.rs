@@ -70,7 +70,7 @@ fn exit(code: i32, message: impl Into<String>) -> anyhow::Error {
 pub fn code(word: &str) -> i32 {
     match word {
         "not_semver" | "version_exists" | "not_newer" | "missing_readme" | "missing_listing" | "bad_listing" | "bad_package" | "bad_manifest"
-        | "too_large" | "too_big" | "id_reserved" | "changed" | "not_a_package" | "unsigned" | "tampered" | "bad_file" => RULES,
+        | "too_large" | "too_big" | "id_reserved" | "id_too_similar" | "claims_zeron" | "changed" | "not_a_package" | "unsigned" | "tampered" | "bad_file" => RULES,
         // (A request already made, or changed on its way: sending it again
         // is the fix.)
         "store_unreachable" | "rate_limited" | "store_error" | "unavailable" | "body_mismatch" | "replayed_request" => UNREACHABLE,
@@ -477,6 +477,8 @@ mod tests {
     fn each_failure_word_has_its_exit_code() {
         assert_eq!(code("not_semver"), RULES);
         assert_eq!(code("version_exists"), RULES);
+        assert_eq!(code("claims_zeron"), RULES);
+        assert_eq!(code("id_too_similar"), RULES);
         assert_eq!(code("key_not_allowed"), REFUSED);
         assert_eq!(code("needs_username"), REFUSED);
         assert_eq!(code("signed_out"), REFUSED);

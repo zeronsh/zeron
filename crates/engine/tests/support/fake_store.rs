@@ -628,6 +628,13 @@ impl FakeStore {
                 if Version::parse(&package.manifest.version).is_err() {
                     return json_reply(400, json!({ "error": "not_semver", "message": "Not a version." }));
                 }
+                // (As the edge: saying it's Zeron's own, from anyone but
+                // Zeron, here everyone.)
+                for (field, text) in [("name", &package.manifest.name), ("description", &package.manifest.description)] {
+                    if let Some(claim) = zeron_engine::plugins::mark::claims_zeron(text) {
+                        return json_reply(400, json!({ "error": "claims_zeron", "message": format!("Its {field} says \"{claim}\": only Zeron's own plugins may say they're Zeron's.") }));
+                    }
+                }
                 let mut state = self.state.lock().unwrap();
                 let published_at = state.tick();
                 let deploy_key = scope.as_ref().and_then(|_| {
