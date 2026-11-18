@@ -924,3 +924,18 @@ zeron.settings_page {
     assert_eq!(rig.app.text("looks-frosted"), "false");
     assert_eq!(rig.app.error(), None);
 }
+
+/// `plugin_status`'s asks of the window, as the MCP tool and the engine
+/// check them: only `page = "settings"`, and `open` only with it (it moves
+/// the person's window to Settings).
+#[test]
+fn only_a_settings_page_ask_opens_settings() {
+    use super::{StatusAsk, status_ask};
+    assert_eq!(status_ask(&json!({})), Ok(StatusAsk::Window));
+    assert_eq!(status_ask(&json!({ "page": null, "open": false })), Ok(StatusAsk::Window));
+    assert_eq!(status_ask(&json!({ "page": "settings" })), Ok(StatusAsk::Settings { open: false }));
+    assert_eq!(status_ask(&json!({ "page": "settings", "open": true })), Ok(StatusAsk::Settings { open: true }));
+    assert!(status_ask(&json!({ "open": true })).is_err(), "open alone moves nothing");
+    assert!(status_ask(&json!({ "page": "sidebar", "open": true })).is_err());
+    assert!(status_ask(&json!({ "page": "Settings" })).is_err());
+}

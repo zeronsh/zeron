@@ -45,9 +45,11 @@ pub fn english(name: &str, settings_page: bool) -> serde_json::Value {
             "toast": format!("Hello from {name}"),
         }
     });
-    if settings_page
-        && let Ok(serde_json::Value::Object(page)) = serde_json::from_str::<serde_json::Value>(SETTINGS_PAGE_WORDS)
-    {
+    if settings_page {
+        // (Our own file, included as built: one that doesn't parse is a bug
+        // in the tree, never an input.)
+        let page: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(SETTINGS_PAGE_WORDS).expect("plugins-sdk/settings_page.en.json is an object of words");
         for (k, v) in page {
             words[k] = v;
         }
