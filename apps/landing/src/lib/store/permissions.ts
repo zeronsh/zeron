@@ -455,8 +455,10 @@ const mcpLines = (m: McpRecord | null): string[] => (m ? [[m.command, ...m.args]
  */
 function bound(diff: PermissionsDiff): Compared[] {
   const out: Compared[] = [];
-  if (diff.mcp_changed) out.push({ ...line(true, "plug-circle", "Its MCP server changed"), name: "mcp", bound: "its MCP server", change: "changed", was: mcpLines(diff.mcp_changed.before), now: mcpLines(diff.mcp_changed.after) });
-  if (diff.service_changed) out.push({ ...line(true, "action-play", "Its service changed"), name: "service", bound: "its service", change: "changed", was: [diff.service_changed.before ?? "none"], now: [diff.service_changed.after ?? "none"] });
+  // (Added where there was none, dropped where there is none now, else changed: the edge lane's words.)
+  const said = (m: { before: unknown; after: unknown }, what: string, a: string) => (m.before === null ? `It adds ${a} ${what}` : m.after === null ? `It drops its ${what}` : `Its ${what} changed`);
+  if (diff.mcp_changed) out.push({ ...line(true, "plug-circle", said(diff.mcp_changed, "MCP server", "an")), name: "mcp", bound: "its MCP server", change: "changed", was: mcpLines(diff.mcp_changed.before), now: mcpLines(diff.mcp_changed.after) });
+  if (diff.service_changed) out.push({ ...line(true, "action-play", said(diff.service_changed, "service", "a")), name: "service", bound: "its service", change: "changed", was: [diff.service_changed.before ?? "none"], now: [diff.service_changed.after ?? "none"] });
   if (diff.settings_changed) out.push({ ...line(true, "tuning", "A setting that grants access changed"), name: "settings", bound: "a setting that grants", change: "changed" });
   return out;
 }

@@ -137,10 +137,12 @@ describe("against the last approved version", () => {
     });
     expect(out.map((l) => [l.title, l.change, l.risky])).toEqual([
       ["Add things to Zeron's interface", "new", false],
-      ["Its MCP server changed", "changed", true],
-      ["Its service changed", "changed", true],
+      ["It drops its MCP server", "changed", true],
+      ["It adds a service", "changed", true],
       ["A setting that grants access changed", "changed", true],
     ]);
+    const both = compared(p({ asks: [] }), { ...NONE_BOUND, mcp_changed: { before: null, after: { command: "x", args: [], env: {} } }, service_changed: { before: "a.luau", after: "b.luau" } });
+    expect(both.lines.map((l) => l.title)).toEqual(["It adds an MCP server", "Its service changed"]);
     expect(out[1]).toMatchObject({ was: ["node a.js", "B=2", "A=1"], now: ["none"] });
     expect(out[2]).toMatchObject({ was: ["none"], now: ["service.luau"] });
     expect(out[3]).not.toHaveProperty("was");

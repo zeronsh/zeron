@@ -356,7 +356,7 @@ describe("an update", () => {
     expect(overview.body).toContain("New or changed since 1.0.0");
     expect(overview.body).toMatch(/Send messages to your agents as you\s*<span class="badge sm info">New<\/span>/);
     // What it binds past its asks, from the edge's diff (amendment 41): a service where there was none.
-    expect(overview.body).toContain("Its service changed");
+    expect(overview.body).toContain("It adds a service");
     expect(overview.body).toMatch(/<dt>Before<\/dt><dd><span>none<\/span><\/dd><\/div><div><dt>After<\/dt><dd><span>service\.luau<\/span><\/dd>/);
     const changes = await grace.get("/admin/plugins/focus-timer/1.2.0?view=changes");
     expect(changes.response.status).toBe(200);
