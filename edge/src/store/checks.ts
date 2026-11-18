@@ -119,7 +119,20 @@ const unshownPictures = (listing: Listing, kinds: ReadonlyMap<string, FileKind>)
 const list = (items: readonly string[], most = 8): string =>
   items.length <= most ? items.join(", ") : `${items.slice(0, most).join(", ")} and ${items.length - most} more`;
 
-const megabytes = (bytes: number): string => `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+/** A size as the site writes one (apps/landing/src/lib/store/format.ts
+ * `bytes`): whole bytes under 1 KB, else KB, MB or GB by 1024s, with one
+ * decimal under 10 ("9.8 KB", "1.4 MB") and whole numbers from 10 ("13 KB"). */
+export const sizeText = (n: number): string => {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = n / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+};
 
 export interface CheckInput {
   readonly pkg: VerifiedPackage;
@@ -146,7 +159,7 @@ export const runChecks = (input: CheckInput): Check[] => {
 
   add("signature", "ok", `Signed by ${pkg.key}, uploaded ${input.via === "deploy_key" ? "with a deploy key" : "from a signed-in device"}.`);
   add("manifest", "ok", "The manifest follows every rule a device checks.");
-  add("size", "ok", `${pkg.files.size} files, ${megabytes(total)} (${megabytes(pkg.bytes)} packaged).`);
+  add("size", "ok", `${pkg.files.size} files, ${sizeText(total)} (${sizeText(pkg.bytes)} packaged).`);
   add("version", listing.version.pre.length ? "warn" : "ok", listing.version.pre.length ? `${listing.version.text} is a pre-release.` : `${listing.version.text}.`);
   add("newer", "ok", input.previous ? `Later than ${input.previous}.` : "Its first version.");
   add("readme", "ok", "README.md is there.");

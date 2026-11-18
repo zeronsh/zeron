@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decodeCursor, encodeCursor, ftsQuery, searchTerms } from "./search";
-import { isText, readmePictures } from "./checks";
+import { isText, readmePictures, sizeText } from "./checks";
 import { askParts, askPartsOf, asksChanged, consentDiff, consentItem, fullControl, heldToItsOwnRules } from "./consent";
 import { canonicalJson, formatFloat, parseJsonText } from "./json";
 import type { JsonObject } from "./json";
@@ -337,6 +337,17 @@ describe("store listing: a refusal says why and where (listing_causes)", () => {
     expect(firstUnseen("Focus\u{200b}Board\u{202e}")).toBe("\u{200b}");
     expect(firstUnseen("Stars \u{2b50}\u{fe0f}")).toBeUndefined();
     expect(problemWord(`a\u{202e}${"x".repeat(100)}`)).toBe(`a${"x".repeat(63)}`);
+  });
+});
+
+describe("store sizes, as the site writes them", () => {
+  it("writes bytes under 1 KB, then KB, MB, GB, one decimal under 10", () => {
+    for (const [n, text] of [
+      [0, "0 B"], [512, "512 B"], [1023, "1023 B"], [1024, "1.0 KB"], [5222, "5.1 KB"], [10 * 1024, "10 KB"], [12_800, "13 KB"],
+      [1024 * 1024, "1.0 MB"], [1.4 * 1024 * 1024, "1.4 MB"], [52_428_800, "50 MB"], [3 * 1024 ** 3, "3.0 GB"], [2048 * 1024 ** 3, "2048 GB"]
+    ] as const) {
+      expect(sizeText(n), String(n)).toBe(text);
+    }
   });
 });
 
