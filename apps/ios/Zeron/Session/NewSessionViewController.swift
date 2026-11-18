@@ -60,6 +60,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private let hero = UILabel()
     private let wallpaper = WallpaperView()
     private let mark = UIImageView()
+    private let heroStack = UIStackView()
     private var draft: NewSessionDraft
     private var models: [ModelChoice] = []
 
@@ -136,7 +137,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         hero.font = Fonts.ui(.sansSemibold, 22)
         hero.textColor = Palette.text
         hero.textAlignment = .center
-        let heroStack = UIStackView(arrangedSubviews: [mark, hero])
+        heroStack.addArrangedSubview(mark)
+        heroStack.addArrangedSubview(hero)
         heroStack.axis = .vertical
         heroStack.spacing = 14
         heroStack.alignment = .center
@@ -284,6 +286,20 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         // artwork softened behind the composer.
         wallpaper.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: min(view.bounds.height * 0.72, 760))
         wallpaper.cutout = composer.convert(composer.bounds, to: wallpaper)
+        fitHero()
+    }
+
+    /// Short on room above the composer (the keyboard up on a folded iPhone
+    /// Duo, a phone in landscape), the headline gives way whole instead of
+    /// squeezing the mark into the text: the mark goes first, then the line.
+    private func fitHero() {
+        let room = composer.frame.minY - 20 - view.safeAreaInsets.top
+        let width = max(0, view.safeAreaLayoutGuide.layoutFrame.width - 48)
+        let line = hero.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+        let showMark = room >= line + heroStack.spacing + mark.intrinsicContentSize.height
+        if mark.isHidden == showMark { mark.isHidden = !showMark }
+        let alpha: CGFloat = room >= line ? 1 : 0
+        if heroStack.alpha != alpha { heroStack.alpha = alpha }
     }
 
     @objc private func dismissKeyboard() {
