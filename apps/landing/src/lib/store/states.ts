@@ -51,7 +51,7 @@ export function verificationState(v: Pick<VersionInfo, "verified"> & { review?: 
 /** The app's sentence for a superseded version (its replacer from the public field or the owner's). */
 const replaced = (v: Pick<Partial<VersionInfo>, "superseded_by" | "superseded">) => {
   const by = v.superseded_by ?? v.superseded?.by;
-  return by ? store("plugins.store.superseded", { version: by }) : "Replaced by a newer version before it was verified: no new installs";
+  return by ? store("plugins.store.superseded", { version: by }) : "Replaced by a newer version before it was verified";
 };
 
 /**

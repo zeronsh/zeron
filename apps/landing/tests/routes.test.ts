@@ -642,7 +642,7 @@ describe("forms", () => {
     expect(verifiedOf(body, "1.4.0")).toBe("Not verified");
     expect(verifiedOf(body, "1.0.0")).toBe("Verified");
     // A superseded version says why it takes no new installs, and can't be allowed again by its author.
-    expect(body).toContain("Replaced by 1.5.0 before it was verified: no new installs. Those who have it keep it working; verifying it would allow installs again.");
+    expect(body).toContain("Replaced by 1.5.0 before it was verified. Those who have it keep it working; verifying it would allow installs again.");
     const actions = [...body.matchAll(/data-dialog="(yank|unyank)-([\d_]+)"/g)].map((m) => `${m[1]} ${m[2]}`);
     expect(actions).toEqual(["yank 1_5_0", "unyank 1_1_0", "yank 1_0_0"]);
     // A reviewer's words in full, never cut; staff's reason for a take-down beside it.
@@ -654,7 +654,7 @@ describe("forms", () => {
 
   test("in public, a version that takes no new installs says why: replaced before it was verified, or stopped by its author", async () => {
     const superseded = await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0");
-    expect(superseded.body).toContain("Replaced by 1.5.0 before it was verified: no new installs. Those who have it keep it working.");
+    expect(superseded.body).toContain("Replaced by 1.5.0 before it was verified. Those who have it keep it working.");
     // (It can't be installed, and says so in place of Install.)
     expect(superseded.body).toContain('<span class="btn pri lg" aria-disabled="true">Can\'t be installed</span>');
     expect(superseded.body).not.toContain("data-install");
@@ -904,7 +904,7 @@ describe("Discover", () => {
 
   test("its lists: See all, each a real link to the list it summarises; Just published only what isn't verified yet", async () => {
     const { body } = await html("/plugins");
-    expect([...body.matchAll(/<a class="more" href="([^"]+)">See all/g)].map((m) => m[1])).toEqual(["/plugins/all", "/plugins/all?verified=1&amp;sort=updated", "/plugins/all?sort=new"]);
+    expect([...body.matchAll(/<a class="more" href="([^"]+)">See all/g)].map((m) => m[1])).toEqual(["/plugins/all", "/plugins/all?sort=verified", "/plugins/all?sort=new"]);
     const fresh = body.slice(body.indexOf('<ul class="fresh">'), body.indexOf("</ul>", body.indexOf('<ul class="fresh">')));
     expect(fresh.match(/<li>/g)!.length).toBeGreaterThan(0);
     expect(fresh.match(/<li>/g)!.length).toBe(fresh.match(/<span class="state no">Not verified yet<\/span>/g)!.length);

@@ -10,7 +10,7 @@ import { canonicalSearch, catalogHref, effectiveSort, PAGE_SIZE, pageHref, range
 import { count, day } from "../../lib/store/format.ts";
 import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
 import { CATEGORIES } from "../../lib/store/nav.ts";
-import type { PluginCard, Sort } from "../../lib/store/types.ts";
+import type { PluginCard } from "../../lib/store/types.ts";
 import { EMPTY_BODY, store } from "../../lib/store/words.ts";
 
 export const prerender = false;
@@ -58,7 +58,8 @@ const measure: Measure =
       ? { head: "Published", cell: published, folded: (p) => `Published ${published(p)}` }
       : { head: "Installs", cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
 
-const sorts = (["relevance", "popular", "updated", "new"] as Sort[]).filter((s) => s !== "relevance" || state.q);
+// (The orders Browse offers, each in the app's words; "Newly verified" is Discover's shelf, reached by its link.)
+const sorts = (["relevance", "popular", "updated", "new"] as const).filter((s) => s !== "relevance" || state.q);
 const heading = state.q ? `Results for “${state.q}”` : state.category ? categoryName(state.category) : state.keyword ? `Tagged “${state.keyword}”` : "All plugins";
 const title = state.q ? `“${state.q}” · Plugins · Zeron` : state.category ? `${categoryName(state.category)} plugins · Zeron` : "All plugins · Zeron";
 const description = state.category

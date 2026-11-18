@@ -39,7 +39,14 @@ export function httpsUrl(value: string | null | undefined): string | null {
 export const memberUrl = (username: string) => `/@${encodeURIComponent(username)}`;
 
 /** The app's own link to a plugin's page in Settings → Plugins (apps/zgx/src/links.rs). */
-export const appUrl = (id: string, version?: string) => `zeron://open/plugin/${encodeURIComponent(id)}${version ? `?version=${encodeURIComponent(version)}` : ""}`;
+/**
+ * Zeron's own address for a plugin, naming a version when given (the
+ * contract's "The link can name a version"). The app reads `version` only
+ * as a version reads, unescaped (letters, digits, ".", "+", "-", at most
+ * 32): one that doesn't is left out, and the link opens the plugin.
+ */
+export const appUrl = (id: string, version?: string) =>
+  `zeron://open/plugin/${encodeURIComponent(id)}${version && /^[A-Za-z0-9.+-]{1,32}$/.test(version) ? `?version=${version}` : ""}`;
 
 /** Sign in, then come back to `path` (a path on this site, never anywhere else). */
 export const signInUrl = (path: string) => `/auth/web/login?${new URLSearchParams({ return_to: sitePath(path) })}`;

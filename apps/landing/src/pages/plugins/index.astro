@@ -2,8 +2,8 @@
 // Discover, the store's front (the prototype's discover): what the store
 // is, in a line and three numbers; its search and its categories; what's
 // featured, each on its own colour with its first picture (or its tile,
-// large, when it ships none); the most installed and the verified ones
-// updated lately; every category with a line and a few of its plugins; and
+// large, when it ships none); the most installed and the newly verified
+// (by when Zeron verified each, ?sort=verified); every category with a line and a few of its plugins; and
 // what was just published, said honestly: live, not yet verified.
 // Public and the same for everyone (no cookie read): the Worker cache
 // keeps it as it keeps the lists.
@@ -35,7 +35,7 @@ const [stats, categoriesResult, featured, popular, recent, newest] = await Promi
   edge.categories(3),
   edge.catalog({ featured: true, sort: "popular" }),
   edge.catalog({ sort: "popular" }),
-  edge.catalog({ verified: true, sort: "updated" }),
+  edge.catalog({ sort: "verified" }),
   edge.catalog({ sort: "new" }),
 ]);
 
@@ -179,14 +179,14 @@ const n = (value: number | undefined) => (value === undefined ? "—" : count(va
           </div>
           {updated.length > 0 && (
             <div>
-              <div class="sec-head"><h2 id="updated">Updated, verified</h2><a class="more" href={catalogHref({ verified: true, sort: "updated" })}>See all<span class="sr-only"> verified, by update</span><Icon name="chev" /></a></div>
+              <div class="sec-head"><h2 id="updated">Newly verified</h2><a class="more" href={catalogHref({ sort: "verified" })}>See all<span class="sr-only"> newly verified</span><Icon name="chev" /></a></div>
               <ul class="list" aria-labelledby="updated">
                 {updated.map((p) => (
                   <li>
                     <a class="item" href={pluginUrl(p.id)}>
                       <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} />
-                      <div class="txt"><div class="nm"><span class="name">{p.name}</span><Seal size="s" /></div><div class="sm">{p.summary}</div></div>
-                      <div class="meta"><time datetime={new Date(p.updated_at).toISOString()}>{since(p.updated_at, now)}</time></div>
+                      <div class="txt"><div class="nm"><span class="name">{p.name}</span>{p.verified && <Seal size="s" />}</div><div class="sm">{p.summary}</div></div>
+                      {p.verified_at && <div class="meta"><time datetime={new Date(p.verified_at).toISOString()}>{since(p.verified_at, now)}</time></div>}
                     </a>
                   </li>
                 ))}

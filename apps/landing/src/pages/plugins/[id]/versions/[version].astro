@@ -89,7 +89,7 @@ const base = pluginUrl(id);
               <h2 class="rail-h" id="rail-version">This version</h2>
               <dl class="facts">
                 <dt>Verified</dt>
-                <dd>{v.verified ? <span class="okline"><Seal size="s" quiet />{v.verified_at !== null ? `On ${day(v.verified_at, now)}` : store("plugins.store.verified")}</span> : v.yanked ? "No" : store("plugins.store.review.waiting")}</dd>
+                <dd>{v.verified ? <span class="okline"><Seal size="s" quiet />{v.verified_at !== null ? `On ${day(v.verified_at, now)}` : store("plugins.store.verified")}</span> : store("plugins.store.review.waiting")}</dd>
                 <dt>Published</dt><dd>{date(v.published_at)}</dd>
                 <dt>{store("plugins.store.fact.works_with")}</dt><dd>{compatibility(engines?.zeron)}</dd>
                 {v.bytes !== undefined && <><dt>Size</dt><dd class="num">{bytes(v.bytes)}</dd></>}

@@ -46,7 +46,8 @@ export interface EdgeError {
   message?: string;
 }
 
-export type Sort = "relevance" | "popular" | "updated" | "new";
+/** `verified`: newest verification first, only plugins with a verified listed version (contract ee380cca3). */
+export type Sort = "relevance" | "popular" | "updated" | "new" | "verified";
 
 export interface Badge {
   id: string;
@@ -82,6 +83,8 @@ export interface PluginCard {
   verified: boolean;
   /** The newest verified listed version, or null. */
   verified_version: string | null;
+  /** When `verified_version` was verified, or null (contract ee380cca3; an edge before 9a787d3c2 leaves it out). */
+  verified_at?: number | null;
   updated_at: number;
   /**
    * When it was first listed: what Newest sorts by (amendment 39). Set once,

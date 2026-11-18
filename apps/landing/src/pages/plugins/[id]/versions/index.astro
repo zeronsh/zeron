@@ -58,7 +58,7 @@ const said = (v: VersionInfo) => {
   const published = `published ${day(v.published_at, now)}`;
   if (v.yanked && v.yanked_by === "superseded") {
     const by = v.superseded_by ?? v.superseded?.by;
-    return `${by ? store("plugins.store.superseded", { version: by }) : "Replaced by a newer version before it was verified: no new installs"} · ${published}`;
+    return `${by ? store("plugins.store.superseded", { version: by }) : "Replaced by a newer version before it was verified"} · ${published}`;
   }
   if (v.yanked) return `${v.yanked_by === "author" ? "Its author stopped new installs" : "No new installs"} · ${published}`;
   if (v.verified && v.verified_at !== null) return `Verified ${day(v.verified_at, now)} · ${published}`;
@@ -96,7 +96,7 @@ const pager = page.state === "ok" && page.versions ? pagerOf(`${pluginUrl(asked)
                         {notes.get(v.version) ? <div class="notes prose" set:html={notes.get(v.version)} /> : <p class="notes t3">No notes for this version.</p>}
                       </div>
                       <div class="act">
-                        {v.yanked ? <span class="off">Can't be installed</span> : <a class:list={["btn sm", newest ? "sec" : "ghost"]} href={appUrl(page.plugin.id, newest ? undefined : v.version)}>Install {v.version}</a>}
+                        {v.yanked ? <span class="off">Can't be installed</span> : <a class:list={["btn sm", newest ? "sec" : "ghost"]} href={appUrl(page.plugin.id, newest ? undefined : v.version)}>{store("plugins.store.install_version", { version: v.version })}</a>}
                       </div>
                     </li>
                   );

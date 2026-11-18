@@ -17,6 +17,7 @@ export const STORE_WORDS = {
   "plugins.store.not_verified": "Not verified",
   "plugins.store.not_verified_line": "{version} isn't verified yet. {verified} is.",
   "plugins.store.install_instead": "Install {version} instead",
+  "plugins.store.install_version": "Install {version}",
   "plugins.store.none_verified": "No version of this plugin is verified yet.",
   "plugins.store.verified_on": "Verified on {date}",
   // A version's state.
@@ -24,7 +25,7 @@ export const STORE_WORDS = {
   "plugins.store.status.taken_down": "Taken down",
   "plugins.store.status.removed": "Removed",
   // Why a version takes no new installs, when a newer one replaced it unverified (amendment 45); and one waiting.
-  "plugins.store.superseded": "Replaced by {version} before it was verified: no new installs",
+  "plugins.store.superseded": "Replaced by {version} before it was verified",
   "plugins.store.review.waiting": "Not verified yet",
   // The account's deploy keys (amendment 44).
   "plugins.store.keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each key publishes the plugins chosen when it's made.",

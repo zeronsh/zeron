@@ -29,7 +29,7 @@ interface Props {
   off?: { needs: string | undefined; latest: string } | null;
 }
 const { id, name, version, newest, verified, verifiedAt, publishedAt, verifiedVersion, verifiedVersionAt, off } = Astro.props;
-const label = newest ? "Install in Zeron" : `Install ${version}`;
+const label = newest ? "Install in Zeron" : store("plugins.store.install_version", { version });
 const href = appUrl(id, newest ? undefined : version);
 const now = Date.now();
 const mark = [[0, 0], [1, 0], [2, 0], [4, 0], [0, 1], [1, 1], [3, 1], [4, 1], [0, 2], [2, 2], [3, 2], [4, 2]];
