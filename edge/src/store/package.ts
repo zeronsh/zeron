@@ -26,7 +26,7 @@
 import { type Json, type JsonObject, JsonError, canonicalJson, isObject, parseJson } from "./json";
 import { MANIFEST_FILE, type Manifest, idProblem, readManifest } from "./manifest";
 import { LIMITS, STORE_DATA } from "./data";
-import { plainPath } from "./paths";
+import { SOURCE_FILE, firstCollision, plainPath } from "./paths";
 import { Scanner, decodeBase64String, decodedBound as spanBound, stringIs, stringText } from "./scan";
 
 export const FORMAT: string = STORE_DATA.package_format;
@@ -46,6 +46,7 @@ export type PackageError =
   | "bad_signature"
   | "too_big"
   | "bad_file"
+  | "paths_collide"
   | "bad_manifest"
   | "bad_id"
   | "missing_entry";
@@ -57,6 +58,7 @@ export const PACKAGE_WORDS: Record<PackageError, string> = {
   bad_signature: "Its signature doesn't check out",
   too_big: "It's too big for a plugin",
   bad_file: "It has a file Zeron won't write",
+  paths_collide: "Two of its paths are one file on macOS and Windows",
   bad_manifest: "Its manifest is broken",
   bad_id: "Its id can't be used",
   missing_entry: "Its entry file is missing"
@@ -379,6 +381,11 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   if ("invalid" in checked) {
     return refuse(checked.invalid === "files_differ" ? "tampered" : checked.invalid);
   }
+  // Paths a device would write as one file, or a file where a folder must
+  // be (amendment 42): refused as a device refuses them, after the
+  // package's own checks and before the manifest's.
+  const collision = firstCollision(decoded.keys(), [MANIFEST_FILE, SOURCE_FILE]);
+  if (collision) refuse("paths_collide", collision);
   const manifest = readManifest(manifestValue);
   if (manifest.problem) refuse("bad_manifest", manifest.problem);
   const badId = idProblem(manifest.id);

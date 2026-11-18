@@ -15,7 +15,7 @@ import { type Json, type JsonObject, canonicalJson, isArray, isObject } from "./
 import { MANIFEST_FILE, type Manifest, RESERVED_ID_ERROR, idProblem, isRustWhitespace, rustTrim, rustTrimStart } from "./manifest";
 import { MAX_BYTES, MAX_FILES } from "./package";
 import { LIMITS, STORE_DATA } from "./data";
-import { plainPath } from "./paths";
+import { foldPath, plainPath } from "./paths";
 import { type Range, type Version, parseRange, parseVersion } from "./semver";
 
 /** The fixed list (contract amendment 4), with the words shown for each. */
@@ -91,16 +91,8 @@ const isControl = (ch: string): boolean => {
  * them), which `name`, `description` and `keywords` refuse (amendment 31). */
 const UNSEEN = /[\p{Cc}\p{Cf}]/u;
 
-/** plugin-guard `fold`, after Unicode normalization (NFC): how macOS and
- * Windows compare two paths. Two that fold the same are one file there. */
-export const foldPath = (rel: string): string =>
-  [...rel.normalize("NFC").replaceAll("\\", "/")]
-    .map((c) => c.toUpperCase().toLowerCase())
-    .join("")
-    .split("/")
-    .filter((part) => part !== "" && part !== ".")
-    .map((part) => part.replace(/[. ]+$/, ""))
-    .join("/");
+/** (The fold of a path, as the store and devices compare paths: paths.ts.) */
+export { foldPath } from "./paths";
 
 /** A link's parsed text (amendment 31): it begins `https://`, holds no
  * backslash, whitespace, control character or `user:password@` part, and
@@ -352,13 +344,33 @@ export const checkListing = (
   unsigned.delete("signature");
   if (byteLength(canonicalJson(unsigned)) > MAX_MANIFEST_BYTES) problems.push(problem("too_large", "manifest", "Its manifest is over 256 KB"));
   // Two paths that are one file on a Mac or a Windows machine (the
-  // manifest's own name among them).
+  // manifest's own name among them), or a file where another path needs
+  // a folder of that name there (amendment 42): each at the later path, in
+  // code point order; a path with a problem is never recorded.
   const folded = new Map<string, string>([[foldPath(MANIFEST_FILE), MANIFEST_FILE]]);
+  const folders = new Map<string, string>();
   for (const rel of [...files.keys()].sort(byCodePoint)) {
     const key = foldPath(rel);
     const other = folded.get(key);
-    if (other !== undefined) problems.push(problem("bad_listing", "files", `"${rel}" and "${other}" are the same file on macOS and Windows`, rel));
-    else folded.set(key, rel);
+    if (other !== undefined) {
+      problems.push(problem("bad_listing", "files", `"${rel}" and "${other}" are the same file on macOS and Windows`, rel));
+      continue;
+    }
+    const inside = folders.get(key);
+    if (inside !== undefined) {
+      problems.push(problem("bad_listing", "files", `"${rel}" is a file where "${inside}" needs a folder of that name on macOS and Windows`, rel));
+      continue;
+    }
+    const parts = key.split("/");
+    const parents = parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
+    const clash = parents.map((folder) => folded.get(folder)).find((file) => file !== undefined);
+    if (clash !== undefined) {
+      problems.push(problem("bad_listing", "files", `"${clash}" is a file where "${rel}" needs a folder of that name on macOS and Windows`, rel));
+      continue;
+    }
+    // (Only a path with no problem is recorded, as the engine's `clashes`.)
+    for (const folder of parents) if (!folders.has(folder)) folders.set(folder, rel);
+    folded.set(key, rel);
   }
 
   return { problems, warnings };

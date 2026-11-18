@@ -27,6 +27,54 @@ const walk = (value: unknown, path: string, bad: string[], seen: { n: number }):
   } else if (typeof value === "string" && ISO.test(value)) bad.push(`${path} = ${JSON.stringify(value)}`);
 };
 
+describe("what a device reads (amendment 43)", () => {
+  it("names every package's bytes, and never answers with a redirect", async () => {
+    const a = await author();
+    const other = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    await listed(a, id, "1.1.0", { manifest: { permissions: ["ui.add", "links.open"] } });
+    expect((await publish(a.userId, id, await makePackage({ id, version: "1.2.0", signer: a.signer }))).status).toBe(201);
+    const served = async (version: string) =>
+      (await (await call(a.userId, "GET", `/store/v1/plugins/${id}/versions/${version}/package`)).arrayBuffer()).byteLength;
+    const sizes = Object.fromEntries(await Promise.all(["1.0.0", "1.1.0", "1.2.0"].map(async (v) => [v, await served(v)] as const)));
+    const detail = (await (await call(undefined, "GET", `/store/v1/plugins/${id}`)).json()) as any;
+    const versions = ((await (await call(undefined, "GET", `/store/v1/plugins/${id}/versions`)).json()) as any).versions;
+    const mine = ((await (await call(a.userId, "GET", "/store/v1/me/plugins")).json()) as any).plugins.find((p: { id: string }) => p.id === id).versions;
+    const hash = (await env.STORE_DB.prepare("SELECT content_hash FROM versions WHERE plugin_id = ? AND version = '1.0.0'").bind(id).first<string>("content_hash"))!;
+    const offers = ((await (await call(a.userId, "POST", "/store/v1/updates", { zeron: "0.4.0", plugins: [{ id, version: "1.0.0", hash }] })).json()) as any).updates;
+    // Every record a device installs or updates by: its package's exact size.
+    expect(detail.package.bytes).toBe(sizes[detail.version]);
+    for (const v of [...versions, ...mine]) expect(v.bytes, v.version).toBe(sizes[v.version]);
+    expect(offers.length).toBeGreaterThan(0);
+    for (const o of offers) expect(o.bytes, o.version).toBe(sizes[o.version]);
+    // No route a device calls answers with a redirect, refusals included.
+    const asks: [string | undefined, string, string, unknown?][] = [
+      [undefined, "GET", "/store/v1/plugins"],
+      [undefined, "GET", `/store/v1/plugins/${id}`],
+      [undefined, "GET", `/store/v1/plugins/${id}/versions`],
+      [undefined, "GET", `/store/v1/plugins/${id}/versions/1.1.0/package`],
+      [undefined, "HEAD", `/store/v1/plugins/${id}/versions/1.1.0/package`],
+      [undefined, "GET", `/store/v1/plugins/${id}/files/1.1.0/icon.svg`],
+      [undefined, "GET", `/store/v1/plugins/${id}/files/1.1.0/init.luau`],
+      [other.userId, "GET", `/store/v1/plugins/${id}/versions/1.2.0/package`],
+      [undefined, "GET", `/store/v1/plugins/${id}/versions/9.9.9/package`],
+      [undefined, "GET", `/store/v1/plugins/${id}/versions/1.1.0/package/`],
+      [undefined, "GET", `/store/v1/plugins/${id}//versions`],
+      [undefined, "GET", "/store/v1/plugins/no-such-plugin"],
+      [undefined, "GET", "/store/v1/categories"],
+      [a.userId, "GET", "/store/v1/me/plugins"],
+      [a.userId, "POST", "/store/v1/updates", { zeron: "0.4.0", plugins: [] }],
+      [a.userId, "POST", `/store/v1/plugins/${id}/installed`]
+    ];
+    for (const [who, method, path, body] of asks) {
+      const res = await call(who, method, path, body);
+      expect([res.status >= 300 && res.status < 400, res.headers.get("location")], `${method} ${path}`).toEqual([false, null]);
+      await res.arrayBuffer();
+    }
+  });
+});
+
 describe("store answers", () => {
   it("give every time as ms since the epoch", async () => {
     const a = await author();

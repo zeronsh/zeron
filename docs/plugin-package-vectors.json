@@ -4297,6 +4297,286 @@
         }
       ],
       "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "UI/x.luau": "Mg==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui": "MQ=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "a file and a folder that fold alike",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "Ui": "MQ==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/x.luau": "Mg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "a folder and a file that fold alike",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/x.luau",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "ZERON-PLUGIN.JSON/x.luau": "MQ==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "init2.luau": "Mg==",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "its manifest's name as a folder on a Mac",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ZERON-PLUGIN.JSON/x.luau",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "UI/a": "MQ==",
+        "Ui": "MQ==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/b": "MQ=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "a file on a folder, then a path inside it",
+      "problems": [
+        {
+          "field": "files",
+          "path": "Ui",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "café/a": "MQ==",
+        "café": "MQ==",
+        "café/b": "MQ==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "a file on a folder in Unicode's other spelling, then a path inside it",
+      "problems": [
+        {
+          "field": "files",
+          "path": "café",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "A": "MQ==",
+        "A/B": "MQ==",
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "a/b/c": "MQ==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "a file, a path under it, a path deeper under it",
+      "problems": [
+        {
+          "field": "files",
+          "path": "A/B",
+          "rule": "bad_listing"
+        },
+        {
+          "field": "files",
+          "path": "a/b/c",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "A": "MQ==",
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "a": "MQ==",
+        "a/x": "MQ==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "a file, the same file, a path under it",
+      "problems": [
+        {
+          "field": "files",
+          "path": "a",
+          "rule": "bad_listing"
+        },
+        {
+          "field": "files",
+          "path": "a/x",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
     }
   ],
   "manifests": [
@@ -6300,6 +6580,54 @@
       }
     },
     {
+      "name": "two paths that differ only in case",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9CYWRnZS5sdWF1IjoiZUE9PSIsInVpL2JhZGdlLmx1YXUiOiJlQT09In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL0JhZGdlLmx1YXUiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwidWkvYmFkZ2UubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IlZwLUhRVDVvTUw5bjhybG5mSFdmM052ZFEzODFEYktsME1KNWltbE9wdXE2RkJHcGJKQWhfQ05sN1hfcXFWUk1JdHpRTDVGUmF0NTJ2SVhGMVpCbEN3In0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "error": "paths_collide",
+        "ok": false
+      }
+    },
+    {
+      "name": "one name in Unicode's two spellings (NFC, NFD)",
+      "package_b64": "eyJmaWxlcyI6eyJjYWZlzIEubHVhdSI6ImVBPT0iLCJjYWbDqS5sdWF1IjoiZUE9PSIsImluaXQubHVhdSI6ImNtVjBkWEp1SURFPSIsInVpL2JhZGdlLmx1YXUiOiJjbVYwZFhKdUlIdDkifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJjYWZlzIEubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJjYWbDqS5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSIsImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiMHV1R2lWQl9md2RlV3BwSVM0djZrUVl3VXFJNkdVOEtaNGxrbkd3a1o2ZXhxOVVIRENaSzdFeUtjT0xmMlBpNjRtYURZeWVJMEpLSUl1LTFTeUZuQ3cifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": {
+        "error": "paths_collide",
+        "ok": false
+      }
+    },
+    {
+      "name": "a file and a folder that fold alike",
+      "package_b64": "eyJmaWxlcyI6eyJVSS94Lmx1YXUiOiJlQT09IiwiaW5pdC5sdWF1IjoiY21WMGRYSnVJREU9IiwidWkiOiJlQT09IiwidWkvYmFkZ2UubHVhdSI6ImNtVjBkWEp1SUh0OSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7IlVJL3gubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6InAxS0lyVGw4Zk1XUng2V1FMYzdVSXhnZVRPaVlhMXc2TFd4MFJFeGFkajZUOU9HSDhxcU1CNG95dThzRmcyTVNKQUUtWWtGcm1oQngyd09ObXpnVUFBIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "error": "paths_collide",
+        "ok": false
+      }
+    },
+    {
+      "name": "its manifest's name in capitals",
+      "package_b64": "eyJmaWxlcyI6eyJaZXJvbi1QbHVnaW4uanNvbiI6ImVBPT0iLCJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiWmVyb24tUGx1Z2luLmpzb24iOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJDbHA3NngtUlRaQ0tBRXp0VW16Y0poandiS1RCaWtKeGlObklHeFdsOFMzZGxVZV9JOU1NOEJ0T3JLU2N6ZXR0cUktVjFQMExLNkJ4RlBrbWx6WDJDdyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": {
+        "error": "paths_collide",
+        "ok": false
+      }
+    },
+    {
+      "name": "its manifest's name with a long s",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5IiwiemVyb24tcGx1Z2luLmrFv29uIjoiZUE9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7ImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInplcm9uLXBsdWdpbi5qxb9vbiI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IldjUXo4RnJCUXMwaGdMQmZjOVh6VHBjbjc1TUMwZV8weVFYQzdQY2JYWUVCaVlZbGJZZU8zb2RBQ25oRklYei1BY1hWcHY4cG41eFVqT19XVkxRaUJ3In0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "error": "paths_collide",
+        "ok": false
+      }
+    },
+    {
+      "name": "its manifest's name as a folder",
+      "package_b64": "eyJmaWxlcyI6eyJaRVJPTi1QTFVHSU4uSlNPTi94Lmx1YXUiOiJlQT09IiwiaW5pdC5sdWF1IjoiY21WMGRYSnVJREU9IiwidWkvYmFkZ2UubHVhdSI6ImNtVjBkWEp1SUh0OSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7IlpFUk9OLVBMVUdJTi5KU09OL3gubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IjIwQ1hyYW9kZW0ySXV0RXI1WmdVQjYtd3l6LVNkMl9GRnBPenZKU2JMMzlPTjAzOHlQZWdfcnROYXZaU2YwV0hqS2JKZmhYSzMyTWhTOTFUSjV6Z0FRIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "error": "paths_collide",
+        "ok": false
+      }
+    },
+    {
       "name": "its entry file is missing",
       "package_b64": "eyJmaWxlcyI6eyJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6InQyUFNFODhzNU5XZlV6YV9sNktBNjhsLTFnQUpIOHZWaHpueGRqeHhBMHVMSHlPbVpHWnZDZ2J1MEVlcnhJcVVyeWJ4alZKemkyRTBMY3FFLUlvSkR3In0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
       "result": {
@@ -6615,22 +6943,22 @@
     },
     {
       "name": "valid_unicode_and_odd_paths",
-      "package_b64": "eyJmaWxlcyI6eyJaRVJPTi1QTFVHSU4uSlNPTiI6ImUzMD0iLCJhIGIvY34kLnR4dCI6ImVRPT0iLCJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9jYWbDqS5sdWF1IjoiZUE9PSIsInplcm9uLXBsdWdpbi5qc29uLmJhayI6ImUzMD0iLCLwn5iALnR4dCI6IiJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6W10sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJaRVJPTi1QTFVHSU4uSlNPTiI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJhIGIvY34kLnR4dCI6ImExZmNlNDM2Mzg1NGZmODg4Y2ZmNGI4ZTc4NzVkNjAwYzI2ODIzOTA0MTJhOGNmNzliMzdkMGIxMTE0OGIwZmEiLCJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvY2Fmw6kubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJ6ZXJvbi1wbHVnaW4uanNvbi5iYWsiOiI0NDEzNmZhMzU1YjM2NzhhMTE0NmFkMTZmN2U4NjQ5ZTk0ZmI0ZmMyMWZlNzdlODMxMGMwNjBmNjFjYWFmZjhhIiwi8J+YgC50eHQiOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1In0sImtleSI6ImdUbDNEcWg5RjE5V28xUm13MHgtek11TmlwRzA3amVpWGZZUFc0X0pzNVEiLCJzaWciOiJZemJLTjNXWHAybi1sYnp5b0t4TkpjWWZmVUo1d2RPRWZ2ZkZ2X2tOVlhQMklfcHZDSERMOTlEdUpzLVBKQlNYUy1qZklVbkM1OW15ZDJhSDFvY2REQSJ9LCJ2ZXJzaW9uIjoiMS4yLjMifX0=",
+      "package_b64": "eyJmaWxlcyI6eyJaRVJPTi1QTFVHSU4uSlNPTi50eHQiOiJlMzA9IiwiYSBiL2N+JC50eHQiOiJlUT09IiwiaW5pdC5sdWF1IjoiY21WMGRYSnVJREU9IiwidWkvY2Fmw6kubHVhdSI6ImVBPT0iLCJ6ZXJvbi1wbHVnaW4uanNvbi5iYWsiOiJlMzA9Iiwi8J+YgC50eHQiOiIifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOltdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiWkVST04tUExVR0lOLkpTT04udHh0IjoiNDQxMzZmYTM1NWIzNjc4YTExNDZhZDE2ZjdlODY0OWU5NGZiNGZjMjFmZTc3ZTgzMTBjMDYwZjYxY2FhZmY4YSIsImEgYi9jfiQudHh0IjoiYTFmY2U0MzYzODU0ZmY4ODhjZmY0YjhlNzg3NWQ2MDBjMjY4MjM5MDQxMmE4Y2Y3OWIzN2QwYjExMTQ4YjBmYSIsImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9jYWbDqS5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSIsInplcm9uLXBsdWdpbi5qc29uLmJhayI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCLwn5iALnR4dCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IjdjQU02cVhQeS1VOHBNSFhuc2JxcjZGSGZLaWVFWGZhVTkwd0ZvckhlTnU3ZDRzeGhDYUFaSzYyT3ZORDgtQkljT1FxZWJhUEJxekFVWTVjbVFuckFRIn0sInZlcnNpb24iOiIxLjIuMyJ9fQ==",
       "result": {
         "files": 6,
-        "hash": "90cf21a0db0e2e64a1201d73c0cb9fc6f78484e300563f6dd0b4e048e84a42f3",
+        "hash": "53fcc6b21a0c0b46cfa04381b7300ffe48408e6792d8f5b845cfe047d0ed19e9",
         "id": "focus",
-        "key": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
         "ok": true,
         "paths": [
-          "ZERON-PLUGIN.JSON",
+          "ZERON-PLUGIN.JSON.txt",
           "a b/c~$.txt",
           "init.luau",
           "ui/café.luau",
           "zeron-plugin.json.bak",
           "😀.txt"
         ],
-        "sha256": "9330143d65bdd6953fe08efdebe11f2d038a684c2920f2de09963bf6d421fd81",
+        "sha256": "6fded40702065cbf645d04accfe2a1364c71a9e6abf429b8220184059bf598b4",
         "version": "1.2.3"
       }
     },
