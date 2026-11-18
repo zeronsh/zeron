@@ -130,6 +130,17 @@ pub fn page_description(manifest: &Json) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// Settings' page of plugin `id`'s settings (screens/plugins/settings's).
+pub fn page_id(id: &str) -> String {
+    format!("plugin-{id}")
+}
+
+/// Whether the window shows plugin `id`'s settings page now, by its route
+/// as the app shares it (`zeron.route`: `{ name, page }`).
+pub fn page_shown(route: &Json, id: &str) -> bool {
+    route["name"] == "settings" && route["page"].as_str() == Some(page_id(id).as_str())
+}
+
 /// One declared setting, as the page draws it (its manifest's fields,
 /// checked and filled in: a default that fits, a choice's style).
 #[derive(Clone, Debug, PartialEq)]
@@ -994,6 +1005,15 @@ mod tests {
         book.declare_page("bare", &json!([]));
         book.forget("bare");
         assert_eq!(book.page_problem("bare"), None);
+    }
+
+    #[test]
+    fn a_plugin_s_page_shows_by_the_window_s_route() {
+        assert!(page_shown(&json!({ "name": "settings", "page": "plugin-demo" }), "demo"));
+        assert!(!page_shown(&json!({ "name": "settings", "page": "plugin-other" }), "demo"));
+        assert!(!page_shown(&json!({ "name": "settings", "page": "general" }), "demo"));
+        assert!(!page_shown(&json!({ "name": "session", "page": "plugin-demo" }), "demo"));
+        assert!(!page_shown(&Json::Null, "demo"));
     }
 
     #[test]

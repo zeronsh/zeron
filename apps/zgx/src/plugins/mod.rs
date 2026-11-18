@@ -302,6 +302,8 @@ pub struct Bridge {
     watches: RefCell<Vec<crate::engine::rpc::SetUpWatch>>,
     pub(crate) consent: RefCell<Option<consent::Consent>>,
     reviewed: Cell<bool>,
+    /// The plugins whose folder dialog (`plugin.<id>.setting_folder`) is open.
+    folder_asking: RefCell<HashSet<String>>,
     /// Another device's plugins, shown by Settings → Plugins' switcher
     /// (`plugins.remote`; never loaded here).
     pub(crate) remote: remote::Remote,
@@ -645,6 +647,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         watches: RefCell::default(),
         consent: RefCell::default(),
         reviewed: Cell::new(false),
+        folder_asking: RefCell::default(),
         remote: remote::Remote::new(host.shared("plugins.remote", remote::Remote::initial())),
         me: RefCell::default(),
         first_load: Cell::new(true),
@@ -2531,11 +2534,23 @@ impl Bridge {
                     let (dialogs, title) = {
                         let b = me.upgrade().ok_or("The window closed")?;
                         let label = b.settings.borrow().folder_label(&plugin, &id)?;
+                        // The system's dialog, outside the window: asked from
+                        // its settings page as it shows (the person there,
+                        // choosing), one at a time.
+                        if !settings::page_shown(&b.route(), &plugin) {
+                            return Err("A folder is chosen from its settings page, while it shows".to_string());
+                        }
+                        if !b.folder_asking.borrow_mut().insert(plugin.clone()) {
+                            return Err("Its folder dialog is open already".to_string());
+                        }
                         let name = b.item(&plugin).map(|i| i.name().to_string()).unwrap_or_else(|| plugin.clone());
                         (b.dialogs.clone(), format!("{name}: {label}"))
                     };
-                    let chosen = dialogs.open_folder(zgx_desktop::FileDialogOptions::new(title)).await.map_err(|e| e.to_string())?;
-                    let Some(path) = chosen else { return Ok(Value::Nil) };
+                    let chosen = dialogs.open_folder(zgx_desktop::FileDialogOptions::new(title)).await.map_err(|e| e.to_string());
+                    if let Some(b) = me.upgrade() {
+                        b.folder_asking.borrow_mut().remove(&plugin);
+                    }
+                    let Some(path) = chosen? else { return Ok(Value::Nil) };
                     let path = path.to_string_lossy().to_string();
                     let b = me.upgrade().ok_or("The window closed")?;
                     b.setting_set(&json!({ "plugin": plugin, "id": id, "value": path }))?;
@@ -3168,7 +3183,7 @@ impl Bridge {
         // Its settings page of its own (`zeron.settings_page`): how it last
         // built, and where Settings lists it.
         if let Some(problem) = self.settings.borrow().page_problem(plugin) {
-            out["settings_page"] = json!({ "page": format!("plugin-{plugin}"), "built": problem.is_none() });
+            out["settings_page"] = json!({ "page": settings::page_id(plugin), "built": problem.is_none() });
             if let Some(problem) = problem {
                 out["settings_page"]["problem"] = json!(problem);
             }
@@ -3203,6 +3218,11 @@ impl Bridge {
         self.push_call(plugin, id, "where", vec![("snapshot", Value::from(snapshot))]);
     }
 
+    /// The window's route, as the app shares it (`zeron.route`).
+    fn route(&self) -> Json {
+        value_json(&self.host.shared("zeron.route", Value::Nil).signal().with_untracked(Value::clone))
+    }
+
     /// An agent's `plugin_status { page = "settings" }`: the host's part,
     /// what its Luau uses off the design system (hints, never a block), and,
     /// with `snapshot`, a picture of its settings page as Settings shows it,
@@ -3211,7 +3231,7 @@ impl Bridge {
     /// answer says so).
     fn settings_status(&self, plugin: &str, id: String, snapshot: bool) {
         let mut out = self.host_status(plugin);
-        let page = format!("plugin-{plugin}");
+        let page = settings::page_id(plugin);
         if let Some(dir) = self.item(plugin).and_then(|i| i.json["snapshot"].as_str().map(PathBuf::from)) {
             let (hints, more) = surfaces::style_hints(&dir);
             out["hints"] = json!(hints);
@@ -3229,8 +3249,7 @@ impl Bridge {
             answer_tool(id, true, out, String::new());
             return;
         }
-        let route = value_json(&self.host.shared("zeron.route", Value::Nil).signal().with_untracked(Value::clone));
-        let shown = route["name"] == "settings" && route["page"] == page.as_str();
+        let shown = settings::page_shown(&self.route(), plugin);
         if !shown {
             self.request("open", "", json_value(&json!({ "settings": page })));
             out["opened"] = json!(format!("Settings opened on its page ({page}) to picture it"));
@@ -3255,8 +3274,7 @@ impl Bridge {
     /// The settings page open (`page`) as the window shows it, saved for the
     /// agent: the page's column, cut to what of it the window shows.
     fn picture_settings_page(&self, page: &str) -> Result<Json, String> {
-        let route = value_json(&self.host.shared("zeron.route", Value::Nil).signal().with_untracked(Value::clone));
-        if route["name"] != "settings" || route["page"] != page {
+        if !settings::page_shown(&self.route(), page.trim_start_matches("plugin-")) {
             return Err("Settings didn't open on its page".into());
         }
         let ui = self.ui.upgrade().ok_or("The window is closed")?;

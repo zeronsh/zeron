@@ -143,10 +143,13 @@ impl Rig {
                 {
                     // The person's folder, as the dialog would choose it.
                     let (book, list, own, id) = (b.clone(), list.clone(), own.clone(), id.clone());
+                    let route = host.shared("zeron.route", json_value(&json!({ "name": "home" })));
                     host.async_action(format!("plugin.{id}.setting_folder"), move |v: Value| {
                         let asked = value_json(&v);
                         let setting = asked["id"].as_str().unwrap_or_default().to_string();
-                        let label = book.borrow().folder_label(&id, &setting);
+                        // (As the bridge: from its settings page, while it shows.)
+                        let shown = super::settings::page_shown(&value_json(&route.signal().with_untracked(Value::clone)), &id);
+                        let label = if shown { book.borrow().folder_label(&id, &setting) } else { Err("not from its page".to_string()) };
                         let done = label.and_then(|_| book.borrow_mut().set(&id, &setting, &json!("/Users/me/Picked")));
                         if done.is_ok() {
                             publish(&book, &list, &own);
