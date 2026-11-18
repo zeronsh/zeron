@@ -87,7 +87,7 @@ const listingRefusal = (first: Problem, all: readonly Problem[]): Response =>
   fail(first.rule === "id_reserved" ? 403 : first.rule === "too_large" ? 413 : 400, first.rule, first.words, {
     field: first.field,
     path: first.path,
-    problems: all.map((p) => ({ rule: p.rule, field: p.field, path: p.path, message: p.words }))
+    problems: all.slice(0, 100).map((p) => ({ rule: p.rule, field: p.field, path: p.path, message: p.words }))
   });
 
 const accepted = (id: string, version: string, status: string, checks: unknown): Response =>
@@ -113,21 +113,23 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     throw e;
   }
   if (pkg.manifest.id !== id) return fail(400, "bad_package", `The package is "${pkg.manifest.id}", not "${id}".`, { reason: "id_mismatch" });
+  // Who may publish this, before any work on what it is: a stranger's key,
+  // someone else's id, a suspended plugin are refused here.
+  if (!(await signingKeyAllowed(env, publisher, id, pkg.key))) {
+    return fail(403, "key_not_allowed", "The key that signed this package isn't one of this account's.");
+  }
+  const plugin = await pluginRow(db, id);
+  if (plugin && plugin.owner_id !== publisher.userId) return fail(403, "id_taken", `"${id}" belongs to another account.`);
+  if (plugin?.status === "suspended") return fail(403, "suspended", "This plugin is suspended: it can't take new versions.");
+  if (!plugin && (await idReserved(db, id, publisher.userId))) return fail(403, "id_reserved", `"${id}" is kept back: ask Zeron for it.`);
+  if (!plugin && (await overClaims(db, publisher.userId, Date.now()))) return claimsRefusal();
+
   // The engine's listing rules (what `zeron plugin check` says on the
   // device), then the store's own size limits.
   const { problems, warnings } = checkListing(pkg.manifest, pkg.files, isText);
   if (problems.length > 0) return listingRefusal(problems[0]!, problems);
   const listing = listingOf(pkg.manifest, pkg.files);
   if ("rule" in listing) return listingRefusal(listing, [listing]);
-  if (!(await signingKeyAllowed(env, publisher, id, pkg.key))) {
-    return fail(403, "key_not_allowed", "The key that signed this package isn't one of this account's.");
-  }
-
-  const plugin = await pluginRow(db, id);
-  if (plugin && plugin.owner_id !== publisher.userId) return fail(403, "id_taken", `"${id}" belongs to another account.`);
-  if (plugin?.status === "suspended") return fail(403, "suspended", "This plugin is suspended: it can't take new versions.");
-  if (!plugin && (await idReserved(db, id, publisher.userId))) return fail(403, "id_reserved", `"${id}" is kept back: ask Zeron for it.`);
-  if (!plugin && (await overClaims(db, publisher.userId, Date.now()))) return claimsRefusal();
 
   const version = listing.version;
   const precedence = precedenceText(version);
@@ -167,47 +169,60 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
 
   const pkgKey = packageKey(id, version.text, pkg.sha256);
   const blobKey = filesKey(id, version.text, pkg.sha256);
-  await Promise.all([
-    bucket.put(pkgKey, body, { sha256: pkg.sha256, httpMetadata: { contentType: "application/octet-stream" } }),
-    bucket.put(blobKey, pkg.blob, { httpMetadata: { contentType: "application/octet-stream" } })
-  ]);
+  // R2 first (content-addressed: harmless if this publish loses), then the
+  // one D1 batch that decides. Whatever throws in between, nothing written
+  // here is left behind unless a version row names it.
+  try {
+    await Promise.all([
+      bucket.put(pkgKey, body, { sha256: pkg.sha256, httpMetadata: { contentType: "application/octet-stream" } }),
+      bucket.put(blobKey, pkg.blob, { httpMetadata: { contentType: "application/octet-stream" } })
+    ]);
 
-  const files: [string, number, number, string, FileKind][] = [];
-  let at = 0;
-  for (const [path, bytes] of pkg.files) {
-    files.push([path, at, bytes.length, pkg.hashes.get(path)!, kinds.get(path)!]);
-    at += bytes.length;
+    const files: [string, number, number, string, FileKind][] = [];
+    let at = 0;
+    for (const [path, bytes] of pkg.files) {
+      files.push([path, at, bytes.length, pkg.hashes.get(path)!, kinds.get(path)!]);
+      at += bytes.length;
+    }
+    const statements: D1PreparedStatement[] = [
+      // A new id is claimed within the weekly limit, and the claim recorded.
+      db
+        .prepare(`INSERT INTO plugins (id, owner_id, skeleton, created_at) SELECT ?, ?, ?, ? WHERE ${CLAIMS_SQL} ON CONFLICT DO NOTHING`)
+        .bind(id, publisher.userId, skeleton(id), now, publisher.userId, now - WEEK, CLAIMS_PER_WEEK),
+      db.prepare("INSERT INTO id_claims (user_id, plugin_id, at) SELECT ?, ?, ? WHERE changes() = 1").bind(publisher.userId, id, now),
+      insertVersion(db, publisher, id, now, {
+        version: version.text,
+        precedence,
+        order,
+        sha256: pkg.sha256,
+        bytes: pkg.bytes,
+        key: pkg.key,
+        hash: pkg.hash,
+        filesCount: pkg.files.size,
+        filesBytes: at,
+        manifest: pkg.manifestCanonical,
+        listing,
+        consent,
+        checks
+      }),
+      ...fileRows(db, id, version.text, pkg.sha256, files),
+      // A claim whose version didn't land isn't kept: no id is held without a
+      // submission, and a refused publish doesn't count towards the limit.
+      db
+        .prepare("DELETE FROM id_claims WHERE user_id = ? AND plugin_id = ? AND at = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)")
+        .bind(publisher.userId, id, now, id),
+      db.prepare("DELETE FROM plugins WHERE id = ? AND owner_id = ? AND created_at = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)").bind(id, publisher.userId, now, id)
+    ];
+    await db.batch(statements);
+  } catch (e) {
+    const kept = await db
+      .prepare("SELECT 1 FROM versions WHERE plugin_id = ? AND package_sha256 = ?")
+      .bind(id, pkg.sha256)
+      .first()
+      .catch(() => null);
+    if (!kept) await Promise.all([bucket.delete(pkgKey), bucket.delete(blobKey)]).catch(() => undefined);
+    throw e;
   }
-  const statements: D1PreparedStatement[] = [
-    // A new id is claimed within the weekly limit, and the claim recorded.
-    db
-      .prepare(`INSERT INTO plugins (id, owner_id, skeleton, created_at) SELECT ?, ?, ?, ? WHERE ${CLAIMS_SQL} ON CONFLICT DO NOTHING`)
-      .bind(id, publisher.userId, skeleton(id), now, publisher.userId, now - WEEK, CLAIMS_PER_WEEK),
-    db.prepare("INSERT INTO id_claims (user_id, plugin_id, at) SELECT ?, ?, ? WHERE changes() = 1").bind(publisher.userId, id, now),
-    insertVersion(db, publisher, id, now, {
-      version: version.text,
-      precedence,
-      order,
-      sha256: pkg.sha256,
-      bytes: pkg.bytes,
-      key: pkg.key,
-      hash: pkg.hash,
-      filesCount: pkg.files.size,
-      filesBytes: at,
-      manifest: pkg.manifestCanonical,
-      listing,
-      consent,
-      checks
-    }),
-    ...fileRows(db, id, version.text, pkg.sha256, files),
-    // A claim whose version didn't land isn't kept: no id is held without a
-    // submission, and a refused publish doesn't count towards the limit.
-    db
-      .prepare("DELETE FROM id_claims WHERE user_id = ? AND plugin_id = ? AND at = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)")
-      .bind(publisher.userId, id, now, id),
-    db.prepare("DELETE FROM plugins WHERE id = ? AND owner_id = ? AND created_at = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)").bind(id, publisher.userId, now, id)
-  ];
-  await db.batch(statements);
 
   const landed = await db
     .prepare("SELECT version, status, package_sha256 FROM versions WHERE plugin_id = ? AND precedence = ?")

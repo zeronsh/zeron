@@ -19,9 +19,10 @@
  * Then the content hash: sha256 of `canonical(manifest without signature) +
  * "\n" + canonical(file hashes)`.
  */
-import { type Json, type JsonObject, JsonError, canonicalJson, isObject, isRawString, materialize, parsePackageJson } from "./json";
+import { type Json, type JsonObject, JsonError, canonicalJson, isObject, parseJson } from "./json";
 import { MANIFEST_FILE, type Manifest, idProblem, readManifest } from "./manifest";
 import { plainPath } from "./paths";
+import { Scanner, type Span, decodeBase64String, spanDecodedBound, stringText } from "./scan";
 
 export const FORMAT = "zeron-plugin:v1";
 export const PAYLOAD_PREFIX = "zeron-plugin:v1\n";
@@ -63,7 +64,8 @@ export class PackageRefusal extends Error {
 
 export interface VerifiedPackage {
   readonly manifest: Manifest;
-  /** The signed manifest's canonical JSON (signature included). */
+  /** The manifest's canonical JSON without its signature: what the
+   * content hash covers (the signature's file hashes are kept per file). */
   readonly manifestCanonical: string;
   /** The signer's public key, b64url without padding. */
   readonly key: string;
@@ -181,12 +183,15 @@ export const signaturePayload = (prefix: string, manifest: JsonObject, key: stri
   return prefix + canonicalJson(value);
 };
 
-/** signing.rs `content_hash`. */
-export const contentHash = async (manifest: JsonObject, hashes: ReadonlyMap<string, string>): Promise<string> => {
+const unsignedOf = (manifest: JsonObject): JsonObject => {
   const unsigned: JsonObject = new Map(manifest);
   unsigned.delete("signature");
-  return sha256Hex(encoder.encode(`${canonicalJson(unsigned)}\n${canonicalJson(filesValue(hashes))}`));
+  return unsigned;
 };
+
+/** signing.rs `content_hash`. */
+export const contentHash = async (manifest: JsonObject, hashes: ReadonlyMap<string, string>): Promise<string> =>
+  sha256Hex(encoder.encode(`${canonicalJson(unsignedOf(manifest))}\n${canonicalJson(filesValue(hashes))}`));
 
 export const verifyEd25519 = async (key: Uint8Array, message: Uint8Array, signature: Uint8Array): Promise<boolean> => {
   try {
@@ -238,55 +243,92 @@ const byCodePoint = (a: string, b: string): number => {
   return a.length - b.length;
 };
 
+/** The longest manifest JSON the store reads (bytes as written), and the
+ * most values in it: bounds on what building it can cost. The canonical
+ * manifest is held to 256 KB as a listing rule (listing.ts). */
+export const MAX_MANIFEST_JSON = 1024 * 1024;
+export const MAX_MANIFEST_VALUES = 100_000;
+/** A file's path is at most 1,024 bytes, and each takes at most six bytes
+ * of JSON (`\u0041`): a longer key is no path, read or not. */
+const MAX_KEY_JSON = 6 * 1024 + 6;
+
+const keyText = (raw: Uint8Array, span: Span): string | undefined => (span.end - span.start <= 96 ? stringText(raw, span) : undefined);
+
 /**
  * The package `raw`, verified as install.rs `parse` verifies it, or a
  * `PackageRefusal` naming the engine's reason. `maxBytes` is the caller's
  * ceiling on the file itself (the engine's, or the store's lower one).
+ *
+ * The whole document is checked first, as serde_json reads it, without
+ * building it (scan.ts); then only the manifest is built, under
+ * `MAX_MANIFEST_JSON` and `MAX_MANIFEST_VALUES`, and each file's base64 is
+ * decoded from the request's bytes into one buffer.
  */
 export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTES): Promise<VerifiedPackage> => {
   if (raw.length > maxBytes) refuse("too_big");
-  let value: Json;
+  let format: Span | undefined;
+  let manifestSpan: Span | undefined;
+  let filesSpan: Span | undefined;
   try {
-    // File data stays in `raw` as byte ranges, decoded straight into the
-    // files buffer: no string copy of a package's bulk is ever made.
-    value = parsePackageJson(raw);
+    const top = new Scanner(raw);
+    top.skipWhitespace();
+    if (raw[top.at] !== 0x7b) return refuse("not_a_package");
+    // Duplicate keys: the last one wins, as serde_json's map keeps it.
+    top.members((key, value) => {
+      const name = keyText(raw, key);
+      if (name === "format") format = value;
+      else if (name === "manifest") manifestSpan = value;
+      else if (name === "files") filesSpan = value;
+    });
+    top.end();
   } catch (e) {
     if (e instanceof JsonError) return refuse("not_a_package");
     throw e;
   }
-  if (!isObject(value) || value.get("format") !== FORMAT) refuse("not_a_package");
-  const top = value as JsonObject;
-  const manifestRaw = top.get("manifest");
-  const filesValueRaw = top.get("files");
-  if (!isObject(filesValueRaw) || !isObject(manifestRaw)) return refuse("not_a_package");
-  const manifestValue = materialize(manifestRaw) as JsonObject;
-  if (filesValueRaw.size > MAX_FILES) refuse("too_big");
-  const paths = [...filesValueRaw.keys()].sort(byCodePoint);
+  const isString = (span: Span | undefined): span is Span => span !== undefined && raw[span.start] === 0x22;
+  const inner = (span: Span): Span => ({ start: span.start + 1, end: span.end - 1 });
+  if (!isString(format) || format.end - format.start > 128 || stringText(raw, inner(format)) !== FORMAT) return refuse("not_a_package");
+  if (!filesSpan || raw[filesSpan.start] !== 0x7b || !manifestSpan || raw[manifestSpan.start] !== 0x7b) return refuse("not_a_package");
+
+  const entries = new Map<string, Span | null>();
+  let tooLong = 0;
+  const files = new Scanner(raw);
+  files.at = filesSpan.start;
+  files.members((key, value) => {
+    // (A key too long to be a path stands for itself: it's a bad file.)
+    const name = key.end - key.start > MAX_KEY_JSON ? `\u0000${tooLong++}` : stringText(raw, key);
+    entries.set(name, isString(value) ? inner(value) : null);
+    return entries.size <= MAX_FILES;
+  });
+  if (entries.size > MAX_FILES) refuse("too_big");
+  if (manifestSpan.end - manifestSpan.start > MAX_MANIFEST_JSON) refuse("too_big", "Its manifest is over 1 MB");
+  let manifestValue: JsonObject;
+  try {
+    manifestValue = parseJson(raw.subarray(manifestSpan.start, manifestSpan.end), { maxValues: MAX_MANIFEST_VALUES }) as JsonObject;
+  } catch (e) {
+    if (e instanceof JsonError) return refuse("too_big", "Its manifest has too many values");
+    throw e;
+  }
+
+  const paths = [...entries.keys()].sort(byCodePoint);
   // Every file decodes into one buffer, in path order: the files are views
   // of it, and it is what the store keeps as the version's files.
   let bound = 0;
-  for (const rel of paths) {
-    const data = filesValueRaw.get(rel);
-    if (isRawString(data) || typeof data === "string") bound += decodedBound(data as { length: number });
-  }
+  for (const span of entries.values()) if (span) bound += spanDecodedBound(span);
   const blob = new Uint8Array(bound);
-  const files = new Map<string, Uint8Array>();
+  const decoded = new Map<string, Uint8Array>();
   let total = 0;
   for (const rel of paths) {
-    if (!plainPath(rel) || rel === MANIFEST_FILE) refuse("bad_file", JSON.stringify(rel));
-    const data = filesValueRaw.get(rel);
-    const written = isRawString(data)
-      ? decodeBase64BytesInto(data.bytes, data.start, data.end, true, blob, total)
-      : typeof data === "string"
-        ? decodeBase64Into(data, true, blob, total)
-        : -1;
+    if (rel.startsWith("\u0000") || !plainPath(rel) || rel === MANIFEST_FILE) refuse("bad_file", JSON.stringify(rel.slice(0, 80)));
+    const span = entries.get(rel);
+    const written = span ? decodeBase64String(raw, span, blob, total) : -1;
     if (written < 0) return refuse("bad_file", JSON.stringify(rel));
-    files.set(rel, blob.subarray(total, total + written));
+    decoded.set(rel, blob.subarray(total, total + written));
     total += written;
   }
   if (total > MAX_BYTES) refuse("too_big");
   const hashes = new Map<string, string>();
-  for (const [rel, bytes] of files) hashes.set(rel, await sha256Hex(bytes));
+  for (const [rel, bytes] of decoded) hashes.set(rel, await sha256Hex(bytes));
   const checked = await checkSignature(PAYLOAD_PREFIX, manifestValue, hashes);
   if ("invalid" in checked) {
     return refuse(checked.invalid === "files_differ" ? "tampered" : checked.invalid);
@@ -295,12 +337,12 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   if (manifest.problem) refuse("bad_manifest", manifest.problem);
   const badId = idProblem(manifest.id);
   if (badId) refuse("bad_manifest", badId);
-  if (!files.has(manifest.entry)) refuse("bad_manifest", `Its entry file ${manifest.entry} is missing`);
+  if (!decoded.has(manifest.entry)) refuse("bad_manifest", `Its entry file ${manifest.entry} is missing`);
   return {
     manifest,
-    manifestCanonical: canonicalJson(manifestValue),
+    manifestCanonical: canonicalJson(unsignedOf(manifestValue)),
     key: checked.valid,
-    files,
+    files: decoded,
     blob: blob.subarray(0, total),
     hashes,
     hash: await contentHash(manifestValue, hashes),

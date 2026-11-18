@@ -4,7 +4,7 @@
  * the store's package limit (src/store/publish.ts STORE_MAX_PACKAGE_BYTES)
  * from numbers rather than a guess. Results: docs/plugin-store-limits.md.
  *
- *   node scripts/store-package-limit.mjs [size in MB …] [--no-r2] [--chunks]
+ *   node scripts/store-package-limit.mjs [size in MB …] [--no-r2] [--chunks] [--shape=zeros|digits|objects|escapes|manifest|keys]
  *
  * For each size it starts a fresh local workerd (`wrangler dev` on
  * scripts/store-limit/, which runs the publish pipeline's heavy steps:
@@ -29,6 +29,9 @@ const sizes = process.argv.slice(2).filter((a) => !a.startsWith("--")).map(Numbe
 const SIZES_MB = sizes.length ? sizes : [1, 5, 10, 15, 20, 25, 30, 40, 50, 67];
 /** `--no-r2`: measure without the R2 writes (local R2 shares workerd's process). */
 const R2 = !process.argv.includes("--no-r2");
+/** `--shape=<name>`: a hostile body of that shape at each size instead of
+ * a package (zeros, digits, escapes, objects, manifest, keys). */
+const SHAPE = process.argv.find((a) => a.startsWith("--shape="))?.slice(8);
 /** `--chunks`: read the body as the identity lane's readBody does. */
 const CHUNKS = process.argv.includes("--chunks");
 const FILE = 256 * 1024;
@@ -43,6 +46,27 @@ const b64url = (b) => Buffer.from(b).toString("base64url");
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const key = b64url(publicKey.export({ format: "der", type: "spki" }).subarray(-32));
+
+/** A hostile body of `bytes` bytes: valid-looking JSON whose bulk is the
+ * shape named, beside a small valid package's members where that matters. */
+const hostile = (shape, bytes) => {
+  const small = JSON.parse(makePackage(64 * 1024).toString());
+  const fill = (unit, room) => unit.repeat(Math.max(0, Math.floor(room / unit.length)));
+  const wrap = (member) => {
+    const head = JSON.stringify(small).slice(0, -1);
+    return Buffer.from(`${head},${member}}`);
+  };
+  const room = bytes - JSON.stringify(small).length - 64;
+  switch (shape) {
+    case "zeros": return wrap(`"x":[0${fill(",0", room)}]`);
+    case "digits": return wrap(`"x":0.${fill("0", room)}1`);
+    case "objects": return wrap(`"x":[{}${fill(",{}", room)}]`);
+    case "escapes": return Buffer.from(JSON.stringify({ ...small, files: { ...small.files, "big.bin": "@" } }).replace('"@"', `"${fill("\\/", room)}"`));
+    case "manifest": return Buffer.from(JSON.stringify(small).replace('"manifest":{', `"manifest":{"x":[0${fill(",0", room)}],`));
+    case "keys": return Buffer.from(JSON.stringify(small).replace('"files":{', `"files":{${Array.from({ length: Math.floor(room / 12) }, (_, i) => `"k${i}":"",`).join("")}`));
+    default: throw new Error(`no shape ${shape}`);
+  }
+};
 
 const makePackage = (bytes) => {
   const files = {
@@ -129,7 +153,7 @@ for (const size of SIZES_MB) {
   const { child, workerds } = await startWorker(port, persist);
   try {
     await (await fetch(`http://127.0.0.1:${port}/`, { method: "POST", body: warm })).text();
-    const pkg = makePackage(size * 1024 * 1024);
+    const pkg = SHAPE ? hostile(SHAPE, size * 1024 * 1024) : makePackage(size * 1024 * 1024);
     const idle = workerds.map((w) => status(w, "VmRSS"));
     const before = workerds.map(cpu);
     const res = await fetch(`http://127.0.0.1:${port}/?${R2 ? "" : "r2=0&"}${CHUNKS ? "read=chunks" : ""}`, { method: "POST", body: pkg });
@@ -140,7 +164,7 @@ for (const size of SIZES_MB) {
     const used = cpus[worker];
     const idleRss = idle[worker];
     const answer = res.ok ? JSON.parse(text) : { status: res.status, text: text.slice(0, 60) };
-    console.log(`${mb(pkg.length)} | ${answer.files ?? "-"} | ${mb(peak - idleRss)} | ${used.toFixed(0)} | ${answer.wallMs ?? "-"} | ${res.status}`);
+    console.log(`${mb(pkg.length)} | ${answer.files ?? "-"} | ${mb(peak - idleRss)} | ${used.toFixed(0)} | ${answer.wallMs ?? "-"} | ${res.status}${answer.refused ? ` ${answer.refused}` : ""}`);
   } finally {
     process.kill(-child.pid, "SIGTERM");
     await new Promise((r) => setTimeout(r, 500));

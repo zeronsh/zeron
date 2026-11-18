@@ -9,7 +9,7 @@
 import { fileKind, isText, runChecks } from "../../src/store/checks";
 import { consentItem } from "../../src/store/consent";
 import { checkListing, listingOf } from "../../src/store/listing";
-import { verifyPackage } from "../../src/store/package";
+import { PackageRefusal, verifyPackage } from "../../src/store/package";
 import { readCapped } from "../../src/read-capped";
 
 const readChunks = async (request: Request): Promise<Uint8Array> => {
@@ -42,7 +42,13 @@ export default {
     // kept, then one copy), not into one buffer of the declared length.
     const body = new URL(request.url).searchParams.get("read") === "chunks" ? await readChunks(request) : await readCapped(request, 80 * 1024 * 1024);
     if (!body) return new Response("too large", { status: 413 });
-    const pkg = await verifyPackage(body, 80 * 1024 * 1024);
+    let pkg;
+    try {
+      pkg = await verifyPackage(body, 80 * 1024 * 1024);
+    } catch (e) {
+      if (!(e instanceof PackageRefusal)) throw e;
+      return Response.json({ bytes: body.length, refused: e.code, wallMs: Date.now() - started });
+    }
     const { problems, warnings } = checkListing(pkg.manifest, pkg.files, isText);
     if (problems.length) return new Response(problems[0]!.words, { status: 400 });
     const listing = listingOf(pkg.manifest, pkg.files);

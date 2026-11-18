@@ -120,14 +120,31 @@ describe("store listing", () => {
   const rules = (fields: Record<string, unknown>, extra?: Record<string, string>) => checkListing(manifest(fields), files(extra), isText).problems.map((p) => p.rule);
 
   it("reads a complete listing, and the store's own size limits on top", () => {
-    expect(rules({ keywords: ["timer", "deep work"], homepage: "https://example.com", engines: { zeron: ">=0.4.0" } })).toEqual([]);
+    expect(rules({ keywords: ["timer", "deep work"], homepage: "https://example.com/", engines: { zeron: ">=0.4.0" } })).toEqual([]);
     const ok = listingOf(manifest({ keywords: ["timer"], engines: { zeron: ">=0.4.0" } }), files());
     expect(ok).toMatchObject({ summary: "Focus.", icon: "icon.svg", categories: ["productivity"], keywords: ["timer"], engines: ">=0.4.0", readme: "# Hi", notes: null });
-    expect(listingOf(manifest({}), files({ "README.md": `# Big\n${"x".repeat(512 * 1024)}` }))).toMatchObject({ rule: "too_large" });
+    expect(rules({}, { "README.md": `# Big\n${"x".repeat(512 * 1024)}` })).toEqual(["too_large"]);
+    expect(rules({}, { "CHANGELOG.md": `## 1.0.0\n${"x".repeat(512 * 1024)}` })).toEqual(["too_large"]);
+    expect(rules({ x: "y".repeat(256 * 1024) })).toEqual(["too_large"]);
     expect(rules({ icon: "../icon.svg" })).toEqual(["bad_listing"]);
     expect(rules({ icon: "big.svg" }, { "big.svg": `<svg>${"x".repeat(33 * 1024)}</svg>` })).toEqual(["bad_listing"]);
     expect(rules({ repository: "https://user@example.com" })).toEqual(["bad_listing"]);
     expect(rules({ description: undefined, icon: undefined })).toEqual(["missing_listing", "missing_listing"]);
+  });
+
+  it("holds amendment 31's rules: folded paths, unseen characters, exact URLs", () => {
+    const problems = (fields: Record<string, unknown>, extra?: Record<string, string>) => checkListing(manifest(fields), files(extra), isText).problems.map((p) => [p.rule, p.field, p.path]);
+    expect(problems({}, { "INIT.luau": "y" })).toEqual([["bad_listing", "files", "init.luau"]]);
+    expect(problems({}, { "caf\u00e9.txt": "a", "cafe\u0301.txt": "b" })).toEqual([["bad_listing", "files", "caf\u00e9.txt"]]);
+    expect(problems({}, { "Zeron-Plugin.json": "{}" })).toEqual([["bad_listing", "files", "Zeron-Plugin.json"]]);
+    expect(problems({}, { "a/b.txt": "a", "a/b.txt.": "b" }).length).toBe(1);
+    expect(problems({ name: "Focus\u202e" })).toEqual([["bad_listing", "name", null]]);
+    expect(problems({ description: "Fo\u200bcus." })).toEqual([["bad_listing", "description", null]]);
+    expect(problems({ description: "Tab\there." })).toEqual([["bad_listing", "description", null]]);
+    expect(problems({ homepage: "https://example.com/a b" })).toEqual([["bad_listing", "homepage", null]]);
+    expect(problems({ repository: "https://example.com/x/../y" })).toEqual([["bad_listing", "repository", null]]);
+    expect(problems({ homepage: "https://Example.com/" })).toEqual([["bad_listing", "homepage", null]]);
+    expect(problems({ homepage: "https://example.com/focus?x=1#y" })).toEqual([]);
   });
 });
 
@@ -141,7 +158,8 @@ describe("store search", () => {
 
   it("keeps a cursor to the list it came from", () => {
     const c = encodeCursor("f1", -3.25, 42);
-    expect(decodeCursor(c, "f1")).toEqual({ key: -3.25, seq: 42 });
+    expect(decodeCursor(c, "f1")).toEqual({ key: -3.25, seq: 42, dir: "next" });
+    expect(decodeCursor(encodeCursor("f1", 1, 2, "prev"), "f1")).toEqual({ key: 1, seq: 2, dir: "prev" });
     expect(decodeCursor(c, "f2")).toBeUndefined();
     for (const bad of ["", "!!!", "e30", encodeCursor("f1", Number.NaN, 1), "a".repeat(600)]) expect(decodeCursor(bad, "f1"), bad).toBeUndefined();
   });

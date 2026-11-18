@@ -11,8 +11,8 @@
  * version's row.
  */
 import { cleanImage } from "../image-check";
-import { type Json, isArray, isObject } from "./json";
-import { type Manifest, RESERVED_ID_ERROR, idProblem, isRustWhitespace, rustTrim, rustTrimStart } from "./manifest";
+import { type Json, type JsonObject, canonicalJson, isArray, isObject } from "./json";
+import { MANIFEST_FILE, type Manifest, RESERVED_ID_ERROR, idProblem, isRustWhitespace, rustTrim, rustTrimStart } from "./manifest";
 import { MAX_BYTES, MAX_FILES } from "./package";
 import { plainPath } from "./paths";
 import { type Range, type Version, parseRange, parseVersion } from "./semver";
@@ -45,8 +45,12 @@ export const MAX_NAME_LEN = 60;
 export const MAX_DESCRIPTION_LEN = 200;
 export const MAX_ICON_BYTES = 32 * 1024;
 export const SCREENSHOT_TYPES = ["png", "jpg", "jpeg", "webp", "gif"];
-/** The store's own. */
+/** Amendment 31: README.md and CHANGELOG.md at most 512 KB each, the
+ * canonical manifest at most 256 KB. */
 export const MAX_README_BYTES = 512 * 1024;
+export const MAX_CHANGELOG_BYTES = 512 * 1024;
+export const MAX_MANIFEST_BYTES = 256 * 1024;
+/** The store's own: a version's notes live in its row. */
 export const MAX_NOTES_BYTES = 64 * 1024;
 
 export type ListingRule =
@@ -88,6 +92,31 @@ const isControl = (ch: string): boolean => {
   return c <= 0x1f || (c >= 0x7f && c <= 0x9f);
 };
 
+/** A control or format character (Unicode Cc, Cf: bidi controls among
+ * them), which `name`, `description` and `keywords` refuse (amendment 31). */
+const UNSEEN = /[\p{Cc}\p{Cf}]/u;
+
+/** plugin-guard `fold`, after Unicode normalization (NFC): how macOS and
+ * Windows compare two paths. Two that fold the same are one file there. */
+export const foldPath = (rel: string): string =>
+  [...rel.normalize("NFC").replaceAll("\\", "/")]
+    .map((c) => c.toUpperCase().toLowerCase())
+    .join("")
+    .split("/")
+    .filter((part) => part !== "" && part !== ".")
+    .map((part) => part.replace(/[. ]+$/, ""))
+    .join("/");
+
+/** The URL as written, when it parses to exactly that (amendment 31:
+ * `https:\\evil.com` reads as `https://evil.com/`, and is refused). */
+const exactUrl = (raw: string): boolean => {
+  try {
+    return new URL(raw).href === raw;
+  } catch {
+    return false;
+  }
+};
+
 /** listing.rs `https_url`. */
 const httpsUrl = (url: string): boolean => {
   if (!url.startsWith("https://")) return false;
@@ -102,7 +131,7 @@ const httpsUrl = (url: string): boolean => {
   );
 };
 
-/** listing.rs `keyword`. */
+/** listing.rs `keyword` (ASCII only: no control or format character). */
 const keyword = (k: string): boolean =>
   k !== "" && byteLength(k) <= MAX_KEYWORD_LEN && rustTrim(k) === k && !k.includes("  ") && /^[a-z0-9 -]+$/.test(k);
 
@@ -174,6 +203,17 @@ export const changelogNotes = (changelog: string, version: string): string | und
   return notes === "" ? undefined : notes;
 };
 
+/** Rust's `String` order: by code point (UTF-8's byte order). */
+const byCodePoint = (a: string, b: string): number => {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const x = a.codePointAt(i)!;
+    const y = b.codePointAt(i)!;
+    if (x !== y) return x - y;
+    if (x > 0xffff) i++;
+  }
+  return a.length - b.length;
+};
+
 const strings = (items: readonly Json[]): (string | undefined)[] => items.map((v) => (typeof v === "string" ? v : undefined));
 const duplicates = (items: readonly (string | undefined)[]): boolean => new Set(items).size !== items.length;
 
@@ -205,10 +245,12 @@ export const checkListing = (
   }
   if (!parseVersion(manifest.version)) problems.push(problem("not_semver", "version", `"${manifest.version}" isn't a version (MAJOR.MINOR.PATCH)`));
   if (chars(manifest.name) > MAX_NAME_LEN) problems.push(problem("bad_listing", "name", `Its name is longer than ${MAX_NAME_LEN} characters`));
+  else if (UNSEEN.test(manifest.name)) problems.push(problem("bad_listing", "name", "Its name has a control or invisible formatting character"));
   if (manifest.entry !== "" && !files.has(manifest.entry)) problems.push(problem("bad_package", "entry", `Its entry file ${manifest.entry} is missing`));
 
   const readme = files.get(README_FILE);
   if (!readme) problems.push(problem("missing_readme", null, "It needs a README.md: its page in the store"));
+  else if (readme.length > MAX_README_BYTES) problems.push(problem("too_large", null, "README.md is over 512 KB", README_FILE));
   else {
     const text = decodeText(readme);
     if (text === undefined || rustTrim(text) === "") problems.push(problem("missing_readme", null, "Its README.md is empty or isn't text", README_FILE));
@@ -218,7 +260,7 @@ export const checkListing = (
   if (description === "") problems.push(problem("missing_listing", "description", 'It needs a "description": one line saying what it does'));
   else if (chars(description) > MAX_DESCRIPTION_LEN || description.includes("\n")) {
     problems.push(problem("bad_listing", "description", `Its description is one line of at most ${MAX_DESCRIPTION_LEN} characters`));
-  }
+  } else if (UNSEEN.test(description)) problems.push(problem("bad_listing", "description", "Its description has a control or invisible formatting character"));
   const icon = raw.get("icon");
   if (icon === undefined || icon === null) problems.push(problem("missing_listing", "icon", 'It needs an "icon": an SVG file in it'));
   else if (typeof icon === "string") {
@@ -255,7 +297,7 @@ export const checkListing = (
 
   for (const field of ["homepage", "repository"]) {
     const url = raw.get(field);
-    if (url === undefined || url === null || (typeof url === "string" && httpsUrl(url))) continue;
+    if (url === undefined || url === null || (typeof url === "string" && httpsUrl(url) && exactUrl(url))) continue;
     problems.push(problem("bad_listing", field, `Its "${field}" must be an https:// link`));
   }
   const license = raw.get("license");
@@ -282,6 +324,22 @@ export const checkListing = (
   if ("error" in range) problems.push(problem("bad_listing", "engines", range.error));
   else if (range.range !== null && !parseRange(range.range)) problems.push(problem("bad_listing", "engines", `"${range.range}" isn't a range of versions`));
 
+  const changelogBytes = files.get(CHANGELOG_FILE);
+  if (changelogBytes && changelogBytes.length > MAX_CHANGELOG_BYTES) problems.push(problem("too_large", null, "CHANGELOG.md is over 512 KB", CHANGELOG_FILE));
+  // (As written: without the signature, which the store keeps apart.)
+  const unsigned: JsonObject = new Map(raw);
+  unsigned.delete("signature");
+  if (byteLength(canonicalJson(unsigned)) > MAX_MANIFEST_BYTES) problems.push(problem("too_large", "manifest", "Its manifest is over 256 KB"));
+  // Two paths that are one file on a Mac or a Windows machine (the
+  // manifest's own name among them).
+  const folded = new Map<string, string>([[foldPath(MANIFEST_FILE), MANIFEST_FILE]]);
+  for (const rel of [...files.keys()].sort(byCodePoint)) {
+    const key = foldPath(rel);
+    const other = folded.get(key);
+    if (other !== undefined) problems.push(problem("bad_listing", "files", `"${rel}" and "${other}" are the same file on macOS and Windows`, rel));
+    else folded.set(key, rel);
+  }
+
   let total = 0;
   for (const bytes of files.values()) total += bytes.length;
   if (files.size > MAX_FILES || total > MAX_BYTES) problems.push(problem("too_large", null, "It's too big for a plugin (2,000 files, 50 MB)"));
@@ -290,7 +348,7 @@ export const checkListing = (
     if (!readable(rel, bytes, isText)) warnings.push(problem("binary_file", null, "It isn't text or a picture: reviewers look closely at files like this", rel));
   }
   const changelog = files.get(CHANGELOG_FILE);
-  if (changelog && changelogNotes(lossy.decode(changelog), manifest.version) === undefined) {
+  if (changelog && changelog.length <= MAX_CHANGELOG_BYTES && changelogNotes(lossy.decode(changelog), manifest.version) === undefined) {
     warnings.push(problem("no_notes", null, `CHANGELOG.md has no section for ${manifest.version}: this version shows without notes`, CHANGELOG_FILE));
   }
   return { problems, warnings };
@@ -319,7 +377,6 @@ export interface Listing {
 export const listingOf = (manifest: Manifest, files: ReadonlyMap<string, Uint8Array>): Listing | Problem => {
   const raw = manifest.raw;
   const readmeBytes = files.get(README_FILE)!;
-  if (readmeBytes.length > MAX_README_BYTES) return problem("too_large", null, "README.md is over 512 KB.", README_FILE);
   const changelog = files.get(CHANGELOG_FILE);
   const notes = changelog ? (changelogNotes(lossy.decode(changelog), manifest.version) ?? null) : null;
   if (notes !== null && byteLength(notes) > MAX_NOTES_BYTES) return problem("too_large", null, "This version's changelog section is over 64 KB.", CHANGELOG_FILE);
@@ -345,7 +402,7 @@ export const listingOf = (manifest: Manifest, files: ReadonlyMap<string, Uint8Ar
     screenshots: list("screenshots"),
     engines,
     enginesRange: engines === null ? null : (parseRange(engines) ?? null),
-    readme: decodeText(readmeBytes)!,
+    readme: decodeText(readmeBytes)!.replace(/^\uFEFF/, ""),
     notes,
     version: parseVersion(manifest.version)!
   };

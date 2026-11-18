@@ -26,6 +26,8 @@
  */
 
 export class JsonError extends Error {}
+/** Valid, maybe, but more than the caller would build. */
+export class JsonTooLarge extends JsonError {}
 
 /** A number as serde_json holds it: an integer (in decimal) or a float. */
 export class JsonNumber {
@@ -46,32 +48,6 @@ export class JsonNumber {
 }
 
 export type Json = null | boolean | string | JsonNumber | Json[] | JsonObject;
-
-/**
- * A string left in the input as a byte range (`parseJson`'s `raw` option):
- * one of at least `RAW_MIN` bytes, all ASCII, with no escapes, so its text
- * is exactly those bytes. A package's file data is read this way, straight
- * from the request's bytes, never copied into a string first.
- */
-export class RawString {
-  constructor(
-    readonly bytes: Uint8Array,
-    readonly start: number,
-    readonly end: number
-  ) {}
-
-  get length(): number {
-    return this.end - this.start;
-  }
-
-  text(): string {
-    let out = "";
-    for (let i = this.start; i < this.end; i += 8192) out += String.fromCharCode(...this.bytes.subarray(i, Math.min(i + 8192, this.end)));
-    return out;
-  }
-}
-
-export const RAW_MIN = 64;
 /** Insertion order is irrelevant: serde_json's map is sorted. */
 export type JsonObject = Map<string, Json>;
 
@@ -85,6 +61,7 @@ const U64_MAX = 18446744073709551615n;
 const I64_MIN = -9223372036854775808n;
 
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+const latin1 = new TextDecoder("latin1");
 const encoder = new TextEncoder();
 
 const isDigit = (b: number): boolean => b >= 0x30 && b <= 0x39;
@@ -99,12 +76,17 @@ const hexValue = (b: number): number => {
 
 class Parser {
   at = 0;
+  /** Values read so far, against `maxValues`. */
+  private values = 0;
   constructor(
     private readonly bytes: Uint8Array,
-    /** Leave long plain strings as `RawString`s (typed as strings: only
-     * `parsePackageJson`'s callers see them). */
-    private readonly raw = false
+    private readonly maxValues = Number.POSITIVE_INFINITY
   ) {}
+
+  /** Count one more value: building is bounded by how many. */
+  counted(): void {
+    if (++this.values > this.maxValues) throw new JsonTooLarge(`more than ${this.maxValues} values`);
+  }
 
   fail(why: string): never {
     throw new JsonError(`${why} at byte ${this.at}`);
@@ -123,6 +105,7 @@ class Parser {
       this.skipWhitespace();
       let value: Json;
       let opened: Frame | undefined;
+      this.counted();
       const b = this.bytes[this.at];
       if (b === undefined) this.fail("EOF while parsing a value");
       if (b === 0x5b || b === 0x7b) {
@@ -179,8 +162,7 @@ class Parser {
   objectKey(): string {
     this.skipWhitespace();
     if (this.bytes[this.at] !== 0x22) this.fail(this.bytes[this.at] === 0x7d ? "trailing comma" : "key must be a string");
-    // (Keys are always strings: a duplicate must find its first.)
-    const key = this.string(false);
+    const key = this.string();
     this.skipWhitespace();
     if (this.bytes[this.at] !== 0x3a) this.fail("expected `:`");
     this.at++;
@@ -235,9 +217,10 @@ class Parser {
       if (!(this.at < bytes.length && isDigit(bytes[this.at]!))) this.fail("invalid number");
       while (this.at < bytes.length && isDigit(bytes[this.at]!)) this.at++;
     }
-    let text = "";
-    for (let i = start; i < this.at; i++) text += String.fromCharCode(bytes[i]!);
-    if (!float) {
+    // (ASCII: latin1 reads it as is, in one step, however long.)
+    const text = latin1.decode(bytes.subarray(start, this.at));
+    const digits = this.at - start - (text.startsWith("-") ? 1 : 0);
+    if (!float && digits <= 20) {
       const integer = BigInt(text);
       const negative = text.startsWith("-");
       // `-0` is serde_json's float -0.0, as is anything out of range.
@@ -249,23 +232,9 @@ class Parser {
     return JsonNumber.float(value);
   }
 
-  string(mayStayRaw = true): string {
+  string(): string {
     const bytes = this.bytes;
     this.at++; // the opening quote
-    if (this.raw && mayStayRaw) {
-      // A long run of plain ASCII up to the closing quote stays in place.
-      const start = this.at;
-      let end = start;
-      for (;;) {
-        const b = bytes[end];
-        if (b === undefined || b === 0x22 || b === 0x5c || b < 0x20 || b >= 0x80) break;
-        end++;
-      }
-      if (bytes[end] === 0x22 && end - start >= RAW_MIN) {
-        this.at = end + 1;
-        return new RawString(bytes, start, end) as unknown as string;
-      }
-    }
     let out = "";
     let runStart = this.at;
     let runAscii = true;
@@ -362,31 +331,12 @@ class Parser {
   }
 }
 
-/** The JSON in `bytes`, as serde_json's `from_slice` reads it. */
-export const parseJson = (bytes: Uint8Array): Json => parse(bytes, false);
+/** The JSON in `bytes`, as serde_json's `from_slice` reads it; past
+ * `maxValues` values, `JsonTooLarge`. */
+export const parseJson = (bytes: Uint8Array, options: { readonly maxValues?: number } = {}): Json => parse(bytes, options.maxValues);
 
-/** `parseJson`, with long plain strings left as `RawString`s: a value or key
- * typed as a string may be one. Turn a subtree into plain JSON with
- * `materialize` before anything else reads it. */
-export const parsePackageJson = (bytes: Uint8Array): Json => parse(bytes, true);
-
-const isRaw = (value: unknown): value is RawString => value instanceof RawString;
-export { isRaw as isRawString };
-
-/** `value` with every `RawString` made a string. */
-export const materialize = (value: Json): Json => {
-  if (isRaw(value)) return value.text();
-  if (Array.isArray(value)) return value.map(materialize);
-  if (value instanceof Map) {
-    const out: JsonObject = new Map();
-    for (const [key, item] of value) out.set(isRaw(key) ? (key as RawString).text() : key, materialize(item));
-    return out;
-  }
-  return value;
-};
-
-const parse = (bytes: Uint8Array, raw: boolean): Json => {
-  const parser = new Parser(bytes, raw);
+const parse = (bytes: Uint8Array, maxValues?: number): Json => {
+  const parser = new Parser(bytes, maxValues);
   const value = parser.value();
   parser.skipWhitespace();
   if (parser.at !== bytes.length) parser.fail("trailing characters");

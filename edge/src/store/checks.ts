@@ -10,6 +10,9 @@ import type { Listing, Problem } from "./listing";
 import { riskyHost } from "./manifest";
 import type { VerifiedPackage } from "./package";
 
+/** Warnings stored one by one, at most. */
+export const MAX_WARNINGS = 50;
+
 export interface Check {
   readonly id: string;
   readonly level: "ok" | "warn" | "fail";
@@ -100,8 +103,12 @@ export const runChecks = (input: CheckInput): Check[] => {
   if (listing.notes) add("changelog", "ok", "CHANGELOG.md has a section for this version.");
   add("engines", listing.engines ? "ok" : "warn", listing.engines ? `Needs Zeron ${listing.engines}.` : "It doesn't say which Zeron versions it works with.");
 
-  // The engine's warnings, by its rule words, one per file.
-  for (const w of input.warnings) checks.push({ id: w.rule, level: "warn", message: w.path ? `${w.path}: ${w.words}.` : `${w.words}.`, ...(w.path ? { path: w.path } : {}) });
+  // The engine's warnings, by its rule words, one per file: the first
+  // MAX_WARNINGS, then how many more (the list is stored with the version).
+  for (const w of input.warnings.slice(0, MAX_WARNINGS)) {
+    checks.push({ id: w.rule, level: "warn", message: w.path ? `${w.path}: ${w.words}.` : `${w.words}.`, ...(w.path ? { path: w.path } : {}) });
+  }
+  if (input.warnings.length > MAX_WARNINGS) add("more_warnings", "warn", `${input.warnings.length - MAX_WARNINGS} more warnings like these.`);
   if (!input.warnings.some((w) => w.rule === "binary_file")) add("binary_file", "ok", "Every file is text or a picture.");
 
   const risky = consent.asks.filter((a) => RISKY_ASKS.includes(a));

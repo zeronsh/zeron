@@ -54,7 +54,7 @@ CREATE TABLE versions (
   package_bytes INTEGER NOT NULL,
   files_count INTEGER NOT NULL,
   files_bytes INTEGER NOT NULL,
-  manifest TEXT NOT NULL,                        -- canonical JSON of the signed manifest
+  manifest TEXT NOT NULL,                        -- canonical JSON, without its signature (≤ 256 KB)
   name TEXT NOT NULL,
   summary TEXT NOT NULL,
   icon TEXT NOT NULL,
