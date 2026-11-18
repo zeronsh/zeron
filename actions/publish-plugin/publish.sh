@@ -9,7 +9,10 @@
 #   ZERON_DEPLOY_KEY   the deploy key's secret (zpk_…), or empty
 #   ZERON_PLUGIN_PATH  the plugin's folder (default .)
 #   ZERON_DRY_RUN      true: check, sign and pack, don't submit
-#   ZERON_VERSION      latest, or a release's version
+#   ZERON_VERSION      latest, or a release's version (held: the release's
+#                      manifest must name that version)
+#   ZERON_SHA256       optional: the command line's tarball must have this
+#                      sha256 (with a pinned version, holds the step still)
 #   ZERON_RELEASES_URL where releases are (default https://zeron.sh/releases)
 #   ZERON_EDGE_URL     the store's edge (default: the command line's own)
 #
@@ -44,10 +47,15 @@ case "$releases" in
 esac
 version="${ZERON_VERSION:-latest}"
 case "$version" in
-  latest) manifest_url="$releases/manifest.json" ;;
+  latest) manifest_url="$releases/manifest.json"; pinned="" ;;
   *[!0-9A-Za-z.+-]* | "") fail "zeron-version is latest or a version like 0.4.0." ;;
-  *) manifest_url="$releases/manifest-$version.json" ;;
+  *) manifest_url="$releases/manifest-$version.json"; pinned="$version" ;;
 esac
+pinned_sha="${ZERON_SHA256:-}"
+if [ -n "$pinned_sha" ]; then
+  pinned_sha="$(tr 'A-F' 'a-f' <<<"$pinned_sha")"
+  [[ "$pinned_sha" =~ ^[0-9a-f]{64}$ ]] || fail "sha256 is the command line tarball's sha256: 64 hex digits."
+fi
 
 work="${RUNNER_TEMP:-$(mktemp -d)}/zeron-cli"
 rm -rf "$work"
@@ -56,12 +64,18 @@ mkdir -p "$work/bin" "$work/data"
 manifest="$(curl -fsSL --retry 3 "${proto[@]}" "$manifest_url")" || fail "Couldn't read Zeron's release manifest ($manifest_url)."
 version="$(jq -r '.version // empty' <<<"$manifest")"
 [ -n "$version" ] || fail "Zeron's release manifest names no version."
+# A pinned version is the one that runs, whatever its manifest says.
+[ -z "$pinned" ] || [ "$version" = "$pinned" ] ||
+  fail "Zeron's release manifest for $pinned names version $version: not the version pinned."
 file="zeron-$version-linux-$arch.tar.gz"
 sha="$(jq -r --arg f "$file" '.files[$f].sha256 // empty' <<<"$manifest")"
 [ -n "$sha" ] || fail "Zeron $version has no $file."
 
 curl -fsSL --retry 3 "${proto[@]}" "$releases/$file" -o "$work/$file" || fail "Couldn't download $file."
 echo "$sha  $work/$file" | sha256sum -c --quiet - || fail "$file isn't what Zeron's release manifest says (sha256)."
+if [ -n "$pinned_sha" ]; then
+  echo "$pinned_sha  $work/$file" | sha256sum -c --quiet - || fail "$file isn't the one pinned (the sha256 input)."
+fi
 tar -xzf "$work/$file" -C "$work/bin" --strip-components=1 --wildcards '*/zeron-engine' || fail "$file has no zeron-engine."
 zeron="$work/bin/zeron-engine"
 echo "Zeron $("$zeron" --version | awk '{print $2}') ($arch)"

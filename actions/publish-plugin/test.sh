@@ -77,6 +77,11 @@ cp "$work/good.tar.gz" "$work/www/other-file/$file"
 release hollow "$(manifest "$file" "$hollow_sha")"
 cp "$work/hollow.tar.gz" "$work/www/hollow/$file"
 release no-version '{"files": {}}'
+# Asked for the pinned version, the manifest names another (with its own
+# tarball, which would run): the pin must hold.
+moved="zeron-9.9.9-linux-$arch.tar.gz"
+release pin-moved "$(jq -cn --arg f "$moved" --arg s "$good_sha" '{version: "9.9.9", files: {($f): {sha256: $s}}}')"
+cp "$work/good.tar.gz" "$work/www/pin-moved/$moved"
 
 # ── The servers ─────────────────────────────────────────────────────────────
 # http and https on 127.0.0.1, both serving www/. Over https, /to-http/<path>
@@ -200,6 +205,18 @@ expect "a manifest naming another file than this machine's" 2 "Zeron $version ha
 never_ran "another file"
 expect "a tarball without zeron-engine" 2 "$file has no zeron-engine." \
   ZERON_RELEASES_URL="$http/hollow" ZERON_PLUGIN_PATH="$ok"
+expect "a pinned version whose manifest names another is refused" 2 "Zeron's release manifest for $version names version 9.9.9: not the version pinned." \
+  ZERON_RELEASES_URL="$http/pin-moved" ZERON_VERSION="$version" ZERON_PLUGIN_PATH="$ok"
+never_ran "the pin moved"
+expect "a pinned version and its sha256 run that command line" 0 "meets the store's rules." \
+  ZERON_RELEASES_URL="$http/good" ZERON_VERSION="$version" ZERON_SHA256="$good_sha" ZERON_PLUGIN_PATH="$ok"
+expect "the sha256 input in capitals is the same sha256" 0 "meets the store's rules." \
+  ZERON_RELEASES_URL="$http/good" ZERON_VERSION="$version" ZERON_SHA256="$(tr 'a-f' 'A-F' <<<"$good_sha")" ZERON_PLUGIN_PATH="$ok"
+expect "a tarball that isn't the pinned sha256 is never run (the manifest agreeing with it)" 2 "$file isn't the one pinned (the sha256 input)." \
+  ZERON_RELEASES_URL="$http/good" ZERON_VERSION="$version" ZERON_SHA256="$hollow_sha" ZERON_PLUGIN_PATH="$ok"
+never_ran "another sha256 pinned"
+expect "a sha256 input that isn't one" 2 "sha256 is the command line tarball's sha256: 64 hex digits." \
+  ZERON_RELEASES_URL="$http/good" ZERON_SHA256="abc" ZERON_PLUGIN_PATH="$ok"
 expect "a manifest that names no version" 2 "Zeron's release manifest names no version." \
   ZERON_RELEASES_URL="$http/no-version" ZERON_PLUGIN_PATH="$ok"
 expect "releases over plain http anywhere but this machine" 2 "Zeron's releases are fetched over https." \

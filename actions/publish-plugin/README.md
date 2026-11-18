@@ -71,7 +71,21 @@ Bump `version` in `zeron-plugin.json` (and add its section to
 | `key` | none | The deploy key's secret. Without it the plugin is only checked, so a pull request from a fork, which gets no secrets, still runs the store's checks. |
 | `path` | `.` | The plugin's folder: the one with `zeron-plugin.json`. |
 | `dry-run` | `false` | Check, sign and pack the plugin, but don't submit it. |
-| `zeron-version` | `latest` | The Zeron release whose command line runs. |
+| `zeron-version` | `latest` | The Zeron release whose command line runs. `latest` follows each new release; a version (`0.4.0`) runs that release, and the step fails if its manifest names another. |
+| `sha256` | none | The sha256 of that release's command line tarball for the runner (`zeron-<version>-linux-x86_64.tar.gz` or `-aarch64`, from the release's `manifest-<version>.json`). With a pinned `zeron-version`, the step runs exactly that command line or fails. |
+
+The action's tag pins the script; the command line it runs is fetched from
+Zeron's releases, checked against the release's sha256. With
+`zeron-version: latest` that is whichever release is newest when the job
+runs. To hold the step still, the command line included, pin both:
+
+```yaml
+- uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
+  with:
+    key: ${{ secrets.ZERON_DEPLOY_KEY }}
+    zeron-version: 0.4.0
+    sha256: <the tarball's sha256 for your runner>
+```
 
 ## When it fails
 
