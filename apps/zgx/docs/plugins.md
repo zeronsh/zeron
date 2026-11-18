@@ -613,17 +613,22 @@ When declared rows aren't enough (a list the person edits, one thing chosen from
 
 ```lua
 local Settings = require("@ds/settings")
-local Switch = require("@ds/switch")
+local Button = require("@ds/button")
+
+local accounts = zeron.store("accounts", {})   -- { { id, name, email } }, kept for your plugin
 
 zeron.settings_page {
 	keywords = { "accounts", "sync" },   -- Settings search finds the page by these and its name
 	build = function(page)
+		local list = ui.computed(function() return accounts:get() end)
 		return {                         -- a list of sections, spaced as Zeron's are
-			Settings.Section { title = "Accounts", description = "The accounts it reads from.",
-				Settings.Group {
-					Settings.Row { label = "Sync now and then", description = "Every hour, while Zeron is open.",
-						control = Switch { value = page.bind("sync"), label = "Sync now and then" } },
-				},
+			Settings.Section {
+				title = "Accounts",
+				description = "The accounts it reads from.",
+				trail = Button { "Add account", tone = "secondary", size = "sm", on_click = add_account },
+				Settings.Each(list, function(a)
+					return Settings.Row { label = a.name, description = a.email }
+				end, { key = function(a) return a.id end }),
 			},
 		}
 	end,
@@ -631,7 +636,7 @@ zeron.settings_page {
 ```
 
 - **It's yours alone.** It draws in a box only your plugin fills, in your plugin's sandbox. What you draw stays in the box, your dialogs too (menus still open over the window). No other plugin reaches into it.
-- **One value with the row.** Keep what the person sets in your declared settings where you can: Zeron keeps it, checks it and tells you (`zeron.on_setting`), and its row and your control move together. `page.bind(id)` is a setting as a state a control takes (`page.bind(id, { wait = 600 })` for a text field: kept once the typing stops). `zeron.setting(id):set(value)` sets one (a promise of the value kept, or why not). Each is checked as Zeron's row checks it (a choice's options, a number's bounds), and one that doesn't fit is refused. A `folder` is the person's to choose: `page.choose_folder(id)` opens Zeron's dialog. Keep the rest (a list, records) in `zeron.store` or `zeron.db`. A plugin sets only its own.
+- **One value with the row.** Keep what the person sets in your declared settings where you can: Zeron keeps it, checks it and tells you (`zeron.on_setting`), and its row and your control move together. Zeron draws a row for each declared setting already, so don't draw it again: a control of yours is for what's tied to one (a notice that turns it back on, a choice inside a list's detail). `page.bind(id)` is a setting as a state a control takes (`page.bind(id, { wait = 600 })` for a text field: kept once the typing stops). `zeron.setting(id):set(value)` sets one (a promise of the value kept, or why not). Each is checked as Zeron's row checks it (a choice's options, a number's bounds), and one that doesn't fit is refused. A `folder` is the person's to choose: `page.choose_folder(id)` opens Zeron's dialog. Keep the rest (a list, records) in `zeron.store` or `zeron.db`. A plugin sets only its own.
 - **It takes the page's width and grows down.** Settings scrolls it. Don't give it a height or a scroll of its own.
 - **When it fails.** A build that errors draws nothing, and Zeron says "<Name>'s settings couldn't be shown" with the error in its place; your declared rows stay, and your row in Settings → Plugins and `plugin_status` say it too. A build that runs past its time budget is stopped, and your plugin is turned off until it changes; its page stays, saying why. Fix it and save.
 - **Search** finds the page by your plugin's name and its `keywords` (text, or `zeron.t(…)`), and opens it.
