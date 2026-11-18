@@ -475,8 +475,11 @@ Agreed after the plan was first written. Newest last.
     - `name`, `description` and `keywords` refuse Unicode bidi controls
       (U+202A–202E, U+2066–2069) and other format characters, as well as
       control characters.
-    - `homepage` and `repository` are stored as the parsed URL's text and
-      refused when that differs from what was written.
+    - `homepage` and `repository` must begin `https://`, hold no backslash,
+      whitespace, control character or `user:password@` part, and parse as a
+      URL; they are stored as the parsed URL's text (so `https://example.com`
+      is accepted and kept as `https://example.com/`, and `https:\\evil.com`
+      is refused).
     - The canonical manifest is at most 256 KB; `CHANGELOG.md` at most
       512 KB, like `README.md`.
 32. **`engines.zeron` and pre-releases**: comparison is by SemVer precedence
@@ -491,3 +494,9 @@ Agreed after the plan was first written. Newest last.
     device binds a store install's consent to `store:<id>`, so a username
     that an operator moves can never carry another account's decisions; the
     username is what people read.
+34. **The store's package limit is 20 MiB** (`MAX_PUBLISH_BODY_BYTES =
+    20971520`), counted on the request body: the `.zeron-plugin` file as
+    uploaded. Measured in workerd with the bounded parser (a 20 MB package
+    peaks near 72 MB, 0.28 s CPU; hostile shapes stay under 72 MB). Inside a
+    package the store also bounds the manifest JSON to 1 MiB and 100,000
+    values. Sideloaded packages keep the engine's 50 MB.
