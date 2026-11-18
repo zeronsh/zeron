@@ -8,6 +8,8 @@
 --   needs.Asks { now, sessions, orchestrator?, name_of, on_open?, recent?, limit? }
 --   needs.Decision { name_of, hue_of, on_open?, on_link }   once per page
 --   needs.open_chat(id, message?)       an orchestrator's page, else the session
+--   needs.on_answer, needs.on_expand    a Board card's ask (ds/orch_board's
+--                                       on_answer and on_expand_ask), as Needs you's
 
 local ds = require("@ds")
 local locale = require("@ds/locale")
@@ -87,6 +89,13 @@ end
 -- (ds/orch_decide), with Retry.
 function M.answer(ask: any, choice: any): any
 	return orchestration.answer(ask.id, choice, ask)
+end
+
+-- A Board card waiting on a decision answers and opens as Needs you's rows
+-- do: its chips answer it, its expand opens the whole of it in the overlay.
+M.on_answer = M.answer
+function M.on_expand(ask: any)
+	decide.show(ask.id)
 end
 
 export type AsksProps = {

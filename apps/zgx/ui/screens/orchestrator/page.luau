@@ -442,9 +442,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					on_priority = function(id: string, p: string)
 						orchestration.set_priority(id, p)
 					end,
-					on_open_thread = function(chat: string)
-						route.open_session(chat)
-					end,
+					on_open_thread = NeedsYou.open_chat,
 					-- (A card's dump, shown in the Control room's capture.)
 					on_source = function(src: any)
 						orchestration.reveal_dump:set(src.dump_id)
@@ -471,6 +469,11 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					end,
 					progress_of = Progress.row,
 					on_link = open_link,
+					-- A card waiting on a decision: its options as chips,
+					-- and the whole of it in the overlay (as the Control
+					-- room's: screens/control/needs).
+					on_answer = NeedsYou.on_answer,
+					on_expand_ask = NeedsYou.on_expand,
 				} end), "orch-section-board"),
 				Section(ui.t("orch.page.crew"), function(): number
 					return #crew:get()
