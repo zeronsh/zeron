@@ -6,15 +6,63 @@
  * it without pulling vault code into its bundle.
  */
 
-export type VaultProviderId = "codex" | "claude" | "github" | "anthropic-key" | "openai-key";
+/** The user's own API keys, one vendor's each (`{key}` material, never
+ * refreshed). One key serves every agent that reaches its vendor. */
+export type VaultKeyProviderId =
+  | "anthropic-key"
+  | "openai-key"
+  | "openrouter-key"
+  | "gemini-key"
+  | "xai-key"
+  | "deepseek-key"
+  | "ai-gateway-key"
+  | "meta-key"
+  | "cursor-key";
+
+export type VaultProviderId = "codex" | "claude" | "github" | "copilot" | "devin" | "grok" | VaultKeyProviderId;
+
+export const VAULT_KEY_PROVIDERS: readonly VaultKeyProviderId[] = [
+  "anthropic-key",
+  "openai-key",
+  "openrouter-key",
+  "gemini-key",
+  "xai-key",
+  "deepseek-key",
+  "ai-gateway-key",
+  "meta-key",
+  "cursor-key"
+];
 
 export const VAULT_PROVIDERS: readonly VaultProviderId[] = [
   "codex",
   "claude",
   "github",
   "anthropic-key",
+  "openai-key",
+  "openrouter-key",
+  "gemini-key",
+  "xai-key",
+  "deepseek-key",
+  "ai-gateway-key",
+  "meta-key",
+  "cursor-key",
+  "copilot",
+  "devin",
+  "grok"
+];
+
+/** What a client built before the providers above existed understands: a
+ * status listing anything else would fail its whole read. */
+export const LEGACY_VAULT_PROVIDERS: readonly VaultProviderId[] = [
+  "codex",
+  "claude",
+  "github",
+  "anthropic-key",
   "openai-key"
 ];
+
+export const isKeyProvider = (provider: VaultProviderId): provider is VaultKeyProviderId =>
+  (VAULT_KEY_PROVIDERS as readonly string[]).includes(provider);
 
 /** Identity the main Worker verified (WorkOS JWT or runner JWT). */
 export interface VaultCaller {
@@ -85,7 +133,7 @@ export interface VaultAccountView {
   readonly slot: string;
   readonly status: "connected" | "needsReconnect";
   readonly active: boolean;
-  /** `oauth` (subscription login) · `setup-token` · `api-key` · `github`. */
+  /** `oauth` (a sign-in) · `setup-token` · `api-key` · `github`. */
   readonly kind: "oauth" | "setup-token" | "api-key" | "github";
   /** Email / GitHub login / `…abcd` key suffix / plan. Never secret. */
   readonly account?: string;
@@ -183,7 +231,16 @@ export interface VaultStatusView {
  *   Running Claude Code on the user's own Cloud device with their subscription is
  *   permitted for Zeron under its arrangement with Anthropic; grants go only to the
  *   unmodified Claude Code CLI on the user's own devices.
- * - `anthropic-key` / `openai-key`: `{ key }`.
+ * - `*-key`: `{ key }` — the user's own API key. `cursor-key` may add
+ *   `expiresAt` (Unix ms): a key Cursor's browser sign-in minted expires.
+ * - `copilot`: `{ copilotToken, login }` — the GitHub token of Copilot's editor
+ *   app (device flow) and the GitHub login it belongs to. Never expires.
+ * - `devin`: `{ devinCredentials }` — Devin's `credentials.toml` as a table
+ *   (`windsurf_api_key` and its server urls). Never refreshed.
+ * - `grok`: `{ grokAuth, scope }` — one entry of the `auth.json` that
+ *   `grok login` writes (`key`, `refresh_token`, `expires_at`, `oidc_issuer`,
+ *   `oidc_client_id`, identity fields) and its map key `{issuer}::{client_id}`.
+ *   Refreshed by the vault at the issuer (an xAI host only).
  * - `github`: not uploadable; use the device flow. The resulting user token
  *   stays in the vault: `github` grants are App installation tokens.
  */
@@ -191,7 +248,10 @@ export type VaultMaterial =
   | { readonly authJson: Record<string, unknown> }
   | { readonly claudeAiOauth: Record<string, unknown> }
   | { readonly oauthToken: string; readonly expiresAt?: number }
-  | { readonly key: string };
+  | { readonly key: string; readonly expiresAt?: number }
+  | { readonly copilotToken: string; readonly login: string }
+  | { readonly devinCredentials: Record<string, unknown> }
+  | { readonly grokAuth: Record<string, unknown>; readonly scope: string };
 
 export interface PutCredentialRequest {
   readonly material: VaultMaterial;
@@ -259,7 +319,33 @@ export interface Grant {
   readonly account?: string;
   /** `github`: the App installation the token came from. */
   readonly installationId?: number;
+  /**
+   * What the consumer needs beside the token to write the agent's own
+   * credential file, never secret: `devin`, the rest of `credentials.toml`
+   * (its server urls); `grok`, the `auth.json` entry's identity and issuer
+   * fields plus `scope` (its map key).
+   */
+  readonly settings?: Readonly<Record<string, string>>;
   readonly generation: number;
+}
+
+/**
+ * Several providers' grants for one device in one round trip. `sig` signs
+ * the grant message with `providers.join(",")` as its provider. The list is
+ * sorted and distinct, and never holds `github` (its grants name a
+ * repository). One signature spends one `ts`.
+ */
+export interface GrantManyRequest {
+  readonly providers: readonly VaultProviderId[];
+  readonly deviceId: string;
+  readonly ts: number;
+  readonly sig: string;
+}
+
+export interface GrantManyReply {
+  readonly grants: readonly Grant[];
+  /** The providers granted nothing, and why (`not_found`, `needs_reconnect`, …). */
+  readonly missing: readonly { readonly provider: VaultProviderId; readonly error: VaultErrorCode; readonly message: string }[];
 }
 
 export interface GithubDeviceStart {
@@ -298,6 +384,10 @@ export interface VaultRpc {
   /** Per-user kill switch. */
   setDisabled(caller: VaultCaller, disabled: boolean): Promise<VaultResult<VaultStatusView>>;
   grant(caller: VaultCaller, request: GrantRequest): Promise<VaultResult<Grant>>;
+  /** Several grants at once (`GrantManyRequest`). A refusal of the device
+   * (signature, revoked, disabled) fails the whole call; a provider with
+   * nothing to grant is listed in `missing`. */
+  grantMany(caller: VaultCaller, request: GrantManyRequest): Promise<VaultResult<GrantManyReply>>;
   githubDeviceStart(
     caller: VaultCaller,
     authorizedDevices: readonly string[]

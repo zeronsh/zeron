@@ -428,20 +428,17 @@ impl Client {
         .await
     }
 
-    /// `PUT /vault/{org}/credentials/{anthropic-key|openai-key}` — the user's
-    /// own API key, made the one Cloud uses (the subscription login steps
-    /// aside, as on desktop).
+    /// `PUT /vault/{org}/credentials/{vendor}-key` — the user's own API key
+    /// (any vendor's: `anthropic-key`, `openrouter-key`, …), made the one
+    /// Cloud uses: the subscription login it stands behind steps aside, as
+    /// on desktop.
     pub async fn vault_put_api_key(&self, provider: VaultProvider, key: &str) -> Result<()> {
-        let login = match provider {
-            VaultProvider::AnthropicKey => VaultProvider::Claude,
-            VaultProvider::OpenaiKey => VaultProvider::Codex,
-            other => {
-                return Err(ClientError::InvalidArgument(format!(
-                    "{} isn't an API key provider",
-                    other.as_str()
-                )));
-            }
-        };
+        if !provider.is_api_key() {
+            return Err(ClientError::InvalidArgument(format!(
+                "{} isn't an API key provider",
+                provider.as_str()
+            )));
+        }
         let key = key.trim();
         if key.is_empty() {
             return Err(ClientError::InvalidArgument(
@@ -458,7 +455,10 @@ impl Client {
         }
         self.put_credential(provider, serde_json::json!({ "key": key }), None)
             .await?;
-        self.vault_activate(login, None).await.map(drop)
+        match provider.login_it_replaces() {
+            Some(login) => self.vault_activate(login, None).await.map(drop),
+            None => Ok(()),
+        }
     }
 
     /// `PUT /vault/{org}/credentials/{provider}` for the logical Cloud device:
@@ -795,7 +795,15 @@ impl Client {
         let mut request = crate::auth::http()
             .request(method, url)
             .bearer_auth(token)
-            .header(zeron_proto::CLOUD_STATES_HEADER, zeron_proto::CLOUD_STATES_UNDERSTOOD);
+            .header(
+                zeron_proto::CLOUD_STATES_HEADER,
+                zeron_proto::CLOUD_STATES_UNDERSTOOD,
+            )
+            // The vault providers this build parses: the edge lists no other.
+            .header(
+                zeron_proto::VAULT_PROVIDERS_HEADER,
+                zeron_proto::vault_providers_understood(),
+            );
         if let Some(body) = body {
             request = request.json(&body);
         }

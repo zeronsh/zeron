@@ -47,6 +47,7 @@
  * key re-seals it under the current one (see `open`).
  */
 import { DurableObject } from "cloudflare:workers";
+import { isKeyProvider } from "./api";
 import type {
   Grant,
   GithubDevicePoll,
@@ -294,7 +295,7 @@ const statusOf = (row: AccountRow, now: number): "connected" | "needsReconnect" 
 
 const kindOf = (provider: VaultProviderId, secret: unknown): AccountKind => {
   if (provider === "github") return "github";
-  if (provider === "anthropic-key" || provider === "openai-key") return "api-key";
+  if (isKeyProvider(provider)) return "api-key";
   if (provider === "claude" && (secret as { kind?: string } | null)?.kind === "setup-token") return "setup-token";
   return "oauth";
 };
@@ -445,6 +446,7 @@ export class VaultAccount extends DurableObject<Env> {
       const provider = this.getMeta("provider");
       const kind: AccountKind =
         provider === "github" ? "github" : provider === "anthropic-key" || provider === "openai-key" ? "api-key" : "oauth";
+      // (Only the original five providers ever had a single `record`.)
       this.sql.exec(
         `INSERT INTO accounts (slot, generation, status, kind, identity, account, profile, authorized_devices, envelope,
            created_at, updated_at, hard_expires_at, last_refresh_at, last_attempt_at, last_error, failures)
@@ -1610,10 +1612,12 @@ export class VaultAccount extends DurableObject<Env> {
   /** What makes two uploads the same login: never secret material itself. */
   private async identityOf(secret: unknown, profile: VaultAccountProfile): Promise<string | undefined> {
     const value = (secret ?? {}) as Record<string, unknown>;
+    const adapter = this.adapter();
+    if (adapter.identity) return adapter.identity(secret);
+    if (isKeyProvider(this.provider)) {
+      return typeof value.key === "string" ? `key:${await keyId(utf8(value.key))}` : undefined;
+    }
     switch (this.provider) {
-      case "anthropic-key":
-      case "openai-key":
-        return typeof value.key === "string" ? `key:${await keyId(utf8(value.key))}` : undefined;
       case "github":
         return typeof value.login === "string" ? `login:${value.login.toLowerCase()}` : undefined;
       case "codex": {
@@ -1637,7 +1641,8 @@ export class VaultAccount extends DurableObject<Env> {
       ...(material.idToken ? { idToken: material.idToken } : {}),
       ...(material.account ? { account: material.account } : {}),
       ...(material.scopes ? { scopes: [...material.scopes] } : {}),
-      ...(material.subscriptionType ? { subscriptionType: material.subscriptionType } : {})
+      ...(material.subscriptionType ? { subscriptionType: material.subscriptionType } : {}),
+      ...(material.settings && Object.keys(material.settings).length > 0 ? { settings: { ...material.settings } } : {})
     };
   }
 

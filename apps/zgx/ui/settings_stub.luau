@@ -434,7 +434,9 @@ end
 local agents = require("@account/agents")
 local function agents_of(target: string?): any
 	-- Cloud (the engine answers for it from the vault): Claude Code and
-	-- Codex, always installed; Codex with an account, so on.
+	-- Codex, always installed; Codex with an account, so on. Muse Code runs
+	-- there on a Meta key alone: no sign-in, a note saying so. Its keys, a
+	-- row per vendor, as the engine lists them.
 	if target == "cloud" then
 		local function one(id: string, name: string, mark: string, accounts: { any }): any
 			return { id = id, name = name, mark = mark, installed = true, can_install = false, enabled = #accounts > 0, version = nil, installing = false, login = "idle", accounts = accounts }
@@ -445,6 +447,17 @@ local function agents_of(target: string?): any
 			list = {
 				one("claude-code", "Claude Code", "claude", {}),
 				one("codex", "Codex", "openai", { { id = "c1", email = "ada@example.com", plan = "Pro", session = 0.1, week = 0.2, active = true } }),
+				(function(): any
+					local muse = one("muse", "Muse Code", "muse", {})
+					muse.can_add = false
+					muse.cloud_note = "On Cloud, Muse Code uses a Meta API key. Its own sign-in stays on your devices."
+					return muse
+				end)(),
+			},
+			cloud_keys = {
+				{ provider = "anthropic-key", vendor = "Anthropic", agents = "Claude Code, Hermes, fx, Pi, OpenCode" },
+				{ provider = "openai-key", vendor = "OpenAI", agents = "Codex, Hermes, fx, Pi, OpenCode" },
+				{ provider = "meta-key", vendor = "Meta", agents = "Muse Code" },
 			},
 		}
 	end

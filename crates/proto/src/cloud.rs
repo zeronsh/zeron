@@ -28,8 +28,22 @@ pub const CLOUD_ACCOUNT_CAPABILITY: &str = "cloud-account";
 /// Device lists hide these; the logical Cloud device stands for them.
 pub const CLOUD_SESSION_CAPABILITY: &str = "cloud-session";
 
-/// Harnesses a Cloud device offers in v1 (wire `HarnessId` names).
-pub const CLOUD_HARNESSES: &[&str] = &["codex", "claude-code"];
+/// Harnesses a Cloud device offers (wire `HarnessId` names): every built-in
+/// agent. How each signs in there is [`crate::providers::cloud_credentials`].
+/// Agents added from the ACP registry stay on the devices that added them.
+pub const CLOUD_HARNESSES: &[&str] = &[
+    "codex",
+    "claude-code",
+    "cursor",
+    "devin",
+    "grok",
+    "hermes",
+    "fx",
+    "pi",
+    "opencode",
+    "antigravity",
+    "muse",
+];
 
 /// A Cloud session machine's own setup steps — started or woke, cloned the
 /// project, checked out the session branch — shown as tool chips that open
@@ -400,21 +414,50 @@ pub struct BillingLink {
     pub url: String,
 }
 
-/// Credentials the vault can hold.
+/// Credentials the vault can hold. Logins (`codex`, `claude`, `grok`, …) are
+/// one account's sign-in; `*-key` providers are the user's own API keys,
+/// one vendor's each, used by every agent that reaches that vendor
+/// ([`crate::providers::cloud_credentials`] says which agent takes which).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VaultProvider {
-    /// ChatGPT sign-in for Codex (uploaded from a laptop's `codex login`).
+    /// ChatGPT sign-in (a `codex login` token set). Codex runs on it, and so
+    /// does Pi's ChatGPT provider: the vault is its only refresher.
     Codex,
     /// Claude subscription sign-in for Claude Code (uploaded from a laptop's
     /// sign-in through Claude's own OAuth flow, or a `claude setup-token`).
+    /// Granted to the unmodified Claude Code CLI only.
     Claude,
     /// GitHub App user token (device flow).
     Github,
-    /// The user's own Anthropic API key (Claude Code).
+    /// The user's own Anthropic API key.
     AnthropicKey,
-    /// The user's own OpenAI API key (Codex).
+    /// The user's own OpenAI API key.
     OpenaiKey,
+    /// The user's own OpenRouter API key.
+    OpenrouterKey,
+    /// The user's own Google Gemini API key.
+    GeminiKey,
+    /// The user's own xAI API key.
+    XaiKey,
+    /// The user's own DeepSeek API key.
+    DeepseekKey,
+    /// The user's own Vercel AI Gateway API key.
+    AiGatewayKey,
+    /// The user's own Meta API key (Muse Code's `META_API_KEY`).
+    MetaKey,
+    /// A Cursor user API key: minted by Cursor's own browser sign-in (named
+    /// and expiring) or pasted from cursor.com/settings.
+    CursorKey,
+    /// A GitHub Copilot sign-in: the GitHub token of Copilot's editor app
+    /// (device flow), which agents exchange for Copilot sessions themselves.
+    Copilot,
+    /// A Devin sign-in: the long-lived key (and its servers) Devin's own
+    /// browser sign-in writes to `credentials.toml`.
+    Devin,
+    /// A Grok (xAI) sign-in: the OIDC token set `grok login` writes. The
+    /// vault refreshes it; machines get its access token only.
+    Grok,
 }
 
 impl VaultProvider {
@@ -422,12 +465,22 @@ impl VaultProvider {
         Self::ALL.into_iter().find(|p| p.as_str() == value)
     }
 
-    pub const ALL: [VaultProvider; 5] = [
+    pub const ALL: [VaultProvider; 15] = [
         VaultProvider::Codex,
         VaultProvider::Claude,
         VaultProvider::Github,
         VaultProvider::AnthropicKey,
         VaultProvider::OpenaiKey,
+        VaultProvider::OpenrouterKey,
+        VaultProvider::GeminiKey,
+        VaultProvider::XaiKey,
+        VaultProvider::DeepseekKey,
+        VaultProvider::AiGatewayKey,
+        VaultProvider::MetaKey,
+        VaultProvider::CursorKey,
+        VaultProvider::Copilot,
+        VaultProvider::Devin,
+        VaultProvider::Grok,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -437,8 +490,80 @@ impl VaultProvider {
             VaultProvider::Github => "github",
             VaultProvider::AnthropicKey => "anthropic-key",
             VaultProvider::OpenaiKey => "openai-key",
+            VaultProvider::OpenrouterKey => "openrouter-key",
+            VaultProvider::GeminiKey => "gemini-key",
+            VaultProvider::XaiKey => "xai-key",
+            VaultProvider::DeepseekKey => "deepseek-key",
+            VaultProvider::AiGatewayKey => "ai-gateway-key",
+            VaultProvider::MetaKey => "meta-key",
+            VaultProvider::CursorKey => "cursor-key",
+            VaultProvider::Copilot => "copilot",
+            VaultProvider::Devin => "devin",
+            VaultProvider::Grok => "grok",
         }
     }
+
+    /// A pasted API key (`{key}` material), as opposed to a sign-in.
+    pub fn is_api_key(self) -> bool {
+        self.as_str().ends_with("-key")
+    }
+
+    /// Who issues the key, for a pasted API key: "OpenRouter".
+    pub fn key_vendor(self) -> Option<&'static str> {
+        Some(match self {
+            VaultProvider::AnthropicKey => "Anthropic",
+            VaultProvider::OpenaiKey => "OpenAI",
+            VaultProvider::OpenrouterKey => "OpenRouter",
+            VaultProvider::GeminiKey => "Google Gemini",
+            VaultProvider::XaiKey => "xAI",
+            VaultProvider::DeepseekKey => "DeepSeek",
+            VaultProvider::AiGatewayKey => "Vercel AI Gateway",
+            VaultProvider::MetaKey => "Meta",
+            VaultProvider::CursorKey => "Cursor",
+            _ => return None,
+        })
+    }
+
+    /// The sign-in a machine prefers over this API key, for the agent whose
+    /// card both sit on: saving the key as the one to use steps that login
+    /// aside, as on a laptop (Claude Code, Codex and Grok run a login first).
+    pub fn login_it_replaces(self) -> Option<VaultProvider> {
+        match self {
+            VaultProvider::AnthropicKey => Some(VaultProvider::Claude),
+            VaultProvider::OpenaiKey => Some(VaultProvider::Codex),
+            VaultProvider::XaiKey => Some(VaultProvider::Grok),
+            _ => None,
+        }
+    }
+}
+
+/// Request header naming the vault providers a client understands
+/// (comma-separated wire names). The edge lists only those in `VaultStatus`;
+/// a client that sends none (built before this header) sees the original
+/// five, so a provider added later never fails its whole status read.
+pub const VAULT_PROVIDERS_HEADER: &str = "x-zeron-vault-providers";
+
+/// [`VAULT_PROVIDERS_HEADER`]'s value for this build.
+pub fn vault_providers_understood() -> String {
+    VaultProvider::ALL
+        .iter()
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// `connections`, keeping only providers this build knows: an edge newer
+/// than the client may list more, and one unknown entry must not fail the
+/// whole status.
+fn known_connections<'de, D>(deserializer: D) -> Result<Vec<VaultConnection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -541,7 +666,7 @@ pub struct VaultDevice {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultStatus {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "known_connections")]
     pub connections: Vec<VaultConnection>,
     #[serde(default)]
     pub devices: Vec<VaultDevice>,
@@ -630,6 +755,42 @@ mod tests {
             let wire = serde_json::to_value(provider).unwrap();
             assert_eq!(wire, serde_json::Value::String(provider.as_str().into()));
         }
+    }
+
+    #[test]
+    fn a_provider_this_build_doesnt_know_never_fails_the_status() {
+        let status: VaultStatus = serde_json::from_value(serde_json::json!({
+            "available": true,
+            "connections": [
+                {"provider": "codex", "status": "connected", "updatedAt": 1},
+                {"provider": "some-later-key", "status": "connected", "updatedAt": 2},
+                {"provider": "grok", "status": "needsReconnect", "updatedAt": 3},
+            ],
+        }))
+        .unwrap();
+        let providers: Vec<_> = status.connections.iter().map(|c| c.provider).collect();
+        assert_eq!(providers, vec![VaultProvider::Codex, VaultProvider::Grok]);
+        assert!(
+            vault_providers_understood()
+                .split(',')
+                .all(|p| VaultProvider::parse(p).is_some())
+        );
+    }
+
+    #[test]
+    fn keys_and_logins_say_what_they_are() {
+        for provider in VaultProvider::ALL {
+            assert_eq!(
+                provider.is_api_key(),
+                provider.key_vendor().is_some(),
+                "{provider:?}"
+            );
+        }
+        assert_eq!(
+            VaultProvider::XaiKey.login_it_replaces(),
+            Some(VaultProvider::Grok)
+        );
+        assert_eq!(VaultProvider::OpenrouterKey.login_it_replaces(), None);
     }
 
     #[test]

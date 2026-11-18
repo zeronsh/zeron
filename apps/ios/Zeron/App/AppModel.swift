@@ -865,19 +865,30 @@ final class AppModel {
     /// A Cloud chat created whose first message didn't go out yet.
     private var unsentCloudChat: (key: String, chatId: String)?
 
-    /// The agents Cloud runs.
-    static let cloudHarnesses = ["claude-code", "codex"]
+    /// The agents Cloud runs: every built-in one (mirrors
+    /// `zeron_proto::CLOUD_HARNESSES`).
+    static let cloudHarnesses = [
+        "claude-code", "codex", "cursor", "devin", "grok", "hermes", "fx", "pi", "opencode", "antigravity", "muse",
+    ]
 
     /// Cloud's models, as the edge lists them (no computer or Cloud machine
     /// is asked).
     func cloudModels() async -> [ModelChoice] {
         guard let client else { return [] }
-        var out: [ModelChoice] = []
-        for h in Self.cloudHarnesses {
-            let label = HarnessNames.label(h)
-            out += await client.cloudModels(harness: h).map { ModelChoice(harness: h, harnessLabel: label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
+        // One request per agent, all at once; the list keeps the agents' order.
+        let lists = await withTaskGroup(of: (Int, [ModelChoice]).self) { group in
+            for (i, h) in Self.cloudHarnesses.enumerated() {
+                group.addTask {
+                    let label = HarnessNames.label(h)
+                    let models = await client.cloudModels(harness: h).map { ModelChoice(harness: h, harnessLabel: label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
+                    return (i, models)
+                }
+            }
+            var byIndex: [Int: [ModelChoice]] = [:]
+            for await (i, models) in group { byIndex[i] = models }
+            return byIndex
         }
-        return out
+        return Self.cloudHarnesses.indices.flatMap { lists[$0] ?? [] }
     }
 
     func listFolders(deviceId: String, path: String?) async -> FolderListing? {

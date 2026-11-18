@@ -641,12 +641,9 @@ impl CloudClient {
         key: &str,
         authorized_devices: Vec<String>,
     ) -> Result<VaultStatus, EngineError> {
-        if !matches!(
-            provider,
-            VaultProvider::AnthropicKey | VaultProvider::OpenaiKey
-        ) {
+        if !provider.is_api_key() {
             return Err(EngineError::Other(format!(
-                "{} is not an API-key provider (use anthropic-key or openai-key)",
+                "{} is not an API-key provider",
                 provider.as_str()
             )));
         }
@@ -710,7 +707,7 @@ impl CloudClient {
             .await
     }
 
-    async fn put_credential_with(
+    pub(crate) async fn put_credential_with(
         &self,
         provider: VaultProvider,
         material: serde_json::Value,
@@ -1186,12 +1183,7 @@ pub(crate) async fn dispatch(
                 .map_err(failed)?;
             // A new key is the account Cloud uses from now on — machines
             // prefer an active subscription login, so clear that one.
-            let login = match p.provider {
-                VaultProvider::AnthropicKey => Some(VaultProvider::Claude),
-                VaultProvider::OpenaiKey => Some(VaultProvider::Codex),
-                _ => None,
-            };
-            if let Some(login) = login {
+            if let Some(login) = p.provider.login_it_replaces() {
                 cloud.vault_activate(login, None).await.map_err(failed)?;
             }
             RpcReply::value(&status)
@@ -1254,9 +1246,14 @@ pub(crate) async fn dispatch(
             } else {
                 HarnessId::ClaudeCode
             };
-            let capture = vault_upload_sink(cloud, harness, p.authorized_devices);
+            let vault = if harness == HarnessId::Codex {
+                VaultProvider::Codex
+            } else {
+                VaultProvider::Claude
+            };
+            let capture = vault_upload_sink(cloud, vault, p.authorized_devices);
             let start = accounts
-                .start_capture_login(harness, capture)
+                .start_capture_login(harness, None, capture)
                 .await
                 .map_err(failed)?;
             RpcReply::value(&start)
@@ -1266,25 +1263,66 @@ pub(crate) async fn dispatch(
 }
 
 /// Where a capture-only sign-in on this device lands: the vault, as a login
-/// of `harness`'s subscription provider usable by `devices`.
+/// of `vault` usable by `devices`. Codex's capture is its `auth.json`,
+/// Claude's `{credential, profile}`; every other sign-in hands over its
+/// upload as `{provider, material, profile?}`, which must name `vault`.
 pub(crate) fn vault_upload_sink(
     cloud: CloudClient,
-    harness: HarnessId,
+    vault: VaultProvider,
     devices: Vec<String>,
 ) -> CaptureSink {
     Arc::new(move |captured| {
         let cloud = cloud.clone();
         let devices = devices.clone();
         Box::pin(async move {
-            let uploaded = if harness == HarnessId::Codex {
-                cloud.put_codex_auth(captured, devices).await
-            } else {
-                let (credential, profile) = split_capture(captured);
-                cloud.put_claude_auth(credential, devices, profile).await
+            let uploaded = match vault {
+                VaultProvider::Codex => cloud.put_codex_auth(captured, devices).await,
+                VaultProvider::Claude => {
+                    let (credential, profile) = split_capture(captured);
+                    cloud.put_claude_auth(credential, devices, profile).await
+                }
+                _ => {
+                    let upload = CapturedUpload::read(captured)
+                        .filter(|upload| upload.provider == vault)
+                        .ok_or_else(|| {
+                            format!("The {} sign-in returned nothing to keep.", vault.as_str())
+                        })?;
+                    cloud
+                        .put_credential_with(vault, upload.material, devices, upload.profile)
+                        .await
+                }
             };
             uploaded.map(drop).map_err(|e| e.to_string())
         })
     })
+}
+
+/// A captured sign-in's own upload: `{provider, material, profile?}`.
+struct CapturedUpload {
+    provider: VaultProvider,
+    material: serde_json::Value,
+    profile: Option<VaultAccountProfile>,
+}
+
+impl CapturedUpload {
+    fn read(captured: serde_json::Value) -> Option<Self> {
+        let serde_json::Value::Object(mut map) = captured else {
+            return None;
+        };
+        let provider = VaultProvider::parse(map.get("provider")?.as_str()?)?;
+        let material = map
+            .remove("material")
+            .filter(serde_json::Value::is_object)?;
+        let profile = map
+            .remove("profile")
+            .and_then(|p| serde_json::from_value::<VaultAccountProfile>(p).ok())
+            .filter(|p| *p != VaultAccountProfile::default());
+        Some(Self {
+            provider,
+            material,
+            profile,
+        })
+    }
 }
 
 /// A captured sign-in: `{credential, profile}` (Claude's, with the identity
@@ -1366,7 +1404,13 @@ impl Target {
             .http
             .request(method, url)
             .bearer_auth(token)
-            .header(CLOUD_STATES_HEADER, CLOUD_STATES_UNDERSTOOD);
+            .header(CLOUD_STATES_HEADER, CLOUD_STATES_UNDERSTOOD)
+            // The vault providers this build parses: the edge lists no other
+            // in `VaultStatus` (an older build sees the original five).
+            .header(
+                zeron_proto::VAULT_PROVIDERS_HEADER,
+                zeron_proto::vault_providers_understood(),
+            );
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -1498,6 +1542,7 @@ mod tests {
         target: String,
         authorization: Option<String>,
         cloud_states: Option<String>,
+        vault_providers: Option<String>,
         body: serde_json::Value,
     }
 
@@ -1541,6 +1586,7 @@ mod tests {
                         let mut length = 0usize;
                         let mut authorization = None;
                         let mut cloud_states = None;
+                        let mut vault_providers = None;
                         for line in lines {
                             if let Some((name, value)) = line.split_once(':') {
                                 let value = value.trim();
@@ -1550,6 +1596,10 @@ mod tests {
                                     authorization = Some(value.to_string());
                                 } else if name.eq_ignore_ascii_case(CLOUD_STATES_HEADER) {
                                     cloud_states = Some(value.to_string());
+                                } else if name
+                                    .eq_ignore_ascii_case(zeron_proto::VAULT_PROVIDERS_HEADER)
+                                {
+                                    vault_providers = Some(value.to_string());
                                 }
                             }
                         }
@@ -1570,6 +1620,7 @@ mod tests {
                             target,
                             authorization,
                             cloud_states,
+                            vault_providers,
                             body,
                         });
                         let reply = reply.to_string();
@@ -1807,6 +1858,15 @@ mod tests {
             edge.requests()
                 .iter()
                 .all(|r| r.cloud_states.as_deref() == Some(CLOUD_STATES_UNDERSTOOD)),
+            "{:?}",
+            edge.requests()
+        );
+        // ... and which vault providers: the edge lists no other.
+        let understood = zeron_proto::vault_providers_understood();
+        assert!(
+            edge.requests()
+                .iter()
+                .all(|r| r.vault_providers.as_deref() == Some(understood.as_str())),
             "{:?}",
             edge.requests()
         );
@@ -2121,6 +2181,33 @@ mod tests {
             assert!(client.github_start(vec![]).await.is_err());
         }
         assert_eq!(edge.requests().len(), calls);
+    }
+
+    #[test]
+    fn a_captured_upload_names_its_provider_material_and_identity() {
+        let upload = CapturedUpload::read(serde_json::json!({
+            "provider": "grok",
+            "material": {"grokAuth": {"key": "k"}, "scope": "https://auth.x.ai::c"},
+            "profile": {"email": "ada@x.ai"},
+        }))
+        .unwrap();
+        assert_eq!(upload.provider, VaultProvider::Grok);
+        assert_eq!(upload.material["scope"], "https://auth.x.ai::c");
+        assert_eq!(upload.profile.unwrap().email.as_deref(), Some("ada@x.ai"));
+        // An empty profile is no profile; anything malformed is nothing.
+        let bare = CapturedUpload::read(serde_json::json!({
+            "provider": "devin", "material": {"devinCredentials": {}}, "profile": {},
+        }))
+        .unwrap();
+        assert!(bare.profile.is_none());
+        for junk in [
+            serde_json::json!({"provider": "nope", "material": {}}),
+            serde_json::json!({"provider": "devin", "material": "x"}),
+            serde_json::json!({"material": {}}),
+            serde_json::json!([]),
+        ] {
+            assert!(CapturedUpload::read(junk.clone()).is_none(), "{junk}");
+        }
     }
 
     #[test]

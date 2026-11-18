@@ -757,6 +757,36 @@ impl RunnerIdentity {
             repo: repo.map(str::to_owned),
         }
     }
+
+    /// A freshly signed `/vault/{orgId}/grants` body: several providers in
+    /// one round trip. They are signed sorted and distinct, joined by `,`,
+    /// in the place a single grant signs its provider (no provider id holds
+    /// a comma, so the two can't be confused). Never `github`: its grants
+    /// name a repository.
+    pub fn grants_request(&self, providers: &[&str]) -> GrantsRequest {
+        let mut providers: Vec<String> = providers.iter().map(|p| (*p).to_owned()).collect();
+        providers.sort();
+        providers.dedup();
+        let ts = self.next_ts();
+        let message =
+            Self::grant_message(self.user_id(), self.device_id(), &providers.join(","), ts);
+        GrantsRequest {
+            providers,
+            device_id: self.device_id().into(),
+            ts,
+            sig: self.sign(&message),
+        }
+    }
+}
+
+/// Body of `POST /vault/{orgId}/grants`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantsRequest {
+    pub providers: Vec<String>,
+    pub device_id: String,
+    pub ts: i64,
+    pub sig: String,
 }
 
 pub(crate) fn http_client() -> reqwest::Client {
