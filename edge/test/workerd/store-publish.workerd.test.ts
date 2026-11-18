@@ -1,0 +1,223 @@
+import { env } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
+import { PUBLISHES_PER_HOUR } from "../../src/store/publish";
+import { ADMIN, author, call, makePackage, member, newSigner, publish, uniqueId } from "./store-helpers";
+
+const json = async (res: Response) => (await res.json()) as Record<string, unknown>;
+
+describe("POST /store/v1/plugins/:id/versions", () => {
+  it("takes a signed package as a pending version, with its checks, and stores it", async () => {
+    const a = await author();
+    const id = uniqueId("focus");
+    const pkg = await makePackage({ id, version: "1.0.0", signer: a.signer });
+    const res = await publish(a.userId, id, pkg);
+    expect(res.status, await res.clone().text()).toBe(201);
+    const body = await json(res);
+    expect(body).toMatchObject({ id, version: "1.0.0", status: "pending" });
+    const checks = body.checks as { id: string; level: string }[];
+    expect(checks.map((c) => c.id)).toEqual(expect.arrayContaining(["signature", "manifest", "size", "version", "newer", "readme", "binary", "asks"]));
+    expect(checks.every((c) => c.level === "ok" || c.level === "warn")).toBe(true);
+    const row = await env.STORE_DB.prepare("SELECT * FROM versions WHERE plugin_id = ?").bind(id).first<Record<string, unknown>>();
+    expect(row).toMatchObject({ status: "pending", publisher_id: a.userId, via: "session", signer_key: a.signer.key, package_bytes: pkg.length });
+    const objects = await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` });
+    expect(objects.objects).toHaveLength(1);
+    expect(new Uint8Array(await (await env.PLUGIN_STORE.get(objects.objects[0]!.key))!.arrayBuffer())).toEqual(pkg);
+    const files = await env.STORE_DB.prepare("SELECT path, kind FROM version_files WHERE plugin_id = ? ORDER BY path").bind(id).all();
+    expect(files.results).toEqual([
+      { path: "CHANGELOG.md", kind: "text" },
+      { path: "README.md", kind: "text" },
+      { path: "icon.svg", kind: "svg" },
+      { path: "init.luau", kind: "text" },
+      { path: "shots/one.png", kind: "png" }
+    ]);
+    // Pending: not in the catalog.
+    expect((await call(undefined, "GET", `/store/v1/plugins/${id}`)).status).toBe(404);
+  });
+
+  it("answers the same bytes again as the first time, and refuses other bytes for that version", async () => {
+    const a = await author();
+    const id = uniqueId();
+    const pkg = await makePackage({ id, version: "1.0.0", signer: a.signer });
+    expect((await publish(a.userId, id, pkg)).status).toBe(201);
+    const again = await publish(a.userId, id, pkg);
+    expect(again.status).toBe(201);
+    expect(await json(again)).toMatchObject({ id, version: "1.0.0", status: "pending" });
+    const other = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer, files: { "init.luau": "return 2" } }));
+    expect(other.status).toBe(409);
+    expect((await json(other)).error).toBe("version_exists");
+    // Build metadata doesn't make another version.
+    const build = await publish(a.userId, id, await makePackage({ id, version: "1.0.0+build.7", signer: a.signer }));
+    expect((await json(build)).error).toBe("version_exists");
+    const count = await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM versions WHERE plugin_id = ?").bind(id).first<{ n: number }>();
+    expect(count?.n).toBe(1);
+    // The loser's R2 objects are gone.
+    expect((await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` })).objects).toHaveLength(1);
+    expect((await env.PLUGIN_STORE.list({ prefix: `files/${id}/` })).objects).toHaveLength(1);
+  });
+
+  it("lets one of two publishes of the same version with different bytes win, and the other is told so", async () => {
+    const a = await author();
+    const id = uniqueId();
+    const [one, two] = await Promise.all([
+      makePackage({ id, version: "2.0.0", signer: a.signer, files: { "init.luau": "return 1" } }),
+      makePackage({ id, version: "2.0.0", signer: a.signer, files: { "init.luau": "return 2" } })
+    ]);
+    const answers = await Promise.all([publish(a.userId, id, one), publish(a.userId, id, two)]);
+    const statuses = answers.map((r) => r.status).sort();
+    expect(statuses).toEqual([201, 409]);
+    const row = await env.STORE_DB.prepare("SELECT package_sha256 FROM versions WHERE plugin_id = ?").bind(id).all<{ package_sha256: string }>();
+    expect(row.results).toHaveLength(1);
+    const pkgs = (await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` })).objects;
+    expect(pkgs.map((o) => o.key)).toEqual([`pkg/${id}/2.0.0/${row.results[0]!.package_sha256}.zeron-plugin`]);
+  });
+
+  it("gives a new id to the first account and refuses it to anyone else", async () => {
+    const a = await author();
+    const b = await author();
+    const id = uniqueId();
+    expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    const res = await publish(b.userId, id, await makePackage({ id, version: "1.0.1", signer: b.signer }));
+    expect(res.status).toBe(403);
+    expect((await json(res)).error).toBe("id_taken");
+  });
+
+  it("refuses reserved ids and ids that look like one already taken", async () => {
+    const a = await author();
+    for (const id of ["git", "github", "parallax-scenes", "github-review", "zer0n-tools", "admin-panel", "openai-chat"]) {
+      const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }));
+      expect(res.status, id).toBe(403);
+      expect((await json(res)).error, id).toBe("id_reserved");
+    }
+    const id = uniqueId("lookalike");
+    expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    const b = await author();
+    const twin = id.replace("lookalike", "look-alike");
+    const res = await publish(b.userId, twin, await makePackage({ id: twin, version: "1.0.0", signer: b.signer }));
+    expect(res.status).toBe(403);
+    expect((await json(res)).error).toBe("id_reserved");
+  });
+
+  it("lets an admin keep an id back, or give a reserved one to one account", async () => {
+    const a = await author();
+    const b = await author();
+    const kept = uniqueId("kept");
+    expect((await call(ADMIN, "POST", "/store/v1/admin/reservations", { id: kept, note: "for a partner" })).status).toBe(200);
+    const refused = await publish(a.userId, kept, await makePackage({ id: kept, version: "1.0.0", signer: a.signer }));
+    expect((await json(refused)).error).toBe("id_reserved");
+    const given = "github-helper";
+    expect((await call(ADMIN, "POST", "/store/v1/admin/reservations", { id: given, to_username: b.username })).status).toBe(200);
+    expect((await publish(a.userId, given, await makePackage({ id: given, version: "1.0.0", signer: a.signer }))).status).toBe(403);
+    expect((await publish(b.userId, given, await makePackage({ id: given, version: "1.0.0", signer: b.signer }))).status).toBe(201);
+  });
+
+  it("needs a username, a sign-in, and a key of the account's", async () => {
+    const signer = await newSigner();
+    const nameless = await member();
+    const id = uniqueId();
+    const pkg = await makePackage({ id, version: "1.0.0", signer });
+    const r1 = await publish(nameless, id, pkg);
+    expect(r1.status).toBe(403);
+    expect((await json(r1)).error).toBe("needs_username");
+    expect((await call(undefined, "POST", `/store/v1/plugins/${id}/versions`, pkg)).status).toBe(401);
+    const a = await author();
+    const r2 = await publish(a.userId, id, pkg); // signed by a key not theirs
+    expect(r2.status).toBe(403);
+    expect((await json(r2)).error).toBe("key_not_allowed");
+    // A runner (a Cloud machine) never publishes.
+    expect((await publish(`runner:${a.userId}@org_1:dev1`, id, pkg)).status).toBe(403);
+  });
+
+  it("refuses what a device would refuse, with the engine's reason", async () => {
+    const a = await author();
+    const id = uniqueId();
+    const good = await makePackage({ id, version: "1.0.0", signer: a.signer });
+    const text = new TextDecoder().decode(good);
+    const tampered = new TextEncoder().encode(text.replace(/"init\.luau":"[^"]+"/, `"init.luau":"${btoa("return 666")}"`));
+    const cases: [Uint8Array, number, string, string?][] = [
+      [new TextEncoder().encode("not json"), 400, "bad_package", "not_a_package"],
+      [tampered, 400, "bad_signature", "tampered"],
+      [await makePackage({ id, version: "1.0.0", signer: a.signer, manifest: { permissions: ["root"] } }), 400, "bad_package", "bad_manifest"],
+      [await makePackage({ id, version: "1.0.0", signer: a.signer, files: { "../evil": "x" } }), 400, "bad_package", "bad_file"],
+      [await makePackage({ id, version: "1.0.0", signer: a.signer, manifest: { entry: "missing.luau" } }), 400, "bad_package", "missing_entry"],
+      [await makePackage({ id: `${id}-x`, version: "1.0.0", signer: a.signer }), 400, "bad_package", "id_mismatch"]
+    ];
+    for (const [pkg, status, error, reason] of cases) {
+      const res = await publish(a.userId, id, pkg);
+      const body = await json(res);
+      expect([res.status, body.error, body.reason], reason).toEqual([status, error, reason]);
+    }
+  });
+
+  it("refuses what the store needs and a device doesn't", async () => {
+    const a = await author();
+    const id = uniqueId();
+    const cases: [Record<string, unknown>, Record<string, string | undefined>, string][] = [
+      [{ version: "1.0" }, {}, "not_semver"],
+      [{ version: "01.0.0" }, {}, "not_semver"],
+      [{ version: "9007199254740992.0.0" }, {}, "not_semver"],
+      [{}, { "README.md": undefined }, "missing_readme"],
+      [{ description: undefined }, {}, "missing_listing"],
+      [{ icon: undefined }, {}, "missing_listing"],
+      [{ icon: "init.luau" }, {}, "missing_listing"],
+      [{ categories: [] }, {}, "missing_listing"],
+      [{ categories: ["games"] }, {}, "missing_listing"],
+      [{ categories: ["git", "chat", "agents"] }, {}, "missing_listing"],
+      [{ keywords: ["Upper"] }, {}, "missing_listing"],
+      [{ screenshots: ["init.luau"] }, {}, "missing_listing"],
+      [{ homepage: "http://example.com" }, {}, "missing_listing"],
+      [{ engines: { zeron: ">= 0.4" } }, {}, "missing_listing"]
+    ];
+    for (const [manifest, files, error] of cases) {
+      const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer, manifest, files }));
+      expect([res.status, (await json(res)).error], JSON.stringify(manifest) + JSON.stringify(files)).toEqual([400, error]);
+    }
+  });
+
+  it("refuses a version not later than those before it; a release only follows releases", async () => {
+    const a = await author();
+    const id = uniqueId();
+    const go = async (version: string) => publish(a.userId, id, await makePackage({ id, version, signer: a.signer }));
+    expect((await go("2.0.0")).status).toBe(201);
+    const older = await go("1.9.9");
+    expect([older.status, (await json(older)).error]).toEqual([409, "not_newer"]);
+    expect((await go("2.1.0-beta.1")).status).toBe(201);
+    // A release while a later beta is out: it follows the releases.
+    expect((await go("2.0.1")).status).toBe(201);
+    // A pre-release follows everything.
+    expect((await json(await go("2.0.2-rc.1"))).error).toBe("not_newer");
+    expect((await go("2.1.0-beta.2")).status).toBe(201);
+    // A rejected version doesn't stand in the way, but its number stays taken.
+    expect((await call(ADMIN, "POST", `/store/v1/admin/submissions/${id}/2.1.0-beta.2/reject`, { reason: "broken", message: "It crashes." })).status).toBe(200);
+    const same = await go("2.1.0-beta.2");
+    expect([same.status, (await json(same)).status]).toEqual([201, "rejected"]);
+    const changed = await publish(a.userId, id, await makePackage({ id, version: "2.1.0-beta.2", signer: a.signer, files: { "init.luau": "return 3" } }));
+    expect((await json(changed)).error).toBe("version_exists");
+    expect((await go("2.1.0-beta.3")).status).toBe(201);
+  });
+
+  it("refuses an upload past the store's limit before reading it all", async () => {
+    const a = await author();
+    const id = uniqueId();
+    const res = await call(a.userId, "POST", `/store/v1/plugins/${id}/versions`, new Uint8Array(21 * 1024 * 1024));
+    expect([res.status, (await json(res)).error]).toEqual([413, "too_large"]);
+  });
+
+  it("limits how many versions an account submits an hour", async () => {
+    const a = await author();
+    const id = uniqueId();
+    for (let i = 0; i < PUBLISHES_PER_HOUR; i++) {
+      expect((await publish(a.userId, id, await makePackage({ id, version: `1.0.${i}`, signer: a.signer }))).status).toBe(201);
+    }
+    const res = await publish(a.userId, id, await makePackage({ id, version: "1.1.0", signer: a.signer }));
+    expect([res.status, (await json(res)).error]).toEqual([429, "rate_limited"]);
+  });
+
+  it("takes nothing new for a suspended plugin", async () => {
+    const a = await author();
+    const id = uniqueId();
+    expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    expect((await call(ADMIN, "POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "Malware." })).status).toBe(200);
+    const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.1", signer: a.signer }));
+    expect([res.status, (await json(res)).error]).toEqual([403, "suspended"]);
+  });
+});
