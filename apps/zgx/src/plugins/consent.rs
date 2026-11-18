@@ -146,25 +146,17 @@ fn bounded(item: &Json) -> Json {
         }
     };
     tools(&mut item["tools"]);
-    // How far each program and place it names reaches, as the engine
-    // rates them (zeron-plugin-guard): a shell or interpreter, which is full
-    // control of the computer; another program that can do anything you can
-    // (git and gh are said as what they do: the runner holds them to rules of
-    // their own); a host on this device or your network.
-    use zeron_plugin_guard::commands::{Risk, full_control, held_to_its_own_rules, risk};
-    let programs = |list: &Json, keep: &dyn Fn(&str) -> bool| -> Json {
-        json!(list.as_array().into_iter().flatten().filter_map(Json::as_str).filter(|c| keep(c)).collect::<Vec<_>>())
+    // How far each program and place it names reaches: plugin-guard's
+    // `consent` module rates them, one implementation for every place that
+    // words a plugin's asks.
+    use zeron_plugin_guard::consent;
+    let strings = |list: &Json| -> Vec<String> {
+        list.as_array().into_iter().flatten().filter_map(Json::as_str).map(str::to_owned).collect()
     };
-    let anything = |list: &Json| programs(list, &|c| risk(c) == Risk::Anything && !full_control(c) && !held_to_its_own_rules(c));
-    let full = |list: &Json| programs(list, &|c| full_control(c));
-    let local = |list: &Json| -> Json {
-        json!(list.as_array().into_iter().flatten().filter_map(Json::as_str).filter(|h| *h != "*" && zeron_plugin_guard::net::risky(h)).collect::<Vec<_>>())
-    };
-    // A host named exactly that doesn't read as local: nothing can tell from
-    // its name where it points, so the sheet says it might be near.
-    let named = |list: &Json| -> Json {
-        json!(list.as_array().into_iter().flatten().filter_map(Json::as_str).filter(|h| zeron_plugin_guard::net::names_exactly(h) && !zeron_plugin_guard::net::risky(h)).collect::<Vec<_>>())
-    };
+    let anything = |list: &Json| json!(consent::anything(&strings(list)));
+    let full = |list: &Json| json!(consent::full_control(&strings(list)));
+    let local = |list: &Json| json!(consent::local(&strings(list)));
+    let named = |list: &Json| json!(consent::named(&strings(list)));
     item["commands_anything"] = anything(&item["commands"]);
     item["commands_full_control"] = full(&item["commands"]);
     item["network_local"] = local(&item["network_hosts"]);
