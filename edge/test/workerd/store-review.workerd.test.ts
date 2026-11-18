@@ -309,6 +309,48 @@ describe("store author routes", () => {
   });
 });
 
+describe("admin lists page both ways (amendment 29)", () => {
+  /** Walk a list forward with next_cursor, then back with prev_cursor:
+   * the same pages, the first with no prev_cursor. */
+  const walk = async (path: string, items: (page: any) => unknown[]) => {
+    type Page = { next_cursor?: string; prev_cursor?: string };
+    const get = async (cursor?: string) => (await (await adminCall("GET", `${path}${path.includes("?") ? "&" : "?"}limit=2${cursor ? `&cursor=${cursor}` : ""}`)).json()) as Page;
+    const forward: unknown[][] = [];
+    let page = await get();
+    expect(page.prev_cursor, `${path}: the first page`).toBeUndefined();
+    forward.push(items(page));
+    while (page.next_cursor) {
+      page = await get(page.next_cursor);
+      forward.push(items(page));
+    }
+    const back: unknown[][] = [items(page)];
+    while (page.prev_cursor) {
+      page = await get(page.prev_cursor);
+      back.unshift(items(page));
+    }
+    expect(back, path).toEqual(forward);
+    return forward.flat();
+  };
+
+  it("the queue and reports, forward then back", async () => {
+    const a = await author();
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const id = uniqueId("queue");
+      ids.push(id);
+      await pending(a, id, "1.0.0");
+    }
+    const queued = (await walk("/store/v1/admin/queue", (p) => p.items.map((i: any) => `${i.plugin.id}@${i.version}`))) as string[];
+    expect(queued.filter((q) => ids.some((id) => q.startsWith(id)))).toEqual(ids.map((id) => `${id}@1.0.0`));
+    const readers = [await author(), await author(), await author()];
+    const listedId = uniqueId("reported");
+    await listed(a, listedId, "1.0.0");
+    for (const r of readers) expect((await call(r.userId, "POST", `/store/v1/plugins/${listedId}/reports`, { reason: "broken", text: "x" })).status).toBe(201);
+    const reported = (await walk("/store/v1/admin/reports", (p) => p.reports.map((r: any) => r.id))) as number[];
+    expect(reported.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
 describe("store ids: claiming and release (amendment 30)", () => {
   it("lets an account claim at most 5 new ids in 7 days, and a refused publish claims nothing", async () => {
     const a = await author();
