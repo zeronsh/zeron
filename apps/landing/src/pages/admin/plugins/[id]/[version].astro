@@ -22,7 +22,7 @@ import { REJECT_REASONS } from "../../../../lib/store/admin.ts";
 import { takeFlash } from "../../../../lib/store/flash.ts";
 import { age, ago, bytes } from "../../../../lib/store/format.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
-import { renderedOnce } from "../../../../lib/store/rendered.ts";
+import { renderMarkdown } from "../../../../lib/store/markdown.ts";
 import { isPluginId, isVersion, packagePath } from "../../../../lib/store/names.ts";
 import { grew } from "../../../../lib/store/permissions.ts";
 import { changedFiles, countRows, diffRows, fileTree, isPicture, languageOf, manifestChanges, readText, type DiffRow } from "../../../../lib/store/review.ts";
@@ -59,7 +59,8 @@ const changeOf = new Map(changes.map((c) => [c.path, c.change]));
 let readme = "";
 if (s && view === "readme") {
   const file = await readText(await edge.file(id, version, "README.md", true));
-  readme = file && "text" in file ? await renderedOnce(id, version, "readme", file.text, { file: (p) => fileUrl(id, version, p), demote: true }) : "";
+  // (Rendered each time: a version in review is no one's to keep.)
+  readme = file && "text" in file ? renderMarkdown(file.text, { file: (p) => fileUrl(id, version, p), demote: true }) : "";
 }
 
 // The file viewer: the file asked for, else the manifest.
