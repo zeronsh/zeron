@@ -129,6 +129,41 @@ impl Prepared {
     }
 }
 
+/// Whether `version` is one the store will take beside the versions it
+/// already has of the plugin (`versions`: `/me/plugins`' `[{version,
+/// status}]`), as amendment 21 says: equal precedence to any version
+/// submitted is `version_exists`; a release must be above every release
+/// that isn't rejected or withdrawn, a pre-release above every version that
+/// isn't, else `not_newer`. (The store has the last word: this is what it
+/// said a moment ago.)
+pub fn newer_problem(version: &str, versions: &[Value]) -> Option<Problem> {
+    use crate::plugins::version::Version;
+    let mine = Version::parse(version).ok()?;
+    let mut above: Option<Version> = None;
+    for v in versions {
+        let Some(theirs) = v["version"].as_str().and_then(|t| Version::parse(t).ok()) else { continue };
+        if theirs == mine {
+            return Some(Problem {
+                rule: "version_exists",
+                field: Some("version"),
+                path: None,
+                words: format!("Version {version} was submitted already: a version is submitted once, so give this one a new number"),
+            });
+        }
+        let counts = !matches!(v["status"].as_str(), Some("rejected" | "withdrawn")) && (mine.is_prerelease() || !theirs.is_prerelease());
+        if counts && above.as_ref().is_none_or(|a| &theirs > a) {
+            above = Some(theirs);
+        }
+    }
+    let above = above.filter(|a| &mine < a)?;
+    Some(Problem {
+        rule: "not_newer",
+        field: Some("version"),
+        path: None,
+        words: format!("Version {version} isn't later than {above}, which the store has"),
+    })
+}
+
 /// Each problem as one line: `rule (field): words`.
 pub fn lines(problems: &[Problem]) -> Vec<String> {
     problems
@@ -200,6 +235,22 @@ mod tests {
         let rules: Vec<_> = read(dir.path()).unwrap().problems.iter().map(|p| (p.rule, p.field)).collect();
         assert_eq!(rules, vec![("too_large", Some("manifest"))]);
         assert_eq!(listing::count_values(&json!({ "a": [1, 2], "b": { "c": null } })), 6);
+    }
+
+    /// Amendment 21, as the store says it.
+    #[test]
+    fn a_version_is_newer_as_the_store_counts_it() {
+        let have = |list: &[(&str, &str)]| -> Vec<Value> { list.iter().map(|(v, s)| json!({ "version": v, "status": s })).collect() };
+        let rule = |version: &str, list: &[(&str, &str)]| newer_problem(version, &have(list)).map(|p| p.rule);
+        let store = [("1.0.0", "approved"), ("1.1.0", "rejected"), ("1.2.0-beta.1", "pending")];
+        assert_eq!(rule("1.0.1", &store), None, "a release above every release that counts (1.1.0 was rejected)");
+        assert_eq!(rule("0.9.0", &store), Some("not_newer"));
+        assert_eq!(rule("1.1.0", &store), Some("version_exists"), "rejected, it's still submitted");
+        assert_eq!(rule("1.0.0+build.2", &store), Some("version_exists"), "build metadata isn't a new version");
+        assert_eq!(rule("1.2.0-beta.0", &store), Some("not_newer"), "a pre-release is above every version that counts");
+        assert_eq!(rule("1.2.0-beta.2", &store), None);
+        assert_eq!(rule("1.1.5", &[("1.1.0", "withdrawn"), ("1.0.0", "approved")]), None);
+        assert_eq!(rule("1.0.0", &[]), None, "a first version");
     }
 
     #[test]

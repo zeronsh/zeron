@@ -110,7 +110,25 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
     let caller = Caller::DeployKey(key.clone());
     match command {
         PluginCommand::Publish { target, dry_run } => {
-            let prepared = read(&folder(&target, data_dir)?)?;
+            let mut prepared = read(&folder(&target, data_dir)?)?;
+            // Newer than what the store has (a deploy key reads its plugin's
+            // state), asked only of a plugin that meets the rules here; the
+            // store has the last word if it can't be asked.
+            let asked = if prepared.ok() { Some(store.my_plugins(&caller).await) } else { None };
+            match asked.unwrap_or_else(|| Err(String::new())) {
+                Ok(mine) => {
+                    let versions = mine["plugins"].as_array().into_iter().flatten().find(|p| p["id"] == prepared.manifest.id.as_str()).map(|p| p["versions"].clone());
+                    if let Some(Value::Array(versions)) = versions
+                        && let Some(problem) = publish::newer_problem(&prepared.manifest.version, &versions)
+                    {
+                        prepared.problems.push(problem);
+                    }
+                }
+                Err(error) if !error.is_empty() => {
+                    eprintln!("note: couldn't ask the store which versions it has: it has the last word on whether this one is newer")
+                }
+                Err(_) => {}
+            }
             say(&prepared);
             if !prepared.ok() {
                 return Err(exit(RULES, problems_line(&prepared)));
