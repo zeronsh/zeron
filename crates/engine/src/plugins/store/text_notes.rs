@@ -156,10 +156,11 @@ pub fn notes(file: &str, text: &str) -> Vec<Problem> {
             break;
         }
     }
-    let note = |rule: &'static str, words: String| Problem {
+    let note = |rule: &'static str, line: usize, words: String| Problem {
         rule,
         field: None,
         path: Some(file.to_owned()),
+        line: Some(line),
         words,
     };
     let as_text = |line: usize, what: &str, instead: &str| {
@@ -169,18 +170,21 @@ pub fn notes(file: &str, text: &str) -> Vec<Problem> {
     if let Some(line) = html {
         out.push(note(
             RAW_HTML,
+            line,
             as_text(line, "HTML", "Use Markdown for pictures and headings."),
         ));
     }
     if let Some(line) = footnote {
         out.push(note(
             FOOTNOTE,
+            line,
             as_text(line, "a footnote", "Write the note into the text instead."),
         ));
     }
     if let Some(line) = math {
         out.push(note(
             MATH,
+            line,
             format!("{file} line {line} has math; the store's website shows it as typed (Zeron itself draws it)."),
         ));
     }

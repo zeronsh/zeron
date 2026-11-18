@@ -77,6 +77,7 @@ fn sizes(manifest: &Manifest, files: &BTreeMap<String, Vec<u8>>) -> Vec<Problem>
             rule: listing::rule::TOO_LARGE,
             field: Some("manifest"),
             path: None,
+            line: None,
             words: "Its manifest is too big for the store (1 MB and 100,000 values, its signature included)".into(),
         });
     }
@@ -89,6 +90,7 @@ fn sizes(manifest: &Manifest, files: &BTreeMap<String, Vec<u8>>) -> Vec<Problem>
             rule: listing::rule::TOO_LARGE,
             field: Some("package"),
             path: None,
+            line: None,
             words: "It's too big for the store: its package is over 20 MB".into(),
         });
     }
@@ -154,6 +156,7 @@ pub fn newer_problem(version: &str, versions: &[Value]) -> Option<Problem> {
                 rule: "version_exists",
                 field: Some("version"),
                 path: None,
+                line: None,
                 words: format!("Version {version} was submitted already: a version is submitted once, so give this one a new number"),
             });
         }
@@ -167,6 +170,7 @@ pub fn newer_problem(version: &str, versions: &[Value]) -> Option<Problem> {
         rule: "not_newer",
         field: Some("version"),
         path: None,
+        line: None,
         words: format!("Version {version} isn't later than {above}, which the store has"),
     })
 }
@@ -300,6 +304,9 @@ mod tests {
         assert!(prepared.ok(), "{:?}", prepared.problems);
         let said: Vec<(&str, Option<&str>)> = prepared.warnings.iter().map(|w| (w.rule, w.path.as_deref())).collect();
         assert_eq!(said, [("raw_html", Some("README.md")), ("footnote", Some("README.md")), ("raw_html", Some("CHANGELOG.md"))]);
+        // Each says its line, for a caller saying its own words.
+        assert_eq!(prepared.warnings.iter().map(|w| w.line).collect::<Vec<_>>(), [Some(3), Some(5), Some(10)]);
+        assert_eq!(prepared.shown()["warnings"][0]["line"], 3);
         assert_eq!(prepared.warnings[0].words, "README.md line 3 has HTML; the store shows it as text. Use Markdown for pictures and headings.");
         assert_eq!(lines(&prepared.warnings)[1], "footnote (README.md): README.md line 5 has a footnote; the store shows it as text. Write the note into the text instead.");
         // The listed plugin as it was: nothing to say.
