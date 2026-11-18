@@ -38,6 +38,7 @@ local nav = require("@app/screens/plugins/nav")
 local browse = require("@app/screens/plugins/browse")
 local listing = require("@app/screens/plugins/listing")
 local publish = require("@app/screens/plugins/publish")
+local store = require("@app/screens/plugins/store")
 local keys = require("@app/screens/plugins/keys")
 
 local M = {}
@@ -187,7 +188,16 @@ end
 
 local function update(id: string, name: string)
 	updating:set(id)
-	local p: any = state.update(id, device())
+	-- (A store plugin's one click takes a verified update alone: one the
+	-- store hasn't verified opens its page's update sheet, its own question.)
+	local it: any = nil
+	for _, i in (if device() then state.remote:peek().list else state.now:peek().list) or {} do
+		if i.id == id then
+			it = i
+		end
+	end
+	local store_id = if it and type(it.source) == "table" and it.source.kind == "store" and type(it.source.id) == "string" then it.source.id else nil
+	local p: any = state.update(id, device(), store_id ~= nil)
 	if p == nil then
 		updating:set(nil)
 		return
@@ -197,6 +207,11 @@ local function update(id: string, name: string)
 		settled("plugins.page.updated_toast", "plugins.page.updated_toast_version")(done)
 	end, function(err: any)
 		updating:set(nil)
+		local m = if type(err) == "table" then err.message else err
+		if store_id and type(m) == "string" and string.match(m, "^not_verified") then
+			nav.open_update(store_id)
+			return
+		end
 		failed(ui.t("plugins.page.couldnt_update", { name = name }))(err)
 	end)
 end
@@ -451,7 +466,8 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			if publishing then
 				return publish.summary(it.id) or ui.t("plugins.store.summary.unknown"):get()
 			end
-			return words.grants(it) or words.update(it)
+			-- (And a store version running that the store hasn't verified.)
+			return words.grants(it) or words.update(it) or words.store_unverified(it)
 		end,
 		detail_action = if publishing then nil else UpdateLink { now = now },
 		-- (Publish… is its sentence's own link: right after its last word,
@@ -634,6 +650,51 @@ local function dialogs(): { Node }
 	}
 end
 
+-- Under Installed's card: which updates this device's plugins from the
+-- store take (each can choose its own on its store page). This device's
+-- alone: another device's choice isn't known here.
+local device_updates = ui.state("plugins_device_updates", "newest")
+local function store_updates_section(): Node
+	ui.effect(function()
+		local prefs: any = state.store_updates:get()
+		local now = if type(prefs) == "table" and prefs.device == "verified" then "verified" else "newest"
+		if device_updates:peek() ~= now then
+			device_updates:set(now)
+		end
+	end)
+	return ui.show(function(): boolean
+		return device() == nil
+	end, ds.Settings.Section {
+		title = ui.t("plugins.store.updates_section"),
+		ds.Settings.Group {
+			ds.Settings.Row {
+				label = ui.t("plugins.store.updates_all_label"),
+				description = ui.t("plugins.store.updates_all_body"),
+				control = ui.div {
+					id = "plugins-store-updates",
+					ds.Select {
+						value = device_updates,
+						size = "sm",
+						w = 160,
+						name = ui.t("plugins.store.updates_all_label"),
+						options = {
+							{ value = "newest", label = ui.t("plugins.store.updates_newest") },
+							{ value = "verified", label = ui.t("plugins.store.updates_verified") },
+						},
+						on_change = function(v: any)
+							local was = if v == "verified" then "newest" else "verified"
+							store.set_updates(nil, v):after(function(_: any) end, function(err: any)
+								device_updates:set(was)
+								failed(ui.t("plugins.store.couldnt_updates_all"))(err)
+							end)
+						end,
+					},
+				},
+			},
+		},
+	})
+end
+
 -- The page: ds.Settings.Catalog's search, tabs, card and states (the
 -- Templates page is the same), with this page's device choice, rows, empty
 -- state, offline states and dialogs.
@@ -696,9 +757,10 @@ local function catalog(): Node
 				return browse.View {}
 			end,
 		},
-		-- Under Yours' card: the account's deploy keys (screens/plugins/keys),
-		-- for the plugins of yours in the store.
+		-- Under Installed's card, which updates its store plugins take here;
+		-- under Yours', the account's deploy keys (screens/plugins/keys).
 		below = {
+			installed = store_updates_section,
 			yours = function(): Node
 				return keys.Section { plugins = publish.owned }
 			end,

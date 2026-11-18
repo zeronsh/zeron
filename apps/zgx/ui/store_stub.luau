@@ -531,12 +531,23 @@ stub.report = function(id: string, reason: string, text: string): any
 		return {}
 	end)
 end
+-- (What the engine keeps of it, as the host shares it.)
+local store_updates = ui.shared("plugins.store_updates", { device = "newest", plugins = {} } :: any)
+if store_updates:peek() == nil then
+	store_updates:set({ device = "newest", plugins = {} })
+end
 stub.set_updates = function(id: string?, prefer: string?): any
 	note(`updates:{id or "device"}:{prefer or "default"}`)
 	return answer(function(): any
+		local now = table.clone(store_updates:peek() or { device = "newest", plugins = {} })
+		now.plugins = table.clone(now.plugins or {})
 		if id then
 			updates_pref[id] = prefer
+			now.plugins[id] = prefer
+		else
+			now.device = prefer or "newest"
 		end
+		store_updates:set(now)
 		return { prefer = prefer or "newest" }
 	end)
 end

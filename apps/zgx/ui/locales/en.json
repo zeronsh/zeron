@@ -3642,7 +3642,9 @@
         "changes": "Parts of Zeron it changes",
         "replaces": "Screens it replaces",
         "changes_since": "Also changes, since you allowed it"
-      }
+      },
+      "store_unverified": "Version {version} isn't verified by the plugin store.",
+      "store_unverified_unversioned": "This version isn't verified by the plugin store."
     },
     "page": {
       "title": "Plugins",
@@ -4136,7 +4138,12 @@
       "updates_body": "Which newer versions it takes on this device.",
       "updates_newest": "Newest",
       "updates_verified": "Verified only",
-      "couldnt_updates": "Couldn't change {name}'s updates"
+      "couldnt_updates": "Couldn't change {name}'s updates",
+      "updates_device": "As set for all ({choice})",
+      "updates_section": "Plugin store",
+      "updates_all_label": "Updates from the plugin store",
+      "updates_all_body": "Which newer versions your plugins from the store take on this device. Each one can choose its own on its page.",
+      "couldnt_updates_all": "Couldn't change which updates your plugins take"
     }
   },
   "templates": {

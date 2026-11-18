@@ -292,6 +292,9 @@ pub struct Bridge {
     /// (`plugin.<id>.settings`, its own, read only).
     settings: RefCell<settings::Book>,
     settings_list: Shared,
+    /// Which updates the store's plugins take on this device (the
+    /// engine's `store_updates`: `{ device, plugins = { id = … } }`).
+    store_updates: Shared,
     settings_own: RefCell<HashMap<String, Shared>>,
     /// The main window's dialogs (a folder setting's).
     dialogs: zgx_desktop::FileDialogs,
@@ -640,6 +643,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         stores: RefCell::default(),
         settings: RefCell::new(settings::Book::new(settings::storage_dir())),
         settings_list: host.shared("plugins.settings", vlist(Vec::new())),
+        store_updates: host.shared("plugins.store_updates", Value::Nil),
         settings_own: RefCell::default(),
         dialogs: cx.dialogs.clone(),
         costs: RefCell::default(),
@@ -1431,6 +1435,10 @@ impl Bridge {
             {
                 host_bar::notice(host_bar::Notice::key(notice["kind"].as_str().unwrap_or(""), notice["device"].as_str(), words));
             }
+        }
+        // Which updates the store's plugins take here, as the engine keeps it.
+        if frame["store_updates"].is_object() {
+            self.store_updates.set(json_value(&frame["store_updates"]));
         }
         // Versions of the account's plugins published somewhere other than
         // here (another device, a deploy key): said once each, staying, and
@@ -3596,7 +3604,14 @@ impl Bridge {
                 let me = me.clone();
                 async move { crate::plugins::preview::refuse("plugins.update")?;
                     let (id, device) = remote::id_and_device(&arg);
-                    let reply = call_on(&me, device, "UpdatePlugin", json!({ "id": id })).await?;
+                    // (`verified_only`: a one-click update, which never
+                    // takes an unverified version unasked: the engine
+                    // refuses it `not_verified`, for its own question.)
+                    let mut params = json!({ "id": id });
+                    if matches!(arg.field("verified_only"), Some(Value::Bool(true))) {
+                        params["verified_only"] = json!(true);
+                    }
+                    let reply = call_on(&me, device, "UpdatePlugin", params).await?;
                     Ok(json_value(&reply))
                 }
             }

@@ -93,8 +93,19 @@ s.install = function(from: any): any
 		end,
 	}
 end
-s.update = function(id: string): any
-	stub.note(`update:{id}`)
+-- (A one-click update the engine refuses, while set: its words.)
+local refuse_update: string? = nil
+s.update = function(id: string, _device: string?, verified_only: boolean?): any
+	stub.note(`update:{id}{if verified_only then ":verified_only" else ""}`)
+	-- (Refused as the engine refuses a one-click update of an unverified one.)
+	if verified_only and refuse_update then
+		local why = refuse_update
+		return {
+			after = function(_self: any, _ok: any, bad: (any) -> ())
+				bad({ message = why })
+			end,
+		}
+	end
 	local p = find(id)
 	if p and p.update then
 		p.version = p.update.version
@@ -210,6 +221,24 @@ ui.command {
 		local p = find("focus-timer")
 		p.update = { version = "1.3.0", added = {}, removed = {}, notes = "- Longer breaks.", verified = false, installed_verified = true, verified_alternative = { version = "1.2.1" } }
 		publish()
+	end,
+}
+-- Focus timer, installed from the store at a version it hasn't verified.
+ui.command {
+	id = "store.running_unverified",
+	title = "Focus timer runs a version the store hasn't verified",
+	run = function()
+		local p = find("focus-timer")
+		p.source = { kind = "store", id = "focus-timer", publisher = "ada", verified = false }
+		publish()
+	end,
+}
+-- Updating Focus timer in one click is refused: its update isn't verified.
+ui.command {
+	id = "store.update_refused_unverified",
+	title = "Updating Focus timer in one click is refused: not verified",
+	run = function()
+		refuse_update = "not_verified: 1.3.0 isn't verified"
 	end,
 }
 ui.command {

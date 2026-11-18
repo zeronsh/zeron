@@ -551,6 +551,17 @@ function M.about(item: any): string
 	return if item.description and item.description ~= "" then item.description else s("plugins.words.about.no_description")
 end
 
+-- A store plugin running a version the store hasn't verified (its install
+-- record's word): said on its row. Nil for any other.
+function M.store_unverified(item: any): string?
+	local src = item.source
+	if type(src) ~= "table" or src.kind ~= "store" or src.verified ~= false or item.builtin then
+		return nil
+	end
+	local v = if type(item.version) == "string" and item.version ~= "" then item.version else nil
+	return if v then s("plugins.words.store_unverified", { version = v }) else s("plugins.words.store_unverified_unversioned")
+end
+
 -- What one of Zeron's own is allowed, said under its description: they're
 -- allowed what they ask without asking you, so it's never out of sight.
 -- Nil for any other, or one that isn't working.

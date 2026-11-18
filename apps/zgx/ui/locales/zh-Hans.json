@@ -3642,7 +3642,9 @@
         "changes": "它更改的 Zeron 部分",
         "replaces": "它替换的界面",
         "changes_since": "自你允许以来还更改"
-      }
+      },
+      "store_unverified": "版本 {version} 未经插件商店验证。",
+      "store_unverified_unversioned": "这个版本未经插件商店验证。"
     },
     "page": {
       "title": "插件",
@@ -4136,7 +4138,12 @@
       "updates_body": "它在这台设备上接受哪些新版本。",
       "updates_newest": "最新",
       "updates_verified": "仅已验证",
-      "couldnt_updates": "无法更改 {name} 的更新设置"
+      "couldnt_updates": "无法更改 {name} 的更新设置",
+      "updates_device": "与全部相同（{choice}）",
+      "updates_section": "插件商店",
+      "updates_all_label": "来自插件商店的更新",
+      "updates_all_body": "你从商店安装的插件在这台设备上接受哪些新版本。每个插件也可以在自己的页面上单独设置。",
+      "couldnt_updates_all": "无法更改插件接受的更新"
     }
   },
   "templates": {

@@ -96,6 +96,10 @@ end)
 
 -- Another device's, as the host watches it.
 M.remote = ui.shared("plugins.remote", { state = "idle", list = {} } :: { device: string?, state: string, list: { Item } })
+-- Which updates the store's plugins take on this device, as the engine
+-- keeps it: the device's ("newest", the default, or "verified") and each
+-- plugin's own, where it has one (nil: as the device).
+M.store_updates = ui.shared("plugins.store_updates", nil :: { device: string?, plugins: { [string]: string }? }?)
 
 function M.device(): string?
 	local d = M.remote:get().device
@@ -138,7 +142,12 @@ function M.install(from: { path: string?, url: string?, device: string? }): any
 	return ui.call("plugins.install", from)
 end
 
-function M.update(id: string, device: string?): any
+-- (`verified_only`: a one-click update, refused `not_verified` for an
+-- update the store hasn't verified, which asks a question of its own.)
+function M.update(id: string, device: string?, verified_only: boolean?): any
+	if verified_only then
+		return ui.call("plugins.update", { id = id, device = device, verified_only = true })
+	end
 	return ui.call("plugins.update", if device then { id = id, device = device } else id)
 end
 

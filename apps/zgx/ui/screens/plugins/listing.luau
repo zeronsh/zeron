@@ -382,6 +382,13 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local busy = ui.use_state(false)
 	local updating = ui.use_state(false)
 	local update_open = ui.use_state(false)
+	-- (Opened for its update sheet, an update one click wouldn't take.)
+	ui.on_mount(function()
+		if nav.take_update(id) then
+			state.check_updates(props.here.device(), id)
+			update_open:set(true)
+		end
+	end)
 	local report_open = ui.use_state(false)
 	local report_reason = ui.use_state(store.REPORT_REASONS[1])
 	local report_text = ui.use_state("")
@@ -1038,9 +1045,40 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			pre_on:set(want)
 		end
 	end)
-	-- Which updates it takes on the device shown: the newest (the default),
-	-- or only those the store has verified (the engine's `installed.updates`).
-	local updates = ui.use_state(if type(first.installed) == "table" and first.installed.updates == "verified" then "verified" else "newest")
+	-- Which updates it takes on the device shown: as set for all (the
+	-- device's choice), the newest, or only those the store has verified.
+	-- This device's from what the engine keeps; another device's, its
+	-- page's word for it (no "as set for all" there: the page says what's
+	-- in effect).
+	local function local_prefs(): any
+		return if here.device() == nil then state.store_updates:get() else nil
+	end
+	local function chosen_updates(): string
+		local prefs = local_prefs()
+		if prefs then
+			local own = if type(prefs.plugins) == "table" then prefs.plugins[id] else nil
+			return if own == "newest" or own == "verified" then own else "device"
+		end
+		return if type(first.installed) == "table" and first.installed.updates == "verified" then "verified" else "newest"
+	end
+	local updates = ui.use_state(chosen_updates())
+	ui.effect(function()
+		local now = chosen_updates()
+		if updates:peek() ~= now then
+			updates:set(now)
+		end
+	end)
+	local function update_options(): { any }
+		local out: { any } = {}
+		local prefs = local_prefs()
+		if prefs then
+			local device_word = if prefs.device == "verified" then ui.t("plugins.store.updates_verified"):get() else ui.t("plugins.store.updates_newest"):get()
+			table.insert(out, { value = "device", label = ui.t("plugins.store.updates_device", { choice = device_word }):get() })
+		end
+		table.insert(out, { value = "newest", label = ui.t("plugins.store.updates_newest"):get() })
+		table.insert(out, { value = "verified", label = ui.t("plugins.store.updates_verified"):get() })
+		return out
+	end
 	local prerelease = ui.show(function(): boolean
 		local it: any = item()
 		return it ~= nil and type(it.source) == "table" and it.source.kind == "store"
@@ -1053,15 +1091,12 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				ds.Select {
 					value = updates,
 					size = "sm",
-					w = 160,
+					w = 200,
 					name = ui.t("plugins.store.updates_label"),
-					options = {
-						{ value = "newest", label = ui.t("plugins.store.updates_newest") },
-						{ value = "verified", label = ui.t("plugins.store.updates_verified") },
-					},
+					options = update_options,
 					on_change = function(v: any)
-						local was = if v == "verified" then "newest" else "verified"
-						store.set_updates(id, v, here.device()):after(function(_: any) end, function(err: any)
+						local was = chosen_updates()
+						store.set_updates(id, if v == "device" then nil else v, here.device()):after(function(_: any) end, function(err: any)
 							updates:set(was)
 							here.failed(ui.t("plugins.store.couldnt_updates", { name = d().name or id }))(err)
 						end)
