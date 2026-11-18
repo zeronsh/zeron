@@ -35,10 +35,10 @@ function M.glass_theme(): { [string]: any }?
 	return if thicker then { background = thicker } else nil
 end
 
--- What a theme wears where nothing shows through, for one whose glass tones
--- would all but vanish on its solid window (`zeron.solid`): the page's card
--- and its edge, and muted text. Nil over glass, and for a theme that doesn't
--- name its own.
+-- What a theme wears where nothing shows through: the islands' solid fill,
+-- and, for a theme whose glass tones would all but vanish on its solid
+-- window (`zeron.solid`), muted text that holds. Nil over glass. (The page
+-- and sidebar keep the theme's own fill and edge.)
 function M.solid_theme(): { [string]: any }?
 	if M.see_through() then
 		return nil
@@ -50,9 +50,7 @@ function M.solid_theme(): { [string]: any }?
 		["zeron.island.tint"] = "$zeron.menu.solid",
 		["zeron.island.blur"] = 0,
 	}
-	if ui.theme.get("zeron.solid.card") ~= nil then
-		out["zeron.inset.bg"] = "$zeron.solid.card"
-		out["zeron.inset.edge"] = "$zeron.solid.edge"
+	if ui.theme.get("zeron.solid.secondary") ~= nil then
 		out["text.secondary"] = "$zeron.solid.secondary"
 		out["text.tertiary"] = "$zeron.solid.tertiary"
 	end
