@@ -612,11 +612,12 @@ end
 
 
 -- A row's inline link (a sentence's own Publish…, a plugin's Update): its
--- words in the small type, medium, the text's ink, underlined 4 under
--- the baseline and the accent under the pointer, with the app's focus ring
--- for the keys. The one look every row's link has (`detail_link`, and
--- `detail_action`'s links: Installed's Update). (Its words a rich span:
--- zgx paints a plain text's underline nowhere, zgx-asks/text-underline.)
+-- words in the small type, medium, the text's ink and the accent under the
+-- pointer (the row's own, as Installed's Update has always had it),
+-- underlined, with the app's focus ring for the keys. The one look every
+-- row's link has (`detail_link`, and `detail_action`'s links). (The line 2
+-- under the baseline: at 4 it falls on the bottom of the text's 16 line,
+-- where zgx clips it, zgx-asks/text-underline.)
 -- `role`: "link" to go somewhere (the default), "button" to do something.
 export type InlineLinkProps = {
 	label: string | Message | () -> string,
@@ -634,19 +635,17 @@ function M.InlineLink(props: InlineLinkProps): Node
 		disabled = props.disabled,
 		shrink = 0,
 		cursor = "pointer",
+		color = "$text.primary",
+		hover = { color = "$accent" },
 		focus = control.ring,
 		on_click = props.on_click,
-		ui.rich {
+		ui.text {
+			props.label,
 			text_size = "$font.size.sm",
 			line_height = "$font.line.sm",
 			weight = "$font.weight.medium",
-			color = "$text.primary",
-			ui.span {
-				props.label,
-				underline = true,
-				underline_offset = 4,
-				hover = { underline = true, color = "$accent" },
-			},
+			underline = true,
+			underline_offset = 2,
 		},
 	}
 end
