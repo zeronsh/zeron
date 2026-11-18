@@ -252,8 +252,98 @@ pub fn store_link(url: &str) -> Option<String> {
 /// direction overrides, invisible joiners), which what a listing shows may
 /// not (amendment 31).
 fn unseen(text: &str) -> bool {
+    text.chars().any(unseen_char)
+}
+
+/// Whether `c` is a control or format character (Unicode Cc or Cf): a
+/// newline, an escape sequence's ESC, a direction override, an invisible
+/// joiner.
+pub fn unseen_char(c: char) -> bool {
     use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
-    text.chars().any(|c| matches!(c.general_category(), GeneralCategory::Control | GeneralCategory::Format))
+    matches!(c.general_category(), GeneralCategory::Control | GeneralCategory::Format)
+}
+
+/// `text` for a terminal or a CI log, as one line: each control or format
+/// character written out (`\u{1b}`), so words from a plugin or the store
+/// can't start a line of their own, colour one, or reorder it.
+pub fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if unseen_char(c) {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Two of a package's paths that a disk folding names (macOS's, Windows')
+/// makes meet ([`clashes`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Clash<'a> {
+    /// One file there: `path`, met after `other`.
+    SameFile { path: &'a str, other: &'a str },
+    /// `file` is a file where `inside` needs a folder of that name; `path`
+    /// is whichever of them was met second.
+    Folder { file: &'a str, inside: &'a str, path: &'a str },
+}
+
+impl Clash<'_> {
+    /// The path met second: the one that clashes with what came before.
+    pub fn path(&self) -> &str {
+        match self {
+            Clash::SameFile { path, .. } | Clash::Folder { path, .. } => path,
+        }
+    }
+
+    /// In words naming both paths.
+    pub fn words(&self) -> String {
+        match self {
+            Clash::SameFile { path, other } => format!("{path:?} and {other:?} are one file on macOS and Windows"),
+            Clash::Folder { file, inside, .. } => format!("{file:?} is a file where {inside:?} needs a folder of that name on macOS and Windows"),
+        }
+    }
+}
+
+/// Every clash among `paths`, in their order, as a disk that folds names
+/// makes them ([`fold_path`]): two that are one file, or a file where
+/// another needs a folder of that name. `taken` (a manifest's name, a file
+/// the installer writes beside it) are there first, as files.
+pub fn clashes<'a>(paths: impl IntoIterator<Item = &'a str>, taken: &[&'a str]) -> Vec<Clash<'a>> {
+    // Each folded file: the path it was. Each folded folder: a path inside it.
+    let mut files: BTreeMap<String, &'a str> = taken.iter().map(|rel| (fold_path(rel), *rel)).collect();
+    let mut folders: BTreeMap<String, &'a str> = BTreeMap::new();
+    let mut found = Vec::new();
+    for rel in paths {
+        let folded = fold_path(rel);
+        if let Some(other) = files.get(&folded) {
+            found.push(Clash::SameFile { path: rel, other });
+            continue;
+        }
+        if let Some(inside) = folders.get(&folded) {
+            found.push(Clash::Folder { file: rel, inside, path: rel });
+            continue;
+        }
+        let parts: Vec<&str> = folded.split('/').collect();
+        let mut clashed = false;
+        for end in 1..parts.len() {
+            let folder = parts[..end].join("/");
+            if let Some(file) = files.get(&folder) {
+                found.push(Clash::Folder { file, inside: rel, path: rel });
+                clashed = true;
+                break;
+            }
+        }
+        if clashed {
+            continue;
+        }
+        for end in 1..parts.len() {
+            folders.entry(parts[..end].join("/")).or_insert(rel);
+        }
+        files.insert(folded, rel);
+    }
+    found
 }
 
 /// A path as macOS and Windows compare it: Unicode NFC, then
@@ -636,22 +726,10 @@ pub fn check(
         problems.push(Problem::new(TOO_LARGE, Some("manifest"), "Its manifest is over 256 KB"));
     }
     // Two paths that are one file on a Mac or a Windows machine (the
-    // manifest's own name among them), in code point order.
-    let mut folded: BTreeMap<String, &str> = BTreeMap::new();
-    folded.insert(fold_path(super::manifest::MANIFEST_FILE), super::manifest::MANIFEST_FILE);
-    for rel in files.keys() {
-        let key = fold_path(rel);
-        match folded.get(&key) {
-            Some(other) => problems.push(Problem::at(
-                BAD_LISTING,
-                Some("files"),
-                rel,
-                format!("\"{rel}\" and \"{other}\" are the same file on macOS and Windows"),
-            )),
-            None => {
-                folded.insert(key, rel);
-            }
-        }
+    // manifest's own name among them), or a file where another needs a
+    // folder of that name (amendment 42), in code point order.
+    for clash in clashes(files.keys().map(String::as_str), &[super::manifest::MANIFEST_FILE]) {
+        problems.push(Problem::at(BAD_LISTING, Some("files"), clash.path(), clash.words()));
     }
 
     // How big.
@@ -932,6 +1010,33 @@ pub(crate) mod tests {
         let mut manifest_too = files.clone();
         manifest_too.insert("ZERON-PLUGIN.JSON".into(), b"{}".to_vec());
         assert_eq!(rules(&base, &manifest_too), bad("files"));
+        // A file where another needs a folder of that name (amendment 42),
+        // either order, the manifest's name too; the path met second named.
+        for (a, b, at) in [("ui", "UI/x.luau", "ui"), ("Ui", "ui/x.luau", "ui/x.luau"), ("ZERON-PLUGIN.JSON/x.luau", "init2.luau", "ZERON-PLUGIN.JSON/x.luau")] {
+            let mut two = files.clone();
+            two.insert(a.into(), b"1".to_vec());
+            two.insert(b.into(), b"2".to_vec());
+            let problems = check(&Manifest::from_value(base.clone()).unwrap(), &two).0;
+            assert_eq!(problems.iter().map(|p| (p.rule, p.field, p.path.as_deref())).collect::<Vec<_>>(), [("bad_listing", Some("files"), Some(at))], "{a} {b}");
+            assert!(problems[0].words.contains("needs a folder of that name"), "{}", problems[0].words);
+        }
+        // A path that clashes records nothing: later paths are held only to
+        // what came before them without a problem (in code point order).
+        for (paths, clashing) in [
+            (["UI/a", "Ui", "ui/b"], &["Ui"][..]),
+            (["cafe\u{301}/a", "caf\u{e9}", "caf\u{e9}/b"], &["caf\u{e9}"]),
+            (["A", "A/B", "a/b/c"], &["A/B", "a/b/c"]),
+            (["A", "a", "a/x"], &["a", "a/x"]),
+        ] {
+            let found: Vec<String> = clashes(paths, &[]).iter().map(|c| c.path().to_owned()).collect();
+            assert_eq!(found, clashing, "{paths:?}");
+        }
+        // Names that only look alike are anyone's.
+        let mut alike = files.clone();
+        for rel in ["ui/a.luau", "ui2", "uix/b.luau"] {
+            alike.insert(rel.into(), b"1".to_vec());
+        }
+        assert_eq!(rules(&base, &alike), vec![]);
         // Sizes.
         let mut big = base.clone();
         big["x-notes"] = serde_json::json!("x".repeat(MAX_MANIFEST_BYTES));

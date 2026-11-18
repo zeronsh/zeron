@@ -954,10 +954,10 @@ What the store shows is what's there:
 
 ### Submitting
 
-Publishing is the person's act, in Zeron (Settings → Plugins → Yours → Publish…) or on the command line. An agent can check a plugin, but it can't submit one.
+Publishing is the person's act, in Zeron (Settings → Plugins → Yours → Publish…) or on the command line. An agent can check a plugin: no tool submits one, and Zeron never gives an agent the check's ticket that does. (An agent with a shell could still run `zeron plugin publish` as you, so tell it not to unless you mean it.)
 
 - **From your machine:** `zeron plugin publish <id>`, with Zeron running and signed in. Your plugin is signed with this device's key and sent with your session. `--dry-run` checks it without sending it.
-- **From CI:** use a **deploy key**. It's a key made on your device for one plugin you already have in the store (its first version comes from your machine), registered to your account; making one asks you to sign in again. Its secret (`zpk_…`) is shown once, and Zeron keeps no copy. A deploy key submits new versions of its plugin and reads their review state (`zeron plugin status`), nothing else: yank, unyank, withdraw and keys are yours, from your machine. So if one leaks, the most it can do is add a version that waits for review. Put it in your CI's secrets as `ZERON_DEPLOY_KEY`, then run `zeron plugin publish <folder>`. No Zeron needs to be running and nobody needs to be signed in: the package is signed with the deploy key, and so is the request that sends it.
+- **From CI:** use a **deploy key**. It's a key made on your device for one plugin you already have in the store (its first version comes from your machine), registered to your account; making one asks you to sign in again. Its secret (`zpk_…`) is shown once, and Zeron keeps no copy. A deploy key submits new versions of its plugin and reads their review state (`zeron plugin status`), nothing else: yank, unyank, withdraw and keys are yours, from your machine. So if one leaks, the most it can do is add a version: nobody else gets it before review, but your own devices are offered it as an update at once, as they are any version of yours in review (an update you still click; check one you didn't publish before taking it). Revoke a leaked key, and withdraw what it sent. Put it in your CI's secrets as `ZERON_DEPLOY_KEY`, then run `zeron plugin publish <folder>`. No Zeron needs to be running and nobody needs to be signed in: the package is signed with the deploy key, and so is the request that sends it.
 
   ```sh
   zeron plugin key create focus-timer --name "GitHub Actions"   # once, on your machine
@@ -988,6 +988,8 @@ Every refusal from the store, or from Zeron about the store, reads `"<word>: <wo
 |---|---|
 | `not_a_package`, `unsigned`, `tampered`, `bad_signature`, `too_big`, `bad_file` | the package itself is refused, as from a file |
 | `incompatible` | its `engines.zeron` leaves this Zeron out |
+| `paths_collide` | two of its paths are one file on macOS and Windows (case, Unicode spelling, trailing dots), a file sits where another needs a folder of that name, or a path is the manifest's name there: refused as it's read, on every disk |
+| `needs_person` | an agent tried to install over a plugin installed from the store: updating it (and taking its pre-releases) is the person's, in Zeron's window |
 | `other_signer`, `not_newer`, `different_plugin`, `up_to_date`, `no_source` | installing or updating, as from any source |
 | `store_unreachable` | the store didn't answer (offline, or busy): what's installed keeps running |
 | `not_in_store` | no such plugin or version, or not to you |
@@ -998,10 +1000,11 @@ Every refusal from the store, or from Zeron about the store, reads `"<word>: <wo
 | `review` | publishing needs the check Zeron's window or the CLI made, for the plugin as it was checked |
 | `changed` | the plugin changed since it was checked: check it again |
 | `not_published` | a deploy key is for a plugin you already have in the store |
-| `step_up_required` | making a deploy key needs a fresh sign-in |
+| `step_up_required` | making a deploy key needs a fresh sign-in begun for it (`StepUp {for: "deploy_key"}`): each key its own, and no other sign-in's |
 | `bad_package`, `id_reserved`, `not_semver`, `missing_readme`, `missing_listing`, `bad_listing`, `too_large` | the store's rules (`check_plugin`); `binary_file` and `no_notes` are warnings |
 | `needs_username`, `id_taken`, `version_exists`, `suspended` | the store refused the submission |
 | `key_not_allowed`, `key_revoked`, `key_expired`, `invalid_signature`, `unauthenticated` | the store refused the deploy key |
+| `unauthenticated`, `forbidden` | the store turned away who's asking (a 401 or 403 that said no more): for a signed-in person, sign in again |
 | `stale_request` | the clock is more than five minutes out |
 | `replayed_request`, `body_mismatch` | the request was already made, or changed on its way: send it again |
 | `too_many_keys`, `key_taken`, `invalid_name`, `invalid_expiry`, `invalid_proof` | making a deploy key |

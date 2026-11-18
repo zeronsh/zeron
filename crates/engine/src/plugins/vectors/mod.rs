@@ -292,8 +292,11 @@ fn packed(key: Option<&SigningKey>, manifest: &Value, files: &BTreeMap<String, V
 
 /// What a device makes of package `raw`: `{ok: true, id, version, key,
 /// hash, sha256, files}`, or `{ok: false, error}`. `error` is the refusal's
-/// word (`install::reason`); past the package's own checks, the manifest's:
-/// `bad_manifest` (one Zeron won't run), `bad_id`, `missing_entry`.
+/// word (`install::reason`), the first in this order: the package's own
+/// checks (`not_a_package`, `too_big`, `bad_file`, the signature's), then
+/// `paths_collide` (two paths one file on a folding disk, or the manifest's
+/// name), then the manifest's: `bad_manifest` (one Zeron won't run),
+/// `bad_id`, `missing_entry`.
 fn package_result(raw: Vec<u8>) -> Value {
     let sha256 = signing::sha256_hex(&raw);
     match install::parse(raw.clone()) {
@@ -354,6 +357,22 @@ fn package_cases() -> Value {
     ] {
         let mut with = good.clone();
         with.insert(bad.into(), b"x".to_vec());
+        cases.push((name.into(), packed(Some(&key), &manifest, &with)));
+    }
+    // Paths one disk or another makes one file (macOS's and Windows' fold
+    // names: listing.rs `fold_path`): refused as read, on every disk alike.
+    for (name, paths) in [
+        ("two paths that differ only in case", &["ui/Badge.luau", "ui/badge.luau"][..]),
+        ("one name in Unicode's two spellings (NFC, NFD)", &["caf\u{e9}.luau", "cafe\u{301}.luau"]),
+        ("a file and a folder that fold alike", &["ui", "UI/x.luau"]),
+        ("its manifest's name in capitals", &["Zeron-Plugin.json"]),
+        ("its manifest's name with a long s", &["zeron-plugin.j\u{17f}on"]),
+        ("its manifest's name as a folder", &["ZERON-PLUGIN.JSON/x.luau"]),
+    ] {
+        let mut with = good.clone();
+        for rel in paths {
+            with.insert((*rel).into(), b"x".to_vec());
+        }
         cases.push((name.into(), packed(Some(&key), &manifest, &with)));
     }
     let mut no_entry = good.clone();
@@ -679,11 +698,32 @@ fn listing_cases() -> Value {
         ("two folders differing in case", "shots/a.png", "Shots/A.png"),
         ("a path and the same with a trailing dot", "x.txt", "x.txt."),
         ("a file that is its manifest on a Mac", "ZERON-PLUGIN.JSON", "init2.luau"),
+        // (Amendment 42: a file where another needs a folder of that name.)
+        ("a file and a folder that fold alike", "ui", "UI/x.luau"),
+        ("a folder and a file that fold alike", "Ui", "ui/x.luau"),
+        ("its manifest's name as a folder on a Mac", "ZERON-PLUGIN.JSON/x.luau", "init2.luau"),
     ] {
         let mut two = files.clone();
         two.insert(a.into(), b"1".to_vec());
         two.insert(b.into(), b"2".to_vec());
         cases.push((name.into(), base.clone(), two));
+    }
+    // Three paths, in code point order: a path that clashes records nothing
+    // (no file, no folders), so a later one is held only to what came
+    // before it without a problem. The first two decide that: a folder, a
+    // file folding onto it (the clash), then a path inside that folder,
+    // which doesn't clash.
+    for (name, paths) in [
+        ("a file on a folder, then a path inside it", ["UI/a", "Ui", "ui/b"]),
+        ("a file on a folder in Unicode's other spelling, then a path inside it", ["cafe\u{301}/a", "caf\u{e9}", "caf\u{e9}/b"]),
+        ("a file, a path under it, a path deeper under it", ["A", "A/B", "a/b/c"]),
+        ("a file, the same file, a path under it", ["A", "a", "a/x"]),
+    ] {
+        let mut three = files.clone();
+        for rel in paths {
+            three.insert(rel.into(), b"1".to_vec());
+        }
+        cases.push((name.into(), base.clone(), three));
     }
     Value::Array(
         cases
@@ -962,7 +1002,7 @@ fn vectors_say_what_the_code_does() {
     let valid = &v["packages"][0]["result"];
     assert_eq!((valid["ok"].as_bool(), valid["key"].as_str()), (Some(true), Some(author().public().as_str())));
     let words: Vec<&str> = v["packages"].as_array().unwrap().iter().filter_map(|c| c["result"]["error"].as_str()).collect();
-    for word in ["not_a_package", "unsigned", "tampered", "bad_signature", "bad_file", "bad_manifest", "bad_id", "missing_entry"] {
+    for word in ["not_a_package", "unsigned", "tampered", "bad_signature", "bad_file", "paths_collide", "bad_manifest", "bad_id", "missing_entry"] {
         assert!(words.contains(&word), "{word} has a case");
     }
     let fractional = v["packages"].as_array().unwrap().iter().find(|c| c["name"] == "fractional settings").unwrap();
@@ -979,3 +1019,4 @@ fn vectors_say_what_the_code_does() {
         assert!(zeron_plugin_guard::commands::held_to_its_own_rules(program));
     }
 }
+

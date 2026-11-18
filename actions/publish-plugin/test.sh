@@ -77,6 +77,11 @@ cp "$work/good.tar.gz" "$work/www/other-file/$file"
 release hollow "$(manifest "$file" "$hollow_sha")"
 cp "$work/hollow.tar.gz" "$work/www/hollow/$file"
 release no-version '{"files": {}}'
+# Asked for the pinned version, the manifest names another (with its own
+# tarball, which would run): the pin must hold.
+moved="zeron-9.9.9-linux-$arch.tar.gz"
+release pin-moved "$(jq -cn --arg f "$moved" --arg s "$good_sha" '{version: "9.9.9", files: {($f): {sha256: $s}}}')"
+cp "$work/good.tar.gz" "$work/www/pin-moved/$moved"
 
 # ── The servers ─────────────────────────────────────────────────────────────
 # http and https on 127.0.0.1, both serving www/. Over https, /to-http/<path>
@@ -200,6 +205,18 @@ expect "a manifest naming another file than this machine's" 2 "Zeron $version ha
 never_ran "another file"
 expect "a tarball without zeron-engine" 2 "$file has no zeron-engine." \
   ZERON_RELEASES_URL="$http/hollow" ZERON_PLUGIN_PATH="$ok"
+expect "a pinned version whose manifest names another is refused" 2 "Zeron's release manifest for $version names version 9.9.9: not the version pinned." \
+  ZERON_RELEASES_URL="$http/pin-moved" ZERON_VERSION="$version" ZERON_PLUGIN_PATH="$ok"
+never_ran "the pin moved"
+expect "a pinned version and its sha256 run that command line" 0 "meets the store's rules." \
+  ZERON_RELEASES_URL="$http/good" ZERON_VERSION="$version" ZERON_SHA256="$good_sha" ZERON_PLUGIN_PATH="$ok"
+expect "the sha256 input in capitals is the same sha256" 0 "meets the store's rules." \
+  ZERON_RELEASES_URL="$http/good" ZERON_VERSION="$version" ZERON_SHA256="$(tr 'a-f' 'A-F' <<<"$good_sha")" ZERON_PLUGIN_PATH="$ok"
+expect "a tarball that isn't the pinned sha256 is never run (the manifest agreeing with it)" 2 "$file isn't the one pinned (the sha256 input)." \
+  ZERON_RELEASES_URL="$http/good" ZERON_VERSION="$version" ZERON_SHA256="$hollow_sha" ZERON_PLUGIN_PATH="$ok"
+never_ran "another sha256 pinned"
+expect "a sha256 input that isn't one" 2 "sha256 is the command line tarball's sha256: 64 hex digits." \
+  ZERON_RELEASES_URL="$http/good" ZERON_SHA256="abc" ZERON_PLUGIN_PATH="$ok"
 expect "a manifest that names no version" 2 "Zeron's release manifest names no version." \
   ZERON_RELEASES_URL="$http/no-version" ZERON_PLUGIN_PATH="$ok"
 expect "releases over plain http anywhere but this machine" 2 "Zeron's releases are fetched over https." \
@@ -215,5 +232,21 @@ expect "a version that isn't one is refused, never run as a command" 2 "zeron-ve
 [[ ! -e "$touch_target" ]] || { echo "FAIL the version ran as a command" >&2; exit 1; }
 expect "an empty version is refused" 2 "zeron-version is latest or a version like 0.4.0." \
   ZERON_RELEASES_URL="$http/good" ZERON_VERSION=" " ZERON_PLUGIN_PATH="$ok"
+
+# With a deploy key (made for the run; the store is a closed port here, so
+# nothing could be sent anyway).
+key="$(python3 -c 'import base64, hashlib; seed = bytes(range(32)); print("zpk_" + base64.urlsafe_b64encode(seed + hashlib.sha256(seed).digest()[:4]).decode().rstrip("="))')"
+offline="http://127.0.0.1:9"
+expect "a dry run with a key checks, signs and packs, and sends nothing" 0 "Not sent (--dry-run)." \
+  ZERON_RELEASES_URL="$http/good" ZERON_DEPLOY_KEY="$key" ZERON_DRY_RUN=true ZERON_EDGE_URL="$offline" ZERON_PLUGIN_PATH="$ok"
+for word in yes True 1 " true"; do
+  expect "dry-run \"$word\" is refused, never taken as false" 2 "dry-run is true or false." \
+    ZERON_RELEASES_URL="$http/good" ZERON_DEPLOY_KEY="$key" ZERON_DRY_RUN="$word" ZERON_EDGE_URL="$offline" ZERON_PLUGIN_PATH="$ok"
+  never_ran "dry-run $word"
+done
+expect "a path that reads like an option is a path" 2 "--help: there's no plugin folder there" \
+  ZERON_RELEASES_URL="$http/good" ZERON_PLUGIN_PATH="--help"
+expect "and so with a key" 2 "--dry-run: there's no plugin folder there" \
+  ZERON_RELEASES_URL="$http/good" ZERON_DEPLOY_KEY="$key" ZERON_EDGE_URL="$offline" ZERON_PLUGIN_PATH="--dry-run"
 
 echo "publish.sh: $passed of $passed cases as promised"

@@ -201,7 +201,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: INSTALL_PLUGIN,
-            description: "Install someone's Zeron plugin from the store (`store`, its id, from search_plugins; `version` for one other than the latest), a .zeron-plugin file (`path`) or a link (`url`): a link to a .zeron-plugin file, a GitHub release (…/releases/latest or …/releases/tag/<tag>, its .zeron-plugin asset), or a git repository (owner/repo, its GitHub page, …/tree/<branch>/<folder>, or any https git URL; `ref` a branch or tag, `folder` where the plugin is in it). Zeron checks the signature over every file first (and, from the store, that it's exactly what the store reviewed): an unsigned or changed plugin is refused, and so is one made for another version of Zeron (`incompatible`). Whatever you install waits for the person to allow it in Zeron's window, which shows who made it and what it asks: you can't allow it for them (`waiting` says so). Installing over a plugin already installed is an update, and only when the same author made both.",
+            description: "Install someone's Zeron plugin from the store (`store`, its id, from search_plugins; `version` for one other than the latest), a .zeron-plugin file (`path`) or a link (`url`): a link to a .zeron-plugin file, a GitHub release (…/releases/latest or …/releases/tag/<tag>, its .zeron-plugin asset), or a git repository (owner/repo, its GitHub page, …/tree/<branch>/<folder>, or any https git URL; `ref` a branch or tag, `folder` where the plugin is in it). Zeron checks the signature over every file first (and, from the store, that it's exactly what the store reviewed): an unsigned or changed plugin is refused, and so is one made for another version of Zeron (`incompatible`). Whatever you install waits for the person to allow it in Zeron's window, which shows who made it and what it asks: you can't allow it for them (`waiting` says so). Installing over a plugin already installed is an update, and only when the same author made both; one installed from the store you can't update or move to its pre-releases (`needs_person`): that's the person's, in Zeron's window, and check_plugin_updates tells them there's one.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -265,7 +265,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: CHECK_PLUGIN,
-            description: "Check one of the person's own plugins (made on this device, by its id) against the store's rules before it's published: every problem, each with a `rule` (missing_readme, missing_listing, bad_listing, not_semver, id_reserved, bad_package, too_large), the `field` or `path` it's about and words to fix it by, plus warnings that don't block it (binary files, no CHANGELOG.md section for its version), its listing as the store will show it, and this version's notes. Fix and check again until `ok`. Submitting it to the store is the person's: they publish it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish <id>`; you can't submit it for them. The store needs README.md (its page), a one-line `description`, an `icon` (an SVG file in it), one or two `categories`, and a strict semver `version`; see the guide's \"Publishing to the store\".",
+            description: "Check one of the person's own plugins (made on this device, by its id) against the store's rules before it's published: every problem, each with a `rule` (missing_readme, missing_listing, bad_listing, not_semver, id_reserved, bad_package, too_large), the `field` or `path` it's about and words to fix it by, plus warnings that don't block it (binary files, no CHANGELOG.md section for its version), its listing as the store will show it, and this version's notes. Fix and check again until `ok`. Submitting it to the store is the person's: they publish it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish <id>`. No tool here submits it and Zeron never gives you what does (the check's ticket), so don't run `zeron plugin publish` yourself unless they ask you to. The store needs README.md (its page), a one-line `description`, an `icon` (an SVG file in it), one or two `categories`, and a strict semver `version`; see the guide's \"Publishing to the store\".",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -821,7 +821,7 @@ impl Tools {
         }
         reply["next"] = json!(if reply["ok"] == json!(true) {
             format!(
-                "It meets the store's rules. Publishing is the person's: they submit it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish {}`; you can't submit it for them. Every version is reviewed before others see it.",
+                "It meets the store's rules. Publishing is the person's: they submit it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish {}`. No tool here submits it, and Zeron never gives you what does: don't run that command yourself unless they ask you to. Every version is reviewed before others see it.",
                 id.trim()
             )
         } else {
@@ -1076,7 +1076,8 @@ mod tests {
         let checked = tools.call(CHECK_PLUGIN, json!({ "id": "focus" })).await.unwrap();
         assert_eq!(checked["ok"], true);
         assert!(checked.get("ticket").is_none(), "an agent never holds what submits it");
-        assert!(checked["next"].as_str().unwrap().contains("you can't submit it for them"));
+        assert!(checked["next"].as_str().unwrap().contains("No tool here submits it"));
+        assert!(!checked["next"].as_str().unwrap().contains("can't submit"), "(it says what's enforced, no more)");
         let rough = tools.call(CHECK_PLUGIN, json!({ "id": "rough" })).await.unwrap();
         assert_eq!(rough["problems"][0]["rule"], "not_semver");
         assert!(rough["next"].as_str().unwrap().contains("check_plugin again"));

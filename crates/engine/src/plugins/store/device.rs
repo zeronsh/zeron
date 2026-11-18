@@ -147,6 +147,8 @@ struct Candidate {
     permissions: Vec<String>,
     allowed: Value,
     prerelease: bool,
+    /// The key that signed the version installed.
+    key: Option<String>,
 }
 
 /// `{ok: false, error, message}` from a failure's `"<word>: <words>"`.
@@ -160,6 +162,36 @@ fn not_ok(error: &str) -> Value {
 /// overrides, invisible joiners): never kept from the store's words.
 fn invisible(c: char) -> bool {
     matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}')
+}
+
+/// A store card or plugin page as this device passes it on: its one-line
+/// words (name, summary, description, license, the author's username,
+/// categories, keywords) without control or format characters, and its
+/// versions' notes without any but line breaks. The edge refuses them in a
+/// listing; a hostile or broken answer still can't draw them in a dialog.
+fn clean_card(card: &mut Value) {
+    let one_line = |text: &str| text.chars().filter(|c| !listing::unseen_char(*c)).collect::<String>();
+    let Some(object) = card.as_object_mut() else { return };
+    for key in ["name", "summary", "description", "license"] {
+        if let Some(Value::String(text)) = object.get_mut(key) {
+            *text = one_line(text);
+        }
+    }
+    if let Some(Value::String(name)) = object.get_mut("author").and_then(|a| a.get_mut("username")) {
+        *name = one_line(name);
+    }
+    for key in ["categories", "keywords"] {
+        for item in object.get_mut(key).and_then(Value::as_array_mut).into_iter().flatten() {
+            if let Value::String(text) = item {
+                *text = one_line(text);
+            }
+        }
+    }
+    for version in object.get_mut("versions").and_then(Value::as_array_mut).into_iter().flatten() {
+        if let Some(Value::String(text)) = version.get_mut("notes") {
+            *text = text.chars().filter(|c| *c == '\n' || !listing::unseen_char(*c)).collect();
+        }
+    }
 }
 
 /// Words from the store, made safe to keep and show: one line, no control
@@ -251,6 +283,7 @@ impl Plugins {
                 self.rescan().await;
                 if let Some(items) = reply.get_mut("items").and_then(Value::as_array_mut) {
                     for item in items {
+                        clean_card(item);
                         if let Some(installed) = item["id"].as_str().and_then(|id| self.installed_here(id)) {
                             item["installed"] = installed;
                         }
@@ -267,6 +300,7 @@ impl Plugins {
                     let (versions, _) = client.versions(&p.id, &caller).await.map_err(failed)?;
                     reply["versions"] = versions.get("versions").cloned().unwrap_or(json!([]));
                 }
+                clean_card(&mut reply);
                 let zeron = match p.for_zeron.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
                     Some(v) => Version::parse(v).map_err(failed)?,
                     None => version::zeron(),
@@ -359,7 +393,11 @@ impl Plugins {
             }
             methods::STORE_MY_PLUGINS => {
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
-                RpcReply::value(&client.my_plugins(&caller).await.map_err(failed)?)
+                let mut reply = client.my_plugins(&caller).await.map_err(failed)?;
+                for plugin in reply.get_mut("plugins").and_then(Value::as_array_mut).into_iter().flatten() {
+                    clean_card(plugin);
+                }
+                RpcReply::value(&reply)
             }
             methods::STORE_VERSION_ACTION => {
                 let p: VersionActionParams = parse_params(params)?;
@@ -407,6 +445,9 @@ impl Plugins {
             methods::REVOKE_DEPLOY_KEY => {
                 let p: RevokeKeyParams = parse_params(params)?;
                 manifest::check_id(&p.id).map_err(failed)?;
+                if !super::deploy_key::valid_public(p.key.trim()) {
+                    return Err(failed("That isn't a deploy key: give its key as `zeron plugin key list` shows it"));
+                }
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
                 client.revoke_key(&p.id, p.key.trim(), &caller).await.map_err(failed)?;
                 RpcReply::value(&json!({ "revoked": p.key.trim() }))
@@ -510,9 +551,11 @@ impl Plugins {
             Ok(_) => return not_published(&p.id),
             Err(error) => return not_ok(&error),
         }
-        let step_up = lock(&self.inner.step_up).clone().and_then(|f| f());
+        // A step-up begun for this (`StepUp {for: "deploy_key"}`), used up
+        // here: a sign-in's ticket, or one already spent, isn't one.
+        let step_up = lock(&self.inner.deploy_key_step_up).clone().and_then(|f| f());
         let Some(step_up) = step_up else {
-            return not_ok(&failure("step_up_required", "Making a deploy key needs a fresh sign-in"));
+            return not_ok(&failure("step_up_required", "Making a deploy key needs a fresh sign-in for it"));
         };
         let key = match DeployKey::generate() {
             Ok(key) => key,
@@ -579,6 +622,13 @@ impl Plugins {
     /// record, then installed as any package (the same consent window).
     pub(in crate::plugins) async fn install_from_store(&self, id: &str, version: Option<&str>, reinstalling: bool) -> Result<RpcReply, RpcError> {
         let id = id.trim();
+        // (Before fetching anything: `install_package` refuses it too.)
+        if !reinstalling && !Self::by_person() {
+            self.rescan().await;
+            if let Some(entry) = self.entry(id).filter(|e| !e.item.builtin && !e.item.own) {
+                return Err(Self::needs_person(&entry.item.name));
+            }
+        }
         let (package, source) = self.fetch_from_store(id, version, reinstalling).await?;
         let reply = self.install_package(package, source).await?;
         // Counted once per account (the edge's to say): a new install here.
@@ -635,7 +685,7 @@ impl Plugins {
             // plugins in the store say it, for your devices alone.
             None => self.own_record(&client, id, wanted, installed).await.map_err(failed)?,
         };
-        let raw = client.package(id, &version, &caller).await.map_err(failed)?;
+        let raw = client.package(id, &version, &caller, record.bytes).await.map_err(failed)?;
         let (id_owned, version_owned) = (id.to_owned(), version.clone());
         let (package, store) = tokio::task::spawn_blocking(move || super::verify(raw, &id_owned, &version_owned, &record, &publisher))
             .await
@@ -701,6 +751,7 @@ impl Plugins {
                     permissions: e.item.permissions.clone(),
                     allowed,
                     prerelease: prerelease.contains(&e.item.id),
+                    key: e.key().map(str::to_owned),
                 })
             })
             .collect();
@@ -747,12 +798,18 @@ impl Plugins {
                 }
             }
         }
+        // One block per plugin, for the version installed (the first the
+        // store says: a hostile answer repeating one costs nothing more).
+        let mut blocked: BTreeMap<&str, (&Candidate, String)> = BTreeMap::new();
         for block in &blocks {
             if let Some(c) = by_id.get(block.id.as_str())
                 && same_version(&block.version, &c.version)
             {
-                self.block(c, &plain(&block.reason, 500)).await;
+                blocked.entry(c.id.as_str()).or_insert_with(|| (*c, plain(&block.reason, 500)));
             }
+        }
+        if !blocked.is_empty() {
+            self.block(blocked.into_values().collect()).await;
         }
         let plugins_dir = self.inner.plugins_dir.clone();
         let mut updates = Vec::new();
@@ -795,7 +852,7 @@ impl Plugins {
             let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()) };
             (package, store)
         } else {
-            let raw = client.package(&c.id, &offer.version, caller).await?;
+            let raw = client.package(&c.id, &offer.version, caller, record.bytes).await?;
             tokio::task::spawn_blocking(move || super::verify(raw, &id, &version, &record, &publisher))
                 .await
                 .map_err(|_| "Couldn't read it".to_string())??
@@ -819,7 +876,9 @@ impl Plugins {
             refused,
             source: Some(Source { kind: STORE.into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: Some(store) }),
             digest_diff: diff.grew().then(|| diff.to_value()),
-            new_key: false,
+            // (The store's record decides whose it is: shown, so the update
+            // can say its signing key changed.)
+            new_key: c.key.as_deref().is_some_and(|key| key != package.key),
             new_owner,
             in_review: offer.in_review,
             notes: notes(&offer.notes, listing::MAX_NOTES_BYTES),
@@ -831,10 +890,18 @@ impl Plugins {
 
     /// `c`'s installed version is blocked by the store: turned off, the
     /// reason kept, and you're told. Not again once you turned it back on.
-    async fn block(&self, c: &Candidate, reason: &str) {
+    /// Turn off each blocked version (with the store's reason), after one
+    /// rescan for all of them.
+    async fn block(&self, blocked: Vec<(&Candidate, String)>) {
+        self.rescan().await;
+        for (c, reason) in blocked {
+            self.block_one(c, &reason);
+        }
+    }
+
+    fn block_one(&self, c: &Candidate, reason: &str) {
         // Still the version the store blocked (not one installed while the
         // check was out).
-        self.rescan().await;
         if self.entry(&c.id).is_none_or(|e| e.item.version != c.version || e.item.hash != c.hash) {
             return;
         }

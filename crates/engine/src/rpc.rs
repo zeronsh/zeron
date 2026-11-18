@@ -3310,9 +3310,21 @@ impl RpcService for AuthRpc {
             // refused before here): a fresh interactive sign-in whose ticket
             // stays in the engine, then the deletion it allows (R16).
             methods::STEP_UP => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default, rename = "for")]
+                    action: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                let action = match p.action.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+                    None => None,
+                    Some(word) => Some(crate::StepUpFor::parse(word).ok_or_else(|| {
+                        RpcError::Failed(format!("A step-up is for deploy_key, or for nothing in particular (not \"{word}\")"))
+                    })?),
+                };
                 let url = self
                     .auth
-                    .start_step_up()
+                    .start_step_up(action)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "url": url }))

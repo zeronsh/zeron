@@ -33,8 +33,13 @@ signed with the plugin's deploy key. It installs Zeron's Linux command line
 
 A deploy key can submit a new version of its plugin and read its review
 state, nothing else: yanking, withdrawing and managing keys are yours, from
-your machine. If one leaks, the most it can do is add a version that waits
-for review; revoke it (`zeron plugin key revoke <plugin-id> <key>`).
+your machine. If one leaks, the most it can do is add a version. Nobody
+else gets that version before review, but your own devices (signed in to
+your account) are offered it as an update at once, as they are any version
+of yours in review: an update you'd still have to click, so check an
+update you didn't publish before taking it. Revoke a leaked key at once
+(`zeron plugin key revoke <plugin-id> <key>`), and withdraw what it sent
+(`zeron plugin withdraw <plugin-id> <version>`).
 
 ## Runners
 
@@ -70,8 +75,22 @@ Bump `version` in `zeron-plugin.json` (and add its section to
 |---|---|---|
 | `key` | none | The deploy key's secret. Without it the plugin is only checked, so a pull request from a fork, which gets no secrets, still runs the store's checks. |
 | `path` | `.` | The plugin's folder: the one with `zeron-plugin.json`. |
-| `dry-run` | `false` | Check, sign and pack the plugin, but don't submit it. |
-| `zeron-version` | `latest` | The Zeron release whose command line runs. |
+| `dry-run` | `false` | `true`: check, sign and pack the plugin, but don't submit it. Only `true` or `false`: anything else (`yes`, `True`, `1`) fails the step rather than submit. |
+| `zeron-version` | `latest` | The Zeron release whose command line runs. `latest` follows each new release; a version (`0.4.0`) runs that release, and the step fails if its manifest names another. |
+| `sha256` | none | The sha256 of that release's command line tarball for the runner (`zeron-<version>-linux-x86_64.tar.gz` or `-aarch64`, from the release's `manifest-<version>.json`). With a pinned `zeron-version`, the step runs exactly that command line or fails. |
+
+The action's tag pins the script; the command line it runs is fetched from
+Zeron's releases, checked against the release's sha256. With
+`zeron-version: latest` that is whichever release is newest when the job
+runs. To hold the step still, the command line included, pin both:
+
+```yaml
+- uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
+  with:
+    key: ${{ secrets.ZERON_DEPLOY_KEY }}
+    zeron-version: 0.4.0
+    sha256: <the tarball's sha256 for your runner>
+```
 
 ## When it fails
 
