@@ -1,0 +1,6 @@
+{
+	"title": "A rich paragraph that must break at a span's boundary",
+	"width": 800,
+	"height": 400,
+	"app_id": "rich-span-boundary-break"
+}
