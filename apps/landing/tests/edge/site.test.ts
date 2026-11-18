@@ -249,6 +249,9 @@ describe("the catalog, from the edge's real listing", () => {
       expect(body, path).toContain('href="/plugins/pr-review"');
       expect(body, path).not.toContain('href="/plugins/theme-sync"');
     }
+    // The count is the edge's total (amendment 38): exact, the public list's.
+    expect((await new Browser().get("/plugins/all")).body).toMatch(/All plugins<span class="title-count"> · \d+<\/span>/);
+    expect((await new Browser().get("/plugins/all?q=zzzzqqq")).body).toContain('<span class="title-count"> · 0</span>');
     const git = await new Browser().get("/plugins/all?category=git");
     expect(git.body).toContain('href="/plugins/pr-review"');
     expect(git.body).not.toContain('href="/plugins/focus-timer"');
@@ -422,6 +425,10 @@ describe("reserved ids", () => {
     const list = await grace.get("/admin/reservations");
     expect(list.body).toContain("pomodoro-pro");
     expect(list.body).toContain("@adawren");
+    // The site's own page words: the edge refuses them (400 site_id), and the page says so.
+    expect((await grace.post("/admin/reservations", { csrf, id: "publishing", note: "Ours." })).status).toBe(303);
+    expect(grace.flash()).toBe("site_id");
+    expect((await grace.get("/admin/reservations")).body).not.toMatch(/<code[^>]*>publishing<\/code>/);
     const freed = await grace.post("/admin/reservations/pomodoro-pro", { csrf });
     expect(freed.status).toBe(303);
     expect(grace.flash()).toBe("reservation_released");

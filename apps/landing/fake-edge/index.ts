@@ -668,6 +668,8 @@ function paged<T>(all: T[], url: URL, field: string, limit = 20): Record<string,
   const at = (n: number) => btoa(String(n)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   return {
     [field]: all.slice(start, start + limit),
+    // (Every paged list's count, beside its items: amendment 38.)
+    total: all.length,
     ...(start + limit < all.length ? { next_cursor: at(start + limit) } : {}),
     ...(start > 0 ? { prev_cursor: at(Math.max(0, start - limit)) } : {}),
   };

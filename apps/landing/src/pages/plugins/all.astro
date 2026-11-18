@@ -39,9 +39,10 @@ const categoryName = (id: string) => CATEGORIES.find((c) => c.id === id)?.label 
 const items = page.ok ? page.data.items : [];
 const next = page.ok ? pageHref(state, page.data.next_cursor) : null;
 const previous = page.ok ? (page.data.prev_cursor ? pageHref(state, page.data.prev_cursor, -1) : state.cursor ? catalogHref({ ...state, cursor: null, page: null }) : null) : null;
-// How many the query matches (amendment 38's total; until the edge sends
-// it, only what one whole page says exactly), and which of them this page is.
-const total = page.ok ? (page.data.total ?? (!state.cursor && !page.data.next_cursor ? items.length : undefined)) : undefined;
+// How many the query matches (amendment 38's total: this page's own, so a
+// cached later page may say one less for a minute after a change), and
+// which of them this page is.
+const total = page.ok ? page.data.total : undefined;
 const shown = page.ok ? range(state, items.length) : null;
 
 /**

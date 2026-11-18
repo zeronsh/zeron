@@ -169,10 +169,11 @@ export interface PluginDetail extends PluginCard {
 export interface CatalogPage {
   items: PluginCard[];
   /**
-   * How many plugins the query matches, every page of them (amendment 38).
-   * (Read when present until the edge sends it, then always.)
+   * How many plugins the query matches, every page of them (amendment 38;
+   * the public list's count, whoever asks). Cached with its page, so two
+   * pages of one list may differ for a minute: each page says its own.
    */
-  total?: number;
+  total: number;
   next_cursor?: string;
   /** The cursor back to the page before this one, when there is one. */
   prev_cursor?: string;
@@ -236,6 +237,8 @@ export interface QueueItem {
 
 export interface QueuePage {
   items: QueueItem[];
+  /** How many the queue holds, every page of it (amendment 38). */
+  total: number;
   next_cursor?: string;
   prev_cursor?: string;
 }
@@ -322,6 +325,8 @@ export interface Report {
 
 export interface ReportsPage {
   reports: Report[];
+  /** How many reports in this state, every page of them (amendment 38). */
+  total: number;
   next_cursor?: string;
   prev_cursor?: string;
 }
@@ -348,6 +353,8 @@ export interface AuditEntry {
 
 export interface AuditPage {
   entries: AuditEntry[];
+  /** How many entries (for one plugin, when asked), every page of them (amendment 38). */
+  total: number;
   next_cursor?: string;
   prev_cursor?: string;
 }
