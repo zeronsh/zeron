@@ -494,6 +494,21 @@ fn name_mark(text: &str) -> Option<String> {
     if let Some(word) = MARK_WORDS.iter().find(|word| readings.iter().any(|reading| spelled(reading, word))) {
         return Some((*word).to_owned());
     }
+    // A word that alone isn't the mark, directly before a word for the
+    // plugin (a space allowed): "认证插件", "공인 플러그인", "公認プラグイン".
+    let cjk_plugin_words: Vec<Vec<char>> = PLUGIN_WORDS.iter().filter(|(_, substring, _)| *substring).flat_map(|(_, _, words)| words.iter().map(|w| folded_word(w))).collect();
+    for word in AMBIGUOUS {
+        let wanted = folded_word(word);
+        let before_plugin = readings.iter().any(|reading| {
+            spans(reading, &wanted, true).into_iter().any(|(_, end)| {
+                let rest: Vec<char> = reading[end..].iter().copied().skip_while(|c| separator(*c)).collect();
+                cjk_plugin_words.iter().any(|p| rest.starts_with(p))
+            })
+        });
+        if before_plugin {
+            return Some((*word).to_owned());
+        }
+    }
     // In the store's other languages.
     let kana = has_kana(text);
     OTHER_LANGUAGES.iter().flat_map(|(_, substring, words)| words.iter().map(move |w| (*substring, w))).find_map(|(substring, word)| {
@@ -1183,6 +1198,26 @@ mod tests {
             "\u{41f}\u{43e}\u{43a}\u{430}\u{437}\u{44b}\u{432}\u{430}\u{435}\u{442} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e} \u{434}\u{43e}\u{43a}\u{443}\u{43c}\u{435}\u{43d}\u{442}\u{430}\u{446}\u{438}\u{44e} Rust.",
         ] {
             assert_eq!(mark_claim(text, false), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_identity_lane_s_fifth_probe() {
+        for name in ["Built-in Zeron Git", "Built in Zeron", "Ships with Zeron", "Bundled with Zeron", "Included in Zeron", "Comes with Zeron", "Native to Zeron", "Default in Zeron"] {
+            assert!(claims_zeron_in_name(name).is_some(), "{name}");
+        }
+        for name in ["\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}", "\u{4f7f}\u{7528}Zeron\u{7684}Git"] {
+            assert_eq!(claims_zeron_in_name(name), None, "{name}");
+        }
+        for name in [
+            "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{439}", "\u{434}\u{43b}\u{44f} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{445}",
+            "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e}", "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}", "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{445}",
+            "Verifi\u{441}ado", "0ficial", "\u{516c}\u{8a8d}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{acf5}\u{c778} \u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}",
+        ] {
+            assert!(mark_claim(name, true).is_some(), "{name}");
+        }
+        for name in ["\u{6570}\u{5b66}\u{516c}\u{5f0f}", "\u{516c}\u{5f0f}\u{7f16}\u{8f91}\u{5668}", "\u{c218}\u{d559} \u{acf5}\u{c2dd}", "\u{acf5}\u{c2dd} \u{acc4}\u{c0b0}\u{ae30}"] {
+            assert_eq!(mark_claim(name, true), None, "{name}");
         }
     }
 
