@@ -172,6 +172,60 @@ test("the head's one slot is the same primary button in every state, its words s
 	said("Turned off")
 end)
 
+test("the name's column is one width in every state of the head, at 1000 and at 760", function()
+	for _, width in { 1000, 760 } do
+		local app = page("Focus timer")
+		app:resize(width, 900)
+		settle(app)
+		local function name_w(): number
+			return tonumber((app:tree('#store-header >> role:heading'):match(" [%d.]+,[%d.]+ ([%d.]+)x"))) or 0
+		end
+		local widths = { name_w() }
+		app:click('#store-slot >> role:button "Install"')
+		app:command("store.install_done")
+		settle(app)
+		table.insert(widths, name_w())
+		app:command("store.allowed")
+		settle(app)
+		table.insert(widths, name_w())
+		app:command("store.update_found")
+		settle(app)
+		table.insert(widths, name_w())
+		app:command("store.blocked")
+		settle(app)
+		table.insert(widths, name_w())
+		for i = 2, #widths do
+			expect(`{width}: {widths[i]}`).to_be(`{width}: {widths[1]}`)
+		end
+	end
+end)
+
+test("Show more opens a 64 KB note whole in place, and the same control, Show less, folds it back", function()
+	local app = page("Focus timer")
+	app:set_state("plugins_view", "store:extremes")
+	app:wait("#store-header", { timeout_ms = 3000 })
+	settle(app)
+	app:scroll("#fixture-scroll", 1e6)
+	settle(app)
+	local more = '.store-notes-more'
+	local function notes_h(): number
+		return tonumber((app:tree(".store-notes[1]"):match(" [%d.]+,[%-%d.]+ [%d.]+x([%d.]+)"))) or 0
+	end
+	local folded = notes_h()
+	expect(app:tree(`{more}[1]`)).to_contain("Show more")
+	app:click(`{more}[1]`)
+	settle(app)
+	expect(app:tree(`{more}[1]`)).to_contain("Show less")
+	expect(notes_h() > 10 * folded).to_be(true)
+	-- (Under the whole of it now: the page's foot.)
+	app:scroll("#fixture-scroll", 1e6)
+	settle(app)
+	app:click(`{more}[1]`)
+	settle(app)
+	expect(app:tree(`{more}[1]`)).to_contain("Show more")
+	expect(notes_h()).to_be(folded)
+end)
+
 test("an install that fails says why, and Install is there to try again", function()
 	local app = page("Focus timer")
 	app:click('#store-offer >> role:button "Install"')

@@ -201,8 +201,9 @@ local function listing(id: string): Node
 			ui.row { w_full = true, justify = "end", ds.Button { "Install", tone = "primary" } },
 			-- Its README as a document under the page's title (ds/markdown's
 			-- `heading_step`, `drop_title`, `picture_radius`): its `# Name`
-			-- not drawn again, its headings a level down, none larger than
-			-- the page's name.
+			-- not drawn again, its headings a level down in size, none larger
+			-- than the page's name, each with its own level's room above (its
+			-- `## Settings` 12 under the words before it, as in a chat reply).
 			ds.Settings.Section {
 				title = "About",
 				ds.Settings.Group {

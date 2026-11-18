@@ -137,7 +137,8 @@ local function said(node: Node): Node
 end
 
 -- A version's notes (its changelog, the store takes 64 KB of it), kept to
--- `lines` lines of the small prose while folded, their foot fading, with
+-- `lines` lines of the small prose while folded (the latest's: 10 lines of
+-- 20, a 200 pt clamp, which shows eight list items at their 26 pitch), their foot fading, with
 -- Show more under them when there's more; open, the whole of it, and Show
 -- less. Folded, only its start is drawn: enough for the lines it shows,
 -- each piece ending at a line's end, so a long one costs what shows. One
@@ -217,7 +218,8 @@ local Notes = ui.component(function(props: { text: () -> string, lines: number }
 					truncate = true,
 					text_size = "$zeron.prose.small.size",
 					line_height = "$zeron.prose.small.line",
-					color = "$text.secondary",
+					-- (The notes' own ink: the latest's are the same words.)
+					color = "$text.primary",
 				}
 			end
 			return Markdown { text = props.text, small = true, foreign = true }
@@ -530,12 +532,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			color = "$text.secondary",
 			-- (There: the check, the small type's glyph.)
 			if there then ds.Icon { name = "check-circle", size = 14, aria_hidden = true } else nil,
+			-- (One line as short as its state; longer, a translation's or a
+			-- device's name, it wraps inside the slot, right-aligned.)
 			ui.text {
 				said,
 				min_w = 0,
 				shrink = 1,
-				lines = 1,
-				truncate = true,
+				wrap = true,
+				align = "right",
 				text_size = "$font.size.sm",
 				line_height = "$font.line.sm",
 			},
@@ -543,19 +547,23 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	end
 	-- The slot at the head's right: the button, its centre on the name's
 	-- first line, and the line under it, both ending on the content edge;
-	-- the line in the button's place when there's none. No wider than a
-	-- row's control, so a long device name ends in "…" there.
+	-- the line in the button's place when there's none. Its room is a row's
+	-- control's, `zeron.settings.control`, in every state, so the name's
+	-- column is one width for a window's width whatever the state (or the
+	-- device's name in it) and never re-wraps as one changes to the next.
+	local SLOT = ui.theme.get("zeron.settings.control") :: number?
 	local function slot(kind: string): Node
 		local button = action(kind)
 		local line = state_line(kind)
 		local top = button or line
 		if not top then
-			return ui.div {}
+			return ui.div { class = "store-slot-room", w = SLOT, shrink = 0 }
 		end
 		return ui.column {
 			id = "store-slot",
+			class = "store-slot-room",
+			w = SLOT,
 			shrink = 0,
-			max_w = ui.theme.get("zeron.settings.control") :: number?,
 			items = "end",
 			gap = "$space.1",
 			ui.row { min_w = 0, max_w = "100%", min_h = ui.theme.get("font.line.xl") :: number?, items = "center", top },
@@ -957,7 +965,9 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	end
 
 	-- Its screenshots, each opening the set in the lightbox: 16:10, with
-	-- the cards' corner, the strip's first at the cards' edge. Decided by how
+	-- the cards' own corner (Settings.Group's, `$radius.xl`): they stand on
+	-- the cards' edges as the cards' peers. (A README's pictures, 16 inside
+	-- a card, keep the smaller corner concentric there.) Decided by how
 	-- many: one fills the column (no taller than a reply's picture,
 	-- `zeron.prose.picture.h`, 420); two share it, 12 apart; three or more
 	-- show two whole and the third at the column's end, to say there are
@@ -973,7 +983,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			return ui.div {}
 		end
 		local gap = (ui.theme.get("space.3") :: number?) or 12
-		local radius = (ui.theme.get("radius.lg") :: number?) or 12
+		local radius = (ui.theme.get("radius.xl") :: number?) or 12
 		local function items(): { any }
 			local out = {}
 			for _, path in list do
@@ -992,7 +1002,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				return if src == false then "\0none" else (src or "")
 			end, function(src: string): Node
 				if src == "" then
-					return ui.div { w_full = true, h_full = true, rounded = "$radius.lg", overflow = "hidden", ds.Skeleton { fill = true } }
+					return ui.div { w_full = true, h_full = true, rounded = "$radius.xl", overflow = "hidden", ds.Skeleton { fill = true } }
 				elseif src == "\0none" then
 					return ui.div {}
 				end
@@ -1009,11 +1019,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					radius = radius,
 					w_full = true,
 					h_full = true,
-					rounded = "$radius.lg",
+					rounded = "$radius.xl",
 					ui.overlay {
 						w_full = true,
 						h_full = true,
-						rounded = "$radius.lg",
+						rounded = "$radius.xl",
 						overflow = "hidden",
 						border = 1,
 						border_color = "$border",

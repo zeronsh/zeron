@@ -131,9 +131,10 @@ export type Props = {
 	-- chat, a file, a picture, a skill), whatever its target says.
 	foreign: boolean?,
 	-- A document shown under a page's own title (a store plugin's README):
-	-- its headings drawn `heading_step` levels down, its `#` as a `##` is
-	-- (and said so to assistive technology), so none outweighs the page's
-	-- title; the third level's size is the least.
+	-- its headings drawn `heading_step` levels down in size, its `#` as a
+	-- `##` is (and said so to assistive technology), so none outweighs the
+	-- page's title; the third level's size is the least. The room above
+	-- each stays its own level's, so its sections group as written.
 	heading_step: number?,
 	-- Handed the words of a top-level heading that opens the text: `true`
 	-- leaves it out (a README's `# Name`, on a page that has just said the
@@ -1443,8 +1444,10 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			letter_spacing = if level == 1 then -0.3 else nil,
 			color = ink,
 			-- More room above than the blocks keep, less below: a heading
-			-- belongs to what follows it.
-			pt = if level < 3 then "$space.3" else "$space.1",
+			-- belongs to what follows it. (The room is its own level's, as
+			-- written: stepped down, a section's heading still opens a
+			-- section; only its size steps.)
+			pt = if b.l < 3 then "$space.3" else "$space.1",
 			mb = ui.raw(-6, "a heading sits closer to what it heads"),
 			class = "md-heading",
 		}, ctx)
