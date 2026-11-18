@@ -1,0 +1,44 @@
+name: Plugin store end to end
+
+# Called by ci.yml when the store's code changes on either side: the edge
+# (edge/), the engine's plugin and sign-in code, the CLI, the shared data
+# file, or this harness. scripts/plugin-store-e2e/run.sh runs the edge worker
+# locally (its bundle in Miniflare, the store's D1 migrations, local R2, a
+# WorkOS fake) and real `zeron headless` engines and the real CLI against it:
+# publish, review, install, update, deploy keys, takedown, transfer and the
+# refusals. Under a minute once built; nothing leaves the runner.
+on:
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  store-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          # Its own key: it builds `zeron` and the engine's tests, not core's graph.
+          rust-cache: store-e2e
+          save-rust-cache: 'true'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      - name: The store, end to end (engine, CLI and the edge worker)
+        run: scripts/plugin-store-e2e/run.sh
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-store-e2e

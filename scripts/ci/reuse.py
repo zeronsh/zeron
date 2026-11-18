@@ -62,6 +62,10 @@ SUITE_INPUTS: dict[str, list[str]] = {
     "core": [".github/workflows/ui-tests.yml", "scripts/ci/test-core.sh"] + LINUX_SETUP + NEXTEST,
     "cursor": [".github/workflows/cursor-compatibility.yml", "scripts/*cursor-sdk*", "crates/harness/src/cursor/**"],
     "edge": [".github/workflows/preview-tests.yml", "edge/**"],
+    "site": [".github/workflows/site-tests.yml", "apps/landing/**", "apps/zgx/ui/locales/en.json", "edge/**",
+             "scripts/plugin-store-e2e/edge.mjs"],
+    "store-e2e": [".github/workflows/plugin-store-e2e.yml", "scripts/plugin-store-e2e/**", "edge/**",
+                  "docs/plugin-store-data.json"] + LINUX_SETUP,
     "installer": [".github/workflows/linux-installer.yml", "edge/src/install.sh", "scripts/package-linux.sh",
                   "scripts/test-linux-desktop-entry.sh", "dist/zeron.desktop", "dist/zeron.png",
                   "scripts/ci/apt-install.sh"],
@@ -88,6 +92,8 @@ SUITE_PACKAGES: dict[str, list[str]] = {
     "macos": ["zeron-update", "zeron-preview", "zeron-text", "zeron"],
     "ios": ["zeron-mobile", "zeron-text", "zeron-markdown", "zeron-client"],
     "android": ["zeron-mobile"],
+    # The `zeron` binary the harness runs, and the engine whose test drives it.
+    "store-e2e": ["zeron", "zeron-engine"],
     # zeron-engine's plugin tests, and the root crates apps/zgx builds against.
     "zgx": ["zeron-engine", "zatex", "zeron-theme", "zeron-preview-label", "zeron-cli", "zeron-launch",
             "zeron-notify", "zeron-proto", "zeron-update", "zeron-visual", "zeron-plugin-guard",

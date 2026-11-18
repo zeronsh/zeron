@@ -1,0 +1,53 @@
+name: Site
+
+# Called by ci.yml when apps/landing/ or the edge changes (zeron.sh: the
+# landing page and the plugin store's web pages). Type checks, builds the
+# site as it deploys, and runs its tests: the scripts and pure modules, the
+# built pages and server routes against the fake edge (fake-edge/), and the
+# store's pages in Chromium (axe, keyboard). Then the same site in front of
+# the real edge worker (tests/edge: the edge's bundle in Miniflare with its
+# D1 and R2, run by scripts/plugin-store-e2e/edge.mjs), its routes and a
+# browser, with data published and reviewed through them.
+on:
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/landing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/landing/package-lock.json
+            edge/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - name: Chromium, for the browser tests
+        run: npx playwright install --with-deps chromium
+      - run: npm test
+      - name: The edge's packages, for the site in front of it
+        working-directory: edge
+        run: npm ci
+      - name: The site in front of the real edge
+        run: npm run test:edge
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: apps/landing/package-lock.json
+          key: ${{ inputs.pass-key }}-site
