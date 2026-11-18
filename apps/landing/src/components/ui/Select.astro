@@ -1,0 +1,53 @@
+---
+// A choice from a short list: the browser's own select (its menu, its
+// keys, its screen reader), dressed as the app's (ds/select.luau).
+import Glyph from "./Glyph.astro";
+
+interface Props {
+  name: string;
+  label: string;
+  options: { value: string; label: string }[];
+  value?: string;
+  /** Shows its label beside it, not only to screen readers. */
+  visibleLabel?: boolean;
+  /** The form is sent as soon as a choice is made (with a script; else its button). */
+  autosubmit?: boolean;
+  id?: string;
+}
+const { name, label, options, value, visibleLabel = false, autosubmit = false, id } = Astro.props;
+---
+
+<label class:list={["select", { inline: visibleLabel }]}>
+  <span class:list={[visibleLabel ? "caption" : "sr-only"]}>{label}</span>
+  <span class="box">
+    <select name={name} id={id} data-autosubmit={autosubmit ? "" : undefined}>
+      {options.map((o) => <option value={o.value} selected={o.value === value}>{o.label}</option>)}
+    </select>
+    <Glyph name="alt-arrow-down" size={14} />
+  </span>
+</label>
+
+<style>
+  .select { display: inline-flex; align-items: center; gap: 10px; }
+  .caption { font-size: 13px; color: var(--text-3); white-space: nowrap; }
+  .box { position: relative; display: inline-flex; align-items: center; color: var(--text-3); }
+  .box :global(.glyph) { position: absolute; right: 10px; pointer-events: none; }
+  select {
+    height: 32px;
+    padding: 0 32px 0 12px;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+    background: var(--secondary-bg);
+    border: 0;
+    border-radius: var(--radius-lg);
+    appearance: none;
+    cursor: pointer;
+    transition: background-color 0.12s;
+  }
+  select:hover { background: var(--secondary-hover); }
+  select:active { background: var(--secondary-active); }
+  select:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 80%, white); outline-offset: 2px; }
+  option { color: var(--text); background: var(--menu-solid); }
+</style>

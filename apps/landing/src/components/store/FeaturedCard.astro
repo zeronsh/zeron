@@ -1,0 +1,70 @@
+---
+// A plugin the store features: its card, with its first screenshot set in
+// at the foot and running off the card, as the home page shows the app.
+import type { PluginCard } from "../../lib/store/types.ts";
+import { installs } from "../../lib/store/format.ts";
+import { fileUrl, pluginUrl } from "../../lib/store/urls.ts";
+import PluginTile from "./PluginTile.astro";
+
+interface Props {
+  plugin: PluginCard;
+  screenshot: string | null;
+}
+const { plugin, screenshot } = Astro.props;
+---
+
+<article class="featured card">
+  <div class="copy">
+    <div class="head">
+      <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={40} />
+      <div class="title">
+        <h3 class="name"><a class="follow" href={pluginUrl(plugin.id)}>{plugin.name}</a></h3>
+        <p class="by">by @{plugin.author.username} · <span class="num">{installs(plugin.installs)}</span></p>
+      </div>
+    </div>
+    <p class="summary">{plugin.summary}</p>
+  </div>
+  {
+    screenshot && (
+      <div class="visual" aria-hidden="true">
+        <img src={fileUrl(plugin.id, plugin.version, screenshot)} alt="" width="1280" height="800" loading="lazy" decoding="async" />
+      </div>
+    )
+  }
+</article>
+
+<style>
+  .featured { min-height: 320px; }
+  .featured:has(.follow:focus-visible)::after { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 80%, white), 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent); }
+  .copy { padding: 24px 24px 0; }
+  .head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .title { min-width: 0; }
+  .name { font-size: 17px; font-weight: 600; line-height: 1.3; letter-spacing: -0.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .follow::before { content: ""; position: absolute; inset: 0; z-index: 1; border-radius: inherit; }
+  .follow:focus-visible { outline: none; }
+  .by { margin-top: 1px; font-size: 13px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .summary { margin-top: 14px; max-width: 30em; font-size: 14.5px; line-height: 1.5; color: var(--text-2); text-wrap: pretty; overflow-wrap: anywhere; }
+  /* The picture: set in from the left under the words, off the card to the
+     right and below, dissolving before the edge (global.css .piece). */
+  .visual {
+    margin: auto 0 0 24px;
+    padding-top: 24px;
+  }
+  .visual img {
+    display: block;
+    width: 560px;
+    max-width: none;
+    height: auto;
+    border-radius: 10px 0 0 0;
+    box-shadow: 0 0 0 1px var(--line);
+    -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent 99%), linear-gradient(to right, #000 70%, transparent 99.5%);
+    mask-image: linear-gradient(to bottom, #000 55%, transparent 99%), linear-gradient(to right, #000 70%, transparent 99.5%);
+    -webkit-mask-composite: source-in;
+    mask-composite: intersect;
+    transition: translate 0.5s var(--ease-out);
+  }
+  .featured .visual { height: 180px; overflow: hidden; }
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .featured:hover .visual img { translate: -6px -6px; }
+  }
+</style>

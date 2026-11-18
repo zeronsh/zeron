@@ -1,0 +1,55 @@
+---
+// A search box (apps/zgx/ui/ds/search_field.luau): a field cut into the
+// page, its glass under the pointer, the accent's ring when keyed to.
+import Glyph from "./Glyph.astro";
+
+interface Props {
+  name: string;
+  value?: string;
+  label: string;
+  placeholder?: string;
+  size?: "md" | "lg";
+  maxlength?: number;
+}
+const { name, value = "", label, placeholder, size = "lg", maxlength = 100 } = Astro.props;
+---
+
+<label class:list={["search", size]}>
+  <span class="sr-only">{label}</span>
+  <Glyph name="magnifer" size={size === "lg" ? 18 : 16} />
+  <input type="search" name={name} value={value} placeholder={placeholder} maxlength={maxlength} autocomplete="off" spellcheck="false" enterkeyhint="search" />
+</label>
+
+<style>
+  .search {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 0 12px;
+    color: var(--text-3);
+    background: var(--field-bg);
+    border-radius: var(--radius-lg);
+    box-shadow: inset 0 0 0 1px var(--field-edge);
+    transition: box-shadow 0.12s, background-color 0.12s;
+  }
+  .md { height: 32px; }
+  .lg { height: 44px; padding: 0 14px; gap: 12px; }
+  .search:hover { background: var(--field-hover); box-shadow: inset 0 0 0 1px var(--field-edge-hover); }
+  .search:focus-within { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 80%, white), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+  input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    font: inherit;
+    font-size: 15px;
+    color: var(--text);
+    background: none;
+    border: 0;
+    outline: none;
+  }
+  .md input { font-size: 14px; }
+  input::placeholder { color: var(--text-3); }
+  input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+</style>

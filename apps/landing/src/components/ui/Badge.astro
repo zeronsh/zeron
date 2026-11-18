@@ -1,0 +1,53 @@
+---
+// A small label that says what something is or how it stands
+// (apps/zgx/ui/ds/badge.luau): a tone's ink on a faint wash of it.
+import Glyph, { type GlyphName } from "./Glyph.astro";
+
+export type Tone = "neutral" | "accent" | "info" | "success" | "warning" | "danger";
+
+interface Props {
+  tone?: Tone;
+  icon?: GlyphName;
+  size?: "sm" | "md";
+  /** A dot before the label, in its colour. */
+  dot?: boolean;
+  mono?: boolean;
+  class?: string;
+  title?: string;
+}
+const { tone = "neutral", icon, size = "md", dot = false, mono = false, class: className, title } = Astro.props;
+---
+
+<span class:list={["badge", tone, size, { mono }, className]} title={title}>
+  {dot && <i class="dot" aria-hidden="true" />}
+  {icon && <Glyph name={icon} size={size === "sm" ? 12 : 14} />}
+  <span class="label"><slot /></span>
+</span>
+
+<style>
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    color: var(--ink);
+    background: var(--wash);
+    border-radius: var(--radius-md);
+    box-shadow: inset 0 0 0 1px var(--edge);
+  }
+  .md { height: 22px; padding: 0 7px; font-size: 12.5px; }
+  .sm { height: 18px; padding: 0 5px; font-size: 11.5px; gap: 3px; border-radius: var(--radius-sm); }
+  .label { overflow: hidden; text-overflow: ellipsis; }
+  .mono .label { font-family: var(--mono); font-size: 0.95em; font-variant-numeric: tabular-nums; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  .neutral { --ink: var(--text-2); --wash: var(--secondary-bg); --edge: transparent; }
+  .accent { --ink: var(--tone-accent); --wash: var(--tone-accent-wash); --edge: transparent; }
+  .info { --ink: var(--tone-info); --wash: var(--tone-info-wash); --edge: transparent; }
+  .success { --ink: var(--tone-success); --wash: var(--tone-success-wash); --edge: transparent; }
+  .warning { --ink: var(--tone-warning); --wash: var(--tone-warning-wash); --edge: transparent; }
+  .danger { --ink: var(--tone-danger); --wash: var(--tone-danger-wash); --edge: transparent; }
+</style>

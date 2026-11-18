@@ -1,0 +1,40 @@
+---
+// What every page's <head> says about it: its title and description, where
+// it lives, how it looks when shared, its icons and its fonts. (Base adds
+// the landing page's own scripts after it; the store's pages add none.)
+import { Font } from "astro:assets";
+import { SITE } from "../../data/site.ts";
+
+interface Props {
+  title: string;
+  description: string;
+  /** Kept out of search results (a search's results, the account and admin pages). */
+  noindex?: boolean;
+  /** The page's own address when its query is part of it (a category); else its path. */
+  canonical?: string;
+}
+const { title, description, noindex = false } = Astro.props;
+const canonical = new URL(Astro.props.canonical ?? Astro.url.pathname, Astro.site);
+const image = new URL("/assets/og.png", Astro.site);
+---
+
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{title}</title>
+<meta name="description" content={description} />
+{noindex && <meta name="robots" content="noindex, nofollow" />}
+<link rel="canonical" href={canonical} />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content={SITE.name} />
+<meta property="og:url" content={canonical} />
+<meta property="og:title" content={title} />
+<meta property="og:description" content={description} />
+<meta property="og:image" content={image} />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="theme-color" content="#0e0e10" />
+<link rel="icon" href="/assets/zeron-favicon-light.png" type="image/png" sizes="128x128" media="(prefers-color-scheme: light)" />
+<link rel="icon" href="/assets/zeron-favicon-dark.png" type="image/png" sizes="128x128" media="(prefers-color-scheme: dark)" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any" />
+<link rel="apple-touch-icon" href="/assets/zeron-app-icon.png" />
+<Font cssVariable="--font-sans" preload />
+<Font cssVariable="--font-mono" />

@@ -1,0 +1,61 @@
+---
+// Previous and Next, as links whose addresses carry the cursor: each page
+// of a list is a real URL, and back and forward work as they should.
+import Glyph from "./Glyph.astro";
+
+interface Props {
+  label: string;
+  previous?: string | null;
+  next?: string | null;
+}
+const { label, previous, next } = Astro.props;
+---
+
+{
+  (previous || next) && (
+    <nav class="pages" aria-label={label}>
+      {previous ? (
+        <a class="page" href={previous} rel="prev">
+          <Glyph name="alt-arrow-left" size={14} />
+          Previous
+        </a>
+      ) : (
+        <span class="page" aria-disabled="true">
+          <Glyph name="alt-arrow-left" size={14} />
+          Previous
+        </span>
+      )}
+      {next ? (
+        <a class="page" href={next} rel="next">
+          Next
+          <Glyph name="alt-arrow-right" size={14} />
+        </a>
+      ) : (
+        <span class="page" aria-disabled="true">
+          Next
+          <Glyph name="alt-arrow-right" size={14} />
+        </span>
+      )}
+    </nav>
+  )
+}
+
+<style>
+  .pages { display: flex; justify-content: center; gap: 8px; }
+  .page {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 36px;
+    padding: 0 14px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+    background: var(--secondary-bg);
+    border-radius: var(--radius-lg);
+    transition: background-color 0.12s, color 0.12s;
+  }
+  a.page:hover { background: var(--secondary-hover); }
+  a.page:active { background: var(--secondary-active); }
+  .page[aria-disabled="true"] { color: var(--text-3); background: none; box-shadow: inset 0 0 0 1px var(--line); cursor: default; }
+</style>

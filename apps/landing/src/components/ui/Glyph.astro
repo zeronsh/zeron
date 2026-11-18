@@ -1,0 +1,27 @@
+---
+// One of the app's icons (src/data/icons.json) in the text's colour, sized
+// by class rather than a style attribute: the store's pages allow no inline
+// style but their own stylesheets'.
+import icons from "../../data/icons.json";
+
+export type GlyphName = keyof typeof icons;
+
+interface Props {
+  name: GlyphName;
+  size?: 12 | 14 | 16 | 18 | 20;
+  class?: string;
+}
+const { name, size = 16, class: className } = Astro.props;
+---
+
+<span class:list={["glyph", `g${size}`, className]} aria-hidden="true" set:html={icons[name]} />
+
+<style is:global>
+  .glyph { display: inline-block; flex: none; }
+  .glyph svg { display: block; width: 100%; height: 100%; }
+  .glyph.g12 { width: 12px; height: 12px; }
+  .glyph.g14 { width: 14px; height: 14px; }
+  .glyph.g16 { width: 16px; height: 16px; }
+  .glyph.g18 { width: 18px; height: 18px; }
+  .glyph.g20 { width: 20px; height: 20px; }
+</style>

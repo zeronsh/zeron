@@ -1,0 +1,213 @@
+---
+// The store: every listed plugin, searched, filtered and sorted, a page at
+// a time. Public and the same for everyone (no cookie is read), so the
+// Worker cache keeps each address for half a minute and serves it stale
+// for another while it asks again: at most a minute old.
+import FeaturedCard from "../../components/store/FeaturedCard.astro";
+import PluginCard from "../../components/store/PluginCard.astro";
+import Action from "../../components/ui/Action.astro";
+import Glyph from "../../components/ui/Glyph.astro";
+import Pagination from "../../components/ui/Pagination.astro";
+import SearchField from "../../components/ui/SearchField.astro";
+import Select from "../../components/ui/Select.astro";
+import Store from "../../layouts/Store.astro";
+import { canonicalSearch, catalogHref, effectiveSort, isFront, PAGE_SIZE, pageHref, readCatalog, SORT_LABELS } from "../../lib/store/catalog.ts";
+import { publicPage } from "../../lib/store/http.ts";
+import type { PluginCard as Card, Sort } from "../../lib/store/types.ts";
+
+export const prerender = false;
+
+const edge = Astro.locals.edge;
+const categoriesResult = await edge.categories();
+const categories = categoriesResult.ok ? categoriesResult.data.categories : [];
+const state = readCatalog(Astro.url.searchParams, categoriesResult.ok ? categories : null);
+
+// An address that says more than it means is sent to the one that says it plainly.
+const canonical = canonicalSearch(Astro.url.searchParams, state);
+if (canonical && categoriesResult.ok) return Astro.redirect(canonical, 301);
+
+const sort = effectiveSort(state);
+const front = isFront(state);
+const [page, featured] = await Promise.all([
+  edge.catalog({ q: state.q || undefined, category: state.category ?? undefined, keyword: state.keyword ?? undefined, sort, cursor: state.cursor ?? undefined, limit: PAGE_SIZE }),
+  front ? edge.catalog({ featured: true, sort: "popular", limit: 3 }) : null,
+]);
+
+// The featured row's pictures: each one's first screenshot.
+const featuredItems: { plugin: Card; screenshot: string | null }[] = [];
+if (featured?.ok) {
+  const details = await Promise.all(featured.data.items.map((p) => edge.plugin(p.id)));
+  for (const [i, plugin] of featured.data.items.entries()) {
+    const detail = details[i];
+    featuredItems.push({ plugin, screenshot: detail?.ok ? (detail.data.screenshots[0] ?? null) : null });
+  }
+}
+
+const names = new Map(categories.map((c) => [c.id, c.name]));
+const categoryName = state.category ? names.get(state.category) : null;
+
+if (page.ok) publicPage(Astro);
+else Astro.response.status = page.error === "bad_request" ? 400 : 503;
+
+const sortOptions = (["relevance", "popular", "updated", "new"] as Sort[])
+  .filter((s) => s !== "relevance" || state.q)
+  .map((s) => ({ value: s, label: SORT_LABELS[s] }));
+
+const heading = state.q ? `Results for “${state.q}”` : categoryName ?? (state.keyword ? `Tagged “${state.keyword}”` : "All plugins");
+const title = state.q ? `“${state.q}” · Plugins · Zeron` : categoryName ? `${categoryName} plugins · Zeron` : "Plugins · Zeron";
+const description = categoryName
+  ? `Plugins for Zeron in ${categoryName}: reviewed before they're listed, installed in a click.`
+  : "Plugins for Zeron: panels, commands, tools for your agents and more. Each one is reviewed before it's listed.";
+// Search results and later pages stay out of search engines; the store and its categories don't.
+const noindex = Boolean(state.q || state.cursor || state.keyword);
+---
+
+<Store title={title} description={description} noindex={noindex} canonical={catalogHref({ category: state.category })}>
+  <div class="wrap catalog">
+    <header class="intro">
+      <div>
+        <h1>Plugins</h1>
+        <p class="lead">Panels, commands, tools for your agents and more. Every plugin is reviewed before it's listed here.</p>
+      </div>
+      <a class="mine" href="/account">Your plugins<Glyph name="alt-arrow-right" size={12} /></a>
+    </header>
+
+    <form class="controls" action="/plugins" method="get" role="search" data-tidy>
+      <SearchField name="q" value={state.q} label="Search plugins" placeholder="Search plugins" />
+      {state.category && <input type="hidden" name="category" value={state.category} />}
+      {state.keyword && <input type="hidden" name="keyword" value={state.keyword} />}
+      <div class="sort">
+        <Select name="sort" label="Sort by" options={sortOptions} value={sort} autosubmit />
+        <Action class="js-hidden" tone="secondary">Search</Action>
+      </div>
+    </form>
+
+    {
+      front && featuredItems.length > 0 && (
+        <section class="featured" aria-labelledby="featured-heading">
+          <h2 id="featured-heading" class="section-title">Featured</h2>
+          <div class="featured-grid">
+            {featuredItems.map((f) => <FeaturedCard plugin={f.plugin} screenshot={f.screenshot} />)}
+          </div>
+        </section>
+      )
+    }
+
+    <div class="layout">
+      <nav class="categories" aria-label="Categories">
+        <a href={catalogHref({ q: state.q, keyword: state.keyword, sort: state.sort })} aria-current={!state.category ? "page" : undefined}>All</a>
+        {
+          categories.map((c) => (
+            <a href={catalogHref({ q: state.q, keyword: state.keyword, sort: state.sort, category: c.id })} aria-current={state.category === c.id ? "page" : undefined}>
+              {c.name}
+            </a>
+          ))
+        }
+      </nav>
+
+      <section class="results" aria-labelledby="results-heading">
+        <div class="results-head">
+          <h2 id="results-heading" class="section-title">{heading}</h2>
+          {
+            state.keyword && (
+              <a class="chip" href={catalogHref({ ...state, keyword: null, cursor: null })} aria-label={`Remove the tag “${state.keyword}”`}>
+                <span>Tag: {state.keyword}</span>
+                <Glyph name="close" size={12} />
+              </a>
+            )
+          }
+        </div>
+
+        {
+          !page.ok ? (
+            <div class="state">
+              <Glyph name="danger-triangle" size={20} />
+              <h3>The store can't be reached right now</h3>
+              <p>Try again in a minute.</p>
+              <a class="again" href={Astro.url.pathname + Astro.url.search}>Try again</a>
+            </div>
+          ) : page.data.items.length === 0 ? (
+            <div class="state">
+              <Glyph name="magnifer" size={20} />
+              <h3>{state.q ? `No plugins match “${state.q}”` : "No plugins here yet"}</h3>
+              <p>{state.q || state.category || state.keyword ? "Try other words, or look through all of them." : "Check back soon."}</p>
+              {(state.q || state.category || state.keyword) && <a class="again" href="/plugins">See every plugin</a>}
+            </div>
+          ) : (
+            <>
+              <ul class="grid" role="list">
+                {page.data.items.map((plugin) => (
+                  <li>
+                    <PluginCard plugin={plugin} categories={names} />
+                  </li>
+                ))}
+              </ul>
+              <Pagination label="More plugins" previous={pageHref(state, page.data.prev_cursor)} next={pageHref(state, page.data.next_cursor)} />
+            </>
+          )
+        }
+      </section>
+    </div>
+  </div>
+</Store>
+
+<style>
+  .catalog { display: grid; gap: 32px; }
+  .intro { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 32px; flex-wrap: wrap; }
+  .intro .lead { max-width: 34em; margin-top: 12px; }
+  .mine { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 2px; font-size: 14px; font-weight: 500; color: var(--text-2); transition: color 0.12s; }
+  .mine:hover { color: var(--text); }
+
+  .controls { display: flex; gap: 12px; align-items: center; }
+  .controls :global(.search) { flex: 1; }
+  .sort { display: flex; gap: 8px; flex: none; }
+  .sort :global(select) { height: 44px; }
+
+  .section-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.4; }
+  .featured { display: grid; gap: 14px; }
+  .featured-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+
+  .layout { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 32px; align-items: start; }
+  /* The categories: the app's menu rows, a wash under the pointer, firmer on the one shown. */
+  .categories { position: sticky; top: 24px; display: grid; gap: 2px; margin-left: -12px; }
+  .categories a { display: flex; align-items: center; height: 34px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text-2); border-radius: var(--radius-lg); transition: background-color 0.12s, color 0.12s; }
+  .categories a:hover { color: var(--text); background: var(--hover); }
+  .categories a[aria-current="page"] { color: var(--text); background: var(--selected); }
+
+  .results { display: grid; gap: 16px; min-width: 0; }
+  .results-head { display: flex; align-items: center; gap: 12px; min-height: 34px; flex-wrap: wrap; }
+  .results-head .section-title { overflow-wrap: anywhere; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 8px 0 10px; font-size: 13px; color: var(--text); background: var(--secondary-bg); border-radius: 13px; transition: background-color 0.12s; }
+  .chip:hover { background: var(--secondary-hover); }
+  .chip span { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .grid > li { display: grid; }
+  .results :global(.pages) { margin-top: 20px; }
+
+  .state { display: grid; justify-items: center; gap: 6px; padding: 72px 24px; text-align: center; color: var(--text-3); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .state h3 { margin-top: 8px; font-size: 16px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+  .state p { font-size: 14px; color: var(--text-2); }
+  .again { margin-top: 12px; display: inline-flex; align-items: center; height: 32px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-lg); transition: background-color 0.12s; }
+  .again:hover { background: var(--secondary-hover); }
+
+  @media (max-width: 1080px) {
+    .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .featured-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .featured-grid > :nth-child(3) { display: none; }
+  }
+  @media (max-width: 800px) {
+    .layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+    /* On a narrow screen the categories are a row to scroll. */
+    .categories { position: static; display: flex; gap: 6px; margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter); overflow-x: auto; scrollbar-width: none; }
+    .categories a { flex: none; height: 32px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); border-radius: 16px; }
+    .categories a[aria-current="page"] { color: var(--primary-text); background: var(--primary-bg); box-shadow: none; }
+    .featured-grid { grid-template-columns: minmax(0, 1fr); }
+    .featured-grid > :nth-child(n + 2) { display: none; }
+  }
+  @media (max-width: 600px) {
+    .grid { grid-template-columns: minmax(0, 1fr); }
+    .controls { flex-wrap: wrap; }
+    .sort { width: 100%; }
+    .sort :global(.select), .sort :global(.box), .sort :global(select) { width: 100%; }
+  }
+</style>

@@ -1,0 +1,50 @@
+---
+// A button that does something (a form's submit, a dialog's opener): the
+// app's buttons (apps/zgx/ui/ds/button.luau), as Button.astro draws its
+// links, with the states a control has: under the pointer, pressed, keyed
+// to, and off. `danger` is the app's destructive.
+import type { HTMLAttributes } from "astro/types";
+
+interface Props extends HTMLAttributes<"button"> {
+  tone?: "primary" | "secondary" | "ghost" | "danger";
+  size?: "sm" | "md" | "lg";
+}
+const { tone = "secondary", size = "md", type = "submit", class: className, ...rest } = Astro.props;
+---
+
+<button type={type} class:list={["action", tone, size, className]} {...rest}><slot /></button>
+
+<style>
+  .action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-weight: 500;
+    white-space: nowrap;
+    border-radius: var(--radius-lg);
+    transition: background-color 0.12s, color 0.12s, opacity 0.12s;
+  }
+  .sm { height: 28px; padding: 0 10px; font-size: 13px; gap: 6px; border-radius: var(--radius-md); }
+  .md { height: 32px; padding: 0 12px; font-size: 14px; }
+  .lg { height: 40px; padding: 0 18px; font-size: 15px; }
+
+  .primary { color: var(--primary-text); background: var(--primary-bg); }
+  .primary:hover { background: var(--primary-hover); }
+  .primary:active { background: var(--primary-active); }
+  .secondary { color: var(--text); background: var(--secondary-bg); }
+  .secondary:hover { background: var(--secondary-hover); }
+  .secondary:active { background: var(--secondary-active); }
+  .ghost { color: var(--text-2); }
+  .ghost:hover { color: var(--text); background: var(--secondary-bg); }
+  .ghost:active { background: var(--secondary-hover); }
+  .danger { color: #fff; background: var(--destructive-bg); }
+  .danger:hover { background: var(--destructive-hover); }
+  .danger:active { background: var(--destructive-active); }
+
+  .action:disabled { opacity: 0.45; cursor: not-allowed; }
+  .action:disabled:is(:hover, :active).primary { background: var(--primary-bg); }
+  .action:disabled:is(:hover, :active).secondary { background: var(--secondary-bg); }
+  .action:disabled:is(:hover, :active).ghost { color: var(--text-2); background: none; }
+  .action:disabled:is(:hover, :active).danger { background: var(--destructive-bg); }
+</style>
