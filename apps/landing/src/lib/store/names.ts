@@ -21,7 +21,8 @@ export const isPluginId = (value: unknown): value is string => typeof value === 
  */
 export const versionParam = (raw: string | undefined) => raw?.replace(/%2B/gi, "+");
 
-export const isVersion = (value: unknown): value is string => typeof value === "string" && value.length <= 64 && SEMVER.test(value);
+/** A version: strict SemVer, at most 32 characters, the store's limit and the most the app's link carries. */
+export const isVersion = (value: unknown): value is string => typeof value === "string" && value.length <= 32 && SEMVER.test(value);
 
 export const isUsername = (value: unknown): value is string => typeof value === "string" && USERNAME.test(value);
 

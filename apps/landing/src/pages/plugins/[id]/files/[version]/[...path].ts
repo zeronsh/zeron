@@ -11,7 +11,7 @@
 // visitor's cookie, and kept by no one.
 import type { APIRoute } from "astro";
 import { pluginTag } from "../../../../../lib/store/http.ts";
-import { isPluginId, isVersion, packagePath } from "../../../../../lib/store/names.ts";
+import { isPluginId, isVersion, packagePath, versionParam } from "../../../../../lib/store/names.ts";
 import { pictureType } from "../../../../../lib/store/review.ts";
 
 export const prerender = false;
@@ -41,7 +41,8 @@ const notFound = () => new Response(null, { status: 404, headers: { ...SANDBOX, 
 export const GET: APIRoute = async ({ params, request, locals, cache, url, redirect }) => {
   // One address per file: a query can't make the edge be asked again.
   if (url.search) return redirect(url.pathname, 301);
-  const { id, version } = params;
+  const { id } = params;
+  const version = versionParam(params.version);
   // The file's path from the address as sent, each part decoded once: a
   // path may hold "#", "%" and spaces, which the route's own decoding
   // (decodeURI) would leave half-done.
