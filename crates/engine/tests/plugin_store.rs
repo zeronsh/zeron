@@ -749,6 +749,10 @@ async fn a_newer_version_supersedes_an_unverified_one_until_zeron_verifies_it() 
     assert_eq!(word(&refused), "not_in_store", "{refused}");
     let page = d.call(methods::STORE_VERSION, json!({ "id": "focus", "version": "1.0.0" })).await.unwrap();
     assert_eq!((page["status"].as_str(), page["verified"].as_bool()), (Some("yanked"), Some(false)));
+    // Why, for its page ("Replaced by 1.1.0 before it was verified").
+    assert_eq!((page["yanked_by"].as_str(), page["superseded_by"].as_str()), (Some("superseded"), Some("1.1.0")), "{page}");
+    let list = d.call(methods::STORE_VERSIONS, json!({ "id": "focus" })).await.unwrap();
+    assert_eq!(list["versions"][1]["superseded_by"], "1.1.0", "{list}");
     // Verified, it's installable again.
     store.verify("focus", "1.0.0");
     let installed = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus", "version": "1.0.0" })).await.unwrap();

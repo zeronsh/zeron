@@ -217,13 +217,22 @@ impl State {
 
 /// A version as the public sees it (`VersionInfo`).
 fn version_info(state: &State, v: &StoredVersion) -> Value {
-    json!({
+    let mut info = json!({
         "version": v.version, "status": v.status, "yanked": v.status == "yanked",
         "prerelease": Version::parse(&v.version).is_ok_and(|x| x.is_prerelease()), "notes": v.notes,
         "engines": { "zeron": v.engines }, "key": v.key, "hash": v.hash, "sha256": sha256_hex(&v.raw),
         "bytes": bytes_of(state, v), "verified": v.verified, "verified_at": v.verified.then_some(1), "via": v.via,
         "published_at": v.published_at,
-    })
+        "yanked_by": match (v.status.as_str(), &v.superseded_by) {
+            ("yanked", Some(_)) => json!("superseded"),
+            ("yanked", None) => json!("author"),
+            _ => Value::Null,
+        },
+    });
+    if let (true, Some(by)) = (v.status == "yanked", &v.superseded_by) {
+        info["superseded_by"] = json!(by);
+    }
+    info
 }
 
 impl FakeStore {
