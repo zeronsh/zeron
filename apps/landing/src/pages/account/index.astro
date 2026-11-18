@@ -48,7 +48,8 @@ const plugins = result.ok ? result.data.plugins : [];
             <span class="tile"><Glyph name="folder-with-files" size={20} /></span>
             <div class="words">
               <h2>You haven't published a plugin yet</h2>
-              <p>Publish from Zeron: <b>Settings</b> › <b>Plugins</b> › <b>Yours</b> › <b>Publish…</b>, or from a terminal:</p>
+              <p>In Zeron: <b>Settings</b> › <b>Plugins</b> › <b>Yours</b> › <b>Publish…</b></p>
+              <p>Or from a terminal:</p>
             </div>
             <div class="copybox"><code>zeron plugin publish</code><button type="button" class="btn ghost icon xs" aria-label="Copy" data-copy><Glyph name="copy" size={14} /></button></div>
             <p class="t-caption t-3">The first account to publish an id keeps it. An account can take up to 5 new ids a week.</p>
@@ -65,6 +66,9 @@ const plugins = result.ok ? result.data.plugins : [];
                 const newest = p.versions[0];
                 const state = newest ? versionState(newest) : null;
                 const listing = listingState(p.listing);
+                // (Steady is quiet: listed, its newest approved. A badge only where a row needs a look.)
+                const listedSteady = p.listing === "listed";
+                const newestSteady = listedSteady && newest?.status === "approved";
                 return (
                   <tr>
                     <td>
@@ -74,14 +78,14 @@ const plugins = result.ok ? result.data.plugins : [];
                           <a class="name name-link" href={`/account/plugins/${p.id}`}>{p.name}</a>
                           <span class="id">{p.id}</span>
                           <span class="meta">
-                            <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>
-                            {newest && state && <><span class="t-mono t-2">{newest.version}</span><span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span></>}
+                            {listedSteady ? <span class="steady">{listing.label}</span> : <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>}
+                            {newest && state && <><span class="t-mono t-2">{newest.version}</span>{!newestSteady && <span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>}</>}
                           </span>
                         </span>
                       </span>
                     </td>
-                    <td class="listing"><span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span></td>
-                    <td class="newest">{newest && state ? <span class="newest-cell"><span class="t-mono">{newest.version}</span><span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span></span> : <span class="t-3">{"—"}</span>}</td>
+                    <td class="listing">{listedSteady ? <span class="steady">{listing.label}</span> : <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>}</td>
+                    <td class="newest">{newest && state ? <span class="newest-cell"><span class="t-mono">{newest.version}</span>{!newestSteady && <span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>}</span> : <span class="t-3">{"—"}</span>}</td>
                     <td class="updated end muted">{newest ? <time datetime={new Date(newest.submitted_at).toISOString()}>{day(newest.submitted_at)}</time> : "—"}</td>
                   </tr>
                 );

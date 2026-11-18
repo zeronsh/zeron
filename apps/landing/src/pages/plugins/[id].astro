@@ -14,6 +14,7 @@ import { bytes, compatibility, count, date, day } from "../../lib/store/format.t
 import { firstLine } from "../../lib/store/markdown.ts";
 import { lines } from "../../lib/store/permissions.ts";
 import { CATEGORIES } from "../../lib/store/nav.ts";
+import { satisfies } from "../../lib/store/semver.ts";
 import { pluginTag, publicPage } from "../../lib/store/http.ts";
 import { renderedOnce } from "../../lib/store/rendered.ts";
 import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
@@ -29,7 +30,7 @@ if (!isPluginId(id)) return new Response(null, { status: 404 });
 if (Astro.url.search) return Astro.redirect(pluginUrl(id), 301);
 
 const edge = Astro.locals.edge;
-const [result, versionsResult, categoriesResult] = await Promise.all([edge.plugin(id), edge.versions(id), edge.categories()]);
+const [result, versionsResult, categoriesResult, latestZeron] = await Promise.all([edge.plugin(id), edge.versions(id), edge.categories(), edge.latestRelease()]);
 if (!result.ok) {
   if (result.error === "not_found") return new Response(null, { status: 404 });
   Astro.response.status = 503;
@@ -64,6 +65,12 @@ const latest = plugin ? (versions.find((v) => v.version === plugin.version) ?? n
 const older = plugin ? versions.filter((v) => v !== latest) : [];
 const asks = plugin ? lines(plugin.permissions).length : 0;
 const when = (v: VersionInfo) => v.published_at ?? v.submitted_at;
+// Install is off when the plugin's range leaves out the latest Zeron: the
+// web can't know your Zeron, but it knows none released can install this.
+// (A range it can't read: nothing said, Install left on.)
+const off = plugin && latestZeron ? satisfies(latestZeron, plugin.engines?.zeron) === false : false;
+/** The older versions shown before "Show all": the latest three in all. */
+const SHOWN = 2;
 
 // The page as a search engine reads it (a data block; nothing runs).
 const structured = plugin
@@ -118,8 +125,14 @@ const structured = plugin
               <span class="updated">Updated <time datetime={new Date(plugin.updated_at).toISOString()}>{day(plugin.updated_at)}</time></span>
             </p>
           </div>
-          <Install id={plugin.id} name={plugin.name} />
+          <Install id={plugin.id} name={plugin.name} off={off} />
         </header>
+        {off && (
+          <p class="notice warn" role="note">
+            <Glyph name="danger-triangle" size={16} />
+            <span><b>{store("plugins.store.needs_other_zeron")}</b> It needs {compatibility(plugin.engines?.zeron)}; the latest Zeron is {latestZeron}.</span>
+          </p>
+        )}
 
         <div class="plugin-body">
           <div class="plugin-strip">
@@ -150,9 +163,9 @@ const structured = plugin
                     </article>
                   )}
                   {older.length > 0 && (
-                    <div class="panel older">
-                      {older.map((v) => (
-                        <details>
+                    <div class="panel older" data-versions>
+                      {older.map((v, i) => (
+                        <details class:list={{ "more-version": i >= SHOWN }}>
                           <summary>
                             <span class="num">{v.version}</span>
                             <span class="first">{firstLine(v.notes) || "No notes"}</span>
@@ -166,6 +179,11 @@ const structured = plugin
                         </details>
                       ))}
                     </div>
+                  )}
+                  {older.length > SHOWN && (
+                    <button type="button" class="btn ghost sm show-all" data-show-all aria-expanded="false" data-less={store("plugins.store.show_less")}>
+                      {store("plugins.store.all_versions", { n: versions.length })}
+                    </button>
                   )}
                 </div>
               </section>
@@ -184,10 +202,7 @@ const structured = plugin
             </section>
             <section class="rail-part" aria-label="Facts">
               <dl class="facts">
-                <div><dt>{store("plugins.store.fact.version")}</dt><dd class="num">{plugin.version}</dd></div>
-                <div><dt>Updated</dt><dd><time datetime={new Date(plugin.updated_at).toISOString()} title={date(plugin.updated_at)}>{day(plugin.updated_at)}</time></dd></div>
                 <div><dt>{store("plugins.store.fact.works_with")}</dt><dd>{compatibility(plugin.engines?.zeron)}</dd></div>
-                <div><dt>{store("plugins.store.fact.installs")}</dt><dd class="num">{count(plugin.installs)}</dd></div>
                 <div><dt>Size</dt><dd class="num">{bytes(plugin.package.bytes)}</dd></div>
                 {plugin.license && <div><dt>{store("plugins.store.fact.license")}</dt><dd>{plugin.license}</dd></div>}
                 {plugin.categories.length > 0 && (

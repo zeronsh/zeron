@@ -57,7 +57,7 @@ const measure: { head: string; cell: (p: PluginCard) => string; folded: (p: Plug
     ? { head: "Updated", cell: (p) => day(p.updated_at), folded: (p) => `Updated ${day(p.updated_at)}` }
     : sort === "new"
       ? { head: "Published", cell: (p) => day(p.listed_at!), folded: (p) => `Published ${day(p.listed_at!)}` }
-      : { head: store("plugins.store.fact.installs"), cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
+      : { head: "Installs", cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
 
 const sorts = (["relevance", "popular", "updated", "new"] as Sort[]).filter((s) => s !== "relevance" || state.q);
 const heading = state.q ? `Results for “${state.q}”` : state.category ? categoryName(state.category) : state.keyword ? `Tagged “${state.keyword}”` : "All plugins";
@@ -116,7 +116,7 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
             <caption class="sr-only">{heading}</caption>
             <colgroup><col /><col class="by" /><col class="category" /><col class="installs" /></colgroup>
             <thead>
-              <tr><th scope="col">Plugin</th><th scope="col">{store("plugins.store.fact.by")}</th><th scope="col">{store("plugins.store.fact.category")}</th><th scope="col" class="end">{measure.head}</th></tr>
+              <tr><th scope="col">Plugin</th><th scope="col">By</th><th scope="col">{store("plugins.store.fact.category")}</th><th scope="col" class="end">{measure.head}</th></tr>
             </thead>
             <tbody class="rows">
               {items.map((p) => (

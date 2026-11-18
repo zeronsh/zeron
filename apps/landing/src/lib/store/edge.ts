@@ -94,6 +94,18 @@ export class Edge {
     return this.#json(`/store/v1/plugins/${segment(id)}/versions`);
   }
 
+  /** The latest Zeron released (the edge's /releases/latest.txt), or null when it can't be had. */
+  async latestRelease(): Promise<string | null> {
+    try {
+      const response = await this.#send(this.#request("/releases/latest.txt", { method: "GET" }));
+      if (!response.ok) return null;
+      const version = (await response.text()).trim();
+      return /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version) ? version : null;
+    } catch {
+      return null;
+    }
+  }
+
   categories(): Promise<Result<{ categories: Category[] }>> {
     return this.#json(`/store/v1/categories`);
   }

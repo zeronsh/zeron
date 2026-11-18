@@ -575,9 +575,20 @@ for (const [i, [id, name, summary, icon, categories]] of MORE.entries()) {
     installs: Math.round(5000 / (i + 2)),
     age: 10 + i * 3,
     screenshots: i % 4 === 0 ? 0 : 1,
-    history: [{ version: `1.${i % 5}.0`, status: "approved", ago: 10 + i * 3 }],
+    // (Weather needs a Zeron not out yet: Install is off on its page.)
+    history: [{ version: `1.${i % 5}.0`, status: "approved", ago: 10 + i * 3, ...(id === "weather" ? { engines: ">=0.9.0" } : {}) }],
   });
 }
+
+// Ada's plugins in the states an author's list must show apart from the
+// steady one: a first version in review, one not approved and never listed,
+// one taken down, one withdrawn and inside its 90 days.
+SPECS.push(
+  { id: "first-light", name: "First light", summary: "Opens your morning chats as you left them.", icon: null, categories: ["productivity"], keywords: ["morning"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 2, screenshots: 0, history: [{ version: "0.1.0", status: "pending", ago: 2 }] },
+  { id: "rough-draft", name: "Rough draft", summary: "Drafts a reply in the composer from the chat so far.", icon: null, categories: ["chat"], keywords: ["draft"], permissions: ["ui.add", "messages.read"], owner: "user_ada", installs: 0, age: 9, screenshots: 0, history: [{ version: "0.1.0", status: "rejected", ago: 9, review: { state: "rejected", reason: "listing", message: "The README is one line. Say what it drafts from, where the draft appears, and add a picture of it.", decided_at: NOW - 8 * DAY } }] },
+  { id: "clipboard-sync", name: "Clipboard sync", summary: "Keeps the clipboard the same on all your devices.", icon: null, categories: ["utilities"], keywords: ["clipboard"], permissions: ["ui.add", "clipboard", "network"], network: ["sync.clipboard-sync.example.com"], owner: "user_ada", installs: 310, age: 40, screenshots: 0, history: [{ version: "1.0.0", status: "removed", ago: 40, review: { state: "removed", reason: "unsafe", message: "It sent every copied password to its sync host in plain text.", decided_at: NOW - 12 * DAY } }] },
+  { id: "old-sketch", name: "Old sketch", summary: "A first try at a sidebar of pinned chats.", icon: null, categories: ["productivity"], keywords: ["pins"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 20, screenshots: 0, history: [{ version: "0.2.0", status: "withdrawn", ago: 20 }] },
+);
 
 export function plugins(): FakePlugin[] {
   return SPECS.map(build).map((p) => (p.id === "crypto-ticker" ? { ...p, suspend_reason: "Sends what you type to a third party." } : p));

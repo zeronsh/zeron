@@ -11,13 +11,15 @@ import Mark from "../ui/Mark.astro";
 interface Props {
   id: string;
   name: string;
+  /** No Zeron released can install it: the button stays, off (the page says why). */
+  off?: boolean;
 }
-const { id, name } = Astro.props;
+const { id, name, off = false } = Astro.props;
 ---
 
 <div class="install" data-install>
-  <a class="btn primary" href={appUrl(id)} data-install-link><Mark />Install in Zeron</a>
-  <details class="install-help" data-install-help>
+  {off ? <span class="btn primary" aria-disabled="true"><Mark />Install in Zeron</span> : <a class="btn primary" href={appUrl(id)} data-install-link><Mark />Install in Zeron</a>}
+  <details class="install-help" data-install-help hidden={off}>
     <summary>Nothing happened?</summary>
     <div class="install-card" role="status" aria-live="polite">
       <p>Install in Zeron opens Zeron on your computer at this plugin, ready to install. If nothing opened:</p>

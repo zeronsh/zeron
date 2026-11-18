@@ -573,6 +573,8 @@ async function route(request: Request): Promise<Response> {
     }
     return notFound();
   }
+  // The release the installer and the site offer (the edge's /releases/*).
+  if (parts[0] === "releases" && parts[1] === "latest.txt" && method === "GET") return new Response("0.3.4\n", { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" } });
   if (parts[0] !== "store" || parts[1] !== "v1") return notFound();
   const [, , a, b, c, d, e] = parts;
 

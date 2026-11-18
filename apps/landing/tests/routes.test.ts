@@ -568,8 +568,9 @@ describe("forms", () => {
     expect(body.match(/data-dialog="revoke-/g)).toHaveLength(7);
     expect(body).toMatch(/<details class="gone"><summary>Revoked keys · 3/);
     for (const m of body.matchAll(/<span class="line key" title="([^"]+)">([^<]+)<\/span>/g)) expect(m[2]).toBe(`${m[1]!.slice(0, 6)}…${m[1]!.slice(-4)}`);
-    // Ending within 14 days: the warning's ink (three of them).
-    expect(body.match(/<span class="line soon">/g)).toHaveLength(3);
+    // Ending within 14 days: the warning's ink and its days in words (three of them), never colour alone.
+    const soon = [...body.matchAll(/<span class="line soon" title="Ends in (\d+) days?">.*?<span class="sr-only">, ends in \1 days?<\/span>/g)];
+    expect(soon).toHaveLength(3);
     // Its parts are tabs that are addresses; New key… opens a sheet that is one too.
     expect(body).toMatch(/<a href="#versions" aria-current="page">Versions <span class="count">6<\/span><\/a><a href="#keys">Deploy keys <span class="count">7<\/span><\/a>/);
     expect(body).toContain('<dialog class="sheet" id="new-key"');

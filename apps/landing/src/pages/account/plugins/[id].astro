@@ -43,8 +43,12 @@ const working = (k: DeployKey) => !k.revoked_at && !(k.expires_at != null && k.e
 const live = keys?.filter(working) ?? [];
 const gone = keys?.filter((k) => !working(k)) ?? [];
 const anyExpired = gone.some((k) => !k.revoked_at);
-/** Ending within 14 days: said in the warning's ink. */
+/** Ending within 14 days: said in the warning's ink, and in words. */
 const soon = (k: DeployKey) => k.expires_at != null && k.expires_at - now < 14 * 86_400_000;
+const endsIn = (k: DeployKey) => {
+  const days = Math.max(0, Math.ceil((k.expires_at! - now) / 86_400_000));
+  return days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`;
+};
 /** A key can be made once the plugin has a version (its first is sent from a computer). */
 const sent = plugin?.versions.some((v) => v.status === "approved" || v.status === "yanked" || v.status === "pending") ?? false;
 const idle = plugin && !plugin.versions.some((v) => v.status === "approved" || v.status === "yanked" || v.status === "pending");
@@ -107,7 +111,7 @@ const listing = plugin ? listingState(plugin.listing) : null;
                   <table class="table wrapping versions-table">
                     <caption class="sr-only">{store("plugins.store.your_versions")}</caption>
                     <colgroup><col class="version" /><col class="state" /><col /><col class="sent" /><col class="action" /></colgroup>
-                    <thead><tr><th scope="col">Version</th><th scope="col">State</th><th scope="col">What it means</th><th scope="col" class="end">Sent</th><th scope="col" class="end"><span class="sr-only">What you can do</span></th></tr></thead>
+                    <thead><tr><th scope="col">Version</th><th scope="col">State</th><th scope="col">What it means</th><th scope="col">Sent</th><th scope="col" class="end"><span class="sr-only">What you can do</span></th></tr></thead>
                     <tbody>
                       {plugin.versions.map((v) => {
                         const state = versionState(v);
@@ -121,14 +125,14 @@ const listing = plugin ? listingState(plugin.listing) : null;
                               {v.review?.message ? (
                                 <>
                                   <span class="said">“{v.review.message}”</span>
-                                  <span class="who">The reviewer{v.review.reason ? `, ${reasonLabel(v.review.reason).toLowerCase()}` : ""}{v.review.decided_at ? ` · ${day(v.review.decided_at)}` : ""}</span>
+                                  <span class="who">{[v.review.reason ? reasonLabel(v.review.reason) : null, v.review.decided_at ? `${v.status === "removed" ? "taken down" : "reviewed"} ${day(v.review.decided_at)}` : null].filter(Boolean).join(" · ")}</span>
                                 </>
                               ) : (
                                 state.about
                               )}
                               {v.blocked && <span class="who">It was turned off on the devices that had it.</span>}
                             </td>
-                            <td class="end"><span class="line end muted"><time datetime={new Date(v.submitted_at).toISOString()}>{day(v.submitted_at)}</time></span></td>
+                            <td><span class="line muted"><time datetime={new Date(v.submitted_at).toISOString()}>{day(v.submitted_at)}</time></span></td>
                             <td class="end">
                               <span class="line end">
                                 {action && ask && (
@@ -174,7 +178,13 @@ const listing = plugin ? listingState(plugin.listing) : null;
                             <td><span class="line key" title={k.key}>{shortKey(k.key)}</span></td>
                             <td data-label="Made"><span class="line muted">{day(k.created_at)}</span></td>
                             <td data-label="Last used"><span class="line muted">{k.last_used_at ? day(k.last_used_at) : store("plugins.store.key.expiry.never")}</span></td>
-                            <td data-label="Ends"><span class:list={["line", soon(k) ? "soon" : "muted"]}>{k.expires_at ? day(k.expires_at) : store("plugins.store.key.expiry.never")}</span></td>
+                            <td data-label="Ends">
+                              {soon(k) ? (
+                                <span class="line soon" title={`Ends ${endsIn(k)}`}>{day(k.expires_at!)}<span class="in-days" aria-hidden="true">{" · "}{endsIn(k)}</span><span class="sr-only">, ends {endsIn(k)}</span></span>
+                              ) : (
+                                <span class="line muted">{k.expires_at ? day(k.expires_at) : store("plugins.store.key.expiry.never")}</span>
+                              )}
+                            </td>
                             <td class="end"><span class="line end"><a class="btn ghost sm" href={`${here}/keys/${encodeURIComponent(k.key)}`} data-dialog={`revoke-${k.key}`}>{revokeAsk(k.name).confirm}</a></span></td>
                           </tr>
                         ))}
@@ -222,7 +232,12 @@ const listing = plugin ? listingState(plugin.listing) : null;
               <>
                 <div class="way">
                   <h3>In Zeron</h3>
-                  <p class="path"><b>Settings</b><Glyph name="alt-arrow-right" size={12} /><b>Plugins</b><Glyph name="alt-arrow-right" size={12} /><b>Yours</b><Glyph name="alt-arrow-right" size={12} /><b>{plugin.name}</b><Glyph name="alt-arrow-right" size={12} /><b>{store("plugins.store.keys")}</b><Glyph name="alt-arrow-right" size={12} /><b>{store("plugins.store.key.new")}</b></p>
+                  <p class="path">
+                    <b>Settings</b>
+                    {["Plugins", "Yours", plugin.name, store("plugins.store.keys"), store("plugins.store.key.new")].map((step) => (
+                      <span class="step"><Glyph name="alt-arrow-right" size={12} /><b>{step}</b></span>
+                    ))}
+                  </p>
                 </div>
                 <div class="way">
                   <h3>With the command</h3>

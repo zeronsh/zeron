@@ -429,10 +429,13 @@ a.account:hover { background: var(--hover); }
 
 /* A section: its title and a line, then what it holds 8 under. */
 .section { display: grid; gap: 8px; }
-.section-head { display: flex; align-items: flex-end; gap: 12px; }
-.section-head .words { flex: 1; min-width: 0; display: grid; gap: 4px; }
-.section-head h2 { font-size: 15px; line-height: 20px; font-weight: 500; }
-.section-head p { font-size: 13px; line-height: 20px; color: var(--text-2); }
+/* (The app's section title: the title and its action on one row, the
+   action the row's trail; the line under, at most 720, as all prose.) */
+.section-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title action" "text text"; align-items: center; gap: 4px 12px; }
+.section-head .words { display: contents; }
+.section-head h2 { grid-area: title; font-size: 15px; line-height: 20px; font-weight: 500; }
+.section-head p { grid-area: text; max-width: 720px; font-size: 13px; line-height: 20px; color: var(--text-2); }
+.section-head > :not(.words) { grid-area: action; }
 
 /* A panel (a settings group's card): a quiet fill, a hairline, a 12 corner;
    what is in it reaches its edges and is clipped to its corners. */
@@ -607,7 +610,8 @@ a.row:focus-visible { outline-offset: -2px; }
 .prose .task-list-item input { accent-color: var(--accent); }
 .prose blockquote { padding-left: 16px; border-left: 2px solid var(--line-strong); color: var(--text-2); }
 .prose hr { height: 1px; border: 0; background: var(--line-faint); margin-block: 24px; }
-.prose img { max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 0 0 1px var(--line-faint); display: inline-block; vertical-align: middle; }
+/* (A picture as the app draws an attachment: the cards' 12 corner, a 1 hairline drawn over it.) */
+.prose img { max-width: 100%; height: auto; border-radius: 12px; outline: 1px solid var(--line-faint); outline-offset: -1px; display: inline-block; vertical-align: middle; }
 .prose p > img:only-child { display: block; }
 .prose :not(pre) > code { padding: 0 4px; font-size: 13px; border-radius: 4px; background: var(--wash); }
 .prose pre { padding: 12px 16px; overflow-x: auto; font-size: 13px; line-height: 20px; border-radius: 8px; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-faint); tab-size: 2; }
@@ -686,14 +690,15 @@ a.row:focus-visible { outline-offset: -2px; }
 .install-card a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 .install-card .glyph { display: inline-block; vertical-align: -2px; }
 
-/* The pictures: one fills the column (to 480 high), two share it, three or
-   more show two whole and 48 of the third. Each on the quiet wash, the
-   cards' 12 corner. */
+/* The pictures (as the app's): one fills the column at 16:10, to 420 high;
+   two share it, 12 apart; three or more show two whole and the third cut
+   by the column's end (48 of it). Each on the quiet wash, the cards' 12
+   corner. */
 .strip ul { display: flex; gap: 12px; }
 .strip li { flex: 1 1 0; min-width: 0; }
 .strip .shot { display: block; overflow: hidden; border-radius: 12px; background: var(--wash); box-shadow: inset 0 0 0 1px var(--line-faint); }
 .strip .shot img { display: block; width: 100%; height: 100%; object-fit: contain; color: transparent; } /* (a picture that won't load: the frame, not its words) */
-.strip.one .shot img { height: auto; max-height: 480px; }
+.strip.one .shot { aspect-ratio: 16 / 10; max-height: 420px; width: 100%; }
 .strip.two .shot, .strip.many .shot { aspect-ratio: 16 / 10; }
 .strip.many ul { overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
 .strip.many li { flex: 0 0 calc((100% - 12px - 48px) / 2); scroll-snap-align: start; }
@@ -813,6 +818,10 @@ a.row:focus-visible { outline-offset: -2px; }
 .older summary .glyph { color: var(--text-3); transition: rotate 0.15s; }
 .older details[open] summary .glyph { rotate: 180deg; }
 .older .notes { padding: 0 16px 16px 124px; }
+/* The latest three, then "Show all N versions" (without the script, all). */
+.show-all { display: none; justify-self: start; }
+.js .show-all { display: inline-flex; }
+.js .older:not(.is-all) > .more-version { display: none; }
 .older details:last-child[open] summary:focus-visible, .older details:last-child summary:focus-visible { border-radius: 0 0 12px 12px; }
 
 @media (max-width: 899px) {
@@ -864,6 +873,7 @@ a.row:focus-visible { outline-offset: -2px; }
 .mine tbody tr:last-child .name-link::after { border-radius: 0 0 12px 12px; }
 .mine .id { font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mine .newest-cell { display: flex; align-items: center; gap: 8px; }
+.mine .steady { color: var(--text-2); }
 .mine .meta { display: none; }
 
 /* ── One plugin: its versions and its keys ─────────────────────────────── */
@@ -910,6 +920,7 @@ a.row:focus-visible { outline-offset: -2px; }
 .keys-table .key-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .keys-table .key { font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-2); }
 .keys-table .soon { color: var(--warn-ink); }
+.keys-table .in-days { display: none; }
 .keys-table td.end .btn { margin-right: -10px; } /* (the button's words, not its wash, on the column's edge) */
 .versions-table td.end .btn { margin-right: -10px; }
 
@@ -928,11 +939,15 @@ a.row:focus-visible { outline-offset: -2px; }
 dialog.sheet:target { display: block; }
 .sheet .ways { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .sheet .way { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
-.sheet .path b { overflow-wrap: anywhere; min-width: 0; }
+.sheet .path b { overflow-wrap: anywhere; font-weight: 500; }
 .sheet .way h3 { font-size: 13px; line-height: 18px; font-weight: 500; }
 .sheet .way p { color: var(--text-2); font-size: 13px; line-height: 20px; }
-.sheet .path { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; color: var(--text); font-size: 13px; line-height: 20px; }
-.sheet .path .glyph { color: var(--text-3); }
+/* (A path: each chevron held to the step after it, so no line starts with
+   one; a long name may break inside itself.) */
+.sheet .path { color: var(--text); font-size: 13px; line-height: 20px; }
+.sheet .path .step { white-space: nowrap; }
+.sheet .path .step b { white-space: normal; }
+.sheet .path .glyph { display: inline-block; vertical-align: -2px; margin: 0 4px; color: var(--text-3); }
 .sheet .first { color: var(--text-3); font-size: 12px; line-height: 16px; }
 
 /* The question as a page (no script): the dialog's card, in the column. */
@@ -978,6 +993,7 @@ dialog.sheet:target { display: block; }
   .keys-table td:nth-child(6) { grid-area: action; align-self: center; }
   .keys-table td[data-label]::before { content: attr(data-label); display: block; color: var(--text-3); font-size: 12px; line-height: 16px; }
   .keys-table tbody tr { row-gap: 8px; }
+  .keys-table .in-days { display: inline; }
   .sheet { inset: auto 0 0 0; width: 100vw; height: auto; max-height: 90dvh; border-radius: 16px 16px 0 0; }
 }
 

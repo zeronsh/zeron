@@ -27,7 +27,7 @@ export const STORE_WORDS = {
   "plugins.store.confirm.unyank.body": "It can be installed again.",
   // Deploy keys.
   "plugins.store.keys": "Deploy keys",
-  "plugins.store.keys_body": "A CI job, a GitHub Action say, publishes new versions with a key instead of your session. A key publishes this plugin alone, and every version still waits for review.",
+  "plugins.store.keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions without your session. It publishes this plugin alone, and every version still waits for review.",
   "plugins.store.keys_none": "No keys yet.",
   "plugins.store.keys_failed": "Couldn't see its keys",
   "plugins.store.keys_publish_first": "Send its first version from your computer; a deploy key can send the ones after it.",
@@ -57,7 +57,6 @@ export const STORE_WORDS = {
   "plugins.store.browse": "Browse",
   "plugins.store.search": "Search plugins",
   "plugins.store.featured": "Featured",
-  "plugins.store.all_categories": "All categories",
   "plugins.store.category.agents": "Agents",
   "plugins.store.category.appearance": "Appearance",
   "plugins.store.category.chat": "Chat",
@@ -81,16 +80,16 @@ export const STORE_WORDS = {
   "plugins.store.failed_title": "The plugin store didn't answer",
   "plugins.store.failed_body": "Your installed plugins still work. Try again in a moment.",
   "plugins.store.try_again": "Try again",
-  "plugins.store.fact.by": "By",
-  "plugins.store.fact.installs": "Installs",
   "plugins.store.fact.category": "Category",
   "plugins.store.fact.works_with": "Works with",
   "plugins.store.fact.license": "License",
-  "plugins.store.fact.version": "Version",
   // A plugin's facts.
   "plugins.store.fact.homepage": "Website",
   "plugins.store.fact.repository": "Source",
   "plugins.store.versions": "Versions",
+  "plugins.store.all_versions": "Show all {n} versions",
+  "plugins.store.show_less": "Show less",
+  "plugins.store.needs_other_zeron": "It doesn't work with this version of Zeron.",
   "plugins.store.asks": "What it asks for",
 } as const;
 

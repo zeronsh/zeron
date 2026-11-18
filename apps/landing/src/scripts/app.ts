@@ -215,3 +215,14 @@ document.addEventListener("click", (event) => {
   event.preventDefault();
   dialog.close();
 });
+
+// ── A plugin's versions: the latest three, then all ───────────────────
+for (const button of document.querySelectorAll<HTMLButtonElement>("[data-show-all]")) {
+  const list = button.parentElement?.querySelector<HTMLElement>("[data-versions]");
+  const all = button.textContent ?? "";
+  button.addEventListener("click", () => {
+    const open = list?.classList.toggle("is-all") ?? false;
+    button.textContent = open ? (button.dataset.less ?? "Show less") : all;
+    button.setAttribute("aria-expanded", String(open));
+  });
+}
