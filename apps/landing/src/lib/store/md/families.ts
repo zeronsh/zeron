@@ -191,18 +191,25 @@ const PIECES = [
   "<script>alert(1)</script>", "javascript:alert(1)", "https://x.y/", "](", "![", "[x]: ", "    ", "> ", "- ", "1. ", "```", "---", "&lt;", "&#0;", "\u0000", "\r", "\t",
 ];
 
-/** A document made at random from pieces and short runs of every family: the same seed, the same document. */
+/**
+ * A document made at random from pieces and short runs of every family:
+ * one block of BLOCK characters from the seed, repeated to the size wanted.
+ * (Repeated, not grown: a longer random sequence would be a different mix
+ * at each size, and an exponent fitted across sizes would measure the mix,
+ * not the renderer. The same seed, the same block.)
+ */
+const BLOCK = 16 * 1024;
+
 export function seeded(seed: number): Family {
-  return (n) => {
-    const next = random(seed);
-    const families = Object.values(FAMILIES);
-    const parts: string[] = [];
-    let length = 0;
-    while (length < n) {
-      const part = next() < 0.5 ? PIECES[Math.floor(next() * PIECES.length)] : families[Math.floor(next() * families.length)](64 + Math.floor(next() * 1024));
-      parts.push(part);
-      length += part.length;
-    }
-    return parts.join("").slice(0, n);
-  };
+  const next = random(seed);
+  const families = Object.values(FAMILIES);
+  const parts: string[] = [];
+  let length = 0;
+  while (length < BLOCK) {
+    const part = next() < 0.5 ? PIECES[Math.floor(next() * PIECES.length)] : families[Math.floor(next() * families.length)](64 + Math.floor(next() * 1024));
+    parts.push(part);
+    length += part.length;
+  }
+  const block = parts.join("").slice(0, BLOCK);
+  return (n) => block.repeat(Math.max(1, Math.ceil(n / BLOCK))).slice(0, n);
 }
