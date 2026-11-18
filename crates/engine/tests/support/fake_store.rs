@@ -71,6 +71,9 @@ pub struct State {
     pub reports: Vec<(String, Value)>,
 }
 
+/// Who sent a request: a username, and the plugin a deploy key is for.
+type Who = (String, Option<String>);
+
 #[derive(Clone)]
 pub struct FakeStore {
     pub url: String,
@@ -179,7 +182,7 @@ impl FakeStore {
 
     /// Who a request is: a session's username, or a deploy key's owner (with
     /// the plugin it's scoped to).
-    fn who(&self, method: &str, path: &str, headers: &BTreeMap<String, String>, body: &[u8]) -> Result<Option<(String, Option<String>)>, (u16, Value)> {
+    fn who(&self, method: &str, path: &str, headers: &BTreeMap<String, String>, body: &[u8]) -> Result<Option<Who>, (u16, Value)> {
         let Some(auth) = headers.get("authorization") else { return Ok(None) };
         if let Some(token) = auth.strip_prefix("Bearer ") {
             return Ok(token.strip_prefix("session:").map(|u| (u.to_owned(), None)));
@@ -342,7 +345,7 @@ impl FakeStore {
                         }));
                     }
                 }
-                updates.extend(state.offer_anyway.drain(..));
+                updates.append(&mut state.offer_anyway);
                 json_reply(200, json!({ "updates": updates, "blocked": blocked }))
             }
             ("POST", ["store", "v1", "plugins", id, "versions"]) => {

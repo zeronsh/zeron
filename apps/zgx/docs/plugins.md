@@ -938,6 +938,7 @@ What the store shows is what's there:
 - The `name`, `description` and `keywords` can't hold control characters or invisible formatting characters (direction overrides, zero-width spaces).
 - Two files whose paths a Mac or a Windows machine would see as one (`README.md` and `readme.md`, or the same name in two Unicode forms) are refused.
 - The manifest is at most 256 KB, and `CHANGELOG.md` at most 512 KB.
+- The package, as sent, is at most 20 MB (a plugin you share any other way can be up to 50 MB), and the manifest in it, its signature included, at most 1 MB and 100,000 values.
 
 ### Checking it
 

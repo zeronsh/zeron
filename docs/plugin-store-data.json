@@ -1,5 +1,5 @@
 {
-  "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
+  "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
   "builtin_ids": [
     "git",
     "github",
@@ -158,11 +158,14 @@
     "max_keywords": 8,
     "max_license_len": 64,
     "max_manifest_bytes": 262144,
+    "max_manifest_json_bytes": 1048576,
+    "max_manifest_values": 100000,
     "max_name_len": 64,
     "max_notes_bytes": 65536,
     "max_number": 9007199254740991,
     "max_package_bytes": 70953642,
     "max_path": 1024,
+    "max_publish_body_bytes": 20971520,
     "max_range_len": 256,
     "max_readme_bytes": 524288,
     "max_screenshots": 8,

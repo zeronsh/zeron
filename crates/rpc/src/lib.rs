@@ -839,11 +839,13 @@ pub fn local_only(method: &str) -> bool {
             | methods::EXPORT_PLUGIN
             // The store: browsing and publishing are this device's app's and
             // CLI's (your session, this device's key); deploy keys too.
+            // Installing from it (`InstallPlugin {store}`), its updates and
+            // a plugin's pre-releases (`SetPluginPrereleases`) are managed
+            // across your devices as any plugin is.
             | methods::STORE_SEARCH
             | methods::STORE_PLUGIN
             | methods::STORE_CATEGORIES
             | methods::STORE_FILE
-            | methods::SET_PLUGIN_PRERELEASES
             | methods::PREPARE_PLUGIN_PUBLISH
             | methods::PUBLISH_PLUGIN
             | methods::STORE_MY_PLUGINS
@@ -1213,6 +1215,24 @@ mod tests {
             methods::WATCH_THEMES,
         ] {
             assert!(local_only(method), "{method}");
+        }
+        // The store: your other devices install from it, update and take
+        // pre-releases here (Settings → Plugins' device switcher); reading
+        // the catalog, publishing, versions, reports and deploy keys are
+        // this device's own, and never an agent's but to read and check.
+        for method in [methods::INSTALL_PLUGIN, methods::CHECK_PLUGIN_UPDATES, methods::UPDATE_PLUGIN, methods::SET_PLUGIN_OFF, methods::SET_PLUGIN_PRERELEASES] {
+            assert!(!local_only(method), "{method}");
+        }
+        assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({ "store": "focus" })));
+        for method in [
+            methods::STORE_SEARCH, methods::STORE_PLUGIN, methods::STORE_CATEGORIES, methods::STORE_FILE, methods::PREPARE_PLUGIN_PUBLISH,
+            methods::PUBLISH_PLUGIN, methods::STORE_MY_PLUGINS, methods::STORE_VERSION_ACTION, methods::STORE_REPORT,
+            methods::LIST_DEPLOY_KEYS, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY,
+        ] {
+            assert!(local_only(method), "{method}");
+        }
+        for method in [methods::PUBLISH_PLUGIN, methods::STORE_VERSION_ACTION, methods::STORE_REPORT, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY, methods::LIST_DEPLOY_KEYS, methods::SET_PLUGIN_PRERELEASES] {
+            assert!(!agent_allowed(method), "{method}");
         }
         assert!(!local_only(methods::PLUGIN_DELIVER));
         assert!(!local_only(methods::SERVE_PLUGIN_CALL));

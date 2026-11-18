@@ -205,6 +205,12 @@ async fn a_version_for_another_zeron_is_never_installed() {
     std::fs::write(dir.path().join("later.zeron-plugin"), other).unwrap();
     let path = dir.path().join("later.zeron-plugin").display().to_string();
     assert_eq!(word(&d.call(methods::INSTALL_PLUGIN, json!({ "path": path })).await.unwrap_err()), "incompatible");
+    // One that names no `engines` installs exactly as before.
+    let plain = package_of(&key, "plain", "1", &[], "return 1", json!({}));
+    std::fs::write(dir.path().join("plain.zeron-plugin"), plain).unwrap();
+    let path = dir.path().join("plain.zeron-plugin").display().to_string();
+    let installed = d.call(methods::INSTALL_PLUGIN, json!({ "path": path })).await.unwrap();
+    assert_eq!((installed["plugin"]["version"].as_str(), installed["update"].as_bool()), (Some("1"), Some(false)));
 }
 
 #[tokio::test]

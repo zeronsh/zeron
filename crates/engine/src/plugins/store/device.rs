@@ -319,11 +319,28 @@ impl Plugins {
             methods::PREPARE_PLUGIN_PUBLISH => {
                 let p: IdParams = parse_params(params)?;
                 let dir = self.own_dir(&p.id).await?;
-                let prepared = tokio::task::spawn_blocking(move || publish::read(&dir))
+                let mut prepared = tokio::task::spawn_blocking(move || publish::read(&dir))
                     .await
                     .map_err(|_| failed("Couldn't read it"))?
                     .map_err(failed)?;
+                // Newer than what the store has, as it said a moment ago (it
+                // has the last word: offline or signed out, it isn't asked).
+                let versions = match self.store_as_person().await {
+                    Ok((client, caller)) => client.my_plugins(&caller).await.ok().map(|mine| {
+                        mine["plugins"].as_array().into_iter().flatten().find(|plugin| plugin["id"] == p.id.as_str()).map(|plugin| plugin["versions"].clone())
+                    }),
+                    Err(_) => None,
+                };
+                if let Some(Some(Value::Array(versions))) = &versions
+                    && let Some(problem) = publish::newer_problem(&prepared.manifest.version, versions)
+                {
+                    prepared.problems.push(problem);
+                }
                 let mut reply = prepared.shown();
+                reply["store_checked"] = json!(versions.is_some());
+                if versions.is_none() {
+                    reply["note"] = json!("Couldn't ask the store which versions it has: the store has the last word on whether this one is newer");
+                }
                 // The ticket to submit it as checked: this device's app or
                 // CLI alone (an agent checks, the person submits).
                 if prepared.ok() && zeron_rpc::caller().is_local() {
