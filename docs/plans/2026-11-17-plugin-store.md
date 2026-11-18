@@ -534,3 +534,6 @@ Agreed after the plan was first written. Newest last.
 38. **Every paged list carries `total`**: the number of items the query
     matches, beside `items`, `next_cursor` and `prev_cursor` (the catalog,
     the admin queue per state, reports, the audit log).
+39. **A `PluginCard` carries `listed_at`**, when the plugin was first listed
+    (ms; null only on a submission's card for a plugin never listed), beside
+    `updated_at`. A list sorted Newest shows it.
