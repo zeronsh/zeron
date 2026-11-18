@@ -713,6 +713,21 @@ fn listing_cases() -> Value {
         m[field] = json!(value);
         cases.push((name.into(), m, files.clone()));
     }
+    // Look-alike letters (a Cyrillic е or о) claim it too, but only the
+    // edge refuses them: it reads the name and description through its
+    // confusables skeleton first. A device's check passes them, so these
+    // cases carry `edge_problems`, the edge's answer, beside `problems`,
+    // the device's.
+    let mut edge_only: BTreeMap<String, &str> = BTreeMap::new();
+    for (name, field, value) in [
+        ("the mark: a name saying verified with a Cyrillic e (edge only)", "name", "V\u{435}rified Focus"),
+        ("the mark: a description saying official with a Cyrillic o (edge only)", "description", "The \u{43e}fficial board."),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
+        edge_only.insert(name.to_owned(), field);
+        cases.push((name.into(), m, files.clone()));
+    }
     cases.push(("a binary file (a warning)".into(), base.clone(), with_file("bin/tool.wasm", b"\0asm\x01\0\0\0".to_vec())));
     for (name, a, b) in [
         ("two paths differing in case", "README.md", "readme.md"),
@@ -753,10 +768,14 @@ fn listing_cases() -> Value {
             .map(|(name, manifest, files)| {
                 let (problems, warnings) = listing::check(&Manifest::from_value(manifest.clone()).unwrap(), &files);
                 let said = |list: &[listing::Problem]| -> Value { list.iter().map(|p| json!({ "rule": p.rule, "field": p.field, "path": p.path })).collect() };
-                json!({
+                let mut case = json!({
                     "name": name, "manifest": compact(&text(&manifest)), "files_b64": files_b64(&files),
                     "problems": said(&problems), "warnings": said(&warnings), "listing": listing::Listing::of(&manifest),
-                })
+                });
+                if let Some(field) = edge_only.get(&name) {
+                    case["edge_problems"] = json!([{ "rule": listing::rule::BAD_LISTING, "field": field, "path": null }]);
+                }
+                case
             })
             .collect(),
     )
@@ -923,7 +942,7 @@ fn data() -> Value {
         },
         "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version. A publish must be later than every version the plugin has had, in any state, pre-releases included.",
         "mark_claims": {
-            "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). The text is read as Unicode NFKC, lowercased (full Unicode lowercase, as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General Category Mn) dropped; it claims the mark when it has any of glyphs anywhere, or any of words as a whole word: an occurrence with no ASCII letter or digit right before or after it. The listing cases named 'the mark' hold both sides to it.",
+            "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). The text is read as Unicode NFKC, lowercased (full Unicode lowercase, as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General Category Mn) dropped; it claims the mark when it has any of glyphs anywhere, or any of words as a whole word: an occurrence with no ASCII letter or digit right before or after it. The listing cases named 'the mark' hold both sides to it. The edge also reads the name and description through its confusables skeleton before the word check, which a device does not: the cases marked '(edge only)' carry edge_problems, the edge's answer, where problems is the device's.",
             "words": listing::MARK_WORDS,
             "glyphs": listing::MARK_GLYPHS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
         },

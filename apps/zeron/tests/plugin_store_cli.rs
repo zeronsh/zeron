@@ -126,6 +126,15 @@ async fn ci_checks_and_publishes_with_a_deploy_key() {
         assert!(text(&out).contains("a deploy key only publishes and reads status"), "{}", text(&out));
     }
     assert_eq!(store.state.lock().unwrap().requests.len(), requests, "nothing was sent");
+
+    // 1.1.0 out before anyone verified 1.0.0: 1.0.0 takes no new installs,
+    // and both the publish and status say so.
+    plugin(&folder, "1.1.0");
+    let newer = run.zeron(&store, Some(&secret), &["publish", &folder_arg]).await;
+    assert_eq!(newer.status.code(), Some(0), "{}", text(&newer));
+    assert!(text(&newer).contains("It supersedes 1.0.0, which weren't verified: they take no new installs now."), "{}", text(&newer));
+    let status = run.zeron(&store, Some(&secret), &["status"]).await;
+    assert!(text(&status).contains("  1.0.0  yanked  not verified: superseded by 1.1.0"), "{}", text(&status));
 }
 
 #[tokio::test(flavor = "multi_thread")]

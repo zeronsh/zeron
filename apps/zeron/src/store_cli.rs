@@ -257,6 +257,11 @@ fn problems_line(prepared: &Prepared) -> String {
 fn submitted(what: &str, reply: &Value, page: &str) {
     let mark = if reply["verified"] == true { "verified" } else { "not yet verified" };
     out!("Published {what}: live now, {mark}. Anyone can install it from {page}");
+    // Older versions nobody had verified take no new installs now.
+    let superseded: Vec<&str> = reply["superseded"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    if !superseded.is_empty() {
+        out!("{}", listing::escaped(&format!("It supersedes {}, which weren't verified: they take no new installs now.", superseded.join(", "))));
+    }
 }
 
 /// `zeron plugin status`'s lines: each plugin, then each version's state.
@@ -278,6 +283,11 @@ fn status_lines(reply: &Value, only: Option<&str>) -> Vec<String> {
         for version in plugin["versions"].as_array().into_iter().flatten() {
             let mark = if version["verified"] == true { "verified" } else { "not verified" };
             let mut line = format!("  {}  {}  {mark}", version["version"].as_str().unwrap_or("?"), version["status"].as_str().unwrap_or("?"));
+            // Yanked because a newer version came out before anyone verified it.
+            if version["yanked_by"] == "superseded" {
+                let by = version["superseded"]["by"].as_str().unwrap_or("a newer version");
+                line.push_str(&format!(": superseded by {by}"));
+            }
             // A reviewer declined to verify it (yours alone to read).
             let review = &version["review"];
             if review["decision"] == "declined" {
@@ -517,12 +527,14 @@ mod tests {
             { "version": "1.0.0\u{1b}[31m", "status": "listed", "verified": false, "review": { "decided": true, "decision": "declined", "reason": HOSTILE } },
             { "version": "1.1.0", "status": "listed", "verified": false, "review": { "decided": true, "decision": "declined", "message": "fine\r\nerror: forged" } },
             { "version": "1.2.0", "status": "listed", "verified": true, "review": { "decided": true, "decision": "verified" } },
+            { "version": "1.3.0", "status": "yanked", "verified": false, "yanked_by": "superseded", "superseded": { "at": 1, "by": "1.4.0\u{1b}[2J" } },
         ] }] });
         let lines = status_lines(&reply, None);
-        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert_eq!(lines.len(), 5, "{lines:?}");
         assert!(lines.iter().all(|l| raw_free(l)), "{lines:?}");
         assert!(lines[1].contains("not verified: declined: a\\u{a}error: fake line\\u{1b}[2J\\u{202e}"), "{lines:?}");
         assert!(lines[2].ends_with("fine\\u{d}\\u{a}error: forged"), "{lines:?}");
         assert_eq!(lines[3], "  1.2.0  listed  verified");
+        assert_eq!(lines[4], "  1.3.0  yanked  not verified: superseded by 1.4.0\\u{1b}[2J");
     }
 }

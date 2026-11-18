@@ -645,9 +645,11 @@ impl FakeStore {
                     published_at,
                     superseded_by: None,
                 });
+                let before: Vec<String> = plugin.versions.iter().filter(|v| v.superseded_by.is_some()).map(|v| v.version.clone()).collect();
                 plugin.supersede(&package.manifest.version);
+                let superseded: Vec<String> = plugin.versions.iter().filter(|v| v.superseded_by.is_some() && !before.contains(&v.version)).map(|v| v.version.clone()).collect();
                 state.submitted.push(((*id).to_owned(), body.to_vec(), via.to_owned()));
-                json_reply(201, json!({ "id": id, "version": package.manifest.version, "status": "listed", "verified": false, "checks": [] }))
+                json_reply(201, json!({ "id": id, "version": package.manifest.version, "status": "listed", "verified": false, "checks": [], "superseded": superseded }))
             }
             ("GET", ["store", "v1", "me", "plugins"]) => {
                 let Some((owner, scope)) = who else { return unauthorized() };
@@ -662,6 +664,12 @@ impl FakeStore {
                             let mut info = version_info(&state, v);
                             // (Which key sent it: the publish notice's.)
                             info["deploy_key"] = v.deploy_key.as_ref().map_or(Value::Null, |(key, name)| json!({ "key": key, "name": name }));
+                            info["yanked_by"] = match (v.status.as_str(), &v.superseded_by) {
+                                ("yanked", Some(_)) => json!("superseded"),
+                                ("yanked", None) => json!("author"),
+                                _ => Value::Null,
+                            };
+                            info["superseded"] = v.superseded_by.as_ref().map_or(Value::Null, |by| json!({ "at": 1, "by": by }));
                             info["review"] = json!({ "decided": v.verified, "decision": if v.verified { json!("verified") } else { Value::Null } });
                             info
                         }).collect::<Vec<_>>(),
@@ -740,8 +748,8 @@ impl FakeStore {
                     return json_reply(403, json!({ "error": "forbidden", "message": "Not yours." }));
                 }
                 let Some(v) = p.versions.iter_mut().find(|v| v.version == *version) else { return not_found() };
-                if v.superseded_by.is_some() {
-                    return json_reply(409, json!({ "error": "superseded", "message": "A newer version superseded this one before it was verified." }));
+                if *action == "unyank" && v.superseded_by.is_some() {
+                    return json_reply(409, json!({ "error": "invalid_state", "message": "A newer version superseded this one before anyone verified it: it stays yanked." }));
                 }
                 v.status = match *action {
                     "yank" => "yanked",
