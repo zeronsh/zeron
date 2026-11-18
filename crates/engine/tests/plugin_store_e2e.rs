@@ -563,7 +563,11 @@ async fn the_plugin_store_end_to_end() {
     e.must("3", "staff verify 1.0.0 on a web session", status == 200, &body);
     let detail = phone.call(methods::STORE_PLUGIN, json!({ "id": ID })).await.unwrap();
     e.check("3", "its page now says verified", detail["verified"] == true && detail["verified_version"] == "1.0.0", &detail);
-    e.check("3", "the phone's copy was installed unverified, and says so still", detail["installed"]["verified"] == false && phone.item(ID).await["source"]["verified"] == false, &detail["installed"]);
+    e.check("3", "the phone's copy was installed unverified, and says so until its next check", detail["installed"]["verified"] == false && phone.item(ID).await["source"]["verified"] == false, &detail["installed"]);
+    phone.call(methods::CHECK_PLUGIN_UPDATES, json!({ "id": ID })).await.unwrap();
+    let caught = wait_for("the phone's copy to read verified", async || phone.item(ID).await["source"]["verified"] == true).await;
+    let item = phone.item(ID).await;
+    e.check("3", "the next update check reads its own record: verified now, with when", caught && item["source"]["verified_at"].is_i64() && item["status"] == "on", &item);
     let only = phone.call(methods::STORE_SEARCH, json!({ "verified": true })).await.unwrap();
     e.check("3", "a search for verified plugins finds it", only["items"].as_array().is_some_and(|i| i.iter().any(|c| c["id"] == ID && c["verified"] == true)), &only);
     let desk = e.device("ada-desk").await;

@@ -96,7 +96,7 @@ async fn install_from_the_store_and_update_by_the_owners_other_key() {
     assert_eq!(installed["waiting"], true, "someone else's plugin waits for the person");
     let item = &installed["plugin"];
     assert_eq!(item["author"], json!({ "kind": "verified", "username": "ada" }), "who made it: the store's record");
-    assert_eq!(item["source"], json!({ "kind": "store", "id": "focus", "publisher": "ada", "verified": true }));
+    assert_eq!(item["source"], json!({ "kind": "store", "id": "focus", "publisher": "ada", "verified": true, "verified_at": 1 }));
     assert_eq!(d.allow("focus").await["status"], "on");
     // Counted once, in the background.
     for _ in 0..50 {
@@ -957,4 +957,61 @@ async fn a_plugin_transferred_in_brings_no_notice_of_its_former_owner_s_versions
     store.add("ann", &package_of(&laptop, "moved", "1.1.0", &["ui.add"], "return 2", json!({})), "listed", "");
     d.plugins.check_publishes().await;
     assert_eq!(ids(d.call(methods::LIST_PLUGINS, json!({})).await.unwrap()), ["moved@1.1.0"]);
+}
+
+#[tokio::test]
+async fn an_installed_version_becomes_verified_when_its_own_record_says_so() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "listed", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    let verified_now = || async { d.item("focus").await["source"]["verified"] == true };
+    let settle = || tokio::time::sleep(Duration::from_millis(300));
+
+    // A record that names other content, or can't be read: nothing changes.
+    {
+        let mut state = store.state.lock().unwrap();
+        let v = &mut state.plugins.get_mut("focus").unwrap().versions[0];
+        v.verified = true;
+        v.hash = "0".repeat(64);
+    }
+    d.check().await;
+    settle().await;
+    assert!(!verified_now().await, "another hash");
+    let real = install::parse(store.state.lock().unwrap().plugins["focus"].versions[0].raw.clone()).unwrap().hash;
+    store.state.lock().unwrap().plugins.get_mut("focus").unwrap().versions[0].hash = real;
+    store.state.lock().unwrap().records_without_verified = true;
+    d.check().await;
+    settle().await;
+    assert!(!verified_now().await, "unreadable");
+    store.state.lock().unwrap().records_without_verified = false;
+
+    // Staff verified it: the next check says so, and the row does.
+    d.check().await;
+    let mut became = false;
+    for _ in 0..50 {
+        if verified_now().await {
+            became = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(became, "{}", d.item("focus").await);
+    let item = d.item("focus").await;
+    assert_eq!((item["source"]["verified_at"].as_i64(), item["status"].as_str()), (Some(1), Some("on")), "{item}");
+    let page = d.call(methods::STORE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
+    assert_eq!(page["installed"]["verified"], true);
+
+    // Never the reverse from a check: the record says not verified (a
+    // take-down is the feed's), and the install record keeps its word.
+    store.state.lock().unwrap().plugins.get_mut("focus").unwrap().versions[0].verified = false;
+    d.check().await;
+    settle().await;
+    assert!(verified_now().await);
+
+    // An agent gains nothing from it: it still can't install over it.
+    let refused = d.call_as(zeron_rpc::Caller::Agent { chat: None }, methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "needs_person", "{refused}");
 }

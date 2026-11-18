@@ -885,10 +885,11 @@ impl Plugins {
         let record = PackageRecord { hash: found.hash, sha256: found.sha256, bytes: found.bytes, key: found.key };
         let raw = client.package(id, version, caller, record.bytes).await.map_err(failed)?;
         let (id_owned, version_owned, publisher, verified) = (id.to_owned(), version.to_owned(), publisher.clone(), found.verified);
-        let (package, store) = tokio::task::spawn_blocking(move || super::verify(raw, &id_owned, &version_owned, &record, &publisher, verified))
+        let (package, mut store) = tokio::task::spawn_blocking(move || super::verify(raw, &id_owned, &version_owned, &record, &publisher, verified))
             .await
             .map_err(|_| failed("Couldn't read it"))?
             .map_err(failed)?;
+        store.verified_at = found.verified.then_some(found.verified_at).flatten();
         let source = Source { kind: STORE.into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: Some(store) };
         Ok((package, source))
     }
@@ -1177,7 +1178,39 @@ impl Plugins {
                 Err(error) => errors.push(said(c, &error)),
             }
         }
+        self.catch_up_verified(&client, &caller, &candidates).await;
         (updates, errors)
+    }
+
+    /// Each version installed here unverified whose own record, read now,
+    /// says verified and names the same content: its install record says so
+    /// from now on (`verified`, `verified_at`), and the list shows it. Only
+    /// ever that way: a record that can't be read, names other content, or
+    /// says not verified changes nothing (a take-down is the feed's).
+    async fn catch_up_verified(&self, client: &StoreClient, caller: &Caller, candidates: &[Candidate]) {
+        let mut caught = false;
+        for c in candidates.iter().filter(|c| !c.verified) {
+            let Ok((_, record)) = client.version(&c.id, &c.version, caller).await else { continue };
+            if !record.verified || !record.hash.eq_ignore_ascii_case(&c.hash) {
+                continue;
+            }
+            let Some(entry) = self.entry(&c.id).filter(|e| e.item.hash.eq_ignore_ascii_case(&c.hash)) else { continue };
+            let dir = Path::new(&entry.item.dir);
+            if let Some(mut source) = Source::load(dir)
+                && let Some(store) = source.store.as_mut().filter(|s| !s.verified && s.hash.eq_ignore_ascii_case(&c.hash))
+            {
+                store.verified = true;
+                store.verified_at = record.verified_at;
+                store.verified_alternative = None;
+                if source.save(dir).is_ok() {
+                    tracing::info!(plugin = %c.id, version = %c.version, "store: the version installed is verified now");
+                    caught = true;
+                }
+            }
+        }
+        if caught {
+            self.kick(super::super::Kick::Rescan);
+        }
     }
 
     /// `offer` for `c`, fetched and verified (or the copy already kept, when
@@ -1202,7 +1235,7 @@ impl Plugins {
             if package.hash != offer.hash || offer.key.as_deref().is_some_and(|k| k != package.key) {
                 return Err(failure(client::reason::STORE_MISMATCH, "The update kept isn't the store's"));
             }
-            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified: offer.verified, verified_alternative: None, instead_of_unverified: false };
+            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified: offer.verified, verified_at: None, verified_alternative: None, instead_of_unverified: false };
             (package, store)
         } else {
             let raw = client.package(&c.id, &offer.version, caller, record.bytes).await?;
@@ -1291,6 +1324,7 @@ impl Plugins {
                     && let Some(store) = source.store.as_mut()
                 {
                     store.verified = false;
+                    store.verified_at = None;
                     let _ = source.save(dir);
                 }
             }

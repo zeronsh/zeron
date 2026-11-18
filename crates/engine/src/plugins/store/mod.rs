@@ -77,7 +77,7 @@ pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, pub
     if record.key.as_deref().is_some_and(|key| key != package.key) {
         return Err(mismatch("who signed it"));
     }
-    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified, verified_alternative: None, instead_of_unverified: false };
+    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified, verified_at: None, verified_alternative: None, instead_of_unverified: false };
     Ok((package, store))
 }
 
@@ -105,7 +105,7 @@ mod tests {
         let good = record(&raw, &package);
         let (verified, store) = verify(raw.clone(), "focus", "1.2.0", &good, &ada(), true).unwrap();
         assert_eq!(verified.hash, package.hash);
-        assert_eq!(store, StoreSource { id: "focus".into(), publisher: "ada".into(), publisher_id: ADA.into(), hash: package.hash.clone(), key: Some(key.public()), verified: true, verified_alternative: None, instead_of_unverified: false });
+        assert_eq!(store, StoreSource { id: "focus".into(), publisher: "ada".into(), publisher_id: ADA.into(), hash: package.hash.clone(), key: Some(key.public()), verified: true, verified_at: None, verified_alternative: None, instead_of_unverified: false });
         assert_eq!(store.binding(), format!("store:{ADA}"), "bound to the owner's id, never the username");
 
         let refused = |raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: Option<&str>| {

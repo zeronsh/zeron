@@ -174,6 +174,9 @@ pub struct StoreSource {
     /// without it reads as not verified: it never fails open.
     #[serde(default)]
     pub verified: bool,
+    /// When the store verified it (ms), as its record said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<i64>,
     /// Installed not verified: the newest verified version this Zeron can
     /// run, other than it, as the store said at install (for its consent
     /// sheet's "instead"; installing it asks its own record again).
@@ -222,6 +225,9 @@ impl Source {
             value["id"] = json!(store.id);
             value["publisher"] = json!(store.publisher);
             value["verified"] = json!(store.verified);
+            if store.verified && let Some(at) = store.verified_at {
+                value["verified_at"] = json!(at);
+            }
             if !store.verified {
                 value["verified_alternative"] = json!(store.verified_alternative);
             }
