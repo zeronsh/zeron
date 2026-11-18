@@ -414,8 +414,14 @@ impl StoreClient {
     /// as `caller`, its reply read up to `limit` bytes: `(status, bytes)` for
     /// a 2xx, else the failure.
     async fn send(&self, method: reqwest::Method, path: &str, body: Option<(Vec<u8>, &str)>, caller: &Caller, limit: u64) -> Result<Vec<u8>, String> {
+        self.exchange(method, path, body, caller, limit).await.map_err(|(failure, _)| failure)
+    }
+
+    /// As [`Self::send`], a refusal with its listing fields ([`refused_fields`]).
+    async fn exchange(&self, method: reqwest::Method, path: &str, body: Option<(Vec<u8>, &str)>, caller: &Caller, limit: u64) -> Result<Vec<u8>, (String, Value)> {
+        let plain = |failure: String| (failure, Value::Null);
         if !plain_segments(path) {
-            return Err(failure(reason::NOT_IN_STORE, "That isn't a name the store has"));
+            return Err(plain(failure(reason::NOT_IN_STORE, "That isn't a name the store has")));
         }
         let url = format!("{}{path}", self.base);
         let mut request = self.http.request(method.clone(), &url);
@@ -441,23 +447,23 @@ impl StoreClient {
             request = request.header("Content-Type", content_type).body(bytes);
         }
         let unreachable = |_| failure(reason::STORE_UNREACHABLE, "The store can't be reached right now");
-        let mut response = request.send().await.map_err(unreachable)?;
+        let mut response = request.send().await.map_err(unreachable).map_err(plain)?;
         let status = response.status().as_u16();
         let cap = if (200..300).contains(&status) { limit } else { MAX_JSON_BYTES };
         if response.content_length().is_some_and(|n| n > cap) {
-            return Err(failure(install::reason::TOO_BIG, "The store's answer is too big"));
+            return Err(plain(failure(install::reason::TOO_BIG, "The store's answer is too big")));
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(unreachable)? {
+        while let Some(chunk) = response.chunk().await.map_err(unreachable).map_err(plain)? {
             bytes.extend_from_slice(&chunk);
             if bytes.len() as u64 > cap {
-                return Err(failure(install::reason::TOO_BIG, "The store's answer is too big"));
+                return Err(plain(failure(install::reason::TOO_BIG, "The store's answer is too big")));
             }
         }
         if (200..300).contains(&status) {
             return Ok(bytes);
         }
-        Err(refusal(status, &bytes))
+        Err((refusal(status, &bytes), refused_fields(&bytes)))
     }
 
     async fn json(&self, method: reqwest::Method, path: &str, body: Option<Value>, caller: &Caller) -> Result<Value, String> {
@@ -559,11 +565,12 @@ impl StoreClient {
 
     // ── Publisher ───────────────────────────────────────────────────────
 
-    /// Submit `package` (a `.zeron-plugin`) as a new version of `id`.
-    pub async fn publish(&self, id: &str, package: Vec<u8>, caller: &Caller) -> Result<Value, String> {
+    /// Submit `package` (a `.zeron-plugin`) as a new version of `id`. A
+    /// refusal comes with its listing fields ([`refused_fields`]).
+    pub async fn publish(&self, id: &str, package: Vec<u8>, caller: &Caller) -> Result<Value, (String, Value)> {
         let path = format!("/store/v1/plugins/{}/versions", segment(id));
-        let bytes = self.send(reqwest::Method::POST, &path, Some((package, "application/json")), caller, MAX_JSON_BYTES).await?;
-        object(&bytes)
+        let bytes = self.exchange(reqwest::Method::POST, &path, Some((package, "application/json")), caller, MAX_JSON_BYTES).await?;
+        object(&bytes).map_err(|failure| (failure, Value::Null))
     }
 
     pub async fn my_plugins(&self, caller: &Caller) -> Result<Value, String> {
@@ -611,6 +618,25 @@ fn object(bytes: &[u8]) -> Result<Value, String> {
         Ok(value @ Value::Object(_)) => Ok(value),
         _ => Err(failure(reason::STORE_ERROR, "The store's answer couldn't be read")),
     }
+}
+
+/// A refusal's listing fields, those the edge gave and as a device would
+/// give them: `field` (a manifest key), `cause` (one of
+/// [`listing::cause::ALL`]) and `word` ([`listing::problem_word`]); an
+/// object, empty when it gave none.
+pub fn refused_fields(body: &[u8]) -> Value {
+    let value: Value = serde_json::from_slice(body).unwrap_or_default();
+    let mut fields = serde_json::Map::new();
+    if let Some(field) = value["field"].as_str().filter(|f| !f.is_empty() && f.len() <= 32 && f.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')) {
+        fields.insert("field".into(), serde_json::json!(field));
+    }
+    if let Some(cause) = value["cause"].as_str().filter(|c| listing::cause::ALL.contains(c)) {
+        fields.insert("cause".into(), serde_json::json!(cause));
+    }
+    if let Some(word) = value["word"].as_str().map(listing::problem_word).filter(|w| !w.is_empty()) {
+        fields.insert("word".into(), serde_json::json!(word));
+    }
+    Value::Object(fields)
 }
 
 /// A non-2xx answer as a failure: the edge's own word when it gave one.
@@ -705,6 +731,17 @@ mod tests {
         assert_eq!(install::reason_of(&said(401, "")), Some("unauthenticated"));
         assert_eq!(install::reason_of(&said(403, "<html>")), Some("forbidden"));
         assert_eq!(install::reason_of(&said(302, "")), Some(reason::STORE_ERROR));
+    }
+
+    #[test]
+    fn a_refusal_s_listing_fields_are_taken_clean() {
+        let fields = |body: &str| refused_fields(body.as_bytes());
+        let body = r#"{"error":"bad_listing","message":"Its name says \"verified\"","field":"name","cause":"mark_word","word":"Ver\u202eified"}"#;
+        assert_eq!(fields(body), serde_json::json!({ "field": "name", "cause": "mark_word", "word": "Verified" }));
+        // Only causes of the closed list, fields that are plain words, words of at most 64 characters.
+        let odd = format!(r#"{{"field":"Name: x","cause":"made_up","word":"{}"}}"#, "w".repeat(100));
+        assert_eq!(fields(&odd), serde_json::json!({ "word": "w".repeat(64) }));
+        assert_eq!(fields("<html>"), serde_json::json!({}));
     }
 
     /// The store adds fields as it grows (amendments 39–41: `listed_at`,

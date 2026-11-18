@@ -78,6 +78,8 @@ fn sizes(manifest: &Manifest, files: &BTreeMap<String, Vec<u8>>) -> Vec<Problem>
             field: Some("manifest"),
             path: None,
             line: None,
+            cause: None,
+            word: None,
             words: "Its manifest is too big for the store (1 MB and 100,000 values, its signature included)".into(),
         });
     }
@@ -91,6 +93,8 @@ fn sizes(manifest: &Manifest, files: &BTreeMap<String, Vec<u8>>) -> Vec<Problem>
             field: Some("package"),
             path: None,
             line: None,
+            cause: None,
+            word: None,
             words: "It's too big for the store: its package is over 20 MB".into(),
         });
     }
@@ -157,6 +161,8 @@ pub fn newer_problem(version: &str, versions: &[Value]) -> Option<Problem> {
                 field: Some("version"),
                 path: None,
                 line: None,
+                cause: None,
+                word: None,
                 words: format!("Version {version} was submitted already: a version is submitted once, so give this one a new number"),
             });
         }
@@ -171,6 +177,8 @@ pub fn newer_problem(version: &str, versions: &[Value]) -> Option<Problem> {
         field: Some("version"),
         path: None,
         line: None,
+        cause: None,
+        word: None,
         words: format!("Version {version} isn't later than {above}, which the store has"),
     })
 }

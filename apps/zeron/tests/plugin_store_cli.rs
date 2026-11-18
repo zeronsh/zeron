@@ -136,18 +136,30 @@ async fn ci_checks_and_publishes_with_a_deploy_key() {
     let status = run.zeron(&store, Some(&secret), &["status"]).await;
     assert!(text(&status).contains("  1.0.0  yanked  not verified: superseded by 1.1.0"), "{}", text(&status));
 
-    // Saying it's Zeron's own: the check warns; the store refuses it, and
-    // the CLI says the store's sentence (the plugin's to fix: 1).
+    // "Zeron" in a listing is nobody's concern: published as any other.
     plugin(&folder, "1.2.0");
     let path = folder.join("zeron-plugin.json");
     let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["name"] = json!("Zeron Git");
     manifest["description"] = json!("Boards, by Zeron.");
     std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
-    let claimed = run.zeron(&store, Some(&secret), &["publish", &folder_arg]).await;
-    let said = text(&claimed);
-    assert_eq!(claimed.status.code(), Some(1), "{said}");
-    assert!(said.contains("warning: ") && said.contains("\"by zeron\""), "{said}");
-    assert!(said.contains("claims_zeron: Its description says \"by zeron\": only Zeron's own plugins may say they're Zeron's."), "{said}");
+    let published = run.zeron(&store, Some(&secret), &["publish", &folder_arg]).await;
+    let said = text(&published);
+    assert_eq!(published.status.code(), Some(0), "{said}");
+    assert!(!said.contains("warning: "), "{said}");
+
+    // Claiming the mark: refused before it's sent, the word named, how to
+    // reword said (the plugin's to fix: 1).
+    plugin(&folder, "1.3.0");
+    let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["description"] = json!("The official board plugin.");
+    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let requests = store.state.lock().unwrap().submitted.len();
+    let refused = run.zeron(&store, Some(&secret), &["publish", &folder_arg]).await;
+    let said = text(&refused);
+    assert_eq!(refused.status.code(), Some(1), "{said}");
+    assert!(said.contains("\"official\"") && said.contains("Say what it does instead"), "{said}");
+    assert_eq!(store.state.lock().unwrap().submitted.len(), requests, "nothing was sent");
 }
 
 #[tokio::test(flavor = "multi_thread")]

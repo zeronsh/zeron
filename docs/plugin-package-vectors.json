@@ -1998,9 +1998,11 @@
       "name": "a keyword in capitals",
       "problems": [
         {
+          "cause": "keyword_shape",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Focus"
         }
       ],
       "warnings": []
@@ -2041,6 +2043,7 @@
       "name": "nine keywords",
       "problems": [
         {
+          "cause": "too_many",
           "field": "keywords",
           "path": null,
           "rule": "bad_listing"
@@ -2106,9 +2109,11 @@
       "name": "a keyword with two spaces",
       "problems": [
         {
+          "cause": "keyword_shape",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "code  review"
         }
       ],
       "warnings": []
@@ -2620,6 +2625,7 @@
       "name": "a description of two lines",
       "problems": [
         {
+          "cause": "not_one_line",
           "field": "description",
           "path": null,
           "rule": "bad_listing"
@@ -2704,6 +2710,7 @@
       "name": "a description of 301 characters",
       "problems": [
         {
+          "cause": "too_long",
           "field": "description",
           "path": null,
           "rule": "bad_listing"
@@ -2740,6 +2747,7 @@
       "name": "a name of 65 characters",
       "problems": [
         {
+          "cause": "too_long",
           "field": "name",
           "path": null,
           "rule": "bad_listing"
@@ -3166,9 +3174,11 @@
       "name": "a name with a direction override",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+202E"
         }
       ],
       "warnings": []
@@ -3202,9 +3212,11 @@
       "name": "a name with a zero-width space",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+200B"
         }
       ],
       "warnings": []
@@ -3238,9 +3250,11 @@
       "name": "a description with a direction isolate",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+2066"
         }
       ],
       "warnings": []
@@ -4022,9 +4036,11 @@
       "name": "a keyword of 33 characters",
       "problems": [
         {
+          "cause": "keyword_shape",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk"
         }
       ],
       "warnings": []
@@ -4124,9 +4140,11 @@
       "name": "the mark: a name saying Verified",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verified"
         }
       ],
       "warnings": []
@@ -4160,9 +4178,11 @@
       "name": "the mark: a name saying OFFICIAL",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "OFFICIAL"
         }
       ],
       "warnings": []
@@ -4196,9 +4216,11 @@
       "name": "the mark: a name with a check mark",
       "problems": [
         {
+          "cause": "mark_glyph",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "✔"
         }
       ],
       "warnings": []
@@ -4232,9 +4254,11 @@
       "name": "the mark: a name with a check mark emoji",
       "problems": [
         {
+          "cause": "mark_glyph",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "✅"
         }
       ],
       "warnings": []
@@ -4268,9 +4292,11 @@
       "name": "the mark: a name saying verified in mathematical bold",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "𝐯𝐞𝐫𝐢𝐟𝐢𝐞𝐝"
         }
       ],
       "warnings": []
@@ -4304,9 +4330,11 @@
       "name": "the mark: a name saying verified in fullwidth letters",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ＶＥＲＩＦＩＥＤ"
         }
       ],
       "warnings": []
@@ -4340,9 +4368,11 @@
       "name": "the mark: a name with verified before an underscore",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -4376,9 +4406,11 @@
       "name": "the mark: a description saying official plugin",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "official"
         }
       ],
       "warnings": []
@@ -4412,9 +4444,11 @@
       "name": "the mark: a description with a ballot box check",
       "problems": [
         {
+          "cause": "mark_glyph",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "☑"
         }
       ],
       "warnings": []
@@ -4448,9 +4482,11 @@
       "name": "the mark: a description saying verified in capital I with a dot",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "VERİFİED"
         }
       ],
       "warnings": []
@@ -4604,9 +4640,11 @@
       "name": "the mark: Cyrillic letters",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Vеrіfіеd"
         }
       ],
       "warnings": []
@@ -4640,9 +4678,11 @@
       "name": "the mark: Cyrillic capitals",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "VЕRIFIЕD"
         }
       ],
       "warnings": []
@@ -4676,9 +4716,11 @@
       "name": "the mark: Cyrillic letters in official",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "оffiсiаl"
         }
       ],
       "warnings": []
@@ -4712,9 +4754,11 @@
       "name": "the mark: Cyrillic palochka for l",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "оfficiaӏ"
         }
       ],
       "warnings": []
@@ -4748,9 +4792,11 @@
       "name": "the mark: Cyrillic izhitsa for v",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ѵerified"
         }
       ],
       "warnings": []
@@ -4784,9 +4830,11 @@
       "name": "the mark: Greek nu for v",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "νerified"
         }
       ],
       "warnings": []
@@ -4820,9 +4868,11 @@
       "name": "the mark: Greek letters",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "vεrιfιεd"
         }
       ],
       "warnings": []
@@ -4856,9 +4906,11 @@
       "name": "the mark: Greek capitals",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ΟFFΙCIAL"
         }
       ],
       "warnings": []
@@ -4892,9 +4944,11 @@
       "name": "the mark: small capitals",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ᴠᴇʀɪꜰɪᴇᴅ"
         }
       ],
       "warnings": []
@@ -4928,9 +4982,11 @@
       "name": "the mark: Lisu capitals for verified",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ꓦꓰꓣꓲꓝꓲꓰꓓ"
         }
       ],
       "warnings": []
@@ -4964,9 +5020,11 @@
       "name": "the mark: Lisu capitals for official",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ꓳꓝꓝꓲꓚꓲꓮꓡ"
         }
       ],
       "warnings": []
@@ -5000,9 +5058,11 @@
       "name": "the mark: a small capital I",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verɪfɪed"
         }
       ],
       "warnings": []
@@ -5036,9 +5096,11 @@
       "name": "the mark: digits for I",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "VER1F1ED"
         }
       ],
       "warnings": []
@@ -5072,9 +5134,11 @@
       "name": "the mark: a digit 0 for O",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "0FFICIAL"
         }
       ],
       "warnings": []
@@ -5108,9 +5172,11 @@
       "name": "the mark: a digit 3 for e",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "v3rified"
         }
       ],
       "warnings": []
@@ -5144,9 +5210,11 @@
       "name": "the mark: a digit 1 for l",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "officia1"
         }
       ],
       "warnings": []
@@ -5180,9 +5248,11 @@
       "name": "the mark: a square root as a tick",
       "problems": [
         {
+          "cause": "mark_glyph",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "√"
         }
       ],
       "warnings": []
@@ -5216,9 +5286,11 @@
       "name": "the mark: the Aegean check mark",
       "problems": [
         {
+          "cause": "mark_glyph",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "𐄂"
         }
       ],
       "warnings": []
@@ -5252,9 +5324,11 @@
       "name": "the mark: the inverse check mark",
       "problems": [
         {
+          "cause": "mark_glyph",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "🮱"
         }
       ],
       "warnings": []
@@ -5288,9 +5362,11 @@
       "name": "the mark: lowercase l for I in capitals",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "VERlFlED"
         }
       ],
       "warnings": []
@@ -5324,9 +5400,11 @@
       "name": "the mark: lowercase l for I in OFFICIAL",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "OFFlClAL"
         }
       ],
       "warnings": []
@@ -5360,9 +5438,11 @@
       "name": "the mark: capital I for l in lowercase",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "officiaI"
         }
       ],
       "warnings": []
@@ -5396,9 +5476,11 @@
       "name": "the mark: cl for d",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verifiecl"
         }
       ],
       "warnings": []
@@ -5432,9 +5514,11 @@
       "name": "the mark: letter-spaced",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V E R I F I E D"
         }
       ],
       "warnings": []
@@ -5468,9 +5552,11 @@
       "name": "the mark: dotted capitals",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V.E.R.I.F.I.E.D"
         }
       ],
       "warnings": []
@@ -5504,9 +5590,11 @@
       "name": "the mark: dot and space",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V. E. R. I. F. I. E. D"
         }
       ],
       "warnings": []
@@ -5540,9 +5628,11 @@
       "name": "the mark: middle dots",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V·E·R·I·F·I·E·D"
         }
       ],
       "warnings": []
@@ -5576,9 +5666,11 @@
       "name": "the mark: en dashes",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V–E–R–I–F–I–E–D"
         }
       ],
       "warnings": []
@@ -5612,9 +5704,11 @@
       "name": "the mark: two spaces",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V  E  R  I  F  I  E  D"
         }
       ],
       "warnings": []
@@ -5648,9 +5742,11 @@
       "name": "the mark: no-break spaces",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V E R I F I E D"
         }
       ],
       "warnings": []
@@ -5684,9 +5780,11 @@
       "name": "the mark: ideographic spaces",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V　E　R　I　F　I　E　D"
         }
       ],
       "warnings": []
@@ -5720,9 +5818,11 @@
       "name": "the mark: spaced look-alikes",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V E R І F І E D"
         }
       ],
       "warnings": []
@@ -5756,9 +5856,11 @@
       "name": "the mark: a word joiner between letters",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+2060"
         }
       ],
       "warnings": []
@@ -5792,9 +5894,11 @@
       "name": "the mark: an enclosing keycap mark between letters",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Veri⃣fied"
         }
       ],
       "warnings": []
@@ -5828,9 +5932,11 @@
       "name": "the mark: an enclosing circle between letters",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Veri⃝fied"
         }
       ],
       "warnings": []
@@ -5864,9 +5970,11 @@
       "name": "the mark: negative circled capitals",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "🅥🅔🅡🅘🅕🅘🅔🅓"
         }
       ],
       "warnings": []
@@ -5900,9 +6008,11 @@
       "name": "the mark: negative squared capitals",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "🆅🅴🆁🅸🅵🅸🅴🅳"
         }
       ],
       "warnings": []
@@ -5936,9 +6046,11 @@
       "name": "the mark: spaced regional indicators",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "🇻 🇪 🇷 🇮 🇫 🇮 🇪 🇩"
         }
       ],
       "warnings": []
@@ -6572,9 +6684,11 @@
       "name": "unseen: U+FE0F after a letter",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+FE0F"
         }
       ],
       "warnings": []
@@ -6608,9 +6722,11 @@
       "name": "unseen: U+FE0F twice after an emoji",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+FE0F"
         }
       ],
       "warnings": []
@@ -6644,9 +6760,11 @@
       "name": "unseen: text-style selector U+FE0E",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+FE0E"
         }
       ],
       "warnings": []
@@ -6680,9 +6798,11 @@
       "name": "unseen: variation selector 1",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+FE00"
         }
       ],
       "warnings": []
@@ -6716,9 +6836,11 @@
       "name": "unseen: variation selector 17",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+E0100"
         }
       ],
       "warnings": []
@@ -6752,9 +6874,11 @@
       "name": "unseen: Hangul filler",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+3164"
         }
       ],
       "warnings": []
@@ -6788,9 +6912,11 @@
       "name": "unseen: Hangul choseong filler",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+115F"
         }
       ],
       "warnings": []
@@ -6824,9 +6950,11 @@
       "name": "unseen: halfwidth Hangul filler",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+FFA0"
         }
       ],
       "warnings": []
@@ -6860,9 +6988,11 @@
       "name": "unseen: U+FE0F at the start",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+FE0F"
         }
       ],
       "warnings": []
@@ -6896,9 +7026,11 @@
       "name": "unseen: U+FE0E after an emoji in a description",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+FE0E"
         }
       ],
       "warnings": []
@@ -6932,9 +7064,11 @@
       "name": "unseen: a zero-width joiner sequence",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+200D"
         }
       ],
       "warnings": []
@@ -6968,9 +7102,11 @@
       "name": "unseen: a tag sequence flag",
       "problems": [
         {
+          "cause": "unseen_char",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "U+E0067"
         }
       ],
       "warnings": []
@@ -7003,9 +7139,11 @@
       "name": "unseen: a variation selector in a keyword",
       "problems": [
         {
+          "cause": "keyword_shape",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "timer"
         }
       ],
       "warnings": []
@@ -7036,15 +7174,39 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Zeron Git\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name leading with Zeron",
+      "name": "zeron: a name leading with Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Git by Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "zeron: a name saying Git by Zeron is fine",
+      "problems": [],
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7072,15 +7234,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Zeron Labs notes\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying Zeron Labs",
+      "name": "zeron: a name saying Zeron Labs is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7108,15 +7264,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Team Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying Team Zeron",
+      "name": "zeron: a name saying Team Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7144,15 +7294,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Zeron's git\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying Zeron's",
+      "name": "zeron: a name saying Zeron's is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7180,15 +7324,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Zeron-made boards\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying Zeron-made",
+      "name": "zeron: a name saying Zeron-made is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7216,15 +7354,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Notes, by Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying by Zeron",
+      "name": "zeron: a name saying by Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7252,15 +7384,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Git by Zer0n\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name with a digit 0 for o",
+      "name": "zeron: a name with a digit 0 for o is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7288,15 +7414,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Git by Zеron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name with a Cyrillic e",
+      "name": "zeron: a name with a Cyrillic e is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7324,15 +7444,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Git by ᴢᴇʀᴏɴ\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name in small capitals",
+      "name": "zeron: a name in small capitals is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7360,15 +7474,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Git bу Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name with a Cyrillic u for y",
+      "name": "zeron: a name with a Cyrillic u for y is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7396,15 +7504,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Z.E.R.O.N. approved\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name in dotted capitals",
+      "name": "zeron: a name in dotted capitals is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7432,15 +7534,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"z e r o n approved\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name spaced",
+      "name": "zeron: a name spaced is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7468,15 +7564,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Git by Z e r o n\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name spaced after by",
+      "name": "zeron: a name spaced after by is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7504,15 +7594,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Zeron插件\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name with Zeron in Chinese text",
+      "name": "zeron: a name with Zeron in Chinese text is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7540,15 +7624,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"由Zeron制作的笔记\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying by Zeron in Chinese",
+      "name": "zeron: a name saying by Zeron in Chinese is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7576,15 +7654,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Boards, by Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying by Zeron",
+      "name": "zeron: a description saying by Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7612,15 +7684,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"From ZERON: the board.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying from ZERON",
+      "name": "zeron: a description saying from ZERON is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7648,15 +7714,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Made by the Zeron team.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying made by the Zeron team",
+      "name": "zeron: a description saying made by the Zeron team is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7684,15 +7744,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeron’s own notes.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying Zeron's own",
+      "name": "zeron: a description saying Zeron's own is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7720,15 +7774,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A Zeron approved board.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying Zeron approved",
+      "name": "zeron: a description saying Zeron approved is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7756,15 +7804,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"zeron—recommended.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying recommended after a dash",
+      "name": "zeron: a description saying recommended after a dash is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7792,15 +7834,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Ein Plugin von Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying von Zeron",
+      "name": "zeron: a description saying von Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7828,15 +7864,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Un thème par Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying par Zeron",
+      "name": "zeron: a description saying par Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7864,15 +7894,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Straight from Zeron HQ.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying Zeron HQ",
+      "name": "zeron: a description saying Zeron HQ is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7900,12 +7924,14 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeron官方插件。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying Zeron official in Chinese is the mark first",
+      "name": "the mark: Chinese official near plugin, Zeron before",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "官方"
         }
       ],
       "warnings": []
@@ -7936,15 +7962,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeronʼs own board.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description with a modifier apostrophe",
+      "name": "zeron: a description with a modifier apostrophe is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -7972,7 +7992,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Themes for Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name for Zeron is fine",
+      "name": "zeron: a name for Zeron is fine",
       "problems": [],
       "warnings": []
     },
@@ -8002,7 +8022,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Git in Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name in Zeron is fine",
+      "name": "zeron: a name in Zeron is fine",
       "problems": [],
       "warnings": []
     },
@@ -8032,7 +8052,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Notes with Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name with Zeron is fine",
+      "name": "zeron: a name with Zeron is fine",
       "problems": [],
       "warnings": []
     },
@@ -8062,7 +8082,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"适用于Zeron的主题\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name for Zeron in Chinese is fine",
+      "name": "zeron: a name for Zeron in Chinese is fine",
       "problems": [],
       "warnings": []
     },
@@ -8092,7 +8112,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Zeronaut\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying Zeronaut is fine",
+      "name": "zeron: a name saying Zeronaut is fine",
       "problems": [],
       "warnings": []
     },
@@ -8122,7 +8142,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Heron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying Heron is fine",
+      "name": "zeron: a name saying Heron is fine",
       "problems": [],
       "warnings": []
     },
@@ -8152,7 +8172,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"使用 Zeron 的技巧\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name using Zeron in Chinese is fine",
+      "name": "zeron: a name using Zeron in Chinese is fine",
       "problems": [],
       "warnings": []
     },
@@ -8182,7 +8202,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"a zero-noise timer\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description of a zero-noise timer is fine",
+      "name": "zeron: a description of a zero-noise timer is fine",
       "problems": [],
       "warnings": []
     },
@@ -8212,7 +8232,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Lazeron approved\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying Lazeron is fine",
+      "name": "zeron: a name saying Lazeron is fine",
       "problems": [],
       "warnings": []
     },
@@ -8242,7 +8262,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"A board by Zenon\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying Zenon is fine",
+      "name": "zeron: a name saying Zenon is fine",
       "problems": [],
       "warnings": []
     },
@@ -8272,7 +8292,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Adds a panel to Zeron's sidebar.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description about Zeron's sidebar is fine",
+      "name": "zeron: a description about Zeron's sidebar is fine",
       "problems": [],
       "warnings": []
     },
@@ -8302,7 +8322,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Made for Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description made for Zeron is fine",
+      "name": "zeron: a description made for Zeron is fine",
       "problems": [],
       "warnings": []
     },
@@ -8332,7 +8352,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Works with Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description works with Zeron is fine",
+      "name": "zeron: a description works with Zeron is fine",
       "problems": [],
       "warnings": []
     },
@@ -8362,7 +8382,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeron notes, kept tidy.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying Zeron notes is fine",
+      "name": "zeron: a description saying Zeron notes is fine",
       "problems": [],
       "warnings": []
     },
@@ -8392,7 +8412,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Counts from zero n times.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying zero n is fine",
+      "name": "zeron: a description saying zero n is fine",
       "problems": [],
       "warnings": []
     },
@@ -8425,9 +8445,11 @@
       "name": "the mark: Spanish oficial",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "oficial"
         }
       ],
       "warnings": []
@@ -8491,9 +8513,11 @@
       "name": "the mark: French vérifié in a description",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "vérifié"
         }
       ],
       "warnings": []
@@ -8527,9 +8551,11 @@
       "name": "the mark: French vérifie in a name, folded",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Vérifie"
         }
       ],
       "warnings": []
@@ -8563,9 +8589,11 @@
       "name": "the mark: French officielle",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "officielle"
         }
       ],
       "warnings": []
@@ -8599,9 +8627,11 @@
       "name": "the mark: German offizieller",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Offizieller"
         }
       ],
       "warnings": []
@@ -8635,9 +8665,11 @@
       "name": "the mark: German verifiziert in a name",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verifiziert"
         }
       ],
       "warnings": []
@@ -8671,9 +8703,11 @@
       "name": "the mark: German offiziell in a name",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Offiziell"
         }
       ],
       "warnings": []
@@ -8707,9 +8741,11 @@
       "name": "the mark: Italian ufficiale",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ufficiale"
         }
       ],
       "warnings": []
@@ -8743,9 +8779,11 @@
       "name": "the mark: Portuguese verificado",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificado"
         }
       ],
       "warnings": []
@@ -8779,9 +8817,11 @@
       "name": "the mark: Russian official",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официальный"
         }
       ],
       "warnings": []
@@ -8815,9 +8855,11 @@
       "name": "the mark: Russian verified in a name",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Проверено"
         }
       ],
       "warnings": []
@@ -8851,9 +8893,11 @@
       "name": "the mark: Chinese official",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "官方"
         }
       ],
       "warnings": []
@@ -8917,9 +8961,11 @@
       "name": "the mark: Chinese verified",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "已验证"
         }
       ],
       "warnings": []
@@ -8953,9 +8999,11 @@
       "name": "the mark: Japanese official beside kana",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公式"
         }
       ],
       "warnings": []
@@ -9019,9 +9067,11 @@
       "name": "the mark: Japanese verified plugin",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "検証済"
         }
       ],
       "warnings": []
@@ -9055,9 +9105,11 @@
       "name": "the mark: Korean verified",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "검증됨"
         }
       ],
       "warnings": []
@@ -9658,14 +9710,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeron 公式のメモ。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: Zeron beside Japanese official",
-      "problems": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "zeron: Zeron beside Japanese official is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -9694,12 +9740,14 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"공식 Zeron 플러그인.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: Zeron beside Korean official",
+      "name": "the mark: Korean official near plugin, Zeron between",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -9730,15 +9778,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeron 认证插件。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: Zeron beside Chinese certified",
+      "name": "zeron: Zeron beside Chinese certified is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -9766,14 +9808,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Le thème Zeron officiel.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: Zeron beside French officiel",
-      "problems": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "zeron: Zeron beside French officiel is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -9802,15 +9838,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"由 Zeron 制作。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: by Zeron in Chinese",
+      "name": "zeron: by Zeron in Chinese is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -9838,15 +9868,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"来自Zeron的笔记。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: from Zeron in Chinese",
+      "name": "zeron: from Zeron in Chinese is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -9877,9 +9901,11 @@
       "name": "description: the first word",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Official"
         }
       ],
       "warnings": []
@@ -9913,9 +9939,11 @@
       "name": "description: alone as a sentence",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verified"
         }
       ],
       "warnings": []
@@ -9949,9 +9977,11 @@
       "name": "description: near plugin",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -9985,9 +10015,11 @@
       "name": "description: near extension, a word between",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "official"
         }
       ],
       "warnings": []
@@ -10021,9 +10053,11 @@
       "name": "description: near version, after a comma",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "official"
         }
       ],
       "warnings": []
@@ -10057,9 +10091,11 @@
       "name": "description: Spanish near cliente",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "oficial"
         }
       ],
       "warnings": []
@@ -10093,9 +10129,11 @@
       "name": "description: Japanese 公式 near 拡張, no kana needed",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公式"
         }
       ],
       "warnings": []
@@ -10129,9 +10167,11 @@
       "name": "description: Korean 공식 near 플러그인",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -10165,9 +10205,11 @@
       "name": "description: Chinese 已认证 near 插件",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "已认证插件"
         }
       ],
       "warnings": []
@@ -10201,9 +10243,11 @@
       "name": "description: Japanese 認証済み near プラグイン",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "認証済みプラグイン"
         }
       ],
       "warnings": []
@@ -10237,9 +10281,11 @@
       "name": "description: after is",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -10273,9 +10319,11 @@
       "name": "description: after now",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "official"
         }
       ],
       "warnings": []
@@ -10309,9 +10357,11 @@
       "name": "description: after fully",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -10345,9 +10395,11 @@
       "name": "description: German after ist",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "offizielle"
         }
       ],
       "warnings": []
@@ -10378,14 +10430,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Boards, Zeron verified.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "description: beside Zeron",
-      "problems": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "description: beside Zeron is no longer rule 4, so is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -10414,12 +10460,44 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Not Zeron official.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "description: beside Zeron, a negation doesn't lift it",
+      "name": "description: not Zeron official is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Checked: verified by Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "description: verified by Zeron, an authority",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -10453,9 +10531,11 @@
       "name": "description: by the store",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -10489,9 +10569,11 @@
       "name": "description: spaced capitals alone",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V.E.R.I.F.I.E.D"
         }
       ],
       "warnings": []
@@ -10525,9 +10607,11 @@
       "name": "description: a digit for e near plugin",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "v3rified"
         }
       ],
       "warnings": []
@@ -10828,15 +10912,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Ships with Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying ships with Zeron",
+      "name": "zeron: a description saying ships with Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -10864,15 +10942,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Included in Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying included in Zeron",
+      "name": "zeron: a description saying included in Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -10900,15 +10972,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Part of Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying part of Zeron",
+      "name": "zeron: a description saying part of Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -10936,15 +11002,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Comes with Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying comes with Zeron",
+      "name": "zeron: a description saying comes with Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -10972,15 +11032,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Built into Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying built into Zeron",
+      "name": "zeron: a description saying built into Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11008,15 +11062,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeron-made boards.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying Zeron-made",
+      "name": "zeron: a description saying Zeron-made is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11044,15 +11092,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"内置于Zeron。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying built into Zeron in Chinese",
+      "name": "zeron: a description saying built into Zeron in Chinese is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11080,15 +11122,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Built-in Zeron Git\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying Built-in Zeron",
+      "name": "zeron: a name saying Built-in Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11116,15 +11152,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Default Git for Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a name saying Default Git for Zeron",
+      "name": "zeron: a name saying Default Git for Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11152,7 +11182,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Adds a button to Zeron's built-in terminal.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description about Zeron's built-in terminal is fine",
+      "name": "zeron: a description about Zeron's built-in terminal is fine",
       "problems": [],
       "warnings": []
     },
@@ -11182,7 +11212,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeron built-in terminal tools.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description saying Zeron built-in is fine",
+      "name": "zeron: a description saying Zeron built-in is fine",
       "problems": [],
       "warnings": []
     },
@@ -11212,7 +11242,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeron内置终端的按钮\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: a description about Zeron's built-in terminal in Chinese is fine",
+      "name": "zeron: a description about Zeron's built-in terminal in Chinese is fine",
       "problems": [],
       "warnings": []
     },
@@ -11245,9 +11275,11 @@
       "name": "the mark: Russian genitive official in a name",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официального"
         }
       ],
       "warnings": []
@@ -11281,9 +11313,11 @@
       "name": "the mark: Russian verified, a stem, in a name",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Верифицированного"
         }
       ],
       "warnings": []
@@ -11317,9 +11351,11 @@
       "name": "the mark: Russian official with a Latin o",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "oфициальный"
         }
       ],
       "warnings": []
@@ -11353,9 +11389,11 @@
       "name": "the mark: Spanish oficial with a digit 0",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "0ficial"
         }
       ],
       "warnings": []
@@ -11389,9 +11427,11 @@
       "name": "the mark: Spanish oficial with Cyrillic letters",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "оfiсial"
         }
       ],
       "warnings": []
@@ -11425,9 +11465,11 @@
       "name": "the mark: Spanish verificado with a digit 0",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verificad0"
         }
       ],
       "warnings": []
@@ -11461,9 +11503,11 @@
       "name": "the mark: Russian official theme in the accusative",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "официальную"
         }
       ],
       "warnings": []
@@ -11527,9 +11571,11 @@
       "name": "the mark: Russian official plugin for Git",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официальный"
         }
       ],
       "warnings": []
@@ -11563,9 +11609,11 @@
       "name": "the mark: Spanish oficial with a Cyrillic o near cliente",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "оficial"
         }
       ],
       "warnings": []
@@ -11716,15 +11764,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Built-in Zeron Git\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: probe 5: Built-in Zeron Git",
+      "name": "zeron: probe 5: Built-in Zeron Git is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11752,15 +11794,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Built in Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: probe 5: Built in Zeron",
+      "name": "zeron: probe 5: Built in Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11788,15 +11824,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Ships with Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: probe 5: Ships with Zeron",
+      "name": "zeron: probe 5: Ships with Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11824,15 +11854,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Bundled with Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: probe 5: Bundled with Zeron",
+      "name": "zeron: probe 5: Bundled with Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11860,15 +11884,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Included in Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: probe 5: Included in Zeron",
+      "name": "zeron: probe 5: Included in Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11896,15 +11914,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Comes with Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: probe 5: Comes with Zeron",
+      "name": "zeron: probe 5: Comes with Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11932,15 +11944,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Native to Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: probe 5: Native to Zeron",
+      "name": "zeron: probe 5: Native to Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -11968,15 +11974,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Default in Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: probe 5: Default in Zeron",
+      "name": "zeron: probe 5: Default in Zeron is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -12004,7 +12004,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"使用 Zeron 的技巧\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: probe 5: using Zeron in Chinese is fine",
+      "name": "zeron: probe 5: using Zeron in Chinese is fine",
       "problems": [],
       "warnings": []
     },
@@ -12034,7 +12034,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"使用Zeron的Git\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "claims_zeron: probe 5: using Zeron's Git in Chinese is fine",
+      "name": "zeron: probe 5: using Zeron's Git in Chinese is fine",
       "problems": [],
       "warnings": []
     },
@@ -12067,9 +12067,11 @@
       "name": "the mark: probe 5: Russian instrumental",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официальной"
         }
       ],
       "warnings": []
@@ -12103,9 +12105,11 @@
       "name": "the mark: probe 5: Russian genitive plural",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "официальных"
         }
       ],
       "warnings": []
@@ -12139,9 +12143,11 @@
       "name": "the mark: probe 5: Russian accusative",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официальную"
         }
       ],
       "warnings": []
@@ -12175,9 +12181,11 @@
       "name": "the mark: probe 5: Russian short form",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Проверен"
         }
       ],
       "warnings": []
@@ -12211,9 +12219,11 @@
       "name": "the mark: probe 5: Russian genitive plural participle",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "проверенных"
         }
       ],
       "warnings": []
@@ -12247,9 +12257,11 @@
       "name": "the mark: probe 5: Spanish with a Cyrillic s",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verifiсado"
         }
       ],
       "warnings": []
@@ -12283,9 +12295,11 @@
       "name": "the mark: probe 5: Spanish with a digit 0",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "0ficial"
         }
       ],
       "warnings": []
@@ -12319,9 +12333,11 @@
       "name": "the mark: probe 5: Japanese 公認 beside kana",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公認"
         }
       ],
       "warnings": []
@@ -12355,9 +12371,11 @@
       "name": "the mark: probe 5: Korean 공인 before 플러그인",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공인"
         }
       ],
       "warnings": []
@@ -14908,15 +14926,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Plugin verifie par Zeron\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "corpus: dodge fr 00",
+      "name": "corpus: once a Zeron dodge fr 00 is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -14977,9 +14989,11 @@
       "name": "corpus: dodge fr 02",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Vérifiée"
         }
       ],
       "warnings": []
@@ -15013,9 +15027,11 @@
       "name": "corpus: dodge fr 03",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Officielle"
         }
       ],
       "warnings": []
@@ -15049,9 +15065,11 @@
       "name": "corpus: dodge fr 04",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "0fficiel"
         }
       ],
       "warnings": []
@@ -15085,9 +15103,11 @@
       "name": "corpus: dodge de 05",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verifiziert"
         }
       ],
       "warnings": []
@@ -15121,9 +15141,11 @@
       "name": "corpus: dodge de 06",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Offiziell"
         }
       ],
       "warnings": []
@@ -15157,9 +15179,11 @@
       "name": "corpus: dodge de 07",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "0ffiziell"
         }
       ],
       "warnings": []
@@ -15193,9 +15217,11 @@
       "name": "corpus: dodge de 08",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Offizielles"
         }
       ],
       "warnings": []
@@ -15259,9 +15285,11 @@
       "name": "corpus: dodge es 10",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Oficial"
         }
       ],
       "warnings": []
@@ -15295,9 +15323,11 @@
       "name": "corpus: dodge es 11",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "0ficial"
         }
       ],
       "warnings": []
@@ -15331,9 +15361,11 @@
       "name": "corpus: dodge es 12",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verifiсado"
         }
       ],
       "warnings": []
@@ -15367,9 +15399,11 @@
       "name": "corpus: dodge it 13",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Ufficiale"
         }
       ],
       "warnings": []
@@ -15403,9 +15437,11 @@
       "name": "corpus: dodge it 14",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verificato"
         }
       ],
       "warnings": []
@@ -15439,9 +15475,11 @@
       "name": "corpus: dodge pt 15",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Oficial"
         }
       ],
       "warnings": []
@@ -15475,9 +15513,11 @@
       "name": "corpus: dodge pt 16",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verificado"
         }
       ],
       "warnings": []
@@ -15511,9 +15551,11 @@
       "name": "corpus: dodge ru 17",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официальный"
         }
       ],
       "warnings": []
@@ -15547,9 +15589,11 @@
       "name": "corpus: dodge ru 18",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официальной"
         }
       ],
       "warnings": []
@@ -15583,9 +15627,11 @@
       "name": "corpus: dodge ru 19",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Проверен"
         }
       ],
       "warnings": []
@@ -15619,9 +15665,11 @@
       "name": "corpus: dodge ru 20",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официальный"
         }
       ],
       "warnings": []
@@ -15655,9 +15703,11 @@
       "name": "corpus: dodge zh 21",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "官方"
         }
       ],
       "warnings": []
@@ -15691,9 +15741,11 @@
       "name": "corpus: dodge zh 22",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "已认证插件"
         }
       ],
       "warnings": []
@@ -15757,9 +15809,11 @@
       "name": "corpus: dodge zh 24",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "官方"
         }
       ],
       "warnings": []
@@ -15793,9 +15847,11 @@
       "name": "corpus: dodge ja 25",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公式"
         }
       ],
       "warnings": []
@@ -15829,9 +15885,11 @@
       "name": "corpus: dodge ja 26",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公式"
         }
       ],
       "warnings": []
@@ -15865,9 +15923,11 @@
       "name": "corpus: dodge ja 27",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公式"
         }
       ],
       "warnings": []
@@ -15901,9 +15961,11 @@
       "name": "corpus: dodge ja 28",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "認証済みプラグイン"
         }
       ],
       "warnings": []
@@ -15937,9 +15999,11 @@
       "name": "corpus: dodge ja 29",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公認"
         }
       ],
       "warnings": []
@@ -15973,9 +16037,11 @@
       "name": "corpus: dodge ko 30",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -16009,9 +16075,11 @@
       "name": "corpus: dodge ko 31",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -16045,9 +16113,11 @@
       "name": "corpus: dodge ko 32",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "인증됨"
         }
       ],
       "warnings": []
@@ -16081,9 +16151,11 @@
       "name": "corpus: dodge ko 33",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공인"
         }
       ],
       "warnings": []
@@ -16114,15 +16186,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Zeron Core Git\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "corpus: dodge en-name 34",
+      "name": "corpus: once a Zeron dodge en-name 34 is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -16150,15 +16216,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Stock Zeron theme\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "corpus: dodge en-name 35",
+      "name": "corpus: once a Zeron dodge en-name 35 is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -16186,15 +16246,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"First-party Zeron git\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "corpus: dodge en-name 36",
+      "name": "corpus: once a Zeron dodge en-name 36 is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -16222,15 +16276,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Ships with Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "corpus: dodge en-desc 37",
+      "name": "corpus: once a Zeron dodge en-desc 37 is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -16258,15 +16306,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Bundled with Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "corpus: dodge en-desc 38",
+      "name": "corpus: once a Zeron dodge en-desc 38 is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -16294,15 +16336,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Built into Zeron.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "corpus: dodge en-desc 39",
+      "name": "corpus: once a Zeron dodge en-desc 39 is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "description",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -16330,15 +16366,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Built-in Zeron Git\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "corpus: dodge en-name 40",
+      "name": "corpus: once a Zeron dodge en-name 40 is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -16366,15 +16396,9 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Included in Zeron\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "corpus: dodge en-name 41",
+      "name": "corpus: once a Zeron dodge en-name 41 is fine",
       "problems": [],
-      "warnings": [
-        {
-          "field": "name",
-          "path": null,
-          "rule": "claims_zeron"
-        }
-      ]
+      "warnings": []
     },
     {
       "files_b64": {
@@ -16405,9 +16429,11 @@
       "name": "corpus: dodge ko 42",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -16441,9 +16467,11 @@
       "name": "corpus: dodge ko 43",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -16477,9 +16505,11 @@
       "name": "corpus: dodge ja 44",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公認"
         }
       ],
       "warnings": []
@@ -21493,9 +21523,11 @@
       "name": "corpus3: dodges en 000 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Official"
         }
       ],
       "warnings": []
@@ -21529,9 +21561,11 @@
       "name": "corpus3: dodges en 001 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verified"
         }
       ],
       "warnings": []
@@ -21565,9 +21599,11 @@
       "name": "corpus3: dodges en 002 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -21601,9 +21637,11 @@
       "name": "corpus3: dodges en 003 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -21637,9 +21675,11 @@
       "name": "corpus3: dodges en 004 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "official"
         }
       ],
       "warnings": []
@@ -21673,9 +21713,11 @@
       "name": "corpus3: dodges en 005 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -21709,9 +21751,11 @@
       "name": "corpus3: dodges en 006 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -21745,9 +21789,11 @@
       "name": "corpus3: dodges en 007 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -21781,9 +21827,11 @@
       "name": "corpus3: dodges en 008 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -21817,9 +21865,11 @@
       "name": "corpus3: dodges en 009 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -21853,9 +21903,11 @@
       "name": "corpus3: dodges en 010 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "official"
         }
       ],
       "warnings": []
@@ -21889,9 +21941,11 @@
       "name": "corpus3: dodges en 011 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -21925,9 +21979,11 @@
       "name": "corpus3: dodges en 012 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -21961,9 +22017,11 @@
       "name": "corpus3: dodges en 013 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "official"
         }
       ],
       "warnings": []
@@ -21997,9 +22055,11 @@
       "name": "corpus3: dodges en 014 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -22033,9 +22093,11 @@
       "name": "corpus3: dodges en 015 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "official"
         }
       ],
       "warnings": []
@@ -22069,9 +22131,11 @@
       "name": "corpus3: dodges en 016 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -22105,9 +22169,11 @@
       "name": "corpus3: dodges en 017 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -22141,9 +22207,11 @@
       "name": "corpus3: dodges en 018 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verified"
         }
       ],
       "warnings": []
@@ -22177,9 +22245,11 @@
       "name": "corpus3: dodges en 019 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Official"
         }
       ],
       "warnings": []
@@ -22213,9 +22283,11 @@
       "name": "corpus3: dodges en 020 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "official"
         }
       ],
       "warnings": []
@@ -22249,9 +22321,11 @@
       "name": "corpus3: dodges en 021 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -22285,9 +22359,11 @@
       "name": "corpus3: dodges en 022 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verified"
         }
       ],
       "warnings": []
@@ -22321,9 +22397,11 @@
       "name": "corpus3: dodges en 023 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -22357,9 +22435,11 @@
       "name": "corpus3: dodges en 024 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "V3rified"
         }
       ],
       "warnings": []
@@ -22393,9 +22473,11 @@
       "name": "corpus3: dodges en 025 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Officіal"
         }
       ],
       "warnings": []
@@ -22429,9 +22511,11 @@
       "name": "corpus3: dodges en 026 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verified"
         }
       ],
       "warnings": []
@@ -22465,9 +22549,11 @@
       "name": "corpus3: dodges en 027 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Official"
         }
       ],
       "warnings": []
@@ -22501,9 +22587,11 @@
       "name": "corpus3: dodges en 028 (name)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verified"
         }
       ],
       "warnings": []
@@ -22537,9 +22625,11 @@
       "name": "corpus3: dodges en 029 (name)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Official"
         }
       ],
       "warnings": []
@@ -22573,9 +22663,11 @@
       "name": "corpus3: dodges en 030 (name)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "name",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -22609,9 +22701,11 @@
       "name": "corpus3: dodges es 031 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "oficial"
         }
       ],
       "warnings": []
@@ -22645,9 +22739,11 @@
       "name": "corpus3: dodges es 032 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificado"
         }
       ],
       "warnings": []
@@ -22681,9 +22777,11 @@
       "name": "corpus3: dodges es 033 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificado"
         }
       ],
       "warnings": []
@@ -22717,9 +22815,11 @@
       "name": "corpus3: dodges es 034 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verificado"
         }
       ],
       "warnings": []
@@ -22753,9 +22853,11 @@
       "name": "corpus3: dodges es 035 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Oficial"
         }
       ],
       "warnings": []
@@ -22789,9 +22891,11 @@
       "name": "corpus3: dodges es 036 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificado"
         }
       ],
       "warnings": []
@@ -22825,9 +22929,11 @@
       "name": "corpus3: dodges es 037 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "oficial"
         }
       ],
       "warnings": []
@@ -22861,9 +22967,11 @@
       "name": "corpus3: dodges es 038 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "0ficial"
         }
       ],
       "warnings": []
@@ -22897,9 +23005,11 @@
       "name": "corpus3: dodges es 039 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificado"
         }
       ],
       "warnings": []
@@ -22933,9 +23043,11 @@
       "name": "corpus3: dodges fr 040 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "officielle"
         }
       ],
       "warnings": []
@@ -22969,9 +23081,11 @@
       "name": "corpus3: dodges fr 041 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "vérifié"
         }
       ],
       "warnings": []
@@ -23005,9 +23119,11 @@
       "name": "corpus3: dodges fr 042 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "vérifié"
         }
       ],
       "warnings": []
@@ -23041,9 +23157,11 @@
       "name": "corpus3: dodges fr 043 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Vérifié"
         }
       ],
       "warnings": []
@@ -23077,9 +23195,11 @@
       "name": "corpus3: dodges fr 044 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Officiel"
         }
       ],
       "warnings": []
@@ -23113,9 +23233,11 @@
       "name": "corpus3: dodges fr 045 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "vérifié"
         }
       ],
       "warnings": []
@@ -23149,9 +23271,11 @@
       "name": "corpus3: dodges fr 046 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "officiel"
         }
       ],
       "warnings": []
@@ -23215,9 +23339,11 @@
       "name": "corpus3: dodges fr 048 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "vérifié"
         }
       ],
       "warnings": []
@@ -23251,9 +23377,11 @@
       "name": "corpus3: dodges de 049 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Offizielle"
         }
       ],
       "warnings": []
@@ -23287,9 +23415,11 @@
       "name": "corpus3: dodges de 050 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verifizierter"
         }
       ],
       "warnings": []
@@ -23323,9 +23453,11 @@
       "name": "corpus3: dodges de 051 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verifiziert"
         }
       ],
       "warnings": []
@@ -23359,9 +23491,11 @@
       "name": "corpus3: dodges de 052 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verifiziert"
         }
       ],
       "warnings": []
@@ -23395,9 +23529,11 @@
       "name": "corpus3: dodges de 053 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Offiziell"
         }
       ],
       "warnings": []
@@ -23431,9 +23567,11 @@
       "name": "corpus3: dodges de 054 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verifiziert"
         }
       ],
       "warnings": []
@@ -23467,9 +23605,11 @@
       "name": "corpus3: dodges de 055 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "offiziell"
         }
       ],
       "warnings": []
@@ -23503,9 +23643,11 @@
       "name": "corpus3: dodges de 056 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "0ffiziell"
         }
       ],
       "warnings": []
@@ -23539,9 +23681,11 @@
       "name": "corpus3: dodges de 057 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verifiziert"
         }
       ],
       "warnings": []
@@ -23575,9 +23719,11 @@
       "name": "corpus3: dodges it 058 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ufficiale"
         }
       ],
       "warnings": []
@@ -23611,9 +23757,11 @@
       "name": "corpus3: dodges it 059 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificato"
         }
       ],
       "warnings": []
@@ -23647,9 +23795,11 @@
       "name": "corpus3: dodges it 060 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificato"
         }
       ],
       "warnings": []
@@ -23683,9 +23833,11 @@
       "name": "corpus3: dodges it 061 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verificato"
         }
       ],
       "warnings": []
@@ -23719,9 +23871,11 @@
       "name": "corpus3: dodges it 062 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Ufficiale"
         }
       ],
       "warnings": []
@@ -23755,9 +23909,11 @@
       "name": "corpus3: dodges it 063 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificato"
         }
       ],
       "warnings": []
@@ -23791,9 +23947,11 @@
       "name": "corpus3: dodges it 064 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ufficiale"
         }
       ],
       "warnings": []
@@ -23827,9 +23985,11 @@
       "name": "corpus3: dodges it 065 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificato"
         }
       ],
       "warnings": []
@@ -23863,9 +24023,11 @@
       "name": "corpus3: dodges pt 066 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "oficial"
         }
       ],
       "warnings": []
@@ -23899,9 +24061,11 @@
       "name": "corpus3: dodges pt 067 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificado"
         }
       ],
       "warnings": []
@@ -23935,9 +24099,11 @@
       "name": "corpus3: dodges pt 068 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificado"
         }
       ],
       "warnings": []
@@ -23971,9 +24137,11 @@
       "name": "corpus3: dodges pt 069 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Verificado"
         }
       ],
       "warnings": []
@@ -24007,9 +24175,11 @@
       "name": "corpus3: dodges pt 070 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Oficial"
         }
       ],
       "warnings": []
@@ -24043,9 +24213,11 @@
       "name": "corpus3: dodges pt 071 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificado"
         }
       ],
       "warnings": []
@@ -24079,9 +24251,11 @@
       "name": "corpus3: dodges pt 072 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "oficial"
         }
       ],
       "warnings": []
@@ -24115,9 +24289,11 @@
       "name": "corpus3: dodges pt 073 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verificado"
         }
       ],
       "warnings": []
@@ -24151,9 +24327,11 @@
       "name": "corpus3: dodges ru 074 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официальное"
         }
       ],
       "warnings": []
@@ -24187,9 +24365,11 @@
       "name": "corpus3: dodges ru 075 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официальный"
         }
       ],
       "warnings": []
@@ -24223,9 +24403,11 @@
       "name": "corpus3: dodges ru 076 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "проверен"
         }
       ],
       "warnings": []
@@ -24259,9 +24441,11 @@
       "name": "corpus3: dodges ru 077 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Проверено"
         }
       ],
       "warnings": []
@@ -24325,9 +24509,11 @@
       "name": "corpus3: dodges ru 079 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "официальный"
         }
       ],
       "warnings": []
@@ -24361,9 +24547,11 @@
       "name": "corpus3: dodges ru 080 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "Официальной"
         }
       ],
       "warnings": []
@@ -24397,9 +24585,11 @@
       "name": "corpus3: dodges ru 081 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "проверенный"
         }
       ],
       "warnings": []
@@ -24433,9 +24623,11 @@
       "name": "corpus3: dodges zh 082 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "官方"
         }
       ],
       "warnings": []
@@ -24469,9 +24661,11 @@
       "name": "corpus3: dodges zh 083 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "已验证"
         }
       ],
       "warnings": []
@@ -24505,9 +24699,11 @@
       "name": "corpus3: dodges zh 084 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "已验证"
         }
       ],
       "warnings": []
@@ -24541,9 +24737,11 @@
       "name": "corpus3: dodges zh 085 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "官方"
         }
       ],
       "warnings": []
@@ -24577,9 +24775,11 @@
       "name": "corpus3: dodges zh 086 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "官方"
         }
       ],
       "warnings": []
@@ -24613,9 +24813,11 @@
       "name": "corpus3: dodges zh 087 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "已认证"
         }
       ],
       "warnings": []
@@ -24649,9 +24851,11 @@
       "name": "corpus3: dodges zh 088 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "已认证插件"
         }
       ],
       "warnings": []
@@ -24685,9 +24889,11 @@
       "name": "corpus3: dodges zh 089 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "官方"
         }
       ],
       "warnings": []
@@ -24721,9 +24927,11 @@
       "name": "corpus3: dodges ja 090 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公式"
         }
       ],
       "warnings": []
@@ -24757,9 +24965,11 @@
       "name": "corpus3: dodges ja 091 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公式"
         }
       ],
       "warnings": []
@@ -24793,9 +25003,11 @@
       "name": "corpus3: dodges ja 092 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公式"
         }
       ],
       "warnings": []
@@ -24829,9 +25041,11 @@
       "name": "corpus3: dodges ja 093 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公式"
         }
       ],
       "warnings": []
@@ -24865,9 +25079,11 @@
       "name": "corpus3: dodges ja 094 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "認証済みプラグイン"
         }
       ],
       "warnings": []
@@ -24901,9 +25117,11 @@
       "name": "corpus3: dodges ja 095 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公認"
         }
       ],
       "warnings": []
@@ -24937,9 +25155,11 @@
       "name": "corpus3: dodges ja 096 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "公式"
         }
       ],
       "warnings": []
@@ -24973,9 +25193,11 @@
       "name": "corpus3: dodges ja 097 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "オフィシャル"
         }
       ],
       "warnings": []
@@ -25009,9 +25231,11 @@
       "name": "corpus3: dodges ko 098 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -25045,9 +25269,11 @@
       "name": "corpus3: dodges ko 099 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -25081,9 +25307,11 @@
       "name": "corpus3: dodges ko 100 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -25117,9 +25345,11 @@
       "name": "corpus3: dodges ko 101 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -25153,9 +25383,11 @@
       "name": "corpus3: dodges ko 102 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "인증됨"
         }
       ],
       "warnings": []
@@ -25189,9 +25421,11 @@
       "name": "corpus3: dodges ko 103 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "검증된"
         }
       ],
       "warnings": []
@@ -25225,9 +25459,11 @@
       "name": "corpus3: dodges ko 104 (description)",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "description",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "공식"
         }
       ],
       "warnings": []
@@ -25261,9 +25497,11 @@
       "name": "keywords: verified",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verified"
         }
       ],
       "warnings": []
@@ -25297,9 +25535,11 @@
       "name": "keywords: veri-fied joined",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "veri-fied"
         }
       ],
       "warnings": []
@@ -25333,9 +25573,11 @@
       "name": "keywords: a digit for O",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "0fficial"
         }
       ],
       "warnings": []
@@ -25369,9 +25611,11 @@
       "name": "keywords: Spanish oficial",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "oficial"
         }
       ],
       "warnings": []
@@ -25405,9 +25649,11 @@
       "name": "keywords: French verifie, folded",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "verifie"
         }
       ],
       "warnings": []
@@ -25438,14 +25684,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zeron\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "keywords: zeron",
-      "problems": [
-        {
-          "field": "keywords",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "keywords: zeron is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -25474,14 +25714,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zeron-themes\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "keywords: zeron as a part",
-      "problems": [
-        {
-          "field": "keywords",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "keywords: zeron as a part is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -25510,14 +25744,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"themes zeron\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "keywords: zeron after a space",
-      "problems": [
-        {
-          "field": "keywords",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "keywords: zeron after a space is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -25546,14 +25774,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zer0n\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "keywords: zer0n",
-      "problems": [
-        {
-          "field": "keywords",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "keywords: zer0n is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -25582,14 +25804,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"2eron\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "keywords: 2eron",
-      "problems": [
-        {
-          "field": "keywords",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "keywords: 2eron is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -25618,14 +25834,38 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"ze-ron\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "keywords: ze-ron joined",
-      "problems": [
-        {
-          "field": "keywords",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "keywords: ze-ron joined is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "zeron-tools"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zeron-tools\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: zeron-tools is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -25807,9 +26047,11 @@
       "name": "keywords: ver-ified joined",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ver-ified"
         }
       ],
       "warnings": []
@@ -25843,9 +26085,11 @@
       "name": "keywords: ver1fied",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "ver1fied"
         }
       ],
       "warnings": []
@@ -25879,9 +26123,11 @@
       "name": "keywords: official as a part",
       "problems": [
         {
+          "cause": "mark_word",
           "field": "keywords",
           "path": null,
-          "rule": "bad_listing"
+          "rule": "bad_listing",
+          "word": "official-docs"
         }
       ],
       "warnings": []
@@ -25912,14 +26158,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"by-zeron\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "keywords: by-zeron",
-      "problems": [
-        {
-          "field": "keywords",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "keywords: by-zeron is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -25948,14 +26188,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zeron-team\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "keywords: zeron-team",
-      "problems": [
-        {
-          "field": "keywords",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "keywords: zeron-team is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -25984,14 +26218,8 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zer0n-approved\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "keywords: zer0n-approved",
-      "problems": [
-        {
-          "field": "keywords",
-          "path": null,
-          "rule": "bad_listing"
-        }
-      ],
+      "name": "keywords: zer0n-approved is fine",
+      "problems": [],
       "warnings": []
     },
     {

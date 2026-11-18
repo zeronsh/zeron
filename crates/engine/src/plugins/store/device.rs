@@ -228,6 +228,18 @@ fn not_ok(error: &str) -> Value {
     json!({ "ok": false, "error": word, "message": message })
 }
 
+/// [`not_ok`] with a listing problem's fields (`field`, `cause`, `word`),
+/// those that are there: for an app that says it in its own words.
+fn refused(error: &str, fields: &Value) -> Value {
+    let mut value = not_ok(error);
+    for key in ["field", "cause", "word"] {
+        if let Some(text) = fields[key].as_str() {
+            value[key] = json!(text);
+        }
+    }
+    value
+}
+
 /// Characters that change how the text around them reads (direction
 /// overrides, invisible joiners): never kept from the store's words.
 fn invisible(c: char) -> bool {
@@ -625,23 +637,25 @@ impl Plugins {
         self.register_key().await;
         let this = self.clone();
         let (id_owned, hash) = (id.to_owned(), hash.to_owned());
-        let packed = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let packed = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, (String, Value)> {
             // Re-signed as it is now, then read as it'll be sent.
             this.auto_resign(&id_owned);
-            let prepared = publish::read(&dir)?;
+            let prepared = publish::read(&dir).map_err(|e| (e, Value::Null))?;
             if prepared.hash != hash {
-                return Err(failure("changed", "It changed since it was checked: check it again"));
+                return Err((failure("changed", "It changed since it was checked: check it again"), Value::Null));
             }
             if !prepared.ok() {
-                return Err(failure(prepared.problems[0].rule, publish::lines(&prepared.problems).join("; ")));
+                let first = &prepared.problems[0];
+                let fields = json!({ "field": first.field, "cause": first.cause, "word": first.word });
+                return Err((failure(first.rule, publish::lines(&prepared.problems).join("; ")), fields));
             }
-            let key = signing::load_or_create_key(&this.inner.data_dir)?;
-            prepared.pack(&key)
+            let key = signing::load_or_create_key(&this.inner.data_dir).map_err(|e| (e, Value::Null))?;
+            prepared.pack(&key).map_err(|e| (e, Value::Null))
         })
         .await;
         let raw = match packed {
             Ok(Ok(raw)) => raw,
-            Ok(Err(error)) => return not_ok(&error),
+            Ok(Err((error, fields))) => return refused(&error, &fields),
             Err(_) => return not_ok("Couldn't pack it"),
         };
         match client.publish(id, raw, &caller).await {
@@ -654,7 +668,7 @@ impl Plugins {
                 reply["url"] = json!(client.page_url(id));
                 reply
             }
-            Err(error) => not_ok(&error),
+            Err((error, fields)) => refused(&error, &fields),
         }
     }
 
@@ -1469,6 +1483,10 @@ mod tests {
         assert_eq!(plain(&"x".repeat(900), 500).len(), 500);
         assert_eq!(not_ok("id_taken: Someone has it"), json!({ "ok": false, "error": "id_taken", "message": "Someone has it" }));
         assert_eq!(not_ok("plain words"), json!({ "ok": false, "error": "failed", "message": "plain words" }));
+        // A listing problem's fields beside its sentence, those there are.
+        let fields = json!({ "field": "name", "cause": "mark_word", "word": "Verified", "other": "x" });
+        assert_eq!(refused("bad_listing: Its name says \"verified\"", &fields), json!({ "ok": false, "error": "bad_listing", "message": "Its name says \"verified\"", "field": "name", "cause": "mark_word", "word": "Verified" }));
+        assert_eq!(refused("too_large: big", &json!({ "field": null })), not_ok("too_large: big"));
         assert_eq!(media_type("shots/A.PNG"), "image/png");
     }
 }

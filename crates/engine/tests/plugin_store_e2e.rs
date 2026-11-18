@@ -802,11 +802,12 @@ async fn the_plugin_store_end_to_end() {
         (res.status().as_u16(), res.json::<Value>().await.unwrap_or_default())
     };
     let (status, body) = from_laptop("2.0.0", json!({ "name": "Verified Third Board" })).await;
-    e.check("9", "a name claiming the mark is refused (bad_listing)", status == 400 && body["error"] == "bad_listing", format!("{status} {body}"));
+    let fields = |body: &Value, field: &str, word: &str| body["field"] == field && body["cause"] == "mark_word" && body["word"] == word;
+    e.check("9", "a name claiming the mark is refused (bad_listing), with its field, cause and word", status == 400 && body["error"] == "bad_listing" && fields(&body, "name", "Verified"), format!("{status} {body}"));
     let (status, body) = from_laptop("2.0.1", json!({ "description": "The \u{43e}fficial board." })).await;
-    e.check("9", "and a description claiming it in look-alike letters", status == 400 && body["error"] == "bad_listing", format!("{status} {body}"));
-    let (status, body) = from_laptop("2.0.2", json!({ "description": "Boards, by Zeron." })).await;
-    e.check("9", "a description saying it's Zeron's own is refused (claims_zeron)", status == 400 && body["error"] == "claims_zeron", format!("{status} {body}"));
+    e.check("9", "and a description claiming it in look-alike letters, its word as written", status == 400 && body["error"] == "bad_listing" && fields(&body, "description", "\u{43e}fficial"), format!("{status} {body}"));
+    let (status, body) = from_laptop("2.0.2", json!({ "name": "Zeron Third Board", "description": "Boards, by Zeron." })).await;
+    e.check("9", "\"Zeron\" in a name or description is nobody's concern: published", status == 201, format!("{status} {body}"));
     let big = store_package(signer, ID, "1.3.2", json!({}), &[("data.bin", vec![7u8; 16 * 1024 * 1024])]);
     let (status, body) = e.publish_signed(&bob_key, ID, &big).await;
     e.check("9", "a package over the store's limit is refused", status == 413 || body["error"] == "too_large", format!("{status} {body}"));

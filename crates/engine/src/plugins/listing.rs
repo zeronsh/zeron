@@ -112,10 +112,35 @@ pub mod rule {
     pub const BINARY_FILE: &str = "binary_file";
     /// `CHANGELOG.md` has no section for this version.
     pub const NO_NOTES: &str = "no_notes";
-    /// A name or description says the plugin is Zeron's own (a warning
-    /// here: the store refuses it unless the publisher is Zeron).
-    pub const CLAIMS_ZERON: &str = "claims_zeron";
 }
+
+/// Why a name, description or keyword is `bad_listing`, for an app that
+/// says it in its own words (the device's check and the edge's answer
+/// alike): a closed list.
+pub mod cause {
+    /// Longer than its limit (a name, a description).
+    pub const TOO_LONG: &str = "too_long";
+    /// A description of more than one line.
+    pub const NOT_ONE_LINE: &str = "not_one_line";
+    /// A character drawn as nothing; `word` is its code point (`U+200B`).
+    pub const UNSEEN_CHAR: &str = "unseen_char";
+    /// The store's mark in words, any language or spelling; `word` is
+    /// where, as written (a keyword: the keyword).
+    pub const MARK_WORD: &str = "mark_word";
+    /// A check mark (`word`, as written).
+    pub const MARK_GLYPH: &str = "mark_glyph";
+    /// A keyword (`word`) not of lowercase letters, digits, dashes and
+    /// single spaces, or too long.
+    pub const KEYWORD_SHAPE: &str = "keyword_shape";
+    /// More keywords than the store takes.
+    pub const TOO_MANY: &str = "too_many";
+    /// A keyword (`word`) given twice.
+    pub const REPEATED: &str = "repeated";
+    pub const ALL: &[&str] = &[TOO_LONG, NOT_ONE_LINE, UNSEEN_CHAR, MARK_WORD, MARK_GLYPH, KEYWORD_SHAPE, TOO_MANY, REPEATED];
+}
+
+/// A [`Problem::word`] is at most this many characters.
+pub const MAX_PROBLEM_WORD_CHARS: usize = 64;
 
 /// One thing in the way of publishing (or, as a warning, worth knowing).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -128,7 +153,21 @@ pub struct Problem {
     /// The line of `path` it's about (1 the first), when it's one line's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
+    /// Why, for a name, description or keyword (one of [`cause::ALL`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<&'static str>,
+    /// The text it's about, as written ([`problem_word`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub word: Option<String>,
     pub words: String,
+}
+
+/// `text` as a [`Problem::word`]: without control or format characters
+/// nor any other drawn as nothing (Default_Ignorable_Code_Point), at most
+/// [`MAX_PROBLEM_WORD_CHARS`] characters.
+pub fn problem_word(text: &str) -> String {
+    use icu_properties::props::{BinaryProperty, DefaultIgnorableCodePoint};
+    text.chars().filter(|c| !unseen_char(*c) && !DefaultIgnorableCodePoint::for_char(*c)).take(MAX_PROBLEM_WORD_CHARS).collect()
 }
 
 impl Problem {
@@ -138,8 +177,30 @@ impl Problem {
             field,
             path: None,
             line: None,
+            cause: None,
+            word: None,
             words: words.into(),
         }
+    }
+
+    /// With its cause and the text it's about.
+    fn because(mut self, cause: &'static str, word: Option<&str>) -> Self {
+        self.cause = Some(cause);
+        self.word = word.map(problem_word).filter(|w| !w.is_empty());
+        self
+    }
+
+    /// A name's or description's mark claim (`claim`, in `text`).
+    fn mark(self, text: &str, claim: &str) -> Self {
+        let glyph = claim.chars().count() == 1 && claim.chars().all(|c| MARK_GLYPHS.contains(&c));
+        let written = super::mark::as_written(text, claim);
+        self.because(if glyph { cause::MARK_GLYPH } else { cause::MARK_WORD }, Some(written.as_deref().unwrap_or(claim)))
+    }
+
+    /// An unseen character in `text`.
+    fn unseen_in(self, text: &str) -> Self {
+        let code = super::mark::first_unseen(text).map(|c| format!("U+{:04X}", c as u32));
+        self.because(cause::UNSEEN_CHAR, code.as_deref())
     }
 
     fn at(
@@ -153,6 +214,8 @@ impl Problem {
             field,
             path: Some(path.to_owned()),
             line: None,
+            cause: None,
+            word: None,
             words: words.into(),
         }
     }
@@ -256,9 +319,9 @@ pub fn store_link(url: &str) -> Option<String> {
     plain.then(|| parsed.to_string())
 }
 
-/// What a listing's name or description may not say: the store's mark,
-/// or that it's Zeron's own (`mark.rs`).
-pub use super::mark::{MARK_GLYPHS, MARK_WORDS, claims_zeron, claims_zeron_in_name, keyword_claim, mark_claim, mark_text};
+/// What a listing's name, description or keywords may not say: the
+/// store's mark (`mark.rs`).
+pub use super::mark::{MARK_GLYPHS, MARK_WORDS, keyword_claim, mark_claim, mark_text};
 
 /// Whether `text` has a character drawn as nothing, which what a listing
 /// shows may not (amendment 31): a control or format character, any other
@@ -488,25 +551,19 @@ pub fn check(
             BAD_LISTING,
             Some("name"),
             format!("Its name is longer than {MAX_NAME_LEN} characters"),
-        ));
+        ).because(cause::TOO_LONG, None));
     } else if unseen(&manifest.name) {
         problems.push(Problem::new(
             BAD_LISTING,
             Some("name"),
             "Its name has a control or invisible formatting character",
-        ));
+        ).unseen_in(&manifest.name));
     } else if let Some(claim) = mark_claim(&manifest.name, true) {
         problems.push(Problem::new(
             BAD_LISTING,
             Some("name"),
             format!("Its name says \"{claim}\": only the store marks a plugin verified or official. Name it for what it does, without that word"),
-        ));
-    } else if claims_zeron_in_name(&manifest.name).is_some() {
-        warnings.push(Problem::new(
-            CLAIMS_ZERON,
-            Some("name"),
-            "Its name says \"Zeron\" other than as what it's for (\"for Zeron\", \"in Zeron\"): only Zeron's own plugins may, and the store refuses it from anyone else",
-        ));
+        ).mark(&manifest.name, &claim));
     }
     if !manifest.entry.is_empty() && !files.contains_key(&manifest.entry) {
         problems.push(Problem::new(
@@ -547,29 +604,24 @@ pub fn check(
             "It needs a \"description\": one line saying what it does",
         ));
     } else if description.chars().count() > MAX_DESCRIPTION_LEN || description.contains('\n') {
+        let why = if description.chars().count() > MAX_DESCRIPTION_LEN { cause::TOO_LONG } else { cause::NOT_ONE_LINE };
         problems.push(Problem::new(
             BAD_LISTING,
             Some("description"),
             format!("Its description is one line of at most {MAX_DESCRIPTION_LEN} characters"),
-        ));
+        ).because(why, None));
     } else if unseen(description) {
         problems.push(Problem::new(
             BAD_LISTING,
             Some("description"),
             "Its description has a control or invisible formatting character",
-        ));
+        ).unseen_in(description));
     } else if let Some(claim) = mark_claim(description, false) {
         problems.push(Problem::new(
             BAD_LISTING,
             Some("description"),
             format!("Its description says \"{claim}\" of the plugin itself: only the store marks a plugin verified or official. Say what it does instead, or say whose thing it is (\"works with the official Slack app\")"),
-        ));
-    } else if let Some(claim) = claims_zeron(description) {
-        warnings.push(Problem::new(
-            CLAIMS_ZERON,
-            Some("description"),
-            format!("Its description says \"{claim}\": only Zeron's own plugins may, and the store refuses it from anyone else"),
-        ));
+        ).mark(description, &claim));
     }
     match raw.get("icon") {
         None | Some(Value::Null) => problems.push(Problem::new(
@@ -652,11 +704,13 @@ pub fn check(
             let words: Vec<Option<&str>> = items.iter().map(Value::as_str).collect();
             let unique: BTreeSet<_> = words.iter().collect();
             if items.len() > MAX_KEYWORDS || unique.len() != words.len() {
-                problems.push(Problem::new(
+                let twice = words.iter().enumerate().find_map(|(at, w)| words[..at].contains(w).then_some(*w)).flatten();
+                let problem = Problem::new(
                     BAD_LISTING,
                     Some("keywords"),
                     format!("It has at most {MAX_KEYWORDS} keywords, each once"),
-                ));
+                );
+                problems.push(if items.len() > MAX_KEYWORDS { problem.because(cause::TOO_MANY, None) } else { problem.because(cause::REPEATED, twice) });
             } else if let Some(bad) = words.iter().find(|w| w.is_none_or(|w| !keyword(w))) {
                 problems.push(Problem::new(
                     BAD_LISTING,
@@ -665,14 +719,13 @@ pub fn check(
                         "Keyword \"{}\" must be lowercase letters, digits, dashes and single spaces, at most {MAX_KEYWORD_LEN} characters",
                         bad.unwrap_or("?")
                     ),
-                ));
+                ).because(cause::KEYWORD_SHAPE, *bad));
             } else if let Some((keyword, claim)) = words.iter().flatten().find_map(|w| keyword_claim(w).map(|claim| (w, claim))) {
-                // (No badge lifts this: every plugin here is for Zeron.)
                 problems.push(Problem::new(
                     BAD_LISTING,
                     Some("keywords"),
-                    format!("Keyword \"{keyword}\" says \"{claim}\": a keyword may say neither the store's mark nor Zeron. Drop it, or use a word for what the plugin does"),
-                ));
+                    format!("Keyword \"{keyword}\" says \"{claim}\": only the store marks a plugin verified or official. Drop it, or use a word for what the plugin does"),
+                ).because(cause::MARK_WORD, Some(keyword)));
             }
         }
         Some(_) => problems.push(Problem::new(
@@ -868,6 +921,35 @@ pub(crate) mod tests {
         let listing = Listing::of(&manifest);
         assert_eq!(listing.categories, vec!["productivity"]);
         assert_eq!(listing.engines_zeron.as_deref(), Some(">=0.3.0"));
+    }
+
+    #[test]
+    fn a_name_description_or_keyword_refused_says_why_and_where() {
+        use serde_json::json;
+        let (base, files) = listed();
+        let first = |key: &str, value: Value| {
+            let mut m = base.clone();
+            m[key] = value;
+            let (problems, _) = check(&Manifest::from_value(m).unwrap(), &files);
+            let p = problems.into_iter().next().unwrap();
+            (p.rule, p.field, p.cause, p.word)
+        };
+        let bad = |field, cause, word: Option<&str>| (rule::BAD_LISTING, Some(field), Some(cause), word.map(str::to_owned));
+        assert_eq!(first("name", json!("Verified Focus")), bad("name", cause::MARK_WORD, Some("Verified")));
+        assert_eq!(first("name", json!("Focus \u{2705}")), bad("name", cause::MARK_GLYPH, Some("\u{2705}")));
+        assert_eq!(first("name", json!("n".repeat(65))), bad("name", cause::TOO_LONG, None));
+        assert_eq!(first("name", json!("Focus\u{200b}Board")), bad("name", cause::UNSEEN_CHAR, Some("U+200B")));
+        assert_eq!(first("description", json!("a\nb")), bad("description", cause::NOT_ONE_LINE, None));
+        assert_eq!(first("description", json!("Official Git tools.")), bad("description", cause::MARK_WORD, Some("Official")));
+        assert_eq!(first("keywords", json!(["a", "b", "a"])), bad("keywords", cause::REPEATED, Some("a")));
+        assert_eq!(first("keywords", json!(["a", "b", "c", "d", "e", "f", "g", "h", "i"])), bad("keywords", cause::TOO_MANY, None));
+        assert_eq!(first("keywords", json!(["Focus"])), bad("keywords", cause::KEYWORD_SHAPE, Some("Focus")));
+        assert_eq!(first("keywords", json!(["timer\u{fe0f}"])), bad("keywords", cause::KEYWORD_SHAPE, Some("timer")));
+        assert_eq!(first("keywords", json!(["veri-fied"])), bad("keywords", cause::MARK_WORD, Some("veri-fied")));
+        // Other fields' problems have no cause.
+        assert_eq!(first("license", json!("")).2, None);
+        // The word is bounded.
+        assert_eq!(problem_word(&format!("a\u{202e}{}", "x".repeat(100))), format!("a{}", "x".repeat(63)));
     }
 
     #[test]

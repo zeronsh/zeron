@@ -1,8 +1,8 @@
-//! What a store listing's name or description may not say (amendment 45):
-//! that it carries the store's mark, or that the plugin is Zeron's own.
+//! What a store listing's name, description or keywords may not say
+//! (amendment 45): that the plugin carries the store's mark.
 //!
 //! One rule for the device's check and the edge, which reads the same data
-//! file (`docs/plugin-store-data.json`: `mark_claims`, `claims_zeron`) and
+//! file (`docs/plugin-store-data.json`: `mark_claims`) and
 //! the shared listing cases (`docs/plugin-package-vectors.json`):
 //!
 //! - The text is folded: Unicode NFKC, lowercased, NFKD without its
@@ -22,13 +22,9 @@
 //!   ([`unseen`]).
 //! - The mark's words in other languages ([`OTHER_LANGUAGES`]): whole words
 //!   in scripts with spaces, substrings in Chinese, Japanese and Korean.
-//! - Claims of being Zeron's (`claims_zeron`), "zeron" read as the mark's
-//!   words are: in a name, any "zeron" not the object of one of
-//!   [`NAME_FORMS`] ([`claims_zeron_in_name`]); in a description, "zeron"
-//!   after a word of origin or beside a word of standing ([`claims_zeron`]).
-//!   Only Zeron's own publisher may: the edge refuses it unless the publisher
-//!   carries the `maintainer` badge; a device, which can't know the
-//!   publisher, warns.
+//! - In a description, a mark word only when said of the plugin itself
+//!   ([`Reading::said_of`]).
+//! - "Zeron" anywhere is nobody's concern (the owner's ruling, Nov 18).
 
 use std::collections::BTreeSet;
 
@@ -190,10 +186,10 @@ pub const NOT_BARE: &[(&str, &str, &str)] = &[
     ("\u{e8}", "not a word that says it of the subject", "Italian \"è\" and Portuguese \"é\" fold to \"e\", \"and\""),
 ];
 
-/// Words beside which "zeron" claims standing though alone they're not the
-/// mark (each of [`OTHER_LANGUAGES`] is too): 公式, 공식, 认证, 認證, 認証,
-/// 인증 and their "done" forms, 確認済み, 확인됨.
-pub const STANDING_OTHER: &[&str] = &[
+/// Words that say a thing is certified, though alone they're not the mark:
+/// 公式, 공식, 认证, 認證, 認証, 인증 and their "done" forms, 確認済み, 확인됨.
+/// A mark word near one is the mark ("官方认证").
+pub const CERTIFIED_WORDS: &[&str] = &[
     "\u{516c}\u{5f0f}", "\u{acf5}\u{c2dd}", "\u{8ba4}\u{8bc1}", "\u{8a8d}\u{8b49}", "\u{8a8d}\u{8a3c}", "\u{c778}\u{c99d}",
     "\u{5df2}\u{8ba4}\u{8bc1}", "\u{5df2}\u{8a8d}\u{8b49}", "\u{8a8d}\u{8a3c}\u{6e08}", "\u{c778}\u{c99d}\u{b428}", "\u{78ba}\u{8a8d}\u{6e08}", "\u{d655}\u{c778}\u{b428}",
     "\u{516c}\u{8a8d}", "\u{acf5}\u{c778}",
@@ -203,7 +199,7 @@ pub const STANDING_OTHER: &[&str] = &[
 /// plugin (rule 2: "已认证插件", "認証済みプラグイン", "공식 플러그인"), or
 /// alone as a sentence. Not the bare nouns 认证/認證/認証/인증 ("双因素认证插件"
 /// is a two-factor authentication plugin) nor 確認済/확인됨 ("checked"): those
-/// are claims only beside "zeron" ([`STANDING_OTHER`]).
+/// only make a mark word near them a claim ([`CERTIFIED_WORDS`]).
 pub const AMBIGUOUS: &[&str] = &[
     "\u{516c}\u{5f0f}", "\u{516c}\u{8a8d}", "\u{acf5}\u{c2dd}", "\u{acf5}\u{c778}",
     "\u{5df2}\u{8ba4}\u{8bc1}", "\u{5df2}\u{8a8d}\u{8b49}", "\u{8a8d}\u{8a3c}\u{6e08}", "\u{c778}\u{c99d}\u{b428}", "\u{ac80}\u{c99d}\u{b41c}",
@@ -297,7 +293,8 @@ pub const OBJECT_WORDS: &[&str] = &[
 /// ([`AUTHORITIES`]: "verified by our team").
 pub const BY_WORDS: &[&str] = &["by", "por", "par", "von", "da", "\u{43e}\u{442}"];
 pub const AUTHORITIES: &[&str] = &[
-    "us", "our", "we", "team", "staff", "experts", "reviewers", "maintainers", "developers", "nosotros", "nuestro", "nuestros", "nuestra", "equipo",
+    // (Zeron verifying is the store's mark itself.)
+    "zeron", "us", "our", "we", "team", "staff", "experts", "reviewers", "maintainers", "developers", "nosotros", "nuestro", "nuestros", "nuestra", "equipo",
     "nous", "notre", "nos", "\u{e9}quipe", "uns", "unserem", "unserer", "unser", "team", "noi", "nostro", "nostra", "squadra", "n\u{f3}s", "nossa", "nosso", "equipe",
     "\u{43d}\u{430}\u{43c}\u{438}", "\u{43d}\u{430}\u{448}\u{435}\u{439}", "\u{43a}\u{43e}\u{43c}\u{430}\u{43d}\u{434}\u{43e}\u{439}",
 ];
@@ -325,61 +322,10 @@ pub const NEGATIONS: &[&str] = &[
 /// forms, and a line break.
 pub const SENTENCE_ENDS: &[char] = &['.', '!', '?', ';', '\u{3002}', '\u{ff01}', '\u{ff1f}', '\u{ff1b}', '\n'];
 
-/// A mark word beside one of these is said of the store or Zeron (rule 4):
-/// no negation lifts it. ("By …" directly after it is beside too:
-/// "verified by the store".)
-pub const STORE_WORDS: &[&str] = &["zeron", "the store", "the plugin store", "by zeron", "by the store", "by the plugin store"];
-
-/// Saying the plugin is part of Zeron: in a name with "zeron", any of these
-/// anywhere; in a description, one directly before "(with | in | into | to
-/// | for | of) zeron" ("ships with Zeron", "part of Zeron"; a word that
-/// ends in one of those is directly before "zeron").
-pub const BELONGING: &[&str] = &[
-    "built-in", "builtin", "built in", "built into", "bundled", "included", "preinstalled", "pre-installed", "ships", "shipped", "comes with", "native",
-    "default", "stock", "core", "first-party", "part of",
-];
-
-/// The words that join a word of [`BELONGING`] to "zeron".
-pub const BELONGING_JOINS: &[&str] = &["with", "in", "into", "to", "for", "of"];
-
-/// [`BELONGING`] in Chinese: 内置 "built-in", 自带 "comes with", 预装
-/// "preinstalled", 默认 "default", 原生 "native", and the traditional forms.
-/// In a description, directly before 于, 在 or 到 "zeron" ("内置于
-/// Zeron"), or after 随 "zeron" ("随 Zeron 自带"); "Zeron 内置终端" ("Zeron's
-/// built-in terminal") says nothing.
-pub const BELONGING_ZH: &[&str] = &[
-    "\u{5185}\u{7f6e}", "\u{5167}\u{7f6e}", "\u{81ea}\u{5e26}", "\u{81ea}\u{5e36}", "\u{9884}\u{88c5}", "\u{9810}\u{88dd}", "\u{9ed8}\u{8ba4}", "\u{9ed8}\u{8a8d}", "\u{539f}\u{751f}",
-];
-
-/// The brand: a listing may say it only about Zeron, never as Zeron, unless
-/// its publisher is Zeron's own.
-pub const ZERON: &str = "zeron";
-
-/// In a name, "zeron" only as the object of one of these, by the store's
-/// locale: `(language, forms)`. Anything else ("Zeron Labs", "Team Zeron",
-/// "Zeron Git", "Zeron's git", "Zeron-made") reads as ours.
-pub const NAME_FORMS: &[(&str, &[&str])] = &[
-    ("en", &["for", "in", "with", "on", "to"]),
-    // (As the app's zh-Hans strings say them: 为 Zeron, 在 Zeron, 使用 Zeron;
-    // with 适用于/用于 "made for", 给 "for", 与/和 "with", and their
-    // traditional forms. Never 由 "by".)
-    ("zh", &[
-        "\u{4e3a}", "\u{70ba}", "\u{5728}", "\u{4f7f}\u{7528}", "\u{9002}\u{7528}\u{4e8e}", "\u{9069}\u{7528}\u{65bc}", "\u{7528}\u{4e8e}", "\u{7528}\u{65bc}", "\u{7ed9}", "\u{7d66}", "\u{4e0e}", "\u{8207}", "\u{548c}",
-    ]),
-];
-
-/// In a description, "zeron" right after one of these reads as its maker.
-pub const ORIGIN_WORDS: &[&str] = &["by", "from", "by the", "made by", "built by", "von", "par", "de", "da", "di", "del", "van", "\u{7531}", "\u{6765}\u{81ea}"];
-
-/// In a description, "zeron" right before or after one of these (or its
-/// possessive, "zeron's team") reads as its standing.
-pub const STANDING_WORDS: &[&str] = &[
-    "team", "labs", "inc", "hq", "staff", "approved", "certified", "endorsed", "recommended", "own", "\u{5b98}\u{65b9}", "\u{516c}\u{5f0f}", "\u{acf5}\u{c2dd}",
-];
-
-/// Standing only directly after a bare "zeron" ("Zeron-made", "Zeron
-/// built"), never after "zeron's" and never as "built-in" / "built in".
-pub const STANDING_AFTER_ZERON: &[&str] = &["made", "built"];
+/// A mark word beside one of these is said of the store (rule 4): no
+/// negation lifts it. ("By …" directly after it is beside too: "verified by
+/// the store", which the "by" rule would otherwise lift.)
+pub const STORE_WORDS: &[&str] = &["the store", "the plugin store", "by the store", "by the plugin store"];
 
 /// `text` as the rules read it before ignorables go: Unicode NFKC (so
 /// 𝐯𝐞𝐫𝐢𝐟𝐢𝐞𝐝 and ｖｅｒｉｆｉｅｄ are "verified"), lowercased, then NFKD
@@ -420,6 +366,11 @@ fn ascii_word(c: Option<&char>) -> bool {
 /// variation selector but U+FE0F, or a U+FE0F not directly after a
 /// character with the Emoji property ("⭐️" is fine).
 pub fn unseen(text: &str) -> bool {
+    first_unseen(text).is_some()
+}
+
+/// The first character of `text` that [`unseen`] refuses.
+pub fn first_unseen(text: &str) -> Option<char> {
     let mut before: Option<char> = None;
     for c in text.chars() {
         let selector = VariationSelector::for_char(c);
@@ -428,11 +379,55 @@ pub fn unseen(text: &str) -> bool {
             || (selector && c != '\u{FE0F}')
             || (c == '\u{FE0F}' && !before.is_some_and(Emoji::for_char));
         if bad {
-            return true;
+            return Some(c);
         }
         before = Some(c);
     }
-    false
+    None
+}
+
+/// At most this many words (runs of characters but White_Space) are tried
+/// together by [`as_written`]: a word spaced out letter by letter is one
+/// word of up to this many.
+pub const WRITTEN_MAX_WORDS: usize = 32;
+
+/// Where `text` says `claim` (what [`mark_claim`] found in it), as its
+/// author wrote it: of the runs of its words (each a run of characters but
+/// White_Space, the run from the first's start to the last's end, as
+/// written), the shortest that, read as a name is, claims `claim`, the
+/// earliest of those; then without its first character while it still
+/// does, then without its last while it still does. Runs of at most
+/// [`WRITTEN_MAX_WORDS`] words; none when no run does.
+pub fn as_written(text: &str, claim: &str) -> Option<String> {
+    let claims = |s: &str| name_mark(s).as_deref() == Some(claim);
+    let mut words: Vec<(usize, usize)> = Vec::new();
+    let mut start = None;
+    for (at, c) in text.char_indices().chain([(text.len(), ' ')]) {
+        match (WhiteSpace::for_char(c), start) {
+            (true, Some(s)) => {
+                words.push((s, at));
+                start = None;
+            }
+            (false, None) => start = Some(at),
+            _ => {}
+        }
+    }
+    let run = (1..=words.len().min(WRITTEN_MAX_WORDS)).find_map(|len| {
+        words.windows(len).map(|w| &text[w[0].0..w[len - 1].1]).find(|run| claims(run))
+    })?;
+    let mut run = run;
+    while let Some((at, _)) = run.char_indices().nth(1)
+        && claims(&run[at..])
+    {
+        run = &run[at..];
+    }
+    while let Some((at, _)) = run.char_indices().next_back()
+        && at > 0
+        && claims(&run[..at])
+    {
+        run = &run[..at];
+    }
+    Some(run.to_owned())
 }
 
 /// The characters that pass for `letter` (itself among them).
@@ -780,7 +775,7 @@ impl Reading {
     }
 
     /// Whether a mark word at `span` is said of the plugin itself (or of
-    /// the store, or Zeron).
+    /// the store).
     fn said_of_plugin(&self, span: (usize, usize), ambiguous: bool) -> bool {
         self.said_of(span, if ambiguous { Kind::Ambiguous } else { Kind::Mark }, !ambiguous)
     }
@@ -805,8 +800,7 @@ impl Reading {
         let Some((first, last)) = self.covers(span) else { return false };
         let (from, to) = self.sentence(span);
         let in_sentence = |n: usize| self.words[n].0 >= from && self.words[n].1 <= to;
-        // 4: beside "zeron", "the store", "the plugin store". No negation
-        // lifts it.
+        // 4: beside "the store", "the plugin store". No negation lifts it.
         if STORE_WORDS.iter().any(|w| self.before_is(first, w) || self.after_is(last, w)) {
             return true;
         }
@@ -890,7 +884,7 @@ impl Reading {
     /// ("connects to the official Slack app"), or after the word for the
     /// thing in Japanese and Korean ("アプリと", "앱과").
     fn near_plugin(&self, (first, last): (usize, usize), span: (usize, usize), ambiguous: bool) -> bool {
-        let certified: &[&str] = if ambiguous { &[] } else { STANDING_OTHER };
+        let certified: &[&str] = if ambiguous { &[] } else { CERTIFIED_WORDS };
         let neighbours = PLUGIN_WORDS.iter().map(|(_, substring, words)| (*substring, *words)).chain(std::iter::once((true, certified)));
         neighbours.into_iter().any(|(substring, words)| {
             words.iter().any(|word| {
@@ -976,20 +970,15 @@ enum Kind {
     Ambiguous,
 }
 
-/// Whether a word of a text is `word`: the same, or (for "zeron") spelled
-/// with look-alikes.
+/// Whether a word of a text is `word`.
 fn same_word(text: &[char], word: &[char]) -> bool {
-    if text == word {
-        return true;
-    }
-    let zeron: Vec<char> = ZERON.chars().collect();
-    word == zeron.as_slice() && spell_end(text, 0, &zeron) == Some(text.len())
+    text == word
 }
 
 /// A description's mark: a glyph anywhere; a mark word only when said of the
 /// plugin itself (the text's first word or alone as a sentence; within two
 /// words of a word for the plugin; directly after a word that says it of
-/// the subject; beside "zeron" or the store), unless a negation is directly
+/// the subject; beside the store), unless a negation is directly
 /// before it (not for the last).
 fn description_mark(text: &str) -> Option<String> {
     let folded_text = folded(text);
@@ -1070,104 +1059,10 @@ fn folded_word(word: &str) -> Vec<char> {
     folded(word)
 }
 
-/// `a` then `b`, as a spelling: apart by a space, or by `~` (none or more
-/// separators) when either is in a script that doesn't space its words.
-fn joined(a: &str, b: &str) -> String {
-    if mark_text(a).is_ascii() && mark_text(b).is_ascii() { format!("{a} {b}") } else { format!("{a}~{b}") }
-}
-
-/// The spellings that make a name's "zeron" the object of a form.
-fn name_forms() -> Vec<String> {
-    NAME_FORMS.iter().flat_map(|(_, forms)| forms.iter().map(|form| joined(form, ZERON))).collect()
-}
-
-/// The spellings a description may not use: "zeron" after a word of origin,
-/// or beside a word of standing.
-pub fn zeron_phrases() -> Vec<String> {
-    let mut phrases: Vec<String> = ORIGIN_WORDS.iter().map(|o| joined(o, ZERON)).collect();
-    let other = OTHER_LANGUAGES.iter().flat_map(|(_, _, words)| words.iter().map(|w| listed(w.word).0));
-    for standing in STANDING_WORDS.iter().copied().chain(STANDING_OTHER.iter().copied()).chain(other) {
-        phrases.push(joined(ZERON, standing));
-        phrases.push(joined(standing, ZERON));
-        if mark_text(standing).is_ascii() {
-            phrases.push(format!("{ZERON}'s {standing}"));
-        }
-    }
-    phrases
-}
-
-/// Whether a name says "zeron" other than as the object of one of
-/// [`NAME_FORMS`] ("Themes for Zeron" may; "Zeron Labs", "Git by Zeron"
-/// may not), or says it beside a word of [`BELONGING`] anywhere ("Default
-/// Git for Zeron"): `Some("zeron")` if it does. Read as the mark's words are.
-pub fn claims_zeron_in_name(text: &str) -> Option<String> {
-    let folded = folded(text);
-    let forms = name_forms();
-    [folded.clone(), unspaced(&folded)]
-        .iter()
-        .any(|reading| {
-            let zerons = ends(reading, ZERON);
-            let allowed: BTreeSet<usize> = forms.iter().flat_map(|form| ends(reading, form)).collect();
-            let belonging = || BELONGING.iter().chain(BELONGING_ZH).any(|b| !ends(reading, b).is_empty());
-            zerons.iter().any(|end| !allowed.contains(end)) || (!zerons.is_empty() && belonging())
-        })
-        .then(|| ZERON.to_owned())
-}
-
-/// The spellings that say the plugin is part of Zeron, in a description.
-fn belonging_phrases() -> Vec<String> {
-    let mut phrases = Vec::new();
-    for word in BELONGING {
-        if BELONGING_JOINS.iter().any(|join| word.ends_with(&format!(" {join}"))) {
-            phrases.push(format!("{word} {ZERON}"));
-        } else {
-            phrases.extend(BELONGING_JOINS.iter().map(|join| format!("{word} {join} {ZERON}")));
-        }
-    }
-    for word in BELONGING_ZH {
-        for join in ["\u{4e8e}", "\u{65bc}", "\u{5728}", "\u{5230}"] {
-            phrases.push(format!("{word}~{join}~{ZERON}"));
-        }
-        phrases.push(format!("\u{968f}~{ZERON}~{word}"));
-        phrases.push(format!("\u{96a8}~{ZERON}~{word}"));
-    }
-    phrases
-}
-
-/// Which of [`zeron_phrases`] a description says, if any, read as the
-/// mark's words are: each letter itself or a look-alike, its apostrophe any
-/// of ' ’ ʼ, each space any run of separators but an apostrophe, whole, in
-/// the text or with its spaced letters read as one word ("Git by Zer0n",
-/// "Z.E.R.O.N. approved"). Prose about Zeron ("adds a panel to Zeron's
-/// sidebar") says none.
-pub fn claims_zeron(text: &str) -> Option<String> {
-    let folded = folded(text);
-    let readings = [folded.clone(), unspaced(&folded)];
-    if let Some(phrase) = zeron_phrases().into_iter().chain(belonging_phrases()).find(|phrase| readings.iter().any(|reading| spelled(reading, phrase))) {
-        return Some(phrase.replace('~', " "));
-    }
-    // "made", "built" only directly after a bare "zeron", never as
-    // "built-in" or "built in".
-    let in_word: Vec<char> = "in".chars().collect();
-    STANDING_AFTER_ZERON
-        .iter()
-        .find(|word| {
-            readings.iter().any(|reading| {
-                ends(reading, &format!("{ZERON} {word}")).into_iter().any(|end| {
-                    let next: Vec<char> = reading[end..].iter().copied().skip_while(|c| separator(*c)).collect();
-                    let gap = reading.len() - end - next.len();
-                    !(gap > 0 && (next.starts_with(&in_word) && !ascii_word(next.get(2))))
-                })
-            })
-        })
-        .map(|word| format!("{ZERON} {word}"))
-}
-
 /// What a keyword says that it may not, if anything: read as a name is,
 /// "-" and " " between its parts, a part (or its parts joined) that is one
-/// of the mark's words in any language a keyword's letters can write, or
-/// that is "zeron" ("ze-ron" as "veri-fied"). No badge lifts it: every plugin here is for Zeron,
-/// so the word says nothing in a keyword and only ever serves a claim.
+/// of the mark's words in any language a keyword's letters can write
+/// ("veri-fied"). No badge lifts it.
 pub fn keyword_claim(keyword: &str) -> Option<String> {
     let parts: Vec<Vec<char>> = keyword.split(['-', ' ']).filter(|p| !p.is_empty()).map(|p| folded(p)).collect();
     let joined: Vec<char> = parts.concat();
@@ -1175,9 +1070,6 @@ pub fn keyword_claim(keyword: &str) -> Option<String> {
         let spelling: Vec<char> = mark_text(word).chars().collect();
         spell_end(text, 0, &spelling) == Some(text.len())
     };
-    if parts.iter().chain([&joined]).any(|part| whole(part, ZERON)) {
-        return Some(ZERON.to_owned());
-    }
     let ascii_words = OTHER_LANGUAGES.iter().flat_map(|(_, _, words)| words.iter().map(|w| listed(w.word).0)).filter(|w| mark_text(w).is_ascii());
     MARK_WORDS.iter().copied().chain(ascii_words).find(|word| parts.iter().chain([&joined]).any(|part| whole(part, word))).map(str::to_owned)
 }
@@ -1283,51 +1175,6 @@ mod tests {
     }
 
     #[test]
-    fn a_name_says_zeron_only_as_what_it_s_for() {
-        for name in [
-            "Zeron Labs", "Team Zeron", "Zeron Git", "Zeron's git", "Zeron-made", "Git by Zeron", "Git by Zer0n", "Git by Z\u{435}ron",
-            "Git by \u{1d22}\u{1d07}\u{280}\u{1d0f}\u{274}", "Z.E.R.O.N. approved", "z e r o n approved", "Zeron notes", "Zeron\u{63d2}\u{4ef6}",
-            "Themes for Zeron, by Zeron",
-            "\u{7531}Zeron\u{5236}\u{4f5c}\u{7684}\u{7b14}\u{8bb0}",
-        ] {
-            assert_eq!(claims_zeron_in_name(name).as_deref(), Some("zeron"), "{name}");
-        }
-        for name in [
-            "Themes for Zeron", "Git in Zeron", "Notes with Zeron", "Tabs on Zeron", "Send to Zeron", "Zeronaut", "Lazeron", "A board by Zenon",
-            "\u{9002}\u{7528}\u{4e8e}Zeron\u{7684}\u{4e3b}\u{9898}", "\u{4e3a} Zeron \u{505a}\u{7684}\u{7b14}\u{8bb0}", "\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}", "Focus Board", "Heron",
-        ] {
-            assert_eq!(claims_zeron_in_name(name), None, "{name}");
-        }
-    }
-
-    #[test]
-    fn a_description_may_say_what_zeron_is_but_not_that_it_s_zeron_s() {
-        for (text, claim) in [
-            ("Notes, by Zeron", "by zeron"),
-            ("From ZERON: the board", "from zeron"),
-            ("Made by the Zeron team.", "by the zeron"),
-            ("Zeron\u{2019}s own notes", "zeron's own"),
-            ("A Zeron approved board", "zeron approved"),
-            ("zeron\u{2014}recommended", "zeron recommended"),
-            ("Team Zeron's notes", "team zeron"),
-            ("Ein Plugin von Zeron", "von zeron"),
-            ("Un th\u{e8}me par Zeron", "par zeron"),
-            ("Git by Zer0n", "by zeron"),
-            ("Git b\u{443} Zeron", "by zeron"),
-            ("Z.E.R.O.N. approved", "zeron approved"),
-            ("Zeron\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", "zeron \u{5b98}\u{65b9}"),
-        ] {
-            assert_eq!(claims_zeron(text).as_deref(), Some(claim), "{text}");
-        }
-        for text in [
-            "Adds a panel to Zeron's sidebar.", "Themes for Zeron.", "Works with Zeron.", "Made for Zeron.", "Built with Zeron in mind.",
-            "Zeronaut tools", "by zeronaut", "A board by Zenon", "Lazeron approved", "from zero n", "Zeron notes", "a zero-noise timer", "Heron",
-        ] {
-            assert_eq!(claims_zeron(text), None, "{text}");
-        }
-    }
-
-    #[test]
     fn the_mark_s_words_in_other_languages_but_never_an_ordinary_word() {
         // (text, in a name, in a description)
         for (text, name, description) in [
@@ -1367,10 +1214,6 @@ mod tests {
             assert_eq!(mark_claim(text, true), None, "{text} (name)");
             assert_eq!(mark_claim(text, false), None, "{text} (description)");
         }
-        // Beside "zeron", each is still a claim.
-        for text in ["Zeron \u{516c}\u{5f0f}", "\u{acf5}\u{c2dd} Zeron", "Zeron \u{8ba4}\u{8bc1}", "\u{c778}\u{c99d} Zeron", "Zeron officiel", "Zeron verifiziert", "\u{7531} Zeron \u{5236}\u{4f5c}", "\u{6765}\u{81ea}Zeron"] {
-            assert!(claims_zeron(text).is_some(), "{text}");
-        }
     }
 
     #[test]
@@ -1384,8 +1227,8 @@ mod tests {
             "\u{5df2}\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}", "\u{8a8d}\u{8a3c}\u{6e08}\u{307f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "A board, the official version.",
             // 3: directly after a word that says it of the subject.
             "This board is verified.", "Now official: boards for everyone.", "Fully verified and signed.", "Der Client ist offizielle Software.",
-            // 4: beside Zeron or the store; no negation lifts it.
-            "Boards, Zeron verified.", "Not Zeron official.", "Checked: verified by the store.",
+            // 4: beside the store; no negation lifts it.
+            "Checked: verified by the store.", "Not verified by the plugin store, but checked.",
             // Look-alikes and spacing count as anywhere.
             "Notes. V.E.R.I.F.I.E.D.", "A v3rified plugin.",
         ] {
@@ -1436,11 +1279,9 @@ mod tests {
 
     #[test]
     fn the_identity_lane_s_fifth_probe() {
-        for name in ["Built-in Zeron Git", "Built in Zeron", "Ships with Zeron", "Bundled with Zeron", "Included in Zeron", "Comes with Zeron", "Native to Zeron", "Default in Zeron"] {
-            assert!(claims_zeron_in_name(name).is_some(), "{name}");
-        }
-        for name in ["\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}", "\u{4f7f}\u{7528}Zeron\u{7684}Git"] {
-            assert_eq!(claims_zeron_in_name(name), None, "{name}");
+        // "Zeron" in a name is nobody's concern.
+        for name in ["Built-in Zeron Git", "Zeron Git", "Git by Zeron", "Ships with Zeron", "\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}"] {
+            assert_eq!(mark_claim(name, true), None, "{name}");
         }
         for name in [
             "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{439}", "\u{434}\u{43b}\u{44f} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{445}",
@@ -1456,28 +1297,35 @@ mod tests {
     }
 
     #[test]
-    fn saying_a_plugin_is_part_of_zeron() {
-        for text in ["Ships with Zeron.", "Included in Zeron.", "Part of Zeron.", "Comes with Zeron.", "Built into Zeron.", "Zeron-made boards.", "Zeron built.", "\u{5185}\u{7f6e}\u{4e8e}Zeron\u{3002}"] {
-            assert!(claims_zeron(text).is_some(), "{text}");
+    fn a_claim_as_its_author_wrote_it() {
+        for (text, in_name, written) in [
+            ("Verified Focus", true, "Verified"),
+            ("Focus, VERIFIED.", true, "VERIFIED"),
+            ("verified_focus", true, "verified"),
+            ("The \u{43e}fficial board.", false, "\u{43e}fficial"),
+            ("Notes. V.E.R.I.F.I.E.D. Boards", false, "V.E.R.I.F.I.E.D"),
+            ("A board V E R I F I E D", true, "V E R I F I E D"),
+            ("Focus \u{2714}\u{fe0f}", true, "\u{2714}"),
+            ("\u{5df2}\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}", false, "\u{5df2}\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}"),
+            ("\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", true, "\u{516c}\u{5f0f}"),
+        ] {
+            let claim = mark_claim(text, in_name).unwrap_or_else(|| panic!("{text:?}"));
+            assert_eq!(as_written(text, &claim).as_deref(), Some(written), "{text:?}");
         }
-        for text in ["Adds a button to Zeron's built-in terminal.", "Zeron built-in terminal tools.", "Uses Zeron's made-up names.", "Zeron\u{5185}\u{7f6e}\u{7ec8}\u{7aef}\u{7684}\u{6309}\u{94ae}"] {
-            assert_eq!(claims_zeron(text), None, "{text}");
-        }
-        for name in ["Built-in Zeron Git", "Default Git for Zeron", "Native notes for Zeron"] {
-            assert!(claims_zeron_in_name(name).is_some(), "{name}");
-        }
-        assert_eq!(claims_zeron_in_name("Themes for Zeron"), None);
+        assert_eq!(as_written("Plain words", "verified"), None);
+        assert_eq!(first_unseen("Focus\u{200b}Board\u{202e}"), Some('\u{200b}'));
+        assert_eq!(first_unseen("Stars \u{2b50}\u{fe0f}"), None);
     }
 
     #[test]
-    fn a_keyword_says_neither_the_mark_nor_zeron() {
+    fn a_keyword_says_no_mark_word() {
         for (keyword, claim) in [
             ("verified", "verified"), ("veri-fied", "verified"), ("0fficial", "official"), ("of-ficial", "official"), ("oficial", "oficial"), ("verifie", "v\u{e9}rifi\u{e9}"),
-            ("zeron", "zeron"), ("zeron-themes", "zeron"), ("themes zeron", "zeron"), ("zer0n", "zeron"), ("2eron", "zeron"), ("ze-ron", "zeron"),
         ] {
             assert_eq!(keyword_claim(keyword).as_deref(), Some(claim), "{keyword}");
         }
-        for keyword in ["themes", "zero", "heron", "verify", "officer", "zeronaut", "notes board"] {
+        // "zeron" in a keyword is allowed.
+        for keyword in ["themes", "zero", "heron", "verify", "officer", "zeronaut", "notes board", "zeron", "zeron-tools", "ze-ron"] {
             assert_eq!(keyword_claim(keyword), None, "{keyword}");
         }
     }
@@ -1493,18 +1341,14 @@ mod tests {
         std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/src/plugins/mark_lookalikes.rs"), source).unwrap();
     }
 
-    /// For each letter of the mark's words and Zeron's phrases, every
-    /// character that passes for
-    /// it, folded as [`mark_text`] folds and as written (kept unless it is,
+    /// For each letter of the mark's words (and the ASCII letters of its
+    /// other languages' words), every character that passes for it, folded as [`mark_text`] folds and as written (kept unless it is,
     /// or folds to, an ASCII letter, which the words match already): from
     /// confusables.txt, every single-character source whose prototype folds
     /// to that letter, then the Latin small capitals and the digit 3 for e.
     fn generate(text: &str, sha256: &str) -> String {
         let version = text.lines().find_map(|l| l.strip_prefix("# Version: ")).unwrap_or("unknown").trim().to_owned();
-        let zeron = [ZERON];
-        let names = NAME_FORMS.iter().flat_map(|(_, forms)| forms.iter());
-        let letters: BTreeSet<char> =
-            MARK_WORDS.iter().chain(&zeron).chain(ORIGIN_WORDS).chain(STANDING_WORDS).chain(names).flat_map(|w| w.chars()).filter(char::is_ascii_lowercase).collect();
+        let letters: BTreeSet<char> = MARK_WORDS.iter().flat_map(|w| w.chars()).collect();
         let others: BTreeSet<char> = OTHER_LANGUAGES.iter().flat_map(|(_, _, words)| words.iter()).flat_map(|w| mark_text(w.word).chars().collect::<Vec<_>>()).filter(char::is_ascii_lowercase).collect();
         let letters: BTreeSet<char> = letters.union(&others).copied().collect();
         let mut table: std::collections::BTreeMap<char, BTreeSet<char>> = letters.iter().map(|l| (*l, BTreeSet::new())).collect();
@@ -1557,12 +1401,10 @@ mod tests {
             }
         }
         add('e', "3");
-        // (The usernames' digit fold: 2 for z.)
-        add('z', "2");
         let escape = |c: char| if c.is_ascii_alphanumeric() { c.to_string() } else { format!("\\u{{{:x}}}", c as u32) };
         let rows: Vec<String> = table.iter().map(|(l, set)| format!("    ('{l}', \"{}\"),", set.iter().map(|c| escape(*c)).collect::<String>())).collect();
         format!(
-            "//! Generated by `mark.rs` (`lookalikes_are_current`) from Unicode's\n//! confusables.txt: do not edit. For each letter of the mark's words and\n//! Zeron's phrases, the characters that pass for it, folded as `mark_text` folds them.\n\npub const SOURCE: &str = \"UTS #39 confusables.txt\";\npub const SOURCE_VERSION: &str = \"{version}\";\npub const SOURCE_SHA256: &str = \"{sha256}\";\n\npub const LOOKALIKES: &[(char, &str)] = &[\n{}\n];\n",
+            "//! Generated by `mark.rs` (`lookalikes_are_current`) from Unicode's\n//! confusables.txt: do not edit. For each letter of the mark's words (and\n//! the ASCII letters of its other languages' words), the characters that pass for it, folded as `mark_text` folds them.\n\npub const SOURCE: &str = \"UTS #39 confusables.txt\";\npub const SOURCE_VERSION: &str = \"{version}\";\npub const SOURCE_SHA256: &str = \"{sha256}\";\n\npub const LOOKALIKES: &[(char, &str)] = &[\n{}\n];\n",
             rows.join("\n")
         )
     }

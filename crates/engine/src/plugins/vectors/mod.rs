@@ -811,52 +811,52 @@ fn listing_cases() -> Value {
     let mut m = base.clone();
     m["keywords"] = json!(["timer\u{fe0f}"]);
     cases.push(("unseen: a variation selector in a keyword".into(), m, files.clone()));
-    // Saying it's Zeron's own: a warning on a device (it can't know the
-    // publisher); the edge refuses it, claims_zeron, unless the publisher is
-    // Zeron's (maintainer). In a name, "zeron" only as what it's for; in a
-    // description, not after a word of origin nor beside one of standing.
+    // "Zeron" in a name, description or keyword is nobody's concern (the
+    // owner's ruling, Nov 18): what once was claims_zeron is published as
+    // any other listing.
     for (name, field, value) in [
-        ("claims_zeron: a name leading with Zeron", "name", "Zeron Git"),
-        ("claims_zeron: a name saying Zeron Labs", "name", "Zeron Labs notes"),
-        ("claims_zeron: a name saying Team Zeron", "name", "Team Zeron"),
-        ("claims_zeron: a name saying Zeron's", "name", "Zeron's git"),
-        ("claims_zeron: a name saying Zeron-made", "name", "Zeron-made boards"),
-        ("claims_zeron: a name saying by Zeron", "name", "Notes, by Zeron"),
-        ("claims_zeron: a name with a digit 0 for o", "name", "Git by Zer0n"),
-        ("claims_zeron: a name with a Cyrillic e", "name", "Git by Z\u{435}ron"),
-        ("claims_zeron: a name in small capitals", "name", "Git by \u{1d22}\u{1d07}\u{280}\u{1d0f}\u{274}"),
-        ("claims_zeron: a name with a Cyrillic u for y", "name", "Git b\u{443} Zeron"),
-        ("claims_zeron: a name in dotted capitals", "name", "Z.E.R.O.N. approved"),
-        ("claims_zeron: a name spaced", "name", "z e r o n approved"),
-        ("claims_zeron: a name spaced after by", "name", "Git by Z e r o n"),
-        ("claims_zeron: a name with Zeron in Chinese text", "name", "Zeron\u{63d2}\u{4ef6}"),
-        ("claims_zeron: a name saying by Zeron in Chinese", "name", "\u{7531}Zeron\u{5236}\u{4f5c}\u{7684}\u{7b14}\u{8bb0}"),
-        ("claims_zeron: a description saying by Zeron", "description", "Boards, by Zeron."),
-        ("claims_zeron: a description saying from ZERON", "description", "From ZERON: the board."),
-        ("claims_zeron: a description saying made by the Zeron team", "description", "Made by the Zeron team."),
-        ("claims_zeron: a description saying Zeron's own", "description", "Zeron\u{2019}s own notes."),
-        ("claims_zeron: a description saying Zeron approved", "description", "A Zeron approved board."),
-        ("claims_zeron: a description saying recommended after a dash", "description", "zeron\u{2014}recommended."),
-        ("claims_zeron: a description saying von Zeron", "description", "Ein Plugin von Zeron."),
-        ("claims_zeron: a description saying par Zeron", "description", "Un th\u{e8}me par Zeron."),
-        ("claims_zeron: a description saying Zeron HQ", "description", "Straight from Zeron HQ."),
-        ("claims_zeron: a description saying Zeron official in Chinese is the mark first", "description", "Zeron\u{5b98}\u{65b9}\u{63d2}\u{4ef6}\u{3002}"),
-        ("claims_zeron: a description with a modifier apostrophe", "description", "Zeron\u{2bc}s own board."),
-        ("claims_zeron: a name for Zeron is fine", "name", "Themes for Zeron"),
-        ("claims_zeron: a name in Zeron is fine", "name", "Git in Zeron"),
-        ("claims_zeron: a name with Zeron is fine", "name", "Notes with Zeron"),
-        ("claims_zeron: a name for Zeron in Chinese is fine", "name", "\u{9002}\u{7528}\u{4e8e}Zeron\u{7684}\u{4e3b}\u{9898}"),
-        ("claims_zeron: a name saying Zeronaut is fine", "name", "Zeronaut"),
-        ("claims_zeron: a name saying Heron is fine", "name", "Heron"),
-        ("claims_zeron: a name using Zeron in Chinese is fine", "name", "\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}"),
-        ("claims_zeron: a description of a zero-noise timer is fine", "description", "a zero-noise timer"),
-        ("claims_zeron: a name saying Lazeron is fine", "name", "Lazeron approved"),
-        ("claims_zeron: a name saying Zenon is fine", "name", "A board by Zenon"),
-        ("claims_zeron: a description about Zeron's sidebar is fine", "description", "Adds a panel to Zeron's sidebar."),
-        ("claims_zeron: a description made for Zeron is fine", "description", "Made for Zeron."),
-        ("claims_zeron: a description works with Zeron is fine", "description", "Works with Zeron."),
-        ("claims_zeron: a description saying Zeron notes is fine", "description", "Zeron notes, kept tidy."),
-        ("claims_zeron: a description saying zero n is fine", "description", "Counts from zero n times."),
+        ("zeron: a name leading with Zeron is fine", "name", "Zeron Git"),
+        ("zeron: a name saying Git by Zeron is fine", "name", "Git by Zeron"),
+        ("zeron: a name saying Zeron Labs is fine", "name", "Zeron Labs notes"),
+        ("zeron: a name saying Team Zeron is fine", "name", "Team Zeron"),
+        ("zeron: a name saying Zeron's is fine", "name", "Zeron's git"),
+        ("zeron: a name saying Zeron-made is fine", "name", "Zeron-made boards"),
+        ("zeron: a name saying by Zeron is fine", "name", "Notes, by Zeron"),
+        ("zeron: a name with a digit 0 for o is fine", "name", "Git by Zer0n"),
+        ("zeron: a name with a Cyrillic e is fine", "name", "Git by Z\u{435}ron"),
+        ("zeron: a name in small capitals is fine", "name", "Git by \u{1d22}\u{1d07}\u{280}\u{1d0f}\u{274}"),
+        ("zeron: a name with a Cyrillic u for y is fine", "name", "Git b\u{443} Zeron"),
+        ("zeron: a name in dotted capitals is fine", "name", "Z.E.R.O.N. approved"),
+        ("zeron: a name spaced is fine", "name", "z e r o n approved"),
+        ("zeron: a name spaced after by is fine", "name", "Git by Z e r o n"),
+        ("zeron: a name with Zeron in Chinese text is fine", "name", "Zeron\u{63d2}\u{4ef6}"),
+        ("zeron: a name saying by Zeron in Chinese is fine", "name", "\u{7531}Zeron\u{5236}\u{4f5c}\u{7684}\u{7b14}\u{8bb0}"),
+        ("zeron: a description saying by Zeron is fine", "description", "Boards, by Zeron."),
+        ("zeron: a description saying from ZERON is fine", "description", "From ZERON: the board."),
+        ("zeron: a description saying made by the Zeron team is fine", "description", "Made by the Zeron team."),
+        ("zeron: a description saying Zeron's own is fine", "description", "Zeron\u{2019}s own notes."),
+        ("zeron: a description saying Zeron approved is fine", "description", "A Zeron approved board."),
+        ("zeron: a description saying recommended after a dash is fine", "description", "zeron\u{2014}recommended."),
+        ("zeron: a description saying von Zeron is fine", "description", "Ein Plugin von Zeron."),
+        ("zeron: a description saying par Zeron is fine", "description", "Un th\u{e8}me par Zeron."),
+        ("zeron: a description saying Zeron HQ is fine", "description", "Straight from Zeron HQ."),
+        ("the mark: Chinese official near plugin, Zeron before", "description", "Zeron\u{5b98}\u{65b9}\u{63d2}\u{4ef6}\u{3002}"),
+        ("zeron: a description with a modifier apostrophe is fine", "description", "Zeron\u{2bc}s own board."),
+        ("zeron: a name for Zeron is fine", "name", "Themes for Zeron"),
+        ("zeron: a name in Zeron is fine", "name", "Git in Zeron"),
+        ("zeron: a name with Zeron is fine", "name", "Notes with Zeron"),
+        ("zeron: a name for Zeron in Chinese is fine", "name", "\u{9002}\u{7528}\u{4e8e}Zeron\u{7684}\u{4e3b}\u{9898}"),
+        ("zeron: a name saying Zeronaut is fine", "name", "Zeronaut"),
+        ("zeron: a name saying Heron is fine", "name", "Heron"),
+        ("zeron: a name using Zeron in Chinese is fine", "name", "\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}"),
+        ("zeron: a description of a zero-noise timer is fine", "description", "a zero-noise timer"),
+        ("zeron: a name saying Lazeron is fine", "name", "Lazeron approved"),
+        ("zeron: a name saying Zenon is fine", "name", "A board by Zenon"),
+        ("zeron: a description about Zeron's sidebar is fine", "description", "Adds a panel to Zeron's sidebar."),
+        ("zeron: a description made for Zeron is fine", "description", "Made for Zeron."),
+        ("zeron: a description works with Zeron is fine", "description", "Works with Zeron."),
+        ("zeron: a description saying Zeron notes is fine", "description", "Zeron notes, kept tidy."),
+        ("zeron: a description saying zero n is fine", "description", "Counts from zero n times."),
     ] {
         let mut m = base.clone();
         m[field] = json!(value);
@@ -908,14 +908,14 @@ fn listing_cases() -> Value {
         m[field] = json!(value);
         cases.push((name.into(), m, files.clone()));
     }
-    // Beside "zeron", each is a claim; and Chinese words of origin.
+    // Once claims beside "zeron", and Chinese words of origin: fine.
     for (name, value) in [
-        ("claims_zeron: Zeron beside Japanese official", "Zeron \u{516c}\u{5f0f}\u{306e}\u{30e1}\u{30e2}\u{3002}"),
-        ("claims_zeron: Zeron beside Korean official", "\u{acf5}\u{c2dd} Zeron \u{d50c}\u{b7ec}\u{adf8}\u{c778}."),
-        ("claims_zeron: Zeron beside Chinese certified", "Zeron \u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}\u{3002}"),
-        ("claims_zeron: Zeron beside French officiel", "Le th\u{e8}me Zeron officiel."),
-        ("claims_zeron: by Zeron in Chinese", "\u{7531} Zeron \u{5236}\u{4f5c}\u{3002}"),
-        ("claims_zeron: from Zeron in Chinese", "\u{6765}\u{81ea}Zeron\u{7684}\u{7b14}\u{8bb0}\u{3002}"),
+        ("zeron: Zeron beside Japanese official is fine", "Zeron \u{516c}\u{5f0f}\u{306e}\u{30e1}\u{30e2}\u{3002}"),
+        ("the mark: Korean official near plugin, Zeron between", "\u{acf5}\u{c2dd} Zeron \u{d50c}\u{b7ec}\u{adf8}\u{c778}."),
+        ("zeron: Zeron beside Chinese certified is fine", "Zeron \u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}\u{3002}"),
+        ("zeron: Zeron beside French officiel is fine", "Le th\u{e8}me Zeron officiel."),
+        ("zeron: by Zeron in Chinese is fine", "\u{7531} Zeron \u{5236}\u{4f5c}\u{3002}"),
+        ("zeron: from Zeron in Chinese is fine", "\u{6765}\u{81ea}Zeron\u{7684}\u{7b14}\u{8bb0}\u{3002}"),
     ] {
         let mut m = base.clone();
         m["description"] = json!(value);
@@ -923,8 +923,8 @@ fn listing_cases() -> Value {
     }
     // In a description, the mark only when said of the plugin itself:
     // 1 first word or alone; 2 near a word for the plugin; 3 after a word
-    // that says it of the subject; 4 beside Zeron or the store (no
-    // negation lifts it); a negation directly before lifts 1 to 3.
+    // that says it of the subject; 4 beside the store (no negation lifts
+    // it); a negation directly before lifts 1 to 3.
     for (name, value) in [
         ("description: the first word", "Official Git tools."),
         ("description: alone as a sentence", "Notes, kept tidy. Verified."),
@@ -940,8 +940,9 @@ fn listing_cases() -> Value {
         ("description: after now", "Now official: boards for everyone."),
         ("description: after fully", "Fully verified and signed."),
         ("description: German after ist", "Der Client ist offizielle Software."),
-        ("description: beside Zeron", "Boards, Zeron verified."),
-        ("description: beside Zeron, a negation doesn't lift it", "Not Zeron official."),
+        ("description: beside Zeron is no longer rule 4, so is fine", "Boards, Zeron verified."),
+        ("description: not Zeron official is fine", "Not Zeron official."),
+        ("description: verified by Zeron, an authority", "Checked: verified by Zeron."),
         ("description: by the store", "Checked: verified by the store."),
         ("description: spaced capitals alone", "Notes. V.E.R.I.F.I.E.D."),
         ("description: a digit for e near plugin", "A v3rified plugin."),
@@ -959,21 +960,20 @@ fn listing_cases() -> Value {
         m["description"] = json!(value);
         cases.push((name.into(), m, files.clone()));
     }
-    // Saying it's part of Zeron (words of belonging), and "made"/"built"
-    // only after a bare "zeron".
+    // Once words of belonging: fine.
     for (name, field, value) in [
-        ("claims_zeron: a description saying ships with Zeron", "description", "Ships with Zeron."),
-        ("claims_zeron: a description saying included in Zeron", "description", "Included in Zeron."),
-        ("claims_zeron: a description saying part of Zeron", "description", "Part of Zeron."),
-        ("claims_zeron: a description saying comes with Zeron", "description", "Comes with Zeron."),
-        ("claims_zeron: a description saying built into Zeron", "description", "Built into Zeron."),
-        ("claims_zeron: a description saying Zeron-made", "description", "Zeron-made boards."),
-        ("claims_zeron: a description saying built into Zeron in Chinese", "description", "\u{5185}\u{7f6e}\u{4e8e}Zeron\u{3002}"),
-        ("claims_zeron: a name saying Built-in Zeron", "name", "Built-in Zeron Git"),
-        ("claims_zeron: a name saying Default Git for Zeron", "name", "Default Git for Zeron"),
-        ("claims_zeron: a description about Zeron's built-in terminal is fine", "description", "Adds a button to Zeron's built-in terminal."),
-        ("claims_zeron: a description saying Zeron built-in is fine", "description", "Zeron built-in terminal tools."),
-        ("claims_zeron: a description about Zeron's built-in terminal in Chinese is fine", "description", "Zeron\u{5185}\u{7f6e}\u{7ec8}\u{7aef}\u{7684}\u{6309}\u{94ae}"),
+        ("zeron: a description saying ships with Zeron is fine", "description", "Ships with Zeron."),
+        ("zeron: a description saying included in Zeron is fine", "description", "Included in Zeron."),
+        ("zeron: a description saying part of Zeron is fine", "description", "Part of Zeron."),
+        ("zeron: a description saying comes with Zeron is fine", "description", "Comes with Zeron."),
+        ("zeron: a description saying built into Zeron is fine", "description", "Built into Zeron."),
+        ("zeron: a description saying Zeron-made is fine", "description", "Zeron-made boards."),
+        ("zeron: a description saying built into Zeron in Chinese is fine", "description", "\u{5185}\u{7f6e}\u{4e8e}Zeron\u{3002}"),
+        ("zeron: a name saying Built-in Zeron is fine", "name", "Built-in Zeron Git"),
+        ("zeron: a name saying Default Git for Zeron is fine", "name", "Default Git for Zeron"),
+        ("zeron: a description about Zeron's built-in terminal is fine", "description", "Adds a button to Zeron's built-in terminal."),
+        ("zeron: a description saying Zeron built-in is fine", "description", "Zeron built-in terminal tools."),
+        ("zeron: a description about Zeron's built-in terminal in Chinese is fine", "description", "Zeron\u{5185}\u{7f6e}\u{7ec8}\u{7aef}\u{7684}\u{6309}\u{94ae}"),
     ] {
         let mut m = base.clone();
         m[field] = json!(value);
@@ -1000,18 +1000,18 @@ fn listing_cases() -> Value {
         m[field] = json!(value);
         cases.push((name.into(), m, files.clone()));
     }
-    // The identity lane's fifth probe, as names.
+    // The identity lane's fifth probe, as names (its Zeron ones fine now).
     for (name, value) in [
-        ("claims_zeron: probe 5: Built-in Zeron Git", "Built-in Zeron Git"),
-        ("claims_zeron: probe 5: Built in Zeron", "Built in Zeron"),
-        ("claims_zeron: probe 5: Ships with Zeron", "Ships with Zeron"),
-        ("claims_zeron: probe 5: Bundled with Zeron", "Bundled with Zeron"),
-        ("claims_zeron: probe 5: Included in Zeron", "Included in Zeron"),
-        ("claims_zeron: probe 5: Comes with Zeron", "Comes with Zeron"),
-        ("claims_zeron: probe 5: Native to Zeron", "Native to Zeron"),
-        ("claims_zeron: probe 5: Default in Zeron", "Default in Zeron"),
-        ("claims_zeron: probe 5: using Zeron in Chinese is fine", "\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}"),
-        ("claims_zeron: probe 5: using Zeron's Git in Chinese is fine", "\u{4f7f}\u{7528}Zeron\u{7684}Git"),
+        ("zeron: probe 5: Built-in Zeron Git is fine", "Built-in Zeron Git"),
+        ("zeron: probe 5: Built in Zeron is fine", "Built in Zeron"),
+        ("zeron: probe 5: Ships with Zeron is fine", "Ships with Zeron"),
+        ("zeron: probe 5: Bundled with Zeron is fine", "Bundled with Zeron"),
+        ("zeron: probe 5: Included in Zeron is fine", "Included in Zeron"),
+        ("zeron: probe 5: Comes with Zeron is fine", "Comes with Zeron"),
+        ("zeron: probe 5: Native to Zeron is fine", "Native to Zeron"),
+        ("zeron: probe 5: Default in Zeron is fine", "Default in Zeron"),
+        ("zeron: probe 5: using Zeron in Chinese is fine", "\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}"),
+        ("zeron: probe 5: using Zeron's Git in Chinese is fine", "\u{4f7f}\u{7528}Zeron\u{7684}Git"),
         ("the mark: probe 5: Russian instrumental", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{439}"),
         ("the mark: probe 5: Russian genitive plural", "\u{434}\u{43b}\u{44f} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{445}"),
         ("the mark: probe 5: Russian accusative", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e}"),
@@ -1053,6 +1053,8 @@ fn listing_cases() -> Value {
         m[field] = json!(text);
         let name = match by_decision.iter().find(|(t, _)| *t == text) {
             Some((_, why)) => format!("corpus: dodge {lang} {n:02} passes by decision ({why}), so is fine"),
+            // (Once claims_zeron: nobody's concern now.)
+            None if text.to_lowercase().contains("zeron") => format!("corpus: once a Zeron dodge {lang} {n:02} is fine"),
             None => format!("corpus: dodge {lang} {n:02}"),
         };
         cases.push((name, m, files.clone()));
@@ -1077,20 +1079,21 @@ fn listing_cases() -> Value {
             cases.push((name, m, files.clone()));
         }
     }
-    // Keywords: neither the mark (any language a keyword can write, a part
-    // or its parts joined) nor "zeron"; no badge lifts it.
+    // Keywords: not the mark (any language a keyword can write, a part or
+    // its parts joined); no badge lifts it. "zeron" in one is anyone's.
     for (name, keyword) in [
         ("keywords: verified", "verified"),
         ("keywords: veri-fied joined", "veri-fied"),
         ("keywords: a digit for O", "0fficial"),
         ("keywords: Spanish oficial", "oficial"),
         ("keywords: French verifie, folded", "verifie"),
-        ("keywords: zeron", "zeron"),
-        ("keywords: zeron as a part", "zeron-themes"),
-        ("keywords: zeron after a space", "themes zeron"),
-        ("keywords: zer0n", "zer0n"),
-        ("keywords: 2eron", "2eron"),
-        ("keywords: ze-ron joined", "ze-ron"),
+        ("keywords: zeron is fine", "zeron"),
+        ("keywords: zeron as a part is fine", "zeron-themes"),
+        ("keywords: zeron after a space is fine", "themes zeron"),
+        ("keywords: zer0n is fine", "zer0n"),
+        ("keywords: 2eron is fine", "2eron"),
+        ("keywords: ze-ron joined is fine", "ze-ron"),
+        ("keywords: zeron-tools is fine", "zeron-tools"),
         ("keywords: themes are fine", "themes"),
         ("keywords: zero is fine", "zero"),
         ("keywords: heron is fine", "heron"),
@@ -1099,9 +1102,9 @@ fn listing_cases() -> Value {
         ("keywords: ver-ified joined", "ver-ified"),
         ("keywords: ver1fied", "ver1fied"),
         ("keywords: official as a part", "official-docs"),
-        ("keywords: by-zeron", "by-zeron"),
-        ("keywords: zeron-team", "zeron-team"),
-        ("keywords: zer0n-approved", "zer0n-approved"),
+        ("keywords: by-zeron is fine", "by-zeron"),
+        ("keywords: zeron-team is fine", "zeron-team"),
+        ("keywords: zer0n-approved is fine", "zer0n-approved"),
         ("keywords: zero-config is fine", "zero-config"),
         ("keywords: verification is fine", "verification"),
         ("keywords: officially-unsupported is fine", "officially-unsupported"),
@@ -1149,7 +1152,20 @@ fn listing_cases() -> Value {
             .into_iter()
             .map(|(name, manifest, files)| {
                 let (problems, warnings) = listing::check(&Manifest::from_value(manifest.clone()).unwrap(), &files);
-                let said = |list: &[listing::Problem]| -> Value { list.iter().map(|p| json!({ "rule": p.rule, "field": p.field, "path": p.path })).collect() };
+                let said = |list: &[listing::Problem]| -> Value {
+                    list.iter()
+                        .map(|p| {
+                            let mut said = json!({ "rule": p.rule, "field": p.field, "path": p.path });
+                            if let Some(cause) = p.cause {
+                                said["cause"] = json!(cause);
+                            }
+                            if let Some(word) = &p.word {
+                                said["word"] = json!(word);
+                            }
+                            said
+                        })
+                        .collect()
+                };
                 json!({
                     "name": name, "manifest": compact(&text(&manifest)), "files_b64": files_b64(&files),
                     "problems": said(&problems), "warnings": said(&warnings), "listing": listing::Listing::of(&manifest),
@@ -1320,7 +1336,7 @@ fn data() -> Value {
         },
         "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version. A publish must be later than every version the plugin has had, in any state, pre-releases included.",
         "mark_claims": {
-            "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or of claims_zeron's phrases, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs), the digit 3 for e and the digit 2 for z. Then, in the store's other languages: each of languages[lang].words, in either reading, spelled letter by letter as the words are (each letter itself or one of its lookalikes; a letter that is itself one of lookalikes[x] reads as x, so a Cyrillic word's о takes a Latin o), as a substring where substring is true (Chinese, Japanese, Korean), else whole (no character of General_Category L* or N* right before or after it); a word ending in '*' is a stem: no letter or digit right before it, any letters after (Russian's case forms). In a name, every word, folded the same way. In a description, a word whose description is 'folded' the same way; 'accented' read with accents kept (NFKC, lowercase, ignorables and Me gone, on both the text and the word; French 'vérifié', whose folded form is also 'vérifie', checks); 'never' not at all (it's also an ordinary word there). In a name, a word of description.ambiguous is refused too when, read as a description is (description.about), rule 4, 2 or 'alone' says it ('已认证插件', '公式 Git 拡張', '인증됨'); and a with_kana word when it is the only CJK in the name ('公式Git'). A word with with_kana is refused only in a text that also holds kana (U+3040–30FF, U+31F0–31FF, U+FF66–FF9F): Japanese 公式 is official, Chinese 公式 a formula. The listing cases named 'the mark:' hold both sides to it.",
+            "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or an ASCII letter of a languages word as mark_text folds it, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs) and the digit 3 for e. Then, in the store's other languages: each of languages[lang].words, in either reading, spelled letter by letter as the words are (each letter itself or one of its lookalikes; a letter that is itself one of lookalikes[x] reads as x, so a Cyrillic word's о takes a Latin o), as a substring where substring is true (Chinese, Japanese, Korean), else whole (no character of General_Category L* or N* right before or after it); a word ending in '*' is a stem: no letter or digit right before it, any letters after (Russian's case forms). In a name, every word, folded the same way. In a description, a word whose description is 'folded' the same way; 'accented' read with accents kept (NFKC, lowercase, ignorables and Me gone, on both the text and the word; French 'vérifié', whose folded form is also 'vérifie', checks); 'never' not at all (it's also an ordinary word there). In a name, a word of description.ambiguous is refused too when, read as a description is (description.about), rule 4, 2 or 'alone' says it ('已认证插件', '公式 Git 拡張', '인증됨'); and a with_kana word when it is the only CJK in the name ('公式Git'). A word with with_kana is refused only in a text that also holds kana (U+3040–30FF, U+31F0–31FF, U+FF66–FF9F): Japanese 公式 is official, Chinese 公式 a formula. The listing cases named 'the mark:' hold both sides to it.",
             "words": listing::MARK_WORDS,
             "glyphs": listing::MARK_GLYPHS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
             "lookalikes": super::mark::LOOKALIKES.iter().map(|(letter, chars)| (letter.to_string(), json!(chars.chars().map(|c| c.to_string()).collect::<Vec<_>>()))).collect::<serde_json::Map<_, _>>(),
@@ -1354,12 +1370,13 @@ fn data() -> Value {
                 })
                 .collect::<serde_json::Map<_, _>>(),
             "description": {
-                "about": "In a description, only a glyph refuses anywhere; a mark word only when said of the plugin itself (crates/engine/src/plugins/mark.rs, Reading::said_of, is the reference). Read the folded text (and its spaced runs read as words) as words: each run of characters that aren't separators is a word, but each Han ideograph (U+3400–4DBF, U+4E00–9FFF, U+F900–FAFF, U+20000–3134F) is a word by itself. A sentence is bounded by sentence_ends. Candidates and their kind: MARK: words spelled as mark_claims reads them; languages words whose description is 'folded'; 'accented' ones in the text read with accents kept; a with_kana word that is the only CJK in the text (no other Han, kana or Hangul). NAME-ONLY: languages words whose description is 'never' and that have neither with_kana nor before. AMBIGUOUS: ambiguous, and the languages words with with_kana or before, as substrings. For each occurrence (covering the words it overlaps), in order: (4) refused when the words directly before it, or directly after it, read as one of store_words; else (negation) not refused when a word of negations is among the four words before it in its sentence, or ends the characters before it inside its word, or one of negations_after is after it in its sentence; else (object) unless a word directly before it holds a plugin_words entry ('Cliente oficial para Git'), not refused when the word directly after it in its sentence is one of object_words; else (by) when that word is one of by_words: refused when the next word after it (articles skipped) is one of authorities, else not; else (alone) refused when every word of its sentence is one it covers. Then by kind. MARK is refused when: it ends its sentence and directly before it is one of conjunctions, subject_words or predicate_before, or one of list_marks ends the characters before it in its sentence (spaces aside); or (first) for a mark word not matched as a substring, every word before it in the text is one of articles or holds no letter or digit; or (3) the word directly before it is one of subject_words; or (2, near) below. NAME-ONLY is refused when: the word directly before it is one of subject_words; or (first, as above) and the word after it is one of conjunctions; or it ends its sentence and the word before it is one of conjunctions or holds a plugin_words entry. AMBIGUOUS is refused when it ends its sentence after one of list_marks or conjunctions, or (2, near). (2, near): a plugin_words entry (whole words in order, a last word ending in '*' a stem; or a substring where substring), or for a MARK one of claims_zeron.description.standing_other as a substring, with nothing in sentence_ends between, either after it with at most two words between and none of them one of relation_words nor any of relation_after among the characters between, or directly before it with no word between, or overlapping it; and the phrase not someone else's thing: walking back from the phrase's first word (skipping at most two articles), no word of relation_words; no relation_before_zh ending the characters before it (separators aside); no relation_after beginning the characters after the plugin word (separators aside). Words and phrases of these lists are compared in the reading's own form (folded, or with accents kept). The listing cases named 'description:', 'corpus:' and 'corpus3:' hold both sides to it.",
+                "about": "In a description, only a glyph refuses anywhere; a mark word only when said of the plugin itself (crates/engine/src/plugins/mark.rs, Reading::said_of, is the reference). Read the folded text (and its spaced runs read as words) as words: each run of characters that aren't separators is a word, but each Han ideograph (U+3400–4DBF, U+4E00–9FFF, U+F900–FAFF, U+20000–3134F) is a word by itself. A sentence is bounded by sentence_ends. Candidates and their kind: MARK: words spelled as mark_claims reads them; languages words whose description is 'folded'; 'accented' ones in the text read with accents kept; a with_kana word that is the only CJK in the text (no other Han, kana or Hangul). NAME-ONLY: languages words whose description is 'never' and that have neither with_kana nor before. AMBIGUOUS: ambiguous, and the languages words with with_kana or before, as substrings. For each occurrence (covering the words it overlaps), in order: (4) refused when the words directly before it, or directly after it, read as one of store_words; else (negation) not refused when a word of negations is among the four words before it in its sentence, or ends the characters before it inside its word, or one of negations_after is after it in its sentence; else (object) unless a word directly before it holds a plugin_words entry ('Cliente oficial para Git'), not refused when the word directly after it in its sentence is one of object_words; else (by) when that word is one of by_words: refused when the next word after it (articles skipped) is one of authorities, else not; else (alone) refused when every word of its sentence is one it covers. Then by kind. MARK is refused when: it ends its sentence and directly before it is one of conjunctions, subject_words or predicate_before, or one of list_marks ends the characters before it in its sentence (spaces aside); or (first) for a mark word not matched as a substring, every word before it in the text is one of articles or holds no letter or digit; or (3) the word directly before it is one of subject_words; or (2, near) below. NAME-ONLY is refused when: the word directly before it is one of subject_words; or (first, as above) and the word after it is one of conjunctions; or it ends its sentence and the word before it is one of conjunctions or holds a plugin_words entry. AMBIGUOUS is refused when it ends its sentence after one of list_marks or conjunctions, or (2, near). (2, near): a plugin_words entry (whole words in order, a last word ending in '*' a stem; or a substring where substring), or for a MARK one of certified_words as a substring, with nothing in sentence_ends between, either after it with at most two words between and none of them one of relation_words nor any of relation_after among the characters between, or directly before it with no word between, or overlapping it; and the phrase not someone else's thing: walking back from the phrase's first word (skipping at most two articles), no word of relation_words; no relation_before_zh ending the characters before it (separators aside); no relation_after beginning the characters after the plugin word (separators aside). Words and phrases of these lists are compared in the reading's own form (folded, or with accents kept). The listing cases named 'description:', 'corpus:' and 'corpus3:' hold both sides to it.",
                 "plugin_words": super::mark::PLUGIN_WORDS.iter().map(|(lang, substring, words)| (lang.to_string(), json!({ "substring": substring, "words": words }))).collect::<serde_json::Map<_, _>>(),
                 "subject_words": super::mark::SUBJECT_WORDS,
                 "negations": super::mark::NEGATIONS,
                 "sentence_ends": super::mark::SENTENCE_ENDS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
                 "store_words": super::mark::STORE_WORDS,
+                "certified_words": super::mark::CERTIFIED_WORDS,
                 "articles": super::mark::ARTICLES,
                 "relation_words": super::mark::RELATION_WORDS,
                 "relation_before_zh": super::mark::RELATION_BEFORE_ZH,
@@ -1375,23 +1392,13 @@ fn data() -> Value {
             },
         },
         "unseen": "A name or description may hold no character drawn as nothing (bad_listing): a control or format character (General_Category Cc, Cf), any other Default_Ignorable_Code_Point (the Hangul fillers among them), any Variation_Selector but U+FE0F, and U+FE0F only directly after a character with the Emoji property. Keywords are ASCII. The listing cases named 'unseen:' hold both sides to it.",
-        "claims_zeron": {
-            "about": "A name or description may not say the plugin is Zeron's own unless its publisher is (the maintainer badge). Every spelling below is read as mark_claims reads its words: in the folded text, or in it with its spaced runs read as words, whole (no ASCII letter or digit right before or after it), each letter itself or one of mark_claims' lookalikes (interchangeable and pairs too), an apostrophe any of ' U+2019 U+02BC, a space a run of one or more separators (White_Space, U+FEFF, General_Category P*) but an apostrophe, and between a word in a script that doesn't space its words and the next a run of none or more. Name: each whole word's end at which word is spelled must also be the end of '<form> word' for a form of name.allowed_before (any language); one that isn't is claims_zeron. Description: any of '<origin> word' (description.origin_before), '<standing> word', 'word <standing>' and, for a standing word in ASCII, 'word's <standing>' (description.standing) is claims_zeron. The edge refuses a publish 400 claims_zeron unless the publisher carries maintainer; a device, which can't know the publisher, gives the warning claims_zeron on that field. The listing cases named 'claims_zeron:' hold both sides to it (warnings).",
-            "word": super::mark::ZERON,
-            "name": { "allowed_before": super::mark::NAME_FORMS.iter().map(|(lang, forms)| (lang.to_string(), json!(forms))).collect::<serde_json::Map<_, _>>() },
-            "description": {
-                "origin_before": super::mark::ORIGIN_WORDS,
-                "standing": super::mark::STANDING_WORDS,
-                "standing_other": super::mark::STANDING_OTHER,
-                "standing_other_about": "Standing too: standing_other, and every word of mark_claims.languages (any language, any description reading), beside the word. 'made' and 'built' (standing_after_word) only directly after a bare word, never followed by a separator and the whole word 'in' (not 'built-in', 'built in'), never after the possessive.",
-                "standing_after_word": super::mark::STANDING_AFTER_ZERON,
-                "belonging": super::mark::BELONGING,
-                "belonging_joins": super::mark::BELONGING_JOINS,
-                "belonging_zh": super::mark::BELONGING_ZH,
-                "belonging_about": "Saying the plugin is part of Zeron. A name in which word is spelled anywhere and any of belonging or belonging_zh too is claims_zeron. A description is claims_zeron when it spells '<b> <join> word' for b of belonging and join of belonging_joins (for a b that ends in ' <join>', '<b> word'), or for b of belonging_zh '<b>~<j>~word' for j of 于 於 在 到, or '随~word~<b>' / '隨~word~<b>'.",
-            },
+        "listing_causes": {
+            "about": "A bad_listing problem on a name, a description or keywords carries cause, one of causes, and, where there is one, word, for an app that says it in its own words: the device's check and the edge's answer alike (the edge's refusal gives field, cause and word beside error and message, those of its first problem, and each of its problems the same). name: too_long; unseen_char; mark_glyph (its claim is one of mark_claims.glyphs) or else mark_word. description: too_long (over max_description_len), else not_one_line; unseen_char; mark_glyph or mark_word. keywords: too_many (more than max_keywords), else repeated (word: the first keyword given again); keyword_shape (word: the keyword, none when it isn't text); mark_word (word: the keyword). unseen_char's word is the first character unseen refuses, as U+ and its code point in at least four uppercase hex digits. mark_glyph's and mark_word's word in a name or description is where it says its claim, as written: of the runs of its words (each word a run of characters but White_Space, as long as it goes; a run from its first word's start to its last's end, as written; at most written_max_words words), the shortest that, read as a name is (mark_claims), claims the same claim, the earliest of those; then without its first character while it still does, then without its last while it still does; the claim itself when no run does. Every word is without control or format characters (General_Category Cc, Cf) and any other Default_Ignorable_Code_Point, and is at most max_word_chars characters (cut there). The listing cases' problems hold both sides to it.",
+            "causes": listing::cause::ALL,
+            "max_word_chars": listing::MAX_PROBLEM_WORD_CHARS,
+            "written_max_words": super::mark::WRITTEN_MAX_WORDS,
         },
-        "keyword_claims": "A keyword (already lowercase letters, digits, dashes and single spaces) is refused (bad_listing, field keywords) when, its parts split at '-' and ' ' and each folded as mark_claims folds, a part or all its parts joined spells, whole, with mark_claims' lookalikes (interchangeable and pairs too): one of mark_claims.words; a word of mark_claims.languages whose folded form is ASCII (any description reading); or claims_zeron.word. No badge lifts it. The listing cases named 'keywords:' hold both sides to it.",
+        "keyword_claims": "A keyword (already lowercase letters, digits, dashes and single spaces) is refused (bad_listing, field keywords) when, its parts split at '-' and ' ' and each folded as mark_claims folds, a part or all its parts joined spells, whole, with mark_claims' lookalikes (interchangeable and pairs too): one of mark_claims.words; a word of mark_claims.languages whose folded form is ASCII (any description reading); No badge lifts it ('zeron' in a keyword is anyone's). The listing cases named 'keywords:' hold both sides to it.",
         "categories": CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
         "builtin_ids": listing::BUILTIN_IDS,
         "reserved_ids": manifest::RESERVED_IDS,

@@ -634,14 +634,11 @@ impl FakeStore {
                 if Version::parse(&package.manifest.version).is_err() {
                     return json_reply(400, json!({ "error": "not_semver", "message": "Not a version." }));
                 }
-                // (As the edge: saying it's Zeron's own, from anyone but
-                // Zeron, here everyone.)
-                use zeron_engine::plugins::mark::{claims_zeron, claims_zeron_in_name};
-                let said = [("name", claims_zeron_in_name(&package.manifest.name)), ("description", claims_zeron(&package.manifest.description))];
-                for (field, claim) in said {
-                    if let Some(claim) = claim {
-                        return json_reply(400, json!({ "error": "claims_zeron", "message": format!("Its {field} says \"{claim}\": only Zeron's own plugins may say they're Zeron's.") }));
-                    }
+                // (As the edge: a listing's mark claim, with the fields the
+                // device's check gives.)
+                let (problems, _) = zeron_engine::plugins::listing::check(&package.manifest, &package.files);
+                if let Some(p) = problems.iter().find(|p| p.rule == "bad_listing" && p.cause.is_some()) {
+                    return json_reply(400, json!({ "error": "bad_listing", "message": p.words, "field": p.field, "cause": p.cause, "word": p.word }));
                 }
                 let mut state = self.state.lock().unwrap();
                 let published_at = state.tick();
