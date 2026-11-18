@@ -59,6 +59,13 @@ pub const SHARED_READ: &[(&str, Option<&str>)] = &[
     ("window.blur", None),
 ];
 
+/// What the person sets that the design system follows (Appearance's glass,
+/// accent, accent throughout, text size and fonts, reduce motion; General's
+/// hiding email addresses), each shared read only as
+/// `zeron.preference.<key>`: the design system lent to each plugin draws by
+/// the app's values (ui/ds/preference.luau), and none can change them.
+pub const PREFERENCES: &[&str] = &["frosted", "accent", "accent_throughout", "text_size", "interface_font", "code_font", "motion_reduce", "private_text_hidden"];
+
 /// What plugins may change of the app's own shared state, and the grant
 /// each needs: the sidebar's filter (`{ statuses, by }`, the shell's), for
 /// a plugin allowed "ui.change" on the sidebar or its rows (it's one virtual
@@ -292,6 +299,26 @@ mod tests {
     /// Its own settings page's placeholder, every plugin's.
     fn mine(id: &str) -> Capability {
         Capability::OverrideElement(settings_selector(id))
+    }
+
+    /// Every preference the design system keeps (`preference.kept`) is one
+    /// the host shares with plugins, and no other: else a plugin's copy of
+    /// the design system would sit at its default whatever the person chose.
+    #[test]
+    fn every_preference_the_design_system_follows_is_shared_with_plugins() {
+        let ds = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/ds");
+        let mut kept: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&ds).unwrap().flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            for part in text.split("preference.kept(\"").skip(1) {
+                kept.push(part.split('"').next().unwrap().to_string());
+            }
+        }
+        kept.sort();
+        kept.dedup();
+        let mut shared: Vec<String> = PREFERENCES.iter().map(|k| k.to_string()).collect();
+        shared.sort();
+        assert_eq!(kept, shared);
     }
 
     #[test]

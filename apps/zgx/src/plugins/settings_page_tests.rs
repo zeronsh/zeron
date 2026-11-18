@@ -825,3 +825,83 @@ zeron.settings_page { build = function() return widgets("settings") end }
     assert_eq!(got[0][0], Some((380., 152.)));
     assert_eq!(got[0][1], Some((1200., 1400.)));
 }
+
+/// What the person sets that the design system follows reaches the copy lent
+/// to a plugin, at once, set through Zeron's own controls with the plugin's
+/// page open in the window: frosted glass, the accent, the accent throughout,
+/// reduce motion, the text size, hiding email addresses (ds/preference). And
+/// a plugin can't change one.
+#[test]
+fn what_the_person_sets_in_appearance_reaches_a_plugin_s_design_system() {
+    let dir = written(
+        "looks",
+        json!({ "id": "looks", "name": "Looks", "version": "1.0.0", "entry": "init.luau", "permissions": [] }),
+        r#"
+local zeron = require("./zeron")("looks")
+local material = require("@ds/material")
+local motion = require("@ds/motion")
+local look = require("@ds/look")
+local PrivateText = require("@ds/private_text")
+local Button = require("@ds/button")
+local function said(id, read)
+	return ui.text { id = id, function() return tostring(read()) end }
+end
+zeron.settings_page {
+	build = function()
+		return ui.column {
+			id = "looks-page",
+			said("looks-frosted", function() return material.frosted:get() end),
+			said("looks-accent", function() return look.accent:get() end),
+			said("looks-accented", function() return look.accented:get() end),
+			said("looks-reduce", function() return motion.reduce:get() end),
+			said("looks-text-size", function() return look.text_size:get() end),
+			said("looks-hidden", function() return PrivateText.hidden:get() end),
+			Button { "Change it", on_click = function()
+				local ok = pcall(function() material.frosted:set(not material.frosted:peek()) end)
+				zeron.toast(if ok then "changed" else "refused")
+			end },
+		}
+	end,
+}
+"#,
+    );
+    let mut rig = Rig::new(&[dir]);
+    let shown = |rig: &mut Rig| -> Vec<String> {
+        ["looks-frosted", "looks-accent", "looks-accented", "looks-reduce", "looks-text-size", "looks-hidden"].iter().map(|id| rig.app.text(id)).collect()
+    };
+    let go = |rig: &mut Rig, page: &str| {
+        rig.app.scroll(NAV, -2000.);
+        rig.frames(5);
+        rig.app.scroll(NAV, if page == "Looks" { 2000. } else { 0. });
+        rig.frames(5);
+        rig.app.click(&format!("{NAV} >> role:tab \"{page}\""));
+        rig.frames(30);
+    };
+    rig.open("Looks");
+    let before = shown(&mut rig);
+    // (The fixture's own: hide emails off, the rest their defaults.)
+    assert_eq!(before, ["true", "default", "true", "false", "13", "false"], "the app's values, not the plugin's own defaults");
+    // Each through Zeron's own control, then back to the plugin's page.
+    go(&mut rig, "Appearance");
+    rig.app.click(&format!("{PAGE} >> role:switch \"Frosted glass\""));
+    rig.app.click(&format!("{PAGE} >> role:switch \"Accent color throughout\""));
+    rig.app.click(&format!("{PAGE} >> role:switch \"Reduce motion\""));
+    rig.app.click(&format!("{PAGE} >> role:radio \"Green\""));
+    rig.frames(10);
+    rig.app.click(&format!("{PAGE} >> role:button \"Interface text size\""));
+    rig.frames(20);
+    rig.app.click("role:menuitem \"15 pt\"");
+    rig.frames(10);
+    go(&mut rig, "General");
+    rig.app.click(&format!("{PAGE} >> role:switch \"Hide email addresses\""));
+    rig.frames(10);
+    go(&mut rig, "Looks");
+    assert_eq!(shown(&mut rig), ["false", "green", "false", "true", "15", "true"], "{}", rig.tree());
+    // A plugin can't change one: refused, the app's as it was.
+    rig.app.click("role:button \"Change it\"");
+    rig.frames(10);
+    let toast = rig.heard.borrow().iter().rev().find(|(k, _)| k == "plugin.looks.toast").map(|(_, v)| v.clone());
+    assert_eq!(toast, Some(json!("refused")));
+    assert_eq!(rig.app.text("looks-frosted"), "false");
+    assert_eq!(rig.app.error(), None);
+}

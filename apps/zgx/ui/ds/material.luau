@@ -12,9 +12,11 @@ local prefers = require("@self/prefers")
 
 local glass_tint = require("@self/glass_tint")
 
+local preference = require("@self/preference")
+
 local M = {}
 
-M.frosted = ui.persist("frosted", true)
+M.frosted = preference.kept("frosted", true)
 
 -- How much the desktop blurs behind the window's glass, in points, where
 -- the app can tell (Hyprland, by its blur settings: src/desktop_blur.rs);

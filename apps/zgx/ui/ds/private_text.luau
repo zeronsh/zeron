@@ -21,12 +21,14 @@ local CardSeed = require("@self/card_seed")
 local FadeText = require("@self/fade_text")
 local locale = require("@self/locale")
 
+local preference = require("@self/preference")
+
 local M = {}
 
 -- Whether addresses are hidden: Settings → General's switch (kept across
 -- launches), on until it's turned off. (Its own key: a switch saved off
 -- before hiding was the default doesn't carry over.)
-M.hidden = ui.persist("private_text_hidden", true)
+M.hidden = preference.kept("private_text_hidden", true)
 
 -- The letters a stand-in is made of: no look-alikes (no i, l, o, 0, 1).
 local ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
