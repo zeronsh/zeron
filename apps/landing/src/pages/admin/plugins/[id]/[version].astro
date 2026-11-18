@@ -25,7 +25,7 @@ import { privatePage } from "../../../../lib/store/http.ts";
 import { renderMarkdown } from "../../../../lib/store/markdown.ts";
 import { isPluginId, isVersion, packagePath } from "../../../../lib/store/names.ts";
 import { grew } from "../../../../lib/store/permissions.ts";
-import { changedFiles, countRows, diffRows, fileTree, isPicture, languageOf, manifestChanges, readText, type DiffRow } from "../../../../lib/store/review.ts";
+import { changedFiles, countRows, diffRows, fileTree, isPicture, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, readText, type DiffRow } from "../../../../lib/store/review.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
 import { reasonWords, versionState } from "../../../../lib/store/states.ts";
 import { fileUrl, memberUrl } from "../../../../lib/store/urls.ts";
@@ -53,7 +53,11 @@ const view: View = askedView && Object.hasOwn(VIEWS, askedView) ? (askedView as 
 const here = `/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(version)}`;
 const viewHref = (v: View, extra: Record<string, string> = {}) => `${here}${v === "overview" && !Object.keys(extra).length ? "" : `?${new URLSearchParams({ view: v, ...extra })}`}`;
 
-const changes = s?.base ? changedFiles(s.files, s.base_files) : [];
+// Its files, with its manifest among them as the reviewer reads it.
+const manifest = s ? manifestText(s.manifest) : "";
+const baseManifest = s?.base ? manifestText(s.base.manifest) : "";
+const files = s ? [await manifestFile(manifest), ...s.files] : [];
+const changes = s?.base ? changedFiles(files, [await manifestFile(baseManifest), ...s.base_files]) : [];
 const changeOf = new Map(changes.map((c) => [c.path, c.change]));
 
 // README, as it will show in the store (its pictures through the file
@@ -66,14 +70,16 @@ if (s && view === "readme") {
 }
 
 // The file viewer: the file asked for, else the manifest.
+/** A file's text, from the edge (the manifest from what came with the submission). */
+const textOf = async (at: string, path: string, manifestAt: string) => (path === MANIFEST_FILE ? { text: manifestAt } : readText(await edge.file(id, at, path, true)));
 let viewing: { path: string; content: { text: string } | { binary: true } | { tooBig: true } | { picture: string } | null } | null = null;
 if (s && view === "files") {
   const asked = packagePath(Astro.url.searchParams.get("path") ?? "");
-  const file = s.files.find((f) => f.path === asked) ?? s.files.find((f) => f.path === "zeron-plugin.json") ?? s.files[0];
+  const file = files.find((f) => f.path === asked) ?? files[0];
   if (file) {
     viewing = isPicture(file.path)
       ? { path: file.path, content: { picture: fileUrl(id, version, file.path) } }
-      : { path: file.path, content: file.binary ? { binary: true } : await readText(await edge.file(id, version, file.path, true)) };
+      : { path: file.path, content: file.binary ? { binary: true } : await textOf(version, file.path, manifest) };
   }
 }
 
@@ -92,8 +98,8 @@ if (s?.base && view === "changes") {
       if (i >= DIFF_FILES) return { path: c.path, change: c.change, rows: null, note: "Open it in Files to read it." };
       if (file.binary) return { path: c.path, change: c.change, rows: null, note: "Not text: compare it by its files." };
       const [now, before] = await Promise.all([
-        c.now ? readText(await edge.file(id, version, c.path, true)) : Promise.resolve({ text: "" }),
-        c.before ? readText(await edge.file(id, base, c.path, true)) : Promise.resolve({ text: "" }),
+        c.now ? textOf(version, c.path, manifest) : Promise.resolve({ text: "" }),
+        c.before ? textOf(base, c.path, baseManifest) : Promise.resolve({ text: "" }),
       ]);
       if (!now || !before) return { path: c.path, change: c.change, rows: null, note: "It couldn't be read." };
       if (!("text" in now) || !("text" in before)) return { path: c.path, change: c.change, rows: null, note: "tooBig" in now || "tooBig" in before ? "Too big to show here." : "Not text." };
@@ -165,7 +171,7 @@ const failing = checks.filter((c) => c.level === "fail").length;
             label="What to read"
             tabs={(Object.keys(VIEWS) as View[])
               .filter((v) => v !== "changes" || s.base)
-              .map((v) => ({ href: viewHref(v), label: VIEWS[v], current: v === view, count: v === "changes" ? changes.length : v === "files" ? s.files.length : undefined }))}
+              .map((v) => ({ href: viewHref(v), label: VIEWS[v], current: v === view, count: v === "changes" ? changes.length : v === "files" ? files.length : undefined }))}
           />
 
           {view === "overview" && (
@@ -284,14 +290,14 @@ const failing = checks.filter((c) => c.level === "fail").length;
           {view === "files" && (
             <div class="files">
               <nav class="tree-pane" aria-label="Files">
-                <FileTree nodes={fileTree(s.files)} current={viewing?.path ?? null} href={(p) => viewHref("files", { path: p })} changes={changeOf} />
+                <FileTree nodes={fileTree(files)} current={viewing?.path ?? null} href={(p) => viewHref("files", { path: p })} changes={changeOf} />
               </nav>
               <section class="viewer" aria-label={viewing ? viewing.path : "File"}>
                 {viewing && (
                   <>
                     <p class="file-head">
                       <code>{viewing.path}</code>
-                      <span class="faint num">{bytes(s.files.find((f) => f.path === viewing!.path)?.bytes ?? 0)}</span>
+                      <span class="faint num">{bytes(files.find((f) => f.path === viewing!.path)?.bytes ?? 0)}</span>
                       {changeOf.get(viewing.path) && (
                         <a href={`${viewHref("changes")}#${encodeURIComponent(viewing.path)}`}>See its changes</a>
                       )}
@@ -427,6 +433,8 @@ const failing = checks.filter((c) => c.level === "fail").length;
   .recent a:hover { color: var(--text); }
   .check-list { display: grid; gap: 10px; font-size: 14px; line-height: 1.45; }
   .check-list li { display: flex; gap: 10px; align-items: flex-start; color: var(--text-2); }
+  /* (A check names keys and hashes: long, with nowhere to break.) */
+  .check-list li > span { min-width: 0; overflow-wrap: anywhere; }
   .check-list :global(.glyph) { margin-top: 1px; }
   .check-list .ok :global(.glyph) { color: var(--tone-success); }
   .check-list .warn { color: var(--tone-warning); }

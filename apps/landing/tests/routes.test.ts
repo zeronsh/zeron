@@ -297,7 +297,7 @@ describe("signed-in pages", () => {
   test("a session the edge rotates goes back to the browser, and that page is kept by no one", async () => {
     // (The edge rotates a staff session as it's used.)
     const { response } = await html("/admin/plugins", await site.signIn("user_grace"));
-    expect(response.headers.getSetCookie().join("\n")).toMatch(/__Host-zeron_session=[\w-]+; Path=\/; HttpOnly; Secure; SameSite=Lax/);
+    expect(response.headers.getSetCookie().join("\n")).toMatch(/__Host-zeron_session=[\w-]+; Path=\/; Secure; HttpOnly; SameSite=Lax/);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("cloudflare-cdn-cache-control") ?? "").not.toMatch(/public/);
   });
@@ -504,9 +504,10 @@ describe("forms", () => {
     const lin = await site.signIn("user_lin");
     const page = await html("/account", lin);
     expect(page.body).toContain("claim a username first");
-    const response = await post("/auth/web/logout", lin, { csrf: tokenOf(page.body), return_to: "/plugins" });
+    const response = await post("/auth/web/logout", lin, { csrf: tokenOf(page.body) });
     expect(response.status).toBe(303);
-    expect(response.headers.get("location")).toBe("/plugins");
+    // (As the edge does: always the front page, absolute.)
+    expect(response.headers.get("location")).toBe("https://zeron.sh/");
     expect((await site.fetch("/account", { headers: { cookie: lin } })).status).toBe(303);
   });
 });

@@ -18,7 +18,8 @@ const state = {
     { id: "linear", user: null, note: "Held until Linear asks for it.", created_at: NOW - 12 * DAY },
   ] as { id: string; user: string | null; note: string | null; created_at: number }[],
   /** session id → user id, csrf */
-  sessions: new Map<string, { user: string; csrf: string }>(),
+  /** `rotated`: a staff session already replaced on its first privileged use. */
+  sessions: new Map<string, { user: string; csrf: string; rotated?: boolean }>(),
 };
 
 // Programs the host rates (crates/plugin-guard/src/commands.rs), enough for the fixtures.
@@ -290,6 +291,25 @@ function admin(request: Request): { user: FakeUser } | Response {
   return { user: s.user };
 }
 
+/**
+ * A staff session is replaced on its first privileged use, as the edge's is
+ * (edge/src/web-session.ts; it rotates again every 10 minutes of use, which
+ * no test here lasts): the new token goes out on that answer, the old one
+ * stays good (for the edge, a minute; here, for the fake's life). Nobody
+ * else's ever rotates.
+ */
+function rotate(request: Request, response: Response): Response {
+  const s = session(request);
+  const found = s && state.sessions.get(s.id);
+  if (!s || !found || found.rotated || !isAdmin(s.user)) return response;
+  found.rotated = true;
+  const next = crypto.randomUUID();
+  state.sessions.set(next, { user: s.user.id, csrf: s.csrf, rotated: true });
+  const headers = new Headers(response.headers);
+  headers.append("set-cookie", `${COOKIE}=${next}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=1800`);
+  return new Response(response.body, { status: response.status, headers });
+}
+
 function adminWriter(request: Request): { user: FakeUser } | Response {
   const who = writer(request);
   if (who instanceof Response) return who;
@@ -511,7 +531,8 @@ function callback(url: URL): Response {
   state.sessions.set(id, { user: user.id, csrf: crypto.randomUUID().replace(/-/g, "") });
   return new Response(null, {
     status: 303,
-    headers: { location: safeReturn(url.searchParams.get("return_to")), "set-cookie": `${COOKIE}=${id}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${user.roles.includes("admin") ? 3600 : 30 * 86400}`, "cache-control": "no-store" },
+    // (The edge sends the browser back to an absolute address on the site.)
+    headers: { location: new URL(safeReturn(url.searchParams.get("return_to")), url.origin).href, "set-cookie": `${COOKIE}=${id}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${user.roles.includes("admin") ? 3600 : 30 * 86400}`, "cache-control": "no-store" },
   });
 }
 
@@ -520,12 +541,14 @@ async function logout(request: Request, url: URL): Promise<Response> {
   const form = await request.formData().catch(() => null);
   const origin = request.headers.get("origin");
   if (s) {
-    if (origin !== url.origin || form?.get("csrf") !== s.csrf) return fail(403, "bad_csrf");
-    state.sessions.delete(s.id);
+    // (The edge's sign-out answers its refusals in its own words, not the store's.)
+    if (origin !== url.origin || form?.get("csrf") !== s.csrf) return json({ error: "forbidden", reason: "bad_csrf" }, 403);
+    for (const [id, other] of state.sessions) if (other.user === s.user.id) state.sessions.delete(id);
   }
+  // Always the site's front page: the edge takes no return_to here.
   return new Response(null, {
     status: 303,
-    headers: { location: safeReturn(typeof form?.get("return_to") === "string" ? (form.get("return_to") as string) : null), "set-cookie": `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`, "cache-control": "no-store" },
+    headers: { location: new URL("/", url.origin).href, "set-cookie": `${COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`, "cache-control": "no-store" },
   });
 }
 
@@ -543,16 +566,7 @@ async function route(request: Request): Promise<Response> {
     if (parts[2] === "session" && method === "GET") {
       const s = session(request);
       if (!s) return fail(401, "signed_out");
-      // A staff session rotates as it's used, as the edge's do
-      // (edge/src/web-session.ts): a new token, the old one still good for a
-      // moment (here, for the fake's life). Nobody else's ever rotates.
-      let cookie: string | null = null;
-      if (s.user.roles.length > 0) {
-        const rotated = crypto.randomUUID();
-        state.sessions.set(rotated, { user: s.user.id, csrf: s.csrf });
-        cookie = `${COOKIE}=${rotated}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=1800`;
-      }
-      return json({ user: { name: s.user.name, email: `${s.user.id.slice(5)}@example.com` }, username: s.user.username, roles: s.user.roles, csrf: s.csrf, expires_at: NOW + DAY, fresh_sign_in: false }, 200, cookie ? { "set-cookie": cookie } : {});
+      return json({ user: { name: s.user.name, email: `${s.user.id.slice(5)}@example.com` }, username: s.user.username, roles: s.user.roles, csrf: s.csrf, expires_at: NOW + DAY, fresh_sign_in: false });
     }
     return notFound();
   }
@@ -583,7 +597,7 @@ async function route(request: Request): Promise<Response> {
       const k = state.keys.find((x) => x.plugin_id === b && x.key === d);
       if (!k) return notFound();
       k.revoked_at ??= Date.now();
-      return new Response(null, { status: 204 });
+      return json({ revoked: true });
     }
   }
   if (a === "plugins" && b && c === "reports" && method === "POST") {
@@ -665,7 +679,8 @@ function reportView(r: (typeof state.reports)[number]) {
 export default {
   async fetch(request: Request): Promise<Response> {
     try {
-      return await route(request);
+      const response = await route(request);
+      return new URL(request.url).pathname.startsWith("/store/v1/admin/") ? rotate(request, response) : response;
     } catch (error) {
       return fail(500, "unknown", error instanceof Error ? error.message : String(error));
     }

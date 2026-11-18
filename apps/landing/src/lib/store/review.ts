@@ -48,6 +48,23 @@ export interface ChangedFile {
   before?: PackageFile;
 }
 
+/**
+ * The manifest, as a reviewer reads it among the files. A package carries
+ * it beside its files, not as one of them (no file may have its name), so
+ * the edge sends it apart from the file list: here it is put back in that
+ * list as the text a reviewer reads, with its own hash so two versions with
+ * the same manifest show no change.
+ */
+export const MANIFEST_FILE = "zeron-plugin.json";
+
+export const manifestText = (manifest: Record<string, unknown>): string => `${JSON.stringify(manifest, null, 2)}\n`;
+
+export async function manifestFile(text: string): Promise<PackageFile> {
+  const bytes = new TextEncoder().encode(text);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return { path: MANIFEST_FILE, bytes: bytes.length, sha256: [...digest].map((b) => b.toString(16).padStart(2, "0")).join(""), binary: false };
+}
+
 /** Each file added, removed or changed since `base`, by path. */
 export function changedFiles(files: readonly PackageFile[], base: readonly PackageFile[]): ChangedFile[] {
   const before = new Map(base.map((f) => [f.path, f]));

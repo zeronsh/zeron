@@ -15,6 +15,8 @@ npm run dev        # http://localhost:4321, with the fake edge (fake-edge/)
 npm run check      # types, in .astro and .ts
 npm test           # builds ./dist, then every test (Chromium for the browser ones:
                    # `npx playwright install chromium` once)
+npm run test:edge  # the same site in front of the real edge worker (tests/edge);
+                   # needs `npm ci` in ../../edge and scripts/plugin-store-e2e
 npm run deploy             # install, check, build, test, then deploy zeron.sh
 npm run deploy:staging     # the same for https://site-staging.zeron.sh
 ```
@@ -54,6 +56,9 @@ fake-edge/         the edge's store contract and sign-in over fixtures, for
                    dev and tests (never deployed)
 tests/             the built pages and routes against the fake edge
                    (harness.ts), the store's pages in Chromium (axe, keyboard)
+  edge/            the same against the real edge worker: plugins published
+                   as a device publishes them, a real web sign-in, every page
+                   and form, and a browser on the site's https origin
 public/
   telemetry.js     the page-view counter, served exactly as written
 tools/

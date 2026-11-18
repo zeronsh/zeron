@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { changedFiles, diffRows, fileTree, languageOf, manifestChanges, readText } from "./review.ts";
+import { changedFiles, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, readText } from "./review.ts";
 
 const f = (path: string, sha = "1", binary = false) => ({ path, bytes: 1, sha256: sha, binary });
 
@@ -17,6 +17,17 @@ describe("what changed", () => {
     const now = [f("a", "1"), f("b", "2"), f("d", "4")];
     const base = [f("a", "1"), f("b", "x"), f("c", "3")];
     expect(changedFiles(now, base).map((c) => [c.path, c.change])).toEqual([["b", "modified"], ["c", "removed"], ["d", "added"]]);
+  });
+
+  test("the manifest is among the files, and only a different manifest is a change", async () => {
+    const one = await manifestFile(manifestText({ id: "a", version: "1.0.0" }));
+    expect(one.path).toBe(MANIFEST_FILE);
+    expect(one.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(one.bytes).toBe(new TextEncoder().encode(manifestText({ id: "a", version: "1.0.0" })).length);
+    expect((await manifestFile(manifestText({ id: "a", version: "1.0.0" }))).sha256).toBe(one.sha256);
+    const two = await manifestFile(manifestText({ id: "a", version: "1.1.0" }));
+    expect(changedFiles([two, f("a")], [one, f("a")]).map((c) => [c.path, c.change])).toEqual([[MANIFEST_FILE, "modified"]]);
+    expect(changedFiles([one, f("a")], [one, f("a")])).toEqual([]);
   });
 
   test("manifest lists change item by item, risky additions called out, reach first", () => {

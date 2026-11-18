@@ -13,7 +13,8 @@
     "check": "astro check",
     "test": "astro build && vitest run",
     "deploy": "npm ci && npm run check && npm test && wrangler deploy",
-    "deploy:staging": "npm ci && npm run check && CLOUDFLARE_ENV=staging npm test && wrangler deploy"
+    "deploy:staging": "npm ci && npm run check && CLOUDFLARE_ENV=staging npm test && wrangler deploy",
+    "test:edge": "astro build && vitest run -c vitest.edge.config.ts"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^14.4.8",

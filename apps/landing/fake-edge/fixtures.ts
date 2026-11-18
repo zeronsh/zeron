@@ -98,12 +98,14 @@ interface Spec {
   status?: FakePlugin["status"];
 }
 
+// (As the edge words them: the signature's names the key, 43 characters
+// with nowhere to break, as wide as base64 can make it.)
 const OK_CHECKS: FakeVersion["checks"] = [
-  { id: "signature", level: "ok", message: "Signed by a key of the publisher's account." },
-  { id: "manifest", level: "ok", message: "The manifest follows the rules." },
-  { id: "semver", level: "ok", message: "The version is strict semver and newer than the last." },
-  { id: "readme", level: "ok", message: "README.md is present." },
-  { id: "size", level: "ok", message: "Within the limits." },
+  { id: "signature", level: "ok", message: "Signed by WMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMW, uploaded from a signed-in device." },
+  { id: "manifest", level: "ok", message: "The manifest follows every rule a device checks." },
+  { id: "size", level: "ok", message: "6 files, 0.0 MB (0.0 MB packaged)." },
+  { id: "newer", level: "ok", message: "Later than the last version." },
+  { id: "readme", level: "ok", message: "README.md is there." },
 ];
 
 function readme(spec: Spec, shots: string[]): string {
@@ -175,8 +177,7 @@ function build(spec: Spec): FakePlugin {
     const checks = h.status === "pending" && (h.permissions ?? spec.permissions ?? []).some((p) => p === "commands" || p === "native")
       ? [...OK_CHECKS, { id: "risky", level: "warn" as const, message: "Asks to run programs on the computer as you." }]
       : OK_CHECKS;
-    // The signed manifest travels in the package too (its signature left out here).
-    files["zeron-plugin.json"] = `${JSON.stringify(manifest, null, 2)}\n`;
+    // (The manifest travels beside the files, never as one: the edge lists it apart.)
     return {
       version: h.version,
       status: h.status,

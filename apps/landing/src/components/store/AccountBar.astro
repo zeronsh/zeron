@@ -29,7 +29,6 @@ const tabs = [
       <span class="name">{session.username ? `@${session.username}` : (session.user.name ?? "Signed in")}</span>
       <form method="post" action="/auth/web/logout">
         <input type="hidden" name="csrf" value={session.csrf} />
-        <input type="hidden" name="return_to" value="/plugins" />
         <Action tone="ghost" size="sm">Sign out</Action>
       </form>
     </div>
