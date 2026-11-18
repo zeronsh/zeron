@@ -189,6 +189,11 @@ pub struct PluginItem {
     /// (`capability::Diff`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub digest_diff: Option<serde_json::Value>,
+    /// It was allowed and waits again though it asks for nothing new (an
+    /// unverified store version taken or restored, or an update bound to
+    /// its content): the sheet says so plainly.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub nothing_new: bool,
     /// From the store: its installed version was blocked by the store
     /// (`{version, reason, at, overridden}`, `status::Blocked`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -350,6 +355,7 @@ pub fn entry_bound(inspected: Inspected, author: Author, binding: Option<String>
         icon_svg: manifest.and_then(|m| icon_svg(&inspected.dir, &m.raw)),
         digest: capability::digest(&record),
         digest_diff: verdict.diff.clone(),
+        nothing_new: verdict.status == Status::Pending && verdict.diff.is_none() && decision.is_some_and(|d| d.allowed && d.reask),
         blocked: state.blocked.get(&id).map(|b| serde_json::json!(b)),
         prerelease: state.prerelease.contains(&id),
     };
@@ -376,6 +382,7 @@ pub fn builtin_entry(inspected: Inspected, off: bool) -> Entry {
         entry.item.allowed.sort();
         entry.item.ask = Vec::new();
         entry.item.digest_diff = None;
+        entry.item.nothing_new = false;
     }
     entry
 }

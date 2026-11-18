@@ -155,7 +155,13 @@ async fn an_unverified_update_is_offered_at_once_marked_and_always_asks() {
     // On its own: taken, and it asks, though it asks for nothing new.
     let updated = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
     assert_eq!((updated["plugin"]["version"].as_str(), updated["plugin"]["status"].as_str()), (Some("1.2.0"), Some("pending")), "{updated}");
-    assert_eq!(d.item("focus").await["source"]["verified"], false);
+    let item = d.item("focus").await;
+    assert_eq!((item["source"]["verified"].as_bool(), item["nothing_new"].as_bool()), (Some(false), Some(true)), "the sheet says it's not verified and asks nothing new: {item}");
+    assert!(item.get("digest_diff").is_none());
+    // A first install of an unverified version isn't "nothing new".
+    let other = device(&store, Some("eve"));
+    let fresh = other.call(methods::INSTALL_PLUGIN, json!({ "store": "focus", "version": "1.2.0" })).await.unwrap();
+    assert!(fresh["plugin"].get("nothing_new").is_none(), "{fresh}");
 }
 
 #[tokio::test]
