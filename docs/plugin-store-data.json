@@ -1,5 +1,5 @@
 {
-  "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
+  "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. reserved_ids are each refused as id_reserved: Zeron's own (templates, zeron, app: Zeron won't run a plugin with one either), then the store site's pages beside /plugins/<id> (Zeron runs a plugin with one of those; only the store refuses it). The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
   "builtin_ids": [
     "git",
     "github",
@@ -191,7 +191,31 @@
   "reserved_ids": [
     "templates",
     "zeron",
-    "app"
+    "app",
+    "all",
+    "new",
+    "search",
+    "browse",
+    "discover",
+    "featured",
+    "popular",
+    "updated",
+    "category",
+    "categories",
+    "keyword",
+    "keywords",
+    "tags",
+    "publishing",
+    "publish",
+    "guide",
+    "report",
+    "reports",
+    "review",
+    "queue",
+    "audit",
+    "sitemap",
+    "feed",
+    "static"
   ],
   "template_payload_prefix": "zeron-template:v1\n"
 }

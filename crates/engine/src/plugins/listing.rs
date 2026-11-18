@@ -81,6 +81,19 @@ pub const CATEGORIES: &[(&str, &str)] = &[
 /// Ids nobody publishes: Zeron's own plugins'.
 pub const BUILTIN_IDS: &[&str] = &["git", "github", "parallax-scenes"];
 
+/// The store site's own pages beside plugin pages (`/plugins/<id>`): a
+/// plugin with one of these ids would be shadowed there, so the store never
+/// lists one. Zeron runs a plugin with one of these ids as any other (one
+/// made before they were kept still loads); only publishing is refused.
+/// (The username rules' words, which the edge already keeps from new ids,
+/// aren't repeated: docs, help, about, account, admin, api, install, me,
+/// settings, terms, privacy, assets.)
+pub const SITE_IDS: &[&str] = &[
+    "all", "new", "search", "browse", "discover", "featured", "popular", "updated", "category", "categories",
+    "keyword", "keywords", "tags", "publishing", "publish", "guide", "report", "reports", "review", "queue",
+    "audit", "sitemap", "feed", "static",
+];
+
 /// The stable words a problem is reported by.
 pub mod rule {
     /// The manifest is one Zeron won't run (`Manifest::problem`).
@@ -207,11 +220,13 @@ pub fn zeron_range(raw: &Value) -> Result<Option<String>, String> {
     }
 }
 
-/// Whether `id` is one the store keeps for Zeron: its own plugins', or
-/// starting `zeron`. (The edge also keeps brand and lookalike names, as
-/// usernames are kept: those it says when it refuses.)
+/// Whether `id` is one the store keeps for Zeron: its own plugins', its
+/// site's pages ([`SITE_IDS`]), or starting `zeron`. (The edge also keeps
+/// brand and lookalike names, as usernames are kept: those it says when it
+/// refuses.)
 pub fn reserved_for_store(id: &str) -> bool {
     BUILTIN_IDS.contains(&id)
+        || SITE_IDS.contains(&id)
         || id.starts_with("zeron")
         || manifest::check_id(id).is_err_and(|e| e == manifest::RESERVED_ID_ERROR)
 }
@@ -353,7 +368,11 @@ pub fn check(
             problems.push(Problem::new(
                 ID_RESERVED,
                 Some("id"),
-                format!("\"{}\" is kept for Zeron", manifest.id),
+                if SITE_IDS.contains(&manifest.id.as_str()) {
+                    format!("\"{}\" is kept for the store's own pages: pick another id", manifest.id)
+                } else {
+                    format!("\"{}\" is kept for Zeron", manifest.id)
+                },
             ));
         }
         _ => {}
@@ -727,6 +746,23 @@ pub(crate) mod tests {
         let listing = Listing::of(&manifest);
         assert_eq!(listing.categories, vec!["productivity"]);
         assert_eq!(listing.engines_zeron.as_deref(), Some(">=0.3.0"));
+    }
+
+    #[test]
+    fn the_site_s_pages_are_never_a_listed_plugin_s_id_but_still_run() {
+        let (base, files) = listed();
+        for id in SITE_IDS {
+            // Each a valid id Zeron runs and nothing else already kept.
+            assert_eq!(manifest::check_id(id), Ok(()), "{id} still runs");
+            assert!(!BUILTIN_IDS.contains(id) && !id.starts_with("zeron") && !manifest::RESERVED_IDS.contains(id), "{id}");
+            let mut m = base.clone();
+            m["id"] = serde_json::json!(id);
+            assert_eq!(rules(&m, &files), vec![(rule::ID_RESERVED, Some("id"))], "{id}");
+        }
+        // Only the words themselves.
+        for id in ["feed-reader", "allergies", "news-feed"] {
+            assert!(!reserved_for_store(id), "{id}");
+        }
     }
 
     #[test]

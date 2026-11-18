@@ -595,6 +595,12 @@ fn listing_cases() -> Value {
         ("a loose version", "version", json!("1.2")),
         ("an id starting zeron", "id", json!("zeron-tools")),
         ("a built-in plugin's id", "id", json!("github")),
+        ("an id the site's pages use: all", "id", json!("all")),
+        ("an id the site's pages use: publishing", "id", json!("publishing")),
+        ("an id the site's pages use: featured", "id", json!("featured")),
+        ("an id the site's pages use: feed", "id", json!("feed")),
+        ("an id with a site word in it is anyone's", "id", json!("feed-reader")),
+        ("an id a site word is in is anyone's", "id", json!("allergies")),
         ("a permission Zeron doesn't know", "permissions", json!(["root"])),
         ("a name with a direction override", "name", json!("Focus\u{202e}draoB")),
         ("a name with a zero-width space", "name", json!("Focus\u{200b}Board")),
@@ -793,7 +799,7 @@ fn consent_item_cases() -> Value {
 fn data() -> Value {
     json!({
         "format": "zeron-plugin-store-data:v1",
-        "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
+        "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. reserved_ids are each refused as id_reserved: Zeron's own (templates, zeron, app: Zeron won't run a plugin with one either), then the store site's pages beside /plugins/<id> (Zeron runs a plugin with one of those; only the store refuses it). The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
         "package_format": FORMAT,
         "payload_prefix": PAYLOAD_PREFIX,
         "template_payload_prefix": TEMPLATE_PAYLOAD_PREFIX,
@@ -836,7 +842,9 @@ fn data() -> Value {
         "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version.",
         "categories": CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
         "builtin_ids": listing::BUILTIN_IDS,
-        "reserved_ids": manifest::RESERVED_IDS,
+        // (Zeron's own, which it won't run either, then the site's pages,
+        // which only the store refuses: one list, each refused as id_reserved.)
+        "reserved_ids": manifest::RESERVED_IDS.iter().chain(listing::SITE_IDS).collect::<Vec<_>>(),
         "report_reasons": super::store::REPORT_REASONS,
         "consent": consent_tables(),
     })
