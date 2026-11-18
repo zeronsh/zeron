@@ -19,7 +19,9 @@ import type { Root, RootContent } from "hast";
 import { toHtml } from "hast-util-to-html";
 import { common, createLowlight } from "lowlight";
 
-const lowlight = createLowlight(common);
+/** The grammars shipped (common's), and the names people write after ``` for some of them. */
+export const lowlight = createLowlight(common);
+lowlight.registerAlias({ javascript: ["mjs", "cjs"], lua: ["luau"], bash: ["zsh"], json: ["jsonc", "json5"] });
 
 /** Deeper than any real file's highlighting nests (a few levels). */
 export const NESTING = 64;

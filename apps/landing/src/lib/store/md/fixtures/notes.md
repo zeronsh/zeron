@@ -1,0 +1,2 @@
+- Pauses when you leave the chat.
+- Says when it's done.
