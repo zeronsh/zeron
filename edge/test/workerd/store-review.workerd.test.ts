@@ -96,7 +96,8 @@ describe("store admin routes", () => {
         checks: { ok: expect.any(Number), warn: expect.any(Number), fail: 0 },
         review: { decided: false, decision: null },
         reports: 0,
-        earlier_undecided: 0
+        earlier_undecided: 0,
+        installs: 0
       }
     ]);
     const sub = await json<Record<string, any>>(await adminCall("GET", `/store/v1/admin/versions/${id}/1.1.0`));
@@ -740,5 +741,54 @@ describe("store publisher ids (amendment 33)", () => {
     expect((await publish(a.userId, id, await makePackage({ id, version: "1.1.0", signer: a.signer }))).status).toBe(201);
     const offers = (await (await call(undefined, "POST", "/store/v1/updates", { zeron: "0.4.0", plugins: [{ id, version: "1.0.0", hash }] })).json()) as { updates: Record<string, unknown>[] };
     expect(offers.updates[0]).toMatchObject({ publisher: renamed, publisher_id: pid });
+  });
+});
+
+describe("what the staff pages read", () => {
+  const takeDown = (id: string, version: string) => adminCall("POST", `/store/v1/admin/plugins/${id}/versions/${version}/take-down`, { reason: "Harmful." });
+  const queueRows = async (query: string, id: string) =>
+    (await json<{ items: Record<string, any>[] }>(await adminCall("GET", `/store/v1/admin/queue?${query}&limit=50`))).items.filter((i) => i.plugin.id === id);
+
+  it("gives a queue row its plugin's installs, and a version's publisher their first publish and their listed and verified plugins", async () => {
+    const a = await author();
+    const [first, second, unlisted] = [uniqueId(), uniqueId(), uniqueId()];
+    await listed(a, first, "1.0.0");
+    await published(a, second, "1.0.0");
+    await published(a, unlisted, "1.0.0");
+    expect((await takeDown(unlisted, "1.0.0")).status).toBe(200);
+    for (let n = 0; n < 2; n++) expect((await call((await author()).userId, "POST", `/store/v1/plugins/${second}/installed`)).status).toBe(200);
+    const [row] = await queueRows("state=undecided", second);
+    expect(row).toMatchObject({ version: "1.0.0", installs: 2 });
+    const firstAt = await env.STORE_DB.prepare("SELECT MIN(published_at) AS t FROM versions WHERE publisher_id = ?").bind(a.userId).first<number>("t");
+    const view = await json<{ publisher: Record<string, unknown> }>(await adminCall("GET", `/store/v1/admin/versions/${second}/1.0.0`));
+    // Listed: two (the taken-down one is in no list); verified: one.
+    expect(view.publisher).toMatchObject({ first_published_at: firstAt, plugins: { total: 2, verified: 1 } });
+    // Nothing public carries them.
+    for (const path of [`/store/v1/plugins/${second}`, `/store/v1/plugins?author=${a.username}`, `/store/v1/plugins/${second}/versions`]) {
+      const text = await (await call(undefined, "GET", path)).text();
+      expect(text, path).not.toContain("first_published_at");
+      expect(text, path).not.toMatch(/"plugins":\{"total"/);
+    }
+  });
+
+  it("lists versions taken down and not restored, newest take-down first, for staff only", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await published(a, id, "1.0.0");
+    await published(a, id, "1.1.0");
+    expect((await takeDown(id, "1.1.0")).status).toBe(200);
+    expect((await takeDown(id, "1.0.0")).status).toBe(200);
+    // (Taken down a second apart, so the order isn't a tie.)
+    await env.STORE_DB.prepare("UPDATE versions SET removed_at = removed_at + 1000 WHERE plugin_id = ? AND version = '1.0.0'").bind(id).run();
+    expect((await queueRows("state=taken_down", id)).map((r) => [r.version, r.status])).toEqual([["1.0.0", "taken_down"], ["1.1.0", "taken_down"]]);
+    // Restored: off the list.
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/restore`, { reason: "A mistake." })).status).toBe(200);
+    expect((await queueRows("state=taken_down", id)).map((r) => r.version)).toEqual(["1.1.0"]);
+    // Paged like the other states.
+    const page = await json<{ items: unknown[]; next_cursor?: string }>(await adminCall("GET", "/store/v1/admin/queue?state=taken_down&limit=1"));
+    expect(page.items).toHaveLength(1);
+    // Staff only.
+    expect((await call(a.userId, "GET", "/store/v1/admin/queue?state=taken_down")).status).toBe(403);
+    expect((await call(undefined, "GET", "/store/v1/admin/queue?state=taken_down")).status).toBe(401);
   });
 });
