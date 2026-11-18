@@ -3091,17 +3091,84 @@ async fn windowed_doc_messages_stream(
     .boxed())
 }
 
+/// Entries an opening for a reader holding rows reads before the whole
+/// transcript (`since_doc_messages_stream`), and the parts they may hold.
+const SINCE_TAIL_ENTRIES: usize = 48;
+const SINCE_TAIL_PARTS: usize = 2_048;
+
 /// For a reader that holds the transcript as `known`: one `since` frame of
 /// what changed from it (a reset only when that's most of it), then deltas
 /// as the doc changes. A long chat opened again costs what's new.
+///
+/// That frame costs the whole transcript: every entry summed, and on a cold
+/// doc (just opened, or out of its read cache) every entry read from the doc
+/// first, which in a long chat takes from tens of milliseconds to a second.
+/// For a long chat, then, before it: what changed among its newest entries,
+/// read alone, as an opening tail (`historyPending`, which a reader holding
+/// rows takes into them in place, the new after them); none when nothing
+/// there changed. The `since` frame then counts from the rows as the reader
+/// holds them after that. Every app that sends `known` takes the two frames
+/// so: it applied an opening tail to held rows before it sent `known`.
 async fn since_doc_messages_stream(
     host: crate::doc_host::DocHost,
     chat_id: String,
     options: zeron_doc::DiffOptions,
     known: Vec<(String, u64)>,
 ) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
-    let (rx, doc, first, start) = tokio::task::spawn_blocking(move || {
+    let (preview, handle, known) = match tokio::task::spawn_blocking(move || {
         let handle = host.open(&chat_id)?;
+        let tail = match handle.transcript_is_long() {
+            true => handle.doc().read_newest_entries(SINCE_TAIL_ENTRIES, SINCE_TAIL_PARTS)?,
+            false => Vec::new(),
+        };
+        let (changed, holds) = zeron_doc::tail_since_known(&known, &tail);
+        // (A short chat, or nothing changed among its newest: the `since`
+        // frame at once.)
+        if changed.is_empty() {
+            return since_stream(&handle, options, &known).map(Err);
+        }
+        let mut preview = serde_json::to_value(zeron_doc::TranscriptUpdate {
+            frame: zeron_doc::TranscriptFrame::reset(&changed),
+            context_usage: handle.doc().context_usage(),
+            replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&changed)),
+        })
+        .map_err(|e| crate::EngineError::Other(e.to_string()))?;
+        preview["historyPending"] = serde_json::Value::Bool(true);
+        Ok::<_, crate::EngineError>(Ok((preview, handle, holds)))
+    })
+    .await
+    .map_err(|e| RpcError::Failed(e.to_string()))?
+    .map_err(|e| RpcError::Failed(e.to_string()))?
+    {
+        Ok(first) => first,
+        Err(stream) => return Ok(stream),
+    };
+    // The whole read on the next poll, as the opening tail's is.
+    let rest = futures::stream::once(async move {
+        match tokio::task::spawn_blocking(move || since_stream(&handle, options, &known)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "transcript since failed");
+                futures::stream::empty().boxed()
+            }
+            Err(error) => {
+                tracing::warn!(%error, "transcript since failed");
+                futures::stream::empty().boxed()
+            }
+        }
+    })
+    .flatten();
+    Ok(futures::stream::once(async move { preview }).chain(rest).boxed())
+}
+
+/// [`since_doc_messages_stream`]'s `since` frame, from the whole transcript,
+/// then its deltas.
+fn since_stream(
+    handle: &crate::doc_host::ChatDocHandle,
+    options: zeron_doc::DiffOptions,
+    known: &[(String, u64)],
+) -> Result<BoxStream<'static, serde_json::Value>, crate::EngineError> {
+    let (rx, doc, first, start) = {
         let rx = handle.watch_messages();
         // As the doc is now, not as last published (a commit's publish may
         // be on its way): what's changed is measured from this. Cheap: the
@@ -3109,7 +3176,7 @@ async fn since_doc_messages_stream(
         handle.publish_messages();
         let current = rx.borrow().clone();
         let baseline = zeron_doc::TranscriptBaseline::capture(&current.entries);
-        let frame = zeron_doc::delta_from_known(&known, &current.entries);
+        let frame = zeron_doc::delta_from_known(known, &current.entries);
         // What the frame carries is history, not a reply arriving: its
         // cutoff, only for what it carries (the reader's rows have theirs).
         let sent = match &frame {
@@ -3130,11 +3197,8 @@ async fn since_doc_messages_stream(
         first["orderSum"] = serde_json::json!(zeron_doc::order_sum(
             current.entries.iter().map(|e| e.id.as_str())
         ));
-        Ok::<_, crate::EngineError>((rx, handle.doc_arc(), first, (current, baseline)))
-    })
-    .await
-    .map_err(|e| RpcError::Failed(e.to_string()))?
-    .map_err(|e| RpcError::Failed(e.to_string()))?;
+        (rx, handle.doc_arc(), first, (current, baseline))
+    };
     Ok(futures::stream::once(async move { first })
         .chain(doc_messages_stream_from(rx, doc, options, Some(start)))
         .boxed())
@@ -7694,5 +7758,341 @@ mod context_usage_tests {
         remote.clear_context_usage().unwrap();
         tx.send_replace(crate::doc_host::TranscriptSnapshot::default());
         assert!(stream.next().await.unwrap()["contextUsage"].is_null());
+    }
+}
+
+/// A chat opened while its doc is cold (not in the warm set, or its read
+/// cache let go): the first `WatchDocMessages` frame comes from the doc's
+/// newest entries, not from reading all of them.
+#[cfg(test)]
+mod cold_open_tests {
+    use super::*;
+    use crate::doc_host::{DocHost, DocHostConfig};
+    use futures::StreamExt;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionDoc, SessionMessageEntry};
+
+    /// Words for a synthetic chat: varied enough not to compress away.
+    struct Words(u64);
+    impl Words {
+        const VOCAB: &'static [&'static str] = &[
+            "the", "engine", "reads", "a", "chat", "document", "snapshot", "loro", "entry", "part",
+            "tool", "output", "transcript", "frame", "tail", "known", "since", "cold", "warm",
+            "cache", "import", "list", "container", "deep", "value", "json", "serialize", "hash",
+            "order", "count", "delta", "upsert", "remove", "append", "reply", "assistant", "user",
+            "prompt", "reasoning", "command", "cargo", "test", "build", "release", "window",
+            "viewport", "skeleton", "latency", "milliseconds", "budget", "thread", "blocking",
+        ];
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn text(&mut self, bytes: usize) -> String {
+            let mut out = String::with_capacity(bytes + 16);
+            while out.len() < bytes {
+                let word = Self::VOCAB[(self.next() % Self::VOCAB.len() as u64) as usize];
+                out.push_str(word);
+                // A number now and then: real text doesn't repeat this much.
+                if self.next().is_multiple_of(5) {
+                    out.push_str(&format!("{}", self.next() % 100_000));
+                }
+                out.push(if self.next().is_multiple_of(11) { '\n' } else { ' ' });
+            }
+            out
+        }
+    }
+
+    /// One turn's worth: a prompt, or a reply with thinking, words and calls
+    /// (~7 KB), as real chats hold them.
+    fn synthetic_entry(i: usize, words: &mut Words) -> SessionMessageEntry {
+        let id = format!("e{i:06}");
+        if i.is_multiple_of(2) {
+            return SessionMessageEntry {
+                id: id.clone(),
+                role: MessageRole::User,
+                parts: vec![MessagePart::Text { id: format!("{id}-t"), text: words.text(300) }],
+                created_at: i as i64,
+                device_id: "host".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            };
+        }
+        let mut parts = vec![MessagePart::Reasoning { id: format!("{id}-r"), text: words.text(900) }];
+        parts.push(MessagePart::Text { id: format!("{id}-t0"), text: words.text(1200) });
+        for call in 0..6 {
+            parts.push(
+                serde_json::from_value(serde_json::json!({
+                    "kind": "tool",
+                    "id": format!("{id}-c{call}"),
+                    "call": { "kind": "exec", "command": words.text(60) },
+                    "resolved": true,
+                    "output": words.text(600),
+                }))
+                .unwrap(),
+            );
+        }
+        parts.push(MessagePart::Text { id: format!("{id}-t1"), text: words.text(800) });
+        SessionMessageEntry {
+            id,
+            role: MessageRole::Assistant,
+            parts,
+            created_at: i as i64,
+            device_id: "host".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: Some(1_000),
+        }
+    }
+
+    /// A chat of `entries` entries, stored as the engine stores one (a
+    /// chat2 snapshot), so a host opens it cold.
+    fn store_synthetic_chat(store: &zeron_sync::DocsStore, chat_id: &str, entries: usize) -> usize {
+        let doc = SessionDoc::init(chat_id).unwrap();
+        let mut words = Words(0x9e37_79b9_7f4a_7c15);
+        for i in 0..entries {
+            doc.push_message(&synthetic_entry(i, &mut words)).unwrap();
+        }
+        let bytes = doc.export_snapshot().unwrap();
+        store
+            .save_snapshot_with_cursor(chat_id, &bytes, 0, crate::chat2_host::CHAT2_DOC_EPOCH)
+            .unwrap();
+        bytes.len()
+    }
+
+    fn new_host(store: &Arc<zeron_sync::DocsStore>) -> DocHost {
+        DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "viewer".into(),
+                default_harness: zeron_proto::HarnessId::Mock,
+                edge: None,
+            },
+        )
+    }
+
+    /// What a reader holding these entries says it holds.
+    fn known_of(entries: &[serde_json::Value]) -> Vec<(String, u64)> {
+        entries
+            .iter()
+            .map(|e| (e["id"].as_str().unwrap().to_owned(), zeron_doc::entry_sum(e)))
+            .collect()
+    }
+
+    /// The transcript as a reader of the whole of it gets it.
+    async fn whole_transcript(store: &Arc<zeron_sync::DocsStore>, chat: &str) -> Vec<serde_json::Value> {
+        let host = new_host(store);
+        let handle = host.open(chat).unwrap();
+        let rx = handle.watch_messages();
+        let entries = rx.borrow().entries.clone();
+        drop(rx);
+        drop(handle);
+        host.shutdown_workers().await;
+        entries.iter().map(|e| serde_json::to_value(&**e).unwrap()).collect()
+    }
+
+    /// A reader holding a long chat's rows opens it cold: what changed among
+    /// its newest entries comes first, without waiting on the whole read;
+    /// then `since` from the rows as it then holds them, then live deltas.
+    /// Its rows end as the transcript.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reader_holding_rows_gets_a_cold_chats_newest_changes_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let chat = "long";
+        assert!(store_synthetic_chat(&store, chat, 400) > 1 << 20);
+        let whole: Vec<SessionMessageEntry> = whole_transcript(&store, chat)
+            .await
+            .into_iter()
+            .map(|e| serde_json::from_value(e).unwrap())
+            .collect();
+        let n = whole.len();
+        // What the reader holds: all but the newest three, two of them as
+        // they were before a change (an old reply, one among the newest).
+        let mut held = whole[..n - 3].to_vec();
+        for at in [11, n - 5] {
+            assert!(held[at].parts.len() > 1, "a reply");
+            held[at].parts.truncate(1);
+        }
+        let known: Vec<(String, u64)> =
+            held.iter().map(|e| (e.id.clone(), zeron_doc::entry_sum_of(e))).collect();
+
+        let host = new_host(&store);
+        let handle = host.open(chat).unwrap();
+        // The whole read held up: the first frame mustn't wait on it.
+        let blocked = handle.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let blocker = std::thread::spawn(move || {
+            blocked.import_transcript(|| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        });
+        locked_rx.recv().unwrap();
+        let options = zeron_doc::DiffOptions { part_patches: true };
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            since_doc_messages_stream(host.clone(), chat.into(), options, known.clone()),
+        )
+        .await
+        .expect("the first frame mustn't wait on the whole read")
+        .unwrap();
+        let preview = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the first frame mustn't wait on the whole read")
+            .unwrap();
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+        assert_eq!(preview["historyPending"], true);
+        assert!(preview.get("since").is_none());
+        let ids: Vec<&str> =
+            preview["reset"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+        let newest: Vec<&str> = [n - 5, n - 3, n - 2, n - 1].iter().map(|&i| whole[i].id.as_str()).collect();
+        assert_eq!(ids, newest, "of the newest entries, only what changed");
+        // As the app takes an opening tail into rows it holds.
+        let mut rows = held.clone();
+        for entry in preview["reset"].as_array().unwrap() {
+            let entry: SessionMessageEntry = serde_json::from_value(entry.clone()).unwrap();
+            match rows.iter_mut().find(|e| e.id == entry.id) {
+                Some(row) => *row = entry,
+                None => rows.push(entry),
+            }
+        }
+        // Then what changed since, from those rows.
+        let since = stream.next().await.unwrap();
+        assert_eq!(since["since"], true);
+        let upserts: Vec<&str> =
+            since["upsert"].as_array().unwrap().iter().map(|u| u["entry"]["id"].as_str().unwrap()).collect();
+        assert_eq!(upserts, [whole[11].id.as_str()], "the older change, nothing of the tail again");
+        let order = since["orderSum"].as_u64();
+        let update: zeron_doc::TranscriptUpdate = serde_json::from_value(since).unwrap();
+        zeron_doc::apply_transcript_frame(&mut rows, update.frame).unwrap();
+        assert_eq!(rows, whole);
+        assert_eq!(order, Some(zeron_doc::order_sum(rows.iter().map(|e| e.id.as_str()))));
+        // Then live changes, as deltas.
+        handle.write_user_message("live", "after", 1).unwrap();
+        let live = tokio::time::timeout(Duration::from_secs(5), stream.next()).await.unwrap().unwrap();
+        let update: zeron_doc::TranscriptUpdate = serde_json::from_value(live).unwrap();
+        zeron_doc::apply_transcript_frame(&mut rows, update.frame).unwrap();
+        assert_eq!(rows.len(), n + 1);
+        assert_eq!(rows.last().unwrap().id, "live");
+        drop(stream);
+
+        // Nothing among the newest entries changed: the `since` frame alone.
+        let mut known: Vec<(String, u64)> =
+            rows.iter().map(|e| (e.id.clone(), zeron_doc::entry_sum_of(e))).collect();
+        known[11].1 = 0;
+        let mut again = since_doc_messages_stream(host.clone(), chat.into(), options, known).await.unwrap();
+        let first = again.next().await.unwrap();
+        assert_eq!(first["since"], true);
+        assert!(first.get("historyPending").is_none());
+        assert_eq!(first["upsert"][0]["entry"]["id"], whole[11].id.as_str());
+        drop(again);
+        drop(handle);
+        host.shutdown_workers().await;
+    }
+
+    fn median(mut v: Vec<Duration>) -> Duration {
+        v.sort();
+        v[v.len() / 2]
+    }
+
+    /// Time from a `WatchDocMessages` request to its first frame (and to
+    /// the whole history) for a cold doc: (a) the opening tail, no `known`;
+    /// (b) `known` all but the newest few entries; and (b) again on the doc
+    /// warm. Each frame is serialized as the RPC layer would. Run with:
+    /// `cargo test --release -p zeron-engine --lib cold_open_first_frame -- --ignored --nocapture`
+    /// (`ZERON_COLD_OPEN_ENTRIES=4000,20000` for other sizes).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "benchmark: builds tens of MB of chat"]
+    async fn cold_open_first_frame_bench() {
+        const RUNS: usize = 7;
+        let sizes: Vec<usize> = std::env::var("ZERON_COLD_OPEN_ENTRIES")
+            .ok()
+            .map(|v| v.split(',').map(|n| n.parse().unwrap()).collect())
+            .unwrap_or_else(|| vec![4_000, 20_000]);
+        for entries in sizes {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+            let chat = "bench";
+            let built = Instant::now();
+            let snapshot = store_synthetic_chat(&store, chat, entries);
+            // The reader's rows: all but the newest three entries.
+            let whole = whole_transcript(&store, chat).await;
+            let json_bytes: usize = whole.iter().map(|e| e.to_string().len()).sum();
+            let known = known_of(&whole[..whole.len() - 3]);
+            eprintln!(
+                "\n{entries} entries: snapshot {:.1} MB, transcript JSON {:.1} MB (built in {:.1?})",
+                snapshot as f64 / 1e6,
+                json_bytes as f64 / 1e6,
+                built.elapsed()
+            );
+            // What any first frame waits on: the doc's snapshot loaded and imported.
+            let mut opens = Vec::new();
+            for _ in 0..RUNS {
+                let host = new_host(&store);
+                let start = Instant::now();
+                let handle = tokio::task::spawn_blocking({
+                    let host = host.clone();
+                    move || host.open(chat).unwrap()
+                })
+                .await
+                .unwrap();
+                opens.push(start.elapsed());
+                drop(handle);
+                host.shutdown_workers().await;
+            }
+            eprintln!("  open alone (load + import)  {:>8.1?}", median(opens));
+            let mut results = Vec::new();
+            for scenario in ["(a) opening tail, cold", "(b) known, cold", "(b) known, warm"] {
+                let (mut first, mut rest, mut bytes) = (Vec::new(), Vec::new(), (0, 0));
+                for _ in 0..RUNS {
+                    let host = new_host(&store);
+                    let options = zeron_doc::DiffOptions { part_patches: true };
+                    if scenario.ends_with("warm") {
+                        // Viewed a moment ago: open, its reader gone, its
+                        // read cache kept.
+                        let mut viewed =
+                            since_doc_messages_stream(host.clone(), chat.into(), options, known.clone())
+                                .await
+                                .unwrap();
+                        while let Some(frame) = viewed.next().await {
+                            if frame.get("historyPending").is_none() {
+                                break;
+                            }
+                        }
+                    }
+                    let start = Instant::now();
+                    let mut stream = if scenario.starts_with("(a)") {
+                        opening_doc_messages_stream(host.clone(), chat.into(), options).await.unwrap()
+                    } else {
+                        since_doc_messages_stream(host.clone(), chat.into(), options, known.clone())
+                            .await
+                            .unwrap()
+                    };
+                    let frame = stream.next().await.unwrap();
+                    bytes.0 = serde_json::to_vec(&frame).unwrap().len();
+                    first.push(start.elapsed());
+                    // The whole history: (a)'s full reset, (b)'s `since`.
+                    if frame.get("historyPending").is_some() {
+                        let frame = stream.next().await.unwrap();
+                        bytes.1 = serde_json::to_vec(&frame).unwrap().len();
+                    }
+                    rest.push(start.elapsed());
+                    drop(stream);
+                    host.shutdown_workers().await;
+                }
+                results.push((scenario, median(first), median(rest), bytes));
+            }
+            for (scenario, first, rest, (first_bytes, rest_bytes)) in results {
+                eprintln!(
+                    "  {scenario:<24} first frame {first:>8.1?} ({first_bytes} B)   whole history {rest:>8.1?} ({rest_bytes} B)"
+                );
+            }
+        }
     }
 }

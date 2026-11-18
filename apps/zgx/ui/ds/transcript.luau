@@ -297,10 +297,10 @@ local SEAM_GAP = 6
 
 -- `ZERON_ZGX_TRACE_TRANSCRIPT=1`: the transcript's hover and layout, a line
 -- each to the app's output (off, nothing is made or printed).
-local TRACING = ui.shared("debug.trace_transcript", false):peek() == true
+local TRACING = ui.shared("trace.transcript", false):peek() == true
 local function trace(what: string, ...: any)
 	if TRACING then
-		print(`[transcript] {math.floor(ui.now())} {what}`, ...)
+		print(`zeron-zgx: transcript {math.floor(ui.now())} {what}`, ...)
 	end
 end
 

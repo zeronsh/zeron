@@ -8788,6 +8788,63 @@ mod tests {
         assert!(!rows().contains("tail engine.log"), "the whole copy replaces it: {}", rows());
     }
 
+    /// Rows held, the chat's doc cold in the engine: what changed among its
+    /// newest entries comes first (an opening tail of just those), then what
+    /// changed since, measured from the rows as they hold it after that
+    /// tail (crates/engine/src/rpc.rs `since_doc_messages_stream`). The rows
+    /// end as the engine's, nothing asked for whole.
+    #[test]
+    fn rows_held_take_a_cold_chats_tail_then_what_changed_since() {
+        use super::{Entry, Open, View, draft_value};
+        use serde_json::json;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let reply = |id: &str, words: &str| {
+            json!({ "id": id, "role": "assistant", "status": "complete", "parts": [{ "id": format!("{id}p"), "kind": "text", "text": words }], "createdAt": 1_762_000_000_000_i64 })
+        };
+        let held: Vec<Entry> = (0..10).map(|i| Entry::new(reply(&format!("a{i}"), "done"))).collect();
+        let view = Rc::new(View {
+            session: app.host.shared("t.session", Value::Nil),
+            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            draft: app.host.shared("t.draft", draft_value("", "")),
+            rpc: RefCell::default(),
+            open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            snapshot: Cell::new(false),
+        });
+        let ids = || view.open.borrow().as_ref().unwrap().entries.iter().map(|e| e.id.to_string()).collect::<Vec<_>>();
+        let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
+        // While away: a8 changed, a10 and a11 came, a3 went (older than the tail).
+        let engine: Vec<serde_json::Value> = (0..12)
+            .filter(|&i| i != 3)
+            .map(|i| reply(&format!("a{i}"), if i == 8 { "changed" } else if i >= 10 { "new" } else { "done" }))
+            .collect();
+        // First: of the newest entries, only what changed.
+        view.heard_frame(json!({ "reset": [engine[7].clone(), engine[9].clone(), engine[10].clone()], "historyPending": true }));
+        assert!(view.open.borrow().as_ref().unwrap().has_whole, "still waiting for what changed since");
+        assert_eq!(ids(), ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11"]);
+        assert!(rows().contains("changed") && rows().contains("new"), "{}", rows());
+        // Then what changed since, from the rows as they now are: a3 gone,
+        // a4 after a2.
+        let order: Vec<&str> = engine.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        view.heard_frame(json!({
+            "since": true,
+            "remove": ["a3"],
+            "upsert": [{ "after": "a2", "entry": engine[3].clone() }],
+            "count": engine.len(),
+            "orderSum": super::order_sum(order.iter().copied()),
+        }));
+        assert_eq!(view.generation.get(), 0, "nothing asked for whole");
+        assert!(!view.open.borrow().as_ref().unwrap().has_whole);
+        assert_eq!(ids(), order);
+        let sums: Vec<u64> = view.open.borrow().as_ref().unwrap().entries.iter().map(|e| e.sum()).collect();
+        assert_eq!(sums, engine.iter().map(super::sum_of).collect::<Vec<_>>(), "the engine's entries, as they are");
+    }
+
     /// A prompt sent from here that a reopened chat's opening tail brings
     /// shows once: the engine's copy, the one pending here let go. Shown twice
     /// it was two rows with one id, and zgx's virtual list panicked
