@@ -137,12 +137,13 @@ export const RENDERER = 5;
  * - each block (lines between blank lines, outside fenced code) is bounded
  *   in lines, bytes, nesting and emphasis delimiters, the shapes whose cost
  *   is superlinear: one past a bound and the document is its text;
- * - blocks are parsed in pieces of a bounded size, each on its own (link
- *   and footnote definitions carried into each), then joined into one
+ * - blocks are parsed in pieces of a bounded size, each on its own (the
+ *   link and footnote definitions it refers to carried into it), then joined into one
  *   document, so no single parse can run long;
  * - what a rendering will cost is reckoned before it parses (COST: each
  *   byte, line, emphasis delimiter and bracket at what it was measured to
- *   take, in milliseconds), and a rendering may cost at most `work`; a page
+ *   take, code's bytes at what highlighting them takes, and the definitions
+ *   carried into pieces, in milliseconds), and a rendering may cost at most `work`; a page
  *   shares one such budget among everything it renders (`Budget`). Past
  *   either, the document is shown as its text.
  *
@@ -165,11 +166,55 @@ export const BOUNDS = {
   work: 600,
 } as const;
 
-/** What each part of a document was measured to cost to draw, in milliseconds (bytes outside fenced code). */
-export const COST = { byte: 0.002, line: 0.05, delimiter: 0.03, bracket: 0.016 } as const;
+/**
+ * What each part of a document was measured to cost to draw, in
+ * milliseconds: a byte outside fenced code, a line, an emphasis delimiter,
+ * a bracket, a byte of fenced code (highlighted). Each from a shape that
+ * isolates it, divided by its count.
+ *
+ * Measured on AMD Ryzen 9 5900X (24 threads, shared, loaded), Node 22.23,
+ * the shapes in markdown.shapes.ts, each drawn in a fresh process (cold,
+ * as a first rendering in a new isolate is) and as the best of three (warm):
+ *
+ *   shape                                        estimate   cold ms  ratio   warm ms  ratio
+ *   an ordinary README (53 KB)                      231       339    1.47      205    0.89
+ *   prose and tables (77 KB, the reference)         276       230    0.83      123    0.44
+ *   setext headings, a block each (24 KB)           540       431    0.80      240    0.44
+ *   list items, a block each (24 KB)                290       362    1.25      258    0.89
+ *   nested pictures, many blocks (58 KB)            301       338    1.12      288    0.96
+ *   nested links, many blocks (90 KB)               500       181    0.36      143    0.29
+ *   autolinks (264 KB)                              545       459    0.84      375    0.69
+ *   raw HTML, dropped (79 KB)                       306        69    0.22       36    0.12
+ *   character references (234 KB)                  483       168    0.35      133    0.27
+ *   long lines (234 KB)                             482       140    0.29      118    0.25
+ *   fenced code, highlighted (465 KB)               477       471    0.99      404    0.85
+ *   fenced code, huge blocks (309 KB)               317       347    1.10      260    0.82
+ *   footnotes, 1,000 (33 KB)                        335       325    0.97      226    0.67
+ *   every footnote referenced from every piece      384       415    1.08      305    0.79
+ *   every link definition referenced from every    556       347    0.62      233    0.42
+ *
+ * The worst real ÷ estimated seen: 1.47 cold here (an ordinary README), and
+ * 1.83 for the same shape in an earlier, more loaded run; 0.96 warm.
+ * markdown.test.ts fails if any shape's (warm, judged against the
+ * reference's) passes RATIO_CEILING. Before definitions were carried only
+ * into the pieces that use them and code was counted, 2,000 footnote
+ * definitions behind 100 KB ran 5.47× their estimate and 465 KB of code
+ * cost 450 ms on an estimate of 0 (BEATERS, in the shapes, holds them).
+ */
+export const COST = { byte: 0.002, line: 0.05, delimiter: 0.03, bracket: 0.016, code: 0.001 } as const;
 
-/** What a page may spend on all it renders together, reckoned as BOUNDS.work is. */
-export const PAGE_WORK = 1200;
+/** No measured shape may cost more than this many times its estimate (markdown.test.ts). */
+export const RATIO_CEILING = 2.5;
+
+/**
+ * What a page may spend on all it renders together, reckoned as BOUNDS.work
+ * is. At the worst ratio seen (1.83), 900 is about 1.6 s of real work on a
+ * first visit. Each rendering is kept by its text's hash, so that is spent
+ * once per version a data center draws, never per visit: the page's budget
+ * bounds that one first visit, and a document left undrawn by it (never
+ * kept) is drawn by a later visit, with what was kept costing nothing.
+ */
+export const PAGE_WORK = 900;
 
 /** What a page may spend rendering, shared by every document on it: work left (COST). */
 export class Budget {
@@ -240,9 +285,9 @@ interface Block {
  * bound. A fence opens at any indent (one inside a list item too), so a
  * blank line inside code never splits it.
  */
-function blocksOf(markdown: string): { blocks: Block[]; definitions: string[]; work: number } | null {
+function blocksOf(markdown: string): { blocks: Block[]; definitions: Map<string, string>; work: number } | null {
   const blocks: Block[] = [];
-  const definitions: string[] = [];
+  const definitions = new Map<string, string>();
   let work = 0;
   let current: Block = { lines: [], textLines: 0, textBytes: 0 };
   let fence: string | null = null;
@@ -258,12 +303,15 @@ function blocksOf(markdown: string): { blocks: Block[]; definitions: string[]; w
     const opens = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
     if (fence) {
       current.lines.push(line);
+      // (Code isn't parsed as markdown, but is highlighted: COST.code a byte.)
+      work += COST.code * (line.length + 1);
       if (opens && opens[0] === fence[0] && opens.length >= fence.length) fence = null;
       continue;
     }
     if (opens) {
       fence = opens;
       current.lines.push(line);
+      work += COST.code * (line.length + 1);
       continue;
     }
     if (line.trim() === "") {
@@ -274,7 +322,8 @@ function blocksOf(markdown: string): { blocks: Block[]; definitions: string[]; w
     current.textLines++;
     current.textBytes += line.length + 1;
     // (A link's definition; a footnote's, which runs on, is taken whole below.)
-    if (/^ {0,3}\[(?!\^)[^\]\n]+\]:\s*\S/.test(line)) definitions.push(line);
+    const defined = /^ {0,3}\[(?!\^)([^\]\n]+)\]:\s*\S/.exec(line);
+    if (defined && !definitions.has(label(defined[1]!))) definitions.set(label(defined[1]!), line);
     // Quote markers at the line's start, brackets open at once, delimiters.
     if ((/^[\s>]*/.exec(line)?.[0].match(/>/g)?.length ?? 0) > BOUNDS.quotes) return null;
     const bare = line.replace(/\\[[\]]/g, "").replace(/(`+)[^`]*?\1/g, "");
@@ -293,8 +342,31 @@ function blocksOf(markdown: string): { blocks: Block[]; definitions: string[]; w
   }
   close();
   // A footnote's definition is a block starting `[^label]:` (its lines with it).
-  for (const block of blocks) if (/^ {0,3}\[\^[^\]\n]+\]:/.test(block.lines[0]!)) definitions.push(block.lines.join("\n"));
+  for (const block of blocks) {
+    const footnote = /^ {0,3}\[(\^[^\]\n]+)\]:/.exec(block.lines[0]!);
+    if (footnote && !definitions.has(label(footnote[1]!))) definitions.set(label(footnote[1]!), block.lines.join("\n"));
+  }
   return { blocks, definitions, work };
+}
+
+/** A label as references match it: case and runs of space set aside (`^name` for a footnote's). */
+const label = (text: string) => text.trim().replace(/\s+/g, " ").toLowerCase();
+
+/**
+ * The definitions a piece refers to (each `[…]` in it that names one), to
+ * be carried into it, and what they add to the work: only what each piece
+ * uses, so carrying them never costs the square of their number.
+ */
+function carriedInto(piece: string, definitions: Map<string, string>): { text: string; work: number } {
+  if (!definitions.size) return { text: "", work: 0 };
+  const used = new Set<string>();
+  for (const match of piece.matchAll(/\[([^\]\n]{1,999})\]/g)) {
+    const key = label(match[1]!);
+    if (definitions.has(key)) used.add(key);
+  }
+  const texts = [...used].map((key) => definitions.get(key)!);
+  const text = texts.length ? `\n\n${texts.join("\n\n")}` : "";
+  return { text, work: COST.byte * text.length + COST.line * (text.split("\n").length - 1) };
 }
 
 /**
@@ -340,19 +412,17 @@ const plain = (markdown: string) =>
  */
 export function render(markdown: string, options: RenderOptions, budget?: Budget): Rendered {
   const cut = (why: Cut): Rendered => ({ html: plain(markdown), cut: why });
-  const shaped = blocksOf(markdown);
-  if (!shaped) return cut("shape");
-  if (shaped.work > BOUNDS.work) return cut("budget");
+  const plan = planOf(markdown);
+  if (!plan) return cut("shape");
+  const { pieces, carried, work } = plan;
+  if (work > BOUNDS.work) return cut("budget");
   if (budget) {
-    if (shaped.work > budget.work) return cut("page");
-    budget.work -= shaped.work;
+    if (work > budget.work) return cut("page");
+    budget.work -= work;
   }
   try {
-    const pieces = piecesOf(shaped.blocks);
-    // (Each piece knows every definition, so a reference finds its target wherever it is.)
-    const carried = pieces.length > 1 && shaped.definitions.length ? `\n\n${shaped.definitions.join("\n\n")}` : "";
     const children: RootContent[] = [];
-    for (const piece of pieces) children.push(...(processor.parse(piece + carried) as unknown as { children: RootContent[] }).children);
+    for (const [i, piece] of pieces.entries()) children.push(...(processor.parse(piece + (carried[i] ?? "")) as unknown as { children: RootContent[] }).children);
     const tree = processor.runSync({ type: "root", children } as never) as Root;
     point(tree, options);
     const clean = sanitize.runSync(tree) as Root;
@@ -365,13 +435,31 @@ export function render(markdown: string, options: RenderOptions, budget?: Budget
 }
 
 /**
+ * What drawing a document would cost, reckoned without parsing it (COST,
+ * about milliseconds), or null when a block is past a bound (BOUNDS).
+ */
+export function workOf(markdown: string): number | null {
+  return planOf(markdown)?.work ?? null;
+}
+
+/**
  * Whether a document would be drawn, reckoned without parsing it: why not
  * (a shape past a bound, or past its budget), or null. (A document can still
  * be its text if the parser fails on it; render says so when it does.)
  */
 export function drawable(markdown: string): Cut | null {
+  const plan = planOf(markdown);
+  return !plan ? "shape" : plan.work > BOUNDS.work ? "budget" : null;
+}
+
+/** The pieces a document is parsed in, what each carries, and what it all costs; null past a bound. */
+function planOf(markdown: string): { pieces: string[]; carried: string[]; work: number } | null {
   const shaped = blocksOf(markdown);
-  return !shaped ? "shape" : shaped.work > BOUNDS.work ? "budget" : null;
+  if (!shaped) return null;
+  const pieces = piecesOf(shaped.blocks);
+  // (Each piece knows the definitions it refers to, so a reference finds its target wherever it is.)
+  const carried = pieces.length > 1 ? pieces.map((piece) => carriedInto(piece, shaped.definitions)) : [];
+  return { pieces, carried: carried.map((c) => c.text), work: shaped.work + carried.reduce((n, c) => n + c.work, 0) };
 }
 
 /** Markdown in, safe HTML out (render's HTML, within its own budget). */

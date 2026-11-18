@@ -2,7 +2,8 @@
 // Whatever goes in, what comes out runs nothing, loads nothing from
 // anywhere but the package, and can't pass for the page's own parts.
 import { describe, expect, test } from "vitest";
-import { Budget, delimiters, drawable, render as renderWithin, renderMarkdown, target } from "./markdown.ts";
+import { BOUNDS, Budget, delimiters, drawable, RATIO_CEILING, render as renderWithin, renderMarkdown, target, workOf } from "./markdown.ts";
+import { BEATERS, REFERENCE, SHAPES } from "./markdown.shapes.ts";
 
 const FILES = "/plugins/demo/files/1.0.0/";
 const render = (md: string) => renderMarkdown(md, { file: (p) => FILES + p.split("/").map(encodeURIComponent).join("/"), demote: true });
@@ -303,5 +304,54 @@ test("two documents' footnotes on one page share no id", () => {
   expect(ids(a)).toHaveLength(3);
   expect(ids(a).filter((id) => ids(b).includes(id))).toEqual([]);
   expect(a).not.toContain('id="footnote-label"');
+});
+
+describe("the estimate holds: what beat it before is caught, and no shape costs far more than reckoned", () => {
+  const options = { file: (p: string) => `/f/${p}`, demote: true };
+  /** What each shape must come to: drawn within the budget, or its text because it's past it. */
+  const OUTCOMES: Record<string, "drawn" | "budget"> = {
+    "2,000 footnote definitions at the end of 100 KB": "budget",
+    "link definitions spread out with blank lines": "budget",
+    "every footnote referenced from every piece": "drawn",
+    "465 KB of fenced code": "drawn",
+    "2,000 footnotes": "budget",
+  };
+
+  for (const [name, make] of Object.entries(BEATERS)) {
+    test(`${name}: ${OUTCOMES[name] === "drawn" ? "drawn, within the budget of work" : "its text, said so: past the budget of work"}`, () => {
+      const md = make();
+      const work = workOf(md);
+      expect(work).not.toBeNull();
+      const { html, cut } = renderWithin(md, options);
+      if (OUTCOMES[name] === "drawn") {
+        expect(cut).toBeNull();
+        expect(work!).toBeLessThanOrEqual(BOUNDS.work);
+      } else {
+        expect(cut).toBe("budget");
+        expect(work!).toBeGreaterThan(BOUNDS.work);
+        expect(html).toContain('<p class="as-text">Shown as plain text.</p>');
+      }
+    });
+  }
+
+  test(`no measured shape costs more than ${RATIO_CEILING}× its estimate (each judged against the reference shape, so a machine's speed is set aside)`, () => {
+    // (Here the clock moves: this is Node, not a Worker. Best of three, warm.)
+    const ratio = (md: string) => {
+      let best = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const started = performance.now();
+        renderWithin(md, options);
+        best = Math.min(best, performance.now() - started);
+      }
+      return best / workOf(md)!;
+    };
+    // The reference's ratio on the measuring box (markdown.ts, warm), and here.
+    const MEASURED_REFERENCE = 0.44;
+    const scale = MEASURED_REFERENCE / ratio(SHAPES[REFERENCE]!());
+    const over = Object.entries(SHAPES)
+      .map(([name, make]) => [name, ratio(make()) * scale] as const)
+      .filter(([, r]) => r > RATIO_CEILING);
+    expect(over).toEqual([]);
+  }, 120_000);
 });
 
