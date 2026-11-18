@@ -89,6 +89,37 @@ describe("the admin role", () => {
     expect(await res.json()).toEqual({ admin: { userId } });
   });
 
+  it("refuses an admin's valid bearer on every admin route of the contract, and takes their session", async () => {
+    const userId = await person();
+    await grantAdmin(userId);
+    const staff = await webSignIn(userId);
+    const routes: [string, string][] = [
+      ["GET", "/store/v1/admin/queue?status=pending"],
+      ["GET", "/store/v1/admin/submissions/demo/1.0.0"],
+      ["POST", "/store/v1/admin/submissions/demo/1.0.0/approve"],
+      ["POST", "/store/v1/admin/submissions/demo/1.0.0/reject"],
+      ["GET", "/store/v1/admin/plugins/demo"],
+      ...["suspend", "restore", "feature", "transfer"].map((a): [string, string] => ["POST", `/store/v1/admin/plugins/demo/${a}`]),
+      ["POST", "/store/v1/admin/plugins/demo/versions/1.0.0/remove"],
+      ["GET", "/store/v1/admin/reports"],
+      ["POST", "/store/v1/admin/reports/r1/resolve"],
+      ["GET", "/store/v1/admin/audit"],
+      ["GET", "/store/v1/admin/reservations"],
+      ["POST", "/store/v1/admin/reservations"]
+    ];
+    for (const [method, path] of routes) {
+      const bearer = await SELF.fetch(`https://site.test${path}`, { method, headers: { authorization: `Bearer ${userId}`, origin: "https://site.test" } });
+      expect(bearer.status, `${method} ${path}`).toBe(403);
+      expect(await errorOf(bearer)).toBe("forbidden");
+      const session = await SELF.fetch(`https://site.test${path}`, {
+        method,
+        headers: { cookie: staff.cookie, origin: "https://site.test", "x-csrf-token": staff.csrf }
+      });
+      expect(session.status, `${method} ${path} (session)`).toBe(200);
+      await session.arrayBuffer();
+    }
+  });
+
   it("is by web session only: never a bearer, a runner token or a deploy key", async () => {
     const userId = await person();
     await grantAdmin(userId);

@@ -29,7 +29,8 @@
  * expired.
  */
 import type { Env } from "../../env";
-import { jsonError } from "../../http";
+import { adminAuthorized } from "../../cloud/billing";
+import { jsonError, readJsonBody } from "../../http";
 import { stepUpHash, stepUpRequired } from "../../step-up";
 import { b64urlEncode, parseEd25519PublicKey, verifyEd25519 } from "../../cloud/crypto";
 import { userDirectoryStub, type DeployKeyRow } from "../../user-directory";
@@ -175,4 +176,36 @@ export const handleDeployKeyRoute = async (
         headers: { "content-type": "application/json", "retry-after": "3600" }
       });
   }
+};
+
+/**
+ * Operator routes (ADMIN_TOKEN, before the bearer gate):
+ *   GET  /admin/deploy-keys                      → { live }   (live deploy keys)
+ *   POST /admin/deploy-keys/revoke { pluginId }  → { revoked } (one plugin's)
+ *   POST /admin/deploy-keys/revoke { all: true } → { revoked } (every one)
+ * For a leaked key's plugin, and before rolling the edge back past deploy
+ * keys: code from before them can't tell a deploy key from a device's, so
+ * every deploy key must be revoked first (docs/plans/2026-11-18-plugin-store-identity-rollout.md).
+ */
+export const handleDeployKeyAdminRoute = async (request: Request, env: Env, url: URL): Promise<Response | undefined> => {
+  if (url.pathname !== "/admin/deploy-keys" && url.pathname !== "/admin/deploy-keys/revoke") return undefined;
+  if (!env.ADMIN_TOKEN) return jsonError(404, "not_found", "Not found.");
+  if (!(await adminAuthorized(request, env.ADMIN_TOKEN))) return jsonError(401, "unauthenticated", "Admin token required.");
+  const directory = userDirectoryStub(env);
+  if (!directory) return jsonError(503, "unavailable", "The user directory isn't set up on this server.");
+  if (url.pathname === "/admin/deploy-keys") {
+    if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET only.");
+    return fresh({ live: await directory.liveDeployKeys() });
+  }
+  if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+  const body = (await readJsonBody(request, 1024)) as { pluginId?: unknown; all?: unknown } | undefined;
+  if (body?.all === true && body.pluginId === undefined) {
+    const revoked = await directory.revokeAllDeployKeys();
+    console.log("deploy keys: an operator revoked all", revoked);
+    return fresh({ revoked });
+  }
+  if (typeof body?.pluginId === "string" && PLUGIN_ID_RE.test(body.pluginId) && body.all === undefined) {
+    return fresh({ revoked: await directory.revokeDeployKeys(body.pluginId) });
+  }
+  return jsonError(400, "bad_request", "Expected {pluginId} or {all: true}.");
 };

@@ -1419,6 +1419,24 @@ export class UserDirectory extends DurableObject<Env> {
       .toArray().length;
   }
 
+  /** Revoke every live deploy key there is (an operator's, before rolling
+   * the edge back past deploy keys, or on a leak). Answers how many. */
+  revokeAllDeployKeys(): number {
+    return this.ctx.storage.sql
+      .exec("UPDATE plugin_keys SET revoked_at = ? WHERE kind = 'deploy' AND revoked_at IS NULL RETURNING key", Date.now())
+      .toArray().length;
+  }
+
+  /** How many deploy keys are live now (not revoked, not expired). */
+  liveDeployKeys(): number {
+    return this.ctx.storage.sql
+      .exec(
+        "SELECT COUNT(*) AS n FROM plugin_keys WHERE kind = 'deploy' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+        Date.now()
+      )
+      .one().n as number;
+  }
+
   /** A deploy key's signed request (signature already checked) for
    * `pluginId`, or for its own plugin when that's null: whose it is and for
    * which plugin, or why it may not. Each request is accepted once:

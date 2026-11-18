@@ -26,7 +26,7 @@ import { handleOnboardingRoute } from "../../src/onboarding-routes";
 import { handlePluginKeyRoute } from "../../src/plugin-keys";
 import { handleWebAuthRoute } from "../../src/web-auth-routes";
 import { handleRoleAdminRoute } from "../../src/roles";
-import { handleDeployKeyRoute } from "../../src/store/identity/deploy-keys";
+import { handleDeployKeyAdminRoute, handleDeployKeyRoute } from "../../src/store/identity/deploy-keys";
 import { sha256Hex } from "../../src/store/identity/signing";
 import { BodyRefused, authenticatePublisher, hasCredentials, bodyStream, optionalUser, readBody, requireAdmin, withSessionCookie } from "../../src/store/principal";
 export { DeviceRoom } from "../../src/device-room";
@@ -210,6 +210,8 @@ export default {
     if (webAuth) return webAuth;
     const roles = await handleRoleAdminRoute(request, env, url);
     if (roles) return roles;
+    const deployKeyAdmin = await handleDeployKeyAdminRoute(request, env, url);
+    if (deployKeyAdmin) return deployKeyAdmin;
     if (url.pathname === "/__test/owner" && request.method === "POST") {
       const { pluginId, userId } = (await request.json()) as { pluginId: string; userId: string | null };
       if (userId) owners.set(pluginId, userId);

@@ -521,3 +521,34 @@ describe("signingKeyAllowed", () => {
     expect(await allowed(publisher, "another-plugin", signer.key)).toBe(false);
   });
 });
+
+// Last in this file: it revokes every deploy key there is.
+describe("deploy keys: the operator's routes", () => {
+  const operator = (method: string, path: string, body?: unknown, token = "test-admin-token") =>
+    SELF.fetch(`https://edge.test${path}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+
+  it("revoke one plugin's keys, or every key (before a rollback), with the operator token only", async () => {
+    const a = await owned();
+    const b = await owned();
+    const { signer: aKey } = await addKey(a.userId, a.pluginId);
+    const { signer: bKey } = await addKey(b.userId, b.pluginId);
+    expect((await operator("GET", "/admin/deploy-keys", undefined, "wrong")).status).toBe(401);
+    expect((await operator("POST", "/admin/deploy-keys/revoke", { all: true }, a.userId)).status).toBe(401);
+    for (const body of [{}, { pluginId: "Bad Id" }, { all: "yes" }, { all: true, pluginId: a.pluginId }]) {
+      expect((await operator("POST", "/admin/deploy-keys/revoke", body)).status, JSON.stringify(body)).toBe(400);
+    }
+    expect(((await (await operator("GET", "/admin/deploy-keys")).json()) as { live: number }).live).toBeGreaterThanOrEqual(2);
+    expect(await (await operator("POST", "/admin/deploy-keys/revoke", { pluginId: a.pluginId })).json()).toEqual({ revoked: 1 });
+    expect(await errorOf(await signed(aKey, `/store/v1/plugins/${a.pluginId}/versions`, "pkg"))).toBe("key_revoked");
+    expect((await signed(bKey, `/store/v1/plugins/${b.pluginId}/versions`, "pkg")).status).toBe(200);
+    const all = (await (await operator("POST", "/admin/deploy-keys/revoke", { all: true })).json()) as { revoked: number };
+    expect(all.revoked).toBeGreaterThanOrEqual(1);
+    expect(await errorOf(await signed(bKey, `/store/v1/plugins/${b.pluginId}/versions`, "pkg 2"))).toBe("key_revoked");
+    expect(await (await operator("GET", "/admin/deploy-keys")).json()).toEqual({ live: 0 });
+    expect((await operator("DELETE", "/admin/deploy-keys")).status).toBe(405);
+  });
+});

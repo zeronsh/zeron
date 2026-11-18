@@ -25,6 +25,8 @@
  *
  * Staff roles and the store's identity routes:
  *   GET  /admin/roles, POST /admin/roles/{grant|revoke} — ADMIN_TOKEN (roles.ts)
+ *   GET  /admin/deploy-keys, POST /admin/deploy-keys/revoke — ADMIN_TOKEN
+ *     (store/identity/deploy-keys.ts: one plugin's, or all, before a rollback)
  *   GET|POST /store/v1/plugins/:id/keys, DELETE …/keys/:key — deploy keys
  *     (store/identity/deploy-keys.ts; a signed-in owner, checked there)
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
@@ -118,7 +120,7 @@ import { handleVaultRoute } from "./vault-routes";
 import { handleUserDirectoryRoute, UserDirectory } from "./user-directory";
 import { handleWebAuthRoute } from "./web-auth-routes";
 import { handleRoleAdminRoute } from "./roles";
-import { handleDeployKeyRoute, type PluginOwnerLookup } from "./store/identity/deploy-keys";
+import { handleDeployKeyAdminRoute, handleDeployKeyRoute, type PluginOwnerLookup } from "./store/identity/deploy-keys";
 import { withSessionCookie } from "./web-session";
 import installSh from "./install.sh";
 
@@ -196,6 +198,8 @@ export default {
     if (usersRouted) return usersRouted;
     const rolesRouted = await handleRoleAdminRoute(request, env, url);
     if (rolesRouted) return rolesRouted;
+    const deployKeyAdminRouted = await handleDeployKeyAdminRoute(request, env, url);
+    if (deployKeyAdminRouted) return deployKeyAdminRouted;
     // The store's own principals (store/principal.ts): before the bearer gate.
     const deployKeysRouted = await handleDeployKeyRoute(request, env, url, pluginOwner);
     if (deployKeysRouted) return withSessionCookie(request, deployKeysRouted);
