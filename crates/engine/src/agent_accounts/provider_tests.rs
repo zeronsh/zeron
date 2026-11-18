@@ -1264,6 +1264,9 @@ fn nan_usage_reads_each_models_share_of_its_cap() {
             .is_empty()
     );
     assert!(nan_usage_snapshot(&serde_json::json!({ "error": "invalid session" })).is_none());
+    let credits_plan = nan_usage_snapshot(&serde_json::json!({ "periodStart": "2030-01-02" }))
+        .expect("a plan without per-model allowances is not an error");
+    assert!(credits_plan.windows.is_empty());
 }
 
 #[test]
@@ -1335,22 +1338,26 @@ async fn nan_keys_in_opencode_and_pi_configs_list_read_only_rows_with_quota_usag
         .iter()
         .map(|a| a.email.clone().unwrap())
         .collect();
-    assert_eq!(emails, ["API key ·…0001", "API key ·…0002"]);
+    // The auth.json key is listed once, by its own key row, with NaN quota.
+    assert_eq!(emails, ["API key ···0002", "API key ···0001"]);
     let pi_rows = rows(&snapshot, HarnessId::Pi);
     assert_eq!(pi_rows.len(), 1);
-    assert_eq!(pi_rows[0].email.as_deref(), Some("API key ·…0003"));
+    assert_eq!(pi_rows[0].email.as_deref(), Some("API key ···0003"));
     for row in opencode_rows.iter().chain(&pi_rows) {
-        assert!(row.active && !row.switchable && row.saved_at.is_none());
-        assert_eq!(row.provider.as_deref(), Some("nan"));
-        assert_eq!(row.plan_label.as_deref(), Some("NaN"));
         assert_eq!(row.auth_kind, Some(AgentAuthKind::ApiKey));
         assert_eq!(row.usage_error, None);
         let used: Vec<_> = row.usage_windows.iter().map(|w| w.used_fraction).collect();
         assert_eq!(used, [0.25, 0.1]);
     }
+    for row in [&opencode_rows[1], &pi_rows[0]] {
+        assert!(row.active && !row.switchable && row.saved_at.is_none());
+        assert_eq!(row.provider.as_deref(), Some("nan"));
+        assert_eq!(row.plan_label.as_deref(), Some("NaN"));
+    }
+    assert_eq!(opencode_rows[0].provider.as_deref(), Some("nan-login"));
     assert_eq!(server.hits("GET /api/usage/quota"), 3);
 
-    let nan_row = &opencode_rows[0];
+    let nan_row = &opencode_rows[1];
     assert!(
         accounts
             .activate(HarnessId::Opencode, &nan_row.id)
@@ -1369,8 +1376,14 @@ async fn nan_keys_in_opencode_and_pi_configs_list_read_only_rows_with_quota_usag
             .await
             .is_err()
     );
-    assert!(accounts.read_slots(HarnessId::Opencode).is_empty());
-    assert!(accounts.read_slots(HarnessId::Pi).is_empty());
+    for harness in [HarnessId::Opencode, HarnessId::Pi] {
+        assert!(
+            accounts
+                .read_slots(harness)
+                .iter()
+                .all(|slot| slot.store_key.as_deref() != Some("nan"))
+        );
+    }
     assert_eq!(std::fs::read_to_string(&opencode_config).unwrap(), opencode);
     assert_eq!(
         std::fs::read_to_string(&config.opencode_auth_file).unwrap(),

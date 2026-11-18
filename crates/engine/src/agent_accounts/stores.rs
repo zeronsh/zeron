@@ -540,17 +540,19 @@ fn declared_providers(harness: HarnessId, config: &serde_json::Value) -> Vec<Dec
 
 fn nan_slot(harness: HarnessId, key: String) -> Slot {
     let account_key = format!("{NAN_STORE_KEY}:api-key:{}", hashed_key(&key));
+    let mut profile = SlotProfile {
+        email: String::new(),
+        display_name: None,
+        organization: None,
+        plan: None,
+        auth_kind: AgentAuthKind::ApiKey,
+    };
+    api_keys::name_key_profile(&mut profile, "NaN", Some(&key), None);
     Slot {
         id: slot_id_for(harness, &account_key),
         harness,
         account_key,
-        profile: SlotProfile {
-            email: format!("API key ·…{}", key_tail(&key)),
-            display_name: None,
-            organization: None,
-            plan: Some("NaN".to_string()),
-            auth_kind: AgentAuthKind::ApiKey,
-        },
+        profile,
         credentials: serde_json::json!({ "type": "api", "key": key }),
         claude_config: None,
         saved_at: 0,
@@ -1298,49 +1300,54 @@ impl AgentAccounts {
         (slots, active)
     }
 
-    pub(super) fn nan_slots(&self, harness: HarnessId) -> Vec<Slot> {
+    fn nan_providers(&self, harness: HarnessId) -> Vec<DeclaredProvider> {
         let config = &self.inner.config;
-        let (files, auth_file, auth_type) = match harness {
-            HarnessId::Opencode => (
-                vec![
-                    config.opencode_config_dir.join("opencode.json"),
-                    config.opencode_config_dir.join("opencode.jsonc"),
-                ],
-                config.opencode_auth_file.clone(),
-                "api",
-            ),
-            HarnessId::Pi => (
-                vec![config.pi_agent_dir.join("models.json")],
-                config.pi_agent_dir.join("auth.json"),
-                "api_key",
-            ),
+        let files = match harness {
+            HarnessId::Opencode => vec![
+                config.opencode_config_dir.join("opencode.json"),
+                config.opencode_config_dir.join("opencode.jsonc"),
+            ],
+            HarnessId::Pi => vec![config.pi_agent_dir.join("models.json")],
             _ => return Vec::new(),
         };
-        let auth = read_json(&auth_file);
-        let stored_key = |id: &str| {
-            auth.as_ref()?
-                .get(id)
-                .filter(|entry| str_field(entry, "type").as_deref() == Some(auth_type))
-                .and_then(|entry| str_field(entry, "key"))
+        files
+            .iter()
+            .filter_map(|file| read_json(file))
+            .flat_map(|document| declared_providers(harness, &document))
+            .filter(|provider| provider.base_url.as_deref().is_some_and(is_nan_base_url))
+            .collect()
+    }
+
+    /// Whether `provider` (an auth.json entry's id) is declared in the
+    /// agent's config with NaN's base URL, so its key row can show NaN quota.
+    pub(super) fn is_nan_provider(&self, harness: HarnessId, provider: &str) -> bool {
+        self.nan_providers(harness)
+            .iter()
+            .any(|declared| declared.id == provider)
+    }
+
+    /// Rows for NaN keys written literally in the agent's config. A key kept
+    /// in auth.json already has its own row ([`super::api_keys`]); its quota
+    /// is attached there instead of listing the key twice.
+    pub(super) fn nan_slots(&self, harness: HarnessId) -> Vec<Slot> {
+        let auth_file = match harness {
+            HarnessId::Opencode => self.inner.config.opencode_auth_file.clone(),
+            HarnessId::Pi => self.inner.config.pi_agent_dir.join("auth.json"),
+            _ => return Vec::new(),
         };
+        let stored_keys: Vec<String> = read_json(&auth_file)
+            .and_then(|auth| auth.as_object().cloned())
+            .into_iter()
+            .flat_map(|entries| entries.into_values())
+            .filter_map(|entry| api_keys::key_entry_secret(harness, &entry))
+            .collect();
         let mut keys: Vec<String> = Vec::new();
-        for file in files {
-            let Some(document) = read_json(&file) else {
-                continue;
-            };
-            for provider in declared_providers(harness, &document) {
-                if !provider.base_url.as_deref().is_some_and(is_nan_base_url) {
-                    continue;
-                }
-                let key = provider
-                    .api_key
-                    .or_else(|| stored_key(&provider.id))
-                    .and_then(|raw| literal_api_key(&raw));
-                if let Some(key) = key
-                    && !keys.contains(&key)
-                {
-                    keys.push(key);
-                }
+        for provider in self.nan_providers(harness) {
+            if let Some(key) = provider.api_key.and_then(|raw| literal_api_key(&raw))
+                && !stored_keys.contains(&key)
+                && !keys.contains(&key)
+            {
+                keys.push(key);
             }
         }
         keys.into_iter().map(|key| nan_slot(harness, key)).collect()

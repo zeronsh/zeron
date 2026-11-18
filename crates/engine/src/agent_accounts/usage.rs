@@ -262,6 +262,12 @@ impl AgentAccounts {
                 }),
             };
         }
+        // A NaN key is the one exception: its quota comes from NaN itself,
+        // the same vendor the key already authenticates against.
+        if key == NAN_STORE_KEY || self.is_nan_provider(harness, key) {
+            let api_key = str_field(creds, "key").ok_or(missing)?;
+            return self.nan_usage(&api_key).await;
+        }
         // An API key has no plan to report (and is never sent to a usage
         // endpoint).
         if api_keys::key_entry_secret(harness, creds).is_some() {
@@ -290,10 +296,6 @@ impl AgentAccounts {
                 )
                 .ok_or(ProbeError::UntrustedEndpoint)?;
                 self.copilot_usage(&api, &token).await
-            }
-            None if key == NAN_STORE_KEY => {
-                let api_key = str_field(creds, "key").ok_or(missing)?;
-                self.nan_usage(&api_key).await
             }
             None => Err(ProbeError::NoCredentials {
                 why: NoCredentials::Unsupported,
@@ -374,8 +376,18 @@ impl AgentAccounts {
     }
 }
 
+/// Only Gentle keys have per-model allowances. Credit plans (Inference,
+/// Premium) have no documented quota shape yet (helmcode/nan-cli#87): an
+/// answer without `models` shows the row with no windows, not an error.
 pub(super) fn nan_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
-    let models = body.get("models")?.as_array()?;
+    let Some(models) = body.get("models") else {
+        return (body.is_object() && body.get("error").is_none()).then(|| UsageSnapshot {
+            windows: Vec::new(),
+            plan_label: None,
+            codex_reset_credits: None,
+        });
+    };
+    let models = models.as_array()?;
     let windows = models
         .iter()
         .filter_map(|model| {
