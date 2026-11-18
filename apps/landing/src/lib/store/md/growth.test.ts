@@ -2,7 +2,8 @@
 // (md/families.ts): the identity lane's attack, made a test. For each
 // family, at sizes up to the README's cap:
 // - what it reads (the meter's count, md/meter.ts) is at most READ_PER_BYTE
-//   a byte, and grows linearly: its fitted exponent at most 1.1;
+//   a byte, and grows linearly: its fitted exponent at most 1.05 (the
+//   identity lane's bound; the most measured is 1.01);
 // - what it keeps never passes KEEP_MOST, and what it writes never passes
 //   the output's bound (each stops it, said so, and is held here anyway);
 // - its time, a second witness, loosely: within TIME_MOST at the cap, and
@@ -72,7 +73,7 @@ describe("linear in what it is given, family by family", () => {
       expect(row.peak, `kept at ${row.n}`).toBeLessThanOrEqual(KEEP_MOST);
       expect(row.written, `written at ${row.n}`).toBeLessThanOrEqual(MOST + 64);
     }
-    expect(exponent(rows.map((r) => [r.n, r.read])), "read's exponent").toBeLessThanOrEqual(1.1);
+    expect(exponent(rows.map((r) => [r.n, r.read])), "read's exponent").toBeLessThanOrEqual(1.05);
     const last = rows[rows.length - 1];
     expect(last.ms, "time at the cap").toBeLessThan(TIME_MOST);
     if (last.ms >= 25) expect(exponent(rows.map((r) => [r.n, r.ms])), "time's exponent").toBeLessThanOrEqual(1.6);
