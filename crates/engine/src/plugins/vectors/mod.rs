@@ -262,6 +262,8 @@ fn manifest_cases() -> Value {
     let mut cases: Vec<(String, String)> = vec![
         ("fractional settings".into(), text(&fractional())),
         ("listing fields of the wrong shape never break it".into(), text(&json!({ "id": "focus", "name": "F", "version": "1", "entry": "init.luau", "categories": "x", "keywords": 7, "engines": [] }))),
+        // (A site id is the store's alone: as a manifest's id it's fine.)
+        ("an id the store site keeps is a fine id here".into(), text(&json!({ "id": "all", "name": "All", "version": "1.0.0", "entry": "init.luau" }))),
     ];
     for c in corpus()["manifests"].as_array().unwrap() {
         cases.push((c["name"].as_str().unwrap().into(), c["manifest"].as_str().unwrap().into()));
@@ -599,6 +601,7 @@ fn listing_cases() -> Value {
         ("an id the site's pages use: publishing", "id", json!("publishing")),
         ("an id the site's pages use: featured", "id", json!("featured")),
         ("an id the site's pages use: feed", "id", json!("feed")),
+        ("an id the site's pages use: admin", "id", json!("admin")),
         ("an id with a site word in it is anyone's", "id", json!("feed-reader")),
         ("an id a site word is in is anyone's", "id", json!("allergies")),
         ("a permission Zeron doesn't know", "permissions", json!(["root"])),
@@ -799,7 +802,7 @@ fn consent_item_cases() -> Value {
 fn data() -> Value {
     json!({
         "format": "zeron-plugin-store-data:v1",
-        "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. reserved_ids are each refused as id_reserved: Zeron's own (templates, zeron, app: Zeron won't run a plugin with one either), then the store site's pages beside /plugins/<id> (Zeron runs a plugin with one of those; only the store refuses it). The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
+        "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. reserved_ids are the manifest rule's: ids Zeron itself won't run ('Zeron already uses that name', the manifests cases' id_error). site_ids are the store site's own pages beside /plugins/<id>: a device runs a plugin with one, but the store never lists it (the listing rule id_reserved, which no reservation lifts). The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
         "package_format": FORMAT,
         "payload_prefix": PAYLOAD_PREFIX,
         "template_payload_prefix": TEMPLATE_PAYLOAD_PREFIX,
@@ -842,9 +845,8 @@ fn data() -> Value {
         "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version.",
         "categories": CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
         "builtin_ids": listing::BUILTIN_IDS,
-        // (Zeron's own, which it won't run either, then the site's pages,
-        // which only the store refuses: one list, each refused as id_reserved.)
-        "reserved_ids": manifest::RESERVED_IDS.iter().chain(listing::SITE_IDS).collect::<Vec<_>>(),
+        "reserved_ids": manifest::RESERVED_IDS,
+        "site_ids": listing::SITE_IDS,
         "report_reasons": super::store::REPORT_REASONS,
         "consent": consent_tables(),
     })

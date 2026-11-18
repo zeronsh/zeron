@@ -85,13 +85,13 @@ pub const BUILTIN_IDS: &[&str] = &["git", "github", "parallax-scenes"];
 /// plugin with one of these ids would be shadowed there, so the store never
 /// lists one. Zeron runs a plugin with one of these ids as any other (one
 /// made before they were kept still loads); only publishing is refused.
-/// (The username rules' words, which the edge already keeps from new ids,
-/// aren't repeated: docs, help, about, account, admin, api, install, me,
-/// settings, terms, privacy, assets.)
+/// (Some are usernames the edge keeps too; they're kept here all the same,
+/// so the site's pages never rest on another list.)
 pub const SITE_IDS: &[&str] = &[
     "all", "new", "search", "browse", "discover", "featured", "popular", "updated", "category", "categories",
-    "keyword", "keywords", "tags", "publishing", "publish", "guide", "report", "reports", "review", "queue",
-    "audit", "sitemap", "feed", "static",
+    "keyword", "keywords", "tags", "publishing", "publish", "guide", "docs", "help", "about", "account", "admin",
+    "api", "install", "me", "settings", "report", "reports", "review", "queue", "audit", "terms", "privacy",
+    "sitemap", "feed", "static", "assets",
 ];
 
 /// The stable words a problem is reported by.
