@@ -29,7 +29,7 @@ end
 
 local function publishing(): any
 	local app = yours()
-	app:click('role:button "Publish…"')
+	app:click('role:link "Publish…"')
 	app:wait("#publish-checks", { timeout_ms = 3000 })
 	settle(app)
 	return app
@@ -38,13 +38,15 @@ end
 test("each of yours in Yours says where it stands in the store, with Publish…", function()
 	local app = yours()
 	local tree = app:tree()
-	expect(tree).to_contain("1.0.0 in the plugin store")
-	expect(app:has('role:button "Publish…"')).to_be(true)
+	-- What people install, and the newest past it that's yours to hear
+	-- about (1.1.0 wasn't approved).
+	expect(tree).to_contain("1.0.0 in the plugin store · 1.1.0 not approved")
+	expect(app:has('role:link "Publish…"')).to_be(true)
 	expect(calls(app)).to_contain("mine")
 	-- Installed is as it was: no store line there, no Publish….
 	app:click('role:tab "Installed"')
 	settle(app)
-	expect(app:has('role:button "Publish…"')).to_be(false)
+	expect(app:has('role:link "Publish…"')).to_be(false)
 end)
 
 test("Publish… checks it here, and says what to fix before it can be sent", function()
@@ -75,6 +77,29 @@ test("Submit sends what was checked with its ticket, and the version shows In re
 	settle(app)
 	expect(calls(app)).to_contain("publish:pomodoro-clock:pomodoro-clock-1.2.0:ticket-1.2.0")
 	expect(app:tree()).to_contain("In review")
+	-- Yours says it too: the newest is the one in review now.
+	app:click('role:button "Back to Plugins"')
+	settle(app)
+	expect(app:tree()).to_contain("1.0.0 in the plugin store · 1.2.0 in review")
+end)
+
+test("a plugin whose versions were all turned down never reads as in review", function()
+	local app = yours()
+	app:set_state("store_mine", (function()
+		local now = app:state("store_mine")
+		local p = table.clone(now.plugins["pomodoro-clock"])
+		local only = {}
+		for _, v in p.versions do
+			if v.version == "1.1.0" then
+				table.insert(only, v)
+			end
+		end
+		p.versions = only
+		return { state = now.state, plugins = { ["pomodoro-clock"] = p } }
+	end)())
+	settle(app)
+	expect(app:tree()).to_contain("1.1.0 not approved")
+	expect(app:tree()).never.to_contain("In review for the plugin store")
 end)
 
 test("each version says where its review stands, and the reviewer's words when it wasn't approved", function()
@@ -169,13 +194,13 @@ test("Back from publishing is Yours", function()
 	local app = publishing()
 	app:click('role:button "Back to Plugins"')
 	settle(app)
-	expect(app:has('role:button "Publish…"')).to_be(true)
+	expect(app:has('role:link "Publish…"')).to_be(true)
 end)
 
 test("newer than every version sent is a check of its own, or the engine's note when it couldn't ask", function()
 	local app = yours()
 	app:command("store_stub.not_newer")
-	app:click('role:button "Publish…"')
+	app:click('role:link "Publish…"')
 	app:wait("#publish-checks", { timeout_ms = 3000 })
 	settle(app)
 	expect(app:tree("#publish-checks")).to_contain("Give it a version newer than every one")
@@ -192,7 +217,7 @@ test("an id the store keeps for its own pages says so, and nothing is sent", fun
 	-- (Its one problem.)
 	app:command("store_stub.fixed")
 	app:command("store_stub.id_reserved")
-	app:click('role:button "Publish…"')
+	app:click('role:link "Publish…"')
 	app:wait("#publish-checks", { timeout_ms = 3000 })
 	settle(app)
 	expect(app:tree("#publish-checks")).to_contain("This id is taken")
@@ -206,7 +231,7 @@ test("handed a newer-than problem it can't have (the store not asked), the page 
 	app:set_state("store_stub_force_problem", true)
 	app:command("store_stub.store_unchecked")
 	app:command("store_stub.not_newer")
-	app:click('role:button "Publish…"')
+	app:click('role:link "Publish…"')
 	app:wait("#publish-checks", { timeout_ms = 3000 })
 	settle(app)
 	expect(app:tree("#publish-checks")).to_contain("Couldn't ask the store which versions")
@@ -221,7 +246,7 @@ test("a deploy key waits for the first version, sent from this computer", functi
 	app:click('role:tab "Yours"')
 	settle(app)
 	expect(app:tree()).to_contain("Not in the plugin store")
-	app:click('role:button "Publish…"')
+	app:click('role:link "Publish…"')
 	app:wait("#publish-checks", { timeout_ms = 3000 })
 	settle(app)
 	expect(app:tree()).to_contain("Send its first version from this computer")

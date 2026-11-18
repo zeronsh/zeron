@@ -644,9 +644,10 @@ export type RowProps = {
 	-- At the detail line's end, while it shows: a small action of its own
 	-- (a plugin's Update), so the row's control stays the same on every row.
 	detail_action: Node?,
-	-- The action right after the detail's words, not at the line's end:
-	-- the sentence's own link (Publish… after where a plugin stands).
-	detail_inline: boolean?,
+	-- The sentence's own link, right after the detail's last word and
+	-- wrapping with it as one sentence does (Publish… after where a plugin
+	-- stands in the store): a link in the text's own ink, underlined.
+	detail_link: { label: string | Message, on_click: () -> () }?,
 }
 
 function M.Row(props: RowProps): Node
@@ -713,24 +714,64 @@ function M.Row(props: RowProps): Node
 			then ui.show(function(): boolean
 				local d = control.value(props.detail)
 				return type(d) == "string" and d ~= ""
-			end, ui.row {
-				w_full = true,
-				gap = "$space.3",
-				items = "start",
-				ui.text {
-					function(): string
-						return control.value(props.detail) or ""
-					end,
-					grow = if props.detail_inline then nil else 1,
-					shrink = if props.detail_inline then 1 else nil,
-					min_w = 0,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.tertiary",
-					wrap = true,
-				},
-				props.detail_action,
-			})
+			end, if props.detail_link
+				-- (One rich paragraph, the link its last span, is the drawing
+				-- this wants: zgx-asks/rich-span-boundary-break. Meanwhile the
+				-- sentence and its link are two boxes, the link at the
+				-- sentence's end on its last line.)
+				then ui.row {
+					w_full = true,
+					gap = "$space.1",
+					items = "end",
+					ui.text {
+						function(): string
+							return control.value(props.detail) or ""
+						end,
+						class = "settings-detail",
+						shrink = 1,
+						min_w = 0,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.tertiary",
+						wrap = true,
+					},
+					ui.row {
+						role = "link",
+						label = props.detail_link.label,
+						focusable = true,
+						shrink = 0,
+						cursor = "pointer",
+						color = "$text.primary",
+						hover = { color = "$accent" },
+						focus = control.ring,
+						on_click = props.detail_link.on_click,
+						ui.text {
+							props.detail_link.label,
+							text_size = "$font.size.sm",
+							line_height = "$font.line.sm",
+							weight = "$font.weight.medium",
+							underline = true,
+							underline_offset = 4,
+						},
+					},
+				}
+				else ui.row {
+					w_full = true,
+					gap = "$space.3",
+					items = "start",
+					ui.text {
+						function(): string
+							return control.value(props.detail) or ""
+						end,
+						grow = 1,
+						min_w = 0,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.tertiary",
+						wrap = true,
+					},
+					props.detail_action,
+				})
 			else nil,
 	}
 	local lead: Node? = props.lead

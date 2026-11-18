@@ -88,24 +88,33 @@ function M.summary(id: string): string?
 	if not p then
 		return ui.t("plugins.store.summary.none"):get()
 	end
-	local parts: { string } = {}
-	local listed, waiting = nil :: string?, nil :: string?
+	-- Newest first: the version people install (or, stopped, the one
+	-- that was), and the newest past it that's still yours to hear about:
+	-- in review, not approved, taken down. (One you withdrew isn't news.)
+	local listed, stopped, news = nil :: string?, nil :: string?, nil :: { version: string, state: string }?
 	for _, v in (if type(p.versions) == "table" then p.versions else {}) :: { any } do
-		local s = status_of(v)
-		if s == "approved" and listed == nil then
+		local st = status_of(v)
+		if st == "approved" then
 			listed = v.version
-		elseif s == "pending" and waiting == nil then
-			waiting = v.version
+			break
+		elseif st == "yanked" and stopped == nil then
+			stopped = v.version
+		elseif news == nil and stopped == nil and (st == "pending" or st == "rejected" or st == "removed") then
+			news = { version = v.version, state = st }
 		end
 	end
+	local parts: { string } = {}
 	if listed then
 		table.insert(parts, ui.t("plugins.store.summary.listed", { version = listed }):get())
+	elseif stopped then
+		table.insert(parts, ui.t("plugins.store.summary.no_installs", { version = stopped }):get())
 	end
-	if waiting then
-		table.insert(parts, ui.t("plugins.store.summary.in_review", { version = waiting }):get())
+	if news then
+		local key = if news.state == "pending" then "in_review" elseif news.state == "rejected" then "not_approved" else "taken_down"
+		table.insert(parts, ui.t(`plugins.store.summary.{key}`, { version = news.version }):get())
 	end
 	if #parts == 0 then
-		return ui.t("plugins.store.summary.none_listed"):get()
+		return ui.t("plugins.store.summary.none"):get()
 	end
 	return table.concat(parts, " · ")
 end

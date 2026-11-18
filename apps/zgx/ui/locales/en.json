@@ -4029,10 +4029,12 @@
       },
       "summary": {
         "none": "Not in the plugin store",
-        "none_listed": "In review for the plugin store",
         "listed": "{version} in the plugin store",
         "in_review": "{version} in review",
-        "unknown": "Share it in the plugin store"
+        "unknown": "Share it in the plugin store",
+        "no_installs": "{version}: no new installs",
+        "not_approved": "{version} not approved",
+        "taken_down": "{version} taken down"
       },
       "keys": "Deploy keys",
       "keys_body": "A deploy key lets a CI job, such as a GitHub Action, send new versions of this plugin without your session; each still waits for review.",

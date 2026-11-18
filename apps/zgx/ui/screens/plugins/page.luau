@@ -430,33 +430,6 @@ local UpdateLink = ui.component(function(props: { now: State<any> }): Node
 	})
 end)
 
--- Publish…, at the end of an own plugin's line in Yours saying where it
--- stands in the store: link-like, as Update is, so the row's controls stay
--- where every row has them.
-local PublishLink = ui.component(function(props: { now: State<any> }): Node
-	local now = props.now
-	return ui.row {
-		role = "button",
-		label = ui.t("plugins.store.publish_link"),
-		focusable = true,
-		shrink = 0,
-		cursor = "pointer",
-		color = "$text.primary",
-		hover = { color = "$accent" },
-		on_click = function()
-			nav.open_publish(now:peek().id)
-		end,
-		ui.text {
-			ui.t("plugins.store.publish_link"),
-			text_size = "$font.size.sm",
-			line_height = "$font.line.sm",
-			weight = "$font.weight.medium",
-			underline = true,
-			underline_offset = 4,
-		},
-	}
-end)
-
 local function row(p: state.Item, _i: number, now: State<any>): Node
 	-- (Rows are built for their tab: Yours' own plugins, made on this
 	-- device, say where they stand in the store.)
@@ -490,9 +463,17 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			end
 			return words.grants(it) or words.update(it)
 		end,
-		detail_action = if publishing then PublishLink { now = now } else UpdateLink { now = now },
-		-- (Publish… is its sentence's own link: right after its words.)
-		detail_inline = publishing,
+		detail_action = if publishing then nil else UpdateLink { now = now },
+		-- (Publish… is its sentence's own link: right after its last word,
+		-- wrapping with it.)
+		detail_link = if publishing
+			then {
+				label = ui.t("plugins.store.publish_link"),
+				on_click = function()
+					nav.open_publish(now:peek().id)
+				end,
+			}
+			else nil,
 		truncate = true,
 		-- Its version, centred on the row beside its controls; before it,
 		-- Unverified for one whose maker Zeron can't vouch for.

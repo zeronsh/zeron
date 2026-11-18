@@ -214,13 +214,38 @@ test("a skeleton that waits too long rests: the first load's, the next page's an
 	expect(app:has("#store-loading-still")).to_be(true)
 end)
 
-test("Yours' Publish… follows its sentence", function()
+test("Yours' Publish… follows its sentence: a word's space after it, on its last line however it wraps", function()
+	-- (Two boxes until zgx-asks/rich-span-boundary-break: then one rich
+	-- paragraph, the link right after the last word.)
 	local app = mounted()
 	app:click('role:tab "Yours"')
 	settle(app)
-	local link = box(app, 'role:button "Publish…"')
-	local words = box(app, '"1.0.0 in the plugin store"')
-	expect(math.abs(link.x - (words.x + words.w + 12)) < 1).to_be(true)
+	local function placed()
+		local link = box(app, 'role:link "Publish…"')
+		local sentence = box(app, '.settings-detail')
+		expect(math.abs(link.y + link.h - (sentence.y + sentence.h)) < 0.6).to_be(true)
+		expect(math.abs(link.x - (sentence.x + sentence.w + 4)) < 0.6).to_be(true)
+		return sentence
+	end
+	placed()
+	-- Versions with long pre-release names: the sentence wraps, and the
+	-- link stays on its last line.
+	app:set_state("store_mine", (function()
+		local now = app:state("store_mine")
+		local p = table.clone(now.plugins["pomodoro-clock"])
+		local list = {}
+		for _, v in p.versions do
+			local w = table.clone(v)
+			w.version = `{v.version}-preview.20261118.build.4821`
+			table.insert(list, w)
+		end
+		p.versions = list
+		return { state = now.state, plugins = { ["pomodoro-clock"] = p } }
+	end)())
+	settle(app)
+	expect(placed().h >= 2 * 16).to_be(true)
+	app:click('role:link "Publish…"')
+	app:wait("#publish-checks", { timeout_ms = 3000 })
 end)
 
 -- An ask's words, top to bottom, under `root` (each text node's label, with
@@ -372,7 +397,7 @@ test("publishing's buttons and its versions' actions end on one edge, the conten
 	local app = mounted()
 	app:click('role:tab "Yours"')
 	settle(app)
-	app:click('role:button "Publish…"')
+	app:click('role:link "Publish…"')
 	app:wait("#publish-checks", { timeout_ms = 3000 })
 	settle(app, 500)
 	local _, content = edges(app, "#publish-checks")
@@ -389,7 +414,7 @@ test("a deploy key's secret is one line in the code face, never broken inside it
 	local app = mounted()
 	app:click('role:tab "Yours"')
 	settle(app)
-	app:click('role:button "Publish…"')
+	app:click('role:link "Publish…"')
 	app:wait("#publish-checks", { timeout_ms = 3000 })
 	settle(app, 400)
 	app:scroll(SCROLL, 2000)

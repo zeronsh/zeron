@@ -4029,10 +4029,12 @@
       },
       "summary": {
         "none": "未发布到插件商店",
-        "none_listed": "正在等待插件商店审核",
         "listed": "{version} 已在插件商店",
         "in_review": "{version} 审核中",
-        "unknown": "把它分享到插件商店"
+        "unknown": "把它分享到插件商店",
+        "no_installs": "{version} 已停止新安装",
+        "not_approved": "{version} 未通过审核",
+        "taken_down": "{version} 已下架"
       },
       "keys": "部署密钥",
       "keys_body": "部署密钥让 CI 任务（例如 GitHub Action）不用你的登录也能发送这个插件的新版本；每个版本仍需审核。",
