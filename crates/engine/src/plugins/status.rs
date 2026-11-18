@@ -23,6 +23,29 @@ pub struct State {
     pub own: BTreeSet<String>,
     #[serde(default)]
     pub decisions: BTreeMap<String, Decision>,
+    /// Store plugins whose installed version the store blocked (taken down
+    /// as harmful): turned off at the update check that said so, the
+    /// reason kept to show.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub blocked: BTreeMap<String, Blocked>,
+    /// Store plugins this device takes pre-releases of.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub prerelease: BTreeSet<String>,
+}
+
+/// A store plugin's installed version, blocked by the store.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Blocked {
+    pub version: String,
+    #[serde(default)]
+    pub reason: String,
+    /// When this device learned of it (epoch seconds).
+    #[serde(default)]
+    pub at: i64,
+    /// The person turned it back on anyway (it's theirs): later checks
+    /// leave it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overridden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,9 +97,12 @@ impl State {
     /// stranger's package of that name yours. Whether anything went.
     pub fn prune(&mut self, present: &BTreeSet<String>) -> bool {
         let (own, decisions) = (self.own.len(), self.decisions.len());
+        let (blocked, prerelease) = (self.blocked.len(), self.prerelease.len());
         self.own.retain(|id| present.contains(id));
         self.decisions.retain(|id, _| present.contains(id));
-        own != self.own.len() || decisions != self.decisions.len()
+        self.blocked.retain(|id, _| present.contains(id));
+        self.prerelease.retain(|id| present.contains(id));
+        own != self.own.len() || decisions != self.decisions.len() || blocked != self.blocked.len() || prerelease != self.prerelease.len()
     }
 }
 

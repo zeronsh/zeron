@@ -15,7 +15,7 @@ pub const DIR: &str = "docs";
 pub const README: &str = "README.md";
 
 /// What each guide covers, said in the replies that link it.
-pub const PLUGINS_SUMMARY: &str = "How to write a Zeron plugin: the manifest and permissions, placing by selector (zeron.place, the stable element names and what each provides), context (zeron.context, need, live; records per grant), actions, tools for agents, commands, services (service.luau run headless on each device, zeron.service(device):call from windows, failure reasons), settings (declared rows Zeron draws, and settings pages a plugin draws itself with zeron.settings_page: built from Zeron's design system, @ds/settings' Section, Group and Row and Zeron's controls in its tokens, with the numbers and rules that make one match Zeron's pages, a model page, and create_plugin's settings_page to start one), Zeron's components (@ds/…) and style, the loop (create_plugin, edit, plugin_status with snapshot, and page = \"settings\" (open = true to open it) for a settings page, fix) and three worked examples.";
+pub const PLUGINS_SUMMARY: &str = "How to write a Zeron plugin: the manifest and permissions, placing by selector (zeron.place, the stable element names and what each provides), context (zeron.context, need, live; records per grant), actions, tools for agents, commands, services (service.luau run headless on each device, zeron.service(device):call from windows, failure reasons), settings (declared rows Zeron draws, and settings pages a plugin draws itself with zeron.settings_page: built from Zeron's design system, @ds/settings' Section, Group and Row and Zeron's controls in its tokens, with the numbers and rules that make one match Zeron's pages, a model page, and create_plugin's settings_page to start one), the loop (create_plugin, edit, plugin_status with snapshot, and page = \"settings\" (open = true to open it) for a settings page, fix), sharing and installing (the store: search_plugins, install_plugin with store), publishing to the store (README.md, the listing fields, strict versions, check_plugin, review, yank, deploy keys and the GitHub Action), Zeron's components (@ds/…) and style, and three worked examples.";
 pub const TEMPLATES_SUMMARY: &str = "How to write a Zeron template: how it's laid over Zeron's own with per-file fallback, the folder map (app.luau, screens/, ds/ tokens and themes), the rules (tokens, concentric corners, data in place, reloads, keeping element names), what's never templated, the loop (create_template, use_template, edit, template_status) and two worked examples.";
 
 /// Both guides in `<data_dir>/docs/`, written where missing or changed (an
@@ -73,11 +73,14 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&plugins).unwrap(), PLUGINS);
         assert_eq!(std::fs::read_to_string(&templates).unwrap(), TEMPLATES);
         assert!(PLUGINS.contains("zeron.place") && TEMPLATES.contains("template_status"));
-        // What the summary names, the guide has.
+        // What the summary names, the guide has: settings pages and the
+        // design system, and the store.
         for part in ["## Settings pages", "### Match Zeron's pages", "### A model page", "zeron.settings_page", "## Zeron's components", "## Style", "settings_page = true", "page = \"settings\""] {
             assert!(PLUGINS.contains(part), "the guide has {part}");
         }
         assert!(PLUGINS_SUMMARY.contains("zeron.settings_page") && PLUGINS_SUMMARY.contains("design system"));
+        assert!(PLUGINS.contains("## Publishing to the store") && PLUGINS.contains("ZERON_DEPLOY_KEY"));
+        assert!(PLUGINS_SUMMARY.contains("publishing to the store") && PLUGINS_SUMMARY.contains("check_plugin"));
         assert!(plugin_readme("Focus", &plugins).contains(&plugins.display().to_string()));
         assert!(template_readme("Dusk", &templates).contains("isn't part of the interface"));
         let _ = std::fs::remove_dir_all(&data);

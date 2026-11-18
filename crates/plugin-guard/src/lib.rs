@@ -5,8 +5,10 @@
 //! - [`path`]: package and manifest paths, before any join to a folder;
 //! - [`commands`]: the programs a plugin runs (`zeron.run`), and the one
 //!   runner both sides use;
-//! - [`net`]: where a plugin's requests may go (`zeron.fetch`).
+//! - [`net`]: where a plugin's requests may go (`zeron.fetch`);
+//! - [`consent`]: what it asks for, rated as its consent sheet says it.
 
 pub mod commands;
+pub mod consent;
 pub mod net;
 pub mod path;

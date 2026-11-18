@@ -32,6 +32,9 @@ pub(super) const PLUGIN_STATUS: &str = "plugin_status";
 pub(super) const INSTALL_PLUGIN: &str = "install_plugin";
 pub(super) const UPDATE_PLUGIN: &str = "update_plugin";
 pub(super) const EXPORT_PLUGIN: &str = "export_plugin";
+pub(super) const SEARCH_PLUGINS: &str = "search_plugins";
+pub(super) const GET_STORE_PLUGIN: &str = "get_store_plugin";
+pub(super) const CHECK_PLUGIN: &str = "check_plugin";
 
 /// How long a listing waits for the engine's plugin tools before it goes
 /// out with the static tools only.
@@ -198,10 +201,12 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: INSTALL_PLUGIN,
-            description: "Install someone's Zeron plugin from a .zeron-plugin file (`path`) or a link (`url`): a link to a .zeron-plugin file, a GitHub release (…/releases/latest or …/releases/tag/<tag>, its .zeron-plugin asset), or a git repository (owner/repo, its GitHub page, …/tree/<branch>/<folder>, or any https git URL; `ref` a branch or tag, `folder` where the plugin is in it). Zeron checks the signature over every file first: an unsigned or changed plugin is refused. Whatever you install waits for the person to allow it in Zeron's window, which shows who signed it and what it asks: you can't allow it for them (`waiting` says so). Installing over a plugin already installed is an update, and only when the same key signed both.",
+            description: "Install someone's Zeron plugin from the store (`store`, its id, from search_plugins; `version` for one other than the latest), a .zeron-plugin file (`path`) or a link (`url`): a link to a .zeron-plugin file, a GitHub release (…/releases/latest or …/releases/tag/<tag>, its .zeron-plugin asset), or a git repository (owner/repo, its GitHub page, …/tree/<branch>/<folder>, or any https git URL; `ref` a branch or tag, `folder` where the plugin is in it). Zeron checks the signature over every file first (and, from the store, that it's exactly what the store reviewed): an unsigned or changed plugin is refused, and so is one made for another version of Zeron (`incompatible`). Whatever you install waits for the person to allow it in Zeron's window, which shows who made it and what it asks: you can't allow it for them (`waiting` says so). Installing over a plugin already installed is an update, and only when the same author made both.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "store": { "type": "string", "description": "A plugin's id in the store." },
+                    "version": { "type": "string", "description": "With `store`: a version other than the latest." },
                     "path": { "type": "string", "description": "A .zeron-plugin file's full path." },
                     "url": { "type": "string", "description": "A package link, a GitHub release, or a git repository (https)." },
                     "ref": { "type": "string", "description": "With a git repository: the branch or tag (default its default branch)." },
@@ -227,6 +232,43 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "The plugin's id, from list_plugins." }
+                },
+                "required": ["id"]
+            }),
+        },
+        ToolDef {
+            name: SEARCH_PLUGINS,
+            description: "Search the Zeron plugin store: plugins made by people, each reviewed by Zeron before it's listed. Each result has its id (what install_plugin's `store` takes), name, summary, author (by @username), categories, keywords, latest version and installs, and `installed` when it's on this device already. Filter by `category` or `keyword`; `sort` is relevance (with a query), popular, updated or new. Page with `cursor` (the reply's next_cursor). Read one's page with get_store_plugin before suggesting it.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Words to look for in names, summaries, keywords, authors and READMEs." },
+                    "category": { "type": "string", "description": "One of the store's categories (agents, appearance, chat, developer-tools, git, integrations, productivity, utilities)." },
+                    "keyword": { "type": "string" },
+                    "sort": { "type": "string", "enum": ["relevance", "popular", "updated", "new"] },
+                    "cursor": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                }
+            }),
+        },
+        ToolDef {
+            name: GET_STORE_PLUGIN,
+            description: "A plugin's page in the Zeron plugin store: its README, what it asks for (permissions, grouped as the person's consent sheet shows them), its versions and their notes, its author, links (homepage, repository, license), whether it works with this Zeron (`compatible`), and `installed` when it's on this device. Say what it asks for before suggesting it; installing is install_plugin { store = id }, and it waits for the person to allow it.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The plugin's id, from search_plugins." }
+                },
+                "required": ["id"]
+            }),
+        },
+        ToolDef {
+            name: CHECK_PLUGIN,
+            description: "Check one of the person's own plugins (made on this device, by its id) against the store's rules before it's published: every problem, each with a `rule` (missing_readme, missing_listing, bad_listing, not_semver, id_reserved, bad_package, too_large), the `field` or `path` it's about and words to fix it by, plus warnings that don't block it (binary files, no CHANGELOG.md section for its version), its listing as the store will show it, and this version's notes. Fix and check again until `ok`. Submitting it to the store is the person's: they publish it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish <id>`; you can't submit it for them. The store needs README.md (its page), a one-line `description`, an `icon` (an SVG file in it), one or two `categories`, and a strict semver `version`; see the guide's \"Publishing to the store\".",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The plugin's id, from list_plugins (one of the person's own)." }
                 },
                 "required": ["id"]
             }),
@@ -623,6 +665,8 @@ impl Tools {
     pub(super) async fn install_plugin(&self, args: Value) -> Result<Value, String> {
         #[derive(Deserialize)]
         struct Args {
+            store: Option<String>,
+            version: Option<String>,
             path: Option<String>,
             url: Option<String>,
             #[serde(rename = "ref")]
@@ -631,10 +675,11 @@ impl Tools {
         }
         let args: Args = parse(args)?;
         let given = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
-        let params = match (given(args.path), given(args.url)) {
-            (Some(path), None) => json!({ "path": path }),
-            (None, Some(url)) => json!({ "url": url, "ref": given(args.git_ref), "folder": given(args.folder) }),
-            _ => return Err("Give one of `path` (a .zeron-plugin file) or `url` (a link or repository).".into()),
+        let params = match (given(args.store), given(args.path), given(args.url)) {
+            (Some(id), None, None) => json!({ "store": id.trim(), "version": given(args.version) }),
+            (None, Some(path), None) => json!({ "path": path }),
+            (None, None, Some(url)) => json!({ "url": url, "ref": given(args.git_ref), "folder": given(args.folder) }),
+            _ => return Err("Give one of `store` (a store id), `path` (a .zeron-plugin file) or `url` (a link or repository).".into()),
         };
         let reply = self.zeron.call_rpc(methods::INSTALL_PLUGIN, params).await.map_err(plain)?;
         Ok(installed(reply))
@@ -689,6 +734,97 @@ impl Tools {
                 "Attach {path} to a release, or send it: anyone installs it with install_plugin (or Settings → Plugins), and it waits for them to allow it."
             ));
         }
+        Ok(reply)
+    }
+
+    /// `search_plugins`: the engine's `StoreSearch`, each card said briefly.
+    pub(super) async fn search_plugins(&self, args: Value) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        struct Args {
+            query: Option<String>,
+            category: Option<String>,
+            keyword: Option<String>,
+            sort: Option<String>,
+            cursor: Option<String>,
+            limit: Option<u32>,
+        }
+        let args: Args = parse(args)?;
+        let params = json!({
+            "q": args.query, "category": args.category, "keyword": args.keyword,
+            "sort": args.sort, "cursor": args.cursor, "limit": args.limit,
+        });
+        let reply = self.zeron.call_rpc(methods::STORE_SEARCH, params).await.map_err(plain)?;
+        let plugins: Vec<Value> = reply["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|card| {
+                let mut out = json!({});
+                for key in ["id", "name", "summary", "author", "categories", "keywords", "version", "installs", "installed"] {
+                    if let Some(value) = card.get(key).filter(|v| !v.is_null()) {
+                        out[key] = value.clone();
+                    }
+                }
+                out
+            })
+            .collect();
+        let mut out = json!({ "plugins": plugins });
+        if let Some(cursor) = reply.get("next_cursor").filter(|c| !c.is_null()) {
+            out["next_cursor"] = cursor.clone();
+        }
+        Ok(out)
+    }
+
+    /// `get_store_plugin`: the engine's `StorePlugin`, every version.
+    pub(super) async fn get_store_plugin(&self, args: Value) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        struct Args {
+            id: Option<String>,
+        }
+        let args: Args = parse(args)?;
+        let Some(id) = args.id.filter(|id| !id.trim().is_empty()) else {
+            return Err("Say which plugin: `id`, from search_plugins.".into());
+        };
+        let mut reply = self
+            .zeron
+            .call_rpc(methods::STORE_PLUGIN, json!({ "id": id.trim(), "versions": true }))
+            .await
+            .map_err(plain)?;
+        // (Its package's hashes are for the device that checks them.)
+        if let Some(object) = reply.as_object_mut() {
+            object.remove("package");
+        }
+        Ok(reply)
+    }
+
+    /// `check_plugin`: the engine's `PreparePluginPublish`. An agent's token
+    /// gets the checks and never the ticket that submits: that's the
+    /// person's, in Zeron or the CLI.
+    pub(super) async fn check_plugin(&self, args: Value) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        struct Args {
+            id: Option<String>,
+        }
+        let args: Args = parse(args)?;
+        let Some(id) = args.id.filter(|id| !id.trim().is_empty()) else {
+            return Err("Say which plugin: `id`, from list_plugins (one of the person's own).".into());
+        };
+        let mut reply = self
+            .zeron
+            .call_rpc(methods::PREPARE_PLUGIN_PUBLISH, json!({ "id": id.trim() }))
+            .await
+            .map_err(plain)?;
+        if let Some(object) = reply.as_object_mut() {
+            object.remove("ticket");
+        }
+        reply["next"] = json!(if reply["ok"] == json!(true) {
+            format!(
+                "It meets the store's rules. Publishing is the person's: they submit it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish {}`; you can't submit it for them. Every version is reviewed before others see it.",
+                id.trim()
+            )
+        } else {
+            "Fix each problem (edit the plugin; Zeron re-signs it as you save), then check_plugin again.".to_owned()
+        });
         Ok(reply)
     }
 
@@ -892,6 +1028,23 @@ mod tests {
                 methods::DESCRIBE_APP => RpcReply::Value(json!({
                     "screens": [{ "module": "@app/screens/shell/sidebar", "elements": ["#sidebar"] }], "map": "app.luau is the root",
                 })),
+                methods::STORE_SEARCH => RpcReply::Value(json!({
+                    "items": [{ "id": "focus", "name": "Focus", "summary": "Stay on one thing.", "icon": "icon.svg",
+                                "author": { "username": "ada", "verified": true, "badges": [] }, "featured": false,
+                                "categories": ["productivity"], "keywords": ["focus"], "version": "1.2.0", "installs": 40 }],
+                    "next_cursor": "c2",
+                })),
+                methods::STORE_PLUGIN => RpcReply::Value(json!({
+                    "id": params["id"], "name": "Focus", "readme": "# Focus", "compatible": true,
+                    "package": { "bytes": 10, "sha256": "aa", "hash": "bb" }, "versions": [{ "version": "1.2.0" }],
+                })),
+                methods::PREPARE_PLUGIN_PUBLISH => RpcReply::Value(match params["id"].as_str() {
+                    Some("rough") => json!({ "id": "rough", "version": "1.2", "ok": false,
+                        "problems": [{ "rule": "not_semver", "field": "version", "words": "\"1.2\" isn't a version" }], "warnings": [] }),
+                    // (An engine never gives an agent a ticket; this one does,
+                    // to show the tool drops it all the same.)
+                    _ => json!({ "id": params["id"], "version": "1.2.0", "ok": true, "problems": [], "warnings": [], "hash": "h", "ticket": "t" }),
+                }),
                 other => return Err(RpcError::UnknownMethod(other.into())),
             })
         }
@@ -899,6 +1052,37 @@ mod tests {
 
     fn last_call(engine: &Engine) -> (String, Value) {
         engine.calls.lock().unwrap().last().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn store_tools_search_read_check_and_install_but_never_submit() {
+        let engine = Arc::new(Engine::default());
+        let tools = tools_for(engine.clone(), None);
+        let found = tools.call(SEARCH_PLUGINS, json!({ "query": "focus", "limit": 5 })).await.unwrap();
+        assert_eq!(found["plugins"][0]["id"], "focus");
+        assert_eq!(found["plugins"][0]["author"]["username"], "ada");
+        assert!(found["plugins"][0].get("icon").is_none(), "said briefly");
+        assert_eq!(found["next_cursor"], "c2");
+        assert_eq!(last_call(&engine).1["q"], "focus");
+
+        let page = tools.call(GET_STORE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
+        assert_eq!((page["readme"].as_str(), page.get("package")), (Some("# Focus"), None));
+        assert_eq!(last_call(&engine), (methods::STORE_PLUGIN.to_owned(), json!({ "id": "focus", "versions": true })));
+
+        let checked = tools.call(CHECK_PLUGIN, json!({ "id": "focus" })).await.unwrap();
+        assert_eq!(checked["ok"], true);
+        assert!(checked.get("ticket").is_none(), "an agent never holds what submits it");
+        assert!(checked["next"].as_str().unwrap().contains("you can't submit it for them"));
+        let rough = tools.call(CHECK_PLUGIN, json!({ "id": "rough" })).await.unwrap();
+        assert_eq!(rough["problems"][0]["rule"], "not_semver");
+        assert!(rough["next"].as_str().unwrap().contains("check_plugin again"));
+        // No tool submits: the engine's PublishPlugin is never asked.
+        assert!(!engine.calls.lock().unwrap().iter().any(|(m, _)| m == methods::PUBLISH_PLUGIN));
+
+        let installed = tools.call(INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+        assert_eq!(installed["waiting"], true);
+        assert_eq!(last_call(&engine), (methods::INSTALL_PLUGIN.to_owned(), json!({ "store": "focus", "version": null })));
+        assert!(tools.call(INSTALL_PLUGIN, json!({ "store": "focus", "url": "ada/focus" })).await.is_err());
     }
 
     #[tokio::test]

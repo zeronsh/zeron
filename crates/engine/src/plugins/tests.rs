@@ -411,8 +411,7 @@ async fn plugins_verified_author_and_different_author() {
             username: Some("ada".into()),
             mine: false,
             revoked: false,
-            verified: None,
-        },
+            verified: None, deploy: None },
     );
     fake.keys.lock().unwrap().insert(
         eve.public(),
@@ -420,8 +419,7 @@ async fn plugins_verified_author_and_different_author() {
             username: Some("eve".into()),
             mine: false,
             revoked: false,
-            verified: None,
-        },
+            verified: None, deploy: None },
     );
     f.plugins.set_directory(fake.clone());
     f.plugins.set_account(|| Some("user-1".into()));
@@ -837,8 +835,7 @@ async fn plugins_deliver_checks_on_the_receiving_side() {
                 username: Some(user.into()),
                 mine: false,
                 revoked: false,
-                verified: None,
-            },
+                verified: None, deploy: None },
         );
     }
     f.plugins.set_directory(fake);
@@ -1094,7 +1091,7 @@ fn someone(f: &Fixture, fake: &Arc<FakeDirectory>, username: &str) -> SigningKey
     let (key, _) = SigningKey::generate().unwrap();
     fake.keys.lock().unwrap().insert(
         key.public(),
-        Lookup::Found { username: Some(username.into()), mine: false, revoked: false, verified: None },
+        Lookup::Found { username: Some(username.into()), mine: false, revoked: false, verified: None, deploy: None },
     );
     f.plugins.set_directory(fake.clone());
     f.plugins.set_account(|| Some("user-1".into()));
@@ -1436,7 +1433,7 @@ async fn plugins_an_authors_new_key_updates_and_asks_again() {
     // key of hers updates it (installing straight from the file too).
     fake.keys.lock().unwrap().insert(
         desktop.public(),
-        Lookup::Found { username: Some("ada".into()), mine: false, revoked: true, verified: Some(false) },
+        Lookup::Found { username: Some("ada".into()), mine: false, revoked: true, verified: Some(false), deploy: None },
     );
     let phone = someone(&f, &fake, "ada");
     let path = package_file(&f, "focus-2.zeron-plugin", &signed_package(&phone, "focus", "1.2.0", &["ui.add"], "return 3"));
@@ -1449,7 +1446,7 @@ async fn plugins_an_authors_new_key_updates_and_asks_again() {
     let stolen = someone(&f, &fake, "ada");
     fake.keys.lock().unwrap().insert(
         stolen.public(),
-        Lookup::Found { username: Some("ada".into()), mine: false, revoked: true, verified: Some(false) },
+        Lookup::Found { username: Some("ada".into()), mine: false, revoked: true, verified: Some(false), deploy: None },
     );
     let unchecked = someone(&f, &fake, "ada");
     for (key, offline) in [(&eve, false), (&stolen, false), (&unchecked, true)] {

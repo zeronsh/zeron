@@ -54,6 +54,13 @@ bytes = "1"
 # The rules plugins are held to (paths, programs, network), shared with apps/zgx.
 zeron-plugin-guard.workspace = true
 ignore.workspace = true
+# The store's listing rules (plugins/listing.rs), as the edge checks them:
+# links equal to their parsed form (WHATWG URL), paths that are one file
+# after Unicode normalization, and no format characters in what a listing
+# shows. Already in the tree (reqwest's url, its idna's normalizer).
+url = "2"
+icu_normalizer = "2"
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 fff-search.workspace = true
 
 same-file = "1"
