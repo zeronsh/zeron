@@ -20,6 +20,7 @@ export const FLASH = {
   reserved: { message: "Reserved.", tone: "success" },
   reservation_released: { message: "The id is free to claim.", tone: "success" },
   id_in_use: { message: "That id is in use: move its plugin to the account instead.", tone: "danger" },
+  site_id: { message: "That id is one of the site's pages: no plugin can have it.", tone: "danger" },
   report_sent: { message: "Thanks. Your report reached the people who review plugins.", tone: "success" },
   failed: { message: "That didn't work. Try again in a moment.", tone: "danger" },
   slow_down: { message: "That's a lot of changes at once. Wait a minute, then try again.", tone: "danger" },

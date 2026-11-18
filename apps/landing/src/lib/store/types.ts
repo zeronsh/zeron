@@ -6,6 +6,7 @@
 
 /** A failure's stable word. Anything else the edge says reads as `unknown`. */
 export type ErrorWord =
+  | "site_id"
   | "not_found"
   | "signed_out"
   | "forbidden"

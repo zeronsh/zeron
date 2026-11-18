@@ -621,6 +621,13 @@ describe("forms", () => {
     // An id in use moves by a transfer, and the page says so.
     expect(flashOf(await post("/admin/reservations", grace, { csrf, id: "focus-timer" }))).toBe("__Host-zeron_flash=id_in_use");
     expect(flashOf(await post("/admin/reservations", grace, { csrf, id: "x" }))).toBe("__Host-zeron_flash=bad_input");
+    // The site's own page words: nobody can be granted one, and the page says why, beside the form too.
+    for (const fields of [{ id: "all" }, { id: "publishing", to_username: "@kai" }] as Record<string, string>[]) {
+      expect(flashOf(await post("/admin/reservations", grace, { csrf, ...fields }))).toBe("__Host-zeron_flash=site_id");
+    }
+    const after = await html("/admin/reservations", grace);
+    expect(after.body).not.toMatch(/<code[^>]*>(all|publishing)<\/code>/);
+    expect(after.body).toContain("The site's own page words can't be reserved: no plugin can have them.");
     expect(flashOf(await post("/admin/reservations/kai-tools", grace, { csrf }))).toBe("__Host-zeron_flash=reservation_released");
     expect((await html("/admin/reservations", grace)).body).not.toContain("kai-tools");
     expect((await html("/admin/audit", grace)).body).toMatch(/Freed\s*<a href="\/admin\/reservations"/);

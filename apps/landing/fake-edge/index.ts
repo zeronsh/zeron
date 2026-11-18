@@ -4,6 +4,7 @@
 // on every write, keyset cursors, error words. Its sign-in is a page of the
 // fixtures' accounts in place of WorkOS.
 
+import { SITE_IDS } from "../src/lib/store/names.ts";
 import { audit, CATEGORIES, DAY, keys, NOW, plugins, reports, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
 
 const COOKIE = "__Host-zeron_session";
@@ -485,6 +486,8 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
   if (parts[0] === "reservations" && parts.length === 1) {
     const id = text("id");
     if (!/^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/.test(id)) return fail(400, "bad_request", "id is a plugin id.");
+    // (The site's own page words: nobody can be granted one, with an account or without.)
+    if (SITE_IDS.includes(id)) return fail(400, "site_id", `"${id}" is one of the site's pages: no plugin can have it.`);
     if (state.plugins.some((p) => p.id === id && p.versions.some((v) => v.status === "approved" || v.status === "pending"))) return fail(409, "invalid_state", `"${id}" is in use: transfer it instead.`);
     let user: string | null = null;
     if (text("to_username")) {

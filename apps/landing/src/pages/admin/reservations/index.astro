@@ -12,7 +12,7 @@ import { takeFlash } from "../../../lib/store/flash.ts";
 import { ago, date } from "../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { privatePage } from "../../../lib/store/http.ts";
-import { isPluginId, isUsername } from "../../../lib/store/names.ts";
+import { isPluginId, isUsername, SITE_IDS } from "../../../lib/store/names.ts";
 import { resumed } from "../../../lib/store/resume.ts";
 
 export const prerender = false;
@@ -88,6 +88,7 @@ const dialogId = (id: string) => `free-${id}`;
       <form method="post" action={here} class="reserve">
         <input type="hidden" name="csrf" value={session.csrf} />
         <Field name="id" label="Plugin id" required maxlength={40} value={resumed(Astro.url, "id", 40)} placeholder="an-id" hint="2 to 40 lowercase letters, digits and dashes. An id in use moves by a transfer instead." />
+        <p class="site-ids">The site's own page words can't be reserved: no plugin can have them. <span class="words">{SITE_IDS.join(", ")}</span></p>
         <Field name="to_username" label="For" maxlength={21} value={resumed(Astro.url, "to_username", 21)} placeholder="@username" hint="Leave it empty to hold the id for nobody." />
         <Field name="note" label="Why" maxlength={500} value={resumed(Astro.url, "note", 500)} hint="For the other reviewers." />
         <div class="answers"><Action tone="primary">Reserve</Action></div>
@@ -111,6 +112,8 @@ const dialogId = (id: string) => `free-${id}`;
   .panel { display: grid; gap: 16px; max-width: 640px; padding: 20px; background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
   .panel h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
   .reserve { display: grid; gap: 14px; }
+  .site-ids { font-size: 13px; line-height: 20px; color: var(--text-2); }
+  .site-ids .words { display: block; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-3); }
   .answers { display: flex; justify-content: flex-end; }
   .quiet { font-size: 14px; color: var(--text-3); }
   .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }

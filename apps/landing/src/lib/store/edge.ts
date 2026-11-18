@@ -29,7 +29,7 @@ const ERROR_WORDS = new Set<string>([
   "not_found", "signed_out", "forbidden", "bad_request", "bad_csrf", "rate_limited", "suspended",
   "needs_username", "id_taken", "id_reserved", "not_semver", "version_exists", "not_newer", "bad_package",
   "bad_signature", "key_not_allowed", "missing_readme", "missing_listing", "too_large", "conflict", "invalid_state",
-  "unauthenticated", "bad_cursor", "bad_path",
+  "unauthenticated", "bad_cursor", "bad_path", "site_id",
 ]);
 
 /** A binding: what `env.EDGE` is, and what a test hands in instead. */

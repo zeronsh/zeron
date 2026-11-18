@@ -21,6 +21,18 @@ export const isUsername = (value: unknown): value is string => typeof value === 
 /** Whether a version is a pre-release (`1.2.0-beta.1`). */
 export const isPrerelease = (version: string): boolean => /^[^+]*-/.test(version);
 
+/**
+ * The words that are the site's own pages under /plugins/ (and the store's
+ * other pages), never a plugin's id: docs/plugin-store-data.json `site_ids`,
+ * settled across the lanes, closed once anyone can publish. (names.test.ts
+ * holds this to that file.)
+ */
+export const SITE_IDS: readonly string[] = [
+  "all", "new", "search", "browse", "discover", "featured", "popular", "updated", "category", "categories", "keyword", "keywords",
+  "tags", "publishing", "publish", "guide", "report", "reports", "review", "queue", "audit", "sitemap", "feed", "static", "docs",
+  "help", "about", "account", "admin", "api", "install", "me", "settings", "terms", "privacy", "assets",
+];
+
 /** The longest path in a package, in UTF-8 bytes (the edge's max_path). */
 export const MAX_PATH = 1024;
 

@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
-import { isPluginId, isPrerelease, isUsername, isVersion, packagePath, resolvePackagePath } from "./names.ts";
+import { isPluginId, isPrerelease, isUsername, isVersion, packagePath, resolvePackagePath, SITE_IDS } from "./names.ts";
 
 describe("plugin ids", () => {
   test.each(["focus-timer", "a1", "x".repeat(40), "git"])("%s is one", (id) => expect(isPluginId(id)).toBe(true));
@@ -51,4 +52,26 @@ describe("paths in a package", () => {
     ["shots%2F..%2F..%2Fa.png", null],
     ["%zz", null],
   ])("resolves %j → %j", (input, out) => expect(resolvePackagePath(input)).toBe(out));
+});
+
+// The site's own page words are the store's (docs/plugin-store-data.json
+// `site_ids`, the edge's and the engine's data): once that file carries
+// them here (the merge), this holds the site's copy to it.
+describe("the site's own page words", () => {
+  const data = (() => {
+    try {
+      return JSON.parse(readFileSync(new URL("../../../../../docs/plugin-store-data.json", import.meta.url), "utf8")) as { site_ids?: string[] };
+    } catch {
+      return null;
+    }
+  })();
+  test.skipIf(!data?.site_ids)("are the store data's site_ids, word for word", () => {
+    expect([...SITE_IDS].sort()).toEqual([...data!.site_ids!].sort());
+  });
+  test("every one is a word a plugin id could otherwise be, and none is twice", () => {
+    for (const word of SITE_IDS) expect(isPluginId(word), word).toBe(true);
+    expect(new Set(SITE_IDS).size).toBe(SITE_IDS.length);
+    expect(SITE_IDS).toContain("all");
+    expect(SITE_IDS).toContain("publishing");
+  });
 });
