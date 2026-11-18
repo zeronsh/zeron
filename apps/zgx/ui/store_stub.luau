@@ -37,19 +37,31 @@ local notes = true
 local no_total = false
 
 -- A promise as the host's: settled a beat later, from one clock the script
--- keeps; or, held, once released. `await` works in a task (ui.paged's load).
+-- keeps while answers are due (none runs with nothing to answer, so a
+-- window idling with the stub in it runs no script); or, held, once
+-- released. `await` works in a task (ui.paged's load).
 local due: { () -> () } = {}
 local held: { () -> () } = {}
-ui.every(16, function()
-	if #due > 0 then
-		local now = due
-		due = {}
-		for _, f in now do
-			f()
-		end
+local ticking = false
+local function tick()
+	local now = due
+	due = {}
+	for _, f in now do
+		f()
 	end
-	return true
-end)
+	if #due > 0 then
+		ui.after(16, tick)
+	else
+		ticking = false
+	end
+end
+local function soon(f: () -> ())
+	table.insert(due, f)
+	if not ticking then
+		ticking = true
+		ui.after(16, tick)
+	end
+end
 
 -- (`quiet`: a call `fail_next` passes over, a picture or an icon, so it
 -- lands on the next search or page.)
@@ -84,7 +96,7 @@ local function answer(work: () -> any, quiet: boolean?): any
 	if holding then
 		table.insert(held, settle)
 	else
-		table.insert(due, settle)
+		soon(settle)
 	end
 	function p.after(_self: any, ok: ((any) -> ())?, bad: ((any) -> ())?)
 		local function tell()
@@ -97,7 +109,7 @@ local function answer(work: () -> any, quiet: boolean?): any
 			end
 		end
 		if p.settled then
-			table.insert(due, tell)
+			soon(tell)
 		else
 			table.insert(p.waiters, tell)
 		end
@@ -696,7 +708,7 @@ ui.command {
 		local now = held
 		held = {}
 		for _, f in now do
-			table.insert(due, f)
+			soon(f)
 		end
 	end,
 }

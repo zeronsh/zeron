@@ -258,7 +258,9 @@ fn snippets_draws_its_own_page_after_its_declared_rows_and_fills_its_room() {
     rig.open("Snippets");
     assert_eq!(rig.app.error(), None);
     // Zeron's header and its declared rows, then the plugin's own page.
-    assert!(rig.app.find(&format!("{PAGE} >> role:heading \"Snippets\"")).is_some(), "{}", rig.tree());
+    // (The page's title the first heading named so: its own Snippets section's
+    // title, which has an action at its end, is a heading too.)
+    assert!(rig.app.find(&format!("{PAGE} >> role:heading \"Snippets\"[1]")).is_some(), "{}", rig.tree());
     assert!(rig.app.find("#setting-insert").is_some(), "its declared rows: {}", rig.tree());
     let list = rig.app.find("#snippets-list");
     assert!(list.is_some(), "its own page drew: {}", rig.tree());
