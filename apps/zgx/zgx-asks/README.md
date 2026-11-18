@@ -28,6 +28,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [web-snapshot](web-snapshot/ASK.md) | The browser panel can't attach a picture of the page. |
 | [markdown-offsets](markdown-offsets/ASK.md) | Review comments on a Markdown preview can't anchor to the block that holds their line. |
 | [rich-span-boundary-break](rich-span-boundary-break/ASK.md) | A rich paragraph that must break at the boundary between two spans breaks the next span's word in two instead (a sentence's own link, Publish… in Yours, cut across lines). Zeron draws that link as a box after the sentence meanwhile. |
+| [text-underline](text-underline/ASK.md) | A plain `ui.text { underline = true }` draws no line (only a rich text's span does): every inline link in Zeron's rows read as bold words. Zeron draws its row links' words as a rich span meanwhile. |
 
 ## Developers of Zeron (and of any zgx app)
 
