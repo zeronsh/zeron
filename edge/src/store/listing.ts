@@ -100,15 +100,18 @@ const UNSEEN = /[\p{Cc}\p{Cf}]|(?!\p{Variation_Selector})\p{Default_Ignorable_Co
 /**
  * The store's mark (amendment 45) and claims of being Zeron's own: one rule
  * for a device's check and the edge, as the data file states it
- * (`mark_claims`, `claims_zeron`; the engine's mark.rs).
+ * (`mark_claims`, `claims_zeron`), ported from the engine's mark.rs.
  *
  * The text is folded (`markText`: NFKC, lowercase, NFKD without nonspacing
  * marks), then every Default_Ignorable_Code_Point (variation selectors
  * among them) and enclosing mark (Me) goes, so nothing drawn as nothing, or
- * around a letter, splits a word. It claims the mark with a glyph anywhere,
- * a word whole as written, or a word spelled with look-alikes (generated
- * from Unicode's confusables, UTS #39; `i` and `l` interchangeable; `cl`
- * for d), in the text or with its spaced single characters read as one word.
+ * around a letter, splits a word. A word or phrase is "spelled" in a
+ * reading (the folded text, or it with its spaced single characters read
+ * as one word) when it starts and ends with no ASCII letter or digit beside
+ * it and each of its letters is the letter or a look-alike (UTS #39; `i`
+ * and `l` interchangeable; `cl` for d), each space a run of separators but
+ * an apostrophe, each `~` (beside a word in a script that doesn't space its
+ * words) a run of none or more, each apostrophe any of ' ’ ʼ.
  */
 const MARKS = STORE_DATA.mark_claims;
 const MARK_GLYPHS: readonly string[] = MARKS.glyphs;
@@ -116,94 +119,190 @@ const MARK_WORDS: readonly string[] = MARKS.words;
 const LOOKALIKES: Readonly<Record<string, readonly string[]>> = MARKS.lookalikes;
 const PAIRS: Readonly<Record<string, readonly string[]>> = MARKS.pairs;
 const INTERCHANGEABLE: readonly (readonly string[])[] = MARKS.interchangeable;
-const ZERON_PHRASES: readonly string[] = STORE_DATA.claims_zeron.phrases;
-const ASCII_WORD = /[A-Za-z0-9]/;
+const LANGUAGES: Readonly<Record<string, { readonly substring: boolean; readonly words: readonly string[] }>> = MARKS.languages;
+const ZERONS = STORE_DATA.claims_zeron;
+const ZERON: string = ZERONS.word;
+const ASCII_WORD = /^[A-Za-z0-9]$/;
+const ANY_WORD = /^[\p{L}\p{N}]$/u;
+const SEPARATOR_CHAR = /^[\p{White_Space}\u{feff}\p{P}]$/u;
 const IGNORABLE = /[\p{Default_Ignorable_Code_Point}\p{Me}]/gu;
-/** A space (White_Space, or U+FEFF) or a punctuation mark (P*). */
-const SEPARATOR = "[\\p{White_Space}\\u{feff}\\p{P}]";
-const NOT_SEPARATOR = "[^\\p{White_Space}\\u{feff}\\p{P}]";
+const isApostrophe = (c: string): boolean => c === "'" || c === "\u{2019}" || c === "\u{2bc}";
 
 export const markText = (text: string): string =>
   text.normalize("NFKC").toLowerCase().normalize("NFKD").replace(/\p{Mn}/gu, "");
-const folded = (text: string): string => markText(text).replace(IGNORABLE, "");
+/** The text as the rules read it: its characters, one per code point. */
+const folded = (text: string): string[] => [...markText(text).replace(IGNORABLE, "")];
+const asciiWord = (c: string | undefined): boolean => c !== undefined && ASCII_WORD.test(c);
+const separator = (c: string): boolean => SEPARATOR_CHAR.test(c);
 
-/** Whether `phrase` is in `text` whole: no ASCII letter or digit right
- * before or after it. */
-const whole = (text: string, phrase: string): boolean => {
-  for (let at = text.indexOf(phrase); at !== -1; at = text.indexOf(phrase, at + 1)) {
-    const before = text[at - 1];
-    const after = text[at + phrase.length];
-    if (!(before !== undefined && ASCII_WORD.test(before)) && !(after !== undefined && ASCII_WORD.test(after))) return true;
-  }
-  return false;
-};
-
-const charClass = (chars: Iterable<string>): string => `[${[...new Set(chars)].map((ch) => `\\u{${ch.codePointAt(0)!.toString(16)}}`).join("")}]`;
-const lookalikesOf = (letter: string): string[] => [letter, ...(LOOKALIKES[letter] ?? [])];
+const lookalikesOf = (letter: string): Set<string> => new Set([letter, ...(LOOKALIKES[letter] ?? [])]);
+const CLASSES = new Map<string, Set<string>>();
 /** What may stand for `letter`: its look-alikes, and those of the letter
  * it's interchangeable with. */
-const classOf = (letter: string): string[] => {
-  const other = INTERCHANGEABLE.flatMap((pair) => (pair.includes(letter) ? pair.filter((l) => l !== letter) : []));
-  return [letter, ...other].flatMap(lookalikesOf);
+const classOf = (letter: string): Set<string> => {
+  let found = CLASSES.get(letter);
+  if (!found) {
+    const others = INTERCHANGEABLE.flatMap((pair) => (pair.includes(letter) ? pair.filter((l) => l !== letter) : []));
+    found = new Set([letter, ...others].flatMap((l) => [...lookalikesOf(l)]));
+    CLASSES.set(letter, found);
+  }
+  return found;
 };
-const letterPattern = (letter: string): string => {
-  const pairs = (PAIRS[letter] ?? []).map((pair) => [...pair].map((ch) => charClass(lookalikesOf(ch))).join(""));
-  return pairs.length ? `(?:${[charClass(classOf(letter)), ...pairs].join("|")})` : charClass(classOf(letter));
+
+/** Where `spelling` (from its `i`th character) spelled from `at` in `text`
+ * ends, with no ASCII letter or digit right after; undefined if it isn't. */
+const spellEnd = (text: readonly string[], at: number, spelling: readonly string[], i: number): number | undefined => {
+  if (i === spelling.length) return asciiWord(text[at]) ? undefined : at;
+  const letter = spelling[i]!;
+  const gaps = function* (from: number) {
+    for (let n = from; n < text.length && separator(text[n]!) && !isApostrophe(text[n]!); n++) yield n + 1;
+  };
+  if (letter === " " || letter === "~") {
+    if (letter === "~") {
+      const here = spellEnd(text, at, spelling, i + 1);
+      if (here !== undefined) return here;
+    }
+    for (const next of gaps(at)) {
+      const end = spellEnd(text, next, spelling, i + 1);
+      if (end !== undefined) return end;
+    }
+    return undefined;
+  }
+  if (letter === "'") return text[at] !== undefined && isApostrophe(text[at]!) ? spellEnd(text, at + 1, spelling, i + 1) : undefined;
+  if (text[at] !== undefined && classOf(letter).has(text[at]!)) {
+    const end = spellEnd(text, at + 1, spelling, i + 1);
+    if (end !== undefined) return end;
+  }
+  for (const pair of PAIRS[letter] ?? []) {
+    const chars = [...pair];
+    if (chars.every((p, n) => text[at + n] !== undefined && lookalikesOf(p).has(text[at + n]!))) {
+      const end = spellEnd(text, at + chars.length, spelling, i + 1);
+      if (end !== undefined) return end;
+    }
+  }
+  return undefined;
 };
-const SPELLED: readonly (readonly [string, RegExp])[] = MARK_WORDS.map(
-  (word) => [word, new RegExp(`(?<![A-Za-z0-9])${[...word].map(letterPattern).join("")}(?![A-Za-z0-9])`, "u")] as const
-);
+
+/** Every end of `words` spelled whole in `text`. */
+const ends = (text: readonly string[], words: string): Set<number> => {
+  const spelling = [...markText(words)];
+  const found = new Set<number>();
+  for (let at = 0; at < text.length; at++) {
+    if (asciiWord(text[at - 1])) continue;
+    const end = spellEnd(text, at, spelling, 0);
+    if (end !== undefined) found.add(end);
+  }
+  return found;
+};
+const spelled = (text: readonly string[], words: string): boolean => ends(text, words).size > 0;
+
 /** `text` with each run of single characters (a separator or the text's
  * edge on each side), apart by 1 to `max_spacing` separators, read as one
  * word: "V E R I F I E D", "V. E. R. I. F. I. E. D.", "V·E·R·I·F·I·E·D". */
-const SPACED = new RegExp(
-  `(?<!${NOT_SEPARATOR})${NOT_SEPARATOR}(?:${SEPARATOR}{1,${MARKS.max_spacing}}${NOT_SEPARATOR})+(?!${NOT_SEPARATOR})`,
-  "gu"
-);
-const SEPARATORS = new RegExp(SEPARATOR, "gu");
-const unspaced = (text: string): string => text.replace(SPACED, (run) => run.replace(SEPARATORS, ""));
-
-/** What in `text` claims the store's mark, if anything: a glyph, or the
- * word it says or spells ("Vеrified" with a Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ",
- * "VER1F1ED", "OFFlClAL", "V. E. R. I. F. I. E. D."). */
-export const markClaim = (text: string): string | undefined => {
-  const plain = folded(text);
-  const glyph = [...plain].find((ch) => MARK_GLYPHS.includes(ch));
-  if (glyph !== undefined) return glyph;
-  const written = MARK_WORDS.find((word) => whole(plain, word));
-  if (written !== undefined) return written;
-  const readings = [plain, unspaced(plain)];
-  return SPELLED.find(([, re]) => readings.some((r) => re.test(r)))?.[0];
+const unspaced = (text: readonly string[]): string[] => {
+  const out: string[] = [];
+  let at = 0;
+  while (at < text.length) {
+    const starts = !separator(text[at]!) && (at === 0 || separator(text[at - 1]!));
+    if (starts) {
+      const run = [text[at]!];
+      let last = at;
+      for (;;) {
+        let gap = 0;
+        while (last + 1 + gap < text.length && separator(text[last + 1 + gap]!)) gap++;
+        const next = last + 1 + gap;
+        if (gap < 1 || gap > MARKS.max_spacing || next >= text.length || (text[next + 1] !== undefined && !separator(text[next + 1]!))) break;
+        run.push(text[next]!);
+        last = next;
+      }
+      if (run.length > 1) {
+        out.push(...run);
+        at = last + 1;
+        continue;
+      }
+    }
+    out.push(text[at]!);
+    at++;
+  }
+  return out;
 };
 
-/** Each phrase only Zeron's own plugins may use, spelled as the mark's
- * words are: each letter itself or a look-alike (where the table has them),
- * its apostrophe any of ' ’ ʼ, and each space any run of separators (but
- * an apostrophe), as the data file's rule reads them. */
-const APOSTROPHE = "['\\u{2019}\\u{2bc}]";
-const PHRASE_SPACE = `(?:(?!${APOSTROPHE})${SEPARATOR})+`;
-const ZERON_SPELLED: readonly (readonly [string, RegExp])[] = ZERON_PHRASES.map((phrase) => {
-  const body = phrase
-    .split(" ")
-    .map((word) => [...word].map((ch) => (ch === "'" ? APOSTROPHE : /[a-z]/.test(ch) ? letterPattern(ch) : charClass([ch]))).join(""))
-    .join(PHRASE_SPACE);
-  return [phrase, new RegExp(`(?<![A-Za-z0-9])${body}(?![A-Za-z0-9])`, "u")] as const;
-});
+const startsWith = (text: readonly string[], at: number, word: readonly string[]): boolean => word.every((c, n) => text[at + n] === c);
 
-/** Which of the phrases only Zeron's own plugins may use `text` says, if
- * any: folded as `markClaim` folds, spelled as the mark's words may be, in
- * the text or with its spaced single characters read as one word ("Git by
- * Zer0n", "Git by Zеron", "Z.E.R.O.N. approved"). */
+/** What in `text` claims the store's mark, if anything: a glyph, the word
+ * it says or spells ("Vеrified" with a Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ",
+ * "VER1F1ED", "V. E. R. I. F. I. E. D."), or one of the store's other
+ * languages' words (whole where words are spaced, else anywhere). */
+export const markClaim = (text: string): string | undefined => {
+  const plain = folded(text);
+  const glyph = plain.find((ch) => MARK_GLYPHS.includes(ch));
+  if (glyph !== undefined) return glyph;
+  const joined = plain.join("");
+  const written = MARK_WORDS.find((word) => {
+    for (let at = joined.indexOf(word); at !== -1; at = joined.indexOf(word, at + 1)) {
+      if (!asciiWord(joined[at - 1]) && !asciiWord(joined[at + word.length])) return true;
+    }
+    return false;
+  });
+  if (written !== undefined) return written;
+  const readings = [plain, unspaced(plain)];
+  const word = MARK_WORDS.find((w) => readings.some((r) => spelled(r, w)));
+  if (word !== undefined) return word;
+  const anyWord = (c: string | undefined) => c !== undefined && ANY_WORD.test(c);
+  for (const { substring, words } of Object.values(LANGUAGES)) {
+    for (const w of words) {
+      const wanted = folded(w);
+      const found = readings.some((r) => {
+        for (let at = 0; at < r.length; at++) {
+          if (startsWith(r, at, wanted) && (substring || (!anyWord(r[at - 1]) && !anyWord(r[at + wanted.length])))) return true;
+        }
+        return false;
+      });
+      if (found) return w;
+    }
+  }
+  return undefined;
+};
+
+/** `a` then `b` as a spelling: apart by a space, or by `~` (none or more
+ * separators) when either is in a script that doesn't space its words. */
+const joinWords = (a: string, b: string): string => (/^[\x00-\x7f]*$/.test(a) && /^[\x00-\x7f]*$/.test(b) ? `${a} ${b}` : `${a}~${b}`);
+/** The spellings that make a name's "zeron" the object of a form. */
+const NAME_FORMS: readonly string[] = Object.values(ZERONS.name.allowed_before as Record<string, readonly string[]>).flatMap((forms) => forms.map((f) => joinWords(f, ZERON)));
+/** The spellings a description may not use: "zeron" after a word of
+ * origin, or beside a word of standing. */
+const ZERON_PHRASES: readonly string[] = [
+  ...ZERONS.description.origin_before.map((o: string) => joinWords(o, ZERON)),
+  ...ZERONS.description.standing.flatMap((st: string) => [
+    joinWords(ZERON, st),
+    joinWords(st, ZERON),
+    ...(/^[\x00-\x7f]*$/.test(st) ? [`${ZERON}'s ${st}`] : [])
+  ])
+];
+
+/** Whether a name says "zeron" other than as the object of an allowed
+ * form ("Themes for Zeron" may; "Zeron Labs", "Git by Zeron" may not). */
+export const claimsZeronInName = (text: string): boolean => {
+  const plain = folded(text);
+  return [plain, unspaced(plain)].some((reading) => {
+    const allowed = new Set(NAME_FORMS.flatMap((form) => [...ends(reading, form)]));
+    return [...ends(reading, ZERON)].some((end) => !allowed.has(end));
+  });
+};
+
+/** Which phrase a description says that only Zeron's own plugins may
+ * ("by zeron", "zeron labs", "zeron's own", "zeron 官方"), if any. Prose
+ * about Zeron ("adds a panel to Zeron's sidebar") says none. */
 export const claimsZeron = (text: string): string | undefined => {
   const plain = folded(text);
   const readings = [plain, unspaced(plain)];
-  return ZERON_SPELLED.find(([, re]) => readings.some((r) => re.test(r)))?.[0];
+  return ZERON_PHRASES.find((phrase) => readings.some((r) => spelled(r, phrase)))?.replace(/~/g, " ");
 };
 
 /** Whether a listing with this name and summary would be refused
  * `claims_zeron` for a publisher without Zeron's own badge. */
 export const listingClaimsZeron = (name: string | null, summary: string | null): boolean =>
-  (name !== null && claimsZeron(name) !== undefined) || (summary !== null && claimsZeron(summary) !== undefined);
+  (name !== null && claimsZeronInName(name)) || (summary !== null && claimsZeron(summary) !== undefined);
 
 /** (The fold of a path, as the store and devices compare paths: paths.ts.) */
 export { foldPath } from "./paths";
@@ -358,9 +457,10 @@ export const checkListing = (
   else if (UNSEEN.test(manifest.name)) problems.push(problem("bad_listing", "name", "Its name has a control or invisible formatting character"));
   else {
     const claim = markClaim(manifest.name);
-    const zeron = claim === undefined ? claimsZeron(manifest.name) : undefined;
     if (claim !== undefined) problems.push(problem("bad_listing", "name", `Its name says "${claim}": only the store marks a plugin verified`));
-    else if (zeron !== undefined) warnings.push(problem("claims_zeron", "name", `Its name says "${zeron}": only Zeron's own plugins may, and the store refuses it from anyone else`));
+    else if (claimsZeronInName(manifest.name)) {
+      warnings.push(problem("claims_zeron", "name", 'Its name says "Zeron" other than as what it\'s for ("for Zeron", "in Zeron"): only Zeron\'s own plugins may, and the store refuses it from anyone else'));
+    }
   }
   if (manifest.entry !== "" && !files.has(manifest.entry)) problems.push(problem("bad_package", "entry", `Its entry file ${manifest.entry} is missing`));
 

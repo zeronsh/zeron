@@ -4,7 +4,7 @@ import { isText, readmePictures } from "./checks";
 import { askParts, askPartsOf, asksChanged, consentDiff, consentItem, fullControl, heldToItsOwnRules } from "./consent";
 import { canonicalJson, formatFloat, parseJsonText } from "./json";
 import type { JsonObject } from "./json";
-import { changelogNotes, checkListing, claimsZeron, listingOf, markClaim } from "./listing";
+import { changelogNotes, checkListing, claimsZeron, claimsZeronInName, listingOf, markClaim } from "./listing";
 import { firstCollision } from "./paths";
 import { readManifest } from "./manifest";
 import { PAYLOAD_PREFIX, decodeBase64, inspectPackageJson, sha256Hex, signaturePayload, verifyPackage } from "./package";
@@ -199,8 +199,9 @@ describe("store listing: the mark (amendment 45)", () => {
       "For every οfficer", // a Greek ο in "officer"
       "Offіcially the best", // a Cyrillic і in "officially"
       // Honest text in those scripts, the mark's meaning included.
-      "Официальный клиент",
-      "Проверено сообществом",
+      // (The mark's own words in Russian are refused: amendment 45's languages.)
+      "Неофициальный клиент",
+      "Доска для заметок",
       "Επίσημη εφαρμογή",
       "Ελεγμένο πρόσθετο",
       "Ρεκόρ και σημειώσεις",
@@ -268,6 +269,35 @@ describe("store listing: claims of being Zeron's own", () => {
   it("leaves what is only about Zeron alone", () => {
     for (const text of ["Themes for Zeron", "Zeronaut", "Zeron notes", "A board by Zenon", "Lazeron approved", "by zeronaut", "from zero n"]) {
       expect(claimsZeron(text), JSON.stringify(text)).toBeUndefined();
+    }
+  });
+});
+
+describe("store listing: Zeron in a name, and the mark in other languages (58fc12caf)", () => {
+  it("lets a name say Zeron only as what it's for", () => {
+    for (const name of ["Themes for Zeron", "Git in Zeron", "Notes with Zer0n", "适用于Zeron的主题", "Zeron 用于"]) {
+      expect(claimsZeronInName(name), name).toBe(name === "Zeron 用于");
+    }
+    for (const name of ["Zeron Labs", "Team Zeron", "Zeron Git", "Zeron's git", "Zeron-made", "Themes for Zeron, by Zeron", "Z e r o n tools"]) {
+      expect(claimsZeronInName(name), name).toBe(true);
+    }
+  });
+
+  it("holds a description to the words of origin and standing, leaving prose about Zeron alone", () => {
+    for (const text of ["Made by Zeron.", "Boards von Zeron.", "From the Zeron team.", "Zeron Labs' own board.", "Zeron HQ approved.", "Zeron官方插件", "官方 Zeron"]) {
+      expect(claimsZeron(text), text).toBeDefined();
+    }
+    for (const text of ["Adds a panel to Zeron's sidebar.", "Works in Zeron.", "Themes for Zeron users."]) {
+      expect(claimsZeron(text), text).toBeUndefined();
+    }
+  });
+
+  it("refuses the mark's words in the store's other languages: whole where words are spaced, anywhere in CJK", () => {
+    for (const text of ["Plugin oficial", "Vérifié", "GEPRÜFT", "Ufficiale", "Officielles", "Официальный клиент", "官方插件", "非官方", "公式プラグイン", "공식 플러그인"]) {
+      expect(markClaim(text), text).toBeDefined();
+    }
+    for (const text of ["Unofficial", "Неофициальный клиент", "Oficialmente útil", "Verificador"]) {
+      expect(markClaim(text), text).toBeUndefined();
     }
   });
 });

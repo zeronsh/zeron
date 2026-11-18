@@ -40,18 +40,66 @@
     }
   ],
   "claims_zeron": {
-    "about": "A name or description may not say the plugin is Zeron's own unless its publisher is (the maintainer badge). Each of phrases is read as mark_claims reads its words: in the folded text, or in it with its spaced runs read as words, whole (no ASCII letter or digit right before or after it), each letter of the phrase itself or one of mark_claims' lookalikes (interchangeable and pairs too), its apostrophe any of ' U+2019 U+02BC, and each space any run of separators (White_Space, U+FEFF, General_Category P*) but an apostrophe. The edge refuses a publish 400 claims_zeron unless the publisher carries maintainer; a device, which can't know the publisher, gives the warning claims_zeron on that field. The listing cases named 'claims_zeron:' hold both sides to it (warnings).",
-    "phrases": [
-      "by zeron",
-      "from zeron",
-      "zeron team",
-      "zeron's own",
-      "zeron approved",
-      "zeron certified",
-      "zeron endorsed",
-      "zeron recommended",
-      "zeron staff"
-    ]
+    "about": "A name or description may not say the plugin is Zeron's own unless its publisher is (the maintainer badge). Every spelling below is read as mark_claims reads its words: in the folded text, or in it with its spaced runs read as words, whole (no ASCII letter or digit right before or after it), each letter itself or one of mark_claims' lookalikes (interchangeable and pairs too), an apostrophe any of ' U+2019 U+02BC, a space a run of one or more separators (White_Space, U+FEFF, General_Category P*) but an apostrophe, and between a word in a script that doesn't space its words and the next a run of none or more. Name: each whole word's end at which word is spelled must also be the end of '<form> word' for a form of name.allowed_before (any language); one that isn't is claims_zeron. Description: any of '<origin> word' (description.origin_before), '<standing> word', 'word <standing>' and, for a standing word in ASCII, 'word's <standing>' (description.standing) is claims_zeron. The edge refuses a publish 400 claims_zeron unless the publisher carries maintainer; a device, which can't know the publisher, gives the warning claims_zeron on that field. The listing cases named 'claims_zeron:' hold both sides to it (warnings).",
+    "description": {
+      "origin_before": [
+        "by",
+        "from",
+        "by the",
+        "made by",
+        "built by",
+        "von",
+        "par",
+        "de",
+        "da",
+        "di",
+        "del",
+        "van"
+      ],
+      "standing": [
+        "team",
+        "labs",
+        "inc",
+        "hq",
+        "staff",
+        "approved",
+        "certified",
+        "endorsed",
+        "recommended",
+        "made",
+        "built",
+        "own",
+        "官方",
+        "公式",
+        "공식"
+      ]
+    },
+    "name": {
+      "allowed_before": {
+        "en": [
+          "for",
+          "in",
+          "with",
+          "on",
+          "to"
+        ],
+        "zh": [
+          "适用于",
+          "適用於",
+          "用于",
+          "用於",
+          "为",
+          "為",
+          "给",
+          "給",
+          "在",
+          "与",
+          "與",
+          "和"
+        ]
+      }
+    },
+    "word": "zeron"
   },
   "consent": {
     "about": "A program's name is lowercased and loses one Windows extension (windows_extensions) before it's looked up. It can do anything you can unless it's in contained. It gives full control when it's in full_control, as it is or with its trailing digits and dots taken off (python3.12 → python). commands_anything is every program that can do anything you can and is neither full_control nor held_to_its_own_rules. A host is local when it's localhost, a private or loopback address, ends .localhost .local .internal .lan .home.arpa .intranet .corp, has one label, or ends in a number (decimal or 0x hex); network_local is every host but * that is local, network_named every host that names one host exactly (not * or *.…) and isn't local.",
@@ -193,7 +241,7 @@
     ]
   },
   "mark_claims": {
-    "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or of claims_zeron's phrases, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs) and the digit 3 for e. The listing cases named 'the mark:' hold both sides to it.",
+    "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or of claims_zeron's phrases, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs) and the digit 3 for e. Then, in the store's other languages: any of languages[lang].words, folded the same way, in either reading, as a substring where substring is true (Chinese, Japanese, Korean), else whole (no character of General_Category L* or N* right before or after it). The listing cases named 'the mark:' hold both sides to it.",
     "glyphs": [
       "✓",
       "✔",
@@ -211,6 +259,120 @@
         "l"
       ]
     ],
+    "languages": {
+      "de": {
+        "substring": false,
+        "words": [
+          "verifiziert",
+          "verifizierte",
+          "verifizierter",
+          "verifiziertes",
+          "verifizierten",
+          "geprüft",
+          "geprüfte",
+          "geprüfter",
+          "geprüftes",
+          "geprüften",
+          "offiziell",
+          "offizielle",
+          "offizieller",
+          "offizielles",
+          "offiziellen"
+        ]
+      },
+      "es": {
+        "substring": false,
+        "words": [
+          "verificado",
+          "verificada",
+          "verificados",
+          "verificadas",
+          "oficial",
+          "oficiales"
+        ]
+      },
+      "fr": {
+        "substring": false,
+        "words": [
+          "vérifié",
+          "vérifiée",
+          "vérifiés",
+          "vérifiées",
+          "officiel",
+          "officielle",
+          "officiels",
+          "officielles"
+        ]
+      },
+      "it": {
+        "substring": false,
+        "words": [
+          "verificato",
+          "verificata",
+          "verificati",
+          "verificate",
+          "ufficiale",
+          "ufficiali"
+        ]
+      },
+      "ja": {
+        "substring": true,
+        "words": [
+          "公式",
+          "認証済",
+          "検証済",
+          "オフィシャル"
+        ]
+      },
+      "ko": {
+        "substring": true,
+        "words": [
+          "공식",
+          "인증됨",
+          "인증된",
+          "검증됨",
+          "검증된"
+        ]
+      },
+      "pt": {
+        "substring": false,
+        "words": [
+          "verificado",
+          "verificada",
+          "verificados",
+          "verificadas",
+          "oficial",
+          "oficiais"
+        ]
+      },
+      "ru": {
+        "substring": false,
+        "words": [
+          "проверено",
+          "проверенный",
+          "проверенная",
+          "проверенное",
+          "проверенные",
+          "верифицирован",
+          "верифицированный",
+          "официальный",
+          "официальная",
+          "официальное",
+          "официальные",
+          "официально"
+        ]
+      },
+      "zh": {
+        "substring": true,
+        "words": [
+          "官方",
+          "已验证",
+          "已驗證",
+          "已认证",
+          "已認證"
+        ]
+      }
+    },
     "lookalikes": {
       "a": [
         "ɑ",
@@ -423,6 +585,55 @@
         "🅕",
         "🅵",
         "🇫"
+      ],
+      "h": [
+        "Ħ",
+        "ħ",
+        "ɦ",
+        "ʜ",
+        "Η",
+        "η",
+        "Н",
+        "н",
+        "ћ",
+        "Ң",
+        "ң",
+        "Һ",
+        "һ",
+        "Ӈ",
+        "ӈ",
+        "Ӊ",
+        "ӊ",
+        "հ",
+        "Ⴙ",
+        "Ꮋ",
+        "Ꮒ",
+        "Ᏺ",
+        "ᏺ",
+        "ᕼ",
+        "ᵸ",
+        "ℏ",
+        "Ⱨ",
+        "ⱨ",
+        "Ⲏ",
+        "ⲏ",
+        "ⴙ",
+        "ꓧ",
+        "ꚕ",
+        "ꮋ",
+        "ꮒ",
+        "𐋏",
+        "𝚮",
+        "𝛨",
+        "𝜢",
+        "𝝜",
+        "𝞖",
+        "𝼲",
+        "𝽆",
+        "𝽇",
+        "🅗",
+        "🅷",
+        "🇭"
       ],
       "i": [
         "¡",
@@ -881,6 +1092,19 @@
         "🅿",
         "🇵"
       ],
+      "q": [
+        "ʠ",
+        "Ԛ",
+        "ԛ",
+        "գ",
+        "զ",
+        "ⵕ",
+        "ꞯ",
+        "𝼴",
+        "🅠",
+        "🆀",
+        "🇶"
+      ],
       "r": [
         "Ʀ",
         "Ɍ",
@@ -993,6 +1217,41 @@
         "🆃",
         "🇹",
         "🝨"
+      ],
+      "u": [
+        "Ʉ",
+        "ʉ",
+        "ʋ",
+        "υ",
+        "џ",
+        "Ս",
+        "ս",
+        "ሀ",
+        "Ꮜ",
+        "ᑌ",
+        "ᴜ",
+        "ᵾ",
+        "∪",
+        "⋃",
+        "ꓴ",
+        "ꞟ",
+        "ꭎ",
+        "ꭒ",
+        "ꮜ",
+        "𐓎",
+        "𐓶",
+        "𑢸",
+        "𑣘",
+        "𖽂",
+        "𝛖",
+        "𝜐",
+        "𝝊",
+        "𝞄",
+        "𝞾",
+        "𝼹",
+        "🅤",
+        "🆄",
+        "🇺"
       ],
       "v": [
         "ν",
