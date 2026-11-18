@@ -3,7 +3,7 @@
 // the parser can be compared with the CommonMark and GFM examples. Never
 // used to draw a page.
 
-import { blocksOf, type Block, type Definition } from "./blocks.ts";
+import { blocksOf, cells, type Block, type Definition } from "./blocks.ts";
 import { inlinesOf, plainText, unescape, type Inline } from "./inlines.ts";
 
 const esc = (s: string) => s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
@@ -102,7 +102,11 @@ function blocks(list: Block[], d: Map<string, Definition>, tight = false): strin
       case "table": {
         const cell = (tag: string, text: string, i: number) => `<${tag}${b.align[i] ? ` style="text-align: ${b.align[i]}"` : ""}>${inline(inlinesOf(text, d).inlines)}</${tag}>\n`;
         out += `<table>\n<thead>\n<tr>\n${b.head.map((t, i) => cell("th", t, i)).join("")}</tr>\n</thead>\n`;
-        out += `<tbody>\n${b.rows.map((r) => `<tr>\n${r.map((t, i) => cell("td", t, i)).join("")}</tr>\n`).join("")}</tbody>\n`;
+        const padded = (row: string) => {
+          const r = cells(row, b.head.length);
+          return b.head.map((_, i) => r[i] ?? "");
+        };
+        out += `<tbody>\n${b.rows.map((r) => `<tr>\n${padded(r).map((t, i) => cell("td", t, i)).join("")}</tr>\n`).join("")}</tbody>\n`;
         out += "</table>\n";
         break;
       }

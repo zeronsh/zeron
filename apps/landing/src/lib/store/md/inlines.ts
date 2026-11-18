@@ -36,9 +36,20 @@
 //   each character read once.
 // No regular expression runs over the author's text with a repeat inside a
 // repeat; the few here test one character, or a span already bounded.
+//
+// Counted (md/meter.ts): each of the steps above adds what it read, and
+// every node, delimiter, bracket and table it makes is counted as kept, so
+// a text that would make more than KEEP_MOST of them stops (its document
+// is shown as its text). A reference is resolved once, where it is
+// defined (md/blocks.ts): its use here is a lookup and a pointer, however
+// often it is used. An address is at most ADDRESS characters and a title
+// TITLE; past either, a link is its characters.
 
-import { decodeNamedCharacterReference } from "decode-named-character-reference";
-import { labelKey, LABEL, NESTING, type Definition } from "./blocks.ts";
+import { ADDRESS, labelKey, LABEL, NESTING, TITLE, type Definition } from "./blocks.ts";
+import { keep, meter, NODE, type Meter } from "./meter.ts";
+import { isAsciiPunctuation, reference, unescape } from "./text.ts";
+
+export { unescape };
 
 export type Inline =
   | { kind: "text"; text: string }
@@ -51,7 +62,8 @@ export type Inline =
 
 export interface Inlines {
   inlines: Inline[];
-  work: number;
+  /** What this text kept on the meter (its nodes, its tables): the caller lets it go once the text is written. */
+  kept: number;
 }
 
 // ── nodes ─────────────────────────────────────────────────────────────────
@@ -73,7 +85,7 @@ interface N {
   next: N | null;
 }
 
-const make = (kind: NodeKind, text = ""): N => ({ kind, text, char: "", count: 0, destination: "", title: null, first: null, last: null, prev: null, next: null });
+const blank = (kind: NodeKind, text: string): N => ({ kind, text, char: "", count: 0, destination: "", title: null, first: null, last: null, prev: null, next: null });
 
 interface Delimiter {
   node: N;
@@ -99,10 +111,6 @@ interface Bracket {
 
 // ── characters ────────────────────────────────────────────────────────────
 
-const PUNCTUATION = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-const ASCII_PUNCTUATION = new Uint8Array(128);
-for (const c of PUNCTUATION) ASCII_PUNCTUATION[c.charCodeAt(0)] = 1;
-const isAsciiPunctuation = (c: string | undefined) => c !== undefined && c.length === 1 && c.charCodeAt(0) < 128 && ASCII_PUNCTUATION[c.charCodeAt(0)] === 1;
 /** Unicode punctuation and symbols (CommonMark 0.31), one character tested. */
 const isPunctuation = (c: string) => (c.charCodeAt(0) < 128 ? isAsciiPunctuation(c) : /^[\p{P}\p{S}]$/u.test(c));
 const isWhitespace = (c: string) => {
@@ -218,46 +226,6 @@ class Tails {
 
 // ── the parser ────────────────────────────────────────────────────────────
 
-/** Backslash escapes and character references undone (a destination's, a title's, an info string's). */
-export function unescape(s: string): string {
-  if (!s.includes("\\") && !s.includes("&")) return s;
-  let out = "";
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === "\\" && isAsciiPunctuation(s[i + 1])) {
-      out += s[++i];
-    } else if (c === "&") {
-      const ref = reference(s, i);
-      if (ref) {
-        out += ref.text;
-        i = ref.end - 1;
-      } else out += c;
-    } else out += c;
-  }
-  return out;
-}
-
-/** A character reference at `i`: what it stands for and where it ends, or null. */
-function reference(s: string, i: number): { text: string; end: number } | null {
-  let j = i + 1;
-  if (s[j] === "#") {
-    j++;
-    const hex = s[j] === "x" || s[j] === "X";
-    if (hex) j++;
-    const from = j;
-    while (j - from < (hex ? 6 : 7) && (hex ? /^[0-9a-fA-F]$/.test(s[j] ?? "") : s[j] >= "0" && s[j] <= "9")) j++;
-    if (j === from || s[j] !== ";") return null;
-    const code = parseInt(s.slice(from, j), hex ? 16 : 10);
-    const ok = code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
-    return { text: ok ? String.fromCodePoint(code) : "�", end: j + 1 };
-  }
-  const from = j;
-  while (j - from < 32 && /^[A-Za-z0-9]$/.test(s[j] ?? "")) j++;
-  if (j === from || s[j] !== ";") return null;
-  const decoded = decodeNamedCharacterReference(s.slice(from, j));
-  return decoded === false ? null : { text: decoded, end: j + 1 };
-}
-
 const LOCAL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$%&'*+/=?^_`{|}~-";
 const isAlnum = (c: string) => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9");
 
@@ -274,8 +242,16 @@ function isEmail(s: string): boolean {
 }
 
 /** The inlines of a block's text. */
-export function inlinesOf(s: string, definitions: Map<string, Definition>): Inlines {
-  let work = s.length;
+export function inlinesOf(s: string, definitions: Map<string, Definition>, m: Meter = meter()): Inlines {
+  const keptBefore = m.kept;
+  const read = (n: number) => {
+    m.read += n;
+  };
+  read(s.length);
+  const make = (kind: NodeKind, text = ""): N => {
+    keep(m, NODE);
+    return blank(kind, text);
+  };
   const root = make("link");
   const append = (n: N) => {
     n.prev = root.last;
@@ -293,13 +269,15 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
   };
   const text = (t: string) => {
     if (t === "") return;
+    keep(m, t.length);
     if (root.last?.kind === "text") root.last.text += t;
     else append(make("text", t));
   };
 
   let runs: Runs | null = null;
   let tails: Tails | null = null;
-  const tailsOf = () => (tails ??= ((work += s.length * 8), new Tails(s)));
+  // (Eight passes over the text, and seven tables of four bytes a character.)
+  const tailsOf = () => (tails ??= (read(s.length * 8), keep(m, s.length * 28), new Tails(s)));
 
   let delimiters: Delimiter | null = null;
   const brackets: Bracket[] = [];
@@ -321,10 +299,10 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
     let closer = delimiters;
     while (closer !== null && closer.prev !== bottom) {
       closer = closer.prev;
-      work++;
+      read(1);
     }
     while (closer !== null) {
-      work++;
+      read(1);
       if (!closer.canClose) {
         closer = closer.next;
         continue;
@@ -334,7 +312,7 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
       let opener = closer.prev;
       let found = false;
       while (opener !== null && opener !== bottom && opener !== floor) {
-        work++;
+        read(1);
         if (opener.char === closer.char && opener.canOpen) {
           if (closer.char === "~") {
             if (opener.length === closer.length) {
@@ -408,7 +386,8 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
     if (s[j] === "<") {
       let k = j + 1;
       while (k < s.length && s[k] !== ">" && s[k] !== "<" && s[k] !== "\n") k += s[k] === "\\" && k + 1 < s.length && s[k + 1] !== "\n" ? 2 : 1;
-      work += k - j;
+      read(k - j);
+      if (k - j - 1 > ADDRESS) return null;
       if (s[k] !== ">") return null;
       destination = s.slice(j + 1, k);
       j = k + 1;
@@ -416,8 +395,9 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
       const end = Math.min(t.space[j], t.unbalanced[j]);
       // (Empty, or parentheses still open at its end: not a destination.)
       if (end === j || t.depth[end] !== t.depth[j]) return null;
+      if (end - j > ADDRESS) return null;
       destination = s.slice(j, end);
-      work += end - j;
+      read(end - j);
       j = end;
     }
     const k = skip(j);
@@ -426,8 +406,9 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
       const close = s[k] === '"' ? t.quote[k + 1] : s[k] === "'" ? t.apostrophe[k + 1] : t.close[k + 1];
       if (close >= s.length) return null;
       if (s[k] === "(" && t.open[k + 1] < close) return null;
+      if (close - k - 1 > TITLE) return null;
       title = s.slice(k + 1, close);
-      work += close - k;
+      read(close - k);
       j = skip(close + 1);
     } else j = k;
     return s[j] === ")" ? { destination, title, end: j + 1 } : null;
@@ -446,11 +427,12 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
       return pos + 1;
     }
     let after = pos + 1;
+    // (An inline link's address and title are undone here, once; a reference's were, where it was defined.)
     let found: { destination: string; title: string | null } | null = null;
     if (s[after] === "(") {
       const tail = inlineTail(after + 1);
       if (tail) {
-        found = tail;
+        found = { destination: unescape(tail.destination, m), title: tail.title === null ? null : unescape(tail.title, m) };
         after = tail.end;
       }
     }
@@ -472,10 +454,10 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
         else label = null;
       }
       if (label !== null && label.trim() !== "") {
-        work += label.length;
+        read(label.length);
         const d = definitions.get(labelKey(label));
         if (d) {
-          found = { destination: d.destination, title: d.title };
+          found = d;
           after = end;
         }
       }
@@ -488,8 +470,8 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
     // Emphasis inside its text first, then the text becomes the link's.
     processEmphasis(opener.delimiters);
     const link = make(opener.image ? "image" : "link");
-    link.destination = unescape(found.destination);
-    link.title = found.title === null ? null : unescape(found.title);
+    link.destination = found.destination;
+    link.title = found.title;
     if (opener.node.next) {
       link.first = opener.node.next;
       link.last = root.last;
@@ -515,6 +497,7 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
         if (k < 128 && SPECIAL[k] === 1) break;
         j++;
       }
+      read(j - pos);
       text(s.slice(pos, j));
       pos = j;
       continue;
@@ -525,6 +508,7 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
         const last = root.last;
         let hard = false;
         if (last?.kind === "text") {
+          read(last.text.length);
           let e = last.text.length;
           while (e > 0 && last.text[e - 1] === " ") e--;
           hard = last.text.length - e >= 2;
@@ -556,12 +540,14 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
         let j = pos;
         while (s[j] === "`") j++;
         const length = j - pos;
+        read(length);
         const end = runs.closer(length, j - 1);
         if (end < 0) {
           text("`".repeat(length));
           pos = j;
           break;
         }
+        read((end - pos - length) * 3);
         let content = s.slice(pos + length, end).replaceAll("\n", " ");
         if (content.length >= 2 && content[0] === " " && content[content.length - 1] === " " && content.trim() !== "") content = content.slice(1, -1);
         append(make("code", content));
@@ -575,6 +561,7 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
         let j = pos;
         while (s[j] === c) j++;
         const length = j - pos;
+        read(length + 4);
         const node = make("run");
         node.char = c;
         node.count = length;
@@ -591,6 +578,7 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
         }
         if (c === "~" && length > 2) canOpen = canClose = false;
         if (canOpen || canClose) {
+          keep(m, NODE);
           const d: Delimiter = { node, char: c, length, canOpen, canClose, prev: delimiters, next: null };
           if (delimiters) delimiters.next = d;
           delimiters = d;
@@ -603,6 +591,7 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
           const node = make("bracket", "![");
           append(node);
           if (brackets.length > 0) brackets[brackets.length - 1].bracketAfter = true;
+          keep(m, NODE);
           brackets.push({ node, image: true, index: pos + 2, delimiters, bracketAfter: false });
           pos += 2;
         } else {
@@ -615,6 +604,7 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
         const node = make("bracket", "[");
         append(node);
         if (brackets.length > 0) brackets[brackets.length - 1].bracketAfter = true;
+        keep(m, NODE);
         brackets.push({ node, image: false, index: pos + 1, delimiters, bracketAfter: false });
         pos++;
         break;
@@ -627,7 +617,7 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
         // An autolink: `<scheme:…>` or `<a@b.c>`, read to the next `>`, `<` or space.
         let j = pos + 1;
         while (j < s.length && s[j] !== ">" && s[j] !== "<" && s[j] > " ") j++;
-        work += j - pos;
+        read(j - pos);
         const inner = s.slice(pos + 1, j);
         if (s[j] === ">" && /^[A-Za-z][A-Za-z0-9+.-]{1,31}:/.test(inner)) {
           const link = make("link");
@@ -648,6 +638,7 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
         break;
       }
       case "&": {
+        read(34);
         const ref = reference(s, pos);
         if (ref) {
           text(ref.text);
@@ -664,7 +655,8 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
     }
   }
   processEmphasis(null);
-  return { inlines: finish(root, (n) => (work += n)), work };
+  const inlines = finish(root, m);
+  return { inlines, kept: m.kept - keptBefore };
 }
 
 /**
@@ -672,7 +664,7 @@ export function inlinesOf(s: string, definitions: Map<string, Definition>): Inli
  * text is long): runs left over become their characters, texts side by side
  * become one, and bare `https://` links are found in text outside links.
  */
-function finish(root: N, count: (n: number) => void): Inline[] {
+function finish(root: N, m: Meter): Inline[] {
   const top: Inline[] = [];
   const stack: { from: N | null; into: Inline[] }[] = [{ from: root.first, into: top }];
   while (stack.length > 0) {
@@ -683,7 +675,8 @@ function finish(root: N, count: (n: number) => void): Inline[] {
       continue;
     }
     frame.from = n.next;
-    count(1);
+    m.read += 1;
+    keep(m, NODE / 2);
     const into = frame.into;
     const push = (t: string) => {
       if (t === "") return;
@@ -735,7 +728,7 @@ function finish(root: N, count: (n: number) => void): Inline[] {
     }
     const rebuilt: Inline[] = [];
     for (const n of list) {
-      if (n.kind === "text") for (const piece of autolinked(n.text)) rebuilt.push(typeof piece === "string" ? { kind: "text", text: piece } : piece);
+      if (n.kind === "text") for (const piece of autolinked(n.text, m)) rebuilt.push(typeof piece === "string" ? { kind: "text", text: piece } : piece);
       else {
         rebuilt.push(n);
         if (n.kind === "em" || n.kind === "strong" || n.kind === "del") lists.push(n.children);
@@ -753,7 +746,8 @@ function finish(root: N, count: (n: number) => void): Inline[] {
  * after the start, a space, or one of `*_~(`; a domain with a dot; up to a
  * space or `<`; less trailing punctuation and an unmatched `)`.
  */
-function autolinked(t: string): (string | Inline)[] {
+function autolinked(t: string, m: Meter): (string | Inline)[] {
+  m.read += t.length * 2;
   if (!t.includes("https://")) return [t];
   const out: (string | Inline)[] = [];
   let from = 0;
@@ -813,7 +807,7 @@ function autolinked(t: string): (string | Inline)[] {
 }
 
 /** A tree's words, without its markup (a picture's alt, a heading's id), iteratively. */
-export function plainText(inlines: Inline[]): string {
+export function plainText(inlines: Inline[], m?: Meter): string {
   let out = "";
   const stack: Inline[][] = [inlines];
   const index: number[] = [0];
@@ -827,6 +821,7 @@ export function plainText(inlines: Inline[]): string {
     }
     index[index.length - 1] = i + 1;
     const n = list[i];
+    if (m) m.read += 1 + (n.kind === "text" || n.kind === "code" ? n.text.length : 0);
     if (n.kind === "text" || n.kind === "code") out += n.text;
     else if (n.kind === "softbreak" || n.kind === "hardbreak") out += "\n";
     else {

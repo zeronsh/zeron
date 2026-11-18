@@ -8,8 +8,10 @@
 // file of the package, through the store's file route). `Html` refuses
 // anything else, so a mistake here fails loudly instead of writing it.
 //
-// Bounded: what it writes is at most a constant times what it reads (a
-// table's missing cells, at most COLUMNS a row, are the largest), and it
+// Bounded: each address is classified once a document, however often it is
+// used; a reference used many times writes its address each time (at most
+// ADDRESS + TITLE characters a use), and a short row its missing cells (at
+// most COLUMNS); what it writes is counted as it is written, and it
 // stops at `most` characters (the caller shows the text instead). A tree of
 // inlines nests as deep as its text is long, so it is walked without
 // recursion; past NESTING, what's inside is written as its words.
@@ -18,8 +20,9 @@ import GithubSlugger from "github-slugger";
 import type { Root } from "hast";
 import { highlightable, lowlight, nestsTooDeep } from "../highlight.ts";
 import { resolvePackagePath } from "../names.ts";
-import { blocksOf, NESTING, type Align, type Block, type Definition } from "./blocks.ts";
+import { blocksOf, cells, NESTING, type Align, type Block, type Definition } from "./blocks.ts";
 import { inlinesOf, plainText, unescape, type Inline } from "./inlines.ts";
+import { meter, release, type Meter } from "./meter.ts";
 import { Html, TAGS, TooLarge, writeHighlighted } from "./writer.ts";
 
 export { TAGS, TooLarge };
@@ -96,14 +99,28 @@ interface Writing {
   options: RenderOptions;
   slugger: GithubSlugger;
   highlight: { bytes: number };
-  work: number;
+  m: Meter;
+  /** Each address classified once, however often it is used (a reference used a thousand times is one). */
+  targets: Map<string, Target>;
 }
 
-/** A text's inlines (counted). */
-function inlines(w: Writing, text: string): Inline[] {
-  const parsed = inlinesOf(text, w.definitions);
-  w.work += parsed.work;
-  return parsed.inlines;
+/** An address, classified once a document; an anchor's id slugged with it. */
+function targetOf(w: Writing, destination: string): Target {
+  let to = w.targets.get(destination);
+  if (!to) {
+    w.m.read += destination.length * 4;
+    to = target(destination);
+    if (to.kind === "anchor") to = { kind: "anchor", id: slug(to.id) };
+    w.targets.set(destination, to);
+  }
+  return to;
+}
+
+/** A text's inlines, written; what parsing them kept, let go once they are. */
+function writeText(w: Writing, text: string): void {
+  const parsed = inlinesOf(text, w.definitions, w.m);
+  writeInlines(w, parsed.inlines);
+  release(w.m, parsed.kept);
 }
 
 /**
@@ -122,7 +139,7 @@ function writeInlines(w: Writing, list: Inline[]): void {
       continue;
     }
     const n = frame.list[frame.i++];
-    w.work++;
+    w.m.read++;
     switch (n.kind) {
       case "text":
         out.text(n.text);
@@ -143,7 +160,7 @@ function writeInlines(w: Writing, list: Inline[]): void {
       case "strong":
       case "del": {
         if (stack.length > NESTING) {
-          out.text(plainText(n.children));
+          out.text(plainText(n.children, w.m));
           break;
         }
         out.open(n.kind);
@@ -151,14 +168,14 @@ function writeInlines(w: Writing, list: Inline[]): void {
         break;
       }
       case "link": {
-        const to = target(n.destination);
+        const to = targetOf(w, n.destination);
         if (frame.inLink || stack.length > NESTING) {
-          out.text(plainText(n.children));
+          out.text(plainText(n.children, w.m));
         } else if (to.kind === "web") {
           out.open("a", [["href", to.url], ["rel", REL]]);
           stack.push({ list: n.children, i: 0, close: "a", inLink: true });
         } else if (to.kind === "anchor") {
-          out.open("a", [["href", `#${PREFIX}${slug(to.id)}`]]);
+          out.open("a", [["href", `#${PREFIX}${to.id}`]]);
           stack.push({ list: n.children, i: 0, close: "a", inLink: true });
         } else {
           // A link to another file of the package, or one that can't be followed: its words stay.
@@ -167,8 +184,8 @@ function writeInlines(w: Writing, list: Inline[]): void {
         break;
       }
       case "image": {
-        const alt = plainText(n.children);
-        const to = target(n.destination);
+        const alt = plainText(n.children, w.m);
+        const to = targetOf(w, n.destination);
         if (to.kind === "file" && PICTURES.test(to.path)) {
           const attributes: [string, string][] = [["src", options.file(to.path)], ["alt", alt]];
           if (n.title !== null) attributes.push(["title", n.title]);
@@ -189,12 +206,13 @@ function writeInlines(w: Writing, list: Inline[]): void {
 /** A code block: highlighted when its language is known and it's within the bounds and the document's budget. */
 function writeCode(w: Writing, info: string, text: string): void {
   const { out } = w;
-  const word = unescape(info).split(/[ \t]/, 1)[0] ?? "";
+  const word = unescape(info, w.m).split(/[ \t]/, 1)[0] ?? "";
   const language = /^[\w+#.-]{1,32}$/.test(word) ? word.toLowerCase() : "";
   out.open("pre", [["tabindex", "0"]]);
   let tree: Root | null = null;
   if (language && lowlight.registered(language) && highlightable(text, language) && text.length <= w.highlight.bytes) {
     w.highlight.bytes -= text.length;
+    w.m.read += text.length;
     try {
       tree = lowlight.highlight(language, text) as Root;
       if (nestsTooDeep(tree)) tree = null;
@@ -216,21 +234,22 @@ function writeCode(w: Writing, info: string, text: string): void {
 function writeBlocks(w: Writing, blocks: Block[], tight: boolean): void {
   const { out, options } = w;
   for (const block of blocks) {
-    w.work++;
+    w.m.read++;
     switch (block.kind) {
       case "paragraph":
         if (!tight) out.open("p");
-        writeInlines(w, inlines(w, block.text));
+        writeText(w, block.text);
         if (!tight) out.close("p");
         // (A tight item's last paragraph ends with the item.)
         if (!tight || block !== blocks[blocks.length - 1]) out.line();
         break;
       case "heading": {
-        const content = inlines(w, block.text);
+        const parsed = inlinesOf(block.text, w.definitions, w.m);
         const level = options.demote ? Math.min(6, block.level + 1) : block.level;
         const tag = `h${level}`;
-        out.open(tag, [["id", `${PREFIX}${w.slugger.slug(plainText(content))}`]]);
-        writeInlines(w, content);
+        out.open(tag, [["id", `${PREFIX}${w.slugger.slug(plainText(parsed.inlines, w.m))}`]]);
+        writeInlines(w, parsed.inlines);
+        release(w.m, parsed.kept);
         out.close(tag);
         out.line();
         break;
@@ -300,7 +319,10 @@ function writeBlocks(w: Writing, blocks: Block[], tight: boolean): void {
         if (block.rows.length > 0) {
           out.open("tbody");
           out.line();
-          for (const row of block.rows) writeRow(w, "td", row, block.align);
+          for (const row of block.rows) {
+            w.m.read += row.length * 2;
+            writeRow(w, "td", cells(row, block.align.length), block.align);
+          }
           out.close("tbody");
           out.line();
         }
@@ -313,27 +335,28 @@ function writeBlocks(w: Writing, blocks: Block[], tight: boolean): void {
   }
 }
 
+/** A row: its cells as written, then empty ones to the header's width (written, never kept). */
 function writeRow(w: Writing, tag: "th" | "td", cells: string[], align: Align[]): void {
   w.out.open("tr");
   w.out.line();
-  cells.forEach((cell, i) => {
+  for (let i = 0; i < align.length; i++) {
     w.out.open(tag, align[i] ? [["align", align[i]!]] : []);
-    writeInlines(w, inlines(w, cell));
+    if (i < cells.length) writeText(w, cells[i]);
     w.out.close(tag);
     w.out.line();
-  });
+  }
   w.out.close("tr");
   w.out.line();
 }
 
-/** What a document shown as its text says first. */
-export const AS_TEXT = "Shown as plain text: it's too long to lay out.";
+/** What a document shown as its text says first: too long, or it couldn't be drawn (it failed, or a try at it never finished). */
+export const AS_TEXT = { long: "Shown as plain text: it's too long to lay out.", failed: "Shown as plain text: it couldn't be laid out." } as const;
 
 /** A document as its text, said so (every character escaped). */
-export function asText(markdown: string): string {
+export function asText(markdown: string, why: keyof typeof AS_TEXT = "long"): string {
   const out = new Html(Infinity);
   out.open("p", [["class", "as-text"]]);
-  out.text(AS_TEXT);
+  out.text(AS_TEXT[why]);
   out.close("p");
   out.open("pre", [["class", "plain"], ["tabindex", "0"]]);
   out.text(markdown);
@@ -343,23 +366,25 @@ export function asText(markdown: string): string {
 
 export interface Written {
   html: string;
-  /** What was read and written: the tests hold it to a constant per byte. */
-  work: number;
+  /** What was read, kept and written (md/meter.ts): the tests hold it to constants per byte. */
+  meter: Meter;
 }
 
 /**
  * Markdown in, HTML out: the subset drawn, everything else its characters.
  * Throws TooLarge past `most` characters of HTML.
  */
-export function toHtml(markdown: string, options: RenderOptions, most: number): Written {
-  const parsed = blocksOf(markdown);
+export function toHtml(markdown: string, options: RenderOptions, most: number, m: Meter = meter()): Written {
+  const parsed = blocksOf(markdown, m);
   let blocks = parsed.blocks;
-  const w: Writing = { out: new Html(most), definitions: parsed.definitions, options, slugger: new GithubSlugger(), highlight: { bytes: HIGHLIGHT_BUDGET }, work: parsed.work };
+  const w: Writing = { out: new Html(most, m), definitions: parsed.definitions, options, slugger: new GithubSlugger(), highlight: { bytes: HIGHLIGHT_BUDGET }, m, targets: new Map() };
   // A first heading that is the plugin's name, said again: not drawn.
   const first = blocks[0];
-  if (options.title && first?.kind === "heading" && first.level === 1 && headingWords(plainText(inlinesOf(first.text, parsed.definitions).inlines)) === headingWords(options.title)) {
-    blocks = blocks.slice(1);
+  if (options.title && first?.kind === "heading" && first.level === 1) {
+    const heading = inlinesOf(first.text, parsed.definitions, m);
+    if (headingWords(plainText(heading.inlines, m)) === headingWords(options.title)) blocks = blocks.slice(1);
+    release(m, heading.kept);
   }
   writeBlocks(w, blocks, false);
-  return { html: w.out.toString(), work: w.work };
+  return { html: w.out.toString(), meter: m };
 }

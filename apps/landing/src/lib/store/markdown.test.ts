@@ -192,6 +192,24 @@ describe("what a README may hold", () => {
   });
 });
 
+describe("why a document is its text", () => {
+  const file = (p: string) => FILES + p;
+  test("past what it may keep (16 MB, as the heap counts it): keep, said too long", () => {
+    const out = renderWith("- a\n+ b\n".repeat(65_536), { file });
+    expect(out.cut).toBe("keep");
+    expect(out.html).toContain("Shown as plain text: it's too long to lay out.");
+  });
+  test("past what it may write: size, said too long", () => {
+    expect(renderWith(`|${"a|".repeat(64)}\n|${"-|".repeat(64)}\n${"a\n".repeat(32_000)}`, { file }).cut).toBe("size");
+  });
+  test("the renderer failing: error, said it couldn't be laid out", () => {
+    // (A file function that throws stands in for a fault anywhere in it.)
+    const out = renderWith("![x](a.png)", { file: () => { throw new Error("fault"); } });
+    expect(out.cut).toBe("error");
+    expect(out.html).toContain("Shown as plain text: it couldn't be laid out.");
+  });
+});
+
 describe("references", () => {
   test.each([
     ["shots/a.png", { kind: "file", path: "shots/a.png" }],
@@ -235,9 +253,15 @@ describe("a version's notes in one line", () => {
     expect(firstLine(null)).toBe("");
   });
 
+  test("only its start is read: notes of 64 KB cost no more than their first 4 KB", async () => {
+    const { FIRST_LINE_READS } = await import("./markdown.ts");
+    expect(firstLine(`${"\n".repeat(FIRST_LINE_READS)}late`)).toBe("");
+    expect(firstLine(`- First\n${"x".repeat(64 * 1024)}`)).toBe("First");
+  });
+
   test("…at once, whatever it holds (a line of 64 KB of brackets once took the square of its length)", () => {
     const started = performance.now();
-    expect(firstLine("[".repeat(64 * 1024))).toBe("[".repeat(64 * 1024));
+    expect(firstLine("[".repeat(64 * 1024))).toBe("[".repeat(4096));
     expect(performance.now() - started).toBeLessThan(250);
   });
 });

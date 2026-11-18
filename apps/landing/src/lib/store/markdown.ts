@@ -17,18 +17,23 @@
 
 import { blocksOf } from "./md/blocks.ts";
 import { asText, TAGS, toHtml, TooLarge, type RenderOptions } from "./md/html.ts";
+import { TOO_MUCH } from "./md/meter.ts";
 import { inlinesOf, plainText } from "./md/inlines.ts";
 
 export { target, type RenderOptions, type Target } from "./md/html.ts";
 
 /** Bump when the HTML this makes changes, so kept renderings are made again. */
-export const RENDERER = 7;
+export const RENDERER = 9;
 
 /** What a rendering may write: past it, the document is shown as its text. */
 export const BOUNDS = { html: 2 * 1024 * 1024 } as const;
 
-/** Why a document was shown as its text: what it would write is past BOUNDS.html, or the renderer failed. */
-export type Cut = "size" | "error";
+/**
+ * Why a document was shown as its text: what it would write is past
+ * BOUNDS.html ("size"), what it would keep is past KEEP_MOST ("keep"), or
+ * the renderer failed ("error").
+ */
+export type Cut = "size" | "keep" | "error";
 
 export interface Rendered {
   html: string;
@@ -53,7 +58,8 @@ export function render(markdown: string, options: RenderOptions): Rendered {
   try {
     return { html: toHtml(markdown, options, BOUNDS.html).html, cut: null };
   } catch (error) {
-    return { html: asText(markdown), cut: error instanceof TooLarge ? "size" : "error" };
+    const cut: Cut = error === TOO_MUCH ? "keep" : error instanceof TooLarge ? "size" : "error";
+    return { html: asText(markdown, cut === "error" ? "failed" : "long"), cut };
   }
 }
 
@@ -62,12 +68,28 @@ export function renderMarkdown(markdown: string, options: RenderOptions): string
   return render(markdown, options).html;
 }
 
+/** What firstLine reads of a version's notes: a line needs no more. */
+export const FIRST_LINE_READS = 4096;
+
 /**
  * A version's notes in one line, for its row (the first block that says
  * something, without its markdown): "- Fixed **the** timer" → "Fixed the timer".
+ * Only the first FIRST_LINE_READS characters are read (a page lists up to
+ * 28 versions; each costs a few, never its whole notes).
  */
 export function firstLine(markdown: string | null | undefined): string {
-  const { blocks, definitions } = blocksOf(markdown ?? "");
+  const start = (markdown ?? "").slice(0, FIRST_LINE_READS);
+  try {
+    return firstLineOf(start);
+  } catch (error) {
+    if (!(error instanceof TooLarge)) throw error;
+    // (Notes too large to read stand as their first line, as written.)
+    return start.split("\n", 64).find((l) => l.trim() !== "")?.trim() ?? "";
+  }
+}
+
+function firstLineOf(markdown: string): string {
+  const { blocks, definitions } = blocksOf(markdown);
   // (Depth first: a list's first item, a quote's first paragraph.)
   const stack = [...blocks].reverse();
   while (stack.length > 0) {

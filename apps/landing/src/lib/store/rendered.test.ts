@@ -1,14 +1,28 @@
-import { expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import { PIPELINE, render as renderWithin, RENDERER, type Rendered, type RenderOptions } from "./markdown.ts";
-import { renderedOnce, type Keeper } from "./rendered.ts";
+import { drawn, HOLDS, renderedOnce, type Keeper } from "./rendered.ts";
 
-/** A cache in memory, as the Worker's keeps responses. */
-const memory = (): Keeper & { size(): number } => {
-  const kept = new Map<string, string>();
+/** A cache in memory, as the Worker's keeps responses: each until its max-age, by a clock the test moves. */
+const memory = (): Keeper & { size(): number; clock: { now: number } } => {
+  const clock = { now: 0 };
+  const kept = new Map<string, { body: string; headers: [string, string][]; until: number }>();
+  const live = (url: string) => {
+    const entry = kept.get(url);
+    if (entry && entry.until <= clock.now) kept.delete(url);
+    return kept.get(url);
+  };
   return {
-    match: async (r) => (kept.has(r.url) ? new Response(kept.get(r.url)) : undefined),
-    put: async (r, response) => void kept.set(r.url, await response.text()),
-    size: () => kept.size,
+    clock,
+    match: async (r) => {
+      const entry = live(r.url);
+      return entry ? new Response(entry.body, { headers: entry.headers }) : undefined;
+    },
+    put: async (r, response) => {
+      const age = Number(/max-age=(\d+)/.exec(response.headers.get("cache-control") ?? "")?.[1] ?? 0);
+      kept.set(r.url, { body: await response.text(), headers: [...response.headers], until: clock.now + age });
+    },
+    delete: async (r) => kept.delete(r.url),
+    size: () => [...kept.keys()].filter((url) => live(url)).length,
   };
 };
 
@@ -69,4 +83,99 @@ test("a document too large to draw is kept as its text, said so (the same text a
   const html = await renderedOnce("https://zeron.sh", "a", "1.0.0", "notes", wide, options, { store });
   expect(html).toContain("Shown as plain text: it's too long to lay out.");
   expect(store.size()).toBe(1);
+});
+
+test("a key's fields can't run into each other: a title with a line end and the text after it are two renderings", async () => {
+  const store = memory();
+  let renders = 0;
+  const render = (md: string, o: RenderOptions): Rendered => (renders++, renderWithin(md, o));
+  const file = (p: string) => `/plugins/a/files/1.0.0/${p}`;
+  // (Joined by line ends, these two were one key: "a\nb\nc".)
+  await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "b\nc", { file, title: "a" }, { store, render });
+  await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "c", { file, title: "a\nb" }, { store, render });
+  expect(renders).toBe(2);
+  expect(store.size()).toBe(2);
+});
+
+describe("a try is recorded before it is made", () => {
+  const options = { file: (p: string) => `/plugins/a/files/1.0.0/${p}`, demote: true };
+  const at = (store: ReturnType<typeof memory>, seconds: number) => void (store.clock.now += seconds);
+
+  test("a renderer that throws: the next request shows the text, said so, without trying; after the hold, one more try", async () => {
+    const store = memory();
+    let tries = 0;
+    const dies = (): Rendered => {
+      tries++;
+      throw new Error("killed");
+    };
+    for (const keep of [true, false]) {
+      const s = keep ? store : memory();
+      tries = 0;
+      const first = await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi <b>", options, { store: s, render: dies, keep });
+      expect(first.cut).toBe("attempt");
+      expect(first.html).toContain("Shown as plain text: it couldn't be laid out.");
+      expect(first.html).toContain("# Hi &lt;b&gt;");
+      const again = await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi <b>", options, { store: s, render: dies, keep });
+      expect(again.cut).toBe("attempt");
+      expect(tries).toBe(1);
+      // (Held five minutes: just before, still held; then one more try.)
+      at(s, HOLDS[0] - 1);
+      await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi <b>", options, { store: s, render: dies, keep });
+      expect(tries).toBe(1);
+      at(s, 1);
+      await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi <b>", options, { store: s, render: dies, keep });
+      expect(tries).toBe(2);
+      // A second death: held an hour now, then six.
+      at(s, HOLDS[0] + 1);
+      await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi <b>", options, { store: s, render: dies, keep });
+      expect(tries).toBe(2);
+      at(s, HOLDS[1]);
+      await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi <b>", options, { store: s, render: dies, keep });
+      expect(tries).toBe(3);
+      at(s, HOLDS[1] + 1);
+      await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi <b>", options, { store: s, render: dies, keep });
+      expect(tries).toBe(3);
+      at(s, HOLDS[2]);
+      await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi <b>", options, { store: s, render: dies, keep });
+      expect(tries).toBe(4);
+    }
+  });
+
+  test("a renderer that never returns (the kill the local runtime can't do): the next request shows the text, without trying", async () => {
+    const store = memory();
+    let tries = 0;
+    const never = (): Promise<Rendered> => (tries++, new Promise<Rendered>(() => {}));
+    void drawn("https://zeron.sh", "a", "1.0.0", "notes", "Some *notes*.", options, { store, render: never, keep: true });
+    // (The try is recorded, and awaited, before the renderer is called.)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(tries).toBe(1);
+    const next = await drawn("https://zeron.sh", "a", "1.0.0", "notes", "Some *notes*.", options, { store, render: never, keep: true });
+    expect(next).toEqual({ html: expect.stringContaining("Shown as plain text: it couldn't be laid out."), cut: "attempt" });
+    expect(tries).toBe(1);
+    // After the hold, one more try, and this time it finishes: drawn, kept, and the tries forgotten.
+    at(store, HOLDS[0]);
+    const drawnNow = await drawn("https://zeron.sh", "a", "1.0.0", "notes", "Some *notes*.", options, { store, keep: true });
+    expect(drawnNow).toEqual({ html: expect.stringContaining("<em>notes</em>"), cut: null });
+    expect(store.size()).toBe(1);
+  });
+
+  test("the renderer's own failure is held like a death, never kept as a fact", async () => {
+    const store = memory();
+    const failing = (md: string): Rendered => ({ html: `<p class="as-text">x</p>${md}`, cut: "error" });
+    const first = await drawn("https://zeron.sh", "a", "1.0.0", "readme", "x", options, { store, render: failing, keep: true });
+    expect(first.cut).toBe("error");
+    expect((await drawn("https://zeron.sh", "a", "1.0.0", "readme", "x", options, { store, render: failing, keep: true })).cut).toBe("attempt");
+    at(store, HOLDS[0]);
+    expect((await drawn("https://zeron.sh", "a", "1.0.0", "readme", "x", options, { store, keep: true })).cut).toBe(null);
+  });
+
+  test("where nothing is kept (a version in review), a finished try takes its record away", async () => {
+    const store = memory();
+    let renders = 0;
+    const render = (md: string, o: RenderOptions): Rendered => (renders++, renderWithin(md, o));
+    await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, keep: false });
+    await drawn("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, keep: false });
+    expect(renders).toBe(2);
+    expect(store.size()).toBe(0);
+  });
 });
