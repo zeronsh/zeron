@@ -179,7 +179,7 @@ impl Disk {
         self.doc
             .queue_command(&SessionCommandEntry {
                 id: id.into(),
-                payload: SessionCommandPayload::Run {
+                payload: SessionCommandPayload::Run { injected: None,
                     request: run_request("long task"),
                     message_id: message_id.into(),
                 },

@@ -386,7 +386,7 @@ fn run_payload(message_id: &str, upload_id: &str) -> SessionCommandPayload {
         "look at this\n\nAttached images (local files — open them to view):\n- {reference}"
     );
     request.attachments = vec![reference];
-    SessionCommandPayload::Run {
+    SessionCommandPayload::Run { injected: None,
         request,
         message_id: message_id.into(),
     }
@@ -537,7 +537,7 @@ async fn send_text(core: &EngineCore, message_id: &str, text: &str) {
             methods::QUEUE_COMMAND,
             serde_json::json!({
                 "chatId": CHAT,
-                "command": serde_json::to_value(SessionCommandPayload::Run {
+                "command": serde_json::to_value(SessionCommandPayload::Run { injected: None,
                     request: text_request(text),
                     message_id: message_id.into(),
                 }).unwrap(),
@@ -608,7 +608,7 @@ async fn an_app_capture_reaches_the_agent_with_its_final_path() {
         &core,
         &entry(
             "cmd-1",
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request,
                 message_id: "m1".into(),
             },
@@ -1662,7 +1662,7 @@ async fn a_row_whose_file_aged_out_fails_with_a_retry_that_sends_it() {
         Some("attachments never arrived")
     );
     match &failed.payload {
-        SessionCommandPayload::Run {
+        SessionCommandPayload::Run { injected: _,
             message_id,
             request,
         } => {

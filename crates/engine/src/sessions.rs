@@ -38,6 +38,10 @@ use crate::doc_host::{ChatDocHandle, DocHost};
 
 #[path = "session_activity.rs"]
 mod activity;
+#[path = "live_activity.rs"]
+mod live;
+#[path = "session_limits.rs"]
+mod limits;
 use crate::registry::{HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
@@ -265,6 +269,10 @@ struct Inner {
     command_tasks: Mutex<HashMap<String, Vec<crate::commands::CommandTask>>>,
     /// The engine is shutting down: dying runs re-dispatch nothing.
     shutting_down: std::sync::atomic::AtomicBool,
+    /// Each chat's live subagents (their sub-chat docs,
+    /// `{chat}--sub--{tool_use_id}`), as its run reports them: what the
+    /// shutdown marks when it stops them.
+    live_subagents: Mutex<HashMap<String, Vec<String>>>,
     /// A shutdown marks the turns it cuts off for pick-up on the next boot
     /// (cleared by [`SessionsEngine::forgo_revival`]).
     revive_after_shutdown: std::sync::atomic::AtomicBool,
@@ -343,6 +351,9 @@ struct Inner {
     turn_listener: OnceLock<TurnListener>,
     /// Plugins whose native MCP servers local runs get (absent in bare tests).
     plugins: OnceLock<crate::plugins::Plugins>,
+    /// Per chat: the usage limit cleared as its current turn started (its
+    /// resume): a limit that turn runs straight back into counts on from it.
+    limit_resumed: Mutex<HashMap<String, zeron_proto::usage_limit::SessionLimit>>,
     /// New chats' warm starts, by the id the chat will be created with
     /// ([`warm_start`]).
     warm: Mutex<HashMap<String, warm_start::WarmStart>>,
@@ -486,6 +497,7 @@ impl SessionsEngine {
                 runtime_tasks: Mutex::new(HashMap::new()),
                 command_tasks: Mutex::new(HashMap::new()),
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
+                live_subagents: Mutex::new(HashMap::new()),
                 revive_after_shutdown: std::sync::atomic::AtomicBool::new(true),
                 revivals: Mutex::new(HashMap::new()),
                 revivals_starting: Mutex::new(std::collections::HashSet::new()),
@@ -515,6 +527,7 @@ impl SessionsEngine {
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
                 plugins: OnceLock::new(),
+                limit_resumed: Mutex::new(HashMap::new()),
                 warm: Mutex::new(HashMap::new()),
                 warm_leases: Mutex::new(None),
             }),
@@ -2526,6 +2539,34 @@ impl SessionsEngine {
             .revive_after_shutdown
             .load(std::sync::atomic::Ordering::Acquire)
         {
+            // Turns that ended into a wait on their own background work: the
+            // shutdown ends that work, and the wait with it (their rows say
+            // nothing of it by the next boot). Marked first, for the board's
+            // start-up pass to resume them.
+            let waits: Vec<(String, Vec<String>)> = lock(&self.inner.statuses)
+                .values()
+                .filter(|session| session.status != SessionStatus::Working)
+                .filter_map(|session| {
+                    let wait = session.waiting.as_ref()?;
+                    Some((session.chat_id.clone(), wait.on.iter().map(|o| o.label.clone()).collect()))
+                })
+                .collect();
+            for (chat_id, labels) in waits {
+                self.inner.journal.note_shutdown_wait(&chat_id, &labels);
+            }
+            // Chats whose subagents are still at work (in-process subagents:
+            // their sub-chats): the shutdown stops them, and the chat's row
+            // says nothing of them by the next boot. Marked, for the board's
+            // start-up pass to resume the chat with them named.
+            let live = lock(&self.inner.live_subagents).clone();
+            let with_subagents: Vec<(String, Vec<String>)> = lock(&self.inner.statuses)
+                .values()
+                .filter(|session| session.running_subagents > 0 || live.get(&session.chat_id).is_some_and(|d| !d.is_empty()))
+                .map(|session| (session.chat_id.clone(), live.get(&session.chat_id).cloned().unwrap_or_default()))
+                .collect();
+            for (chat_id, docs) in with_subagents {
+                self.inner.journal.note_shutdown_subagents(&chat_id, &docs);
+            }
             let working: Vec<String> = lock(&self.inner.statuses)
                 .values()
                 .filter(|session| session.status == SessionStatus::Working)
@@ -2563,6 +2604,30 @@ impl SessionsEngine {
         self.inner.journal.flush_all();
     }
 
+    /// The chats whose subagents the last shutdown stopped, with their
+    /// sub-chats (see [`Self::shutdown`]); taken once.
+    pub fn take_shutdown_subagents(&self) -> Vec<(String, Vec<String>)> {
+        self.inner.journal.take_shutdown_subagents().unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "shutdown subagent markers unreadable");
+            Vec::new()
+        })
+    }
+
+    /// The chats whose wait on their own background work the last shutdown
+    /// ended, with what each waited on (see [`Self::shutdown`]); taken once.
+    pub fn take_shutdown_waits(&self) -> Vec<(String, Vec<String>)> {
+        self.inner.journal.take_shutdown_waits().unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "shutdown wait markers unreadable");
+            Vec::new()
+        })
+    }
+
+    /// Whether the engine's shutdown has begun (every turn is being stopped
+    /// by it, not by anyone's word).
+    pub fn shutting_down(&self) -> bool {
+        self.inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// The engine is going down because its account signed out: the turns
     /// the coming [`Self::shutdown`] cuts off stay ended, rather than
     /// starting again when the account next signs in. Sign-out is the user
@@ -2581,6 +2646,15 @@ impl SessionsEngine {
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         self.inner.set_status(chat_id, status, fresh_start);
+    }
+}
+
+#[cfg(test)]
+impl SessionsEngine {
+    /// Test seam: a chat's session status as a run would set it (a turn in
+    /// flight while `Working`), for tests of what waits on a turn boundary.
+    pub(crate) fn set_status_for_test(&self, chat_id: &str, status: SessionStatus) {
+        self.set_status(chat_id, status, true);
     }
 }
 
@@ -2893,8 +2967,16 @@ impl Inner {
     /// mirrored like any status transition (it doubles as a heartbeat); an
     /// unchanged count is a no-op, and a chat without a status row has
     /// nothing to badge yet.
-    fn set_running_subagents(&self, chat_id: &str, running: usize) {
-        let running = u32::try_from(running).unwrap_or(u32::MAX);
+    fn set_running_subagents(&self, chat_id: &str, docs: Vec<String>) {
+        let running = u32::try_from(docs.len()).unwrap_or(u32::MAX);
+        {
+            let mut live = lock(&self.live_subagents);
+            if docs.is_empty() {
+                live.remove(chat_id);
+            } else {
+                live.insert(chat_id.to_owned(), docs);
+            }
+        }
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
@@ -2983,7 +3065,23 @@ impl Inner {
         completed_turn: Option<String>,
         outcome: Option<DoneStatus>,
     ) {
+        self.update_status(chat_id, status, fresh_start, completed_turn, outcome, None);
+    }
+
+    /// [`Self::set_status_with_completion`], also recording the usage limit
+    /// that ended the turn (`limit`) in the same row write, so no reader sees
+    /// its `Errored` without it.
+    fn update_status(
+        &self,
+        chat_id: &str,
+        status: SessionStatus,
+        fresh_start: bool,
+        completed_turn: Option<String>,
+        outcome: Option<DoneStatus>,
+        limit: Option<zeron_proto::usage_limit::SessionLimit>,
+    ) {
         let now = Utc::now();
+        let mut limit_cleared = false;
         let session = {
             let mut statuses = lock(&self.statuses);
             let entry = statuses
@@ -3000,6 +3098,9 @@ impl Inner {
                     running_subagents: 0,
                     background_tasks: Vec::new(),
                     waiting: None,
+                    activity: None,
+                    todo: None,
+                    limited: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -3021,6 +3122,7 @@ impl Inner {
                 entry.last_completed_turn = Some(turn);
             }
             entry.status = status;
+            live::settle(entry, status, now);
             if let Some(outcome) = outcome {
                 entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
                     status: outcome,
@@ -3033,6 +3135,24 @@ impl Inner {
                 });
             } else if status == SessionStatus::Working && (fresh_start || !was_active) {
                 entry.last_turn_outcome = None;
+            }
+            // A turn starting ends a limit's wait (its resume, or anyone's
+            // message): kept aside, for a limit that turn runs straight back
+            // into. A chat running on another account meanwhile keeps its
+            // limit until it switches back.
+            if status == SessionStatus::Working
+                && (fresh_start || !was_active)
+                && entry.limited.as_ref().is_some_and(|l| l.waiting())
+                && let Some(cleared) = entry.limited.take()
+            {
+                lock(&self.limit_resumed).insert(chat_id.to_owned(), cleared);
+                limit_cleared = true;
+            }
+            if limit.is_some() {
+                entry.limited = limit;
+            } else if was_active && matches!(status, SessionStatus::Idle | SessionStatus::Errored) {
+                // A turn ended on anything but the limit: a resume that ran.
+                lock(&self.limit_resumed).remove(chat_id);
             }
             entry.updated_at = now;
             match status {
@@ -3053,6 +3173,9 @@ impl Inner {
             (session, was)
         };
         let (session, was) = session;
+        if limit_cleared {
+            self.journal.clear_limited(chat_id);
+        }
         // Mirror the transition into the workspace doc's session-status row so
         // remote devices' sidebars show this run (staleness-checked client-side).
         if self.activity_tx.get().is_none()
@@ -3115,18 +3238,18 @@ impl Inner {
 
     /// Whether a run of `chat_id` launches without its provider's own
     /// subagents (Settings → Providers), delegating through side chats
-    /// instead. Never for a chat that has a parent: delegation is one level
-    /// deep, so a side chat can't create chats and keeps its provider's own.
+    /// instead. Never for a chat that has a parent (a side chat or subagent
+    /// can't create chats, so it keeps its provider's own), except a crew
+    /// thread: an orchestrator's thread delegates to subagents of its own.
     /// Nor while its parent is unknown here (its run outran its row).
     fn side_chats_only(&self, chat_id: &str, harness_id: HarnessId) -> bool {
         !self.registry.native_subagents(harness_id)
             && self.workspace().is_none_or(|ws| {
                 !ws.parent_unknown(chat_id)
-                    && !ws
-                        .chat(chat_id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|chat| chat.parent_chat_id.is_some())
+                    && !ws.chat(chat_id).ok().flatten().is_some_and(|chat| {
+                        chat.parent_chat_id.is_some()
+                            && chat.child_kind != Some(zeron_proto::ChildKind::Crew)
+                    })
             })
     }
 
@@ -3178,6 +3301,12 @@ impl Inner {
                 zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV.to_owned(),
                 "1".to_owned(),
             );
+        }
+        // A restriction, never a grant: an id prefix is enough to take tools
+        // away (agents can't mint Brain dump ids, and the person's own chats
+        // never carry one).
+        if zeron_proto::orchestration::is_brain_dump_chat(chat_id) {
+            env.insert(zeron_proto::McpServer::ROUTER_ONLY_ENV.to_owned(), "1".to_owned());
         }
         let endpoint = lock(&self.mcp_endpoint).clone();
         if let Some(endpoint) = endpoint {
@@ -4717,6 +4846,8 @@ async fn drive_run(
         .filter(|h| h.run_id == run_id)
         .map(|h| h.open_tools.clone())
         .unwrap_or_default();
+    // What the agent is doing and its todo progress, for the session row.
+    let mut live = live::LiveTracker::new(inner.live_todo(&chat_id));
     let publish_open = |open: &std::collections::HashSet<String>| {
         open_count.store(open.len(), std::sync::atomic::Ordering::Release);
     };
@@ -5273,6 +5404,10 @@ async fn drive_run(
 
     let mut final_completed_turn = None;
     let mut final_outcome = None;
+    // This turn's `LimitReached` (its window and reset, if the provider
+    // said); and the limit the run ended on (see `usage_limit_text`).
+    let mut limit_signal: Option<(Option<String>, Option<chrono::DateTime<Utc>>)> = None;
+    let mut final_limit: Option<crate::usage_limit_text::LimitHit> = None;
     let final_status = loop {
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
@@ -5764,7 +5899,7 @@ async fn drive_run(
                             dirty: false,
                         },
                     );
-                    inner.set_running_subagents(&chat_id, subagents.len());
+                    inner.set_running_subagents(&chat_id, subagents.values().map(|s| s.doc_id.clone()).collect());
                     if !chip_streaming {
                         let _ = doc_ref.update_subagent_chip(
                             parent_tool_use_id,
@@ -5821,7 +5956,7 @@ async fn drive_run(
                         _ => MessageStatus::Complete,
                     };
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
-                    inner.set_running_subagents(&chat_id, subagents.len());
+                    inner.set_running_subagents(&chat_id, subagents.values().map(|s| s.doc_id.clone()).collect());
                     let doc_id = sink.doc_id.clone();
                     // FREEZE: the finished transcript uploads as a static R2
                     // blob (`blob/{chatId}/{subDocId}`) so viewers of
@@ -5889,6 +6024,13 @@ async fn drive_run(
                     .record_plan_usage(harness_id, &credential, windows.clone(), plan_label.clone())
                     .await;
             }
+            continue;
+        }
+        // The account's usage limit stopped the turn: kept for the turn's
+        // end, never journaled or written to the transcript.
+        if let AgentEvent::LimitReached { window, resets_at } = &event {
+            let (was_window, was_at) = limit_signal.take().unwrap_or_default();
+            limit_signal = Some((window.clone().or(was_window), resets_at.or(was_at)));
             continue;
         }
         // Capacity/occupancy can settle after Done; updating it must not reopen a turn.
@@ -6036,6 +6178,9 @@ async fn drive_run(
                 continue;
             }
             _ => {}
+        }
+        if let Some(update) = live.observe(&event, Utc::now(), std::time::Instant::now()) {
+            inner.set_live(&chat_id, update);
         }
         match &event {
             AgentEvent::ToolCall { id, .. }
@@ -6438,6 +6583,17 @@ async fn drive_run(
             final_completed_turn = completed_turn;
             // Retiring an already parked process is not a new turn outcome.
             final_outcome = turn_was_active.then_some(*status);
+            let turn_limit = limit_signal.take();
+            if *status == DoneStatus::Errored && !interrupted {
+                let errors: Vec<&str> = folded
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::Error { message, .. } => Some(message.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                final_limit = crate::usage_limit_text::limit_hit(turn_limit.as_ref(), &errors, Utc::now());
+            }
             break match status {
                 DoneStatus::Errored => SessionStatus::Errored,
                 _ => SessionStatus::Idle,
@@ -6468,7 +6624,7 @@ async fn drive_run(
             );
         }
     }
-    inner.set_running_subagents(&chat_id, 0);
+    inner.set_running_subagents(&chat_id, Vec::new());
     // The runtime is gone, and its background processes with it.
     inner.set_background_tasks(&chat_id, Vec::new());
     // So is anything it waited on. A wait's held end stands, unless the
@@ -6490,13 +6646,18 @@ async fn drive_run(
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
-    inner.set_status_with_completion(
-        &chat_id,
-        final_status,
-        false,
-        final_completed_turn,
-        final_outcome,
-    );
+    match final_limit {
+        Some(hit) if final_status == SessionStatus::Errored => {
+            inner.set_status_limited(&chat_id, harness_id, final_completed_turn, final_outcome, hit);
+        }
+        _ => inner.set_status_with_completion(
+            &chat_id,
+            final_status,
+            false,
+            final_completed_turn,
+            final_outcome,
+        ),
+    }
     // A Stop cancels the messages it found waiting; one accepted after it
     // began is still the user's next message and must run.
     let orphans: Vec<RoutedSteer> = if inner
@@ -6575,6 +6736,9 @@ mod tests {
             last_turn_outcome: None,
             terminal_activity: None,
             waiting: None,
+            activity: None,
+            todo: None,
+            limited: None,
         }
     }
 
@@ -8029,6 +8193,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_codex_usage_limit_error_ends_the_turn_limited_until_its_reset() {
+        let rig = wake_rig("chat-limit-codex", false).await;
+        rig.feed
+            .send(AgentEvent::Error { message: "Codex usage limit reached — it resets in 2h 14m.".into() })
+            .unwrap();
+        rig.feed.send(done(DoneStatus::Errored)).unwrap();
+        let s = settled(&rig).await;
+        assert_eq!(s.status, SessionStatus::Errored);
+        let limit = s.limited.expect("limited");
+        assert_eq!((limit.provider.as_str(), limit.window.as_deref(), limit.attempt), ("mock", Some("usage"), 0));
+        let wait = limit.until.expect("its reset, from its words") - limit.since;
+        assert!((wait - chrono::Duration::minutes(134)).num_seconds().abs() <= 60, "{wait}");
+        // Marked beside the journal, for a restart.
+        assert!(rig.core.sessions.limit_marks().iter().any(|m| m.chat_id == rig.chat && m.limit.since == limit.since));
+        rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_claude_limit_signal_gives_its_window_and_reset() {
+        let rig = wake_rig("chat-limit-claude", false).await;
+        let resets = Utc::now() + chrono::Duration::hours(3);
+        let resets = chrono::DateTime::from_timestamp(resets.timestamp(), 0).unwrap();
+        rig.feed.send(AgentEvent::LimitReached { window: Some("weekly".into()), resets_at: Some(resets) }).unwrap();
+        rig.feed
+            .send(AgentEvent::Error {
+                message: "Claude weekly limit reached — the turn was blocked. Try again after it resets.".into(),
+            })
+            .unwrap();
+        rig.feed.send(done(DoneStatus::Errored)).unwrap();
+        let limit = settled(&rig).await.limited.expect("limited");
+        assert_eq!((limit.window.as_deref(), limit.until), (Some("weekly"), Some(resets)));
+        rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_claude_window_text_without_a_time_is_a_limit_to_recheck() {
+        let rig = wake_rig("chat-limit-claude-text", false).await;
+        rig.feed
+            .send(AgentEvent::Error {
+                message: "Claude 5-hour limit reached — the turn was blocked. Try again after it resets.".into(),
+            })
+            .unwrap();
+        rig.feed.send(done(DoneStatus::Errored)).unwrap();
+        let limit = settled(&rig).await.limited.expect("limited");
+        assert_eq!((limit.window.as_deref(), limit.until), (Some("5-hour"), None));
+        rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn another_error_is_no_limit() {
+        let rig = wake_rig("chat-limit-none", false).await;
+        rig.feed.send(AgentEvent::Error { message: "Harness exited with status 1".into() }).unwrap();
+        rig.feed.send(done(DoneStatus::Errored)).unwrap();
+        let s = settled(&rig).await;
+        assert_eq!((s.status, s.limited), (SessionStatus::Errored, None));
+        rig.core.sessions.shutdown().await;
+    }
+
+    #[test]
+    fn the_next_turn_clears_a_limit_and_one_that_hits_it_again_counts_on() {
+        use crate::usage_limit_text::LimitHit;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SessionsEngine::new(
+            "dev".into(),
+            Arc::new(RunJournal::open(dir.path()).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let inner = &engine.inner;
+        let hit = || LimitHit { window: Some("5-hour".into()), until: Some(Utc::now() + chrono::Duration::hours(1)) };
+        let limit = |e: &SessionsEngine| e.session_status("c").and_then(|s| s.limited);
+        inner.set_status("c", SessionStatus::Working, true);
+        inner.set_status_limited("c", HarnessId::Codex, None, Some(DoneStatus::Errored), hit());
+        assert_eq!(limit(&engine).map(|l| (l.provider, l.attempt)), Some(("codex".to_owned(), 0)));
+        assert_eq!(engine.limit_marks().len(), 1);
+        // Its resume starts a turn: the wait is over.
+        inner.set_status("c", SessionStatus::Working, true);
+        assert_eq!(limit(&engine), None);
+        assert!(engine.limit_marks().is_empty());
+        // That turn runs straight back into it: attempt 1.
+        inner.set_status_limited("c", HarnessId::Codex, None, Some(DoneStatus::Errored), hit());
+        assert_eq!(limit(&engine).map(|l| l.attempt), Some(1));
+        // A resumed turn that ends otherwise starts the count over.
+        inner.set_status("c", SessionStatus::Working, true);
+        inner.set_status("c", SessionStatus::Idle, false);
+        inner.set_status("c", SessionStatus::Working, true);
+        inner.set_status_limited("c", HarnessId::Codex, None, Some(DoneStatus::Errored), hit());
+        assert_eq!(limit(&engine).map(|l| l.attempt), Some(0));
+        // Running on another account meanwhile: its turns keep the limit
+        // (switched back after the reset).
+        engine.update_limited(
+            "c",
+            |l| {
+                if let Some(l) = l.as_mut() {
+                    l.switched_to = Some(zeron_proto::usage_limit::SwitchedAccount {
+                        account_slot: "slot-2".into(),
+                        account_label: "other@example.com".into(),
+                        at: Utc::now(),
+                        harness: None,
+                        model: None,
+                    });
+                }
+            },
+            None,
+        );
+        inner.set_status("c", SessionStatus::Working, true);
+        assert!(limit(&engine).is_some_and(|l| !l.waiting()));
+    }
+
+    #[tokio::test]
     async fn a_turn_ending_with_a_background_agent_waits_and_its_wake_turn_marks_the_end() {
         let rig = wake_rig("chat-wait-wake", true).await;
         rig.turn.set_background(1);
@@ -8056,6 +8329,124 @@ mod tests {
         assert!(s.waiting.is_none());
         assert!(s.last_completed_turn.is_some());
         rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_chat_waiting_on_its_background_work_when_the_engine_stops_is_resumed_once() {
+        use zeron_rpc::{Caller, RpcService, methods, with_caller};
+        let rig = wake_rig("chat-wait-stop", true).await;
+        // The chat as the workspace lists it (hosted here).
+        let device = rig.core.orchestration.device_id().to_owned();
+        with_caller(
+            Caller::Local,
+            rig.core.rpc_service().handle(
+                methods::MUTATE,
+                serde_json::json!({"op":"createChat","chatId":rig.chat,"deviceId":device,
+                    "config":{"harness":"mock","sandbox":"workspace-write"}}),
+            ),
+        )
+        .await
+        .unwrap();
+        // Its turn completed into a wait on its own build.
+        rig.turn.set_background(1);
+        rig.turn.set_background_agents(vec![waiting_agent("build")]);
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        assert_eq!(waits_on(&settled(&rig).await), ["build"]);
+        // The engine stops: the build and the wait end with it.
+        rig.core.shutdown().await;
+        let dir = rig._dir.path().to_path_buf();
+        drop(rig.core);
+
+        let core = crate::EngineCore::assemble(&dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
+        let rpc = core.rpc_service();
+        let before = core.orchestration.take_before_stop();
+        assert!(
+            before.iter().filter(|s| s.chat_id == "chat-wait-stop").all(|s| s.waiting.is_none()),
+            "its row no longer says it waited: the journal's mark does"
+        );
+        assert_eq!(rpc.resume_after_restart(before), ["chat-wait-stop"]);
+        // Once: the mark is taken.
+        assert!(rpc.resume_after_restart(core.orchestration.take_before_stop()).is_empty());
+        let handle = core.doc_host.open("chat-wait-stop").unwrap();
+        let mut said: Vec<String> = handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .into_iter()
+            .filter_map(|c| match c.payload {
+                zeron_doc::SessionCommandPayload::Run { request, .. } => Some(request.prompt),
+                _ => None,
+            })
+            .collect();
+        said.extend(handle.doc().read_queue().unwrap().into_iter().map(|q| q.text));
+        let resumed: Vec<&String> = said.iter().filter(|p| p.contains("[Resumed] The engine restarted")).collect();
+        assert_eq!(resumed.len(), 1, "{said:?}");
+        assert!(resumed[0].contains("agent build") && resumed[0].contains("run it again"), "{}", resumed[0]);
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_chat_whose_subagent_runs_when_the_engine_stops_is_resumed_once() {
+        use zeron_rpc::{Caller, RpcService, methods, with_caller};
+        let rig = wake_rig("chat-sub-stop", false).await;
+        let device = rig.core.orchestration.device_id().to_owned();
+        with_caller(
+            Caller::Local,
+            rig.core.rpc_service().handle(
+                methods::MUTATE,
+                serde_json::json!({"op":"createChat","chatId":rig.chat,"deviceId":device,
+                    "config":{"harness":"mock","sandbox":"workspace-write"}}),
+            ),
+        )
+        .await
+        .unwrap();
+        // The parent spawns a subagent, which streams; the parent's turn ends
+        // while it runs on.
+        rig.feed
+            .send(AgentEvent::ToolCall {
+                id: "toolu_sub1".into(),
+                call: zeron_proto::ToolCall::Unknown { name: "Agent".into(), input: None },
+            })
+            .unwrap();
+        rig.feed
+            .send(AgentEvent::Subagent {
+                parent_tool_use_id: "toolu_sub1".into(),
+                event: Box::new(AgentEvent::TextDelta { text: "looking".into() }),
+            })
+            .unwrap();
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        let s = settled(&rig).await;
+        assert_eq!(s.running_subagents, 1, "{s:?}");
+        // The engine stops: the subagent with it.
+        rig.core.shutdown().await;
+        let dir = rig._dir.path().to_path_buf();
+        drop(rig.core);
+
+        let core = crate::EngineCore::assemble(&dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
+        let rpc = core.rpc_service();
+        let before = core.orchestration.take_before_stop();
+        assert!(
+            before.iter().filter(|s| s.chat_id == "chat-sub-stop").all(|s| s.running_subagents == 0),
+            "its row no longer counts the subagent: the journal's mark does"
+        );
+        assert_eq!(rpc.resume_after_restart(before), ["chat-sub-stop"]);
+        assert!(rpc.resume_after_restart(core.orchestration.take_before_stop()).is_empty(), "once");
+        let handle = core.doc_host.open("chat-sub-stop").unwrap();
+        let mut said: Vec<String> = handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .into_iter()
+            .filter_map(|c| match c.payload {
+                zeron_doc::SessionCommandPayload::Run { request, .. } => Some(request.prompt),
+                _ => None,
+            })
+            .collect();
+        said.extend(handle.doc().read_queue().unwrap().into_iter().map(|q| q.text));
+        let resumed: Vec<&String> = said.iter().filter(|p| p.contains("[Resumed] The engine restarted; your subagents")).collect();
+        assert_eq!(resumed.len(), 1, "{said:?}");
+        assert!(resumed[0].contains("chat-sub-stop--sub--toolu_sub1"), "{}", resumed[0]);
+        core.shutdown().await;
     }
 
     #[tokio::test]

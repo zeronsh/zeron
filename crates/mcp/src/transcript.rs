@@ -109,8 +109,23 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
     let mut tools = Vec::new();
     let mut pending_input = None;
     let mut errors = Vec::new();
+    // A "Crew updates" message reads as its reports; its text parts are
+    // only there for builds that don't know them.
+    let crew = entry.parts.iter().find_map(|part| match part {
+        MessagePart::CrewReports { reports, .. } => {
+            Some(zeron_proto::orchestration::reports_prompt(reports))
+        }
+        _ => None,
+    });
+    if let Some(crew) = &crew {
+        text_parts.push(crew.as_str());
+    }
     for part in &entry.parts {
         match part {
+            MessagePart::Text { .. } if crew.is_some() => {}
+            MessagePart::CrewReports { .. } => {}
+            // (What kind of engine message it is: its text says it all.)
+            MessagePart::Injected { .. } => {}
             MessagePart::Text { text, .. } => {
                 if !text.trim().is_empty() {
                     text_parts.push(text.as_str());
@@ -247,6 +262,39 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
         }
+    }
+
+    #[test]
+    fn crew_updates_read_as_their_reports_not_their_fallback_text() {
+        use zeron_proto::orchestration::{Report, ReportState};
+        let report = Report {
+            id: "r1".into(),
+            orchestrator_id: "orch".into(),
+            from_chat: "crew-1".into(),
+            item_id: Some("item-9".into()),
+            state: ReportState::Blocked,
+            summary: "needs a token".into(),
+            detail: "CI secret missing".into(),
+            links: vec![],
+            progress: None,
+            at: chrono::Utc::now(),
+            result: None,
+        };
+        let rendered = render_entries(
+            &[entry(
+                "crew:1",
+                MessageRole::User,
+                vec![
+                    MessagePart::Text { id: "t0".into(), text: "FALLBACK".into() },
+                    MessagePart::CrewReports { id: "crew".into(), reports: vec![report] },
+                ],
+            )],
+            RenderOptions::default(),
+        );
+        let text = &rendered[0].text;
+        assert!(!text.contains("FALLBACK"), "{text}");
+        assert!(text.contains("[blocked] chat crew-1 item item-9: needs a token"), "{text}");
+        assert!(text.contains("CI secret missing"), "{text}");
     }
 
     #[test]

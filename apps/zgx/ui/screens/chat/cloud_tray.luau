@@ -168,7 +168,7 @@ function M.bind(c: Bind): any
 			return nil
 		end
 		local a = b.alert:get()
-		local line = if a and a.kind == "expiring" then nil else logic.line(s, { intent = intent })
+		local line = if a and a.kind == "expiring" then nil else logic.line(s, { intent = intent, restarting = logic.size_name(cloud.machines(), cloud.resizing:get()[s.chat]) })
 		if line and line.boot and c.sending and c.sending() then
 			line = nil
 		end

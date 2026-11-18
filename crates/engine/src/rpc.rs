@@ -60,6 +60,9 @@
 //! whose checkout always lives on the routed target device.
 
 mod agent_gate;
+mod brain_model;
+pub(crate) use agent_gate::run_as_chat_is_set;
+mod crew_messages;
 mod device_stats;
 mod remote_plugins;
 mod voice_chat;
@@ -559,6 +562,10 @@ struct ListAgentAccountsParams {
 struct AgentAccountParams {
     harness: HarnessId,
     account_id: String,
+    /// `ActivateAgentAccount` only: switch even to a login whose key the
+    /// provider rejected (refused otherwise).
+    #[serde(default)]
+    force: bool,
 }
 
 /// `AddAgentApiKey`. The key is never logged: this type has no `Debug`.
@@ -798,6 +805,16 @@ enum MutateParams {
         /// Cloud machine, cloning the project's GitHub repository.
         #[serde(default)]
         cloud: bool,
+        /// Its title, on the row from the first write (the Zeron MCP's
+        /// `create_chat` `title`): a crew thread is named from the moment
+        /// it joins its crew, not once a later rename lands.
+        #[serde(default)]
+        title: Option<String>,
+        /// With `cloud`: the size of machine it starts on (an id of
+        /// `CloudStatus.machines`), kept as the chat's own; the account's
+        /// default without one. Refused without `cloud`.
+        #[serde(default)]
+        machine: Option<String>,
         /// What that machine reaches (the composer's pick under Cloud); `None`
         /// = the account's default. The person's alone: from an agent, or
         /// another device, it is ignored.
@@ -940,7 +957,17 @@ pub struct EngineRpc {
     viewport_focus: crate::desktop_notify::ViewportFocus,
     /// The plugins service (absent in bare test assemblies).
     plugins: Option<crate::plugins::Plugins>,
+    /// Orchestrators, crews, the board, asks and dumps (one per engine:
+    /// `with_orchestration`; a bare assembly gets its own).
+    orchestration: crate::orchestration::Orchestration,
     engine_info: EngineInfo,
+}
+
+impl EngineRpc {
+    /// The change requests the app has already resolved (cache only).
+    pub(crate) fn known_change_requests(&self) -> Vec<zeron_proto::ChangeRequestSummary> {
+        self.change_requests.known()
+    }
 }
 
 impl EngineRpc {
@@ -976,6 +1003,7 @@ impl EngineRpc {
             build: Some(crate::build_id().to_owned()),
         };
         let github = GitHubCli::new().with_store(repos.data_dir());
+        let orchestration = crate::orchestration::Orchestration::new(workspace.clone());
         Self {
             voice: sessions.voice_manager(),
             sessions,
@@ -1002,8 +1030,62 @@ impl EngineRpc {
             credentials: None,
             viewport_focus: Default::default(),
             plugins: None,
+            orchestration,
             engine_info,
         }
+    }
+
+    /// Share the engine's orchestration (its comms feed, its wake timer).
+    pub fn with_orchestration(mut self, orchestration: crate::orchestration::Orchestration) -> Self {
+        self.orchestration = orchestration;
+        self
+    }
+
+    pub(crate) fn orchestration(&self) -> &crate::orchestration::Orchestration {
+        &self.orchestration
+    }
+
+    pub(crate) fn workspace_host(&self) -> &WorkspaceHost {
+        &self.workspace
+    }
+
+    pub(crate) fn doc_host_ref(&self) -> &DocHost {
+        &self.doc_host
+    }
+
+    pub(crate) fn registry_ref(&self) -> &std::sync::Arc<HarnessRegistry> {
+        &self.registry
+    }
+
+    pub(crate) fn sessions_ref(&self) -> &SessionsEngine {
+        &self.sessions
+    }
+
+    pub(crate) fn uploads_ref(&self) -> &Uploads {
+        &self.uploads
+    }
+
+    pub(crate) fn agent_accounts_ref(&self) -> &AgentAccounts {
+        &self.agent_accounts
+    }
+
+    /// This engine's data folder.
+    pub(crate) fn data_dir(&self) -> &std::path::Path {
+        self.repos.data_dir()
+    }
+
+    /// `createChat` as an RPC caller sends it: the agent gate first (an
+    /// agent's new chat is capped at its own access), then the mutation.
+    pub(crate) fn create_chat_gated(&self, params: serde_json::Value) -> Result<(), RpcError> {
+        let params = self.agent_gate(methods::MUTATE, params)?;
+        let params: MutateParams = parse_params(params)?;
+        self.mutate(params)
+    }
+
+    /// A banner for the person, as the engine's own are (their Settings
+    /// decide), opening `session` when clicked.
+    pub(crate) fn notify_person(&self, title: &str, body: &str, session: Option<&str>) -> &'static str {
+        crate::desktop_notify::post_asked(self.repos.data_dir(), &self.viewport_focus, title, body, session)
     }
 
     /// Attach the plugins service (the Plugin* methods).
@@ -1321,9 +1403,15 @@ impl EngineRpc {
         cloud: bool,
         reach: Option<zeron_proto::CloudReach>,
         config: Option<&ChatConfig>,
+        machine: Option<&str>,
     ) -> Result<Option<CloudHost>, RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         let on_cloud = |device_id: &str| device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX);
+        if machine.is_some() && !cloud {
+            return Err(RpcError::BadParams(
+                "machine picks a Cloud machine's size: only with cloud".into(),
+            ));
+        }
         // An agent's chat on another of the person's devices runs there.
         let elsewhere = |parent: &str| {
             matches!(zeron_rpc::caller(), zeron_rpc::Caller::Agent { .. })
@@ -1373,7 +1461,7 @@ impl EngineRpc {
             }
             let started = self
                 .cloud()
-                .create_child_session(chat_id, parent, branch, config)
+                .create_child_session(chat_id, parent, branch, config, machine)
                 .await
                 .map_err(|e| RpcError::Failed(format!("Couldn't start a Cloud session: {e}")))?;
             self.await_chat_row(chat_id).await?;
@@ -1406,7 +1494,7 @@ impl EngineRpc {
                 ))
             })?;
         let session = cloud_client
-            .create_session(chat_id, space_id, &repo, branch, reach)
+            .create_session(chat_id, space_id, &repo, branch, machine, reach)
             .await
             .map_err(|e| RpcError::Failed(format!("Couldn't start a Cloud session: {e}")))?;
         Ok(Some(CloudHost {
@@ -2162,15 +2250,51 @@ impl EngineRpc {
                 parent_chat_id,
                 child_kind,
                 cloud: _,
+                title,
+                machine: _,
                 cloud_reach: _,
             } => {
                 tracing::debug!(target: "first_word", chat = %chat_id, "create chat");
-                // A voice orchestrator is hidden, so the chats it creates are
-                // the user's top-level sessions rather than its side chats.
-                let parent_chat_id = parent_chat_id
-                    .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent));
+                // A voice orchestrator and the Brain dump are hidden, so the
+                // chats they create are the user's top-level sessions rather
+                // than their side chats.
+                let parent_chat_id = parent_chat_id.filter(|parent| {
+                    !zeron_proto::voice::is_orchestrator_chat(parent)
+                        && !matches!(
+                            self.orchestration.role_of(parent),
+                            crate::orchestration::ChatRole::BrainDump { .. }
+                        )
+                });
+                // A crew thread's parent is its orchestrator.
+                let child_kind = child_kind.filter(|kind| {
+                    *kind != zeron_proto::ChildKind::Crew
+                        || parent_chat_id.as_deref().is_some_and(|parent| {
+                            matches!(
+                                self.orchestration.role_of(parent),
+                                crate::orchestration::ChatRole::Orchestrator { .. }
+                            )
+                        })
+                });
+                let crew_of = parent_chat_id
+                    .clone()
+                    .filter(|_| child_kind == Some(zeron_proto::ChildKind::Crew));
+                // Joining the crew is an `addToCrew`, held to its rules (an
+                // agent: a new thread of its own, in its own crew), before
+                // anything is written. An agent's create of a chat that
+                // exists (idempotent for retries) is no way to add one.
+                if let Some(orchestrator) = &crew_of {
+                    let who = self.current_who()?;
+                    if matches!(who, crate::orchestration::ops::Who::Agent { .. })
+                        && self.workspace.chat(&chat_id).map_err(failed)?.is_some()
+                    {
+                        return Err(RpcError::Failed(
+                            "That chat already exists: an orchestrator's crew is threads it starts".into(),
+                        ));
+                    }
+                    crate::orchestration::ops::crew_join_permitted(&who, orchestrator, &chat_id, None, true, self)?;
+                }
                 self.workspace
-                    .create_chat_hosted(
+                    .create_chat_titled(
                         &chat_id,
                         space_id.as_deref(),
                         device_id.as_deref(),
@@ -2179,12 +2303,18 @@ impl EngineRpc {
                         cwd,
                         parent_chat_id,
                         child_kind,
+                        title.as_deref(),
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
                     self.workspace
                         .set_chat_branch(&chat_id, branch)
                         .map_err(failed)?;
+                }
+                if let Some(orchestrator) = crew_of {
+                    self.add_to_crew(&orchestrator, &chat_id, "", None)?;
+                    // Started by its orchestrator (besides being its child).
+                    self.mark_started_by(&chat_id, &orchestrator, None, None);
                 }
                 Ok(())
             }
@@ -2873,7 +3003,7 @@ fn wants_changes(params: &serde_json::Value) -> bool {
 }
 
 /// What a keyed list stream last sent: its keys in order, and each row.
-type SentRows = (Vec<String>, std::collections::HashMap<String, serde_json::Value>);
+pub(crate) type SentRows = (Vec<String>, std::collections::HashMap<String, serde_json::Value>);
 
 /// A list of rows keyed by `key` (`id`, or a session's `chatId`) as change
 /// frames: the whole list first, as [`watch_stream`] sends it; then, per
@@ -2886,23 +3016,50 @@ type SentRows = (Vec<String>, std::collections::HashMap<String, serde_json::Valu
 /// The whole chat list is ~0.4 MB with a few hundred chats, and one field
 /// of one row (a seen mark, a heartbeat) changing sent and parsed it all,
 /// in every window on every device.
+///
+/// Changes are coalesced as orchestration's are: each waits
+/// `orchestration::COLLECT` for those right behind it (a turn starting
+/// writes its status, activity and todo apart), and frames go at least
+/// `orchestration::FRAME_SPACING` apart.
 fn keyed_changes_stream<T>(rx: watch::Receiver<Vec<T>>, key: &'static str) -> BoxStream<'static, serde_json::Value>
 where
     T: serde::Serialize + Send + Sync + 'static,
 {
-    futures::stream::unfold((rx, None::<SentRows>), move |(mut rx, mut last)| async move {
+    keyed_changes_stream_paced(rx, key, crate::orchestration::COLLECT, crate::orchestration::FRAME_SPACING)
+}
+
+/// [`keyed_changes_stream`], each change waiting `collect` and frames at
+/// least `spacing` apart.
+fn keyed_changes_stream_paced<T>(
+    rx: watch::Receiver<Vec<T>>,
+    key: &'static str,
+    collect: std::time::Duration,
+    spacing: std::time::Duration,
+) -> BoxStream<'static, serde_json::Value>
+where
+    T: serde::Serialize + Send + Sync + 'static,
+{
+    let start = (rx, None::<SentRows>, None::<tokio::time::Instant>);
+    futures::stream::unfold(start, move |(mut rx, mut last, mut sent_at)| async move {
         loop {
             if last.is_some() {
                 rx.changed().await.ok()?;
+                tokio::time::sleep(collect).await;
+                if let Some(at) = sent_at {
+                    tokio::time::sleep_until(at + spacing).await;
+                }
             }
             let rows: Vec<serde_json::Value> = {
                 let borrowed = rx.borrow_and_update();
                 borrowed.iter().filter_map(|row| serde_json::to_value(row).ok()).collect()
             };
+            let perf_n = rows.len();
             let (frame, sent) = keyed_frame(rows, key, last.take());
             last = Some(sent);
             if let Some(frame) = frame {
-                return Some((frame, (rx, last)));
+                tracing::debug!(target: "perf", what = "keyed_push", key, rows = perf_n as u64, bytes = frame.to_string().len() as u64);
+                sent_at = Some(tokio::time::Instant::now());
+                return Some((frame, (rx, last, sent_at)));
             }
         }
     })
@@ -2911,7 +3068,7 @@ where
 
 /// `rows` as the frame that follows `last` (`None`: nothing changed), and
 /// what's been sent once it is. No `last`: the whole list.
-fn keyed_frame(rows: Vec<serde_json::Value>, key: &str, last: Option<SentRows>) -> (Option<serde_json::Value>, SentRows) {
+pub(crate) fn keyed_frame(rows: Vec<serde_json::Value>, key: &str, last: Option<SentRows>) -> (Option<serde_json::Value>, SentRows) {
     let keys: Vec<String> = rows
         .iter()
         .map(|row| row.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_owned())
@@ -3366,7 +3523,19 @@ impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // An agent's chats: capped at its own access, runs as the chat is
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
+        // A crew thread's message to its own orchestrator is a report
+        // (rpc/crew_messages.rs), read before the gate attributes it.
+        if let Some(reply) = self.crew_message_as_report(method, &params).await? {
+            return Ok(reply);
+        }
+        let mut params = params;
+        self.with_crew_rules(method, &mut params);
         let params = self.agent_gate(method, params)?;
+        self.note_agent_message(method, &params);
+        // An agent's send to a paused card's thread waits in its held queue.
+        if let Some(reply) = self.held_for_paused_card(method, &params)? {
+            return Ok(reply);
+        }
         // Machine stats: answered here, or asked of another of the
         // account's devices with its own deadline and error words.
         if method == methods::DEVICE_STATS {
@@ -3674,9 +3843,17 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
+                // Reports are Zeron's to file (`report` op), never a caller's.
+                if matches!(p.command, zeron_doc::SessionCommandPayload::CrewReport { .. })
+                    && !zeron_rpc::caller().is_local()
+                {
+                    return Err(RpcError::BadParams("Only Zeron files crew reports".into()));
+                }
+                // What the engine's own deliveries say they are (`injected`)
+                // is never a caller's to claim, the local UI's included.
                 let command_id = self
                     .doc_host
-                    .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
+                    .queue_command_with_transfers(&p.chat_id, p.command.without_injected(), p.transfers)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
@@ -3752,7 +3929,13 @@ impl RpcService for EngineRpc {
                 let p: RelayCommandParams = parse_params(params)?;
                 let outcome = self
                     .doc_host
-                    .ingest_relayed_command(&p.chat_id, p.entry)
+                    .ingest_relayed_command(&p.chat_id, {
+                        // (A relayed entry's sender can't be checked here:
+                        // it runs as its words, its doc row still trusted.)
+                        let mut entry = p.entry;
+                        entry.payload = entry.payload.without_injected();
+                        entry
+                    })
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
@@ -4440,6 +4623,40 @@ impl RpcService for EngineRpc {
             methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
+            // An agent sees its own part (orchestration/scope.rs).
+            // A window asks for changes (`{"changes": true}`): frames of
+            // what moved, not the whole state each time.
+            methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(match zeron_rpc::caller() {
+                zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_stream(chat),
+                _ if wants_changes(&params) => self.orchestration.changes_stream(),
+                _ => self.orchestration.stream(),
+            })),
+            methods::ORCHESTRATE => Box::pin(self.orchestrate(params)).await.map(RpcReply::Value),
+            // The Scratchpad: never routes, never makes work
+            // (orchestration/scratchpad.rs).
+            methods::SCRATCHPAD => self.scratchpad(params).await.map(RpcReply::Value),
+            methods::WATCH_SCRATCHPAD => match zeron_rpc::caller() {
+                zeron_rpc::Caller::Agent { .. } => Err(RpcError::Failed(
+                    "Agents read the Scratchpad with Scratchpad{op: read}".into(),
+                )),
+                _ => Ok(RpcReply::Stream(watch_stream(self.workspace.watch_scratchpad()))),
+            },
+            methods::WATCH_DEVICE_LOADS => Ok(RpcReply::Stream(crate::orchestration::loads::stream(
+                std::sync::Arc::new(self.clone()),
+            ))),
+            // An agent sees the chats it may check (orchestration/progress.rs).
+            methods::WATCH_PROGRESS => {
+                let viewer = match zeron_rpc::caller() {
+                    zeron_rpc::Caller::Agent { .. } => Some(self.current_who()?),
+                    _ => None,
+                };
+                let changes = wants_changes(&params);
+                Ok(RpcReply::Stream(crate::orchestration::progress::stream(self.clone(), viewer, changes)))
+            }
+            methods::WATCH_COMMS => Ok(RpcReply::Stream(match zeron_rpc::caller() {
+                zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_comms(chat),
+                _ => crate::orchestration::comms::stream(self.orchestration.comms()),
+            })),
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.
                 let merged = self
@@ -4572,6 +4789,8 @@ impl RpcService for EngineRpc {
                     parent_chat_id,
                     child_kind,
                     cloud,
+                    title,
+                    machine,
                     cloud_reach,
                 } = &p
                     && let Some(host) = Box::pin(self.cloud_chat_host(
@@ -4583,6 +4802,7 @@ impl RpcService for EngineRpc {
                         *cloud,
                         cloud_reach.filter(|_| zeron_rpc::caller().is_local()),
                         config.as_ref(),
+                        machine.as_deref().map(str::trim).filter(|m| !m.is_empty()),
                     ))
                     .await?
                 {
@@ -4596,7 +4816,7 @@ impl RpcService for EngineRpc {
                     // computer it lives on.
                     let cwd = host.cwd.clone().or_else(|| cwd.clone());
                     self.workspace
-                        .create_chat_hosted(
+                        .create_chat_titled(
                             chat_id,
                             space_id.as_deref(),
                             device_id.as_deref(),
@@ -4605,6 +4825,7 @@ impl RpcService for EngineRpc {
                             cwd.clone(),
                             parent_chat_id.clone(),
                             *child_kind,
+                            title.as_deref(),
                         )
                         .map_err(failed)?;
                     if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -5916,7 +6137,7 @@ impl RpcService for EngineRpc {
                 let p: AgentAccountParams = parse_params(params)?;
                 let snapshot = self
                     .agent_accounts
-                    .activate(p.harness, &p.account_id)
+                    .activate_with(p.harness, &p.account_id, p.force)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)
@@ -6323,6 +6544,29 @@ mod tests {
             Some(json!({ "changed": [{ "id": "d", "seen": 0 }], "removed": ["b"], "order": ["c", "a", "d"] }))
         );
         assert_eq!(frames[4], Some(json!({ "changed": [], "removed": ["c", "a", "d"] })));
+    }
+
+    /// A burst of row changes goes as one frame, soon after the first.
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_of_row_changes_is_one_frame() {
+        use futures::StreamExt;
+        use serde_json::json;
+        let (collect, spacing) = (std::time::Duration::from_millis(50), std::time::Duration::from_millis(100));
+        let rows = |seen: &[(&str, i64)]| -> Vec<serde_json::Value> {
+            seen.iter().map(|(id, s)| json!({ "id": id, "seen": s })).collect()
+        };
+        let (tx, rx) = watch::channel(rows(&[("a", 0), ("b", 0)]));
+        let mut frames = keyed_changes_stream_paced(rx, "id", collect, spacing);
+        assert!(frames.next().await.unwrap().is_array());
+        let started = tokio::time::Instant::now();
+        tx.send_replace(rows(&[("a", 1), ("b", 0)]));
+        tx.send_replace(rows(&[("a", 1), ("b", 1)]));
+        tx.send_replace(rows(&[("a", 2), ("b", 1)]));
+        let frame = frames.next().await.unwrap();
+        assert!(started.elapsed() <= collect + spacing);
+        assert_eq!(frame, json!({ "changed": [{ "id": "a", "seen": 2 }, { "id": "b", "seen": 1 }], "removed": [] }));
+        // Nothing more: the burst was one frame.
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(5), frames.next()).await.is_err());
     }
 
     /// Without asking, a watch is the whole list, as older viewports read it.

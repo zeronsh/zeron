@@ -99,9 +99,17 @@ export type Notice = {
 	quiet: boolean?,
 }
 export type Answer = { values: { string }, text: string }
+-- An existing Cloud chat's sizes (`fixed_machine`).
+export type FixedMachine = {
+	value: State<string?>,
+	items: () -> { Dropdown.Item },
+	on_choose: (size: string) -> (),
+	note: (() -> string?)?,
+}
 -- Where an existing chat works (`branch_fixed`). On Cloud (`cloud`): a
 -- machine of its own, and what it reaches (`reach`: "devices" | "isolated",
--- nil while not known).
+-- nil while not known); `restarting`: that machine restarting on a size
+-- picked, the chip's glyph a restart's.
 export type Fixed = {
 	device: string?,
 	name: string?,
@@ -112,6 +120,7 @@ export type Fixed = {
 	emoji: string?,
 	cloud: boolean?,
 	reach: string?,
+	restarting: boolean?,
 }
 export type Sizes = { rest: number, target: number, presented: number, active: boolean, ready: boolean, settling: boolean, context: number }
 export type Props = {
@@ -129,6 +138,11 @@ export type Props = {
 	keep: string?,
 	-- Always opened out (a new chat's), rather than one line while it fits.
 	expanded: (boolean | () -> boolean)?,
+	-- No footer under the pill (its pickers shown elsewhere, or not at
+	-- all): a composer that's only its draft, + and Send.
+	bare: boolean?,
+	-- Told as the draft's field takes the keys (true) and lets them go.
+	on_field_focus: ((focused: boolean) -> ())?,
 	-- Moved as the composer is shown for something else (a new chat's
 	-- page or a session's, as the route switches): its form and size are
 	-- there at once for a moment after, not eased. Growing in place (more
@@ -167,6 +181,12 @@ export type Props = {
 	account_group: ((harness: string, provider: string?) -> ModelPicker.AccountGroup?)?,
 	on_account: ((harness: string, id: string) -> ())?,
 	on_accounts_open: (() -> ())?,
+	-- The model picker opening (its catalog asked after again), and an
+	-- agent's models asked for again or signed in to from its empty tab
+	-- (ds.ModelPicker's `on_open`, `on_retry`, `on_sign_in`).
+	on_models_open: (() -> ())?,
+	on_models_retry: ((harness: string) -> ())?,
+	on_models_sign_in: ((harness: string) -> ())?,
 	-- How much of the model's context is used (0 to 1): a ring beside its
 	-- chip.
 	context: (number | () -> number)?,
@@ -185,6 +205,11 @@ export type Props = {
 	device: State<string?>?,
 	devices: ({ Device } | State<{ Device }> | () -> { Device })?,
 	checkout: State<string?>?,
+	-- On Cloud, the size of machine it starts on (an id of `machines`), in
+	-- Work in's Machine row where the checkout's would be, and named on the
+	-- chip after Cloud. With no sizes, no row.
+	machine: State<string?>?,
+	machines: ({ Dropdown.Item } | State<{ Dropdown.Item }> | () -> { Dropdown.Item })?,
 	branch: State<string?>?,
 	branches: ({ Dropdown.Item } | State<{ Dropdown.Item }> | () -> { Dropdown.Item })?,
 	-- What the branches' list says with none to show (still loading, none
@@ -196,6 +221,11 @@ export type Props = {
 	-- change, as a chat can't move; but a Cloud chat's reach, which
 	-- `on_reach` changes. Nil (a new chat): the picker.
 	branch_fixed: (() -> Fixed?)?,
+	-- An existing chat on Cloud: its chip opens the Machine menu (the new
+	-- chat's sizes, as its Work in lists them), the size it's on chosen,
+	-- `on_choose` told a pick, and `note` said under the sizes (what a pick
+	-- does to the machine). Only while `branch_fixed` says `cloud`.
+	fixed_machine: FixedMachine?,
 	on_reach: ((reach: string) -> ())?,
 	-- On Cloud, what a new chat's machine reaches ("devices" | "isolated";
 	-- nil: `reach_default`, the account's). No default (an edge that can't
@@ -245,6 +275,9 @@ export type Props = {
 	on_queue_reorder: ((from: number, to: number) -> ())?,
 	on_queue_save: ((id: string) -> ())?,
 	on_queue_cancel: ((id: string) -> ())?,
+	-- The queue held (a paused card's thread): its line and action.
+	held: State<dock.Held?>?,
+	on_held_action: (() -> ())?,
 	todos: State<{ dock.Todo }>?,
 	on_dismiss_todos: (() -> ())?,
 	tasks: State<{ dock.Task }>?,
@@ -579,6 +612,10 @@ local function submenu(
 	actions: { Dropdown.Action }?,
 	-- Choices named by the row but not listed (one an action picks).
 	unlisted: ({ Choice } | () -> { Choice })?,
+	-- A list that says more than names (the Machine row's): its panel's
+	-- width (260 else), a head over the list, what ends each row, and how
+	-- the row it opens from names the choice made.
+	more: Submenu?,
 	-- Told of a pick, after `value` takes it.
 	on_choose: ((v: string) -> ())?
 ): Node
@@ -613,7 +650,9 @@ local function submenu(
 		-- (Dropdown hands its label on, as the trigger's name.)
 		label = label :: any,
 		search = search or false,
-		width = 260,
+		width = if more and more.width then more.width else 260,
+		head = if more and more.head then more.head() else nil,
+		trailing_item = if more then more.trailing else nil,
 		submenu = true,
 		-- Close beside the panel, as a submenu sits: 2 from its edge (the
 		-- row it opens from sits 5 inside it, its inset and border).
@@ -648,7 +687,8 @@ local function submenu(
 				choice_mark(current),
 				FadeText {
 					function()
-						return current().label
+						local c = current()
+						return if more and more.name_of then more.name_of(c) else c.label
 					end,
 					text_size = "$font.size.md",
 					color = "$text.primary",
@@ -686,6 +726,76 @@ export type Project = {
 -- What working in no project is, among the projects.
 local NO_PROJECT = "none"
 
+-- What a submenu's list says beyond its names (`submenu`'s `more`).
+type Submenu = {
+	width: number?,
+	head: (() -> Node)?,
+	trailing: ((item: Dropdown.Item, lit: () -> boolean) -> Node?)?,
+	name_of: ((choice: Dropdown.Item) -> string)?,
+}
+
+-- The Machine row's panel: each size on one line, its name (the account's
+-- default saying so after it), then its vCPU, memory, disk and credit rate in
+-- columns under a head naming them (the menus' heading type), right-aligned
+-- in tabular figures so the sizes compare down the list. Each column is as
+-- wide as its widest value or name ("251 GB", "Credits").
+local MACHINE_W = 360
+local MACHINE_COLUMNS = { { key = "vcpu", w = 30 }, { key = "memory", w = 44 }, { key = "disk", w = 48 }, { key = "rate", w = 40 } }
+local function machine_cells(words: (key: string) -> string, tone: string): Node
+	local cells: { Node } = {}
+	for _, column in MACHINE_COLUMNS do
+		table.insert(cells, ui.text {
+			words(column.key),
+			w = column.w,
+			shrink = 0,
+			align = "right",
+			tabular = true,
+			text_size = "$font.size.xs",
+			color = tone,
+		})
+	end
+	return ui.row { shrink = 0, self = "center", gap = "$space.2", items = "center", table.unpack(cells) }
+end
+local function machine_head(): Node
+	local cells: { Node } = {}
+	for _, column in MACHINE_COLUMNS do
+		table.insert(cells, ui.text {
+			locale.s(`ds.composer.machine.column_{column.key}`),
+			w = column.w,
+			shrink = 0,
+			align = "right",
+			text_size = "$font.size.xs",
+			weight = "$font.weight.medium",
+			color = "$text.tertiary",
+		})
+	end
+	return ui.row {
+		w_full = true,
+		h = "$zeron.menu.heading",
+		px = "$space.2",
+		justify = "end",
+		items = "center",
+		aria_hidden = true,
+		ui.row { shrink = 0, gap = "$space.2", items = "center", table.unpack(cells) },
+	}
+end
+local MACHINE_MORE: Submenu = {
+	width = MACHINE_W,
+	head = machine_head,
+	trailing = function(item: Dropdown.Item): Node?
+		local cells = (item :: any).cells
+		if not cells then
+			return nil
+		end
+		return machine_cells(function(key: string): string
+			return cells[key]
+		end, "$text.secondary")
+	end,
+	name_of = function(choice: Dropdown.Item): string
+		return if choice.label == "" then "" else locale.s("ds.composer.machine.chosen", { size = choice.label })
+	end,
+}
+
 -- Whether the device chosen is Cloud (a device row marked `cloud`): a
 -- machine of its own, so no checkout to choose.
 local function on_cloud(device: State<string?>?, devices: any): boolean
@@ -712,6 +822,8 @@ local function work_in(
 	checkout: State<string?>?,
 	device: State<string?>?,
 	devices: ({ Device } | State<{ Device }> | () -> { Device })?,
+	machine: State<string?>?,
+	machines: ({ Choice } | State<{ Choice }> | () -> { Choice })?,
 	reach: State<string?>?,
 	reach_default: (() -> string?)?
 ): Node
@@ -809,6 +921,16 @@ local function work_in(
 			end, submenu(siblings, locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
 		)
 	end
+	if machine and machines then
+		-- On Cloud, in the checkout's place: the size of its machine, each
+		-- with its specs and credit rate.
+		table.insert(
+			rows,
+			ui.show(function(): boolean
+				return on_cloud(device, devices) and #(list_of(machines) :: { Choice }) > 0
+			end, submenu(siblings, locale.t("ds.composer.machine.label"), machine, machines :: any, 1, nil, nil, nil, MACHINE_MORE))
+		)
+	end
 	if reach and reach_default then
 		-- On Cloud, in the checkout's place: whether its machine reaches your
 		-- other devices (none chosen: the account's default).
@@ -865,7 +987,7 @@ local function fixed_work_in(fixed: () -> Fixed?, on_reach: ((reach: string) -> 
 			rows,
 			ui.show(function(): boolean
 				return f().cloud == true and f().reach ~= nil
-			end, submenu({}, locale.t("ds.composer.reach.label"), reach, REACHES, 1, nil, nil, nil, on_reach))
+			end, submenu({}, locale.t("ds.composer.reach.label"), reach, REACHES, 1, nil, nil, nil, nil, on_reach))
 		)
 	end
 	return ui.column { w_full = true, table.unpack(rows) }
@@ -1550,6 +1672,9 @@ return ui.component(function(props: Props): Node
 			account_group = props.account_group,
 			on_account = props.on_account,
 			on_accounts_open = props.on_accounts_open,
+			on_open = props.on_models_open,
+			on_retry = props.on_models_retry,
+			on_sign_in = props.on_models_sign_in,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
 			showing = props.model_open,
@@ -2030,11 +2155,17 @@ return ui.component(function(props: Props): Node
 					if spoken and spoken.on_focus then
 						spoken.on_focus()
 					end
+					if props.on_field_focus then
+						props.on_field_focus(true)
+					end
 				end,
 				on_blur = function()
 					m.on_focus(false)
 					if spoken and spoken.on_blur then
 						spoken.on_blur()
+					end
+					if props.on_field_focus then
+						props.on_field_focus(false)
 					end
 				end,
 				on_key_up = if spoken then spoken.on_key_up else nil,
@@ -2096,6 +2227,10 @@ return ui.component(function(props: Props): Node
 						local el = field:peek()
 						if el then
 							el:blur()
+							-- (A blur asked for is told to no one: said here.)
+							if props.on_field_focus then
+								props.on_field_focus(false)
+							end
 							return true
 						end
 						return false
@@ -2210,6 +2345,8 @@ return ui.component(function(props: Props): Node
 						checkout,
 						props.device,
 						props.devices :: any,
+						props.machine,
+						props.machines :: any,
 						props.reach,
 						props.reach_default
 					)
@@ -2272,7 +2409,17 @@ return ui.component(function(props: Props): Node
 				local v = props.device:get()
 				for _, d in list_of(props.devices) :: { Device } do
 					if d.value == v then
-						return d.label
+						-- On Cloud, with the size it starts on: "Cloud · Large".
+						local size: string? = nil
+						if d.cloud and props.machine and props.machines then
+							local m = props.machine:get()
+							for _, item in list_of(props.machines) :: { Dropdown.Item } do
+								if item.value == m then
+									size = item.label
+								end
+							end
+						end
+						return if size then locale.s("ds.composer.machine.on", { device = d.label, size = size }) else d.label
 					end
 				end
 				return nil
@@ -2324,10 +2471,47 @@ return ui.component(function(props: Props): Node
 			}
 			-- An existing chat's: where it works, said; its panel says so too
 			-- (nothing there to change, as a chat can't move), but for what a
-			-- Cloud chat's machine reaches.
+			-- Cloud chat's machine reaches, and on Cloud with sizes to offer
+			-- (`fixed_machine`), the size it's on, under where it works.
 			local fixed = props.branch_fixed
-			local static: Node? = if fixed
-				then Dropdown {
+			-- The fixed chip's line (built for each chip: a node lives in one
+			-- place).
+			local function fixed_place(f_of: () -> Fixed?): Place
+				return {
+					device = function(): string?
+						local f = f_of()
+						return if f then f.device else nil
+					end,
+					project = function(): Project?
+						local f = f_of()
+						if f and f.project then
+							return { value = f.project, label = f.project, hue = f.hue, src = f.src, emoji = f.emoji }
+						end
+						return nil
+					end,
+					in_project = function(): boolean
+						return true
+					end,
+					branch = function(): string
+						local f = f_of()
+						return if f and f.name then f.name else locale.s("ds.composer.branch.no_ref")
+					end,
+					-- Where it runs off the branch: Cloud's machine (restarting
+					-- on a size picked, a restart's), a worktree, or the
+					-- project's own folder.
+					glyph = function(): Icon.Name?
+						local f = f_of()
+						if f and f.cloud then
+							return if f.restarting then "restart" else "cloud"
+						end
+						return if f and f.worktree then "worktree" else nil
+					end,
+					folded = folded,
+					on_measures = place_measures,
+				}
+			end
+			local function where_menu(f_of: () -> Fixed?): Node
+				return Dropdown {
 					value = ui.use_state(nil :: string?),
 					label = locale.t("ds.composer.branch.label") :: any,
 					items = {},
@@ -2336,45 +2520,60 @@ return ui.component(function(props: Props): Node
 						return false
 					end,
 					width = 280,
-					head = fixed_work_in(fixed, props.on_reach),
+					head = fixed_work_in(f_of, props.on_reach),
 					trigger = function(menu: Dropdown.Menu): Node
 						return chip(menu, function(): string
-							local f = fixed()
+							local f = f_of()
 							return locale.s("ds.composer.branch.fixed", { name = if f and f.name then f.name else "" })
-						end, {
-							device = function(): string?
-								local f = fixed()
-								return if f then f.device else nil
-							end,
-							project = function(): Project?
-								local f = fixed()
-								if f and f.project then
-									return { value = f.project, label = f.project, hue = f.hue, src = f.src, emoji = f.emoji }
-								end
-								return nil
-							end,
-							in_project = function(): boolean
-								return true
-							end,
-							branch = function(): string
-								local f = fixed()
-								return if f and f.name then f.name else locale.s("ds.composer.branch.no_ref")
-							end,
-							-- Where it runs off the branch: Cloud's machine, a
-							-- worktree, or the project's own folder.
-							glyph = function(): Icon.Name?
-								local f = fixed()
-								if f and f.cloud then
-									return "cloud"
-								end
-								return if f and f.worktree then "worktree" else nil
-							end,
-							folded = folded,
-							on_measures = place_measures,
-						})
+						end, fixed_place(f_of))
 					end,
 				}
-				else nil
+			end
+			local fm = props.fixed_machine
+			local static: Node? = nil
+			if fixed and fm then
+				local fixed_fn = fixed :: () -> Fixed?
+				local function on_cloud_fixed(): boolean
+					local f = fixed_fn()
+					return f ~= nil and f.cloud == true and #fm.items() > 0
+				end
+				local note = fm.note
+				static = ui.show(on_cloud_fixed, Dropdown {
+					value = fm.value,
+					items = fm.items :: any,
+					on_choose = fm.on_choose,
+					label = locale.t("ds.composer.machine.label") :: any,
+					search = false,
+					width = MACHINE_W,
+					head = ui.column { w_full = true, fixed_work_in(fixed_fn, props.on_reach), machine_head() },
+					trailing_item = MACHINE_MORE.trailing,
+					extra = if note
+						then ui.row {
+							w_full = true,
+							px = "$space.2",
+							py = "$space.1",
+							ui.text {
+								function(): string
+									return note() or ""
+								end,
+								wrap = true,
+								text_size = "$font.size.xs",
+								color = "$text.tertiary",
+							},
+						}
+						else nil,
+					extra_when = if note
+						then function(): boolean
+							return note() ~= nil
+						end
+						else nil,
+					trigger = function(menu: Dropdown.Menu): Node
+						return chip(menu, locale.t("ds.composer.machine.change"), fixed_place(fixed_fn))
+					end,
+				}, where_menu(fixed_fn))
+			elseif fixed then
+				static = where_menu(fixed)
+			end
 			table.insert(
 				left,
 				ui.row {
@@ -2495,6 +2694,8 @@ return ui.component(function(props: Props): Node
 			on_queue_reorder = props.on_queue_reorder,
 			on_queue_save = props.on_queue_save,
 			on_queue_cancel = props.on_queue_cancel,
+			held = props.held,
+			on_held_action = props.on_held_action,
 			todos = props.todos,
 			live = function()
 				return running ~= nil and running:get()
@@ -2614,7 +2815,7 @@ return ui.component(function(props: Props): Node
 			ui.column { ref = deck_size, w_full = true, shrink = 0, trays },
 			ui.popover(m.popover(surface)),
 		},
-		ui.column { ref = footer_size, w_full = true, shrink = 0, footer },
+		ui.column { ref = footer_size, w_full = true, shrink = 0, if props.bare then nil else footer },
 		-- Folded, what waits on the agent: a pill floating just over the
 		-- composer's middle, out of the layout (the conversation shows under
 		-- it, as under "Scroll to end", which it moves aside for).

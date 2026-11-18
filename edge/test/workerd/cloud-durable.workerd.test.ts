@@ -21,6 +21,7 @@ import {
   readySession,
   runnerKey,
   runnerToken,
+  REPO,
   sandboxFor,
   session,
   status,
@@ -104,6 +105,27 @@ describe("the machine catalog and the account's default", () => {
     const admin = await call("POST", "/admin/cloud/machine", "Bearer test-admin-token", { orgId: u.orgId, userId: u.userId, machine: "large" });
     expect(await admin.json()).toEqual({ machine: "large" });
     expect(await status(u)).toMatchObject({ machine: "large" });
+  });
+
+  it("starts a new session on the size it asks for, kept as its own, the default untouched", async () => {
+    const u = newUser();
+    const { spaceId } = await enableCloud(u);
+    const body = (machine: unknown) => ({ chatId: `sized-${String(machine)}`, spaceId, repo: REPO, machine });
+    const bad = await call("POST", "/cloud/org1/sessions", userBearer(u), body("huge"));
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { message: string }).message).toBe("Expected machine: small | default | large | xlarge.");
+
+    const created = (await (await call("POST", "/cloud/org1/sessions", userBearer(u), body("large"))).json()) as SessionView & { machine: string };
+    expect(created.machine).toBe("large");
+    await sandboxFor(created.deviceId);
+    const create = (await boatState()).calls.find((c) => c.method === "POST" && c.path === "/sandboxes" && c.headers["idempotency-key"]?.startsWith(created.deviceId));
+    expect(create?.body?.type).toBe("large");
+    expect(await session(u, "sized-large")).toMatchObject({ machine: "large" });
+    expect(await status(u)).toMatchObject({ machine: "default" });
+
+    // Without one: the account's default.
+    const plain = (await (await createSession(u, "unsized", spaceId)).json()) as SessionView & { machine: string };
+    expect(plain.machine).toBe("default");
   });
 
   it("keeps a session's own size: the default only applies to new ones", async () => {

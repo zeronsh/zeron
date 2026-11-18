@@ -371,8 +371,10 @@ local function output_view(id: string, source: () -> Source, tool: () -> Tool): 
 	end
 	local function text(): string
 		local c = cleaned:get()
+		-- Folded is not "more than ten here": a cut output folds on what its
+		-- host kept, and the chat's tail (cut by bytes too) can be shorter.
 		if folded() then
-			return table.concat(c.lines, "\n", 1, M.FOLD_LINES)
+			return table.concat(c.lines, "\n", 1, math.min(#c.lines, M.FOLD_LINES))
 		end
 		return table.concat(c.lines, "\n")
 	end

@@ -112,6 +112,8 @@ end
 stub.interrupt = function() end
 stub.load_catalog = function() end
 stub.catalog_on = function() end
+stub.refresh_catalog = function() end
+stub.retry_catalog = function() end
 stub.configure = function() end
 stub.refs = function(): any
 	return {

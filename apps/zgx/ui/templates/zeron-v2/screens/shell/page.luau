@@ -22,6 +22,8 @@ local sessions = require("@account/sessions")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local boundary = require("@app/screens/shell/boundary")
+-- How a working session's work is going, a line in its head.
+local Progress = require("@app/screens/control/progress")
 
 export type Props = {
 	files: State<boolean>,
@@ -52,17 +54,18 @@ return function(props: Props): Node
 	local function in_session(): boolean
 		return route.chat:get().name == "session"
 	end
-	-- A plugin's page open: a page of its own, the chat's kept under it as
-	-- it was but not seen (its wallpaper, its view, the composer).
+	-- A plugin's page open, or another page of its own (the Control room, an
+	-- orchestrator's): the chat's kept under it as it was but not seen (its
+	-- wallpaper, its view, the composer).
 	local function on_plugin(): boolean
-		return route.current:get().name == "plugin"
+		return route.own_page(route.current:get().name)
 	end
 
 	-- What the chat route shows, under the title bar: a new chat, or a
 	-- session (a page swap; another session is the same page, showing it,
 	-- in place).
 	local view = ui.presence(function(): string
-		if route.chat:get().name == "plugin" then
+		if route.own_page(route.chat:get().name) then
 			return "none"
 		end
 		return if in_session() then "session" else "home"
@@ -181,20 +184,8 @@ return function(props: Props): Node
 	-- any session does.)
 	local open_chat = ui.computed(function(): sessions.Chat?
 		local s = route.session:get()
-		if not s then
-			return nil
-		end
-		for _, c in sessions.now:get().chats do
-			if c.id == s.id then
-				return c
-			end
-		end
-		for _, c in sessions.now:get().archived or {} do
-			if c.id == s.id then
-				return c
-			end
-		end
-		return nil
+		-- (A crew thread or side chat opened as its own chat too.)
+		return if s then route.find_chat(s.id) else nil
 	end)
 	local has_chat = ui.computed(function(): boolean
 		return open_chat:get() ~= nil
@@ -297,6 +288,10 @@ return function(props: Props): Node
 						color = "$zeron.title",
 					},
 				},
+				Progress.Header(function(): string?
+					local s = route.session:get()
+					return if s then s.id else nil
+				end),
 			}
 		)
 	)
@@ -354,6 +349,44 @@ return function(props: Props): Node
 					local c = route.current:get()
 					return `{c.plugin or ""}/{c.page or ""}`
 				end, plugin_page, { w_full = true, h_full = true }),
+			}
+		)
+	)
+
+	-- The Control room and an orchestrator's page (screens/control,
+	-- screens/orchestrator): pages of their own, as a plugin's is.
+	local function orchestration_page(kind: string): Node
+		if kind == "control" then
+			return boundary.screen(boundary.named("shell.boundary.screen.control"), "@app/screens/control/page", function(page): Node
+				return page.Page()
+			end)
+		end
+		return boundary.screen(boundary.named("shell.boundary.screen.orchestrator"), "@app/screens/orchestrator/page", function(page): Node
+			return page.Page {
+				id = function(): string?
+					return route.current:get().orchestrator
+				end,
+			}
+		end)
+	end
+	table.insert(
+		pane,
+		ui.show(
+			function(): boolean
+				local name = route.current:get().name
+				return name == "control" or name == "orchestrator"
+			end,
+			ui.column {
+				id = "orchestration-page-area",
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = TITLE_H,
+				bottom = 0,
+				ui.presence(function(): string
+					local name = route.current:get().name
+					return if name == "orchestrator" then "orchestrator" else "control"
+				end, orchestration_page, { w_full = true, h_full = true }),
 			}
 		)
 	)

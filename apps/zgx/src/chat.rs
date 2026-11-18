@@ -12,8 +12,11 @@
 //!                    tasks }, nil for none
 //!   `chat.messages`  its transcript as ds/transcript's messages, keyed by id
 //!   `chat.draft`     the reply being written: { id, text }
-//! and for every window, `chat.catalog`: { state, harnesses, models } as
-//! ds.ModelPicker takes them, a model's `value` "<harness>/<model>".
+//! and for every window, `chat.catalog`: { state, complete, harnesses,
+//! models, device? } as ds.ModelPicker takes them, a model's `value`
+//! "<harness>/<model>". Each agent listed has its tab, with or without
+//! models: its `status` "loading" | "ready" | "empty" | "error", and `error`
+//! (one short line) when it failed. `complete` once every agent has answered.
 //!
 //! A reply streams as `append` frames, which carry only its new words: they
 //! reach `chat.draft` alone, so a word costs a small state's write, not the
@@ -25,6 +28,11 @@
 //! failed):
 //!   chat.open(id?) (an action)    watch that chat, the last one let go
 //!   chat.catalog (an action)      the models, looked up again
+//!   chat.catalog_fresh (an action) a picker opened: the agents whose models
+//!                                 failed, came empty or went stale
+//!                                 (`CATALOG_TTL`) asked again
+//!   chat.catalog_retry({ harness }) (an action) that agent's models asked
+//!                                 again, of its provider
 //!   chat.send(req)                run a message, or queue it while a turn runs
 //!   chat.interrupt(id)
 //!   chat.respond({ id, request, decision = "once" | "always" | "deny" |
@@ -85,8 +93,12 @@ struct Chats {
     harnesses: RefCell<Vec<Json>>,
     /// Models by harness, as the engine lists them.
     models: RefCell<HashMap<String, Vec<Json>>>,
+    /// How each agent's models last answered, and whether they're asked now.
+    looks: RefCell<HashMap<String, Look>>,
     catalog: RefCell<Vec<Shared>>,
     catalog_state: Cell<CatalogState>,
+    /// The agents are being listed (`load_catalog`).
+    listing: Cell<bool>,
     views: RefCell<Vec<Weak<View>>>,
     /// The engine's live session and chat lists, heard as changes.
     listening: RefCell<Vec<engine::lists::Listening>>,
@@ -135,6 +147,9 @@ struct Chats {
     /// Moves with each chat let go of: only the last one's look at the
     /// footprint, once the app has rested, counts.
     let_go_turn: Cell<u64>,
+    /// What the log last said is kept (how many, in tenths of a MB): said
+    /// again only when it changes, not at every switch.
+    let_go_said: Cell<(usize, u64)>,
 }
 
 /// A transcript's entry. A settled one, built into its row and older than
@@ -634,6 +649,9 @@ fn plainly_has_row(entry: &Json) -> bool {
     if entry["id"].as_str().is_none() {
         return false;
     }
+    if is_crew_reports(entry) {
+        return true;
+    }
     match entry["role"].as_str() {
         Some("user") => true,
         // As `blocks_of`: a tool that isn't its output alone, or a thought with words.
@@ -797,23 +815,131 @@ const BUILT_AT_ONCE: usize = 64;
 const BUILD_SLICE: std::time::Duration = std::time::Duration::from_millis(3);
 const BUILD_REST: std::time::Duration = std::time::Duration::from_millis(5);
 
+/// How long an agent's models stand before a picker opening asks for them
+/// again (`chat.catalog_fresh`).
+const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// How long after an agent's models failed or came empty its accounts being
+/// read again asks for them again (`accounts_seen`).
+const FAILED_AGAIN_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Another device's catalog, read through the engine (`targetDeviceId`).
 /// (Kept in `known_remotes`, `ready` is whether it was whole: every agent's
 /// models came.)
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Remote {
     device: String,
     harnesses: Vec<Json>,
     models: HashMap<String, Vec<Json>>,
+    looks: HashMap<String, Look>,
     ready: bool,
+}
+
+impl Remote {
+    /// As kept for later: nothing it was asking is still on its way to it.
+    fn kept(&self) -> Remote {
+        let mut kept = self.clone();
+        for look in kept.looks.values_mut() {
+            look.asking = false;
+            look.again = false;
+        }
+        kept
+    }
 }
 
 /// A catalog looked at ahead of time, kept unless the device has one: one
 /// short of an agent's models gives way to a whole one.
 fn keep_known(known: &mut HashMap<String, Remote>, remote: Remote) {
     if known.get(&remote.device).is_none_or(|r| !r.ready && remote.ready) {
-        known.insert(remote.device.clone(), remote);
+        known.insert(remote.device.clone(), remote.kept());
     }
+}
+
+/// An agent's models as last asked for: when they answered (none yet:
+/// never), what went wrong if they failed, and whether they're asked now
+/// (what they had stays shown meanwhile).
+#[derive(Clone, Default)]
+struct Look {
+    at: Option<std::time::Instant>,
+    error: Option<String>,
+    asking: bool,
+    /// Asked again, of its provider, once it answers: an account changed
+    /// while it was being asked.
+    again: bool,
+}
+
+/// What an account change asks for (`accounts_ask`).
+#[derive(Debug, PartialEq)]
+enum AccountsAsk {
+    /// The agent's models, here (marked asked).
+    Models,
+    /// The agents listed again here: the agent isn't, yet.
+    Relist,
+    /// The composer's other device's catalog looked at again.
+    Remote,
+    Nothing,
+}
+
+/// What `load_catalog` looks up.
+#[derive(Clone, PartialEq)]
+enum Load {
+    /// Every agent's models, once.
+    First,
+    /// Every agent's models again, of their providers.
+    Again,
+    /// The agents listed again, for one signed in to that may only now be
+    /// offered: its models, of its provider, and any never asked for.
+    Relist(String),
+}
+
+/// Its `status` for the picker: "loading" (asked, or not answered yet),
+/// "error", "empty" (no models listed: signed out, or a dead key) or
+/// "ready".
+fn look_status(look: Option<&Look>, models: Option<&Vec<Json>>) -> &'static str {
+    match look {
+        Some(l) if l.asking || l.at.is_none() => "loading",
+        Some(l) if l.error.is_some() => "error",
+        // (Models with no look: put there whole, as answered.)
+        None if models.is_none() => "loading",
+        _ if models.is_none_or(Vec::is_empty) => "empty",
+        _ => "ready",
+    }
+}
+
+/// Which of `ids` to ask for their models again as a picker opens, each
+/// with whether to make the agent ask its provider (`force`): one failed,
+/// empty or never answered, forced; one older than `CATALOG_TTL`, not.
+/// Never one already being asked.
+fn due(ids: &[String], looks: &HashMap<String, Look>, models: &HashMap<String, Vec<Json>>, now: std::time::Instant) -> Vec<(String, bool)> {
+    ids.iter()
+        .filter_map(|id| {
+            let look = looks.get(id);
+            if look.is_some_and(|l| l.asking) {
+                return None;
+            }
+            match look_status(look, models.get(id)) {
+                "ready" => {
+                    let at = look.and_then(|l| l.at)?;
+                    (now.saturating_duration_since(at) >= CATALOG_TTL).then(|| (id.clone(), false))
+                }
+                _ => Some((id.clone(), true)),
+            }
+        })
+        .collect()
+}
+
+/// An engine error as one short line, for the picker to say.
+fn short_error(error: &str) -> String {
+    let line = error.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("failed");
+    if line.chars().count() <= 120 {
+        return line.to_owned();
+    }
+    let cut: String = line.chars().take(119).collect();
+    format!("{cut}…")
+}
+
+/// Ids of listed harnesses.
+fn ids_of(harnesses: &[Json]) -> Vec<String> {
+    harnesses.iter().filter_map(|h| h["id"].as_str().map(Into::into)).collect()
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -841,6 +967,10 @@ struct View {
     /// A finished subagent's transcript, read whole from its uploaded blob
     /// (a lane's): nothing to watch while it stands.
     snapshot: Cell<bool>,
+    /// A lane that shows no transcript (`session_only`: Capture's composer,
+    /// which needs the chat's row and the send path): its transcript isn't
+    /// watched, and its `messages` stay empty.
+    session_only: Cell<bool>,
 }
 
 /// A prompt sent and not yet in the transcript: shown under it meanwhile,
@@ -993,6 +1123,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
+        session_only: Cell::new(false),
     });
     chats.views.borrow_mut().push(Rc::downgrade(&view));
     if chats.views.borrow().len() == 1 {
@@ -1039,6 +1170,12 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             }
             let id = args.field("id").map(text).filter(|s| !s.is_empty());
             let view = lanes.borrow_mut().entry(slot.clone()).or_insert_with(|| lane_view(&host, &slot)).clone();
+            // (Its transcript wanted again, or no longer: the chat opened
+            // afresh, so its watches are what it now wants.)
+            let session_only = args.field("session_only").is_some_and(Value::truthy);
+            if view.session_only.replace(session_only) != session_only {
+                view.open_chat(None);
+            }
             // A finished subagent: its uploaded transcript first.
             match (id, args.field("frozen").is_some_and(Value::truthy)) {
                 (Some(id), true) => view.open_frozen(id, args.field("chat").map(text).filter(|s| !s.is_empty())),
@@ -1127,7 +1264,20 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let c = chats.clone();
     host.action("chat.catalog", move |_| {
         let c = c.clone();
-        engine::get().spawn(async move { c.load_catalog(true).await });
+        engine::get().spawn(async move { c.load_catalog(Load::Again).await });
+    });
+    // A model picker opened: the agents whose models failed, came empty or
+    // went stale asked again (the composer's device's), while it shows
+    // what it has.
+    let c = chats.clone();
+    host.action("chat.catalog_fresh", move |_| c.catalog_fresh());
+    // One agent's models asked again, of its provider (a Retry).
+    let c = chats.clone();
+    host.action("chat.catalog_retry", move |arg| {
+        let harness = arg.field("harness").map(crate::auth::text).unwrap_or_default();
+        if !harness.is_empty() {
+            c.catalog_retry(&harness);
+        }
     });
     // The composer's device: its catalog is `chat.catalog` from now on (nil
     // or this device: this one's).
@@ -1255,6 +1405,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
+        session_only: Cell::new(false),
     });
     chats.views.borrow_mut().push(Rc::downgrade(&view));
     let weak = Rc::downgrade(&view);
@@ -1381,9 +1532,9 @@ impl Chats {
             }
             // The composer's other device's, if it's on one: what an earlier
             // connection was asking is gone with it.
-            me.reload_remote();
+            me.reload_remote(false);
             // Every composer needs it: looked up once a connection is there.
-            me.load_catalog(false).await;
+            me.load_catalog(Load::First).await;
         });
     }
 
@@ -1485,11 +1636,10 @@ impl Chats {
         }
         kept.push(LetGo { at: std::time::Instant::now(), bytes, id, entries, older_todo, built, built_model, context, context_usage });
         prune_let_go(&mut kept);
-        eprintln!(
-            "zeron-zgx: chat: kept chats let go of: {}, {:.1} MB",
-            kept.len(),
-            kept.iter().map(|held| held.bytes).sum::<usize>() as f64 / 1e6
-        );
+        let said = (kept.len(), (kept.iter().map(|held| held.bytes).sum::<usize>() as f64 / 1e5).round() as u64);
+        if self.let_go_said.replace(said) != said {
+            eprintln!("zeron-zgx: chat: kept chats let go of: {}, {:.1} MB", said.0, said.1 as f64 / 10.0);
+        }
         drop(kept);
         // The app's footprint once it has come to rest after the switch (as
         // it lets a chat go it's opening the next, drawing it, its GPU
@@ -1502,6 +1652,7 @@ impl Chats {
             zgx::timer::sleep(LET_GO_SETTLE).await;
             if me.let_go_turn.get() == turn && !room_to_keep() && !me.let_go.borrow().is_empty() {
                 me.let_go.borrow_mut().clear();
+                me.let_go_said.set((0, 0));
                 eprintln!("zeron-zgx: chat: kept chats let go of: none (the app's footprint at rest is past its mark)");
             }
         });
@@ -1534,21 +1685,29 @@ impl Chats {
         }
     }
 
-    /// The agents that can take a chat, and each one's models.
-    async fn load_catalog(self: &Rc<Self>, again: bool) {
-        if self.catalog_state.get() == CatalogState::Loading {
-            return;
-        }
-        if self.catalog_state.get() == CatalogState::Ready && !again {
+    /// The agents that can take a chat, and each one's models: all of them
+    /// the first time (`Load::First`) or again of their providers
+    /// (`Load::Again`); or the agents listed again for one just signed in
+    /// to (`Load::Relist`), only its models and any never asked for.
+    async fn load_catalog(self: &Rc<Self>, load: Load) {
+        let was = self.catalog_state.get();
+        // (Once listed, an agent already being asked isn't asked twice.)
+        if self.listing.get() || (load == Load::First && was != CatalogState::Looking) {
             return;
         }
         self.catalog_state.set(CatalogState::Loading);
+        self.listing.set(true);
         let mock = std::env::var("ZERON_ZGX_MOCK").is_ok_and(|v| v == "1");
-        let list = match engine::get().call("ListHarnesses", json!({ "includeRegistry": true })).await {
+        let list = engine::get().call("ListHarnesses", json!({ "includeRegistry": true })).await;
+        self.listing.set(false);
+        let list = match list {
             Ok(list) => list,
             Err(error) => {
                 eprintln!("zeron-zgx: chat: the agents didn't list: {error}");
-                self.catalog_state.set(CatalogState::Looking);
+                // (What was listed stands; nothing listed yet, looked for
+                // again as a picker opens.)
+                self.catalog_state.set(was);
+                self.finish_catalog();
                 return;
             }
         };
@@ -1565,42 +1724,169 @@ impl Chats {
             })
             .cloned()
             .collect();
+        let asks = self.listed(harnesses, &load);
+        self.publish_catalog();
         // Each agent's models looked up at once, each shown as it comes (one
         // that has to start its agent takes seconds; one signed out fails).
-        let ids: Vec<String> = harnesses
-            .iter()
-            .filter_map(|h| h["id"].as_str().map(Into::into))
-            .collect();
+        for (id, force) in asks {
+            self.ask_models(id, force);
+        }
+    }
+
+    /// The agents as now listed (`load_catalog`): what each had stays, and
+    /// which to ask for their models comes back, each marked as asked.
+    fn listed(&self, harnesses: Vec<Json>, load: &Load) -> Vec<(String, bool)> {
+        let ids = ids_of(&harnesses);
         crate::agents::remember_icons(&harnesses);
         *self.harnesses.borrow_mut() = harnesses;
-        if !again {
+        if *load != Load::Again {
             self.models.borrow_mut().retain(|id, _| ids.contains(id));
         }
-        let left = Rc::new(Cell::new(ids.len()));
-        if ids.is_empty() {
+        self.looks.borrow_mut().retain(|id, _| ids.contains(id));
+        let asks: Vec<(String, bool)> = ids
+            .into_iter()
+            .filter_map(|id| match load {
+                Load::First => Some((id, false)),
+                Load::Again => Some((id, true)),
+                Load::Relist(h) if *h == id => Some((id, true)),
+                Load::Relist(_) => self.looks.borrow().get(&id).is_none_or(|l| l.at.is_none() && !l.asking).then_some((id, false)),
+            })
+            .filter(|(id, force)| self.ask(id, *force))
+            .collect();
+        self.finish_catalog();
+        asks
+    }
+
+    /// `harness`'s models marked as asked for (what it has stays shown),
+    /// unless they already are: then false, and a `force`d ask (an account
+    /// changed meanwhile) is made once that one answers.
+    fn ask(&self, harness: &str, force: bool) -> bool {
+        let mut looks = self.looks.borrow_mut();
+        let look = looks.entry(harness.to_owned()).or_default();
+        if look.asking {
+            look.again |= force;
+            return false;
+        }
+        look.asking = true;
+        true
+    }
+
+    /// `harness`'s models asked of the engine (`force`: of its provider, not
+    /// what the engine kept), marked asked already (`ask`).
+    fn ask_models(self: &Rc<Self>, harness: String, force: bool) {
+        let me = self.clone();
+        engine::get().spawn(async move {
+            let answer = engine::get().call("ListModels", json!({ "harness": harness, "force": force })).await;
+            if let Err(error) = &answer {
+                eprintln!("zeron-zgx: chat: {harness}'s models didn't list: {error}");
+            }
+            let answer = answer.map(|list| list.as_array().cloned().unwrap_or_default());
+            let again = me.models_answered(&harness, answer);
+            me.publish_catalog();
+            if again {
+                me.ask_models(harness, true);
+            }
+        });
+    }
+
+    /// `harness`'s models answered: listed (none, for one signed out or
+    /// given a dead key), or failed (what it had stays, said failed). True:
+    /// asked again at once, forced, as an account changed while it was
+    /// being asked (it stays asked).
+    fn models_answered(&self, harness: &str, answer: Result<Vec<Json>, String>) -> bool {
+        let again = {
+            let mut looks = self.looks.borrow_mut();
+            let look = looks.entry(harness.to_owned()).or_default();
+            look.at = Some(std::time::Instant::now());
+            match answer {
+                Ok(list) => {
+                    look.error = None;
+                    self.models.borrow_mut().insert(harness.to_owned(), list);
+                }
+                Err(error) => look.error = Some(short_error(&error)),
+            }
+            let again = std::mem::take(&mut look.again);
+            look.asking = again;
+            again
+        };
+        self.finish_catalog();
+        again
+    }
+
+    /// The catalog complete once every agent listed has answered (and the
+    /// agents aren't being listed).
+    fn finish_catalog(&self) {
+        if self.catalog_state.get() != CatalogState::Loading || self.listing.get() {
+            return;
+        }
+        let looks = self.looks.borrow();
+        let answered = self
+            .harnesses
+            .borrow()
+            .iter()
+            .filter_map(|h| h["id"].as_str())
+            .all(|id| looks.get(id).is_some_and(|l| l.at.is_some() && !l.asking));
+        if answered {
             self.catalog_state.set(CatalogState::Ready);
+        }
+    }
+
+    /// Which of this device's agents a picker opening asks again (`due`).
+    fn harnesses_due(&self, now: std::time::Instant) -> Vec<(String, bool)> {
+        due(&ids_of(&self.harnesses.borrow()), &self.looks.borrow(), &self.models.borrow(), now)
+    }
+
+    /// A model picker opened (`chat.catalog_fresh`): the composer's device's
+    /// agents whose models failed, came empty, never came or went stale,
+    /// asked again; none already being asked. Never looked up: looked up.
+    fn catalog_fresh(self: &Rc<Self>) {
+        let now = std::time::Instant::now();
+        if self.remote.borrow().is_some() {
+            let device = self.remote.borrow().as_ref().map(|r| r.device.clone()).unwrap_or_default();
+            // (Nothing heard from it in a look that has settled: looked at again.)
+            let unheard = self.remote.borrow().as_ref().is_some_and(|r| r.harnesses.is_empty() && r.looks.is_empty());
+            if unheard {
+                if self.settled(self.remote_turn.get()) {
+                    self.reload_remote(false);
+                }
+                return;
+            }
+            let asks = self.remote.borrow().as_ref().map(|r| due(&ids_of(&r.harnesses), &r.looks, &r.models, now)).unwrap_or_default();
+            for (id, force) in asks {
+                self.remote_ask(&device, id, force);
+            }
+            return;
+        }
+        if self.catalog_state.get() == CatalogState::Looking {
+            let me = self.clone();
+            engine::get().spawn(async move { me.load_catalog(Load::First).await });
+            return;
+        }
+        let asks: Vec<(String, bool)> = self.harnesses_due(now).into_iter().filter(|(id, force)| self.ask(id, *force)).collect();
+        if !asks.is_empty() {
             self.publish_catalog();
         }
-        for id in ids {
-            let (me, left) = (self.clone(), left.clone());
-            engine::get().spawn(async move {
-                match engine::get()
-                    .call("ListModels", json!({ "harness": id, "force": again }))
-                    .await
-                {
-                    Ok(list) => {
-                        me.models
-                            .borrow_mut()
-                            .insert(id, list.as_array().cloned().unwrap_or_default());
-                    }
-                    Err(error) => eprintln!("zeron-zgx: chat: {id}'s models didn't list: {error}"),
-                }
-                left.set(left.get() - 1);
-                if left.get() == 0 {
-                    me.catalog_state.set(CatalogState::Ready);
-                }
-                me.publish_catalog();
-            });
+        for (id, force) in asks {
+            self.ask_models(id, force);
+        }
+    }
+
+    /// One agent's models asked again of its provider (`chat.catalog_retry`),
+    /// on the composer's device.
+    fn catalog_retry(self: &Rc<Self>, harness: &str) {
+        let device = self.remote.borrow().as_ref().map(|r| r.device.clone());
+        if let Some(device) = device {
+            self.remote_ask(&device, harness.to_owned(), true);
+            return;
+        }
+        if !ids_of(&self.harnesses.borrow()).iter().any(|id| id == harness) {
+            let (me, harness) = (self.clone(), harness.to_owned());
+            engine::get().spawn(async move { me.load_catalog(Load::Relist(harness)).await });
+            return;
+        }
+        if self.ask(harness, true) {
+            self.publish_catalog();
+            self.ask_models(harness.to_owned(), true);
         }
     }
 
@@ -1644,33 +1930,133 @@ impl Chats {
     }
 
     /// `harness`'s logins on `device` ("" or this one: here) changed: its
-    /// models looked up again, as the agent now lists them (Pi signed in to
-    /// Claude lists Claude's models). Here, that agent's alone; another
-    /// device's, only while the composer runs on it.
+    /// models looked up again, of its provider, as the agent now lists them
+    /// (Pi signed in to Claude lists Claude's models), also when they failed
+    /// or came empty before (Cursor signed in again after its key died).
+    /// Here, that agent's alone (not listed: the agents listed again, as it
+    /// may only now be offered); another device's, only while the composer
+    /// runs on it.
     fn accounts_changed(self: &Rc<Self>, device: &str, harness: &str) {
+        match self.accounts_ask(device, harness) {
+            AccountsAsk::Models => self.ask_models(harness.to_owned(), true),
+            AccountsAsk::Relist => {
+                let (me, harness) = (self.clone(), harness.to_owned());
+                engine::get().spawn(async move { me.load_catalog(Load::Relist(harness)).await });
+            }
+            AccountsAsk::Remote => self.reload_remote(true),
+            AccountsAsk::Nothing => {}
+        }
+    }
+
+    /// What an account change asks (`accounts_changed`); an agent's models
+    /// here, marked asked (shown as loading, what they had staying).
+    fn accounts_ask(&self, device: &str, harness: &str) -> AccountsAsk {
         let here = self.here.borrow().clone();
         if device.is_empty() || here.as_deref() == Some(device) {
-            if !self.models.borrow().contains_key(harness) {
-                return;
+            if !ids_of(&self.harnesses.borrow()).iter().any(|id| id == harness) {
+                return AccountsAsk::Relist;
             }
-            let (me, id) = (self.clone(), harness.to_owned());
-            engine::get().spawn(async move {
-                match engine::get()
-                    .call("ListModels", json!({ "harness": id, "force": true }))
-                    .await
-                {
-                    Ok(list) => {
-                        me.models
-                            .borrow_mut()
-                            .insert(id, list.as_array().cloned().unwrap_or_default());
-                        me.publish_catalog();
-                    }
-                    Err(error) => eprintln!("zeron-zgx: chat: {id}'s models didn't list again: {error}"),
-                }
-            });
-        } else if self.remote.borrow().as_ref().is_some_and(|r| r.device == device) {
-            self.reload_remote();
+            if !self.ask(harness, true) {
+                // (Being asked: asked again once that answers.)
+                return AccountsAsk::Nothing;
+            }
+            self.publish_catalog();
+            return AccountsAsk::Models;
         }
+        if self.remote.borrow().as_ref().is_some_and(|r| r.device == device) {
+            return AccountsAsk::Remote;
+        }
+        AccountsAsk::Nothing
+    }
+
+    /// `device`'s accounts read again ("" or this one: here), with these
+    /// agents signed in: one whose models failed or came empty, a while
+    /// ago, is asked again of its provider. (A key replaced in place, or the
+    /// same account signed in to again, changes no login.)
+    fn accounts_seen(self: &Rc<Self>, device: &str, signed_in: &[String]) {
+        let now = std::time::Instant::now();
+        let failed = |looks: &HashMap<String, Look>, models: &HashMap<String, Vec<Json>>, id: &str| {
+            let look = looks.get(id);
+            matches!(look_status(look, models.get(id)), "error" | "empty")
+                && look.and_then(|l| l.at).is_none_or(|at| now.saturating_duration_since(at) >= FAILED_AGAIN_AFTER)
+        };
+        let here = self.here.borrow().clone();
+        if device.is_empty() || here.as_deref() == Some(device) {
+            let ids = ids_of(&self.harnesses.borrow());
+            let asks: Vec<String> = signed_in
+                .iter()
+                .filter(|id| ids.contains(id) && failed(&self.looks.borrow(), &self.models.borrow(), id))
+                .filter(|id| self.ask(id, true))
+                .cloned()
+                .collect();
+            if !asks.is_empty() {
+                self.publish_catalog();
+            }
+            for id in asks {
+                self.ask_models(id, true);
+            }
+            return;
+        }
+        let asks: Vec<String> = match self.remote.borrow().as_ref() {
+            Some(r) if r.device == device => {
+                let ids = ids_of(&r.harnesses);
+                signed_in.iter().filter(|id| ids.contains(id) && failed(&r.looks, &r.models, id)).cloned().collect()
+            }
+            _ => Vec::new(),
+        };
+        for id in asks {
+            self.remote_ask(device, id, true);
+        }
+    }
+
+    /// `harness`'s models on the composer's other device asked again (none
+    /// already being asked).
+    fn remote_ask(self: &Rc<Self>, device: &str, harness: String, force: bool) {
+        let asked = match self.remote.borrow_mut().as_mut() {
+            Some(r) if r.device == device => {
+                let look = r.looks.entry(harness.clone()).or_default();
+                !std::mem::replace(&mut look.asking, true)
+            }
+            _ => false,
+        };
+        if !asked {
+            return;
+        }
+        self.publish_catalog();
+        let (me, device) = (self.clone(), device.to_owned());
+        engine::get().spawn(async move {
+            let params = json!({ "harness": harness, "targetDeviceId": device, "force": force });
+            let answer = engine::get().call("ListModels", params).await;
+            if let Err(error) = &answer {
+                eprintln!("zeron-zgx: chat: {harness}'s models on {device} didn't list: {error}");
+            }
+            let answer = answer.map(|list| list.as_array().cloned().unwrap_or_default());
+            if me.remote_answered(&device, &harness, answer) {
+                me.publish_catalog();
+            }
+        });
+    }
+
+    /// `harness`'s models on `device` answered, while the composer's still
+    /// on it (else nothing changes: false). Listed, they're kept for the
+    /// device too.
+    fn remote_answered(&self, device: &str, harness: &str, answer: Result<Vec<Json>, String>) -> bool {
+        let mut remote = self.remote.borrow_mut();
+        let Some(r) = remote.as_mut().filter(|r| r.device == device) else { return false };
+        let look = r.looks.entry(harness.to_owned()).or_default();
+        look.asking = false;
+        look.at = Some(std::time::Instant::now());
+        match answer {
+            Ok(list) => {
+                look.error = None;
+                if let Some(known) = self.known_remotes.borrow_mut().get_mut(device) {
+                    known.models.insert(harness.to_owned(), list.clone());
+                }
+                r.models.insert(harness.to_owned(), list);
+            }
+            Err(error) => look.error = Some(short_error(&error)),
+        }
+        true
     }
 
     /// The composer now runs on `device` ("" or this one: here).
@@ -1686,26 +2072,22 @@ impl Chats {
             return;
         }
         let known = self.known_remotes.borrow().get(device).cloned();
-        *self.remote.borrow_mut() = Some(known.unwrap_or_else(|| Remote {
-            device: device.to_owned(),
-            harnesses: Vec::new(),
-            models: HashMap::new(),
-            ready: false,
-        }));
+        *self.remote.borrow_mut() = Some(known.unwrap_or_else(|| Remote { device: device.to_owned(), ..Remote::default() }));
         self.publish_catalog();
-        self.reload_remote();
+        self.reload_remote(false);
     }
 
     /// The composer's other device's catalog looked at again, a look of its
     /// own: whatever an earlier one (this device's or another's) still hears
-    /// changes nothing.
-    fn reload_remote(self: &Rc<Self>) {
+    /// changes nothing. (`force`: each agent's models of its provider, an
+    /// account there having changed.)
+    fn reload_remote(self: &Rc<Self>, force: bool) {
         let Some(device) = self.remote.borrow().as_ref().map(|r| r.device.clone()) else { return };
         let turn = self.remote_turn.get() + 1;
         self.remote_turn.set(turn);
         let me = self.clone();
         let look = device.clone();
-        engine::get().spawn(async move { me.load_remote(look, turn).await });
+        engine::get().spawn(async move { me.load_remote(look, turn, force).await });
         // Unanswered by then (the device offline, or slow), it settles.
         let me = self.clone();
         engine::get().spawn(async move {
@@ -1747,7 +2129,7 @@ impl Chats {
 
     /// `device`'s agents, then each one's models as they come, while the
     /// composer is still on it (and this is still its look: `turn`).
-    async fn load_remote(self: &Rc<Self>, device: String, turn: u64) {
+    async fn load_remote(self: &Rc<Self>, device: String, turn: u64, force: bool) {
         let mut tries = 0;
         let list = loop {
             let list = engine::get()
@@ -1773,10 +2155,14 @@ impl Chats {
             }
         };
         let harnesses: Vec<Json> = list.as_array().into_iter().flatten().filter(|h| offered(h, &device)).cloned().collect();
-        let ids: Vec<String> = harnesses.iter().filter_map(|h| h["id"].as_str().map(Into::into)).collect();
+        let ids = ids_of(&harnesses);
         if let Some(r) = self.remote.borrow_mut().as_mut() {
             crate::agents::remember_icons(&harnesses);
             r.harnesses = harnesses;
+            r.looks.retain(|id, _| ids.contains(id));
+            for id in &ids {
+                r.looks.entry(id.clone()).or_default().asking = true;
+            }
             r.ready = ids.is_empty() || self.settled(turn);
         }
         self.publish_catalog();
@@ -1789,17 +2175,17 @@ impl Chats {
                 let mut tries = 0;
                 let list = loop {
                     let list = engine::get()
-                        .call("ListModels", json!({ "harness": id, "targetDeviceId": device }))
+                        .call("ListModels", json!({ "harness": id, "targetDeviceId": device, "force": force }))
                         .await;
                     if !me.on_remote(&device, turn) {
                         return;
                     }
                     match list {
-                        Ok(list) => break Some(list),
+                        Ok(list) => break Ok(list),
                         Err(error) => {
                             eprintln!("zeron-zgx: chat: {id}'s models on {device} didn't list: {error}");
                             if tries == MODEL_RETRIES {
-                                break None;
+                                break Err(error);
                             }
                             zgx::timer::sleep(RETRY_AFTER[tries]).await;
                             tries += 1;
@@ -1813,19 +2199,26 @@ impl Chats {
                 {
                     let mut remote = me.remote.borrow_mut();
                     let Some(r) = remote.as_mut() else { return };
+                    let look = r.looks.entry(id.clone()).or_default();
+                    look.asking = false;
+                    look.at = Some(std::time::Instant::now());
                     match list {
-                        Some(list) => {
+                        Ok(list) => {
+                            look.error = None;
                             r.models.insert(id, list.as_array().cloned().unwrap_or_default());
                         }
                         // (What it had before, if anything, stays.)
-                        None => whole.set(false),
+                        Err(error) => {
+                            look.error = Some(short_error(&error));
+                            whole.set(false);
+                        }
                     }
                     let all = left.get() == 0;
                     r.ready = all || me.settled(turn);
                     if all {
                         // Kept short, it isn't ready: moving to it shows it
                         // while it's looked at again.
-                        let mut kept = r.clone();
+                        let mut kept = r.kept();
                         kept.ready = whole.get();
                         me.known_remotes.borrow_mut().insert(device.clone(), kept);
                     }
@@ -1848,29 +2241,37 @@ impl Chats {
             let Ok(list) = engine::get().call("ListHarnesses", params).await else { continue };
             let harnesses: Vec<Json> = list.as_array().into_iter().flatten().filter(|h| offered(h, &device)).cloned().collect();
             let mut models = HashMap::new();
+            let mut looks = HashMap::new();
             let mut whole = true;
             for id in harnesses.iter().filter_map(|h| h["id"].as_str()) {
                 let params = json!({ "harness": id, "targetDeviceId": device });
+                let mut look = Look::default();
                 match engine::get().call("ListModels", params).await {
                     Ok(list) => {
                         models.insert(id.to_owned(), list.as_array().cloned().unwrap_or_default());
                     }
-                    Err(_) => whole = false,
+                    Err(error) => {
+                        look.error = Some(short_error(&error));
+                        whole = false;
+                    }
                 }
+                look.at = Some(std::time::Instant::now());
+                looks.insert(id.to_owned(), look);
             }
             crate::agents::remember_icons(&harnesses);
             // (One opened meanwhile has its own, as new.)
-            keep_known(&mut self.known_remotes.borrow_mut(), Remote { device, harnesses, models, ready: whole });
+            keep_known(&mut self.known_remotes.borrow_mut(), Remote { device, harnesses, models, looks, ready: whole });
         }
     }
 
     fn catalog_value(&self) -> Value {
         if let Some(r) = self.remote.borrow().as_ref() {
-            return catalog_of(&r.harnesses, &r.models, r.ready, Some(&r.device));
+            return catalog_of(&r.harnesses, &r.models, &r.looks, r.ready, Some(&r.device));
         }
         catalog_of(
             &self.harnesses.borrow(),
             &self.models.borrow(),
+            &self.looks.borrow(),
             self.catalog_state.get() == CatalogState::Ready,
             None,
         )
@@ -1949,6 +2350,12 @@ pub(crate) fn accounts_changed(device: &str, harness: &str) {
     CHATS.with(|c| c.clone().accounts_changed(device, harness));
 }
 
+/// An agent's accounts on a device read (src/agents.rs), these agents signed
+/// in: one whose models failed or came empty, asked again.
+pub(crate) fn accounts_seen(device: &str, signed_in: &[String]) {
+    CHATS.with(|c| c.clone().accounts_seen(device, signed_in));
+}
+
 pub(crate) fn made(params: &Json) {
     let Some(id) = params["chatId"].as_str() else { return };
     let mut row = json!({ "id": id });
@@ -1960,32 +2367,37 @@ pub(crate) fn made(params: &Json) {
     CHATS.with(|c| c.made(id, row));
 }
 
-/// `chat.catalog`: the agents with models listed, each model as the picker
-/// takes it; ready once any agent's models are in (more may follow), or all
-/// have answered (`done`). (`device`: whose, when it isn't this one.)
-fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, device: Option<&str>) -> Value {
+/// `chat.catalog`: every agent listed, with how its models stand (its
+/// `status`, and its `error` once they failed: an agent signed out, or its
+/// models failing, keeps its tab), and each model as the picker takes it;
+/// ready once any agent's models are in (more may follow), or all have
+/// answered (`done`). (`device`: whose, when it isn't this one.)
+fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, looks: &HashMap<String, Look>, done: bool, device: Option<&str>) -> Value {
     let any = by.values().any(|l| !l.is_empty());
     let state = if any || done { "ready" } else { "looking" };
     let mut harnesses = Vec::new();
     let mut models = Vec::new();
     for h in listed {
         let id = h["id"].as_str().unwrap_or_default();
-        let Some(list) = by.get(id).filter(|l| !l.is_empty()) else {
-            continue;
-        };
+        let look = looks.get(id);
+        let list = by.get(id);
+        let status = look_status(look, list);
+        let error = look.and_then(|l| l.error.as_deref()).filter(|_| status == "error");
         harnesses.push(Value::record([
             ("id", Value::from(id)),
             ("label", Value::from(h["name"].as_str().unwrap_or(id))),
             ("mark", Value::from(mark(id).as_str())),
             // An agent added from the ACP registry draws its own icon.
             ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),
+            ("status", Value::from(status)),
+            ("error", error.map_or(Value::Nil, Value::from)),
             // It has an auto mode of its own: the access picker offers Auto.
             (
                 "auto",
                 Value::Bool(h["accessModes"].as_array().is_some_and(|m| m.iter().any(|x| x == "auto"))),
             ),
         ]));
-        for m in list {
+        for m in list.into_iter().flatten() {
             models.push(model_value(id, m));
         }
     }
@@ -2174,7 +2586,11 @@ impl View {
             // A chat being made has nothing more to come yet: its rows (its
             // first message) are all there is.
             let heard = chats.creating.borrow().contains_key(&id);
-            chats.take_let_go(&id).unwrap_or(Open { id, heard, ..Open::default() })
+            let mut open = chats.take_let_go(&id).unwrap_or(Open { id, heard, ..Open::default() });
+            // (No transcript is watched: none is coming, and its row is
+            // what it shows.)
+            open.heard |= self.session_only.get();
+            open
         });
         let has_rows = next.as_ref().is_some_and(|o| o.heard);
         let old = self.open.replace(next);
@@ -2268,17 +2684,16 @@ impl View {
         if let Some(open) = self.open.borrow().as_ref() {
             params = with_known(params, open);
         }
-        let transcript = rpc.watch(
-            "WatchDocMessages",
-            params,
-            move |item| {
+        // (A lane showing no transcript: its row and queue alone.)
+        let transcript = (!self.session_only.get()).then(|| {
+            rpc.watch("WatchDocMessages", params, move |item| {
                 if let Some(view) = weak.upgrade()
                     && view.generation.get() == generation
                 {
                     view.heard_frame(item);
                 }
-            },
-        );
+            })
+        });
         let weak = Rc::downgrade(self);
         let queue = rpc.watch("WatchQueue", json!({ "chatId": id }), move |item| {
             if let Some(view) = weak.upgrade()
@@ -2303,7 +2718,7 @@ impl View {
             }
         });
         if let Some(open) = self.open.borrow_mut().as_mut() {
-            open.watches = vec![transcript, queue, waiting];
+            open.watches = transcript.into_iter().chain([queue, waiting]).collect();
         }
     }
 
@@ -2626,6 +3041,10 @@ impl View {
     }
 
     fn publish_messages(&self) {
+        if self.session_only.get() {
+            self.messages.set(Value::List(Rc::from([])));
+            return;
+        }
         let chats = CHATS.with(Rc::clone);
         let subagents;
         let list = {
@@ -2670,8 +3089,11 @@ impl View {
             // then working, as the shipping app's working trailer says
             // (transcript.rs `sending_bridge`): sending while the send is
             // newer than the session's turn, working once the turn starts.
+            // (A crew updates card is the engine's, not a prompt: no
+            // sending or working line under it.)
             if let Some(last) = open.entries.last()
                 && last["role"].as_str() == Some("user")
+                && !last.json.as_ref().is_some_and(|e| is_crew_reports(e) || injected_of(e).is_some())
                 && let Some(Value::Map(_)) = list.last()
             {
                 let sent = last["createdAt"].as_f64().unwrap_or(0.) / 1000.;
@@ -2785,57 +3207,14 @@ impl View {
             return Ok(());
         }
         // What it carries, uploaded to the chat's host.
-        let mut paths = Vec::new();
-        let mut images = 0;
-        // (Each file here, by what it was sent as: an Appshot's context names
-        // its picture by the path the agent has.)
-        let mut sent_as: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        // (Asked once, when there's a file to send: `store_takes_files`.)
-        let mut through_store = None;
-        let mut transfers: Vec<Json> = Vec::new();
-        for a in req.field("attachments").map(Value::list).unwrap_or_default() {
-            let path = a.field("path").map(text).unwrap_or_default();
-            let name = a.field("name").map(text).unwrap_or_else(|| path.clone());
-            if path.is_empty() {
-                continue;
+        let Carried { paths, images, sent_as, transfers } = match carry(&req, target.as_deref()).await {
+            Ok(carried) => carried,
+            Err(why) => {
+                // Failed before it could go: the prompt says so.
+                self.mark_failed(&id, &message_id, None);
+                return Err(why);
             }
-            if a.field("kind").map(text).as_deref() == Some("image") {
-                images += 1;
-            }
-            // A file of the session's own project (the files pane's): on its
-            // computer already, so it goes by its path there.
-            if a.field("on_host").is_some_and(Value::truthy) {
-                paths.push(path);
-                continue;
-            }
-            let store = match through_store {
-                Some(store) => store,
-                None => {
-                    let store = goes_through_store(target.as_deref()).await;
-                    through_store = Some(store);
-                    store
-                }
-            };
-            let uploaded = if store {
-                stage(&path, &name).await.map(|(reference, transfer)| {
-                    transfers.push(transfer);
-                    reference
-                })
-            } else {
-                upload(&path, &name, target.as_deref()).await
-            };
-            match uploaded {
-                Ok(at) => {
-                    sent_as.insert(path.clone(), at.clone());
-                    paths.push(at)
-                }
-                Err(why) => {
-                    // Failed before it could go: the prompt says so.
-                    self.mark_failed(&id, &message_id, None);
-                    return Err(why);
-                }
-            }
-        }
+        };
         // Appshots: the apps they show, as untrusted observed content after
         // the words (src/appshots, the shipping app's `with_appshots`).
         let shots: Vec<crate::appshots::Context> = req
@@ -2939,7 +3318,18 @@ impl View {
                 p.transfers = transfers;
             }
             self.mark_failed(&id, &message_id, Some(run));
-        } else if !fresh && runs_otherwise(&chat["config"], &config) {
+        } else if self.session_only.get() {
+            // (No transcript comes to say it arrived: delivered is done,
+            // unless the outbox holds it, which says when it leaves.)
+            let mut pending = self.pending.borrow_mut();
+            if let Some(prompts) = pending.get_mut(&id) {
+                prompts.retain(|p| p.id != message_id || p.held);
+                if prompts.is_empty() {
+                    pending.remove(&id);
+                }
+            }
+        }
+        if sent.is_ok() && !fresh && runs_otherwise(&chat["config"], &config) {
             // Sent with another agent, model or effort than the chat had (the
             // composer's pick, kept as a draft until now): the chat takes
             // them, as the shipping app's next turn does, and its icon with
@@ -3884,6 +4274,83 @@ fn merged_config(config: &Json, args: &Value) -> Json {
         c["modelOptions"][key] = json!(if fast.truthy() { on } else { off });
     }
     c
+}
+
+/// What a message carries, sent on: each file's path where the run reads
+/// it, how many are pictures, each by the local path it was sent from, and
+/// what the engine must deliver first (files staged through its store).
+pub(crate) struct Carried {
+    pub(crate) paths: Vec<String>,
+    pub(crate) images: usize,
+    pub(crate) sent_as: std::collections::HashMap<String, String>,
+    pub(crate) transfers: Vec<Json>,
+}
+
+/// A request's `attachments` (`{ kind, path, name, on_host }`, as the
+/// composer packs them) uploaded toward `target` (the chat's device; none:
+/// this one): a file of the chat's own project goes by its path there, the
+/// rest uploaded to it, or staged through the engine's store where Cloud
+/// takes files so. The chat page's send and the Brain dump's (a dump's op)
+/// alike.
+pub(crate) async fn carry(req: &Value, target: Option<&str>) -> Result<Carried, &'static str> {
+    let mut paths = Vec::new();
+    let mut images = 0;
+    // (Each file here, by what it was sent as: an Appshot's context names
+    // its picture by the path the agent has.)
+    let mut sent_as: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // (Asked once, when there's a file to send: `store_takes_files`.)
+    let mut through_store = None;
+    let mut transfers: Vec<Json> = Vec::new();
+    for a in req.field("attachments").map(Value::list).unwrap_or_default() {
+        let path = a.field("path").map(text).unwrap_or_default();
+        let name = a.field("name").map(text).unwrap_or_else(|| path.clone());
+        if path.is_empty() {
+            continue;
+        }
+        if a.field("kind").map(text).as_deref() == Some("image") {
+            images += 1;
+        }
+        // A file of the session's own project (the files pane's): on its
+        // computer already, so it goes by its path there.
+        if a.field("on_host").is_some_and(Value::truthy) {
+            paths.push(path);
+            continue;
+        }
+        let store = match through_store {
+            Some(store) => store,
+            None => {
+                let store = goes_through_store(target).await;
+                through_store = Some(store);
+                store
+            }
+        };
+        let at = if store {
+            let (reference, transfer) = stage(&path, &name).await?;
+            transfers.push(transfer);
+            reference
+        } else {
+            upload(&path, &name, target).await?
+        };
+        sent_as.insert(path.clone(), at.clone());
+        paths.push(at);
+    }
+    Ok(Carried { paths, images, sent_as, transfers })
+}
+
+/// Chat `id`'s config with `picks` (a composer's: `model` as
+/// `harness/model`, `effort`, `access`, `fast`, `options`, `plan`) laid
+/// over it, as a send to it would set it (`merged_config`).
+pub(crate) fn config_with(id: &str, picks: &Value) -> Json {
+    let chats = CHATS.with(Rc::clone);
+    let config = chats.chat(id).map(|c| c["config"].clone()).unwrap_or(Json::Null);
+    merged_config(&config, picks)
+}
+
+/// Where chat `id` runs, as a send uploads toward it (none: this device).
+pub(crate) fn target_of(id: &str) -> Option<String> {
+    let chats = CHATS.with(Rc::clone);
+    let chat = chats.chat(id)?;
+    chats.target(&chat)
 }
 
 /// The prompt with its attachments named after it, as the shipping app
@@ -5119,9 +5586,91 @@ impl Subagents {
     }
 }
 
+/// What the engine said `entry` is (its `injected` part: a crew ask, an
+/// answer, a relay…), as ds/orch_injected reads it: `{ kind, ask?, chat?,
+/// turn?, item?, items?, dump?, route?, by? }`. None: it's no engine message.
+fn injected_of(entry: &Json) -> Option<Value> {
+    let part = entry["parts"].as_array()?.iter().find(|p| p["kind"].as_str() == Some("injected"))?;
+    let i = &part["injected"];
+    let kind = i["kind"].as_str().filter(|k| !k.is_empty())?;
+    let text = |key: &str| i[key].as_str().filter(|s| !s.is_empty()).map_or(Value::Nil, Value::from);
+    let items: Vec<Value> = i["itemIds"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(Value::from).collect();
+    Some(Value::record([
+        ("kind", Value::from(kind)),
+        ("ask", text("askId")),
+        ("chat", text("chatId")),
+        ("turn", text("turnId")),
+        ("item", text("itemId")),
+        ("items", if items.is_empty() { Value::Nil } else { Value::List(items.into()) }),
+        ("dump", text("dumpId")),
+        ("route", text("routeId")),
+        ("by", text("by")),
+    ]))
+}
+
+/// Whether `entry` carries crew reports (an orchestrator's "Crew updates").
+fn is_crew_reports(entry: &Json) -> bool {
+    entry["parts"].as_array().into_iter().flatten().any(|p| p["kind"].as_str() == Some("crewReports"))
+}
+
+/// The crew reports `entry` carries, as ds/orch_reports reads them: each
+/// `{ id, from_chat, item_id?, state, summary, detail?, progress?, at }`,
+/// its state in snake_case and its time in Unix seconds, in the order filed
+/// (every `crewReports` part of it, one after another). None: it has none.
+fn crew_reports_of(entry: &Json) -> Option<Value> {
+    if !is_crew_reports(entry) {
+        return None;
+    }
+    let reports: Vec<Value> = entry["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["kind"].as_str() == Some("crewReports"))
+        .flat_map(|p| p["reports"].as_array().into_iter().flatten())
+        .filter_map(|r| {
+            let id = r["id"].as_str()?;
+            let from = r["fromChat"].as_str()?;
+            let state = match r["state"].as_str().unwrap_or_default() {
+                s @ ("progress" | "done" | "blocked" | "failed" | "message") => s,
+                _ => "other",
+            };
+            let at = r["at"]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.timestamp())
+                .or_else(|| seconds(&r["at"]));
+            let text = |key: &str| r[key].as_str().filter(|s| !s.trim().is_empty()).map_or(Value::Nil, Value::from);
+            Some(Value::record([
+                ("id", Value::from(id)),
+                ("from_chat", Value::from(from)),
+                ("item_id", text("itemId")),
+                ("state", Value::from(state)),
+                ("summary", Value::from(single_line(r["summary"].as_str().unwrap_or_default()).as_str())),
+                ("detail", text("detail")),
+                ("progress", r["progress"].as_f64().map_or(Value::Nil, Value::Num)),
+                ("at", at.map_or(Value::Nil, |t| Value::Num(t as f64))),
+            ]))
+        })
+        .collect();
+    Some(Value::List(reports.into()))
+}
+
 /// An entry as ds/transcript's message; nil for one it doesn't show.
 pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
     let id = entry["id"].as_str()?;
+    // Crew reports filed in an orchestrator's transcript (the engine's
+    // `crewReports` part, the wake turn's own message): a "Crew updates"
+    // card, never the person's bubble, whatever role carries it.
+    if let Some(reports) = crew_reports_of(entry) {
+        let created = entry["createdAt"].as_f64().unwrap_or(0.) / 1000.;
+        return Some(Value::record([
+            ("id", Value::from(id)),
+            ("role", Value::from("crew_reports")),
+            ("text", Value::from("")),
+            ("reports", reports),
+            ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
+        ]));
+    }
     match entry["role"].as_str()? {
         "user" => {
             let text = entry["parts"]
@@ -5165,6 +5714,20 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // Always its time under it, as the shipping app's prompts carry
             // it (the strip shows on hover), and its words to copy.
             let created = entry["createdAt"].as_f64().unwrap_or(0.) / 1000.;
+            // The engine's (a crew ask, an answer…): its block, never the
+            // person's bubble. Its words are what the agent was sent, whole:
+            // the block reads what it shows from them and its ids.
+            if let Some(injected) = injected_of(entry) {
+                return Some(Value::record([
+                    ("id", Value::from(id)),
+                    ("role", Value::from("injected")),
+                    ("text", Value::from(body)),
+                    ("injected", injected),
+                    ("created", Value::Num(created.floor())),
+                    ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
+                    ("sender", sender),
+                ]));
+            }
             Some(Value::record([
                 ("id", Value::from(id)),
                 ("role", Value::from("user")),
@@ -6849,6 +7412,23 @@ mod tests {
         assert!(would(&ms, &none, now));
     }
 
+    /// A lane opened for its session only (Capture's composer): its row
+    /// reads ready at once, with no transcript watched or published.
+    #[test]
+    fn a_session_only_lane_is_ready_with_no_transcript() {
+        use zgx_script::testing::TestApp;
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/orch_push_fixture.luau");
+        let app = TestApp::new(|runtime| zgx_script::ScriptHost::new(runtime, path));
+        let view = super::lane_view(&app.host, "capture-test");
+        view.session_only.set(true);
+        view.open_chat(Some("chat-brain".into()));
+        assert!(view.open.borrow().as_ref().is_some_and(|o| o.heard && o.watches.is_empty()));
+        view.publish_messages();
+        assert_eq!(view.messages.get(), Value::List(std::rc::Rc::from([])));
+        let session = view.session.get();
+        assert_eq!(session.field("state"), Some(&Value::from("ready")));
+    }
+
     /// A queued message's files come back to an edit as chips named as they
     /// were attached, already on the host, a picture shown where it can be.
     #[test]
@@ -7344,6 +7924,7 @@ mod tests {
             harnesses: vec![json!({ "id": "claude-code", "name": "Claude Code" })],
             models: HashMap::new(),
             ready: false,
+            ..Remote::default()
         });
         let waiting = chats.catalog_value();
         assert!(matches!(waiting.field("state"), Some(Value::Str(s)) if s.as_ref() == "looking"));
@@ -7412,6 +7993,7 @@ mod tests {
             harnesses: Vec::new(),
             models: HashMap::new(),
             ready: false,
+            ..Remote::default()
         });
         chats.remote_turn.set(2);
         assert!(chats.on_remote("laptop", 2));
@@ -7436,6 +8018,7 @@ mod tests {
             harnesses: Vec::new(),
             models: HashMap::new(),
             ready: false,
+            ..Remote::default()
         });
         chats.remote_turn.set(2);
         let complete = |chats: &Chats| matches!(chats.catalog_value().field("complete"), Some(Value::Bool(true)));
@@ -7451,6 +8034,139 @@ mod tests {
         assert!(chats.settled(2) && !chats.settled(3));
     }
 
+    /// An agent's tab in `chat.catalog`: its status, error and models.
+    fn tab(chats: &Chats, id: &str) -> Option<(String, Option<String>, usize)> {
+        let catalog = chats.catalog_value();
+        let Some(Value::List(harnesses)) = catalog.field("harnesses") else { return None };
+        let h = harnesses.iter().find(|h| h.field("id").map(text).as_deref() == Some(id))?;
+        let status = h.field("status").map(text).unwrap_or_default();
+        let error = h.field("error").filter(|e| !matches!(e, Value::Nil)).map(text);
+        let Some(Value::List(models)) = catalog.field("models") else { return None };
+        let prefix = format!("{id}/");
+        let n = models.iter().filter(|m| m.field("value").map(text).is_some_and(|v| v.starts_with(&prefix))).count();
+        Some((status, error, n))
+    }
+
+    /// This device's catalog listed (`Load::First`), with Codex's models in.
+    fn listed_here() -> Rc<Chats> {
+        let chats = Rc::new(Chats::default());
+        *chats.here.borrow_mut() = Some("mac".into());
+        chats.catalog_state.set(CatalogState::Loading);
+        let asks = chats.listed(
+            vec![json!({ "id": "codex", "name": "Codex" }), json!({ "id": "cursor", "name": "Cursor" })],
+            &Load::First,
+        );
+        assert_eq!(asks, vec![("codex".to_owned(), false), ("cursor".to_owned(), false)]);
+        assert_eq!(tab(&chats, "cursor").map(|t| t.0).as_deref(), Some("loading"));
+        assert!(!chats.models_answered("codex", Ok(vec![json!({ "id": "gpt", "label": "GPT" })])));
+        chats
+    }
+
+    /// 2026-11-17: Cursor's key had died when the app connected, so its
+    /// models came empty (or failed), its tab went, and signing in again
+    /// never brought it back: an agent with no models was never asked again.
+    /// Its tab stays, saying so, and an account change asks it again, of its
+    /// provider, even though it failed.
+    #[test]
+    fn a_cursor_with_no_models_at_connect_keeps_its_tab_and_a_sign_in_brings_them() {
+        for answer in [Ok(Vec::new()), Err("cursor-agent: unauthorized (401)\n  at ListModels".to_owned())] {
+            let chats = listed_here();
+            let failed = answer.is_err();
+            chats.models_answered("cursor", answer);
+            assert!(matches!(chats.catalog_value().field("complete"), Some(Value::Bool(true))), "every agent answered");
+            let (status, error, n) = tab(&chats, "cursor").expect("Cursor keeps its tab");
+            assert_eq!(n, 0);
+            if failed {
+                assert_eq!(status, "error");
+                assert_eq!(error.as_deref(), Some("cursor-agent: unauthorized (401)"), "one line");
+            } else {
+                assert_eq!((status.as_str(), error), ("empty", None));
+            }
+            // Signed in again: asked again, forced, shown loading meanwhile.
+            assert_eq!(chats.accounts_ask("", "cursor"), AccountsAsk::Models);
+            assert_eq!(tab(&chats, "cursor").map(|t| t.0).as_deref(), Some("loading"));
+            assert_eq!(chats.accounts_ask("mac", "cursor"), AccountsAsk::Nothing, "already being asked");
+            let models: Vec<Json> = (0..48).map(|i| json!({ "id": format!("m{i}"), "label": format!("M{i}") })).collect();
+            assert!(chats.models_answered("cursor", Ok(models)), "a change while asked asks once more");
+            assert!(!chats.models_answered("cursor", Ok((0..48).map(|i| json!({ "id": format!("m{i}") })).collect())));
+            assert_eq!(tab(&chats, "cursor"), Some(("ready".to_owned(), None, 48)));
+            assert_eq!(tab(&chats, "codex"), Some(("ready".to_owned(), None, 1)));
+        }
+    }
+
+    /// An agent not listed yet (only now signed in to) lists the agents
+    /// again; another device's change, only while the composer is on it.
+    #[test]
+    fn an_account_change_for_an_agent_not_listed_lists_them_again() {
+        let chats = listed_here();
+        assert_eq!(chats.accounts_ask("", "gemini"), AccountsAsk::Relist);
+        assert_eq!(chats.accounts_ask("box", "codex"), AccountsAsk::Nothing);
+        *chats.remote.borrow_mut() = Some(Remote { device: "box".into(), ..Remote::default() });
+        assert_eq!(chats.accounts_ask("box", "codex"), AccountsAsk::Remote);
+        // Listed again: the new one asked of its provider, and only it.
+        chats.models_answered("cursor", Ok(Vec::new()));
+        chats.remote.borrow_mut().take();
+        let asks = chats.listed(
+            vec![json!({ "id": "codex" }), json!({ "id": "cursor" }), json!({ "id": "gemini" })],
+            &Load::Relist("gemini".into()),
+        );
+        assert_eq!(asks, vec![("gemini".to_owned(), true)]);
+    }
+
+    /// An agent connected with no models still shows its tab, saying how it
+    /// stands, on this device and another.
+    #[test]
+    fn a_connected_agent_with_no_models_still_has_its_tab() {
+        let chats = listed_here();
+        chats.models_answered("cursor", Ok(Vec::new()));
+        let catalog = chats.catalog_value();
+        let Some(Value::List(harnesses)) = catalog.field("harnesses") else { panic!("harnesses") };
+        assert_eq!(harnesses.len(), 2);
+        assert_eq!(tab(&chats, "cursor"), Some(("empty".to_owned(), None, 0)));
+        let mut looks = HashMap::new();
+        looks.insert("pi".to_owned(), Look { at: Some(std::time::Instant::now()), error: Some("offline".into()), ..Look::default() });
+        *chats.remote.borrow_mut() = Some(Remote {
+            device: "box".into(),
+            harnesses: vec![json!({ "id": "pi" }), json!({ "id": "claude-code" })],
+            looks,
+            ready: true,
+            ..Remote::default()
+        });
+        assert_eq!(tab(&chats, "pi"), Some(("error".to_owned(), Some("offline".to_owned()), 0)));
+        assert_eq!(tab(&chats, "claude-code"), Some(("loading".to_owned(), None, 0)));
+        assert!(chats.remote_answered("box", "claude-code", Ok(Vec::new())));
+        assert!(!chats.remote_answered("laptop", "claude-code", Ok(Vec::new())), "another device's");
+        assert_eq!(tab(&chats, "claude-code"), Some(("empty".to_owned(), None, 0)));
+    }
+
+    /// A picker opening asks again for the agents whose models failed, came
+    /// empty, never came or went stale; not fresh ones, nor ones being asked.
+    #[test]
+    fn a_picker_opening_asks_again_for_failed_empty_and_stale_models() {
+        let chats = Rc::new(Chats::default());
+        chats.catalog_state.set(CatalogState::Loading);
+        let ids = ["fresh", "stale", "empty", "failed", "asking", "never"];
+        chats.listed(ids.iter().map(|id| json!({ "id": id })).collect(), &Load::First);
+        let now = std::time::Instant::now();
+        let models = || Ok(vec![json!({ "id": "m" })]);
+        for (id, answer) in [("fresh", models()), ("stale", models()), ("empty", Ok(Vec::new())), ("failed", Err("down".to_owned()))] {
+            chats.models_answered(id, answer);
+        }
+        chats.looks.borrow_mut().get_mut("stale").unwrap().at = now.checked_sub(CATALOG_TTL + std::time::Duration::from_secs(1));
+        chats.looks.borrow_mut().remove("never");
+        // ("asking" was marked asked by the listing and hasn't answered.)
+        assert_eq!(
+            chats.harnesses_due(now),
+            vec![("stale".to_owned(), false), ("empty".to_owned(), true), ("failed".to_owned(), true), ("never".to_owned(), true)]
+        );
+        // Asked: not asked twice.
+        for (id, force) in chats.harnesses_due(now) {
+            assert!(chats.ask(&id, force));
+        }
+        assert!(chats.harnesses_due(now).is_empty());
+        assert!(!chats.ask("failed", true));
+    }
+
     /// One looked at ahead of time without all its agents' models is kept as
     /// not ready, and gives way to a whole one; a whole one stays.
     #[test]
@@ -7460,6 +8176,7 @@ mod tests {
             harnesses: vec![json!({ "id": "codex" })],
             models: [("codex".to_owned(), vec![json!({ "id": model })])].into_iter().collect(),
             ready,
+            ..Remote::default()
         };
         let mut known = HashMap::new();
         keep_known(&mut known, remote(false, "short"));
@@ -7490,6 +8207,7 @@ mod tests {
                 harnesses: Vec::new(),
                 models: [("pi".to_owned(), vec![json!({ "id": "kimi-k3", "label": "Kimi K3" })])].into_iter().collect(),
                 ready: true,
+                ..Remote::default()
             },
         );
         assert_eq!(label(&chats).as_deref(), Some("Kimi K3"));
@@ -7928,6 +8646,87 @@ mod tests {
         assert_eq!(refs, ["a", "b"]);
         assert_eq!(found[0].field("title").map(text).as_deref(), Some("first"));
         assert_eq!(found[1].field("at").and_then(Value::as_f64), Some(2.));
+    }
+
+    /// An engine message (its `injected` part): its block, its words whole.
+    #[test]
+    fn an_engine_message_is_its_block_with_its_words_whole() {
+        let text = "[Crew ask] Builder ended its turn waiting on a decision; it is under Needs you.\n  \u{27E6}crew-output\u{27E7}\n  Ship it?\n  \u{27E6}/crew-output\u{27E7}\nanswer it with `answer_ask` (id ak-1)";
+        let entry = json!({
+            "id": "m1", "role": "user", "createdAt": 1_794_470_000_000_i64,
+            "parts": [
+                { "kind": "text", "id": "t0", "text": text },
+                { "kind": "injected", "id": "injected", "injected": {
+                    "kind": "crew_ask", "askId": "ak-1", "chatId": "th-a", "turnId": "m-9" } },
+            ],
+        });
+        assert!(super::plainly_has_row(&entry));
+        let m = message(&entry, None).expect("a block shows");
+        let is = |v: Option<&Value>, want: &str| matches!(v, Some(Value::Str(s)) if s.as_ref() == want);
+        assert!(is(m.field("role"), "injected"));
+        assert!(is(m.field("text"), text), "the agent's words, whole, for the block to read");
+        assert_eq!(m.field("created").and_then(Value::as_f64), Some(1_794_470_000.));
+        let i = m.field("injected").expect("its kind");
+        assert!(is(i.field("kind"), "crew_ask"));
+        assert!(is(i.field("ask"), "ak-1"));
+        assert!(is(i.field("chat"), "th-a"));
+        assert!(is(i.field("turn"), "m-9"));
+        assert!(i.field("item").is_none_or(|v| matches!(v, Value::Nil)));
+        // A kind this build doesn't know is still the engine's: its block
+        // shows its words.
+        let mut newer = entry.clone();
+        newer["parts"][1]["injected"] = json!({ "kind": "someday" });
+        assert!(is(message(&newer, None).expect("shows").field("role"), "injected"));
+        // Without the part: a prompt, as ever.
+        let plain = json!({ "id": "m2", "role": "user", "createdAt": 0, "parts": [ { "kind": "text", "id": "t0", "text": "hi" } ] });
+        assert!(is(message(&plain, None).expect("shows").field("role"), "user"));
+    }
+
+
+    /// Crew reports in an orchestrator's transcript (the engine's
+    /// `crewReports` part, on the wake turn's user entry) are a "Crew
+    /// updates" card, never the person's bubble: each report's thread,
+    /// state, summary and time, in the order filed.
+    #[test]
+    fn crew_reports_are_a_card_not_a_prompt() {
+        let entry = json!({
+            "id": "w1", "role": "user", "createdAt": 1_794_470_000_000_i64,
+            "parts": [
+                { "kind": "text", "id": "t", "text": "[Crew updates]\n- th-a done: shipped" },
+                { "kind": "crewReports", "reports": [
+                    { "id": "rp-1", "orchestratorId": "orc", "fromChat": "th-a", "itemId": "it-1", "state": "done",
+                      "summary": "Shipped the\nregistry", "detail": "All green.", "progress": 1.0, "at": "2026-11-12T18:30:00Z" },
+                    { "id": "rp-2", "orchestratorId": "orc", "fromChat": "th-b", "state": "blocked",
+                      "summary": "Needs a decision", "at": "2026-11-12T18:35:00+00:00" },
+                    { "id": "rp-3", "orchestratorId": "orc", "fromChat": "th-c", "state": "someday",
+                      "summary": "?", "at": "2026-11-12T18:36:00Z" },
+                ] },
+            ],
+        });
+        assert!(super::plainly_has_row(&entry));
+        let m = message(&entry, None).expect("a card shows");
+        let is = |v: Option<&Value>, want: &str| matches!(v, Some(Value::Str(s)) if s.as_ref() == want);
+        assert!(is(m.field("role"), "crew_reports"));
+        assert!(is(m.field("text"), ""), "the wake's generated prompt is the agent's, not shown");
+        assert!(m.field("sender").is_none_or(|s| matches!(s, Value::Nil)));
+        assert!(m.field("copy").is_none_or(|s| matches!(s, Value::Nil)));
+        let Some(Value::List(reports)) = m.field("reports") else { panic!("reports") };
+        assert_eq!(reports.len(), 3);
+        assert!(is(reports[0].field("id"), "rp-1"));
+        assert!(is(reports[0].field("from_chat"), "th-a"));
+        assert!(is(reports[0].field("item_id"), "it-1"));
+        assert!(is(reports[0].field("state"), "done"));
+        assert!(is(reports[0].field("summary"), "Shipped the registry"));
+        assert!(is(reports[0].field("detail"), "All green."));
+        assert_eq!(reports[0].field("progress").and_then(Value::as_f64), Some(1.));
+        assert_eq!(reports[0].field("at").and_then(Value::as_f64), Some(1_794_508_200.));
+        assert!(is(reports[1].field("state"), "blocked"));
+        assert!(reports[1].field("item_id").is_none_or(|v| matches!(v, Value::Nil)));
+        assert_eq!(reports[1].field("at").and_then(Value::as_f64), Some(1_794_508_500.));
+        assert!(is(reports[2].field("state"), "other"), "a newer peer's state");
+        // A plain prompt is still the person's.
+        let plain = json!({ "id": "u", "role": "user", "parts": [{ "kind": "text", "id": "t", "text": "hi" }] });
+        assert!(is(message(&plain, None).unwrap().field("role"), "user"));
     }
 
     #[test]
@@ -8580,6 +9379,7 @@ mod tests {
                 pending: RefCell::default(),
                 generation: Cell::new(0),
                 snapshot: Cell::new(false),
+                session_only: Cell::new(false),
             })
         };
         let time = |label: &str, view: &Rc<View>, frame: serde_json::Value| {
@@ -8636,6 +9436,7 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            session_only: Cell::new(false),
         });
         for (n, step) in fixture["steps"].as_array().unwrap().iter().enumerate() {
             view.heard_frame(step["frame"].clone());
@@ -8677,6 +9478,7 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            session_only: Cell::new(false),
         });
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
         // What it holds, as it would tell the engine: ids and the engine's sums.
@@ -8765,6 +9567,7 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            session_only: Cell::new(false),
         });
         let draft = || format!("{:?}", view.draft.signal().with_untracked(Clone::clone));
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
@@ -8814,6 +9617,7 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            session_only: Cell::new(false),
         });
         view.pending.borrow_mut().insert(
             "c".into(),

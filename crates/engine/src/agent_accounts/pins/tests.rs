@@ -61,6 +61,7 @@ fn claude_slot(uuid: &str, email: &str, access: &str, expires_at: i64) -> Slot {
         saved_at: now_ms(),
         created_at: None,
         store_key: None,
+        user_id: None,
     }
 }
 
@@ -258,7 +259,7 @@ async fn a_chats_first_run_asks_the_hook_once_and_a_pinned_chat_isnt_asked() {
     assert_eq!(asked.load(Ordering::SeqCst), 1);
     // Another harness, or a run of no chat, is never asked.
     let mut other = request();
-    env.prepare(HarnessId::Codex, Some("c2"), &mut other).await.unwrap();
+    env.prepare(HarnessId::Cursor, Some("c2"), &mut other).await.unwrap();
     env.prepare(HarnessId::ClaudeCode, None, &mut other).await.unwrap();
     assert_eq!(asked.load(Ordering::SeqCst), 1);
 }
@@ -313,6 +314,7 @@ async fn a_pinned_muse_chat_runs_on_its_accounts_own_config_root() {
         saved_at: now_ms(),
         created_at: None,
         store_key: None,
+        user_id: None,
     };
     accounts.write_slot(&slot).unwrap();
     let env = PinRunEnvironment(accounts.clone());

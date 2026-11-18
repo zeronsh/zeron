@@ -70,6 +70,15 @@ impl EngineRpc {
         }
     }
 
+    /// [`Self::device_stats`] as a report; `None` when it fails or doesn't
+    /// read.
+    pub(crate) async fn device_stats_value(&self, params: serde_json::Value) -> Option<device_stats::DeviceStats> {
+        match self.device_stats(params).await {
+            Ok(RpcReply::Value(value)) => serde_json::from_value(value).ok(),
+            _ => None,
+        }
+    }
+
     fn places(&self) -> Places {
         let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
             .filter(|h| !h.is_empty())

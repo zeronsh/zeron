@@ -66,6 +66,7 @@ export type Queued = {
 	-- false: it can't be taken back from here (no Remove).
 	removable: boolean?,
 }
+export type Held = { text: string, action: string? }
 export type TodoState = "done" | "doing" | "pending"
 export type Todo = { id: string, text: string, state: TodoState }
 export type TaskKind = "terminal" | "agent" | "process"
@@ -130,6 +131,11 @@ export type Props = {
 	-- A row being edited: saving it, and letting it go.
 	on_queue_save: ((id: string) -> ())?,
 	on_queue_cancel: ((id: string) -> ())?,
+	-- The queue held (nothing in it goes until something changes): one line
+	-- atop its rows, its words and its action's label, there with no rows
+	-- too; the tab says Held. `on_held_action`: its button.
+	held: State<Held?>?,
+	on_held_action: (() -> ())?,
 	todos: State<{ Todo }>?,
 	-- The turn is live (the step in progress wears the working ring).
 	live: (() -> boolean)?,
@@ -1509,8 +1515,11 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 	end
 	-- Which trays are there: the queue with rows, the plan with steps,
 	-- tasks running.
+	local function held(): Held?
+		return if props.held then props.held:get() else nil
+	end
 	local function has_queue(): boolean
-		return props.queue ~= nil and #props.queue:get() > 0
+		return (props.queue ~= nil and #props.queue:get() > 0) or held() ~= nil
 	end
 	local function has_todos(): boolean
 		return props.todos ~= nil and #props.todos:get() > 0
@@ -1589,7 +1598,14 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 				color = function(): string
 					return `$zeron.tone.{worst()}.ink`
 				end,
-				Icon { name = "danger-triangle", size = size },
+				-- (Only progress and news, nothing wrong: the rows' own info
+				-- glyph, not a warning's.)
+				Icon {
+					name = function(): string
+						return if worst() == "info" then "info-circle" else "danger-triangle"
+					end :: any,
+					size = size,
+				},
 			}
 		end
 		local body = ui.column {
@@ -1972,12 +1988,72 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 	if props.queue then
 		local queue = props.queue
 		local function summary(): string
+			local h = held()
+			if h then
+				return h.text
+			end
 			local first = queue:get()[1]
 			return if first then (string.gsub(first.text, "%s+", " ")) else ""
 		end
+		-- Held: why, and what lets it go, one line atop the rows.
+		local held_line = ui.show(function(): boolean
+			return held() ~= nil
+		end, ui.row {
+			class = "composer-held",
+			h = geometry.row,
+			pl = "$space.1",
+			pr = "$space.1",
+			gap = "$space.2",
+			items = "center",
+			ui.div {
+				w = 14,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				color = "$zeron.tone.warning.ink",
+				Icon { name = "action-pause", size = 14 },
+			},
+			ui.text {
+				function(): string
+					local h = held()
+					return if h then h.text else ""
+				end,
+				class = "composer-held-text",
+				grow = 1,
+				min_w = 0,
+				truncate = true,
+				text_size = "$font.size.md",
+				color = "$text.secondary",
+			},
+			ui.show(function(): boolean
+				local h = held()
+				return h ~= nil and h.action ~= nil and props.on_held_action ~= nil
+			end, Button {
+				id = "composer-held-action",
+				size = "sm",
+				tone = "secondary",
+				h = 24,
+				shrink = 0,
+				on_click = function()
+					if props.on_held_action then
+						props.on_held_action()
+					end
+				end,
+				ui.text {
+					function(): string
+						local h = held()
+						return if h then h.action or "" else ""
+					end,
+					text_size = "$font.size.xs",
+				},
+			}),
+		})
 		local body = ui.column {
 			w_full = true,
 			pb = "$space.1",
+			held_line,
+			ui.column {
+			w_full = true,
 			role = "list",
 			label = locale.t("ds.composer_dock.queued_messages"),
 			ui.each(queue, function(q: Queued): Node
@@ -2015,14 +2091,22 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 					return q.text
 				end,
 			}),
+			},
 		}
+		local function glyph_name(): Icon.Name
+			return if held() then "action-pause" else "list"
+		end
 		table.insert(tabs, {
 			id = "queue",
-			glyph = Icon { name = "list", size = 16 },
-			pill_glyph = Icon { name = "list", size = 14 },
-			title = "ds.composer_dock.queued",
+			glyph = Icon { name = glyph_name, size = 16 },
+			pill_glyph = Icon { name = glyph_name, size = 14 },
+			title = function(): string
+				return if held() then "ds.composer_dock.held" else "ds.composer_dock.queued"
+			end,
+			-- (Held with nothing in it: no count, its name alone.)
 			count = function()
-				return tostring(#queue:get())
+				local n = #queue:get()
+				return if n == 0 and held() then "" else tostring(n)
 			end,
 			summary = summary,
 			body = body,

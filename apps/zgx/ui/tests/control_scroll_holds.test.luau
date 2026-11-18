@@ -1,0 +1,212 @@
+-- The Control room scrolled down stays where the person left it
+-- (screens/control/page, ds/kept_scroll): as the world moves under it (a
+-- report in Comms, a thread showing in Progress, a Board card deleted),
+-- when its content is short for a moment and grows back, and when another
+-- page opened from it is left for it again.
+
+local function open(fixture: string?, h: number?): any
+	local app = mount(fixture or "control_page_fixture.luau")
+	app:resize(1440, h or 900)
+	app:frames(30)
+	return app
+end
+
+-- A person's pause: the view's moves after it aren't their scroll's
+-- (ds/kept_scroll), as a test's frames come at once. (Frames drawn for at
+-- least 0.6 s of the process's time, so as long of the clock's.)
+local function pause(app: any)
+	local from = os.clock()
+	while os.clock() - from < 0.6 do
+		app:frames(1)
+	end
+end
+
+-- Where the tab's content is drawn (Overview's widgets, the Board's
+-- figures): its top, in the window. (The head, the tabs in it, stays.)
+local MARK = "#control-columns"
+local function top(app: any): number
+	local line = string.match(app:tree(MARK), "[^\n]+") or ""
+	return tonumber(string.match(line, " %-?[%d%.]+,(%-?[%d%.]+) ")) or 0
+end
+
+-- Scrolled down `by`, then `change`: the content as far up after as
+-- before. (`board`: on the Board's tab.)
+local function holds(fixture: string, by: number, change: (any) -> (), board: boolean?)
+	-- (The Board's tab is short: a short window, for it to scroll.)
+	local app = open(fixture, if board then 360 else nil)
+	MARK = if board then "#control-board-figures" else "#control-columns"
+	if board then
+		app:set_state("control_tab", "board")
+		app:frames(30)
+	end
+	local start = top(app)
+	app:scroll(if board then "#control-board-scroll" else "#control-scroll", by)
+	app:frames(30)
+	pause(app)
+	local scrolled = top(app)
+	expect(scrolled < start - 200).to_be(true)
+	change(app)
+	app:frames(30)
+	expect(top(app)).to_be(scrolled)
+	-- (The shell's fixture stands in for no `appearance` host action: its
+	-- own error, not the page's.)
+	if fixture == "control_page_fixture.luau" then
+		expect(app:error()).to_be(nil)
+	end
+end
+
+test("control scroll: a report in Comms keeps the place", function()
+	holds("control_page_fixture.luau", 600, function(app)
+		app:command("fixture.report")
+	end)
+end)
+
+test("control scroll: a thread showing in Progress keeps the place", function()
+	holds("control_page_fixture.luau", 600, function(app)
+		app:command("fixture.progress_proxy")
+		app:frames(5)
+		app:command("fixture.activity")
+	end)
+end)
+
+test("control scroll: a Board card deleted keeps the place", function()
+	holds("control_fixture.luau", 250, function(app)
+		-- (A card in view where the Board is scrolled to.)
+		local view = string.match(app:tree("#control-board-scroll", 0), "[^\n]+") or ""
+		local _, vy, _, vh = string.match(view, " (%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+		local top, bottom = tonumber(vy) or 0, (tonumber(vy) or 0) + (tonumber(vh) or 0)
+		local pick = 1
+		for i = 1, app:count("#control-board-tab >> .orch-card") do
+			local line = string.match(app:tree(`#control-board-tab >> .orch-card [{i}]`, 0), "[^\n]+") or ""
+			local _, y, _, h = string.match(line, " (%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+			if tonumber(y) and tonumber(y) >= top and tonumber(y) + tonumber(h) <= bottom then
+				pick = i
+				break
+			end
+		end
+		app:right_click(`#control-board-tab >> .orch-card [{pick}]`)
+		app:frames(10)
+		app:click('role:menuitem "Delete"')
+	end, true)
+end)
+
+-- Every widget but Capture gone for a frame (as when they are built
+-- again), then back: the page was too short to hold the place meanwhile.
+test("control scroll: content short for a moment, the place comes back", function()
+	holds("control_page_fixture.luau", 900, function(app)
+		local all = app:state("control_widgets")
+		app:set_state("control_widgets", {
+			order = all.order,
+			hidden = { needs = true, progress = true, map = true, machines = true, comms = true },
+		})
+		app:frames(2)
+		app:set_state("control_widgets", all)
+	end)
+end)
+
+-- Another page opened from it (a thread, Settings), and Back: the page
+-- made again opens where it was.
+test("control scroll: back from another page, the place is kept", function()
+	holds("control_fixture.luau", 600, function(app)
+		app:command("fixture.leave")
+		app:frames(30)
+		expect(app:has("#control-room")).to_be(false)
+		app:command("fixture.control")
+	end)
+end)
+
+-- Scrolled back to the top, it opens at the top.
+test("control scroll: scrolled back up, the top is kept", function()
+	MARK = "#control-columns"
+	local app = open("control_fixture.luau")
+	local start = top(app)
+	app:scroll("#control-scroll", 600)
+	app:frames(30)
+	app:scroll("#control-scroll", -2000)
+	app:frames(30)
+	expect(top(app)).to_be(start)
+	app:command("fixture.leave")
+	app:frames(30)
+	app:command("fixture.control")
+	app:frames(30)
+	expect(top(app)).to_be(start)
+end)
+
+-- An orchestrator's page (screens/orchestrator/page, its live state's
+-- scroll): kept as the page is made again while the host's orchestration
+-- is a moment unknown.
+test("orchestrator scroll: the live state keeps its place while orchestration is republished", function()
+	local app = mount("orchestrator_fixture.luau")
+	app:resize(1440, 700)
+	app:frames(30)
+	local function at(): number
+		local line = string.match(app:tree("#orch-section-crew"), "[^\n]+") or ""
+		return tonumber(string.match(line, " %-?[%d%.]+,(%-?[%d%.]+) ")) or 0
+	end
+	local start = at()
+	app:scroll("#orch-live", 400)
+	app:frames(30)
+	pause(app)
+	local scrolled = at()
+	expect(scrolled < start - 100).to_be(true)
+	app:command("orch.unknown")
+	app:frames(5)
+	expect(app:has("#orch-live")).to_be(false)
+	app:command("orch.known")
+	app:frames(30)
+	expect(at()).to_be(scrolled)
+end)
+
+-- The board's columns past ten (ds/orch_board): Show more and Show less,
+-- every column at once, the page where it was.
+test("control scroll: a board's columns shown in full, and back, keep the place", function()
+	-- (Short, for the Board's tab to scroll.)
+	local app = open(nil, 500)
+	MARK = "#control-board-figures"
+	app:set_state("control_tab", "board")
+	app:frames(30)
+	local n = table.clone(app:state("orchestration") :: any)
+	local items = table.clone(n.items or {})
+	local now = os.time()
+	for i = 1, 14 do
+		table.insert(items, {
+			id = `it-many{i}`, orchestrator_id = (items[1] or {}).orchestrator_id, title = `Finished thing {i}`,
+			state = "done", priority = "normal", order = 100 + i, updated = now - 60, done = now - 60,
+		})
+	end
+	n.items = items
+	app:set_state("orchestration", n)
+	app:frames(30)
+	local start = top(app)
+	expect(app:has("#control-board-done >> .orch-column-more")).to_be(true)
+	-- (Scrolled down until the button is in the middle of the view.)
+	local line = string.match(app:tree("#control-board-done >> .orch-column-more"), "[^\n]+") or ""
+	local y = tonumber(string.match(line, " %-?[%d%.]+,(%-?[%d%.]+) ")) or 0
+	app:scroll("#control-board-scroll", math.max(300, y - 250))
+	app:frames(30)
+	pause(app)
+	local scrolled = top(app)
+	expect(scrolled < start - 200).to_be(true)
+	app:click("#control-board-done >> .orch-column-more")
+	app:frames(30)
+	expect(app:state("control_board_expanded")).to_be(true)
+	expect(top(app)).to_be(scrolled)
+	-- (Show less is further down now: the person scrolls to it.)
+	pause(app)
+	app:scroll("#control-board-scroll", 400)
+	app:frames(30)
+	pause(app)
+	scrolled = top(app)
+	app:click("#control-board-done >> .orch-column-more")
+	app:frames(30)
+	expect(app:state("control_board_expanded")).to_be(false)
+	-- Back where it was, or (the page shorter than the place, the board
+	-- its last) at its end: never its top, the button still in view.
+	local after = top(app)
+	expect(after <= scrolled + 400).to_be(true)
+	expect(after < start - 200).to_be(true)
+	local more = string.match(app:tree("#control-board-done >> .orch-column-more"), "[^\n]+") or ""
+	local my = tonumber(string.match(more, " %-?[%d%.]+,(%-?[%d%.]+) ")) or -1
+	expect(my >= 0 and my <= 500).to_be(true)
+	expect(app:error()).to_be(nil)
+end)

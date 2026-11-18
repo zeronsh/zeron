@@ -17,6 +17,7 @@ use zeron_sync::DocsStore;
 
 pub mod acp_registry;
 pub mod agent_accounts;
+pub(crate) mod account_switch;
 
 /// Which build this engine is: its git commit and when its executable was
 /// built (the file's modification time, in seconds), as
@@ -50,6 +51,7 @@ pub mod credentials;
 pub mod deferred;
 pub mod desktop_notify;
 pub mod device_stats;
+mod device_names;
 pub mod diff_sync;
 pub mod doc_host;
 mod fs_watch;
@@ -62,6 +64,7 @@ pub mod local_import;
 pub mod keep_running;
 pub mod heap;
 pub mod managed;
+pub mod orchestration;
 mod hosted_models;
 mod model_catalogs;
 mod plugin_agents;
@@ -73,6 +76,7 @@ pub mod remote_terminals;
 pub mod repos;
 pub mod rpc;
 pub mod run_journal;
+pub(crate) mod usage_limit_text;
 pub mod runner;
 pub mod wake_trace;
 pub mod wake_update;
@@ -205,6 +209,9 @@ pub struct EngineCore {
     pub local_import: Option<local_import::LocalImporter>,
     /// Plugins under `{data}/plugins/` (the plugins contract).
     pub plugins: plugins::Plugins,
+    /// Orchestrators, crews, the board, asks and dumps (shared by every
+    /// RPC service of this engine).
+    pub orchestration: orchestration::Orchestration,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -320,6 +327,15 @@ impl EngineCore {
                 local_only: matches!(profile.scope(), WorkspaceScope::Local),
             },
         )?;
+        // What was at work here when the engine last stopped: its session
+        // rows as stored, before anything here rewrites them (crew threads
+        // left waiting are resumed by the board's start-up pass).
+        let before_stop: Vec<zeron_proto::Session> = workspace
+            .read_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.device_id == device_id)
+            .collect();
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.follow_chat_deletions(workspace.watch_chats());
@@ -497,6 +513,8 @@ impl EngineCore {
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         plugins.start();
+        let orchestration = orchestration::Orchestration::new(workspace.clone());
+        orchestration.set_before_stop(before_stop);
         Ok(Self {
             sessions,
             doc_host,
@@ -518,6 +536,7 @@ impl EngineCore {
             device_id,
             local_import,
             plugins,
+            orchestration,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -701,7 +720,9 @@ impl EngineCore {
         if let Some(broker) = self.credentials() {
             rpc = rpc.with_credentials(broker);
         }
-        Arc::new(rpc)
+        let rpc = Arc::new(rpc.with_orchestration(self.orchestration.clone()));
+        self.orchestration.attach_rpc(&rpc);
+        rpc
     }
 
     /// Revoke every account-scoped transport before any slower graceful
@@ -2117,5 +2138,18 @@ mod revival_tests {
         for scope in [WorkspaceScope::Local, WorkspaceScope::Development] {
             assert!(!forgoes_revival(scope, &AuthState::SignedOut));
         }
+    }
+}
+
+/// Logs a scope's duration at target `perf` (debug) when dropped.
+pub(crate) struct PerfGuard(&'static str, std::time::Instant);
+impl PerfGuard {
+    pub(crate) fn new(what: &'static str) -> Self {
+        Self(what, std::time::Instant::now())
+    }
+}
+impl Drop for PerfGuard {
+    fn drop(&mut self) {
+        tracing::debug!(target: "perf", what = self.0, us = self.1.elapsed().as_micros() as u64);
     }
 }

@@ -164,91 +164,122 @@ impl TitleGenerator {
                     .find(|id| zeron_harness::supports_titles(*id))
             }
         })?;
-        if !zeron_harness::supports_titles(harness_id) {
-            return None;
-        }
-        // Order this entire isolated subprocess against a queued update for
-        // the same CLI. The fair registry gate prevents late title work from
-        // jumping ahead of an accepted writer.
-        let execution_lease = Arc::new(self.inner.registry.execution_lease(harness_id).await);
-        // No repository instructions, files, or active coding-session context.
-        let scratch = tempfile::tempdir().ok()?;
-        let harness = match self.inner.registry.resolve(harness_id) {
-            Ok(harness) => harness,
-            Err(err) => {
-                tracing::debug!(error = %err, "titling harness unavailable");
-                return None;
-            }
-        };
-        let model = match settings.model {
-            Some(model) => Some(model),
-            None => cheapest_model(
-                &tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    self.inner
-                        .registry
-                        .discover_models_with_lease(harness_id, execution_lease.clone()),
-                )
-                .await
-                .ok()?
-                .unwrap_or_default(),
-            ),
-        };
         let title_prompt = format!(
             "{}\n\nSession request (JSON string):\n{}",
             zeron_harness::TITLE_INSTRUCTIONS,
             serde_json::to_string(prompt).ok()?
         );
-        for attempt in 0..=RETRY_DELAYS_MS.len() {
-            let mut request = RunRequest {
-                mcp: None,
-                prompt: title_prompt.clone(),
-                harness: Some(harness_id),
-                model: model.clone(),
-                reasoning: Some(ReasoningLevel::Minimal),
-                model_options: serde_json::Map::new(),
-                cwd: scratch.path().to_string_lossy().into_owned(),
-                sandbox: SandboxLevel::ReadOnly,
-                auto_approve: false,
-                access: Default::default(),
-                plan: false,
-                attachments: Vec::new(),
-                resume: None,
-                worktree: None,
-                env: Default::default(),
-                extra_mcp: Vec::new(),
-            };
-            // A Cloud device's credential broker supplies the CLI's login;
-            // without one there is no title to generate.
-            self.inner
-                .registry
-                .prepare_run(harness_id, None, &mut request)
-                .await
-                .ok()?;
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                collect_text(harness.as_ref(), request, Some(execution_lease.clone())),
+        one_shot(&self.inner.registry, harness_id, settings.model, title_prompt, |raw| {
+            Some(clean_title(raw)).filter(|t| !t.is_empty())
+        })
+        .await
+    }
+}
+
+/// The harness and model a cheap side run for a chat on `chat_harness` uses
+/// (a progress note): that harness's own cheapest model when it has the
+/// restricted title path, else the title settings', else any enabled
+/// harness's that has it.
+pub(crate) fn side_run_harness(registry: &HarnessRegistry, chat_harness: HarnessId) -> Option<(HarnessId, Option<String>)> {
+    if zeron_harness::supports_titles(chat_harness) && registry.is_registered(chat_harness) {
+        return Some((chat_harness, None));
+    }
+    let settings = registry.title_settings();
+    if let Some(harness) = settings.harness.filter(|h| zeron_harness::supports_titles(*h)) {
+        return Some((harness, settings.model));
+    }
+    registry
+        .enabled_set()
+        .iter()
+        .copied()
+        .find(|id| zeron_harness::supports_titles(*id))
+        .map(|id| (id, None))
+}
+
+/// One restricted one-shot run on `harness_id` (the title path: no tools,
+/// no repository, read-only, nothing to resume), retried a couple of times.
+/// `model: None` picks the harness's cheapest. What `accept` makes of the
+/// first reply it takes, or `None`.
+pub(crate) async fn one_shot(
+    registry: &Arc<HarnessRegistry>,
+    harness_id: HarnessId,
+    model: Option<String>,
+    prompt: String,
+    accept: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let _perf = crate::PerfGuard::new("one_shot");
+    if !zeron_harness::supports_titles(harness_id) {
+        return None;
+    }
+    // Order this entire isolated subprocess against a queued update for
+    // the same CLI. The fair registry gate prevents late side work from
+    // jumping ahead of an accepted writer.
+    let execution_lease = Arc::new(registry.execution_lease(harness_id).await);
+    // No repository instructions, files, or active coding-session context.
+    let scratch = tempfile::tempdir().ok()?;
+    let harness = match registry.resolve(harness_id) {
+        Ok(harness) => harness,
+        Err(err) => {
+            tracing::debug!(error = %err, "one-shot harness unavailable");
+            return None;
+        }
+    };
+    let model = match model {
+        Some(model) => Some(model),
+        None => cheapest_model(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                registry.discover_models_with_lease(harness_id, execution_lease.clone()),
             )
             .await
-            .unwrap_or_else(|_| Err(EngineError::Other("title generation timed out".into())))
-            {
-                Ok(raw) => {
-                    let candidate = clean_title(&raw);
-                    if !candidate.is_empty() {
-                        return Some(candidate);
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(attempt = attempt + 1, error = %err,
-                        "automatic chat title generation attempt failed");
+            .ok()?
+            .unwrap_or_default(),
+        ),
+    };
+    for attempt in 0..=RETRY_DELAYS_MS.len() {
+        let mut request = RunRequest {
+            mcp: None,
+            prompt: prompt.clone(),
+            harness: Some(harness_id),
+            model: model.clone(),
+            reasoning: Some(ReasoningLevel::Minimal),
+            model_options: serde_json::Map::new(),
+            cwd: scratch.path().to_string_lossy().into_owned(),
+            sandbox: SandboxLevel::ReadOnly,
+            auto_approve: false,
+            access: Default::default(),
+            plan: false,
+            attachments: Vec::new(),
+            resume: None,
+            worktree: None,
+            env: Default::default(),
+            extra_mcp: Vec::new(),
+        };
+        // A Cloud device's credential broker supplies the CLI's login;
+        // without one there is nothing to generate.
+        registry.prepare_run(harness_id, None, &mut request).await.ok()?;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            collect_text(harness.as_ref(), request, Some(execution_lease.clone())),
+        )
+        .await
+        .unwrap_or_else(|_| Err(EngineError::Other("one-shot generation timed out".into())))
+        {
+            Ok(raw) => {
+                if let Some(candidate) = accept(&raw) {
+                    return Some(candidate);
                 }
             }
-            if let Some(delay) = RETRY_DELAYS_MS.get(attempt) {
-                tokio::time::sleep(std::time::Duration::from_millis(*delay)).await;
+            Err(err) => {
+                tracing::warn!(attempt = attempt + 1, error = %err,
+                    "one-shot generation attempt failed");
             }
         }
-        None
+        if let Some(delay) = RETRY_DELAYS_MS.get(attempt) {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay)).await;
+        }
     }
+    None
 }
 
 /// A new chat's title, held until its agent has answered: the agent's first

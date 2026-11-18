@@ -25,7 +25,9 @@
 -- - A table sits in a hairline frame, its header quieter than its cells,
 --   fitted to the reply's width with its prose wrapping; only what can't fit
 --   scrolls sideways (`table_block`).
--- - A quote is set back by a soft bar, in the secondary ink.
+-- - A quote is set back by a soft bar, in the secondary ink. With
+--   `copy_quotes`, it has a Copy of its own at its top right: its words as
+--   plain text, without the quote's markers (an email written out to send).
 --
 -- The text is selectable through whatever holds it (a transcript puts
 -- `selectable` on its list): this draws it, nothing more.
@@ -122,6 +124,12 @@ export type Props = {
 	-- A step smaller (a thought's words in the work tree): the prose's small
 	-- size and line, headings at it too, blocks a little closer.
 	small: boolean?,
+	-- A quote has a Copy of its own, copying its words as plain text.
+	copy_quotes: boolean?,
+	-- One line of it, cut short at the end: the first paragraph's words
+	-- (code spans, emphasis, links as a reply draws them), its blocks'
+	-- breaks read as spaces; a quiet summary line (a dump's answer).
+	inline: boolean?,
 	-- Its words' ink, where not the primary (a thought's, in the secondary).
 	ink: string?,
 }
@@ -294,6 +302,8 @@ type Ctx = {
 	find: { q: string, cur: number, n: number }?,
 	-- Set a step smaller (Props' `small`).
 	small: boolean?,
+	-- A quote's own Copy (Props' `copy_quotes`).
+	copy_quotes: boolean?,
 	-- The whole text now: a ```mermaid fence reads its end to know whether
 	-- it's still being written (ds/mermaid).
 	source: (() -> string)?,
@@ -871,6 +881,31 @@ local function cell_text(cell: { MarkdownRun }): string
 	return table.concat(flat)
 end
 
+-- Blocks' words as plain text, without markdown's marks: a list keeps its
+-- numbers (or a dash), a code block its lines, a quote within its words.
+local function plain_of(list: { any }): string
+	local out: { string } = {}
+	for _, b in list do
+		local t = b.t
+		if t == "p" or t == "h" then
+			table.insert(out, cell_text(b.s or {}))
+		elseif t == "code" then
+			table.insert(out, b.text or "")
+		elseif t == "ul" or t == "ol" then
+			local lines: { string } = {}
+			for i, item in b.items or {} do
+				local mark = if t == "ol" then `{(b.start or 1) + i - 1}. ` else "- "
+				local body = string.gsub(plain_of(item), "\n", "\n" .. string.rep(" ", #mark))
+				table.insert(lines, mark .. body)
+			end
+			table.insert(out, table.concat(lines, "\n"))
+		elseif t == "quote" then
+			table.insert(out, plain_of(b.b or {}))
+		end
+	end
+	return table.concat(out, "\n\n")
+end
+
 -- A number, with a sign or currency before it and a short unit after it.
 local function is_number(text: string): boolean
 	local body = string.match(text, "^%s*[~≈<>+%-−$€£]*([%d.,]*%d[%d.,]*)%s*[%a%%/°]*%s*$")
@@ -1107,6 +1142,52 @@ local function code_shown(text: string): string
 	local shown = string.gsub(string.gsub(text, "\n$", ""), "\t", "    ")
 	return shown
 end
+
+-- A quote's Copy: its words as plain text, "Copied" for a moment after (as
+-- a code block's Copy).
+local QuoteCopy = ui.component(function(props: { text: string }): Node
+	local copied = ui.use_state(false)
+	local stop: (() -> ())? = nil
+	return ui.button {
+		class = "md-quote-copy",
+		label = function(): string
+			return if copied:get() then locale.s("ds.markdown.copied") else locale.s("ds.markdown.copy_quote")
+		end,
+		selectable = false,
+		self = "start",
+		shrink = 0,
+		h = 24,
+		px = "$space.2",
+		gap = "$space.1",
+		items = "center",
+		rounded = "$radius.md",
+		bg = "#00000000",
+		color = "$text.tertiary",
+		text_size = "$font.size.xs",
+		hover = { bg = "$hover", color = "$text.primary" },
+		active = { bg = "$pressed" },
+		focus = control.ring,
+		on_click = function()
+			ui.clipboard.write(props.text)
+			copied:set(true)
+			if stop then
+				stop()
+			end
+			stop = ui.after(1400, function()
+				copied:set(false)
+			end)
+		end,
+		Icon {
+			name = function()
+				return if copied:get() then "check" else "copy"
+			end,
+			size = 12,
+		},
+		ui.text(function()
+			return if copied:get() then locale.s("ds.markdown.copied") else locale.s("common.copy")
+		end),
+	}
+end)
 
 -- A code block: a strip with its language and Copy over its lines, one
 -- quiet panel.
@@ -1533,6 +1614,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			gap = "$space.4",
 			ui.div { w = 2, shrink = 0, rounded = "$radius.full", bg = "$zeron.prose.quote_rail" },
 			ui.column { grow = 1, min_w = 0, gap = "$space.3", blocks(b.b, "$text.secondary", ctx) },
+			if ctx and ctx.copy_quotes then QuoteCopy { text = plain_of(b.b or {}) } else nil,
 		}
 	elseif b.t == "hr" then
 		return ui.div { w_full = true, h = 1, my = "$space.2", bg = "$border" }
@@ -1760,11 +1842,47 @@ local function own_list(): State<{ any }>
 	return list
 end
 
+-- One line of `text`'s first paragraph (`inline`): its runs as a reply's,
+-- not wrapping, cut short with an ellipsis.
+local function one_line(props: Props): Node
+	local function first(): { MarkdownRun }
+		local t: any = props.text
+		local src: string = if type(t) == "function" then (t :: any)() else t
+		for _, b in ui.markdown(src or "") :: any do
+			if b.t == "p" or b.t == "h" then
+				return b.s
+			end
+		end
+		return {}
+	end
+	local small = props.small == true
+	return ui.presence(function(): string
+		local t: any = props.text
+		return if type(t) == "function" then (t :: any)() else t
+	end, function(): Node
+		return runs(first(), {
+			wrap = false,
+			truncate = true,
+			lines = 1,
+			w_full = true,
+			min_w = 0,
+			color = props.ink or "$text.primary",
+			-- (Small, one line: the interface's small type, as the row it
+			-- sits in.)
+			text_size = if small then "$font.size.sm" else nil,
+			line_height = if small then "$font.line.sm" else nil,
+		}, if small then ({ tasks = {}, small = true } :: any) else nil)
+	end, { w_full = true, min_w = 0 })
+end
+
 return function(props: Props): Node
+	if props.inline then
+		return one_line(props)
+	end
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.copy_quotes
+		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small, copy_quotes = props.copy_quotes }
 		else nil
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).

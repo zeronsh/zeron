@@ -271,6 +271,18 @@ pub struct CheckoutChangeRequests {
 }
 
 impl CheckoutChangeRequests {
+    /// The change requests already resolved here, as last seen: read from
+    /// the cache only (an entry being refreshed right now is skipped), never
+    /// asking the provider.
+    pub fn known(&self) -> Vec<zeron_proto::ChangeRequestSummary> {
+        let entries: Vec<Arc<CacheEntry>> =
+            self.inner.entries.lock().unwrap_or_else(PoisonError::into_inner).values().cloned().collect();
+        entries
+            .iter()
+            .filter_map(|e| e.state.try_lock().ok().and_then(|s| s.last_success.as_ref()?.change_request.clone()))
+            .collect()
+    }
+
     pub fn start(repos: Repos, device_id: &str) -> Self {
         Self::new(repos, device_id, Arc::new(ChangeRequestResolver::new()))
     }

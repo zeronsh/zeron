@@ -350,7 +350,7 @@ mod tests {
     fn a_held_payload_round_trips_and_names_its_message() {
         let payload = HeldPayload {
             body: HeldBody::Command {
-                payload: SessionCommandPayload::Steer {
+                payload: SessionCommandPayload::Steer { injected: None,
                     prompt: "look".into(),
                     message_id: Some("m1".into()),
                 },

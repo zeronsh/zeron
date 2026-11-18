@@ -21,7 +21,7 @@
 //! serves the full sidebar before any server contact; the old `ws4` rooms are
 //! simply never joined again. The legacy snapshot is kept for rollback.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use chrono::Utc;
@@ -222,6 +222,15 @@ struct WorkspaceHostInner {
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
+    /// Orchestration rows (`crate::orchestration`), republished on change.
+    orchestration_tx: watch::Sender<zeron_proto::orchestration::OrchestrationState>,
+    /// The registry's orchestration version `orchestration_tx` holds (stored
+    /// after it's sent): see `WorkspaceHost::scan_orchestration`.
+    orchestration_published: AtomicU64,
+    /// Progress rows (`crate::orchestration::progress`), republished on change.
+    progress_tx: watch::Sender<Vec<zeron_proto::orchestration::Progress>>,
+    /// The Scratchpad and its history (`crate::orchestration::scratchpad`).
+    scratchpad_tx: watch::Sender<zeron_proto::scratchpad::ScratchpadState>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// [`WorkspaceHost::registry_synced`], published when it changes so
     /// waiters (the chat sync dispatcher's reconciliation) need not poll it.
@@ -289,6 +298,9 @@ struct PublishedVersions {
     sessions: u64,
     devices: u64,
     spaces: u64,
+    orchestration: u64,
+    progress: u64,
+    scratchpad: u64,
 }
 
 /// The registry replica a store holds: its whole snapshot plus the row
@@ -310,6 +322,70 @@ pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A wait for or hold of the registry lock this long is logged (target
+/// `perf`, debug) with where it was taken.
+const SLOW_REGISTRY_LOCK: std::time::Duration = std::time::Duration::from_millis(5);
+
+thread_local! {
+    /// Registry locks this thread holds now.
+    static REGISTRY_LOCKS_HELD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// How many registry locks this thread holds: work that may take long (a
+/// model run, a subprocess, I/O) asserts it's 0 before it starts.
+pub(crate) fn registry_locks_held() -> u32 {
+    REGISTRY_LOCKS_HELD.with(|held| held.get())
+}
+
+/// The registry lock, timed. A `MutexGuard` is `!Send`, so no spawned
+/// future can hold one across an `.await` (it wouldn't compile); this adds
+/// the slow waits and holds to the log.
+struct RegistryGuard<'a> {
+    guard: MutexGuard<'a, RegistryDoc>,
+    taken: std::time::Instant,
+    waited: std::time::Duration,
+    caller: &'static std::panic::Location<'static>,
+}
+
+#[track_caller]
+fn lock_registry(mutex: &Mutex<RegistryDoc>) -> RegistryGuard<'_> {
+    let caller = std::panic::Location::caller();
+    let asked = std::time::Instant::now();
+    let guard = lock(mutex);
+    let taken = std::time::Instant::now();
+    REGISTRY_LOCKS_HELD.with(|held| held.set(held.get() + 1));
+    RegistryGuard { guard, taken, waited: taken - asked, caller }
+}
+
+impl std::ops::Deref for RegistryGuard<'_> {
+    type Target = RegistryDoc;
+    fn deref(&self) -> &RegistryDoc {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for RegistryGuard<'_> {
+    fn deref_mut(&mut self) -> &mut RegistryDoc {
+        &mut self.guard
+    }
+}
+
+impl Drop for RegistryGuard<'_> {
+    fn drop(&mut self) {
+        REGISTRY_LOCKS_HELD.with(|held| held.set(held.get().saturating_sub(1)));
+        let held = self.taken.elapsed();
+        if held >= SLOW_REGISTRY_LOCK || self.waited >= SLOW_REGISTRY_LOCK {
+            tracing::debug!(
+                target: "perf",
+                what = "registry_lock",
+                at = %self.caller,
+                held_us = held.as_micros() as u64,
+                wait_us = self.waited.as_micros() as u64,
+            );
+        }
+    }
 }
 
 /// A chat row's stored harness-native session (see
@@ -447,6 +523,10 @@ impl WorkspaceHost {
                 .map(|preferences| preferences.pinned_session_ids)
                 .unwrap_or_default(),
         });
+        let (orchestration_tx, _) = watch::channel(doc.read_orchestration());
+        let orchestration_published = AtomicU64::new(doc.orchestration_version());
+        let (progress_tx, _) = watch::channel(doc.read_progress());
+        let (scratchpad_tx, _) = watch::channel(doc.read_scratchpad());
         let (changed_tx, changed_rx) = watch::channel(0u64);
         let edge_less = config.edge.is_none();
 
@@ -460,6 +540,10 @@ impl WorkspaceHost {
                 sessions_tx,
                 spaces_tx,
                 sidebar_preferences_tx,
+                orchestration_tx,
+                orchestration_published,
+                progress_tx,
+                scratchpad_tx,
                 room: Mutex::new(None),
                 registry_synced_tx: watch::Sender::new(edge_less),
                 changed_tx,
@@ -477,6 +561,9 @@ impl WorkspaceHost {
                 whole_saves: std::sync::atomic::AtomicUsize::new(0),
             }),
         };
+        // A name an earlier device already has is numbered now, not after
+        // the first change.
+        host.inner.dedupe_own_name();
         // Persist immediately: after this boot the migration source is never
         // read again, so the registry snapshot must exist even if the process
         // dies before the first debounced save.
@@ -798,8 +885,9 @@ impl WorkspaceHost {
 
     /// Run a mutation under the registry lock, then wake the publish/persist
     /// task and push the write to the room.
+    #[track_caller]
     fn mutate<R>(&self, f: impl FnOnce(&mut RegistryDoc) -> R) -> R {
-        let result = f(&mut lock(&self.inner.reg));
+        let result = f(&mut lock_registry(&self.inner.reg));
         self.inner.local_unsaved.store(true, Ordering::Release);
         self.inner.bump_changed();
         if let Some(room) = lock(&self.inner.room).as_ref() {
@@ -808,8 +896,9 @@ impl WorkspaceHost {
         result
     }
 
+    #[track_caller]
     fn read<R>(&self, f: impl FnOnce(&RegistryDoc) -> R) -> R {
-        f(&lock(&self.inner.reg))
+        f(&lock_registry(&self.inner.reg))
     }
 
     /// The chat row as currently known (overlay view).
@@ -866,6 +955,86 @@ impl WorkspaceHost {
         Ok(())
     }
 
+    // ── orchestration rows (crate::orchestration) ───────────────────────────
+
+    /// Orchestration as the registry holds it now.
+    #[track_caller]
+    pub fn orchestration_state(&self) -> zeron_proto::orchestration::OrchestrationState {
+        self.read(|doc| doc.read_orchestration())
+    }
+
+    /// `f` of the orchestration rows without waiting on the registry lock:
+    /// the published value when it's current, or while the lock is busy (a
+    /// save, a publish); read now only when the lock is free and the value
+    /// is behind. For scans whose writes read the rows again under the lock.
+    /// `f` must be quick (it runs with the watch value borrowed).
+    pub fn scan_orchestration<R>(
+        &self,
+        f: impl FnOnce(&zeron_proto::orchestration::OrchestrationState) -> R,
+    ) -> R {
+        let fresh = match self.inner.reg.try_lock() {
+            Ok(doc) if doc.orchestration_version() != self.inner.orchestration_published.load(Ordering::Acquire) => {
+                Some(doc.read_orchestration())
+            }
+            Ok(_) => None,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner().read_orchestration()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        match fresh {
+            Some(state) => f(&state),
+            None => f(&self.inner.orchestration_tx.borrow()),
+        }
+    }
+
+    /// Registry rows per kind and pending ops (introspection: the engine's
+    /// `perf` stats line).
+    pub(crate) fn registry_stats(&self) -> (Vec<(String, usize)>, usize) {
+        self.read(|doc| (doc.row_counts(), doc.pending_ops_len()))
+    }
+
+    /// Orchestration, republished on every change (not coalesced: see
+    /// `Orchestration::subscribe`).
+    pub fn watch_orchestration_rows(
+        &self,
+    ) -> watch::Receiver<zeron_proto::orchestration::OrchestrationState> {
+        self.inner.orchestration_tx.subscribe()
+    }
+
+    /// Every chat's progress row, republished on every change (not
+    /// coalesced: see `orchestration::progress::stream`).
+    pub fn watch_progress_rows(&self) -> watch::Receiver<Vec<zeron_proto::orchestration::Progress>> {
+        self.inner.progress_tx.subscribe()
+    }
+
+    /// The Scratchpad and its history, republished on every change.
+    pub fn watch_scratchpad(&self) -> watch::Receiver<zeron_proto::scratchpad::ScratchpadState> {
+        self.inner.scratchpad_tx.subscribe()
+    }
+
+    /// Read orchestration rows under the registry lock.
+    #[track_caller]
+    pub fn read_orchestration_with<R>(&self, f: impl FnOnce(&RegistryDoc) -> R) -> R {
+        self.read(f)
+    }
+
+    /// Change orchestration rows under the registry lock (a read and the
+    /// write it decides are one step), then publish and push.
+    #[track_caller]
+    pub fn write_orchestration<R>(&self, f: impl FnOnce(&mut RegistryDoc) -> R) -> R {
+        self.mutate(f)
+    }
+
+    /// Put a chat in an orchestrator's crew (`parent` = the orchestrator's
+    /// chat, kind crew) or take it out (`None`: top-level again). `false`
+    /// when no such chat.
+    pub fn set_chat_parent(
+        &self,
+        chat_id: &str,
+        parent: Option<(&str, zeron_proto::ChildKind)>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_parent(chat_id, parent))?)
+    }
+
     // ── watches (WatchChats / WatchDevices / merged WatchSessions) ──────────
 
     pub fn watch_chats(&self) -> watch::Receiver<Vec<Chat>> {
@@ -892,7 +1061,7 @@ impl WorkspaceHost {
     /// Mutation acknowledgements and watches share the same ordered revision.
     pub fn sidebar_preferences_snapshot(&self) -> SidebarPreferencesState {
         let synced = self.sync_status().is_some_and(|status| status.synced);
-        let doc = lock(&self.inner.reg);
+        let doc = lock_registry(&self.inner.reg);
         self.inner.publish_sidebar_preferences(&doc, synced);
         self.inner.sidebar_preferences_tx.borrow().clone()
     }
@@ -1169,6 +1338,26 @@ impl WorkspaceHost {
         parent_chat_id: Option<String>,
         child_kind: Option<zeron_proto::ChildKind>,
     ) -> Result<(), EngineError> {
+        self.create_chat_titled(chat_id, space_id, device_id, host, config, cwd, parent_chat_id, child_kind, None)
+    }
+
+    /// [`create_chat_hosted`](Self::create_chat_hosted) with the chat's
+    /// title on its row from the first write: a chat named by whoever
+    /// created it (a crew thread, an agent's `create_chat`) is never seen
+    /// untitled, by the Map, the sidebar or a peer. A blank title is none.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_chat_titled(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        host: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        parent_chat_id: Option<String>,
+        child_kind: Option<zeron_proto::ChildKind>,
+        title: Option<&str>,
+    ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
         }
@@ -1208,7 +1397,7 @@ impl WorkspaceHost {
             doc.upsert_chat(&Chat {
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
-                title: None,
+                title: title.map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned),
                 archived: false,
                 cwd: Some(cwd),
                 branch: None,
@@ -1231,6 +1420,7 @@ impl WorkspaceHost {
                 child_kind: child_kind.filter(|_| parent.is_some()),
                 parent_chat_id: parent,
                 sleep: None,
+                started_by: None,
             })
         })?;
         Ok(())
@@ -1587,6 +1777,32 @@ impl WorkspaceHostInner {
 
     fn publish(&self) {
         self.publish_lists(false);
+        // (Any device row may have changed: one came in, or the person
+        // renamed one.)
+        self.dedupe_own_name();
+    }
+
+    /// When an earlier device has this device's name, this device takes the
+    /// lowest free `<name>-N` (`device_names`). Only ever this device's own
+    /// row; a no-op when its name is its own.
+    fn dedupe_own_name(&self) {
+        let me = self.config.device_id.as_str();
+        let renamed = {
+            let mut doc = lock_registry(&self.reg);
+            let Ok(devices) = doc.read_devices() else { return };
+            let Some(name) = crate::device_names::deduped_name(&devices, me) else {
+                return;
+            };
+            tracing::info!(%name, "devices: an earlier device has this name; numbered");
+            doc.rename_device(me, &name).unwrap_or(false)
+        };
+        if renamed {
+            self.local_unsaved.store(true, Ordering::Release);
+            self.bump_changed();
+            if let Some(room) = lock(&self.room).as_ref() {
+                room.nudge();
+            }
+        }
     }
 
     /// One registry room event; `false` when the client is gone.
@@ -1619,7 +1835,7 @@ impl WorkspaceHostInner {
     /// every row change also bumps `changed_tx`, which runs the full publish.
     /// So a heartbeat re-reads the devices alone, not every chat and session.
     fn publish_presence(&self) {
-        let devices = lock(&self.reg).read_devices();
+        let devices = lock_registry(&self.reg).read_devices();
         match devices {
             Ok(mut devices) => {
                 self.overlay_presence(&mut devices);
@@ -1641,7 +1857,7 @@ impl WorkspaceHostInner {
         // would rewrite the missing preferences row after every refused push.
         let owns_sidebar = self.config.platform != zeron_proto::CLOUD_PLATFORM;
         let mut published = lock(&self.published);
-        let mut doc = lock(&self.reg);
+        let mut doc = lock_registry(&self.reg);
         // Each list is rebuilt only when a row of its kind changed since it
         // was last published; reads re-parse only the rows that changed
         // (`RegistryDoc` keeps them parsed). On a 5-device account the
@@ -1653,6 +1869,9 @@ impl WorkspaceHostInner {
             devices: doc.kind_version(zeron_doc::KIND_DEVICES),
             spaces: doc.kind_version(zeron_doc::KIND_SPACES)
                 .wrapping_add(doc.kind_version(zeron_doc::KIND_REPOSITORY_LOOKS)),
+            orchestration: doc.orchestration_version(),
+            progress: doc.progress_version(),
+            scratchpad: doc.scratchpad_version(),
         };
         let last = *published;
         let changed = |pick: fn(&PublishedVersions) -> u64| last.is_none_or(|last| pick(&last) != pick(&now));
@@ -1660,6 +1879,9 @@ impl WorkspaceHostInner {
         let sessions = changed(|v| v.sessions).then(|| doc.read_sessions());
         let devices = (clock_tick || changed(|v| v.devices)).then(|| doc.read_devices());
         let spaces = changed(|v| v.spaces).then(|| doc.read_spaces());
+        let orchestration = changed(|v| v.orchestration).then(|| doc.read_orchestration());
+        let progress = changed(|v| v.progress).then(|| doc.read_progress());
+        let scratchpad = changed(|v| v.scratchpad).then(|| doc.read_scratchpad());
         // Pins reconcile against the chats as they read now: just read, or
         // (unchanged) as last published.
         let reconciled = match &chats {
@@ -1733,6 +1955,16 @@ impl WorkspaceHostInner {
                 tracing::warn!(error = %err, "registry read failed");
             }
             None => {}
+        }
+        if let Some(orchestration) = orchestration {
+            publish_if_changed(&self.orchestration_tx, orchestration);
+            self.orchestration_published.store(now.orchestration, Ordering::Release);
+        }
+        if let Some(progress) = progress {
+            publish_if_changed(&self.progress_tx, progress);
+        }
+        if let Some(scratchpad) = scratchpad {
+            publish_if_changed(&self.scratchpad_tx, scratchpad);
         }
         // A failed read retries every list on the next publish.
         *published = (!failed).then_some(now);
@@ -1907,53 +2139,89 @@ impl WorkspaceHostInner {
     /// replica (2.56 MB on a 5-device account) for each was ~all of the
     /// store's writes.
     fn persist(&self, compact: bool) -> Result<usize, EngineError> {
-        // Keep export and disk write serialized: an older background snapshot
-        // must not overwrite an acknowledged migration's durable snapshot.
-        let mut doc = lock(&self.reg);
-        // Cleared before the export: a write after this point is a new one.
-        let had_local = self.local_unsaved.swap(false, Ordering::AcqRel);
+        // Keep export and disk write serialized (`registry_base` is held
+        // across both): an older background snapshot must not overwrite an
+        // acknowledged migration's durable snapshot. The registry itself is
+        // locked only to copy what the save records; encoding and the SQLite
+        // write run without it, so a save never stalls the registry's
+        // readers and writers (the orchestration ticks waited seconds on it).
         let mut base = lock(&self.registry_base);
         let failed = |error: zeron_sync::StoreError| {
             EngineError::Other(format!("registry snapshot save failed: {error}"))
         };
-        let saved = (|| -> Result<usize, EngineError> {
-            if !compact
-                && let Some(state) = base.as_mut()
-                && state.delta_bytes < state.base_bytes.max(REGISTRY_DELTA_MIN_BUDGET)
-                && state.delta_rows < REGISTRY_DELTA_ROWS
-                && let Some(delta) = doc.delta_bytes()?
-            {
-                if self
-                    .store
-                    .append_row_delta(REGISTRY_DOC_ID, state.token, &delta)
-                    .map_err(failed)?
-                {
-                    state.delta_bytes += delta.len();
-                    state.delta_rows += 1;
-                    doc.mark_saved();
-                    return Ok(delta.len());
-                }
-                // Another full write replaced the base: save whole.
+        // The copy, and whether this device had unsaved writes (cleared with
+        // the copy: a write after this point is a new one).
+        let begin = |delta: bool| {
+            let mut doc = lock_registry(&self.reg);
+            let had_local = self.local_unsaved.swap(false, Ordering::AcqRel);
+            (doc.begin_save(delta), had_local)
+        };
+        // Not stored: what it copied is unsaved again.
+        let abort = |save: zeron_doc::PendingSave, had_local: bool| {
+            lock_registry(&self.reg).abort_save(save);
+            if had_local {
+                self.local_unsaved.store(true, Ordering::Release);
             }
-            let bytes = doc.to_bytes()?;
-            let token = self
-                .store
-                .save_snapshot_base(REGISTRY_DOC_ID, &bytes)
-                .map_err(failed)?;
-            *base = Some(RegistryBase {
-                token,
-                base_bytes: bytes.len(),
-                delta_bytes: 0,
-                delta_rows: 0,
+        };
+        let try_delta = !compact
+            && base.as_ref().is_some_and(|state| {
+                state.delta_bytes < state.base_bytes.max(REGISTRY_DELTA_MIN_BUDGET)
+                    && state.delta_rows < REGISTRY_DELTA_ROWS
             });
-            doc.mark_saved();
-            #[cfg(test)]
-            self.whole_saves.fetch_add(1, Ordering::Relaxed);
-            Ok(bytes.len())
-        })();
-        if saved.is_err() && had_local {
-            self.local_unsaved.store(true, Ordering::Release);
+        let (mut save, mut had_local) = begin(try_delta);
+        let mut saved = None;
+        if save.is_delta()
+            && let Some(state) = base.as_mut()
+        {
+            let appended = save
+                .encode()
+                .map_err(EngineError::from)
+                .and_then(|delta| {
+                    let stored = self
+                        .store
+                        .append_row_delta(REGISTRY_DOC_ID, state.token, &delta)
+                        .map_err(failed)?;
+                    Ok(stored.then_some(delta.len()))
+                });
+            match appended {
+                Ok(Some(len)) => {
+                    state.delta_bytes += len;
+                    state.delta_rows += 1;
+                    saved = Some(Ok(len));
+                }
+                Ok(None) => {
+                    // Another full write replaced the base: save whole.
+                    abort(save, had_local);
+                    (save, had_local) = begin(false);
+                }
+                Err(error) => {
+                    abort(save, had_local);
+                    return Err(error);
+                }
+            }
         }
+        let saved = saved.unwrap_or_else(|| {
+            let whole = (|| -> Result<usize, EngineError> {
+                let bytes = save.encode()?;
+                let token = self
+                    .store
+                    .save_snapshot_base(REGISTRY_DOC_ID, &bytes)
+                    .map_err(failed)?;
+                *base = Some(RegistryBase {
+                    token,
+                    base_bytes: bytes.len(),
+                    delta_bytes: 0,
+                    delta_rows: 0,
+                });
+                #[cfg(test)]
+                self.whole_saves.fetch_add(1, Ordering::Relaxed);
+                Ok(bytes.len())
+            })();
+            if whole.is_err() {
+                abort(save, had_local);
+            }
+            whole
+        });
         #[cfg(test)]
         if saved.is_ok() {
             self.snapshot_saves.fetch_add(1, Ordering::Relaxed);
@@ -2038,7 +2306,7 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
         let self_id = inner.config.device_id.clone();
         let now = now_ms();
         let stale: Vec<String> = {
-            let Ok(devices) = lock(&inner.reg).read_devices() else {
+            let Ok(devices) = lock_registry(&inner.reg).read_devices() else {
                 continue;
             };
             let seen = lock(&inner.presence_seen);
@@ -2147,7 +2415,7 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
                 // Local writes (and queued ops a re-seed made) are only on
                 // this device until saved; server rows come back by seq.
                 let local = inner.local_unsaved.load(Ordering::Acquire)
-                    || lock(&inner.reg).pending_len() > 0;
+                    || lock_registry(&inner.reg).pending_len() > 0;
                 let delay = if local { SNAPSHOT_DEBOUNCE_MS } else { REMOTE_SNAPSHOT_DEBOUNCE_MS };
                 let wanted = tokio::time::Instant::now() + std::time::Duration::from_millis(delay);
                 save_deadline = Some(save_deadline.map_or(wanted, |due| due.min(wanted)));
@@ -2369,6 +2637,65 @@ mod tests {
         }
     }
 
+    /// An earlier device with this device's name: this one becomes
+    /// "<name>-1", on its own row, as soon as it sees it; a person's rename
+    /// to a taken name is numbered the same way, and a unique one stays.
+    #[tokio::test]
+    async fn a_device_whose_name_is_taken_numbers_itself() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "honeypot".into(),
+                platform: "linux".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        let own_name = |host: &WorkspaceHost| {
+            host.read_devices().unwrap().into_iter().find(|d| d.id == "test-device").unwrap().name
+        };
+        let settled = |host: WorkspaceHost, want: &'static str| async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while own_name(&host) != want {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("own name {:?}, wanted {want}", own_name(&host)));
+        };
+        assert_eq!(own_name(&host), "honeypot");
+        let older = |id: &str, name: &str| Device {
+            id: id.into(),
+            name: name.into(),
+            platform: "linux".into(),
+            last_seen_at: None,
+            created_at: chrono::DateTime::from_timestamp_millis(1),
+            version: None,
+            cursor_sdk_version: None,
+            capabilities: vec![],
+        };
+        host.upsert_device_row(&older("older-device", "Honeypot"));
+        settled(host.clone(), "honeypot-1").await;
+        // The older one keeps its name.
+        let names: Vec<String> = host.read_devices().unwrap().into_iter().map(|d| d.name).collect();
+        assert!(names.contains(&"Honeypot".to_string()), "{names:?}");
+
+        // The person names it something unique: it stays.
+        host.rename_device("test-device", "studio").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(own_name(&host), "studio");
+        // Or something taken: numbered.
+        host.upsert_device_row(&older("other-older", "laptop"));
+        host.rename_device("test-device", "Laptop").unwrap();
+        settled(host.clone(), "Laptop-1").await;
+    }
+
     /// The event pump falling behind (the broadcast channel overflowed)
     /// drops events, applied frames among them. That must still republish
     /// and save: presence frames no longer republish everything.
@@ -2537,6 +2864,9 @@ mod tests {
             started_at: None,
             updated_at: Utc::now(),
             waiting: None,
+            activity: None,
+            todo: None,
+            limited: None,
         };
         for i in 0..300 {
             let id = format!("chat-{i:03}");
@@ -2546,7 +2876,7 @@ mod tests {
         host.flush();
         host.inner.publish();
         let whole = || host.inner.whole_saves.load(std::sync::atomic::Ordering::Relaxed);
-        let parsed = || lock(&host.inner.reg).rows_parsed();
+        let parsed = || lock_registry(&host.inner.reg).rows_parsed();
         let (whole_before, parsed_before) = (whole(), parsed());
         let mut chats = host.watch_chats();
         chats.mark_unchanged();
@@ -2714,7 +3044,7 @@ mod tests {
         );
         // The edge tombstones a deleted Cloud session's device: positive
         // evidence that nothing answers, whatever the room's state.
-        let _ = lock(&host.inner.reg).apply_rows(
+        let _ = lock_registry(&host.inner.reg).apply_rows(
             1,
             vec![zeron_doc::RegistryRow {
                 kind: zeron_doc::KIND_DEVICES.into(),
@@ -2870,6 +3200,9 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
+            activity: None,
+            todo: None,
+            limited: None,
         }
     }
 

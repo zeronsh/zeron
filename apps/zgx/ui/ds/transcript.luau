@@ -55,6 +55,8 @@ local Mark = require("@self/mark")
 local glass = require("@self/glass")
 local control = require("@self/control")
 local Quote = require("@self/quote")
+local OrchReports = require("@self/orch_reports")
+local OrchInjected = require("@self/orch_injected")
 local SelectionMenu = require("@self/selection_menu")
 local Rail = require("@self/rail")
 local motion = require("@self/motion")
@@ -63,9 +65,14 @@ local locale = require("@self/locale")
 export type Tool = Activity.Tool
 export type Message = {
 	id: string,
-	-- A person's, a reply, or the seam where the chat moved to another
-	-- agent (`[mark] From → [mark] To` over the prompt that moved it).
-	role: "user" | "assistant" | "switch",
+	-- A person's, a reply, the seam where the chat moved to another
+	-- agent (`[mark] From → [mark] To` over the prompt that moved it), or
+	-- an orchestrator's crew updates (the engine's, never the person's).
+	-- What the engine said into it (a crew ask, a relay, a board check):
+	-- `injected` says which, as ds/orch_injected reads it. A person's whose
+	-- text opens with one of the engine's headers reads as one too (a
+	-- message written before the engine said which).
+	role: "user" | "assistant" | "switch" | "crew_reports" | "injected",
 	text: string,
 	-- A person's: what came with it.
 	attachments: { UserMessage.Attachment }?,
@@ -106,6 +113,12 @@ export type Message = {
 	to_mark: Mark.Name?,
 	-- A person's that another chat sent: which, and its title when it was sent.
 	sender: { chat: string, title: string }?,
+	-- Crew updates': each report (ds/orch_reports), in the order filed.
+	reports: { OrchReports.Report }?,
+	-- An injected message's kind and ids (ds/orch_injected), and when it
+	-- was written (Unix seconds).
+	injected: OrchInjected.Injected?,
+	created: number?,
 }
 
 export type Props = {
@@ -203,8 +216,26 @@ export type Props = {
 	-- A subagent's spawn (an agent row naming its doc): what opens it (a
 	-- lane of its own). Without it, the row opens its call as any does.
 	on_open_subagent: ((sub: { ref: string, title: string?, status: string? }) -> ())?,
+	-- A message to go to (screens/shell/route's `open_session(id, { message })`:
+	-- an ask's turn): each new one (`seq` past the last taken) scrolls the view
+	-- to message `id`, near its top, and lights it a moment. One not in the
+	-- rows yet (a chat opening with its newest rows first) is gone to as it
+	-- comes, the latest showing meanwhile; one that never comes leaves the
+	-- view where it is. The reader scrolling first lets it go.
+	focus: State<Focus?>?,
+	-- A crew ask said into an orchestrator's conversation: its ask as
+	-- orchestration has it now (by id), what opens it (the decision
+	-- overlay), and what opens a chat at a message (the thread that asked,
+	-- at its question).
+	ask_of: ((id: string) -> any?)?,
+	ask_by_question: ((question: string) -> any?)?,
+	open_ask: ((id: string) -> ())?,
+	open_at: ((chat: string, message: string?) -> ())?,
 }
 export type Anchor = { id: string, dy: number }
+export type Focus = { id: string, seq: number }
+-- A place to go back to, or one jumped to (`jump`: lit as it's reached).
+type Place = { id: string, dy: number, jump: boolean? }
 export type TranscriptFind = {
 	query: () -> string,
 	current: () -> { key: string, block: number, k: number, row: number }?,
@@ -416,6 +447,61 @@ local function switch_side(name: string?, mark: Mark.Name?): Node
 	}
 end
 
+-- An orchestrator's crew updates (the engine's `crewReports` message, its
+-- wake turn): a card of their reports, each opening its thread; never a
+-- bubble of the person's.
+local function crew_reports(state: State<Message>, props: Props): Node
+	return ui.column {
+		class = "message message-crew-reports",
+		provide = { message = state:peek().id },
+		w_full = true,
+		OrchReports {
+			reports = function(): { OrchReports.Report }
+				return state:get().reports or {}
+			end,
+			title_of = function(chat: string): string?
+				local c = if props.chat_of then props.chat_of(chat) else nil
+				return if c then c.title else nil
+			end,
+			on_open = function(chat: string)
+				if props.open_link then
+					props.open_link(`zeron-chat:{chat}`)
+				end
+			end,
+		},
+	}
+end
+
+-- What the engine said into the conversation (ds/orch_injected): a quiet
+-- block, never the person's bubble; who sent it over it, as a bubble has.
+local function injected(m: Message, i: OrchInjected.Injected, props: Props, sender: ((Message, Props) -> Node)?): Node
+	return ui.column {
+		class = "message message-injected",
+		provide = { message = m.id },
+		w_full = true,
+		gap = "$space.1",
+		if m.sender and sender then sender(m, props) else nil,
+		OrchInjected.Block {
+			injected = i,
+			at = m.created,
+			title_of = function(chat: string): string?
+				local c = if props.chat_of then props.chat_of(chat) else nil
+				return if c then c.title else nil
+			end,
+			ask_of = props.ask_of,
+			ask_by_question = props.ask_by_question,
+			open_ask = props.open_ask,
+			open_chat = function(chat: string, message: string?)
+				if props.open_at then
+					props.open_at(chat, message)
+				elseif props.open_link then
+					props.open_link(`zeron-chat:{chat}`)
+				end
+			end,
+		},
+	}
+end
+
 local function seam(m: Message): Node
 	return ui.row {
 		role = "group",
@@ -527,6 +613,9 @@ end
 -- word and clock, as Zeron's working trailer (transcript.rs); not
 -- delivered, a line to send it again. The reply's own row takes over once
 -- it comes.
+-- (Declared here, defined below: the waiting line says one too.)
+local turn_line: (line: () -> TurnLine?) -> Node
+
 local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, turn_state: ((m: Message, sending: boolean) -> TurnLine?)?): Node
 	local function said(): TurnLine?
 		local m = row:get()
@@ -649,7 +738,7 @@ export type TurnLine = { text: string, spinner: boolean?, step: string?, summary
 
 -- The line said in a working word's place: a ring while it's still on its
 -- way, then its words, in the working word's quiet ink.
-local function turn_line(line: () -> TurnLine?): Node
+function turn_line(line: () -> TurnLine?): Node
 	return ui.row {
 		gap = "$space.2",
 		items = "center",
@@ -1327,6 +1416,14 @@ local GLIDE_MS = 380
 local GLIDE_CLEAR = 1
 -- How long a steer's glide waits for the host's copy of its prompt.
 local LANDING_MS = 2000
+-- A jump to a message (`focus`): how far below the view's top it lands
+-- (clear of the title bar's fade), how long it waits for a message not in
+-- the rows yet, and its light: held, then fading out (about 2 s in all).
+local JUMP_DY = 56
+local JUMP_WAIT_MS = 8000
+local FLASH_HOLD_MS = 450
+local FLASH_IN_MS = 150
+local FLASH_FADE_MS = 1500
 local function to_end(list: Ref, offset: State<number>, rows: number)
 	local el = list:peek()
 	if el and rows > 0 then
@@ -1414,11 +1511,26 @@ local function Transcript(props: Props): Node
 		return if given ~= nil then given else at_end:peek()
 	end
 	local was_at_end = was_at_end_of(showing)
+	-- A jump asked for before its chat's rows were made (a chat opened at a
+	-- message, as it's made or shown in it: `fresh`): they open there, not
+	-- where they were left. Each taken once (`seq`, kept across a reload,
+	-- which then comes back where the reader is).
+	local focus_seen = ui.state(`transcript_focus_seen{kept}`, 0)
+	local function claim(): string?
+		local asked: Focus? = if props.focus then props.focus:peek() else nil
+		if not asked or asked.seq <= focus_seen:peek() then
+			return nil
+		end
+		focus_seen:set(asked.seq)
+		return asked.id
+	end
+	-- (The message the list's first place is, then: `on_mount`.)
+	local mount_jump: string? = claim()
 	-- A new one starts at its end; one made again where the last was
 	-- scrolled up (a reload, `keep` holding its place) stays away from it,
 	-- its way back to the latest still out. (The list writes the state only
 	-- as it changes, so it must start right.)
-	local restoring = props.keep ~= nil and props.keep:peek() ~= nil and not was_at_end
+	local restoring = mount_jump ~= nil or (props.keep ~= nil and props.keep:peek() ~= nil and not was_at_end)
 	-- (Away from it, putting itself back: a launch's state, at its end by
 	-- default, would hold it at the end through the window's first resizes.)
 	at_end:set(not restoring)
@@ -1435,7 +1547,11 @@ local function Transcript(props: Props): Node
 	-- A place to go back to whose message hasn't come yet (a chat opened
 	-- with its newest rows first, the rest on their way): gone back to as
 	-- it comes, unless the reader goes somewhere first.
-	local waiting: Anchor? = nil
+	local waiting: Place? = nil
+	-- The message lit a moment as a jump reaches it (`focus`), and which
+	-- lighting it is (the same message jumped to again lights again).
+	local flash = ui.state(`transcript_flash{kept}`, nil :: Focus?)
+	local flashes = 0
 	-- (The last message alone: reading the whole list would copy every
 	-- message into the script on each word a reply writes.)
 	local writing = ui.computed(function(): boolean
@@ -1720,7 +1836,7 @@ local function Transcript(props: Props): Node
 	-- The row a view made again goes back to, and how far above the top it
 	-- stood: set as the list mounts, put right as soon as that row is laid
 	-- out (its own `on_resize`, the frame it lands), not on the clock.
-	local returning: { id: string, dy: number }? = nil
+	local returning: Place? = nil
 	-- The view moved by however far message `at.id` stands from `at.dy` below
 	-- its top, where it's laid out. False if it isn't laid out.
 	local function hold_on(at: { id: string, dy: number }): boolean
@@ -1750,7 +1866,7 @@ local function Transcript(props: Props): Node
 	-- far, and the view moves by that. Then the way back to the latest
 	-- follows the list again. (Each armed here: a timer armed in another's
 	-- callback can run late.) False if the message isn't there.
-	local function go_back(at: Anchor): boolean
+	local function go_back(at: Place): boolean
 		local index = messages:index_of("id", at.id)
 		local el = list:peek()
 		if not index or not el then
@@ -1760,12 +1876,25 @@ local function Transcript(props: Props): Node
 		-- the message among. Held until it is (its `on_resize`), as a place
 		-- still to come back to is.
 		if not el.height or el.height <= 0 then
-			waiting = { id = at.id, dy = at.dy }
+			waiting = { id = at.id, dy = at.dy, jump = at.jump }
 			return true
 		end
 		here = { id = at.id, dy = at.dy, index = index }
 		el:scroll_to_row(index, { align = "start" })
-		local back = { id = at.id, dy = at.dy }
+		local back: Place = { id = at.id, dy = at.dy, jump = at.jump }
+		-- A jump's message, lit as the view reaches it, then let fade.
+		if at.jump then
+			flashes += 1
+			local lit = { id = at.id, seq = flashes }
+			flash:set(lit)
+			ui.after(FLASH_HOLD_MS, function()
+				local now = flash:peek()
+				-- (By its lighting: a state holds a copy of the table.)
+				if now and now.id == lit.id and now.seq == lit.seq then
+					flash:set(nil)
+				end
+			end)
+		end
 		returning = back
 		local function correct()
 			if returning ~= back then
@@ -1797,7 +1926,7 @@ local function Transcript(props: Props): Node
 			return
 		end
 		if waiting then
-			local w = waiting :: Anchor
+			local w = waiting :: Place
 			waiting = nil
 			go_back(w)
 		elseif index ~= target.index and not at_end:peek() and not gliding:peek() then
@@ -1903,8 +2032,14 @@ local function Transcript(props: Props): Node
 	local function wheeled(): boolean?
 		wheeled_at = ui.now()
 		-- (Taken somewhere of their own: a place still to come back to is
-		-- let go.)
+		-- let go, and a jump's last corrections with it, so the view isn't
+		-- pulled back from under them.)
 		waiting = nil
+		local r = returning
+		if r and r.jump then
+			returning = nil
+			placing:set(false)
+		end
 		-- A send's glide under way (or its prompt still to land, a steer's):
 		-- the scroll is theirs, so the glide stops where it is rather than
 		-- pulling the view back to the end. The old reply keeps the room it
@@ -1918,6 +2053,52 @@ local function Transcript(props: Props): Node
 			gliding:set(false)
 		end
 		return nil
+	end
+	-- To message `id` (`focus`): near the view's top, lit as it's reached.
+	-- The end let go first, so nothing holding it there (a resize, the list
+	-- following a reply) takes the view back. Not in the rows yet: the view
+	-- stays, and goes there as it comes, for a while (`JUMP_WAIT_MS`).
+	local function jump_to(id: string): boolean
+		local at: Place = { id = id, dy = JUMP_DY, jump = true }
+		end_held = false
+		placing:set(true)
+		if go_back(at) then
+			return true
+		end
+		placing:set(false)
+		waiting = at
+		ui.after(JUMP_WAIT_MS, function()
+			if waiting == at then
+				waiting = nil
+			end
+		end)
+		return false
+	end
+	-- A jump asked for while its chat shows (the chat already open): taken as
+	-- it comes. (One asked before its chat's rows were made is their list's
+	-- first place: `on_mount`, taken as it's made or as `fresh` shows its
+	-- chat; so this waits a step, for a switch's `fresh` to take it first.)
+	if props.focus then
+		local focus = props.focus
+		ui.effect(function()
+			local f = focus:get()
+			if not f or f.seq <= focus_seen:peek() then
+				return
+			end
+			ui.after(0, function()
+				-- (Taken meanwhile, or no longer asked of the chat shown.)
+				local now = focus:peek()
+				if f.seq <= focus_seen:peek() or not now or now.seq ~= f.seq then
+					return
+				end
+				focus_seen:set(f.seq)
+				if list:peek() then
+					jump_to(f.id)
+				else
+					mount_jump = f.id
+				end
+			end)
+		end)
 	end
 	-- When focus last came to something in the list (Tab, ⇧Tab to a row's
 	-- control): taken there, the reader is somewhere of their own.
@@ -2248,8 +2429,56 @@ local function Transcript(props: Props): Node
 		end
 	end)
 
+	-- A message jumped to (`focus`), lit: the accent's tint and ring round it,
+	-- under its words, held a moment and then fading out. Its lane under it
+	-- (a prompt's, a reply's) is left out.
+	local function lit(m: Message): Node
+		local lane = m.role == "user" or m.role == "assistant"
+		return ui.presence(function(): string?
+			local f = flash:get()
+			return if f and f.id == m.id then `{f.seq}` else nil
+		end, function(): Node
+			return ui.div {
+				id = `transcript-flash-{m.id}`,
+				class = "message-flash",
+				aria_hidden = true,
+				w_full = true,
+				h_full = true,
+				rounded = "$radius.lg",
+				border = ui.raw(1.5, "a ring that reads, not a frame"),
+				border_color = "$accent",
+				ui.div {
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					bottom = 0,
+					rounded = "$radius.lg",
+					bg = "$accent",
+					opacity = ui.raw(0.1, "the accent as a tint under the words"),
+				},
+			}
+		end, {
+			absolute = true,
+			left = ui.raw(-10, "clear of the words"),
+			right = ui.raw(-10, "clear of the words"),
+			top = ui.raw(-6, "clear of the words"),
+			bottom = ui.raw(if lane then LANE - 4 else -6, "to the words' foot, its lane left out"),
+			pointer_events = "none",
+			selectable = false,
+			enter = motion.transition({ opacity = { 0, 1 }, duration = FLASH_IN_MS }),
+			exit = motion.transition({ opacity = 0, duration = FLASH_FADE_MS, ease = "inOutQuad" }),
+		})
+	end
+
 	local function row(m: Message, index: State<number>, state: State<Message>): Node
-		local mine = m.role == "user"
+		-- The engine's words (a crew ask, a relay): a block, said by the
+		-- engine or read from a header; or a bubble whose header only shows
+		-- over it (a dump, crew rules, a quoted message).
+		local said = if m.role == "user" or m.role == "injected" then OrchInjected.known(OrchInjected.read(m.text, m.injected)) else nil
+		local over = OrchInjected.bubble(said)
+		local block = if said and not over then said else nil
+		local mine = (m.role == "user" or m.role == "injected") and not block
 		-- The runway: the room under the newest prompt that lets it stand at
 		-- the view's top while its reply is written under it. A prompt sent
 		-- alone (its reply to come) holds it all, from the moment it's sent;
@@ -2257,6 +2486,10 @@ local function Transcript(props: Props): Node
 		-- prompt's own height (pinned below), so the two take the same room
 		-- and nothing moves as the reply arrives.
 		local function need(): number
+			-- (Crew updates are the engine's: they hold no prompt's runway.)
+			if m.role == "crew_reports" or block then
+				return 0
+			end
 			local h = held:get()
 			if h.id == m.id then
 				return h.h
@@ -2365,8 +2598,11 @@ local function Transcript(props: Props): Node
 				w_full = true,
 				max_w = measure,
 				min_w = 0,
+				-- (The light a jump to it shows, round it: `flash`.)
+				relative = true,
+				lit(m),
 				-- Anywhere on a message shows its lane (Zeron's entry hover).
-				on_hover = if m.role == "switch"
+				on_hover = if m.role == "switch" or m.role == "crew_reports" or block
 					then nil
 					else function(inside: boolean)
 						if inside then
@@ -2376,6 +2612,8 @@ local function Transcript(props: Props): Node
 						end
 					end,
 				if m.role == "switch" then seam(m)
+					elseif m.role == "crew_reports" then crew_reports(state, props)
+					elseif block then injected(m, block, props, sender_line)
 					elseif mine then ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the
@@ -2384,9 +2622,10 @@ local function Transcript(props: Props): Node
 						provide = { message = m.id },
 						w_full = true,
 						if m.sender then sender_line(m, props) else nil,
+						if over then OrchInjected.Over { injected = over } else nil,
 						UserMessage {
 							id = m.id,
-							text = m.text,
+							text = if over then over.body or "" else m.text,
 							attachments = m.attachments,
 							-- (Its pictures follow the message: sent from here,
 							-- this Mac's files, then the chat's copies.)
@@ -2425,8 +2664,18 @@ local function Transcript(props: Props): Node
 			-- (a view made again by a reload): its top message back at the
 			-- top, as far above it as it was.
 			on_mount = function(_el)
+				-- Opened at a message (`focus`): there, else (not come yet)
+				-- the latest until it comes.
+				local jump = mount_jump
+				mount_jump = nil
+				if jump then
+					if not jump_to(jump) then
+						to_end(list, offset, count:peek())
+					end
+					return
+				end
 				local at = if keep and not was_at_end then keep:peek() else nil
-				if at and go_back(at) then
+				if at and go_back({ id = at.id, dy = at.dy }) then
 					return
 				end
 				-- Its message not come yet (a chat opened with its newest
@@ -2575,7 +2824,11 @@ local function Transcript(props: Props): Node
 			list = ui.ref()
 		end
 		was_at_end = was_at_end_of(id)
-		restoring = props.keep ~= nil and props.keep:peek() ~= nil and not was_at_end
+		-- (Opened at a message (`focus`, asked of this chat): its list's
+		-- first place, as one made for it would take it; the last chat's
+		-- not taken yet goes with it.)
+		mount_jump = claim()
+		restoring = mount_jump ~= nil or (props.keep ~= nil and props.keep:peek() ~= nil and not was_at_end)
 		if glide then
 			glide:pause()
 			glide = nil
@@ -2593,6 +2846,7 @@ local function Transcript(props: Props): Node
 			pin:set { id = "", h = 0 }
 			hover:set("")
 			spot:set(nil)
+			flash:set(nil)
 			sized:set(sized:peek() + 1)
 		end)
 		-- (Its place told once it has stood 150 ms, as a view just made's.)

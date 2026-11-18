@@ -1176,7 +1176,9 @@ export class CloudAccount extends DurableObject<Env> {
    * A chat runs on Cloud: give it its own machine, cloning `repo` (its
    * project's GitHub repository) into `/home/user/{name}`. Idempotent per
    * chat — a retried create returns the same session (and so the same host
-   * device id for the chat row).
+   * device id for the chat row). `machine`: the size it starts on, kept as
+   * its own (wakes and fresh machines come back on it); the account's
+   * default without one.
    */
   async createSession(
     caller: CloudCaller,
@@ -1186,6 +1188,7 @@ export class CloudAccount extends DurableObject<Env> {
     edgeUrl: string,
     baseBranch?: string,
     parentChatId?: string,
+    machine?: SandboxMachine,
     reach: RunnerReach = this.acct.reach ?? "devices"
   ): Promise<CloudResult<CloudSessionView>> {
     const off = this.accountOf(caller);
@@ -1196,6 +1199,9 @@ export class CloudAccount extends DurableObject<Env> {
     if (!ID_RE.test(chatId)) return fail(400, "bad_request", "Malformed chatId.");
     if (!ID_RE.test(spaceId)) return fail(400, "bad_request", "Malformed spaceId.");
     if (baseBranch !== undefined && !isBranch(baseBranch)) return fail(400, "bad_request", "Malformed branch.");
+    if (machine !== undefined && !machineSpec(machine)) {
+      return fail(400, "bad_request", `Expected machine: ${MACHINES.map((m) => m.id).join(" | ")}.`);
+    }
     const existing = this.sessions.get(chatId);
     if (existing) return this.okSession(existing);
     if (this.balance() <= 0) return this.outOfCredits();
@@ -1243,6 +1249,7 @@ export class CloudAccount extends DurableObject<Env> {
       clients: 0,
       lastTtlExtendAt: now,
       ...(parentChatId !== undefined ? { parentChatId } : {}),
+      ...(machine !== undefined ? { machine } : {}),
       reach
     };
     this.sessions.set(chatId, s);
@@ -1345,7 +1352,8 @@ export class CloudAccount extends DurableObject<Env> {
     parentChatId: string,
     edgeUrl: string,
     branch?: string,
-    config?: Record<string, unknown>
+    config?: Record<string, unknown>,
+    machine?: SandboxMachine
   ): Promise<CloudResult<CloudSessionView>> {
     const off = this.accountOf(caller);
     if (off) return off;
@@ -1357,6 +1365,17 @@ export class CloudAccount extends DurableObject<Env> {
     if (!parent) return fail(404, "unknown_session", "No Cloud session for the parent chat.");
     if (parent.parentChatId !== undefined) {
       return fail(403, "too_deep", "A delegated chat can't start chats of its own.");
+    }
+    // A size is the user's call: a machine may start a delegate on one no
+    // bigger than its own (a stolen runner key spends no faster than the
+    // machine it was on).
+    if (machine !== undefined) {
+      const own = this.currentMachine(parent);
+      if ((machineSpec(machine)?.creditMultiplier ?? Infinity) > (machineSpec(own)?.creditMultiplier ?? 0)) {
+        return fail(403, "machine_too_big", `A Cloud machine starts delegates on its own size (${own}) or smaller.`, {
+          machine: own
+        });
+      }
     }
     const existing = this.sessions.get(chatId);
     if (existing && existing.parentChatId !== parentChatId) {
@@ -1380,6 +1399,7 @@ export class CloudAccount extends DurableObject<Env> {
           edgeUrl,
           branch ?? parent.baseBranch,
           parentChatId,
+          machine,
           // A delegate reaches what its parent does, whatever it asks.
           parent.reach ?? "devices"
         );

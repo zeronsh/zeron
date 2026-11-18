@@ -57,6 +57,10 @@ mod pasted;
 mod math;
 mod menu_bar;
 mod mermaid;
+mod orchestration;
+mod orchestration_progress;
+mod scratchpad;
+mod orchestration_timeline;
 mod plugins;
 mod previews;
 mod projects;
@@ -117,6 +121,10 @@ mod picture_aspect_tests;
 #[cfg(test)]
 mod chip_copy_tests;
 #[cfg(test)]
+mod receipt_copy_tests;
+#[cfg(test)]
+mod overlay_copy_tests;
+#[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
 mod picker_settle_tests;
@@ -145,6 +153,8 @@ mod i18n_tests;
 mod updates;
 #[cfg(test)]
 mod visuals_tests;
+#[cfg(test)]
+mod orchestration_board_tests;
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
@@ -840,6 +850,15 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         cloud::install(cx, &host);
         // The sessions behind the main window (src/sessions.rs).
         sessions::install(cx, &host);
+        // Orchestrators, their crews, board, asks and Brain dump
+        // (src/orchestration.rs).
+        orchestration::install(cx, &host);
+        // What each chat has been doing lately (src/orchestration_timeline.rs).
+        orchestration_timeline::install(cx, &host);
+        // How far each chat's work has got (src/orchestration_progress.rs).
+        orchestration_progress::install(cx, &host);
+        // The Control Room's Scratchpad (src/scratchpad.rs).
+        scratchpad::install(cx, &host);
         // What there is to update, on every device (src/updates.rs).
         updates::install(&host);
         // Adding a project, removing one (src/projects.rs).

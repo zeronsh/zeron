@@ -57,6 +57,9 @@ local locale = require("@self/locale")
 local SessionRow = require("@self/session_row")
 local People = require("@self/people")
 local EditorMenu = require("@self/editor_menu")
+local OrchHue = require("@self/orch_hue")
+local badge = require("@self/badge")
+local trace = require("@self/orch_perf_trace")
 
 -- The page's split chats (screens/shell/split, which keeps these):
 -- the chats side by side now, each row of theirs selected; and whether a
@@ -90,7 +93,11 @@ export type Session = {
 	-- the top).
 	shelf: string?,
 	rank: number?,
+	-- A crew thread: the orchestrator that started it (its name, and its hue
+	-- for the dot after the title, as its row in Orchestrators wears).
+	crew: Crew?,
 }
+export type Crew = { name: string, hue: number? }
 export type PullRequest = { number: number, state: ("open" | "merged" | "closed" | "draft")?, title: string? }
 -- (`src`: its own artwork, a picture chosen for it or its favicon, in place
 -- of its initial and hue; `emoji`: a chosen emoji, on a wash of its hue.)
@@ -134,6 +141,9 @@ export type Details = {
 	-- sessions in a state (working, asking, done unseen: those whose corner
 	-- shows a glyph), each leaving as it settles. On unless the caller says.
 	keep_active: State<boolean>?,
+	-- The chats an orchestrator started (crew threads), listed among the
+	-- rest, where the caller has them. On unless the caller says.
+	orchestrator_chats: State<boolean>?,
 }
 -- How grouped sessions are ordered (Zeron's Sort): the most recently
 -- updated first, or the most recently made. (Pinned and sections keep the
@@ -147,6 +157,29 @@ export type Section = { id: string, name: string, sessions: { string } }
 export type Places = { pinned: { string }, sections: { Section } }
 -- What may change: a list as it is, or read through a state or a function.
 export type Live<T> = T | State<T> | () -> T
+-- An orchestrator as its sidebar row says it: its hue, its crew working
+-- of all of it, and how many of its things need you.
+-- (`archived`: listed only when archived ones are asked for; quieter.)
+export type OrchRow = { id: string, name: string, hue: number?, working: number, total: number, needs: number, paused: boolean?, archived: boolean? }
+-- The Control room's row (its count: what needs you) and the Orchestrators
+-- section under the top, each orchestrator a row.
+export type Orchestration = {
+	control: { count: () -> number, selected: (() -> boolean)?, on_click: (() -> ())? }?,
+	list: Live<{ OrchRow }>?,
+	selected: ((id: string) -> boolean)?,
+	on_open: ((id: string) -> ())?,
+	on_new: (() -> ())?,
+	-- A row's context menu (ds/context_menu's entries), nil for none.
+	menu: ((id: string) -> { ContextMenu.Entry }?)?,
+	-- Whether the Orchestrators section shows (the view menu's toggle); on
+	-- without it. Shown, it shows with none in it too: its "+", and a row
+	-- to make the first.
+	shown: (() -> boolean)?,
+}
+-- What the view menu's groups past Show are given: `close()` closes it;
+-- `menu(entries)` closes it and opens those entries (ds/context_menu's)
+-- under its "…".
+export type ViewMore = { close: () -> (), menu: (entries: { ContextMenu.Entry }) -> () }
 export type Props = {
 	-- Compact (a line a session) or regular (two).
 	compact: State<boolean>,
@@ -211,6 +244,11 @@ export type Props = {
 	-- title, icon? }` as a state of a list, and what choosing one does.
 	pages: State<{ any }>?,
 	on_page: ((page: any) -> ())?,
+	-- Orchestration's place in it, under Search (and the pages): the
+	-- Control room and the Orchestrators section.
+	orchestration: Orchestration?,
+	-- The view menu's groups past Show (each a ds/menu Group), in order.
+	view_more: ((more: ViewMore) -> { Node })?,
 	on_archive: ((id: string) -> ())?,
 	-- The Activity view: on, one list of what needs you (each session by its
 	-- `rank`, those on a `shelf` left out), pinned above it, and at its foot
@@ -1060,12 +1098,35 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (Through a computed of its own: the row's bindings wake when its
 	-- session's table changes, not whenever any session's does. A caller
 	-- that keeps a session's table while it's the same keeps them asleep.)
+	-- (Two sessions' tables saying the same, a few levels down: one handed
+	-- back as a new table, the whole list written again, keeps the one held.)
+	local function same_row(a: any, b: any, depth: number): boolean
+		if rawequal(a, b) then
+			return true
+		end
+		if type(a) ~= "table" or type(b) ~= "table" or depth <= 0 then
+			return false
+		end
+		for k, v in a do
+			if not same_row(v, b[k], depth - 1) then
+				return false
+			end
+		end
+		for k in b do
+			if a[k] == nil then
+				return false
+			end
+		end
+		return true
+	end
 	local function now_of(s: Session): () -> Session
 		local last = s
 		local row = ui.computed(function(): Session
 			local cur = index:get().by_id[s.id]
-			if cur then
+			if cur and not same_row(cur, last, 4) then
 				last = cur
+				-- (Counted: tests/whole_list's "one status, one row".)
+				trace.hit("sidebar.row")
 			end
 			return last
 		end)
@@ -1347,12 +1408,27 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end
 		-- `.session-title`: the row's title, what plugins place beside (a
 		-- badge after it stays in the row, outside the title's fade).
+		-- A crew thread: its orchestrator's dot after the title (named on
+		-- hover), so who started it shows without a word more.
+		local crew = s.crew
 		title = ui.row {
 			class = "session-title",
 			grow = 1,
 			min_w = 0,
 			items = "center",
+			gap = if crew then "$zeron.space.tight" else nil,
 			title,
+			if crew
+				then ui.div {
+					class = "session-crew",
+					shrink = 0,
+					p = 3,
+					role = "img",
+					label = locale.s("ds.sidebar.crew_of", { name = crew.name }),
+					tooltip = locale.s("ds.sidebar.crew_of", { name = crew.name }),
+					OrchHue.Dot { hue = crew.hue, size = 6 },
+				}
+				else nil,
 		}
 		local body = row {
 			class = "session-row",
@@ -2065,6 +2141,243 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		}, tall
 	end
 
+	-- Orchestration's rows: the Control room (what needs you, counted at its
+	-- end), then the Orchestrators section, its title's "+" a new one, a row
+	-- each (its hue's dot, breathing while its crew works; its crew working
+	-- of all of it; what of it needs you). Folds as a section does. On the
+	-- rail, the Control room's icon and each orchestrator's dot.
+	local function orchestration_rows(o: Orchestration): Node
+		local list: any = o.list
+		if type(list) == "function" then
+			list = ui.computed(list)
+		elseif type(list) ~= "table" or (list :: any).get == nil then
+			local plain = list or {}
+			list = ui.computed(function(): { OrchRow }
+				return plain
+			end)
+		end
+		local orch_open = opened["::orchestrators"]
+		local function any_listed(): boolean
+			return #((list :: any):get() :: { OrchRow }) > 0
+		end
+		-- A count in a pill, gone at none.
+		local function count_pill(n: () -> number, class: string): Node
+			return ui.show(function(): boolean
+				return n() > 0
+			end, ui.div { class = class, shrink = 0, badge.Count { n = n, tone = "accent" } })
+		end
+		local control_row: Node? = nil
+		local c = o.control
+		if c then
+			local cn = c.count
+			-- (The rail's tile: a dot over its corner while something needs you.)
+			local lead: Node = if railed()
+				then ui.div {
+					relative = true,
+					Icon { name = "monitor", size = 16 },
+					ui.show(function(): boolean
+						return cn() > 0
+					end, ui.div { absolute = true, right = -3, top = -3, badge.Dot { tone = "accent", size = 7 } }),
+				}
+				else Icon { name = "monitor", size = 16 }
+			control_row = row {
+				name = function(): string
+					return locale.s("ds.sidebar.control_room")
+				end,
+				class = "control-room-row",
+				lead = lead,
+				words = line(label(function(): string
+					return locale.s("ds.sidebar.control_room")
+				end), count_pill(cn, "control-room-count")),
+				selected = c.selected,
+				on_click = c.on_click,
+			}
+		end
+		local function orch_row(now: State<OrchRow>): Node
+			local function cur(): OrchRow
+				return now:get()
+			end
+			local function paused(): boolean
+				return cur().paused == true
+			end
+			local function archived(): boolean
+				return cur().archived == true
+			end
+			-- (Paused or archived: its name quieter, a mark for its counts.)
+			local function quiet(): boolean
+				return paused() or archived()
+			end
+			local function counts(): string
+				local r = cur()
+				return if r.total > 0 then `{r.working}/{r.total}` else ""
+			end
+			-- Paused: two short bars where its counts stood.
+			local pause_mark = ui.row {
+				class = "orchestrator-paused",
+				shrink = 0,
+				gap = "$zeron.space.hair",
+				items = "center",
+				label = locale.t("ds.sidebar.paused"),
+				role = "img",
+				ui.div { w = 2, h = 8, rounded = "$radius.full", bg = "$text.tertiary" },
+				ui.div { w = 2, h = 8, rounded = "$radius.full", bg = "$text.tertiary" },
+			}
+			local body = row {
+				name = function(): string
+					return cur().name
+				end,
+				class = "orchestrator-row",
+				provide = { orchestrator = now:peek().id },
+				lead = OrchHue.Dot {
+					hue = function(): number?
+						return cur().hue
+					end,
+					size = 8,
+					pulse = function(): boolean
+						return cur().working > 0 and not quiet()
+					end,
+				},
+				words = line(
+					label(function(): string
+						return cur().name
+					end, function(): boolean
+						return not quiet()
+					end, nil, "orchestrator-name", "$text.tertiary"),
+					ui.show(function(): boolean
+						return paused() and not archived()
+					end, pause_mark),
+					ui.show(archived, ui.div {
+						class = "orchestrator-archived",
+						shrink = 0,
+						color = "$text.tertiary",
+						label = locale.t("ds.sidebar.archived_orchestrator"),
+						role = "img",
+						Icon { name = "archive-minimalistic", size = 12 },
+					}),
+					ui.show(function(): boolean
+						return not quiet() and counts() ~= ""
+					end, ui.div { class = "orchestrator-crew", shrink = 0, hint(counts) }),
+					count_pill(function(): number
+						return cur().needs
+					end, "orchestrator-needs")
+				),
+				selected = function(): boolean
+					return o.selected ~= nil and o.selected(cur().id)
+				end,
+				on_click = function()
+					if o.on_open then
+						o.on_open(now:peek().id)
+					end
+				end,
+			}
+			local menu = o.menu
+			if menu then
+				body = ContextMenu {
+					label = locale.t("ds.sidebar.orchestrator_actions"),
+					ring = "$radius.md",
+					w_full = true,
+					shrink = 0,
+					items = function()
+						return menu(now:peek().id)
+					end,
+					body,
+				}
+			end
+			return body
+		end
+		local rows = ui.each(list, function(_: any, _i: number, now: State<OrchRow>): Node
+			return orch_row(now)
+		end, {
+			key = function(r: OrchRow): string
+				return r.id
+			end,
+		})
+		local hovered = ui.use_state(false)
+		-- Its title, as a section's: a click folds it; its "+" a new one.
+		local title = if railed()
+			then nil
+			else ui.row {
+				class = "orchestrators-header",
+				w = function(): number
+					return room() - PAD * 2
+				end,
+				h = TITLE,
+				shrink = 0,
+				mt = "$space.2",
+				pl = "$space.2",
+				pr = "$space.1",
+				gap = "$space.1",
+				items = "center",
+				color = "$text.tertiary",
+				cursor = "pointer",
+				hover = { color = "$text.secondary" },
+				label = locale.t("ds.sidebar.orchestrators"),
+				on_hover = function(inside: boolean)
+					hovered:set(inside)
+				end,
+				on_click = function()
+					orch_open:set(not orch_open:peek())
+				end,
+				ui.text {
+					locale.t("ds.sidebar.orchestrators"),
+					grow = 1,
+					text_size = "$font.size.xs",
+					weight = "$font.weight.medium",
+				},
+				if o.on_new then ui.div { class = "orchestrators-new", corner("ds.sidebar.new_orchestrator", "plus", o.on_new) } else nil,
+			}
+		-- With none yet: one quiet row that makes the first.
+		local first = if railed() or not o.on_new
+			then nil
+			else ui.show(
+				function(): boolean
+					return not any_listed()
+				end,
+				row {
+					name = function(): string
+						return locale.s("ds.sidebar.new_orchestrator")
+					end,
+					class = "orchestrators-first",
+					lead = ui.div { color = "$text.tertiary", Icon { name = "plus", size = 16 } },
+					words = line(label(function(): string
+						return locale.s("ds.sidebar.new_orchestrator")
+					end, function(): boolean
+						return false
+					end, nil, nil, "$text.tertiary")),
+					on_click = o.on_new,
+				}
+			)
+		return ui.column {
+			id = if is_island then nil else "sidebar-orchestration",
+			w_full = true,
+			gap = "$zeron.list.gap",
+			shrink = 0,
+			control_row,
+			-- (Shown with none in it too, unless put away; on the rail, its
+			-- dots only, so none there with none.)
+			ui.show(
+				function(): boolean
+					if o.shown and not o.shown() then
+						return false
+					end
+					return not railed() or any_listed()
+				end,
+				ui.column {
+					class = "orchestrators-section",
+					w_full = true,
+					gap = "$zeron.list.gap",
+					shrink = 0,
+					title,
+					if railed()
+						then rows
+						else ui.show(function(): boolean
+							return orch_open:get()
+						end, ui.column { w_full = true, gap = "$zeron.list.gap", shrink = 0, rows, first }),
+				}
+			),
+		}
+	end
+
 	-- The top: a new chat and search, each a row (collapsed, its icon).
 	local top = ui.column {
 		-- Where plugins add beside New chat and Search.
@@ -2125,6 +2438,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end,
 			})
 			else nil,
+		if props.orchestration then orchestration_rows(props.orchestration) else nil,
 	}
 
 	-- The middle: pinned, your sections, then the groups, as one virtualized
@@ -2234,6 +2548,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		return { from = v, to = v, at = 0, dur = 0, delay = 0 }
 	end
 	local moving: { Anim } = {}
+	-- (The longest any of its motions runs, delay and all, in ms.)
+	local MOTION_MAX = 5000
 	local ticking: any = nil
 	-- Each frame: what has arrived is done (its `on_done` run); with nothing
 	-- left moving, the clock stops.
@@ -2242,7 +2558,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local left: { Anim } = {}
 		local arrived: { Anim } = {}
 		for _, a in moving do
-			if t >= a.at + a.delay + a.dur then
+			-- (Its end not a number (a place measured as NaN or inf), or long
+			-- past any motion's: done, so the clock can stop: left in, it
+			-- ran every frame for good, every row's height and ink again.)
+			local ends = a.at + a.delay + a.dur
+			if t >= ends or ends ~= ends or ends - a.at > MOTION_MAX or t - a.at > MOTION_MAX then
 				table.insert(arrived, a)
 			else
 				table.insert(left, a)
@@ -4646,6 +4966,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 	if (details :: any).empty_projects then
 		table.insert(SHOW, { key = "empty_projects", label = "ds.sidebar.view.empty_projects", icon = "inbox" })
 	end
+	if (details :: any).orchestrator_chats then
+		table.insert(SHOW, { key = "orchestrator_chats", label = "ds.sidebar.view.orchestrator_chats", icon = "users-group-rounded" })
+	end
 	-- Opens it. (A press anywhere outside it closes it, this one too, as
 	-- zgx closes any popover: toggling here would open it again.)
 	local view_trigger = IconButton {
@@ -4659,6 +4982,28 @@ fn layer(input:LayerInput)->vec4<f32> {
 			view_open:set(true)
 		end,
 	}
+	-- A menu a row of its opens in its place, under the "…" (`view_more`'s
+	-- `menu`): the entries it's given, read once as it opens.
+	local more_entries: { ContextMenu.Entry }? = nil
+	local more_open: ((x: number, y: number) -> boolean)? = nil
+	local trigger_at: Element? = nil
+	local function open_more(entries: { ContextMenu.Entry })
+		view_open:set(false)
+		more_entries = entries
+		ui.after(0, function()
+			local el = trigger_at
+			if more_open and el and el.x and el.y then
+				(more_open :: any)(el.x, el.y + (el.height or 0) + 4)
+			end
+		end)
+	end
+	local view_more: { Node } = {}
+	-- How much of the window it leaves clear (its top past the title bar's
+	-- line, its foot off the window's), and its least before it scrolls.
+	local VIEW_MENU_CLEAR, VIEW_MENU_MIN = 56, 240
+	-- Its rows' height, as last laid out (kept between openings, so it
+	-- opens at its size).
+	local rows_h = ui.use_state(0)
 	local view_menu = ui.popover(Glass.style({
 		open = view_open,
 		anchor = view_trigger,
@@ -4939,38 +5284,87 @@ fn layer(input:LayerInput)->vec4<f32> {
 						else nil,
 				}
 			end
-			return ui.column {
-				w_full = true,
-				gap = 0,
-				activity_rows,
-				if activity_rows then Menu.Rule() else nil,
+			-- The caller's groups past Show, a rule after each.
+			view_more = {}
+			if props.view_more then
+				for _, g in props.view_more({
+					close = function()
+						view_open:set(false)
+					end,
+					menu = open_more,
+				}) do
+					table.insert(view_more, g)
+					table.insert(view_more, Menu.Rule())
+				end
+			end
+			local parts: { [any]: any } = { w_full = true, gap = 0 }
+			if activity_rows then
+				table.insert(parts, activity_rows)
+				table.insert(parts, Menu.Rule())
+			end
+			for _, g in {
 				Menu.Group(organize_rows :: any),
 				Menu.Rule(),
 				Menu.Group(sort_rows :: any),
 				Menu.Rule(),
 				Menu.Group(show_rows :: any),
 				Menu.Rule(),
-				Menu.Group {
-					-- Compact: its switch says; the row itself takes no click.
-					Menu.Row {
-						label = locale.s("ds.sidebar.view.compact"),
-						cursor = "default",
-						hover = {},
-						active = {},
-						trail = { Switch { value = compact, label = locale.s("ds.sidebar.view.compact") } },
-					},
-					Menu.Row {
-						icon = "plus",
-						label = locale.s("ds.sidebar.view.create_section"),
-						role = "menuitem",
-						-- (Activity lists no sections.)
-						disabled = act,
-						on_click = function()
-							view_open:set(false)
-							new_section()
-						end,
-					},
+			} do
+				table.insert(parts, g)
+			end
+			-- (The caller's groups, then compact and a new section.)
+			for _, g in view_more do
+				table.insert(parts, g)
+			end
+			table.insert(parts, Menu.Group {
+				-- Compact: its switch says; the row itself takes no click.
+				Menu.Row {
+					label = locale.s("ds.sidebar.view.compact"),
+					cursor = "default",
+					hover = {},
+					active = {},
+					trail = { Switch { value = compact, label = locale.s("ds.sidebar.view.compact") } },
 				},
+				Menu.Row {
+					icon = "plus",
+					label = locale.s("ds.sidebar.view.create_section"),
+					role = "menuitem",
+					-- (Activity lists no sections.)
+					disabled = act,
+					on_click = function()
+						view_open:set(false)
+						new_section()
+					end,
+				},
+			})
+			-- (Taller than the window has room for, it scrolls: as tall as
+			-- its rows, at most the window's room.)
+			parts.on_resize = function(size: { w: number, h: number })
+				if math.abs(size.h - rows_h:peek()) >= 0.5 then
+					rows_h:set(size.h)
+				end
+			end
+			local function room_h(): number
+				local window = (ui :: any).window
+				local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
+				local ok, v = pcall(function(): any
+					return if state ~= nil then state:get() else nil
+				end)
+				local h = if ok and type(v) == "table" and type(v.height) == "number" then v.height else 0
+				-- (A window too short to say, a headless host's: no bound.)
+				return if h > VIEW_MENU_MIN + VIEW_MENU_CLEAR then h - VIEW_MENU_CLEAR else math.huge
+			end
+			return ui.scroll {
+				id = "sidebar-view-menu-scroll",
+				w_full = true,
+				-- (Not laid out yet, the first time: as tall as it needs.)
+				h = function(): any
+					local h = rows_h:get()
+					return if h <= 0 then "auto" else math.min(h, room_h())
+				end,
+				fade = { 8, 8 },
+				fade_overflow = true,
+				ui.column(parts :: any),
 			}
 		end,
 	}, "menu"))
@@ -5233,7 +5627,25 @@ fn layer(input:LayerInput)->vec4<f32> {
 			pointer_events = function()
 				return if collapsed:get() then "none" else "auto"
 			end,
-			view_menu,
+			-- (Round it, what its rows open in its place: `view_more`'s menus.)
+			ContextMenu {
+				label = locale.t("ds.sidebar.view.options"),
+				hook = function(open_at)
+					more_open = open_at
+				end,
+				items = function(): { ContextMenu.Entry }?
+					local e = more_entries
+					more_entries = nil
+					return e
+				end,
+				ui.div {
+					id = "sidebar-view-more",
+					on_visible = function(_v: boolean, el: Element)
+						trigger_at = el
+					end,
+					view_menu,
+				},
+			},
 		},
 		-- A hairline down its right, between it and what it opens, full
 		-- height (stronger under the pointer at its edge, and as it's

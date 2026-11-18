@@ -170,8 +170,22 @@ local function naming(): Node
 		for _, h in catalog.harnesses do
 			names[h.id] = h.label
 		end
+		local stocked: { [string]: boolean } = {}
 		for _, m in catalog.models do
+			stocked[m.harness] = true
 			table.insert(out, { value = m.value, label = m.label, description = names[m.harness] })
+		end
+		-- An agent listing no models (Cursor signed out, a look that failed,
+		-- one still on its way) is there too, saying why, and can't be chosen.
+		for _, h in catalog.harnesses do
+			if not stocked[h.id] then
+				local why = if (h :: any).status == "error"
+					then "ds.model_picker.load_failed"
+					elseif (h :: any).status == "loading" then "ds.model_picker.loading"
+					elseif (h :: any).status == "empty" then "ds.model_picker.signed_out"
+					else "ds.model_picker.no_models"
+				table.insert(out, { value = `{h.id}/`, label = h.label, description = ui.t(why):get(), disabled = true })
+			end
 		end
 		return out
 	end
@@ -234,6 +248,10 @@ function M.view(): Node
 		load_all()
 		if chat.catalog:peek().state ~= "ready" then
 			chat.load_catalog()
+		else
+			-- (Agents short of models looked at again: one signed in since
+			-- shows its models here.)
+			chat.refresh_catalog()
 		end
 	end)
 	return ds.Settings.Page {

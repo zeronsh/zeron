@@ -65,8 +65,21 @@ impl RowCache {
         kind: &str,
         list: TypeId,
         rebuild: impl FnOnce() -> Vec<(String, T)>,
-        mut refresh: impl FnMut(&str) -> Option<T>,
+        refresh: impl FnMut(&str) -> Option<T>,
     ) -> Vec<T> {
+        self.read_with(kind, list, rebuild, refresh, |rows| rows.values().cloned().collect())
+    }
+
+    /// [`Self::read`], but `pick` takes what it needs from the parsed rows
+    /// (by id) instead of a copy of every one.
+    pub(super) fn read_with<T: Clone + Send + 'static, O>(
+        &mut self,
+        kind: &str,
+        list: TypeId,
+        rebuild: impl FnOnce() -> Vec<(String, T)>,
+        mut refresh: impl FnMut(&str) -> Option<T>,
+        pick: impl FnOnce(&HashMap<String, T>) -> O,
+    ) -> O {
         let key = (kind.to_owned(), list);
         let entry = self.entries.entry(key).or_insert_with(|| Entry {
             kind: kind.to_owned(),
@@ -94,6 +107,6 @@ impl RowCache {
                 }
             }
         }
-        rows.values().cloned().collect()
+        pick(rows)
     }
 }

@@ -29,7 +29,9 @@ local NAMES: { [Kind]: { string } } = {
 	plan = { "ds.status.plan", "ds.status.plan_long" },
 	done = { "ds.status.done", "ds.status.done_long" },
 	failed = { "ds.status.failed", "ds.status.failed" },
-	limited = { "ds.status.limited", "ds.status.limited" },
+	-- Stopped by its provider's usage limit, waiting for the reset
+	-- (ds/usage_limit).
+	limited = { "ds.status.limited", "ds.limit.waiting" },
 	-- Put to sleep, and woken (its time came, or it asked): not looked at since.
 	woke = { "ds.status.woke", "ds.status.woke_long" },
 }
@@ -57,7 +59,7 @@ local KINDS: { [Kind]: KindInfo } = {
 	plan = kind("plan"),
 	done = kind("done", "status-done"),
 	failed = kind("failed", "status-failed"),
-	limited = kind("limited", "status-failed"),
+	limited = kind("limited", "status-limited"),
 	woke = kind("woke", "status-woke"),
 }
 M.KINDS = KINDS
@@ -230,8 +232,181 @@ local function looping(props: ContainerProps, start: (el: Element) -> Animation,
 	return ui.div(props)
 end
 
+-- Off macOS, a 30 fps loop keeps zgx's event loop turning between its
+-- frames (a frame that draws nothing asks for no frame callback, so the
+-- next is handed out at once): one ring on screen held a core at half.
+-- There the rings and dots step instead, all on one clock, STEP ms apart,
+-- a timer that sleeps between steps and stops while none shows. On macOS
+-- a loop is baked and played by Core Animation: no frames, no wakes.
+local STEP = 100
+local platform: string? = nil
+local function stepped(): boolean
+	if platform == nil then
+		local ok, name = pcall(function(): any
+			return ui.shared("platform", ""):peek()
+		end)
+		platform = if ok and type(name) == "string" then name else ""
+	end
+	return platform ~= "macos"
+end
+M.stepped = stepped
+-- The steps' clock (ui.now() at the last step); what steps (each an
+-- element and what sets it at a step, by a key of its own), and how many
+-- steppers show (a dot steps by reading `step_clock`, nothing set).
+local step_clock = ui.state("ds_status_step", 0)
+type Step = { el: Element, set: (el: Element, now: number) -> () }
+local steps: { [any]: Step } = {}
+local showing = 0
+local stepping = false
+local step_timer: any = nil
+local function ring_time(now: number): number
+	return math.min((now % (RUN * 1000 + REST)) / 1000, RUN)
+end
+local ticked = 0
+local function step_start()
+	-- (Its timer is owned as an effect's is: started from one's run, it goes
+	-- when that runs again. Not stepped for three steps: started again.)
+	if stepping and ui.now() - ticked < 3 * STEP then
+		return
+	end
+	stepping = true
+	ticked = ui.now()
+	local mine = {}
+	step_timer = mine
+	ui.every(STEP, function(): boolean?
+		if step_timer ~= mine then
+			return false
+		end
+		if showing <= 0 then
+			showing = 0
+			stepping = false
+			return false
+		end
+		local now = ui.now()
+		ticked = now
+		step_clock:set(now)
+		for key, st in steps do
+			-- (An element gone without a word: it steps no more.)
+			if not pcall(st.set, st.el, now) then
+				M.unstep(key)
+			end
+		end
+		return nil
+	end)
+end
+-- (A second's look, the script's own: steppers showing and the clock
+-- stopped, as when what started its timer went, it starts again.)
+ui.every(1000, function()
+	if showing > 0 then
+		step_start()
+	end
+end)
+-- Steps `el` (under `key`) on the shared clock, `set(el, now)` at each step
+-- (and at once), until `M.unstep(key)`: for a loop off macOS that a script
+-- starts and stops itself. Nothing when motion is reduced.
+function M.step(key: any, el: Element, set: (el: Element, now: number) -> ())
+	if motion.reduced_now() then
+		return
+	end
+	if not steps[key] then
+		showing += 1
+	end
+	steps[key] = { el = el, set = set }
+	pcall(set, el, ui.now())
+	step_start()
+end
+function M.unstep(key: any)
+	if steps[key] then
+		steps[key] = nil
+		showing -= 1
+	end
+end
+-- A node that steps while it can be seen (`set`: its element set at each
+-- step; else its bound values read `step_clock`), and stops as it goes.
+-- Still when motion is reduced.
+local Stepper = ui.component(function(props: { node: ContainerProps, set: ((el: Element, now: number) -> ())? }): Node
+	local key = {}
+	local shown = false
+	local function hide()
+		if shown then
+			shown = false
+			if props.set then
+				M.unstep(key)
+			else
+				showing -= 1
+			end
+		end
+	end
+	ui.on_cleanup(hide)
+	local node = props.node
+	node.on_visible = function(visible: boolean, el: Element)
+		if visible and not shown then
+			if motion.reduced_now() then
+				return
+			end
+			shown = true
+			if props.set then
+				M.step(key, el, props.set)
+			else
+				showing += 1
+				step_start()
+			end
+		elseif not visible then
+			hide()
+		end
+	end
+	return ui.div(node)
+end)
+-- `node`, stepped while it shows: `set(el, now)` at each step.
+function M.Stepped(node: ContainerProps, set: ((el: Element, now: number) -> ())?): Node
+	return Stepper { node = node, set = set }
+end
+local function set_ring(el: Element, now: number)
+	anime.utils.set(el, { shaderTime = ring_time(now) })
+end
+local function stepper(node: ContainerProps, is_ring: boolean?): Node
+	return Stepper { node = node, set = if is_ring then set_ring else nil }
+end
+-- A sine pulse between `from` and `to`, there and back every `2 * half` ms
+-- (anime's inOutSine, alternating), at `now`.
+function M.sine_at(now: number, from: number, to: number, half: number): number
+	local p = (now % (2 * half)) / half
+	if p > 1 then
+		p = 2 - p
+	end
+	return from + (to - from) * (0.5 - 0.5 * math.cos(math.pi * p))
+end
+-- The time (ms) into a `period` ms cycle, by the steps' clock.
+local function step_at(period: number): number
+	return step_clock:get() % period
+end
+M.test_step = {
+	clock = step_clock,
+	showing = function(): number
+		return showing
+	end,
+	stepping = function(): boolean
+		return stepping
+	end,
+	STEP = STEP,
+}
+
+-- A glyph's size: points, or a function the glyph follows as it changes
+-- (a map's zoom), drawn at the size it is each frame.
+export type Size = number | () -> number
+
 -- The working ring, `size` points, in `ink` (a token).
-local function ring(ink: string, size: number): Node
+local function ring(ink: string, size: Size): Node
+	if stepped() then
+		-- Its run and rest by the steps' clock (`shaderTime` set at each).
+		return stepper({
+			w = size,
+			h = size,
+			shrink = 0,
+			bg_shader = RING,
+			shader_params = { ink, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } },
+		}, true)
+	end
 	return looping({
 		w = size,
 		h = size,
@@ -260,7 +435,7 @@ end
 
 -- A state's glyph, `size` points: working, waiting and connecting their
 -- ring.
-local function glyph(kind: Kind, size: number): Node?
+local function glyph(kind: Kind, size: Size): Node?
 	local k = KINDS[kind]
 	if kind == "working" or kind == "connecting" or kind == "waiting" then
 		return ring(`$zeron.status.{hue(kind)}`, size)
@@ -271,8 +446,8 @@ end
 -- A state's glyph alone, in its hue. `kind` may be a function: the glyph
 -- and its hue follow it in place, and only a move between the working ring
 -- and a glyph (or between the ring's two kinds) swaps what's drawn.
-function M.StatusIcon(props: { kind: Kind | () -> Kind, size: number? }): Node
-	local size = props.size or 16
+function M.StatusIcon(props: { kind: Kind | () -> Kind, size: Size? }): Node
+	local size: Size = props.size or 16
 	local given = props.kind
 	if type(given) ~= "function" then
 		local kind = given :: Kind
@@ -349,6 +524,22 @@ function M.StatusDot(props: { kind: Kind, size: number? }): Node
 	}
 	if not k.pulse then
 		return ui.div(dot)
+	end
+	if stepped() then
+		-- Dimming to half (200 ms), held (800), brightening (200), held:
+		-- by the steps' clock.
+		dot.opacity = function(): number
+			local p = step_at(2 * (200 + 800))
+			if p < 200 then
+				return 1 - 0.5 * p / 200
+			elseif p < 1000 then
+				return 0.5
+			elseif p < 1200 then
+				return 0.5 + 0.5 * (p - 1000) / 200
+			end
+			return 1
+		end
+		return stepper(dot)
 	end
 	return looping(dot, function(el)
 		-- The dimming and the brightening alone, each held for the loop's

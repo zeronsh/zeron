@@ -27,6 +27,7 @@ local Skeleton = require("@self/skeleton")
 local control = require("@self/control")
 local locale = require("@self/locale")
 local EditorMenu = require("@self/editor_menu")
+local Button = require("@self/button")
 
 -- An item: its name, and the harness mark or icon it shows in place of its
 -- letter tile (a model's, a mode's), what it does (under its name), a muted
@@ -64,6 +65,14 @@ export type Item = {
 	-- tile no letter of it (`seed`'s avatar).
 	private: boolean?,
 	tag: string?,
+	-- No tile at its start: a list whose rows are all one kind of thing,
+	-- told apart by their words alone (a machine's sizes). Its tag then
+	-- follows its name, a suffix to it, with what ends the row
+	-- (`trailing_item`) holding the right edge.
+	bare: boolean?,
+	-- More about it than its row says, under the pointer (a size's full
+	-- specs).
+	tooltip: string?,
 	warn: boolean?,
 	-- Shown but not to be picked (a device out of reach): dimmed, passed
 	-- over by the keys, its `description` saying why.
@@ -78,8 +87,11 @@ export type Menu = { open: State<boolean>, toggle: () -> (), on_hover: ((inside:
 -- stays a string: the search reads it, and its tile its first letter.)
 -- `shown`: whether it's offered now (followed as it changes); none, always.
 export type Action = { label: string | Message | () -> string, icon: Icon.Name, on_click: (() -> ())?, shown: (() -> boolean)? }
--- What an empty list shows: what is missing, and how to fill it.
-export type Empty = { title: string | Message, hint: (string | Message)? }
+-- What an empty list shows: what is missing, and how to fill it; a button
+-- that does (`action`: "Retry", "Sign in"); or, `loading`, that it's on its
+-- way (its rows hold their shape, as the list's own `loading`).
+export type EmptyAction = { label: string | Message, on_click: () -> () }
+export type Empty = { title: string | Message, hint: (string | Message)?, action: EmptyAction?, loading: boolean? }
 -- The trigger's weight: `filled` (a control on its own, with a chevron),
 -- `ghost` (a chip among a bar's controls: no fill until touched), `chip` (a
 -- footer's small quiet label). Only `filled` shows a chevron.
@@ -1279,7 +1291,11 @@ return ui.component(function(props: Props): Node
 							tall = item.description ~= nil,
 							opacity = if item.disabled then ui.raw(0.45, "a choice out of reach, dimmed") else nil,
 							cursor = if item.disabled then "default" else nil,
-							tile(item),
+							tooltip = item.tooltip,
+							-- (Beside the panel, never over the rows round it.)
+							tooltip_placement = if item.tooltip then { side = "right", align = "center", offset = 12 } else nil,
+							tooltip_delay = if item.tooltip then 500 else nil,
+							if item.bare then nil else tile(item),
 							if item.description
 								then ui.column {
 									grow = 1,
@@ -1310,11 +1326,33 @@ return ui.component(function(props: Props): Node
 										wrap = true,
 									},
 								}
+								elseif item.bare then ui.row {
+									grow = 1,
+									min_w = 0,
+									gap = "$space.2",
+									items = "center",
+									-- (Short of room, the tag gives way, never the name.)
+									ui.text {
+										item.label,
+										shrink = 0,
+										text_size = "$font.size.md",
+										color = "$text.primary",
+									},
+									if item.tag
+										then FadeText {
+											item.tag,
+											shrink = 1,
+											min_w = 0,
+											text_size = "$font.size.xs",
+											color = "$text.tertiary",
+										}
+										else nil,
+								}
 								elseif item.hint then named(item, function(): boolean
 									return hi:get() == item.value
 								end)
 								else text(item.label),
-							if item.tag
+							if item.tag and not item.bare
 								then ui.text {
 									item.tag,
 									self = "center",
@@ -1382,10 +1420,14 @@ return ui.component(function(props: Props): Node
 						hint = if q ~= "" then locale.s("ds.dropdown.nothing_matches", { query = q }) else nil,
 					}
 				end
+				-- (The list's own, or what an empty list says: on its way.)
+				local function waiting(): boolean
+					return (props.loading ~= nil and props.loading()) or (props.empty ~= nil and said().loading == true)
+				end
 				table.insert(
 					items,
 					ui.show(function()
-						return #shown:get() == 0 and props.loading ~= nil and props.loading()
+						return #shown:get() == 0 and waiting()
 					end, ui.column {
 						w_full = true,
 						gap = "$zeron.list.gap",
@@ -1397,7 +1439,7 @@ return ui.component(function(props: Props): Node
 				table.insert(
 					items,
 					ui.show(function()
-						return #shown:get() == 0 and not (props.loading ~= nil and props.loading())
+						return #shown:get() == 0 and not waiting()
 					end, ui.column {
 						w_full = true,
 						-- (Opened out, the list's whole window: its message in
@@ -1447,6 +1489,31 @@ return ui.component(function(props: Props): Node
 							align = "center",
 							wrap = true,
 							w_full = true,
+						}),
+						-- What fills it, where there's a way ("Retry"), read as
+						-- it's pressed: the message is made again as it changes.
+						ui.show(function(): boolean
+							return said().action ~= nil
+						end, ui.div {
+							pt = "$zeron.space.tight",
+							Button {
+								tone = "secondary",
+								size = "xs",
+								label = function(): string
+									local a = said().action
+									return if a then control.text(a.label) or "" else ""
+								end,
+								on_click = function()
+									local a = said().action
+									if a then
+										a.on_click()
+									end
+								end,
+								function(): string
+									local a = said().action
+									return if a then control.text(a.label) or "" else ""
+								end,
+							},
 						}),
 					})
 				)

@@ -134,7 +134,7 @@ async fn steering_never_aborts_a_running_tool() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 message_id: "call".into(),
                 request: RunRequest {
                     mcp: Some(McpServer {

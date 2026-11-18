@@ -23,6 +23,7 @@ end
 local auth = require("@account/auth")
 local PrivateText = require("@ds/private_text")
 local status = require("@ds/status")
+local limit = require("@ds/usage_limit")
 local route = require("@app/screens/shell/route")
 local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
@@ -32,6 +33,12 @@ local control = require("@ds/control")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
 local activity = require("@app/screens/shell/activity")
+local orchestration = require("@account/orchestration")
+local orch_data = require("@ds/orch_data")
+local orch_decide = require("@ds/orch_decide")
+local Name = require("@ds/orch_name")
+local orch_actions = require("@app/screens/orchestrator/actions")
+local ChatMenu = require("@app/screens/shell/chat_menu")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -77,7 +84,15 @@ local shared = {
 		-- A collapsed group still lists its sessions working, asking or done
 		-- unseen: on, so folding a group away never hides what needs you.
 		keep_active = ui.persist("shell_sidebar_keep_active", true),
+		-- The chats an orchestrator started (its crew threads), listed in
+		-- their project and device as any chat: on until put away. (Its
+		-- Orchestrators row, the Control room and the Map list them anyway.)
+		orchestrator_chats = ui.persist("shell_sidebar_show_orchestrator_chats", true),
 	},
+	-- The view menu's Orchestrators group: the section itself (on until put
+	-- away), and archived orchestrators listed in it (off until asked for).
+	orchestrators = ui.persist("shell_sidebar_show_orchestrators", true),
+	archived_orchestrators = ui.persist("shell_sidebar_show_archived_orchestrators", false),
 	-- The groups showing all their sessions ("Show N more"): until the app
 	-- quits (a reload keeps them).
 	expanded = ui.state("shell_sidebar_expanded", {} :: { [string]: boolean }),
@@ -314,7 +329,7 @@ local ASKED: { [string]: string } = { approval = "approval", question = "input" 
 -- nil, and a word it doesn't know counts for nothing. Who's narrowing it is
 -- the host's word (`sidebar.filter_by`: the name of the plugin allowed to,
 -- src/plugins), never the plugin's own `by`, which could claim to be Zeron.
-local KNOWN = { working = true, waiting = true, input = true, approval = true, failed = true, done = true, woke = true, idle = true }
+local KNOWN = { working = true, waiting = true, input = true, approval = true, failed = true, limited = true, done = true, woke = true, idle = true }
 local filter = ui.shared("sidebar.filter", nil :: any)
 local filter_by = ui.shared("sidebar.filter_by", nil :: any)
 type Narrow = { statuses: { [string]: boolean }, words: { string }, by: string }
@@ -343,12 +358,121 @@ local function say(word: string): string
 	return locale.s(`shell.sidebar.filter.state.{word}`)
 end
 
+-- Every orchestrator's chat (the Brain dump's too, archived or not): an
+-- orchestrator is listed in its own section, never as a session. (The same
+-- table while the ids are: what reads it wakes only when one comes or goes.)
+local orch_ids_last: { [string]: boolean } = {}
+local orch_ids_key = ""
+local orch_ids = ui.computed(function(): { [string]: boolean }
+	local ids: { string } = {}
+	for _, o in orchestration.now:get().orchestrators or {} do
+		table.insert(ids, o.id)
+	end
+	table.sort(ids)
+	local key = table.concat(ids, ",")
+	if key == orch_ids_key then
+		return orch_ids_last
+	end
+	local set: { [string]: boolean } = {}
+	for _, id in ids do
+		set[id] = true
+	end
+	orch_ids_key, orch_ids_last = key, set
+	return set
+end)
+
+-- Each orchestrator's mark for its crew threads' rows: its name and hue,
+-- by its chat's id. (The same table while what it says is: a row keeps its
+-- mark's table, and stays asleep.)
+type CrewMark = { name: string, hue: number? }
+local crew_marks_last: { [string]: CrewMark } = {}
+local crew_marks_key = ""
+local crew_marks = ui.computed(function(): { [string]: CrewMark }
+	local parts: { string } = {}
+	for _, o in orchestration.now:get().orchestrators or {} do
+		table.insert(parts, `{o.id}={o.name or ""}={o.hue or ""}`)
+	end
+	table.sort(parts)
+	local key = table.concat(parts, "\n")
+	if key == crew_marks_key then
+		return crew_marks_last
+	end
+	local set: { [string]: CrewMark } = {}
+	for _, o in orchestration.now:peek().orchestrators or {} do
+		set[o.id] = { name = o.name or "", hue = o.hue }
+	end
+	crew_marks_key, crew_marks_last = key, set
+	return set
+end)
+-- A crew thread's name where it has no title of its own yet
+-- (ds/orch_name's fallback: its role, else its board item's title), by its
+-- chat's id. (The same table while what it says is.)
+local crew_names_last: { [string]: string } = {}
+local crew_names_key = ""
+local crew_names = ui.computed(function(): { [string]: string }
+	local now = orchestration.now:get()
+	local items: { [string]: any } = {}
+	for _, it in now.items or {} do
+		items[it.id] = it
+	end
+	local set: { [string]: string } = {}
+	local parts: { string } = {}
+	for _, m in now.crew or {} do
+		local name = Name.fallback(m, m.item_id and items[m.item_id])
+		if name and m.chat_id then
+			set[m.chat_id] = name
+			table.insert(parts, `{m.chat_id}={name}`)
+		end
+	end
+	table.sort(parts)
+	local key = table.concat(parts, "\n")
+	if key == crew_names_key then
+		return crew_names_last
+	end
+	crew_names_key, crew_names_last = key, set
+	return set
+end)
+
+-- (An orchestrator not (yet) known: a neutral dot, no name.)
+local NO_MARK: CrewMark = { name = "", hue = nil }
+
+-- What the list shows of `now`: its chats, and the crew threads an
+-- orchestrator started. Those are under the orchestrator's chat (`children`),
+-- which is listed in Orchestrators and never as a session, so here they are
+-- listed as their own, in their project like any chat, each marked with its
+-- orchestrator. Its name is ds/orch_name's: its own title, else its role
+-- in the crew, else its board item's title, else "Crew thread" and its id.
+-- (An archived one isn't among `children`: it shows nowhere, as an archived
+-- side chat.)
+local function listed_chats(now: any, marks: { [string]: CrewMark }, names: { [string]: string }): { any }
+	local out: { any } = table.clone(now.chats)
+	-- (Put away in the view menu's Show: none of them.)
+	if not shared.details.orchestrator_chats:get() then
+		return out
+	end
+	for parent, kids in now.children or {} do
+		for _, c in kids do
+			if c.child_kind == "crew" then
+				local row = table.clone(c)
+				row.crew = marks[parent] or NO_MARK
+				row.title = Name.crew(c, names[c.id], c.id)
+				table.insert(out, row)
+			end
+		end
+	end
+	return out
+end
+
 -- The Archived shelf's sessions (the most recently moved first), as the
 -- list's rows read them.
 local shelf = ui.computed(function(): { any }
 	local names = devices()
 	local out = {}
+	local hidden = orch_ids:get()
 	for _, c in sessions.archived:get() do
+		if hidden[c.id] then
+			continue
+		end
 		table.insert(out, {
 			id = c.id,
 			title = c.title,
@@ -498,8 +622,13 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 	-- (Which have sessions listed, and which archived ones.)
 	-- (By group: a repository isn't empty while any clone of it has a session.)
 	local just_group = if just then by[just] else nil
+	local hidden = orch_ids:get()
+	local all = listed_chats(now, crew_marks:get(), crew_names:get())
 	local listed: { [any]: boolean } = {}
-	for _, c in now.chats do
+	for _, c in all do
+		if hidden[c.id] then
+			continue
+		end
 		local group = if c.project then by[c.project] else nil
 		if group then
 			listed[group] = true
@@ -521,13 +650,23 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			group.unused = true
 		end
 	end
-	for _, c in now.chats do
+	for _, c in all do
+		if hidden[c.id] then
+			continue
+		end
 		if just and not (just_group and c.project and by[c.project] == just_group) then
 			continue
 		end
 		local group = (c.project and by[c.project]) or loose
 		-- (Waiting on you beats working: an approval, then a question.)
 		local status = ASKED[asked[c.id] or ""] or c.status
+		-- (Stopped by its usage limit, waiting for the reset: limited, its
+		-- glyph saying till when, unless it's asking for you.)
+		local note: string? = nil
+		if limit.waiting(c) and not ASKED[asked[c.id] or ""] then
+			status = "limited"
+			note = limit.text(limit.of(c))
+		end
 		-- (The Activity view's: woken from sleep and not looked at since, the
 		-- alarm, unless it's asking for you or under way. Which shelf it's
 		-- on, and its place; asleep, its corner says when it wakes. Off, none
@@ -545,6 +684,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			id = c.id,
 			title = c.title,
 			status = status :: any,
+			note = note,
 			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
 			shelf = on_shelf,
 			rank = rank,
@@ -555,6 +695,8 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			-- (Its side chats working count as its subagents do, as its
 			-- lanes' badge counts them: screens/chat/lanes.)
 			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
+			-- (A crew thread: its orchestrator's dot after its title.)
+			crew = c.crew,
 		}) :: any)
 	end
 	if #loose.sessions > 0 then
@@ -1046,244 +1188,48 @@ function M.archive(id: string)
 	sessions.archive(id)
 end
 
--- A session's menu, as the gallery's (Zeron's sidebar chat menu): rename,
--- pin, copy, move into one of your sections, archive (kept: Settings →
--- Archived lists it), delete (for good, asked once more); then plugins'
--- items, under their names (screens/plugins/menus: the app's registry of
--- them, read as the menu opens).
--- (Copied, said so, as Zeron's: "Path copied".)
-local function copy(text: string?, what: string)
-	if text then
-		ui.clipboard.write(text)
-		ds.toast.show { title = locale.s("shell.sidebar.copied", { what = what }), tone = "success" }
-	end
-end
--- A string as a URL's part (as production's `encode_component`).
-local function encoded(v: string): string
-	return (string.gsub(v, "[^%w%-_%.~]", function(c: string): string
-		return string.format("%%%02X", string.byte(c))
-	end))
-end
-
+-- A session's menu: screens/shell/chat_menu's, which this hands what it
+-- does (its rename and delete dialogs, its sections, its custom sleep).
 M.pin = function(id: string)
 	local pinned = table.find(shared.places:peek().pinned, id) ~= nil
 	put(id, if pinned then nil else "pinned")
 end
 
+ChatMenu.install {
+	chat = chat,
+	places = function(): any
+		return shared.places:peek()
+	end,
+	put = put,
+	plain = plain,
+	set_places = function(places: any)
+		shared.places:set(places)
+	end,
+	is_side = is_side,
+	is_orchestrator = function(id: string): boolean
+		return orch_ids:peek()[id] == true
+	end,
+	rename = function(id: string)
+		M.rename(id)
+	end,
+	pin = M.pin,
+	archive = function(id: string)
+		M.archive(id)
+	end,
+	ask_delete = function(id: string, subagents: number, sides: number)
+		delete_subagents:set(subagents)
+		delete_sides:set(sides)
+		deleting:set(id)
+		delete_open:set(true)
+	end,
+	sleep_custom = function(id: string, at: number)
+		sleep_custom:set(id)
+		sleep_custom_at:set(at)
+		sleep_custom_open:set(true)
+	end,
+}
 local function menu(id: string): { any }?
-	local c = chat(id)
-	if not c then
-		return nil
-	end
-	local p = shared.places:peek()
-	local pinned = table.find(p.pinned, id) ~= nil
-	local into: { any } = { { heading = locale.s("shell.sidebar.menu.sections") } }
-	for _, s in p.sections do
-		local here = table.find(s.sessions, id) ~= nil
-		table.insert(into, {
-			label = s.name,
-			icon = "folder",
-			checked = function(): boolean
-				return here
-			end,
-			-- (Chosen where it is: back to its project.)
-			on_select = function()
-				put(id, if here then nil else s.id)
-			end,
-		})
-	end
-	table.insert(into, { separator = true })
-	table.insert(into, {
-		label = locale.s("shell.sidebar.menu.new_section"),
-		icon = "plus",
-		on_select = function()
-			local sid = `section-{os.time()}-{math.random(1, 1e6)}`
-			local now = plain(shared.places:peek())
-			table.insert(now.sections, { id = sid, name = locale.s("shell.sidebar.menu.new_section"), sessions = {} })
-			shared.places:set(now)
-			put(id, sid)
-		end,
-	})
-	-- What Copy offers: its folder, its harness's link and id where it has
-	-- them (a Codex thread's), and its own id.
-	local copies: { any } = {
-		{
-			label = locale.s("shell.sidebar.menu.path"),
-			icon = "folder",
-			disabled = if c.cwd then nil else locale.s("shell.sidebar.menu.no_folder"),
-			on_select = function()
-				copy(c.cwd, locale.s("shell.sidebar.menu.path"))
-			end,
-		},
-	}
-	table.insert(copies, {
-		label = locale.s("shell.sidebar.menu.zeron_link"),
-		icon = "arrow-up-right",
-		on_select = function()
-			sessions.link(id):after(function(link: any)
-				copy(if type(link) == "string" then link else nil, locale.s("shell.sidebar.menu.zeron_link"))
-			end, function()
-				ds.toast.show { title = locale.s("shell.sidebar.menu.link_not_ready"), tone = "danger" }
-			end)
-		end,
-	})
-	if c.harness == "codex" and c.harness_session then
-		table.insert(copies, {
-			label = locale.s("shell.sidebar.menu.codex_link"),
-			icon = "arrow-up-right",
-			on_select = function()
-				copy(`codex://threads/{encoded(c.harness_session :: string)}`, locale.s("shell.sidebar.menu.codex_link"))
-			end,
-		})
-	end
-	if c.harness_session then
-		table.insert(copies, {
-			label = locale.s("shell.sidebar.menu.harness_session_id"),
-			icon = "document",
-			on_select = function()
-				copy(c.harness_session, locale.s("shell.sidebar.menu.harness_session_id"))
-			end,
-		})
-	end
-	table.insert(copies, {
-		label = locale.s("shell.sidebar.menu.session_id"),
-		icon = "document",
-		on_select = function()
-			copy(c.id, locale.s("shell.sidebar.menu.session_id"))
-		end,
-	})
-	local side = is_side(id)
-	-- The Activity view's Sleep (its times, each saying when, and one of
-	-- your own), or, asleep, Wake.
-	local sleep: any = false
-	if activity.on:peek() and not side then
-		if c.sleep_until then
-			sleep = {
-				label = locale.s("shell.activity.wake"),
-				icon = "sun",
-				on_select = function()
-					activity.wake(id)
-				end,
-			}
-		else
-			local times: { any } = {}
-			for _, p in activity.presets() do
-				table.insert(times, {
-					label = locale.s("shell.activity.sleep.choice", { name = p.label, when = p.detail }),
-					on_select = function()
-						activity.sleep(id, p.until_at)
-					end,
-				})
-			end
-			table.insert(times, { separator = true })
-			table.insert(times, {
-				label = locale.s("shell.activity.sleep.custom"),
-				on_select = function()
-					-- (It opens on tomorrow at 9: a time already chosen,
-					-- moved from there.)
-					local d = os.date("*t") :: any
-					sleep_custom:set(id)
-					sleep_custom_at:set(activity.local_time({ year = d.year, month = d.month, day = d.day + 1, hour = 9, min = 0, sec = 0 }))
-					sleep_custom_open:set(true)
-				end,
-			})
-			sleep = { label = locale.s("shell.activity.sleep.title"), icon = "moon", submenu = times }
-		end
-	end
-	-- Waiting on background work it said it waits on: the person can say
-	-- otherwise (a dev server marked by mistake). Its background agents
-	-- aren't its say, so there's nothing to take back there.
-	local stop_waiting: any = false
-	if c.status == "waiting" then
-		for _, w in c.waiting or {} do
-			if w.kind == "process" then
-				stop_waiting = {
-					label = locale.s("shell.activity.stop_waiting"),
-					icon = "close-circle",
-					on_select = function()
-						sessions.stop_waiting(id):after(function() end, function()
-							ds.toast.show { title = locale.s("shell.activity.stop_waiting_failed"), tone = "danger" }
-						end)
-					end,
-				}
-				break
-			end
-		end
-	end
-	local entries = {
-		{
-			label = locale.s("common.rename"),
-			icon = "pen",
-			on_select = function()
-				M.rename(id)
-			end,
-		},
-		if side
-			then false
-			else {
-				label = locale.s(if pinned then "shell.sidebar.menu.unpin" else "shell.sidebar.menu.pin"),
-				icon = "pin",
-				shortcut = "cmd+shift+p",
-				on_select = function()
-					M.pin(id)
-				end,
-			},
-		{
-			label = locale.s("common.copy"),
-			icon = "copy",
-			submenu = copies,
-		},
-		-- (Activity lists no sections: nothing to move into.)
-		if side or activity.on:peek() then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
-		sleep,
-		stop_waiting,
-		{ separator = true },
-		{
-			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
-			label = locale.s("common.archive"),
-			icon = "archive-minimalistic",
-			disabled = if c.status == "working" or c.status == "waiting" then locale.s("shell.sidebar.menu.archive_working") else nil,
-			on_select = function()
-				M.archive(id)
-			end,
-		},
-		{
-			label = locale.s("shell.sidebar.menu.delete"),
-			icon = "trash-bin-minimalistic",
-			danger = true,
-			-- (Asked once more, as Zeron's: "Delete session?")
-			-- (Once it knows what goes with it, to say so.)
-			on_select = function()
-				local function ask(subagents: number, sides: number)
-					delete_subagents:set(subagents)
-					delete_sides:set(sides)
-					deleting:set(id)
-					delete_open:set(true)
-				end
-				sessions.deleted_with(id):after(function(with: any)
-					ask(tonumber(with and with.subagents) or 0, tonumber(with and with.sides) or 0)
-				end, function()
-					ask(0, 0)
-				end)
-			end,
-		},
-	}
-	-- (A side chat's: without what doesn't apply to it.)
-	local kept: { any } = {}
-	for _, e in entries :: { any } do
-		if e ~= false then
-			table.insert(kept, e)
-		end
-	end
-	entries = kept :: any
-	-- (The registry is the plugin system's: without it, the app's alone.)
-	local menus: { extend: ((entries: { any }, kind: string, context: { [string]: any }) -> { any })? }? =
-		boundary.load("@app/screens/plugins/menus")
-	local extend = menus and menus.extend
-	if extend then
-		return extend(entries, "session", { id = id })
-	end
-	return entries
+	return ChatMenu.entries(id)
 end
 
 -- The same menu, for a session shown elsewhere (the panel's side chat rows
@@ -1585,6 +1531,276 @@ local function rename_dialog(): Node
 	}
 end
 
+-- Under the way to a working chat: a chat or crew thread counts as at work.
+local WORKING: { [string]: boolean } = { working = true, connecting = true, waiting = true }
+local ASKING: { [string]: boolean } = { input = true, approval = true }
+
+-- The Orchestrators section's rows: each standard orchestrator not
+-- archived, by when it was made (steady as others come), with its crew
+-- working of all of it and what of it needs you (its open asks, and its
+-- chat or its crew's asking). (The same table while what it says is.)
+local orch_rows_last: { any } = {}
+local orch_rows_key = ""
+local orch_rows = ui.computed(function(): { any }
+	local now = orchestration.now:get()
+	local chats = orch_data.chats(sessions.now:get())
+	local list: { any } = {}
+	local with_archived = shared.archived_orchestrators:get()
+	for _, o in now.orchestrators or {} do
+		if o.kind == "standard" and (with_archived or not o.archived) then
+			table.insert(list, o)
+		end
+	end
+	-- (Archived ones after the rest.)
+	table.sort(list, function(a: any, b: any): boolean
+		if (a.archived == true) ~= (b.archived == true) then
+			return b.archived == true
+		end
+		if (a.created or 0) ~= (b.created or 0) then
+			return (a.created or 0) < (b.created or 0)
+		end
+		return a.id < b.id
+	end)
+	local out: { any } = {}
+	local parts: { string } = {}
+	for _, o in list do
+		local working, total, needs = 0, 0, 0
+		for _, m in now.crew or {} do
+			if m.orchestrator_id == o.id and not m.released then
+				total += 1
+				local c = chats[m.chat_id]
+				local st = c and c.status
+				if st and WORKING[st] then
+					working += 1
+				elseif st and ASKING[st] then
+					needs += 1
+				end
+			end
+		end
+		local own = chats[o.id]
+		local own_status: string? = own and own.status
+		if own_status and ASKING[own_status] then
+			needs += 1
+		end
+		for _, a in now.asks or {} do
+			if a.state == "open" and a.orchestrator_id == o.id then
+				needs += 1
+			end
+		end
+		table.insert(out, { id = o.id, name = o.name, hue = o.hue, working = working, total = total, needs = needs, paused = o.paused == true, archived = o.archived == true })
+		table.insert(parts, `{o.id}|{o.name}|{o.hue}|{working}|{total}|{needs}|{o.paused}|{o.archived}`)
+	end
+	local key = table.concat(parts, "\n")
+	if key == orch_rows_key then
+		return orch_rows_last
+	end
+	orch_rows_key, orch_rows_last = key, out
+	return out
+end)
+M.orchestrator_rows = orch_rows
+-- Show → Orchestrator chats (fixtures put it away for their pictures).
+M.show_orchestrator_chats = shared.details.orchestrator_chats
+-- What needs you, everywhere: open asks and chats awaiting input (not an
+-- ask answered and on its way: ds/orch_decide).
+M.needs_you = ui.computed(function(): number
+	return #orch_data.waiting_for_you(orchestration.now:get(), sessions.now:get(), nil, orch_decide.counted).needs
+end)
+
+-- An orchestrator's row menu: open it, pause or resume it, its settings,
+-- archive it.
+local function orchestrator_menu(id: string): { any }?
+	local o = orch_data.orchestrators(orchestration.now:peek())[id]
+	if not o then
+		return nil
+	end
+	return {
+		{
+			label = locale.s("orch.sidebar.open"),
+			icon = "arrow-up-right",
+			on_select = function()
+				orch_actions.open(id)
+			end,
+		},
+		{
+			label = locale.s(if o.paused then "orch.sidebar.resume" else "orch.sidebar.pause"),
+			icon = if o.paused then "action-play" else "moon",
+			on_select = function()
+				orch_actions.set_paused(id, not o.paused)
+			end,
+		},
+		{
+			label = locale.s("orch.sidebar.settings"),
+			icon = "settings",
+			on_select = function()
+				orch_actions.settings(id)
+			end,
+		},
+		{ separator = true },
+		if o.archived
+			then {
+				label = locale.s("orch.sidebar.unarchive"),
+				icon = "archive-minimalistic",
+				on_select = function()
+					orch_actions.update(id, { archived = false })
+				end,
+			}
+			else {
+				label = locale.s("orch.sidebar.archive"),
+				icon = "archive-minimalistic",
+				on_select = function()
+					orch_actions.archive(id)
+				end,
+			},
+	}
+end
+
+-- The view menu's groups past Show: Orchestrators (a new one, the section
+-- shown, archived ones in it) and the Control room (to it, its widgets, the
+-- Map's view it opens on, the Brain dump's model).
+local Menu = require("@ds/menu")
+local OrchMap = require("@ds/orch_map")
+local function control_page(): any
+	return boundary.load("@app/screens/control/page")
+end
+M.show_orchestrators = shared.orchestrators
+M.show_archived_orchestrators = shared.archived_orchestrators
+local function view_more(more: any): { Node }
+	local function toggle(st: any): () -> ()
+		return function()
+			st:set(not st:peek())
+		end
+	end
+	-- (The Control room's page, for its widgets and its Map's view, loaded
+	-- as one of those is picked, never while the menu is made: loading it
+	-- then, the menu's first opening missed its time budget.)
+	return {
+		Menu.Group {
+			heading = locale.s("orch.sidebar.view.orchestrators"),
+			Menu.Row {
+				icon = "plus",
+				label = locale.s("orch.sidebar.view.new"),
+				on_click = function()
+					more.close()
+					orch_actions.new()
+				end,
+			},
+			Menu.Row {
+				icon = "users-group-rounded",
+				label = locale.s("orch.sidebar.view.section"),
+				checked = function(): boolean
+					return shared.orchestrators:get()
+				end,
+				on_click = toggle(shared.orchestrators),
+			},
+			Menu.Row {
+				icon = "archive-minimalistic",
+				label = locale.s("orch.sidebar.view.archived"),
+				checked = function(): boolean
+					return shared.archived_orchestrators:get()
+				end,
+				on_click = toggle(shared.archived_orchestrators),
+			},
+			-- Crew threads left idle archived on their own (the profile's
+			-- setting, Settings → Orchestration has how long).
+			Menu.Row {
+				icon = "inbox",
+				label = locale.s("orch.sidebar.view.auto_archive"),
+				checked = function(): boolean
+					return orchestration.auto_archive:get() == true
+				end,
+				on_click = toggle(orchestration.auto_archive),
+			},
+		},
+		Menu.Group {
+			heading = locale.s("orch.sidebar.view.control"),
+			Menu.Row {
+				icon = "monitor",
+				label = locale.s("orch.sidebar.view.open_control"),
+				on_click = function()
+					more.close()
+					route.control()
+				end,
+			},
+			Menu.Row {
+				icon = "tuning",
+				label = locale.s("orch.sidebar.view.widgets"),
+				on_click = function()
+					local page = control_page()
+					if page then
+						more.menu(page.widget_entries())
+					end
+				end,
+			},
+			Menu.Row {
+				icon = "git-branch",
+				label = locale.s("orch.sidebar.view.map"),
+				on_click = function()
+					local page = control_page()
+					if not page then
+						return
+					end
+					local out: { any } = { { heading = locale.s("orch.sidebar.view.map") } }
+					for _, v in OrchMap.VARIANTS do
+						table.insert(out, {
+							label = locale.s(`ds.orch.map.variant.{v}`),
+							checked = function(): boolean
+								return OrchMap.valid(page.map_view:get()).variant == v
+							end,
+							on_select = function()
+								OrchMap.set(page.map_view, { variant = v })
+							end,
+						})
+					end
+					more.menu(out)
+				end,
+			},
+			Menu.Row {
+				icon = "bot",
+				label = locale.s("orch.sidebar.view.brain_model"),
+				on_click = function()
+					more.close()
+					route.control()
+					local lane = boundary.load("@app/screens/chat/lane_tab") :: any
+					local ask = lane and lane.open_model_when
+					if ask then
+						(ask :: any)("control-capture")
+					end
+				end,
+			},
+		},
+	}
+end
+M.view_more = view_more
+
+local orchestration_prop = {
+	control = {
+		count = function(): number
+			return M.needs_you:get()
+		end,
+		selected = function(): boolean
+			return route.current:get().name == "control"
+		end,
+		on_click = function()
+			route.control()
+		end,
+	},
+	list = orch_rows,
+	selected = function(id: string): boolean
+		local c = route.current:get()
+		return c.name == "orchestrator" and c.orchestrator == id
+	end,
+	on_open = function(id: string)
+		orch_actions.open(id)
+	end,
+	on_new = function()
+		orch_actions.new()
+	end,
+	menu = orchestrator_menu,
+	shown = function(): boolean
+		return shared.orchestrators:get()
+	end,
+}
+
 M.Sidebar = ui.component(function(props: Props): Node
 	probe.builds += 1
 	probe.built_at = ui.now()
@@ -1641,6 +1857,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 		on_page = function(page: any)
 			route.plugin_page(page.plugin, page.id)
 		end,
+		orchestration = orchestration_prop :: any,
+		view_more = if props.island then nil else view_more,
 		on_search = function()
 			view.palette:set(true)
 		end,

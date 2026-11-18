@@ -184,7 +184,7 @@ async fn agent_process_survives_sends_and_cancel() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run(opening, &model, id, &cwd),
                 message_id: "m-1".into(),
             },
@@ -246,7 +246,7 @@ async fn agent_process_survives_sends_and_cancel() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: follow_up,
                 message_id: "m-2".into(),
             },
@@ -277,7 +277,7 @@ async fn agent_process_survives_sends_and_cancel() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run(
                     "Write a 600-word essay about rivers. Do not use tools.",
                     &model,
@@ -359,7 +359,7 @@ async fn agent_process_survives_sends_and_cancel() {
         core.doc_host
             .queue_command(
                 CHAT,
-                SessionCommandPayload::Run {
+                SessionCommandPayload::Run { injected: None,
                     request: run(
                         "Do not use tools. Reply only SWITCHED.",
                         &Some(other.clone()),
@@ -443,7 +443,7 @@ async fn resume_after_killed_background_work_is_not_done_early() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run(
                     if id == zeron_proto::HarnessId::Codex {
                         "This is an automated test in a disposable directory. Spawn one subagent (spawn_agent) whose task is: \
@@ -504,7 +504,7 @@ async fn resume_after_killed_background_work_is_not_done_early() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run("Do not use tools. Reply only PONG.", &model, id, &cwd),
                 message_id: "m-2".into(),
             },
@@ -623,7 +623,7 @@ async fn stop_tears_down_all_agent_work() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run(opening, &model, id, &cwd),
                 message_id: "m-1".into(),
             },
@@ -655,7 +655,7 @@ async fn stop_tears_down_all_agent_work() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run(
                     "Run this exact shell command in the FOREGROUND (not in the background) and wait for it to finish: python3 -c 'import time; time.sleep(193)' . Then reply FINISHED.",
                     &model,
@@ -697,7 +697,7 @@ async fn stop_tears_down_all_agent_work() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run("Do not use tools. Reply only PONG.", &model, id, &cwd),
                 message_id: "m-3".into(),
             },
@@ -749,7 +749,7 @@ async fn idle_reaper_spares_a_background_shell_until_it_wakes_the_agent() {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run(
                     "This is an automated test in a disposable directory. Do exactly one thing, then end your turn at once without waiting for it: \
                      use the Bash tool with run_in_background=true to run exactly: sleep 45 && printf done > bg-done . \

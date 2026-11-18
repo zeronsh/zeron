@@ -150,6 +150,9 @@ end
 
 -- The sessions as last read, and a wake's progress by chat.
 M.sessions = ui.state("account_cloud_sessions", {} :: { Session })
+-- A size change under way, by chat: the size its machine restarts on, until
+-- it's up on it (or the change failed).
+M.resizing = ui.state("account_cloud_resizing", {} :: { [string]: string })
 M.wakes = ui.state("account_cloud_wakes", {} :: { [string]: { busy: boolean?, failure: string? } })
 -- (As above: a wake out when the scripts reload never answers these ones.)
 do
@@ -354,6 +357,21 @@ local function note_holding(list: { Session })
 	end
 end
 
+-- A size change is over once its machine is up on the size (or has stopped
+-- in error): it's no longer said to be restarting.
+local function settle_resizing(list: { Session })
+	local resizing = M.resizing:peek()
+	if next(resizing) == nil then
+		return
+	end
+	for _, s in list do
+		local to = resizing[s.chat]
+		if to and ((s.state == "ready" and s.machine == to) or s.state == "error" or s.state == "data_expired") then
+			M.resizing:set_key(s.chat, nil :: any)
+		end
+	end
+end
+
 -- (Several panes may follow at once, and a wake reads as it lands: one read
 -- out at a time, none straight after another.)
 function M.load_sessions(force: boolean?)
@@ -365,6 +383,7 @@ function M.load_sessions(force: boolean?)
 		reading = false
 		local next_list = list or {}
 		note_holding(next_list)
+		settle_resizing(next_list)
 		if not same(M.sessions:peek(), next_list) then
 			M.sessions:set(next_list)
 		end
@@ -376,6 +395,7 @@ end
 
 -- One session's answer, in the list.
 local function take_session(s: Session)
+	settle_resizing({ s })
 	note_holding({ s })
 	local list = table.clone(M.sessions:peek())
 	for i, was in list do
@@ -501,10 +521,12 @@ function M.resize(chat: string, machine: string)
 		return
 	end
 	set_wake(chat, { busy = true })
+	M.resizing:set_key(chat, machine :: any)
 	M.ask_sleep({ chat = chat }):after(function()
 		set_wake(chat, nil)
 		M.wake(chat, machine)
 	end, function(e: any)
+		M.resizing:set_key(chat, nil :: any)
 		set_wake(chat, { failure = word_of(e) })
 	end)
 end

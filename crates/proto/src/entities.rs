@@ -341,6 +341,38 @@ pub struct Chat {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep: Option<ChatSleep>,
+    /// The agent that started this chat for the person: the Brain dump
+    /// (a dump's route) or an orchestrator (its crew). Provenance only: a
+    /// top-level chat it started stays top-level and the person's. Set by
+    /// the engine; missing on older rows and peers, and a shape this build
+    /// can't read decodes to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_started_by")]
+    pub started_by: Option<StartedBy>,
+}
+
+/// Who started a chat ([`Chat::started_by`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartedBy {
+    /// The starting chat: a Brain dump's or an orchestrator's.
+    pub chat_id: String,
+    /// The dump and route it was started for, when a route started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dump_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
+    /// The board card it was started for (`startItem`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+}
+
+/// [`Chat::started_by`], leniently.
+pub fn lenient_started_by<'de, D>(deserializer: D) -> Result<Option<StartedBy>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// A chat put to sleep ([`Chat::sleep`]).
@@ -377,6 +409,10 @@ pub enum ChildKind {
     Side,
     /// Delegated work: shown under the parent's subagents.
     Subagent,
+    /// A thread in an orchestrator's crew (the parent is an orchestrator's
+    /// chat; see `orchestration`). A full thread: it may delegate to
+    /// subagents of its own.
+    Crew,
 }
 
 impl ChildKind {
@@ -384,6 +420,7 @@ impl ChildKind {
         match self {
             ChildKind::Side => "side",
             ChildKind::Subagent => "subagent",
+            ChildKind::Crew => "crew",
         }
     }
 
@@ -392,6 +429,7 @@ impl ChildKind {
         match value {
             "side" => Some(ChildKind::Side),
             "subagent" => Some(ChildKind::Subagent),
+            "crew" => Some(ChildKind::Crew),
             _ => None,
         }
     }
@@ -409,9 +447,11 @@ where
 
 impl Chat {
     /// A session the user sees in chat lists: neither another chat's worker
-    /// (`parent_chat_id`) nor a hidden voice orchestrator.
+    /// (`parent_chat_id`) nor a hidden voice orchestrator or Brain dump.
     pub fn is_top_level(&self) -> bool {
-        self.parent_chat_id.is_none() && !crate::voice::is_orchestrator_chat(&self.id)
+        self.parent_chat_id.is_none()
+            && !crate::voice::is_orchestrator_chat(&self.id)
+            && !crate::orchestration::is_brain_dump_chat(&self.id)
     }
 
     /// True when this chat syncs over the chat2 dumb relay.
@@ -612,6 +652,20 @@ pub struct Session {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<SessionWaiting>,
+    /// What the agent is doing right now (testing, merging…), classified
+    /// from its running tool. Host-written while `Working`; `None` otherwise
+    /// and on older peers. See `orchestration::ChatActivity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::orchestration::ChatActivity>,
+    /// Progress through the agent's newest todo/plan list. Host-written;
+    /// missing on older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo: Option<crate::orchestration::TodoProgress>,
+    /// Stopped by its provider's usage limit, waiting for the reset (or
+    /// running on another account meanwhile): host-written, kept until the
+    /// chat is resumed. Missing on older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limited: Option<crate::usage_limit::SessionLimit>,
 }
 
 /// What a chat's agent waits on after its turn ended.
@@ -1686,6 +1740,15 @@ pub struct AgentAccount {
     /// most one of them is in use. `None` for single-login agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// The provider REJECTED this login's credential (a revoked or expired
+    /// key — Cursor's minted SDK keys): switching to it would only break the
+    /// agent, so the engine refuses to unless forced, and the UI offers to
+    /// remove it instead. Absent (false) from older engines.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invalid: bool,
+    /// Why `invalid` ("Key rejected — sign in again"). `None` when valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

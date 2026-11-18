@@ -15,7 +15,7 @@
  *   PUT    /cloud/{orgId}/projects/{spaceId}       add/update a project (user)
  *   DELETE /cloud/{orgId}/projects/{spaceId}       remove a project + its sessions (user)
  *   GET    /cloud/{orgId}/sessions                 sessions (user)
- *   POST   /cloud/{orgId}/sessions                 {chatId, spaceId, reach?}: a machine for a new chat (user)
+ *   POST   /cloud/{orgId}/sessions                 {chatId, spaceId, machine?, reach?}: a machine for a new chat (user)
  *   PUT    /cloud/{orgId}/machine                  {machine}: the default for new sessions (user)
  *   PUT    /cloud/{orgId}/reach                    {reach}: the default reach for new sessions (user)
  *   POST   /cloud/{orgId}/sessions/{chatId}/wake   {machine?, wake?}: wake, or pick its size asleep (user)
@@ -474,6 +474,9 @@ export const handleCloudRoute = async (
       if (!isEdgeOrigin(edgeUrl)) return jsonError(500, "misconfigured", "Bad CLOUD_EDGE_URL.");
       const body = await readJsonBody(request, MAX_RUNNER_BODY);
       if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
+      // The size it starts on; the account's default without one.
+      const picked = machineOfBody(body);
+      if (picked === "bad") return jsonError(400, "bad_request", BAD_MACHINE);
       if (auth.kind === "runner") {
         // A delegate: the project and repository are the parent's.
         const { chatId, parentChatId, branch, config } = body;
@@ -486,7 +489,7 @@ export const handleCloudRoute = async (
         if (config !== undefined && !isChildConfig(config)) {
           return jsonError(400, "bad_request", "Expected config {harness: codex | claude-code, …}.");
         }
-        return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config));
+        return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config, picked.machine));
       }
       const { chatId, spaceId, repo, branch, reach } = body;
       if (typeof chatId !== "string" || !ID_RE.test(chatId)) return jsonError(400, "bad_request", "Bad chatId.");
@@ -499,7 +502,9 @@ export const handleCloudRoute = async (
       }
       // What it reaches: the composer's pick, or the account's default.
       if (reach !== undefined && !isRunnerReach(reach)) return jsonError(400, "bad_request", BAD_REACH);
-      return sessionRpc(() => stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch, undefined, reach));
+      return sessionRpc(() =>
+        stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch, undefined, picked.machine, reach)
+      );
     }
     const chatId = rest[1];
     if (!chatId || !ID_RE.test(chatId)) return jsonError(404, "not_found", "Not found.");

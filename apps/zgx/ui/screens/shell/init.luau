@@ -66,6 +66,16 @@ for _, module in {
 } do
 	boundary.load(module)
 end
+-- The Control room's and an orchestrator's pages, loaded once the window
+-- has come up and settled, one a frame: loaded on the first click instead,
+-- inside the page's build (and the sidebar's view menu's), they cost the
+-- open a quarter of a second more.
+ui.after(2000, function()
+	boundary.load("@app/screens/control/page")
+	ui.after(0, function()
+		boundary.load("@app/screens/orchestrator/page")
+	end)
+end)
 
 -- The finished session last marked seen (kept across the shell being made
 -- again).
@@ -317,6 +327,27 @@ return function(): Node
 	runs["shell.reload_interface"] = function()
 		host.invoke("app.reload_interface")
 	end
+	-- ⌘⇧K on the Control room: its composer, wherever it shows (⌘K is
+	-- Search's).
+	runs["control.focus_capture"] = function()
+		if route.current:peek().name == "control" then
+			local control: any = boundary.load("@app/screens/control/page")
+			if control and control.focus_composer then
+				(control.focus_composer :: any)()
+			end
+		end
+	end
+	-- ⌘⌥1–3 on the Control room: its tabs.
+	for _, tab in { "overview", "board", "chat" } do
+		runs[`control.tab_{tab}`] = function()
+			if route.current:peek().name == "control" then
+				local control: any = boundary.load("@app/screens/control/page")
+				if control and control.show_tab then
+					(control.show_tab :: any)(tab)
+				end
+			end
+		end
+	end
 	runs["shell.pin"] = function()
 		local s = route.current:peek().session
 		local sidebar = boundary.load("@app/screens/shell/sidebar")
@@ -511,6 +542,16 @@ return function(): Node
 					if shared and shared.focus then
 						shared.focus:add(1)
 						return true
+					end
+				end
+			end
+			-- A bare / nothing took, with no text field holding the keyboard,
+			-- on the Control room: into its composer, wherever it shows.
+			if e.key == "/" and not (e.editing or e.cmd or e.alt or e.ctrl or e.meta or e["repeat"]) then
+				if route.current:peek().name == "control" then
+					local control: any = boundary.load("@app/screens/control/page")
+					if control and control.focus_composer then
+						return (control.focus_composer :: any)() == true
 					end
 				end
 			end
@@ -716,6 +757,10 @@ return function(): Node
 			-- New project's (⌘⇧N, its "New project"s).
 			boundary.screen(boundary.named("shell.boundary.screen.new_project"), "@app/screens/shell/add_project", function(AddProject): Node
 				return AddProject()
+			end),
+			-- New orchestrator, and an orchestrator's settings.
+			boundary.screen(boundary.named("shell.boundary.screen.orchestrator"), "@app/screens/orchestrator/dialogs", function(dialogs): Node
+				return dialogs.Dialogs()
 			end),
 		},
 	}

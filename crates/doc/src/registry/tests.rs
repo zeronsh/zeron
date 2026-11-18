@@ -281,6 +281,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         last_seen_at: None,
         room_gen: None,
         sleep: None,
+        started_by: None,
     }
 }
 
@@ -313,6 +314,9 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         started_at: Some(ts(3_000)),
         updated_at: ts(3_500),
         waiting: None,
+        activity: None,
+        todo: None,
+        limited: None,
     }
 }
 
@@ -335,6 +339,54 @@ fn background_processes_replicate_and_clear() {
 
     // Every process ended: an empty list replaces the old one.
     row.background_tasks.clear();
+    row.updated_at = ts(3_600);
+    host.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
+}
+
+#[test]
+fn who_started_a_chat_replicates_and_a_bad_value_costs_only_itself() {
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let row = chat("c1", "host");
+    host.upsert_chat(&row).unwrap();
+    let started = zeron_proto::StartedBy { chat_id: "brain".into(), dump_id: Some("d".into()), route_id: Some("r".into()), item_id: None };
+    assert!(host.set_chat_started_by("c1", &started).unwrap());
+    assert!(!host.set_chat_started_by("nope", &started).unwrap());
+    // A full upsert of the row (older code) keeps it.
+    host.upsert_chat(&row).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.chat("c1").unwrap().unwrap().started_by, Some(started));
+    let bad: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+        "id": "x", "deviceId": "d", "archived": false, "createdAt": "2026-11-01T00:00:00Z", "startedBy": "garbage"
+    }))
+    .unwrap();
+    assert_eq!(bad.started_by, None);
+}
+
+#[test]
+fn live_activity_and_todo_replicate_and_clear() {
+    use zeron_proto::orchestration::{ActivityKind, ChatActivity, TodoProgress};
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let mut row = session("chat", "host", SessionStatus::Working);
+    row.activity = Some(ChatActivity {
+        kind: ActivityKind::Merging,
+        label: "gh pr merge 12".into(),
+        since: ts(3_000),
+    });
+    row.todo = Some(TodoProgress { done: 1, total: 4, current: None });
+    host.upsert_session(&row).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+    // The turn ended: activity clears, todo progress stays.
+    row.status = SessionStatus::Idle;
+    row.activity = None;
     row.updated_at = ts(3_600);
     host.upsert_session(&row).unwrap();
     server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
@@ -386,7 +438,7 @@ fn program_activity_and_native_outcome_survive_replication_and_restart() {
 
 /// Stand-in for the server: applies every pushable batch from `docs` to a row
 /// table with the SAME merge fn, acks, and broadcasts merged rows to all.
-fn server_round(
+pub(super) fn server_round(
     server: &mut HashMap<(String, String), RegistryRow>,
     seq: &mut u64,
     docs: &mut [&mut RegistryDoc],
@@ -3224,4 +3276,57 @@ fn a_broken_delta_chain_keeps_its_pending_writes() {
     assert!(!clean);
     let ids: Vec<String> = loaded.read_chats().unwrap().into_iter().map(|c| c.id).collect();
     assert_eq!(ids, ["after", "kept"], "the pending write after the break was lost");
+}
+
+/// A save started with `begin_save` and stored after (outside the lock): a
+/// write made in between goes to the next save, and the chain loads back
+/// the same replica.
+#[test]
+fn a_write_during_a_save_goes_to_the_next_one() {
+    let mut doc = RegistryDoc::new("host");
+    doc.set_local_only(true);
+    for i in 0..20 {
+        doc.upsert_chat(&chat(&format!("c{i}"), "host")).unwrap();
+    }
+    let base = doc.begin_save(false);
+    assert!(!base.is_delta());
+    let base = base.encode().unwrap();
+    doc.upsert_chat(&chat("during", "host")).unwrap();
+    let first = doc.begin_save(true);
+    assert!(first.is_delta());
+    // Written while the first delta is being encoded and stored.
+    doc.rename_chat("c3", "renamed meanwhile").unwrap();
+    let first = first.encode().unwrap();
+    let second = doc.begin_save(true).encode().unwrap();
+    let (loaded, clean) = RegistryDoc::from_saved(&base, &[first.clone()], &[], "host").unwrap();
+    assert!(clean);
+    assert!(loaded.chat("during").unwrap().is_some(), "the first delta has the write before it");
+    assert_ne!(loaded.chat("c3").unwrap().unwrap().title.as_deref(), Some("renamed meanwhile"));
+    let (loaded, clean) = RegistryDoc::from_saved(&base, &[first, second], &[], "host").unwrap();
+    assert!(clean);
+    same_replica(&doc, &loaded);
+}
+
+/// A save that wasn't stored: what it copied is unsaved again, with what
+/// was written since.
+#[test]
+fn an_aborted_save_leaves_its_rows_unsaved() {
+    let mut doc = RegistryDoc::new("host");
+    doc.set_local_only(true);
+    doc.upsert_chat(&chat("c1", "host")).unwrap();
+    let base = doc.begin_save(false).encode().unwrap();
+    doc.upsert_chat(&chat("lost", "host")).unwrap();
+    let failed = doc.begin_save(true);
+    doc.upsert_chat(&chat("later", "host")).unwrap();
+    doc.abort_save(failed);
+    let retry = doc.begin_save(true).encode().unwrap();
+    let (loaded, _) = RegistryDoc::from_saved(&base, &[retry], &[], "host").unwrap();
+    assert!(loaded.chat("lost").unwrap().is_some(), "an aborted save's rows were dropped");
+    assert!(loaded.chat("later").unwrap().is_some());
+    // A full replace stays whole-only through an aborted whole save.
+    let _ = doc.apply_state(5, true, 0, Vec::new());
+    let whole = doc.begin_save(true);
+    assert!(!whole.is_delta(), "a full replace saved as a delta");
+    doc.abort_save(whole);
+    assert!(!doc.begin_save(true).is_delta(), "an aborted whole save forgot the full replace");
 }

@@ -619,7 +619,61 @@ ui.command {
 		end
 	end,
 }
+-- The open chat a thread of a card the person paused: its messages held
+-- (screens/chat/card_hold). The board's ops are noted (`orch:<op>:<id>`)
+-- and played as the engine would (resumed: into Now).
+do
+	local orchestration = require("@account/orchestration") :: any
+	-- (`orch_refuse`: refused, as the bridge refuses an op it doesn't know.)
+	local refuse = ui.state("orch_refuse", false)
+	orchestration.op = function(op: any): any
+		note(`orch:{op.op}:{op.id or ""}:{op.state or ""}`)
+		if refuse:peek() then
+			return { after = function(_: any, _done: any, failed: any) if failed then failed("not yours") end end }
+		end
+		if op.op == "resumeItem" then
+			local now = table.clone(orchestration.now:peek())
+			local items = {}
+			for _, it in now.items or {} do
+				if it.id == op.id then
+					it = table.clone(it)
+					it.state = op.state or "active"
+					it.paused_at = nil
+				end
+				table.insert(items, it)
+			end
+			now.items = items
+			orchestration.now:set(now)
+		end
+		return { after = function(_: any, done: (any) -> ()) done(nil) end }
+	end
+	ui.command {
+		id = "card_paused",
+		title = "The open chat's card is paused",
+		run = function()
+			if opened then
+				orchestration.now:set({
+					state = "ready",
+					orchestrators = {},
+					crew = {},
+					asks = {},
+					dumps = {},
+					items = { { id = "it-held", title = "Fix the flaky test", state = "blocked", paused_at = os.time() - 600, threads = { opened } } },
+				})
+			end
+		end,
+	}
+end
 stub.load_catalog = function() end
+-- (A model picker opening asks after agents short of models, and an agent's
+-- "Retry" asks for its own: src/chat.rs `chat.catalog_fresh`,
+-- `chat.catalog_retry`, noted.)
+stub.refresh_catalog = function()
+	note("catalog_fresh")
+end
+stub.retry_catalog = function(harness: string)
+	note(`catalog_retry:{harness}`)
+end
 -- (The device whose catalog the composer reads, noted as it changes.)
 stub.catalog_on = function(device: string?)
 	note(`catalog_on:{device or "here"}`)
@@ -1171,6 +1225,10 @@ sessions_stub.create = function(req: any)
 	local id = req.id or `new{made_chats}`
 	note(`create:{req.project or "none"}:{req.config and req.config.model or ""}`)
 	note(`made:{req.project or "-"}|{req.device or "-"}|{req.branch or "-"}|{req.cwd or "-"}{if req.cloud then "|cloud" else ""}`)
+	-- (On Cloud, the size its machine starts on.)
+	if req.cloud then
+		note(`machine:{req.machine or "-"}`)
+	end
 	META[id] = { title = "New chat", project = req.project, model = req.config and req.config.model }
 	-- (On Cloud, its machine's device, as the engine's list will say.)
 	if req.cloud then
@@ -2169,6 +2227,17 @@ for _, id in { "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9" } do
 		end,
 	}
 end
+-- A session opened at one of its messages (an ask's turn: the Control
+-- room's cards, Needs you): `go_s1_at_u3` opens s1 at its third question.
+for _, at in { { "s1", "u3" }, { "s1", "a3" }, { "s1", "u20" }, { "s1", "nope" } } do
+	ui.command {
+		id = `go_{at[1]}_at_{at[2]}`,
+		title = `Open {at[1]} at {at[2]}`,
+		run = function()
+			route.open_session(at[1], { message = at[2] })
+		end,
+	}
+end
 -- A new chat with no project asked of it (⌘N, the sidebar's New chat).
 ui.command {
 	id = "go_new",
@@ -2219,6 +2288,59 @@ ui.command {
 		table.insert(harnesses, { id = "acp.factory-droid", label = "Factory Droid", mark = "acp.factory-droid" })
 		table.insert(models, { value = "droid", label = "Droid Auto", harness = "acp.factory-droid", efforts = EFFORT, effort = "medium" })
 		store.catalog:set { state = "ready", harnesses = harnesses, models = models }
+	end,
+}
+-- Cursor in the catalog with how its models stand (`status`): none yet
+-- (signed out), a look that failed, still looking, or its models come.
+local function with_cursor(status: string, error: string?, models: { any }?)
+	local c = store.catalog:peek()
+	local harnesses: { any } = {}
+	for _, h in c.harnesses do
+		if h.id ~= "cursor" then
+			table.insert(harnesses, h)
+		end
+	end
+	table.insert(harnesses, { id = "cursor", label = "Cursor", mark = "cursor", status = status, error = error })
+	local list: { any } = {}
+	for _, m in c.models do
+		if m.harness ~= "cursor" then
+			table.insert(list, m)
+		end
+	end
+	for _, m in models or {} do
+		table.insert(list, m)
+	end
+	store.catalog:set({ state = "ready", complete = true, harnesses = harnesses, models = list } :: any)
+end
+ui.command {
+	id = "catalog_cursor_empty",
+	title = "Cursor lists no models",
+	run = function()
+		with_cursor("empty")
+	end,
+}
+ui.command {
+	id = "catalog_cursor_error",
+	title = "Cursor's models couldn't be looked up",
+	run = function()
+		with_cursor("error", "cursor-agent exited with status 1")
+	end,
+}
+ui.command {
+	id = "catalog_cursor_loading",
+	title = "Cursor's models are on their way",
+	run = function()
+		with_cursor("loading")
+	end,
+}
+ui.command {
+	id = "catalog_cursor_ready",
+	title = "Cursor's models come",
+	run = function()
+		with_cursor("ready", nil, {
+			{ value = "cursor/auto", label = "Auto", harness = "cursor" },
+			{ value = "cursor/composer-2", label = "Composer 2", harness = "cursor" },
+		})
 	end,
 }
 ui.command {

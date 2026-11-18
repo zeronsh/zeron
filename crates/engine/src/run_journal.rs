@@ -42,6 +42,18 @@ pub enum JournalError {
     Json(#[from] serde_json::Error),
 }
 
+/// A chat its usage limit stopped, as kept beside its journal
+/// (`{chat_id}.limited`, JSON).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitMark {
+    pub chat_id: String,
+    pub limit: zeron_proto::usage_limit::SessionLimit,
+    /// When its resume was sent for this limit (once per reset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JournalLine {
     seq: u64,
@@ -242,8 +254,54 @@ impl RunJournal {
         self.dir.join(format!("{}.shutdown", sanitize_id(chat_id)))
     }
 
+    fn subagents_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.subagents", sanitize_id(chat_id)))
+    }
+
+    fn wait_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.waiting", sanitize_id(chat_id)))
+    }
+
     fn stop_path(&self, chat_id: &str) -> PathBuf {
         self.dir.join(format!("{}.stopped", sanitize_id(chat_id)))
+    }
+
+    fn limited_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.limited", sanitize_id(chat_id)))
+    }
+
+    /// Mark a chat its usage limit stopped (`mark`: the limit and whether
+    /// its resume was sent), kept until [`Self::clear_limited`]: what the
+    /// next boot re-arms the chat's wait from.
+    pub fn note_limited(&self, chat_id: &str, mark: &LimitMark) {
+        let body = serde_json::to_vec(mark).unwrap_or_default();
+        if let Err(err) = std::fs::write(self.limited_path(chat_id), body) {
+            tracing::warn!(chat = %chat_id, error = %err, "usage limit marker write failed");
+        }
+    }
+
+    pub fn clear_limited(&self, chat_id: &str) {
+        let _ = std::fs::remove_file(self.limited_path(chat_id));
+    }
+
+    /// Every chat [`Self::note_limited`] marked, by chat id (kept: each mark
+    /// stays until its chat is resumed). A mark that won't read is dropped.
+    pub fn limited_marks(&self) -> Result<Vec<LimitMark>, JournalError> {
+        let mut marked = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("limited") {
+                continue;
+            }
+            match std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<LimitMark>(&b).ok()) {
+                Some(mark) => marked.push(mark),
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        marked.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+        Ok(marked)
     }
 
     /// Auto-resume revival budget (zeron `resumeAttempt`/`MAX_AUTO_RESUME`):
@@ -306,6 +364,74 @@ impl RunJournal {
 
     pub fn clear_shutdown_interrupt(&self, chat_id: &str) {
         let _ = std::fs::remove_file(self.shutdown_path(chat_id));
+    }
+
+    /// Mark a chat whose turn had ended into a wait on its own background
+    /// work (`labels`: what it waited on) when the engine's shutdown began:
+    /// the shutdown ends that work and the wait with it, so this marker is
+    /// what tells the next boot the chat still had work in hand.
+    pub fn note_shutdown_wait(&self, chat_id: &str, labels: &[String]) {
+        let body = serde_json::to_vec(labels).unwrap_or_default();
+        if let Err(err) = std::fs::write(self.wait_path(chat_id), body) {
+            tracing::warn!(chat = %chat_id, error = %err, "shutdown wait marker write failed");
+        }
+    }
+
+    /// Mark a chat whose subagents (`docs`: their sub-chats) were still at
+    /// work when the engine's shutdown began: it stops them, so this marker
+    /// is what tells the next boot the chat still had work in hand.
+    pub fn note_shutdown_subagents(&self, chat_id: &str, docs: &[String]) {
+        let body = serde_json::to_vec(docs).unwrap_or_default();
+        if let Err(err) = std::fs::write(self.subagents_path(chat_id), body) {
+            tracing::warn!(chat = %chat_id, error = %err, "shutdown subagent marker write failed");
+        }
+    }
+
+    /// Chats marked by [`Self::note_shutdown_subagents`], with their
+    /// sub-chats, taken (each marker removed as it is read).
+    pub fn take_shutdown_subagents(&self) -> Result<Vec<(String, Vec<String>)>, JournalError> {
+        self.take_marks("subagents")
+    }
+
+    /// Every `<chat>.<ext>` marker holding a JSON list of strings, taken.
+    fn take_marks(&self, ext: &str) -> Result<Vec<(String, Vec<String>)>, JournalError> {
+        let mut marked = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some(ext) {
+                continue;
+            }
+            let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
+                continue;
+            };
+            let list: Vec<String> =
+                std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            let _ = std::fs::remove_file(&path);
+            marked.push((chat_id, list));
+        }
+        marked.sort();
+        Ok(marked)
+    }
+
+    /// Chats marked by [`Self::note_shutdown_wait`], with what each waited
+    /// on, taken (each marker removed as it is read).
+    pub fn take_shutdown_waits(&self) -> Result<Vec<(String, Vec<String>)>, JournalError> {
+        let mut marked = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("waiting") {
+                continue;
+            }
+            let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
+                continue;
+            };
+            let labels: Vec<String> =
+                std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            let _ = std::fs::remove_file(&path);
+            marked.push((chat_id, labels));
+        }
+        marked.sort();
+        Ok(marked)
     }
 
     /// Mark a chat whose turn the user stopped. Its journal closes only once

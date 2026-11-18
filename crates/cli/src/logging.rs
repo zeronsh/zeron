@@ -36,20 +36,31 @@ pub fn spawn_malloc_trimmer() {
 /// long-running modes — a process launched from Finder or by the app has no
 /// visible output. Long-running modes log at info, one-shot commands at warn
 /// (`RUST_LOG` overrides either).
+/// loro's internal block-encode diagnostics log at info on every snapshot
+/// export and commit (thousands of lines an hour): enough to fill a disk on a
+/// long-running host, and log I/O on the hot path. Quiet unless `RUST_LOG`
+/// names loro itself; otherwise `RUST_LOG` (when it parses) sets the filter.
+fn log_filter(long_running: bool, rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
+    const QUIET_LORO: [&str; 2] = ["loro_internal=warn", "loro=warn"];
+    let default_filter = if long_running { "info" } else { "warn" };
+    let mut filter = rust_log
+        .filter(|v| !v.trim().is_empty())
+        .and_then(|v| tracing_subscriber::EnvFilter::try_new(v).ok())
+        .unwrap_or_else(|| default_filter.into());
+    if !rust_log.is_some_and(|v| v.contains("loro")) {
+        for directive in QUIET_LORO {
+            if let Ok(directive) = directive.parse() {
+                filter = filter.add_directive(directive);
+            }
+        }
+    }
+    filter
+}
+
 pub fn init_logging(long_running: bool, mode: &str, stderr_only: bool) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    // loro's internal block-encode diagnostics log at info and flood
-    // journald on every snapshot export — enough to fill a disk on a
-    // long-running headless host. Quiet them by default (RUST_LOG still
-    // overrides the whole filter).
-    let default_filter = if long_running {
-        "info,loro_internal=warn,loro=warn"
-    } else {
-        "warn"
-    };
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| default_filter.into());
+    let filter = log_filter(long_running, std::env::var("RUST_LOG").ok().as_deref());
     if stderr_only {
         tracing_subscriber::registry()
             .with(filter)
@@ -297,8 +308,18 @@ fn open_log_file_in(
 
 #[cfg(test)]
 mod rotating_log_tests {
-    use super::RotatingLog;
+    use super::{RotatingLog, log_filter};
     use std::io::Write as _;
+
+    #[test]
+    fn loro_diagnostics_stay_quiet_whatever_rust_log_says() {
+        for (long_running, rust_log) in [(true, None), (true, Some("info")), (false, Some("debug,perf=debug"))] {
+            let filter = log_filter(long_running, rust_log).to_string();
+            assert!(filter.contains("loro_internal=warn"), "{rust_log:?}: {filter}");
+        }
+        let chosen = log_filter(true, Some("info,loro_internal=debug")).to_string();
+        assert!(chosen.contains("loro_internal=debug") && !chosen.contains("loro_internal=warn"), "{chosen}");
+    }
 
     #[test]
     fn a_log_past_its_limit_moves_to_old_and_starts_over() {

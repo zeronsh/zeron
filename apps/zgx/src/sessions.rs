@@ -13,11 +13,13 @@
 //!                    icon? = { emoji?, image?, hue? } } },
 //!     chats = { { id, title, project?, device, branch?, cwd?, status?,
 //!                 updated, created, harness?, agent?, model?,
-//!                 running_subagents, side_chats, working_side_chats } },
+//!                 running_subagents, side_chats, working_side_chats,
+//!                 parent?, child_kind?, activity?, todo? } },
 //!     children = { [parent id] = { { id, parent, title, device, status?,
-//!                 updated, created, harness?, agent?, child_kind? } } } (its
-//!                 side chats, newest first; `child_kind` "subagent" or
-//!                 "side" for one a Zeron chat started, none for the person's),
+//!                 updated, created, harness?, agent?, child_kind?,
+//!                 activity?, todo? } } } (its side chats, newest first;
+//!                 `child_kind` "subagent", "side" or "crew" for one a Zeron
+//!                 chat started, none for the person's),
 //!     places = { pinned = { id }, sections = { { id, name, sessions = { id },
 //!                collapsed } } },
 //!     archived = { chat, … } (as `chats`, the most recently moved first),
@@ -28,6 +30,10 @@
 //! "failed", "done": finished but not yet seen), nil when idle; `updated`
 //! and `created` are Unix seconds; `agent` is ds.Mark's name for the
 //! chat's harness. Chats are the top-level ones that aren't archived.
+//! `activity` is what its agent is doing while it works, `{ kind, label,
+//! since }` (`kind` "testing", "merging"…, `since` Unix seconds); `todo` how
+//! far through its todo list it is, `{ done, total, current? }`, whenever its
+//! host says.
 //!
 //! and call, each rejecting with an outcome word (offline, failed):
 //!   sessions.create({ project?, device?, config?, branch?, cwd?, title?, parent?, id?, no_project? })
@@ -35,9 +41,11 @@
 //!                                  without one, `device` hosts it; `parent`:
 //!                                  a side chat of that chat, where it is;
 //!                                  `cloud`: on a Cloud machine of its own,
-//!                                  reaching `reach` (`devices` | `isolated`;
-//!                                  none: the account's default),
-//!                                  `{ id, cwd }`, or why not in words)
+//!                                  of size `machine` (the account's default
+//!                                  without one), reaching `reach`
+//!                                  (`devices` | `isolated`; none: the
+//!                                  account's default), `{ id, cwd }`, or why
+//!                                  not in words)
 //!   sessions.fork({ source, parent?, id? })  a side chat starting as a copy of
 //!                                  `source` (`ForkSideChat`): its id, or the
 //!                                  engine's words for why not
@@ -83,6 +91,11 @@ use crate::engine::{self, lists, rpc::Watch};
 /// A live state older than this belongs to an engine that has gone (the
 /// shipping app's `SESSION_STALE_MS`).
 const STALE_SECS: i64 = 45;
+/// How long what the engine sends is gathered before the scripts are given
+/// it: a turn starting changes a chat's live state and its entry, which
+/// come as two frames, and each publish runs every script reading
+/// `sessions` (and the Timeline after it). One frame's time.
+const GATHER: Duration = Duration::from_millis(16);
 /// A device whose presence beat is older than this is offline (the shipping
 /// app's `device_online`).
 pub(crate) const ONLINE_SECS: i64 = 70;
@@ -161,6 +174,8 @@ struct Sessions {
     /// When `shown_live` was judged (Unix seconds).
     shown_at: Cell<Option<i64>>,
     shown_devices: RefCell<Option<Value>>,
+    /// Whether a publish is on its way ([`Sessions::publish_soon`]).
+    publish_pending: Cell<bool>,
     /// Publishes so far (for tests).
     #[cfg(test)]
     published: Cell<u32>,
@@ -193,6 +208,14 @@ struct RowWith {
     working_side_chats: u32,
     known_project: bool,
     agent_icon: Option<String>,
+    /// What its agent is doing (while it works), and its todo progress.
+    activity: Option<zeron_proto::orchestration::ChatActivity>,
+    todo: Option<zeron_proto::orchestration::TodoProgress>,
+    /// When the turn it's working on began (Unix seconds), while it works.
+    turn_started: Option<i64>,
+    /// Stopped by its provider's usage limit (or running on another account
+    /// meanwhile), while its host says so.
+    limited: Option<zeron_proto::usage_limit::SessionLimit>,
     /// The last turn its agent finished, as its session row marks it
     /// (`lastCompletedTurn`): what a "finished" chime rings on moving.
     turn: Option<String>,
@@ -569,7 +592,7 @@ impl Layout {
             }
             let place = place_of(c);
             if let Place::Child(parent) = &place {
-                child_row(rows, c, id, parent, live(id), at);
+                child_row(rows, c, id, parent, known, live(id), at);
                 let i = *layout.parent_at.entry(parent.clone()).or_insert_with(|| {
                     layout.parents.push(parent.clone());
                     layout.kids.push(Kids { ids: Vec::new(), value: Value::Nil, working: 0 });
@@ -626,9 +649,20 @@ impl Layout {
 }
 
 /// A side chat's row, built again if what it shows moved.
-fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, session: Option<&Session>, at: chrono::DateTime<chrono::Utc>) {
+fn child_row(
+    rows: &mut HashMap<String, Row>,
+    c: &Json,
+    id: &str,
+    parent: &str,
+    known: &HashSet<&str>,
+    session: Option<&Session>,
+    at: chrono::DateTime<chrono::Utc>,
+) {
     let status = status_of(rows.get(id).map_or_else(|| seen_marks(c), |row| row.marks), session, at);
     let harness = c["config"]["harness"].as_str();
+    // Its project, as a top-level chat's (one not known: none). A crew
+    // thread is listed in the sidebar under it, as any chat is.
+    let project = c["spaceId"].as_str().filter(|s| known.contains(s));
     let with = RowWith {
         status,
         waiting: None,
@@ -636,8 +670,12 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         running_subagents: 0,
         side_chats: 0,
         working_side_chats: 0,
-        known_project: false,
+        known_project: project.is_some(),
         agent_icon: harness.and_then(crate::agents::registry_icon),
+        activity: activity_of(status, session),
+        todo: session.and_then(|s| s.todo.clone()),
+        turn_started: turn_started(status, session),
+        limited: session.and_then(|s| s.limited.clone()),
         turn: None,
     };
     if rows.get(id).is_some_and(|row| row.with == with) {
@@ -656,7 +694,12 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         ("id", Value::from(id)),
         ("parent", Value::from(parent)),
         ("title", Value::from(title)),
+        // Its own title alone (none: not named yet), for a name that falls
+        // back otherwise (a crew thread's: its role, its item's title).
+        ("name", opt(c["title"].as_str().filter(|t| !t.trim().is_empty()))),
         ("device", Value::from(c["deviceId"].as_str().unwrap_or_default())),
+        ("project", opt(project)),
+        ("branch", opt(c["branch"].as_str())),
         ("status", status.map_or(Value::Nil, Value::from)),
         ("updated", Value::from(updated as f64)),
         ("created", Value::from(created as f64)),
@@ -664,9 +707,22 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         ("agent", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |g| Value::from(g.as_str()))),
         // An agent from the ACP registry: its icon, as listed.
         ("agent_icon", with.agent_icon.as_deref().map_or(Value::Nil, Value::from)),
-        // Started by a Zeron chat through Zeron's tools ("subagent" or
-        // "side"); none for a side chat the person started.
+        // Started by a Zeron chat through Zeron's tools ("subagent",
+        // "side", or "crew": a thread of an orchestrator's); none for a side
+        // chat the person started.
         ("child_kind", opt(c["childKind"].as_str())),
+        // Who started it, when an orchestrator or the Brain dump did (and for
+        // which dump and part): `{ chat_id, dump_id?, route_id? }`.
+        ("started_by", started_by_value(&c["startedBy"])),
+        ("activity", with.activity.as_ref().map_or(Value::Nil, crate::orchestration::activity_value)),
+        ("todo", with.todo.as_ref().map_or(Value::Nil, crate::orchestration::todo_value)),
+        // When the turn it's working on began (Unix seconds), while it works:
+        // the Q&A's "Answering" is a turn begun since its question came.
+        ("turn_started", with.turn_started.map_or(Value::Nil, |t| Value::from(t as f64))),
+        // Stopped by its provider's usage limit, waiting for the reset, or
+        // running on another account meanwhile (`switched_to`):
+        // `crate::orchestration::limited_value`'s shape.
+        ("limited", with.limited.as_ref().map_or(Value::Nil, crate::orchestration::limited_value)),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks: seen_marks(c), with, value });
 }
@@ -699,6 +755,10 @@ fn top_row(
         working_side_chats,
         known_project: project.is_some(),
         agent_icon: harness.and_then(crate::agents::registry_icon),
+        activity: activity_of(status, session),
+        todo: session.and_then(|s| s.todo.clone()),
+        turn_started: turn_started(status, session),
+        limited: session.and_then(|s| s.limited.clone()),
         turn: finished_turn(session, at).0,
     };
     if let Some(row) = rows.get(id).filter(|row| row.with == with) {
@@ -740,6 +800,21 @@ fn top_row(
         // it woke (Unix seconds).
         ("sleep_until", with.sleep.filter(|s| s.0).map_or(Value::Nil, |s| Value::from(s.1 as f64))),
         ("woke", with.sleep.filter(|s| !s.0).map_or(Value::Nil, |s| Value::from(s.1 as f64))),
+        // Whose child it is, and how, when it's one (as a side chat's row
+        // says).
+        ("parent", opt(c["parentChatId"].as_str())),
+        ("child_kind", opt(c["childKind"].as_str())),
+        ("started_by", started_by_value(&c["startedBy"])),
+        // What its agent is doing while it works, and its todo progress.
+        ("activity", with.activity.as_ref().map_or(Value::Nil, crate::orchestration::activity_value)),
+        ("todo", with.todo.as_ref().map_or(Value::Nil, crate::orchestration::todo_value)),
+        // When the turn it's working on began (Unix seconds), while it works:
+        // the Q&A's "Answering" is a turn begun since its question came.
+        ("turn_started", with.turn_started.map_or(Value::Nil, |t| Value::from(t as f64))),
+        // Stopped by its provider's usage limit, waiting for the reset, or
+        // running on another account meanwhile (`switched_to`):
+        // `crate::orchestration::limited_value`'s shape.
+        ("limited", with.limited.as_ref().map_or(Value::Nil, crate::orchestration::limited_value)),
         // The last turn its agent finished (an opaque mark), and whether its
         // session row was fresh when that was read: the chimes ring
         // "finished" on this moving, never on the status alone ("done" is
@@ -749,6 +824,17 @@ fn top_row(
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks, with, value: value.clone() });
     value
+}
+
+/// A chat's `startedBy`, as scripts read it (nil: none, or none readable).
+fn started_by_value(v: &Json) -> Value {
+    let opt = |v: Option<&str>| v.filter(|s| !s.is_empty()).map_or(Value::Nil, Value::from);
+    let Some(chat) = v["chatId"].as_str().filter(|s| !s.is_empty()) else { return Value::Nil };
+    Value::record([
+        ("chat_id", Value::from(chat)),
+        ("dump_id", opt(v["dumpId"].as_str())),
+        ("route_id", opt(v["routeId"].as_str())),
+    ])
 }
 
 thread_local! {
@@ -1038,7 +1124,7 @@ impl Sessions {
             }
             Slot::Spaces | Slot::Places | Slot::Connectivity => return self.heard(slot, frame.list.clone()),
         }
-        self.publish();
+        self.publish_soon();
     }
 
     fn heard(&self, slot: Slot, item: Json) {
@@ -1095,10 +1181,32 @@ impl Sessions {
                 *self.confirmed.borrow_mut() = places;
             }
         }
-        self.publish();
+        self.publish_soon();
+    }
+
+    /// What the engine sent, given to the scripts [`GATHER`] from now with
+    /// whatever else comes by then. (At once in tests, and before a
+    /// connection's tasks are there.)
+    fn publish_soon(&self) {
+        if cfg!(test) || !engine::get().can_spawn() {
+            return self.publish();
+        }
+        if self.publish_pending.replace(true) {
+            return;
+        }
+        engine::get().spawn(async {
+            zgx::timer::sleep(GATHER).await;
+            SESSIONS.with(|s| {
+                if s.publish_pending.get() {
+                    s.publish();
+                }
+            });
+        });
     }
 
     fn publish(&self) {
+        // (Whatever was on its way goes now.)
+        self.publish_pending.set(false);
         #[cfg(test)]
         self.published.set(self.published.get() + 1);
         let value = self.value();
@@ -1108,6 +1216,7 @@ impl Sessions {
             shared.set(value.clone());
         }
         self.look_again();
+        crate::orchestration_timeline::heard_sessions(&value);
     }
 
     /// Publishes again as the soonest live state showing goes stale, or a
@@ -1439,7 +1548,7 @@ impl Sessions {
         for id in &dirty {
             let Some(Place::Child(parent)) = layout.place.get(id) else { continue };
             let Some(c) = entry(id, &mut index) else { continue };
-            child_row(&mut rows, c, id, parent, live(id), at);
+            child_row(&mut rows, c, id, parent, known, live(id), at);
             if !parents.contains(parent) {
                 parents.push(parent.clone());
             }
@@ -1553,6 +1662,9 @@ impl Sessions {
         let mut params = json!({ "op": "createChat", "chatId": id, "spaceId": project, "cloud": true });
         if let Some(branch) = field("branch") {
             params["branch"] = Json::from(branch);
+        }
+        if let Some(machine) = field("machine") {
+            params["machine"] = Json::from(machine);
         }
         if let Some(reach) = field("reach").filter(|r| matches!(r.as_str(), "devices" | "isolated")) {
             params["cloudReach"] = Json::from(reach);
@@ -1800,6 +1912,9 @@ struct Live {
     /// them (whether a finish is new, or was interrupted).
     outcome: Option<String>,
     last_completed_turn: Option<String>,
+    /// What its agent is doing, and its todo progress, as its row shows them.
+    activity: Option<zeron_proto::orchestration::ChatActivity>,
+    todo: Option<zeron_proto::orchestration::TodoProgress>,
 }
 
 /// Each chat's `Live`, judged at `now` (Unix seconds).
@@ -1817,6 +1932,8 @@ fn live_of(s: &Session, at: chrono::DateTime<chrono::Utc>) -> Live {
         subagents: zeron_proto::view::running_subagents(Some(s), at),
         outcome: s.last_turn_outcome.as_ref().and_then(|o| serde_json::to_string(o).ok()),
         last_completed_turn: s.last_completed_turn.clone(),
+        activity: s.activity.clone(),
+        todo: s.todo.clone(),
     }
 }
 
@@ -1906,6 +2023,16 @@ fn status_of(
         ChatIndicator::Completed => Some("done"),
         ChatIndicator::Idle => None,
     }
+}
+
+/// What a chat's agent is doing, while its row says it works.
+fn activity_of(status: Option<&str>, session: Option<&Session>) -> Option<zeron_proto::orchestration::ChatActivity> {
+    session.filter(|_| status == Some("working")).and_then(|s| s.activity.clone())
+}
+
+/// When the turn a working chat is on began (Unix seconds).
+fn turn_started(status: Option<&str>, session: Option<&Session>) -> Option<i64> {
+    session.filter(|_| status == Some("working")).and_then(|s| s.started_at).map(|t| t.timestamp())
 }
 
 /// A chat's sleep at `now`: asleep until (`true`, its time), or woke and not
@@ -2486,6 +2613,47 @@ mod tests {
         v.field("chats").unwrap().list().iter().find(|c| c.field("id").map(crate::auth::text).as_deref() == Some(id)).unwrap()
     }
 
+    /// A crew thread (a chat an orchestrator started, under it) carries its
+    /// project and branch, so the sidebar lists it under that project as any
+    /// chat: the orchestrator's own chat is listed in no project, and a
+    /// thread found only under it was in none. Its cwd (a worktree, another
+    /// checkout) doesn't move it: the project is its `spaceId`. Archived, it
+    /// is in no list, as an archived side chat is.
+    #[test]
+    fn a_crew_thread_carries_its_project_for_the_sidebar() {
+        let now = now_seconds();
+        let s = Sessions::default();
+        s.heard(Slot::Spaces, json!([{ "id": "zeron", "name": "zeron", "path": "/home/u/Documents/zeron", "deviceId": "d" }]));
+        s.set_chats(json!([
+            { "id": "orc", "title": "Zeron fixes", "deviceId": "d", "spaceId": "zeron", "createdAt": iso(now - 7200) },
+            { "id": "qa", "title": "Control Room Q&A section", "parentChatId": "orc", "childKind": "crew", "deviceId": "d",
+              "spaceId": "zeron", "cwd": "/home/u/Documents/dev/zeron", "branch": "main", "createdAt": iso(now - 600) },
+            { "id": "new", "title": "", "lastMessagePreview": "[Message from Zeron chat Zeron fixes]", "parentChatId": "orc", "childKind": "crew",
+              "deviceId": "d", "spaceId": "zeron", "createdAt": iso(now - 60) },
+            { "id": "lost", "title": "Project gone", "parentChatId": "orc", "childKind": "crew", "deviceId": "d",
+              "spaceId": "deleted", "createdAt": iso(now - 500) },
+            { "id": "old", "title": "Done and archived", "parentChatId": "orc", "childKind": "crew", "deviceId": "d",
+              "spaceId": "zeron", "archived": true, "createdAt": iso(now - 900) },
+        ]));
+        s.heard.set(true);
+        let v = s.value();
+        let text = |v: Option<&zgx_script::Value>| v.and_then(|v| match v { zgx_script::Value::Nil => None, v => Some(crate::auth::text(v)) });
+        let kids = v.field("children").unwrap().field("orc").unwrap().list();
+        let kid = |id: &str| kids.iter().find(|c| text(c.field("id")).as_deref() == Some(id));
+        let qa = kid("qa").expect("the crew thread, under its orchestrator");
+        assert_eq!(text(qa.field("child_kind")).as_deref(), Some("crew"));
+        assert_eq!(text(qa.field("project")).as_deref(), Some("zeron"));
+        assert_eq!(text(qa.field("branch")).as_deref(), Some("main"));
+        assert_eq!(text(qa.field("name")).as_deref(), Some("Control Room Q&A section"));
+        assert_eq!(text(kid("lost").unwrap().field("project")), None, "a project not known: none");
+        // Not titled yet: no name of its own (the sidebar names it by its role).
+        assert_eq!(text(kid("new").unwrap().field("name")), None);
+        assert!(kid("old").is_none(), "archived: not under it");
+        let listed = |list: &str| v.field(list).unwrap().list().iter().filter_map(|c| text(c.field("id"))).collect::<Vec<_>>();
+        assert!(!listed("chats").contains(&"old".to_owned()) && !listed("archived").contains(&"old".to_owned()));
+        assert!(!listed("chats").contains(&"qa".to_owned()), "listed once: under its orchestrator");
+    }
+
     #[test]
     fn side_chats_are_their_parent_s_and_counted_on_its_row() {
         let v = with_children("2099-01-01T00:00:00Z").value();
@@ -2508,6 +2676,359 @@ mod tests {
         assert_eq!(p.field("side_chats").and_then(|n| n.as_f64()), Some(2.));
         assert_eq!(p.field("working_side_chats").and_then(|n| n.as_f64()), Some(1.));
         assert_eq!(p.field("running_subagents").and_then(|n| n.as_f64()), Some(2.));
+    }
+
+    /// What a live chat's agent is doing, and how far through its todo list
+    /// it is, on its row (top-level or a crew thread's): the activity only
+    /// while it works, the todo whenever its host says; a change to either
+    /// alone is published and builds its row again.
+    /// A snapshot of an engine's lists (`SESSIONS_SNAPSHOT`: a JSON file of
+    /// WatchChats, WatchSessions, WatchDevices, WatchSpaces,
+    /// WatchSidebarPreferences and LocalDevice) through the bridge, its
+    /// value written beside it (`.value.json`): what the scripts would see.
+    #[test]
+    #[ignore]
+    fn sessions_snapshot() {
+        let Ok(path) = std::env::var("SESSIONS_SNAPSHOT") else { return };
+        let snap: Json = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let s = Sessions::default();
+        *s.here.borrow_mut() = snap["LocalDevice"]["id"].as_str().map(String::from);
+        s.heard(Slot::Devices, snap["WatchDevices"].clone());
+        s.heard(Slot::Spaces, snap["WatchSpaces"].clone());
+        s.heard(Slot::Places, snap["WatchSidebarPreferences"].clone());
+        s.heard(Slot::Live, snap["WatchSessions"].clone());
+        s.heard(Slot::Chats, snap["WatchChats"].clone());
+        let v = s.value();
+        std::fs::write(format!("{path}.value.json"), v.to_json()).unwrap();
+    }
+
+    /// A recorded WatchSessions stream (`SESSIONS_STREAM`: [{ t, m: { item } }])
+    /// over the snapshot's chats, replayed: each chat named in
+    /// `SESSIONS_WATCH` (comma-separated prefixes), its status at each frame.
+    #[test]
+    #[ignore]
+    fn sessions_stream_replay() {
+        let (Ok(snap), Ok(stream)) = (std::env::var("SESSIONS_SNAPSHOT"), std::env::var("SESSIONS_STREAM")) else { return };
+        let watch: Vec<String> = std::env::var("SESSIONS_WATCH").unwrap_or_default().split(',').map(String::from).collect();
+        let snap: Json = serde_json::from_str(&std::fs::read_to_string(&snap).unwrap()).unwrap();
+        let stream: Json = serde_json::from_str(&std::fs::read_to_string(&stream).unwrap()).unwrap();
+        let s = Sessions::default();
+        *s.here.borrow_mut() = snap["LocalDevice"]["deviceId"].as_str().map(String::from);
+        s.heard(Slot::Devices, snap["WatchDevices"].clone());
+        s.heard(Slot::Spaces, snap["WatchSpaces"].clone());
+        s.heard(Slot::Chats, snap["WatchChats"].clone());
+        for f in stream.as_array().unwrap() {
+            let t = f["t"].as_f64().unwrap() as i64;
+            s.heard(Slot::Live, f["m"]["item"].clone());
+            let v = s.value_at(t);
+            for c in v.field("chats").unwrap().list() {
+                let id = c.field("id").map(crate::auth::text).unwrap_or_default();
+                if watch.iter().any(|w| !w.is_empty() && id.starts_with(w.as_str())) {
+                    eprintln!("{t} {} {:?}", &id[..8], c.field("status").map(crate::auth::text));
+                }
+            }
+        }
+    }
+
+    /// Recorded change frames (`SESSIONS_FRAMES`: [{ t, m, list, changes? }]
+    /// of WatchChats and WatchSessions, as `{"changes": true}` streams them)
+    /// replayed as the listener hands them over, over the snapshot's devices
+    /// and projects: the watched chats' statuses at each.
+    #[test]
+    #[ignore]
+    fn sessions_frames_replay() {
+        use crate::engine::lists::{Changes, Frame};
+        let (Ok(snap), Ok(frames)) = (std::env::var("SESSIONS_SNAPSHOT"), std::env::var("SESSIONS_FRAMES")) else { return };
+        let watch: Vec<String> = std::env::var("SESSIONS_WATCH").unwrap_or_default().split(',').map(String::from).collect();
+        let snap: Json = serde_json::from_str(&std::fs::read_to_string(&snap).unwrap()).unwrap();
+        let frames: Json = serde_json::from_str(&std::fs::read_to_string(&frames).unwrap()).unwrap();
+        let s = Sessions::default();
+        *s.here.borrow_mut() = snap["LocalDevice"]["deviceId"].as_str().map(String::from);
+        s.heard_list(Slot::Devices, &Frame::for_tests(&snap["WatchDevices"], None, "id"));
+        s.heard(Slot::Spaces, snap["WatchSpaces"].clone());
+        for f in frames.as_array().unwrap() {
+            let t = f["t"].as_f64().unwrap() as i64;
+            let (slot, key) = if f["m"] == "WatchChats" { (Slot::Chats, "id") } else { (Slot::Live, "chatId") };
+            let changes = f["changes"].as_object().map(|c| Changes {
+                changed: c["changed"].as_array().cloned().unwrap_or_default(),
+                removed: c["removed"].as_array().map(|r| r.iter().filter_map(|k| k.as_str().map(String::from)).collect()).unwrap_or_default(),
+                reordered: c["reordered"].as_bool().unwrap_or(false),
+            });
+            s.heard_list(slot, &Frame::for_tests(&f["list"], changes.as_ref(), key));
+            let v = s.value_at(t);
+            let listed: Vec<String> = v.field("chats").unwrap().list().iter().filter_map(|c| c.field("id").map(crate::auth::text)).collect();
+            for w in &watch {
+                if w.is_empty() {
+                    continue;
+                }
+                let found = listed.iter().find(|id| id.starts_with(w.as_str()));
+                let st = found.and_then(|id| chat(&v, id).field("status").map(crate::auth::text));
+                eprintln!("{t} {} {w} listed={} status={st:?}", f["m"].as_str().unwrap_or(""), found.is_some());
+            }
+        }
+    }
+
+    /// The lists as the engine streams them, one change at a time (rows
+    /// changing state, working with background agents, waiting on them,
+    /// going and coming back, chats moving), give the scripts what the same
+    /// lists heard whole give: every chat listed, each in its state.
+    #[test]
+    fn streamed_changes_list_what_whole_lists_do() {
+        use crate::engine::lists::{Changes, Frame};
+        let now = now_seconds();
+        let mut seed: u64 = 0x5eed;
+        let mut rnd = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let n = 40;
+        let chat_row = |i: usize, t: i64| json!({ "id": format!("c{i:02}"), "deviceId": if i % 3 == 0 { "r" } else { "here" }, "title": format!("Chat {i}"),
+            "spaceId": "space", "lastMessageAt": iso(t), "createdAt": iso(now - 9000), "lastSeenAt": iso(now - 5000), "archived": false });
+        let session_row = |i: usize, kind: u64, t: i64| {
+            let mut r = json!({ "chatId": format!("c{i:02}"), "deviceId": if i % 3 == 0 { "r" } else { "here" }, "updatedAt": iso(t),
+                "lastCompletedTurn": format!("t{i}"), "runningSubagents": if kind == 1 || kind == 2 { 3 } else { 0 } });
+            match kind {
+                0 | 1 => { r["status"] = json!("working"); r["startedAt"] = json!(iso(t - 30)); }
+                2 => { r["status"] = json!("idle"); r["startedAt"] = Json::Null;
+                       r["waiting"] = json!({ "since": iso(t), "on": [{ "id": "a", "kind": "agent", "label": "x" }] }); }
+                _ => { r["status"] = json!("idle"); r["startedAt"] = Json::Null;
+                       r["lastTurnOutcome"] = json!({ "status": "completed", "finishedAt": iso(t) }); }
+            }
+            r
+        };
+        let mut chats: Vec<Json> = (0..n).map(|i| chat_row(i, now - 100)).collect();
+        let mut live: Vec<Json> = (0..n).map(|i| session_row(i, (i % 4) as u64, now - 5)).collect();
+        let devices = json!([{ "id": "here", "name": "desk", "lastSeenAt": iso(now) }, { "id": "r", "name": "honeypot", "lastSeenAt": iso(now) }]);
+        let s = Sessions::default();
+        *s.here.borrow_mut() = Some("here".into());
+        s.heard_list(Slot::Devices, &Frame::for_tests(&devices, None, "id"));
+        s.heard_list(Slot::Chats, &Frame::for_tests(&Json::Array(chats.clone()), None, "id"));
+        s.heard_list(Slot::Live, &Frame::for_tests(&Json::Array(live.clone()), None, "chatId"));
+        let shown = |v: &zgx_script::Value| -> Vec<(String, Option<String>)> {
+            let mut out: Vec<(String, Option<String>)> = v.field("chats").unwrap().list().iter()
+                .map(|c| (c.field("id").map(crate::auth::text).unwrap_or_default(), c.field("status").map(crate::auth::text)))
+                .collect();
+            out.sort();
+            out
+        };
+        for step in 0..600 {
+            let t = now - 5 + (step as i64 % 4);
+            match rnd(6) {
+                // A row's state moves (the engine sends that row alone).
+                0..=2 => {
+                    let i = rnd(live.len() as u64) as usize;
+                    let id: usize = live[i]["chatId"].as_str().unwrap()[1..].parse().unwrap();
+                    let row = session_row(id, rnd(4), t);
+                    live[i] = row.clone();
+                    let changes = Changes { changed: vec![row], removed: vec![], reordered: false };
+                    s.heard_list(Slot::Live, &Frame::for_tests(&Json::Array(live.clone()), Some(&changes), "chatId"));
+                }
+                // A row goes from the middle; later, back at the end.
+                3 => {
+                    if live.len() > 5 {
+                        let i = rnd(live.len() as u64) as usize;
+                        let gone = live.remove(i);
+                        let changes = Changes { changed: vec![], removed: vec![gone["chatId"].as_str().unwrap().to_owned()], reordered: false };
+                        s.heard_list(Slot::Live, &Frame::for_tests(&Json::Array(live.clone()), Some(&changes), "chatId"));
+                    }
+                }
+                4 => {
+                    let have: Vec<String> = live.iter().map(|r| r["chatId"].as_str().unwrap().to_owned()).collect();
+                    if let Some(id) = (0..n).find(|i| !have.contains(&format!("c{i:02}"))) {
+                        let row = session_row(id, rnd(4), t);
+                        live.push(row.clone());
+                        let changes = Changes { changed: vec![row], removed: vec![], reordered: false };
+                        s.heard_list(Slot::Live, &Frame::for_tests(&Json::Array(live.clone()), Some(&changes), "chatId"));
+                    }
+                }
+                // A chat's entry moves (a new message).
+                _ => {
+                    let i = rnd(n as u64) as usize;
+                    let row = chat_row(i, t);
+                    chats[i] = row.clone();
+                    let changes = Changes { changed: vec![row], removed: vec![], reordered: false };
+                    s.heard_list(Slot::Chats, &Frame::for_tests(&Json::Array(chats.clone()), Some(&changes), "id"));
+                }
+            }
+            let fresh = Sessions::default();
+            *fresh.here.borrow_mut() = Some("here".into());
+            fresh.heard_list(Slot::Devices, &Frame::for_tests(&devices, None, "id"));
+            fresh.heard_list(Slot::Chats, &Frame::for_tests(&Json::Array(chats.clone()), None, "id"));
+            fresh.heard_list(Slot::Live, &Frame::for_tests(&Json::Array(live.clone()), None, "chatId"));
+            assert_eq!(shown(&s.value_at(now)), shown(&fresh.value_at(now)), "step {step}");
+        }
+    }
+
+    /// Two chats of the person's on one machine (an older host), alike but
+    /// that one waits on (or works with) three background agents of its
+    /// own: both are listed, each with its state. (The live rows as the
+    /// dev engine sent them, times moved to now.)
+    #[test]
+    fn a_chat_running_subagents_is_listed_as_any() {
+        let now = now_seconds();
+        let s = Sessions::default();
+        s.heard.set(true);
+        *s.here.borrow_mut() = Some("here".into());
+        let entry = |id: &str, title: &str| json!({
+            "id": id, "deviceId": "e2f70bf5", "title": title, "archived": false,
+            "cwd": "/w", "branch": "main", "config": { "harness": "claude-code", "model": "claude-opus-5-5", "sandbox": "workspace-write" },
+            "lastMessagePreview": "…", "lastMessageAt": iso(now - 5), "createdAt": iso(now - 20000),
+            "harnessSessionId": "h", "harnessSessionCwd": "/w", "harnessSessionHarness": "claude-code",
+            "spaceId": "space", "lastSeenAt": iso(now - 2000), "roomGen": 3 });
+        s.set_chats(json!([entry("capy", "Explaining Capy.ai Captains"), entry("graph", "Redesign Map Graph Mode")]));
+        *s.spaces.borrow_mut() = json!([{ "id": "space", "name": "zeron", "deviceId": "e2f70bf5", "path": "/w" }]);
+        let waiting = json!([
+            { "lastCompletedTurn": "t1", "chatId": "capy", "deviceId": "e2f70bf5", "status": "idle", "startedAt": null,
+              "updatedAt": iso(now - 1), "runningSubagents": 3,
+              "waiting": { "since": iso(now - 1), "on": [
+                { "id": "a1", "kind": "agent", "label": "Engine: reports flow + MCP tools" },
+                { "id": "a2", "kind": "agent", "label": "Control room v2 polish" },
+                { "id": "a3", "kind": "agent", "label": "Map v2: three variants" } ] } },
+            { "lastCompletedTurn": "t2", "chatId": "graph", "deviceId": "e2f70bf5", "status": "working",
+              "startedAt": iso(now - 200), "updatedAt": iso(now - 3), "runningSubagents": 0 },
+        ]);
+        s.set_live(waiting);
+        s.publish();
+        let v = s.value();
+        let ids: Vec<String> = v.field("chats").unwrap().list().iter().filter_map(|c| c.field("id").map(crate::auth::text)).collect();
+        assert!(ids.contains(&"capy".to_string()), "listed: {ids:?}");
+        assert!(ids.contains(&"graph".to_string()));
+        let status = |id: &str| chat(&v, id).field("status").map(crate::auth::text);
+        assert_eq!(status("capy").as_deref(), Some("waiting"));
+        assert_eq!(status("graph").as_deref(), Some("working"));
+        // Working itself, with its agents: working.
+        let working = json!([
+            { "lastCompletedTurn": "t1", "chatId": "capy", "deviceId": "e2f70bf5", "status": "working", "startedAt": iso(now - 300),
+              "updatedAt": iso(now - 1), "runningSubagents": 3 },
+            { "lastCompletedTurn": "t2", "chatId": "graph", "deviceId": "e2f70bf5", "status": "working",
+              "startedAt": iso(now - 200), "updatedAt": iso(now - 3), "runningSubagents": 0 },
+        ]);
+        s.heard(Slot::Live, working.clone());
+        let v = s.value();
+        let ids: Vec<String> = v.field("chats").unwrap().list().iter().filter_map(|c| c.field("id").map(crate::auth::text)).collect();
+        assert!(ids.contains(&"capy".to_string()), "listed: {ids:?}");
+        assert_eq!(chat(&v, "capy").field("status").map(crate::auth::text).as_deref(), Some("working"));
+        // As the engine streams it: one row's change at a time, back and forth.
+        use crate::engine::lists::{Changes, Frame};
+        let mut list = working;
+        for (i, st) in ["idle", "working", "idle", "working"].iter().enumerate() {
+            let mut row = list[0].clone();
+            row["status"] = json!(st);
+            row["updatedAt"] = json!(iso(now - 1 + i as i64));
+            if *st == "idle" {
+                row["startedAt"] = Json::Null;
+                row["waiting"] = json!({ "since": iso(now - 1), "on": [{ "id": "a1", "kind": "agent", "label": "x" }] });
+            } else {
+                row["startedAt"] = json!(iso(now - 300));
+                row.as_object_mut().unwrap().remove("waiting");
+            }
+            list[0] = row.clone();
+            let changes = Changes { changed: vec![row], removed: vec![], reordered: false };
+            s.heard_list(Slot::Live, &Frame::for_tests(&list, Some(&changes), "chatId"));
+            let v = s.value();
+            let want = if *st == "idle" { "waiting" } else { "working" };
+            assert_eq!(chat(&v, "capy").field("status").map(crate::auth::text).as_deref(), Some(want), "step {i}");
+        }
+    }
+
+    /// A thread on another machine whose host writes no activity (an older
+    /// release): working, then its turn over, told as a change to its row
+    /// alone (`startedAt` null, the outcome completed). Its row says so at
+    /// once, every list the scripts read (the map's, the sidebar's).
+    #[test]
+    fn a_remote_thread_s_turn_ending_shows_at_once() {
+        use crate::engine::lists::{Changes, Frame};
+        let now = now_seconds();
+        let s = Sessions::default();
+        *s.here.borrow_mut() = Some("here".into());
+        let chats = json!([
+            { "id": "brain", "title": "Brain dump", "deviceId": "here", "createdAt": iso(now - 7200),
+              "lastMessageAt": iso(now - 30), "lastSeenAt": iso(now - 600) },
+            { "id": "th", "title": "Verify Unique Device Names", "deviceId": "remote", "createdAt": iso(now - 900),
+              "lastMessageAt": iso(now - 30), "lastSeenAt": iso(now - 600) },
+        ]);
+        s.heard_list(Slot::Chats, &Frame::for_tests(&chats, None, "id"));
+        let devices = json!([
+            { "id": "here", "name": "desk", "lastSeenAt": iso(now - 1) },
+            { "id": "remote", "name": "honeypot", "lastSeenAt": iso(now - 1) },
+        ]);
+        s.heard_list(Slot::Devices, &Frame::for_tests(&devices, None, "id"));
+        let working = json!([
+            { "chatId": "brain", "deviceId": "here", "status": "working", "startedAt": iso(now - 60), "updatedAt": iso(now - 2), "runningSubagents": 0 },
+            { "chatId": "th", "deviceId": "remote", "status": "working", "startedAt": iso(now - 60), "updatedAt": iso(now - 2), "runningSubagents": 0 },
+        ]);
+        s.heard_list(Slot::Live, &Frame::for_tests(&working, None, "chatId"));
+        let status = |v: &zgx_script::Value, id: &str| chat(v, id).field("status").map(crate::auth::text);
+        let v = s.value();
+        assert_eq!(status(&v, "th").as_deref(), Some("working"));
+        // Its turn ends: one row changes.
+        let done = |id: &str, dev: &str| json!({ "chatId": id, "deviceId": dev, "status": "idle", "startedAt": null, "updatedAt": iso(now - 1),
+            "lastTurnOutcome": { "status": "completed", "finishedAt": iso(now - 1) }, "lastCompletedTurn": "t1", "runningSubagents": 0 });
+        let after = json!([done("brain", "here"), done("th", "remote")]);
+        let changes = Changes { changed: vec![done("th", "remote"), done("brain", "here")], removed: vec![], reordered: false };
+        s.heard_list(Slot::Live, &Frame::for_tests(&after, Some(&changes), "chatId"));
+        let v = s.value();
+        assert_ne!(status(&v, "th").as_deref(), Some("working"));
+        assert_ne!(status(&v, "brain").as_deref(), Some("working"));
+    }
+
+    #[test]
+    fn a_live_chat_shows_its_activity_and_todo() {
+        let now = now_seconds();
+        let s = Sessions::default();
+        s.heard.set(true);
+        s.set_chats(json!([
+            { "id": "orc", "title": "Orchestrators", "deviceId": "d", "createdAt": iso(now - 7200) },
+            { "id": "th", "title": "Engine state", "parentChatId": "orc", "childKind": "crew", "deviceId": "d", "createdAt": iso(now - 5400) },
+            { "id": "idle", "title": "Idle", "deviceId": "d", "createdAt": iso(now - 600) },
+        ]));
+        let live = |label: &str| {
+            json!([
+                { "chatId": "orc", "deviceId": "d", "status": "working", "updatedAt": iso(now - 1),
+                  "activity": { "kind": "delegating", "label": "send_message", "since": iso(now - 20) } },
+                { "chatId": "th", "deviceId": "d", "status": "working", "updatedAt": iso(now - 1),
+                  "activity": { "kind": "testing", "label": label, "since": iso(now - 48) },
+                  "todo": { "done": 5, "total": 8, "current": "WatchOrchestration stream" } },
+                // Not working: its last activity isn't shown, its todo is.
+                { "chatId": "idle", "deviceId": "d", "status": "idle", "updatedAt": iso(now - 1),
+                  "activity": { "kind": "editing", "label": "Edit x.rs", "since": iso(now - 300) },
+                  "todo": { "done": 3, "total": 3 } },
+            ])
+        };
+        s.set_live(live("cargo test -p zeron-engine"));
+        s.publish();
+        let v = s.value();
+        let text = |v: Option<&zgx_script::Value>| v.map(crate::auth::text);
+        let none = |v: Option<&zgx_script::Value>| v.is_none_or(|v| matches!(v, zgx_script::Value::Nil));
+        let orc = chat(&v, "orc");
+        assert_eq!(text(orc.field("activity").and_then(|a| a.field("kind"))).as_deref(), Some("delegating"));
+        assert!(none(orc.field("todo")));
+        assert!(none(orc.field("parent")));
+        // The crew thread, under its orchestrator.
+        let th = v.field("children").unwrap().field("orc").unwrap().list()[0].clone();
+        assert_eq!(text(th.field("child_kind")).as_deref(), Some("crew"));
+        let activity = th.field("activity").unwrap();
+        assert_eq!(text(activity.field("kind")).as_deref(), Some("testing"));
+        assert_eq!(text(activity.field("label")).as_deref(), Some("cargo test -p zeron-engine"));
+        assert_eq!(activity.field("since").and_then(|n| n.as_f64()), Some((now - 48) as f64));
+        let todo = th.field("todo").unwrap();
+        assert_eq!(todo.field("done").and_then(|n| n.as_f64()), Some(5.));
+        assert_eq!(todo.field("total").and_then(|n| n.as_f64()), Some(8.));
+        assert_eq!(text(todo.field("current")).as_deref(), Some("WatchOrchestration stream"));
+        let idle = chat(&v, "idle");
+        assert!(none(idle.field("activity")));
+        assert_eq!(idle.field("todo").and_then(|t| t.field("total")).and_then(|n| n.as_f64()), Some(3.));
+        assert!(none(idle.field("todo").unwrap().field("current")));
+        // Its activity moves on, nothing else does: published, its row new.
+        let before = s.published.get();
+        s.heard(Slot::Live, live("cargo test -p zeron-engine --lib orchestration"));
+        assert_eq!(s.published.get(), before + 1);
+        let v = s.value();
+        let th = v.field("children").unwrap().field("orc").unwrap().list()[0].clone();
+        assert_eq!(
+            text(th.field("activity").unwrap().field("label")).as_deref(),
+            Some("cargo test -p zeron-engine --lib orchestration")
+        );
     }
 
     #[test]
@@ -3144,5 +3665,19 @@ mod bench {
             let cm = t.elapsed().as_nanos() as f64 / k as f64;
             println!("n={n:5}  heartbeat {:8.1} µs   chat row moves {:8.1} µs", hb / 1000., cm / 1000.);
         }
+    }
+}
+
+#[cfg(test)]
+mod started_by_tests {
+    use super::*;
+
+    #[test]
+    fn who_started_a_chat_reads_snake_case() {
+        let v = started_by_value(&json!({ "chatId": "orc-brain", "dumpId": "dp", "routeId": "rt" }));
+        assert_eq!(v.field("chat_id").map(crate::auth::text).as_deref(), Some("orc-brain"));
+        assert_eq!(v.field("route_id").map(crate::auth::text).as_deref(), Some("rt"));
+        assert!(matches!(started_by_value(&json!({ "chatId": "x" })).field("dump_id"), None | Some(Value::Nil)));
+        assert_eq!(started_by_value(&Json::Null), Value::Nil);
     }
 }
