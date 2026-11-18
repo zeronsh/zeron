@@ -146,7 +146,7 @@ async fn an_unverified_update_is_offered_at_once_marked_and_always_asks() {
     let checked = d.check().await;
     let update = &checked["updates"][0];
     assert_eq!((update["version"].as_str(), update["verified"].as_bool(), update["installed_verified"].as_bool()), (Some("1.2.0"), Some(false), Some(true)), "{checked}");
-    assert_eq!(update["verified_alternative"], json!({ "version": "1.1.0" }));
+    assert_eq!(update["verified_alternative"], json!({ "version": "1.1.0", "added": [], "removed": [], "verified_at": 1 }));
     assert!(update.get("new_key").is_none(), "signed by the key installed");
     // As one of many ("update all"), it's never taken.
     let refused = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus", "verified_only": true })).await.unwrap_err();
@@ -177,6 +177,8 @@ async fn the_device_stages_the_verified_update_when_told_to() {
     // The default is the newest; "verified" stages 1.1.0.
     let set = d.call(methods::SET_PLUGIN_UPDATES, json!({ "id": "focus", "prefer": "verified" })).await.unwrap();
     assert_eq!((set["prefer"].as_str(), set["device"].as_str()), (Some("verified"), Some("newest")));
+    let list = d.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
+    assert_eq!(list["store_updates"], json!({ "device": "newest", "plugins": { "focus": "verified" } }), "the list says it");
     let checked = d.check().await;
     assert_eq!((checked["updates"][0]["version"].as_str(), checked["updates"][0]["verified"].as_bool()), (Some("1.1.0"), Some(true)), "{checked}");
     // A verified update keeps today's rule: nothing new asked, it stays on.

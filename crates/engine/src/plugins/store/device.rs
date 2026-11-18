@@ -1149,8 +1149,15 @@ impl Plugins {
             new_owner,
             notes: notes(&offer.notes, listing::MAX_NOTES_BYTES),
             store_verified: Some(offer.verified),
+            store_verified_at: offer.verified.then_some(offer.verified_at).flatten(),
             installed_verified: Some(c.verified),
-            verified_alternative: beside.map(|b| b.version.clone()),
+            verified_alternative: beside.filter(|b| b.verified).map(|b| install::Alternative {
+                version: plain(&b.version, 64),
+                added: b.added.iter().map(|p| plain(p, 64)).collect(),
+                removed: b.removed.iter().map(|p| plain(p, 64)).collect(),
+                notes: notes(&b.notes, listing::MAX_NOTES_BYTES),
+                verified_at: b.verified_at,
+            }),
         };
         let keep = found.refused.is_none().then_some(&package);
         install::keep_found(&plugins_dir, &c.id, &found, keep)?;

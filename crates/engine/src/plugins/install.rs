@@ -966,6 +966,9 @@ pub struct Found {
     /// was found (for its sheet; taking it asks the store's record again).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_verified: Option<bool>,
+    /// When the store verified it (ms), as it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_verified_at: Option<i64>,
     /// From the store: the version installed was verified (the sheet says
     /// "the version you have was verified; this one is not").
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -973,7 +976,24 @@ pub struct Found {
     /// From the store, when this update isn't verified: the newest verified
     /// version newer than the one installed, offered beside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verified_alternative: Option<String>,
+    pub verified_alternative: Option<Alternative>,
+}
+
+/// The newest verified version, offered beside an unverified update: what
+/// its sheet says of it (installed by `InstallPlugin {store, version}`,
+/// whose own record then says whether it's verified).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Alternative {
+    pub version: String,
+    /// The permissions it adds and drops against the version installed.
+    #[serde(default)]
+    pub added: Vec<String>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<i64>,
 }
 
 impl Found {
@@ -995,11 +1015,14 @@ impl Found {
         if let Some(verified) = self.store_verified {
             value["verified"] = json!(verified);
         }
+        if let Some(at) = self.store_verified_at {
+            value["verified_at"] = json!(at);
+        }
         if let Some(verified) = self.installed_verified {
             value["installed_verified"] = json!(verified);
         }
-        if let Some(version) = &self.verified_alternative {
-            value["verified_alternative"] = json!({ "version": version });
+        if let Some(alternative) = &self.verified_alternative {
+            value["verified_alternative"] = json!(alternative);
         }
         if !self.notes.is_empty() {
             value["notes"] = json!(self.notes);
@@ -1094,6 +1117,7 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, sam
         new_owner: false,
         notes: String::new(),
         store_verified: None,
+        store_verified_at: None,
         installed_verified: None,
         verified_alternative: None,
     })

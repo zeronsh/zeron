@@ -530,8 +530,10 @@ pub mod methods {
 
     // ── Plugins (the plugins contract; local IPC only but PluginDeliver) ──
     /// `{}` → `{dirs: {plugins, templates}, plugins: PluginItem[],
-    /// key_notices, store_notices}`, by name (`store_notices`: see
-    /// [`ACK_STORE_NOTICES`]).
+    /// key_notices, store_notices, store_updates}`, by name
+    /// (`store_notices`: see [`ACK_STORE_NOTICES`]; `store_updates`:
+    /// `{device: "newest"|"verified", plugins: {id: …}}`, as
+    /// [`SET_PLUGIN_UPDATES`] set them).
     pub const LIST_PLUGINS: &str = "ListPlugins";
     /// `{}` → stream of `ListPlugins`' reply: the current list at once, then
     /// each change.

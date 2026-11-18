@@ -1347,7 +1347,17 @@ impl Plugins {
     }
 
     fn list_value(&self) -> serde_json::Value {
-        let store_notices: Vec<serde_json::Value> = lock(&self.inner.state).publish_notices.iter().map(store::notices::PublishNotice::shown).collect();
+        let (store_notices, store_updates) = {
+            let state = lock(&self.inner.state);
+            let notices: Vec<serde_json::Value> = state.publish_notices.iter().map(store::notices::PublishNotice::shown).collect();
+            // Which store updates this device stages: for every plugin, and
+            // each one set otherwise.
+            let updates = serde_json::json!({
+                "device": state.store_updates.unwrap_or(status::DEFAULT_UPDATES).word(),
+                "plugins": state.store_updates_for.iter().map(|(id, prefer)| (id.clone(), serde_json::json!(prefer.word()))).collect::<serde_json::Map<_, _>>(),
+            });
+            (notices, updates)
+        };
         let entries = lock(&self.inner.entries);
         let items: Vec<&scan::PluginItem> = entries.iter().map(|e| &e.item).collect();
         let key_notices = lock(&self.inner.key_notices).clone();
@@ -1359,6 +1369,7 @@ impl Plugins {
             "plugins": items,
             "key_notices": key_notices,
             "store_notices": store_notices,
+            "store_updates": store_updates,
         })
     }
 
