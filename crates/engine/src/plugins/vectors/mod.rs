@@ -713,19 +713,119 @@ fn listing_cases() -> Value {
         m[field] = json!(value);
         cases.push((name.into(), m, files.clone()));
     }
-    // Look-alike letters (a Cyrillic е or о) claim it too, but only the
-    // edge refuses them: it reads the name and description through its
-    // confusables skeleton first. A device's check passes them, so these
-    // cases carry `edge_problems`, the edge's answer, beside `problems`,
-    // the device's.
-    let mut edge_only: BTreeMap<String, &str> = BTreeMap::new();
+    // Spelled so it reads as the mark at a glance (the edge's attack cases,
+    // each found by the identity lane): look-alike letters from UTS #39,
+    // small capitals, digits, i and l for each other, cl for d, letters
+    // spaced or dotted apart, characters drawn as nothing between letters.
     for (name, field, value) in [
-        ("the mark: a name saying verified with a Cyrillic e (edge only)", "name", "V\u{435}rified Focus"),
-        ("the mark: a description saying official with a Cyrillic o (edge only)", "description", "The \u{43e}fficial board."),
+        ("the mark: Cyrillic letters", "name", "V\u{435}r\u{456}f\u{456}\u{435}d Focus"),
+        ("the mark: Cyrillic capitals", "name", "V\u{415}RIFI\u{415}D"),
+        ("the mark: Cyrillic letters in official", "description", "The \u{43e}ffi\u{441}i\u{430}l board."),
+        ("the mark: Cyrillic palochka for l", "description", "\u{43e}fficia\u{4cf} tools."),
+        ("the mark: Cyrillic izhitsa for v", "name", "\u{475}erified"),
+        ("the mark: Greek nu for v", "name", "\u{3bd}erified"),
+        ("the mark: Greek letters", "description", "v\u{3b5}r\u{3b9}f\u{3b9}\u{3b5}d builds."),
+        ("the mark: Greek capitals", "name", "\u{39f}FF\u{399}CIAL"),
+        ("the mark: small capitals", "name", "\u{1d20}\u{1d07}\u{280}\u{26a}\u{a730}\u{26a}\u{1d07}\u{1d05} Focus"),
+        ("the mark: Lisu capitals for verified", "name", "\u{a4e6}\u{a4f0}\u{a4e3}\u{a4f2}\u{a4dd}\u{a4f2}\u{a4f0}\u{a4d3} Focus"),
+        ("the mark: Lisu capitals for official", "name", "\u{a4f3}\u{a4dd}\u{a4dd}\u{a4f2}\u{a4da}\u{a4f2}\u{a4ee}\u{a4e1} Git"),
+        ("the mark: a small capital I", "name", "Ver\u{26a}f\u{26a}ed"),
+        ("the mark: digits for I", "name", "VER1F1ED"),
+        ("the mark: a digit 0 for O", "name", "0FFICIAL tools"),
+        ("the mark: a digit 3 for e", "name", "v3rified"),
+        ("the mark: a digit 1 for l", "name", "officia1"),
+        ("the mark: a square root as a tick", "name", "Focus \u{221a}"),
+        ("the mark: the Aegean check mark", "name", "Focus \u{10102}"),
+        ("the mark: lowercase l for I in capitals", "name", "VERlFlED Focus"),
+        ("the mark: lowercase l for I in OFFICIAL", "name", "OFFlClAL Git"),
+        ("the mark: capital I for l in lowercase", "description", "The officiaI client."),
+        ("the mark: cl for d", "name", "verifiecl tools"),
+        ("the mark: letter-spaced", "name", "V E R I F I E D"),
+        ("the mark: dotted capitals", "name", "V.E.R.I.F.I.E.D. Focus"),
+        ("the mark: dot and space", "name", "V. E. R. I. F. I. E. D. Focus"),
+        ("the mark: middle dots", "name", "V\u{b7}E\u{b7}R\u{b7}I\u{b7}F\u{b7}I\u{b7}E\u{b7}D"),
+        ("the mark: en dashes", "name", "V\u{2013}E\u{2013}R\u{2013}I\u{2013}F\u{2013}I\u{2013}E\u{2013}D"),
+        ("the mark: two spaces", "name", "V  E  R  I  F  I  E  D"),
+        ("the mark: no-break spaces", "name", "V\u{a0}E\u{a0}R\u{a0}I\u{a0}F\u{a0}I\u{a0}E\u{a0}D"),
+        ("the mark: ideographic spaces", "name", "V\u{3000}E\u{3000}R\u{3000}I\u{3000}F\u{3000}I\u{3000}E\u{3000}D"),
+        ("the mark: spaced look-alikes", "name", "V E R \u{406} F \u{406} E D"),
+        ("the mark: a word joiner between letters", "description", "Veri\u{2060}fied boards."),
+        ("the mark: an enclosing keycap mark between letters", "name", "Veri\u{20e3}fied"),
+        ("the mark: an enclosing circle between letters", "description", "Veri\u{20dd}fied boards."),
+        ("the mark: negative circled capitals", "name", "\u{1f165}\u{1f154}\u{1f161}\u{1f158}\u{1f155}\u{1f158}\u{1f154}\u{1f153} Focus"),
+        ("the mark: negative squared capitals", "name", "\u{1f185}\u{1f174}\u{1f181}\u{1f178}\u{1f175}\u{1f178}\u{1f174}\u{1f173} Focus"),
+        ("the mark: spaced regional indicators", "name", "\u{1f1fb} \u{1f1ea} \u{1f1f7} \u{1f1ee} \u{1f1eb} \u{1f1ee} \u{1f1ea} \u{1f1e9}"),
     ] {
         let mut m = base.clone();
         m[field] = json!(value);
-        edge_only.insert(name.to_owned(), field);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // Honest words, in those alphabets and mixed: nothing claimed.
+    for (name, value) in [
+        ("the mark: unverified with a Cyrillic e is fine", "Unv\u{435}rified Links"),
+        ("the mark: officer with a Greek o is fine", "For every \u{3bf}fficer"),
+        ("the mark: officially with a Cyrillic i is fine", "Off\u{456}cially the best"),
+        ("the mark: Russian for official is fine", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}"),
+        ("the mark: Greek for official is fine", "\u{395}\u{3c0}\u{3af}\u{3c3}\u{3b7}\u{3bc}\u{3b7} \u{3b5}\u{3c6}\u{3b1}\u{3c1}\u{3bc}\u{3bf}\u{3b3}\u{3ae}"),
+        ("the mark: verification is fine", "verification"),
+        ("the mark: officialdom is fine", "officialdom"),
+        ("the mark: a version and verifier are fine", "v1.0 verifier"),
+        ("the mark: 100 percent is fine", "100% local"),
+        ("the mark: verifiedly 3D is fine", "Verifiedly 3D"),
+        ("the mark: A B testing is fine", "A B testing"),
+        ("the mark: U.S. weather is fine", "U.S. weather"),
+        ("the mark: V I M keys are fine", "V I M keys"),
+        ("the mark: initials are fine", "J. R. R. Tolkien notes"),
+        ("the mark: R.E.M. with middle dots is fine", "R\u{b7}E\u{b7}M songs"),
+        ("the mark: oil fields are fine", "Oil fields"),
+        ("the mark: civil filed is fine", "Civil filed"),
+        ("the mark: an emoji with its variation selector is fine", "Stars \u{2b50}\u{fe0f}"),
+        ("the mark: a keycap is fine", "Keys 1\u{fe0f}\u{20e3}"),
+        ("the mark: a keycap in a name is fine", "Top 1\u{fe0f}\u{20e3} timer"),
+    ] {
+        let mut m = base.clone();
+        m["name"] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // Drawn as nothing: refused in a name or description at all (only an
+    // emoji's own U+FE0F, right after it, is seen).
+    for (name, field, value) in [
+        ("unseen: U+FE0F after a letter", "name", "Focus\u{fe0f}"),
+        ("unseen: U+FE0F twice after an emoji", "name", "Stars \u{2b50}\u{fe0f}\u{fe0f}"),
+        ("unseen: text-style selector U+FE0E", "name", "Stars \u{2b50}\u{fe0e}"),
+        ("unseen: variation selector 1", "description", "Focus\u{fe00} boards."),
+        ("unseen: variation selector 17", "name", "Focus\u{e0100}"),
+        ("unseen: Hangul filler", "name", "Focus\u{3164}Board"),
+        ("unseen: Hangul choseong filler", "description", "Focus\u{115f}Board."),
+        ("unseen: halfwidth Hangul filler", "name", "Focus\u{ffa0}Board"),
+        ("unseen: U+FE0F at the start", "name", "\u{fe0f}Focus"),
+        ("unseen: U+FE0E after an emoji in a description", "description", "Focus \u{2b50}\u{fe0e}"),
+        ("unseen: a zero-width joiner sequence", "name", "\u{1f469}\u{200d}\u{1f4bb} Dev"),
+        ("unseen: a tag sequence flag", "name", "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f} Focus"),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    let mut m = base.clone();
+    m["keywords"] = json!(["timer\u{fe0f}"]);
+    cases.push(("unseen: a variation selector in a keyword".into(), m, files.clone()));
+    // Saying it's Zeron's own: a warning on a device (it can't know the
+    // publisher); the edge refuses it, claims_zeron, unless the publisher is
+    // Zeron's (maintainer).
+    for (name, field, value) in [
+        ("claims_zeron: by Zeron", "name", "Notes, by Zeron"),
+        ("claims_zeron: from ZERON", "description", "From ZERON: the board."),
+        ("claims_zeron: the Zeron-team", "description", "Made by the Zeron-team."),
+        ("claims_zeron: Zeron's own with a curly apostrophe", "name", "Zeron\u{2019}s own notes"),
+        ("claims_zeron: Zeron approved", "name", "A Zeron approved board"),
+        ("claims_zeron: Zeron, recommended, with a dash", "description", "zeron\u{2014}recommended."),
+        ("claims_zeron: for Zeron is fine", "name", "Notes for Zeron"),
+        ("claims_zeron: works with Zeron is fine", "description", "Works with Zeron."),
+        ("claims_zeron: Zeronaut is fine", "name", "by zeronaut"),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
         cases.push((name.into(), m, files.clone()));
     }
     cases.push(("a binary file (a warning)".into(), base.clone(), with_file("bin/tool.wasm", b"\0asm\x01\0\0\0".to_vec())));
@@ -768,14 +868,10 @@ fn listing_cases() -> Value {
             .map(|(name, manifest, files)| {
                 let (problems, warnings) = listing::check(&Manifest::from_value(manifest.clone()).unwrap(), &files);
                 let said = |list: &[listing::Problem]| -> Value { list.iter().map(|p| json!({ "rule": p.rule, "field": p.field, "path": p.path })).collect() };
-                let mut case = json!({
+                json!({
                     "name": name, "manifest": compact(&text(&manifest)), "files_b64": files_b64(&files),
                     "problems": said(&problems), "warnings": said(&warnings), "listing": listing::Listing::of(&manifest),
-                });
-                if let Some(field) = edge_only.get(&name) {
-                    case["edge_problems"] = json!([{ "rule": listing::rule::BAD_LISTING, "field": field, "path": null }]);
-                }
-                case
+                })
             })
             .collect(),
     )
@@ -942,9 +1038,19 @@ fn data() -> Value {
         },
         "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version. A publish must be later than every version the plugin has had, in any state, pre-releases included.",
         "mark_claims": {
-            "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). The text is read as Unicode NFKC, lowercased (full Unicode lowercase, as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General Category Mn) dropped; it claims the mark when it has any of glyphs anywhere, or any of words as a whole word: an occurrence with no ASCII letter or digit right before or after it. The listing cases named 'the mark' hold both sides to it. The edge also reads the name and description through its confusables skeleton before the word check, which a device does not: the cases marked '(edge only)' carry edge_problems, the edge's answer, where problems is the device's.",
+            "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the words' letters, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs) and the digit 3 for e. The listing cases named 'the mark:' hold both sides to it.",
             "words": listing::MARK_WORDS,
             "glyphs": listing::MARK_GLYPHS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            "lookalikes": super::mark::LOOKALIKES.iter().map(|(letter, chars)| (letter.to_string(), json!(chars.chars().map(|c| c.to_string()).collect::<Vec<_>>()))).collect::<serde_json::Map<_, _>>(),
+            "interchangeable": super::mark::INTERCHANGEABLE.iter().map(|(a, b)| json!([a.to_string(), b.to_string()])).collect::<Vec<_>>(),
+            "pairs": super::mark::PAIRS.iter().map(|(letter, pair)| (letter.to_string(), json!([pair]))).collect::<serde_json::Map<_, _>>(),
+            "max_spacing": super::mark::MAX_SPACING,
+            "source": { "name": super::mark::SOURCE, "version": super::mark::SOURCE_VERSION, "sha256": super::mark::SOURCE_SHA256 },
+        },
+        "unseen": "A name or description may hold no character drawn as nothing (bad_listing): a control or format character (General_Category Cc, Cf), any other Default_Ignorable_Code_Point (the Hangul fillers among them), any Variation_Selector but U+FE0F, and U+FE0F only directly after a character with the Emoji property. Keywords are ASCII. The listing cases named 'unseen:' hold both sides to it.",
+        "claims_zeron": {
+            "about": "A name or description may not say the plugin is Zeron's own unless its publisher is (the maintainer badge). Folded as mark_claims folds (ignorables gone), U+2019 and U+02BC read as an apostrophe, each run of separators (White_Space, U+FEFF, General_Category P*) but the apostrophe read as one space, it says any of phrases whole (no ASCII letter or digit right before or after it). The edge refuses a publish 400 claims_zeron unless the publisher carries maintainer; a device, which can't know the publisher, gives the warning claims_zeron on that field. The listing cases named 'claims_zeron:' hold both sides to it (warnings).",
+            "phrases": super::mark::ZERON_PHRASES,
         },
         "categories": CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
         "builtin_ids": listing::BUILTIN_IDS,

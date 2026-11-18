@@ -741,7 +741,7 @@ What the store shows is what's there:
 
 ### Checking it
 
-**`check_plugin { id }`** (MCP), or **`zeron plugin check <folder or id>`** on the command line, lists every problem before anything is sent. Each problem has a stable `rule`: `missing_readme`, `missing_listing` (with the `field` that's missing), `bad_listing` (with the `field` that's wrong; a name or description may not claim Zeron's mark: the words "verified" or "official", or a check mark; the store also refuses look-alike spellings the check doesn't catch), `not_semver`, `id_reserved`, `bad_package` (the manifest is one Zeron won't run) and `too_large`. Fix them and check again. `zeron plugin check` needs no Zeron running, so a pull request's CI can run it.
+**`check_plugin { id }`** (MCP), or **`zeron plugin check <folder or id>`** on the command line, lists every problem before anything is sent. Each problem has a stable `rule`: `missing_readme`, `missing_listing` (with the `field` that's missing), `bad_listing` (with the `field` that's wrong; a name or description may not claim Zeron's mark: the words "verified" or "official" in any spelling that reads as them (look-alike letters, letters spaced apart), or a check mark; nor hold a character drawn as nothing, but an emoji's own variation selector), `not_semver`, `id_reserved`, `bad_package` (the manifest is one Zeron won't run) and `too_large`. A name or description that says the plugin is Zeron's own ("by Zeron", "Zeron team", "Zeron approved") is a warning, `claims_zeron`: the store refuses it from anyone but Zeron. Fix them and check again. `zeron plugin check` needs no Zeron running, so a pull request's CI can run it.
 
 ### Versions
 

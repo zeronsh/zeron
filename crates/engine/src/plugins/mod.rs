@@ -24,6 +24,7 @@ pub mod keys;
 mod lifecycle;
 pub mod listing;
 pub mod manifest;
+pub mod mark;
 pub mod package;
 pub mod reviews;
 pub mod scaffold;

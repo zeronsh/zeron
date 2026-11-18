@@ -8981,6 +8981,7 @@ dependencies = [
  "futures",
  "gethostname",
  "icu_normalizer",
+ "icu_properties",
  "ignore",
  "image",
  "libc",

@@ -112,6 +112,9 @@ pub mod rule {
     pub const BINARY_FILE: &str = "binary_file";
     /// `CHANGELOG.md` has no section for this version.
     pub const NO_NOTES: &str = "no_notes";
+    /// A name or description says the plugin is Zeron's own (a warning
+    /// here: the store refuses it unless the publisher is Zeron).
+    pub const CLAIMS_ZERON: &str = "claims_zeron";
 }
 
 /// One thing in the way of publishing (or, as a warning, worth knowing).
@@ -253,54 +256,16 @@ pub fn store_link(url: &str) -> Option<String> {
     plain.then(|| parsed.to_string())
 }
 
-/// Words a listing's name or description may not use: only the store
-/// marks a version verified (amendment 45). Matched as whole words of
-/// [`mark_text`].
-pub const MARK_WORDS: &[&str] = &["verified", "official"];
+/// What a listing's name or description may not say: the store's mark,
+/// or that it's Zeron's own (`mark.rs`).
+pub use super::mark::{MARK_GLYPHS, MARK_WORDS, claims_zeron, mark_claim, mark_text};
 
-/// Check marks a listing's name or description may not have, anywhere:
-/// ✓ ✔ ☑ ✅ 🗸 🗹.
-pub const MARK_GLYPHS: &[char] = &['\u{2713}', '\u{2714}', '\u{2611}', '\u{2705}', '\u{1F5F8}', '\u{1F5F9}'];
-
-/// `text` as the mark rule reads it: Unicode NFKC (so 𝐯𝐞𝐫𝐢𝐟𝐢𝐞𝐝 and
-/// ｖｅｒｉｆｉｅｄ are "verified"), lowercased, then NFKD without its
-/// nonspacing marks (so "vérified" and "VERİFİED", whose lowercase keeps a
-/// dot above, are too).
-pub fn mark_text(text: &str) -> String {
-    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
-    let lower = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc().normalize(text).to_lowercase();
-    icu_normalizer::DecomposingNormalizerBorrowed::new_nfkd()
-        .normalize(&lower)
-        .chars()
-        .filter(|c| c.general_category() != GeneralCategory::NonspacingMark)
-        .collect()
-}
-
-/// What in `text` claims the store's mark, if anything does: one of
-/// [`MARK_GLYPHS`], or one of [`MARK_WORDS`] in [`mark_text`] as a whole
-/// word (not next to an ASCII letter or digit: "unofficial" and
-/// "verifiedly" don't claim it; "Verified!" and "verified_tools" do).
-pub fn mark_claim(text: &str) -> Option<String> {
-    let folded = mark_text(text);
-    if let Some(glyph) = folded.chars().find(|c| MARK_GLYPHS.contains(c)) {
-        return Some(glyph.to_string());
-    }
-    let word_char = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
-    MARK_WORDS
-        .iter()
-        .find(|word| {
-            folded.match_indices(**word).any(|(at, _)| {
-                !word_char(folded[..at].chars().next_back()) && !word_char(folded[at + word.len()..].chars().next())
-            })
-        })
-        .map(|word| (*word).to_owned())
-}
-
-/// Whether `text` has a control or format character (Unicode Cc or Cf:
-/// direction overrides, invisible joiners), which what a listing shows may
-/// not (amendment 31).
+/// Whether `text` has a character drawn as nothing, which what a listing
+/// shows may not (amendment 31): a control or format character, any other
+/// default-ignorable one, a variation selector but an emoji's own
+/// (`mark::unseen`).
 fn unseen(text: &str) -> bool {
-    text.chars().any(unseen_char)
+    super::mark::unseen(text)
 }
 
 /// Whether `c` is a control or format character (Unicode Cc or Cf): a
@@ -536,6 +501,12 @@ pub fn check(
             Some("name"),
             format!("Its name says \"{claim}\": only the store marks a plugin verified"),
         ));
+    } else if let Some(claim) = claims_zeron(&manifest.name) {
+        warnings.push(Problem::new(
+            CLAIMS_ZERON,
+            Some("name"),
+            format!("Its name says \"{claim}\": only Zeron's own plugins may, and the store refuses it from anyone else"),
+        ));
     }
     if !manifest.entry.is_empty() && !files.contains_key(&manifest.entry) {
         problems.push(Problem::new(
@@ -592,6 +563,12 @@ pub fn check(
             BAD_LISTING,
             Some("description"),
             format!("Its description says \"{claim}\": only the store marks a plugin verified"),
+        ));
+    } else if let Some(claim) = claims_zeron(description) {
+        warnings.push(Problem::new(
+            CLAIMS_ZERON,
+            Some("description"),
+            format!("Its description says \"{claim}\": only Zeron's own plugins may, and the store refuses it from anyone else"),
         ));
     }
     match raw.get("icon") {

@@ -61,6 +61,7 @@ ignore.workspace = true
 # shows. Already in the tree (reqwest's url, its idna's normalizer).
 url = "2"
 icu_normalizer = "2"
+icu_properties = "2"
 unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 fff-search.workspace = true
 
