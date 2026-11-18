@@ -2885,21 +2885,26 @@ fn git_painted(app: &mut TestApp, light: bool, at: &[(f32, f32)]) -> Vec<String>
 }
 
 /// A person who never changed a preference sees Zeron's Git plugin as it
-/// always drew: the diff's panel and the commit box in their frosted
-/// fills, light and dark, as before the design system lent to a plugin
-/// followed the person's preferences (c58f65e8a, drawn the same way).
+/// always drew: the diff's panel and the commit box in the fills main
+/// draws them in at the same commit, light and dark, whatever the design
+/// system lent to a plugin does with a preference the person changed.
+///
+/// The values are main's at 774dd72e6, drawn by this test's harness on
+/// main itself (on a Mac). Light's moved from c58f65e8a's (#e5e5e7,
+/// #f4f4f5) with main's one-colour light theme (#1522: light's window
+/// #eeeef0 → #f6f6f7, which the frosted fills sit over); dark's didn't.
+/// When main changes them again, draw them again there.
 #[test]
 fn git_draws_as_it_always_did_for_a_person_who_changed_no_preference() {
     // The diff's panel (beside its lines), the commit box (at its foot).
     let at = [(700., 500.), (1000., 700.)];
-    for (light, was) in [(true, ["#e5e5e7", "#f4f4f5"]), (false, ["#171719", "#1b1b1d"])] {
+    for (light, was) in [(true, ["#ededed", "#f9f9fa"]), (false, ["#181819", "#1b1b1d"])] {
         let (mut app, _, _) = git_tab(git_world(), None);
         app.host.set_state("git_fixture.light", zgx_script::Value::Bool(light)).unwrap();
         assert!(app.wait_until(|app| app.find("role:checkbox \"src/graph.rs\"").is_some()), "{}", app.tree());
         assert!(app.wait_until(|app| app.tree().contains("fn rows(n: usize) {}")), "{}", app.tree());
-        // (Within 2 a channel: GPUs round blending apart, Metal here and
-        // lavapipe where the base was drawn. Opaque fills, what the person's
-        // Opaque would bring, stand 10 and more away.)
+        // (Within 2 a channel: GPUs round blending apart, a step between
+        // Metal and Linux's lavapipe.)
         let now = git_painted(&mut app, light, &at);
         let near = |a: &str, b: &str| (0..3).all(|n| {
             let ch = |s: &str| i32::from_str_radix(&s[1 + n * 2..3 + n * 2], 16).unwrap();
