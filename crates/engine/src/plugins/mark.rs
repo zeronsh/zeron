@@ -216,7 +216,7 @@ pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
         "editor", "previewer", "viewer", "formatter", "linter", "bridge", "connector", "helper", "helpers", "wrapper", "bot", "widget", "panel",
     ]),
     ("es", false, &["complemento", "complementos", "extensi\u{f3}n", "extensiones", "cliente", "aplicaci\u{f3}n", "herramienta", "herramientas", "tema", "temas", "paquete", "versi\u{f3}n", "integraci\u{f3}n"]),
-    ("fr", false, &["module", "modules", "outil", "outils", "th\u{e8}me", "th\u{e8}mes", "paquet", "int\u{e9}gration", "application"]),
+    ("fr", false, &["module", "modules", "outil", "outils", "th\u{e8}me", "th\u{e8}mes", "paquet", "int\u{e9}gration", "application", "panneau"]),
     ("de", false, &["erweiterung", "erweiterungen", "anwendung", "werkzeug", "paket", "pakete"]),
     ("it", false, &["estensione", "estensioni", "applicazione", "strumento", "strumenti", "pacchetto", "versione", "integrazione"]),
     ("pt", false, &["extens\u{e3}o", "extens\u{f5}es", "aplicativo", "ferramenta", "ferramentas", "pacote", "vers\u{e3}o", "integra\u{e7}\u{e3}o"]),
@@ -225,10 +225,12 @@ pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
         "\u{43f}\u{440}\u{438}\u{43b}\u{43e}\u{436}\u{435}\u{43d}\u{438}*", "\u{438}\u{43d}\u{441}\u{442}\u{440}\u{443}\u{43c}\u{435}\u{43d}\u{442}*", "\u{43f}\u{430}\u{43a}\u{435}\u{442}*",
         "\u{432}\u{435}\u{440}\u{441}\u{438}*", "\u{438}\u{43d}\u{442}\u{435}\u{433}\u{440}\u{430}\u{446}\u{438}*",
         "\u{442}\u{435}\u{43c}\u{430}", "\u{442}\u{435}\u{43c}\u{44b}", "\u{442}\u{435}\u{43c}\u{435}", "\u{442}\u{435}\u{43c}\u{443}", "\u{442}\u{435}\u{43c}\u{43e}\u{439}",
+        // Panel (the English list's "panel"), any case.
+        "\u{43f}\u{430}\u{43d}\u{435}\u{43b}*",
     ]),
-    ("zh", true, &["\u{51fa}\u{54c1}", "\u{4ea7}\u{54c1}", "\u{7522}\u{54c1}", "\u{63d2}\u{4ef6}", "\u{6269}\u{5c55}", "\u{64f4}\u{5c55}", "\u{5ba2}\u{6237}\u{7aef}", "\u{5ba2}\u{6236}\u{7aef}", "\u{5e94}\u{7528}", "\u{61c9}\u{7528}", "\u{5de5}\u{5177}", "\u{4e3b}\u{9898}", "\u{4e3b}\u{984c}", "\u{7248}\u{672c}", "\u{96c6}\u{6210}"]),
-    ("ja", true, &["\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{62e1}\u{5f35}", "\u{30a2}\u{30d7}\u{30ea}", "\u{30af}\u{30e9}\u{30a4}\u{30a2}\u{30f3}\u{30c8}", "\u{30c4}\u{30fc}\u{30eb}", "\u{30c6}\u{30fc}\u{30de}", "\u{30d1}\u{30c3}\u{30b1}\u{30fc}\u{30b8}", "\u{30d0}\u{30fc}\u{30b8}\u{30e7}\u{30f3}", "\u{9023}\u{643a}"]),
-    ("ko", true, &["\u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{d655}\u{c7a5}", "\u{c571}", "\u{d074}\u{b77c}\u{c774}\u{c5b8}\u{d2b8}", "\u{b3c4}\u{ad6c}", "\u{d14c}\u{b9c8}", "\u{d328}\u{d0a4}\u{c9c0}", "\u{bc84}\u{c804}", "\u{d1b5}\u{d569}"]),
+    ("zh", true, &["\u{51fa}\u{54c1}", "\u{4ea7}\u{54c1}", "\u{7522}\u{54c1}", "\u{63d2}\u{4ef6}", "\u{6269}\u{5c55}", "\u{64f4}\u{5c55}", "\u{5ba2}\u{6237}\u{7aef}", "\u{5ba2}\u{6236}\u{7aef}", "\u{5e94}\u{7528}", "\u{61c9}\u{7528}", "\u{5de5}\u{5177}", "\u{4e3b}\u{9898}", "\u{4e3b}\u{984c}", "\u{7248}\u{672c}", "\u{96c6}\u{6210}", "\u{9762}\u{677f}"]),
+    ("ja", true, &["\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{62e1}\u{5f35}", "\u{30a2}\u{30d7}\u{30ea}", "\u{30af}\u{30e9}\u{30a4}\u{30a2}\u{30f3}\u{30c8}", "\u{30c4}\u{30fc}\u{30eb}", "\u{30c6}\u{30fc}\u{30de}", "\u{30d1}\u{30c3}\u{30b1}\u{30fc}\u{30b8}", "\u{30d0}\u{30fc}\u{30b8}\u{30e7}\u{30f3}", "\u{9023}\u{643a}", "\u{30d1}\u{30cd}\u{30eb}"]),
+    ("ko", true, &["\u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{d655}\u{c7a5}", "\u{c571}", "\u{d074}\u{b77c}\u{c774}\u{c5b8}\u{d2b8}", "\u{b3c4}\u{ad6c}", "\u{d14c}\u{b9c8}", "\u{d328}\u{d0a4}\u{c9c0}", "\u{bc84}\u{c804}", "\u{d1b5}\u{d569}", "\u{d328}\u{b110}"]),
 ];
 
 /// Words that say a mark word of the subject when it follows them directly
