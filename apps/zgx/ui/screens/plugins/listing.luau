@@ -59,6 +59,14 @@ export type Here = {
 -- Each plugin's page as last read, by id: one opened again draws at once,
 -- and is read again behind it.
 local details = ui.state("store_details", {} :: { [string]: any })
+-- Each plugin's page asked to be read again (a number that moves), by id:
+-- when the engine refused to install it, or Zeron took a version of it
+-- down, so the page never keeps a mark or an Install the store no longer
+-- stands behind.
+local rereads = ui.state("store_rereads", {} :: { [string]: number })
+local function reread(id: string)
+	rereads:set_key(id, (rereads:peek()[id] or 0) + 1)
+end
 
 -- A link the page may open: the web's alone.
 local function web(url: any): string?
@@ -373,10 +381,12 @@ end)
 -- The page itself, its detail read.
 local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local id, here = props.plugin, props.here
-	local function d(): any
-		return details:get()[id] or {}
-	end
 	local first: any = details:peek()[id] or {}
+	-- (What was read of it; once that's let go (no longer in the store),
+	-- the page as it was built, while it leaves.)
+	local function d(): any
+		return details:get()[id] or first
+	end
 	-- (The version this page is of: a newer one builds the page again.)
 	local version: string = if type(first.version) == "string" then first.version else ""
 	local busy = ui.use_state(false)
@@ -387,19 +397,28 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local report_text = ui.use_state("")
 	local unblocking = ui.use_state(false)
 	local unblock_open = ui.use_state(false)
-	-- Opened by a link (`zeron://open/plugin/<id>`), the page's one action
-	-- takes no click until it has shown a moment, the consent window's own
-	-- (`consent.ARM_MS`), disabled meanwhile as Allow is there: a page that
-	-- comes forward under a click mid-way never takes it. Opened from
-	-- inside Zeron, it acts at once.
-	local by_link = nav.linked(id)
-	local armed = ui.use_state(not by_link)
-	ui.on_mount(function()
-		if by_link then
-			ui.after(consent.ARM_MS, function()
-				armed:set(true)
-			end)
+	-- Each time a link (`zeron://open/plugin/<id>`) names this page, as it
+	-- opens or while it's open, every install on it takes no click until it
+	-- has shown a moment, the consent window's own (`consent.ARM_MS`),
+	-- disabled meanwhile as Allow is there: a page that comes forward under
+	-- a click mid-way never takes it. Opened from inside Zeron, it acts at
+	-- once.
+	local armed = ui.use_state(nav.link_seq(id) == 0)
+	local arming = 0
+	ui.effect(function()
+		local seq = nav.link_seq(id)
+		if seq == 0 then
+			return
 		end
+		arming += 1
+		local mine = arming
+		armed:set(false)
+		ui.after(consent.ARM_MS, function()
+			-- (Only the latest link's wait ends it.)
+			if mine == arming then
+				armed:set(true)
+			end
+		end)
 	end)
 
 	-- The version a link chose (`zeron://open/plugin/<id>?version=<v>`):
@@ -583,6 +602,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end, function(err: any)
 			busy:set(false)
 			here.failed(ui.t("plugins.page.couldnt_install"))(err)
+			-- (Refused: what the store says of it now, read again.)
+			reread(id)
 		end)
 	end
 	local function update()
@@ -951,11 +972,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					return ui.t("plugins.store.install_instead", { version = verified_version() or "" }):get()
 				end,
 				disabled = function(): boolean
-					return busy:get()
+					return busy:get() or not armed:get()
 				end,
 				on_click = function()
 					local v = verified_version()
-					if v then
+					if v and armed:peek() then
 						install(v)
 					end
 				end,
@@ -1660,10 +1681,12 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					role = "button",
 					label = ui.t("plugins.store.install"),
 					disabled = function(): boolean
-						return busy:get()
+						return busy:get() or not armed:get()
 					end,
 					on_click = function()
-						install(now:peek().version)
+						if armed:peek() then
+							install(now:peek().version)
+						end
 					end,
 				},
 				installed = ui.text {
@@ -1993,14 +2016,45 @@ M.Page = ui.component(function(props: { plugin: string, here: Here }): Node
 				phase:set("not_found")
 			end
 		end, function(err: any)
+			local m = if type(err) == "table" then err.message else err
+			local word = if type(m) == "string" then (string.match(m, "^([%l_]+)") or m) else ""
+			-- (Not in the store any more: what was kept of it goes too.)
+			if word == "not_in_store" then
+				phase:set("not_found")
+				details:set_key(id, nil)
+				return
+			end
 			if details:peek()[id] then
 				return
 			end
-			local m = if type(err) == "table" then err.message else err
-			local word = if type(m) == "string" then (string.match(m, "^([%l_]+)") or m) else ""
-			phase:set(if word == "not_in_store" then "not_found" elseif word == "offline" or word == "store_unreachable" then "offline" else "failed")
+			phase:set(if word == "offline" or word == "store_unreachable" then "offline" else "failed")
 		end)
 	end
+	-- Asked to be read again (an install refused, a version taken down).
+	local asked = rereads:peek()[id] or 0
+	ui.effect(function()
+		local n = rereads:get()[id] or 0
+		if n ~= asked then
+			asked = n
+			load()
+		end
+	end)
+	-- A version of it Zeron took down, as this device's list says: read
+	-- again, never the mark it had.
+	local was_blocked = false
+	ui.effect(function()
+		local blocked = false
+		for _, p in state.shown:get() do
+			local source: any = p.source
+			if type(source) == "table" and source.kind == "store" and source.id == id and type((p :: any).blocked) == "table" then
+				blocked = true
+			end
+		end
+		if blocked and not was_blocked then
+			reread(id)
+		end
+		was_blocked = blocked
+	end)
 	-- (As it shows, never as it builds.) Another device chosen: whether it
 	-- works there is asked again.
 	ui.on_mount(function()

@@ -946,3 +946,39 @@ test("the installed version's row says Installed where Install would be", functi
 	-- (1.0.0, verified, can be installed instead.)
 	expect(string.sub(tree, string.find(tree, 'text "1.0.0"', 1, true) or 0)).to_contain('button "Install"')
 end)
+
+-- A store page never keeps a mark or an Install the store no longer stands
+-- behind: an install the engine refuses reads the plugin again, and one
+-- the store no longer has says so, what was kept of it gone.
+test("an install refused for a plugin no longer in the store reads it again and says it isn't there", function()
+	local app = page("Focus timer")
+	expect(app:has("#store-offer")).to_be(true)
+	app:command("store_stub.gone")
+	app:click('#store-offer >> role:button "Install"')
+	app:command("store.install_failed")
+	settle(app, 600)
+	expect(calls(app)).to_contain("detail:focus-timer")
+	expect(app:tree()).to_contain("This plugin isn't in the store")
+	expect(app:has("#store-offer")).to_be(false)
+	-- Opened again: not the kept page.
+	app:click('role:button "Back to Plugins"')
+	settle(app)
+	app:set_state("plugins_view", "store:focus-timer")
+	settle(app, 600)
+	expect(app:has("#store-offer")).to_be(false)
+end)
+
+-- Zeron taking a version down, as this device's list says, reads the
+-- plugin's page again while it's open: never the mark it had.
+test("a take-down of a plugin whose page is open reads its page again", function()
+	local app = page("Focus timer")
+	app:click('#store-offer >> role:button "Install"')
+	app:command("store.install_done")
+	app:command("store.allowed")
+	settle(app)
+	local before = select(2, string.gsub(calls(app), "detail:focus%-timer", ""))
+	app:command("store.blocked")
+	settle(app, 600)
+	local after = select(2, string.gsub(calls(app), "detail:focus%-timer", ""))
+	expect(after > before).to_be(true)
+end)

@@ -115,6 +115,7 @@ test("a link's page: a press inside the wait installs nothing, one after it inst
 	app:resize(1000, 900)
 	app:frames(10)
 	app:set_state("plugins_view_linked", "focus-timer")
+	app:set_state("plugins_view_link_seq", 1)
 	app:set_state("plugins_view", "store:focus-timer")
 	app:wait("#store-offer", { timeout_ms = 3000 })
 	app:frames(3)
@@ -256,4 +257,58 @@ test("keys besides a link's version change nothing", function()
 	versioned(app, 2, "focus-timer", nil, { install = true })
 	expect(app:tree(`{PAGE} >> #store-offer`)).to_contain('button "Install"')
 	expect(app:tree(`{PAGE} >> #store-offer`)).never.to_contain("Install 1.0.0")
+end)
+
+-- Every time a link names a page, its installs wait the consent window's
+-- moment again: a second link to a page already open (and armed), with or
+-- without a version; and on a page a link opened, every install on it,
+-- "Install … instead" and a version row's Install too.
+test("a second link to a page already open arms its Install again", function()
+	local app = shell()
+	app:command("shell.settings")
+	app:frames(10)
+	app:click('#settings-nav >> "Plugins"')
+	app:frames(30)
+	app:click(`{PAGE} >> role:tab "Browse"`)
+	app:wait(`{PAGE} >> #store-rows`, { timeout_ms = 3000 })
+	app:frames(10)
+	app:click(`{PAGE} >> #store-card >> role:button "Focus timer"`)
+	app:wait(`{PAGE} >> #store-offer`, { timeout_ms = 3000 })
+	app:frames(3)
+	local install = `{PAGE} >> #store-install`
+	expect(app:tree(install)).never.to_contain("disabled")
+	-- A link to the same page comes: it waits again, the press does nothing.
+	app:set_state("app.link", { seq = 1, plugin = "focus-timer", version = "1.0.0" })
+	app:frames(5)
+	expect(app:tree(install)).to_contain("disabled")
+	app:click(install)
+	app:frames(5)
+	expect(calls(app)).never.to_contain("install:")
+	app:wait("#never-there", { timeout_ms = 900 })
+	app:frames(5)
+	expect(app:tree(install)).never.to_contain("disabled")
+	-- And again for the next link, with no version.
+	app:set_state("app.link", { seq = 2, plugin = "focus-timer" })
+	app:frames(5)
+	expect(app:tree(install)).to_contain("disabled")
+end)
+
+test("on a page a link opened, Install instead and a version row's Install wait too", function()
+	local app = shell()
+	app:command("store_stub.bump")
+	link(app, 1, "focus-timer")
+	app:wait(`{PAGE} >> #store-offer`, { timeout_ms = 3000 })
+	app:frames(3)
+	local instead = `{PAGE} >> #store-verified-line >> role:button "Install 1.2.0 instead"`
+	expect(app:tree(instead)).to_contain("disabled")
+	local rows = app:tree(`{PAGE} >> role:group "Versions"`)
+	local n = 0
+	for line in rows:gmatch('[^\n]*button "Install"[^\n]*') do
+		n += 1
+		expect(line).to_contain("disabled")
+	end
+	expect(n > 0).to_be(true)
+	app:wait("#never-there", { timeout_ms = 900 })
+	app:frames(5)
+	expect(app:tree(instead)).never.to_contain("disabled")
 end)

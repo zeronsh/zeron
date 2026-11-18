@@ -302,6 +302,20 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 						body = why_unknown(it),
 					}
 					else nil,
+				-- An update from a new publisher (the engine's `update.new_owner`):
+				-- said by name, in the update sheet's words, before the rest.
+				if type(it.update) == "table" and it.update.new_owner == true and not elsewhere
+					then ui.div {
+						id = "consent-new-owner",
+						w_full = true,
+						ds.Callout {
+							tone = "warning",
+							title = if it.author and it.author.kind == "verified" and type(it.author.username) == "string" and it.author.username ~= ""
+								then ui.t("plugins.store.update_new_owner", { username = it.author.username })
+								else ui.t("plugins.store.update_new_owner_unnamed"),
+						},
+					}
+					else nil,
 				if unverified
 					then ui.div {
 						id = "consent-unverified",

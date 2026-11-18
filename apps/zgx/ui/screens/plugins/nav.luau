@@ -33,6 +33,9 @@ local linked = ui.state("plugins_view_linked", nil :: string?)
 -- The version a link chose on that page (`?version=`): its Install acts
 -- on it and the page says its state. Gone with the link's page.
 local linked_version = ui.state("plugins_view_linked_version", nil :: string?)
+-- How many links have named a page: each one arms its actions again, even
+-- on a page already open (`nav.link_seq(id)`).
+local link_seq = ui.state("plugins_view_link_seq", 0)
 
 -- (Only an id a store id could be, as a plugin's id is: anything else is
 -- no page at all.)
@@ -54,6 +57,15 @@ function M.open_listing(id: string, from_outside: boolean?, by_link: boolean?, v
 	opened:set(from_outside == true)
 	linked:set(if by_link then id else nil)
 	linked_version:set(if by_link and type(version) == "string" and version_reads(version) then version else nil)
+	if by_link then
+		link_seq:set(link_seq:peek() + 1)
+	end
+end
+
+-- For plugin `id`'s page: a number that moves with each link naming it (0
+-- when none has), tracked: the page arms its actions again as it moves.
+function M.link_seq(id: string): number
+	return if linked:get() == id then link_seq:get() else 0
 end
 
 -- Whether a link opened plugin `id`'s page (read as the page shows).

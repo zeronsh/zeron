@@ -169,6 +169,21 @@ local PLUGINS: { [string]: any } = {
 	-- From the plugin store, a version the store hasn't verified: an update
 	-- asking nothing new, a verified one between; and a first install with
 	-- none to offer.
+	-- An update from a new publisher, the store hasn't verified it.
+	newowner = {
+		id = "newowner",
+		name = "Focus timer",
+		version = "1.3.0",
+		hash = "newowner-13",
+		status = "pending",
+		author = { kind = "verified", username = "bea" },
+		source = { kind = "store", id = "focus-timer", publisher = "bea", verified = false },
+		permissions = { "ui.add" },
+		allowed = { "ui.add" },
+		ask = {},
+		nothing_new = true,
+		update = { version = "1.3.0", verified = false, new_owner = true },
+	},
 	-- From a git link, allowed before, asking again with nothing new (a
 	-- new signing key): the engine's `nothing_new`, as for any re-ask.
 	rekeyed = {
@@ -294,6 +309,7 @@ ui.command {
 ui.command { id = "wide", title = "Show Composer kit", run = function() show("wide") end }
 ui.command { id = "grown", title = "Show Gh helper, grown", run = function() show("grown") end }
 ui.command { id = "timer", title = "Show Focus timer 1.3.0, not verified", run = function() show("timer") end }
+ui.command { id = "newowner", title = "Show Focus timer from a new publisher", run = function() show("newowner") end }
 ui.command { id = "rekeyed", title = "Show Rekeyed, a git plugin asking again with nothing new", run = function() show("rekeyed") end }
 ui.command { id = "fresh", title = "Show Fresh, a first install not verified", run = function() show("fresh") end }
 ui.command { id = "long", title = "Show Everything", run = function() show("long") end }
