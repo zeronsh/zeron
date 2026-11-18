@@ -216,7 +216,11 @@ local Fold = ui.component(function(props: FoldProps): Node
 		gap = "$space.2",
 		ui.column {
 			w_full = true,
-			overflow = "hidden",
+			-- (Clipped only while folded: open, what overhangs its box is
+			-- drawn, as a heading's last descender is past its -6.)
+			overflow = function(): string
+				return if clipped() then "hidden" else "visible"
+			end,
 			max_h = function(): number
 				return if clipped() then props.height else 1e7
 			end,
