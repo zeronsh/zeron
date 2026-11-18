@@ -777,8 +777,9 @@ function M.Row(props: RowProps): Node
 						shrink = 0,
 						cursor = "pointer",
 						color = "$text.primary",
+						-- (As Installed's Update link: its ink, weight, underline,
+						-- hover and focus ring the same.)
 						hover = { color = "$accent" },
-						focus = control.ring,
 						on_click = props.detail_link.on_click,
 						ui.text {
 							props.detail_link.label,
