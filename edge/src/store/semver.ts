@@ -111,7 +111,8 @@ export const parseVersion = (text: string): Version | undefined => {
 
 const isNumeric = (identifier: string): boolean => /^[0-9]+$/.test(identifier);
 
-const comparePre = (a: readonly string[], b: readonly string[]): number => {
+/** SemVer pre-release precedence (empty = a release, above any pre-release). */
+export const comparePre = (a: readonly string[], b: readonly string[]): number => {
   if (a.length === 0 || b.length === 0) return a.length === b.length ? 0 : a.length === 0 ? 1 : -1;
   for (let i = 0; i < a.length; i++) {
     const x = a[i]!;

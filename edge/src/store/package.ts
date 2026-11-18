@@ -68,8 +68,10 @@ export interface VerifiedPackage {
   readonly manifest: Manifest;
   /** The signer's public key, b64url without padding. */
   readonly key: string;
-  /** Every file, by path, in path order. */
+  /** Every file, by path, in path order: views of `blob`. */
   readonly files: ReadonlyMap<string, Uint8Array>;
+  /** Every file's bytes, one after another in path order. */
+  readonly blob: Uint8Array;
   /** Each file's sha256, hex. */
   readonly hashes: ReadonlyMap<string, string>;
   /** The engine's content hash. */
@@ -101,30 +103,28 @@ const STANDARD_TABLE = table(STANDARD);
 const URL_SAFE_TABLE = table(URL_SAFE);
 
 /**
- * The base64 crate's decoding (0.22): `padded` is STANDARD (padding
- * required and canonical), otherwise URL_SAFE_NO_PAD (no padding). Either
- * way the unused bits of the last symbol must be zero, and nothing but the
- * alphabet is taken (no whitespace).
+ * The base64 crate's decoding (0.22), into `out` at `at`: `padded` is
+ * STANDARD (padding required and canonical), otherwise URL_SAFE_NO_PAD (no
+ * padding). Either way the unused bits of the last symbol must be zero and
+ * nothing but the alphabet is taken (no whitespace). Answers the bytes
+ * written, or -1 if `text` isn't base64. `out` needs `decodedBound` room.
  */
-export const decodeBase64 = (text: string, padded: boolean): Uint8Array | undefined => {
+export const decodeBase64Into = (text: string, padded: boolean, out: Uint8Array, at: number): number => {
   const lookup = padded ? STANDARD_TABLE : URL_SAFE_TABLE;
   let length = text.length;
   if (padded) {
-    if (length % 4 !== 0) return undefined;
+    if (length % 4 !== 0) return -1;
     if (length > 0 && text.charCodeAt(length - 1) === 0x3d) {
       length--;
       if (text.charCodeAt(length - 1) === 0x3d) length--;
     }
-  } else if (length % 4 === 1) {
-    return undefined;
   }
   const remainder = length % 4;
-  if (remainder === 1) return undefined;
-  const out = new Uint8Array(Math.floor(length / 4) * 3 + (remainder === 0 ? 0 : remainder - 1));
-  let o = 0;
+  if (remainder === 1) return -1;
+  let o = at;
   let i = 0;
-  const symbol = (at: number): number => {
-    const c = text.charCodeAt(at);
+  const symbol = (index: number): number => {
+    const c = text.charCodeAt(index);
     return c < 128 ? lookup[c]! : -1;
   };
   for (; i + 4 <= length; i += 4) {
@@ -132,7 +132,7 @@ export const decodeBase64 = (text: string, padded: boolean): Uint8Array | undefi
     const b = symbol(i + 1);
     const c = symbol(i + 2);
     const d = symbol(i + 3);
-    if ((a | b | c | d) < 0) return undefined;
+    if ((a | b | c | d) < 0) return -1;
     const n = (a << 18) | (b << 12) | (c << 6) | d;
     out[o++] = n >> 16;
     out[o++] = (n >> 8) & 0xff;
@@ -141,17 +141,26 @@ export const decodeBase64 = (text: string, padded: boolean): Uint8Array | undefi
   if (remainder === 2) {
     const a = symbol(i);
     const b = symbol(i + 1);
-    if ((a | b) < 0 || (b & 0x0f) !== 0) return undefined;
+    if ((a | b) < 0 || (b & 0x0f) !== 0) return -1;
     out[o++] = (a << 2) | (b >> 4);
   } else if (remainder === 3) {
     const a = symbol(i);
     const b = symbol(i + 1);
     const c = symbol(i + 2);
-    if ((a | b | c) < 0 || (c & 0x03) !== 0) return undefined;
+    if ((a | b | c) < 0 || (c & 0x03) !== 0) return -1;
     out[o++] = (a << 2) | (b >> 4);
     out[o++] = ((b & 0x0f) << 4) | (c >> 2);
   }
-  return out;
+  return o - at;
+};
+
+/** The most bytes `text` can decode to. */
+export const decodedBound = (text: string): number => Math.ceil(text.length / 4) * 3;
+
+export const decodeBase64 = (text: string, padded: boolean): Uint8Array | undefined => {
+  const out = new Uint8Array(decodedBound(text));
+  const n = decodeBase64Into(text, padded, out, 0);
+  return n < 0 ? undefined : out.subarray(0, n);
 };
 
 const filesValue = (hashes: ReadonlyMap<string, string>): JsonObject => new Map([...hashes].map(([k, v]) => [k, v] as [string, Json]));
@@ -187,9 +196,11 @@ export type SignatureCheck = { readonly valid: string } | { readonly invalid: "u
 /** signing.rs `check_raw`. */
 export const checkSignature = async (
   prefix: string,
-  manifest: JsonObject,
+  manifest: Json,
   hashes: ReadonlyMap<string, string>
 ): Promise<SignatureCheck> => {
+  // (`Value::get` on anything but an object finds nothing.)
+  if (!isObject(manifest)) return { invalid: "unsigned" };
   const signature = manifest.get("signature");
   if (signature === undefined) return { invalid: "unsigned" };
   const key = isObject(signature) ? signature.get("key") : undefined;
@@ -241,15 +252,24 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   const filesValueRaw = top.get("files");
   if (!isObject(filesValueRaw) || !isObject(manifestValue)) return refuse("not_a_package");
   if (filesValueRaw.size > MAX_FILES) refuse("too_big");
+  const paths = [...filesValueRaw.keys()].sort(byCodePoint);
+  // Every file decodes into one buffer, in path order: the files are views
+  // of it, and it is what the store keeps as the version's files.
+  let bound = 0;
+  for (const rel of paths) {
+    const data = filesValueRaw.get(rel);
+    if (typeof data === "string") bound += decodedBound(data);
+  }
+  const blob = new Uint8Array(bound);
   const files = new Map<string, Uint8Array>();
   let total = 0;
-  for (const rel of [...filesValueRaw.keys()].sort(byCodePoint)) {
+  for (const rel of paths) {
     if (!plainPath(rel) || rel === MANIFEST_FILE) refuse("bad_file", JSON.stringify(rel));
     const data = filesValueRaw.get(rel);
-    const bytes = typeof data === "string" ? decodeBase64(data, true) : undefined;
-    if (!bytes) return refuse("bad_file", JSON.stringify(rel));
-    total += bytes.length;
-    files.set(rel, bytes);
+    const written = typeof data === "string" ? decodeBase64Into(data, true, blob, total) : -1;
+    if (written < 0) return refuse("bad_file", JSON.stringify(rel));
+    files.set(rel, blob.subarray(total, total + written));
+    total += written;
   }
   if (total > MAX_BYTES) refuse("too_big");
   const hashes = new Map<string, string>();
@@ -267,6 +287,7 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
     manifest,
     key: checked.valid,
     files,
+    blob: blob.subarray(0, total),
     hashes,
     hash: await contentHash(manifestValue, hashes),
     sha256: await sha256Hex(raw),

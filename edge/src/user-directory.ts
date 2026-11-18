@@ -321,6 +321,14 @@ export const pluginKeyFingerprint = async (key: string): Promise<string> => {
   return hex.match(/.{4}/g)!.join(" ");
 };
 
+/** `storeAuthors`: what the plugin store shows of an author. */
+export interface StoreAuthor {
+  readonly username: string | null;
+  readonly badges: readonly { readonly id: string; readonly name: string; readonly icon: string | null }[];
+  /** ISO 8601, WorkOS `created_at`. */
+  readonly createdAt: string;
+}
+
 /** `reserveImage`'s answer. */
 export type ImageReservation = "ok" | "too_many" | "too_large" | "rate_limited" | "deleted_user";
 
@@ -1122,6 +1130,45 @@ export class UserDirectory extends DurableObject<Env> {
       firstSeen: row.created_at as number,
       revokedAt: row.revoked_at as number | null
     };
+  }
+
+  /** What the plugin store shows of each of `userIds` who is a live user:
+   * their current username (null for none), their badges as cards order
+   * them, and when they joined (ISO 8601). Never an email or a name. */
+  storeAuthors(userIds: readonly string[]): Record<string, StoreAuthor> {
+    const found: Record<string, StoreAuthor> = {};
+    for (const userId of new Set(userIds)) {
+      const [row] = this.ctx.storage.sql
+        .exec("SELECT created_at FROM users WHERE user_id = ? AND deleted_at IS NULL", userId)
+        .toArray();
+      if (!row) continue;
+      const badges = this.ctx.storage.sql
+        .exec(
+          `SELECT b.badge_id, b.name, b.icon FROM user_badges ub JOIN badges b ON b.badge_id = ub.badge_id
+           WHERE ub.user_id = ? ORDER BY b.badge_id = ? DESC, b.created_at, b.rowid`,
+          userId,
+          LEADING_BADGE
+        )
+        .toArray();
+      found[userId] = {
+        username: this.username(userId),
+        badges: badges.map((b) => ({ id: b.badge_id as string, name: b.name as string, icon: b.icon as string | null })),
+        createdAt: row.created_at as string
+      };
+    }
+    return found;
+  }
+
+  /** The live user who holds `username`, if one does. */
+  userIdForUsername(username: string): string | undefined {
+    const [row] = this.ctx.storage.sql
+      .exec(
+        `SELECT n.user_id FROM usernames n JOIN users u ON u.user_id = n.user_id
+         WHERE n.username = ? AND n.retired_at IS NULL AND u.deleted_at IS NULL`,
+        username
+      )
+      .toArray();
+    return (row?.user_id as string | undefined) ?? undefined;
   }
 
   /** The device a live key of `userId`'s was registered from (device-link.ts),

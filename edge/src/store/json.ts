@@ -22,7 +22,7 @@
  *
  * The canonical form (`canonicalJson`): objects with keys sorted bytewise on
  * UTF-8, no whitespace, strings escaped as serde_json escapes them, integers
- * in decimal and floats as `ryu` prints them (`1.0`, `1e21`, `1.5e-7`).
+ * in decimal and floats as serde_json prints them (`1.0`, `1e+21`, `1.5e-7`).
  */
 
 export class JsonError extends Error {}
@@ -340,22 +340,25 @@ export const compareUtf8 = (a: string, b: string): number => {
   return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
 };
 
-/** A finite double as `ryu` (and so serde_json) prints it. */
+/**
+ * A finite double as serde_json 1.0.151 prints it (the `zmij` crate's
+ * `format_finite`): the shortest digits that read back as the value; fixed
+ * notation when the first digit's decimal exponent is −5 to 15 (`100.0`,
+ * `0.00001`, `1000000000000000.0`), otherwise `d.ddde±x` (`1e+16`, `1e-6`).
+ */
 export const formatFloat = (value: number): string => {
   if (value === 0) return Object.is(value, -0) ? "-0.0" : "0.0";
   const sign = value < 0 ? "-" : "";
-  // The shortest digits that read back as `value` (ECMAScript's Number
-  // to-string, the same digits ryu picks), and the decimal exponent.
+  // ECMAScript's shortest round-trip digits, and the first digit's exponent.
   const [mantissa, exponent] = Math.abs(value).toExponential().split("e") as [string, string];
   const digits = mantissa.replace(".", "");
-  const length = digits.length;
-  const kk = Number(exponent) + 1; // 10^(kk-1) <= v < 10^kk
-  const k = kk - length;
-  if (k >= 0 && kk <= 16) return `${sign}${digits}${"0".repeat(k)}.0`;
-  if (kk > 0 && kk <= 16) return `${sign}${digits.slice(0, kk)}.${digits.slice(kk)}`;
-  if (kk > -5 && kk <= 0) return `${sign}0.${"0".repeat(-kk)}${digits}`;
-  if (length === 1) return `${sign}${digits}e${kk - 1}`;
-  return `${sign}${digits[0]}.${digits.slice(1)}e${kk - 1}`;
+  const e = Number(exponent);
+  if (e >= -5 && e <= 15) {
+    if (digits.length - 1 <= e) return `${sign}${digits}${"0".repeat(e + 1 - digits.length)}.0`;
+    if (e >= 0) return `${sign}${digits.slice(0, e + 1)}.${digits.slice(e + 1)}`;
+    return `${sign}0.${"0".repeat(-e - 1)}${digits}`;
+  }
+  return `${sign}${digits[0]}${digits.length > 1 ? `.${digits.slice(1)}` : ""}e${e < 0 ? "-" : "+"}${Math.abs(e)}`;
 };
 
 const writeCanonical = (value: Json, out: string[]): void => {
