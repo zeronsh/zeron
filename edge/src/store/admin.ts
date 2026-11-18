@@ -29,7 +29,7 @@ import { userDirectoryStub } from "../user-directory";
 import { pluginCacheKeys } from "./author";
 import { purge } from "./cache";
 import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, versionInfo } from "./cards";
-import { type ConsentItem, consentDiff, toolInputs } from "./consent";
+import { ASK_PATHS, type ConsentItem, askParts, asksChanged, consentDiff, toolInputs } from "./consent";
 import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
 import { readBody, requireAdmin, revokeDeployKeys } from "./principal";
@@ -141,13 +141,15 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   const all = status === "all";
   const { rows, total } = await withTotal<{
     rid: number; plugin_id: string; version: string; status: string; submitted_at: number; publisher_id: string; checks: string; permissions: string;
-    name: string; is_release: number; base_version: string | null; base_permissions: string | null;
+    name: string; icon: string | null; is_release: number; parts: string | null;
+    base_version: string | null; base_permissions: string | null; base_parts: string | null;
   }>(
     db,
     db
       .prepare(
         `SELECT v.rowid AS rid, v.plugin_id, v.version, v.status, v.submitted_at, v.publisher_id, v.checks, v.permissions,
-                v.name, v.is_release, b.version AS base_version, b.permissions AS base_permissions
+                v.name, v.icon, v.is_release, ${partsSql("v")} AS parts,
+                b.version AS base_version, b.permissions AS base_permissions, ${partsSql("b")} AS base_parts
          FROM versions v LEFT JOIN versions b ON b.rowid = (${baseSql("v")})
          WHERE (? = 'all' OR v.status = ?) ${ks.where}
          ORDER BY ${ks.order} LIMIT ?`
@@ -162,6 +164,7 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
     items: page.map((r) => {
       const checks = parseStoredJson<{ level: string }[]>(r.checks, []);
       const asks = parseStoredJson<ConsentItem | null>(r.permissions, null);
+      const baseAsks = parseStoredJson<ConsentItem | null>(r.base_permissions, null);
       const count = (level: string) => checks.filter((c) => c.level === level).length;
       return {
         plugin: { id: r.plugin_id, name: r.name },
@@ -170,8 +173,14 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
         prerelease: r.is_release === 0,
         submitted_at: r.submitted_at,
         publisher: names[r.publisher_id] ?? null,
+        // The version's icon, a path in its package (as a card's), fetched
+        // through the files route with this version.
+        icon: r.icon,
         ...(r.base_version !== null ? { base: r.base_version } : {}),
-        new_asks: asks ? consentDiff(parseStoredJson<ConsentItem | null>(r.base_permissions, null), asks).added : [],
+        new_asks: asks ? consentDiff(baseAsks, asks).added : [],
+        // Anything else that moved in what it asks (amendment 40); false
+        // for a first version.
+        asks_changed: asks !== null && baseAsks !== null && asksChanged(baseAsks, asks, askParts(r.base_parts), askParts(r.parts)),
         checks: { ok: count("ok"), warn: count("warn"), fail: count("fail") }
       };
     }),
@@ -179,6 +188,10 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
     ...links
   });
 };
+
+/** What `askParts` reads of the manifest of `alias` (a `versions` row):
+ * a few paths, extracted in D1. */
+const partsSql = (alias: string): string => `json_extract(${alias}.manifest, ${ASK_PATHS.map((p) => `'${p}'`).join(", ")})`;
 
 /** The rowid of the version a submission of `alias` (a `versions` row in
  * the outer query) is compared with: its plugin's highest approved or
