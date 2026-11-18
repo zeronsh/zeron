@@ -65,7 +65,7 @@ SUITE_INPUTS: dict[str, list[str]] = {
     "site": [".github/workflows/site-tests.yml", "apps/landing/**", "apps/zgx/ui/locales/en.json", "edge/**",
              "scripts/plugin-store-e2e/edge.mjs"],
     "store-e2e": [".github/workflows/plugin-store-e2e.yml", "scripts/plugin-store-e2e/**", "edge/**",
-                  "docs/plugin-store-data.json"] + LINUX_SETUP,
+                  "docs/plugin-store-data.json", "actions/publish-plugin/**"] + LINUX_SETUP,
     "installer": [".github/workflows/linux-installer.yml", "edge/src/install.sh", "scripts/package-linux.sh",
                   "scripts/test-linux-desktop-entry.sh", "dist/zeron.desktop", "dist/zeron.png",
                   "scripts/ci/apt-install.sh"],

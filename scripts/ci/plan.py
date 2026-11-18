@@ -114,7 +114,8 @@ STORE_E2E_PATHS = ["edge/src/*.ts", "edge/migrations/store/**", "edge/package.js
                    "edge/wrangler.jsonc", "crates/engine/src/plugins/**", "crates/engine/src/auth.rs",
                    "crates/engine/tests/plugin_store_e2e.rs", "crates/plugin-guard/**", "crates/rpc/**",
                    "crates/cli/**", "apps/zeron/src/**", "docs/plugin-store-data.json",
-                   "scripts/plugin-store-e2e/**", ".github/workflows/plugin-store-e2e.yml"]
+                   "scripts/plugin-store-e2e/**", "actions/publish-plugin/**",
+                   ".github/workflows/plugin-store-e2e.yml"]
 
 BROAD: dict[str, list[str]] = {
     "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**",

@@ -119,7 +119,8 @@ class PlanTests(unittest.TestCase):
 
     def test_the_store_end_to_end_runs_for_either_side(self):
         for path in ["edge/src/store/publish.ts", "crates/engine/src/plugins/store/device.rs", "apps/zeron/src/store_cli.rs",
-                     "scripts/plugin-store-e2e/edge.mjs", "docs/plugin-store-data.json"]:
+                     "scripts/plugin-store-e2e/edge.mjs", "docs/plugin-store-data.json",
+                     "actions/publish-plugin/publish.sh"]:
             self.assertTrue(plan.plan(files(path), "fast")["store-e2e"], path)
         self.assertFalse(plan.plan(files("crates/engine/src/sessions.rs"), "fast")["store-e2e"])
         self.assertFalse(plan.plan(files("README.md"), "full")["store-e2e"])

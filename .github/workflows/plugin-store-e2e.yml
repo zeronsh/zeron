@@ -6,7 +6,9 @@ name: Plugin store end to end
 # locally (its bundle in Miniflare, the store's D1 migrations, local R2, a
 # WorkOS fake) and real `zeron headless` engines and the real CLI against it:
 # publish, review, install, update, deploy keys, takedown, transfer and the
-# refusals. Under a minute once built; nothing leaves the runner.
+# refusals. Under a minute once built; nothing leaves the runner. Then the
+# publish action's script (actions/publish-plugin/test.sh) with the `zeron`
+# that run built, against releases served on the runner itself.
 on:
   workflow_call:
     inputs:
@@ -36,6 +38,8 @@ jobs:
           cache-dependency-path: edge/package-lock.json
       - name: The store, end to end (engine, CLI and the edge worker)
         run: scripts/plugin-store-e2e/run.sh
+      - name: The publish action's script, against releases served on this runner
+        run: actions/publish-plugin/test.sh "${CARGO_TARGET_DIR:-$GITHUB_WORKSPACE/target}/debug/zeron"
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
