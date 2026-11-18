@@ -458,3 +458,36 @@ Agreed after the plan was first written. Newest last.
 28. **After a transfer**, a former owner's deploy key no longer reads as
     verified for the plugin (verified needs the key's maker to own the
     plugin now), and the current owner can list and revoke every key of it.
+29. **Paging goes both ways.** Every paged list (`/store/v1/plugins`, the
+    admin queue, reports, audit) returns `prev_cursor` beside `next_cursor`,
+    so Previous is a real link on the web.
+30. **Claiming ids is limited, and unused ids come back.** An account may
+    claim at most 5 new ids in any 7 days (apart from the publish limits).
+    An id that has never had an approved version and has no pending one is
+    released 90 days after its last submission; an admin can release or
+    grant one at any time through reservations.
+31. **More store listing rules** (checked the same way by the engine's local
+    check and the edge, pinned by `listing` vectors; sideloading is not
+    changed by any of them):
+    - Two paths that are the same after plugin-guard's `fold` (case, Unicode
+      normal form) are refused: reviewers would see two files where a Mac or
+      a Windows machine keeps one.
+    - `name`, `description` and `keywords` refuse Unicode bidi controls
+      (U+202A–202E, U+2066–2069) and other format characters, as well as
+      control characters.
+    - `homepage` and `repository` are stored as the parsed URL's text and
+      refused when that differs from what was written.
+    - The canonical manifest is at most 256 KB; `CHANGELOG.md` at most
+      512 KB, like `README.md`.
+32. **`engines.zeron` and pre-releases**: comparison is by SemVer precedence
+    with no npm-style pre-release exclusion, on purpose: a beta of a Zeron
+    version that satisfies the range should run the plugin. "npm-style" in
+    amendment 2 describes the syntax only.
+33. **A publisher has a stable id.** `author` is `{ id, username, badges }`;
+    `updates[]` entries carry `publisher_id` beside `publisher`; `/me/plugins`
+    and the admin views carry it too. `id` is opaque and never changes for
+    an account (`"pub_" +` the first 32 hex characters of
+    `sha256("zeron-publisher:v1:" + userId)`); it is not the user id. A
+    device binds a store install's consent to `store:<id>`, so a username
+    that an operator moves can never carry another account's decisions; the
+    username is what people read.
