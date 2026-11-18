@@ -7,20 +7,12 @@
 -- installed here said on its row; and every state the card can be in.
 --
 -- (The store answers on a timer, as the host does: the tests wait for what
--- they look for. Rows are built as the page's scroll shows them, so a
--- test scrolls the page a point first: zgx-asks/ancestor-list-fading-in,
--- until then a list faded in builds its rows only as the page moves.)
+-- they look for. Rows are built as they show, the page never moved for
+-- them, under the card's fade too: zgx-asks/ancestor-list-fading-in.)
 
 local SCROLL = "#fixture-scroll"
 -- A row's height (Settings.truncated_row_h with a byline) and its hairline.
 local ROW = 78
-
-local function nudge(app: any)
-	app:scroll(SCROLL, 1)
-	app:frames(4)
-	app:scroll(SCROLL, -1)
-	app:frames(4)
-end
 
 local function open(): any
 	local app = mount("plugins_store_fixture.luau")
@@ -29,7 +21,6 @@ local function open(): any
 	app:click('role:tab "Browse"')
 	app:wait('#store-rows', { timeout_ms = 3000 })
 	app:frames(20)
-	nudge(app)
 	return app
 end
 
@@ -76,7 +67,6 @@ end
 local function settle(app: any, ms: number?)
 	app:wait("#never-there", { timeout_ms = ms or 400 })
 	app:frames(10)
-	nudge(app)
 end
 
 test("Browse lists the store's plugins, the most installed first, with who made them and how many have them", function()
@@ -343,4 +333,22 @@ test("the featured are the store's featured list, asked for as such, in the stor
 	end
 	-- (The stub's three featured, most installed first, as the store sorts.)
 	expect(table.concat(order, ", ")).to_be("Focus timer, Review notes, Slack ping")
+end)
+
+test("rows are built as the card fades them in, the page never scrolled: as Browse opens, and back from a plugin's page", function()
+	local app = mount("plugins_store_fixture.luau")
+	app:resize(1000, 900)
+	app:frames(10)
+	app:click('role:tab "Browse"')
+	app:wait('#store-rows', { timeout_ms = 3000 })
+	app:frames(30)
+	expect(app:has('#store-card >> role:button "Focus timer"')).to_be(true)
+	-- Back from a plugin's page, the whole page fading in: its rows there.
+	app:click('#store-card >> role:button "Focus timer"')
+	app:wait("#store-offer", { timeout_ms = 3000 })
+	app:frames(20)
+	app:click('role:button "Back to Plugins"')
+	app:wait("#store-rows", { timeout_ms = 3000 })
+	app:frames(30)
+	expect(app:has('#store-card >> role:button "Branch badge"')).to_be(true)
 end)

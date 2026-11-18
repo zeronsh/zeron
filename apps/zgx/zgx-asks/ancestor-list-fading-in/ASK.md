@@ -43,3 +43,8 @@ as it opens, after a search is cleared, and on coming back to it.
 Installed (Plugins) and Templates use `Settings.Each`, a keyed `ui.each`
 that isn't virtualized. Browse is the first virtualized list under a
 catalog card's fade.
+
+**Answered (Nov 18):** fixed in zgx PR #2360, in Zeron's pin `7f66d42fb`
+(`b80a8af1c` with that one commit). Browse's tests take no scroll to build
+their rows, as the card or the page fades in; they fail on `b80a8af1c`'s
+CLI and pass on `7f66d42fb`'s. The repro stays as it was.

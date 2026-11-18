@@ -4,9 +4,6 @@
 -- start), one content edge (a card's outer edge − 17, where rows' controls
 -- end); nothing under the pointer moves as things arrive; a skeleton that
 -- waits stops breathing after a bound.
---
--- (Browse's rows are built as the page's scroll shows them, so its tests
--- scroll a point first: zgx-asks/ancestor-list-fading-in.)
 
 local SCROLL = "#fixture-scroll"
 local INSET = 17
@@ -136,8 +133,6 @@ test("a skeleton that waits too long rests: the first load's, the next page's an
 	expect(app:has("#store-loading-still")).to_be(true)
 	app:command("store_stub.release")
 	settle(app, 400)
-	app:scroll(SCROLL, 1)
-	app:frames(4)
 	app:command("store_stub.hold")
 	app:scroll(SCROLL, 4000)
 	app:frames(10)

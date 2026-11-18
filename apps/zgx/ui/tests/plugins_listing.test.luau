@@ -34,8 +34,6 @@ local function page(name: string, before: ((app: any) -> ())?): any
 		app:fill('#store-card >> role:textbox "Search plugins"', name)
 		settle(app, 600)
 	end
-	app:scroll("#fixture-scroll", 1)
-	app:frames(4)
 	app:click(`#store-card >> role:button "{name}"`)
 	app:wait("#store-offer", { timeout_ms = 3000 })
 	settle(app)
@@ -242,8 +240,6 @@ test("a page opened again draws at once from what was read, and is read again be
 	app:click('role:button "Back to Plugins"')
 	app:wait("#store-card", { timeout_ms = 3000 })
 	app:frames(10)
-	app:scroll("#fixture-scroll", 1)
-	app:frames(4)
 	app:command("store_stub.hold")
 	app:click('#store-card >> role:button "Focus timer"')
 	app:frames(30)

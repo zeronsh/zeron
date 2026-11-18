@@ -11,7 +11,6 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 | Ask | What users see today |
 |---|---|
-| [ancestor-list-fading-in](ancestor-list-fading-in/ASK.md) | A list that scrolls with the page around it (the plugin store's Browse) shows an empty card as it fades in, until the page scrolls. |
 | [shader-compile-first-draw](shader-compile-first-draw/ASK.md) | The window freezes 70-360 ms when the first session of a launch starts working (its status ring's shader compiles in the frame). |
 | [inline-node](inline-node/ASK.md) | Inline math (and inline chips, emoji images) can't sit in a paragraph's line. |
 | [windows-caption-buttons](windows-caption-buttons/ASK.md) | Windows' caption glyphs stay the system's light or dark (invisible on a light Zeron on a dark system), come from an icon font (tofu on Windows 10), disagree with their hit test when the window is zoomed, are fixed at 32 tall, and Maximise shows on a fixed-size window. |
@@ -72,6 +71,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [markdown-parse-cost](markdown-parse-cost/ASK.md) | `ui.markdown(text, { key, lazy, first })` (#1380, `0dff42bf5`), in Zeron's pin. Adopted: ds/markdown's windowed path parses lazily (pending blocks held by `hint`/`lines`, a find's block `first`); a 400-block reply's landing frame 39.6M → 21.5M instructions (`ui/tests/lazy_markdown.test.luau`). |
 | [fullscreen-toolbar-strip](fullscreen-toolbar-strip/ASK.md) | Fixed on zgx main `465858d8` (#1413): the inset toolbar hidden in full screen. In Zeron's pin `0e6c32f4`; checked in code (hidden on will-enter, shown on did-exit, only zgx's inset toolbar); the full-screen look is for a person to check. A failed entry into full screen once left the toolbar hidden: #1414 (`33e02879`) gives it back 2 s later, in the pin `a2c9cf1e6`. |
 | [stale-paint-mounted-mid-scroll](stale-paint-mounted-mid-scroll/ASK.md) | A move that repaints also damages where the content was (#1368, `c43b4e5ee`). In Zeron's pin `f6506b6e6`; the app's 90 ms hover rest is gone (ds/transcript), `ui/tests/hover_lane.test.luau` kept. |
+| [ancestor-list-fading-in](ancestor-list-fading-in/ASK.md) | Fixed in zgx PR #2360; in Zeron's pin `7f66d42fb` (the earlier pin `b80a8af1c` with that fix alone); adopted: Browse's tests build rows without scrolling, and fail on the old pin. |
 | [focus-restore](focus-restore/ASK.md) | Fixed in zgx `f3b6b53e`; in Zeron's pin `aaa304eb2`, focus test un-ignored. |
 | [cjk-font-fallback](cjk-font-fallback/ASK.md) | Fixed on zgx main (`f9e2dbce`, PingFang at Regular). In Zeron's pin `03270165c`. |
 | [stranded-stretch](stranded-stretch/ASK.md) | Fixed on zgx main `03270165c`; `zgx inspect node` reports scroll offset vs range and any stretch. In Zeron's pin. |
