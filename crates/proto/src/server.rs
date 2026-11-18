@@ -294,7 +294,7 @@ impl ServerError {
                 format!("{host} runs an older Zeron server. Its owner needs to update it.")
             }
             Self::NeedsNewerApp => {
-                format!("{host} needs a newer version of Zeron. Update the app to connect.")
+                format!("{host} needs a newer version of Zeron. Update Zeron to connect.")
             }
             Self::DevServer => format!(
                 "{host} is a development server, which apps can't sign in to. It needs WorkOS sign-in set up."

@@ -139,8 +139,8 @@ With an `ADMIN_TOKEN` secret set as well, `GET /admin/users` and `GET
 Send people your edge's address, `https://<your edge>/`. The page there
 has an **Open in Zeron** button: it opens the app's server dialog with your
 address filled in and checked. The app switches only when they click
-*Connect to Acme*, or *Switch* if they're signed in somewhere else. A link
-alone never changes their server.
+*Connect to Acme*, or *Sign Out and Switch* if they're signed in somewhere
+else. A link alone never changes their server.
 
 The page also has the download links, and the address with a **Copy**
 button for anyone connecting by hand. It isn't shown on `zeron.sh` hosts.
