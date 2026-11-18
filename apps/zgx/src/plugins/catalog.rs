@@ -28,13 +28,15 @@
 //!   plugins.store.version_action { id, version, action }  StoreVersionAction
 //!   plugins.store.prepare(id)         PreparePluginPublish
 //!   plugins.store.publish { id, hash, ticket }  PublishPlugin
-//!   plugins.store.keys(id)            ListDeployKeys
-//!   plugins.store.create_key { id, name, expires? }  CreateDeployKey, a
+//!   plugins.store.keys()              ListDeployKeys: the account's
+//!   plugins.store.create_key { name, scope, expires? }  CreateDeployKey
+//!                                     (`scope`: `{ all = true }` or
+//!                                     `{ plugins = { ids } }`), a
 //!                                     fresh sign-in begun for it first
 //!                                     (StepUp `for: "deploy_key"`, each one
 //!                                     a key's); `cancel_step_up` stops
 //!                                     waiting for it
-//!   plugins.store.revoke_key { id, key }  RevokeDeployKey
+//!   plugins.store.revoke_key { key }  RevokeDeployKey
 //!   plugins.store.report { id, reason, text }  StoreReport
 //!
 //! Each rejects with the engine's words ("offline", "not_in_store", a store
@@ -214,7 +216,9 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let version = arg.field("version").map(text).filter(|v| version_ok(v)).ok_or("not_in_store")?;
             let action = arg.field("action").map(text).unwrap_or_default();
-            if !["withdraw", "yank", "unyank"].contains(&action.as_str()) {
+            // (Its author's: stop new installs, allow them again. Withdrawing
+            // is gone: a version is listed as it's published.)
+            if !["yank", "unyank"].contains(&action.as_str()) {
                 return Err("invalid".into());
             }
             answer(&e, "StoreVersionAction", json!({ "id": id, "version": version, "action": action })).await
@@ -241,14 +245,13 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.keys", move |id| {
+    host.async_action("plugins.store.keys", move |_| {
         let e = e.clone();
         async move {
-            // (Your own account: your keys' names, fingerprints and when
-            // they were last used.)
+            // (Your own account: your keys' names, fingerprints, scopes and
+            // when they were last used.)
             crate::plugins::preview::refuse("plugins.store.keys")?;
-            let id = store_id(&text(&id)).ok_or("not_in_store")?;
-            ask(&e, "ListDeployKeys", json!({ "id": id })).await
+            ask(&e, "ListDeployKeys", json!({})).await
         }
     });
     let e = engine.clone();
@@ -256,12 +259,12 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         let e = e.clone();
         async move {
             crate::plugins::preview::refuse("plugins.store.create_key")?;
-            let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let name: String = arg.field("name").map(text).unwrap_or_default().trim().chars().take(64).collect();
             if name.is_empty() {
                 return Err("invalid_name".into());
             }
-            let mut params = json!({ "id": id, "name": name });
+            let scope = key_scope(arg.field("scope")).ok_or("invalid_scope")?;
+            let mut params = json!({ "name": name, "scope": scope });
             if let Some(Value::Num(at)) = arg.field("expires")
                 && at.is_finite()
                 && *at > 0.0
@@ -279,9 +282,8 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         let e = e.clone();
         async move {
             crate::plugins::preview::refuse("plugins.store.revoke_key")?;
-            let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let key = arg.field("key").map(text).filter(|k| !k.is_empty() && k.len() <= 128).ok_or("not_in_store")?;
-            answer(&e, "RevokeDeployKey", json!({ "id": id, "key": key })).await
+            answer(&e, "RevokeDeployKey", json!({ "key": key })).await
         }
     });
     let e = engine;
@@ -399,6 +401,27 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
         tx.send(work());
     });
     rx.recv().await
+}
+
+/// A deploy key's scope as the store takes it: `{ all: true }` (every
+/// plugin of the account's, those it publishes later too), or
+/// `{ plugins: [ids] }`, one to fifty store ids, each once (a duplicate
+/// refused, never dropped). Anything else is no scope.
+fn key_scope(scope: Option<&Value>) -> Option<Json> {
+    let scope = scope?;
+    if matches!(scope.field("all"), Some(Value::Bool(true))) {
+        return Some(json!({ "all": true }));
+    }
+    let Some(Value::List(items)) = scope.field("plugins") else { return None };
+    let mut ids: Vec<String> = Vec::new();
+    for item in items.iter() {
+        let id = store_id(&text(item))?;
+        if ids.contains(&id) {
+            return None;
+        }
+        ids.push(id);
+    }
+    (1..=50).contains(&ids.len()).then(|| json!({ "plugins": ids }))
 }
 
 /// A deploy key made after a fresh sign-in in the browser begun for it

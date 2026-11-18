@@ -1432,6 +1432,33 @@ impl Bridge {
                 host_bar::notice(host_bar::Notice::key(notice["kind"].as_str().unwrap_or(""), notice["device"].as_str(), words));
             }
         }
+        // Versions of the account's plugins published somewhere other than
+        // here (another device, a deploy key): said once each, staying, and
+        // let go of at the engine once said (it keeps them until then, so
+        // one published while Zeron was closed is said when it opens).
+        let mut said: Vec<String> = Vec::new();
+        for notice in frame["store_notices"].as_array().into_iter().flatten() {
+            if let Some(id) = notice["id"].as_str().filter(|id| !id.is_empty()) {
+                if self.told.borrow_mut().insert(format!("store-notice:{id}")) {
+                    let name = notice["name"].as_str().or(notice["plugin"].as_str()).unwrap_or("");
+                    host_bar::notice(host_bar::Notice::published(
+                        name,
+                        notice["version"].as_str().unwrap_or(""),
+                        notice["via"].as_str().unwrap_or(""),
+                        notice["key_name"].as_str(),
+                        notice["words"].as_str().unwrap_or(""),
+                    ));
+                }
+                said.push(id.to_owned());
+            }
+        }
+        if !said.is_empty() {
+            crate::engine::get().spawn(async move {
+                if let Err(error) = crate::engine::get().call("AckStoreNotices", json!({ "ids": said })).await {
+                    eprintln!("zeron-zgx: plugins: couldn't let go of store notices: {error}");
+                }
+            });
+        }
         // One removed, or put back from elsewhere under the same id, starts
         // afresh: nothing it left (its queues, what it set, its saved state)
         // reaches what's installed now.

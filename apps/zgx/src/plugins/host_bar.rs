@@ -121,6 +121,29 @@ impl Notice {
         Notice { title, body, tone: Tone::Warning, action: None, stays: true }
     }
 
+    /// A version of one of your plugins published somewhere other than
+    /// this device (`via`: "deploy_key", with the key's name, or "device",
+    /// another of yours), in the host's words; one it doesn't know, in the
+    /// engine's (`words`). Its name and the key's are words someone chose:
+    /// plain, one line, short.
+    pub fn published(name: &str, version: &str, via: &str, key_name: Option<&str>, words: &str) -> Self {
+        let plain = |text: &str, most: usize| -> String {
+            text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(most).collect()
+        };
+        let (name, version) = (plain(name, 64), plain(version, 32));
+        let key = key_name.map(|k| plain(k, 64)).filter(|k| !k.is_empty());
+        let chinese = CHINESE.with(std::cell::Cell::get);
+        let title = if chinese { format!("{name} {version} 已发布") } else { format!("{name} {version} was published") };
+        let body = match (via, key) {
+            ("deploy_key", Some(key)) if chinese => format!("使用你的部署密钥“{key}”。如果不是你，请在“设置 → 插件 → 我的”中吊销它。"),
+            ("deploy_key", Some(key)) => format!("With your deploy key \u{201c}{key}\u{201d}. If it wasn't you, revoke the key in Settings → Plugins → Yours."),
+            ("device", _) if chinese => "来自你的另一台设备。".to_owned(),
+            ("device", _) => "From another of your devices.".to_owned(),
+            _ => plain(words, 300),
+        };
+        Notice { title, body, tone: Tone::Neutral, action: None, stays: true }
+    }
+
     /// Zeron opened with the default interface (safe mode): ⌥ (Alt) held, or
     /// the template crashed it twice as it opened.
     pub fn safe_at_launch(reason: preview::SafeReason) -> Self {
@@ -694,6 +717,28 @@ mod tests {
 
     fn sleek() -> preview::Preview {
         preview::Preview { id: "sleek".into(), name: "Sleek".into() }
+    }
+
+    /// A version published somewhere other than here says where it came
+    /// from, in the host's words; the names in it are plain, one line,
+    /// short; a `via` the host doesn't know says the engine's sentence.
+    #[test]
+    fn a_publish_from_elsewhere_says_where_it_came_from() {
+        CHINESE.with(|c| c.set(false));
+        let key = Notice::published("Focus timer", "1.3.0", "deploy_key", Some("ci"), "");
+        assert_eq!(key.title, "Focus timer 1.3.0 was published");
+        assert!(key.body.starts_with("With your deploy key \u{201c}ci\u{201d}."), "{}", key.body);
+        assert!(key.stays);
+        let device = Notice::published("Focus timer", "1.3.0", "device", None, "");
+        assert_eq!(device.body, "From another of your devices.");
+        let odd = Notice::published("Focus\ntimer\u{7}", "1.3.0", "somewhere", None, "Published from somewhere.");
+        assert_eq!(odd.title, "Focus timer 1.3.0 was published");
+        assert_eq!(odd.body, "Published from somewhere.");
+        let long = Notice::published(&"x".repeat(500), "1.3.0", "device", None, "");
+        assert!(long.title.chars().count() <= 64 + " 1.3.0 was published".len());
+        CHINESE.with(|c| c.set(true));
+        assert_eq!(Notice::published("Focus timer", "1.3.0", "device", None, "").title, "Focus timer 1.3.0 已发布");
+        CHINESE.with(|c| c.set(false));
     }
 
     /// The scripts' root fills the window whatever the host shows: its

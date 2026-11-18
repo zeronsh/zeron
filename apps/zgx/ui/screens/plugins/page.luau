@@ -38,6 +38,7 @@ local nav = require("@app/screens/plugins/nav")
 local browse = require("@app/screens/plugins/browse")
 local listing = require("@app/screens/plugins/listing")
 local publish = require("@app/screens/plugins/publish")
+local keys = require("@app/screens/plugins/keys")
 
 local M = {}
 
@@ -693,6 +694,13 @@ local function catalog(): Node
 		views = {
 			browse = function(): Node
 				return browse.View {}
+			end,
+		},
+		-- Under Yours' card: the account's deploy keys (screens/plugins/keys),
+		-- for the plugins of yours in the store.
+		below = {
+			yours = function(): Node
+				return keys.Section { plugins = publish.owned }
 			end,
 		},
 		found = found,

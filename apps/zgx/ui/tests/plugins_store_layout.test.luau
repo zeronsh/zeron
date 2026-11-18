@@ -512,6 +512,20 @@ end)
 
 -- Publish… for Pomodoro clock, from Yours; `before` runs first (a stub's
 -- command), `held` keeps the checks from answering.
+-- Yours, scrolled to the account's deploy keys at its end; `before` runs
+-- first.
+local function keys_page(before: ((app: any) -> ())?): any
+	local app = mounted()
+	if before then
+		before(app)
+	end
+	app:click('role:tab "Yours"')
+	settle(app, 400)
+	app:scroll(SCROLL, 1e6)
+	settle(app)
+	return app
+end
+
 local function publishing(before: ((app: any) -> ())?, held: boolean?): any
 	local app = mounted()
 	if before then
@@ -544,27 +558,27 @@ test("the checks open at the height they have when all pass: a plugin that passe
 	expect(box(app, 'role:group "Versions you\'ve sent"').y).to_be(versions.y)
 end)
 
-test("opened from Yours, its versions draw on the first frame from what Yours read: Deploy keys doesn't move as the store answers", function()
+test("opened from Yours, its versions draw on the first frame from what Yours read: they don't move as the store answers", function()
 	local app = mounted()
 	app:command("store_stub.fixed")
 	app:command("store_stub.no_notes")
 	app:click('role:tab "Yours"')
 	settle(app)
 	-- (Yours has read its versions: its store line says so.)
-	expect(app:tree()).to_contain("1.0.0 in the plugin store")
+	expect(app:tree()).to_contain("1.1.0 in the plugin store")
 	app:command("store_stub.hold")
 	app:click('role:link "Publish…"')
-	app:wait('role:group "Deploy keys"', { timeout_ms = 3000 })
+	app:wait('role:group "Versions you\'ve sent"', { timeout_ms = 3000 })
 	-- (The page come to rest, the store still not answering.)
 	settle(app, 400)
 	expect(app:has("#publish-checks")).to_be(false)
 	expect(app:has("#versions-none")).to_be(false)
-	expect(app:tree('role:group "Versions you\'ve sent"')).to_contain("Not approved")
-	local keys = box(app, 'role:group "Deploy keys"').y
+	expect(app:tree('role:group "Versions you\'ve sent"')).to_contain("Not verified")
+	local versions = box(app, 'role:group "Versions you\'ve sent"').y
 	app:command("store_stub.release")
 	settle(app, 500)
 	expect(app:has("#publish-checks")).to_be(true)
-	expect(box(app, 'role:group "Deploy keys"').y).to_be(keys)
+	expect(box(app, 'role:group "Versions you\'ve sent"').y).to_be(versions)
 end)
 
 -- The checks' rows: each one's height and its hairline, by where each
@@ -608,9 +622,7 @@ test("a check is a Settings row: a passed one the row's own height, one with wha
 end)
 
 test("a section's action stands at its title's end as Settings' do: its line as tall as the action, the sentence 4 under it, the card 8", function()
-	local app = publishing()
-	app:scroll(SCROLL, 1e6)
-	settle(app)
+	local app = keys_page()
 	local title = box(app, 'role:group "Deploy keys" >> role:heading')
 	local line = app:tree('role:group "Deploy keys"'):match("[^\n]*A deploy key lets[^\n]*") or ""
 	local sx, sy, sw, sh = line:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
@@ -619,12 +631,13 @@ test("a section's action stands at its title's end as Settings' do: its line as 
 	local action = box(app, "#keys-new")
 	expect(math.abs((action.y + action.h / 2) - (title.y + title.h / 2)) < 0.6).to_be(true)
 	expect(sentence.y - (action.y + action.h)).to_be(4)
+	app = publishing()
 	local checks_action = box(app, "#publish-check-again")
 	expect(box(app, "#publish-checks").y - 1 - (checks_action.y + checks_action.h)).to_be(8)
 end)
 
 test("a key's short form is a column down its rows, ending before Revoke, at 1000 and in a narrow pane", function()
-	local app = publishing(function(a: any)
+	local app = keys_page(function(a: any)
 		a:command("store_stub.many_keys")
 	end)
 	for _, width in { 1000, 560 } do
@@ -647,7 +660,7 @@ test("a key's short form is a column down its rows, ending before Revoke, at 100
 end)
 
 test("a key within 14 days of its end says how soon, after when it was last used", function()
-	local app = publishing(function(a: any)
+	local app = keys_page(function(a: any)
 		a:command("store_stub.many_keys")
 	end)
 	local tree = app:tree()
@@ -666,6 +679,10 @@ test("with nothing sent, its versions say so in one quiet line in their card, as
 	end)
 	expect(app:has("#versions-none")).to_be(true)
 	expect(box(app, "#versions-none").h).to_be(16 + 2 * 12)
+	-- (The keys, at Yours' end: none until a plugin of yours is in the store.)
+	app = keys_page(function(a: any)
+		a:command("store_stub.never_published")
+	end)
 	expect(box(app, "#keys-none").h).to_be(16 + 2 * 12)
 end)
 
@@ -680,29 +697,22 @@ test("publishing's buttons and its versions' actions end on one edge, the conten
 	-- (The checks' column is 1 in from its card's edge.)
 	content += 1
 	-- (A filled control's box is its edge: Submit, a version's action.)
-	for _, target in { "#publish-submit", 'role:button "Stop new installs"' } do
+	for _, target in { "#publish-submit", 'role:button "Stop new installs"[1]' } do
 		local b = box(app, target)
 		expect(`{target} {math.abs(b.x + b.w - content) < 0.6}`).to_be(`{target} true`)
 	end
 	-- A ghost trail's words end on it, its wash past by its end padding (a
 	-- ghost sm button's, 10, `zeron.space.snug`): text lined up with text.
-	app:scroll(SCROLL, 1e6)
-	settle(app)
-	for _, target in { "#publish-check-again", "#keys-new" } do
-		local b = box(app, target)
-		expect(`{target} {math.abs(b.x + b.w - 10 - content) < 0.6}`).to_be(`{target} true`)
-	end
+	local check = box(app, "#publish-check-again")
+	expect(math.abs(check.x + check.w - 10 - content) < 0.6).to_be(true)
+	-- New key…, at Yours' end, on the same edge (the same column's width).
+	app = keys_page()
+	local new = box(app, "#keys-new")
+	expect(math.abs(new.x + new.w - 10 - content) < 0.6).to_be(true)
 end)
 
 test("a deploy key's secret is one line in the code face, never broken inside it", function()
-	local app = mounted()
-	app:click('role:tab "Yours"')
-	settle(app)
-	app:click('role:link "Publish…"')
-	app:wait("#publish-checks", { timeout_ms = 3000 })
-	settle(app, 400)
-	app:scroll(SCROLL, 2000)
-	app:frames(10)
+	local app = keys_page()
 	app:click("#keys-new")
 	settle(app)
 	app:type('role:dialog >> role:textbox "Name"', "CI")

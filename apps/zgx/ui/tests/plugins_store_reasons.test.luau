@@ -12,7 +12,7 @@ local REASONS = {
 	"binary_file", "no_notes", "raw_html", "footnote", "math", "needs_username", "id_taken", "version_exists", "suspended",
 	"key_not_allowed", "key_revoked", "key_expired", "invalid_signature", "unauthenticated", "forbidden",
 	"stale_request", "replayed_request", "body_mismatch",
-	"too_many_keys", "key_taken", "invalid_name", "invalid_expiry", "invalid_proof", "bad_csrf",
+	"too_many_keys", "key_taken", "not_owner", "invalid_scope", "invalid_name", "invalid_expiry", "invalid_proof", "bad_csrf",
 }
 
 local function said(): { [string]: any }

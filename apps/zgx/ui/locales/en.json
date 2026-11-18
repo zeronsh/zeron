@@ -3849,7 +3849,9 @@
       "invalid_name": "Give the key a shorter name.",
       "invalid_expiry": "Choose when the key ends again.",
       "invalid_proof": "The store couldn't check the new key. Try again.",
-      "bad_csrf": "The store refused a request it couldn't trust. Try again."
+      "bad_csrf": "The store refused a request it couldn't trust. Try again.",
+      "not_owner": "Some of those plugins aren't yours in the store.",
+      "invalid_scope": "Choose at least one of your plugins for it."
     },
     "store": {
       "browse": "Browse",
@@ -4013,36 +4015,27 @@
       "check_again": "Check again",
       "check_failed": "Couldn't check it",
       "fix_first": "Fix what's marked, save, and check again.",
-      "submit": "Submit for review",
-      "submit_version": "Submit {version} for review",
+      "submit": "Publish",
+      "submit_version": "Publish {version}",
       "submit_note": "{n, plural, one {# file is} other {# files are}} sent, signed as yours, exactly as checked.",
-      "sent_toast": "Sent {name} {version} for review",
+      "sent_toast": "{name} {version} is in the plugin store",
       "your_versions": "Versions you've sent",
       "no_versions": "Nothing sent yet.",
       "versions_failed": "Couldn't see your versions",
       "sign_in_to_see": "Sign in to see your versions",
       "at_line": "{path}, line {line}",
-      "sign_in_to_see_keys": "Sign in to see its keys",
+      "sign_in_to_see_keys": "Sign in to see your keys",
       "status": {
-        "pending": "In review",
-        "approved": "Approved",
-        "rejected": "Not approved",
-        "withdrawn": "Withdrawn",
         "yanked": "No new installs",
-        "removed": "Taken down"
+        "taken_down": "Taken down",
+        "removed": "Removed"
       },
-      "reviewer_said": "{date} · “{words}”",
       "action": {
-        "withdraw": "Withdraw",
         "yank": "Stop new installs",
         "unyank": "Allow installs again"
       },
       "action_failed": "Couldn't change that version",
       "confirm": {
-        "withdraw": {
-          "title": "Withdraw {name} {version}?",
-          "body": "It leaves the review queue. A version once sent keeps its number: send the next one under a new version."
-        },
         "yank": {
           "title": "Stop new installs of {name} {version}?",
           "body": "Nobody can install it anymore. Those who have it keep it working. You can allow installs again later."
@@ -4054,17 +4047,17 @@
       },
       "summary": {
         "none": "Not in the plugin store",
-        "listed": "{version} in the plugin store",
-        "in_review": "{version} in review",
         "unknown": "Share it in the plugin store",
+        "listed_verified": "{version} in the plugin store, verified",
+        "listed_waiting": "{version} in the plugin store, not verified yet",
+        "listed_declined": "{version} in the plugin store, not verified",
         "no_installs": "{version}: no new installs",
-        "not_approved": "{version} not approved",
         "taken_down": "{version} taken down"
       },
       "keys": "Deploy keys",
-      "keys_body": "A deploy key lets a CI job, such as a GitHub Action, send new versions of this plugin without your session; each still waits for review.",
+      "keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each key publishes the plugins chosen when it's made.",
       "keys_none": "No keys yet.",
-      "keys_failed": "Couldn't see its keys",
+      "keys_failed": "Couldn't see your keys",
       "key": {
         "new": "New key…",
         "new_title": "New deploy key",
@@ -4083,7 +4076,7 @@
         "stop_waiting": "Stop waiting",
         "timed_out": "The sign-in didn't finish. Try again.",
         "secret_title": "Copy your key now",
-        "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets. Anyone with it can send versions of this plugin as you.",
+        "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets. Anyone with it can publish versions of the plugins it's for, as you.",
         "done": "I've copied it",
         "ends": "Ends {date}",
         "revoke": "Revoke",
@@ -4095,7 +4088,16 @@
         "no_end": "Doesn't expire",
         "ends_today": "Ends today",
         "ends_tomorrow": "Ends tomorrow",
-        "ends_in": "{n, plural, one {Ends in # day} other {Ends in # days}}"
+        "ends_in": "{n, plural, one {Ends in # day} other {Ends in # days}}",
+        "last_used_on": "Last used {date} on {plugin}",
+        "scope": {
+          "label": "Publishes",
+          "all": "All your plugins",
+          "chosen": "Chosen plugins",
+          "one": "{name}",
+          "two": "{a} and {b}",
+          "some": "{n, plural, one {# of your plugins} other {# of your plugins}}"
+        }
       },
       "unblock_title": "Turn {name} back on?",
       "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",
@@ -4103,7 +4105,7 @@
       "update_new_owner": "It has a new publisher, @{username}. Zeron asks you to allow it again after it updates.",
       "update_new_owner_unnamed": "It has a new publisher. Zeron asks you to allow it again after it updates.",
       "update_new_key": "This version is signed with a different key than the one you have.",
-      "keys_publish_first": "Send its first version from this computer; a deploy key can send the ones after it.",
+      "keys_publish_first": "Publish one of your plugins from this computer first.",
       "version_installs": "Version {version} · {n, plural, one {# install} other {# installs}}",
       "show_installed": "Show it in Installed",
       "readme_more": "Show more",
@@ -4120,7 +4122,14 @@
       "count": "{n, plural, one {# plugin} other {# plugins}}",
       "list_title": "Plugins",
       "plain_readme": "This README is drawn as plain text past here: it's too long or too deeply nested to lay out.",
-      "plain_notes": "These notes are drawn as plain text past here: they're too long or too deeply nested to lay out."
+      "plain_notes": "These notes are drawn as plain text past here: they're too long or too deeply nested to lay out.",
+      "review": {
+        "waiting": "Waiting for a reviewer",
+        "declined": "Not verified: a reviewer declined to verify it",
+        "declined_said": "Not verified: “{words}”"
+      },
+      "superseded": "Replaced by {version} before it was verified: no new installs",
+      "sent_toast_body": "It shows as not verified until a reviewer has read it."
     }
   },
   "templates": {

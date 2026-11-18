@@ -18,7 +18,7 @@
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
 --   store_stub.html_and_footnote  your plugin's README has HTML and math, its CHANGELOG a footnote (advice)
 --   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
---   store_stub.many_keys   Pomodoro clock has ten deploy keys: names of every length,
+--   store_stub.many_keys   the account has ten deploy keys: names of every length,
 --                          one ending today, one tomorrow, one in five days
 --   store_stub.long_featured   the first featured says 300 characters of itself, the second nothing
 
@@ -531,8 +531,9 @@ stub.prereleases = function(id: string, on: boolean): any
 		return {}
 	end)
 end
--- Your own: Pomodoro clock (yours, on this device) in the store, a version
--- approved, one turned down with the reviewer's words; its deploy keys.
+-- Your own: Pomodoro clock (yours, on this device) in the store: 1.0.0
+-- verified; 1.0.5, never verified, replaced by 1.1.0 (superseded: no new
+-- installs); 1.1.0, listed, a reviewer declined to verify it, their words.
 local mine: { [string]: any } = {
 	["pomodoro-clock"] = {
 		id = "pomodoro-clock",
@@ -541,15 +542,16 @@ local mine: { [string]: any } = {
 		listing = "listed",
 		author = { username = "you", badges = {} },
 		versions = {
-			{ version = "1.1.0", status = "rejected", published_at = NOW - 3 * DAY, review = { state = "rejected", message = "It reads every chat's messages but only needs the title. Ask for less." } },
-			{ version = "1.0.0", status = "approved", published_at = NOW - 20 * DAY, review = { state = "approved" } },
+			{ version = "1.1.0", status = "listed", verified = false, published_at = NOW - 3 * DAY, via = "device", review = { decided = true, decision = "declined", reason = "asks_too_much", message = "It reads every chat's messages but only needs the title. Ask for less.", decided_at = NOW - 2 * DAY } },
+			{ version = "1.0.5", status = "yanked", yanked_by = "superseded", superseded = { at = NOW - 3 * DAY, by = "1.1.0" }, verified = false, published_at = NOW - 9 * DAY, via = "device", review = { decided = false } },
+			{ version = "1.0.0", status = "listed", verified = true, verified_at = NOW - 19 * DAY, published_at = NOW - 20 * DAY, via = "device", review = { decided = true, decision = "verified", decided_at = NOW - 19 * DAY } },
 		},
 	},
 }
-local keys: { [string]: { any } } = {
-	["pomodoro-clock"] = {
-		{ key = "k_gh", name = "GitHub Actions", created_at = NOW - 10 * DAY, last_used_at = NOW - 2 * DAY },
-	},
+-- The account's deploy keys, each with its scope (all its plugins, or
+-- some) and the plugin it last published.
+local keys: { any } = {
+	{ key = "k_gh", name = "GitHub Actions", scope = { all = true }, created_at = NOW - 10 * DAY, last_used_at = NOW - 2 * DAY, last_used_plugin = "pomodoro-clock" },
 }
 -- What the engine finds checking your plugin's folder; `store_stub.fixed`
 -- makes it all there.
@@ -635,8 +637,19 @@ stub.publish = function(id: string, hash: string, ticket: string): any
 			p = { id = id, name = "Pomodoro clock", version = prepared_version, versions = {} }
 			mine[id] = p
 		end
-		table.insert(p.versions, 1, { version = prepared_version, status = "pending", published_at = NOW, review = { state = "pending" } })
-		return { ok = true, id = id, version = prepared_version, status = "pending" }
+		-- Listed at once, not verified; every older listed one that isn't
+		-- verified takes no new installs from now (superseded).
+		local superseded = {}
+		for _, v in p.versions do
+			if v.status == "listed" and v.verified ~= true then
+				v.status = "yanked"
+				v.yanked_by = "superseded"
+				v.superseded = { at = NOW, by = prepared_version }
+				table.insert(superseded, v.version)
+			end
+		end
+		table.insert(p.versions, 1, { version = prepared_version, status = "listed", verified = false, published_at = NOW, via = "device", review = { decided = false } })
+		return { ok = true, id = id, version = prepared_version, status = "listed", verified = false, superseded = superseded, url = `https://zeron.example/plugins/{id}` }
 	end)
 end
 stub.version_action = function(id: string, version: string, action: string): any
@@ -644,30 +657,36 @@ stub.version_action = function(id: string, version: string, action: string): any
 	return answer(function(): any
 		for _, v in mine[id].versions do
 			if v.version == version then
-				v.status = if action == "withdraw" then "withdrawn" elseif action == "yank" then "yanked" else "approved"
-				v.review = nil
+				-- (Its author's own yank and unyank: never a superseded one's.)
+				if action == "yank" then
+					v.status = "yanked"
+					v.yanked_by = "author"
+				elseif action == "unyank" and v.yanked_by == "author" then
+					v.status = "listed"
+					v.yanked_by = nil
+				end
 			end
 		end
 		return {}
 	end)
 end
-stub.keys = function(id: string): any
-	note(`keys:{id}`)
+stub.keys = function(): any
+	note("keys")
 	return answer(function(): any
 		refused_as_you()
-		return { keys = table.clone(keys[id] or {}) }
+		return { keys = table.clone(keys) }
 	end)
 end
 -- A new key needs a fresh sign-in: the first ask waits until
 -- `store_stub.signed_in_again`, as the host's StepUp does.
 stub.create_key = function(args: any): any
-	note(`create_key:{args.id}:{args.name}:{if args.expires then "expires" else "never"}`)
+	local scope = if args.scope and args.scope.all then "all" else table.concat((args.scope and args.scope.plugins) or {}, ",")
+	note(`create_key:{scope}:{args.name}:{if args.expires then "expires" else "never"}`)
 	local p: any = { settled = false, waiters = {} }
 	local function settle()
 		p.settled = true
-		local k = { key = `k_{#(keys[args.id] or {}) + 1}`, name = args.name, created_at = NOW, expires_at = args.expires }
-		keys[args.id] = keys[args.id] or {}
-		table.insert(keys[args.id], k)
+		local k = { key = `k_{#keys + 1}`, name = args.name, scope = args.scope, created_at = NOW, expires_at = args.expires }
+		table.insert(keys, k)
 		p.value = { ok = true, key = k.key, secret = "zpk_live_3f9a1c7e0b2d4f6a8c1e3a5b7d9f0e2c" }
 		for _, w in p.waiters do
 			w()
@@ -702,17 +721,17 @@ end
 stub.cancel_step_up = function()
 	note("cancel_step_up")
 end
-stub.revoke_key = function(id: string, key: string): any
-	note(`revoke_key:{id}:{key}`)
+stub.revoke_key = function(key: string): any
+	note(`revoke_key:{key}`)
 	return answer(function(): any
 		local out = {}
-		for _, k in keys[id] or {} do
+		for _, k in keys do
 			if k.key ~= key then
 				table.insert(out, k)
 			end
 		end
-		keys[id] = out
-		return { revoked = key }
+		keys = out
+		return { revoked = true }
 	end)
 end
 ui.command {
@@ -874,9 +893,17 @@ ui.command {
 			elseif i % 3 == 0 then
 				ends = noon + 90 * DAY
 			end
-			table.insert(list, { key = key, name = name, created_at = NOW - i * DAY, last_used_at = if i % 2 == 0 then NOW - DAY else nil, expires_at = ends })
+			table.insert(list, {
+				key = key,
+				name = name,
+				scope = if i % 2 == 0 then { all = true } else { plugins = { "pomodoro-clock" } },
+				created_at = NOW - i * DAY,
+				last_used_at = if i % 2 == 0 then NOW - DAY else nil,
+				last_used_plugin = if i % 2 == 0 then "pomodoro-clock" else nil,
+				expires_at = ends,
+			})
 		end
-		keys["pomodoro-clock"] = list
+		keys = list
 	end,
 }
 ui.command {

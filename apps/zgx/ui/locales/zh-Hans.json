@@ -3849,7 +3849,9 @@
       "invalid_name": "请给密钥一个短一点的名字。",
       "invalid_expiry": "请重新选择密钥的到期时间。",
       "invalid_proof": "商店无法验证新密钥。请再试一次。",
-      "bad_csrf": "商店拒绝了一个无法信任的请求。请再试一次。"
+      "bad_csrf": "商店拒绝了一个无法信任的请求。请再试一次。",
+      "not_owner": "其中有些插件在商店里不属于你。",
+      "invalid_scope": "请至少为它选择一个你的插件。"
     },
     "store": {
       "browse": "浏览",
@@ -4013,36 +4015,27 @@
       "check_again": "重新检查",
       "check_failed": "无法检查",
       "fix_first": "修正标出的问题，保存后重新检查。",
-      "submit": "提交审核",
-      "submit_version": "提交 {version} 审核",
+      "submit": "发布",
+      "submit_version": "发布 {version}",
       "submit_note": "{n, plural, other {将发送 # 个文件}}，以你的签名、与检查时完全一致。",
-      "sent_toast": "已提交{name} {version}审核",
+      "sent_toast": "{name} {version} 已在插件商店",
       "your_versions": "你发送过的版本",
       "no_versions": "还没有发送过版本。",
       "versions_failed": "无法查看你的版本",
       "sign_in_to_see": "登录后查看你的版本",
       "at_line": "{path}，第 {line} 行",
-      "sign_in_to_see_keys": "登录后查看它的密钥",
+      "sign_in_to_see_keys": "登录后查看你的密钥",
       "status": {
-        "pending": "审核中",
-        "approved": "已通过",
-        "rejected": "未通过",
-        "withdrawn": "已撤回",
         "yanked": "停止新安装",
-        "removed": "已下架"
+        "taken_down": "已下架",
+        "removed": "已移除"
       },
-      "reviewer_said": "{date} · “{words}”",
       "action": {
-        "withdraw": "撤回",
         "yank": "停止新安装",
         "unyank": "重新允许安装"
       },
       "action_failed": "无法更改这个版本",
       "confirm": {
-        "withdraw": {
-          "title": "撤回{name} {version}？",
-          "body": "它会离开审核队列。发送过的版本号不能再用：下一个请用新版本号。"
-        },
         "yank": {
           "title": "停止{name} {version}的新安装？",
           "body": "之后没人能再安装它。已经安装的人仍然可以使用。你以后可以重新允许安装。"
@@ -4054,17 +4047,17 @@
       },
       "summary": {
         "none": "未发布到插件商店",
-        "listed": "{version} 已在插件商店",
-        "in_review": "{version} 审核中",
         "unknown": "把它分享到插件商店",
+        "listed_verified": "{version} 已在插件商店，已验证",
+        "listed_waiting": "{version} 已在插件商店，尚未验证",
+        "listed_declined": "{version} 已在插件商店，未通过验证",
         "no_installs": "{version} 已停止新安装",
-        "not_approved": "{version} 未通过审核",
         "taken_down": "{version} 已下架"
       },
       "keys": "部署密钥",
-      "keys_body": "部署密钥让 CI 任务（例如 GitHub Action）不用你的登录也能发送这个插件的新版本；每个版本仍需审核。",
+      "keys_body": "部署密钥让 CI 任务（例如 GitHub Action）无需你的会话即可发布你插件的新版本。每个密钥只发布创建时选定的插件。",
       "keys_none": "还没有密钥。",
-      "keys_failed": "无法查看它的密钥",
+      "keys_failed": "无法查看你的密钥",
       "key": {
         "new": "新建密钥…",
         "new_title": "新建部署密钥",
@@ -4083,7 +4076,7 @@
         "stop_waiting": "停止等待",
         "timed_out": "登录没有完成。请再试一次。",
         "secret_title": "现在复制你的密钥",
-        "secret_body": "Zeron 只显示这一次。请把它放进 CI 的机密设置里。拿到它的人可以以你的名义发送这个插件的版本。",
+        "secret_body": "这是 Zeron 唯一一次显示它。请把它放进 CI 的密钥中。任何拿到它的人都能以你的身份发布它所对应插件的版本。",
         "done": "我已复制",
         "ends": "{date} 到期",
         "revoke": "吊销",
@@ -4095,7 +4088,16 @@
         "no_end": "永不过期",
         "ends_today": "今天到期",
         "ends_tomorrow": "明天到期",
-        "ends_in": "{n, plural, other {# 天后到期}}"
+        "ends_in": "{n, plural, other {# 天后到期}}",
+        "last_used_on": "{date} 用于 {plugin}",
+        "scope": {
+          "label": "发布范围",
+          "all": "你的所有插件",
+          "chosen": "选定的插件",
+          "one": "{name}",
+          "two": "{a} 和 {b}",
+          "some": "你的 {n} 个插件"
+        }
       },
       "unblock_title": "重新打开{name}？",
       "unblock_body": "Zeron 已将这个版本从商店下架。它会按你之前的允许在这里再次运行。",
@@ -4103,7 +4105,7 @@
       "update_new_owner": "它有了新的发布者 @{username}。更新后 Zeron 会再次请你允许。",
       "update_new_owner_unnamed": "它有了新的发布者。更新后 Zeron 会再次请你允许。",
       "update_new_key": "这个版本的签名密钥与你现有版本的不同。",
-      "keys_publish_first": "请先从这台电脑发送第一个版本；之后的版本可以由部署密钥发送。",
+      "keys_publish_first": "请先从这台电脑发布你的一个插件。",
       "version_installs": "版本 {version} · {n, plural, other {# 次安装}}",
       "show_installed": "在“已安装”中查看",
       "readme_more": "显示更多",
@@ -4120,7 +4122,14 @@
       "count": "{n, plural, other {# 个插件}}",
       "list_title": "插件",
       "plain_readme": "此处以下的 README 以纯文本显示：它太长或嵌套太深，无法排版。",
-      "plain_notes": "此处以下的更新说明以纯文本显示：它太长或嵌套太深，无法排版。"
+      "plain_notes": "此处以下的更新说明以纯文本显示：它太长或嵌套太深，无法排版。",
+      "review": {
+        "waiting": "等待审核",
+        "declined": "未验证：审核者拒绝验证",
+        "declined_said": "未验证：“{words}”"
+      },
+      "superseded": "在验证前已被 {version} 取代：不再接受新安装",
+      "sent_toast_body": "在审核者看过之前，它会显示为未验证。"
     }
   },
   "templates": {

@@ -164,13 +164,35 @@ fn a_report_carries_its_reason_and_words_and_only_the_store_s_reasons() {
 }
 
 #[test]
-fn a_deploy_key_that_isn_t_allowed_yet_says_so() {
+fn a_deploy_key_that_isn_t_allowed_says_so() {
     let (out, asked) = run(
-        r#"ui.call("plugins.store.create_key", { id = "focus", name = "CI" })"#,
-        json!({ "ok": false, "error": "not_published", "message": "Publish a version first" }),
+        r#"ui.call("plugins.store.create_key", { name = "CI", scope = { plugins = { "focus", "timer" } } })"#,
+        json!({ "ok": false, "error": "not_owner", "message": "Not yours: timer" }),
     );
-    assert_eq!(asked[0], ("CreateDeployKey".into(), json!({ "id": "focus", "name": "CI" }), None));
-    assert_eq!(out, "err:not_published: Publish a version first");
+    assert_eq!(asked[0], ("CreateDeployKey".into(), json!({ "name": "CI", "scope": { "plugins": ["focus", "timer"] } }), None));
+    assert_eq!(out, "err:not_owner: Not yours: timer");
+}
+
+#[test]
+fn a_deploy_key_s_scope_is_all_or_one_to_fifty_store_ids_each_once() {
+    let (_, asked) = run(r#"ui.call("plugins.store.create_key", { name = "CI", scope = { all = true } })"#, json!({ "ok": true }));
+    assert_eq!(asked[0].1, json!({ "name": "CI", "scope": { "all": true } }));
+    for bad in [
+        r#"{ name = "CI" }"#,
+        r#"{ name = "CI", scope = { plugins = {} } }"#,
+        r#"{ name = "CI", scope = { plugins = { "focus", "focus" } } }"#,
+        r#"{ name = "CI", scope = { plugins = { "../etc" } } }"#,
+        r#"{ name = "CI", scope = { all = false } }"#,
+    ] {
+        let (out, asked) = run(&format!(r#"ui.call("plugins.store.create_key", {bad})"#), json!({ "ok": true }));
+        assert_eq!(out, "err:invalid_scope", "{bad}");
+        assert!(asked.is_empty(), "{bad}");
+    }
+    // The account's keys, and one revoked by its key alone.
+    let (_, asked) = run(r#"ui.call("plugins.store.keys", nil)"#, json!({ "keys": [] }));
+    assert_eq!(asked[0], ("ListDeployKeys".into(), json!({}), None));
+    let (_, asked) = run(r#"ui.call("plugins.store.revoke_key", { key = "k_gh" })"#, json!({ "ok": true }));
+    assert_eq!(asked[0], ("RevokeDeployKey".into(), json!({ "key": "k_gh" }), None));
 }
 
 #[test]
@@ -178,7 +200,7 @@ fn a_deploy_key_s_sign_in_is_begun_for_a_deploy_key() {
     // (Every reply says a sign-in is needed, its page no https one: the
     // browser never opens, the call ends there.)
     let (out, asked) = run(
-        r#"ui.call("plugins.store.create_key", { id = "focus", name = "CI" })"#,
+        r#"ui.call("plugins.store.create_key", { name = "CI", scope = { all = true } })"#,
         json!({ "ok": false, "error": "step_up_required", "url": "about:blank" }),
     );
     let methods: Vec<&str> = asked.iter().map(|(m, _, _)| m.as_str()).collect();

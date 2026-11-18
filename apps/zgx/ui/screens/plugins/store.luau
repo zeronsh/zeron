@@ -37,11 +37,12 @@
 --                             field?, path?, words } }, warnings, listing,
 --                             notes, package = { files, bytes }, ticket? }
 --   store.publish(id, hash, ticket)  { id, version, status, checks }
---   store.keys(id)            { keys = { Key } }
---   store.create_key { id, name, expires? }   { key, secret } once: a fresh
---                             sign-in first when the store asks for one
+--   store.keys()              { keys = { Key } }, the account's
+--   store.create_key { name, scope, expires? }   { key, secret } once: a fresh
+--                             sign-in first (`scope`: { all = true } or
+--                             { plugins = { ids } })
 --   store.cancel_step_up()    stops waiting for that sign-in
---   store.revoke_key(id, key)
+--   store.revoke_key(key)
 --
 -- Shapes (the plan's contract and its amendments,
 -- docs/plans/2026-11-17-plugin-store.md):
@@ -161,11 +162,12 @@ function M.publish(id: string, hash: string, ticket: string): any
 	return ui.call("plugins.store.publish", { id = id, hash = hash, ticket = ticket })
 end
 
-function M.keys(id: string): any
-	return ui.call("plugins.store.keys", id)
+function M.keys(): any
+	return ui.call("plugins.store.keys", nil)
 end
 
-function M.create_key(args: { id: string, name: string, expires: number? }): any
+export type Scope = { all: boolean?, plugins: { string }? }
+function M.create_key(args: { name: string, scope: Scope, expires: number? }): any
 	return ui.call("plugins.store.create_key", args)
 end
 
@@ -173,8 +175,8 @@ function M.cancel_step_up()
 	ui.invoke("plugins.store.cancel_step_up", nil)
 end
 
-function M.revoke_key(id: string, key: string): any
-	return ui.call("plugins.store.revoke_key", { id = id, key = key })
+function M.revoke_key(key: string): any
+	return ui.call("plugins.store.revoke_key", { key = key })
 end
 
 -- What a report may say is wrong (the store's list).

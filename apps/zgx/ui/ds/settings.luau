@@ -1213,6 +1213,9 @@ export type CatalogProps = {
 	-- terms: Plugins' Browse). Each is built as its tab is chosen; it has
 	-- the same card to hand, `Settings.CatalogCard`.
 	views: { [string]: () -> Node }?,
+	-- What a tab adds under its card, by value, a section's step below it
+	-- (Plugins' Yours: the account's deploy keys).
+	below: { [string]: () -> Node }?,
 }
 
 -- A Catalog's card: its search heading it (a quiet field inset evenly,
@@ -1373,7 +1376,24 @@ function M.Catalog(props: CatalogProps): Node
 		if own then
 			return own()
 		end
-		return card()
+		if not props.below then
+			return card()
+		end
+		local below = props.below
+		return ui.column {
+			w_full = true,
+			gap = "$space.6",
+			card(),
+			-- (Only a tab with something under it: nothing, no gap.)
+			ui.show(function(): boolean
+				return below[tab:get()] ~= nil
+			end, ui.presence(function(): string
+				local t = tab:get()
+				return if below[t] then t else ""
+			end, function(t: string): Node
+				return if t ~= "" then below[t]() else ui.div {}
+			end, { w_full = true })),
+		}
 	end
 	local column: { any } = {
 		w_full = true,
