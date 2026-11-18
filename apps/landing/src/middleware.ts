@@ -8,6 +8,13 @@ import { contentSecurityPolicy, SECURITY_HEADERS } from "./lib/store/security.ts
 
 export const onRequest = defineMiddleware(async (context, next) => {
   if (context.isPrerendered) return next();
+  // One address per page: "/plugins//x" and "//plugins/x" are "/plugins/x".
+  // (The address as sent: Astro's own is already tidied.)
+  const sent = new URL(context.request.url);
+  if (/\/\//.test(sent.pathname)) {
+    const plain = sent.pathname.replace(/\/{2,}/g, "/");
+    return new Response(null, { status: 301, headers: { location: `${plain}${sent.search}`, "cache-control": "public, max-age=3600" } });
+  }
   const edge = new Edge(env.EDGE, context.request);
   context.locals.edge = edge;
   const response = await next();
@@ -15,6 +22,19 @@ export const onRequest = defineMiddleware(async (context, next) => {
 });
 
 async function secure(response: Response, cookies: string[]): Promise<Response> {
+  // The site's 404 page goes out exactly as it does for an address that
+  // doesn't exist (a file, with that file's headers), so a page that
+  // answers "not here" can't be told from one that isn't there. (Only a
+  // staff session ever rotates, so only an admin's 404 carries a cookie.)
+  // (A route's "not here" is still empty at this point: the 404 page is
+  // put in after. A file route's 404 keeps the headers it set itself.)
+  if (response.status === 404) {
+    if (cookies.length === 0) return response;
+    const notFound = new Headers(response.headers);
+    for (const cookie of cookies) notFound.append("set-cookie", cookie);
+    notFound.set("cache-control", "private, no-store");
+    return new Response(response.body, { status: 404, statusText: response.statusText, headers: notFound });
+  }
   const headers = new Headers(response.headers);
   // The session the edge rotated while it answered goes back to the browser,
   // and a response that carries one is that person's alone: never kept.

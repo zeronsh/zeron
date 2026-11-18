@@ -229,14 +229,19 @@ function file(request: Request, id: string, version: string, path: string): Resp
   const v = p?.versions.find((x) => x.version === version);
   if (!p || !v || !(path in v.files)) return notFound();
   const ext = path.split(".").pop()!.toLowerCase();
-  const picture = /^(svg|png|jpe?g|gif|webp|avif)$/.test(ext);
+  // A picture is shown inline only when its bytes are that picture
+  // (amendment 14); anything else is given as a download.
+  const body = v.files[path]!;
+  const MAGIC: Record<string, RegExp> = { png: /^\x89PNG/, jpg: /^\xff\xd8/, jpeg: /^\xff\xd8/, gif: /^GIF8[79]a/, webp: /^RIFF/, avif: /^....ftyp/, svg: /^\s*<svg[\s>]/ };
+  const picture = Object.hasOwn(MAGIC, ext) && MAGIC[ext]!.test(body);
   const open = listed(p) && (v.status === "approved" || v.status === "yanked") && picture;
   const s = session(request);
   const allowed = open || (s && (s.user.id === p.owner || isAdmin(s.user)));
   if (!allowed) return notFound();
   return new Response(v.files[path], {
     headers: {
-      "content-type": TYPES[ext] ?? "application/octet-stream",
+      "content-type": picture ? TYPES[ext]! : "application/octet-stream",
+      "content-disposition": picture ? "inline" : "attachment",
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
       "x-content-type-options": "nosniff",
       // (The edge checks the version's state before it serves a file, and

@@ -53,3 +53,12 @@ export function done(astro: Pick<AstroGlobal, "cookies" | "redirect">, word: Fla
   setFlash(astro.cookies, word);
   return astro.redirect(sitePath(to), 303);
 }
+
+/**
+ * Whether the browser says this visit came from another site (a link
+ * elsewhere, or typed in). Browsers that don't say are taken at their word.
+ */
+export const fromElsewhere = (request: Request) => {
+  const site = request.headers.get("sec-fetch-site");
+  return site !== null && site !== "same-origin";
+};

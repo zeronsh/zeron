@@ -1,0 +1,53 @@
+---
+// On a page that decides something about a plugin: what is being decided,
+// so a link that lands someone here can't have them decide blind. When the
+// browser says the visit came from another site, it says so plainly.
+import Badge, { type Tone } from "../ui/Badge.astro";
+import Glyph from "../ui/Glyph.astro";
+import PluginTile from "./PluginTile.astro";
+
+interface Props {
+  id: string;
+  name: string;
+  icon: string | null;
+  version: string;
+  lines: { label: string; tone?: Tone }[];
+  /** Where to read it all first. */
+  read: string;
+  /** The visit came from another site (Sec-Fetch-Site). */
+  fromElsewhere: boolean;
+}
+const { id, name, icon, version, lines, read, fromElsewhere } = Astro.props;
+---
+
+<div class="deciding">
+  {
+    fromElsewhere && (
+      <p class="elsewhere">
+        <Glyph name="danger-triangle" size={16} />
+        <span>You followed a link from somewhere else to this question. Read what you're deciding before you answer.</span>
+      </p>
+    )
+  }
+  <div class="what">
+    <PluginTile id={id} name={name} icon={icon} version={version} size={40} />
+    <div class="words">
+      <p class="name">{name} <span class="num">{version}</span></p>
+      <p class="facts">{lines.map((l) => <Badge tone={l.tone ?? "neutral"} size="sm">{l.label}</Badge>)}</p>
+    </div>
+  </div>
+  <a class="read" href={read}>Read it first<Glyph name="alt-arrow-right" size={12} /></a>
+</div>
+
+<style>
+  .deciding { display: grid; gap: 12px; padding: 14px; background: var(--surface); border-radius: var(--radius-xl); box-shadow: inset 0 0 0 1px var(--line); }
+  .elsewhere { display: flex; gap: 8px; font-size: 13.5px; line-height: 1.5; color: var(--tone-warning); }
+  .elsewhere :global(.glyph) { margin-top: 2px; }
+  .what { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .words { display: grid; gap: 4px; min-width: 0; }
+  .name { font-size: 14.5px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+  .name .num { font-weight: 500; color: var(--text-3); }
+  .facts { display: flex; flex-wrap: wrap; gap: 4px; }
+  .read { display: inline-flex; align-items: center; gap: 6px; justify-self: start; font-size: 13.5px; font-weight: 500; color: var(--accent-soft); }
+  .read:hover { color: var(--text); }
+</style>

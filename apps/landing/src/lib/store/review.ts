@@ -120,12 +120,14 @@ export function manifestChanges(now: Record<string, unknown>, before: Record<str
     const was = items(key, before[key]);
     const is = items(key, now[key]);
     const listed = was !== null && is !== null;
+    const wasSet = new Set(was ?? []);
+    const isSet = new Set(is ?? []);
     out.push({
       key,
       before: a,
       after: b,
-      added: listed ? is.filter((x) => !was.includes(x)).map((item) => ({ item, risky: riskyItem(key, item) })) : null,
-      removed: listed ? was.filter((x) => !is.includes(x)).map((item) => ({ item, risky: false })) : null,
+      added: listed ? is.filter((x) => !wasSet.has(x)).map((item) => ({ item, risky: riskyItem(key, item) })) : null,
+      removed: listed ? was.filter((x) => !isSet.has(x)).map((item) => ({ item, risky: false })) : null,
       reach: REACH.has(key),
     });
   }
@@ -148,9 +150,27 @@ export interface DiffRow {
   new?: number;
 }
 
-/** A unified diff of two texts, as rows to draw, three lines of context. */
-export function diffRows(before: string, after: string): DiffRow[] {
-  const patch = structuredPatch("before", "after", before, after, "", "", { context: 3 });
+/**
+ * The most a line diff may cost. Its work grows with the lines times the
+ * edits between them, so two texts longer than MAX_LINES, or differing by
+ * more than MAX_EDITS, are "too different to show line by line": a
+ * submitter could otherwise make the page hang. (Edits, not time, are the
+ * bound: in a Worker the clock doesn't move during work, so a timeout
+ * can't stop it.)
+ */
+export const DIFF_BUDGET = { MAX_LINES: 6000, MAX_EDITS: 1500 } as const;
+
+const lineCount = (text: string) => {
+  let n = 1;
+  for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) n++;
+  return n;
+};
+
+/** A unified diff of two texts, as rows to draw, three lines of context; null when it costs too much. */
+export function diffRows(before: string, after: string): DiffRow[] | null {
+  if (lineCount(before) > DIFF_BUDGET.MAX_LINES || lineCount(after) > DIFF_BUDGET.MAX_LINES) return null;
+  const patch = structuredPatch("before", "after", before, after, "", "", { context: 3, maxEditLength: DIFF_BUDGET.MAX_EDITS });
+  if (!patch) return null;
   const rows: DiffRow[] = [];
   for (const hunk of patch.hunks) {
     rows.push({ kind: "hunk", text: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@` });

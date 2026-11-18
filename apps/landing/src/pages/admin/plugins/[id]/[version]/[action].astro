@@ -2,12 +2,13 @@
 // Approve, reject or take down a version. A post does it; a visit (no
 // script to open the dialog) is the same question as a page.
 import ConfirmPage from "../../../../../components/store/ConfirmPage.astro";
+import Deciding from "../../../../../components/store/Deciding.astro";
 import Field from "../../../../../components/ui/Field.astro";
 import Select from "../../../../../components/ui/Select.astro";
 import Store from "../../../../../layouts/Store.astro";
 import { isVersionAction, REJECT_REASONS, VERSION_FLASH, versionRequest } from "../../../../../lib/store/admin.ts";
-import { done, field, flashFor, formOf, tokenMatches } from "../../../../../lib/store/forms.ts";
-import { privatePage } from "../../../../../lib/store/http.ts";
+import { done, field, flashFor, formOf, fromElsewhere, tokenMatches } from "../../../../../lib/store/forms.ts";
+import { privatePage, purge } from "../../../../../lib/store/http.ts";
 import { isPluginId, isVersion } from "../../../../../lib/store/names.ts";
 import { adminOrResume, resumed, wasCut } from "../../../../../lib/store/resume.ts";
 
@@ -30,10 +31,25 @@ if (Astro.request.method === "POST") {
   const request = versionRequest(id, version, action, { get: (name) => field(form, name) });
   if (!request) return done(Astro, "bad_input", back);
   const result = await Astro.locals.edge.admin(request.path, request.body, session.csrf);
+  if (result.ok && action !== "reject") await purge(Astro, id);
   return done(Astro, flashFor(result, VERSION_FLASH[action]), back);
 }
 if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
 privatePage(Astro);
+// What is being decided, so nobody decides it blind.
+const record = await Astro.locals.edge.submission(id, version);
+if (!record.ok && record.error === "not_found") return new Response(null, { status: 404 });
+const s = record.ok ? record.data : null;
+const failing = s?.checks.filter((c) => c.level === "fail").length ?? 0;
+const warnings = s?.checks.filter((c) => c.level === "warn").length ?? 0;
+const facts = s
+  ? [
+      { label: s.publisher.username ? `by @${s.publisher.username}` : "No username" },
+      { label: s.base ? `Update from ${s.base.version}` : "First listing" },
+      failing ? { label: `${failing} checks failed`, tone: "danger" as const } : warnings ? { label: `${warnings} checks to look at`, tone: "warning" as const } : { label: "Checks passed", tone: "success" as const },
+      ...(s.permissions_diff?.asks_added ?? []).map((a) => ({ label: `asks ${a}`, tone: "danger" as const })),
+    ]
+  : [];
 
 const ASK = {
   approve: { title: `Approve ${id} ${version}?`, words: "It's listed at once, and offered to everyone who has it at their next update check.", confirm: "Approve", tone: "primary" },
@@ -47,6 +63,7 @@ const ask = ASK[action];
   <div class="wrap">
     <ConfirmPage title={ask.title} action={Astro.url.pathname} csrf={session.csrf} confirm={ask.confirm} tone={ask.tone} back={back}>
       <Fragment slot="words">
+        {s && <Deciding id={id} name={String(s.manifest.name ?? id)} icon={typeof s.manifest.icon === "string" ? s.manifest.icon : null} version={version} lines={facts} read={submission} fromElsewhere={fromElsewhere(Astro.request)} />}
         <p>{ask.words}</p>
         {wasCut(Astro.url) && <p class="cut">You signed in again. What you wrote was longer than could be kept through that, so its end is missing: check it before you send it.</p>}
       </Fragment>

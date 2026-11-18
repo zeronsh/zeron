@@ -78,6 +78,9 @@ if (s && view === "files") {
 // The changes: every changed text file's lines, read from both versions
 // (at most this many files on one page; the rest are listed).
 const DIFF_FILES = 40;
+/** The most time the page spends diffing, all files together. */
+const PAGE_BUDGET_MS = 1500;
+const started = Date.now();
 let diffs: { path: string; change: string; rows: DiffRow[] | null; note?: string }[] = [];
 if (s?.base && view === "changes") {
   const base = s.base.version;
@@ -92,11 +95,16 @@ if (s?.base && view === "changes") {
       ]);
       if (!now || !before) return { path: c.path, change: c.change, rows: null, note: "It couldn't be read." };
       if (!("text" in now) || !("text" in before)) return { path: c.path, change: c.change, rows: null, note: "tooBig" in now || "tooBig" in before ? "Too big to show here." : "Not text." };
-      return { path: c.path, change: c.change, rows: diffRows(before.text, now.text) };
+      // (Each diff is bounded; and once the page has spent its time, the rest are listed to open in Files.)
+      if (Date.now() - started > PAGE_BUDGET_MS) return { path: c.path, change: c.change, rows: null, note: "Not compared here: open it in Files." };
+      const rows = diffRows(before.text, now.text);
+      return rows ? { path: c.path, change: c.change, rows } : { path: c.path, change: c.change, rows: null, note: "Too different to show line by line: open it in Files." };
     }),
   );
 }
 
+// Its notes, as they'll show on its page (reviewed like the README).
+const notes = s?.version.notes && view === "overview" ? renderMarkdown(s.version.notes, { file: (p) => fileUrl(id, version, p), demote: true }) : "";
 const state = s ? versionState(s.version) : null;
 const pending = s?.version.status === "pending";
 const newLines = s ? grew(s.permissions, s.permissions_diff) : [];
@@ -216,6 +224,10 @@ const failing = checks.filter((c) => c.level === "fail").length;
                 <section class="panel" aria-labelledby="asks-heading">
                   <h2 id="asks-heading">What it asks for</h2>
                   <PermissionList permissions={s.permissions} author={s.publisher.username ?? undefined} />
+                </section>
+                <section class="panel" aria-labelledby="notes-heading">
+                  <h2 id="notes-heading">Notes for {version}</h2>
+                  {notes ? <div class="readme notes" set:html={notes} /> : <p class="quiet">No notes for this version.</p>}
                 </section>
               </div>
               <div class="col">
@@ -419,6 +431,7 @@ const failing = checks.filter((c) => c.level === "fail").length;
   .check-list .fail { color: var(--tone-danger); }
 
   .readme-view { display: grid; gap: 16px; max-width: 760px; }
+  .notes { font-size: 14.5px; }
 
   .files { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 20px; align-items: start; }
   .tree-pane { position: sticky; top: 24px; max-height: calc(100dvh - 48px); overflow: auto; padding: 8px; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }

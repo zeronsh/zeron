@@ -1,0 +1,21 @@
+---
+// Close a report: dismissed, or acted on, with a note (not destructive: no
+// question first). Only a post; anything else, and anyone not an admin,
+// gets the site's 404 page.
+import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { adminOrResume } from "../../../lib/store/resume.ts";
+
+export const prerender = false;
+
+const { report } = Astro.params;
+if (Astro.request.method !== "POST" || !report || !/^[\w-]{1,64}$/.test(report)) return new Response(null, { status: 404 });
+// (Signed out while the page was open: back to the reports, the note as typed.)
+const session = await adminOrResume(Astro, { path: "/admin/reports", fields: ["report", "note"], form: (form) => form.set("report", report) });
+if (session instanceof Response) return session;
+const form = await formOf(Astro.request);
+if (!form || !tokenMatches(form, session)) return done(Astro, "expired", "/admin/reports");
+const resolution = field(form, "resolution");
+if (resolution !== "dismissed" && resolution !== "actioned") return done(Astro, "bad_input", "/admin/reports");
+const result = await Astro.locals.edge.admin(`reports/${encodeURIComponent(report)}/resolve`, { resolution, note: field(form, "note", 500) }, session.csrf);
+return done(Astro, flashFor(result, "report_resolved"), "/admin/reports");
+---

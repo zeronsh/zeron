@@ -10,30 +10,49 @@
 // A pending one's are its owner's and the admins': asked for again with the
 // visitor's cookie, and kept by no one.
 import type { APIRoute } from "astro";
+import { pluginTag } from "../../../../../lib/store/http.ts";
 import { isPluginId, isVersion, packagePath } from "../../../../../lib/store/names.ts";
 
 export const prerender = false;
 
-const PICTURES: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  avif: "image/avif",
-  svg: "image/svg+xml",
-};
+const PICTURES = new Map([
+  ["png", "image/png"],
+  ["jpg", "image/jpeg"],
+  ["jpeg", "image/jpeg"],
+  ["gif", "image/gif"],
+  ["webp", "image/webp"],
+  ["avif", "image/avif"],
+  ["svg", "image/svg+xml"],
+]);
 
 /** The most a shared cache keeps a public file (seconds). */
 const SHARED = 60;
 
-const notFound = () => new Response(null, { status: 404 });
+/** On every answer from this route, a picture or not: nothing here ever runs, nothing is sniffed. */
+const SANDBOX = {
+  "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+  "x-content-type-options": "nosniff",
+  "cross-origin-resource-policy": "same-origin",
+};
 
-export const GET: APIRoute = async ({ params, request, locals, cache }) => {
+const notFound = () => new Response(null, { status: 404, headers: { ...SANDBOX, "cache-control": "no-store" } });
+
+export const GET: APIRoute = async ({ params, request, locals, cache, url, redirect }) => {
+  // One address per file: a query can't make the edge be asked again.
+  if (url.search) return redirect(url.pathname, 301);
   const { id, version } = params;
-  const path = packagePath(params.path ?? "");
+  // The file's path from the address as sent, each part decoded once: a
+  // path may hold "#", "%" and spaces, which the route's own decoding
+  // (decodeURI) would leave half-done.
+  const raw = new URL(request.url).pathname.split("/").slice(5);
+  let path: string | null = null;
+  try {
+    path = packagePath(raw.map(decodeURIComponent).join("/"));
+  } catch {
+    path = null;
+  }
   if (!isPluginId(id) || !isVersion(version) || !path) return notFound();
-  const type = PICTURES[path.split(".").pop()!.toLowerCase()];
+  const type = PICTURES.get(path.split(".").pop()!.toLowerCase());
   if (!type) return notFound();
 
   let open = true;
@@ -42,15 +61,19 @@ export const GET: APIRoute = async ({ params, request, locals, cache }) => {
     open = false;
     answer = await locals.edge.file(id, version, path, true);
   }
-  if (!answer.ok || !answer.body) return notFound();
-  if (open) cache.set({ maxAge: SHARED });
+  // A file the edge gives only as a download is never shown inline from here.
+  const attachment = /^\s*attachment/i.test(answer.headers.get("content-disposition") ?? "");
+  if (!answer.ok || !answer.body || attachment) {
+    await answer.body?.cancel();
+    return notFound();
+  }
+  if (open) cache.set({ maxAge: SHARED, tags: [pluginTag(id)] });
 
   return new Response(answer.body, {
     headers: {
+      ...SANDBOX,
       "content-type": type,
-      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
       "content-disposition": "inline",
-      "cross-origin-resource-policy": "same-origin",
       "cache-control": open ? (answer.headers.get("cache-control") ?? `public, max-age=${SHARED}`) : "private, no-store",
     },
   });

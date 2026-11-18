@@ -10,7 +10,7 @@ import Badge from "../../components/ui/Badge.astro";
 import Glyph from "../../components/ui/Glyph.astro";
 import Store from "../../layouts/Store.astro";
 import { ago, bytes, compatibility, count, date } from "../../lib/store/format.ts";
-import { publicPage } from "../../lib/store/http.ts";
+import { pluginTag, publicPage } from "../../lib/store/http.ts";
 import { renderedOnce } from "../../lib/store/rendered.ts";
 import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
 import { fileUrl, memberUrl, pluginUrl } from "../../lib/store/urls.ts";
@@ -32,14 +32,18 @@ if (!result.ok) {
 }
 const plugin = result.ok ? result.data : null;
 
+/** Versions whose notes the page shows (each is rendered once, then kept). */
+const NOTED = 8;
 let readme = "";
 let versions: (VersionInfo & { html: string | null })[] = [];
 if (plugin) {
-  publicPage(Astro);
+  publicPage(Astro, [pluginTag(plugin.id)]);
   const file = (version: string) => (path: string) => fileUrl(plugin.id, version, path);
-  readme = await renderedOnce(plugin.id, plugin.version, "readme", plugin.readme, { file: file(plugin.version), demote: true });
-  const all = versionsResult.ok ? versionsResult.data.versions : plugin.versions;
-  versions = await Promise.all(all.map(async (v) => ({ ...v, html: v.notes ? await renderedOnce(plugin.id, v.version, "notes", v.notes, { file: file(v.version), demote: true }) : null })));
+  const origin = Astro.url.origin;
+  readme = await renderedOnce(origin, plugin.id, plugin.version, "readme", plugin.readme, { file: file(plugin.version), demote: true });
+  // The notes of the latest few versions are shown; older versions are listed by number and date.
+  const all = (versionsResult.ok ? versionsResult.data.versions : plugin.versions).slice(0, NOTED + 20);
+  versions = await Promise.all(all.map(async (v, i) => ({ ...v, html: v.notes && i < NOTED ? await renderedOnce(origin, plugin.id, v.version, "notes", v.notes, { file: file(v.version), demote: true }) : null })));
 }
 const categories = categoriesResult.ok ? new Map(categoriesResult.data.categories.map((c) => [c.id, c.name])) : new Map<string, string>();
 const RECENT = 4;

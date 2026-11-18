@@ -16,6 +16,9 @@ export function versionState(v: Pick<VersionInfo, "status" | "review">): { label
       return { label: "No longer offered", tone: "neutral", about: "Nobody new gets it. Anyone who has it keeps it." };
     case "removed":
       return { label: "Taken down", tone: "danger", about: "Removed from the store by its reviewers." };
+    default:
+      // A state this site doesn't know yet: named as the edge says it.
+      return { label: reasonWords(String(v.status)), tone: "neutral", about: "" };
   }
 }
 
@@ -29,6 +32,8 @@ export function listingState(listing: Listing | PluginStatus): { label: string; 
       return { label: "Suspended", tone: "danger" };
     case "removed":
       return { label: "Removed", tone: "danger" };
+    default:
+      return { label: reasonWords(String(listing)), tone: "neutral" };
   }
 }
 

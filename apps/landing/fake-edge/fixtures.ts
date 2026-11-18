@@ -69,6 +69,8 @@ interface Spec {
   owner?: string;
   summary: string;
   icon?: keyof typeof ICONS | null;
+  /** An icon of its own, in place of the art's. */
+  iconSvg?: string;
   accent?: string;
   part?: Parameters<typeof screenshot>[2];
   categories: string[];
@@ -144,7 +146,7 @@ function build(spec: Spec): FakePlugin {
       "README.md": readme(spec, shots),
       "CHANGELOG.md": history.map((x) => `## ${x.version}\n\n${x.notes ?? "First release."}\n`).reverse().join("\n"),
     };
-    if (spec.icon) files["icon.svg"] = ICONS[spec.icon]!;
+    if (spec.icon) files["icon.svg"] = spec.iconSvg ?? ICONS[spec.icon]!;
     Object.assign(files, spec.files ?? {});
     for (const [i, s] of shots.entries()) files[s] = screenshot(spec.name, accent, i === 0 ? (spec.part ?? "panel") : "page");
     const manifest: Record<string, unknown> = {
@@ -387,7 +389,19 @@ const SPECS: Spec[] = [
     icon: "flame",
     categories: ["utilities"],
     keywords: [`"><svg onload=alert(1)>`, "javascript:alert(1)", "normal"],
-    permissions: ["ui.add", "ui.replace", "network"],
+    // Its icon tries to run when opened on its own.
+    iconSvg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" onload="document.documentElement.setAttribute('data-ran','onload')"><script>document.documentElement.setAttribute('data-ran','script')</script><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor"/></svg>`,
+    permissions: ["ui.add", "ui.replace", "network", "tools"],
+    tools: [{ name: "probe_tool", description: `</p><script>alert('tool')</script><img src=x onerror=alert('tool')>` }],
+    // Paths may hold %, spaces and # (and, here, markup).
+    files: {
+      "docs/<b>notes</b> #1 100%.md": "# <script>alert('file')</script>\n",
+      "shots/a b#1 100%.svg": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#9277b0"/></svg>`,
+    },
+    history: [
+      { version: "1.0.0", status: "approved", ago: 3, notes: `<script>alert('notes')</script> and [a link](javascript:alert('notes'))` },
+      { version: "1.1.0", status: "pending", ago: 1, notes: `</code></pre><script>alert('diff')</script><img src=x onerror=alert('diff')>` },
+    ],
     ui: { replace: ["@app/screens/chat/composer"] },
     network: ["*", "localhost:8080"],
     owner: "user_mo",

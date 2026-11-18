@@ -23,7 +23,9 @@ export function sitePath(value: string | null | undefined): string {
   if (/[\u0000-\u001f\u007f\\]/.test(value)) return "/";
   try {
     const url = new URL(value, "https://zeron.sh");
-    return url.origin === "https://zeron.sh" ? `${url.pathname}${url.search}${url.hash}` : "/";
+    // (Normalising can turn a path that read as one, "/.//host", into "//host".)
+    if (url.origin !== "https://zeron.sh" || url.pathname.startsWith("//")) return "/";
+    return `${url.pathname}${url.search}${url.hash}`;
   } catch {
     return "/";
   }

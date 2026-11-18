@@ -1,6 +1,7 @@
 // Every listed plugin's page and each category's, for search engines:
 // read from the catalog a page at a time, kept for an hour.
 import type { APIRoute } from "astro";
+import { CATALOG_TAG } from "../../lib/store/http.ts";
 import { urlset, XML } from "../../lib/store/sitemap.ts";
 import { pluginUrl } from "../../lib/store/urls.ts";
 
@@ -9,7 +10,9 @@ export const prerender = false;
 /** A sitemap holds 50,000 addresses at most; the store is far from it, and this stops well short. */
 const MOST_PAGES = 200;
 
-export const GET: APIRoute = async ({ locals, site, cache }) => {
+export const GET: APIRoute = async ({ locals, site, cache, url, redirect }) => {
+  // One address: a query can't make it read the catalog again.
+  if (url.search) return redirect(url.pathname, 301);
   const entries: { loc: string; lastmod?: number }[] = [];
   const categories = await locals.edge.categories();
   if (categories.ok) for (const c of categories.data.categories) entries.push({ loc: new URL(`/plugins?category=${encodeURIComponent(c.id)}`, site).href });
@@ -21,6 +24,6 @@ export const GET: APIRoute = async ({ locals, site, cache }) => {
     cursor = result.data.next_cursor;
     if (!cursor) break;
   }
-  cache.set({ maxAge: 3600 });
+  cache.set({ maxAge: 3600, tags: [CATALOG_TAG] });
   return new Response(urlset(entries), { headers: { ...XML, "cache-control": "public, max-age=3600" } });
 };

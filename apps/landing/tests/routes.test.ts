@@ -3,7 +3,16 @@
 // with which headers, and that nothing a plugin's author writes runs.
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { hasInlineScript } from "../src/lib/store/security.ts";
+import { hasInlineScript, rawElements } from "../src/lib/store/security.ts";
+import { fileUrl } from "../src/lib/store/urls.ts";
+
+/** A page runs only the site's own script files: no inline script, no handler, no javascript: link. */
+function inert(body: string) {
+  for (const e of rawElements(body)) if (e.tag === "script") expect(e.attributes).toMatch(/\bsrc="\/_astro\/|type="application\/ld\+json"/);
+  const markup = body.replace(/="[^"]*"/g, '=""');
+  expect(markup).not.toMatch(/<[a-z][^>]*\son[a-z]+=/i);
+  expect(body).not.toMatch(/(href|src)="\s*(javascript|data|vbscript):/i);
+}
 import { startSite, type Site } from "./harness.ts";
 
 let site: Site;
@@ -179,7 +188,7 @@ describe("package files", () => {
   });
 
   test("pictures that aren't what they say are still only pictures: typed by name, sandboxed, never sniffed", async () => {
-    for (const [file, type] of [["script.svg", "image/svg+xml"], ["page.png", "image/png"], ["polyglot.gif", "image/gif"]]) {
+    for (const [file, type] of [["script.svg", "image/svg+xml"], ["polyglot.gif", "image/gif"]]) {
       const response = await site.fetch(`/plugins/theme-sync/files/1.0.0/shots/${file}`);
       expect(response.status, file).toBe(200);
       expect(response.headers.get("content-type"), file).toBe(type);
@@ -191,14 +200,35 @@ describe("package files", () => {
       expect(csp, file).not.toContain("script");
       expect(response.headers.get("cross-origin-resource-policy"), file).toBe("same-origin");
     }
+    // A file the edge gives only as a download (an HTML page named .png) is never shown inline from here,
+    // and every answer of this route, a refusal too, carries the sandbox.
+    const attached = await site.fetch("/plugins/theme-sync/files/1.0.0/shots/page.png");
+    expect(attached.status).toBe(404);
+    expect(await attached.text()).toBe("");
+    expect(attached.headers.get("content-security-policy")).toContain("sandbox");
+    expect(attached.headers.get("x-content-type-options")).toBe("nosniff");
     // Anything else in a package is never served from here, whatever it's called.
     for (const file of ["page.html", "x.js", "x.htm", "x.xml", "x.svgz", "x.json", "x"]) {
       expect((await site.fetch(`/plugins/theme-sync/files/1.0.0/shots/${file}`)).status, file).toBe(404);
     }
   });
 
+  test("a path with spaces, # and % is a file's, encoded part by part", async () => {
+    const response = await site.fetch(fileUrl("xss-probe", "1.0.0", "shots/a b#1 100%.svg"));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/svg+xml");
+  });
+
+  test("one address per file, page and sitemap: a query or a doubled slash goes to the plain one", async () => {
+    for (const [asked, plain] of [["/plugins/focus-timer/files/1.2.0/icon.svg?v=2", "/plugins/focus-timer/files/1.2.0/icon.svg"], ["/plugins/sitemap.xml?n=1", "/plugins/sitemap.xml"], ["/plugins//focus-timer", "/plugins/focus-timer"], ["https://zeron.sh//plugins/focus-timer", "/plugins/focus-timer"]]) {
+      const response = await site.fetch(asked);
+      expect(response.status, asked).toBe(301);
+      expect(response.headers.get("location"), asked).toBe(plain);
+    }
+  });
+
   test("only pictures pass, and no path climbs out", async () => {
-    for (const path of ["/plugins/focus-timer/files/1.2.0/init.luau", "/plugins/focus-timer/files/1.2.0/README.md", "/plugins/focus-timer/files/1.2.0/..%2f..%2fsecret.png", "/plugins/focus-timer/files/1.2.0/a//b.png", "/plugins/focus-timer/files/v1/icon.svg"]) {
+    for (const path of ["/plugins/focus-timer/files/1.2.0/init.luau", "/plugins/focus-timer/files/1.2.0/README.md", "/plugins/focus-timer/files/1.2.0/..%2f..%2fsecret.png", "/plugins/focus-timer/files/v1/icon.svg"]) {
       expect((await site.fetch(path)).status, path).toBe(404);
     }
   });
@@ -274,7 +304,9 @@ describe("the admin pages can't be told from pages that don't exist", () => {
         const { response, body } = await html(path, cookie);
         expect(response.status, `${path} ${cookie ? "ada" : "anyone"}`).toBe(404);
         expect(body, path).toBe(notFound);
-        expect(response.headers.get("cache-control"), path).toBe(unknown.headers.get("cache-control"));
+        // Every header, not only the body: nothing says "this one exists".
+        const headersOf = (r: Response) => JSON.stringify([...r.headers].filter(([k]) => k !== "date" && k !== "cf-cache-status"));
+        expect(headersOf(response), path).toBe(headersOf(unknown));
         expect(response.headers.get("location"), path).toBeNull();
       }
     }
@@ -363,11 +395,47 @@ describe("forms", () => {
   });
 
   test("a non-admin's post, signed in or not, is the 404 page and nothing more", async () => {
+    const notFound = readFileSync(new URL("../dist/client/404.html", import.meta.url), "utf8");
     for (const cookie of [await site.signIn("user_ada"), "theme=dark"]) {
-      const response = await post("/admin/plugins/focus-timer/1.3.0-beta.1/reject", cookie, { csrf: "x", reason: "listing", message: "m" });
-      expect(response.status).toBe(404);
-      expect(response.headers.get("location")).toBeNull();
+      for (const path of ["/admin/plugins/focus-timer/1.3.0-beta.1/reject", "/admin/reports/rep_1", "/admin/reservations"]) {
+        const response = await post(path, cookie, { csrf: "x", reason: "listing", message: "m", resolution: "dismissed", id: "abc" });
+        expect(response.status, path).toBe(404);
+        expect(response.headers.get("location"), path).toBeNull();
+        expect(await response.text(), path).toBe(notFound);
+      }
     }
+  });
+
+  test("what an author wrote shows as words on every admin view: tools, notes, file names, contents, diffs", async () => {
+    const grace = await site.signIn("user_grace");
+    const here = "/admin/plugins/xss-probe/1.1.0";
+    const overview = await html(here, grace);
+    inert(overview.body);
+    expect(overview.body).toContain("&lt;/p&gt;&lt;script&gt;alert(&#39;tool&#39;)&lt;/script&gt;&lt;img src=x onerror=alert(&#39;tool&#39;)&gt;");
+    expect(overview.body).toContain("Notes for 1.1.0");
+    const files = await html(`${here}?view=files&path=${encodeURIComponent("docs/<b>notes</b> #1 100%.md")}`, grace);
+    inert(files.body);
+    expect(files.body).toContain("&lt;b&gt;notes&lt;/b&gt; #1 100%.md");
+    // (The file's text, highlighted: its words are there, as text.)
+    expect(files.body).toContain("alert('file')");
+    const changes = await html(`${here}?view=changes`, grace);
+    inert(changes.body);
+    expect(changes.body).toMatch(/&#x3C;\/code>&#x3C;\/pre>&#x3C;script>alert\('diff'\)|&lt;\/code&gt;&lt;\/pre&gt;&lt;script&gt;alert\(&#39;diff&#39;\)/);
+    const readme = await html(`${here}?view=readme`, grace);
+    inert(readme.body);
+    // The public page's notes too.
+    inert((await html("/plugins/xss-probe")).body);
+  });
+
+  test("a decision's page says what is decided, and says so when the visit came from elsewhere", async () => {
+    const grace = await site.signIn("user_grace");
+    const plain = await html("/admin/plugins/session-badges/1.2.1/approve", grace);
+    expect(plain.body).toContain("Session badges");
+    expect(plain.body).toContain("Update from");
+    expect(plain.body).toContain("Read it first");
+    expect(plain.body).not.toContain("You followed a link from somewhere else");
+    const lured = await site.fetch("/admin/plugins/session-badges/1.2.1/approve", { headers: { cookie: grace, "sec-fetch-site": "cross-site" } });
+    expect(await lured.text()).toContain("You followed a link from somewhere else");
   });
 
   test("reserving an id for an account, and freeing it", async () => {

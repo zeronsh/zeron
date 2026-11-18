@@ -12,21 +12,67 @@ export const SECURITY_HEADERS: Record<string, string> = {
   "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
 };
 
-/** Each inline <style>'s text, as the browser hashes it. */
-export function inlineStyles(html: string): string[] {
-  const out: string[] = [];
-  for (const match of html.matchAll(/<style(?:\s[^>]*)?>([^]*?)<\/style>/gi)) out.push(match[1]!);
+/** A raw-text element of a page (<style> or <script>): its attributes and its text. */
+interface RawElement {
+  tag: "style" | "script";
+  attributes: string;
+  text: string;
+}
+
+/**
+ * The <style> and <script> elements of a page, found as a browser's
+ * tokenizer finds them: a tag's attributes are read through their quotes,
+ * and comments and text are passed over, so author text inside an
+ * attribute ("<style>" in a description) is never taken for an element.
+ */
+export function rawElements(html: string): RawElement[] {
+  const out: RawElement[] = [];
+  let i = 0;
+  const lower = html.toLowerCase();
+  while (i < html.length) {
+    const open = html.indexOf("<", i);
+    if (open === -1) break;
+    if (html.startsWith("<!--", open)) {
+      const close = html.indexOf("-->", open + 4);
+      i = close === -1 ? html.length : close + 3;
+      continue;
+    }
+    const name = /^<\/?([a-zA-Z][a-zA-Z0-9-]*)/.exec(html.slice(open, open + 64));
+    if (!name) {
+      i = open + 1;
+      continue;
+    }
+    // Through the tag's attributes, quotes and all, to its ">".
+    let j = open + name[0].length;
+    let quote: string | null = null;
+    for (; j < html.length; j++) {
+      const ch = html[j]!;
+      if (quote) {
+        if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === ">") break;
+    }
+    const tag = name[1]!.toLowerCase();
+    const closing = html[open + 1] === "/";
+    i = j + 1;
+    if (!closing && (tag === "style" || tag === "script")) {
+      const end = lower.indexOf(`</${tag}`, i);
+      const stop = end === -1 ? html.length : end;
+      out.push({ tag, attributes: html.slice(open + name[0].length, j), text: html.slice(i, stop) });
+      i = stop;
+    }
+  }
   return out;
 }
 
-/** Whether the page carries any inline script (it must not). */
+/** Each inline <style>'s text, as the browser hashes it. */
+export function inlineStyles(html: string): string[] {
+  return rawElements(html).filter((e) => e.tag === "style").map((e) => e.text);
+}
+
+/** Whether the page carries any inline script (it must not; data blocks aren't scripts). */
 export function hasInlineScript(html: string): boolean {
-  for (const match of html.matchAll(/<script\b([^>]*)>([^]*?)<\/script>/gi)) {
-    const attributes = match[1]!;
-    const json = /\btype\s*=\s*["']?application\/(ld\+)?json/i.test(attributes);
-    if (!/\bsrc\s*=/.test(attributes) && !json && match[2]!.trim() !== "") return true;
-  }
-  return false;
+  return rawElements(html).some((e) => e.tag === "script" && !/\bsrc\s*=/i.test(e.attributes) && !/\btype\s*=\s*["']?application\/(ld\+)?json/i.test(e.attributes) && e.text.trim() !== "");
 }
 
 async function sha256(text: string): Promise<string> {

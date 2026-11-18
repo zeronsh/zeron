@@ -115,13 +115,45 @@ const sanitize = unified().use(rehypeSanitize, SCHEMA).freeze();
 const stringify = unified().use(rehypeStringify, { allowDangerousHtml: false }).freeze();
 
 /** Bump when the HTML this makes changes, so kept renderings are made again. */
-export const RENDERER = 2;
+export const RENDERER = 3;
 
 /**
- * Markdown in, safe HTML out. A document the parser can't finish (nesting
- * deep enough to exhaust the stack) is shown as its plain text instead.
+ * Emphasis delimiters (`*`, `_`, `~`) outside code a document may hold and
+ * still be parsed: resolving them costs the square of their number (40,000
+ * took 18 s), so past this the document is shown as its text. No README
+ * needs a tenth of it; code, where underscores live, doesn't count.
+ */
+export const MOST_DELIMITERS = 3000;
+
+/** How many emphasis delimiters a document has outside fenced code and code spans. */
+export function delimiters(markdown: string): number {
+  let count = 0;
+  let fence: string | null = null;
+  for (const line of markdown.split("\n")) {
+    const opens = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence) {
+      if (opens && opens[0] === fence[0] && opens.length >= fence.length) fence = null;
+      continue;
+    }
+    if (opens) {
+      fence = opens;
+      continue;
+    }
+    for (const ch of line.replace(/(`+)[^`]*?\1/g, "")) if (ch === "*" || ch === "_" || ch === "~") count++;
+  }
+  return count;
+}
+
+const plain = (markdown: string) =>
+  stringify.stringify({ type: "root", children: [{ type: "element", tagName: "pre", properties: { className: ["plain"], tabIndex: 0 }, children: [{ type: "text", value: markdown }] }] });
+
+/**
+ * Markdown in, safe HTML out. A document that would cost too much to parse
+ * (MOST_DELIMITERS), or that the parser can't finish (nesting deep enough
+ * to exhaust the stack), is shown as its plain text instead.
  */
 export function renderMarkdown(markdown: string, options: RenderOptions): string {
+  if (delimiters(markdown) > MOST_DELIMITERS) return plain(markdown);
   try {
     const tree = processor.runSync(processor.parse(markdown)) as Root;
     point(tree, options);
@@ -129,7 +161,7 @@ export function renderMarkdown(markdown: string, options: RenderOptions): string
     finish(clean, options);
     return stringify.stringify(clean);
   } catch {
-    return stringify.stringify({ type: "root", children: [{ type: "element", tagName: "pre", properties: { className: ["plain"] }, children: [{ type: "text", value: markdown }] }] });
+    return plain(markdown);
   }
 }
 

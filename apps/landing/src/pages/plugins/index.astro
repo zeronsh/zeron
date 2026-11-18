@@ -13,7 +13,7 @@ import SearchField from "../../components/ui/SearchField.astro";
 import Select from "../../components/ui/Select.astro";
 import Store from "../../layouts/Store.astro";
 import { canonicalSearch, catalogHref, effectiveSort, isFront, PAGE_SIZE, pageHref, readCatalog, SORT_LABELS } from "../../lib/store/catalog.ts";
-import { publicPage } from "../../lib/store/http.ts";
+import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
 import type { PluginCard as Card, Sort } from "../../lib/store/types.ts";
 
 export const prerender = false;
@@ -47,7 +47,7 @@ if (featured?.ok) {
 const names = new Map(categories.map((c) => [c.id, c.name]));
 const categoryName = state.category ? names.get(state.category) : null;
 
-if (page.ok) publicPage(Astro);
+if (page.ok) publicPage(Astro, [CATALOG_TAG]);
 else Astro.response.status = page.error === "bad_request" ? 400 : 503;
 
 const sortOptions = (["relevance", "popular", "updated", "new"] as Sort[])

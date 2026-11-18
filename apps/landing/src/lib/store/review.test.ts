@@ -38,7 +38,7 @@ describe("what changed", () => {
   });
 
   test("lines, numbered before and after", () => {
-    const rows = diffRows("a\nb\nc\n", "a\nB\nc\nd\n");
+    const rows = diffRows("a\nb\nc\n", "a\nB\nc\nd\n")!;
     expect(rows[0]).toEqual({ kind: "hunk", text: "@@ -1,3 +1,4 @@" });
     expect(rows.slice(1)).toEqual([
       { kind: "context", text: "a", old: 1, new: 1 },
@@ -47,6 +47,20 @@ describe("what changed", () => {
       { kind: "context", text: "c", old: 3, new: 3 },
       { kind: "added", text: "d", new: 4 },
     ]);
+  });
+
+  test("texts too different, or too long, to compare cost nothing and say so", () => {
+    const lines = (n: number, seed: string) => Array.from({ length: n }, (_, i) => `${seed} ${i} ${(i * 7919) % 104729}`).join("\n");
+    let started = performance.now();
+    expect(diffRows(lines(5000, "a"), lines(5000, "b"))).toBeNull();
+    expect(performance.now() - started).toBeLessThan(1500);
+    started = performance.now();
+    expect(diffRows(lines(7000, "a"), lines(7000, "a"))).toBeNull();
+    expect(performance.now() - started).toBeLessThan(50);
+    // A real change in a long file still shows.
+    const before = lines(5000, "a");
+    const after = before.replace("a 2500 ", "A 2500 ");
+    expect(diffRows(before, after)!.filter((r) => r.kind !== "context" && r.kind !== "hunk")).toHaveLength(2);
   });
 });
 

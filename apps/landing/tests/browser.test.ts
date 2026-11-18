@@ -71,6 +71,16 @@ describe("no violations axe can find", () => {
 });
 
 describe("a package's pictures can't run", () => {
+  test("a plugin's icon with script, opened on its own in a tab, runs nothing", async () => {
+    const { page, context } = await open("/plugins/xss-probe/files/1.0.0/icon.svg");
+    try {
+      await page.waitForTimeout(300);
+      expect(await page.evaluate(() => document.documentElement.getAttribute("data-ran"))).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
   test("an SVG with script, opened on its own, runs nothing", async () => {
     const { page, context } = await open("/plugins/theme-sync/files/1.0.0/shots/script.svg");
     try {
@@ -81,7 +91,7 @@ describe("a package's pictures can't run", () => {
     }
   });
 
-  test("an HTML page named .png is shown as a (broken) picture, not a page", async () => {
+  test("an HTML page named .png, which the edge gives only as a download, isn't shown at all", async () => {
     const { page, context } = await open("/plugins/theme-sync/files/1.0.0/shots/page.png");
     try {
       expect(await page.evaluate(() => document.getElementById("ran"))).toBeNull();

@@ -13,6 +13,12 @@ test("a page's policy allows exactly its own inline styles", async () => {
   expect(csp).toContain("default-src 'none'");
 });
 
+test("author text in an attribute is never taken for a style or a script", () => {
+  const html = `<meta name="description" content="Probe <style> summary <script>x</script>"><style>real{}</style><p title='<style>no{}</style>'>t</p><!-- <style>gone{}</style> -->`;
+  expect(inlineStyles(html)).toEqual(["real{}"]);
+  expect(hasInlineScript(html)).toBe(false);
+});
+
 test("inline scripts are found; script files and data blocks aren't scripts", () => {
   expect(hasInlineScript('<script type="module" src="/_astro/a.js"></script>')).toBe(false);
   expect(hasInlineScript('<script type="application/ld+json">{"a":1}</script>')).toBe(false);

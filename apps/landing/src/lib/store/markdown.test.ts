@@ -2,7 +2,7 @@
 // Whatever goes in, what comes out runs nothing, loads nothing from
 // anywhere but the package, and can't pass for the page's own parts.
 import { describe, expect, test } from "vitest";
-import { renderMarkdown, target } from "./markdown.ts";
+import { delimiters, renderMarkdown, target } from "./markdown.ts";
 
 const FILES = "/plugins/demo/files/1.0.0/";
 const render = (md: string) => renderMarkdown(md, { file: (p) => FILES + p.split("/").map(encodeURIComponent).join("/"), demote: true });
@@ -150,9 +150,24 @@ describe("what a README may hold", () => {
   test("a document nested past what the parser can hold is shown as its text", () => {
     const md = `${"> ".repeat(5_000)}<script>alert(1)</script>`;
     const html = render(md);
-    expect(html.startsWith('<pre class="plain">')).toBe(true);
+    expect(html.startsWith('<pre class="plain" tabindex="0">')).toBe(true);
     expect(html).toContain("&#x3C;script>");
     expect(html).not.toContain("<script");
+  });
+
+  test("emphasis delimiters past the bound are shown as text, at once (the parser's cost is their square)", () => {
+    for (const md of ["*a_ ".repeat(12_000), "**_ ".repeat(16_000), "~~a~~ ".repeat(8_000)]) {
+      const started = performance.now();
+      const html = render(md);
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(html.startsWith('<pre class="plain"')).toBe(true);
+    }
+  });
+
+  test("underscores in code don't count against the bound", () => {
+    const code = `\`\`\`py\n${"snake_case_name = other_name_here\n".repeat(2_000)}\`\`\`\n\nSome *real* emphasis and \`inline_code_with_underscores\`.`;
+    expect(delimiters(code)).toBe(2);
+    expect(render(code)).toContain("<em>real</em>");
   });
 
   test("brackets and emphasis by the thousand render in good time", () => {

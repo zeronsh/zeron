@@ -10,6 +10,9 @@ test.each([
   ["https://evil.example/", "/"],
   ["javascript:alert(1)", "/"],
   ["/\tjavascript", "/"],
+  ["/.//evil.example", "/"],
+  ["/a/..//evil.example", "/"],
+  ["/%2e//evil.example", "/"],
   ["", "/"],
   [null, "/"],
 ])("a way back to %j stays on the site: %j", (input, out) => expect(sitePath(input)).toBe(out));
