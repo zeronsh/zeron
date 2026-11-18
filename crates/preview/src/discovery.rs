@@ -332,9 +332,11 @@ pub struct Origins {
     /// `Some(origin)` when the marker is present, and whether the process
     /// is an agent's sign-in.
     markers: HashMap<(u32, u64), (Option<String>, bool)>,
-    /// [`Origins::owned`] reads failed this many times (a process mid-exec,
-    /// a zombie). It gives up after [`UNREADABLE_TRIES`], so such a process
-    /// can't cost a read every scan; [`Origins::resolve`] still retries.
+    /// [`Origins::owned`] reads failed, or read an empty environment, this
+    /// many times (a process mid-exec, a zombie). It gives up after
+    /// [`UNREADABLE_TRIES`], so such a process can't cost a read every scan
+    /// (one read empty that often is taken to have no environment);
+    /// [`Origins::resolve`] still retries.
     unreadable: HashMap<(u32, u64), u8>,
     /// Whether each ancestor of a listener [`Origins::under_test_run`] read
     /// runs tests, read once per process lifetime as the markers are.
@@ -404,13 +406,17 @@ impl Origins {
             let (marker, sign_in) = match self.markers.get(&key) {
                 Some(marker) => marker.clone(),
                 None => match read(pid) {
-                    Some(environment) => {
+                    Some(environment) if !environment.is_empty() => {
                         let marker = (origin_marker(&environment), has_variable(&environment, SIGN_IN_ENV));
                         self.markers.insert(key, marker.clone());
                         marker
                     }
-                    // Unreadable now: retried next scan, never cached.
-                    None => (None, false),
+                    // Unreadable, or read empty (mid-exec, most likely): not
+                    // known yet, so retried next scan, never cached. A
+                    // process whose environment really is empty (`env -i`)
+                    // is settled by [`Self::owned`], which every scan runs
+                    // first.
+                    _ => (None, false),
                 },
             };
             signing_in |= sign_in;
@@ -448,12 +454,27 @@ impl Origins {
                 Some((marker, _)) => marker.clone(),
                 None if self.unreadable.get(&key).is_some_and(|n| *n >= UNREADABLE_TRIES) => continue,
                 None => match read(pid) {
-                    Some(environment) => {
+                    Some(environment) if !environment.is_empty() => {
                         let marker = origin_marker(&environment);
                         let sign_in = has_variable(&environment, SIGN_IN_ENV);
                         self.markers.insert(key, (marker.clone(), sign_in));
                         self.unreadable.remove(&key);
                         marker
+                    }
+                    // Read empty: a process caught mid-exec reads so (seen
+                    // with Xcode's `python3` launcher), and caching that
+                    // would hide everything it serves for its lifetime. It
+                    // is unknown until a later scan reads its environment;
+                    // read empty every time, it has none (`env -i`), and
+                    // that is its verdict.
+                    Some(_) => {
+                        let tries = self.unreadable.entry(key).or_default();
+                        *tries += 1;
+                        if *tries >= UNREADABLE_TRIES {
+                            self.unreadable.remove(&key);
+                            self.markers.insert(key, (None, false));
+                        }
+                        continue;
                     }
                     None => {
                         *self.unreadable.entry(key).or_default() += 1;
@@ -1767,6 +1788,55 @@ mod tests {
             |_| None,
         );
         assert_eq!(listeners[0].origin.as_deref(), Some("chat:c"));
+    }
+    /// A process caught mid-exec reads an empty environment. That is not
+    /// "no marker": it is read again on later scans, so the chat's server is
+    /// found once its environment reads. One that reads empty every time
+    /// (`env -i`) is settled after a few scans, still owned through the
+    /// marked process that started it.
+    #[test]
+    fn an_empty_environment_is_unknown_not_unmarked() {
+        let p = |parent, started_at| Process { parent, started_at };
+        // 100: an agent (chat:a). 200: a server caught mid-exec on the first
+        // scan, marked once it reads. 300: the agent's `env -i` child.
+        let processes: HashMap<u32, Process> =
+            [(100, p(1, 1)), (200, p(1, 2)), (300, p(100, 3))].into();
+        let mine: HashSet<u32> = processes.keys().copied().collect();
+        let accept = |origin: &str| origin == "chat:a";
+        let scan = std::cell::Cell::new(0);
+        let reads = std::cell::RefCell::new(Vec::new());
+        let read = |pid: u32| {
+            reads.borrow_mut().push(pid);
+            Some(match (pid, scan.get()) {
+                (200, 0) | (300, _) => Vec::new(),
+                _ => environment(&["ZERON_ORIGIN=chat:a"]),
+            })
+        };
+        let mut origins = Origins::default();
+        let owned = origins.owned(processes.clone(), &mine, &accept, read);
+        let mut pids: Vec<_> = owned.pids.iter().copied().collect();
+        pids.sort();
+        assert_eq!(pids, [100, 300], "the one read empty is not yet known");
+        // Its listener is not attributed while unknown, nor remembered so.
+        let mut listeners = vec![listener_of(200)];
+        origins.attribute(&mut listeners, &processes, read, |_| None);
+        assert!(!listeners[0].zeron_owned);
+        scan.set(1);
+        let owned = origins.owned(processes.clone(), &mine, &accept, read);
+        let mut pids: Vec<_> = owned.pids.iter().copied().collect();
+        pids.sort();
+        assert_eq!(pids, [100, 200, 300], "found once its environment reads");
+        origins.attribute(&mut listeners, &processes, read, |_| None);
+        assert_eq!(listeners[0].origin.as_deref(), Some("chat:a"));
+        // `env -i`: read empty a few scans, then settled, never read again.
+        for _ in 0..UNREADABLE_TRIES + 2 {
+            origins.owned(processes.clone(), &mine, &accept, read);
+        }
+        let empty_reads = reads.borrow().iter().filter(|pid| **pid == 300).count();
+        assert_eq!(empty_reads, UNREADABLE_TRIES as usize);
+        let owned = origins.owned(processes.clone(), &mine, &accept, read);
+        assert!(owned.pids.contains(&300), "still owned through its agent");
+        assert_eq!(reads.borrow().iter().filter(|pid| **pid == 300).count(), empty_reads);
     }
     /// Owned = processes whose own marker is in scope, plus everything
     /// below them; never the engine or what it starts unmarked; each
