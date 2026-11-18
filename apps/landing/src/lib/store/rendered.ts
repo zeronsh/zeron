@@ -40,7 +40,8 @@ export async function renderedOnce(
   const store = keep.store === undefined ? workerCache() : keep.store;
   const render = keep.render ?? renderWithin;
   const pictures = options.file("x");
-  const hash = await sha256(`${keep.pipeline ?? PIPELINE}\n${origin}\n${pictures}\n${options.demote ? 1 : 0}\n${options.title ?? ""}\n${markdown}`);
+  // (Its fields as a JSON array: unambiguous by construction, whatever a field holds.)
+  const hash = await sha256(JSON.stringify([keep.pipeline ?? PIPELINE, origin, pictures, options.demote ? 1 : 0, options.title ?? "", markdown]));
   const key = new Request(`https://rendered.zeron.invalid/${encodeURIComponent(id)}/${encodeURIComponent(version)}/${what}/${hash}`);
   if (store) {
     const kept = await store.match(key).catch(() => undefined);

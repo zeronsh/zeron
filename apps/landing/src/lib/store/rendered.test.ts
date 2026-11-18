@@ -70,3 +70,15 @@ test("a document too large to draw is kept as its text, said so (the same text a
   expect(html).toContain("Shown as plain text: it's too long to lay out.");
   expect(store.size()).toBe(1);
 });
+
+test("a key's fields can't run into each other: a title with a line end and the text after it are two renderings", async () => {
+  const store = memory();
+  let renders = 0;
+  const render = (md: string, o: RenderOptions): Rendered => (renders++, renderWithin(md, o));
+  const file = (p: string) => `/plugins/a/files/1.0.0/${p}`;
+  // (Joined by line ends, these two were one key: "a\nb\nc".)
+  await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "b\nc", { file, title: "a" }, { store, render });
+  await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "c", { file, title: "a\nb" }, { store, render });
+  expect(renders).toBe(2);
+  expect(store.size()).toBe(2);
+});
