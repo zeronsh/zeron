@@ -181,7 +181,10 @@
     // snapshot.read. Unset ⇒ every session installs the engine (~30–60 s).
     "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
     "AUTH_MODE": "workos",
-    // The web site, where web sign-in lives (src/web-auth-routes.ts).
+    // The web site, where web sign-in lives (src/web-auth-routes.ts). Its
+    // sign-in uses PKCE beside the client secret; should WorkOS ever refuse
+    // that pair, "WEB_SIGNIN_PKCE": "off" falls back to the state cookie
+    // alone (see usesPkce there) until it's resolved.
     "WEB_ORIGIN": "https://zeron.sh",
     // Who the chat rooms offer the relay layer to (docs/design/relay-layer.md):
     // "1" for everyone, a comma-separated list of WorkOS user ids (each room

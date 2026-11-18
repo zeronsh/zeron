@@ -1,6 +1,8 @@
 import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { Env } from "../../src/env";
 import type { UserDirectory } from "../../src/user-directory";
+import { handleWebAuthRoute, usesPkce } from "../../src/web-auth-routes";
 import {
   ROTATED_TOKEN_GRACE_MS,
   STAFF_SESSION_ABSOLUTE_MS,
@@ -530,5 +532,43 @@ describe("through the site's service binding", () => {
     const res = await viaSite("/store/v1/admin/queue", { headers: { cookie: browser.cookie } });
     expect(res.status).toBe(200);
     expect(setCookies(res).get("__Host-zeron_session")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+});
+
+describe("web sign-in without PKCE (WEB_SIGNIN_PKCE=off, the fallback)", () => {
+  const offEnv = { ...(env as unknown as Env), WEB_SIGNIN_PKCE: "off" };
+  const call = async (path: string, cookie?: string) => {
+    const url = new URL(`${SITE}${path}`);
+    return (await handleWebAuthRoute(new Request(url, { headers: cookie ? { cookie } : {}, redirect: "manual" }), offEnv, url))!;
+  };
+
+  it("sends no challenge and no verifier, and the state cookie still binds the sign-in to the browser", async () => {
+    expect(usesPkce(offEnv)).toBe(false);
+    expect(usesPkce(env as unknown as Env)).toBe(true);
+    const userId = await person();
+    const login = await call("/auth/web/login?return_to=/plugins");
+    expect(login.status).toBe(302);
+    const authorize = new URL(login.headers.get("location")!);
+    expect(authorize.searchParams.has("code_challenge")).toBe(false);
+    expect(authorize.searchParams.has("code_challenge_method")).toBe(false);
+    expect(authorize.searchParams.get("max_age")).toBe("0");
+    const loginCookie = `__Host-zeron_web_login=${setCookies(login).get("__Host-zeron_web_login")}`;
+    const state = authorize.searchParams.get("state")!;
+
+    // Someone else's state in this browser: refused, as with PKCE.
+    const code = newId("code");
+    await workos("__codes", { code, user_id: userId });
+    const other = await startLogin();
+    expect((await call(`/auth/web/callback?code=${code}&state=${state}`, other.loginCookie)).status).toBe(400);
+    expect((await call(`/auth/web/callback?code=${code}&state=${state}`)).status).toBe(400);
+
+    // Its own state: signed in, the code sent with the secret and no verifier.
+    const res = await call(`/auth/web/callback?code=${code}&state=${state}`, loginCookie);
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe(`${SITE}/plugins`);
+    const { authenticated } = (await workos("__state")) as { authenticated: { code: string; code_verifier: string | null; client_secret: string | null }[] };
+    expect(authenticated.find((a) => a.code === code)).toEqual({ code, code_verifier: null, client_secret: "sk_test" });
+    const token = setCookies(res).get("__Host-zeron_session")!;
+    expect((await sessionOf(sessionHeader(token))).status).toBe(200);
   });
 });

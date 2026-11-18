@@ -56,6 +56,10 @@ export interface Env {
    * registered with WorkOS, and cookie-authenticated changes must come from
    * it. Unset ⇒ no web sign-in, and no cookie is ever accepted. */
   WEB_ORIGIN?: string;
+  /** "off": web sign-in without PKCE, its state cookie alone binding the
+   * sign-in to the browser. Only if WorkOS refuses a code verifier sent
+   * beside the client secret (web-auth-routes.ts). Unset ⇒ PKCE. */
+  WEB_SIGNIN_PKCE?: string;
   /** Every WorkOS user and organization, with members (`users1`; user-directory.ts). */
   USER_DIRECTORY?: DurableObjectNamespace<import("./user-directory").UserDirectory>;
   /** APNs auth key (contents of AuthKey_XXXX.p8, wrangler secret) and its

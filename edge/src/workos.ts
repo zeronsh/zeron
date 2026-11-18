@@ -95,13 +95,13 @@ const post = async (apiKey: string, path: string, body: unknown): Promise<Respon
 
 /** AuthKit's sign-in page for the web (web-auth-routes.ts): back to
  * `redirectUri` with a code and `state`, the code bound to `codeChallenge`
- * (PKCE, S256). `max_age=0` makes AuthKit ask for the person's credentials
+ * (PKCE, S256) unless that's null (`WEB_SIGNIN_PKCE=off`). `max_age=0` makes AuthKit ask for the person's credentials
  * every time, rather than reuse its own session: a web sign-in is always a
  * real one, so it can earn a step-up ticket and nobody is signed in silently
  * as the last person on a shared computer. */
 export const authorizeUrl = (
   env: Pick<Env, "WORKOS_CLIENT_ID">,
-  params: { readonly redirectUri: string; readonly state: string; readonly codeChallenge: string }
+  params: { readonly redirectUri: string; readonly state: string; readonly codeChallenge: string | null }
 ): string =>
   `${API}/user_management/authorize?${new URLSearchParams({
     client_id: env.WORKOS_CLIENT_ID,
@@ -109,8 +109,7 @@ export const authorizeUrl = (
     response_type: "code",
     provider: "authkit",
     state: params.state,
-    code_challenge: params.codeChallenge,
-    code_challenge_method: "S256",
+    ...(params.codeChallenge === null ? {} : { code_challenge: params.codeChallenge, code_challenge_method: "S256" }),
     max_age: "0"
   })}`;
 

@@ -125,6 +125,14 @@ export const handleWebAuthRoute = async (request: Request, env: Env, url: URL): 
 const notAllowed = (allow: string): Response =>
   new Response(JSON.stringify({ error: "method_not_allowed" }), { status: 405, headers: { "content-type": "application/json", allow } });
 
+/** Whether web sign-in uses PKCE (the default). `WEB_SIGNIN_PKCE=off` is
+ * the fallback for a WorkOS that refuses a verifier sent beside the client
+ * secret: the attempt's `state` cookie still binds the callback to the
+ * browser that began it (no login CSRF), but a code stolen in transit could
+ * then be redeemed by whoever holds it, so turn it off only if that refusal
+ * is real, and only until it's resolved. */
+export const usesPkce = (env: Pick<Env, "WEB_SIGNIN_PKCE">): boolean => env.WEB_SIGNIN_PKCE !== "off";
+
 const login = async (env: Env, url: URL, origin: string): Promise<Response> => {
   if (!env.WORKOS_API_KEY) return jsonAnswer({ error: "workos not configured" }, 501);
   const returnTo = safeReturnTo(url.searchParams.get("return_to"), origin);
@@ -133,7 +141,7 @@ const login = async (env: Env, url: URL, origin: string): Promise<Response> => {
   const location = authorizeUrl(env, {
     redirectUri: `${origin}${CALLBACK_PATH}`,
     state,
-    codeChallenge: await codeChallenge(verifier)
+    codeChallenge: usesPkce(env) ? await codeChallenge(verifier) : null
   });
   return new Response(null, {
     status: 302,
@@ -170,7 +178,7 @@ const callback = async (request: Request, env: Env, url: URL, origin: string): P
   if (!code) return signInFailed("This link is missing its sign-in code.");
   let exchanged: Awaited<ReturnType<typeof exchange>>;
   try {
-    exchanged = await exchange(env, apiKey, code, attempt.verifier);
+    exchanged = await exchange(env, apiKey, code, usesPkce(env) ? attempt.verifier : undefined);
   } catch (e) {
     console.warn("auth/web: code exchange failed", e instanceof WorkOsAuthFailed ? (e.status ?? "no status") : "error");
     return signInFailed("The sign-in code was refused. It may have been used already.");
