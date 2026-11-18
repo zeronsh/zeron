@@ -108,7 +108,23 @@ const PARTS = [
 
     <h2 id="ci">Publishing from CI</h2>
     <p>A <strong>deploy key</strong> lets a CI job, such as a GitHub Action, send new versions without your session. A key is your account's, made in Zeron on your machine, with a scope you choose then and can't change: the plugins it names, or all of yours, those you publish later included. A plugin's first version always comes from your machine; a key sends the ones after it.</p>
-    <p>Making a key asks you to sign in again. Its secret (<code>zpk_…</code>) is shown once and Zeron keeps no copy: put it in your CI's secrets as <code>ZERON_DEPLOY_KEY</code>, then run <code>zeron plugin publish &lt;folder&gt;</code>. A key sends new versions of the plugins in its scope, nothing else, and each is listed as any version is, waiting to be verified; your devices tell you when a key publishes one. A version it sends is installable at once, so treat a key like a password: if one leaks, revoke it (from <a href="/account/keys">Deploy keys</a>, Zeron, or the command line) and stop new installs of what it sent.</p>
+    <p>Make one in Zeron, or from a terminal with Zeron running and signed in:</p>
+    <pre tabindex="0"><code>{`zeron plugin key create --name "GitHub Actions" --plugins focus-timer,focus-board
+zeron plugin key create --name "All my plugins" --all
+zeron plugin key create --name "Release CI" --plugins focus-timer --expires-in-days 90
+zeron plugin key list
+zeron plugin key revoke <key>`}</code></pre>
+    <ul>
+      <li><code>key create</code> asks you to sign in again first. <code>--name</code> says what it's for. Its scope is <code>--plugins a,b</code> (plugins you already have in the store) or <code>--all</code> (every plugin of yours, those you first publish later included, never one transferred to you), fixed once made: another set of plugins is another key. <code>--expires-in-days</code> stops it working after that many days.</li>
+      <li>Its secret (<code>zpk_…</code>) is printed once, and Zeron keeps no copy.</li>
+      <li><code>key list</code> shows your live keys: each one's name, what it publishes, when it was made and last used, and when it ends; never their secrets. So does <a href="/account/keys">Deploy keys</a>.</li>
+      <li><code>key revoke</code> takes the key as <code>key list</code> shows it. It publishes nothing from then on; what it published stays.</li>
+      <li>An account has at most 20 live keys, and makes at most 10 a day.</li>
+    </ul>
+    <p>Put the secret in your CI's secrets as <code>ZERON_DEPLOY_KEY</code>, then publish with it. It's read from the environment only, never from an argument, and needs no Zeron running and nobody signed in:</p>
+    <pre tabindex="0"><code>{`ZERON_DEPLOY_KEY=zpk_… zeron plugin publish <folder>`}</code></pre>
+    <p>It exits 0 when published, 1 when the plugin doesn't meet the store's rules, 2 for a set-up problem, 3 when the store refused the key or the account, and 4 when the store couldn't be reached.</p>
+    <p>A key sends new versions of the plugins in its scope, nothing else, and each is listed as any version is, not yet verified; your devices tell you when a key publishes one. A version it sends is installable at once, so treat a key like a password: if one leaks, revoke it (from <a href="/account/keys">Deploy keys</a>, Zeron, or <code>zeron plugin key revoke</code>) and stop new installs of what it sent.</p>
     <p>On GitHub, the publish action installs Zeron's command line and sends the plugin with your key:</p>
     <pre tabindex="0"><code>{`- uses: actions/checkout@v4
 - uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
