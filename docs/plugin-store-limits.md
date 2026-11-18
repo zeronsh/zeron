@@ -1,30 +1,17 @@
-# Plugin store: rollout gate and package size limit
+# Plugin store: package size limit and the bounds on a body
 
-## Before anything reaches main (hard gate)
-
-`edge/wrangler.jsonc` binds `STORE_DB` to **placeholder database ids**
-(`00000000-0000-0000-0000-000000000000` for production, `…0001` for
-staging). A deploy with a placeholder id fails, and the deploy job now runs
-`wrangler d1 migrations apply STORE_DB --remote` before `wrangler deploy`,
-so a placeholder on main breaks every edge deploy. Before the store merges
-to main:
-
-1. Create the databases (`wrangler d1 create zeron-store`,
-   `wrangler d1 create zeron-store-staging`) and put their ids in
-   `edge/wrangler.jsonc` (production and `env.staging`).
-2. Create the R2 buckets `zeron-plugins` and `zeron-staging-plugins`.
-3. Check the rate limit namespace ids (`STORE_READS` 1003/1004,
-   `STORE_WRITES` 1005/1006) don't clash with others on the account.
-4. Give the deploy token D1 edit access (the migrations step needs it).
-5. Apply the migrations to staging by hand once:
-   `npx wrangler d1 migrations apply STORE_DB --remote --env staging`.
+The rollout (the hard gate before main: real D1 ids, buckets, the deploy
+token's D1 access, the migrations step) is in
+`docs/plans/2026-11-18-plugin-store-catalog-rollout.md`.
 
 ## The package limit
 
 The store takes a request body (the `.zeron-plugin` file exactly as
 uploaded: its files as base64 inside JSON) of at most **20,971,520 bytes**
-(20 MiB): `MAX_PUBLISH_BODY_BYTES` (`edge/src/store/principal.ts`), which
-`STORE_MAX_PACKAGE_BYTES` (`edge/src/store/publish.ts`) is. There is no
+(20 MiB): `MAX_PUBLISH_BODY_BYTES` (`edge/src/store/identity/body.ts`),
+which `STORE_MAX_PACKAGE_BYTES` (`edge/src/store/publish.ts`) is. It is
+`limits.max_publish_body_bytes` in `docs/plugin-store-data.json` too, and a
+test holds the two equal. There is no
 second number for decoded files: base64 makes them at most three quarters of
 the body (about 15.7 MB), and the engine's own 50 MB limit on files is
 checked as well. A device takes up to 50 MB of files (about
@@ -78,20 +65,18 @@ peaked at 280 MB for 20 MB without these):
   (`json.ts` `RawString`), never copied into JavaScript strings first.
 - Files are classified as text or binary in place (`checks.ts` `isText`),
   not decoded.
-- A body with a declared length is read into one buffer of that size
-  (`read-capped.ts`), not collected and then joined.
 - A version's files are one R2 object (`files/<id>/<version>/<sha256>.bin`)
   served by ranged reads, not up to 2,000 separate writes.
 
 Re-run the script after changing the pipeline:
 `node edge/scripts/store-package-limit.mjs [MB …] [--no-r2]`.
 
-## With the identity lane's body reader
+## Through the edge's body reader
 
-The store reads bodies through `readBody` (`edge/src/store/principal.ts`),
-which the identity lane's version replaces at the merge. That reader keeps
-every chunk and then joins them, never allocating from `Content-Length`, so
-the body is briefly held twice. Measured that way (`--chunks`):
+The store reads bodies through `readBody` (`edge/src/store/identity/body.ts`).
+It keeps every chunk and then joins them, never allocating from
+`Content-Length`, so the body is briefly held twice. Measured that way
+(`--chunks`):
 
 | Package | Peak over idle | CPU |
 |---:|---:|---:|
