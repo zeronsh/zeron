@@ -144,7 +144,7 @@ type Entry = {
 local entries: { Entry } = {}
 local by_id: { [string]: Entry } = {}
 local DAY = 86400 * 1000
-local NOW = 1_763_337_600_000 -- the 17th of November, 2026
+local NOW = 1_794_873_600_000 -- the 17th of November, 2026
 
 for i, name in WORDS do
 	local id = slug(name)
@@ -192,6 +192,7 @@ do
 	local f = by_id["focus-timer"]
 	f.card.icon = "icon.svg"
 	f.card.author = { username = "ada", verified = true, badges = {} }
+	f.detail.repository = "https://github.com/ada/focus-timer"
 	f.card.version = "1.2.0"
 	f.card.keywords = { "focus", "timer", "pomodoro" }
 	f.detail.readme = table.concat({

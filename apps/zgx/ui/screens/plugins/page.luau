@@ -750,7 +750,7 @@ function M.View(): Node
 		end, function(v: string): Node
 			local id = string.match(v, "^store:(.+)$")
 			if id then
-				return ui.column { w_full = true, items = "center", listing.Page { id = id, here = here } }
+				return ui.column { w_full = true, items = "center", listing.Page { plugin = id, here = here } }
 			end
 			return ui.column { w_full = true, items = "center", catalog() }
 		end, { w_full = true, enter = { opacity = { 0, 1 }, y = { 6, 0 }, duration = 160 }, exit = { opacity = 0, duration = 80 }, mode = "wait" }),

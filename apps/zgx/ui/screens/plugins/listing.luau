@@ -23,7 +23,7 @@
 -- anywhere else is its link; raw HTML is words, never run; links open
 -- where links open.
 --
---   listing.Page { id, here }   `here`: the Plugins page's device shown
+--   listing.Page { plugin, here }  `here`: the Plugins page's device shown
 --                               (`device()`, `device_name()`, `away()`) and
 --                               its outcomes (`settled`, `failed`)
 
@@ -122,8 +122,8 @@ local function said(node: Node): Node
 end
 
 -- The page itself, its detail read.
-local Found = ui.component(function(props: { id: string, here: Here }): Node
-	local id, here = props.id, props.here
+local Found = ui.component(function(props: { plugin: string, here: Here }): Node
+	local id, here = props.plugin, props.here
 	local function d(): any
 		return details:get()[id] or {}
 	end
@@ -854,8 +854,8 @@ end)
 
 -- A store plugin's page: read as it opens (at once from the last read),
 -- or what stands in its place while it can't be.
-M.Page = ui.component(function(props: { id: string, here: Here }): Node
-	local id = props.id
+M.Page = ui.component(function(props: { plugin: string, here: Here }): Node
+	local id = props.plugin
 	local phase = ui.use_state(if details:peek()[id] then "found" else "loading")
 	local function load()
 		store.detail(id):after(function(found: any)
@@ -879,7 +879,7 @@ M.Page = ui.component(function(props: { id: string, here: Here }): Node
 	end)
 	local function body(kind: string): Node
 		if kind == "found" then
-			return Found { id = id, here = props.here }
+			return Found { plugin = id, here = props.here }
 		elseif kind == "loading" then
 			return ui.column {
 				id = "store-loading",
