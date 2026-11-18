@@ -33,6 +33,29 @@ const devPages = {
   },
 };
 
+/**
+ * The built 404 page (an address nothing answers) is a file the Worker
+ * never renders, so its headers are the built files' own: the site's
+ * security headers and its policy, appended to _headers (the adapter adds
+ * its own rule beside them). Its bytes stay as built.
+ * @type {import("astro").AstroIntegration}
+ */
+const notFoundHeaders = {
+  name: "zeron:not-found-headers",
+  hooks: {
+    "astro:build:done": async ({ dir }) => {
+      const { readFile, writeFile } = await import("node:fs/promises");
+      const { SECURITY_HEADERS, policyFor } = await import("./src/lib/store/policy.mjs");
+      const { hashes } = JSON.parse(await readFile(new URL("./src/lib/store/inline-styles.json", import.meta.url), "utf8"));
+      const file = new URL("./_headers", dir);
+      const before = await readFile(file, "utf8").catch(() => "");
+      const lines = [...Object.entries(SECURITY_HEADERS).map(([k, v]) => `  ${k}: ${v}`), `  content-security-policy: ${policyFor(hashes)}`];
+      const rules = ["/404.html", "/404"].map((path) => `${path}\n${lines.join("\n")}`).join("\n");
+      await writeFile(file, `${before}${before && !before.endsWith("\n") ? "\n" : ""}${rules}\n`);
+    },
+  },
+};
+
 /** The landing page's components with scripts of their own (their chunks' names). */
 const LANDING_SCRIPTS = /(^|\/)(Base|CopyCommand|Downloads|GitHubStars|Yours)\.astro_astro_type_script_/;
 
@@ -42,7 +65,7 @@ export default defineConfig({
   // /privacy is served from privacy.html, the URL the app and stores link to.
   build: { format: "file" },
   devToolbar: { enabled: false },
-  integrations: [devPages],
+  integrations: [devPages, notFoundHeaders],
   adapter: cloudflare({
     // Pictures are optimized at build time, as before the adapter.
     imageService: "compile",

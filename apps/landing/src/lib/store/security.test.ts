@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "vitest";
-import { contentSecurityPolicy, hasInlineScript, inlineStyles } from "./security.ts";
+import { CONTENT_SECURITY_POLICY, hasInlineScript, inlineStyles, STYLE_HASHES } from "./security.ts";
 
-test("a page's policy allows exactly its own inline styles", async () => {
-  const html = `<html><head><style>a{color:red}</style><style data-x>b{}</style></head><body style="x"></body></html>`;
-  expect(inlineStyles(html)).toEqual(["a{color:red}", "b{}"]);
-  const csp = await contentSecurityPolicy(html);
-  for (const style of inlineStyles(html)) expect(csp).toContain(`'sha256-${createHash("sha256").update(style).digest("base64")}'`);
+test("the policy allows the build's own inline styles by their hashes, and no other inline style", () => {
+  const csp = CONTENT_SECURITY_POLICY;
+  for (const hash of STYLE_HASHES) expect(csp).toContain(`'sha256-${hash}'`);
+  // A style an author might slip in is in no list: not allowed, whatever page it is on.
+  expect(csp).not.toContain(`'sha256-${createHash("sha256").update("body{display:none}").digest("base64")}'`);
   expect(csp).toContain("script-src 'self';");
   expect(csp).not.toContain("unsafe-inline");
   expect(csp).toContain("frame-ancestors 'none'");

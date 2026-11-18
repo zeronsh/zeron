@@ -1,7 +1,7 @@
 // The headers that keep each response the Worker renders what it is (the
 // middleware's last step): the cookies the edge set while it answered, the
 // site's security headers, and a page's Content Security Policy.
-import { contentSecurityPolicy, SECURITY_HEADERS } from "./security.ts";
+import { CONTENT_SECURITY_POLICY, SECURITY_HEADERS } from "./security.ts";
 
 export async function secure(cache: { set(input: false): void }, response: Response, cookies: string[]): Promise<Response> {
   // A response that carries someone's cookie is theirs alone: Astro adds a
@@ -32,9 +32,8 @@ export async function secure(cache: { set(input: false): void }, response: Respo
   if (!type.startsWith("text/html") || headers.has("content-security-policy")) {
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   }
-  // A page: its own inline styles (Astro's, and the fonts') are allowed by
-  // their hashes, and nothing else inline is.
-  const html = await response.text();
-  headers.set("content-security-policy", await contentSecurityPolicy(html));
-  return new Response(html, { status: response.status, statusText: response.statusText, headers });
+  // A page: the build's own inline styles are allowed by their hashes
+  // (security.ts), and nothing else inline is.
+  headers.set("content-security-policy", CONTENT_SECURITY_POLICY);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }

@@ -3,6 +3,7 @@
 // and every page and form of the store's, its admin's and an author's,
 // against what the edge really answers. (tests/routes.test.ts holds the
 // same site to the fake; where the two disagreed, the fake was wrong.)
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { PNG, Publisher, startRealEdge, type RealEdge } from "./real-edge.ts";
 import { rawElements } from "../../src/lib/store/security.ts";
@@ -173,6 +174,19 @@ describe("review", () => {
     expect(rotated).toMatch(/; Path=\//i);
     // The new cookie is the one that works from here on, for pages and forms.
     expect((await browser.get("/admin/reports")).response.status).toBe(200);
+    expect(browser.rotations).toBe(1);
+  });
+
+  test("a staff session whose first use is an address no staff page has: the 404 page, private, and no rotation (the edge rotates only on a privileged call)", async () => {
+    const browser = await signInOnTheWeb("user_grace", "/admin/plugins");
+    const missing = await browser.get("/admin/nothing-here");
+    expect(missing.response.status).toBe(404);
+    expect(missing.body).toBe(readFileSync(new URL("../../dist/client/404.html", import.meta.url), "utf8"));
+    expect(missing.response.headers.get("cache-control")).toBe("private, no-store");
+    expect(missing.response.headers.getSetCookie()).toEqual([]);
+    expect(browser.rotations).toBe(0);
+    // Its first page that calls the edge's admin routes rotates it, as ever.
+    expect((await browser.get("/admin/plugins")).response.status).toBe(200);
     expect(browser.rotations).toBe(1);
   });
 

@@ -967,6 +967,7 @@ a.row:focus-visible { outline-offset: -2px; }
 .notice b { font-weight: 500; }
 .notice code { font-size: 12px; }
 .notice.warn { background: var(--warn-wash); color: var(--warn-ink); }
+.notice.bad { background: var(--bad-wash); color: var(--bad-ink); }
 
 /* ── Your plugins ──────────────────────────────────────────────────────── */
 

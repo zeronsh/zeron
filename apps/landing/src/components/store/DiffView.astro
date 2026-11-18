@@ -1,22 +1,29 @@
 ---
 // One file's changes since the last approved version: a unified diff, each
 // line with its numbers before and after, added and removed in their colours.
-import { highlight } from "../../lib/store/highlight.ts";
+import { highlighted, type HighlightBudget } from "../../lib/store/highlight.ts";
 import type { DiffRow } from "../../lib/store/review.ts";
 
 interface Props {
   rows: DiffRow[];
   language: string | null;
+  /** What the page may highlight, in bytes, shared by every file's changes (highlight.ts). */
+  budget?: HighlightBudget;
 }
-const { rows, language } = Astro.props;
+const { rows, language, budget } = Astro.props;
 const SIGN = { added: "+", removed: "-", context: " ", hunk: "" } as const;
+// (Each line highlighted on its own; one the highlighter can't take is plain, and the reviewer told.)
+const lines = rows.map((row) => (row.kind === "hunk" ? null : highlighted(row.text, language, budget)));
+const plain = lines.some((l) => l?.plain);
 ---
+
+{plain && <p class="notice bad" role="note"><b>Some lines couldn't be highlighted.</b> They nest deeper than real code does, so they're shown as plain text. They're worth a look.</p>}
 
 <div class="diff" role="region" aria-label="Changes" tabindex="0">
   <table>
     <tbody>
       {
-        rows.map((row) =>
+        rows.map((row, i) =>
           row.kind === "hunk" ? (
             <tr class="hunk">
               <td colspan="3">{row.text}</td>
@@ -30,7 +37,7 @@ const SIGN = { added: "+", removed: "-", context: " ", hunk: "" } as const;
                   {SIGN[row.kind]}
                   {row.kind !== "context" && <span class="sr-only">{row.kind}: </span>}
                 </span>
-                <code class="hljs" set:html={highlight(row.text, language)} />
+                <code class="hljs" set:html={lines[i]!.html} />
               </td>
             </tr>
           ),

@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { PIPELINE, renderMarkdown, RENDERER } from "./markdown.ts";
+import { Budget, PIPELINE, render as renderWithin, RENDERER, type Rendered, type RenderOptions } from "./markdown.ts";
 import { renderedOnce, type Keeper } from "./rendered.ts";
 
 /** A cache in memory, as the Worker's keeps responses. */
@@ -15,7 +15,7 @@ const memory = (): Keeper & { size(): number } => {
 test("a rendering is kept, and found again for the same text", async () => {
   const store = memory();
   let renders = 0;
-  const render: typeof renderMarkdown = (md, o) => (renders++, renderMarkdown(md, o));
+  const render = (md: string, o: RenderOptions, b?: Budget): Rendered => (renders++, renderWithin(md, o, b));
   const options = { file: (p: string) => `/plugins/a/files/1.0.0/${p}`, demote: true };
   const first = await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render });
   const again = await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render });
@@ -30,7 +30,7 @@ test("a rendering is kept, and found again for the same text", async () => {
 test("a change to the pipeline or the sanitizer's schema misses every kept rendering", async () => {
   const store = memory();
   let renders = 0;
-  const render: typeof renderMarkdown = (md, o) => (renders++, renderMarkdown(md, o));
+  const render = (md: string, o: RenderOptions, b?: Budget): Rendered => (renders++, renderWithin(md, o, b));
   const options = { file: (p: string) => `/plugins/a/files/1.0.0/${p}`, demote: true };
   await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render });
   // (RENDERER bumped by hand, or the schema's fingerprint changed by itself.)
@@ -40,3 +40,16 @@ test("a change to the pipeline or the sanitizer's schema misses every kept rende
   expect(store.size()).toBe(3);
   expect(PIPELINE.startsWith(`${RENDERER}.`)).toBe(true);
 });
+
+test("a document shown as text only because the page spent its budget isn't kept; one drawn with the budget is", async () => {
+  const store = memory();
+  const options = { file: (p: string) => `/plugins/a/files/1.0.0/${p}`, demote: true };
+  const spent = new Budget(0);
+  const html = await renderedOnce("https://zeron.sh", "a", "1.0.0", "notes", "Some *notes*.", options, { store, budget: spent });
+  expect(html).toContain("Shown as plain text.");
+  expect(store.size()).toBe(0);
+  const drawn = await renderedOnce("https://zeron.sh", "a", "1.0.0", "notes", "Some *notes*.", options, { store, budget: new Budget() });
+  expect(drawn).toContain("<em>notes</em>");
+  expect(store.size()).toBe(1);
+});
+

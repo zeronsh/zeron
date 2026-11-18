@@ -11,6 +11,8 @@ interface Env {
   ASSETS: ServiceBinding;
   /** The edge worker: the store, and the web sign-in session. */
   EDGE: ServiceBinding;
+  /** The site's own origin (https://zeron.sh): the store's paths on any other name of this Worker go there. */
+  SITE_ORIGIN?: string;
 }
 
 declare module "cloudflare:workers" {

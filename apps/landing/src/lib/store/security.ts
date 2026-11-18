@@ -4,13 +4,13 @@
 // inline <style> blocks the page carries, pictures and fonts from the site,
 // nothing from anyone else, never framed.
 
-export const SECURITY_HEADERS: Record<string, string> = {
-  "x-content-type-options": "nosniff",
-  "referrer-policy": "strict-origin-when-cross-origin",
-  "x-frame-options": "DENY",
-  "cross-origin-opener-policy": "same-origin",
-  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
-};
+import allowlist from "./inline-styles.json";
+import { policyFor } from "./policy.mjs";
+
+/** The build's own inline styles' hashes (inline-styles.json). */
+export const STYLE_HASHES: readonly string[] = allowlist.hashes;
+
+export { SECURITY_HEADERS } from "./policy.mjs";
 
 /** A raw-text element of a page (<style> or <script>): its attributes and its text. */
 interface RawElement {
@@ -75,6 +75,9 @@ export function hasInlineScript(html: string): boolean {
   return rawElements(html).some((e) => e.tag === "script" && !/\bsrc\s*=/i.test(e.attributes) && !/\btype\s*=\s*["']?application\/(ld\+)?json/i.test(e.attributes) && e.text.trim() !== "");
 }
 
+/** An inline style's hash, as a CSP names it (base64 SHA-256 of its text). */
+export const styleHash = (text: string): Promise<string> => sha256(text);
+
 async function sha256(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   let binary = "";
@@ -82,23 +85,15 @@ async function sha256(text: string): Promise<string> {
   return btoa(binary);
 }
 
-export async function contentSecurityPolicy(html: string): Promise<string> {
-  const hashes = await Promise.all(inlineStyles(html).map(async (text) => `'sha256-${await sha256(text)}'`));
-  return [
-    "default-src 'none'",
-    "script-src 'self'",
-    `style-src 'self' ${[...new Set(hashes)].join(" ")}`.trim(),
-    // (data: for the small icons the build inlines into the stylesheets.)
-    "img-src 'self' data:",
-    "font-src 'self'",
-    "connect-src 'self'",
-    "manifest-src 'self'",
-    "form-action 'self'",
-    "frame-ancestors 'none'",
-    "base-uri 'none'",
-    "object-src 'none'",
-  ].join("; ");
-}
+/**
+ * The site's Content Security Policy, the same for every page. Inline
+ * styles are allowed by a fixed list of the build's own (inline-styles.json),
+ * never by what a page happens to carry: were an author's <style> ever to
+ * reach a page, it would not be allowed. tests/styles.test.ts renders every
+ * kind of page and fails on a style not in the list, or one listed that no
+ * page carries (WRITE_STYLE_HASHES=1 writes the list anew).
+ */
+export const CONTENT_SECURITY_POLICY = policyFor(STYLE_HASHES);
 
 /** What an HTML form can send without asking first (a cross-site one included). */
 const FORM_TYPES = ["application/x-www-form-urlencoded", "multipart/form-data", "text/plain"];
