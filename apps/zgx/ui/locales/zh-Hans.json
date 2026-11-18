@@ -3898,7 +3898,7 @@
         "homepage": "网站",
         "repository": "源代码"
       },
-      "review_note": "它在等你允许。",
+      "review_note": "等你允许",
       "needs_other_zeron": "它不支持这个版本的 Zeron。",
       "blocked_title": "Zeron 关闭了{name}",
       "blocked_title_version": "Zeron 关闭了{name} {version}",
@@ -4084,7 +4084,7 @@
       "all": "全部",
       "has_version": "你已安装 {version}",
       "has_version_on": "{device} 已安装 {version}",
-      "off_note": "它已关闭。",
+      "off_note": "已关闭",
       "away_note": "{device} 不在线",
       "other_title": "已安装另一个使用此 ID 的插件",
       "other_body": "它来自别处。在“已安装”中移除它，即可安装这个。",

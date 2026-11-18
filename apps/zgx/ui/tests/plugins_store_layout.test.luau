@@ -311,7 +311,7 @@ test("where it stands is one line under the button, ending on the content edge; 
 	settle(app)
 	local button = box(app, '#store-slot >> role:button "Review"')
 	local line = box(app, "#store-state")
-	expect(app:tree("#store-state")).to_contain("It's waiting for you to allow it.")
+	expect(app:tree("#store-state")).to_contain("Waiting for you to allow it")
 	expect(math.abs(line.x + line.w - content) < 0.6).to_be(true)
 	expect(math.abs(button.x + button.w - content) < 0.6).to_be(true)
 	expect(line.y >= button.y + button.h).to_be(true)

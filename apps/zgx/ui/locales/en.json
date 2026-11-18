@@ -3898,7 +3898,7 @@
         "homepage": "Website",
         "repository": "Source"
       },
-      "review_note": "It's waiting for you to allow it.",
+      "review_note": "Waiting for you to allow it",
       "needs_other_zeron": "It doesn't work with this version of Zeron.",
       "blocked_title": "Zeron turned off {name}",
       "blocked_title_version": "Zeron turned off {name} {version}",
@@ -4084,7 +4084,7 @@
       "all": "All",
       "has_version": "You have {version}",
       "has_version_on": "{device} has {version}",
-      "off_note": "It's turned off.",
+      "off_note": "Turned off",
       "away_note": "{device} is away",
       "other_title": "A different plugin with this id is installed",
       "other_body": "It came from somewhere else. Remove it in Installed to install this one.",

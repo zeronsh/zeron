@@ -153,7 +153,7 @@ test("the head's one slot is the same primary button in every state, its words s
 	app:command("store.install_done")
 	settle(app)
 	one("Review")
-	said("It's waiting for you to allow it.")
+	said("Waiting for you to allow it")
 	app:command("store.allowed")
 	settle(app)
 	-- Installed: said, never a button of its own.
@@ -169,7 +169,7 @@ test("the head's one slot is the same primary button in every state, its words s
 		p.status = "off"
 	end)
 	one("Turn on")
-	said("It's turned off.")
+	said("Turned off")
 end)
 
 test("an install that fails says why, and Install is there to try again", function()
