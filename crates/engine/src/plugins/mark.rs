@@ -40,8 +40,10 @@ pub use generated::{LOOKALIKES, SOURCE, SOURCE_SHA256, SOURCE_VERSION};
 pub const MARK_WORDS: &[&str] = &["verified", "official"];
 
 /// Ticks a listing's name or description may not have, anywhere:
-/// ✓ ✔ ☑ ✅ 🗸 🗹 √ 𐄂.
-pub const MARK_GLYPHS: &[char] = &['\u{2713}', '\u{2714}', '\u{2611}', '\u{2705}', '\u{1F5F8}', '\u{1F5F9}', '\u{221A}', '\u{10102}'];
+/// ✓ ✔ ☑ ✅ 🗸 🗹 √ 𐄂 🮱. (Of Unicode's other check marks and ballot boxes,
+/// none reads as a tick: ⍻ is crossed through, ☐ ☒ 🗵 🗷 ⮽ 🗳 are empty
+/// or crossed boxes, ⟤ ⟥ ⦍–⦐ squares and brackets with a short stroke.)
+pub const MARK_GLYPHS: &[char] = &['\u{2713}', '\u{2714}', '\u{2611}', '\u{2705}', '\u{1F5F8}', '\u{1F5F9}', '\u{221A}', '\u{10102}', '\u{1FBB1}'];
 
 /// Letters that stand for each other, their look-alikes too (a capital I and
 /// a lowercase l are one stroke in sans-serif).
@@ -257,6 +259,9 @@ mod tests {
             ("Focus \u{2713}", Some("\u{2713}")),
             ("Focus \u{221A}", Some("\u{221A}")),
             ("Focus \u{10102}", Some("\u{10102}")),
+            ("Focus \u{1fbb1}", Some("\u{1fbb1}")),
+            ("Focus \u{237b}", None),
+            ("Focus \u{2612}", None),
             ("\u{1d42f}\u{1d41e}\u{1d42b}\u{1d422}\u{1d41f}\u{1d422}\u{1d41e}\u{1d41d} Focus", Some("verified")),
             ("V\u{e9}rified", Some("verified")),
             ("VER\u{130}F\u{130}ED", Some("verified")),

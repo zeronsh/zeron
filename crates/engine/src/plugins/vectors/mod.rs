@@ -736,6 +736,7 @@ fn listing_cases() -> Value {
         ("the mark: a digit 1 for l", "name", "officia1"),
         ("the mark: a square root as a tick", "name", "Focus \u{221a}"),
         ("the mark: the Aegean check mark", "name", "Focus \u{10102}"),
+        ("the mark: the inverse check mark", "name", "Focus \u{1fbb1}"),
         ("the mark: lowercase l for I in capitals", "name", "VERlFlED Focus"),
         ("the mark: lowercase l for I in OFFICIAL", "name", "OFFlClAL Git"),
         ("the mark: capital I for l in lowercase", "description", "The officiaI client."),
@@ -782,6 +783,7 @@ fn listing_cases() -> Value {
         ("the mark: an emoji with its variation selector is fine", "Stars \u{2b50}\u{fe0f}"),
         ("the mark: a keycap is fine", "Keys 1\u{fe0f}\u{20e3}"),
         ("the mark: a keycap in a name is fine", "Top 1\u{fe0f}\u{20e3} timer"),
+        ("the mark: a ballot box with an X is fine", "Tasks \u{2612}"),
     ] {
         let mut m = base.clone();
         m["name"] = json!(value);
