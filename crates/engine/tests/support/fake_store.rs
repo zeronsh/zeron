@@ -256,7 +256,8 @@ impl FakeStore {
                         Some(json!({ "id": id, "name": id, "version": v.version, "author": p.author(), "featured": p.featured }))
                     })
                     .collect();
-                json_reply(200, json!({ "items": items }))
+                // (One page: the total is what it lists.)
+                json_reply(200, json!({ "total": items.len(), "items": items }))
             }
             ("GET", ["store", "v1", "plugins", id]) => {
                 let state = self.state.lock().unwrap();

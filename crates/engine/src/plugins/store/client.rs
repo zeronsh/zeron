@@ -508,4 +508,29 @@ mod tests {
         assert_eq!(install::reason_of(&said(400, r#"{"error":"Bad: thing"}"#)), Some(reason::STORE_ERROR));
         assert!(!said(400, "{\"error\":\"x\",\"message\":\"a\\u0007b\"}").contains('\u{7}'));
     }
+
+    /// The store adds fields as it grows (amendments 39–41: `listed_at`,
+    /// `icon`, `asks_changed`, more of `permissions_diff`): what the device
+    /// reads takes what it names and lets the rest be, by design (no
+    /// `deny_unknown_fields`), and passes cards through whole.
+    #[test]
+    fn fields_the_store_adds_later_are_let_be() {
+        use serde_json::json;
+        let author = json!({ "id": "pub_00000000000000000000000000000000", "username": "ada", "badges": [], "joined_at": 1 });
+        let detail: Detail = StoreClient::typed(json!({
+            "id": "focus", "version": "1.2.0", "author": author, "listed_at": 1_700_000_000_000_i64,
+            "package": { "hash": "h", "sha256": "s", "bytes": 9, "url": "/x", "compressed": false },
+            "permissions_diff": { "mcp_changed": null },
+        }))
+        .unwrap();
+        assert_eq!((detail.id.as_str(), detail.author.username.as_deref(), detail.package.bytes), ("focus", Some("ada"), 9));
+        let versions: Vec<VersionRecord> = StoreClient::typed(json!([{ "version": "1.2.0", "status": "approved", "hash": "h", "listed_at": 1, "asks_changed": true }])).unwrap();
+        assert_eq!(versions[0].status, "approved");
+        let updates = Updates::read(&json!({
+            "updates": [{ "id": "focus", "version": "1.3.0", "hash": "h", "listed_at": 1, "icon": "icon.svg" }],
+            "blocked": [{ "id": "old", "version": "1.0.0", "reason": "r", "blocked_at": 1 }],
+            "total": 2,
+        }));
+        assert_eq!((updates.updates.len(), updates.blocked.len(), updates.unreadable.len()), (1, 1, 0));
+    }
 }

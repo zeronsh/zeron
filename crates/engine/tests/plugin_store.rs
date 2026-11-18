@@ -335,6 +335,7 @@ async fn a_featured_search_lists_only_the_featured_ones_in_the_store_s_order() {
     let device = device(&store, Some("bob"));
     let ids = |reply: Value| reply["items"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
     let featured = device.call(methods::STORE_SEARCH, json!({ "featured": true })).await.unwrap();
+    assert_eq!(featured["total"], 2, "the store's total comes through");
     assert_eq!(ids(featured), ["alpha", "gamma"], "only the featured ones, in the order the store lists them");
     let path = store.state.lock().unwrap().requests.last().unwrap().1.clone();
     assert_eq!(path, "/store/v1/plugins?featured=true");
