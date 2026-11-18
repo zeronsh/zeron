@@ -18,6 +18,17 @@
  *   GET  /auth/orgs/:orgId/invitations — admin: pending + recently expired
  *   DELETE /auth/orgs/:orgId/invitations/:id, POST …/:id/resend — admin
  *   GET  /auth/cli/callback           — headless sign-in paste-code page
+ *
+ * Web sign-in (web-auth-routes.ts; only on WEB_ORIGIN, routed from zeron.sh):
+ *   GET  /auth/web/login, /auth/web/callback, /auth/web/session
+ *   POST /auth/web/logout
+ *
+ * Staff roles and the store's identity routes:
+ *   GET  /admin/roles, POST /admin/roles/{grant|revoke} — ADMIN_TOKEN (roles.ts)
+ *   GET  /admin/deploy-keys, POST /admin/deploy-keys/revoke — ADMIN_TOKEN
+ *     (store/identity/deploy-keys.ts: one plugin's, or all, before a rollback)
+ *   GET|POST /store/v1/plugins/:id/keys, DELETE …/keys/:key — deploy keys
+ *     (store/identity/deploy-keys.ts; a signed-in owner, checked there)
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
  *   GET  /diff/:chatId                — latest working-tree diff (§6.1)
@@ -116,6 +127,11 @@ import { handleVaultRoute } from "./vault-routes";
 import { handleUserDirectoryRoute, UserDirectory } from "./user-directory";
 import { handleStoreRoute } from "./store/routes";
 import { releaseUnusedIds } from "./store/release";
+import { pluginOwner } from "./store/db";
+import { handleWebAuthRoute } from "./web-auth-routes";
+import { handleRoleAdminRoute } from "./roles";
+import { handleDeployKeyAdminRoute, handleDeployKeyRoute } from "./store/identity/deploy-keys";
+import { withSessionCookie } from "./web-session";
 import installSh from "./install.sh";
 
 export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, CloudAccount, CloudIndex, UserDirectory };
@@ -166,6 +182,10 @@ export default {
     const modelList = await modelListRoute(request, env, url);
     if (modelList) return modelList;
 
+    // ── web sign-in (cookies, not bearers; web-auth-routes.ts) ─────────────
+    const webAuthRouted = await handleWebAuthRoute(request, env, url);
+    if (webAuthRouted) return webAuthRouted;
+
     // ── WorkOS auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────
     const authRouted = await handleAuthRoute(request, env, url);
@@ -182,10 +202,18 @@ export default {
     if (runnerRouted) return runnerRouted;
     const usersRouted = await handleUserDirectoryRoute(request, env, url);
     if (usersRouted) return usersRouted;
+    const rolesRouted = await handleRoleAdminRoute(request, env, url);
+    if (rolesRouted) return rolesRouted;
+    const deployKeyAdminRouted = await handleDeployKeyAdminRoute(request, env, url);
+    if (deployKeyAdminRouted) return deployKeyAdminRouted;
+    // The store's own principals (store/principal.ts): before the bearer gate.
+    const deployKeysRouted = await handleDeployKeyRoute(request, env, url, pluginOwner);
+    if (deployKeysRouted) return withSessionCookie(request, deployKeysRouted);
     const cardRouted = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
     if (cardRouted) return cardRouted;
-    // ── the plugin store (store/routes.ts): public reads need no sign-in;
-    //    each other route asks store/principal.ts who the caller is ──────────
+    // ── the plugin store (store/routes.ts), after its deploy-key routes:
+    //    public reads need no sign-in; each other route asks
+    //    store/principal.ts who the caller is ──────────────────────────────
     const storeRouted = await handleStoreRoute(request, env, url);
     if (storeRouted) return storeRouted;
 
@@ -213,7 +241,7 @@ export default {
     if (usernameRouted) return usernameRouted;
     const onboardingRouted = await handleOnboardingRoute(request, env, auth, url);
     if (onboardingRouted) return onboardingRouted;
-    const pluginKeysRouted = await handlePluginKeyRoute(request, env, auth, url);
+    const pluginKeysRouted = await handlePluginKeyRoute(request, env, auth, url, pluginOwner);
     if (pluginKeysRouted) return pluginKeysRouted;
 
     const cloudRouted = await handleCloudRoute(request, env, auth, url);

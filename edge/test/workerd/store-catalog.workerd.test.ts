@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { packageBytesKey, packageStateKey } from "../../src/store/serve";
 import { publisherId } from "../../src/store/cards";
-import { ADMIN, PNG, author, call, listed, makePackage, publish, randomLetters, uniqueId, adminCall } from "./store-helpers";
+import { PNG, author, call, listed, makePackage, publish, randomLetters, uniqueId, adminCall } from "./store-helpers";
 
 type Card = { id: string; name: string; version: string; installs: number; author: { username: string }; icon: string | null; featured: boolean };
 const json = async <T = Record<string, unknown>>(res: Response) => (await res.json()) as T;

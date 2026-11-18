@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { PUBLISHES_PER_HOUR } from "../../src/store/publish";
-import { ADMIN, author, call, makePackage, member, newSigner, publish, uniqueId, adminCall } from "./store-helpers";
+import { author, call, makePackage, member, newSigner, publish, uniqueId, adminCall } from "./store-helpers";
 
 const json = async (res: Response) => (await res.json()) as Record<string, unknown>;
 

@@ -51,6 +51,15 @@ export interface Env {
    * organization and organization_membership. Unset ⇒ that route answers 503
    * and WorkOS retries. */
   WORKOS_WEBHOOK_SECRET?: string;
+  /** The web site's origin (`https://zeron.sh`), where web sign-in lives
+   * (web-auth-routes.ts): its callback is `${WEB_ORIGIN}/auth/web/callback`,
+   * registered with WorkOS, and cookie-authenticated changes must come from
+   * it. Unset ⇒ no web sign-in, and no cookie is ever accepted. */
+  WEB_ORIGIN?: string;
+  /** "off": web sign-in without PKCE, its state cookie alone binding the
+   * sign-in to the browser. Only if WorkOS refuses a code verifier sent
+   * beside the client secret (web-auth-routes.ts). Unset ⇒ PKCE. */
+  WEB_SIGNIN_PKCE?: string;
   /** Every WorkOS user and organization, with members (`users1`; user-directory.ts). */
   USER_DIRECTORY?: DurableObjectNamespace<import("./user-directory").UserDirectory>;
   /** APNs auth key (contents of AuthKey_XXXX.p8, wrangler secret) and its
@@ -157,9 +166,6 @@ export interface Env {
   /** Public store reads per client IP, and store writes per account. Unset ⇒ unlimited. */
   STORE_READS?: RateLimit;
   STORE_WRITES?: RateLimit;
-  /** Test only, until the `admin` role lands (store/principal.ts): user ids
-   * that hold it, separated by spaces or commas. */
-  STORE_ADMIN_USERS?: string;
 }
 
 /** APNs settings, when push is set up for this deployment. */

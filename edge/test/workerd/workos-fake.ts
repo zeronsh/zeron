@@ -16,6 +16,13 @@
  *                                              profile_picture_url?} seeds a user
  *   POST https://api.workos.com/__invitations  {email, organization_id, state,
  *                                              expires_at} seeds an invitation
+ *   POST https://api.workos.com/__codes        {code, user_id, code_challenge?, sid?}
+ *                                              an authorization code AuthKit gave a
+ *                                              browser: one use, and with a challenge
+ *                                              only for its S256 verifier. Its access
+ *                                              token carries `sid` (unsigned JWT).
+ *   GET  …/__state also answers {revokedSessions, authenticated: [{code, code_verifier,
+ *                                              client_secret}]}
  */
 import { Response, type Request } from "miniflare";
 
@@ -68,6 +75,13 @@ export const createWorkOsFake = () => {
   /** Orgs deleted (DELETE /organizations/{id}), in order. */
   const deletedOrgs: string[] = [];
   const failures = new Map<string, { times: number; status: number; code?: string; method?: string }>();
+  /** Authorization codes handed to browsers (`__codes`), until used. */
+  const codes = new Map<string, { user_id: string; code_challenge?: string; sid?: string }>();
+  const revokedSessions: string[] = [];
+  const authenticated: { code: string; code_verifier: string | null; client_secret: string | null }[] = [];
+  const b64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const unsignedJwt = (claims: Record<string, unknown>) =>
+    `${b64url(new TextEncoder().encode(JSON.stringify({ alg: "none" })))}.${b64url(new TextEncoder().encode(JSON.stringify(claims)))}.sig`;
   let next = 0;
   /** Strictly increasing, so a later write always has a later `updated_at`. */
   let clock = Date.parse("2026-01-01T00:00:00Z");
@@ -105,7 +119,7 @@ export const createWorkOsFake = () => {
   };
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
-    if (url.pathname === "/__state") return reply(200, { orgs, users, memberships, invitations, deletedOrgs });
+    if (url.pathname === "/__state") return reply(200, { orgs, users, memberships, invitations, deletedOrgs, revokedSessions, authenticated });
     const body =
       request.method === "POST" || request.method === "PUT" ? ((await request.json()) as Record<string, string | number>) : {};
     if (url.pathname === "/__fail") {
@@ -145,6 +159,18 @@ export const createWorkOsFake = () => {
       };
       invitations.push(invitation);
       return reply(200, wireInvitation(invitation));
+    }
+    if (url.pathname === "/__codes") {
+      codes.set(body.code as string, {
+        user_id: body.user_id as string,
+        code_challenge: body.code_challenge as string | undefined,
+        sid: body.sid as string | undefined
+      });
+      return reply(200, {});
+    }
+    if (request.method === "POST" && url.pathname === "/user_management/sessions/revoke") {
+      revokedSessions.push(body.session_id as string);
+      return reply(200, {});
     }
     if (url.pathname === "/__memberships") {
       return reply(
@@ -231,6 +257,29 @@ export const createWorkOsFake = () => {
       // A code is `code:<userId>` for a seeded user; a refresh token is
       // `rt:<userId>`. The access token is the user id (the edge's dev mode).
       const grant = body.grant_type as string;
+      if (grant === "authorization_code") {
+        authenticated.push({
+          code: String(body.code),
+          code_verifier: (body.code_verifier as string | undefined) ?? null,
+          client_secret: (body.client_secret as string | undefined) ?? null
+        });
+      }
+      const issued = grant === "authorization_code" ? codes.get(String(body.code)) : undefined;
+      if (issued) {
+        codes.delete(String(body.code));
+        if (issued.code_challenge !== undefined) {
+          const verifier = String(body.code_verifier ?? "");
+          const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+          if (b64url(digest) !== issued.code_challenge) return reply(400, { error: "invalid_grant", error_description: "Invalid code verifier." });
+        }
+        const user = users.find((u) => u.id === issued.user_id);
+        if (!user) return reply(400, { error: "invalid_grant", error_description: "Invalid code." });
+        return reply(200, {
+          user: { object: "user", ...user },
+          access_token: unsignedJwt({ sub: user.id, ...(issued.sid ? { sid: issued.sid } : {}) }),
+          refresh_token: `rt:${user.id}`
+        });
+      }
       const raw = String(grant === "authorization_code" ? body.code : body.refresh_token);
       const prefix = grant === "authorization_code" ? "code:" : "rt:";
       const user = raw.startsWith(prefix) ? users.find((u) => u.id === raw.slice(prefix.length)) : undefined;

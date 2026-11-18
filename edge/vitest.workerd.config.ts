@@ -71,11 +71,14 @@ export default defineConfig({
           CLOUD_DELETE: { name: "test-cloud-delete", className: "DeleteWorkflow" }
         },
         serviceBindings: {
-          VAULT: { name: kCurrentWorker, entrypoint: "VaultStub" }
+          VAULT: { name: kCurrentWorker, entrypoint: "VaultStub" },
+          // The web site's server (fixture.ts SiteStub) and the edge it
+          // reaches over its service binding, as the site does in production.
+          SITE: { name: kCurrentWorker, entrypoint: "SiteStub" },
+          EDGE: kCurrentWorker
         },
         bindings: {
           STORE_MIGRATIONS: storeMigrations,
-          STORE_ADMIN_USERS: "user_storeadmin1 user_storeadmin2",
           AUTH_MODE: "dev",
           WORKOS_CLIENT_ID: "test-only",
           BOAT_API_KEY: "test-boat-key",
@@ -94,6 +97,9 @@ export default defineConfig({
           STRIPE_API_URL: "https://stripe.test",
           CLOUD_MAX_AWAKE: "2",
           ADMIN_TOKEN: "test-admin-token",
+          // Web sign-in (web-auth-routes.ts) answers on this origin only.
+          WEB_ORIGIN: "https://site.test",
+          WORKOS_API_KEY: "sk_test",
           WORKOS_WEBHOOK_SECRET: "workos_whsec_test",
           RUNNER_JWT_PRIVATE_KEY: JSON.stringify(runnerKeys.privateKey.export({ format: "jwk" })),
           RUNNER_JWT_PUBLIC_KEY: JSON.stringify(runnerKeys.publicKey.export({ format: "jwk" }))

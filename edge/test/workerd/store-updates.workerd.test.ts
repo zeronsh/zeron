@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { ADMIN, author, call, listed, makePackage, publish, uniqueId, adminCall } from "./store-helpers";
+import { author, call, listed, makePackage, publish, uniqueId, adminCall } from "./store-helpers";
 
 type Updates = { updates: Record<string, unknown>[]; blocked: Record<string, unknown>[] };
 const json = async <T>(res: Response) => (await res.json()) as T;

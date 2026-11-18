@@ -6,31 +6,62 @@ import { PLUGIN_KEY_PROOF_PREFIX } from "../../src/plugin-keys";
 import { MAX_LIVE_STEP_UPS, STEP_UP_TTL_MS, newStepUpToken, stepUpHash } from "../../src/step-up";
 import { type Json, type JsonObject, canonicalJson, parseJsonText } from "../../src/store/json";
 import { PAYLOAD_PREFIX, sha256Hex } from "../../src/store/package";
+import { SITE, grantAdmin, person, sessionHeader, setCookies, webSignIn } from "./identity-helpers";
 
-export const ADMIN = "user_storeadmin1";
-export const ADMIN2 = "user_storeadmin2";
+/** Which staff account: two, for the tests where two admins race. */
+export const ADMIN = 1;
+export const ADMIN2 = 2;
 
-export const SITE = "https://site.test";
+interface Staff {
+  readonly userId: string;
+  cookie: string;
+  readonly csrf: string;
+}
+const staff = new Map<number, Promise<Staff>>();
+
+/**
+ * A staff account (one per `slot`, made once per test file): a WorkOS user
+ * signed in on the web site, granted `admin` by an operator
+ * (`/admin/roles/grant`, ADMIN_TOKEN). Admin is by web session only
+ * (amendment 27).
+ */
+export const admin = (slot = ADMIN): Promise<Staff> => {
+  let made = staff.get(slot);
+  if (!made) {
+    made = (async () => {
+      const userId = await person();
+      await grantAdmin(userId);
+      const browser = await webSignIn(userId);
+      return { userId, cookie: browser.cookie, csrf: browser.csrf };
+    })();
+    staff.set(slot, made);
+  }
+  return made;
+};
 
 /**
  * An admin's request, as the web site's admin pages make it: the staff
- * session's cookie, the site's Origin and its CSRF token (admin is by web
- * session only, amendment 27; a bearer is refused). Until the identity
- * lane's web sessions merge, the session is principal.ts's stand-in for the
- * test admins in STORE_ADMIN_USERS; then this signs them in on the web
- * (identity-helpers.ts `webSignIn` + `grantAdmin`).
+ * session's cookie, the site's Origin and the session's CSRF token. A
+ * rotated session cookie (the edge rotates a staff token on privileged use)
+ * is kept for the next call.
  */
-export const adminCall = (method: string, path: string, body?: unknown, who = ADMIN) =>
-  SELF.fetch(`https://edge.test${path}`, {
+export const adminCall = async (method: string, path: string, body?: unknown, slot = ADMIN): Promise<Response> => {
+  const s = await admin(slot);
+  const res = await SELF.fetch(`${SITE}${path}`, {
     method,
+    redirect: "manual",
     headers: {
-      cookie: `__Host-zeron_session=store-test.${who}`,
+      cookie: s.cookie,
       origin: SITE,
-      "x-csrf-token": "store-test",
+      "x-csrf-token": s.csrf,
       ...(body === undefined ? {} : { "content-type": "application/json" })
     },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
+  const rotated = setCookies(res).get("__Host-zeron_session");
+  if (rotated) s.cookie = sessionHeader(rotated);
+  return res;
+};
 
 export const newUserId = () => `user_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 export const directory = () => env.USER_DIRECTORY!.get(env.USER_DIRECTORY!.idFromName("users1"));

@@ -34,6 +34,9 @@
     // The card pages' script, style, fonts and art (public/card, built by
     // scripts/card-assets.mjs from apps/card-web; static assets below).
     { "pattern": "zeron.sh/card/*", "zone_name": "zeron.sh" },
+    // Web sign-in (src/web-auth-routes.ts): its cookies belong to zeron.sh,
+    // so it's served there. WorkOS redirect URI: https://zeron.sh/auth/web/callback.
+    { "pattern": "zeron.sh/auth/web/*", "zone_name": "zeron.sh" },
     // Legacy comet hostnames — keep until 0.1.x clients are gone.
     { "pattern": "edge.comet.zeron.sh", "custom_domain": true },
     { "pattern": "comet.zeron.sh/install.sh", "zone_name": "zeron.sh" },
@@ -202,6 +205,11 @@
     // snapshot.read. Unset ⇒ every session installs the engine (~30–60 s).
     "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
     "AUTH_MODE": "workos",
+    // The web site, where web sign-in lives (src/web-auth-routes.ts). Its
+    // sign-in uses PKCE beside the client secret; should WorkOS ever refuse
+    // that pair, "WEB_SIGNIN_PKCE": "off" falls back to the state cookie
+    // alone (see usesPkce there) until it's resolved.
+    "WEB_ORIGIN": "https://zeron.sh",
     // Who the chat rooms offer the relay layer to (docs/design/relay-layer.md):
     // "1" for everyone, a comma-separated list of WorkOS user ids (each room
     // checks its owner), or "" (or unset) for nobody. Now: everyone. Taking a
@@ -262,7 +270,12 @@
       // on the zeron.sh zone (its record wins over the zone's *.zeron.sh
       // wildcard for this one name).
       "workers_dev": true,
-      "routes": [{ "pattern": "staging.zeron.sh", "custom_domain": true }],
+      "routes": [
+        { "pattern": "staging.zeron.sh", "custom_domain": true },
+        // Web sign-in on the staging site (its WEB_ORIGIN). WorkOS redirect URI
+        // (staging environment): https://site-staging.zeron.sh/auth/web/callback.
+        { "pattern": "site-staging.zeron.sh/auth/web/*", "zone_name": "zeron.sh" }
+      ],
       "durable_objects": {
         "bindings": [
           { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
@@ -307,6 +320,7 @@
       "vars": {
         "WORKOS_CLIENT_ID": "client_01KWD0E9SYPV2WE4QN9TP9DP0W",
         "AUTH_MODE": "workos",
+        "WEB_ORIGIN": "https://site-staging.zeron.sh",
         // The hosted model list at /models/v1.json (src/model-list.ts).
         // Production sets none yet: engines there use their built-in lists.
         "MODEL_LIST": "staging",

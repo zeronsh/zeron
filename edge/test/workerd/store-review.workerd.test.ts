@@ -4,7 +4,7 @@ import { CLAIMS_PER_WEEK } from "../../src/store/publish";
 import { publisherId } from "../../src/store/cards";
 import { releaseRows } from "../../src/store/release";
 import { releaseUnusedIds } from "../../src/store/release";
-import { ADMIN, ADMIN2, author, call, listed, makePackage, publish, uniqueId, adminCall } from "./store-helpers";
+import { ADMIN2, admin, author, call, listed, makePackage, publish, uniqueId, adminCall } from "./store-helpers";
 
 const json = async <T = Record<string, unknown>>(res: Response) => (await res.json()) as T;
 const pending = async (a: Awaited<ReturnType<typeof author>>, id: string, version: string, options = {}) => {
@@ -40,9 +40,10 @@ describe("store admin routes", () => {
     for (const [method, path, body] of routes) {
       expect((await call(undefined, method, path, body)).status, `${method} ${path} anonymous`).toBe(401);
       expect((await call(a.userId, method, path, body)).status, `${method} ${path} as the author`).toBe(403);
-      expect((await call(`runner:${ADMIN}@org_1:dev1`, method, path, body)).status, `${method} ${path} as a runner`).toBe(403);
+      const staffId = (await admin()).userId;
+      expect((await call(`runner:${staffId}@org_1:dev1`, method, path, body)).status, `${method} ${path} as a runner`).toBe(403);
       // Admin is by web session only: an admin's own bearer is refused.
-      expect((await call(ADMIN, method, path, body)).status, `${method} ${path} with an admin's bearer`).toBe(403);
+      expect((await call(staffId, method, path, body)).status, `${method} ${path} with an admin's bearer`).toBe(403);
     }
     // Nothing changed.
     expect((await env.STORE_DB.prepare("SELECT status FROM versions WHERE plugin_id = ?").bind(id).first())?.status).toBe("pending");
@@ -194,7 +195,8 @@ describe("store admin routes", () => {
     }
     const entries = await audit(id);
     expect(entries.map((e) => e.action)).toEqual(["plugin.feature", "plugin.unfeature", "plugin.feature"]);
-    expect(entries.every((e) => e.actor.user_id === ADMIN)).toBe(true);
+    const staffId = (await admin()).userId;
+    expect(entries.every((e) => e.actor.user_id === staffId)).toBe(true);
   });
 });
 
@@ -375,7 +377,7 @@ describe("store ids: claiming and release (amendment 30)", () => {
     expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
     expect((await call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.0.0/withdraw`)).status).toBe(200);
     // Reserved for its holder, as an admin may: the sweep leaves it.
-    await env.STORE_DB.prepare("INSERT INTO reservations (id, user_id, note, created_by, created_at) VALUES (?, ?, 'kept', ?, ?)").bind(id, a.userId, ADMIN, Date.now()).run();
+    await env.STORE_DB.prepare("INSERT INTO reservations (id, user_id, note, created_by, created_at) VALUES (?, ?, 'kept', ?, ?)").bind(id, a.userId, (await admin()).userId, Date.now()).run();
     await releaseUnusedIds(env as never, Date.now() + 91 * 86_400_000);
     expect(await env.STORE_DB.prepare("SELECT 1 FROM plugins WHERE id = ?").bind(id).first()).not.toBeNull();
   });
