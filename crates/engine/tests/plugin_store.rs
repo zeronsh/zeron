@@ -536,6 +536,14 @@ async fn reports_compatibility_for_another_zeron_and_deploy_keys_for_owned_plugi
     assert!(!body["text"].as_str().unwrap().contains('\u{202e}'));
     assert!(d.call(methods::STORE_REPORT, json!({ "id": "focus", "reason": "boring" })).await.is_err());
 
+    // A key that isn't one (`zeron plugin key revoke focus ..`): nothing sent.
+    let sent = store.state.lock().unwrap().requests.len();
+    for key in ["..", ".", "", "%2e%2e", "abc"] {
+        let refused = d.call(methods::REVOKE_DEPLOY_KEY, json!({ "id": "focus", "key": key })).await.unwrap_err();
+        assert!(refused.contains("isn't a deploy key"), "{key}: {refused}");
+    }
+    assert_eq!(store.state.lock().unwrap().requests.len(), sent);
+
     // bob owns no focus in the store: no deploy key for it.
     let refused = d.call(methods::CREATE_DEPLOY_KEY, json!({ "id": "focus", "name": "CI" })).await.unwrap();
     assert_eq!(refused["error"], "not_published", "{refused}");

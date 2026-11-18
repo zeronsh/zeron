@@ -136,7 +136,8 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
     }
     let Some(key) = deploy_key()? else { return Ok(Some(command)) };
     let key = Arc::new(key);
-    let store = StoreClient::new(&zeron_cli::edge_url_from_env());
+    let edge = zeron_engine::plugins::store::client::edge_base(&zeron_cli::edge_url_from_env()).map_err(|why| exit(SETUP, why))?;
+    let store = StoreClient::new(&edge);
     let caller = Caller::DeployKey(key.clone());
     match command {
         PluginCommand::Publish { target, dry_run } => {
@@ -462,6 +463,9 @@ mod tests {
         assert_eq!(code("too_many_keys"), REFUSED);
         assert_eq!(code("stale_request"), SETUP);
         assert_eq!(code("replayed_request"), UNREACHABLE);
+        // A 401 or 403 with no body: refused, not "run it again".
+        assert_eq!(code("unauthenticated"), REFUSED);
+        assert_eq!(code("forbidden"), REFUSED);
         // Each signed-request word reads as one plain line, word first.
         for word in ["replayed_request", "stale_request", "key_revoked", "key_expired", "invalid_signature", "key_not_allowed", "unauthenticated", "too_many_keys", "body_mismatch"] {
             let said = failed(&format!("{word}: the store's own words")).to_string();

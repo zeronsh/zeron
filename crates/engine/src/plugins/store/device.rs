@@ -409,6 +409,9 @@ impl Plugins {
             methods::REVOKE_DEPLOY_KEY => {
                 let p: RevokeKeyParams = parse_params(params)?;
                 manifest::check_id(&p.id).map_err(failed)?;
+                if !super::deploy_key::valid_public(p.key.trim()) {
+                    return Err(failed("That isn't a deploy key: give its key as `zeron plugin key list` shows it"));
+                }
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
                 client.revoke_key(&p.id, p.key.trim(), &caller).await.map_err(failed)?;
                 RpcReply::value(&json!({ "revoked": p.key.trim() }))

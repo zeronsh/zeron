@@ -71,6 +71,42 @@ fn segment(text: &str) -> String {
     out
 }
 
+/// Whether every segment of `path` (no query) is one the URL keeps as
+/// written: never empty, `.` or `..` (spelled out or percent-encoded),
+/// which a URL resolves away and so would send the request elsewhere.
+fn plain_segments(path: &str) -> bool {
+    path.split('?').next().unwrap_or(path).split('/').skip(1).all(|segment| {
+        let lower = segment.to_ascii_lowercase().replace("%2e", ".");
+        !segment.is_empty() && lower != "." && lower != ".."
+    })
+}
+
+/// `url` as the edge the store CLI may sign requests for: `https://`, or
+/// `http://` on this machine (loopback), with no path, query, fragment or
+/// user. Its base, without a trailing slash.
+pub fn edge_base(url: &str) -> Result<String, String> {
+    let bad = |why: &str| format!("ZERON_EDGE_URL {why}");
+    let parsed = url::Url::parse(url.trim()).map_err(|_| bad("isn't a URL"))?;
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => return Err(bad("has no host")),
+    };
+    match parsed.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        _ => return Err(bad("is https (http only on this machine)")),
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(bad("can't carry a user or password"));
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(bad("is the edge's address alone, with no path (like https://zeron.sh)"));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_owned())
+}
+
 /// A `/`-separated path (a file in a package), each part a segment.
 fn segments(path: &str) -> String {
     path.split('/').map(segment).collect::<Vec<_>>().join("/")
@@ -307,6 +343,9 @@ impl StoreClient {
     /// as `caller`, its reply read up to `limit` bytes: `(status, bytes)` for
     /// a 2xx, else the failure.
     async fn send(&self, method: reqwest::Method, path: &str, body: Option<(Vec<u8>, &str)>, caller: &Caller, limit: u64) -> Result<Vec<u8>, String> {
+        if !plain_segments(path) {
+            return Err(failure(reason::NOT_IN_STORE, "That isn't a name the store has"));
+        }
         let url = format!("{}{path}", self.base);
         let mut request = self.http.request(method.clone(), &url);
         match caller {
@@ -486,6 +525,9 @@ fn refusal(status: u16, body: &[u8]) -> String {
         (None, 404) => failure(reason::NOT_IN_STORE, "The store has no such plugin"),
         (None, 429) => failure(install::reason::RATE_LIMITED, "The store is turning away requests from here for now; try again later"),
         (None, 500..) => failure(reason::STORE_UNREACHABLE, format!("The store couldn't answer just now ({status})")),
+        // (No body to say more: who's asking wasn't accepted, or may not.)
+        (None, 401) => failure("unauthenticated", "The store didn't accept who's asking (401)"),
+        (None, 403) => failure("forbidden", "The store refused it (403)"),
         (None, 300..=399) => failure(reason::STORE_ERROR, format!("The store sent it elsewhere ({status}), which it never does: nothing was fetched")),
         (None, _) => failure(reason::STORE_ERROR, format!("The store refused it ({status})")),
     }
@@ -509,6 +551,40 @@ mod tests {
     }
 
     #[test]
+    fn the_edge_the_cli_signs_for_is_its_address_alone() {
+        assert_eq!(edge_base("https://zeron.sh").as_deref(), Ok("https://zeron.sh"));
+        assert_eq!(edge_base("https://zeron.sh/").as_deref(), Ok("https://zeron.sh"));
+        assert_eq!(edge_base("http://127.0.0.1:8787").as_deref(), Ok("http://127.0.0.1:8787"));
+        assert_eq!(edge_base("http://localhost:8787/").as_deref(), Ok("http://localhost:8787"));
+        assert_eq!(edge_base("http://[::1]:8787").as_deref(), Ok("http://[::1]:8787"));
+        for refused in [
+            "http://zeron.sh", "http://10.0.0.2:8787", "ftp://zeron.sh", "https://zeron.sh/api", "https://zeron.sh/?x=1",
+            "https://zeron.sh/#x", "https://user:pw@zeron.sh", "zeron.sh", "",
+        ] {
+            assert!(edge_base(refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_path_a_url_would_resolve_away_is_never_sent() {
+        assert!(plain_segments("/store/v1/plugins/focus/keys/abc"));
+        assert!(plain_segments("/store/v1/plugins?q=..%2e"), "(a query is the query's)");
+        for path in ["/store/v1/plugins/focus/keys/..", "/store/v1/plugins/focus/keys/.", "/store/v1/plugins/focus/keys/",
+                     "/store/v1/plugins/focus/keys/%2E%2e", "/store/v1/plugins/focus/keys/.%2E", "/store/v1/plugins//keys/x"] {
+            assert!(!plain_segments(path), "{path}");
+        }
+        assert_eq!(segment(".."), "..", "(segment escapes; send() refuses what still resolves)");
+    }
+
+    #[tokio::test]
+    async fn revoking_dot_dot_sends_nothing() {
+        // (A closed port: had it been sent, the word would be store_unreachable.)
+        let client = StoreClient::new("http://127.0.0.1:9");
+        let error = client.revoke_key("focus", "..", &Caller::Anonymous).await.unwrap_err();
+        assert_eq!(install::reason_of(&error), Some(reason::NOT_IN_STORE), "{error}");
+    }
+
+    #[test]
     fn refusals_carry_the_edge_s_word() {
         let said = |status, body: &str| refusal(status, body.as_bytes());
         assert_eq!(said(409, r#"{"error":"id_taken","message":"Someone has that id."}"#), "id_taken: Someone has that id.");
@@ -522,6 +598,10 @@ mod tests {
         // A word the edge didn't really give (not a plain word) isn't taken as one.
         assert_eq!(install::reason_of(&said(400, r#"{"error":"Bad: thing"}"#)), Some(reason::STORE_ERROR));
         assert!(!said(400, "{\"error\":\"x\",\"message\":\"a\\u0007b\"}").contains('\u{7}'));
+        // No body to say more: who's asking wasn't accepted (not "try again").
+        assert_eq!(install::reason_of(&said(401, "")), Some("unauthenticated"));
+        assert_eq!(install::reason_of(&said(403, "<html>")), Some("forbidden"));
+        assert_eq!(install::reason_of(&said(302, "")), Some(reason::STORE_ERROR));
     }
 
     /// The store adds fields as it grows (amendments 39–41: `listed_at`,
