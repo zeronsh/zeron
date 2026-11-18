@@ -3622,7 +3622,7 @@
         "held_computer": "{version} is waiting: this computer takes verified updates only.",
         "held_device": "{version} is waiting: {device} takes verified updates only."
       },
-      "unverified": "Unverified",
+      "unverified": "Unknown author",
       "from": "From {where}",
       "from_file": "From a file",
       "more": "and {n} more",

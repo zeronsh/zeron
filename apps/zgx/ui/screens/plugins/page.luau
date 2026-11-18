@@ -472,9 +472,15 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			end
 			return words.about(it)
 		end,
-		-- Who made it, on its own line.
+		-- Who made it, on its own line; for one whose author can't be told
+		-- and that came from nowhere named, none: its Unknown author badge
+		-- says it.
 		byline = function(): string
-			return words.author(now:get())
+			local it = now:get()
+			if words.unverified(it) and words.from(it.source) == nil then
+				return ""
+			end
+			return words.author(it)
 		end,
 		-- (Its icon from its device: the listing carries it.)
 		lead = words.tile(p, 32),
@@ -503,7 +509,7 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			else nil,
 		truncate = true,
 		-- Its version, centred on the row beside its controls; before it,
-		-- Unverified for one whose maker Zeron can't vouch for.
+		-- Unknown author for one whose maker Zeron can't vouch for.
 		control = ui.row {
 			gap = "$space.3",
 			items = "center",

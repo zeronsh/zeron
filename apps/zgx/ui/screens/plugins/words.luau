@@ -496,7 +496,7 @@ function M.author(item: any): string
 		return s("plugins.words.author.verified", { username = a.username })
 	end
 	-- (Who made it can't be told: where it came from instead, beside the
-	-- Unverified badge.)
+	-- Unknown author badge.)
 	return M.from(item.source) or s("plugins.words.author.unknown")
 end
 

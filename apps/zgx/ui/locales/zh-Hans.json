@@ -3622,7 +3622,7 @@
         "held_computer": "{version} 正在等待：这台电脑只接受已验证的更新。",
         "held_device": "{version} 正在等待：{device} 只接受已验证的更新。"
       },
-      "unverified": "未验证",
+      "unverified": "作者未知",
       "from": "来自 {where}",
       "from_file": "来自文件",
       "more": "另有 {n} 项",

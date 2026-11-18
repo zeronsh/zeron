@@ -702,7 +702,8 @@ export type RowProps = {
 	private_label: boolean?,
 	private_description: boolean?,
 	-- Who made it, on a line of its own under the name, over the
-	-- description, in the same quiet ink (a plugin's, a template's).
+	-- description, in the same quiet ink (a plugin's, a template's). As a
+	-- function, the line shows only while it says something.
 	byline: (string | Message | () -> string)?,
 	-- A second line under the description, in its tertiary ink, wrapped
 	-- whole even in a truncating row (what a built-in plugin is allowed).
@@ -811,6 +812,22 @@ local BadgedName = ui.component(function(props: { name: Node, badges: RowBadges 
 	}
 end)
 
+-- A row's byline, on a line of its own; one given as a function shows
+-- only while it has words (nothing to say of who made it: no line).
+local function byline_line(props: RowProps): Node
+	local line = if props.truncate
+		then FadeText { props.byline, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
+		else ui.text { props.byline, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
+	local byline = props.byline
+	if type(byline) ~= "function" then
+		return line
+	end
+	return ui.show(function(): boolean
+		local words = (byline :: () -> string)()
+		return type(words) == "string" and words ~= ""
+	end, line)
+end
+
 function M.Row(props: RowProps): Node
 	local name = if props.private_label
 		then PrivateText {
@@ -856,11 +873,7 @@ function M.Row(props: RowProps): Node
 				name,
 				props.badge,
 			},
-		if props.byline and props.truncate
-			then FadeText { props.byline, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
-			elseif props.byline
-			then ui.text { props.byline, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
-			else nil,
+		if props.byline then byline_line(props) else nil,
 		if props.description and props.private_description
 			then PrivateText {
 				props.description,
