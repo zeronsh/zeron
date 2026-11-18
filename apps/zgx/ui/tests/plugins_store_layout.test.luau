@@ -164,16 +164,18 @@ test("Browse's list: its head's order on the content edge, the categories across
 	settle(app, 500)
 	local all = app:tree('#store-filters >> role:tab "All"'):match("[^\n]+") or ""
 	local first_tab = box(app, '#store-filters >> role:tab "All"')
-	-- (A quiet tab's words are 12 inside it.)
-	expect(math.abs(first_tab.x + 12 - text) < 0.6).to_be(true)
+	-- (A filter row's xs tab's words are 8 inside it.)
+	expect(math.abs(first_tab.x + 8 - text) < 0.6).to_be(true)
 	expect(box(app, "#store-filters").h).to_be(bar_before)
 	expect(box(app, '#store-card >> role:textbox "Search plugins"').y).to_be(search_before)
 	expect(box(app, "#store-card").y).to_be(card_before)
 	expect(all).never.to_contain("All categories")
 	-- The categories run the card's width, from edge to edge of its row.
 	local tabs = box(app, "#store-categories")
-	expect(math.abs(tabs.x - (card.x + 1 + 4)) < 0.6).to_be(true)
-	expect(math.abs(tabs.x + tabs.w - (card.x + card.w - 1 - 4)) < 0.6).to_be(true)
+	expect(math.abs(tabs.x - (card.x + 1 + 8)) < 0.6).to_be(true)
+	expect(math.abs(tabs.x + tabs.w - (card.x + card.w - 1 - 8)) < 0.6).to_be(true)
+	-- (The design system's xs, 24, as the head's Order is.)
+	expect(box(app, '#store-filters >> role:tab "All"').h).to_be(24)
 end)
 
 test("the featured hold their room as they come, one height each, and stand a section's step from the list", function()

@@ -350,17 +350,19 @@ local function category_tabs(): Node
 			value = category,
 			label = ui.t("plugins.store.category_label"),
 			look = "pill",
-			size = "sm",
+			-- (The filter row's size: all nine of the store's at a pane's
+			-- full width.)
+			size = "xs",
 			options = options,
 		}
 	end)
-	-- (A quiet tab's words are 12 inside it, so 4 here puts the first's on
-	-- the rows' 16; 4 at the end as well, the row's own inset.)
+	-- (An xs tab's words are 8 inside it, so 8 here puts the first's on the
+	-- rows' 16; 8 at the end as well.)
 	return ui.row {
 		id = "store-filters",
 		w_full = true,
 		py = "$space.1",
-		px = "$space.1",
+		px = "$space.2",
 		ds.Pager {
 			id = "store-categories",
 			back = ui.t("plugins.store.categories_back"),

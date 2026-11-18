@@ -144,12 +144,12 @@ local function browse(): Node
 						keyword:set("")
 					end,
 				}),
-				-- (A quiet tab's words are 12 inside it, so 4 here puts the
+				-- (An xs tab's words are 8 inside it, so 8 here puts the
 				-- first's on the rows' 16.)
 				filters = ui.row {
 					w_full = true,
 					py = "$space.1",
-					px = "$space.1",
+					px = "$space.2",
 					ds.Pager {
 						back = "Earlier categories",
 						more = "More categories",
@@ -157,7 +157,7 @@ local function browse(): Node
 							value = category,
 							label = "Category",
 							look = "pill",
-							size = "sm",
+							size = "xs",
 							options = {
 								{ value = "", label = "All" },
 								{ value = "agents", label = "Agents" },
