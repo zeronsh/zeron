@@ -13,7 +13,7 @@ import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
 import { isPluginId, isPrerelease, isVersion } from "../../../../lib/store/names.ts";
 import { drawn, keepable } from "../../../../lib/store/rendered.ts";
 import { fileUrl, pluginUrl } from "../../../../lib/store/urls.ts";
-import { SITE_WORDS, statusWords, store, storeAround } from "../../../../lib/store/words.ts";
+import { statusWords, store, storeAround } from "../../../../lib/store/words.ts";
 
 export const prerender = false;
 
@@ -61,7 +61,7 @@ const [onBefore, onAfter] = storeAround("plugins.store.verified_on", {}, "date")
           <div class="who">
             <h1 class="t-title">{name} <span class="num">{v.version}</span></h1>
             <p class="meta">
-              {v.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{SITE_WORDS.undecided}</span>}
+              {v.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{store("plugins.store.review.waiting")}</span>}
               {isNewest && <span class="badge sm ok">Latest</span>}
               {isPrerelease(v.version) && <span class="badge sm info">Pre-release</span>}
               {v.yanked && <span class="badge sm warn">{statusWords("yanked")}</span>}
