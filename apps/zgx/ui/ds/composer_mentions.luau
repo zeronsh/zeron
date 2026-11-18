@@ -33,8 +33,6 @@ local Skeleton = require("@self/skeleton")
 local Launcher = require("@self/mention_launcher")
 
 local M = {}
--- Prints the caret and each choice to the host's log (debugging the keys).
-M.debug = false
 
 local tokens = require("@self/mention_tokens")
 local Draft = require("@self/draft_text")
@@ -327,10 +325,6 @@ function M.use(opts: Use)
 		if not from or not to or not text or not tok then
 			return
 		end
-		if M.debug then
-			local a, b = el:selection_bytes()
-			print(`[mentions] choose from {from} to {to} (field selection {a}..{b}) text {string.sub(now, 1, 80)}`)
-		end
 		-- The path the new token stands for, in place of the old one's.
 		local old = string.sub(now, from + 1, to)
 		local next = table.clone(refs:peek())
@@ -341,10 +335,6 @@ function M.use(opts: Use)
 		refs:set(next)
 		el:set_selection_bytes(from, to)
 		el:replace_selection(text)
-		if M.debug then
-			local a, b = el:selection_bytes()
-			print(`[mentions] after: selection {a}..{b} text {string.sub(opts.value:peek(), 1, 80)}`)
-		end
 		-- The caret is past what was put in (the field says so on its next
 		-- caret event; said here too, so the list goes with the token at
 		-- once). The token's session is over; the next trigger opens one.
@@ -401,9 +391,6 @@ function M.use(opts: Use)
 		return false
 	end
 	local function on_caret(_line: number, _column: number, _anchor: number, focus: number)
-		if M.debug then
-			print(`[mentions] caret {focus} text {string.sub(opts.value:peek(), 1, 80)}`)
-		end
 		caret:set(focus)
 	end
 	-- The field's focus and blur (`on_focus`, `on_blur`).
