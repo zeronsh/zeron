@@ -15,7 +15,7 @@ protocol AppRouter: AnyObject {
 /// It shows when the window is regular in both directions (iPad, an unfolded
 /// iPhone Duo); anything else (iPhone, the Duo folded, Slide Over, narrow
 /// Split View) collapses to the iPhone tab shell.
-final class SplitRootController: UISplitViewController, UISplitViewControllerDelegate, AppRouter {
+final class SplitRootController: UISplitViewController, UISplitViewControllerDelegate, UINavigationControllerDelegate, AppRouter {
     private let app: AppModel
     private let sidebar: SidebarViewController
     private let detail = UINavigationController()
@@ -47,11 +47,14 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         minimumPrimaryColumnWidth = 320
         maximumPrimaryColumnWidth = 400
         primaryBackgroundStyle = .none
-        // No toggle button (the phone has none); ⌘B still hides the sidebar.
+        // Our own toggles instead of the system's: the sidebar's is in its
+        // header (the split's bar above it is hidden), and while it's hidden
+        // the main column offers it back beside New Session. ⌘B also works.
         displayModeButtonVisibility = .never
         setViewController(sidebar, for: .primary)
         detail.navigationBar.titleTextAttributes = [.font: Fonts.ui(.sansSemibold, 17), .foregroundColor: Palette.text]
         detail.navigationBar.tintColor = Palette.text
+        detail.delegate = self
         setViewController(detail, for: .secondary)
         inspector.navigationBar.titleTextAttributes = [.font: Fonts.ui(.sansSemibold, 17), .foregroundColor: Palette.text]
         inspector.navigationBar.tintColor = Palette.text
@@ -107,9 +110,60 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
     @objc private func newSessionCommand() { presentNewSession(prompt: nil) }
     @objc private func searchCommand() { showSearch() }
     @objc private func toggleSidebarCommand() {
+        setSidebarShown(displayMode == .secondaryOnly)
+    }
+
+    /// The sidebar in or out, by the user's hand (its header button, the
+    /// main column's, ⌘B). Their choice outlasts the companions panel's
+    /// stepping it aside.
+    func setSidebarShown(_ shown: Bool) {
+        modeBeforeInspector = nil
         UIView.animate(withDuration: 0.3) {
-            self.preferredDisplayMode = self.displayMode == .secondaryOnly ? .oneBesideSecondary : .secondaryOnly
+            self.preferredDisplayMode = shown ? .oneBesideSecondary : .secondaryOnly
         }
+    }
+
+    // MARK: Main column chrome
+
+    /// With the sidebar hidden the main column carries what it would have
+    /// offered: a button to bring it back, and New Session (but not on the
+    /// new-session page itself).
+    private func syncDetailChrome(mode: UISplitViewController.DisplayMode? = nil, animated: Bool = false) {
+        guard let root = detail.viewControllers.first else { return }
+        let hidden = !isCollapsed && (mode ?? displayMode) == .secondaryOnly
+        var items: [UIBarButtonItem] = []
+        if hidden {
+            let show = UIBarButtonItem(image: UIImage(systemName: "sidebar.left"), primaryAction: UIAction { [weak self] _ in
+                self?.setSidebarShown(true)
+            })
+            show.accessibilityLabel = "Show Sidebar"
+            show.accessibilityIdentifier = "sidebar-show"
+            items.append(show)
+            if !(root is NewSessionViewController) {
+                let compose = UIBarButtonItem(image: UIImage(systemName: "square.and.pencil"), primaryAction: UIAction { [weak self] _ in
+                    self?.presentNewSession(prompt: nil)
+                })
+                compose.accessibilityLabel = "New session"
+                compose.accessibilityIdentifier = "detail-new-session"
+                items.append(compose)
+            }
+        }
+        let current = root.navigationItem.leftBarButtonItems ?? []
+        guard current.map(\.accessibilityIdentifier) != items.map(\.accessibilityIdentifier) else { return }
+        root.navigationItem.leftItemsSupplementBackButton = true
+        root.navigationItem.setLeftBarButtonItems(items.isEmpty ? nil : items, animated: animated)
+    }
+
+    func splitViewController(_ svc: UISplitViewController, willChangeTo displayMode: UISplitViewController.DisplayMode) {
+        syncDetailChrome(mode: displayMode, animated: view.window != nil)
+    }
+
+    func splitViewControllerDidExpand(_ svc: UISplitViewController) {
+        syncDetailChrome()
+    }
+
+    func navigationController(_ nav: UINavigationController, willShow vc: UIViewController, animated: Bool) {
+        if nav === detail { syncDetailChrome() }
     }
 
     // MARK: AppRouter
@@ -300,6 +354,8 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         modeBeforeInspector = nil
         (inspector.viewControllers.first as? CompanionsViewController)?.showsClose = true
         if let session = detail.viewControllers.first as? SessionViewController {
+            // The tab shell has its own way back; the column's buttons stay.
+            session.navigationItem.leftBarButtonItems = nil
             session.relocating = true
             detail.setViewControllers([], animated: false)
             tabs.adoptSession(session)
@@ -420,6 +476,12 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         compose.accessibilityLabel = "New session"
         compose.accessibilityIdentifier = "new-session"
         list.navigationItem.rightBarButtonItem = nil
+        let hide = UIBarButtonItem(image: UIImage(systemName: "sidebar.left"), primaryAction: UIAction { [weak self] _ in
+            (self?.splitViewController as? SplitRootController)?.setSidebarShown(false)
+        })
+        hide.accessibilityLabel = "Hide Sidebar"
+        hide.accessibilityIdentifier = "sidebar-hide"
+        list.navigationItem.leftBarButtonItem = hide
         toolbarProbe.isUserInteractionEnabled = false
         let probe = UIBarButtonItem(customView: toolbarProbe)
         probe.hidesSharedBackground = true
