@@ -5,6 +5,7 @@ import { askParts, askPartsOf, asksChanged, consentDiff, consentItem, fullContro
 import { canonicalJson, formatFloat, parseJsonText } from "./json";
 import type { JsonObject } from "./json";
 import { changelogNotes, checkListing, listingOf } from "./listing";
+import { firstCollision } from "./paths";
 import { readManifest } from "./manifest";
 import { PAYLOAD_PREFIX, decodeBase64, inspectPackageJson, sha256Hex, signaturePayload, verifyPackage } from "./package";
 import { comparePrecedence, parseRange, parseVersion, preKey, precedenceText, satisfies } from "./semver";
@@ -268,6 +269,29 @@ describe("store queue: whether asks changed, and the diff naming it (amendments 
     expect(diffOf({}, { mcp: { command: "node" } }).mcp_changed).toEqual({ before: null, after: { command: "node", args: [], env: {} } });
     expect(diffOf({ service: "svc.luau" }, {}).service_changed).toEqual({ before: "svc.luau", after: null });
     expect(diffOf({}, { settings: [{ kind: "permission", key: "p" }] }).settings_changed).toBe(true);
+  });
+});
+
+describe("store paths that collide once folded (amendment 42)", () => {
+  const taken = ["zeron-plugin.json", ".source.json"];
+  it("finds two paths one file, a file where a folder must be, and the manifest's or source's name", () => {
+    for (const paths of [
+      ["Init.luau", "init.luau"],
+      ["caf\u00e9.png", "cafe\u0301.png"],
+      ["ui", "UI/x.luau"],
+      ["ui/a/b.luau", "UI/A"],
+      ["ZERON-PLUGIN.JSON"],
+      ["zeron-plugin.json/x.luau"],
+      [".SOURCE.JSON"],
+      ["stra\u00dfe.txt", "STRASSE.txt"]
+    ]) {
+      expect(firstCollision(paths, taken), paths.join(" + ")).toBeDefined();
+    }
+  });
+  it("leaves paths that only look alike", () => {
+    for (const paths of [["init.luau", "ui/init.luau"], ["a.png", "a.jpg"], ["ui/x.luau", "ui/y.luau", "uix.luau"], ["source.json"]]) {
+      expect(firstCollision(paths, taken), paths.join(" + ")).toBeUndefined();
+    }
   });
 });
 

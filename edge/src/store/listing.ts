@@ -15,7 +15,7 @@ import { type Json, type JsonObject, canonicalJson, isArray, isObject } from "./
 import { MANIFEST_FILE, type Manifest, RESERVED_ID_ERROR, idProblem, isRustWhitespace, rustTrim, rustTrimStart } from "./manifest";
 import { MAX_BYTES, MAX_FILES } from "./package";
 import { LIMITS, STORE_DATA } from "./data";
-import { plainPath } from "./paths";
+import { foldPath, plainPath } from "./paths";
 import { type Range, type Version, parseRange, parseVersion } from "./semver";
 
 /** The fixed list (contract amendment 4), with the words shown for each. */
@@ -91,16 +91,8 @@ const isControl = (ch: string): boolean => {
  * them), which `name`, `description` and `keywords` refuse (amendment 31). */
 const UNSEEN = /[\p{Cc}\p{Cf}]/u;
 
-/** plugin-guard `fold`, after Unicode normalization (NFC): how macOS and
- * Windows compare two paths. Two that fold the same are one file there. */
-export const foldPath = (rel: string): string =>
-  [...rel.normalize("NFC").replaceAll("\\", "/")]
-    .map((c) => c.toUpperCase().toLowerCase())
-    .join("")
-    .split("/")
-    .filter((part) => part !== "" && part !== ".")
-    .map((part) => part.replace(/[. ]+$/, ""))
-    .join("/");
+/** (The fold of a path, as the store and devices compare paths: paths.ts.) */
+export { foldPath } from "./paths";
 
 /** A link's parsed text (amendment 31): it begins `https://`, holds no
  * backslash, whitespace, control character or `user:password@` part, and
