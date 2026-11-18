@@ -4041,7 +4041,7 @@
       "key": {
         "new": "新建密钥…",
         "new_title": "新建部署密钥",
-        "new_body": "Zeron 可能会先请你重新登录。",
+        "new_body": "Zeron 会先请你重新登录。",
         "name": "名称",
         "name_placeholder": "GitHub Actions",
         "expiry_label": "到期",

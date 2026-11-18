@@ -4041,7 +4041,7 @@
       "key": {
         "new": "New key…",
         "new_title": "New deploy key",
-        "new_body": "Zeron may ask you to sign in again first.",
+        "new_body": "Zeron will ask you to sign in again first.",
         "name": "Name",
         "name_placeholder": "GitHub Actions",
         "expiry_label": "Ends",
