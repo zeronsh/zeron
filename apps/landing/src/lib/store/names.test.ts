@@ -31,7 +31,12 @@ describe("paths in a package", () => {
     ["a//b", null],
     ["a\\b", null],
     ["a\nb", null],
-    ["x".repeat(513), null],
+    // (1024 bytes of UTF-8 at most, as the edge takes them: an author can't hide a longer one from review.)
+    [`src/${"x".repeat(600)}.lua`, `src/${"x".repeat(600)}.lua`],
+    ["x".repeat(1024), "x".repeat(1024)],
+    ["x".repeat(1025), null],
+    ["é".repeat(513), null],
+    ["%2e%2e/a.png", "%2e%2e/a.png"],
   ])("%j → %j", (input, out) => expect(packagePath(input)).toBe(out));
 
   test.each([

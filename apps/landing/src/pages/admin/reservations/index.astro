@@ -1,6 +1,7 @@
 ---
 // Ids held back from first-come claims (plan, amendment 19): each for one
 // account, or for nobody. Reserve one here, or free it. Admins only.
+import { adminSession } from "../../../lib/store/session.ts";
 import AccountBar from "../../../components/store/AccountBar.astro";
 import ConfirmForm from "../../../components/store/ConfirmForm.astro";
 import Action from "../../../components/ui/Action.astro";
@@ -12,13 +13,14 @@ import { ago, date } from "../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId, isUsername } from "../../../lib/store/names.ts";
-import { adminOrResume, resumed } from "../../../lib/store/resume.ts";
+import { resumed } from "../../../lib/store/resume.ts";
 
 export const prerender = false;
 
 const here = "/admin/reservations";
-const session = await adminOrResume(Astro, { path: here, fields: ["id", "to_username", "note"] });
-if (session instanceof Response) return session;
+// (The middleware's admin gate let only an admin this far.)
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
 
 if (Astro.request.method === "POST") {
   const form = await formOf(Astro.request);

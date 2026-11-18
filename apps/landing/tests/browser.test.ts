@@ -37,20 +37,58 @@ const PAGES: [string, string | undefined][] = [
   ["/plugins/pr-radar", undefined],
   ["/plugins/xss-probe", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12", undefined],
+  ["/plugins?q=git", undefined],
   ["/plugins/theme-sync/report", "user_kai"],
   ["/account", "user_ada"],
+  ["/account", "user_lin"],
   ["/account/plugins/session-badges", "user_ada"],
+  ["/account/plugins/focus-timer", "user_ada"],
   ["/account/plugins/session-badges/versions/1.2.1/withdraw", "user_ada"],
   ["/admin/plugins", "user_grace"],
   ["/admin/plugins/session-badges", "user_grace"],
+  ["/admin/plugins/crypto-ticker", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1?view=readme", "user_grace"],
+  ["/admin/plugins/session-badges/1.2.1?view=files", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1?view=files&path=init.luau", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1?view=changes", "user_grace"],
+  ["/admin/plugins/xss-probe/1.1.0?view=changes", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1/reject", "user_grace"],
+  ["/admin/plugins/session-badges/actions/suspend", "user_grace"],
+  ["/admin/plugins/session-badges/actions/transfer", "user_grace"],
   ["/admin/reports", "user_grace"],
+  ["/admin/reports?status=actioned", "user_grace"],
   ["/admin/reservations", "user_grace"],
+  ["/admin/reservations/linear", "user_grace"],
   ["/admin/audit", "user_grace"],
+];
+
+/** The states a page opens into: each must be as clean as the page. */
+const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>][] = [
+  ["the approve dialog", "/admin/plugins/session-badges/1.2.1", "user_grace", async (page) => {
+    await page.getByRole("link", { name: "Approve" }).first().click();
+    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
+  }],
+  ["the reject dialog", "/admin/plugins/session-badges/1.2.1", "user_grace", async (page) => {
+    await page.getByRole("link", { name: "Reject" }).first().click();
+    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
+  }],
+  ["the withdraw dialog", "/account/plugins/session-badges", "user_ada", async (page) => {
+    await page.getByRole("link", { name: "Withdraw" }).first().click();
+    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
+  }],
+  ["the screenshots", "/plugins/focus-timer", undefined, async (page) => {
+    await page.getByRole("link", { name: /Screenshot 1 of/ }).first().click();
+    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
+  }],
+  ["Install in Zeron's help", "/plugins/focus-timer", undefined, async (page) => {
+    await page.evaluate(() => {
+      const a = document.querySelector<HTMLAnchorElement>("[data-install-link]")!;
+      a.addEventListener("click", (e) => e.preventDefault(), { once: true });
+      a.click();
+    });
+    await expect.poll(() => page.locator("[data-install-help]").evaluate((d) => (d as HTMLDetailsElement).open), { timeout: 4_000 }).toBe(true);
+  }],
 ];
 
 describe("no violations axe can find", () => {
@@ -61,6 +99,23 @@ describe("no violations axe can find", () => {
         try {
           expect(await violations(page)).toEqual([]);
           // Nothing runs off the side of a phone.
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        } finally {
+          await context.close();
+        }
+      }, 30_000);
+    }
+  }
+});
+
+describe("no violations axe can find, opened", () => {
+  for (const width of [1440, 390]) {
+    for (const [what, path, as, opening] of OPENED) {
+      test(`${what} at ${width}`, async () => {
+        const { page, context } = await open(path, { as, width });
+        try {
+          await opening(page);
+          expect(await violations(page)).toEqual([]);
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
         } finally {
           await context.close();
@@ -145,7 +200,7 @@ describe("by keyboard", () => {
       const opener = page.getByRole("link", { name: "Withdraw" });
       await opener.focus();
       await page.keyboard.press("Enter");
-      const dialog = page.getByRole("dialog", { name: "Withdraw 1.2.1 from review?" });
+      const dialog = page.getByRole("dialog", { name: "Withdraw Session badges 1.2.1?" });
       await expect.poll(() => dialog.isVisible()).toBe(true);
       expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Cancel");
       await page.keyboard.press("Escape");

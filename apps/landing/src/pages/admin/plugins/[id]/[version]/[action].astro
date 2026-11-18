@@ -1,6 +1,7 @@
 ---
 // Approve, reject or take down a version. A post does it; a visit (no
 // script to open the dialog) is the same question as a page.
+import { adminSession } from "../../../../../lib/store/session.ts";
 import ConfirmPage from "../../../../../components/store/ConfirmPage.astro";
 import Deciding from "../../../../../components/store/Deciding.astro";
 import Field from "../../../../../components/ui/Field.astro";
@@ -10,18 +11,15 @@ import { isVersionAction, REJECT_REASONS, VERSION_FLASH, versionRequest } from "
 import { done, field, flashFor, formOf, fromElsewhere, tokenMatches } from "../../../../../lib/store/forms.ts";
 import { privatePage, purge } from "../../../../../lib/store/http.ts";
 import { isPluginId, isVersion } from "../../../../../lib/store/names.ts";
-import { adminOrResume, resumed, wasCut } from "../../../../../lib/store/resume.ts";
+import { resumed, wasCut } from "../../../../../lib/store/resume.ts";
 
 export const prerender = false;
 
 const { id, version, action } = Astro.params;
 if (!isPluginId(id) || !isVersion(version) || !isVersionAction(action)) return new Response(null, { status: 404 });
-/** What each action's form has a person type: kept across a sign-in. */
-const TYPED = { approve: [], reject: ["reason", "message"], remove: ["reason", "block"] } as const;
-// (A session that ended while the form was open: sign in again and come
-// back to this question with the answer as typed. Anyone else: the 404.)
-const session = await adminOrResume(Astro, { path: Astro.url.pathname, fields: TYPED[action] });
-if (session instanceof Response) return session;
+// (The middleware's admin gate let only an admin this far.)
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
 const submission = `/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(version)}`;
 const back = action === "remove" ? `/admin/plugins/${encodeURIComponent(id)}` : submission;
 

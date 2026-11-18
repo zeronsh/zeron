@@ -13,11 +13,9 @@ import { join } from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { startSite, type Site } from "../harness.ts";
 import { Publisher, startRealEdge, type RealEdge } from "./real-edge.ts";
 
 let edge: RealEdge;
-let site: Site;
 let browser: Browser;
 let front: Server;
 /** Who AuthKit's page signs in next. */
@@ -36,14 +34,14 @@ async function startFront(): Promise<{ server: Server; port: number }> {
     const path = req.url ?? "/";
     if (req.headers.host === "api.workos.com") {
       if (!signingIn || !path.startsWith("/user_management/authorize?")) return res.writeHead(404).end();
-      const page = await fetch(`${edge.runnerSite}/__workos/authorize${path.slice(path.indexOf("?"))}&e2e_user=${signingIn}`, { redirect: "manual" });
+      const page = await edge.authorize(new URL(path, "https://api.workos.com"), signingIn);
       return res.writeHead(page.status, { location: page.headers.get("location") ?? "" }).end();
     }
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const headers = new Headers();
     for (const [name, value] of Object.entries(req.headers)) if (name !== "host" && value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
-    const response = await site.fetch(path, { method: req.method, headers, body: req.method === "GET" || req.method === "HEAD" ? undefined : Buffer.concat(chunks) });
+    const response = await edge.site(path, { method: req.method, headers, body: req.method === "GET" || req.method === "HEAD" ? undefined : Buffer.concat(chunks) });
     const out: Record<string, string | string[]> = {};
     response.headers.forEach((value, name) => {
       if (name !== "set-cookie") out[name] = value;
@@ -58,7 +56,6 @@ async function startFront(): Promise<{ server: Server; port: number }> {
 
 beforeAll(async () => {
   edge = await startRealEdge();
-  site = await startSite({ edge: { url: edge.url }, origin: edge.origin });
   const { server, port } = await startFront();
   front = server;
   browser = await chromium.launch({ args: [`--host-resolver-rules=MAP site.e2e.test:443 127.0.0.1:${port}, MAP api.workos.com:443 127.0.0.1:${port}`] });
@@ -74,7 +71,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await browser?.close();
   await new Promise((done) => (front ? front.close(done) : done(undefined)));
-  await site?.dispose();
   await edge?.stop();
 });
 

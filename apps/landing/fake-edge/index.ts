@@ -541,8 +541,7 @@ async function logout(request: Request, url: URL): Promise<Response> {
   const form = await request.formData().catch(() => null);
   const origin = request.headers.get("origin");
   if (s) {
-    // (The edge's sign-out answers its refusals in its own words, not the store's.)
-    if (origin !== url.origin || form?.get("csrf") !== s.csrf) return json({ error: "forbidden", reason: "bad_csrf" }, 403);
+    if (origin !== url.origin || form?.get("csrf") !== s.csrf) return fail(403, "bad_csrf", "This sign-out didn't come from the site.");
     for (const [id, other] of state.sessions) if (other.user === s.user.id) state.sessions.delete(id);
   }
   // Always the site's front page: the edge takes no return_to here.

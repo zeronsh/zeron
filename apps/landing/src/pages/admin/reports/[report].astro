@@ -1,17 +1,25 @@
 ---
 // Close a report: dismissed, or acted on, with a note (not destructive: no
-// question first). Only a post; anything else, and anyone not an admin,
-// gets the site's 404 page.
+// question first). A post does it. A visit is a post that came back through
+// sign-in (the middleware's admin gate sent it there with what was typed):
+// it goes on to the reports, the note filled in on that report's row.
 import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
-import { adminOrResume } from "../../../lib/store/resume.ts";
+import { adminSession } from "../../../lib/store/session.ts";
 
 export const prerender = false;
 
 const { report } = Astro.params;
-if (Astro.request.method !== "POST" || !report || !/^[\w-]{1,64}$/.test(report)) return new Response(null, { status: 404 });
-// (Signed out while the page was open: back to the reports, the note as typed.)
-const session = await adminOrResume(Astro, { path: "/admin/reports", fields: ["report", "note"], form: (form) => form.set("report", report) });
-if (session instanceof Response) return session;
+if (!report || !/^[\w-]{1,64}$/.test(report)) return new Response(null, { status: 404 });
+// (The middleware's admin gate let only an admin this far.)
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+if (Astro.request.method === "GET") {
+  const back = new URLSearchParams({ report });
+  const note = Astro.url.searchParams.get("note");
+  if (note) back.set("note", note.slice(0, 500));
+  return Astro.redirect(`/admin/reports?${back}`, 303);
+}
+if (Astro.request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
 const form = await formOf(Astro.request);
 if (!form || !tokenMatches(form, session)) return done(Astro, "expired", "/admin/reports");
 const resolution = field(form, "resolution");

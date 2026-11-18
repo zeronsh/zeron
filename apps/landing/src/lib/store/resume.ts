@@ -56,21 +56,21 @@ export const resumed = (url: URL, name: string, max = 2000) => (url.searchParams
 /** Whether what came back was cut to fit. */
 export const wasCut = (url: URL) => url.searchParams.get("cut") === "1";
 
+/** Every field a form had typed into it (its token aside), for the address it comes back to. */
+export const typedFields = (form: FormData | null): string[] => (form ? [...new Set(form.keys())].filter((name) => name !== "csrf") : []);
+
 /**
- * An admin action's gate: the session when it holds `admin`. A post whose
- * session ended goes to sign in and back with what was typed; anyone else,
- * signed in or not, gets the site's 404.
+ * The gate in front of every address under /admin, whether a page is there
+ * or not, so that nobody but an admin can tell which are: an admin goes
+ * on; a form posted from this site whose session ended goes to sign in and
+ * back to the same address with what was typed (whatever the address); a
+ * form from anywhere else, and everyone else, gets the site's 404.
  */
-export async function adminOrResume(
-  astro: Pick<AstroGlobal, "locals" | "request" | "redirect">,
-  resume: { path: string; fields: readonly string[]; form?: (form: FormData) => void },
-): Promise<WebSession | Response> {
-  const session = await astro.locals.edge.session();
-  if (session?.roles.includes("admin")) return session;
-  if (!session && astro.request.method === "POST" && hadSession(astro.request)) {
-    const form = await formOf(astro.request);
-    if (form) resume.form?.(form);
-    return signInAndResume(astro, resume.path, form, resume.fields);
+export async function adminGate(request: Request, session: WebSession | null, path: string, crossSite: boolean): Promise<Response | null> {
+  if (session?.roles.includes("admin")) return null;
+  if (!session && !crossSite && request.method === "POST" && hadSession(request)) {
+    const form = await formOf(request);
+    return new Response(null, { status: 303, headers: { location: signInUrl(resumeAddress(path, form, typedFields(form))) } });
   }
   return new Response(null, { status: 404 });
 }

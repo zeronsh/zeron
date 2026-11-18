@@ -4,7 +4,6 @@
 // against what the edge really answers. (tests/routes.test.ts holds the
 // same site to the fake; where the two disagreed, the fake was wrong.)
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { startSite, type Site } from "../harness.ts";
 import { PNG, Publisher, startRealEdge, type RealEdge } from "./real-edge.ts";
 import { rawElements } from "../../src/lib/store/security.ts";
 
@@ -18,7 +17,6 @@ function inert(body: string) {
 const SESSION = "__Host-zeron_session";
 
 let edge: RealEdge;
-let site: Site;
 let ada: Publisher;
 let grace: Browser;
 let adaOnWeb: Browser;
@@ -51,14 +49,14 @@ class Browser {
   }
 
   async get(path: string): Promise<{ response: Response; body: string }> {
-    const response = this.keep(await site.fetch(path, { headers: this.cookies.size ? { cookie: this.cookie } : {} }));
+    const response = this.keep(await edge.site(path, { headers: this.cookies.size ? { cookie: this.cookie } : {} }));
     return { response, body: await response.text() };
   }
 
   /** A form on the site's pages, posted as a browser posts it (its Origin, the page's token). */
   async post(path: string, fields: Record<string, string>): Promise<Response> {
     return this.keep(
-      await site.fetch(path, {
+      await edge.site(path, {
         method: "POST",
         headers: { cookie: this.cookie, origin: edge.origin, "content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams(fields).toString(),
@@ -89,14 +87,14 @@ class Browser {
  */
 async function signInOnTheWeb(userId: string, returnTo = "/account"): Promise<Browser> {
   const browser = new Browser();
-  const login = browser.keep(await site.fetch(`/auth/web/login?return_to=${encodeURIComponent(returnTo)}`));
+  const login = browser.keep(await edge.site(`/auth/web/login?return_to=${encodeURIComponent(returnTo)}`));
   expect(login.status, await login.clone().text()).toBe(302);
   const authorize = new URL(login.headers.get("location")!);
   expect(authorize.origin + authorize.pathname).toBe("https://api.workos.com/user_management/authorize");
-  const page = await fetch(`${edge.runnerSite}/__workos/authorize${authorize.search}&e2e_user=${userId}`, { redirect: "manual" });
+  const page = await edge.authorize(authorize, userId);
   const callback = new URL(page.headers.get("location")!);
   expect(callback.origin).toBe(edge.origin);
-  const back = browser.keep(await site.fetch(`${callback.pathname}${callback.search}`, { headers: { cookie: browser.cookie } }));
+  const back = browser.keep(await edge.site(`${callback.pathname}${callback.search}`, { headers: { cookie: browser.cookie } }));
   expect(back.status, await back.clone().text()).toBe(303);
   // (The edge sends the browser back to the site's own address, absolute.)
   expect(new URL(back.headers.get("location")!, edge.origin).href).toBe(new URL(returnTo, edge.origin).href);
@@ -106,7 +104,6 @@ async function signInOnTheWeb(userId: string, returnTo = "/account"): Promise<Br
 
 beforeAll(async () => {
   edge = await startRealEdge();
-  site = await startSite({ edge: { url: edge.url }, origin: edge.origin });
   // An author, signed in on their device, with a key; and a reviewer the
   // edge has met (their first sign-in) and an operator made staff.
   ada = await Publisher.signIn(edge.url, "user_ada", "adawren");
@@ -122,13 +119,12 @@ beforeAll(async () => {
 }, 300_000);
 
 afterAll(async () => {
-  await site?.dispose();
   await edge?.stop();
 });
 
 describe("signing in on the web", () => {
   test("the session the site reads is the edge's", async () => {
-    const response = await site.fetch("/auth/web/session", { headers: { cookie: grace.cookie } });
+    const response = await edge.site("/auth/web/session", { headers: { cookie: grace.cookie } });
     expect(response.status).toBe(200);
     const session = (await response.json()) as { user: { name: string }; username: string; roles: string[]; csrf: string; fresh_sign_in: boolean };
     expect(session.username).toBe("gracehop");
@@ -140,10 +136,10 @@ describe("signing in on the web", () => {
   });
 
   test("signed out, the account pages ask you to sign in, and the admin ones aren't there", async () => {
-    const account = await site.fetch("/account");
+    const account = await edge.site("/account");
     expect(account.status).toBe(303);
     expect(account.headers.get("location")).toBe("/auth/web/login?return_to=%2Faccount");
-    expect((await site.fetch("/admin/plugins")).status).toBe(404);
+    expect((await edge.site("/admin/plugins")).status).toBe(404);
     // (A member who isn't staff gets the same 404 as an address that isn't there.)
     expect((await adaOnWeb.get("/admin/plugins")).response.status).toBe(404);
   });
@@ -270,22 +266,24 @@ describe("the catalog, from the edge's real listing", () => {
   });
 
   test("the files proxy serves the edge's files as pictures in a sandbox, and nothing else", async () => {
-    const png = await site.fetch("/plugins/focus-timer/files/1.0.0/shots/one.png");
+    const png = await edge.site("/plugins/focus-timer/files/1.0.0/shots/one.png");
     expect(png.status).toBe(200);
     expect(png.headers.get("content-type")).toBe("image/png");
     expect(png.headers.get("content-security-policy")).toContain("sandbox");
     expect(png.headers.get("x-content-type-options")).toBe("nosniff");
     expect(Buffer.from(await png.arrayBuffer()).equals(PNG)).toBe(true);
-    const icon = await site.fetch("/plugins/focus-timer/files/1.0.0/icon.svg");
+    // Kept a minute at most, by a browser as by a shared cache: a version taken down stops showing within it.
+    expect(Number(/^public, max-age=(\d+)$/.exec(png.headers.get("cache-control") ?? "")?.[1])).toBeLessThanOrEqual(60);
+    const icon = await edge.site("/plugins/focus-timer/files/1.0.0/icon.svg");
     expect(icon.status).toBe(200);
     expect(icon.headers.get("content-type")).toBe("image/svg+xml");
     for (const path of ["init.luau", "README.md", "shots/none.png"]) {
-      const refused = await site.fetch(`/plugins/focus-timer/files/1.0.0/${path}`);
+      const refused = await edge.site(`/plugins/focus-timer/files/1.0.0/${path}`);
       expect(refused.status, path).toBe(404);
       expect(refused.headers.get("content-security-policy"), path).toContain("sandbox");
     }
     // A version still in review has no public files.
-    expect((await site.fetch("/plugins/theme-sync/files/0.1.0/icon.svg")).status).toBe(404);
+    expect((await edge.site("/plugins/theme-sync/files/0.1.0/icon.svg")).status).toBe(404);
   });
 });
 
@@ -303,7 +301,7 @@ describe("an author's pages", () => {
     expect(adaOnWeb.flash()).toBe("key_revoked");
   });
 
-  test("stop offering a version, and offer it again", async () => {
+  test("stop new installs of a version, and allow them again", async () => {
     const csrf = await adaOnWeb.token("/account/plugins/focus-timer");
     expect((await adaOnWeb.post("/account/plugins/focus-timer/versions/1.0.0/yank", { csrf })).status).toBe(303);
     expect(adaOnWeb.flash()).toBe("yanked");
@@ -466,6 +464,15 @@ describe("every page, with what the real edge holds", () => {
 });
 
 describe("signing out", () => {
+  test("without the session's token, it's refused in the store's word, and the session lives", async () => {
+    const browser = await signInOnTheWeb("user_ada");
+    const refused = await browser.post("/auth/web/logout", {});
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ error: "bad_csrf" });
+    expect((await browser.get("/account")).response.status).toBe(200);
+  });
+
+
   test("ends the session at the edge, and the browser's cookie with it", async () => {
     const browser = await signInOnTheWeb("user_ada");
     const kept = browser.cookie;
@@ -480,6 +487,6 @@ describe("signing out", () => {
     expect(out.status).toBe(303);
     expect(browser.cookies.has(SESSION)).toBe(false);
     // The old cookie, kept by someone, opens nothing.
-    expect((await site.fetch("/account", { headers: { cookie: kept } })).status).toBe(303);
+    expect((await edge.site("/account", { headers: { cookie: kept } })).status).toBe(303);
   });
 });

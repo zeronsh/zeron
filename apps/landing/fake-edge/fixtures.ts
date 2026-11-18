@@ -402,6 +402,11 @@ const SPECS: Spec[] = [
     files: {
       "docs/<b>notes</b> #1 100%.md": "# <script>alert('file')</script>\n",
       "shots/a b#1 100%.svg": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#9277b0"/></svg>`,
+      // Files an author might hope the review can't show: a path as long as
+      // the edge takes (past any shorter limit of the site's), and a folder
+      // named like an encoded climb.
+      [`src/${"x".repeat(600)}.lua`]: "return 'the long one'\n",
+      "lib/%2e%2e/x.lua": "return 'the dotted one'\n",
     },
     history: [
       { version: "1.0.0", status: "approved", ago: 3, notes: `<script>alert('notes')</script> and [a link](javascript:alert('notes'))` },

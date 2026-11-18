@@ -1,5 +1,5 @@
 ---
-// Withdraw, stop offering, or offer again one of your versions. A post does
+// Withdraw, stop new installs of, or allow installs again of one of your versions. A post does
 // it; a visit (a link followed without a script) asks first.
 import ConfirmPage from "../../../../../../components/store/ConfirmPage.astro";
 import Store from "../../../../../../layouts/Store.astro";
@@ -16,9 +16,9 @@ if (!isPluginId(id) || !isVersion(version) || !isAuthorAction(action)) return ne
 const session = await requireSession(Astro);
 if (session instanceof Response) return session;
 const back = `/account/plugins/${id}`;
-const ask = AUTHOR_ACTIONS[action].ask(version);
 
 if (Astro.request.method === "POST") {
+  const ask = AUTHOR_ACTIONS[action].ask(id, version);
   const form = await formOf(Astro.request);
   if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
   const result = await Astro.locals.edge.versionAction(id, version, action, session.csrf);
@@ -27,6 +27,11 @@ if (Astro.request.method === "POST") {
 }
 if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
 privatePage(Astro);
+// The question names the plugin as its page does; someone else's is the 404, as there.
+const mine = await Astro.locals.edge.myPlugins();
+const plugin = mine.ok ? mine.data.plugins.find((p) => p.id === id) : undefined;
+if (mine.ok && !plugin) return new Response(null, { status: 404 });
+const ask = AUTHOR_ACTIONS[action].ask(plugin?.name ?? id, version);
 ---
 
 <Store title={`${ask.title} · Zeron`} description={ask.title} noindex tool>

@@ -1,6 +1,7 @@
 ---
 // Suspend, restore, feature or move a plugin to another account. A post
 // does it; a visit is the same question as a page.
+import { adminSession } from "../../../../../lib/store/session.ts";
 import ConfirmPage from "../../../../../components/store/ConfirmPage.astro";
 import Deciding from "../../../../../components/store/Deciding.astro";
 import Field from "../../../../../components/ui/Field.astro";
@@ -10,16 +11,15 @@ import { done, field, flashFor, formOf, fromElsewhere, tokenMatches } from "../.
 import { listingState } from "../../../../../lib/store/states.ts";
 import { privatePage, purge } from "../../../../../lib/store/http.ts";
 import { isPluginId } from "../../../../../lib/store/names.ts";
-import { adminOrResume, resumed, wasCut } from "../../../../../lib/store/resume.ts";
+import { resumed, wasCut } from "../../../../../lib/store/resume.ts";
 
 export const prerender = false;
 
 const { id, action } = Astro.params;
 if (!isPluginId(id) || !isPluginAction(action)) return new Response(null, { status: 404 });
-/** What each action's form has a person type: kept across a sign-in. */
-const TYPED = { suspend: ["reason"], restore: [], feature: [], unfeature: [], transfer: ["to_username"] } as const;
-const session = await adminOrResume(Astro, { path: Astro.url.pathname, fields: TYPED[action] });
-if (session instanceof Response) return session;
+// (The middleware's admin gate let only an admin this far.)
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
 const back = `/admin/plugins/${encodeURIComponent(id)}`;
 
 if (Astro.request.method === "POST") {

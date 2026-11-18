@@ -2,6 +2,7 @@
 // One of your plugins: every version you've submitted with its review state
 // and what the reviewer said, what you can do with each, and the deploy
 // keys that can publish it. Yours only: anyone else's id is the 404 page.
+import { store } from "../../../lib/store/words.ts";
 import AccountBar from "../../../components/store/AccountBar.astro";
 import ConfirmForm from "../../../components/store/ConfirmForm.astro";
 import PluginTile from "../../../components/store/PluginTile.astro";
@@ -93,7 +94,7 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
                   {plugin.versions.map((v) => {
                     const state = versionState(v);
                     const action = actionOf(v);
-                    const ask = action ? AUTHOR_ACTIONS[action].ask(v.version) : null;
+                    const ask = action ? AUTHOR_ACTIONS[action].ask(plugin.name, v.version) : null;
                     const warn = (v.checks ?? []).filter((c) => c.level !== "ok");
                     return (
                       <tr>
@@ -142,7 +143,7 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
           </section>
 
           <section aria-labelledby="keys-heading" class="block">
-            <h2 id="keys-heading">Deploy keys</h2>
+            <h2 id="keys-heading">{store("plugins.store.keys")}</h2>
             <p class="explain">
               A deploy key lets a script or a GitHub Action publish new versions of {plugin.name} without signing in. Each version it publishes is still reviewed.
             </p>
@@ -206,7 +207,7 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
           {plugin.versions.map((v) => {
             const action = actionOf(v);
             if (!action) return null;
-            const ask = AUTHOR_ACTIONS[action].ask(v.version);
+            const ask = AUTHOR_ACTIONS[action].ask(plugin.name, v.version);
             return (
               <Dialog id={dialogId(action, v.version)} title={ask.title} tone={ask.tone === "danger" ? "danger" : "default"}>
                 {ask.words.map((w) => <p>{w}</p>)}
@@ -267,7 +268,8 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
   .said { margin-top: 4px; padding: 10px 12px; font-size: 13.5px; color: var(--text); background: var(--tone-danger-wash); border-radius: var(--radius-lg); }
   .said .who { margin-bottom: 2px; font-size: 12px; font-weight: 500; color: var(--tone-danger); }
   .checks { display: grid; gap: 4px; font-size: 13px; }
-  .checks li { display: flex; gap: 6px; align-items: flex-start; color: var(--tone-warning); }
+  /* (A check can name a key or a hash: long, with nowhere to break.) */
+  .checks li { display: flex; gap: 6px; align-items: flex-start; color: var(--tone-warning); overflow-wrap: anywhere; }
   .checks li.fail { color: var(--tone-danger); }
   .checks :global(.glyph) { margin-top: 3px; }
   .when { color: var(--text-2); white-space: nowrap; }

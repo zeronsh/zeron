@@ -14,6 +14,8 @@ import { privatePage } from "../../../lib/store/http.ts";
 import { resumed } from "../../../lib/store/resume.ts";
 import { adminSession } from "../../../lib/store/session.ts";
 import { reasonWords } from "../../../lib/store/states.ts";
+import { REPORT_REASONS, type ReportReason } from "../../../lib/store/types.ts";
+import { reportReasonWords } from "../../../lib/store/words.ts";
 
 export const prerender = false;
 
@@ -62,7 +64,7 @@ const resumedNote = resumed(Astro.url, "note", 500);
                   <span>{r.plugin.name ?? r.plugin.id}</span>
                   {r.version && <span class="num"> {r.version}</span>}
                 </a>
-                <Badge tone={r.reason === "malware" ? "danger" : "warning"} size="sm">{reasonWords(r.reason)}</Badge>
+                <Badge tone={r.reason === "malware" ? "danger" : "warning"} size="sm">{(REPORT_REASONS as readonly string[]).includes(r.reason) ? reportReasonWords(r.reason as ReportReason) : reasonWords(r.reason)}</Badge>
                 {!open && r.resolved_by?.username && <span class="by">by @{r.resolved_by.username}</span>}
                 <span class="from">
                   {r.reporter?.username ? `@${r.reporter.username}` : "Someone"} · <time datetime={new Date(r.created_at).toISOString()} title={date(r.created_at)}>{ago(r.created_at)}</time>

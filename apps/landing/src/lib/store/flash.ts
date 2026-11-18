@@ -5,8 +5,8 @@ import type { AstroCookies } from "astro";
 
 export const FLASH = {
   withdrawn: { message: "Withdrawn from review.", tone: "success" },
-  yanked: { message: "No longer offered. Anyone who has it keeps it.", tone: "success" },
-  unyanked: { message: "Offered again.", tone: "success" },
+  yanked: { message: "New installs stopped. Those who have it keep it working.", tone: "success" },
+  unyanked: { message: "It can be installed again.", tone: "success" },
   key_revoked: { message: "Key revoked. It can't publish anything now.", tone: "success" },
   approved: { message: "Approved. It's listed now.", tone: "success" },
   rejected: { message: "Not approved. The author can read why.", tone: "success" },

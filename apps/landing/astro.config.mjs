@@ -32,7 +32,10 @@ export default defineConfig({
   // Public store pages are kept by the Worker cache for as long as they say
   // (Astro.cache in the route); anything that doesn't say is never kept.
   cache: { provider: cacheCloudflare() },
-  security: { checkOrigin: true },
+  // A form from another site is refused by the middleware, as Astro's own
+  // check would (lib/store/security.ts isCrossSiteForm): Astro's runs only
+  // where a page is, so under /admin it would say which pages are there.
+  security: { checkOrigin: false },
   vite: {
     // The store's pages allow scripts from the site's own files only (no
     // inline script), so a script is a file unless it is one of the

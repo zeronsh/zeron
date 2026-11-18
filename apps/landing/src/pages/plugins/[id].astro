@@ -2,6 +2,7 @@
 // A plugin's page: who made it, what it does (its README, as reviewed),
 // what it asks for, its versions, and Install in Zeron. The same for
 // everyone, so kept by the Worker cache for at most a minute.
+import { statusWords, store } from "../../lib/store/words.ts";
 import InstallButton from "../../components/store/InstallButton.astro";
 import PermissionList from "../../components/store/PermissionList.astro";
 import PluginTile from "../../components/store/PluginTile.astro";
@@ -119,7 +120,7 @@ const structured = plugin
                         <h3 class="num">{v.version}</h3>
                         {v.version === plugin.version && <Badge tone="success" size="sm">Latest</Badge>}
                         {isPrerelease(v.version) && <Badge tone="accent" size="sm">Pre-release</Badge>}
-                        {v.yanked && <Badge tone="warning" size="sm" title="Its author stopped offering it. Anyone who has it can keep it.">No longer offered</Badge>}
+                        {v.yanked && <Badge tone="warning" size="sm" title="Its author stopped new installs. Those who have it keep it working.">{statusWords("yanked")}</Badge>}
                         <time datetime={new Date(v.published_at ?? v.submitted_at).toISOString()} title={date(v.published_at ?? v.submitted_at)}>{ago(v.published_at ?? v.submitted_at)}</time>
                       </div>
                       {v.html ? <div class="readme notes" set:html={v.html} /> : <p class="no-notes">No notes for this version.</p>}
@@ -137,7 +138,7 @@ const structured = plugin
                         <li class="version">
                           <div class="version-head">
                             <h3 class="num">{v.version}</h3>
-                            {v.yanked && <Badge tone="warning" size="sm">No longer offered</Badge>}
+                            {v.yanked && <Badge tone="warning" size="sm">{statusWords("yanked")}</Badge>}
                             <time datetime={new Date(v.published_at ?? v.submitted_at).toISOString()}>{date(v.published_at ?? v.submitted_at)}</time>
                           </div>
                           {v.html && <div class="readme notes" set:html={v.html} />}
@@ -181,16 +182,16 @@ const structured = plugin
                 {(homepage || repository) && (
                   <ul class="out" role="list">
                     {homepage && (
-                      <li><a href={homepage} rel="nofollow noopener ugc"><Glyph name="global" size={14} />Website<Glyph name="arrow-up-right" size={12} /></a></li>
+                      <li><a href={homepage} rel="nofollow noopener ugc"><Glyph name="global" size={14} />{store("plugins.store.fact.homepage")}<Glyph name="arrow-up-right" size={12} /></a></li>
                     )}
                     {repository && (
-                      <li><a href={repository} rel="nofollow noopener ugc"><Glyph name="file-code" size={14} />Source code<Glyph name="arrow-up-right" size={12} /></a></li>
+                      <li><a href={repository} rel="nofollow noopener ugc"><Glyph name="file-code" size={14} />{store("plugins.store.fact.repository")}<Glyph name="arrow-up-right" size={12} /></a></li>
                     )}
                   </ul>
                 )}
               </section>
 
-              <a class="report" href={`${pluginUrl(plugin.id)}/report`}><Glyph name="flag" size={14} />Report this plugin</a>
+              <a class="report" href={`${pluginUrl(plugin.id)}/report`}><Glyph name="flag" size={14} />{store("plugins.store.report.link")}</a>
             </aside>
           </div>
         </>

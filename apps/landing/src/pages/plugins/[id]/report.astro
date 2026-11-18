@@ -2,6 +2,7 @@
 // Report a listed plugin to the people who review them. Signed in, so a
 // report has someone behind it; the plugin's page itself stays the same
 // for everyone (and cached), so the thanks are said here.
+import { reportReasonWords, store } from "../../../lib/store/words.ts";
 import PluginTile from "../../../components/store/PluginTile.astro";
 import Action from "../../../components/ui/Action.astro";
 import Field from "../../../components/ui/Field.astro";
@@ -45,12 +46,13 @@ const flash = takeFlash(Astro.cookies);
 const sent = flash?.word === "report_sent";
 const plugin = result.ok ? result.data : null;
 
-const REASONS: Record<(typeof REPORT_REASONS)[number], { label: string; about: string }> = {
-  malware: { label: "It's harmful", about: "It steals, spies, or does damage." },
-  misleading: { label: "It isn't what it says", about: "It asks for or does more than it tells you." },
-  broken: { label: "It doesn't work", about: "It fails, or breaks part of Zeron." },
-  copyright: { label: "It uses my work or name", about: "It copies someone's code, art or brand without leave." },
-  other: { label: "Something else", about: "Tell us below." },
+/** Each reason as the app's report sheet names it, and a line on what it covers. */
+const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
+  malware: "It steals, spies, or does damage.",
+  misleading: "It asks for or does more than it tells you.",
+  broken: "It fails, or breaks part of Zeron.",
+  copyright: "It copies someone's code, art or brand without leave.",
+  other: "Tell us below.",
 };
 ---
 
@@ -77,21 +79,21 @@ const REASONS: Record<(typeof REPORT_REASONS)[number], { label: string; about: s
           <form method="post" action={here} class="form">
             <input type="hidden" name="csrf" value={session.csrf} />
             <fieldset>
-              <legend>What's wrong?</legend>
+              <legend>{store("plugins.store.report.reason_label")}</legend>
               {REPORT_REASONS.map((r, i) => (
                 <label class="choice">
                   <input type="radio" name="reason" value={r} required checked={resumed(Astro.url, "reason") ? resumed(Astro.url, "reason") === r : i === 0} />
                   <span>
-                    <b>{REASONS[r].label}</b>
-                    <span class="about">{REASONS[r].about}</span>
+                    <b>{reportReasonWords(r)}</b>
+                    <span class="about">{ABOUT[r]}</span>
                   </span>
                 </label>
               ))}
             </fieldset>
-            <Field name="text" label="What happened" multiline maxlength={2000} value={resumed(Astro.url, "text")} hint="What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it." />
+            <Field name="text" label={store("plugins.store.report.text_label")} multiline maxlength={2000} value={resumed(Astro.url, "text")} hint="What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it." />
             <div class="answers">
               <a class="cancel" href={pluginUrl(id)}>Cancel</a>
-              <Action tone="danger">Send report</Action>
+              <Action tone="danger">{store("plugins.store.report.send")}</Action>
             </div>
           </form>
         </section>

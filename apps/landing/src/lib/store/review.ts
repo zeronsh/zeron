@@ -224,7 +224,26 @@ export function languageOf(path: string): string | null {
 }
 
 /** Pictures the viewer shows as pictures. */
-export const isPicture = (path: string) => /\.(png|jpe?g|gif|webp|avif|svg)$/i.test(path);
+/**
+ * What the site shows as a picture (amendments 14, 22): PNG and JPEG
+ * pictures and the SVG icon, by extension, never by what a file claims.
+ * The files proxy serves these and nothing else; the review shows anything
+ * else as text or as "not text".
+ */
+export const PICTURE_TYPES: ReadonlyMap<string, string> = new Map([
+  ["png", "image/png"],
+  ["jpg", "image/jpeg"],
+  ["jpeg", "image/jpeg"],
+  ["svg", "image/svg+xml"],
+]);
+
+/** A path's picture type, if the site shows it as a picture. */
+export const pictureType = (path: string): string | undefined => {
+  const dot = path.lastIndexOf(".");
+  return dot === -1 || path.lastIndexOf("/") > dot ? undefined : PICTURE_TYPES.get(path.slice(dot + 1).toLowerCase());
+};
+
+export const isPicture = (path: string) => pictureType(path) !== undefined;
 
 /** The most of one file the viewer reads (bytes); past it, it says so. */
 export const VIEW_LIMIT = 512 * 1024;

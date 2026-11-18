@@ -243,6 +243,13 @@ describe("package files", () => {
     }
   });
 
+  test("a name that is an encoded dot is a name, not a climb: the edge's 404, sandboxed", async () => {
+    const response = await site.fetch("/plugins/focus-timer/files/1.2.0/%252e%252e/icon.svg");
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-security-policy")).toContain("sandbox");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
   test("only pictures pass, and no path climbs out", async () => {
     for (const path of ["/plugins/focus-timer/files/1.2.0/init.luau", "/plugins/focus-timer/files/1.2.0/README.md", "/plugins/focus-timer/files/1.2.0/..%2f..%2fsecret.png", "/plugins/focus-timer/files/v1/icon.svg"]) {
       expect((await site.fetch(path)).status, path).toBe(404);
@@ -344,6 +351,66 @@ describe("the admin pages can't be told from pages that don't exist", () => {
     }
   });
 
+  /** A response's every header but the clock's. */
+  const headersOf = (r: Response) => JSON.stringify([...r.headers].filter(([k]) => k !== "date" && k !== "cf-cache-status"));
+  /** Pages that are there, beside addresses that aren't (an action no page has among them). */
+  const PAIRS: [string, string][] = [
+    ["/admin/reservations", "/admin/nothing-here"],
+    ["/admin/plugins/session-badges/1.2.1/approve", "/admin/plugins/session-badges/1.2.1/bogus"],
+    ["/admin/plugins/session-badges/actions/suspend", "/admin/plugins/session-badges/actions/bogus"],
+    ["/admin/reports/1", "/admin/reports/1/more"],
+  ];
+
+  test("a form from another site: the same 404 whether a page is there or not", async () => {
+    const notFound = readFileSync(new URL("../dist/client/404.html", import.meta.url), "utf8");
+    for (const pair of PAIRS) {
+      const answers = await Promise.all(pair.map((path) => post(path, "", { csrf: "x" }, "https://evil.example")));
+      for (const [i, response] of answers.entries()) {
+        expect(response.status, pair[i]).toBe(404);
+        expect(await response.text(), pair[i]).toBe(notFound);
+      }
+      expect(headersOf(answers[0]!), pair[0]).toBe(headersOf(answers[1]!));
+    }
+  });
+
+  test("a form posted with a session that ended: the same trip to sign in, whether a page is there or not", async () => {
+    for (const pair of PAIRS) {
+      const answers = await Promise.all(pair.map((path) => post(path, "__Host-zeron_session=ended", { csrf: "x", reason: "Looks wrong" })));
+      for (const [i, response] of answers.entries()) {
+        expect(response.status, pair[i]).toBe(303);
+        // (What was typed comes back; the stale token doesn't.)
+        expect(response.headers.get("location"), pair[i]).toBe(`/auth/web/login?${new URLSearchParams({ return_to: `${pair[i]}?reason=Looks+wrong` })}`);
+      }
+      expect(headersOf(answers[0]!).replace(/return_to=[^"]*/, ""), pair[0]).toBe(headersOf(answers[1]!).replace(/return_to=[^"]*/, ""));
+    }
+  });
+
+  test("a doubled slash: the 404 whether a page is there or not; an admin is sent on", async () => {
+    const unknown = await site.fetch("/admin/nothing-here");
+    for (const path of ["/admin//plugins", "/admin//nothing-here", "//admin/audit", "/admin"]) {
+      const response = await site.fetch(path);
+      expect(response.status, path).toBe(404);
+      expect(headersOf(response), path).toBe(headersOf(unknown));
+    }
+    const grace = await site.signIn("user_grace");
+    const sent = await site.fetch("/admin//plugins", { headers: { cookie: grace } });
+    expect(sent.status).toBe(301);
+    expect(sent.headers.get("location")).toBe("/admin/plugins");
+  });
+
+  test("an admin: a form from another site is refused; an address no page has is the 404", async () => {
+    const grace = await site.signIn("user_grace");
+    expect((await post("/admin/reservations", grace, { csrf: "x", id: "a-b" }, "https://evil.example")).status).toBe(403);
+    expect((await site.fetch("/admin/nothing-here", { headers: { cookie: grace } })).status).toBe(404);
+  });
+
+  test("a report closed after signing in again comes back to its row, the note as typed", async () => {
+    const grace = await site.signIn("user_grace");
+    const back = await site.fetch("/admin/reports/1?note=Checked+it", { headers: { cookie: grace } });
+    expect(back.status).toBe(303);
+    expect(back.headers.get("location")).toBe("/admin/reports?report=1&note=Checked+it");
+  });
+
   test("a post from a non-admin does nothing and says nothing", async () => {
     const ada = await site.signIn("user_ada");
     const page = await html("/account", ada);
@@ -371,11 +438,21 @@ describe("forms", () => {
     expect(after.body).toMatch(/1\.2\.1<\/th>\s*<td[^>]*>[^]*?In review/);
   });
 
+  test("a confirm page names the plugin in the app's words; someone else's plugin is the 404", async () => {
+    const ada = await site.signIn("user_ada");
+    const ask = await html("/account/plugins/focus-timer/versions/1.2.0/yank", ada);
+    expect(ask.response.status).toBe(200);
+    expect(ask.body).toContain("Stop new installs of Focus timer 1.2.0?");
+    expect(ask.body).toContain("Those who have it keep it working.");
+    const kai = await site.signIn("user_kai");
+    expect((await html("/account/plugins/focus-timer/versions/1.2.0/yank", kai)).response.status).toBe(404);
+  });
+
   test("a confirm page asks first; the post does it once and says so once", async () => {
     const ada = await site.signIn("user_ada");
     const ask = await html("/account/plugins/session-badges/versions/1.2.1/withdraw", ada);
     expect(ask.response.status).toBe(200);
-    expect(ask.body).toContain("Withdraw 1.2.1 from review?");
+    expect(ask.body).toContain("Withdraw Session badges 1.2.1?");
     const response = await post("/account/plugins/session-badges/versions/1.2.1/withdraw", ada, { csrf: tokenOf(ask.body) });
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe("/account/plugins/session-badges");
@@ -449,6 +526,28 @@ describe("forms", () => {
     inert((await html("/plugins/xss-probe")).body);
   });
 
+  test("no file can hide from the reviewer: each is shown as itself, or said to be missing, never another in its place", async () => {
+    const grace = await site.signIn("user_grace");
+    const here = "/admin/plugins/xss-probe/1.1.0";
+    const view = (path: string) => html(`${here}?view=files&path=${encodeURIComponent(path)}`, grace);
+    const long = await view(`src/${"x".repeat(600)}.lua`);
+    expect(long.response.status).toBe(200);
+    expect(long.body).toContain("the long one");
+    const dotted = await view("lib/%2e%2e/x.lua");
+    expect(dotted.response.status).toBe(200);
+    expect(dotted.body).toContain("the dotted one");
+    const missing = await view("no/such/file.lua");
+    expect(missing.body).toContain("This version has no file at that path.");
+    expect(missing.body).not.toMatch(/"entry"|&quot;entry&quot;/);
+    // An SVG is shown as a picture and as its source: what it draws, and what runs.
+    const svg = await view("shots/a b#1 100%.svg");
+    expect(svg.body).toContain(`src="${fileUrl("xss-probe", "1.1.0", "shots/a b#1 100%.svg")}"`);
+    expect(svg.body).toMatch(/rect/);
+    expect(svg.body).toContain("9277b0");
+    // Every file of the version, changed or not, can be compared.
+    expect((await html(`${here}?view=changes`, grace)).response.status).toBe(200);
+  });
+
   test("a decision's page says what is decided, and says so when the visit came from elsewhere", async () => {
     const grace = await site.signIn("user_grace");
     const plain = await html("/admin/plugins/session-badges/1.2.1/approve", grace);
@@ -498,6 +597,14 @@ describe("forms", () => {
     expect((await html("/plugins/theme-sync/report", `${kai}; ${flashOf(sent)}`)).body).toContain("Thanks for telling us");
     const reports = await html("/admin/reports", await site.signIn("user_grace"));
     expect(reports.body).toContain("It &lt;script&gt;breaks&lt;/script&gt; the sidebar.");
+  });
+
+  test("signing out without the token is refused in the store's word, and the session lives", async () => {
+    const lin = await site.signIn("user_lin");
+    const refused = await post("/auth/web/logout", lin, {});
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ error: "bad_csrf" });
+    expect((await site.fetch("/account", { headers: { cookie: lin } })).status).toBe(200);
   });
 
   test("signing out is a form post with the token; the session ends", async () => {

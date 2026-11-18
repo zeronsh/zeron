@@ -57,6 +57,7 @@ export class Edge {
   readonly #binding: EdgeBinding;
   readonly #origin: string;
   readonly #cookie: string | null;
+  #session: Promise<WebSession | null> | undefined;
   readonly #from: string | null;
 
   /**
@@ -102,8 +103,14 @@ export class Edge {
    * what of it goes to the browser). `signedIn` sends the visitor's cookie:
    * a pending version's files are its owner's and admins' only.
    */
-  file(id: string, version: string, path: string, signedIn: boolean): Promise<Response> {
-    const url = `/store/v1/plugins/${segment(id)}/files/${segment(version)}/${path.split("/").map(segment).join("/")}`;
+  async file(id: string, version: string, path: string, signedIn: boolean): Promise<Response> {
+    let url: string;
+    try {
+      url = `/store/v1/plugins/${segment(id)}/files/${segment(version)}/${path.split("/").map(segment).join("/")}`;
+    } catch {
+      // (A path no package can hold is a file that isn't there.)
+      return new Response(null, { status: 404 });
+    }
     // (An edge that can't be reached is a file that can't be had, never a failed page.)
     return this.#send(this.#request(url, { method: "GET", signedIn })).catch(() => new Response(null, { status: 502 }));
   }
@@ -111,10 +118,10 @@ export class Edge {
   // ── Signed in ─────────────────────────────────────────────────────────
 
   /** The visitor's session, or null when they aren't signed in. */
-  async session(): Promise<WebSession | null> {
-    if (!this.#cookie) return null;
-    const result = await this.#json<WebSession>("/auth/web/session", { signedIn: true });
-    return result.ok ? result.data : null;
+  session(): Promise<WebSession | null> {
+    // (Read once a request: the admin gate and the page ask the same thing.)
+    this.#session ??= this.#cookie ? this.#json<WebSession>("/auth/web/session", { signedIn: true }).then((result) => (result.ok ? result.data : null)) : Promise.resolve(null);
+    return this.#session;
   }
 
   myPlugins(): Promise<Result<{ plugins: MyPlugin[] }>> {
@@ -234,11 +241,13 @@ function failure(status: number, payload: unknown): { ok: false; status: number;
 
 /**
  * One path segment, encoded, so an id or a version can never reach another
- * route. A dot segment would be resolved away by the URL parser even
- * encoded (`%2e%2e` is `..`), so it is refused; callers check their input
- * first (names.ts), and this is the last line.
+ * route. encodeURIComponent leaves "." alone, and the URL parser would
+ * resolve "." and ".." away, so they are refused (callers check their input
+ * first, names.ts, and this is the last line). A name like "%2e" is safe:
+ * encoded it is "%252e", which no parser takes for a dot.
  */
 function segment(value: string): string {
-  if (value === "" || /^(\.|%2e){1,2}$/i.test(value)) throw new RangeError("not a path segment");
+  // (Encoded, "%2e" is "%252e": a name, not a dot. Only real dot segments are refused.)
+  if (value === "" || value === "." || value === "..") throw new RangeError("not a path segment");
   return encodeURIComponent(value);
 }

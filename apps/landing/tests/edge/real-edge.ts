@@ -1,72 +1,84 @@
 // The real edge worker for the site's second tier of tests: its bundle as
-// `wrangler deploy --dry-run` makes it, run by the store's end-to-end runner
+// `wrangler deploy --dry-run` makes it, run by the store's local runner
 // (scripts/plugin-store-e2e/edge.mjs: Miniflare, the store's D1 migrations,
-// local R2, WorkOS faked but its tokens real). Publishers sign in as a
-// device does and publish real signed packages; staff sign in on the web
-// through the site.
+// local R2 and Durable Objects, WorkOS faked but its tokens real), with the
+// built site beside it in the same Miniflare, its EDGE service binding
+// naming the edge as it does when deployed. Publishers sign in as a device
+// does and publish real signed packages; staff sign in on the web through
+// the site.
 //
 // E2E_ROOT names the checkout that holds edge/, docs/ and the runner (the
 // repository by default); E2E_BUNDLE an already built bundle.
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { siteWorker } from "../harness.ts";
 
 const ROOT = resolve(process.env.E2E_ROOT ?? new URL("../../../../", import.meta.url).pathname);
 const EDGE = join(ROOT, "edge");
 
+/** The site's origin, the edge's WEB_ORIGIN: a name that is never anyone's real site. */
+export const ORIGIN = "https://site.e2e.test";
+
 export interface RealEdge {
-  /** The edge worker (Miniflare's address). */
+  /** The edge worker's address, as devices and the CLI reach it. */
   url: string;
-  /** The runner's site port: AuthKit's page (/__workos/authorize) is served here. */
-  runnerSite: string;
-  /** The web origin the edge holds the site to (WEB_ORIGIN). */
+  /** The site's origin (the edge holds web sign-in and cookie writes to it). */
   origin: string;
+  /** A request to the site, as from a browser on its origin. */
+  site(path: string, init?: RequestInit): Promise<Response>;
+  /** AuthKit's page, for a browser sent to `authorize` (api.workos.com/user_management/authorize?…): it signs `userId` in. */
+  authorize(authorize: URL, userId: string): Promise<Response>;
   /** An operator grants `userId` (a user the edge has already met) a staff role. */
   grant(userId: string, role: "admin"): Promise<void>;
   stop(): Promise<void>;
 }
 
-/** Bundle the edge (unless E2E_BUNDLE is given) and start it. */
+interface Runner {
+  EDGE_NAME: string;
+  startEdge(options: Record<string, unknown>): Promise<{
+    mf: { dispatchFetch(url: string, init?: RequestInit): Promise<Response> };
+    url: string;
+    workos: string;
+    grantRole(userId: string, role: string): Promise<unknown>;
+    stop(): Promise<void>;
+  }>;
+}
+
+/** Bundle the edge (unless E2E_BUNDLE is given) and start it with the built site beside it. */
 export async function startRealEdge(): Promise<RealEdge> {
   const work = mkdtempSync(join(tmpdir(), "zeron-site-edge-"));
   if (!existsSync(join(EDGE, "node_modules"))) run("npm", ["ci", "--no-audit", "--no-fund"], EDGE);
   let bundle = process.env.E2E_BUNDLE;
   if (!bundle) {
     bundle = join(work, "bundle");
+    mkdirSync(join(EDGE, "public"), { recursive: true });
     run("npx", ["wrangler", "deploy", "--dry-run", "--outdir", bundle], EDGE);
   }
-  const ready = join(work, "ready.json");
-  const child: ChildProcess = spawn(process.execPath, [join(ROOT, "scripts/plugin-store-e2e/edge.mjs"), EDGE, bundle, ready], {
-    env: process.env,
-    stdio: ["ignore", "ignore", "pipe"],
+  const runner = (await import(pathToFileURL(join(ROOT, "scripts/plugin-store-e2e/edge.mjs")).href)) as Runner;
+  const edge = await runner.startEdge({
+    edgeDir: EDGE,
+    bundleDir: bundle,
+    siteOrigin: ORIGIN,
+    workers: [siteWorker({ EDGE: runner.EDGE_NAME })],
+    siteWorker: "site",
+    site: false,
   });
-  let log = "";
-  child.stderr?.on("data", (d) => (log += d));
-  for (let i = 0; i < 240 && !existsSync(ready); i++) {
-    if (child.exitCode !== null) throw new Error(`the edge didn't start:\n${log}`);
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!existsSync(ready)) throw new Error(`the edge didn't start in time:\n${log}`);
-  const info = JSON.parse(readFileSync(ready, "utf8")) as { url: string; site: string; site_origin: string; admin_token: string };
   return {
-    url: info.url,
-    runnerSite: info.site,
-    origin: info.site_origin,
+    url: edge.url,
+    origin: ORIGIN,
+    site: (path, init = {}) => edge.mf.dispatchFetch(`${ORIGIN}${path}`, { redirect: "manual", ...init }),
+    authorize: (authorize, userId) => fetch(`${edge.workos}${authorize.pathname}${authorize.search}&e2e_user=${encodeURIComponent(userId)}`, { redirect: "manual" }),
     async grant(userId, role) {
       // (The operator's route, as staff are made: not a way in for the tests.
       // Every admin call after this is the web session's.)
-      await json(fetch(`${info.url}/admin/roles/grant`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${info.admin_token}`, "content-type": "application/json" },
-        body: JSON.stringify({ userId, role, by: "site tests" }),
-      }));
+      await edge.grantRole(userId, role);
     },
     async stop() {
-      child.kill("SIGTERM");
-      await new Promise((r) => child.once("exit", r));
+      await edge.stop();
       rmSync(work, { recursive: true, force: true });
     },
   };

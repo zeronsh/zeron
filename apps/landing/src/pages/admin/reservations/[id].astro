@@ -1,18 +1,19 @@
 ---
 // Free a reserved id. A post does it; a visit asks first.
+import { adminSession } from "../../../lib/store/session.ts";
 import ConfirmPage from "../../../components/store/ConfirmPage.astro";
 import Store from "../../../layouts/Store.astro";
 import { done, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId } from "../../../lib/store/names.ts";
-import { adminOrResume } from "../../../lib/store/resume.ts";
 
 export const prerender = false;
 
 const { id } = Astro.params;
 if (!isPluginId(id)) return new Response(null, { status: 404 });
-const session = await adminOrResume(Astro, { path: Astro.url.pathname, fields: [] });
-if (session instanceof Response) return session;
+// (The middleware's admin gate let only an admin this far.)
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
 const back = "/admin/reservations";
 
 if (Astro.request.method === "POST") {

@@ -12,18 +12,11 @@
 import type { APIRoute } from "astro";
 import { pluginTag } from "../../../../../lib/store/http.ts";
 import { isPluginId, isVersion, packagePath } from "../../../../../lib/store/names.ts";
+import { pictureType } from "../../../../../lib/store/review.ts";
 
 export const prerender = false;
 
-/** What the edge shows inline (amendments 14, 22): PNG and JPEG pictures, and the SVG icon. */
-const PICTURES = new Map([
-  ["png", "image/png"],
-  ["jpg", "image/jpeg"],
-  ["jpeg", "image/jpeg"],
-  ["svg", "image/svg+xml"],
-]);
-
-/** The most a shared cache keeps a public file (seconds). */
+/** The most a shared cache, or a browser, keeps a public file (seconds). */
 const SHARED = 60;
 
 /** On every answer from this route, a picture or not: nothing here ever runs, nothing is sniffed. */
@@ -32,6 +25,16 @@ const SANDBOX = {
   "x-content-type-options": "nosniff",
   "cross-origin-resource-policy": "same-origin",
 };
+
+/**
+ * How long a browser keeps a public file: as the edge says, and a minute at
+ * most, so a version taken down stops showing within it there too.
+ */
+function keep(edge: string | null): string {
+  if (edge && /\b(no-store|private)\b/i.test(edge)) return edge;
+  const asked = Number(/\bmax-age=(\d+)/i.exec(edge ?? "")?.[1] ?? SHARED);
+  return `public, max-age=${Math.min(asked, SHARED)}`;
+}
 
 const notFound = () => new Response(null, { status: 404, headers: { ...SANDBOX, "cache-control": "no-store" } });
 
@@ -50,7 +53,7 @@ export const GET: APIRoute = async ({ params, request, locals, cache, url, redir
     path = null;
   }
   if (!isPluginId(id) || !isVersion(version) || !path) return notFound();
-  const type = PICTURES.get(path.split(".").pop()!.toLowerCase());
+  const type = pictureType(path);
   if (!type) return notFound();
 
   let open = true;
@@ -72,7 +75,7 @@ export const GET: APIRoute = async ({ params, request, locals, cache, url, redir
       ...SANDBOX,
       "content-type": type,
       "content-disposition": "inline",
-      "cache-control": open ? (answer.headers.get("cache-control") ?? `public, max-age=${SHARED}`) : "private, no-store",
+      "cache-control": open ? keep(answer.headers.get("cache-control")) : "private, no-store",
     },
   });
 };

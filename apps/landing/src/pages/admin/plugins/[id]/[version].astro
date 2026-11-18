@@ -23,9 +23,9 @@ import { takeFlash } from "../../../../lib/store/flash.ts";
 import { age, ago, bytes } from "../../../../lib/store/format.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
 import { renderMarkdown } from "../../../../lib/store/markdown.ts";
-import { isPluginId, isVersion, packagePath } from "../../../../lib/store/names.ts";
+import { isPluginId, isVersion } from "../../../../lib/store/names.ts";
 import { grew } from "../../../../lib/store/permissions.ts";
-import { changedFiles, countRows, diffRows, fileTree, isPicture, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, readText, type DiffRow } from "../../../../lib/store/review.ts";
+import { changedFiles, countRows, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, pictureType, readText, type DiffRow } from "../../../../lib/store/review.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
 import { reasonWords, versionState } from "../../../../lib/store/states.ts";
 import { fileUrl, memberUrl } from "../../../../lib/store/urls.ts";
@@ -69,17 +69,21 @@ if (s && view === "readme") {
   readme = file && "text" in file ? renderMarkdown(file.text, { file: (p) => fileUrl(id, version, p), demote: true }) : "";
 }
 
-// The file viewer: the file asked for, else the manifest.
+// The file viewer: exactly the file asked for (one of the edge's list, by
+// its own path: never another in its place), else the manifest. A picture
+// shows as itself; an SVG as itself and as its source, which is what runs.
 /** A file's text, from the edge (the manifest from what came with the submission). */
 const textOf = async (at: string, path: string, manifestAt: string) => (path === MANIFEST_FILE ? { text: manifestAt } : readText(await edge.file(id, at, path, true)));
-let viewing: { path: string; content: { text: string } | { binary: true } | { tooBig: true } | { picture: string } | null } | null = null;
+type Content = { text: string } | { binary: true } | { tooBig: true } | null;
+let viewing: { path: string; picture: string | null; content: Content | { missing: true } | "picture" } | null = null;
 if (s && view === "files") {
-  const asked = packagePath(Astro.url.searchParams.get("path") ?? "");
-  const file = files.find((f) => f.path === asked) ?? files[0];
-  if (file) {
-    viewing = isPicture(file.path)
-      ? { path: file.path, content: { picture: fileUrl(id, version, file.path) } }
-      : { path: file.path, content: file.binary ? { binary: true } : await textOf(version, file.path, manifest) };
+  const asked = Astro.url.searchParams.get("path");
+  const file = asked === null ? files[0] : files.find((f) => f.path === asked);
+  if (!file) viewing = { path: asked ?? "", picture: null, content: { missing: true } };
+  else {
+    const type = pictureType(file.path);
+    const picture = type ? fileUrl(id, version, file.path) : null;
+    viewing = { path: file.path, picture, content: type && type !== "image/svg+xml" ? "picture" : file.binary ? { binary: true } : await textOf(version, file.path, manifest) };
   }
 }
 
@@ -299,13 +303,14 @@ const failing = checks.filter((c) => c.level === "fail").length;
                       <code>{viewing.path}</code>
                       <span class="faint num">{bytes(files.find((f) => f.path === viewing!.path)?.bytes ?? 0)}</span>
                       {changeOf.get(viewing.path) && (
-                        <a href={`${viewHref("changes")}#${encodeURIComponent(viewing.path)}`}>See its changes</a>
+                        <a href={`${viewHref("changes")}#change-${encodeURIComponent(viewing.path)}`}>See its changes</a>
                       )}
                     </p>
-                    {viewing.content === null ? (
+                    {viewing.picture && <img class="picture" src={viewing.picture} alt={viewing.path} />}
+                    {viewing.content === "picture" ? null : viewing.content === null ? (
                       <p class="quiet">It couldn't be read.</p>
-                    ) : "picture" in viewing.content ? (
-                      <img class="picture" src={viewing.content.picture} alt={viewing.path} />
+                    ) : "missing" in viewing.content ? (
+                      <p class="quiet">This version has no file at that path.</p>
                     ) : "binary" in viewing.content ? (
                       <p class="flag"><Glyph name="danger-triangle" size={16} />Not text, so not shown. Binary files can hold code: ask what it's for.</p>
                     ) : "tooBig" in viewing.content ? (
@@ -327,7 +332,7 @@ const failing = checks.filter((c) => c.level === "fail").length;
               {diffs.map((d) => {
                 const n = d.rows ? countRows(d.rows) : null;
                 return (
-                  <article class="change" id={encodeURIComponent(d.path)}>
+                  <article class="change" id={`change-${encodeURIComponent(d.path)}`}>
                     <header>
                       <Badge tone={d.change === "added" ? "success" : d.change === "removed" ? "danger" : "warning"} size="sm">
                         {d.change === "added" ? "Added" : d.change === "removed" ? "Removed" : "Changed"}

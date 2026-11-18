@@ -21,6 +21,9 @@ export const isUsername = (value: unknown): value is string => typeof value === 
 /** Whether a version is a pre-release (`1.2.0-beta.1`). */
 export const isPrerelease = (version: string): boolean => /^[^+]*-/.test(version);
 
+/** The longest path in a package, in UTF-8 bytes (the edge's max_path). */
+export const MAX_PATH = 1024;
+
 /**
  * A file's path inside a package, normalized, or null when it isn't one: no
  * leading slash, no backslash, no empty, `.` or `..` part, no control
@@ -28,7 +31,8 @@ export const isPrerelease = (version: string): boolean => /^[^+]*-/.test(version
  * packages to them, so anything else names no file.)
  */
 export function packagePath(value: string): string | null {
-  if (value.length === 0 || value.length > 512) return null;
+  // (1 to 1024 bytes of UTF-8, as the edge takes them: docs/plugin-store-data.json max_path.)
+  if (value.length === 0 || new TextEncoder().encode(value).length > MAX_PATH) return null;
   if (value.startsWith("/") || value.includes("\\")) return null;
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(value)) return null;

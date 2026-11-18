@@ -99,3 +99,30 @@ export async function contentSecurityPolicy(html: string): Promise<string> {
     "object-src 'none'",
   ].join("; ");
 }
+
+/** What an HTML form can send without asking first (a cross-site one included). */
+const FORM_TYPES = ["application/x-www-form-urlencoded", "multipart/form-data", "text/plain"];
+
+/**
+ * Whether `request` is a form posted from another site, as Astro's own
+ * check decides it (security.checkOrigin, astro/dist/core/app/origin-check.js),
+ * made here so the admin pages can answer it with their 404: Astro's runs
+ * only where a page is, and so would say which pages are.
+ */
+export function isCrossSiteForm(request: Request): boolean {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return false;
+  const type = request.headers.get("content-type");
+  if (type && !FORM_TYPES.some((form) => type.toLowerCase().includes(form))) return false;
+  switch (request.headers.get("sec-fetch-site")) {
+    case null:
+    case "":
+      break;
+    case "same-origin":
+    case "none":
+      return false;
+    default:
+      return true;
+  }
+  const origin = request.headers.get("origin");
+  return origin !== null && origin !== new URL(request.url).origin;
+}
