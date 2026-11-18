@@ -330,18 +330,23 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 				bg = "$surface.sunken",
 				border = 1,
 				border_color = "$zeron.well.edge",
-				ui.text {
-					function(): string
-						return secret:get() or ""
-					end,
+				-- (One line in the code face, scrolling sideways: never broken
+				-- inside the token. Copy is what takes it.)
+				ui.scroll_x {
 					grow = 1,
 					min_w = 0,
-					font = "$font.mono",
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.primary",
-					wrap = true,
-					selectable = true,
+					fade = { 12, 12 },
+					fade_overflow = true,
+					ui.text {
+						function(): string
+							return secret:get() or ""
+						end,
+						font = "$font.mono",
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.primary",
+						selectable = true,
+					},
 				},
 				ds.Button {
 					tone = "secondary",

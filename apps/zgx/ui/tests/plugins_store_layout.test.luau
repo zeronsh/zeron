@@ -189,3 +189,86 @@ test("what a plugin asks for reads as the consent sheet reads it: the same words
 		expect(`{l.text}: {tostring(said[l.text] == true)}`).to_be(`{l.text}: true`)
 	end
 end)
+
+-- Every node under `root` ends at or before `edge`.
+local function within(app: any, root: string, edge: number): (boolean, string)
+	local first = true
+	for line in app:tree(root):gmatch("[^\n]+") do
+		-- (Its descendants: the root is the card's own frame.)
+		if first then
+			first = false
+			continue
+		end
+		local x, w = line:match(" (%-?[%d.]+),%-?[%d.]+ ([%d.]+)x[%d.]+")
+		if x and (tonumber(x) :: number) + (tonumber(w) :: number) > edge + 0.6 then
+			return false, line
+		end
+	end
+	return true, ""
+end
+
+test("a listing at every limit stays inside its page: its whole name, its facts' long links", function()
+	local app = page("extremes")
+	local _, content = edges(app, "#store-readme")
+	content += 1
+	local install = box(app, '#store-header >> role:button "Install"')
+	local heading = box(app, '#store-header >> role:heading')
+	expect(heading.x + heading.w <= install.x).to_be(true)
+	local ok, line = within(app, "#store-facts", content)
+	expect(`{ok} {line}`).to_be("true ")
+end)
+
+test("a different plugin with the same id says so as the other reasons Install is off do, with the way to it", function()
+	local app = page("focus-timer")
+	app:set_state("plugins", (function()
+		local now = app:state("plugins")
+		local list = {}
+		for _, p in now.list do
+			table.insert(list, p)
+		end
+		table.insert(list, { id = "focus-timer", name = "Focus timer", version = "9.9.9", author = { kind = "unknown" }, status = "on", permissions = {}, allowed = {}, ask = {}, hash = "x", source = { kind = "link", url = "https://e.example/f.zeron-plugin" } })
+		return { state = now.state, list = list }
+	end)())
+	settle(app)
+	app:click('role:link "Show it in Installed"')
+	settle(app)
+	expect(app:has('role:tab "Installed" selected') or app:has("#catalog-card")).to_be(true)
+end)
+
+test("publishing's buttons and its versions' actions end on one edge, the content's", function()
+	local app = mounted()
+	app:click('role:tab "Yours"')
+	settle(app)
+	app:click('role:button "Publish…"')
+	app:wait("#publish-checks", { timeout_ms = 3000 })
+	settle(app, 500)
+	local _, content = edges(app, "#publish-checks")
+	-- (The checks' column is 1 in from its card's edge.)
+	content += 1
+	-- (Each row's last: Check again stands before Submit.)
+	for _, target in { "#publish-submit", 'role:button "Stop new installs"', "#keys-new" } do
+		local b = box(app, target)
+		expect(`{target} {math.abs(b.x + b.w - content) < 0.6}`).to_be(`{target} true`)
+	end
+end)
+
+test("a deploy key's secret is one line in the code face, never broken inside it", function()
+	local app = mounted()
+	app:click('role:tab "Yours"')
+	settle(app)
+	app:click('role:button "Publish…"')
+	app:wait("#publish-checks", { timeout_ms = 3000 })
+	settle(app, 400)
+	app:scroll(SCROLL, 2000)
+	app:frames(10)
+	app:click("#keys-new")
+	settle(app)
+	app:type('role:dialog >> role:textbox "Name"', "CI")
+	app:click('role:dialog >> role:button "Create key"')
+	settle(app)
+	app:command("store_stub.signed_in_again")
+	settle(app, 400)
+	local line = app:tree("#key-secret")
+	local text_h = tonumber(line:match('text "zpk_[^"]*" [%-%d.]+,[%-%d.]+ [%d.]+x([%d.]+)')) or 0
+	expect(text_h <= 20).to_be(true)
+end)

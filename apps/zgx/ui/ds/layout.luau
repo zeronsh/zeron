@@ -58,6 +58,10 @@ export type LinkProps = {
 	href: string?,
 	tone: ("accent" | "quiet")?,
 	size: ("sm" | "md")?,
+	-- Short of room, its words end in "…" (its arrow kept), and `tooltip`
+	-- says them whole: a long address in a column of facts.
+	truncate: boolean?,
+	tooltip: string?,
 }
 
 function M.Link(props: LinkProps): Node
@@ -70,7 +74,9 @@ function M.Link(props: LinkProps): Node
 		cursor = "pointer",
 		gap = "$zeron.space.hair",
 		items = "center",
-		shrink = 0,
+		shrink = if props.truncate then 1 else 0,
+		min_w = if props.truncate then 0 else nil,
+		tooltip = props.tooltip,
 		rounded = "$radius.sm",
 		color = if quiet then "$text.secondary" else "$zeron.tone.accent.ink",
 		hover = { underline = true, color = if quiet then "$text.primary" else "$zeron.tone.accent.ink" },
@@ -82,8 +88,13 @@ function M.Link(props: LinkProps): Node
 				return href
 			end, props.on_click)
 			else nil,
-		ui.text { props[1], text_size = if props.size == "sm" then "$font.size.sm" else "$font.size.md" },
-		if props.external then ui.div { y = -0.5, Icon { name = "arrow-up-right", size = 12 } } else nil,
+		ui.text {
+			props[1],
+			text_size = if props.size == "sm" then "$font.size.sm" else "$font.size.md",
+			truncate = props.truncate,
+			min_w = if props.truncate then 0 else nil,
+		},
+		if props.external then ui.div { y = -0.5, shrink = 0, Icon { name = "arrow-up-right", size = 12 } } else nil,
 	}
 end
 

@@ -74,7 +74,8 @@ local STATUS_TONE: { [string]: string } = {
 	approved = "success",
 	rejected = "danger",
 	withdrawn = "neutral",
-	yanked = "neutral",
+	-- (Approved, no longer offered: not the same as pulled before review.)
+	yanked = "info",
 	removed = "warning",
 }
 
@@ -282,6 +283,13 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 			end
 			add(check_row(found == nil, ui.t("plugins.store.check.newer"), if found then fix_of(found) else nil))
 		else
+			-- (Not asked, so nothing to say of it but the note: a newer-than
+			-- answer can't come with it, and none is shown if one does.)
+			for _, p in problems do
+				if type(p) == "table" and (p.rule == "not_newer" or p.rule == "version_exists") then
+					used[p] = true
+				end
+			end
 			local note = if type(r.note) == "string" and r.note ~= "" then string.sub(r.note, 1, 300) else nil
 			add(check_row("later", ui.t("plugins.store.check.newer"), function(): string
 				return note or ui.t("plugins.store.check.newer_unchecked"):get()

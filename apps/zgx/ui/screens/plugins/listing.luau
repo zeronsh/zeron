@@ -95,6 +95,32 @@ local function package_path(src: string): string?
 	return path
 end
 
+-- A README cut into pieces of about `PIECE` bytes, each ending where a
+-- paragraph does (a blank line), never inside a fenced code block.
+local PIECE = 64 * 1024
+local function readme_pieces(text: string): { string }
+	local out: { string } = {}
+	local piece: { string } = {}
+	local size = 0
+	local fenced = false
+	for line in string.gmatch(text .. "\n", "([^\n]*)\n") do
+		if string.match(line, "^%s*```") or string.match(line, "^%s*~~~") then
+			fenced = not fenced
+		end
+		table.insert(piece, line)
+		size += #line + 1
+		if size >= PIECE and not fenced and string.match(line, "^%s*$") then
+			table.insert(out, table.concat(piece, "\n"))
+			piece = {}
+			size = 0
+		end
+	end
+	if #piece > 0 then
+		table.insert(out, table.concat(piece, "\n"))
+	end
+	return out
+end
+
 local function said(node: Node): Node
 	return ui.column { w_full = true, py = "$space.6", px = "$space.4", node }
 end
@@ -380,6 +406,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					end,
 					heading = 1,
 					w_full = true,
+					-- (The whole of it, on as many lines as it takes: a word
+					-- longer than the line breaks to fit.)
 					wrap = true,
 					text_size = "$font.size.xl",
 					line_height = "$font.line.xl",
@@ -458,9 +486,25 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			wrap = true,
 			text_size = "$font.size.sm",
 			line_height = "$font.line.sm",
+			-- (What keeps Install off, in the warning's ink, whichever it is.)
 			color = function(): string
-				return if standing() == "incompatible" then "$zeron.tone.warning.ink" else "$text.tertiary"
+				local k = standing()
+				return if k == "incompatible" or k == "other" or k == "away" then "$zeron.tone.warning.ink" else "$text.tertiary"
 			end,
+		}),
+		-- The other plugin with its id: where it is, to remove it.
+		ui.show(function(): boolean
+			return standing() == "other"
+		end, ui.row {
+			px = ds.Settings.inset(),
+			ds.Link {
+				ui.t("plugins.store.show_installed"),
+				size = "sm",
+				on_click = function()
+					nav.tab:set("installed")
+					nav.back()
+				end,
+			},
 		}),
 		-- A version Zeron took down: why, and the way back.
 		ui.show(function(): boolean
@@ -573,6 +617,10 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						href = u,
 						size = "sm",
 						tone = "quiet",
+						-- (A long one ends in "…" inside the card; the link and
+						-- its tooltip are the whole of it.)
+						truncate = true,
+						tooltip = u,
 						on_click = function()
 							Links.open(u)
 						end,
@@ -588,8 +636,30 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		}
 	end
 
-	-- The README: the app's Markdown, its pictures the package's own.
+	-- The README: the app's Markdown, its pictures the package's own. A
+	-- long one (the store takes 512 KB) is drawn a piece at a time, each
+	-- piece ending at a paragraph's end outside any code block: the first
+	-- at once, the rest as asked (Show more), so no frame lays out half a
+	-- megabyte of prose.
+	local pieces = readme_pieces(if type(first.readme) == "string" then string.sub(first.readme, 1, 512 * 1024) else "")
+	local shown_pieces = ui.use_state(1)
+	local function picture(src: string): any
+		-- A picture of its package, through the store; anything else is its
+		-- link (`false`), never fetched from where it points.
+		local path = package_path(src)
+		if not path then
+			return false
+		end
+		return store.picture_src(id, version, path :: string)
+	end
 	local function readme(): Node
+		local list = ui.computed(function(): { number }
+			local out = {}
+			for i = 1, math.min(shown_pieces:get(), #pieces) do
+				table.insert(out, i)
+			end
+			return out
+		end)
 		return ds.Settings.Section {
 			title = ui.t("plugins.store.about"),
 			ds.Settings.Group {
@@ -598,23 +668,32 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					w_full = true,
 					px = "$space.4",
 					py = "$space.4",
-					Markdown {
-						-- (Its author's words: links are links, never Zeron's chips.)
-						foreign = true,
-						text = function(): string
-							local r = d().readme
-							return if type(r) == "string" then string.sub(r, 1, 512 * 1024) else ""
+					gap = "$space.4",
+					ui.each(list, function(i: number): Node
+						return Markdown {
+							-- (Its author's words: links are links, never Zeron's chips.)
+							foreign = true,
+							text = pieces[i],
+							image = picture,
+						}
+					end, {
+						key = function(i: number): number
+							return i
 						end,
-						-- A picture of its package, through the store; anything else
-						-- is its link (`false`), never fetched from where it points.
-						image = function(src: string): any
-							local path = package_path(src)
-							if not path then
-								return false
-							end
-							return store.picture_src(id, version, path :: string)
-						end,
-					},
+					}),
+					ui.show(function(): boolean
+						return shown_pieces:get() < #pieces
+					end, ui.row {
+						ds.Button {
+							id = "store-readme-more",
+							tone = "secondary",
+							size = "sm",
+							on_click = function()
+								shown_pieces:set(shown_pieces:peek() + 1)
+							end,
+							ui.t("plugins.store.readme_more"),
+						},
+					}),
 				},
 			},
 		}
@@ -731,7 +810,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			end,
 			badge = ui.show(function(): boolean
 				return now:get().yanked == true or now:get().status == "yanked"
-			end, ds.Badge { ui.t("plugins.store.yanked"), tone = "neutral", size = "sm" }),
+			end, ds.Badge { ui.t("plugins.store.status.yanked"), tone = "info", size = "sm" }),
 			description = function(): string
 				local at = now:get().published_at
 				return if type(at) == "number" then locale.date(at / 1000) else ""

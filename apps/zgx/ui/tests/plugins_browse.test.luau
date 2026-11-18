@@ -330,3 +330,17 @@ test("a row at every limit at once keeps its height, its words fading at its end
 	expect(tonumber(h)).to_be(ROW)
 	expect(tonumber(w) <= 640).to_be(true)
 end)
+
+test("the featured are the store's featured list, asked for as such, in the store's order", function()
+	local app = open()
+	expect(calls(app)).to_contain("search:q=,category=,keyword=,sort=popular,cursor=,featured")
+	local order = {}
+	for line in app:tree("#store-featured"):gmatch("[^\n]+") do
+		local name = line:match('button "([^"]+)"')
+		if name then
+			table.insert(order, name)
+		end
+	end
+	-- (The stub's three featured, most installed first, as the store sorts.)
+	expect(table.concat(order, ", ")).to_be("Focus timer, Review notes, Slack ping")
+end)

@@ -3915,7 +3915,6 @@
       "asks": "它需要的权限",
       "asks_note": "和其他插件一样，安装时由你来允许。",
       "versions": "版本",
-      "yanked": "已撤回",
       "update_title": "将{name}更新到 {version}？",
       "update_title_plain": "更新{name}？",
       "update_body": "新内容，以及它需要的权限有什么变化。",
@@ -4040,7 +4039,7 @@
         "unknown": "把它分享到插件商店"
       },
       "keys": "部署密钥",
-      "keys_body": "CI 任务（例如 GitHub Action）可以用密钥代替你的登录来发布新版本。一个密钥只能发布这个插件，每个版本仍需审核。",
+      "keys_body": "部署密钥让 CI 任务（例如 GitHub Action）不用你的登录就能发布新版本。它只能发布这个插件，每个版本仍需审核。",
       "keys_none": "还没有密钥。",
       "keys_failed": "无法查看它的密钥",
       "key": {
@@ -4074,7 +4073,7 @@
         "revoke_body": "用它发布的流程会立即停止。它已经发送的版本保持不变。",
         "revoke_failed": "无法吊销密钥"
       },
-      "other_installed": "这里已安装了另一个同 id 的插件（来自别处）。先移除它才能安装这个。",
+      "other_installed": "这里已安装了另一个同 id 的插件（来自别处）。在“已安装”中移除它后才能安装这个。",
       "unblock_title": "重新打开{name}？",
       "unblock_body": "Zeron 已将这个版本从商店下架。它会按你之前的允许在这里再次运行。",
       "unblock_body_reason": "Zeron 已将这个版本从商店下架：{reason} 它会按你之前的允许在这里再次运行。",
@@ -4082,7 +4081,9 @@
       "update_new_owner_unnamed": "它有了新的发布者。更新后 Zeron 会再次请你允许。",
       "update_in_review": "这个版本还在审核中：只提供给你自己的设备。",
       "keys_publish_first": "请先从这台电脑发送第一个版本；之后的版本可以由部署密钥发送。",
-      "version_installs": "版本 {version} · {n, plural, other {# 次安装}}"
+      "version_installs": "版本 {version} · {n, plural, other {# 次安装}}",
+      "show_installed": "在“已安装”中查看",
+      "readme_more": "显示更多"
     }
   },
   "templates": {

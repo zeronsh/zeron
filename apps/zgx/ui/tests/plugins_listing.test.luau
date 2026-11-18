@@ -337,3 +337,25 @@ test("an update from a new publisher says so by name, and one still in review sa
 	expect(dialog).to_contain("It has a new publisher, @ada.")
 	expect(dialog).to_contain("still in review")
 end)
+
+test("a README of the store's whole 512 KB opens with its first piece, the rest a piece at a time", function()
+	local app = mount("plugins_store_fixture.luau")
+	app:resize(1000, 900)
+	app:frames(10)
+	app:set_state("plugins_view", "store:extremes")
+	app:wait("#store-readme", { timeout_ms = 10000 })
+	settle(app, 300)
+	expect(app:error()).to_be_nil()
+	expect(app:has("#store-readme-more")).to_be(true)
+	local function height(): number
+		return tonumber((app:tree("#store-readme"):match("^%s*@%d+[^\n]- [%d.]+x([%d.]+)"))) or 0
+	end
+	local before = height()
+	local y = tonumber((app:tree("#store-readme-more"):match(" %-?[%d.]+,(%-?[%d.]+) "))) or 0
+	app:scroll("#fixture-scroll", y - 400)
+	app:frames(10)
+	app:click("#store-readme-more")
+	settle(app, 300)
+	expect(height() > before + 1000).to_be(true)
+	expect(app:error()).to_be_nil()
+end)

@@ -113,8 +113,9 @@ listing = ui.paged(function(cursor: string?): any
 	return { items = items, next = next }
 end)
 
--- The few Zeron features, for when nothing narrows the list. (Asked once
--- Browse is looked at; the store marks each card `featured`.)
+-- The few Zeron features, for when nothing narrows the list: the store's
+-- featured list (`featured = true`), in its order. (Asked once Browse is
+-- looked at.)
 local featured_pages = ui.paged(function(_cursor: string?): any
 	if not wanted:get() then
 		return { items = {}, next = nil }
@@ -127,7 +128,8 @@ local featured_pages = ui.paged(function(_cursor: string?): any
 	end
 	local out: { store.Card } = {}
 	for _, c in (if type(page.items) == "table" then page.items else {}) :: { any } do
-		if type(c) == "table" and c.featured == true and store.valid_id(c.id) and #out < 3 then
+		-- (The store's featured, in the store's order: the first few.)
+		if type(c) == "table" and store.valid_id(c.id) and #out < 3 then
 			table.insert(out, c)
 		end
 	end

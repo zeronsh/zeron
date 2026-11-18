@@ -3915,7 +3915,6 @@
       "asks": "What it asks for",
       "asks_note": "You allow these as it installs, as with any plugin.",
       "versions": "Versions",
-      "yanked": "Withdrawn",
       "update_title": "Update {name} to {version}?",
       "update_title_plain": "Update {name}?",
       "update_body": "What's new, and what changes in what it asks for.",
@@ -4040,7 +4039,7 @@
         "unknown": "Share it in the plugin store"
       },
       "keys": "Deploy keys",
-      "keys_body": "A CI job, a GitHub Action say, publishes new versions with a key instead of your session. A key publishes this plugin alone, and every version still waits for review.",
+      "keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions without your session. It publishes this plugin alone, and every version still waits for review.",
       "keys_none": "No keys yet.",
       "keys_failed": "Couldn't see its keys",
       "key": {
@@ -4074,7 +4073,7 @@
         "revoke_body": "Anything publishing with it stops working at once. Versions it already sent stay as they are.",
         "revoke_failed": "Couldn't revoke the key"
       },
-      "other_installed": "A different plugin with this id is installed here, from somewhere else. Remove it to install this one.",
+      "other_installed": "A different plugin with this id is installed here, from somewhere else. Remove it in Installed to install this one.",
       "unblock_title": "Turn {name} back on?",
       "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",
       "unblock_body_reason": "Zeron took this version down from the store: {reason} It runs again here, as you allowed it.",
@@ -4082,7 +4081,9 @@
       "update_new_owner_unnamed": "It has a new publisher. Zeron asks you to allow it again after it updates.",
       "update_in_review": "This version is still in review: only your own devices are offered it.",
       "keys_publish_first": "Send its first version from this computer; a deploy key can send the ones after it.",
-      "version_installs": "Version {version} · {n, plural, one {# install} other {# installs}}"
+      "version_installs": "Version {version} · {n, plural, one {# install} other {# installs}}",
+      "show_installed": "Show it in Installed",
+      "readme_more": "Show more"
     }
   },
   "templates": {

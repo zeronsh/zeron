@@ -474,6 +474,8 @@ local problems: { any } = {
 local prepared_version = "1.2.0"
 -- Whether the engine could ask the store which versions it has.
 local store_checked = true
+-- (Tests: an answer the engine can't give, to see the page stays honest.)
+local force_problem = ui.state("store_stub_force_problem", false)
 local signed_in_again = false
 
 stub.mine = function(): any
@@ -496,7 +498,17 @@ stub.prepare = function(id: string): any
 			version = prepared_version,
 			hash = `{id}-{prepared_version}`,
 			ok = ok,
-			problems = table.clone(problems),
+			-- (Each answer alone: not having asked the store, it gives no
+			-- newer-than answer.)
+			problems = (function(): { any }
+				local out = {}
+				for _, p in problems do
+					if store_checked or force_problem:peek() or (p.rule ~= "not_newer" and p.rule ~= "version_exists") then
+						table.insert(out, p)
+					end
+				end
+				return out
+			end)(),
 			warnings = { { rule = "no_notes", words = "CHANGELOG.md has no section for 1.2.0" } },
 			package = { files = 4, bytes = 9120 },
 			ticket = if ok then `ticket-{prepared_version}` else nil,

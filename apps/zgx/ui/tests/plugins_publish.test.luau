@@ -181,6 +181,20 @@ test("newer than every version sent is a check of its own, or the engine's note 
 	app:click('role:button "Check again"')
 	settle(app)
 	expect(app:tree("#publish-checks")).to_contain("Couldn't ask the store which versions")
+	-- Not asked, no newer-than answer: only the note.
+	expect(app:tree("#publish-checks")).never.to_contain("Give it a version newer")
+end)
+
+test("handed a newer-than problem it can't have (the store not asked), the page still shows only the note", function()
+	local app = yours()
+	app:set_state("store_stub_force_problem", true)
+	app:command("store_stub.store_unchecked")
+	app:command("store_stub.not_newer")
+	app:click('role:button "Publish…"')
+	app:wait("#publish-checks", { timeout_ms = 3000 })
+	settle(app)
+	expect(app:tree("#publish-checks")).to_contain("Couldn't ask the store which versions")
+	expect(app:tree("#publish-checks")).never.to_contain("Give it a version newer")
 end)
 
 test("a deploy key waits for the first version, sent from this computer", function()
