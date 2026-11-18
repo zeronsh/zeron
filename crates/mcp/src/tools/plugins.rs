@@ -262,7 +262,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: CHECK_PLUGIN,
-            description: "Check one of the person's own plugins (made on this device, by its id) against the store's rules before it's published: every problem, each with a `rule` (missing_readme, missing_listing, bad_listing, not_semver, id_reserved, bad_package, too_large), the `field` or `path` it's about and words to fix it by, plus warnings that don't block it (binary files, no CHANGELOG.md section for its version), its listing as the store will show it, and this version's notes. Fix and check again until `ok`. Submitting it to the store is the person's: they publish it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish <id>`; you can't submit it for them. The store needs README.md (its page), a one-line `description`, an `icon` (an SVG file in it), one or two `categories`, and a strict semver `version`; see the guide's \"Publishing to the store\".",
+            description: "Check one of the person's own plugins (made on this device, by its id) against the store's rules before it's published: every problem, each with a `rule` (missing_readme, missing_listing, bad_listing, not_semver, id_reserved, bad_package, too_large), the `field` or `path` it's about and words to fix it by, plus warnings that don't block it (binary files, no CHANGELOG.md section for its version), its listing as the store will show it, and this version's notes. Fix and check again until `ok`. Submitting it to the store is the person's: they publish it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish <id>`. No tool here submits it and Zeron never gives you what does (the check's ticket), so don't run `zeron plugin publish` yourself unless they ask you to. The store needs README.md (its page), a one-line `description`, an `icon` (an SVG file in it), one or two `categories`, and a strict semver `version`; see the guide's \"Publishing to the store\".",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -799,7 +799,7 @@ impl Tools {
         }
         reply["next"] = json!(if reply["ok"] == json!(true) {
             format!(
-                "It meets the store's rules. Publishing is the person's: they submit it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish {}`; you can't submit it for them. Every version is reviewed before others see it.",
+                "It meets the store's rules. Publishing is the person's: they submit it in Zeron (Settings → Plugins → Yours → Publish…) or with `zeron plugin publish {}`. No tool here submits it, and Zeron never gives you what does: don't run that command yourself unless they ask you to. Every version is reviewed before others see it.",
                 id.trim()
             )
         } else {
@@ -1054,7 +1054,8 @@ mod tests {
         let checked = tools.call(CHECK_PLUGIN, json!({ "id": "focus" })).await.unwrap();
         assert_eq!(checked["ok"], true);
         assert!(checked.get("ticket").is_none(), "an agent never holds what submits it");
-        assert!(checked["next"].as_str().unwrap().contains("you can't submit it for them"));
+        assert!(checked["next"].as_str().unwrap().contains("No tool here submits it"));
+        assert!(!checked["next"].as_str().unwrap().contains("can't submit"), "(it says what's enforced, no more)");
         let rough = tools.call(CHECK_PLUGIN, json!({ "id": "rough" })).await.unwrap();
         assert_eq!(rough["problems"][0]["rule"], "not_semver");
         assert!(rough["next"].as_str().unwrap().contains("check_plugin again"));
