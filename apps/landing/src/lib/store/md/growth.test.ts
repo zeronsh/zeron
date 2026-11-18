@@ -2,8 +2,9 @@
 // (md/families.ts): the identity lane's attack, made a test. For each
 // family, at sizes up to the README's cap:
 // - what it reads (the meter's count, md/meter.ts) is at most READ_PER_BYTE
-//   a byte, and grows linearly: its fitted exponent at most 1.05 (the
-//   identity lane's bound; the most measured is 1.01);
+//   a byte, and grows linearly: its exponent, fitted over the sizes from
+//   128 KiB (where a cheaper start, a first block with nothing before it,
+//   no longer shows, as the identity lane fits it), at most 1.05;
 // - what it keeps never passes KEEP_MOST, and what it writes never passes
 //   the output's bound (each stops it, said so, and is held here anyway);
 // - its time, a second witness, loosely: within TIME_MOST at the cap, and
@@ -66,14 +67,15 @@ describe("linear in what it is given, family by family", () => {
       // (The best of two: a time is the least it took.)
       const a = run(md);
       const b = run(md);
-      return { n: md.length, read: a.m.read, peak: Math.max(a.m.peak, b.m.peak), written: a.m.written, ms: Math.min(a.ms, b.ms) };
+      return { size, n: md.length, read: a.m.read, peak: Math.max(a.m.peak, b.m.peak), written: a.m.written, ms: Math.min(a.ms, b.ms) };
     });
     for (const row of rows) {
       expect(row.read / row.n, `read a byte at ${row.n}`).toBeLessThanOrEqual(READ_PER_BYTE);
       expect(row.peak, `kept at ${row.n}`).toBeLessThanOrEqual(KEEP_MOST);
       expect(row.written, `written at ${row.n}`).toBeLessThanOrEqual(MOST + 64);
     }
-    expect(exponent(rows.map((r) => [r.n, r.read])), "read's exponent").toBeLessThanOrEqual(1.05);
+    const large = rows.filter((r) => r.size >= 128 * 1024);
+    expect(exponent(large.map((r) => [r.n, r.read])), "read's exponent").toBeLessThanOrEqual(1.05);
     const last = rows[rows.length - 1];
     expect(last.ms, "time at the cap").toBeLessThan(TIME_MOST);
     if (last.ms >= 25) expect(exponent(rows.map((r) => [r.n, r.ms])), "time's exponent").toBeLessThanOrEqual(1.6);
