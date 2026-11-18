@@ -716,7 +716,7 @@ ui.effect(function()
 		-- (Plugins already open: no visit begins to keep the page for.)
 		local r = at()
 		local there = r.name == "settings" and r.params.page == "plugins"
-		require("@app/screens/plugins/nav").open_listing(l.plugin, not there)
+		require("@app/screens/plugins/nav").open_listing(l.plugin, not there, true)
 		M.settings("plugins")
 		-- Followed: a window made later isn't sent here again.
 		pcall(ui.invoke, "app.link_followed", l.seq)

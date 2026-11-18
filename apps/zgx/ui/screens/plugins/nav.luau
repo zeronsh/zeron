@@ -6,7 +6,8 @@
 --
 --   nav.view:get()          "catalog" | "store:<id>" | "publish:<id>"
 --   nav.tab                 the tab shown: "installed" | "yours" | "browse"
---   nav.open_listing(id)    a store plugin's page (Browse its way back)
+--   nav.open_listing(id)    a store plugin's page (Browse its way back);
+--                           `by_link`: a link opened it (`nav.linked()`)
 --   nav.open_publish(id)    publishing one of yours (Yours its way back)
 --   nav.back()              the tabs again
 --   nav.arrive()            for a visit: the tabs, unless something opened
@@ -18,6 +19,10 @@ M.view = ui.state("plugins_view", "catalog")
 M.tab = ui.state("plugins_tab", "installed")
 -- A page opened from outside the page (a link) before the visit began.
 local opened = ui.state("plugins_view_opened", false)
+-- The store plugin whose page a link opened, until the person goes
+-- anywhere else from it: its page's action waits a moment before it takes
+-- a click (screens/plugins/listing), as the consent window's Allow does.
+local linked = ui.state("plugins_view_linked", nil :: string?)
 
 -- (Only an id a store id could be, as a plugin's id is: anything else is
 -- no page at all.)
@@ -25,13 +30,19 @@ local function valid(id: string): boolean
 	return #id >= 2 and #id <= 40 and string.match(id, "^[a-z0-9][a-z0-9%-]*$") ~= nil
 end
 
-function M.open_listing(id: string, from_outside: boolean?)
+function M.open_listing(id: string, from_outside: boolean?, by_link: boolean?)
 	if not valid(id) then
 		return
 	end
 	M.tab:set("browse")
 	M.view:set(`store:{id}`)
 	opened:set(from_outside == true)
+	linked:set(if by_link then id else nil)
+end
+
+-- Whether a link opened plugin `id`'s page (read as the page shows).
+function M.linked(id: string): boolean
+	return linked:peek() == id
 end
 
 function M.open_publish(id: string)
@@ -41,10 +52,12 @@ function M.open_publish(id: string)
 	M.tab:set("yours")
 	M.view:set(`publish:{id}`)
 	opened:set(false)
+	linked:set(nil)
 end
 
 function M.back()
 	opened:set(false)
+	linked:set(nil)
 	M.view:set("catalog")
 end
 

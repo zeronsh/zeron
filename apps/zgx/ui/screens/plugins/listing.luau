@@ -41,6 +41,7 @@ local state = require("@app/screens/plugins/state")
 local words = require("@app/screens/plugins/words")
 local asks_view = require("@app/screens/plugins/asks")
 local nav = require("@app/screens/plugins/nav")
+local consent = require("@screens/plugins/consent")
 local browse = require("@app/screens/plugins/browse")
 local plugin_settings = require("@app/screens/plugins/settings")
 local sessions = require("@account/sessions")
@@ -300,6 +301,20 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local report_text = ui.use_state("")
 	local unblocking = ui.use_state(false)
 	local unblock_open = ui.use_state(false)
+	-- Opened by a link (`zeron://open/plugin/<id>`), the page's one action
+	-- takes no click until it has shown a moment, the consent window's own
+	-- (`consent.ARM_MS`), disabled meanwhile as Allow is there: a page that
+	-- comes forward under a click mid-way never takes it. Opened from
+	-- inside Zeron, it acts at once.
+	local by_link = nav.linked(id)
+	local armed = ui.use_state(not by_link)
+	ui.on_mount(function()
+		if by_link then
+			ui.after(consent.ARM_MS, function()
+				armed:set(true)
+			end)
+		end
+	end)
 
 	-- What the device shown has of it: this store plugin (installed from
 	-- the store); another plugin that has its id (from a file, a link)
@@ -426,8 +441,21 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 
 	-- (Every one of them the same button: the page's primary, small, as a
 	-- row's controls are.)
+	-- (And none takes a click before it's armed.)
 	local function primary(props: { [any]: any }): Node
 		props.tone, props.size, props.class = "primary", "sm", "store-action"
+		local given, click = props.disabled, props.on_click
+		props.disabled = function(): boolean
+			if not armed:get() then
+				return true
+			end
+			return if type(given) == "function" then given() == true else given == true
+		end
+		props.on_click = function(...)
+			if armed:peek() and click then
+				click(...)
+			end
+		end
 		return ds.Button(props :: any)
 	end
 	-- The one button, by what it does now: the page's one primary action,
