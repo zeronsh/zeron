@@ -26,6 +26,10 @@ test("the app's link names only a store id", () => {
   expect(appUrl("focus-timer")).toBe("zeron://open/plugin/focus-timer");
   // (The link can name a version: the contract's "The link can name a version".)
   expect(appUrl("focus-timer", "1.2.0-beta.1")).toBe("zeron://open/plugin/focus-timer?version=1.2.0-beta.1");
+  // (As the app reads it: unescaped, a build's "+" as it is; anything else left out.)
+  expect(appUrl("focus-timer", "1.2.0+build.7")).toBe("zeron://open/plugin/focus-timer?version=1.2.0+build.7");
+  expect(appUrl("focus-timer", "1.2.0&x=1")).toBe("zeron://open/plugin/focus-timer");
+  expect(appUrl("focus-timer", "1".repeat(33))).toBe("zeron://open/plugin/focus-timer");
 });
 
 test("a file's address encodes each part", () => {

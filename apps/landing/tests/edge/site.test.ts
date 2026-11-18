@@ -409,7 +409,7 @@ describe("an update", () => {
     });
     // (1.1.0, not verified, is superseded by 1.2.0: no new installs, and its author reads why.)
     const mine = await adaOnWeb.get("/account/plugins/focus-timer");
-    expect(mine.body).toContain("Replaced by 1.2.0 before it was verified: no new installs. Those who have it keep it working; verifying it would allow installs again.");
+    expect(mine.body).toContain("Replaced by 1.2.0 before it was verified. Those who have it keep it working; verifying it would allow installs again.");
     expect(mine.body).not.toContain("/versions/1.1.0/unyank");
     const queue = await grace.get("/admin/plugins");
     expect(queue.body).not.toContain("/admin/plugins/focus-timer/1.1.0");
@@ -417,7 +417,7 @@ describe("an update", () => {
     // In public too, from an edge that says why (dc45c3606 on); an older one says only that it takes none.
     const publicly = await new Browser().get("/plugins/focus-timer/versions/1.1.0");
     expect(publicly.response.status).toBe(200);
-    expect(publicly.body).toMatch(process.env.E2E_OLD_EDGE ? /It takes no new installs\./ : /Replaced by 1\.2\.0 before it was verified: no new installs\. Those who have it keep it working\./);
+    expect(publicly.body).toMatch(process.env.E2E_OLD_EDGE ? /It takes no new installs\./ : /Replaced by 1\.2\.0 before it was verified\. Those who have it keep it working\./);
     const overview = await grace.get("/admin/plugins/focus-timer/1.2.0");
     expect(overview.body).toContain("Update from 1.0.0, its newest verified version");
     expect(overview.body).toContain("New or changed since 1.0.0");

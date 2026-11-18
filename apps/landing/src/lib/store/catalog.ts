@@ -9,12 +9,13 @@ import type { Category, Sort } from "./types.ts";
 export const PAGE_SIZE = 24;
 /** Where the list of every plugin is (/plugins itself is Discover). */
 export const LIST = "/plugins/all";
-const SORTS: readonly Sort[] = ["relevance", "popular", "updated", "new"];
+const SORTS: readonly Sort[] = ["relevance", "popular", "updated", "new", "verified"];
 export const SORT_LABELS: Record<Sort, string> = {
   relevance: "Best match",
   popular: "Most installed",
   updated: "Recently updated",
   new: "Newest",
+  verified: "Newly verified",
 };
 
 export interface CatalogState {

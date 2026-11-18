@@ -104,6 +104,7 @@ function card(p: FakePlugin, version: FakeVersion | undefined = latest(p)) {
     version: listedVersion?.version ?? null,
     verified: listedVersion?.verified ?? false,
     verified_version: verifiedVersion(p)?.version ?? null,
+    verified_at: verifiedVersion(p)?.verified_at ?? null,
     updated_at: (listedVersion ?? v).published_at,
     listed_at: listedAt(p),
     installs: p.installs,
@@ -225,13 +226,13 @@ function catalog(url: URL): Response {
   const verified = url.searchParams.get("verified") === "1";
   const authorName = url.searchParams.get("author");
   let sort = url.searchParams.get("sort") ?? (terms.length ? "relevance" : "popular");
-  if (!["relevance", "popular", "updated", "new"].includes(sort)) return fail(400, "bad_request", "Unknown sort.");
+  if (!["relevance", "popular", "updated", "new", "verified"].includes(sort)) return fail(400, "bad_request", "Unknown sort.");
   if (sort === "relevance" && !terms.length) sort = "popular";
   if (category && !CATEGORIES.some((c) => c.id === category)) return fail(400, "bad_request", "Unknown category.");
   const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? 24) || 24));
 
   const keyOf = (p: FakePlugin): Key => {
-    const value = sort === "relevance" ? score(p, terms) : sort === "popular" ? p.installs : sort === "updated" ? latest(p)!.published_at : listedAt(p)!;
+    const value = sort === "relevance" ? score(p, terms) : sort === "popular" ? p.installs : sort === "updated" ? latest(p)!.published_at : sort === "verified" ? (verifiedVersion(p)?.verified_at ?? 0) : listedAt(p)!;
     return [value, p.id];
   };
   // Descending by value, then ascending by id: a stable total order.
@@ -242,6 +243,8 @@ function catalog(url: URL): Response {
     // (Featured holds only plugins whose newest version is verified.)
     .filter((p) => !featured || (p.featured && latest(p)!.verified))
     .filter((p) => !verified || latest(p)!.verified)
+    // (Newly verified: only plugins with a verified listed version, at its time: contract ee380cca3.)
+    .filter((p) => sort !== "verified" || verifiedVersion(p) !== undefined)
     .filter((p) => !authorName || userOf(p.owner).username === authorName)
     .filter((p) => !category || card(p).categories.includes(category))
     .filter((p) => !keyword || card(p).keywords.some((k) => k.toLowerCase() === keyword))

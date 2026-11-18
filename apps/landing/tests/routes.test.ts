@@ -628,7 +628,7 @@ describe("forms", () => {
     expect(verifiedOf(body, "1.4.0")).toBe("Not verified");
     expect(verifiedOf(body, "1.0.0")).toBe("Verified");
     // A superseded version says why it takes no new installs, and can't be allowed again by its author.
-    expect(body).toContain("Replaced by 1.5.0 before it was verified: no new installs. Those who have it keep it working; verifying it would allow installs again.");
+    expect(body).toContain("Replaced by 1.5.0 before it was verified. Those who have it keep it working; verifying it would allow installs again.");
     const actions = [...body.matchAll(/data-dialog="(yank|unyank)-([\d_]+)"/g)].map((m) => `${m[1]} ${m[2]}`);
     expect(actions).toEqual(["yank 1_5_0", "unyank 1_1_0", "yank 1_0_0"]);
     // A reviewer's words in full, never cut; staff's reason for a take-down beside it.
@@ -640,7 +640,7 @@ describe("forms", () => {
 
   test("in public, a version that takes no new installs says why: replaced before it was verified, or stopped by its author", async () => {
     const superseded = await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0");
-    expect(superseded.body).toContain("Replaced by 1.5.0 before it was verified: no new installs. Those who have it keep it working.");
+    expect(superseded.body).toContain("Replaced by 1.5.0 before it was verified. Those who have it keep it working.");
     // (The app's sentence, its newest verified listed version a link to it: 1.0.0, its author having stopped 1.1.0.)
     expect(superseded.body).toContain('<b>1.4.0 isn&#39;t verified yet. <a href="/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.0.0">1.0.0</a> is.</b>');
     // (Never the reviewer's reason: that is its author's to read.)
