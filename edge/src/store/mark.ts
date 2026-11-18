@@ -47,11 +47,22 @@ const MARKS = STORE_DATA.mark_claims as unknown as {
   readonly languages: Readonly<Record<string, { readonly substring: boolean; readonly words: readonly OtherWord[] }>>;
   readonly description: {
     readonly ambiguous: readonly string[];
+    readonly articles: readonly string[];
+    readonly by_words: readonly string[];
+    readonly conjunctions: readonly string[];
+    readonly list_marks: readonly string[];
     readonly negations: readonly string[];
+    readonly negations_after: readonly string[];
+    readonly platform_words: readonly string[];
     readonly plugin_words: Readonly<Record<string, WordList>>;
+    readonly predicate_before: readonly string[];
+    readonly relation_after: readonly string[];
+    readonly relation_before_zh: readonly string[];
+    readonly relation_words: readonly string[];
     readonly sentence_ends: readonly string[];
     readonly store_words: readonly string[];
     readonly subject_words: readonly string[];
+    readonly verified_stems: readonly string[];
   };
 };
 const ZERONS = STORE_DATA.claims_zeron as unknown as {
@@ -81,6 +92,17 @@ const PLUGIN_WORDS: readonly WordList[] = Object.values(MARKS.description.plugin
 const SENTENCE_ENDS = new Set(MARKS.description.sentence_ends);
 const STORE_WORDS = MARKS.description.store_words;
 const SUBJECT_WORDS = MARKS.description.subject_words;
+const ARTICLES = MARKS.description.articles;
+const BY_WORDS = MARKS.description.by_words;
+const CONJUNCTIONS = MARKS.description.conjunctions;
+const LIST_MARKS = new Set(MARKS.description.list_marks);
+const NEGATIONS_AFTER = MARKS.description.negations_after;
+const PLATFORM_WORDS = MARKS.description.platform_words;
+const PREDICATE_BEFORE = MARKS.description.predicate_before;
+const RELATION_AFTER = MARKS.description.relation_after;
+const RELATION_BEFORE_ZH = MARKS.description.relation_before_zh;
+const RELATION_WORDS = MARKS.description.relation_words;
+const VERIFIED_STEMS = MARKS.description.verified_stems;
 const ZERON = ZERONS.word;
 const NAME_FORMS: readonly string[] = Object.values(ZERONS.name.allowed_before).flat();
 const ORIGIN_WORDS = ZERONS.description.origin_before;
@@ -96,6 +118,12 @@ const ANY_WORD = /^[\p{L}\p{N}]$/u;
 const ASCII_WORD = /^[A-Za-z0-9]$/;
 const ASCII = /^[\x00-\x7f]*$/;
 const IGNORABLE = /[\p{Default_Ignorable_Code_Point}\p{Me}]/gu;
+const WHITE_SPACE = /^\p{White_Space}$/u;
+
+/** How a candidate word is held: a mark word; a word that is also an
+ * ordinary word (a name's only, else only where that can't be); a word that
+ * alone isn't the mark. */
+type Kind = "mark" | "name_only" | "ambiguous";
 
 /** `text` as the rules read it before ignorables go: NFKC, lowercase, then
  * NFKD without its nonspacing marks. */
@@ -351,28 +379,118 @@ class Reading {
   }
 
   saidOfPlugin(span: Span, ambiguous: boolean): boolean {
-    return this.saidOf(span, ambiguous, !ambiguous);
+    return this.saidOf(span, ambiguous ? "ambiguous" : "mark", !ambiguous);
   }
 
-  saidOf(span: Span, ambiguous: boolean, firstWord: boolean): boolean {
+  /** Whether word `at` is one of `list`. */
+  wordIs(at: number, list: readonly string[]): boolean {
+    const [a, b] = this.words[at]!;
+    const word = this.text.slice(a, b);
+    return list.some((w) => sameWord(word, this.form(w)));
+  }
+
+  /** The sentence holding `span`: (from, to). */
+  sentence(span: Span): readonly [number, number] {
+    let from = 0;
+    for (let n = span[0] - 1; n >= 0; n--) {
+      if (SENTENCE_ENDS.has(this.text[n]!)) {
+        from = n + 1;
+        break;
+      }
+    }
+    let to = this.text.length;
+    for (let n = span[1]; n < this.text.length; n++) {
+      if (SENTENCE_ENDS.has(this.text[n]!)) {
+        to = n;
+        break;
+      }
+    }
+    return [from, to];
+  }
+
+  saidOf(span: Span, kind: Kind, firstWord: boolean): boolean {
     const covered = this.covers(span);
     if (!covered) return false;
     const [first, last] = covered;
+    const [from, to] = this.sentence(span);
+    const inSentence = (n: number) => this.words[n]![0] >= from && this.words[n]![1] <= to;
     // 4: beside "zeron", "the store", "the plugin store". No negation lifts it.
     if (STORE_WORDS.some((w) => this.beforeIs(first, w) || this.afterIs(last, w))) return true;
-    // A negation directly before lifts 1 to 3: the word before, or (in a
-    // script that doesn't space words) inside this word.
+    // A negation lifts the rest: within four words before it in its
+    // sentence, inside its word (非公式), or after it in Japanese and Korean.
     const inside = this.text.slice(this.words[first]![0], span[0]);
-    if (NEGATIONS.some((n) => this.beforeIs(first, n) || (inside.length > 0 && endsWith(inside, this.form(n))))) return false;
-    // 1: alone as a sentence; or the text's first word.
-    if (this.alone(covered, span)) return true;
-    if (!ambiguous) {
-      if (firstWord && first === 0) return true;
-      // 3: directly after a word that says it of the subject.
-      if (SUBJECT_WORDS.some((w) => this.beforeIs(first, w))) return true;
+    let negatedBefore = false;
+    for (let n = Math.max(0, first - 4); n < first; n++) if (inSentence(n) && this.wordIs(n, NEGATIONS)) negatedBefore = true;
+    const after = this.text.slice(span[1], to);
+    if (
+      negatedBefore ||
+      NEGATIONS.some((n) => inside.length > 0 && endsWith(inside, this.form(n))) ||
+      NEGATIONS_AFTER.some((n) => spans(after, this.form(n), true).length > 0)
+    ) {
+      return false;
     }
-    // 2: within two words of a word for the plugin (or, for a mark word, of
-    // a word that says it's certified), nothing ending a sentence between.
+    // A "verified" word checked with a platform: a changelog line.
+    const said = [...markText(this.text.slice(span[0], span[1]).join(""))];
+    const verified = VERIFIED_STEMS.some((stem) => {
+      const st = [...markText(stem)];
+      return startsWith(said, 0, st) || spans(said, st, true).length > 0;
+    });
+    if (verified && last + 1 < this.words.length && inSentence(last + 1) && this.wordIs(last + 1, PLATFORM_WORDS)) return false;
+    // Alone as a sentence: any of them.
+    if (this.alone(covered, span)) return true;
+    const afterConjunction = first > 0 && inSentence(first - 1) && this.wordIs(first - 1, CONJUNCTIONS);
+    let listedBefore = false;
+    for (let n = span[0] - 1; n >= from; n--) {
+      const c = this.text[n]!;
+      if (WHITE_SPACE.test(c)) continue;
+      listedBefore = LIST_MARKS.has(c);
+      break;
+    }
+    const predicateBefore =
+      afterConjunction || listedBefore || (first > 0 && inSentence(first - 1) && (this.wordIs(first - 1, PREDICATE_BEFORE) || this.wordIs(first - 1, SUBJECT_WORDS)));
+    let atEnd = true;
+    for (let n = last + 1; n < this.words.length; n++) if (inSentence(n)) atEnd = false;
+    const pluginBefore =
+      first > 0 &&
+      inSentence(first - 1) &&
+      (() => {
+        const [a, b] = this.words[first - 1]!;
+        const word = this.text.slice(a, b);
+        return PLUGIN_WORDS.some(({ substring, words }) =>
+          words.some((entry) => {
+            const [w, stem] = listed(entry);
+            const wanted = this.form(w);
+            return substring ? spans(word, wanted, true).length > 0 : eq(word, wanted) || (stem && startsWith(word, 0, wanted));
+          })
+        );
+      })();
+    const byAfter = last + 1 < this.words.length && inSentence(last + 1) && this.wordIs(last + 1, BY_WORDS);
+    const subject = first > 0 && inSentence(first - 1) && SUBJECT_WORDS.some((w) => this.beforeIs(first, w));
+    let firstInText = true;
+    for (let n = 0; n < first; n++) {
+      const [a, b] = this.words[n]!;
+      if (!(this.wordIs(n, ARTICLES) || !this.text.slice(a, b).some((c) => anyWord(c)))) firstInText = false;
+    }
+    switch (kind) {
+      case "mark":
+        // Ending its sentence ("Safe, fast and verified."), first (articles
+        // and symbols aside), after a word that says it of the subject, or
+        // after "and" with "by …" after it.
+        return (atEnd && predicateBefore) || (firstWord && firstInText) || subject || (afterConjunction && byAfter) || this.nearPlugin(covered, span, false);
+      case "name_only": {
+        // Also an ordinary word: only where that can't be.
+        const conjunctionAfter = last + 1 < this.words.length && inSentence(last + 1) && this.wordIs(last + 1, CONJUNCTIONS);
+        return subject || (firstWord && firstInText && conjunctionAfter) || (atEnd && (afterConjunction || pluginBefore));
+      }
+      case "ambiguous":
+        return (atEnd && (listedBefore || afterConjunction)) || this.nearPlugin(covered, span, true);
+    }
+  }
+
+  /** Rule 2: a word for the plugin (or, for a mark word, a word that says
+   * it's certified) after it within two words with no relation between, or
+   * directly before it; not when the phrase is someone else's. */
+  nearPlugin([first, last]: readonly [number, number], span: Span, ambiguous: boolean): boolean {
     const neighbours: WordList[] = [...PLUGIN_WORDS, { substring: true, words: ambiguous ? [] : STANDING_OTHER }];
     return neighbours.some(({ substring, words }) =>
       words.some((entry) => {
@@ -383,11 +501,40 @@ class Reading {
           const around = this.covers(other);
           if (!around) return false;
           const [oFirst, oLast] = around;
-          const [gap, from, to] = oFirst > last ? [oFirst - last - 1, span[1], other[0]] : first > oLast ? [first - oLast - 1, other[1], span[0]] : [0, 0, 0];
-          return gap <= 2 && !this.sentenceEndIn(from, to);
+          let near: boolean;
+          if (oFirst > last) {
+            const between = this.text.slice(span[1], other[0]);
+            let related = RELATION_AFTER.some((r) => spans(between, this.form(r), true).length > 0);
+            for (let n = last + 1; n < oFirst; n++) if (this.wordIs(n, RELATION_WORDS)) related = true;
+            near = oFirst - last - 1 <= 2 && !this.sentenceEndIn(span[1], other[0]) && !related;
+          } else if (first > oLast) {
+            near = first - oLast - 1 === 0 && !this.sentenceEndIn(other[1], span[0]);
+          } else near = true;
+          return near && !this.someoneElses(Math.min(first, oFirst), Math.min(span[0], other[0]), other[1]);
         });
       })
     );
+  }
+
+  /** Whether the phrase starting at word `start` is someone else's: a
+   * relation word before it (articles aside, at most two), a ZH relation
+   * verb right before, or a ja/ko particle right after the thing. */
+  someoneElses(start: number, startAt: number, thingEnd: number): boolean {
+    let at = start;
+    let skipped = 0;
+    while (at > 0 && !this.sentenceEndIn(this.words[at - 1]![1], this.words[at]![0])) {
+      at -= 1;
+      if (this.wordIs(at, RELATION_WORDS)) return true;
+      if (!this.wordIs(at, ARTICLES) || skipped === 2) break;
+      skipped += 1;
+    }
+    let end = startAt;
+    while (end > 0 && separator(this.text[end - 1])) end--;
+    const before = this.text.slice(0, end);
+    let begin = thingEnd;
+    while (begin < this.text.length && separator(this.text[begin])) begin++;
+    const after = this.text.slice(begin);
+    return RELATION_BEFORE_ZH.some((r) => endsWith(before, this.form(r))) || RELATION_AFTER.some((r) => startsWith(after, 0, this.form(r)));
   }
 
   /** Whether every word of the sentence holding `span` is one it covers. */
@@ -456,7 +603,7 @@ const nameMark = (text: string): string | undefined => {
     const wanted = folded(ambiguous);
     const said = readings.some((r) => {
       const reading = new Reading(r, folded);
-      return spans(reading.text, wanted, true).some((span) => reading.saidOf(span, true, false));
+      return spans(reading.text, wanted, true).some((span) => reading.saidOf(span, "ambiguous", false));
     });
     if (said) return ambiguous;
   }
@@ -507,12 +654,14 @@ const descriptionMark = (text: string): string | undefined => {
         const said = (span: Span): boolean => {
           switch (w.description) {
             case "folded":
-              return reading.saidOf(span, false, !substring);
-            case "never": {
-              if (lone) return reading.saidOf(span, false, true);
-              const covered = reading.covers(span);
-              return covered !== undefined && reading.alone(covered, span);
-            }
+              return reading.saidOf(span, "mark", !substring);
+            case "never":
+              // 公式 alone among Latin: the mark, wherever it stands; 公式 and
+              // 공식 beside other CJK: near the plugin, or ending a list; an
+              // ordinary word too: only where that can't be.
+              if (lone) return reading.saidOf(span, "mark", true);
+              if (w.with_kana || (w.before?.length ?? 0) > 0) return reading.saidOf(span, "ambiguous", false);
+              return reading.saidOf(span, "name_only", !substring);
             case "accented":
               return false;
           }
