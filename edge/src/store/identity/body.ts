@@ -18,11 +18,10 @@
  * arrives.
  */
 
-/** The largest body a store publisher route reads: a whole `.zeron-plugin`
- * file at its limits, with room for its base64. The store lane sets the
- * real cap; a buffered read of this size doesn't fit a Worker twice, so a
- * package goes through `bodyStream`. */
-export const MAX_PUBLISH_BODY_BYTES = 72 * 1024 * 1024;
+/** The largest body a store publisher route reads (contract amendment 34):
+ * 20 MiB, the store's package limit. Measured through `readBody`, a package
+ * of this size peaks at about 72 MB in a Worker. */
+export const MAX_PUBLISH_BODY_BYTES = 20 * 1024 * 1024;
 
 const bodies = new WeakMap<Request, Promise<Uint8Array | "too_large" | "body_mismatch">>();
 const expected = new WeakMap<Request, string>();
