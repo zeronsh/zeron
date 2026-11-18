@@ -441,9 +441,7 @@ export function grew(p: Permissions, diff: PermissionsDiff | null): Line[] {
     out.push(line(true, "danger-triangle", say("plugins.words.diff.ui_replace", { places: places(diff.ui_replace_added) }), say("plugins.words.permission.ui_replace.detail"), { literal: literal(diff.ui_replace_added) }));
   }
   if (!asked.has("tools") && (diff.tools_added?.length ?? 0) > 0) {
-    // (Named, with what each tells agents: from the diff, or the version's own list.)
-    const added = diff.tools_added!.map((t) => (typeof t === "string" ? (p.tools ?? []).find((x) => x.name === t) ?? { name: t } : t));
-    out.push(line(false, "magic-stick", say("plugins.words.diff.tools_added"), undefined, { items: tools(added) }));
+    out.push(line(false, "magic-stick", say("plugins.words.diff.tools_added"), undefined, { items: tools(diff.tools_added) }));
   }
   if ((diff.tools_changed?.length ?? 0) > 0) {
     const items = diff.tools_changed!.map((t) => (t.description_after ? { name: t.name, description: t.description_after } : { name: t.name }));

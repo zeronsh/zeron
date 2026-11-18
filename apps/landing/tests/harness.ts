@@ -27,14 +27,35 @@ function modules(dir: string) {
   return files.map((f) => ({ type: "ESModule" as const, path: relative(dir, `${dir}/${f}`), contents: readFileSync(`${dir}/${f}`, "utf8") }));
 }
 
-export async function startSite(): Promise<Site> {
+/**
+ * `edge`: the fake (the default); "missing", no EDGE binding at all; or
+ * "broken", one that fails every request: the site's own pages must be
+ * whole either way.
+ */
+export async function startSite(options: { edge?: "fake" | "missing" | "broken" } = {}): Promise<Site> {
+  const edgeKind = options.edge ?? "fake";
   const edge = await build({ entryPoints: [new URL("fake-edge/index.ts", root).pathname], bundle: true, format: "esm", platform: "neutral", target: "es2024", write: false });
   const { workerOptions } = unstable_getMiniflareWorkerOptions(new URL("dist/server/wrangler.json", root).pathname);
   const mf = new Miniflare(
     // (wrangler describes a Worker in Miniflare's v4 options; Miniflare 5 converts them.)
     convertV4MiniflareOptions({
       workers: [
-        { ...workerOptions, name: "site", modules: modules(new URL("dist/server", root).pathname), modulesRoot: new URL("dist/server", root).pathname, serviceBindings: { EDGE: "comet-native-edge" } },
+        {
+          ...workerOptions,
+          name: "site",
+          modules: modules(new URL("dist/server", root).pathname),
+          modulesRoot: new URL("dist/server", root).pathname,
+          serviceBindings:
+            edgeKind === "fake"
+              ? { EDGE: "comet-native-edge" }
+              : edgeKind === "broken"
+                ? {
+                    EDGE: async () => {
+                      throw new Error("the edge is down");
+                    },
+                  }
+                : {},
+        },
         { name: "comet-native-edge", modules: true, script: edge.outputFiles[0]!.text, compatibilityDate: "2026-07-01" },
       ],
     } as never),

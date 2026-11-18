@@ -62,11 +62,7 @@ export interface PluginCard {
   id: string;
   name: string;
   summary: string;
-  /**
-   * The icon (an SVG): the edge's address for the file
-   * (/store/v1/plugins/<id>/files/<version>/<path>), or its path in the
-   * package. urls.ts `pictureUrl` takes either. Null when there's none.
-   */
+  /** The icon's path in the package (an SVG), or null (amendment 35). */
   icon: string | null;
   author: Author;
   categories: string[];
@@ -155,7 +151,7 @@ export interface PackageInfo {
 export interface PluginDetail extends PluginCard {
   /** README.md, markdown. */
   readme: string;
-  /** Pictures: the edge's addresses for them, or their paths in the package (see `icon`). */
+  /** Pictures' paths in the package (amendment 35). */
   screenshots: string[];
   permissions: Permissions;
   engines: { zeron?: string } | null;
@@ -220,17 +216,14 @@ export interface QueueItem {
   plugin: { id: string; name: string };
   version: string;
   status: VersionStatus;
-  prerelease?: boolean;
+  prerelease: boolean;
   submitted_at: number;
-  decided_at?: number | null;
-  publisher: { id?: string; username: string | null } | null;
-  via?: string;
-  /** Checks it raised to look at. */
-  warnings: number;
-  /** (Asked of the edge: the version it would replace, what it newly asks, every check's count.) */
-  base?: string | null;
-  new_asks?: string[];
-  checks?: { ok: number; warn: number; fail: number };
+  publisher: { id: string; username: string | null } | null;
+  /** The version it would replace (none for a first listing). */
+  base?: string;
+  /** Permissions it asks for that the last approved version didn't. */
+  new_asks: string[];
+  checks: { ok: number; warn: number; fail: number };
 }
 
 export interface QueuePage {
@@ -239,8 +232,8 @@ export interface QueuePage {
   prev_cursor?: string;
 }
 
-/** An account's age, as the edge gives it: ms since the epoch, or an ISO date. */
-export type Created = number | string | null;
+/** When an account was made: ms since the epoch (null for one since deleted). */
+export type Created = number | null;
 
 export interface Publisher {
   id?: string;
@@ -266,17 +259,16 @@ export interface PermissionsDiff {
   removed_commands?: string[];
   network_added?: string[];
   network_removed?: string[];
-  /** Tools by name (or with their words). */
-  tools_added?: (string | { name: string; description?: string })[];
+  tools_added?: { name: string; description?: string }[];
   tools_removed?: string[];
-  tools_changed?: { name: string; description_after?: string }[];
+  tools_changed?: { name: string; description_before?: string; description_after?: string; input_changed?: boolean }[];
   ui_replace_added?: string[];
   ui_change_added?: string[];
 }
 
 export interface Submission {
-  /** The plugin (a card, per the contract; the edge sends its id, status and owner today). */
-  plugin: Partial<PluginCard> & { id: string; owner?: { id?: string; username: string | null } };
+  /** The plugin (for one never listed: this submission's words, `version` and `icon` null). */
+  plugin: PluginCard;
   /** The version, with what it lists: its name, icon, README and more. */
   version: VersionInfo & { name?: string; summary?: string; icon?: string | null; readme?: string; screenshots?: string[] };
   publisher: Publisher;
@@ -296,25 +288,12 @@ export type PluginStatus = "listed" | "unlisted" | "suspended" | "removed";
 
 export interface AdminPlugin {
   plugin: PluginCard & { listed_version?: string | null; created_at?: number; suspend_reason?: string | null };
-  /** A listing word, or the edge's own (active, suspended). */
-  status: PluginStatus | "active";
+  status: Listing;
   featured: boolean;
   owner: { id?: string; user_id: string; username: string | null; created_at: Created };
   versions: VersionInfo[];
-  reports: PluginReport[];
-}
-
-/** A report as the plugin's admin view lists it. */
-export interface PluginReport {
-  id: number | string;
-  version?: string | null;
-  reason: ReportReason;
-  text: string;
-  status: ReportStatus;
-  created_at: number;
-  resolved_at?: number | null;
-  note?: string | null;
-  reporter?: { username: string | null } | null;
+  /** As /admin/reports gives them. */
+  reports: Report[];
 }
 
 export type ReportStatus = "open" | "dismissed" | "actioned";

@@ -104,7 +104,8 @@ export class Edge {
    */
   file(id: string, version: string, path: string, signedIn: boolean): Promise<Response> {
     const url = `/store/v1/plugins/${segment(id)}/files/${segment(version)}/${path.split("/").map(segment).join("/")}`;
-    return this.#send(this.#request(url, { method: "GET", signedIn }));
+    // (An edge that can't be reached is a file that can't be had, never a failed page.)
+    return this.#send(this.#request(url, { method: "GET", signedIn })).catch(() => new Response(null, { status: 502 }));
   }
 
   // ── Signed in ─────────────────────────────────────────────────────────

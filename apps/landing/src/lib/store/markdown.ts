@@ -125,6 +125,21 @@ export const RENDERER = 4;
  */
 export const MOST_DELIMITERS = 3000;
 
+/**
+ * What a kept rendering was made by: the pipeline's version (RENDERER,
+ * bumped by hand when a step changes) and a fingerprint of the sanitizer's
+ * schema (changes by itself when the schema does). rendered.ts keys every
+ * kept rendering by it, so a change to either makes them all again.
+ */
+export const PIPELINE = `${RENDERER}.${fingerprint(JSON.stringify(SCHEMA, (_, v) => (v instanceof RegExp ? `/${v.source}/${v.flags}` : v)))}.${MOST_DELIMITERS}`;
+
+function fingerprint(text: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619) >>> 0;
+  return h.toString(36);
+}
+
+
 /** How many emphasis delimiters a document has outside fenced code and code spans. */
 export function delimiters(markdown: string): number {
   let count = 0;

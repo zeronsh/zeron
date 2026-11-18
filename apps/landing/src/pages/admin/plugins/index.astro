@@ -27,8 +27,6 @@ const status: View = asked && Object.hasOwn(VIEWS, asked) ? (asked as View) : "p
 const cursor = Astro.url.searchParams.get("cursor");
 const result = await Astro.locals.edge.queue(status, cursor && /^[A-Za-z0-9_-]{1,512}$/.test(cursor) ? cursor : undefined);
 const items = result.ok ? result.data.items : [];
-// (What each newly asks, once the edge says: until then the column isn't drawn.)
-const showAsks = items.some((i) => i.new_asks !== undefined);
 const RISKY = new Set(["commands", "native", "service", "ui.replace", "messages.send", "accounts.switch", "accounts.pin", "models.set", "devices"]);
 const href = (s: View, c?: string) => `/admin/plugins${s === "pending" && !c ? "" : `?${new URLSearchParams({ ...(s !== "pending" ? { status: s } : {}), ...(c ? { cursor: c } : {}) })}`}`;
 ---
@@ -59,7 +57,7 @@ const href = (s: View, c?: string) => `/admin/plugins${s === "pending" && !c ? "
                 <th scope="col">Publisher</th>
                 <th scope="col">Submitted</th>
                 <th scope="col">Checks</th>
-                {showAsks && <th scope="col">Asks for more</th>}
+                <th scope="col">Asks for more</th>
               </tr>
             </thead>
             <tbody>
@@ -71,9 +69,8 @@ const href = (s: View, c?: string) => `/admin/plugins${s === "pending" && !c ? "
                       <span class="version num">{item.version}</span>
                     </a>
                     <span class="sub">
-                      {item.base !== undefined && <>{item.base ? `Update from ${item.base}` : "First listing"} · </>}
+                      {item.base ? `Update from ${item.base}` : "First listing"} ·{" "}
                       {item.prerelease && <>Pre-release · </>}
-                      {item.via === "deploy_key" && <>By a deploy key · </>}
                       <code>{item.plugin.id}</code>
                     </span>
                   </th>
@@ -83,34 +80,24 @@ const href = (s: View, c?: string) => `/admin/plugins${s === "pending" && !c ? "
                   </td>
                   <td>
                     <span class="checks">
-                      {item.checks ? (
-                        <>
-                          {item.checks.fail > 0 && <Badge tone="danger" size="sm" icon="close-circle">{item.checks.fail} failed</Badge>}
-                          {item.checks.warn > 0 && <Badge tone="warning" size="sm" icon="danger-triangle">{item.checks.warn} to look at</Badge>}
-                          {item.checks.fail === 0 && item.checks.warn === 0 && <Badge tone="success" size="sm" icon="check-circle">Passed</Badge>}
-                        </>
-                      ) : item.warnings > 0 ? (
-                        <Badge tone="warning" size="sm" icon="danger-triangle">{item.warnings} to look at</Badge>
-                      ) : (
-                        <Badge tone="success" size="sm" icon="check-circle">Nothing to look at</Badge>
-                      )}
+                      {item.checks.fail > 0 && <Badge tone="danger" size="sm" icon="close-circle">{item.checks.fail} failed</Badge>}
+                      {item.checks.warn > 0 && <Badge tone="warning" size="sm" icon="danger-triangle">{item.checks.warn} to look at</Badge>}
+                      {item.checks.fail === 0 && item.checks.warn === 0 && <Badge tone="success" size="sm" icon="check-circle">Passed</Badge>}
                     </span>
                   </td>
-                  {showAsks && (
-                    <td>
-                      {(item.new_asks ?? []).length === 0 ? (
+                  <td>
+                      {item.new_asks.length === 0 ? (
                         <span class="faint">Nothing new</span>
                       ) : (
                         <span class="asks">
-                          {item.new_asks!.map((a) => (
+                          {item.new_asks.map((a) => (
                             <Badge tone={RISKY.has(a) ? "danger" : "neutral"} size="sm" mono>
                               {a}
                             </Badge>
                           ))}
                         </span>
                       )}
-                    </td>
-                  )}
+                  </td>
                 </tr>
               ))}
             </tbody>

@@ -1,4 +1,5 @@
 // The site's own addresses for the store, made in one place.
+import { packagePath } from "./names.ts";
 
 /** A plugin's page. */
 export const pluginUrl = (id: string) => `/plugins/${encodeURIComponent(id)}`;
@@ -8,17 +9,13 @@ export const fileUrl = (id: string, version: string, path: string) =>
   `/plugins/${encodeURIComponent(id)}/files/${encodeURIComponent(version)}/${path.split("/").map(encodeURIComponent).join("/")}`;
 
 /**
- * A picture of a plugin's, on this site: from the edge's address for it
- * (/store/v1/plugins/<id>/files/<version>/<path>, which the site serves at
- * the same path without /store/v1), or from its path in the package and
- * the version it's from. Null when it names nothing this site serves.
+ * A picture of a plugin's on this site, from its path in the package and
+ * the version it's from (amendment 35: always a path, never a URL). Null
+ * when there's no version, or the path isn't one (packagePath).
  */
-export function pictureUrl(id: string, version: string | null, value: string | null | undefined): string | null {
-  if (!value) return null;
-  const edge = `/store/v1/plugins/${encodeURIComponent(id)}/files/`;
-  if (value.startsWith("/store/v1/")) return value.startsWith(edge) && !/[?#]/.test(value) ? value.slice("/store/v1".length) : null;
-  if (/^[a-z][a-z0-9+.-]*:|^\/\//i.test(value) || value.startsWith("/")) return null;
-  return version ? fileUrl(id, version, value) : null;
+export function pictureUrl(id: string, version: string | null, path: string | null | undefined): string | null {
+  const clean = path ? packagePath(path) : null;
+  return clean && version ? fileUrl(id, version, clean) : null;
 }
 
 /**
