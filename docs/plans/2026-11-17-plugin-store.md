@@ -519,3 +519,9 @@ Agreed after the plan was first written. Newest last.
     - Pictures the store serves are PNG, JPEG and the icon SVG.
     - A cookie-authenticated write with a bad token or Origin is `403
       bad_csrf` on every route, reports included.
+36. **A body that is not the one that was signed is `400 body_mismatch`**,
+    not `401 invalid_signature`. The signature over the claimed hash did
+    verify; the bytes changed on the way (a proxy, a cut upload). A client
+    retries a `body_mismatch`; it treats `invalid_signature` as a refused
+    key. A request whose signature does not verify stays `401
+    invalid_signature`.
