@@ -48,8 +48,15 @@ pub fn read(dir: &Path) -> Result<Prepared, String> {
         read.insert(rel.clone(), bytes);
     }
     let hash = signing::content_hash(&manifest, &package::hashes(&read));
-    let (mut problems, warnings) = listing::check(&manifest, &read);
+    let (mut problems, mut warnings) = listing::check(&manifest, &read);
     problems.extend(sizes(&manifest, &read));
+    // What the stores show as typed (raw HTML, footnotes): advice, the
+    // publish check's own, never a failure.
+    for name in [listing::README, listing::CHANGELOG] {
+        if let Some(bytes) = read.get(name) {
+            warnings.extend(super::text_notes::notes(name, &String::from_utf8_lossy(bytes)));
+        }
+    }
     let notes = read
         .get(listing::CHANGELOG)
         .and_then(|bytes| listing::changelog_notes(&String::from_utf8_lossy(bytes), &manifest.version));
@@ -280,5 +287,22 @@ mod tests {
             std::os::unix::fs::symlink("/etc/passwd", dir.path().join("leak.txt")).unwrap();
             assert_eq!(read(dir.path()).unwrap_err(), files::LINK_ERROR);
         }
+    }
+
+    #[test]
+    fn what_the_stores_show_as_typed_is_advice_never_a_failure() {
+        let (manifest, mut files) = listed();
+        let readme = "# Focus Board\n\n<p align=\"center\"><img src=\"shots/board.png\"></p>\n\nFast.[^1]\n\n[^1]: Mostly.\n";
+        files.insert(listing::README.into(), readme.as_bytes().to_vec());
+        let log = String::from_utf8(files[listing::CHANGELOG].clone()).unwrap();
+        files.insert(listing::CHANGELOG.into(), format!("{log}\n<details>Older</details>\n").into_bytes());
+        let prepared = read(folder(&manifest, &files).path()).unwrap();
+        assert!(prepared.ok(), "{:?}", prepared.problems);
+        let said: Vec<(&str, Option<&str>)> = prepared.warnings.iter().map(|w| (w.rule, w.path.as_deref())).collect();
+        assert_eq!(said, [("raw_html", Some("README.md")), ("footnote", Some("README.md")), ("raw_html", Some("CHANGELOG.md"))]);
+        assert_eq!(prepared.warnings[0].words, "README.md line 3 has HTML; the store shows it as text. Use Markdown for pictures and headings.");
+        assert_eq!(lines(&prepared.warnings)[1], "footnote (README.md): README.md line 5 has a footnote; the store shows it as text. Write the note into the text instead.");
+        // The listed plugin as it was: nothing to say.
+        assert_eq!(read(folder(&listed().0, &listed().1).path()).unwrap().warnings.len(), 0);
     }
 }

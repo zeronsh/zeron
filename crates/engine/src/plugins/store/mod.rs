@@ -15,6 +15,7 @@ pub mod client;
 pub mod deploy_key;
 mod device;
 pub mod publish;
+pub mod text_notes;
 
 use super::install::{self, Package, StoreSource, failure};
 use super::signing;
