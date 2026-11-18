@@ -22,6 +22,7 @@ pub mod guides;
 pub mod install;
 pub mod keys;
 mod lifecycle;
+pub mod listing;
 pub mod manifest;
 pub mod package;
 pub mod reviews;
@@ -31,10 +32,12 @@ pub mod service;
 pub mod signing;
 pub mod snapshot;
 pub mod status;
+pub mod store;
 pub mod template_packages;
 pub mod templates;
 pub mod themes;
 pub mod uploads;
+pub mod version;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -3291,6 +3294,8 @@ fn watch_stream(rx: watch::Receiver<serde_json::Value>) -> BoxStream<'static, se
     .boxed()
 }
 
+#[cfg(test)]
+mod vectors;
 #[cfg(test)]
 mod authority_tests;
 #[cfg(test)]

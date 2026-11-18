@@ -1,0 +1,2502 @@
+{
+  "about": "Made by crates/engine/src/plugins/vectors.rs from the engine's own code; the edge's package verification must agree with every case. Keys are ed25519, base64url without padding; hashes are lowercase hex sha256; package_b64 and files_b64 are standard base64 of the exact bytes.",
+  "builtin_ids": [
+    "git",
+    "github",
+    "parallax-scenes"
+  ],
+  "canonical_json": [
+    {
+      "canonical": "{\"a\":[true,false,null],\"b\":1,\"c\":{\"y\":{},\"z\":\"\"}}",
+      "input": {
+        "a": [
+          true,
+          false,
+          null
+        ],
+        "b": 1,
+        "c": {
+          "y": {},
+          "z": ""
+        }
+      },
+      "name": "keys sorted, no whitespace"
+    },
+    {
+      "canonical": "{\"Z\":3,\"a\":4,\"é\":5,\"\":1,\"😀\":2}",
+      "input": {
+        "Z": 3,
+        "a": 4,
+        "é": 5,
+        "": 1,
+        "😀": 2
+      },
+      "name": "keys sorted by UTF-8 bytes, not UTF-16 units"
+    },
+    {
+      "canonical": "{\"s\":\"quote \\\" backslash \\\\ slash / newline \\n tab \\t nul \\u0000 unit sep \\u001f del  line sep   é 😀\"}",
+      "input": {
+        "s": "quote \" backslash \\ slash / newline \n tab \t nul \u0000 unit sep \u001f del  line sep   é 😀"
+      },
+      "name": "strings escaped as JSON.stringify does"
+    },
+    {
+      "canonical": "[3,1,2,[],{}]",
+      "input": [
+        3,
+        1,
+        2,
+        [],
+        {}
+      ],
+      "name": "arrays keep their order"
+    },
+    {
+      "canonical": "{\"max_safe\":9007199254740991,\"neg\":-7,\"zero\":0}",
+      "input": {
+        "max_safe": 9007199254740991,
+        "neg": -7,
+        "zero": 0
+      },
+      "name": "integers"
+    },
+    {
+      "canonical": "{\"f\":1.5}",
+      "input": {
+        "f": 1.5
+      },
+      "name": "a fraction"
+    }
+  ],
+  "categories": [
+    {
+      "id": "agents",
+      "name": "Agents"
+    },
+    {
+      "id": "appearance",
+      "name": "Appearance"
+    },
+    {
+      "id": "chat",
+      "name": "Chat"
+    },
+    {
+      "id": "developer-tools",
+      "name": "Developer tools"
+    },
+    {
+      "id": "git",
+      "name": "Git"
+    },
+    {
+      "id": "integrations",
+      "name": "Integrations"
+    },
+    {
+      "id": "productivity",
+      "name": "Productivity"
+    },
+    {
+      "id": "utilities",
+      "name": "Utilities"
+    }
+  ],
+  "changelog": [
+    {
+      "changelog": "# Changelog\n\n## [1.2.0] - 2026-11-01\n\n### Added\n- Boards.\n\n## v1.1.0\n- First.\n\n## 1.0.0\n\n## 0.9.0\n- Old.\n",
+      "notes": "### Added\n- Boards.",
+      "version": "1.2.0"
+    },
+    {
+      "changelog": "# Changelog\n\n## [1.2.0] - 2026-11-01\n\n### Added\n- Boards.\n\n## v1.1.0\n- First.\n\n## 1.0.0\n\n## 0.9.0\n- Old.\n",
+      "notes": "- First.",
+      "version": "1.1.0"
+    },
+    {
+      "changelog": "# Changelog\n\n## [1.2.0] - 2026-11-01\n\n### Added\n- Boards.\n\n## v1.1.0\n- First.\n\n## 1.0.0\n\n## 0.9.0\n- Old.\n",
+      "notes": null,
+      "version": "1.0.0"
+    },
+    {
+      "changelog": "# Changelog\n\n## [1.2.0] - 2026-11-01\n\n### Added\n- Boards.\n\n## v1.1.0\n- First.\n\n## 1.0.0\n\n## 0.9.0\n- Old.\n",
+      "notes": "- Old.",
+      "version": "0.9.0"
+    },
+    {
+      "changelog": "# Changelog\n\n## [1.2.0] - 2026-11-01\n\n### Added\n- Boards.\n\n## v1.1.0\n- First.\n\n## 1.0.0\n\n## 0.9.0\n- Old.\n",
+      "notes": null,
+      "version": "0.8.0"
+    }
+  ],
+  "content_hash": [
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade",
+        "ui/badge.luau": "7df8f0cd9e1cd0b204a760783671c0ccca4a3258dc7c51f59e9e2295c6c25315"
+      },
+      "hash": "8559ddea34a83a98fcc456dd31056b62827be004078eff3fb152fa8694a72776",
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "permissions": [
+          "ui.add"
+        ],
+        "version": "1.0.0"
+      },
+      "name": "unsigned"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade",
+        "ui/badge.luau": "7df8f0cd9e1cd0b204a760783671c0ccca4a3258dc7c51f59e9e2295c6c25315"
+      },
+      "hash": "8559ddea34a83a98fcc456dd31056b62827be004078eff3fb152fa8694a72776",
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "permissions": [
+          "ui.add"
+        ],
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade",
+            "ui/badge.luau": "7df8f0cd9e1cd0b204a760783671c0ccca4a3258dc7c51f59e9e2295c6c25315"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "sig": "USIhsG44NS8ZrRFzdPOF9JIxcaSlG8XXWyYu3LaZ0kaI5EYkaJ328mCilAds1ZVzpQMCHxClxBplbrN0_lfRDg"
+        },
+        "version": "1.0.0"
+      },
+      "name": "signed: the signature isn't part of it"
+    },
+    {
+      "files": {
+        "init.luau": "8373f7e086bb27784827ef8f2f4ae118e05d58b67f513f82c2316dc57b0d896c",
+        "ui/badge.luau": "7df8f0cd9e1cd0b204a760783671c0ccca4a3258dc7c51f59e9e2295c6c25315"
+      },
+      "hash": "b97fc89e2db21cef8aa20e840c3847dd1aa9af221babb64f9de0202541b68616",
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "permissions": [
+          "ui.add"
+        ],
+        "version": "1.0.0"
+      },
+      "name": "a file changed"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade",
+        "ui/badge.luau": "7df8f0cd9e1cd0b204a760783671c0ccca4a3258dc7c51f59e9e2295c6c25315"
+      },
+      "hash": "73499db0e988fe7b8defe9e5d03a57d6dd841b5932c1ca9776ec78fceabcb1f4",
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "permissions": [
+          "ui.add"
+        ],
+        "version": "1.0.0",
+        "x-future": {
+          "k": [
+            1
+          ]
+        }
+      },
+      "name": "unknown fields are part of it"
+    }
+  ],
+  "deploy_key": {
+    "bad_secrets": [
+      {
+        "error": "not_a_secret",
+        "secret": "ghp_notours"
+      },
+      {
+        "error": "damaged",
+        "secret": "zpk_AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwNkiq"
+      }
+    ],
+    "max_skew_ms": 300000,
+    "proof": "HzZttdv3iM853x3qWQN-cgp1p6Ld8eQ5veSs1N-c-_AP0RslixzOk3ALUfSypfA2-6moC6qt-432zqo050rhDw",
+    "proof_message": "zeron-deploy-key:v1:focus:7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
+    "public": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
+    "request": {
+      "authorization": "ZeronKey key=7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E, ts=1763000000000, sig=CUgEppcMj5ix5gOT_329hAHIYGhbJs29lynECL9ikJZH-WymAd57wIImye9WObhhV1K-jhcRHL_UAN4JSjxaAQ",
+      "body_b64": "eyJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEifQ==",
+      "body_sha256": "70f3ba660353a3950b0d1ae05439d85de429c0f60ba0871266030193174efe70",
+      "message": "zeron-plugin-publish:v1\nPOST\n/store/v1/plugins/focus/versions\n70f3ba660353a3950b0d1ae05439d85de429c0f60ba0871266030193174efe70\n1763000000000",
+      "method": "POST",
+      "path": "/store/v1/plugins/focus/versions",
+      "ts": 1763000000000
+    },
+    "secret": "zpk_AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwNkiqXF",
+    "secret_prefix": "zpk_"
+  },
+  "format": "zeron-plugin-package-vectors:v1",
+  "key_proof_prefix": "zeron-plugin-key:v1:",
+  "limits": {
+    "max_bytes": 52428800,
+    "max_categories": 2,
+    "max_description_len": 200,
+    "max_files": 2000,
+    "max_icon_bytes": 32768,
+    "max_keyword_len": 32,
+    "max_keywords": 8,
+    "max_license_len": 64,
+    "max_name_len": 60,
+    "max_number": 9007199254740991,
+    "max_package_bytes": 70953642,
+    "max_range_len": 256,
+    "max_screenshots": 8,
+    "max_url_len": 300,
+    "max_version_len": 128,
+    "screenshot_types": [
+      "png",
+      "jpg",
+      "jpeg",
+      "webp",
+      "gif"
+    ]
+  },
+  "listing": [
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "meets every rule",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "no category",
+      "problems": [
+        {
+          "field": "categories",
+          "path": null,
+          "rule": "missing_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "an empty category list",
+      "problems": [
+        {
+          "field": "categories",
+          "path": null,
+          "rule": "missing_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "games"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a category not on the list",
+      "problems": [
+        {
+          "field": "categories",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "git",
+          "chat",
+          "agents"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "three categories",
+      "problems": [
+        {
+          "field": "categories",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "git",
+          "git"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a category twice",
+      "problems": [
+        {
+          "field": "categories",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "Focus"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a keyword in capitals",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "a",
+          "b",
+          "c",
+          "d",
+          "e",
+          "f",
+          "g",
+          "h",
+          "i"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "nine keywords",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "code review",
+          "git-flow"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "keywords with spaces and dashes",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "code  review"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a keyword with two spaces",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "http://example.com",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "an http homepage",
+      "problems": [
+        {
+          "field": "homepage",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://exa mple.com",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a repository with a space",
+      "problems": [
+        {
+          "field": "repository",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "an empty license",
+      "problems": [
+        {
+          "field": "license",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/missing.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a screenshot that isn't there",
+      "problems": [
+        {
+          "field": "screenshots",
+          "path": "shots/missing.png",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "init.luau"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a screenshot that isn't a picture",
+      "problems": [
+        {
+          "field": "screenshots",
+          "path": "init.luau",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "../x.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a screenshot outside the folder",
+      "problems": [
+        {
+          "field": "screenshots",
+          "path": "../x.png",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": "0.4"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a partial engines range",
+      "problems": [
+        {
+          "field": "engines",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": ">=0.4.0",
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "engines as text",
+      "problems": [
+        {
+          "field": "engines",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "README.md",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "an icon that isn't an SVG",
+      "problems": [
+        {
+          "field": "icon",
+          "path": "README.md",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "no icon",
+      "problems": [
+        {
+          "field": "icon",
+          "path": null,
+          "rule": "missing_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "no description",
+      "problems": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "missing_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "a\nb",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a description of two lines",
+      "problems": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2"
+      },
+      "name": "a loose version",
+      "problems": [
+        {
+          "field": "version",
+          "path": null,
+          "rule": "not_semver"
+        }
+      ],
+      "warnings": [
+        {
+          "field": null,
+          "path": "CHANGELOG.md",
+          "rule": "no_notes"
+        }
+      ]
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "zeron-tools",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "an id starting zeron",
+      "problems": [
+        {
+          "field": "id",
+          "path": null,
+          "rule": "id_reserved"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "github",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a built-in plugin's id",
+      "problems": [
+        {
+          "field": "id",
+          "path": null,
+          "rule": "id_reserved"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "permissions": [
+          "root"
+        ],
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a permission Zeron doesn't know",
+      "problems": [
+        {
+          "field": "manifest",
+          "path": null,
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "no README.md",
+      "problems": [
+        {
+          "field": null,
+          "path": null,
+          "rule": "missing_readme"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "bin/tool.wasm": "AGFzbQEAAAA=",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "manifest": {
+        "categories": [
+          "productivity"
+        ],
+        "description": "A board of what you're focused on.",
+        "engines": {
+          "zeron": ">=0.3.0"
+        },
+        "entry": "init.luau",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "id": "focus-board",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "name": "Focus Board",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ],
+        "version": "1.2.0"
+      },
+      "name": "a binary file (a warning)",
+      "problems": [],
+      "warnings": [
+        {
+          "field": null,
+          "path": "bin/tool.wasm",
+          "rule": "binary_file"
+        }
+      ]
+    }
+  ],
+  "package_format": "zeron-plugin:v1",
+  "packages": [
+    {
+      "content_hash": "8559ddea34a83a98fcc456dd31056b62827be004078eff3fb152fa8694a72776",
+      "id": "focus",
+      "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+      "name": "valid",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJVU0loc0c0NE5TOFpyUkZ6ZFBPRjlKSXhjYVNsRzhYWFd5WXUzTGFaMGthSTVFWWthSjMyOG1DaWxBZHMxWlZ6cFFNQ0h4Q2x4QnBsYnJOMF9sZlJEZyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": "ok",
+      "sha256": "6bc8e253efca7dc439682bcd531bb2720db9793c3e91105efd4f870d25080379"
+    },
+    {
+      "name": "not JSON",
+      "package_b64": "UEsDBA==",
+      "result": "not_a_package",
+      "sha256": "8dcc7e601606217f3b754766511182a916b17e9a26a94c9d887104eba92e9bb2"
+    },
+    {
+      "name": "another format",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXRlbXBsYXRlOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IlVTSWhzRzQ0TlM4WnJSRnpkUE9GOUpJeGNhU2xHOFhYV3lZdTNMYVowa2FJNUVZa2FKMzI4bUNpbEFkczFaVnpwUU1DSHhDbHhCcGxick4wX2xmUkRnIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": "not_a_package",
+      "sha256": "3e7c1b563590944da3ca20510ca17615492ce5bf802004fb0deaa24c4d98c781"
+    },
+    {
+      "name": "files isn't an object",
+      "package_b64": "eyJmaWxlcyI6W10sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJVU0loc0c0NE5TOFpyUkZ6ZFBPRjlKSXhjYVNsRzhYWFd5WXUzTGFaMGthSTVFWWthSjMyOG1DaWxBZHMxWlZ6cFFNQ0h4Q2x4QnBsYnJOMF9sZlJEZyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": "not_a_package",
+      "sha256": "50321a3ddb9e152cfb2eecc56b5d0f9386d5305ecd9dfe7a5dd3fd6908a6aff6"
+    },
+    {
+      "name": "unsigned",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": "unsigned",
+      "sha256": "6cc0c67f19609ee3664b0c0f5ddacd6188e6920f46ae12922d53c9f6f2c511be"
+    },
+    {
+      "name": "a file changed after signing",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlEST0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJVU0loc0c0NE5TOFpyUkZ6ZFBPRjlKSXhjYVNsRzhYWFd5WXUzTGFaMGthSTVFWWthSjMyOG1DaWxBZHMxWlZ6cFFNQ0h4Q2x4QnBsYnJOMF9sZlJEZyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": "tampered",
+      "sha256": "70365a1fc3929514f2f040681a8e9cbee7235875c5c765a80b2721072507345b"
+    },
+    {
+      "name": "a file added after signing",
+      "package_b64": "eyJmaWxlcyI6eyJleHRyYS5sdWF1IjoiZUE9PSIsImluaXQubHVhdSI6ImNtVjBkWEp1SURFPSIsInVpL2JhZGdlLmx1YXUiOiJjbVYwZFhKdUlIdDkifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IlVTSWhzRzQ0TlM4WnJSRnpkUE9GOUpJeGNhU2xHOFhYV3lZdTNMYVowa2FJNUVZa2FKMzI4bUNpbEFkczFaVnpwUU1DSHhDbHhCcGxick4wX2xmUkRnIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": "tampered",
+      "sha256": "093407803834f5bbb1b9b49d20a200cf6861dcc74932aa5620e80bff378c3f14"
+    },
+    {
+      "name": "a manifest field changed after signing",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCIsIm5ldHdvcmsiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7ImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiVVNJaHNHNDROUzhaclJGemRQT0Y5Skl4Y2FTbEc4WFhXeVl1M0xhWjBrYUk1RVlrYUozMjhtQ2lsQWRzMVpWenBRTUNIeENseEJwbGJyTjBfbGZSRGcifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": "bad_signature",
+      "sha256": "dd1b89b4a7991d050a95aa2a527b7aa930a6a6548eb17a164c5b918eb7966106"
+    },
+    {
+      "name": "a file that isn't base64",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJAQEAiLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJVU0loc0c0NE5TOFpyUkZ6ZFBPRjlKSXhjYVNsRzhYWFd5WXUzTGFaMGthSTVFWWthSjMyOG1DaWxBZHMxWlZ6cFFNQ0h4Q2x4QnBsYnJOMF9sZlJEZyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": "bad_file",
+      "sha256": "a7ae9c94ad08ae6f3b782e26ef7e398485960364ce6810cae0de55d13f287782"
+    },
+    {
+      "name": "a path out of the folder",
+      "package_b64": "eyJmaWxlcyI6eyIuLi9ldmlsLmx1YXUiOiJlQT09IiwiaW5pdC5sdWF1IjoiY21WMGRYSnVJREU9IiwidWkvYmFkZ2UubHVhdSI6ImNtVjBkWEp1SUh0OSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7Ii4uL2V2aWwubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IklkZE83WFlhUXZiaU85UFJkUVdGS2lEQm5TczY4bVJrMXJ5YTUyUy13S1ItYkpBVFpjTGF5c0JIRFJaRXdrYldwSVlFdkt6dDd3dEx0N1psOXBzekRnIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": "bad_file",
+      "sha256": "a2dad354bfda2adbc53b4923fecec40f0bd1ef48e5bfab2da2356936382dbcbe"
+    },
+    {
+      "name": "an absolute path",
+      "package_b64": "eyJmaWxlcyI6eyIvZXRjL3giOiJlQT09IiwiaW5pdC5sdWF1IjoiY21WMGRYSnVJREU9IiwidWkvYmFkZ2UubHVhdSI6ImNtVjBkWEp1SUh0OSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7Ii9ldGMveCI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6Ik9XOFFhcHg3b21peFkwTW05MWdYellodDJhc1hfYVVPTjg1cUxZWHdycGtwZmlHLUFpcDRfNkstVXNYbUYwbXI4b2JQUHhLMExNYjQzbEtDbU1pYURBIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": "bad_file",
+      "sha256": "75e7791066d3c845247f27d07922a801885743ba02d03afcb41af1f6e1ede1eb"
+    },
+    {
+      "name": "a dot folder",
+      "package_b64": "eyJmaWxlcyI6eyIuZ2l0L2NvbmZpZyI6ImVBPT0iLCJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiLmdpdC9jb25maWciOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJ6eG80RlNlZGVnZm5GTWd5MHE3QnB2TzRsZzF1NDZSWHBHVm9oVWtvcDBGNEZVWW5yaEx1YkJOTkxQVHVGUDhjSUsyYmsxV2R0TzRVRDFJUlRoa0FDZyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": "bad_file",
+      "sha256": "e7132433a0b6b8ef2daa05d0196d5f746bfe7fc51b63780661f51683072d3803"
+    },
+    {
+      "name": "a drive-relative path",
+      "package_b64": "eyJmaWxlcyI6eyJDOnguY21kIjoiZUE9PSIsImluaXQubHVhdSI6ImNtVjBkWEp1SURFPSIsInVpL2JhZGdlLmx1YXUiOiJjbVYwZFhKdUlIdDkifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJDOnguY21kIjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSIsImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiS1JjcVEzSGViTkNKODJyZXZGNUNyb3hIaTVkVU9RY3lsRXVYenRaaC1EWHpCcTlXRnRDV2lNZXlobnpMVDdVRThXbFlnak9DOVh4TWhkU1pKaEprQ2cifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": "bad_file",
+      "sha256": "6b7b18d91b97773224f9dd39c0391233ed077468d9225871f721d4e4f99b2d39"
+    },
+    {
+      "name": "a Windows device name",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9OVUwubHVhdSI6ImVBPT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL05VTC5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJqRllTeTRmRnFmVjh4LVhOajZqcWd4dFpJT0Eya2ZPMVRVX1RYRVk4QmV1bUVIaVNTT0xVZW9nTmo2TGsyZFhMVmtZWnBNTkNEc2YwaVFzRERBNGhBUSJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": "bad_file",
+      "sha256": "270e0deac9e88ba3ea987ae8a83c9d997e8a783163a71dbe97fc9bb5a818c5c9"
+    },
+    {
+      "name": "a trailing dot",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJpbml0Lmx1YXUuIjoiZUE9PSIsInVpL2JhZGdlLmx1YXUiOiJjbVYwZFhKdUlIdDkifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwiaW5pdC5sdWF1LiI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoibmw4TUN4RHM2Xzh6MVk4djlxYWlGR0xPbmFqUjJvdHNHRzluVzFNbzh1bURsTFVzeHFEMXl5WmpoNnBrN3BETnlpbExONlROZi1DS1NLbmpoekFGREEifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": "bad_file",
+      "sha256": "2c16fcace35bf57b5f5e5a7eed9401fe40df2f9ec10548a73955e0cdad079c6a"
+    },
+    {
+      "name": "a backslash",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5IiwidWlcXHgubHVhdSI6ImVBPT0ifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUiLCJ1aVxceC5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiMU4zRURYYmRVVnRxWVZqYjZXZ3VaMlFCSWxULWEyZmJaS04waW9ySGZkeE5JTTlncXNZU2NRLWdLN1Fhak5BRVlhLThnUGYxYWs0bkYxRXJOUXJnRGcifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": "bad_file",
+      "sha256": "a48ad66c303036a77b921cdc3eac7f266779155432f9939a3e74cdd2e4f4e95d"
+    },
+    {
+      "name": "its own manifest as a file",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5IiwiemVyb24tcGx1Z2luLmpzb24iOiJlQT09In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1IiwiemVyb24tcGx1Z2luLmpzb24iOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIn0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJaVFNsYVNSVmRGV3VUd1NxbkUySGx6V1JjV181YUJNM1lKZlRzOWxCLXBqamxMVUU4a0xIZVRzREVuOWg5YXV1SW90RmxiWFhDR3BZMEpNRmpTZ2FBZyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": "bad_file",
+      "sha256": "e18e58c928118e91999c6fcf321984883c67a016ffcd7883b6c3996c85131913"
+    },
+    {
+      "name": "its entry file is missing",
+      "package_b64": "eyJmaWxlcyI6eyJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6InQyUFNFODhzNU5XZlV6YV9sNktBNjhsLTFnQUpIOHZWaHpueGRqeHhBMHVMSHlPbVpHWnZDZ2J1MEVlcnhJcVVyeWJ4alZKemkyRTBMY3FFLUlvSkR3In0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": "bad_manifest",
+      "sha256": "3fb0b7ecc61bb75b0fcdfaa363af9cf562c0c27f77a251bdda441479bfd3c415"
+    },
+    {
+      "name": "a permission Zeron doesn't know",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInJvb3QiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7ImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiWHJYdEZxbG1jYUs1anBoZFJGMFNTNndoc29kMy1qM3hlR3dMYklIRWl0bjdYMEFrT2lUek1lZVFCVHFqa3BYUks4SHNfeEdZWjMyWjVVOFNQUk1FQlEifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": "bad_manifest",
+      "sha256": "1687143f1fa8013c8f656f6f33b967fac919d8e377fafeccee2febe2b38f4301"
+    },
+    {
+      "name": "an id Zeron keeps",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJ6ZXJvbiIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJVbFRrRjlWbktiYmNxMUM4aUR5am5ISHIyLUw5YWpUbWgzRnVaX1cybUhyTzJRVHFqLUhJMmJZVHV3VVlJWTRfVFgxRG5JR3EySTBGeXYxMWU2Wi1CZyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": "bad_manifest",
+      "sha256": "4f4d95f68f066f5d5ab57d32fd20ebef7a0ae5dfbce093b01b74de41dd5d0029"
+    },
+    {
+      "name": "an id that isn't one",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJGb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJ3ZFZ1OUM3aV9pa2ZpNVIyNDhpWDRpbHdHczBpV3Y0VVdPdzBxSXVMT0NGN0VnbTVuWGdCLXBjeWRWOGZMTzA1bmhjV21Xb2tqWGVTRE5qRFVmMldBdyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": "bad_manifest",
+      "sha256": "37d7791932a97f4c3f56e21208a94e5592c88fb5d73bc2fbe32095c1811a4571"
+    },
+    {
+      "content_hash": "2ec2ec7bdee8e39a246603215b0060847374b30cce8967ec39886c3f66fd840d",
+      "id": "focus",
+      "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+      "name": "unknown fields are kept",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJtVTA0TEl4dVpRclJiYlR2ZWlIcm14NktKVzNnNWQ1a1BKY2NCeTl4dkZZMmUweEV4aDI5Y2ZwNlh6XzF1MEhueDI5ZXdzWHpsNkUzWkVwQlZTVFJDQSJ9LCJ2ZXJzaW9uIjoiMS4wLjAiLCJ4LWZ1dHVyZSI6eyJ1bmtub3duIjoiZmllbGRzIGFyZSBrZXB0IGFuZCBzaWduZWQifX19",
+      "result": "ok",
+      "sha256": "957340ac8e75c889eecd1db313c4b2e5a4ff7020245e8ebfe796eb53d7ce0d69"
+    }
+  ],
+  "paths": [
+    {
+      "ok": true,
+      "path": "init.luau"
+    },
+    {
+      "ok": true,
+      "path": "ui/badge.luau"
+    },
+    {
+      "ok": true,
+      "path": "shots/board.png"
+    },
+    {
+      "ok": true,
+      "path": "a-b_c.d/e"
+    },
+    {
+      "ok": true,
+      "path": "README.md"
+    },
+    {
+      "ok": false,
+      "path": ""
+    },
+    {
+      "ok": false,
+      "path": "/etc/x"
+    },
+    {
+      "ok": false,
+      "path": "../x"
+    },
+    {
+      "ok": false,
+      "path": "a/../b"
+    },
+    {
+      "ok": false,
+      "path": "a/./b"
+    },
+    {
+      "ok": false,
+      "path": ".git/config"
+    },
+    {
+      "ok": false,
+      "path": "a/.hidden"
+    },
+    {
+      "ok": false,
+      "path": "a//b"
+    },
+    {
+      "ok": false,
+      "path": "a/"
+    },
+    {
+      "ok": false,
+      "path": "a\\b"
+    },
+    {
+      "ok": false,
+      "path": "D:x.cmd"
+    },
+    {
+      "ok": false,
+      "path": "C:../x"
+    },
+    {
+      "ok": false,
+      "path": "CON"
+    },
+    {
+      "ok": false,
+      "path": "con.txt"
+    },
+    {
+      "ok": false,
+      "path": "com1.luau"
+    },
+    {
+      "ok": false,
+      "path": "LPT9"
+    },
+    {
+      "ok": false,
+      "path": "ui/NUL.luau"
+    },
+    {
+      "ok": false,
+      "path": "AUX"
+    },
+    {
+      "ok": false,
+      "path": "x."
+    },
+    {
+      "ok": false,
+      "path": "a. "
+    },
+    {
+      "ok": false,
+      "path": "a :b"
+    },
+    {
+      "ok": false,
+      "path": "x:y"
+    }
+  ],
+  "payload_prefix": "zeron-plugin:v1\n",
+  "ranges": [
+    {
+      "matches": true,
+      "range": ">=0.4.0",
+      "version": "0.4.0"
+    },
+    {
+      "matches": false,
+      "range": ">=0.4.0",
+      "version": "0.3.9"
+    },
+    {
+      "matches": false,
+      "range": ">=0.4.0",
+      "version": "0.4.0-beta.1"
+    },
+    {
+      "matches": true,
+      "range": ">=0.4.0",
+      "version": "1.0.0"
+    },
+    {
+      "matches": true,
+      "range": ">= 0.4.0 <0.6.0",
+      "version": "0.5.9"
+    },
+    {
+      "matches": false,
+      "range": ">= 0.4.0 <0.6.0",
+      "version": "0.6.0"
+    },
+    {
+      "matches": true,
+      "range": ">= 0.4.0 <0.6.0",
+      "version": "0.6.0-0"
+    },
+    {
+      "matches": true,
+      "range": ">= 0.4.0 <0.6.0",
+      "version": "0.4.0"
+    },
+    {
+      "matches": false,
+      "range": ">0.4.0",
+      "version": "0.4.0"
+    },
+    {
+      "matches": true,
+      "range": ">0.4.0",
+      "version": "0.4.1-0"
+    },
+    {
+      "matches": true,
+      "range": "<=1.0.0",
+      "version": "1.0.0"
+    },
+    {
+      "matches": true,
+      "range": "<=1.0.0",
+      "version": "1.0.0+b"
+    },
+    {
+      "matches": false,
+      "range": "<=1.0.0",
+      "version": "1.0.1-0"
+    },
+    {
+      "matches": true,
+      "range": "<1.0.0",
+      "version": "0.9.9"
+    },
+    {
+      "matches": true,
+      "range": "<1.0.0",
+      "version": "1.0.0-rc.1"
+    },
+    {
+      "matches": false,
+      "range": "<1.0.0",
+      "version": "1.0.0"
+    },
+    {
+      "matches": true,
+      "range": "^1.2.3",
+      "version": "1.2.3"
+    },
+    {
+      "matches": true,
+      "range": "^1.2.3",
+      "version": "1.9.0"
+    },
+    {
+      "matches": false,
+      "range": "^1.2.3",
+      "version": "2.0.0-alpha"
+    },
+    {
+      "matches": false,
+      "range": "^1.2.3",
+      "version": "2.0.0"
+    },
+    {
+      "matches": false,
+      "range": "^1.2.3",
+      "version": "1.2.2"
+    },
+    {
+      "matches": true,
+      "range": "^0.2.3",
+      "version": "0.2.9"
+    },
+    {
+      "matches": false,
+      "range": "^0.2.3",
+      "version": "0.3.0"
+    },
+    {
+      "matches": false,
+      "range": "^0.2.3",
+      "version": "0.3.0-0"
+    },
+    {
+      "matches": false,
+      "range": "^0.2.3",
+      "version": "0.2.2"
+    },
+    {
+      "matches": true,
+      "range": "^0.0.3",
+      "version": "0.0.3"
+    },
+    {
+      "matches": false,
+      "range": "^0.0.3",
+      "version": "0.0.4"
+    },
+    {
+      "matches": false,
+      "range": "^0.0.3",
+      "version": "0.0.4-0"
+    },
+    {
+      "matches": true,
+      "range": "^1.2.3-beta.2",
+      "version": "1.2.3-beta.2"
+    },
+    {
+      "matches": false,
+      "range": "^1.2.3-beta.2",
+      "version": "1.2.3-beta.1"
+    },
+    {
+      "matches": true,
+      "range": "^1.2.3-beta.2",
+      "version": "1.2.3"
+    },
+    {
+      "matches": true,
+      "range": "^1.2.3-beta.2",
+      "version": "1.3.0-alpha"
+    },
+    {
+      "matches": true,
+      "range": "~1.2.3",
+      "version": "1.2.9"
+    },
+    {
+      "matches": false,
+      "range": "~1.2.3",
+      "version": "1.3.0"
+    },
+    {
+      "matches": false,
+      "range": "~1.2.3",
+      "version": "1.3.0-rc.1"
+    },
+    {
+      "matches": false,
+      "range": "~1.2.3",
+      "version": "1.2.3-rc.1"
+    },
+    {
+      "matches": true,
+      "range": "~0.0.3",
+      "version": "0.0.9"
+    },
+    {
+      "matches": false,
+      "range": "~0.0.3",
+      "version": "0.1.0"
+    },
+    {
+      "matches": true,
+      "range": "1.2.3",
+      "version": "1.2.3"
+    },
+    {
+      "matches": true,
+      "range": "1.2.3",
+      "version": "1.2.3+build"
+    },
+    {
+      "matches": false,
+      "range": "1.2.3",
+      "version": "1.2.4"
+    },
+    {
+      "matches": true,
+      "range": "=1.2.3",
+      "version": "1.2.3"
+    },
+    {
+      "matches": true,
+      "range": "*",
+      "version": "0.0.1-alpha"
+    },
+    {
+      "matches": true,
+      "range": "*",
+      "version": "99.0.0"
+    },
+    {
+      "matches": false,
+      "range": "<0.3.0 || >=0.5.0",
+      "version": "0.4.0"
+    },
+    {
+      "matches": true,
+      "range": "<0.3.0 || >=0.5.0",
+      "version": "0.5.1"
+    },
+    {
+      "matches": true,
+      "range": "<0.3.0 || >=0.5.0",
+      "version": "0.2.0"
+    },
+    {
+      "matches": true,
+      "range": "<0.3.0 || *",
+      "version": "9.9.9"
+    },
+    {
+      "matches": true,
+      "range": "  >=1.0.0   <2.0.0  ",
+      "version": "1.5.0"
+    },
+    {
+      "matches": false,
+      "range": ">=1.0.0 <1.0.0",
+      "version": "1.0.0"
+    },
+    {
+      "error": true,
+      "range": ""
+    },
+    {
+      "error": true,
+      "range": " "
+    },
+    {
+      "error": true,
+      "range": "1.2"
+    },
+    {
+      "error": true,
+      "range": ">="
+    },
+    {
+      "error": true,
+      "range": ">= "
+    },
+    {
+      "error": true,
+      "range": "1.x"
+    },
+    {
+      "error": true,
+      "range": "1.2.3 - 2.0.0"
+    },
+    {
+      "error": true,
+      "range": "||"
+    },
+    {
+      "error": true,
+      "range": ">=1.0.0 ||"
+    },
+    {
+      "error": true,
+      "range": "^v1.0.0"
+    },
+    {
+      "error": true,
+      "range": ">=1.0.0\t<2.0.0"
+    },
+    {
+      "error": true,
+      "range": ">> 1.0.0"
+    },
+    {
+      "error": true,
+      "range": "* 1.0.0"
+    },
+    {
+      "error": true,
+      "range": ">=*"
+    },
+    {
+      "error": true,
+      "range": "latest"
+    },
+    {
+      "error": true,
+      "range": "~>1.0.0"
+    },
+    {
+      "error": true,
+      "range": ">=1.0.0                                                                                                                                                                                                                                                                "
+    }
+  ],
+  "semver": {
+    "compare": [
+      {
+        "a": "1.0.0+a",
+        "b": "1.0.0+b",
+        "cmp": 0
+      },
+      {
+        "a": "1.0.0",
+        "b": "1.0.0+b",
+        "cmp": 0
+      },
+      {
+        "a": "1.0.0-a.1",
+        "b": "1.0.0-a.1.0",
+        "cmp": -1
+      },
+      {
+        "a": "1.0.0-1",
+        "b": "1.0.0-a",
+        "cmp": -1
+      },
+      {
+        "a": "2.0.0",
+        "b": "10.0.0",
+        "cmp": -1
+      },
+      {
+        "a": "1.0.0-rc.1",
+        "b": "1.0.0",
+        "cmp": -1
+      }
+    ],
+    "max_len": 128,
+    "max_number": 9007199254740991,
+    "order": [
+      "0.0.1",
+      "0.1.0",
+      "1.0.0-0",
+      "1.0.0-1",
+      "1.0.0-2",
+      "1.0.0-10",
+      "1.0.0-A",
+      "1.0.0-a",
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
+      "1.0.0-rc.1",
+      "1.0.0",
+      "1.0.1",
+      "1.1.0",
+      "2.0.0",
+      "10.0.0"
+    ],
+    "parse": [
+      {
+        "input": "0.0.0",
+        "ok": true
+      },
+      {
+        "input": "1.2.3",
+        "ok": true
+      },
+      {
+        "input": "1.0.0-alpha",
+        "ok": true
+      },
+      {
+        "input": "1.0.0-alpha.1",
+        "ok": true
+      },
+      {
+        "input": "1.0.0-0.3.7",
+        "ok": true
+      },
+      {
+        "input": "1.0.0-x.7.z.92",
+        "ok": true
+      },
+      {
+        "input": "1.0.0-x-y-z.--",
+        "ok": true
+      },
+      {
+        "input": "1.0.0+20130313144700",
+        "ok": true
+      },
+      {
+        "input": "1.0.0-beta+exp.sha.5114f85",
+        "ok": true
+      },
+      {
+        "input": "1.0.0+21AF26D3----117B344092BD",
+        "ok": true
+      },
+      {
+        "input": "1.0.0+001",
+        "ok": true
+      },
+      {
+        "input": "9007199254740991.9007199254740991.9007199254740991",
+        "ok": true
+      },
+      {
+        "input": "",
+        "ok": false
+      },
+      {
+        "input": "1",
+        "ok": false
+      },
+      {
+        "input": "1.2",
+        "ok": false
+      },
+      {
+        "input": "1.2.3.4",
+        "ok": false
+      },
+      {
+        "input": "v1.2.3",
+        "ok": false
+      },
+      {
+        "input": " 1.2.3",
+        "ok": false
+      },
+      {
+        "input": "1.2.3 ",
+        "ok": false
+      },
+      {
+        "input": "01.2.3",
+        "ok": false
+      },
+      {
+        "input": "1.02.3",
+        "ok": false
+      },
+      {
+        "input": "1.2.03",
+        "ok": false
+      },
+      {
+        "input": "1.2.3-",
+        "ok": false
+      },
+      {
+        "input": "1.2.3+",
+        "ok": false
+      },
+      {
+        "input": "1.2.3-01",
+        "ok": false
+      },
+      {
+        "input": "1.2.3-a..b",
+        "ok": false
+      },
+      {
+        "input": "1.2.3-a_b",
+        "ok": false
+      },
+      {
+        "input": "1.2.3+a..b",
+        "ok": false
+      },
+      {
+        "input": "1.2.3-é",
+        "ok": false
+      },
+      {
+        "input": "9007199254740992.0.0",
+        "ok": false
+      },
+      {
+        "input": "1.0.0-9007199254740992",
+        "ok": false
+      },
+      {
+        "input": "-1.0.0",
+        "ok": false
+      },
+      {
+        "input": "1.0.0++a",
+        "ok": false
+      },
+      {
+        "input": "1.0.0-+a",
+        "ok": false
+      },
+      {
+        "input": "1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ok": true
+      },
+      {
+        "input": "1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ok": false
+      }
+    ]
+  },
+  "signatures": [
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "sig": "IeGfJBxCivtLbXnfRTjrSDfK-Qu_05cCwiUcyQr2U1QSIStnIWnVis_EhSpB1k6z5hfzNhOHuNk2XLtqYrMDAg"
+        },
+        "version": "1.0.0"
+      },
+      "name": "valid",
+      "payload": "zeron-plugin:v1\n{\"entry\":\"init.luau\",\"id\":\"focus\",\"name\":\"Focus\",\"signature\":{\"files\":{\"init.luau\":\"486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade\"},\"key\":\"iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w\"},\"version\":\"1.0.0\"}",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "valid"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "version": "1.0.0"
+      },
+      "name": "unsigned",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "unsigned"
+    },
+    {
+      "files": {
+        "evil.luau": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "sig": "IeGfJBxCivtLbXnfRTjrSDfK-Qu_05cCwiUcyQr2U1QSIStnIWnVis_EhSpB1k6z5hfzNhOHuNk2XLtqYrMDAg"
+        },
+        "version": "1.0.0"
+      },
+      "name": "an extra file",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "files_differ"
+    },
+    {
+      "files": {
+        "init.luau": "8373f7e086bb27784827ef8f2f4ae118e05d58b67f513f82c2316dc57b0d896c"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "sig": "IeGfJBxCivtLbXnfRTjrSDfK-Qu_05cCwiUcyQr2U1QSIStnIWnVis_EhSpB1k6z5hfzNhOHuNk2XLtqYrMDAg"
+        },
+        "version": "1.0.0"
+      },
+      "name": "a changed file",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "files_differ"
+    },
+    {
+      "files": {},
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "sig": "IeGfJBxCivtLbXnfRTjrSDfK-Qu_05cCwiUcyQr2U1QSIStnIWnVis_EhSpB1k6z5hfzNhOHuNk2XLtqYrMDAg"
+        },
+        "version": "1.0.0"
+      },
+      "name": "a missing file",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "files_differ"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "sig": "UvGmxghWUL1gzZyyeO-wNFTGRlCwTm57-6StVIgsCuDuWRdeoWAt8FYJCckUJDuUT2g1czsRE7khkoI82IjcCA"
+        },
+        "version": "1.0.0"
+      },
+      "name": "a template's signature isn't a plugin's",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "bad_signature"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "sig": "IeGfJBxCivtLbXnfRTjrSDfK-Qu_05cCwiUcyQr2U1QSIStnIWnVis_EhSpB1k6z5hfzNhOHuNk2XLtqYrMDAg"
+        },
+        "version": "1.0.0"
+      },
+      "name": "a plugin's signature isn't a template's",
+      "prefix": "zeron-template:v1\n",
+      "result": "bad_signature"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "sig": "IeGfJBxCivtLbXnfRTjrSDfK-Qu_05cCwiUcyQr2U1QSIStnIWnVis_EhSpB1k6z5hfzNhOHuNk2XLtqYrMDAg"
+        },
+        "version": "2.0.0"
+      },
+      "name": "a manifest field changed after signing",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "bad_signature"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "sig": "ifaEx1I62HSC8BYSEBjXe2HO05GU__BP9g2M4fZAtj-QBWZX97nZWfgrDlffL3c_Z31XN8KnKNkBg8gkWTymDw"
+        },
+        "version": "1.0.0"
+      },
+      "name": "a signature over something else",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "bad_signature"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+          "sig": "IeGfJBxCivtLbXnfRTjrSDfK-Qu_05cCwiUcyQr2U1QSIStnIWnVis_EhSpB1k6z5hfzNhOHuNk2XLtqYrMDAg"
+        },
+        "version": "1.0.0"
+      },
+      "name": "another key named",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "bad_signature"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": "nope",
+        "version": "1.0.0"
+      },
+      "name": "a signature that isn't an object",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "bad_signature"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "AAAA",
+          "sig": "IeGfJBxCivtLbXnfRTjrSDfK-Qu_05cCwiUcyQr2U1QSIStnIWnVis_EhSpB1k6z5hfzNhOHuNk2XLtqYrMDAg"
+        },
+        "version": "1.0.0"
+      },
+      "name": "a key of the wrong length",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "bad_signature"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w"
+        },
+        "version": "1.0.0"
+      },
+      "name": "a signature without sig",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "bad_signature"
+    },
+    {
+      "files": {
+        "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+      },
+      "manifest": {
+        "entry": "init.luau",
+        "id": "focus",
+        "name": "Focus",
+        "signature": {
+          "files": {
+            "init.luau": "486d9affb60dbb0063b03d8e23a6ccf6364ce203dc3a9f56f20e750eb41ecade"
+          },
+          "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "sig": "IeGfJBxCivtLbXnfRTjrSDfK-Qu_05cCwiUcyQr2U1QSIStnIWnVis_EhSpB1k6z5hfzNhOHuNk2XLtqYrMDAg=="
+        },
+        "version": "1.0.0"
+      },
+      "name": "base64url with padding isn't accepted",
+      "prefix": "zeron-plugin:v1\n",
+      "result": "bad_signature"
+    }
+  ],
+  "template_payload_prefix": "zeron-template:v1\n"
+}
