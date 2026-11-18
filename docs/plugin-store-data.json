@@ -303,7 +303,7 @@
     ]
   },
   "mark_claims": {
-    "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or of claims_zeron's phrases, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs), the digit 3 for e and the digit 2 for z. Then, in the store's other languages: each of languages[lang].words, in either reading, as a substring where substring is true (Chinese, Japanese, Korean), else whole (no character of General_Category L* or N* right before or after it). In a name, every word, folded the same way. In a description, a word whose description is 'folded' the same way; 'accented' read with accents kept (NFKC, lowercase, ignorables and Me gone, on both the text and the word; French 'vérifié', whose folded form is also 'vérifie', checks); 'never' not at all (it's also an ordinary word there). A word with with_kana is refused only in a text that also holds kana (U+3040–30FF, U+31F0–31FF, U+FF66–FF9F): Japanese 公式 is official, Chinese 公式 a formula. The listing cases named 'the mark:' hold both sides to it.",
+    "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or of claims_zeron's phrases, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs), the digit 3 for e and the digit 2 for z. Then, in the store's other languages: each of languages[lang].words, in either reading, spelled letter by letter as the words are (each letter itself or one of its lookalikes; a letter that is itself one of lookalikes[x] reads as x, so a Cyrillic word's о takes a Latin o), as a substring where substring is true (Chinese, Japanese, Korean), else whole (no character of General_Category L* or N* right before or after it); a word ending in '*' is a stem: no letter or digit right before it, any letters after (Russian's case forms). In a name, every word, folded the same way. In a description, a word whose description is 'folded' the same way; 'accented' read with accents kept (NFKC, lowercase, ignorables and Me gone, on both the text and the word; French 'vérifié', whose folded form is also 'vérifie', checks); 'never' not at all (it's also an ordinary word there). A word with with_kana is refused only in a text that also holds kana (U+3040–30FF, U+31F0–31FF, U+FF66–FF9F): Japanese 公式 is official, Chinese 公式 a formula. The listing cases named 'the mark:' hold both sides to it.",
     "description": {
       "about": "In a description, only a glyph refuses anywhere. A mark word is refused only when said of the plugin itself. Read the folded text (and its spaced runs read as words) as words: each run of characters that aren't separators is a word, but each Han ideograph (U+3400–4DBF, U+4E00–9FFF, U+F900–FAFF, U+20000–3134F) is a word by itself. The mark words here: words spelled as mark_claims reads them (lookalikes and all); each word of languages whose description is 'folded' (where it is, substring or whole, any script's letters as the boundary); 'accented' ones the same in the text read with accents kept; and ambiguous, as substrings, for rule 2 and rule 4 only, with the languages words that have with_kana or before. Each occurrence covers the words it overlaps. It's refused when: (4) the words directly before it read as one of store_words, or the words directly after it do (nothing in sentence_ends between); else not when the word directly before it is one of negations, or (in a word that holds it) the characters directly before it are; else (1) its first word is the text's first word, or every word of its sentence (sentence_ends bound it) is one it covers; or (3) the word directly before it is one of subject_words; or (2) a word or phrase of plugin_words (whole words in order, or substrings where substring) has at most two words between it and the occurrence, and nothing in sentence_ends between them. Words and phrases of these lists are compared in the reading's own form (folded, or with accents kept). The listing cases named 'description:' hold both sides to it.",
       "ambiguous": [
@@ -472,18 +472,19 @@
         "ru": {
           "substring": false,
           "words": [
-            "плагин",
-            "плагина",
-            "плагины",
-            "расширение",
-            "расширения",
-            "клиент",
-            "приложение",
-            "инструмент",
+            "плагин*",
+            "расширени*",
+            "клиент*",
+            "приложени*",
+            "инструмент*",
+            "пакет*",
+            "верси*",
+            "интеграци*",
             "тема",
-            "пакет",
-            "версия",
-            "интеграция"
+            "темы",
+            "теме",
+            "тему",
+            "темой"
           ]
         },
         "zh": {
@@ -829,31 +830,11 @@
         "words": [
           {
             "description": "never",
-            "word": "проверено"
-          },
-          {
-            "description": "never",
-            "word": "проверенный"
-          },
-          {
-            "description": "never",
-            "word": "проверенная"
-          },
-          {
-            "description": "never",
-            "word": "проверенное"
-          },
-          {
-            "description": "never",
-            "word": "проверенные"
+            "word": "проверен*"
           },
           {
             "description": "folded",
-            "word": "верифицирован"
-          },
-          {
-            "description": "folded",
-            "word": "верифицированный"
+            "word": "верифицирован*"
           },
           {
             "description": "folded",
@@ -870,6 +851,38 @@
           {
             "description": "folded",
             "word": "официальные"
+          },
+          {
+            "description": "folded",
+            "word": "официального"
+          },
+          {
+            "description": "folded",
+            "word": "официальной"
+          },
+          {
+            "description": "folded",
+            "word": "официальному"
+          },
+          {
+            "description": "folded",
+            "word": "официальным"
+          },
+          {
+            "description": "folded",
+            "word": "официальном"
+          },
+          {
+            "description": "folded",
+            "word": "официальную"
+          },
+          {
+            "description": "folded",
+            "word": "официальных"
+          },
+          {
+            "description": "folded",
+            "word": "официальными"
           }
         ]
       },
@@ -1103,6 +1116,28 @@
         "🅕",
         "🅵",
         "🇫"
+      ],
+      "g": [
+        "ƍ",
+        "Ǥ",
+        "ǥ",
+        "ɠ",
+        "ɡ",
+        "ɢ",
+        "Ԍ",
+        "ԍ",
+        "ց",
+        "Ꮐ",
+        "Ᏻ",
+        "ᏻ",
+        "ᶃ",
+        "ᶢ",
+        "ꓖ",
+        "ꮐ",
+        "𝽅",
+        "🅖",
+        "🅶",
+        "🇬"
       ],
       "h": [
         "Ħ",

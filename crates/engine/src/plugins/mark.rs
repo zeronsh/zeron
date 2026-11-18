@@ -129,19 +129,24 @@ pub const OTHER_LANGUAGES: &[(&str, bool, &[OtherWord])] = &[
     ("it", false, &[w("verificato"), w("verificata"), w("verificati"), w("verificate"), w("ufficiale"), w("ufficiali")]),
     ("pt", false, &[w("verificado"), w("verificada"), w("verificados"), w("verificadas"), w("oficial"), w("oficiais")]),
     ("ru", false, &[
-        // "проверено", "проверенный" are also "checked", "proven" (a
-        // proven way).
-        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}"),
-        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{439}"),
-        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{430}\u{44f}"),
-        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{43e}\u{435}"),
-        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{435}"),
-        w("\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}"),
-        w("\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}\u{43d}\u{44b}\u{439}"),
+        // A word ending in "*" is a stem: any ending (Russian's case forms).
+        // "провер(ен)…" is also "checked", "proven" (a proven way): a name
+        // only. "официальн…" listed in full: its stem would take
+        // "официально", "officially", which English doesn't refuse.
+        name_only("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}*"),
+        w("\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}*"),
         w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}"),
         w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{430}\u{44f}"),
         w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{435}"),
         w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{435}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{433}\u{43e}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{439}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{43c}\u{443}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{43c}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{43c}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{445}"),
+        w("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{43c}\u{438}"),
     ]),
     // 官方 "official"; 已验证 "verified". Not 已认证 (also "authenticated").
     ("zh", true, &[w("\u{5b98}\u{65b9}"), w("\u{5df2}\u{9a8c}\u{8bc1}"), w("\u{5df2}\u{9a57}\u{8b49}")]),
@@ -192,10 +197,10 @@ pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
     ("it", false, &["estensione", "estensioni", "applicazione", "strumento", "strumenti", "pacchetto", "versione", "integrazione"]),
     ("pt", false, &["extens\u{e3}o", "extens\u{f5}es", "aplicativo", "ferramenta", "ferramentas", "pacote", "vers\u{e3}o", "integra\u{e7}\u{e3}o"]),
     ("ru", false, &[
-        "\u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}", "\u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{430}", "\u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{44b}",
-        "\u{440}\u{430}\u{441}\u{448}\u{438}\u{440}\u{435}\u{43d}\u{438}\u{435}", "\u{440}\u{430}\u{441}\u{448}\u{438}\u{440}\u{435}\u{43d}\u{438}\u{44f}",
-        "\u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}", "\u{43f}\u{440}\u{438}\u{43b}\u{43e}\u{436}\u{435}\u{43d}\u{438}\u{435}", "\u{438}\u{43d}\u{441}\u{442}\u{440}\u{443}\u{43c}\u{435}\u{43d}\u{442}",
-        "\u{442}\u{435}\u{43c}\u{430}", "\u{43f}\u{430}\u{43a}\u{435}\u{442}", "\u{432}\u{435}\u{440}\u{441}\u{438}\u{44f}", "\u{438}\u{43d}\u{442}\u{435}\u{433}\u{440}\u{430}\u{446}\u{438}\u{44f}",
+        "\u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}*", "\u{440}\u{430}\u{441}\u{448}\u{438}\u{440}\u{435}\u{43d}\u{438}*", "\u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}*",
+        "\u{43f}\u{440}\u{438}\u{43b}\u{43e}\u{436}\u{435}\u{43d}\u{438}*", "\u{438}\u{43d}\u{441}\u{442}\u{440}\u{443}\u{43c}\u{435}\u{43d}\u{442}*", "\u{43f}\u{430}\u{43a}\u{435}\u{442}*",
+        "\u{432}\u{435}\u{440}\u{441}\u{438}*", "\u{438}\u{43d}\u{442}\u{435}\u{433}\u{440}\u{430}\u{446}\u{438}*",
+        "\u{442}\u{435}\u{43c}\u{430}", "\u{442}\u{435}\u{43c}\u{44b}", "\u{442}\u{435}\u{43c}\u{435}", "\u{442}\u{435}\u{43c}\u{443}", "\u{442}\u{435}\u{43c}\u{43e}\u{439}",
     ]),
     ("zh", true, &["\u{63d2}\u{4ef6}", "\u{6269}\u{5c55}", "\u{64f4}\u{5c55}", "\u{5ba2}\u{6237}\u{7aef}", "\u{5ba2}\u{6236}\u{7aef}", "\u{5e94}\u{7528}", "\u{61c9}\u{7528}", "\u{5de5}\u{5177}", "\u{4e3b}\u{9898}", "\u{4e3b}\u{984c}", "\u{7248}\u{672c}", "\u{96c6}\u{6210}"]),
     ("ja", true, &["\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{62e1}\u{5f35}", "\u{30a2}\u{30d7}\u{30ea}", "\u{30af}\u{30e9}\u{30a4}\u{30a2}\u{30f3}\u{30c8}", "\u{30c4}\u{30fc}\u{30eb}", "\u{30c6}\u{30fc}\u{30de}", "\u{30d1}\u{30c3}\u{30b1}\u{30fc}\u{30b8}", "\u{30d0}\u{30fc}\u{30b8}\u{30e7}\u{30f3}", "\u{9023}\u{643a}"]),
@@ -344,17 +349,37 @@ fn lookalikes_of(letter: char) -> BTreeSet<char> {
     chars
 }
 
+/// The letter of the table `c` passes for, if it's one of its look-alikes
+/// (a Cyrillic о is an o): a word's letter is read as that letter.
+fn reads_as(c: char) -> char {
+    if LOOKALIKES.iter().any(|(l, _)| *l == c) {
+        return c;
+    }
+    LOOKALIKES.iter().find(|(_, chars)| chars.contains(c)).map_or(c, |(l, _)| *l)
+}
+
 /// What may stand for `letter` in a word: its look-alikes, and those of the
-/// letter it's interchangeable with.
-fn class_of(letter: char) -> BTreeSet<char> {
-    let mut chars = lookalikes_of(letter);
+/// letter it's interchangeable with (a letter of another script that is
+/// itself a look-alike reads as the letter it passes for: [`reads_as`]).
+/// Computed once for each letter asked.
+fn class_of(letter: char) -> std::sync::Arc<BTreeSet<char>> {
+    static CLASSES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<char, std::sync::Arc<BTreeSet<char>>>>> = std::sync::OnceLock::new();
+    let classes = CLASSES.get_or_init(Default::default);
+    if let Some(class) = classes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&letter) {
+        return class.clone();
+    }
+    let base = reads_as(letter);
+    let mut chars = lookalikes_of(base);
+    chars.insert(letter);
     for (a, b) in INTERCHANGEABLE {
-        let other = if *a == letter { Some(*b) } else if *b == letter { Some(*a) } else { None };
+        let other = if *a == base { Some(*b) } else if *b == base { Some(*a) } else { None };
         if let Some(other) = other {
             chars.extend(lookalikes_of(other));
         }
     }
-    chars
+    let class = std::sync::Arc::new(chars);
+    classes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(letter, class.clone());
+    class
 }
 
 /// An apostrophe as a phrase may be written: ' ’ ʼ.
@@ -475,16 +500,18 @@ fn name_mark(text: &str) -> Option<String> {
         if word.with_kana && !kana {
             return None;
         }
-        let wanted = folded_word(word.word);
-        let said = readings.iter().any(|reading| {
-            spans(reading, &wanted, substring).into_iter().any(|(_, end)| {
-                word.before.is_empty() || {
+        let (listed_word, stem) = listed(word.word);
+        let wanted = folded_word(listed_word);
+        readings.iter().find_map(|reading| {
+            spelled_spans(reading, &wanted, substring, stem).into_iter().find_map(|(start, end)| {
+                let before = word.before.is_empty() || {
                     let rest: Vec<char> = reading[end..].iter().copied().skip_while(|c| separator(*c)).collect();
                     word.before.iter().any(|b| rest.starts_with(&folded_word(b)))
-                }
+                };
+                // (A stem says the word as written: "проверено".)
+                before.then(|| if stem { reading[start..end].iter().collect() } else { word.word.to_owned() })
             })
-        });
-        said.then(|| word.word.to_owned())
+        })
     })
 }
 
@@ -534,6 +561,52 @@ fn spans(text: &[char], wanted: &[char], substring: bool) -> Vec<(usize, usize)>
                 && (substring || (!any_word(at.checked_sub(1).and_then(|b| text.get(b))) && !any_word(text.get(at + wanted.len()))))
         })
         .map(|at| (at, at + wanted.len()))
+        .collect()
+}
+
+/// A listed word and whether it's a stem (written with a trailing `*`: any
+/// ending).
+fn listed(word: &str) -> (&str, bool) {
+    word.strip_suffix('*').map_or((word, false), |stem| (stem, true))
+}
+
+fn any_word(c: Option<&char>) -> bool {
+    c.is_some_and(|c| matches!(c.general_category_group(), GeneralCategoryGroup::Letter | GeneralCategoryGroup::Number))
+}
+
+/// Where `word`'s letters, each one of its class or a pair, end when they
+/// match `text` from `at` (no boundary asked).
+fn letters_end(text: &[char], at: usize, word: &[char]) -> Option<usize> {
+    let Some((&letter, rest)) = word.split_first() else { return Some(at) };
+    if text.get(at).is_some_and(|c| class_of(letter).contains(c))
+        && let Some(end) = letters_end(text, at + 1, rest)
+    {
+        return Some(end);
+    }
+    PAIRS.iter().filter(|(l, _)| *l == letter).find_map(|(_, pair)| {
+        let pair: Vec<char> = pair.chars().collect();
+        let fits = pair.iter().enumerate().all(|(n, p)| text.get(at + n).is_some_and(|c| lookalikes_of(*p).contains(c)));
+        if fits { letters_end(text, at + pair.len(), rest) } else { None }
+    })
+}
+
+/// Where a listed word is spelled in `text`, with the look-alikes as the
+/// mark's words are: anywhere (`substring`), or whole (no letter or digit of
+/// any script right before or after); a stem with any ending.
+fn spelled_spans(text: &[char], word: &[char], substring: bool, stem: bool) -> Vec<(usize, usize)> {
+    if word.is_empty() {
+        return Vec::new();
+    }
+    (0..text.len())
+        .filter(|at| substring || !any_word(at.checked_sub(1).and_then(|b| text.get(b))))
+        .filter_map(|at| {
+            let end = letters_end(text, at, word)?;
+            if stem {
+                let end = end + text[end..].iter().take_while(|c| any_word(Some(c))).count();
+                return Some((at, end));
+            }
+            (substring || !any_word(text.get(end))).then_some((at, end))
+        })
         .collect()
 }
 
@@ -627,11 +700,12 @@ impl Reading {
         // sentence between.
         PLUGIN_WORDS.iter().any(|(_, substring, words)| {
             words.iter().any(|word| {
+                let (word, stem) = listed(word);
                 let wanted = (self.form)(word);
                 let found: Vec<(usize, usize)> = if *substring {
                     spans(&self.text, &wanted, true)
                 } else {
-                    self.phrase_spans(&wanted)
+                    self.phrase_spans(&wanted, stem)
                 };
                 found.into_iter().any(|other| {
                     let Some((o_first, o_last)) = self.covers(other) else { return false };
@@ -648,8 +722,9 @@ impl Reading {
         })
     }
 
-    /// Where a word or phrase of spaced words is, whole word by word.
-    fn phrase_spans(&self, phrase: &[char]) -> Vec<(usize, usize)> {
+    /// Where a word or phrase of spaced words is, whole word by word (its
+    /// last word a stem: any ending).
+    fn phrase_spans(&self, phrase: &[char], stem: bool) -> Vec<(usize, usize)> {
         let parts: Vec<Vec<char>> = words_of(phrase).iter().map(|(a, b)| phrase[*a..*b].to_vec()).collect();
         if parts.is_empty() || parts.len() > self.words.len() {
             return Vec::new();
@@ -658,7 +733,8 @@ impl Reading {
             .filter(|at| {
                 parts.iter().enumerate().all(|(n, part)| {
                     let (a, b) = self.words[at + n];
-                    same_word(&self.text[a..b], part)
+                    let last = n + 1 == parts.len();
+                    same_word(&self.text[a..b], part) || (stem && last && self.text[a..b].starts_with(part))
                 }) && !self.sentence_end_in(self.words[*at].0, self.words[at + parts.len() - 1].1)
             })
             .map(|at| (self.words[at].0, self.words[at + parts.len() - 1].1))
@@ -699,8 +775,9 @@ fn description_mark(text: &str) -> Option<String> {
         }
         for (_, substring, words) in OTHER_LANGUAGES {
             for word in words.iter().filter(|w| w.description == InDescription::Folded) {
-                if spans(&reading.text, &folded_word(word.word), *substring).into_iter().any(|span| reading.said_of_plugin(span, false)) {
-                    return Some(word.word.to_owned());
+                let (listed_word, stem) = listed(word.word);
+                if let Some((start, end)) = spelled_spans(&reading.text, &folded_word(listed_word), *substring, stem).into_iter().find(|span| reading.said_of_plugin(*span, false)) {
+                    return Some(if stem { reading.text[start..end].iter().collect() } else { word.word.to_owned() });
                 }
             }
         }
@@ -762,7 +839,7 @@ fn name_forms() -> Vec<String> {
 /// or beside a word of standing.
 pub fn zeron_phrases() -> Vec<String> {
     let mut phrases: Vec<String> = ORIGIN_WORDS.iter().map(|o| joined(o, ZERON)).collect();
-    let other = OTHER_LANGUAGES.iter().flat_map(|(_, _, words)| words.iter().map(|w| w.word));
+    let other = OTHER_LANGUAGES.iter().flat_map(|(_, _, words)| words.iter().map(|w| listed(w.word).0));
     for standing in STANDING_WORDS.iter().copied().chain(STANDING_OTHER.iter().copied()).chain(other) {
         phrases.push(joined(ZERON, standing));
         phrases.push(joined(standing, ZERON));
@@ -855,7 +932,7 @@ pub fn keyword_claim(keyword: &str) -> Option<String> {
     if parts.iter().chain([&joined]).any(|part| whole(part, ZERON)) {
         return Some(ZERON.to_owned());
     }
-    let ascii_words = OTHER_LANGUAGES.iter().flat_map(|(_, _, words)| words.iter().map(|w| w.word)).filter(|w| mark_text(w).is_ascii());
+    let ascii_words = OTHER_LANGUAGES.iter().flat_map(|(_, _, words)| words.iter().map(|w| listed(w.word).0)).filter(|w| mark_text(w).is_ascii());
     MARK_WORDS.iter().copied().chain(ascii_words).find(|word| parts.iter().chain([&joined]).any(|part| whole(part, word))).map(str::to_owned)
 }
 
@@ -1079,6 +1156,37 @@ mod tests {
     }
 
     #[test]
+    fn russian_case_forms_and_look_alikes_in_every_language() {
+        // Names: any case form; look-alike letters either way.
+        for name in [
+            "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{433}\u{43e} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}\u{430}",
+            "\u{412}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}\u{43d}\u{43e}\u{433}\u{43e} \u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{430}",
+            "o\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}",
+            "0ficial", "\u{43e}fi\u{441}ial", "Offici3l", "Verificat0",
+        ] {
+            assert!(mark_claim(name, true).is_some(), "{name}");
+        }
+        for name in ["Oficina", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e} \u{43d}\u{435}\u{442}", "\u{43d}\u{435}\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}"] {
+            assert_eq!(mark_claim(name, true), None, "{name}");
+        }
+        // Descriptions: said of the plugin, in any case form.
+        for text in [
+            "\u{423}\u{441}\u{442}\u{430}\u{43d}\u{43e}\u{432}\u{438}\u{442}\u{435} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e} \u{442}\u{435}\u{43c}\u{443}.",
+            "\u{414}\u{43b}\u{44f} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{433}\u{43e} \u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{430} Git.",
+            "Cliente \u{43e}ficial para Git.",
+        ] {
+            assert!(mark_claim(text, false).is_some(), "{text}");
+        }
+        for text in [
+            "\u{42d}\u{442}\u{43e} \u{43d}\u{435} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{435} \u{43f}\u{440}\u{438}\u{43b}\u{43e}\u{436}\u{435}\u{43d}\u{438}\u{435}.",
+            "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{439} \u{441}\u{43f}\u{43e}\u{441}\u{43e}\u{431} \u{445}\u{440}\u{430}\u{43d}\u{438}\u{442}\u{44c} \u{437}\u{430}\u{43c}\u{435}\u{442}\u{43a}\u{438}.",
+            "\u{41f}\u{43e}\u{43a}\u{430}\u{437}\u{44b}\u{432}\u{430}\u{435}\u{442} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e} \u{434}\u{43e}\u{43a}\u{443}\u{43c}\u{435}\u{43d}\u{442}\u{430}\u{446}\u{438}\u{44e} Rust.",
+        ] {
+            assert_eq!(mark_claim(text, false), None, "{text}");
+        }
+    }
+
+    #[test]
     fn saying_a_plugin_is_part_of_zeron() {
         for text in ["Ships with Zeron.", "Included in Zeron.", "Part of Zeron.", "Comes with Zeron.", "Built into Zeron.", "Zeron-made boards.", "Zeron built.", "\u{5185}\u{7f6e}\u{4e8e}Zeron\u{3002}"] {
             assert!(claims_zeron(text).is_some(), "{text}");
@@ -1128,6 +1236,8 @@ mod tests {
         let names = NAME_FORMS.iter().flat_map(|(_, forms)| forms.iter());
         let letters: BTreeSet<char> =
             MARK_WORDS.iter().chain(&zeron).chain(ORIGIN_WORDS).chain(STANDING_WORDS).chain(names).flat_map(|w| w.chars()).filter(char::is_ascii_lowercase).collect();
+        let others: BTreeSet<char> = OTHER_LANGUAGES.iter().flat_map(|(_, _, words)| words.iter()).flat_map(|w| mark_text(w.word).chars().collect::<Vec<_>>()).filter(char::is_ascii_lowercase).collect();
+        let letters: BTreeSet<char> = letters.union(&others).copied().collect();
         let mut table: std::collections::BTreeMap<char, BTreeSet<char>> = letters.iter().map(|l| (*l, BTreeSet::new())).collect();
         // Each kept as folded here and as written, so a runtime whose case
         // data is older or newer than this one's (a new letter it doesn't
