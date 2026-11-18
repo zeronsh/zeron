@@ -163,6 +163,7 @@ fn observe(catalog: &Catalog, port: u16, pid: u32) {
                 origin: Some("chat:chat".into()),
                 chat_id: Some("chat".into()),
                 signing_in: false,
+                test_run: false,
             },
         )])
         .unwrap();
