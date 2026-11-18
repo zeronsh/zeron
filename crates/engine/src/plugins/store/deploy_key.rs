@@ -22,6 +22,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use ring::rand::SecureRandom as _;
 use sha2::Digest as _;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::super::signing::{self, SigningKey};
 
@@ -60,9 +61,16 @@ impl fmt::Debug for DeployKey {
 
 impl Drop for DeployKey {
     fn drop(&mut self) {
-        // (Best effort: the pair inside ring keeps its own copy.)
-        self.seed.iter_mut().for_each(|b| *b = 0);
+        // (Zeroed so it can't be optimised away; the pair inside ring keeps
+        // its own copy, which ring's own drop handles.)
+        self.seed.zeroize();
     }
+}
+
+/// Whether `key` is a deploy key's public half as the store names it:
+/// base64url of 32 bytes.
+pub fn valid_public(key: &str) -> bool {
+    key.len() == 43 && B64URL.decode(key).is_ok_and(|bytes| bytes.len() == SEED_LEN)
 }
 
 /// Why a secret can't be used, in words a CI log can carry (never quoting it).
@@ -72,11 +80,11 @@ pub const DAMAGED: &str = "That deploy key's secret is cut short or mistyped: co
 impl DeployKey {
     /// A new key, from the system's randomness.
     pub fn generate() -> Result<Self, String> {
-        let mut seed = [0u8; SEED_LEN];
+        let mut seed = Zeroizing::new([0u8; SEED_LEN]);
         ring::rand::SystemRandom::new()
-            .fill(&mut seed)
+            .fill(&mut seed[..])
             .map_err(|_| "Couldn't make a key".to_string())?;
-        Self::from_seed(seed)
+        Self::from_seed(*seed)
     }
 
     pub fn from_seed(seed: [u8; SEED_LEN]) -> Result<Self, String> {
@@ -90,7 +98,7 @@ impl DeployKey {
             .trim()
             .strip_prefix(SECRET_PREFIX)
             .ok_or(NOT_A_SECRET)?;
-        let bytes = B64URL.decode(body).map_err(|_| DAMAGED)?;
+        let bytes = Zeroizing::new(B64URL.decode(body).map_err(|_| DAMAGED)?);
         if bytes.len() != SEED_LEN + CHECK_LEN {
             return Err(DAMAGED.into());
         }
@@ -98,16 +106,16 @@ impl DeployKey {
         if sha2::Sha256::digest(seed)[..CHECK_LEN] != *check {
             return Err(DAMAGED.into());
         }
-        let mut owned = [0u8; SEED_LEN];
+        let mut owned = Zeroizing::new([0u8; SEED_LEN]);
         owned.copy_from_slice(seed);
-        Self::from_seed(owned)
+        Self::from_seed(*owned)
     }
 
     /// The secret, to show once.
     pub fn secret(&self) -> String {
-        let mut bytes = self.seed.to_vec();
+        let mut bytes = Zeroizing::new(self.seed.to_vec());
         bytes.extend_from_slice(&sha2::Sha256::digest(self.seed)[..CHECK_LEN]);
-        format!("{SECRET_PREFIX}{}", B64URL.encode(bytes))
+        format!("{SECRET_PREFIX}{}", B64URL.encode(&*bytes))
     }
 
     /// The public half, base64url without padding.
@@ -152,6 +160,15 @@ pub fn request_message(method: &str, path: &str, body_sha256: &str, ts: i64) -> 
 mod tests {
     use super::*;
     use ring::signature::{ED25519, UnparsedPublicKey};
+
+    #[test]
+    fn a_public_key_is_32_bytes_of_base64url() {
+        let key = DeployKey::from_seed([5; 32]).unwrap();
+        assert!(valid_public(&key.public()));
+        for not in ["", ".", "..", "abc", &format!("{}=", key.public()), &key.public()[1..], &key.secret()] {
+            assert!(!valid_public(not), "{not}");
+        }
+    }
 
     /// The edge's own expectations (edge-identity `signing.test.ts`), byte
     /// for byte: the signing string, an empty body's hash, the proof.

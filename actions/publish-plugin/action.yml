@@ -18,13 +18,23 @@ inputs:
     required: false
     default: "."
   dry-run:
-    description: Check, sign and pack the plugin, but don't submit it.
+    description: "`true`: check, sign and pack the plugin, but don't submit it. `true` or `false` only: anything else fails the step."
     required: false
     default: "false"
   zeron-version:
-    description: The Zeron release whose command line runs (`latest`, or a version like 0.4.0).
+    description: >-
+      The Zeron release whose command line runs: `latest` (follows each new
+      release), or a version like 0.4.0 (refused if its manifest names
+      another).
     required: false
     default: latest
+  sha256:
+    description: >-
+      Optional: the sha256 of that release's Linux command line tarball for
+      this runner. Given with a pinned zeron-version, the step runs exactly
+      that command line or fails.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -38,4 +48,5 @@ runs:
         ZERON_PLUGIN_PATH: ${{ inputs.path }}
         ZERON_DRY_RUN: ${{ inputs.dry-run }}
         ZERON_VERSION: ${{ inputs.zeron-version }}
+        ZERON_SHA256: ${{ inputs.sha256 }}
       run: '"$GITHUB_ACTION_PATH/publish.sh"'

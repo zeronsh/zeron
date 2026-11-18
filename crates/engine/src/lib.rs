@@ -94,7 +94,7 @@ mod worktree_settings;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use auth::{
-    Auth, AuthConfig, AuthState, AuthUser, OrgMembership, ScreenHint, SignInOptions,
+    Auth, AuthConfig, AuthState, AuthUser, OrgMembership, ScreenHint, SignInOptions, StepUpFor,
 };
 pub use change_requests::{ChangeRequestCacheKey, CheckoutChangeRequests};
 pub use diff_sync::{

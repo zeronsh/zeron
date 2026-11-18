@@ -55,6 +55,11 @@ impl Device {
         }
     }
 
+    /// `method` as `caller` sends it (an agent's MCP server, another device).
+    async fn call_as(&self, caller: zeron_rpc::Caller, method: &str, params: Value) -> Result<Value, String> {
+        zeron_rpc::with_caller(caller, self.call(method, params)).await
+    }
+
     async fn item(&self, id: &str) -> Value {
         let list = self.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
         list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == id).cloned().unwrap_or(Value::Null)
@@ -109,6 +114,7 @@ async fn install_from_the_store_and_update_by_the_owners_other_key() {
     let update = &checked["updates"][0];
     assert_eq!((update["id"].as_str(), update["version"].as_str(), update["notes"].as_str()), (Some("focus"), Some("1.1.0"), Some("- Faster.")));
     assert!(update.get("new_owner").is_none() && update.get("in_review").is_none());
+    assert_eq!(update["new_key"], true, "signed on the owner's laptop: the update says its key changed");
     // One request for every store plugin, saying this Zeron's version.
     let ask = store.state.lock().unwrap().asks.last().cloned().unwrap();
     assert_eq!(ask["plugins"], json!([{ "id": "focus", "version": "1.0.0", "hash": item["hash"] }]));
@@ -142,6 +148,7 @@ async fn the_owner_s_own_devices_are_offered_their_pending_version() {
     let checked = mine.check().await;
     assert_eq!(checked["updates"][0]["version"], "1.1.0");
     assert_eq!(checked["updates"][0]["in_review"], true);
+    assert!(checked["updates"][0].get("new_key").is_none(), "signed by the key installed");
     assert_eq!(mine.item("focus").await["update"]["in_review"], true);
     let updated = mine.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
     assert_eq!(updated["plugin"]["version"], "1.1.0");
@@ -172,6 +179,28 @@ async fn a_blocked_version_is_turned_off_and_can_be_turned_back_on() {
     assert_eq!(on["blocked"]["overridden"], true, "the reason is still said");
     d.check().await;
     assert_eq!(d.item("focus").await["status"], "on");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_block_repeated_by_a_hostile_store_is_applied_once() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    // 8 MB, so each rescan (which hashes every file) costs something.
+    let body = format!("return 1 --{}", "x".repeat(8 * 1024 * 1024));
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], &body, json!({})), "approved", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    let mut blocks = vec![json!({ "id": "focus", "version": "1.0.0", "reason": "It sent your chats somewhere." }); 2000];
+    blocks.push(json!({ "id": "focus", "version": "1.0.0", "reason": "Another reason." }));
+    store.state.lock().unwrap().blocked_anyway = blocks;
+    let started = std::time::Instant::now();
+    d.check().await;
+    let took = started.elapsed();
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item["blocked"]["reason"].as_str()), (Some("off"), Some("It sent your chats somewhere.")), "{item}");
+    // (A rescan per copy took over ten seconds here.)
+    assert!(took < Duration::from_secs(3), "2001 copies of one block took {took:?}");
 }
 
 #[tokio::test]
@@ -231,6 +260,84 @@ async fn a_new_owner_asks_again() {
     assert_eq!(updated["plugin"]["author"]["username"], "cy");
     assert_eq!(updated["plugin"]["status"], "pending", "a new owner waits for the person again");
     assert_eq!(d.allow("focus").await["status"], "on");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_package_is_read_no_further_than_its_record_says() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "approved", "");
+    let d = device(&store, Some("bob"));
+    // 60 MB where the record says a few hundred bytes: refused at the size,
+    // not read to the end and hashed.
+    store.state.lock().unwrap().serve_instead.insert(("focus".into(), "1.0.0".into()), vec![b' '; 60 * 1024 * 1024]);
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_mismatch");
+    assert!(refused.contains("bigger than its record says"), "{refused}");
+
+    // A record that doesn't say the size: nothing is fetched.
+    store.state.lock().unwrap().serve_instead.clear();
+    store.state.lock().unwrap().without_bytes = true;
+    let packages = || store.state.lock().unwrap().requests.iter().filter(|(_, path, _)| path.ends_with("/package")).count();
+    let before = packages();
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_mismatch", "{refused}");
+    assert_eq!(packages(), before, "nothing fetched for a record without its size");
+
+    // Nor for an update.
+    store.state.lock().unwrap().without_bytes = false;
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "approved", "");
+    store.state.lock().unwrap().without_bytes = true;
+    let before = packages();
+    let checked = d.check().await;
+    assert_eq!(checked["updates"], json!([]), "{checked}");
+    assert!(word(checked["errors"][0]["error"].as_str().unwrap()) == "store_mismatch", "{checked}");
+    assert_eq!(packages(), before);
+}
+
+#[tokio::test]
+async fn a_hostile_store_s_words_reach_no_dialog_with_controls_or_direction_marks() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "approved", "");
+    let hostile = "Focus\u{202e}draoB\u{1b}[2J\nok\u{200b}";
+    store.state.lock().unwrap().card_extra = json!({
+        "name": hostile, "summary": hostile, "description": hostile, "license": hostile,
+        "author": { "username": hostile, "badges": [] }, "categories": [hostile], "keywords": [hostile],
+    });
+    let unseen = |text: &str| text.chars().any(zeron_engine::plugins::listing::unseen_char);
+    let clean = |card: &Value| {
+        ["name", "summary", "description", "license"].iter().all(|k| card[k].as_str().is_some_and(|t| !unseen(t) && t.contains("draoB")))
+            && !unseen(card["author"]["username"].as_str().unwrap())
+            && !unseen(card["categories"][0].as_str().unwrap())
+            && !unseen(card["keywords"][0].as_str().unwrap())
+    };
+    let d = device(&store, Some("ada"));
+    let found = d.call(methods::STORE_SEARCH, json!({})).await.unwrap();
+    assert!(clean(&found["items"][0]), "{found}");
+    let page = d.call(methods::STORE_PLUGIN, json!({ "id": "focus", "versions": true })).await.unwrap();
+    assert!(clean(&page), "{page}");
+    let mine = d.call(methods::STORE_MY_PLUGINS, json!({})).await.unwrap();
+    assert!(clean(&mine["plugins"][0]), "{mine}");
+}
+
+#[tokio::test]
+async fn a_store_answer_that_redirects_is_never_followed() {
+    let store = FakeStore::start().await;
+    let elsewhere = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let raw = package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({}));
+    store.add("ada", &raw, "approved", "");
+    elsewhere.add("ada", &raw, "approved", "");
+    store.state.lock().unwrap().redirect_package = Some(format!("{}/store/v1/plugins/focus/versions/1.0.0/package", elsewhere.url));
+    let d = device(&store, Some("bob"));
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_error", "{refused}");
+    assert!(refused.contains("(302)"), "{refused}");
+    assert!(elsewhere.state.lock().unwrap().requests.is_empty(), "the other origin was never asked");
+    // (Without the redirect, it installs.)
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
 }
 
 #[tokio::test]
@@ -324,6 +431,50 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 #[tokio::test]
+async fn an_agent_never_replaces_an_installed_store_plugin_or_opts_it_into_pre_releases() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "approved", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    let before = d.item("focus").await;
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "approved", "");
+    store.add("ada", &package_of(&key, "focus", "2.0.0-beta.1", &["ui.add"], "return 3", json!({})), "approved", "");
+    let agent = || zeron_rpc::Caller::Agent { chat: Some("c1".into()) };
+
+    // An agent's install over it, latest or a pre-release: refused, nothing changed.
+    for params in [json!({ "store": "focus" }), json!({ "store": "focus", "version": "2.0.0-beta.1" })] {
+        let refused = d.call_as(agent(), methods::INSTALL_PLUGIN, params.clone()).await.unwrap_err();
+        assert_eq!(word(&refused), "needs_person", "{params}: {refused}");
+        let now = d.item("focus").await;
+        assert_eq!((now["version"].as_str(), now["hash"].as_str(), now["status"].as_str()), (Some("1.0.0"), before["hash"].as_str(), Some("on")));
+        assert!(now.get("prerelease").is_none(), "an agent never opts the person into pre-releases");
+    }
+    // (Nothing was fetched for it.)
+    let fetched = |v: &str| store.state.lock().unwrap().requests.iter().any(|(_, path, _)| path.ends_with(&format!("/{v}/package")));
+    assert!(!fetched("1.1.0") && !fetched("2.0.0-beta.1"));
+
+    // An agent's first install of another plugin still lands, waiting for
+    // the person, and doesn't opt them in either.
+    store.add("ada", &package_of(&key, "lab", "0.1.0-beta.1", &["ui.add"], "return 1", json!({})), "approved", "");
+    let landed = d.call_as(agent(), methods::INSTALL_PLUGIN, json!({ "store": "lab", "version": "0.1.0-beta.1" })).await.unwrap();
+    assert_eq!((landed["update"].as_bool(), landed["waiting"].as_bool()), (Some(false), Some(true)));
+    assert!(d.item("lab").await.get("prerelease").is_none());
+
+    // The person's own: from another of their devices (as the edge verified
+    // the link), and from this one, the update and the pre-release go in.
+    let peer = zeron_rpc::Caller::Peer { device: Some("dev-2".into()) };
+    let updated = d.call_as(peer, methods::INSTALL_PLUGIN, json!({ "store": "focus", "version": "1.1.0" })).await.unwrap();
+    assert_eq!((updated["update"].as_bool(), updated["plugin"]["version"].as_str()), (Some(true), Some("1.1.0")));
+    let unverified = zeron_rpc::Caller::Peer { device: None };
+    assert_eq!(word(&d.call_as(unverified, methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err()), "needs_person");
+    let beta = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus", "version": "2.0.0-beta.1" })).await.unwrap();
+    assert_eq!(beta["plugin"]["version"], "2.0.0-beta.1");
+    assert_eq!(d.item("focus").await["prerelease"], true, "the person's pre-release install takes its later ones");
+}
+
+#[tokio::test]
 async fn a_featured_search_lists_only_the_featured_ones_in_the_store_s_order() {
     let store = FakeStore::start().await;
     let (key, _) = SigningKey::generate().unwrap();
@@ -335,6 +486,7 @@ async fn a_featured_search_lists_only_the_featured_ones_in_the_store_s_order() {
     let device = device(&store, Some("bob"));
     let ids = |reply: Value| reply["items"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
     let featured = device.call(methods::STORE_SEARCH, json!({ "featured": true })).await.unwrap();
+    assert_eq!(featured["total"], 2, "the store's total comes through");
     assert_eq!(ids(featured), ["alpha", "gamma"], "only the featured ones, in the order the store lists them");
     let path = store.state.lock().unwrap().requests.last().unwrap().1.clone();
     assert_eq!(path, "/store/v1/plugins?featured=true");
@@ -409,6 +561,14 @@ async fn reports_compatibility_for_another_zeron_and_deploy_keys_for_owned_plugi
     assert_eq!((id.as_str(), body["reason"].as_str()), ("focus", Some("malware")));
     assert!(!body["text"].as_str().unwrap().contains('\u{202e}'));
     assert!(d.call(methods::STORE_REPORT, json!({ "id": "focus", "reason": "boring" })).await.is_err());
+
+    // A key that isn't one (`zeron plugin key revoke focus ..`): nothing sent.
+    let sent = store.state.lock().unwrap().requests.len();
+    for key in ["..", ".", "", "%2e%2e", "abc"] {
+        let refused = d.call(methods::REVOKE_DEPLOY_KEY, json!({ "id": "focus", "key": key })).await.unwrap_err();
+        assert!(refused.contains("isn't a deploy key"), "{key}: {refused}");
+    }
+    assert_eq!(store.state.lock().unwrap().requests.len(), sent);
 
     // bob owns no focus in the store: no deploy key for it.
     let refused = d.call(methods::CREATE_DEPLOY_KEY, json!({ "id": "focus", "name": "CI" })).await.unwrap();

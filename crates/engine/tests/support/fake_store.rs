@@ -71,6 +71,30 @@ pub struct State {
     pub content_sha256: Vec<Option<String>>,
     /// Reports: `(id, body)`.
     pub reports: Vec<(String, Value)>,
+    /// Blocks sent whatever the device asked (a hostile store).
+    pub blocked_anyway: Vec<Value>,
+    /// Records sent without their package's size (`bytes: null`).
+    pub without_bytes: bool,
+    /// Answer the next package download with a 302 to this URL.
+    pub redirect_package: Option<String>,
+    /// Fields laid over every card, page and plugin of yours it answers (a
+    /// hostile store's words).
+    pub card_extra: Value,
+}
+
+/// `card` with the store's `card_extra` laid over it.
+fn carded(state: &State, mut card: Value) -> Value {
+    if let (Some(card), Some(extra)) = (card.as_object_mut(), state.card_extra.as_object()) {
+        for (k, v) in extra {
+            card.insert(k.clone(), v.clone());
+        }
+    }
+    card
+}
+
+/// A version's package size as the store's records give it.
+fn bytes_of(state: &State, v: &StoredVersion) -> Value {
+    if state.without_bytes { Value::Null } else { json!(v.raw.len()) }
 }
 
 /// Who sent a request: a username, and the plugin a deploy key is for.
@@ -118,7 +142,13 @@ impl FakeStore {
                         return;
                     }
                     let (status, content_type, reply) = store.answer(&method, &path, &headers, &body);
-                    let head = format!("HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", reply.len());
+                    let head = if content_type == "redirect" {
+                        let location = String::from_utf8_lossy(&reply);
+                        format!("HTTP/1.1 {status} X\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    } else {
+                        format!("HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", reply.len())
+                    };
+                    let reply = if content_type == "redirect" { Vec::new() } else { reply };
                     let _ = socket.write_all(head.as_bytes()).await;
                     let _ = socket.write_all(&reply).await;
                 });
@@ -253,21 +283,22 @@ impl FakeStore {
                     .filter(|(_, p)| !featured_only || p.featured)
                     .filter_map(|(id, p)| {
                         let v = p.versions.iter().rev().find(|v| v.status == "approved")?;
-                        Some(json!({ "id": id, "name": id, "version": v.version, "author": p.author(), "featured": p.featured }))
+                        Some(carded(&state, json!({ "id": id, "name": id, "version": v.version, "author": p.author(), "featured": p.featured })))
                     })
                     .collect();
-                json_reply(200, json!({ "items": items }))
+                // (One page: the total is what it lists.)
+                json_reply(200, json!({ "total": items.len(), "items": items }))
             }
             ("GET", ["store", "v1", "plugins", id]) => {
                 let state = self.state.lock().unwrap();
                 let Some(p) = state.plugins.get(*id) else { return not_found() };
                 let Some(v) = p.versions.iter().rev().find(|v| v.status == "approved") else { return not_found() };
-                json_reply(200, json!({
+                json_reply(200, carded(&state, json!({
                     "id": id, "name": id, "version": v.version,
                     "author": p.author(),
                     "engines": { "zeron": v.engines },
-                    "package": { "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(), "key": v.key },
-                }))
+                    "package": { "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v), "key": v.key },
+                })))
             }
             ("GET", ["store", "v1", "plugins", id, "versions"]) => {
                 let state = self.state.lock().unwrap();
@@ -279,7 +310,7 @@ impl FakeStore {
                     .filter(|v| mine || matches!(v.status.as_str(), "approved" | "yanked"))
                     .map(|v| json!({
                         "version": v.version, "status": v.status, "yanked": v.status == "yanked", "notes": v.notes,
-                        "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(), "key": v.key,
+                        "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v), "key": v.key,
                     }))
                     .collect();
                 json_reply(200, json!({ "versions": versions }))
@@ -288,6 +319,9 @@ impl FakeStore {
                 let mut state = self.state.lock().unwrap();
                 if let Some(raw) = state.serve_instead.remove(&((*id).to_owned(), (*version).to_owned())) {
                     return (200, "application/octet-stream", raw);
+                }
+                if let Some(location) = state.redirect_package.take() {
+                    return (302, "redirect", location.into_bytes());
                 }
                 let Some(p) = state.plugins.get(*id) else { return not_found() };
                 let mine = caller.as_deref() == Some(p.owner.as_str());
@@ -350,13 +384,14 @@ impl FakeStore {
                         .max_by(|a, b| Version::parse(&a.version).unwrap().cmp(&Version::parse(&b.version).unwrap()));
                     if let Some(v) = best {
                         updates.push(json!({
-                            "id": id, "version": v.version, "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(),
+                            "id": id, "version": v.version, "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v),
                             "key": v.key, "publisher": p.owner, "publisher_id": publisher_id(p.account()), "notes": v.notes, "added": [], "removed": [],
                             "in_review": v.status == "pending",
                         }));
                     }
                 }
                 updates.append(&mut state.offer_anyway);
+                blocked.extend(state.blocked_anyway.iter().cloned());
                 json_reply(200, json!({ "updates": updates, "blocked": blocked }))
             }
             ("POST", ["store", "v1", "plugins", id, "versions"]) => {
@@ -407,13 +442,13 @@ impl FakeStore {
                     .plugins
                     .iter()
                     .filter(|(id, p)| p.owner == owner && scope.as_deref().is_none_or(|s| s == id.as_str()))
-                    .map(|(id, p)| json!({
+                    .map(|(id, p)| carded(&state, json!({
                         "id": id, "author": p.author(),
                         "versions": p.versions.iter().map(|v| json!({
                             "version": v.version, "status": v.status, "yanked": v.status == "yanked",
-                            "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": v.raw.len(), "key": v.key,
+                            "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v), "key": v.key,
                         })).collect::<Vec<_>>(),
-                    }))
+                    })))
                     .collect();
                 json_reply(200, json!({ "plugins": plugins }))
             }

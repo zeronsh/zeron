@@ -327,19 +327,39 @@ struct AuthInner {
     runner_rejected: std::sync::atomic::AtomicBool,
     /// The step-up ticket of the last interactive sign-in (`stepUp` from
     /// `/auth/exchange`): proof a person just signed in, which binding a new
-    /// plugin signing key and deleting the account need. Memory only, never
-    /// on disk or over IPC; until it expires (10 min at most).
-    step_up: Mutex<Option<(String, Instant)>>,
+    /// plugin signing key and deleting the account need, and what it was
+    /// begun for (`None`: a sign-in, or a step-up for no one action).
+    /// Memory only, never on disk or over IPC; until it expires (10 min at
+    /// most).
+    step_up: Mutex<Option<(String, Instant, Option<StepUpFor>)>>,
     /// Sign-ins begun as a step-up for the account signed in now
-    /// ([`Auth::start_step_up`]): their exchange keeps the ticket and
-    /// nothing else.
-    step_up_states: Mutex<std::collections::HashSet<String>>,
+    /// ([`Auth::start_step_up`]), with what each is for: their exchange
+    /// keeps the ticket and nothing else.
+    step_up_states: Mutex<std::collections::HashMap<String, Option<StepUpFor>>>,
     /// [`Auth::on_fresh_ticket`].
     fresh_ticket: Mutex<Option<FreshTicketHook>>,
 }
 
 /// The longest a step-up ticket is kept.
 const STEP_UP_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// One action a step-up can be begun for: its ticket serves that action
+/// alone, once ([`Auth::take_step_up`]), never whatever comes next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepUpFor {
+    /// Making a plugin's deploy key (`CreateDeployKey`).
+    DeployKey,
+}
+
+impl StepUpFor {
+    /// `StepUp`'s `for`: `deploy_key`.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "deploy_key" => Some(Self::DeployKey),
+            _ => None,
+        }
+    }
+}
 /// How long a sign-in waits on what must happen while its ticket is fresh
 /// ([`Auth::on_fresh_ticket`]) before it's announced anyway.
 const FRESH_TICKET_WAIT: Duration = Duration::from_secs(8);
@@ -490,7 +510,7 @@ impl Auth {
                 runner,
                 runner_rejected: std::sync::atomic::AtomicBool::new(false),
                 step_up: Mutex::new(None),
-                step_up_states: Mutex::new(std::collections::HashSet::new()),
+                step_up_states: Mutex::new(std::collections::HashMap::new()),
                 fresh_ticket: Mutex::new(None),
             }),
         }
@@ -782,15 +802,31 @@ impl Auth {
         }
     }
 
-    /// The step-up ticket of the last interactive sign-in, while it's
-    /// fresh. Not used up here: the edge uses it up when it binds a new key
-    /// or deletes the account.
+    /// The step-up ticket of the last interactive sign-in (or a step-up for
+    /// no one action), while it's fresh. Not used up here: the edge uses it
+    /// up when it binds a new key or deletes the account. A ticket begun
+    /// for one action ([`StepUpFor`]) is never this.
     pub fn step_up(&self) -> Option<String> {
         let mut slot = lock(&self.inner.step_up);
         match slot.as_ref() {
-            Some((ticket, until)) if Instant::now() < *until => Some(ticket.clone()),
-            _ => {
+            Some((_, until, _)) if Instant::now() >= *until => {
                 *slot = None;
+                None
+            }
+            Some((ticket, _, None)) => Some(ticket.clone()),
+            _ => None,
+        }
+    }
+
+    /// The ticket of a step-up begun for `action`, while it's fresh: given
+    /// once, then gone. Any other ticket (a sign-in's, another action's)
+    /// isn't given.
+    pub fn take_step_up(&self, action: StepUpFor) -> Option<String> {
+        let mut slot = lock(&self.inner.step_up);
+        match slot.take() {
+            Some((ticket, until, Some(held))) if held == action && Instant::now() < until => Some(ticket),
+            other => {
+                *slot = other.filter(|(_, until, _)| Instant::now() < *until);
                 None
             }
         }
@@ -799,8 +835,9 @@ impl Auth {
     /// Begin a fresh interactive sign-in as the account signed in now, for
     /// a step-up ticket alone (the session stays as it is). Returns the URL
     /// to open, as [`Self::start_sign_in`]; a sign-in as anyone else is
-    /// refused when it lands.
-    pub async fn start_step_up(&self) -> Result<String, EngineError> {
+    /// refused when it lands. `action`: what its ticket is for alone
+    /// ([`Self::take_step_up`]); `None`, what a sign-in's is.
+    pub async fn start_step_up(&self, action: Option<StepUpFor>) -> Result<String, EngineError> {
         if self.inner.workos.is_none() || self.user_id().is_none() {
             return Err(EngineError::Other("Sign in first".into()));
         }
@@ -810,7 +847,7 @@ impl Auth {
             SignInOptions { fresh: true, ..SignInOptions::default() },
         );
         if let Some(state) = url.split("&state=").nth(1).and_then(|rest| rest.split('&').next()) {
-            lock(&self.inner.step_up_states).insert(state.to_owned());
+            lock(&self.inner.step_up_states).insert(state.to_owned(), action);
         }
         Ok(url)
     }
@@ -859,12 +896,14 @@ impl Auth {
     /// A code exchanged: a step-up keeps its ticket if it's the account
     /// signed in now (and changes nothing else); a sign-in signs in.
     async fn finish_exchange(&self, state: &str, result: SignInResult, generation: u64) -> Result<(), EngineError> {
-        if lock(&self.inner.step_up_states).remove(state) {
+        let begun = lock(&self.inner.step_up_states).remove(state);
+        if let Some(action) = begun {
             if self.user_id().as_deref() != Some(result.user.id.as_str()) {
                 return Err(EngineError::Other("That was another account: sign in as the one using Zeron here".into()));
             }
-            let fresh = result.step_up.is_some();
-            self.keep_step_up(result.step_up);
+            // (One for an action is that action's alone: nothing else runs on it.)
+            let fresh = result.step_up.is_some() && action.is_none();
+            self.keep_step_up(result.step_up, action);
             if fresh {
                 self.run_fresh_ticket(result.user.id).await;
             }
@@ -877,8 +916,8 @@ impl Auth {
         self.announce_sign_in(user, org_id, generation)
     }
 
-    fn keep_step_up(&self, step_up: Option<(String, Duration)>) {
-        *lock(&self.inner.step_up) = step_up.map(|(ticket, ttl)| (ticket, Instant::now() + ttl.min(STEP_UP_TTL)));
+    fn keep_step_up(&self, step_up: Option<(String, Duration)>, action: Option<StepUpFor>) {
+        *lock(&self.inner.step_up) = step_up.map(|(ticket, ttl)| (ticket, Instant::now() + ttl.min(STEP_UP_TTL), action));
     }
 
     pub fn sign_out(&self) {
@@ -1111,7 +1150,7 @@ impl Auth {
             ));
         }
         let org_id = jwt_claims(&result.access_token).and_then(|c| c.org_id);
-        self.keep_step_up(result.step_up.clone());
+        self.keep_step_up(result.step_up.clone(), None);
         *lock(&self.inner.access) = Some(AccessEntry::fresh(result.access_token));
         let session = StoredSession {
             refresh_token: result.refresh_token,
@@ -1879,6 +1918,29 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_step_up_for_an_action_is_that_action_s_alone_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Auth::new(AuthConfig::new("https://edge.invalid", dir.path()));
+        let ttl = Duration::from_secs(60);
+        // A sign-in's ticket: what registering a key and deleting the
+        // account take, never a deploy key's.
+        auth.keep_step_up(Some(("t-sign-in".into(), ttl)), None);
+        assert_eq!(auth.step_up().as_deref(), Some("t-sign-in"));
+        assert_eq!(auth.take_step_up(StepUpFor::DeployKey), None);
+        assert_eq!(auth.step_up().as_deref(), Some("t-sign-in"), "kept for what it's for");
+        // A step-up begun for a deploy key: that alone, once.
+        auth.keep_step_up(Some(("t-key".into(), ttl)), Some(StepUpFor::DeployKey));
+        assert_eq!(auth.step_up(), None, "not a sign-in's");
+        assert_eq!(auth.take_step_up(StepUpFor::DeployKey).as_deref(), Some("t-key"));
+        assert_eq!(auth.take_step_up(StepUpFor::DeployKey), None, "used once");
+        // Expired, never.
+        auth.keep_step_up(Some(("t-old".into(), Duration::ZERO)), Some(StepUpFor::DeployKey));
+        assert_eq!(auth.take_step_up(StepUpFor::DeployKey), None);
+        assert_eq!(StepUpFor::parse("deploy_key"), Some(StepUpFor::DeployKey));
+        assert_eq!(StepUpFor::parse("delete_account"), None);
+    }
 
     #[tokio::test]
     async fn concurrent_dns_failure_is_shared_with_http_and_room_consumers() {

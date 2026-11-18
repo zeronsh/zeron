@@ -292,8 +292,11 @@ fn packed(key: Option<&SigningKey>, manifest: &Value, files: &BTreeMap<String, V
 
 /// What a device makes of package `raw`: `{ok: true, id, version, key,
 /// hash, sha256, files}`, or `{ok: false, error}`. `error` is the refusal's
-/// word (`install::reason`); past the package's own checks, the manifest's:
-/// `bad_manifest` (one Zeron won't run), `bad_id`, `missing_entry`.
+/// word (`install::reason`), the first in this order: the package's own
+/// checks (`not_a_package`, `too_big`, `bad_file`, the signature's), then
+/// `paths_collide` (two paths one file on a folding disk, or the manifest's
+/// name), then the manifest's: `bad_manifest` (one Zeron won't run),
+/// `bad_id`, `missing_entry`.
 fn package_result(raw: Vec<u8>) -> Value {
     let sha256 = signing::sha256_hex(&raw);
     match install::parse(raw.clone()) {
@@ -354,6 +357,22 @@ fn package_cases() -> Value {
     ] {
         let mut with = good.clone();
         with.insert(bad.into(), b"x".to_vec());
+        cases.push((name.into(), packed(Some(&key), &manifest, &with)));
+    }
+    // Paths one disk or another makes one file (macOS's and Windows' fold
+    // names: listing.rs `fold_path`): refused as read, on every disk alike.
+    for (name, paths) in [
+        ("two paths that differ only in case", &["ui/Badge.luau", "ui/badge.luau"][..]),
+        ("one name in Unicode's two spellings (NFC, NFD)", &["caf\u{e9}.luau", "cafe\u{301}.luau"]),
+        ("a file and a folder that fold alike", &["ui", "UI/x.luau"]),
+        ("its manifest's name in capitals", &["Zeron-Plugin.json"]),
+        ("its manifest's name with a long s", &["zeron-plugin.j\u{17f}on"]),
+        ("its manifest's name as a folder", &["ZERON-PLUGIN.JSON/x.luau"]),
+    ] {
+        let mut with = good.clone();
+        for rel in paths {
+            with.insert((*rel).into(), b"x".to_vec());
+        }
         cases.push((name.into(), packed(Some(&key), &manifest, &with)));
     }
     let mut no_entry = good.clone();
@@ -962,7 +981,7 @@ fn vectors_say_what_the_code_does() {
     let valid = &v["packages"][0]["result"];
     assert_eq!((valid["ok"].as_bool(), valid["key"].as_str()), (Some(true), Some(author().public().as_str())));
     let words: Vec<&str> = v["packages"].as_array().unwrap().iter().filter_map(|c| c["result"]["error"].as_str()).collect();
-    for word in ["not_a_package", "unsigned", "tampered", "bad_signature", "bad_file", "bad_manifest", "bad_id", "missing_entry"] {
+    for word in ["not_a_package", "unsigned", "tampered", "bad_signature", "bad_file", "paths_collide", "bad_manifest", "bad_id", "missing_entry"] {
         assert!(words.contains(&word), "{word} has a case");
     }
     let fractional = v["packages"].as_array().unwrap().iter().find(|c| c["name"] == "fractional settings").unwrap();
@@ -979,3 +998,4 @@ fn vectors_say_what_the_code_does() {
         assert!(zeron_plugin_guard::commands::held_to_its_own_rules(program));
     }
 }
+

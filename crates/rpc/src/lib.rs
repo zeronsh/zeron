@@ -221,9 +221,11 @@ pub mod methods {
     /// calls refresh; the refresh token never leaves the engine. Local IPC
     /// only ([`crate::local_only`]): the device-room relay refuses it.
     pub const ACCESS_TOKEN: &str = "AccessToken";
-    /// `{}` → `{url}`: a fresh interactive sign-in (as `SignIn`) whose
+    /// `{for?}` → `{url}`: a fresh interactive sign-in (as `SignIn`) whose
     /// exchange leaves the engine a one-time step-up ticket, kept in memory
-    /// and never handed out. Needed before `DeleteAccount`.
+    /// and never handed out. Needed before `DeleteAccount` (no `for`).
+    /// `for: "deploy_key"`: the ticket is `CreateDeployKey`'s alone, used
+    /// once, and no other ticket makes a deploy key.
     pub const STEP_UP: &str = "StepUp";
     /// `{confirm}` (the account's email) → `{ok: true}`, or `{ok: false,
     /// error, message, organization?}`: the engine deletes the account at
@@ -724,8 +726,10 @@ pub mod methods {
 
     /// `{q?, category?, keyword?, featured?, sort?, cursor?, limit?}` →
     /// `{items: [PluginCard + installed?: {version, status, store}],
-    /// next_cursor?}`. `featured: true` lists only the plugins staff feature,
-    /// in the store's order; false or absent lists every one.
+    /// next_cursor?, total}`. `featured: true` lists only the plugins staff
+    /// feature, in the store's order; false or absent lists every one.
+    /// `total` is how many plugins the search matches across all its pages
+    /// (the same on each page; 0 for none), as the store counts them.
     pub const STORE_SEARCH: &str = "StoreSearch";
     /// `{id, versions?, for_zeron?}` → the store's `PluginDetail` (with every
     /// version the caller may see when `versions`), `installed?: {version,
@@ -764,8 +768,8 @@ pub mod methods {
     pub const LIST_DEPLOY_KEYS: &str = "ListDeployKeys";
     /// `{id, name, expires?}` → `{ok: true, key, secret}` (the secret,
     /// `zpk_…`, shown this once and kept nowhere), or `{ok: false, error,
-    /// message}`: `step_up_required` (run [`STEP_UP`], then again), or the
-    /// store's word.
+    /// message}`: `step_up_required` (run [`STEP_UP`] `{for: "deploy_key"}`,
+    /// then again: each key takes a step-up of its own), or the store's word.
     pub const CREATE_DEPLOY_KEY: &str = "CreateDeployKey";
     /// `{id, key}` → `{revoked: key}`.
     pub const REVOKE_DEPLOY_KEY: &str = "RevokeDeployKey";
@@ -938,7 +942,9 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::READ_COMMAND_OUTPUT
             | methods::STOP_COMMAND
             | methods::LIST_BACKGROUND_COMMANDS
-            // Plugins: authoring, installing (lands waiting for the person),
+            // Plugins: authoring, installing (lands waiting for the person;
+            // over one installed from the store it's refused, `needs_person`:
+            // an update is the person's, `UpdatePlugin`),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their
             // tools.

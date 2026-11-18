@@ -51,13 +51,13 @@ pub fn vouched(publisher: &Publisher) -> Result<(String, String), String> {
 pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: &Publisher) -> Result<(Package, StoreSource), String> {
     let mismatch = |what: &str| failure(reason::STORE_MISMATCH, format!("What the store sent isn't what its record says ({what}), so it wasn't installed"));
     let (publisher, publisher_id) = vouched(publisher)?;
-    if record.sha256.is_empty() || record.hash.is_empty() {
+    if record.sha256.is_empty() || record.hash.is_empty() || record.bytes == 0 {
         return Err(mismatch("its record is incomplete"));
     }
     if signing::sha256_hex(&raw) != record.sha256.to_ascii_lowercase() {
         return Err(mismatch("the file"));
     }
-    if record.bytes != 0 && record.bytes != raw.len() as u64 {
+    if record.bytes != raw.len() as u64 {
         return Err(mismatch("its size"));
     }
     let package = install::parse(raw)?;
@@ -114,6 +114,7 @@ mod tests {
         assert_eq!(refused(raw.clone(), "focus", "1.3.0", &good, Some("ada")), "store_mismatch");
         assert_eq!(refused(raw.clone(), "focus", "1.2.0", &PackageRecord { sha256: "00".repeat(32), ..good.clone() }, Some("ada")), "store_mismatch");
         assert_eq!(refused(raw.clone(), "focus", "1.2.0", &PackageRecord { bytes: 3, ..good.clone() }, Some("ada")), "store_mismatch");
+        assert_eq!(refused(raw.clone(), "focus", "1.2.0", &PackageRecord { bytes: 0, ..good.clone() }, Some("ada")), "store_mismatch", "a record without its size");
         let (eve, _) = SigningKey::generate().unwrap();
         assert_eq!(refused(raw.clone(), "focus", "1.2.0", &PackageRecord { key: Some(eve.public()), ..good.clone() }, Some("ada")), "store_mismatch");
         // A record that names no publisher, or no hashes.
