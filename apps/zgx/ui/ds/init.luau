@@ -105,6 +105,7 @@ return {
 	Glass = require("@self/glass").Panel,
 	glass = require("@self/glass").style,
 	SectionTitle = require("@self/section_title"),
+	Shelf = require("@self/shelf").Shelf,
 	Hint = require("@self/hint"),
 	-- Primitives: fields, choices, notices, overlays, and the pieces
 	-- settings, onboarding and the git pages are built from.

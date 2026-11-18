@@ -172,6 +172,35 @@ test("the head's one slot is the same primary button in every state, its words s
 	said("Turned off")
 end)
 
+test("Show less at the foot of a long note, with versions under it, keeps the control just pressed in view", function()
+	local app = page("Focus timer")
+	app:set_state("plugins_view", "store:extremes")
+	app:wait("#store-header", { timeout_ms = 3000 })
+	settle(app)
+	local function y_of(sel: string): number
+		return tonumber((app:tree(sel):match(" [%d.]+,([%-%d.]+) "))) or 0
+	end
+	app:scroll("#fixture-scroll", 1e6)
+	settle(app)
+	app:click('role:button "Show all 12 versions"')
+	settle(app)
+	app:scroll("#fixture-scroll", -1e6)
+	settle(app)
+	app:scroll("#fixture-scroll", y_of(".store-notes-more[1]") - 450)
+	settle(app)
+	app:click(".store-notes-more[1]")
+	settle(app)
+	-- At its foot, the eleven older versions under it.
+	app:scroll("#fixture-scroll", y_of(".store-notes-more[1]") - 450)
+	settle(app)
+	app:click(".store-notes-more[1]")
+	settle(app)
+	local y = y_of(".store-notes-more[1]")
+	expect(y >= 0 and y < 900).to_be(true)
+	expect(app:tree(".store-notes-more[1]")).to_contain("Show more")
+	expect(app:tree(".store-notes-more[1]")).to_contain("focused")
+end)
+
 test("the name's column is one width in every state of the head, at 1000 and at 760", function()
 	for _, width in { 1000, 760 } do
 		local app = page("Focus timer")
@@ -198,6 +227,56 @@ test("the name's column is one width in every state of the head, at 1000 and at 
 			expect(`{width}: {widths[i]}`).to_be(`{width}: {widths[1]}`)
 		end
 	end
+end)
+
+test("in a narrow pane the slot goes under the meta line on the name's edge, the name has the whole row, one width in every state", function()
+	local app = page("Focus timer")
+	-- (A 496 column: beside the slot the name would have 142, under a row's
+	-- least for its words, 180.)
+	app:resize(560, 900)
+	settle(app)
+	local function box(sel: string): { x: number, y: number, w: number, h: number }
+		local line = app:tree(sel):match("[^\n]+") or ""
+		local x, y, w, h = line:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
+		return { x = tonumber(x) or 0, y = tonumber(y) or 0, w = tonumber(w) or 0, h = tonumber(h) or 0 }
+	end
+	local header = box("#store-header")
+	local widths = {}
+	local function check(label: string?)
+		expect(app:has(".store-slot-under")).to_be(true)
+		local name = box('#store-header >> role:heading')
+		local slot = box("#store-slot")
+		-- On the name's edge, under the meta line; the name the row's whole.
+		expect(math.abs(slot.x - name.x) < 0.6).to_be(true)
+		expect(slot.y > name.y + name.h).to_be(true)
+		expect(math.abs(name.x + name.w - (header.x + header.w - 17)) < 0.6).to_be(true)
+		if label then
+			expect(app:has(`#store-slot >> role:button "{label}"`)).to_be(true)
+		end
+		table.insert(widths, name.w)
+	end
+	check("Install")
+	app:click('#store-slot >> role:button "Install"')
+	app:command("store.install_done")
+	settle(app)
+	check("Review")
+	-- (The line beside the button.)
+	local review, line = box('#store-slot >> role:button "Review"'), box("#store-state")
+	expect(math.abs(line.x - (review.x + review.w + 12)) < 0.6).to_be(true)
+	app:command("store.allowed")
+	settle(app)
+	check(nil)
+	app:command("store.update_found")
+	settle(app)
+	check("Update to 1.3.0")
+	for i = 2, #widths do
+		expect(widths[i]).to_be(widths[1])
+	end
+	-- Wider (a 576 column), the slot is back beside the name.
+	app:resize(640, 900)
+	settle(app)
+	expect(app:has(".store-slot-under")).to_be(false)
+	expect(app:has(".store-slot-room")).to_be(true)
 end)
 
 test("Show more opens a 64 KB note whole in place, and the same control, Show less, folds it back", function()

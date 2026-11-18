@@ -39,6 +39,9 @@ local M = {}
 -- The least a row's words keep before its control drops under them, so a
 -- narrow window never squeezes them to a letter a line.
 local MIN_TEXT = 180
+-- (The same least, for a screen of its own laying its words beside a
+-- control: a store plugin's head.)
+M.MIN_TEXT = MIN_TEXT
 -- The chevron at the end of a row that leads somewhere.
 local CHEVRON = 14
 -- Where the search glyph's ink starts inside its box at a small field's

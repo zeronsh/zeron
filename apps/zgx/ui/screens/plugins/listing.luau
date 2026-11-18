@@ -181,7 +181,7 @@ local function first_line(text: string): string
 	return ""
 end
 
-local Notes = ui.component(function(props: { text: () -> string, lines: number }): Node
+local Notes = ui.component(function(props: { text: () -> string, lines: number, on_fold: (() -> ())? }): Node
 	local open = ui.use_state(false)
 	local line = (ui.theme.get("zeron.prose.small.line") :: number?) or 20
 	local folded_h = props.lines * line
@@ -269,7 +269,13 @@ local Notes = ui.component(function(props: { text: () -> string, lines: number }
 				return open:get()
 			end,
 			on_click = function()
-				open:set(not open:peek())
+				local folding = open:peek()
+				open:set(not folding)
+				-- (Folded from far down a long one: its version brought back
+				-- into view, as it's laid out again.)
+				if folding and props.on_fold then
+					ui.after(0, props.on_fold)
+				end
 			end,
 			class = "store-notes-more",
 			place = { self = "start" },
@@ -518,7 +524,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end
 		return nil
 	end
-	local function state_line(kind: string): Node?
+	local function state_line(kind: string, align: string?): Node?
 		local said = state_words(kind)
 		if not said then
 			return nil
@@ -539,7 +545,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				min_w = 0,
 				shrink = 1,
 				wrap = true,
-				align = "right",
+				align = align or "right",
 				text_size = "$font.size.sm",
 				line_height = "$font.line.sm",
 			},
@@ -569,6 +575,41 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			ui.row { min_w = 0, max_w = "100%", min_h = ui.theme.get("font.line.xl") :: number?, items = "center", top },
 			if button and line then line else nil,
 		}
+	end
+
+	-- The slot in a narrow pane (`narrow`): its own row under the meta line,
+	-- on the name's text edge, the button first and the line beside it; the
+	-- name then has the head's whole row.
+	local function slot_under(kind: string): Node
+		local button = action(kind)
+		local line = state_line(kind, "left")
+		if not button and not line then
+			return ui.div {}
+		end
+		return ui.row {
+			id = "store-slot",
+			class = "store-slot-under",
+			w_full = true,
+			min_w = 0,
+			gap = "$space.3",
+			items = "center",
+			button,
+			line,
+		}
+	end
+	-- Whether the name's column beside the slot would fall under a row's
+	-- least for its words (Settings.Row's `MIN_TEXT`, 180, where its control
+	-- goes under them): the head's width less its insets, the tile and its
+	-- gap, and the gap and slot after the name.
+	local head_w = ui.use_state(0)
+	local function narrow(): boolean
+		local w = head_w:get()
+		if w <= 0 then
+			return false
+		end
+		local gap = (ui.theme.get("space.4") :: number?) or 16
+		local name = w - 2 * ds.Settings.TEXT_INSET - 48 - gap - gap - ((SLOT :: number?) or 240)
+		return name < ds.Settings.MIN_TEXT
 	end
 
 	-- Why it can't install, where it takes more than a line: made for
@@ -649,6 +690,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			px = ds.Settings.inset(),
 			gap = "$space.4",
 			items = "start",
+			on_resize = function(size: { w: number, h: number })
+				if math.abs(size.w - head_w:peek()) >= 0.5 then
+					head_w:set(size.w)
+				end
+			end,
 			ui.div {
 				id = "store-tile",
 				shrink = 0,
@@ -663,62 +709,83 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				grow = 1,
 				basis = 0,
 				min_w = 0,
-				gap = "$space.1",
-				-- (The whole name, however long: on as many lines as it takes.)
-				ui.text {
-					function(): string
-						return d().name or id
-					end,
-					heading = 1,
+				gap = "$space.3",
+				ui.column {
 					w_full = true,
-					-- (The whole of it, on as many lines as it takes: a word
-					-- longer than the line breaks to fit.)
-					wrap = true,
-					text_size = "$font.size.xl",
-					line_height = "$font.line.xl",
-					weight = "$font.weight.semibold",
-					color = "$text.primary",
-				},
-				ui.row {
-					gap = "$space.2",
-					items = "center",
-					flex_wrap = true,
+					gap = "$space.1",
+					-- (The whole name, however long: on as many lines as it takes.)
 					ui.text {
 						function(): string
-							return browse.author(d())
+							return d().name or id
 						end,
+						heading = 1,
+						w_full = true,
+						-- (The whole of it, on as many lines as it takes: a word
+						-- longer than the line breaks to fit.)
+						wrap = true,
+						text_size = "$font.size.xl",
+						line_height = "$font.line.xl",
+						weight = "$font.weight.semibold",
+						color = "$text.primary",
+					},
+					ui.row {
+						gap = "$space.2",
+						items = "center",
+						flex_wrap = true,
+						ui.text {
+							function(): string
+								return browse.author(d())
+							end,
+							text_size = "$font.size.sm",
+							line_height = "$font.line.sm",
+							color = "$text.secondary",
+						},
+						browse.badges(d),
+					},
+					-- Its version, the day that version came out (the Versions
+					-- list's day for it) and how many have it.
+					ui.text {
+						function(): string
+							local n = d().installs
+							local count = if type(n) == "number" then math.max(0, math.floor(n)) else 0
+							local version = d().version or ""
+							local at: number? = nil
+							for _, v in (if type(d().versions) == "table" then d().versions else {}) :: { any } do
+								if type(v) == "table" and v.version == version and type(v.published_at) == "number" then
+									at = v.published_at
+								end
+							end
+							if at then
+								return ui.t("plugins.store.version_meta", { version = version, date = locale.date(at / 1000), n = count }):get()
+							end
+							return ui.t("plugins.store.version_installs", { version = version, n = count }):get()
+						end,
+						tabular = true,
 						text_size = "$font.size.sm",
 						line_height = "$font.line.sm",
-						color = "$text.secondary",
+						color = "$text.tertiary",
 					},
-					browse.badges(d),
 				},
-				-- Its version, the day that version came out (the Versions
-				-- list's day for it) and how many have it.
-				ui.text {
-					function(): string
-						local n = d().installs
-						local count = if type(n) == "number" then math.max(0, math.floor(n)) else 0
-						local version = d().version or ""
-						local at: number? = nil
-						for _, v in (if type(d().versions) == "table" then d().versions else {}) :: { any } do
-							if type(v) == "table" and v.version == version and type(v.published_at) == "number" then
-								at = v.published_at
-							end
-						end
-						if at then
-							return ui.t("plugins.store.version_meta", { version = version, date = locale.date(at / 1000), n = count }):get()
-						end
-						return ui.t("plugins.store.version_installs", { version = version, n = count }):get()
-					end,
-					tabular = true,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.tertiary",
-				},
+				-- (Narrow: the slot under the meta line, 12 below it.)
+				ui.show(function(): boolean
+					return narrow() and standing() ~= "blocked"
+				end, ui.switch(standing, {
+					install = slot_under("install"),
+					incompatible = slot_under("incompatible"),
+					away = slot_under("away"),
+					other = slot_under("other"),
+					update = slot_under("update"),
+					review = slot_under("review"),
+					off = slot_under("off"),
+					settings = slot_under("settings"),
+					installed = slot_under("installed"),
+					blocked = ui.div {},
+				})),
 			},
 			-- (The name's column ends a section's gap, 16, before it.)
-			ui.switch(standing, {
+			ui.show(function(): boolean
+				return not narrow()
+			end, ui.switch(standing, {
 				install = slot("install"),
 				incompatible = slot("incompatible"),
 				away = slot("away"),
@@ -729,7 +796,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				settings = slot("settings"),
 				installed = slot("installed"),
 				blocked = slot("blocked"),
-			}),
+			})),
 		},
 		ui.show(function(): boolean
 			local summary = d().summary
@@ -967,11 +1034,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	-- Its screenshots, each opening the set in the lightbox: 16:10, with
 	-- the cards' own corner (Settings.Group's, `$radius.xl`): they stand on
 	-- the cards' edges as the cards' peers. (A README's pictures, 16 inside
-	-- a card, keep the smaller corner concentric there.) Decided by how
-	-- many: one fills the column (no taller than a reply's picture,
+	-- a card, keep the smaller corner concentric there.) A shelf
+	-- (ds/shelf): one fills the column (no taller than a reply's picture,
 	-- `zeron.prose.picture.h`, 420); two share it, 12 apart; three or more
 	-- show two whole and the third at the column's end, to say there are
-	-- more, as wide as two and a bit of the column as it's laid out.
+	-- more.
 	local function shots(): Node
 		local list: { string } = {}
 		for _, s in (if type(first.screenshots) == "table" then first.screenshots else {}) :: { any } do
@@ -982,7 +1049,6 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		if #list == 0 then
 			return ui.div {}
 		end
-		local gap = (ui.theme.get("space.3") :: number?) or 12
 		local radius = (ui.theme.get("radius.xl") :: number?) or 12
 		local function items(): { any }
 			local out = {}
@@ -1034,49 +1100,30 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				}
 			end, { w_full = true, h_full = true })
 		end
-		if #list == 1 then
-			return ui.div {
-				id = "store-shots",
-				class = "store-shot",
-				w_full = true,
-				aspect = 1.6,
-				max_h = ui.theme.get("zeron.prose.picture.h") :: number?,
-				picture_in(list[1]),
-			}
-		elseif #list == 2 then
-			local pair: { Node } = {}
-			for _, path in list do
-				table.insert(pair, ui.div { class = "store-shot", grow = 1, basis = 0, min_w = 0, aspect = 1.6, picture_in(path) })
-			end
-			return ui.row { id = "store-shots", w_full = true, gap = "$space.3", table.unpack(pair) }
-		end
-		-- (The column's width as it's laid out; the measure until then.)
-		local column_w = ui.use_state((ui.theme.get("zeron.settings.measure") :: number?) or 640)
-		local function w(): number
-			return math.floor((column_w:get() - 2 * gap) / 2.4)
-		end
-		local function h(): number
-			return math.floor(w() / 1.6)
-		end
-		local thumbs: { Node } = {}
-		for _, path in list do
-			table.insert(thumbs, ui.div { class = "store-shot", w = w, h = h, shrink = 0, picture_in(path) })
-		end
-		return ui.div {
-			w_full = true,
-			on_resize = function(size: { w: number, h: number })
-				if math.abs(size.w - column_w:peek()) >= 0.5 then
-					column_w:set(size.w)
-				end
+		-- (The shelf's rule, as Browse's featured: one fills the column, two
+		-- share it, three or more show two whole and the third begun.)
+		local one = #list == 1
+		return ds.Shelf {
+			id = "store-shots",
+			across = 2,
+			count = function(): number
+				return #list
 			end,
-			ui.scroll_x {
-				id = "store-shots",
-				w_full = true,
-				h = h,
-				fade = { 12, 12 },
-				fade_overflow = true,
-				ui.row { gap = "$space.3", table.unpack(thumbs) },
-			},
+			build = function(w: () -> number): any
+				local thumbs: { Node } = {}
+				for _, path in list do
+					table.insert(thumbs, ui.div {
+						class = "store-shot",
+						w = w,
+						shrink = 0,
+						aspect = 1.6,
+						-- (One alone: no taller than a reply's picture.)
+						max_h = if one then ui.theme.get("zeron.prose.picture.h") :: number? else nil,
+						picture_in(path),
+					})
+				end
+				return thumbs
+			end,
 		}
 	end
 
@@ -1138,7 +1185,21 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			local n = now:get().notes
 			return if type(n) == "string" then string.sub(n, 1, NOTES_MOST) else ""
 		end
-		return ds.Settings.Row {
+		local row = ui.ref()
+		-- Folded from far down a long one: the control that folded it
+		-- brought back into view, focus on it again. (Focusing the row hands
+		-- focus to its first control, Show more, and zgx scrolls the least
+		-- that shows it; nothing moves when it's in view. The version's head
+		-- too, once zgx can bring any element into view:
+		-- zgx-asks/scroll-into-view.)
+		local function keep_in_view()
+			local el = row:peek()
+			if el then
+				el:blur()
+				el:focus()
+			end
+		end
+		return ui.column { ref = row, class = "store-version", w_full = true, ds.Settings.Row {
 			label = function(): string
 				return now:get().version
 			end,
@@ -1152,8 +1213,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			stacked = true,
 			control = ui.show(function(): boolean
 				return notes() ~= ""
-			end, Notes { text = notes, lines = if latest then NOTES_LINES else 1 }),
-		}
+			end, Notes { text = notes, lines = if latest then NOTES_LINES else 1, on_fold = keep_in_view }),
+		} }
 	end
 	local function history(): Node
 		return ds.Settings.Section {
