@@ -33,8 +33,13 @@ signed with the plugin's deploy key. It installs Zeron's Linux command line
 
 A deploy key can submit a new version of its plugin and read its review
 state, nothing else: yanking, withdrawing and managing keys are yours, from
-your machine. If one leaks, the most it can do is add a version that waits
-for review; revoke it (`zeron plugin key revoke <plugin-id> <key>`).
+your machine. If one leaks, the most it can do is add a version. Nobody
+else gets that version before review, but your own devices (signed in to
+your account) are offered it as an update at once, as they are any version
+of yours in review: an update you'd still have to click, so check an
+update you didn't publish before taking it. Revoke a leaked key at once
+(`zeron plugin key revoke <plugin-id> <key>`), and withdraw what it sent
+(`zeron plugin withdraw <plugin-id> <version>`).
 
 ## Runners
 
