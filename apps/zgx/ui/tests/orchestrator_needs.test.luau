@@ -123,3 +123,52 @@ test("orchestrator needs: answered in the Control room, gone from its page", fun
 	expect(app:has(`{NEEDS} >> .orch-need >> "Side by side"`)).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
+
+-- A Board card on its page waiting on an ask answers and opens as the
+-- Control room's cards do (screens/control/needs).
+local CARD = '#orch-page-board >> .orch-card "Orchestrator screen"'
+
+local function board(): any
+	local app = open()
+	-- (Tall enough for the Board under Needs you.)
+	app:resize(1440, 2000)
+	settle(app, 60)
+	return app
+end
+
+test("orchestrator board: a card waiting on an ask shows its question and chips", function()
+	local app = board()
+	expect(app:has(`{CARD} >> .orch-card-question`)).to_be(true)
+	expect(app:has(`{CARD} >> role:button "Side by side"`)).to_be(true)
+	expect(app:has(`{CARD} >> role:button "Tabs"`)).to_be(true)
+	expect(app:has(`{CARD} >> .orch-choice-expand`)).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("orchestrator board: a card's chip answers its ask, gone from Needs you too", function()
+	local app = board()
+	app:click(`{CARD} >> role:button "Tabs"`)
+	app:frames(4)
+	expect(app:has(`{CARD} >> .orch-sending >> "Tabs"`)).to_be(true)
+	expect(calls(app)).never.to_contain("answer_ask:")
+	expect(app:wait(`{CARD} >> role:button "Undo"`, { gone = true, timeout_ms = 8000 })).to_be(true)
+	expect(calls(app)).to_contain("answer_ask:id=ak-1,option=2")
+	expect(app:wait(`{CARD} >> role:button "Side by side"`, { gone = true, timeout_ms = 6000 })).to_be(true)
+	settle(app)
+	expect(app:has(`{NEEDS} >> role:button "Side by side"`)).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("orchestrator board: a card's expand opens the whole decision, and it closes", function()
+	local app = board()
+	app:click(`{CARD} >> .orch-choice-expand`)
+	settle(app)
+	expect(app:state("orch_decide_shown")).to_be("ak-1")
+	expect(shows(app, ".orch-decision")).to_be(true)
+	expect(app:has('.orch-decision >> ~"side by side, or tabs?"')).to_be(true)
+	app:key("Escape")
+	expect(closes(app)).to_be(true)
+	expect(app:state("orch_decide_shown")).to_be_nil()
+	expect(calls(app)).never.to_contain("answer_ask:")
+	expect(app:error()).to_be_nil()
+end)

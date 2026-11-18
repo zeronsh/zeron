@@ -864,11 +864,6 @@ function M.show_dump(id: string?)
 	end)
 end
 
--- An ask answered (its option 1-based, or words, or both): from Needs you,
--- a card, or the overlay, past its Undo. The engine's reply: a failure is
--- said on the ask (ds/orch_decide), with Retry.
-local answer = NeedsYou.answer
-
 -- A link of a card's or an ask's: a chat opened here, a web one outside.
 local function open_link(link: any)
 	if link.kind == "chat" then
@@ -981,10 +976,8 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 		on_link = open_link,
 		-- A card waiting on a decision: its options as chips, and the
 		-- whole of it in the overlay.
-		on_answer = answer,
-		on_expand_ask = function(ask: any)
-			decide.show(ask.id)
-		end,
+		on_answer = NeedsYou.on_answer,
+		on_expand_ask = NeedsYou.on_expand,
 	}
 end
 
