@@ -685,3 +685,33 @@ fn activity_sleep_wake_and_stop_waiting() {
     let again = zeron_client::runtime::shared().block_on(client.stop_waiting("chat-ios-keyboard")).unwrap();
     assert!(!again, "nothing left to stop");
 }
+
+/// Cloud's API key as the phone saves it: the key and an Anthropic key's
+/// base URL are checked on the device, before anything is uploaded (demo
+/// mode stops right after).
+#[tokio::test]
+async fn cloud_api_key_base_url_is_checked_before_upload() {
+    use zeron_client::ClientError;
+    use zeron_proto::VaultProvider::{AnthropicKey, OpenaiKey};
+    let (client, _dir) = demo(fast());
+    for base_url in [None, Some(""), Some(" https://llm-gateway.example.com/ ")] {
+        client
+            .vault_put_api_key(AnthropicKey, "sk-ant-api03-key", base_url)
+            .await
+            .unwrap();
+    }
+    for (provider, base_url) in [
+        (AnthropicKey, "http://llm-gateway.example.com"),
+        (AnthropicKey, "https://llm-gateway.example.com/v1"),
+        (OpenaiKey, "https://api.openai.com"),
+    ] {
+        let error = client
+            .vault_put_api_key(provider, "sk-key", Some(base_url))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ClientError::InvalidArgument(_)),
+            "{base_url}: {error}"
+        );
+    }
+}
