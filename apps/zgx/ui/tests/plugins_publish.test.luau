@@ -194,6 +194,32 @@ test("a deploy key is made for the plugins chosen, after a fresh sign-in, its se
 	expect(app:tree()).to_contain("Release job")
 end)
 
+-- What a new key can publish is labelled as its Name and Ends are, by the
+-- same ds piece (ds/field): the same words' place and size.
+test("a new key's Can publish is labelled as its Name and Ends are", function()
+	local app = keys_page()
+	app:click("#keys-new")
+	settle(app)
+	local tree = app:tree("role:dialog")
+	local function label(words: string): (number, number)
+		local x, h = string.match(tree, `text "{words}" (%-?%d+),%-?%d+ %d+x(%d+)`)
+		assert(x, `no label "{words}" in:\n{tree}`)
+		return tonumber(x) :: number, tonumber(h) :: number
+	end
+	local name_x, name_h = label("Name")
+	local ends_x, ends_h = label("Ends")
+	local scope_x, scope_h = label("Can publish")
+	expect(scope_x).to_be(name_x)
+	expect(ends_x).to_be(name_x)
+	expect(scope_h).to_be(name_h)
+	expect(ends_h).to_be(name_h)
+	-- Above the choice it names.
+	local _, label_y = string.match(tree, 'text "Can publish" (%-?%d+),(%-?%d+)')
+	local _, radio_y = string.match(tree, 'radio "All your plugins" (%-?%d+),(%-?%d+)')
+	assert(label_y and radio_y, tree)
+	expect((tonumber(label_y) :: number) < (tonumber(radio_y) :: number)).to_be(true)
+end)
+
 test("waiting on the sign-in can be stopped; a key for all your plugins is the first choice", function()
 	local app = keys_page()
 	app:click("#keys-new")
@@ -364,6 +390,24 @@ test("signed out before Yours is read, its versions say to sign in", function()
 		expect(`{word} {tree:find("Sign in to see your versions", 1, true) ~= nil}`).to_be(`{word} true`)
 		expect(`{word} {tree:find("Couldn't see your versions", 1, true) ~= nil}`).to_be(`{word} false`)
 	end
+end)
+
+-- A name calling it verified is in the way; a description saying it comes
+-- from Zeron is a warning (the store refuses it from anyone else). Each in
+-- Zeron's words, which cover every reason the engine has for that field.
+test("a name that says verified is in the way and a description that says it's from Zeron is warned of, in Zeron's words", function()
+	local app = publishing()
+	app:command("store_stub.fixed")
+	app:command("store_stub.claims")
+	app:click('role:button "Check again"')
+	settle(app)
+	local checks = app:tree("#publish-checks")
+	expect(checks).to_contain("Keep its name to 64 characters, with nothing hidden in it")
+	expect(checks).to_contain("It says it comes from Zeron: the store refuses that from")
+	-- (Never the engine's English as it came.)
+	expect(checks).never.to_contain("only the store marks a plugin verified")
+	expect(checks).never.to_contain("Zeron's own")
+	expect(app:tree("#publish-submit")).to_contain("disabled")
 end)
 
 test("HTML and math in its README and a footnote in its CHANGELOG are advice under the checks, in Zeron's words, and Submit still sends", function()

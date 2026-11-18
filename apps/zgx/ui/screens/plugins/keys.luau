@@ -19,6 +19,7 @@
 --                             what a scope chooses from; none, no key yet)
 
 local ds = require("@ds")
+local field = require("@ds/field")
 local Markdown = require("@ds/markdown")
 local locale = require("@ds/locale")
 local store = require("@app/screens/plugins/store")
@@ -377,47 +378,52 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 			},
 			ds.Select { value = expiry, label = ui.t("plugins.store.key.expiry_label"), options = expiry_options, w_full = true },
 			-- What it publishes: all of yours (those you publish later too),
-			-- or the ones ticked. Fixed once it's made.
-			ui.column {
-				id = "key-scope",
+			-- or the ones ticked. Fixed once it's made. Labelled as the
+			-- Name and Ends fields above it are (ds/field).
+			field.wrap {
+				label = ui.t("plugins.store.key.scope.label"),
 				w_full = true,
-				gap = "$space.2",
-				ds.Segmented {
-					value = scope_kind,
-					label = ui.t("plugins.store.key.scope.label"),
-					options = {
-						{ value = "all", label = ui.t("plugins.store.key.scope.all") },
-						{ value = "chosen", label = ui.t("plugins.store.key.scope.chosen") },
-					},
-				},
-				ui.show(function(): boolean
-					return scope_kind:get() == "chosen"
-				end, ui.column {
+				box = ui.column {
+					id = "key-scope",
 					w_full = true,
-					gap = "$space.1",
-					ui.each(ui.computed(function(): { Owned }
-						return props.plugins()
-					end), function(p: Owned): Node
-						local on = ui.computed(function(): boolean
-							return chosen:get()[p.id] == true
-						end)
-						return ds.Checkbox {
-							value = function(): boolean
-								return on:get()
+					gap = "$space.2",
+					ds.Segmented {
+						value = scope_kind,
+						label = ui.t("plugins.store.key.scope.label"),
+						options = {
+							{ value = "all", label = ui.t("plugins.store.key.scope.all") },
+							{ value = "chosen", label = ui.t("plugins.store.key.scope.chosen") },
+						},
+					},
+					ui.show(function(): boolean
+						return scope_kind:get() == "chosen"
+					end, ui.column {
+						w_full = true,
+						gap = "$space.1",
+						ui.each(ui.computed(function(): { Owned }
+							return props.plugins()
+						end), function(p: Owned): Node
+							local on = ui.computed(function(): boolean
+								return chosen:get()[p.id] == true
+							end)
+							return ds.Checkbox {
+								value = function(): boolean
+									return on:get()
+								end,
+								on_change = function(v: boolean)
+									local next = table.clone(chosen:peek())
+									next[p.id] = if v then true else nil
+									chosen:set(next)
+								end,
+								label = p.name,
+							}
+						end, {
+							key = function(p: Owned): string
+								return p.id
 							end,
-							on_change = function(v: boolean)
-								local next = table.clone(chosen:peek())
-								next[p.id] = if v then true else nil
-								chosen:set(next)
-							end,
-							label = p.name,
-						}
-					end, {
-						key = function(p: Owned): string
-							return p.id
-						end,
+						}),
 					}),
-				}),
+				},
 			},
 			ui.show(function(): boolean
 				return made_phase:get() == "busy"

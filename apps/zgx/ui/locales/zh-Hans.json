@@ -3855,7 +3855,8 @@
       "bad_csrf": "商店拒绝了一个无法信任的请求。请再试一次。",
       "not_owner": "其中有些插件在商店里不属于你。",
       "invalid_scope": "请至少为它选择一个你的插件。",
-      "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。"
+      "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。",
+      "claims_zeron": "它的名字或描述说它来自 Zeron，商店不接受其他发布者这样写。"
     },
     "store": {
       "browse": "浏览",
@@ -4005,8 +4006,8 @@
         "bad_listing": {
           "icon": "图标必须是不超过 32 KB 的 SVG。",
           "categories": "从商店的类别中选择一到两个。",
-          "description": "描述不能超过 300 个字符。",
-          "name": "名字不能超过 64 个字符。",
+          "description": "描述只能有一行、不超过 300 个字符，不能含隐藏字符，也不要说它已验证：这由商店来标注。",
+          "name": "名字不能超过 64 个字符，不能含隐藏字符，也不要说它已验证：这由商店来标注。",
           "keywords": "最多 8 个关键词，小写，每个不超过 32 个字符。",
           "screenshots": "最多 8 张图片，每张都是文件夹里的 PNG 或 JPEG。",
           "homepage": "网站必须是 https 链接。",
@@ -4014,7 +4015,8 @@
           "license": "许可证不能超过 64 个字符。"
         },
         "not_newer": "在 zeron-plugin.json 里给它一个比你发送过的所有版本都新的版本号。",
-        "version_exists": "这个版本你已经发送过了。请在 zeron-plugin.json 里换一个新版本号。"
+        "version_exists": "这个版本你已经发送过了。请在 zeron-plugin.json 里换一个新版本号。",
+        "claims_zeron": "它说自己来自 Zeron：商店不接受其他发布者这样写。"
       },
       "check_again": "重新检查",
       "check_failed": "无法检查",
@@ -4097,7 +4099,7 @@
         "ends_in": "{n, plural, other {# 天后到期}}",
         "last_used_on": "{date} 用于 {plugin}",
         "scope": {
-          "label": "发布范围",
+          "label": "可以发布",
           "all": "你的所有插件",
           "chosen": "选定的插件",
           "one": "{name}",
@@ -4139,14 +4141,14 @@
       "superseded": "在验证前已被 {version} 取代：不再接受新安装",
       "sent_toast_body": "在审核者看过之前，它会显示为未验证。",
       "updates_label": "更新",
-      "updates_body": "它在这台设备上接受哪些新版本。",
-      "updates_newest": "最新",
-      "updates_verified": "仅已验证",
+      "updates_body": "它在这台电脑上更新到哪些新版本。",
+      "updates_newest": "最新版本",
+      "updates_verified": "仅已验证的版本",
       "couldnt_updates": "无法更改 {name} 的更新设置",
-      "updates_device": "与全部相同（{choice}）",
+      "updates_device": "与这台电脑相同",
       "updates_section": "插件商店",
-      "updates_all_label": "来自插件商店的更新",
-      "updates_all_body": "你从商店安装的插件在这台设备上接受哪些新版本。每个插件也可以在自己的页面上单独设置。",
+      "updates_all_label": "更新",
+      "updates_all_body": "你从商店安装的插件在这台电脑上更新到哪些新版本。",
       "couldnt_updates_all": "无法更改插件接受的更新",
       "installed_was_verified_plain": "你现有的版本已验证。"
     }

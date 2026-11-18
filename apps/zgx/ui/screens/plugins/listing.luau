@@ -1045,11 +1045,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			pre_on:set(want)
 		end
 	end)
-	-- Which updates it takes on the device shown: as set for all (the
-	-- device's choice), the newest, or only those the store has verified.
-	-- This device's from what the engine keeps; another device's, its
-	-- page's word for it (no "as set for all" there: the page says what's
-	-- in effect).
+	-- Which updates it takes on the device shown: the same as this
+	-- computer's choice (Installed's), the newest version, or only versions
+	-- the store has verified. This device's from what the engine keeps;
+	-- another device's, its page's word for it (no "same as this computer"
+	-- there: the page says what's in effect).
 	local function local_prefs(): any
 		return if here.device() == nil then state.store_updates:get() else nil
 	end
@@ -1072,8 +1072,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		local out: { any } = {}
 		local prefs = local_prefs()
 		if prefs then
-			local device_word = if prefs.device == "verified" then ui.t("plugins.store.updates_verified"):get() else ui.t("plugins.store.updates_newest"):get()
-			table.insert(out, { value = "device", label = ui.t("plugins.store.updates_device", { choice = device_word }):get() })
+			table.insert(out, { value = "device", label = ui.t("plugins.store.updates_device"):get() })
 		end
 		table.insert(out, { value = "newest", label = ui.t("plugins.store.updates_newest"):get() })
 		table.insert(out, { value = "verified", label = ui.t("plugins.store.updates_verified"):get() })

@@ -143,3 +143,23 @@ test("opened from Browse, the page's action takes a click at once", function()
 	app:frames(3)
 	expect(app:tree(`{PAGE} >> #store-slot >> role:button "Install"`)).never.to_contain("disabled")
 end)
+
+-- A publish notice's "Deploy keys" (the host's `zeron.open-deploy-keys`
+-- tells `app.link` `{ settings = "plugins", tab = "yours" }`): Settings →
+-- Plugins on Yours, where the keys are, even from a store plugin's page.
+test("a notice's Deploy keys opens Settings → Plugins on Yours, from any page of it", function()
+	local app = shell()
+	link(app, 1, "focus-timer")
+	app:wait(`{PAGE} >> #store-offer`, { timeout_ms = 3000 })
+	app:set_state("app.link", { seq = 2, settings = "plugins", tab = "yours" })
+	app:wait(`{PAGE} >> "Deploy keys"`, { timeout_ms = 3000 })
+	app:frames(20)
+	expect(app:has(`{PAGE} >> #store-offer`)).to_be(false)
+	expect(app:has(`{PAGE} >> #keys-new`)).to_be(true)
+	expect(app:state("plugins_tab")).to_be("yours")
+	-- A tab the page hasn't is no tab at all: Settings opens, as it was.
+	app:set_state("app.link", { seq = 3, settings = "plugins", tab = "nowhere" })
+	app:frames(20)
+	expect(app:state("plugins_tab")).to_be("yours")
+	expect(app:has(`{PAGE} >> #keys-new`)).to_be(true)
+end)

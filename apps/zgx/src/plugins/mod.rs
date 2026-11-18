@@ -869,6 +869,9 @@ pub fn prepare_live() -> PathBuf {
 pub const USE_ZERON_TEMPLATE: &str = "zeron.use-zeron-template";
 /// The host's own "Keep <template>…": the keep sheet for the one in preview.
 pub const KEEP_TEMPLATE: &str = "zeron.keep-template";
+/// The host's own "Deploy keys" (a publish notice's button): Settings →
+/// Plugins → Yours, where the account's deploy keys are.
+pub const OPEN_DEPLOY_KEYS: &str = "zeron.open-deploy-keys";
 
 /// One of the host's own commands (its menu items and its toasts' buttons:
 /// never a script's, `zeron.` being the host's).
@@ -888,6 +891,7 @@ pub fn host_command(id: &str) {
                 template_consent::keep(&b, &p.id);
             }
         }
+        OPEN_DEPLOY_KEYS => crate::links::show(crate::links::Target::PluginsTab("yours")),
         other => eprintln!("zeron-zgx: no host command {other}"),
     }
 }

@@ -90,6 +90,10 @@ export type PageProps = {
 -- An aside's column, by default.
 local ASIDE = 180
 
+-- The page's section step: between its sections, its aside and them, and
+-- a catalog's card and what a tab puts under it.
+local SECTION_STEP = "$space.6"
+
 function M.Page(props: PageProps): Node
 	local children: { any } = {}
 	for _, c in ipairs(props :: any) do
@@ -104,7 +108,7 @@ function M.Page(props: PageProps): Node
 		grow = 1,
 		min_w = 0,
 		w_full = if props.aside then top else true,
-		gap = "$space.6",
+		gap = SECTION_STEP,
 		table.unpack(children),
 	}
 	local body: Node
@@ -115,7 +119,7 @@ function M.Page(props: PageProps): Node
 		-- (the aside after the groups, so over them is a reversed column).
 		body = ui.div {
 			w_full = true,
-			gap = "$space.6",
+			gap = SECTION_STEP,
 			direction = function(): Direction
 				return if top() then "column_reverse" else "row"
 			end,
@@ -1382,7 +1386,7 @@ function M.Catalog(props: CatalogProps): Node
 		local below = props.below
 		return ui.column {
 			w_full = true,
-			gap = "$space.6",
+			gap = SECTION_STEP,
 			card(),
 			-- (Only a tab with something under it: nothing, no gap.)
 			ui.show(function(): boolean

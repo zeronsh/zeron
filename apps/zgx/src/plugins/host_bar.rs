@@ -78,6 +78,10 @@ pub struct Notice {
 /// Interface").
 const USE_DEFAULT: Action = Action { label: "Use default interface", command: super::USE_ZERON_TEMPLATE };
 
+/// Settings → Plugins → Yours, where the account's deploy keys are.
+const DEPLOY_KEYS: Action = Action { label: "Deploy keys", command: super::OPEN_DEPLOY_KEYS };
+const DEPLOY_KEYS_ZH: Action = Action { label: "部署密钥", command: super::OPEN_DEPLOY_KEYS };
+
 impl Notice {
     /// The template changed without you choosing it here: to `name`, or
     /// to the default (`to_default`); by a chat or otherwise. One in
@@ -125,7 +129,8 @@ impl Notice {
     /// this device (`via`: "deploy_key", with the key's name, or "device",
     /// another of yours), in the host's words; one it doesn't know, in the
     /// engine's (`words`). Its name and the key's are words someone chose:
-    /// plain, one line, short.
+    /// plain, one line, short. One by a deploy key has a button to the
+    /// keys, to revoke it there.
     pub fn published(name: &str, version: &str, via: &str, key_name: Option<&str>, words: &str) -> Self {
         let plain = |text: &str, most: usize| -> String {
             text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(most).collect()
@@ -134,14 +139,16 @@ impl Notice {
         let key = key_name.map(|k| plain(k, 64)).filter(|k| !k.is_empty());
         let chinese = CHINESE.with(std::cell::Cell::get);
         let title = if chinese { format!("{name} {version} 已发布") } else { format!("{name} {version} was published") };
+        let by_key = via == "deploy_key" && key.is_some();
         let body = match (via, key) {
-            ("deploy_key", Some(key)) if chinese => format!("使用你的部署密钥“{key}”。如果不是你，请在“设置 → 插件 → 我的”中吊销它。"),
-            ("deploy_key", Some(key)) => format!("With your deploy key \u{201c}{key}\u{201d}. If it wasn't you, revoke the key in Settings → Plugins → Yours."),
+            ("deploy_key", Some(key)) if chinese => format!("使用你的部署密钥“{key}”。如果不是你，请吊销它。"),
+            ("deploy_key", Some(key)) => format!("With your deploy key \u{201c}{key}\u{201d}. If it wasn't you, revoke the key."),
             ("device", _) if chinese => "来自你的另一台设备。".to_owned(),
             ("device", _) => "From another of your devices.".to_owned(),
             _ => plain(words, 300),
         };
-        Notice { title, body, tone: Tone::Neutral, action: None, stays: true }
+        let action = by_key.then_some(if chinese { DEPLOY_KEYS_ZH } else { DEPLOY_KEYS });
+        Notice { title, body, tone: Tone::Neutral, action, stays: true }
     }
 
     /// Zeron opened with the default interface (safe mode): ⌥ (Alt) held, or
@@ -727,17 +734,22 @@ mod tests {
         CHINESE.with(|c| c.set(false));
         let key = Notice::published("Focus timer", "1.3.0", "deploy_key", Some("ci"), "");
         assert_eq!(key.title, "Focus timer 1.3.0 was published");
-        assert!(key.body.starts_with("With your deploy key \u{201c}ci\u{201d}."), "{}", key.body);
+        assert_eq!(key.body, "With your deploy key \u{201c}ci\u{201d}. If it wasn't you, revoke the key.");
+        assert_eq!(key.action, Some(DEPLOY_KEYS));
         assert!(key.stays);
         let device = Notice::published("Focus timer", "1.3.0", "device", None, "");
         assert_eq!(device.body, "From another of your devices.");
+        assert_eq!(device.action, None);
         let odd = Notice::published("Focus\ntimer\u{7}", "1.3.0", "somewhere", None, "Published from somewhere.");
         assert_eq!(odd.title, "Focus timer 1.3.0 was published");
         assert_eq!(odd.body, "Published from somewhere.");
+        assert_eq!(odd.action, None);
         let long = Notice::published(&"x".repeat(500), "1.3.0", "device", None, "");
         assert!(long.title.chars().count() <= 64 + " 1.3.0 was published".len());
         CHINESE.with(|c| c.set(true));
         assert_eq!(Notice::published("Focus timer", "1.3.0", "device", None, "").title, "Focus timer 1.3.0 已发布");
+        let zh = Notice::published("Focus timer", "1.3.0", "deploy_key", Some("ci"), "");
+        assert_eq!((zh.body.as_str(), zh.action), ("使用你的部署密钥“ci”。如果不是你，请吊销它。", Some(DEPLOY_KEYS_ZH)));
         CHINESE.with(|c| c.set(false));
     }
 

@@ -16,7 +16,8 @@
 //!                                   person does, from the page
 //!
 //! What to open goes to the scripts as shared `app.link`,
-//! `{ seq, chat?, settings?, plugin? }` (`seq` moving with each), which the
+//! `{ seq, chat?, settings?, tab?, plugin? }` (`tab`: Settings → Plugins'
+//! tab, for the host's own buttons, never from a link) (`seq` moving with each), which the
 //! shell's route follows (ui/screens/shell/route.luau). The beta registers
 //! for them (`sh.zeron.app`'s `zeron` scheme: dist/macos/Info.plist,
 //! dist/zeron.desktop, dist/windows/zeron.iss, the whole scheme, so a new
@@ -36,6 +37,8 @@ pub enum Target {
     Settings(&'static str),
     /// A store plugin's page, by its id.
     Plugin(String),
+    /// A tab of Settings → Plugins ("yours": what a notice's button opens).
+    PluginsTab(&'static str),
 }
 
 /// What a plugin link starts with.
@@ -133,6 +136,12 @@ pub fn open(url: &str) {
     });
 }
 
+/// Somewhere in the app the host itself opens (a notice's button): no
+/// link was handed in, so nothing to read or check.
+pub fn show(target: Target) {
+    tell(target);
+}
+
 /// Banner clicks, taken in this process. The engine posts Zeron's banners,
 /// but macOS hands a click to the app its bundle names (Zeron.app's
 /// interface, this process), never to the engine that posted it, so the
@@ -178,6 +187,10 @@ fn tell(target: Target) {
         Target::Chat(id) => fields.push(("chat", Value::from(id.as_str()))),
         Target::Settings(page) => fields.push(("settings", Value::from(page))),
         Target::Plugin(id) => fields.push(("plugin", Value::from(id.as_str()))),
+        Target::PluginsTab(tab) => {
+            fields.push(("settings", Value::from("plugins")));
+            fields.push(("tab", Value::from(tab)));
+        }
     }
     let value = Value::record(fields);
     LAST.with(|l| *l.borrow_mut() = value.clone());
@@ -212,6 +225,14 @@ mod tests {
         assert_eq!(last(), (Some("chat-42".into()), None));
         clicked(zeron_notify::AGENT_UPDATES_TARGET);
         assert_eq!(last(), (None, Some("providers".into())));
+    }
+
+    /// A notice's "Deploy keys" opens Settings → Plugins on Yours.
+    #[test]
+    fn the_host_opens_a_plugins_tab() {
+        show(Target::PluginsTab("yours"));
+        assert_eq!(last(), (None, Some("plugins".into())));
+        assert_eq!(field("tab").as_deref(), Some("yours"));
     }
 
     #[test]

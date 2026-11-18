@@ -3855,7 +3855,8 @@
       "bad_csrf": "The store refused a request it couldn't trust. Try again.",
       "not_owner": "Some of those plugins aren't yours in the store.",
       "invalid_scope": "Choose at least one of your plugins for it.",
-      "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others."
+      "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others.",
+      "claims_zeron": "Its name or description says it comes from Zeron, which the store refuses from anyone else."
     },
     "store": {
       "browse": "Browse",
@@ -4005,8 +4006,8 @@
         "bad_listing": {
           "icon": "Its icon must be an SVG of at most 32 KB.",
           "categories": "Choose one or two of the store's categories.",
-          "description": "Keep its description to 300 characters.",
-          "name": "Keep its name to 64 characters.",
+          "description": "Keep its description to one line of 300 characters, with nothing hidden in it, and don't call it verified: the store does that.",
+          "name": "Keep its name to 64 characters, with nothing hidden in it, and don't call it verified: the store does that.",
           "keywords": "Use at most 8 keywords, lowercase, 32 characters each.",
           "screenshots": "Use at most 8 pictures, each a PNG or JPEG in its folder.",
           "homepage": "Its website must be an https link.",
@@ -4014,7 +4015,8 @@
           "license": "Keep its license to 64 characters."
         },
         "not_newer": "Give it a version newer than every one you've sent, in zeron-plugin.json.",
-        "version_exists": "You've sent this version already. Give it a new one in zeron-plugin.json."
+        "version_exists": "You've sent this version already. Give it a new one in zeron-plugin.json.",
+        "claims_zeron": "It says it comes from Zeron: the store refuses that from anyone else."
       },
       "check_again": "Check again",
       "check_failed": "Couldn't check it",
@@ -4097,7 +4099,7 @@
         "ends_in": "{n, plural, one {Ends in # day} other {Ends in # days}}",
         "last_used_on": "Last used {date} on {plugin}",
         "scope": {
-          "label": "Publishes",
+          "label": "Can publish",
           "all": "All your plugins",
           "chosen": "Chosen plugins",
           "one": "{name}",
@@ -4139,14 +4141,14 @@
       "superseded": "Replaced by {version} before it was verified: no new installs",
       "sent_toast_body": "It shows as not verified until a reviewer has read it.",
       "updates_label": "Updates",
-      "updates_body": "Which newer versions it takes on this device.",
-      "updates_newest": "Newest",
-      "updates_verified": "Verified only",
+      "updates_body": "Which new versions it updates to on this computer.",
+      "updates_newest": "Newest version",
+      "updates_verified": "Verified versions only",
       "couldnt_updates": "Couldn't change {name}'s updates",
-      "updates_device": "As set for all ({choice})",
+      "updates_device": "Same as this computer",
       "updates_section": "Plugin store",
-      "updates_all_label": "Updates from the plugin store",
-      "updates_all_body": "Which newer versions your plugins from the store take on this device. Each one can choose its own on its page.",
+      "updates_all_label": "Updates",
+      "updates_all_body": "Which new versions your plugins from the store update to on this computer.",
       "couldnt_updates_all": "Couldn't change which updates your plugins take",
       "installed_was_verified_plain": "The version you have was verified."
     }

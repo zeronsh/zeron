@@ -675,7 +675,7 @@ local function store_updates_section(): Node
 					ds.Select {
 						value = device_updates,
 						size = "sm",
-						w = 160,
+						w = 200,
 						name = ui.t("plugins.store.updates_all_label"),
 						options = {
 							{ value = "newest", label = ui.t("plugins.store.updates_newest") },

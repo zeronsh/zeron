@@ -37,6 +37,9 @@ local notes = true
 -- Its README's HTML and math, and its CHANGELOG's footnote, said
 -- (`store_stub.html_and_footnote`).
 local typed = false
+-- Its name calls it verified, its description says it comes from Zeron
+-- (`store_stub.claims`): a problem and a warning, the engine's English.
+local claims = false
 -- Lists without `total`, as a store from before it counted them.
 local no_total = false
 
@@ -617,7 +620,7 @@ end
 stub.prepare = function(id: string): any
 	note(`prepare:{id}`)
 	return answer(function(): any
-		local ok = #problems == 0
+		local ok = #problems == 0 and not claims
 		return {
 			id = id,
 			name = "Pomodoro clock",
@@ -628,6 +631,9 @@ stub.prepare = function(id: string): any
 			-- newer-than answer.)
 			problems = (function(): { any }
 				local out = {}
+				if claims then
+					table.insert(out, { rule = "bad_listing", field = "name", words = "Its name says \"verified\": only the store marks a plugin verified" })
+				end
 				for _, p in problems do
 					if store_checked or force_problem:peek() or (p.rule ~= "not_newer" and p.rule ~= "version_exists") then
 						table.insert(out, p)
@@ -639,6 +645,9 @@ stub.prepare = function(id: string): any
 				local out = {}
 				if notes then
 					table.insert(out, { rule = "no_notes", words = "CHANGELOG.md has no section for 1.2.0" })
+				end
+				if claims then
+					table.insert(out, { rule = "claims_zeron", field = "description", words = "Its description says \"by Zeron\": only Zeron's own plugins may, and the store refuses it from anyone else" })
 				end
 				if typed then
 					table.insert(out, { rule = "raw_html", path = "README.md", line = 3, words = "README.md line 3 has HTML; the store shows it as text. Use Markdown for pictures and headings." })
@@ -876,6 +885,13 @@ ui.command {
 	title = "Store: your plugin's README has HTML and math, its CHANGELOG a footnote",
 	run = function()
 		typed = true
+	end,
+}
+ui.command {
+	id = "store_stub.claims",
+	title = "Store: your plugin's name says verified, its description says it's from Zeron",
+	run = function()
+		claims = true
 	end,
 }
 ui.command {

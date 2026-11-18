@@ -15,6 +15,8 @@
 --   nav.take_update(id)     for that page: whether to open its sheet (once)
 --   nav.show_browse()       Browse, wherever a page was opened from (what
 --                           a plugin's keyword or publisher narrowed it to)
+--   nav.show_tab(tab)       a tab, whatever page was open (a notice's
+--                           "Deploy keys": Yours)
 --   nav.arrive()            for a visit: the tabs, unless something opened
 --                           a page as Settings came up (a link)
 
@@ -83,11 +85,20 @@ function M.take_update(id: string): boolean
 	return true
 end
 
-function M.show_browse()
+local TABS = { installed = true, yours = true, browse = true }
+
+function M.show_tab(tab: string)
+	if not TABS[tab] then
+		return
+	end
 	opened:set(false)
 	linked:set(nil)
-	M.tab:set("browse")
+	M.tab:set(tab)
 	M.view:set("catalog")
+end
+
+function M.show_browse()
+	M.show_tab("browse")
 end
 
 function M.arrive()
