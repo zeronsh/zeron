@@ -761,6 +761,14 @@ async function route(request: Request): Promise<Response> {
     state.bare = url.searchParams.get("id") || null;
     return json({ bare: state.bare });
   }
+  // (One plugin's version under another name, everywhere it is named: POST /_fake/rename?id=…&from=…&to=…. A version the app's link can't carry, without a fixture of its own.)
+  if (parts[0] === "_fake" && parts[1] === "rename" && method === "POST") {
+    const [id, from, to] = ["id", "from", "to"].map((k) => url.searchParams.get(k) ?? "");
+    const i = state.plugins.findIndex((p) => p.id === id);
+    if (i < 0 || !from || !to) return fail(400, "bad_request", "id, from and to.");
+    state.plugins[i] = JSON.parse(JSON.stringify(state.plugins[i]).replaceAll(JSON.stringify(from), JSON.stringify(to)));
+    return json({ renamed: to });
+  }
   if (parts[0] === "_fake" && parts[1] === "down" && method === "POST") {
     state.down = url.searchParams.get("on") === "1";
     return json({ down: state.down });

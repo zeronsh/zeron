@@ -14,6 +14,13 @@ const USERNAME = /^[a-z0-9][a-z0-9_-]{2,19}$/;
 
 export const isPluginId = (value: unknown): value is string => typeof value === "string" && PLUGIN_ID.test(value);
 
+/**
+ * A version from an address. Astro decodes a path with decodeURI, which
+ * leaves a reserved character escaped, so a version's "+" (its build, as
+ * in 1.0.0+build.7) arrives as %2B: put back here, and nothing else.
+ */
+export const versionParam = (raw: string | undefined) => raw?.replace(/%2B/gi, "+");
+
 export const isVersion = (value: unknown): value is string => typeof value === "string" && value.length <= 64 && SEMVER.test(value);
 
 export const isUsername = (value: unknown): value is string => typeof value === "string" && USERNAME.test(value);

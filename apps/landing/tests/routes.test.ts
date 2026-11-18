@@ -582,6 +582,24 @@ describe("the admin pages can't be told from pages that don't exist", () => {
     // (Its newest's page: the plain link.)
     expect((await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.5.0")).body).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install-link');
   });
+
+  test("a version the link can't name is never named on its button: Open in Zeron, and the app chooses", async () => {
+    // (33 characters and a "+": the app's link carries 32 at most.)
+    const long = "1.0.0-rc.1+build.20261118.0123456";
+    try {
+      await site.fake("rename", { id: "worst-case-listing-at-every-limit-xyz12", from: "1.0.0", to: long });
+      const cookie = await site.signIn("user_kai");
+      const page = (await html("/plugins/worst-case-listing-at-every-limit-xyz12", cookie)).body;
+      expect(page).not.toContain(`Install ${long} instead`);
+      expect(page).not.toContain("?version=");
+      const older = (await html(`/plugins/worst-case-listing-at-every-limit-xyz12/versions/${encodeURIComponent(long)}`, cookie)).body;
+      expect(older).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install-link');
+      expect(older).toContain("Open in Zeron");
+      expect(older).not.toContain(`Install ${long} in Zeron`);
+    } finally {
+      await site.fake("rename", { id: "worst-case-listing-at-every-limit-xyz12", from: long, to: "1.0.0" });
+    }
+  });
 });
 
 describe("forms", () => {

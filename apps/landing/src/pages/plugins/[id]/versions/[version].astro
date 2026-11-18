@@ -10,19 +10,22 @@ import Glyph from "../../../../components/ui/Glyph.astro";
 import App from "../../../../layouts/App.astro";
 import { bytes, compatibility, day } from "../../../../lib/store/format.ts";
 import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
-import { isPluginId, isPrerelease, isVersion } from "../../../../lib/store/names.ts";
+import { isPluginId, isPrerelease, isVersion, versionParam } from "../../../../lib/store/names.ts";
 import { drawn, keepable } from "../../../../lib/store/rendered.ts";
 import { fileUrl, pluginUrl } from "../../../../lib/store/urls.ts";
 import { statusWords, store, storeAround } from "../../../../lib/store/words.ts";
 
 export const prerender = false;
 
-const { id, version } = Astro.params;
+const { id } = Astro.params;
+const version = versionParam(Astro.params.version);
 if (!isPluginId(id) || !isVersion(version)) return new Response(null, { status: 404 });
 const edge = Astro.locals.edge;
 const [plugin, found] = await Promise.all([edge.plugin(id), edge.version(id, version)]);
 if ((!plugin.ok && plugin.error === "not_found") || (!found.ok && found.error === "not_found")) return new Response(null, { status: 404 });
 const v = found.ok ? found.data : null;
+/** The version as the store spells it, never as the address did. */
+const shown = v?.version ?? version;
 const name = plugin.ok ? plugin.data.name : id;
 let notes = "";
 if (v && plugin.ok) {
@@ -36,13 +39,13 @@ if (v && plugin.ok) {
 const isNewest = plugin.ok && v ? plugin.data.version === v.version : false;
 const newestVerified = plugin.ok ? plugin.data.verified_version : null;
 // (The app's sentences around their values: a link, a time.)
-const [before, after] = storeAround("plugins.store.not_verified_line", { version }, "verified");
+const [before, after] = storeAround("plugins.store.not_verified_line", { version: shown }, "verified");
 const [onBefore, onAfter] = storeAround("plugins.store.verified_on", {}, "date");
 ---
 
-<App title={`${name} ${version} · Plugins · Zeron`} description={`${name} ${version}, a plugin for Zeron.`} current={null}>
+<App title={`${name} ${shown} · Plugins · Zeron`} description={`${name} ${shown}, a plugin for Zeron.`} current={null}>
   <nav slot="title" class="crumbs" aria-label="Where this is">
-    <a href="/plugins/all">All plugins</a><Glyph name="alt-arrow-right" size={12} /><a href={pluginUrl(id)}>{name}</a><Glyph name="alt-arrow-right" size={12} /><a href={`${pluginUrl(id)}/versions`}>Versions</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{version}</span>
+    <a href="/plugins/all">All plugins</a><Glyph name="alt-arrow-right" size={12} /><a href={pluginUrl(id)}>{name}</a><Glyph name="alt-arrow-right" size={12} /><a href={`${pluginUrl(id)}/versions`}>Versions</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{shown}</span>
   </nav>
   {
     !v || !plugin.ok ? (

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
-import { isPluginId, isPrerelease, isUsername, isVersion, packagePath, resolvePackagePath, SITE_IDS } from "./names.ts";
+import { isPluginId, isPrerelease, isUsername, isVersion, packagePath, resolvePackagePath, SITE_IDS, versionParam } from "./names.ts";
 
 describe("plugin ids", () => {
   test.each(["focus-timer", "a1", "x".repeat(40), "git"])("%s is one", (id) => expect(isPluginId(id)).toBe(true));
@@ -10,6 +10,12 @@ describe("plugin ids", () => {
 describe("versions", () => {
   test.each(["1.0.0", "0.3.0-beta.1", "1.2.3+build.5", "10.20.30-rc.1+x"])("%s is strict semver", (v) => expect(isVersion(v)).toBe(true));
   test.each(["1.0", "01.0.0", "1.0.0-", "v1.0.0", "1.0.0-01", "..", "1.0.0/../x", `1.0.0-${"a".repeat(70)}`])("%s isn't", (v) => expect(isVersion(v)).toBe(false));
+  test("a version from an address gets its \"+\" back (decodeURI leaves %2B), and nothing else", () => {
+    expect(versionParam(decodeURI("/" + encodeURIComponent("1.2.3+build.5")).slice(1))).toBe("1.2.3+build.5");
+    expect(versionParam("1.2.3%2bx")).toBe("1.2.3+x");
+    expect(versionParam("1.0.0%2F..")).toBe("1.0.0%2F..");
+    expect(versionParam(undefined)).toBeUndefined();
+  });
   test("pre-releases", () => {
     expect(isPrerelease("1.0.0-beta.1")).toBe(true);
     expect(isPrerelease("1.0.0+build-5")).toBe(false);
