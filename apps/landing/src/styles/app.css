@@ -97,6 +97,103 @@
   --inset: 4px; /* zeron.inset.gap: the window round and between the cards */
   --head-h: 56px; /* a 32 control with 12 above and under */
   --measure: 640px; /* zeron.settings.measure: a column of reading */
+
+  /* What the dark set writes in place and the light one changes. */
+  --head-bg: color-mix(in srgb, #ffffff 5.9%, var(--window)); /* the page card's fill, solid, over the window */
+  --field: var(--sunken); /* a field's well */
+  --field-focus: rgb(146 119 176 / 0.7);
+  --field-error: rgb(248 113 113 / 0.7);
+  --scrim: #00000059; /* under a dialog, a sheet, the drawer */
+  --shadow-pop: 0 24px 64px #00000080; /* a dialog's, a sheet's, the drawer's */
+  --shadow-toast: 0 20px 56px #00000052;
+  --scrollbar-thumb: rgb(237 237 239 / 0.26);
+  --selection: rgb(146 119 176 / 0.5); --selection-ink: #ffffff;
+  --lightbox: #060607e0;
+  --checker: #ffffff08; /* behind a picture that may be clear */
+  --seg-thumb: var(--selected); --seg-thumb-shadow: none; /* a segmented control's chosen one */
+  /* (A neutral badge's ink: the second ink, 0.6, is 4.33 on its wash over a hovered row; 0.72 holds AA.) */
+  --neutral-ink: rgb(237 237 239 / 0.72);
+}
+
+/* Light, as the app follows the person's setting: zeron-light.json, its
+   solid surfaces (zeron.solid: a white card on the window, muted text at
+   0.74 and 0.62), its tones at the deep steps (600, 700 for the warm ones)
+   on the 500s' faint washes, its code at the 700s. No toggle: the setting
+   is the person's. Where the web differs, the line says why. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --window: #eeeef0; /* zeron.window */
+    --sidebar: #1a1a1a0d; /* zeron.sidebar.tint */
+    --card: #ffffff; /* zeron.solid.card */
+    --panel: #1a1a1a0b; /* zeron.settings.tint */
+    --sunken: #0000000d; /* surface.sunken */
+    --overlay: #fbfbfc; /* zeron.menu.solid */
+
+    --line-faint: #00000017; /* border.subtle */
+    --line: #00000024; /* border */
+    --line-strong: #0000002e; /* border.strong */
+    --field-edge: #0000001f; /* zeron.field.edge */
+    --field-edge-hover: #00000038;
+
+    --hover: #0000000a;
+    --pressed: #00000012;
+    --selected: #00000012; /* zeron.selected.flat.bg */
+    --wash: #0000000d; /* zeron.secondary.bg */
+
+    --text: #1b1b1d;
+    --text-2: rgb(27 27 29 / 0.74); /* zeron.solid.secondary */
+    /* (zeron.solid.tertiary is 0.62: on the sidebar's tint that's 4.41, under AA; 0.66 here, 4.97.) */
+    --text-3: rgb(27 27 29 / 0.66);
+    --text-off: rgb(27 27 29 / 0.28);
+
+    --accent: #7a55c4;
+    --ring: rgb(122 85 196 / 0.6);
+
+    /* (The app's inks are emerald and amber 700, red 600, the accent itself:
+       a step deeper here wherever that held a badge under AA on a group's
+       panel, or under the pointer's wash, the web's grounds. Blue 700 holds.) */
+    --ok-ink: #015a3c; --ok-wash: rgb(39 172 122 / 0.1); --ok-edge: rgb(3 144 98 / 0.26); /* emerald 800 on 500 */
+    --warn-ink: #6e4603; --warn-wash: rgb(214 141 10 / 0.12); --warn-edge: rgb(180 117 1 / 0.3); /* amber 800 on 500 */
+    --bad-ink: #a13735; --bad-wash: rgb(228 96 91 / 0.1); --bad-edge: rgb(197 71 68 / 0.26); /* red 700 on 500 */
+    --info-ink: #265eaf; --info-wash: rgb(75 143 243 / 0.1); --info-edge: rgb(51 117 212 / 0.26); /* blue 700 on 500 */
+    --accent-ink: #644cab; --accent-wash: rgb(122 85 196 / 0.1); --accent-edge: rgb(122 85 196 / 0.28); /* violet 700 */
+
+    --primary: #1b1b1d; --primary-hover: #2d2d31; --primary-active: #000000; --primary-ink: #ffffff;
+    --secondary: #0000000d; --secondary-hover: #00000014; --secondary-active: #0000001c;
+    --danger: #c54744; --danger-hover: #a13735; --danger-active: #7d2a28; /* red 600, 700, 800: deepening as it's touched */
+
+    --code-text: rgb(27 27 29 / 0.92);
+    /* (Strings green 800, not 700: on a removed line's wash 700 is 4.48.) */
+    --code-keyword: #644cab; --code-function: #265eaf; --code-type: #905d02; --code-string: #1b5b2a;
+    /* (Numbers orange 700, not 600: 600 is under AA on the well.) */
+    --code-number: #9e4708; --code-property: #a0354b; --code-tag: #a13735; --code-attribute: #856f06;
+    /* (The app's comment ink is 0.5 and punctuation 0.52: 0.66 here, for AA on the well and a diff's washes.) */
+    --code-comment: rgb(27 27 29 / 0.66);
+    --code-punct: rgb(27 27 29 / 0.66);
+    --diff-added: #03754f; --diff-removed: #a13735; /* emerald 700, red 700 */
+    --diff-added-wash: rgb(39 172 122 / 0.1); --diff-removed-wash: rgb(228 96 91 / 0.1);
+
+    --head-bg: #ffffff;
+    --field: #ffffff; /* zeron.field.bg over the white card: whiter than a well, never grey (grey reads as off) */
+    --field-focus: rgb(122 85 196 / 0.7);
+    --field-error: rgb(197 71 68 / 0.7);
+    --scrim: #0000002e; /* backdrop: light (a dark dim turns a pale window muddy) */
+    --shadow-pop: 0 24px 64px #00000029; /* zeron.dialog.shadow */
+    --shadow-toast: 0 18px 48px #0000001c; /* zeron.menu.shadow */
+    --scrollbar-thumb: rgb(27 27 29 / 0.26);
+    --selection: rgb(122 85 196 / 0.2); --selection-ink: #1b1b1d;
+    --lightbox: #f3f3f5eb; /* zeron.lightbox.scrim: light stays light */
+    --checker: #00000008;
+    --neutral-ink: var(--text-2);
+    --seg-thumb: #ffffff; --seg-thumb-shadow: 0 1px 2px #0000000f, 0 0 0 1px #0000000d; /* zeron.segmented.thumb: white, lifted by a hairline */
+  }
+  /* (Form controls and scrollbars follow too.) */
+  html { color-scheme: light; }
+}
+/* A phone in light: no window round a card, so the page is the card, white
+   (on the grey window every ink would fall under AA). */
+@media (prefers-color-scheme: light) and (max-width: 899px) {
+  :root { --window: #ffffff; }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -118,11 +215,13 @@ ul, ol { list-style: none; }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { background: none; border: 0; cursor: pointer; }
 code, pre, kbd, samp { font-family: var(--mono); font-variant-ligatures: none; }
-::selection { background: rgb(146 119 176 / 0.5); color: #fff; }
+::selection { background: var(--selection); color: var(--selection-ink); }
 :focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 .num, td, .tabular { font-variant-numeric: tabular-nums; }
 /* (Hidden means hidden: a component's own display never shows it.) */
 [hidden] { display: none !important; }
+/* (A plugin's icon takes the text's ink, light or dark: the filter's flood, set here, as the page's policy allows no inline style.) */
+.ink-flood { flood-color: var(--text); }
 .ink-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 /* An author's words keep their reordering to themselves. */
@@ -169,7 +268,7 @@ code, pre, kbd, samp { font-family: var(--mono); font-variant-ligatures: none; }
   padding: 0 8px 12px;
   mask-image: linear-gradient(transparent, #000 12px, #000 calc(100% - 12px), transparent);
   scrollbar-width: thin;
-  scrollbar-color: rgb(237 237 239 / 0.26) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 .sidebar-foot { padding: 8px; display: grid; gap: 4px; }
 
@@ -182,7 +281,7 @@ code, pre, kbd, samp { font-family: var(--mono); font-variant-ligatures: none; }
   border-radius: 12px;
   box-shadow: inset 0 0 0 1px var(--line-faint);
   scrollbar-width: thin;
-  scrollbar-color: rgb(237 237 239 / 0.26) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 /* The header runs the card's width (its hairline edge to edge); what is in
    it keeps to the page's column, so header and body share their edges. */
@@ -192,7 +291,7 @@ code, pre, kbd, samp { font-family: var(--mono); font-variant-ligatures: none; }
   z-index: 2;
   padding: 12px 24px;
   /* (The card's own fill over the window, solid, so what scrolls under it doesn't show.) */
-  background: color-mix(in srgb, #ffffff 5.9%, var(--window));
+  background: var(--head-bg);
   border-bottom: 1px solid var(--line-faint);
   border-radius: 12px 12px 0 0;
 }
@@ -279,9 +378,9 @@ a.account:hover { background: var(--hover); }
     width: min(304px, 88vw);
     border: 0;
     background: var(--overlay);
-    box-shadow: 0 24px 64px #00000080;
+    box-shadow: var(--shadow-pop);
   }
-  .js .drawer-scrim.is-open { display: block; position: fixed; inset: 0; z-index: 20; background: #00000059; }
+  .js .drawer-scrim.is-open { display: block; position: fixed; inset: 0; z-index: 20; background: var(--scrim); }
   .page { overflow: visible; border-radius: 0; box-shadow: none; background: transparent; }
   .topbar {
     position: sticky;
@@ -374,8 +473,8 @@ a.account:hover { background: var(--hover); }
 }
 .field.sm { height: 28px; padding: 0 8px; border-radius: 6px; gap: 6px; }
 .field:hover, .field.is-hover { box-shadow: inset 0 0 0 1px var(--field-edge-hover); }
-.field:focus-within, .field.is-focus { box-shadow: inset 0 0 0 1px rgb(146 119 176 / 0.7); outline: 2px solid var(--ring); outline-offset: 1px; }
-.field.is-error { box-shadow: inset 0 0 0 1px rgb(248 113 113 / 0.7); }
+.field:focus-within, .field.is-focus { box-shadow: inset 0 0 0 1px var(--field-focus); outline: 2px solid var(--ring); outline-offset: 1px; }
+.field.is-error { box-shadow: inset 0 0 0 1px var(--field-error); }
 .field.is-disabled { opacity: 0.4; pointer-events: none; }
 .field input, .field select, .field textarea { flex: 1; min-width: 0; height: 100%; background: none; border: 0; outline: 0; font-size: 13px; line-height: 18px; }
 .field.sm input { font-size: 12px; line-height: 16px; }
@@ -394,7 +493,7 @@ a.account:hover { background: var(--hover); }
 .segmented { display: inline-flex; height: 26px; padding: 2px; gap: 2px; border-radius: 6px; background: var(--wash); }
 .segmented > * { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 12px; border-radius: 4px; color: var(--text-2); font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; }
 .segmented > *:hover, .segmented > .is-hover { color: var(--text); }
-.segmented > [aria-current="page"], .segmented > [aria-pressed="true"], .segmented > .is-on { background: var(--selected); color: var(--text); }
+.segmented > [aria-current="page"], .segmented > [aria-pressed="true"], .segmented > .is-on { background: var(--seg-thumb); box-shadow: var(--seg-thumb-shadow); color: var(--text); }
 .segmented > *:focus-visible { outline: 1px solid var(--ring); outline-offset: -1px; }
 
 /* Tabs: labels on a hairline, the open one marked under. 36 high (32 small). */
@@ -410,7 +509,7 @@ a.account:hover { background: var(--hover); }
 .tabs .count { color: var(--text-3); font-size: 11px; line-height: 14px; }
 
 /* A badge: 20 high (16 small), its tone's ink on its wash. */
-.badge { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 6px; border-radius: 6px; background: var(--wash); color: var(--text-2); font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; }
+.badge { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 6px; border-radius: 6px; background: var(--wash); color: var(--neutral-ink); font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; }
 .badge.sm { height: 16px; padding: 0 4px; gap: 3px; border-radius: 4px; font-size: 11px; line-height: 14px; }
 .badge.dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .badge.ok { background: var(--ok-wash); color: var(--ok-ink); }
@@ -516,10 +615,10 @@ a.row:focus-visible { outline-offset: -2px; }
 
 /* A dialog (ds/dialog): 460 wide, a 16 corner, 24 in, 24 between its parts;
    a sheet: 400 from the right, the window's height. */
-.dialog, .sheet { color: var(--text); background: var(--overlay); box-shadow: 0 0 0 1px var(--line), 0 24px 64px #00000080; border: 0; }
+.dialog, .sheet { color: var(--text); background: var(--overlay); box-shadow: 0 0 0 1px var(--line), var(--shadow-pop); border: 0; }
 .dialog { width: min(460px, calc(100vw - 32px)); border-radius: 16px; padding: 24px; margin: auto; }
 .dialog.sm { width: min(380px, calc(100vw - 32px)); }
-.dialog::backdrop, .sheet::backdrop { background: #00000059; }
+.dialog::backdrop, .sheet::backdrop { background: var(--scrim); }
 .dialog .head, .sheet .head { display: grid; gap: 6px; }
 .dialog h2, .sheet h2 { font-size: 15px; line-height: 20px; font-weight: 600; overflow-wrap: anywhere; }
 .dialog p, .sheet p { overflow-wrap: anywhere; }
@@ -529,7 +628,7 @@ a.row:focus-visible { outline-offset: -2px; }
 .sheet { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(400px, 100vw); max-width: 100vw; height: 100dvh; max-height: none; padding: 24px; border-radius: 16px 0 0 16px; overflow-y: auto; }
 
 /* A toast (ds/toast): 340 wide, a 12 corner, its tone's glyph, what happened. */
-.toast { display: flex; align-items: flex-start; gap: 12px; width: min(340px, calc(100vw - 32px)); padding: 12px 8px 12px 16px; border-radius: 12px; background: var(--overlay); box-shadow: 0 0 0 1px var(--line), 0 20px 56px #00000052; }
+.toast { display: flex; align-items: flex-start; gap: 12px; width: min(340px, calc(100vw - 32px)); padding: 12px 8px 12px 16px; border-radius: 12px; background: var(--overlay); box-shadow: 0 0 0 1px var(--line), var(--shadow-toast); }
 .toast .glyph { margin-top: 1px; }
 .toast.ok .glyph { color: var(--ok-ink); }
 .toast.bad .glyph { color: var(--bad-ink); }
@@ -693,7 +792,7 @@ a.row:focus-visible { outline-offset: -2px; }
   padding: 16px;
   border-radius: 12px;
   background: var(--overlay);
-  box-shadow: 0 0 0 1px var(--line), 0 20px 56px #00000052;
+  box-shadow: 0 0 0 1px var(--line), var(--shadow-toast);
   color: var(--text-2);
   font-size: 13px;
   line-height: 20px;
@@ -723,7 +822,7 @@ a.row:focus-visible { outline-offset: -2px; }
 }
 
 /* A picture, large (ds/lightbox): its scrim, 40 from the window's edges. */
-.lightbox { position: fixed; inset: 0; width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 40px; border: 0; background: #060607e0; color: var(--text); }
+.lightbox { position: fixed; inset: 0; width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 40px; border: 0; background: var(--lightbox); color: var(--text); }
 .lightbox::backdrop { background: transparent; }
 .lightbox[open] { display: grid; place-items: center; }
 .lightbox figure { display: grid; justify-items: center; gap: 12px; max-width: 100%; max-height: 100%; }
@@ -1225,7 +1324,7 @@ dialog.sheet:target { display: block; }
 .file-head code { color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
 .file-head a { margin-left: auto; color: var(--text-2); }
 .file-head a:hover { color: var(--text); }
-.file-picture { max-width: 100%; border-radius: 12px; outline: 1px solid var(--line-faint); outline-offset: -1px; background: repeating-conic-gradient(#ffffff08 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
+.file-picture { max-width: 100%; border-radius: 12px; outline: 1px solid var(--line-faint); outline-offset: -1px; background: repeating-conic-gradient(var(--checker) 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
 .changes-view { display: grid; gap: 24px; }
 .change-block { display: grid; gap: 8px; scroll-margin-top: calc(var(--head-h) + 24px); }
 .change-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-height: 28px; font-size: 13px; line-height: 18px; }

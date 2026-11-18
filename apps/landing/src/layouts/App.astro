@@ -46,6 +46,8 @@ const row = (item: NavItem) => ({ ...item, on: item.id === current });
 <html lang="en" class="app">
   <head>
     <Head title={title} description={description} noindex={noindex} canonical={canonical} />
+    <!-- The person's own setting, light or dark (styles/app.css), as the app follows it. -->
+    <meta name="color-scheme" content="dark light" />
     <slot name="head" />
     <!-- Without the script, the list's foot says "Sign in" plainly. -->
     <noscript><style>.account.is-pending .name{color:inherit}.account.is-pending .name::before{display:none}</style></noscript>
@@ -135,10 +137,10 @@ const row = (item: NavItem) => ({ ...item, on: item.id === current });
         <div class="page-body"><div class:list={["column", measure]}><slot /></div></div>
       </main>
     </div>
-    <!-- Icons a plugin ships are drawn through this: any colour in, the text's ink out. -->
+    <!-- Icons a plugin ships are drawn through this: any colour in, the text's ink out (light or dark). -->
     <svg class="ink-defs" aria-hidden="true" focusable="false">
       <filter id="store-ink" color-interpolation-filters="sRGB">
-        <feFlood flood-color="#ededef" result="ink"></feFlood>
+        <feFlood class="ink-flood" flood-color="#ededef" result="ink"></feFlood>
         <feComposite in="ink" in2="SourceGraphic" operator="in"></feComposite>
       </filter>
     </svg>

@@ -48,7 +48,7 @@ const PARTS = [
     </ul>
     <p>The first account to publish an id keeps it. An account can take up to 5 new ids in any 7 days. Zeron's own plugins' ids, ids starting with <code>zeron</code>, and names that look like a brand's are held back.</p>
     <p>The rest is optional:</p>
-    <pre><code>{`{
+    <pre tabindex="0"><code>{`{
   "keywords": ["focus", "timer"],
   "homepage": "https://example.com/focus-timer",
   "repository": "https://github.com/you/focus-timer",
@@ -91,12 +91,12 @@ const PARTS = [
 
     <h2 id="ci">Publishing from CI</h2>
     <p>A <strong>deploy key</strong> lets a CI job, such as a GitHub Action, send new versions of one plugin without your session. Its first version comes from your machine; a key can send the ones after it, and every one still waits for review.</p>
-    <pre><code>{`zeron plugin key create focus-timer --name "GitHub Actions"   # once, on your machine
+    <pre tabindex="0"><code>{`zeron plugin key create focus-timer --name "GitHub Actions"   # once, on your machine
 zeron plugin key list focus-timer
 zeron plugin key revoke focus-timer <key>`}</code></pre>
     <p>Making a key asks you to sign in again. Its secret (<code>zpk_…</code>) is shown once and Zeron keeps no copy: put it in your CI's secrets as <code>ZERON_DEPLOY_KEY</code>, then run <code>zeron plugin publish &lt;folder&gt;</code>. A key sends new versions of its plugin and reads their state, nothing else, so if one leaks, the most it can do is add a version that waits for review. Revoke it from <a href="/account">Your plugins</a> or the command line; versions it sent stay.</p>
     <p>On GitHub, the publish action installs Zeron's command line and sends the plugin with your key:</p>
-    <pre><code>{`- uses: actions/checkout@v4
+    <pre tabindex="0"><code>{`- uses: actions/checkout@v4
 - uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
   with:
     key: \${{ secrets.ZERON_DEPLOY_KEY }}`}</code></pre>

@@ -16,8 +16,11 @@ afterAll(async () => {
   await site?.dispose();
 });
 
-async function open(path: string, options: { as?: string; width?: number } = {}): Promise<{ page: Page; context: BrowserContext }> {
-  const context = await browser.newContext({ viewport: { width: options.width ?? 1440, height: 900 }, reducedMotion: "reduce" });
+/** The person's setting: the shell follows it (styles/app.css), so each is checked. */
+type Scheme = "dark" | "light";
+
+async function open(path: string, options: { as?: string; width?: number; scheme?: Scheme } = {}): Promise<{ page: Page; context: BrowserContext }> {
+  const context = await browser.newContext({ viewport: { width: options.width ?? 1440, height: 900 }, reducedMotion: "reduce", colorScheme: options.scheme ?? "dark" });
   const page = await context.newPage();
   if (options.as) await page.goto(new URL(`/auth/web/callback?as=${options.as}&return_to=/plugins`, site.url).href);
   await page.goto(new URL(path, site.url).href, { waitUntil: "networkidle" });
@@ -40,6 +43,8 @@ const PAGES: [string, string | undefined][] = [
   ["/plugins/worst-case-listing-at-every-limit-xyz12", undefined],
   ["/plugins/all?q=git", undefined],
   ["/plugins/theme-sync/report", "user_kai"],
+  ["/plugins/publishing", undefined],
+  ["/plugins/no-such-plugin", undefined],
   ["/account", "user_ada"],
   ["/account", "user_lin"],
   ["/account/plugins/session-badges", "user_ada"],
@@ -89,6 +94,10 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
     await page.getByRole("link", { name: "Close it…" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
+  ["the new key sheet", "/account/plugins/worst-case-listing-at-every-limit-xyz12#keys", "user_ada", async (page) => {
+    await page.locator("[data-dialog='new-key']").first().click();
+    await expect.poll(() => page.locator("dialog#new-key").isVisible()).toBe(true);
+  }],
   ["the withdraw dialog", "/account/plugins/session-badges", "user_ada", async (page) => {
     await page.getByRole("link", { name: "Withdraw" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
@@ -108,10 +117,11 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
 ];
 
 describe("no violations axe can find", () => {
+  for (const scheme of ["dark", "light"] as const)
   for (const width of [1440, 390]) {
     for (const [path, as] of PAGES) {
-      test(`${path} at ${width}`, async () => {
-        const { page, context } = await open(path, { as, width });
+      test(`${path} at ${width}, ${scheme}`, async () => {
+        const { page, context } = await open(path, { as, width, scheme });
         try {
           expect(await violations(page)).toEqual([]);
           // Nothing runs off the side of a phone.
@@ -125,10 +135,11 @@ describe("no violations axe can find", () => {
 });
 
 describe("no violations axe can find, opened", () => {
+  for (const scheme of ["dark", "light"] as const)
   for (const width of [1440, 390]) {
     for (const [what, path, as, opening] of OPENED) {
-      test(`${what} at ${width}`, async () => {
-        const { page, context } = await open(path, { as, width });
+      test(`${what} at ${width}, ${scheme}`, async () => {
+        const { page, context } = await open(path, { as, width, scheme });
         try {
           await opening(page);
           expect(await violations(page)).toEqual([]);

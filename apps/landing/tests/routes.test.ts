@@ -566,7 +566,7 @@ describe("forms", () => {
   test("an author with nothing sent is told how to send the first", async () => {
     const { body } = await html("/account", await site.signIn("user_noor"));
     expect(body).toContain("You haven't published a plugin yet");
-    expect(body).toContain("<code>zeron plugin publish</code>");
+    expect(body).toContain("<code tabindex=\"0\">zeron plugin publish</code>");
     expect(body).toMatch(/Your plugins<span class="title-count"> · 0<\/span>/);
   });
 
@@ -592,7 +592,7 @@ describe("forms", () => {
     // Its parts are tabs that are addresses; New key… opens a sheet that is one too.
     expect(body).toMatch(/<a href="#versions" aria-current="page">Versions <span class="count">6<\/span><\/a><a href="#keys">Deploy keys <span class="count">7<\/span><\/a>/);
     expect(body).toContain('<dialog class="sheet" id="new-key"');
-    expect(body).toContain("<code>zeron plugin key create worst-case-listing-at-every-limit-xyz12</code>");
+    expect(body).toContain("<code tabindex=\"0\">zeron plugin key create worst-case-listing-at-every-limit-xyz12</code>");
   });
 
   test("a confirm page asks first; the post does it once and says so once", async () => {
