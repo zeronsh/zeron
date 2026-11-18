@@ -769,6 +769,36 @@ async fn the_plugin_store_end_to_end() {
     let (status, answer) = web_report(&carol.csrf.clone()).await;
     e.check("8", "and the ended session can't report", status == 401, format!("{status} {answer}"));
 
+    // ── 9: featured ──
+    const OTHER: &str = "notes-board-e2e";
+    let notes = author_plugin(&bob_laptop, OTHER, "1.0.0", &["ui.add"]).await;
+    let manifest_path = notes.join("zeron-plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["name"] = json!("Notes Board");
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let submitted = publish(&bob_laptop, OTHER).await;
+    e.must("9", "a second plugin is published", submitted["ok"] == true, &submitted);
+    let (status, body) = e.admin(&staff, &format!("submissions/{OTHER}/1.0.0/approve"), json!({})).await;
+    e.must("9", "and approved", status == 200, &body);
+    let ids = |reply: &Value| reply["items"].as_array().into_iter().flatten().filter_map(|c| c["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+    let featured = async || {
+        let engine = phone.call(methods::STORE_SEARCH, json!({ "featured": true })).await.unwrap();
+        let (_, edge) = e.get("/store/v1/plugins?featured=true", None).await;
+        (ids(&engine), ids(&edge), engine)
+    };
+    let (status, body) = e.admin(&staff, &format!("plugins/{ID}/feature"), json!({ "featured": true })).await;
+    e.must("9", &format!("staff feature {ID}"), status == 200, &body);
+    let (engine, edge, reply) = featured().await;
+    let only = engine == [ID] && engine == edge && reply["items"][0]["featured"] == true;
+    e.check("9", "a featured search lists only the featured one", only, format!("engine {engine:?} / edge {edge:?}"));
+    let (_, every) = e.get("/store/v1/plugins", None).await;
+    e.check("9", "while the full list has both", ids(&every).contains(&OTHER.to_owned()) && ids(&every).contains(&ID.to_owned()), &every);
+    let (status, body) = e.admin(&staff, &format!("plugins/{OTHER}/feature"), json!({ "featured": true })).await;
+    e.must("9", &format!("staff feature {OTHER} too"), status == 200, &body);
+    let (engine, edge, _) = featured().await;
+    let both = engine.len() == 2 && engine.contains(&ID.to_owned()) && engine.contains(&OTHER.to_owned()) && engine == edge;
+    e.check("9", "a featured search lists both, in the edge's order", both, format!("engine {engine:?} / edge {edge:?}"));
+
     drop((laptop, desk, phone, bob_laptop));
     let failures = e.failures.lock().unwrap().clone();
     assert!(failures.is_empty(), "{} check(s) failed:\n{}", failures.len(), failures.join("\n"));
