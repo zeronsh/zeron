@@ -754,6 +754,20 @@ async fn the_plugin_store_end_to_end() {
     let (_, open) = e.admin_get(&staff, "reports?status=open").await;
     let gone = open["reports"].as_array().is_some_and(|r| r.iter().all(|r| r["id"] != first["id"]) && r.iter().any(|r| r["id"] == carols["id"]));
     e.check("8", "and it leaves the open reports (the other one stays)", gone, &open);
+    // Signing out on the site: Origin and the CSRF token, as any write.
+    let logout = async |origin: &str, csrf: &str| {
+        let cookie = carol.cookie.lock().unwrap().clone();
+        let res = e.http.post(format!("{}/auth/web/logout", e.site)).header("cookie", cookie).header("origin", origin).header("x-csrf-token", csrf).send().await.unwrap();
+        (res.status().as_u16(), res.json::<Value>().await.unwrap_or_default())
+    };
+    let (status, answer) = logout(&e.site_origin.clone(), "not-the-session-token").await;
+    e.check("8", "signing out with a wrong CSRF token is refused", status == 403 && answer["error"] == "bad_csrf", format!("{status} {answer}"));
+    let (status, answer) = logout("https://evil.example", &carol.csrf.clone()).await;
+    e.check("8", "and from another origin", status == 403 && answer["error"] == "bad_csrf", format!("{status} {answer}"));
+    let (status, answer) = logout(&e.site_origin.clone(), &carol.csrf.clone()).await;
+    e.check("8", "with both, it signs out", status == 200 && answer["ok"] == true, format!("{status} {answer}"));
+    let (status, answer) = web_report(&carol.csrf.clone()).await;
+    e.check("8", "and the ended session can't report", status == 401, format!("{status} {answer}"));
 
     drop((laptop, desk, phone, bob_laptop));
     let failures = e.failures.lock().unwrap().clone();
