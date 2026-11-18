@@ -491,6 +491,8 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			return words.grants(it) or words.update(it)
 		end,
 		detail_action = if publishing then PublishLink { now = now } else UpdateLink { now = now },
+		-- (Publish… is its sentence's own link: right after its words.)
+		detail_inline = publishing,
 		truncate = true,
 		-- Its version, centred on the row beside its controls; before it,
 		-- Unverified for one whose maker Zeron can't vouch for.

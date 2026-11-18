@@ -222,6 +222,15 @@ ui.effect(function()
 	said:set(out)
 end)
 
+-- (Tests: skeletons that rest after a moment, not after their real wait.)
+ui.command {
+	id = "store.short_wait",
+	title = "Skeletons rest after 300 ms",
+	run = function()
+		(require("@ds/skeleton") :: any).WAIT_MS = 300
+	end,
+}
+
 ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
 
 return ui.column {

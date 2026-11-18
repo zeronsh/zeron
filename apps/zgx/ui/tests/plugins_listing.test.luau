@@ -49,7 +49,7 @@ test("a plugin's page says what it is, who made it, which version, how many have
 	expect(tree).to_contain("by @ada")
 	expect(tree).to_contain("Maintainer")
 	expect(tree).never.to_contain("Verified")
-	expect(tree).to_contain("1.2.0, Nov 15, 2026")
+	expect(tree).to_contain("Version 1.2.0 · ")
 	expect(tree).to_contain("installs")
 	expect(tree).to_contain("This version of Zeron")
 	expect(tree).to_contain('link "github.com/ada/focus-timer"')

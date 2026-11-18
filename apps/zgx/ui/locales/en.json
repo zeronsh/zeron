@@ -3893,16 +3893,12 @@
       "not_found_body": "It may have been taken down, or the link is wrong.",
       "browse_all": "Browse plugins",
       "fact": {
-        "by": "By",
-        "version": "Version",
-        "installs": "Installs",
         "works_with": "Works with",
         "category": "Category",
         "license": "License",
         "homepage": "Website",
         "repository": "Source"
       },
-      "version_on": "{version}, {date}",
       "install_note": "Zeron checks who signed it, then asks you to allow what it needs.",
       "update_note": "A newer version is ready.",
       "review_note": "It's waiting for you to allow it.",
@@ -4085,7 +4081,8 @@
       "update_new_owner": "It has a new publisher, @{username}. Zeron asks you to allow it again after it updates.",
       "update_new_owner_unnamed": "It has a new publisher. Zeron asks you to allow it again after it updates.",
       "update_in_review": "This version is still in review: only your own devices are offered it.",
-      "keys_publish_first": "Send its first version from this computer; a deploy key can send the ones after it."
+      "keys_publish_first": "Send its first version from this computer; a deploy key can send the ones after it.",
+      "version_installs": "Version {version} · {n, plural, one {# install} other {# installs}}"
     }
   },
   "templates": {

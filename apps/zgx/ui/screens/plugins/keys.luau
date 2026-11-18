@@ -163,7 +163,7 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 					w_full = true,
 					gap = "$space.3",
 					items = "center",
-					pl = ds.Settings.inset(),
+					px = ds.Settings.inset(),
 					ui.text {
 						function(): string
 							if not props.published() then
@@ -196,7 +196,11 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 				},
 			}
 		elseif key == "loading" then
-			return ds.Settings.Group { ds.SkeletonRow { lead = 28, title = 120, line = 220, trail = 60 } }
+			return ds.SkeletonWaiting {
+				build = function(still: boolean): Node
+					return ds.Settings.Group { ds.SkeletonRow { lead = 28, title = 120, line = 220, trail = 60, still = still } }
+				end,
+			}
 		end
 		return ds.Callout {
 			tone = "neutral",

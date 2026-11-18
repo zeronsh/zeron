@@ -248,7 +248,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			return ds.Button {
 				id = "store-install",
 				tone = "primary",
-				size = "md",
+				size = "sm",
 				disabled = kind ~= "install",
 				busy = function(): boolean
 					return busy:get()
@@ -264,7 +264,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			return ds.Button {
 				id = "store-update",
 				tone = "primary",
-				size = "md",
+				size = "sm",
 				busy = function(): boolean
 					return updating:get()
 				end,
@@ -283,19 +283,19 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			return ds.Button {
 				id = "store-review",
 				tone = "accent",
-				size = "md",
+				size = "sm",
 				on_click = function()
 					state.review(id, here.device(), if here.device() then here.device_name() else nil)
 				end,
 				ui.t("plugins.page.review"),
 			}
 		elseif kind == "off" then
-			return ds.Button { id = "store-turn-on", tone = "primary", size = "md", on_click = turn_on, ui.t("plugins.store.turn_on") }
+			return ds.Button { id = "store-turn-on", tone = "primary", size = "sm", on_click = turn_on, ui.t("plugins.store.turn_on") }
 		elseif kind == "settings" then
 			return ds.Button {
 				id = "store-settings",
 				tone = "secondary",
-				size = "md",
+				size = "sm",
 				on_click = function()
 					plugin_settings.open(id)
 				end,
@@ -343,10 +343,125 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		return ""
 	end
 
+	-- The page's head: its tile at the left of its name (as every row's
+	-- is), who made it, its version and how many have it under the name,
+	-- and the one thing to do at the right, ending on the content edge
+	-- where the rows' controls end. Then what it says of itself, what
+	-- installing it means here, and a version Zeron took down.
 	local offer = ui.column {
 		id = "store-offer",
 		w_full = true,
 		gap = "$space.3",
+		ui.row {
+			id = "store-header",
+			w_full = true,
+			px = ds.Settings.inset(),
+			gap = "$space.4",
+			items = "start",
+			ui.div {
+				id = "store-tile",
+				shrink = 0,
+				browse.Tile {
+					card = function(): store.Card
+						return d()
+					end,
+					size = 48,
+				},
+			},
+			ui.column {
+				grow = 1,
+				basis = 0,
+				min_w = 0,
+				gap = "$space.1",
+				-- (The whole name, however long: on as many lines as it takes.)
+				ui.text {
+					function(): string
+						return d().name or id
+					end,
+					heading = 1,
+					w_full = true,
+					wrap = true,
+					text_size = "$font.size.xl",
+					line_height = "$font.line.xl",
+					weight = "$font.weight.semibold",
+					color = "$text.primary",
+				},
+				ui.row {
+					gap = "$space.2",
+					items = "center",
+					flex_wrap = true,
+					ui.text {
+						function(): string
+							return browse.author(d())
+						end,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.secondary",
+					},
+					browse.badges(d),
+				},
+				ui.text {
+					function(): string
+						local n = d().installs
+						return ui.t("plugins.store.version_installs", {
+							version = d().version or "",
+							n = if type(n) == "number" then math.max(0, math.floor(n)) else 0,
+						}):get()
+					end,
+					tabular = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+				},
+			},
+			-- (Its centre on the name's first line.)
+			ui.row {
+				shrink = 0,
+				min_h = ui.theme.get("font.line.xl") :: number?,
+				items = "center",
+				ui.switch(standing, {
+					install = action("install"),
+					incompatible = action("incompatible"),
+					away = action("away"),
+					other = action("other"),
+					update = action("update"),
+					review = action("review"),
+					off = action("off"),
+					settings = action("settings"),
+					installed = action("installed"),
+					blocked = action("blocked"),
+				}),
+			},
+		},
+		ui.show(function(): boolean
+			local summary = d().summary
+			return type(summary) == "string" and summary ~= ""
+		end, ui.text {
+			id = "store-summary",
+			function(): string
+				return d().summary or ""
+			end,
+			px = ds.Settings.inset(),
+			w_full = true,
+			wrap = true,
+			text_size = "$font.size.md",
+			line_height = 20,
+			color = "$text.secondary",
+		}),
+		ui.show(function(): boolean
+			return note() ~= ""
+		end, ui.text {
+			id = "store-note",
+			note,
+			px = ds.Settings.inset(),
+			w_full = true,
+			wrap = true,
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			color = function(): string
+				return if standing() == "incompatible" then "$zeron.tone.warning.ink" else "$text.tertiary"
+			end,
+		}),
 		-- A version Zeron took down: why, and the way back.
 		ui.show(function(): boolean
 			return standing() == "blocked"
@@ -375,40 +490,6 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				end,
 			},
 		}),
-		ui.row {
-			w_full = true,
-			gap = "$space.3",
-			items = "center",
-			-- (Its words on the page's text edge.)
-			pl = ds.Settings.inset(),
-			ui.show(function(): boolean
-				return note() ~= ""
-			end, ui.text {
-				id = "store-note",
-				note,
-				grow = 1,
-				min_w = 0,
-				wrap = true,
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
-				color = function(): string
-					return if standing() == "incompatible" then "$zeron.tone.warning.ink" else "$text.tertiary"
-				end,
-			}),
-			ui.div { grow = 1, min_w = 0 },
-			ui.switch(standing, {
-				install = action("install"),
-				incompatible = action("incompatible"),
-				away = action("away"),
-				other = action("other"),
-				update = action("update"),
-				review = action("review"),
-				off = action("off"),
-				settings = action("settings"),
-				installed = action("installed"),
-				blocked = action("blocked"),
-			}),
-		},
 	}
 
 	-- Whether the device shown takes its pre-releases (the engine's choice,
@@ -443,61 +524,17 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 
 	-- The facts: who, which version, how many, where from, what it needs.
 	local function facts(): Node
-		local items: { any } = {
-			{
-				key = ui.t("plugins.store.fact.by"),
-				value = ui.row {
-					gap = "$space.2",
-					items = "center",
-					ui.text {
-						function(): string
-							return browse.author(d())
-						end,
-						text_size = "$font.size.sm",
-						color = "$text.primary",
-					},
-					browse.badges(d),
-				},
-			},
-			{
-				key = ui.t("plugins.store.fact.version"),
-				value = ui.text {
-					function(): string
-						local v = d().version or ""
-						local at = d().updated_at
-						return if type(at) == "number"
-							then ui.t("plugins.store.version_on", { version = v, date = locale.date(at / 1000) }):get()
-							else v
-					end,
-					tabular = true,
-					text_size = "$font.size.sm",
-					color = "$text.primary",
-				},
-			},
-			{
-				key = ui.t("plugins.store.fact.installs"),
-				value = ui.text {
-					function(): string
-						local n = d().installs
-						return ui.t("plugins.store.installs", { n = if type(n) == "number" then math.max(0, math.floor(n)) else 0 }):get()
-					end,
-					tabular = true,
-					text_size = "$font.size.sm",
-					color = "$text.primary",
-				},
-			},
-			{
+		-- (Who, which version and how many are the head's; a version that
+		-- doesn't work here is said under it, once.)
+		local items: { any } = {}
+		if first.compatible ~= false then
+			table.insert(items, {
 				key = ui.t("plugins.store.fact.works_with"),
-				value = ui.text {
-					function(): string
-						return if compatible() then ui.t("plugins.store.works_here"):get() else incompatible()
-					end,
-					wrap = true,
-					text_size = "$font.size.sm",
-					color = "$text.primary",
-				},
-			},
-		}
+				value = function(): string
+					return ui.t("plugins.store.works_here"):get()
+				end,
+			})
+		end
 		if type(first.categories) == "table" and #first.categories > 0 then
 			local names: { string } = {}
 			for _, c in first.categories do
@@ -543,8 +580,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				})
 			end
 		end
+		if #items == 0 then
+			return ui.div {}
+		end
 		return ds.Settings.Group {
-			ui.column { w_full = true, px = "$space.4", py = "$space.3", ds.KeyValue { items = items, key_width = 96 } },
+			ui.column { id = "store-facts", w_full = true, px = "$space.4", py = "$space.3", ds.KeyValue { items = items, key_width = 96 } },
 		}
 	end
 
@@ -631,10 +671,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end
 		return ds.Settings.Section {
 			title = ui.t("plugins.store.pictures"),
-			ui.scroll {
+			ui.scroll_x {
 				id = "store-shots",
 				w_full = true,
-				direction = "row",
+				-- (As tall as its pictures: nothing under them.)
+				h = 125,
 				fade = { 12, 12 },
 				fade_overflow = true,
 				ui.row { gap = "$space.3", px = ds.Settings.inset(1), table.unpack(thumbs) },
@@ -893,22 +934,12 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	return ui.column {
 		w_full = true,
 		gap = "$space.6",
-		ds.Settings.Page {
-			title = function(): string
-				return d().name or id
-			end,
-			description = function(): string
-				return d().summary or ""
-			end,
-			trail = browse.Tile {
-				card = function(): store.Card
-					return d()
-				end,
-				size = 48,
-			},
+		ui.column {
+			w_full = true,
+			gap = "$space.6",
+			offer,
 			keywords(),
 			facts(),
-			offer,
 			prerelease,
 			readme(),
 			shots(),
@@ -1003,23 +1034,29 @@ M.Page = ui.component(function(props: { plugin: string, here: Here }): Node
 		if kind == "found" then
 			return Found { plugin = id, here = props.here }
 		elseif kind == "loading" then
-			return ui.column {
-				id = "store-loading",
-				w_full = true,
-				gap = "$space.6",
-				ui.row {
-					w_full = true,
-					px = ds.Settings.inset(),
-					gap = "$space.3",
-					items = "center",
-					ui.column { grow = 1, gap = "$space.2", ds.Skeleton { w = 180, h = 20 }, ds.Skeleton { w = 300 } },
-					ds.Skeleton { w = 48, h = 48, rounded = "$radius.lg" },
-				},
-				ds.Settings.Group {
-					ds.SkeletonRow { lead = 0, title = 160, line = 220 },
-					ds.Settings.Rule(),
-					ds.SkeletonRow { lead = 0, title = 120, line = 260 },
-				},
+			-- (Its head's shape, then a card's: as the page that comes.)
+			return ds.SkeletonWaiting {
+				build = function(still: boolean): Node
+					return ui.column {
+						id = if still then "store-loading-still" else "store-loading",
+						w_full = true,
+						gap = "$space.6",
+						ui.row {
+							w_full = true,
+							px = ds.Settings.inset(),
+							gap = "$space.4",
+							items = "start",
+							ds.Skeleton { w = 48, h = 48, rounded = "$radius.md", still = still },
+							ui.column { grow = 1, gap = "$space.2", ds.Skeleton { w = 180, h = 20, still = still }, ds.Skeleton { w = 120, still = still }, ds.Skeleton { w = 160, still = still } },
+							ds.Skeleton { w = 64, h = 28, rounded = "$radius.lg", still = still },
+						},
+						ds.Settings.Group {
+							ds.SkeletonRow { lead = 0, title = 160, line = 220, still = still },
+							ds.Settings.Rule(),
+							ds.SkeletonRow { lead = 0, title = 120, line = 260, still = still },
+						},
+					}
+				end,
 			}
 		elseif kind == "not_found" then
 			return said(ds.EmptyState {
@@ -1061,8 +1098,11 @@ M.Page = ui.component(function(props: { plugin: string, here: Here }): Node
 		ui.presence(function(): string
 			local p = phase:get()
 			if p == "found" then
-				local v = (details:get()[id] or {}).version
-				return `found:{if type(v) == "string" then v else ""}`
+				local found = details:get()[id] or {}
+				local v = found.version
+				-- (And whether it works here: another device chosen may say
+				-- otherwise, which the head and the facts say.)
+				return `found:{if type(v) == "string" then v else ""}:{tostring(found.compatible ~= false)}`
 			end
 			return p
 		end, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),

@@ -18,6 +18,7 @@
 -- right stays: what's installed is that device's, and Install goes there.
 
 local ds = require("@ds")
+local control = require("@ds/control")
 local store = require("@app/screens/plugins/store")
 local state = require("@app/screens/plugins/state")
 local words = require("@app/screens/plugins/words")
@@ -316,6 +317,9 @@ local function row(first: store.Card, _i: State<number>, now: State<store.Card>)
 	}
 end
 
+-- A filter's width: a settings select's (a choice, not a form's field).
+local FILTER_W = 168
+
 -- What narrows the list: a category, the order, and keywords (the one
 -- chosen, removable; else the commonest among what shows, to choose).
 local function filters(): Node
@@ -384,31 +388,51 @@ local function filters(): Node
 		end
 		return out
 	end)
+	-- (Controls on the card's even inset, as a bar's are: a select's words
+	-- sit inside its own box, and that box can't stand on the card's edge
+	-- to bring them to the rows' text. One line, whatever chips come: they
+	-- scroll sideways rather than wrap, so the bar keeps its height.)
 	return ui.row {
 		id = "store-filters",
 		w_full = true,
-		-- An even inset round the controls, but the first select's words
-		-- land on the rows' edge (its 1 edge and its own inset taken off).
 		p = "$space.2",
-		pl = ds.Settings.inset(1 + 8),
 		gap = "$space.2",
 		items = "center",
-		flex_wrap = true,
-		ds.Select {
-			value = category,
-			name = ui.t("plugins.store.category_label"),
-			size = "sm",
-			options = category_options,
+		ui.div {
+			shrink = 0,
+			ds.Select {
+				value = category,
+				name = ui.t("plugins.store.category_label"),
+				size = "sm",
+				w = FILTER_W,
+				options = category_options,
+			},
 		},
-		ds.Select {
-			value = sort_value,
-			name = ui.t("plugins.store.sort_label"),
-			size = "sm",
-			options = sort_options,
-			on_change = function(v: string)
-				sort:set(v)
-			end,
+		ui.div {
+			shrink = 0,
+			ds.Select {
+				value = sort_value,
+				name = ui.t("plugins.store.sort_label"),
+				size = "sm",
+				w = FILTER_W,
+				options = sort_options,
+				on_change = function(v: string)
+					sort:set(v)
+				end,
+			},
 		},
+		ui.scroll_x {
+			id = "store-chips",
+			grow = 1,
+			min_w = 0,
+			-- (A small control's height: the selects' beside it.)
+			h = control.H.sm,
+			fade = { 12, 12 },
+			fade_overflow = true,
+			ui.row {
+				gap = "$space.2",
+				items = "center",
+				h_full = true,
 		-- (The chosen one is a chip of another kind, with its ×: keyed so.)
 		ui.each(suggested, function(chip: { k: string, chosen: boolean }): Node
 			local k = chip.k
@@ -434,6 +458,8 @@ local function filters(): Node
 				return if chip.chosen then `chosen:{chip.k}` else chip.k
 			end,
 		}),
+			},
+		},
 	}
 end
 
@@ -451,15 +477,20 @@ end
 -- What the card holds under its bar, by kind.
 local function inside(key: string): Node
 	if key == "loading" then
-		return ui.column {
-			w_full = true,
-			ds.SkeletonRow { title = 120, byline = 90, line = 260, trail = 0 },
-			ds.Settings.Rule(),
-			ds.SkeletonRow { title = 96, byline = 110, line = 220, trail = 0 },
-			ds.Settings.Rule(),
-			ds.SkeletonRow { title = 140, byline = 80, line = 240, trail = 0 },
-			ds.Settings.Rule(),
-			ds.SkeletonRow { title = 84, byline = 100, line = 200, trail = 0 },
+		return ds.SkeletonWaiting {
+			build = function(still: boolean): Node
+				return ui.column {
+					id = if still then "store-loading-still" else "store-loading",
+					w_full = true,
+					ds.SkeletonRow { title = 120, byline = 90, line = 260, trail = 0, still = still },
+					ds.Settings.Rule(),
+					ds.SkeletonRow { title = 96, byline = 110, line = 220, trail = 0, still = still },
+					ds.Settings.Rule(),
+					ds.SkeletonRow { title = 140, byline = 80, line = 240, trail = 0, still = still },
+					ds.Settings.Rule(),
+					ds.SkeletonRow { title = 84, byline = 100, line = 200, trail = 0, still = still },
+				}
+			end,
 		}
 	elseif key == "offline" then
 		return said(ds.EmptyState {
@@ -519,7 +550,15 @@ local function inside(key: string): Node
 			id = "store-more",
 			w_full = true,
 			ds.Settings.Rule(),
-			ds.SkeletonRow { title = 110, byline = 90, line = 240, trail = 0 },
+			ds.SkeletonWaiting {
+				build = function(still: boolean): Node
+					return ui.div {
+						id = if still then "store-more-still" else nil,
+						w_full = true,
+						ds.SkeletonRow { title = 110, byline = 90, line = 240, trail = 0, still = still },
+					}
+				end,
+			},
 		}),
 		ui.show(function(): boolean
 			return listing.status:get() == "failed" and failed:get() == nil
@@ -602,25 +641,54 @@ M.View = ui.component(function(): Node
 		end
 		load_categories()
 	end)
+	-- The featured: while they come, their room held by cards of their
+	-- shape (nothing under them moves when they arrive); none, no room.
+	local function featured_key(): string
+		if narrowed() then
+			return "none"
+		elseif #featured_pages.items:get() > 0 then
+			return "cards"
+		elseif featured_pages.status:get() == "loading" or not wanted:get() then
+			return "loading"
+		end
+		return "none"
+	end
 	return ui.column {
 		w_full = true,
-		gap = "$space.5",
+		-- (Sections apart as a Settings page's are.)
+		gap = "$space.6",
 		ui.show(function(): boolean
-			return not narrowed() and #featured_pages.items:get() > 0
-		end, ds.Settings.Section {
-			title = ui.t("plugins.store.featured"),
-			ui.row {
-				id = "store-featured",
-				w_full = true,
-				gap = "$space.3",
-				flex_wrap = true,
-				ui.each(featured_pages.items, feature, {
-					key = function(c: store.Card): string
-						return c.id
-					end,
-				}),
-			},
-		}),
+			return featured_key() ~= "none"
+		end, ui.presence(featured_key, function(key: string): Node
+			return ds.Settings.Section {
+				title = ui.t("plugins.store.featured"),
+				if key == "loading"
+					then ds.SkeletonWaiting {
+						build = function(still: boolean): Node
+							return ui.row {
+								id = "store-featured-loading",
+								w_full = true,
+								gap = "$space.3",
+								flex_wrap = true,
+								ds.Settings.FeatureSkeleton { still = still },
+								ds.Settings.FeatureSkeleton { still = still },
+								ds.Settings.FeatureSkeleton { still = still },
+							}
+						end,
+					}
+					else ui.row {
+						id = "store-featured",
+						w_full = true,
+						gap = "$space.3",
+						flex_wrap = true,
+						ui.each(featured_pages.items, feature, {
+							key = function(c: store.Card): string
+								return c.id
+							end,
+						}),
+					},
+			}
+		end, { w_full = true })),
 		ds.Settings.CatalogCard {
 			id = "store-card",
 			search = { value = query, placeholder = ui.t("plugins.store.search") },

@@ -247,6 +247,20 @@ do
 	by_id.extremes = e
 end
 
+-- Reacher, as the consent fixture has it (its hosts rated near, named
+-- and any), its asks the store's consent item: the page and the sheet say
+-- it in one wording.
+do
+	local e = by_id["api-probe"]
+	e.card.name = "Reacher"
+	e.detail.permissions = {
+		asks = { "network" },
+		network_hosts = { "localhost:8080", "box.example.ts.net", "*.example.org" },
+		network_local = { "localhost:8080" },
+		network_named = { "box.example.ts.net" },
+	}
+end
+
 -- A README of forty pictures (a page asks for only so many).
 do
 	local lines = { "# Screenshot tray" }

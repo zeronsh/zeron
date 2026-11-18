@@ -523,6 +523,8 @@ function M.Feature(props: FeatureProps): Node
 					w_full = true,
 					wrap = true,
 					lines = 2,
+					-- (Cut at its second line's end, said so: "…".)
+					truncate = true,
 					text_size = "$font.size.sm",
 					line_height = "$font.line.sm",
 					color = "$text.secondary",
@@ -531,6 +533,46 @@ function M.Feature(props: FeatureProps): Node
 		},
 	}
 end
+
+-- A `Feature` still on its way: its card and shape, its tile, name, who
+-- made it and two lines held in the skeleton's wash, as tall as the card
+-- that comes, so nothing under it moves when it does. `still`: at rest, not
+-- breathing (it has waited long enough).
+function M.FeatureSkeleton(props: { still: boolean? }?): Node
+	local still = props and props.still
+	local function line(w: any, h: string, bar: number?): Node
+		return ui.div { h = h, w_full = true, justify = "center", skeleton.Bar { w = w, h = bar, still = still } }
+	end
+	return ui.column {
+		class = "settings-feature-skeleton",
+		grow = 1,
+		basis = 0,
+		min_w = MIN_FEATURE,
+		rounded = "$radius.xl",
+		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
+		border = 1,
+		border_color = "$zeron.settings.edge",
+		aria_hidden = true,
+		ui.column {
+			w_full = true,
+			p = "$space.4",
+			gap = "$space.3",
+			skeleton.Bar { w = 40, h = 40, rounded = "$radius.md", still = still },
+			ui.column {
+				w_full = true,
+				gap = "$zeron.space.hair",
+				line(96, "$font.line.md", nil),
+				line(72, "$font.line.sm", 8),
+			},
+			ui.column {
+				w_full = true,
+				line("90%", "$font.line.sm", 8),
+				line("60%", "$font.line.sm", 8),
+			},
+		},
+	}
+end
+
 
 export type RowProps = {
 	label: string | Message | () -> string,
@@ -571,6 +613,9 @@ export type RowProps = {
 	-- At the detail line's end, while it shows: a small action of its own
 	-- (a plugin's Update), so the row's control stays the same on every row.
 	detail_action: Node?,
+	-- The action right after the detail's words, not at the line's end:
+	-- the sentence's own link (Publish… after where a plugin stands).
+	detail_inline: boolean?,
 }
 
 function M.Row(props: RowProps): Node
@@ -645,7 +690,8 @@ function M.Row(props: RowProps): Node
 					function(): string
 						return control.value(props.detail) or ""
 					end,
-					grow = 1,
+					grow = if props.detail_inline then nil else 1,
+					shrink = if props.detail_inline then 1 else nil,
 					min_w = 0,
 					text_size = "$font.size.sm",
 					line_height = "$font.line.sm",

@@ -314,11 +314,13 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 				ds.Settings.Group { ui.column { id = "publish-checks", w_full = true, table.unpack(rows) } },
 			},
 			if #notes > 0 then ui.column { w_full = true, gap = "$space.1", px = ds.Settings.inset(), table.unpack(notes) } else nil,
+			-- (Its words on the text edge, its buttons ending on the content
+			-- edge, where the rows' controls end.)
 			ui.row {
 				w_full = true,
 				gap = "$space.3",
 				items = "center",
-				pl = ds.Settings.inset(),
+				px = ds.Settings.inset(),
 				ui.text {
 					function(): string
 						if sent_error:get() ~= "" then
@@ -344,14 +346,14 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 				},
 				ds.Button {
 					tone = "secondary",
-					size = "md",
+					size = "sm",
 					on_click = check,
 					ui.t("plugins.store.check_again"),
 				},
 				ds.Button {
 					id = "publish-submit",
 					tone = "primary",
-					size = "md",
+					size = "sm",
 					disabled = function(): boolean
 						local now = prepared:get() or {}
 						return now.ok ~= true or type(now.ticket) ~= "string"
@@ -375,12 +377,16 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 		if key == "ready" then
 			return checks()
 		elseif key == "checking" then
-			return ds.Settings.Group {
-				ds.SkeletonRow { lead = 16, title = 140, line = 0 },
-				ds.Settings.Rule(),
-				ds.SkeletonRow { lead = 16, title = 110, line = 0 },
-				ds.Settings.Rule(),
-				ds.SkeletonRow { lead = 16, title = 160, line = 0 },
+			return ds.SkeletonWaiting {
+				build = function(still: boolean): Node
+					return ds.Settings.Group {
+						ds.SkeletonRow { lead = 16, title = 140, line = 0, still = still },
+						ds.Settings.Rule(),
+						ds.SkeletonRow { lead = 16, title = 110, line = 0, still = still },
+						ds.Settings.Rule(),
+						ds.SkeletonRow { lead = 16, title = 160, line = 0, still = still },
+					}
+				end,
 			}
 		end
 		return ds.Callout {
@@ -506,7 +512,11 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 				elseif key == "none" then
 					return ds.Settings.Group { said(ds.EmptyState { icon = "widget", title = ui.t("plugins.store.no_versions"), body = ui.t("plugins.store.no_versions_body"), size = "sm" }) }
 				elseif key == "loading" or key == "idle" then
-					return ds.Settings.Group { ds.SkeletonRow { lead = 0, title = 60, line = 140, trail = 70 } }
+					return ds.SkeletonWaiting {
+						build = function(still: boolean): Node
+							return ds.Settings.Group { ds.SkeletonRow { lead = 0, title = 60, line = 140, trail = 70, still = still } }
+						end,
+					}
 				end
 				return ds.Callout {
 					tone = "neutral",

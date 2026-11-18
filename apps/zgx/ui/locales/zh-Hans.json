@@ -3893,16 +3893,12 @@
       "not_found_body": "它可能已被下架，或者链接有误。",
       "browse_all": "浏览插件",
       "fact": {
-        "by": "作者",
-        "version": "版本",
-        "installs": "安装次数",
         "works_with": "适用于",
         "category": "类别",
         "license": "许可证",
         "homepage": "网站",
         "repository": "源代码"
       },
-      "version_on": "{version}，{date}",
       "install_note": "Zeron 会检查签名者，然后请你允许它需要的权限。",
       "update_note": "有新版本可用。",
       "review_note": "它在等你允许。",
@@ -4085,7 +4081,8 @@
       "update_new_owner": "它有了新的发布者 @{username}。更新后 Zeron 会再次请你允许。",
       "update_new_owner_unnamed": "它有了新的发布者。更新后 Zeron 会再次请你允许。",
       "update_in_review": "这个版本还在审核中：只提供给你自己的设备。",
-      "keys_publish_first": "请先从这台电脑发送第一个版本；之后的版本可以由部署密钥发送。"
+      "keys_publish_first": "请先从这台电脑发送第一个版本；之后的版本可以由部署密钥发送。",
+      "version_installs": "版本 {version} · {n, plural, other {# 次安装}}"
     }
   },
   "templates": {

@@ -140,6 +140,7 @@ return {
 	EmptyState = require("@self/empty_state"),
 	Skeleton = skeleton.Bar,
 	SkeletonRow = skeleton.Row,
+	SkeletonWaiting = skeleton.Waiting,
 	ProgressBar = progress.ProgressBar,
 	ProgressRing = progress.ProgressRing,
 	Divider = layout.Divider,
