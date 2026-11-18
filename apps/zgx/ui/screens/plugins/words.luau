@@ -632,7 +632,6 @@ local FAILURES: { [string]: boolean } = {
 	missing_readme = true,
 	missing_listing = true,
 	bad_listing = true,
-	claims_zeron = true,
 	too_large = true,
 	binary_file = true,
 	no_notes = true,

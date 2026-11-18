@@ -3859,8 +3859,7 @@
       "bad_csrf": "The store refused a request it couldn't trust. Try again.",
       "not_owner": "Some of those plugins aren't yours in the store.",
       "invalid_scope": "Choose at least one of your plugins for it.",
-      "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others.",
-      "claims_zeron": "Its name or description says it comes from Zeron, which the store refuses from anyone else."
+      "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others."
     },
     "store": {
       "browse": "Browse",
@@ -4029,8 +4028,7 @@
           "license": "Keep its license to 64 characters."
         },
         "not_newer": "Give it a version newer than every one you've sent, in zeron-plugin.json.",
-        "version_exists": "You've sent this version already. Give it a new one in zeron-plugin.json.",
-        "claims_zeron": "It says it comes from Zeron: the store refuses that from anyone else."
+        "version_exists": "You've sent this version already. Give it a new one in zeron-plugin.json."
       },
       "check_again": "Check again",
       "check_failed": "Couldn't check it",
@@ -4171,7 +4169,40 @@
       "updates_all_body": "Take every new version, or only the ones Zeron has verified.",
       "couldnt_updates_all": "Couldn't change which updates your plugins take",
       "installed_was_verified_plain": "The version you have was verified.",
-      "newest_verified_is": "{version} is the newest version Zeron has verified."
+      "newest_verified_is": "{version} is the newest version Zeron has verified.",
+      "cause": {
+        "field": {
+          "name": "name",
+          "description": "description",
+          "keywords": "keywords"
+        },
+        "too_long": {
+          "name": "Its name is longer than 64 characters.",
+          "description": "Its description is longer than 300 characters."
+        },
+        "not_one_line": {
+          "description": "Its description must be one line."
+        },
+        "unseen_char": {
+          "any": "Its {field} has a hidden character, {word}. Take it out."
+        },
+        "mark_word": {
+          "any": "Its {field} calls it “{word}”. The store's mark says that; take the word out or say what was verified.",
+          "keywords": "The keyword “{word}” is the store's mark. Take it out."
+        },
+        "mark_glyph": {
+          "any": "Its {field} has “{word}”, which reads as the store's mark. Take it out."
+        },
+        "keyword_shape": {
+          "keywords": "The keyword “{word}” must be lowercase letters, digits, dashes and single spaces, at most 32 characters."
+        },
+        "too_many": {
+          "keywords": "Use at most 8 keywords."
+        },
+        "repeated": {
+          "keywords": "The keyword “{word}” is there twice."
+        }
+      }
     }
   },
   "templates": {

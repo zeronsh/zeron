@@ -3859,8 +3859,7 @@
       "bad_csrf": "商店拒绝了一个无法信任的请求。请再试一次。",
       "not_owner": "其中有些插件在商店里不属于你。",
       "invalid_scope": "请至少为它选择一个你的插件。",
-      "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。",
-      "claims_zeron": "它的名字或描述说它来自 Zeron，商店不接受其他发布者这样写。"
+      "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。"
     },
     "store": {
       "browse": "浏览",
@@ -4029,8 +4028,7 @@
           "license": "许可证不能超过 64 个字符。"
         },
         "not_newer": "在 zeron-plugin.json 里给它一个比你发送过的所有版本都新的版本号。",
-        "version_exists": "这个版本你已经发送过了。请在 zeron-plugin.json 里换一个新版本号。",
-        "claims_zeron": "它说自己来自 Zeron：商店不接受其他发布者这样写。"
+        "version_exists": "这个版本你已经发送过了。请在 zeron-plugin.json 里换一个新版本号。"
       },
       "check_again": "重新检查",
       "check_failed": "无法检查",
@@ -4171,7 +4169,40 @@
       "updates_all_body": "接受每个新版本，或只接受 Zeron 已验证的版本。",
       "couldnt_updates_all": "无法更改插件接受的更新",
       "installed_was_verified_plain": "你现有的版本已验证。",
-      "newest_verified_is": "{version} 是 Zeron 已验证的最新版本。"
+      "newest_verified_is": "{version} 是 Zeron 已验证的最新版本。",
+      "cause": {
+        "field": {
+          "name": "名字",
+          "description": "描述",
+          "keywords": "关键词"
+        },
+        "too_long": {
+          "name": "名字超过 64 个字符。",
+          "description": "描述超过 300 个字符。"
+        },
+        "not_one_line": {
+          "description": "描述只能有一行。"
+        },
+        "unseen_char": {
+          "any": "{field}里有一个隐藏字符 {word}。请删掉它。"
+        },
+        "mark_word": {
+          "any": "{field}里说它“{word}”。这由商店的标记来说明；请删掉这个词，或说明验证的是什么。",
+          "keywords": "关键词“{word}”是商店的标记。请删掉它。"
+        },
+        "mark_glyph": {
+          "any": "{field}里有“{word}”，看起来像商店的标记。请删掉它。"
+        },
+        "keyword_shape": {
+          "keywords": "关键词“{word}”只能使用小写字母、数字、连字符和单个空格，最多 32 个字符。"
+        },
+        "too_many": {
+          "keywords": "最多使用 8 个关键词。"
+        },
+        "repeated": {
+          "keywords": "关键词“{word}”重复了。"
+        }
+      }
     }
   },
   "templates": {

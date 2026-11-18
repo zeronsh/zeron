@@ -145,11 +145,62 @@ end
 -- What a check that didn't pass asks of you, in Zeron's words where it
 -- knows the rule (and the field), else the engine's.
 local FIELDS: { [string]: boolean } = { icon = true, categories = true, description = true, name = true, keywords = true, screenshots = true, homepage = true, repository = true, license = true }
+-- Why a listing's name, description or keywords were refused, by the cause
+-- the engine names, its word shown as written (bounded, plain); nil for a
+-- cause or field it doesn't name, the words below covering every cause.
+local CAUSES: { [string]: boolean } = {
+	too_long = true,
+	not_one_line = true,
+	unseen_char = true,
+	mark_word = true,
+	mark_glyph = true,
+	keyword_shape = true,
+	too_many = true,
+	repeated = true,
+}
+local CAUSE_FIELDS: { [string]: boolean } = { name = true, description = true, keywords = true }
+local OWN_WORDS: { [string]: boolean } = {
+	["too_long.name"] = true,
+	["too_long.description"] = true,
+	["not_one_line.description"] = true,
+	["mark_word.keywords"] = true,
+	["keyword_shape.keywords"] = true,
+	["too_many.keywords"] = true,
+	["repeated.keywords"] = true,
+}
+function M.cause_words(p: any): string?
+	local field, cause = p.field, p.cause
+	if type(field) ~= "string" or not CAUSE_FIELDS[field] or type(cause) ~= "string" or not CAUSES[cause] then
+		return nil
+	end
+	-- (Plain, one line, at most 64 characters, as the host bounds it.)
+	local word = ""
+	if type(p.word) == "string" then
+		word = string.gsub(string.gsub(p.word, "%c", " "), "%s+", " ")
+		word = string.sub(string.match(word, "^%s*(.-)%s*$") or "", 1, 64)
+	end
+	-- (A cause about a word, without one: the field's covering words.)
+	local needs_word = cause == "unseen_char" or cause == "mark_word" or cause == "mark_glyph" or cause == "keyword_shape" or cause == "repeated"
+	if needs_word and word == "" then
+		return nil
+	end
+	-- (Its own words where the field is part of them; else one sentence
+	-- for any field, the field named in it.)
+	if OWN_WORDS[`{cause}.{field}`] then
+		return ui.t(`plugins.store.cause.{cause}.{field}`, { word = word }):get()
+	end
+	return ui.t(`plugins.store.cause.{cause}.any`, { word = word, field = ui.t(`plugins.store.cause.field.{field}`):get() }):get()
+end
+
 local function fix_of(p: any): string
 	local rule, field = p.rule, p.field
+	local caused = if rule == "bad_listing" then M.cause_words(p) else nil
+	if caused then
+		return caused
+	end
 	if (rule == "missing_listing" or rule == "bad_listing") and type(field) == "string" and FIELDS[field] then
 		return ui.t(`plugins.store.fix.{rule}.{field}`):get()
-	elseif rule == "missing_readme" or rule == "not_semver" or rule == "id_reserved" or rule == "too_large" or rule == "binary_file" or rule == "no_notes" or rule == "raw_html" or rule == "footnote" or rule == "math" or rule == "not_newer" or rule == "version_exists" or rule == "claims_zeron" then
+	elseif rule == "missing_readme" or rule == "not_semver" or rule == "id_reserved" or rule == "too_large" or rule == "binary_file" or rule == "no_notes" or rule == "raw_html" or rule == "footnote" or rule == "math" or rule == "not_newer" or rule == "version_exists" then
 		return ui.t(`plugins.store.fix.{rule}`):get()
 	end
 	return if type(p.words) == "string" and p.words ~= "" then string.sub(p.words, 1, 400) else ui.t("plugins.store.fix.other"):get()
@@ -286,6 +337,11 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 		sent_error:set("")
 		store.publish(id, r.hash, r.ticket):after(function(done: any)
 			sending:set(false)
+			-- (Refused for a listing's field and cause: said in its words.)
+			if type(done) == "table" and done.ok == false then
+				sent_error:set(M.cause_words(done) or M.failure("bad_listing"))
+				return
+			end
 			local v = if type(done) == "table" and type(done.version) == "string" then done.version else r.version
 			-- (Listed at once: it shows as not verified until a reviewer has
 			-- read it.)

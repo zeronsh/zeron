@@ -400,22 +400,34 @@ test("signed out before Yours is read, its versions say to sign in", function()
 	end
 end)
 
--- A name calling it verified is in the way; a description saying it comes
--- from Zeron is a warning (the store refuses it from anyone else). Each in
--- Zeron's words, which cover every reason the engine has for that field.
-test("a name that says verified is in the way and a description that says it's from Zeron is warned of, in Zeron's words", function()
+-- What's in the way of a listing says which thing and why, by the cause
+-- the engine names, the word shown as it was written; never the engine's
+-- English.
+test("a refused name or keyword says which word and why, in Zeron's words", function()
 	local app = publishing()
 	app:command("store_stub.fixed")
 	app:command("store_stub.claims")
 	app:click('role:button "Check again"')
 	settle(app)
 	local checks = app:tree("#publish-checks")
-	expect(checks).to_contain("Keep its name to 64 characters, with nothing hidden in it")
-	expect(checks).to_contain("It says it comes from Zeron: the store refuses that from")
+	expect(checks).to_contain("Its name calls it “Verified”. The store's mark says")
+	expect(checks).to_contain("The keyword “timer” is there twice.")
 	-- (Never the engine's English as it came.)
 	expect(checks).never.to_contain("only the store marks a plugin verified")
-	expect(checks).never.to_contain("Zeron's own")
+	expect(checks).never.to_contain("each once")
 	expect(app:tree("#publish-submit")).to_contain("disabled")
+end)
+
+-- The store refusing the publish itself says the same way.
+test("a publish the store refuses for a listing's cause says which and why", function()
+	local app = publishing()
+	app:command("store_stub.fixed")
+	app:click('role:button "Check again"')
+	settle(app)
+	app:command("store_stub.refuse_listing")
+	app:click("#publish-submit")
+	settle(app)
+	expect(app:tree()).to_contain("Its description has “✅”, which reads as the store's mark.")
 end)
 
 test("HTML and math in its README and a footnote in its CHANGELOG are advice under the checks, in Zeron's words, and Submit still sends", function()

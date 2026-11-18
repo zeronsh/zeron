@@ -267,7 +267,14 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let hash = arg.field("hash").map(text).unwrap_or_default();
             let ticket = arg.field("ticket").map(text).unwrap_or_default();
-            answer(&e, "PublishPlugin", json!({ "id": id, "hash": hash, "ticket": ticket })).await
+            let reply = e("PublishPlugin", json!({ "id": id, "hash": hash, "ticket": ticket }), None).await?;
+            // (A listing refused for a cause it names: the page says which,
+            // in its own words, so the refusal comes as the answer.)
+            if let Some(refused) = listing_refusal(&reply) {
+                return Ok(json_value(&refused));
+            }
+            answered(&reply)?;
+            Ok(json_value(&reply))
         }
     });
     let e = engine.clone();
@@ -369,6 +376,32 @@ fn answered(reply: &Json) -> Result<(), String> {
     let word = reply["error"].as_str().filter(|w| !w.is_empty()).unwrap_or("failed");
     let message = reply["message"].as_str().unwrap_or_default();
     Err(if message.is_empty() { word.to_string() } else { format!("{word}: {message}") })
+}
+
+/// The causes a refused listing may name (crates/engine plugins/listing.rs
+/// `cause::ALL`): the page has a sentence for each.
+const LISTING_CAUSES: &[&str] = &["too_long", "not_one_line", "unseen_char", "mark_word", "mark_glyph", "keyword_shape", "too_many", "repeated"];
+/// The listing fields those causes are about.
+const LISTING_FIELDS: &[&str] = &["name", "description", "keywords"];
+
+/// A publish refused for a listing's field and a cause the page knows,
+/// `{ ok = false, error, field, cause, word? }`, each bounded: a known
+/// field and cause, the word plain, one line, at most 64 characters. Any
+/// other refusal is an error as before (`answered`).
+fn listing_refusal(reply: &Json) -> Option<Json> {
+    if reply["ok"].as_bool() != Some(false) {
+        return None;
+    }
+    let field = reply["field"].as_str().filter(|f| LISTING_FIELDS.contains(f))?;
+    let cause = reply["cause"].as_str().filter(|c| LISTING_CAUSES.contains(c))?;
+    let mut out = json!({ "ok": false, "error": "bad_listing", "field": field, "cause": cause });
+    if let Some(word) = reply["word"].as_str() {
+        let word: String = word.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(64).collect();
+        if !word.is_empty() {
+            out["word"] = json!(word);
+        }
+    }
+    Some(out)
 }
 
 /// A file of a package, as a README or a listing names it: relative,
@@ -549,6 +582,23 @@ mod tests {
         assert_eq!(answered(&json!({ "ok": false, "error": "not_newer", "message": "1.0.0 is older" })).unwrap_err(), "not_newer: 1.0.0 is older");
         assert_eq!(answered(&json!({ "ok": false, "error": "changed" })).unwrap_err(), "changed");
         assert_eq!(answered(&json!({ "ok": false })).unwrap_err(), "failed");
+    }
+
+    /// A publish refused for a listing's field and cause comes to the page
+    /// as its answer, bounded; anything else stays an error.
+    #[test]
+    fn a_listing_refusal_names_its_field_cause_and_word_bounded() {
+        let refused = json!({ "ok": false, "error": "bad_listing", "message": "Its name says \"Verified\"", "field": "name", "cause": "mark_word", "word": "Verified" });
+        assert_eq!(listing_refusal(&refused), Some(json!({ "ok": false, "error": "bad_listing", "field": "name", "cause": "mark_word", "word": "Verified" })));
+        // The word plain, one line, at most 64 characters.
+        let long = json!({ "ok": false, "field": "description", "cause": "unseen_char", "word": format!("U+200B\n{}", "x".repeat(100)) });
+        let word = listing_refusal(&long).unwrap()["word"].as_str().unwrap().to_owned();
+        assert!(!word.contains('\n') && word.chars().count() == 64, "{word}");
+        // None: a field or cause the page doesn't know, no cause, or not a refusal.
+        assert_eq!(listing_refusal(&json!({ "ok": false, "field": "icon", "cause": "too_long" })), None);
+        assert_eq!(listing_refusal(&json!({ "ok": false, "field": "name", "cause": "claims_zeron" })), None);
+        assert_eq!(listing_refusal(&json!({ "ok": false, "error": "not_newer" })), None);
+        assert_eq!(listing_refusal(&json!({ "ok": true, "field": "name", "cause": "too_long" })), None);
     }
 
     #[test]

@@ -37,9 +37,12 @@ local notes = true
 -- Its README's HTML and math, and its CHANGELOG's footnote, said
 -- (`store_stub.html_and_footnote`).
 local typed = false
--- Its name calls it verified, its description says it comes from Zeron
--- (`store_stub.claims`): a problem and a warning, the engine's English.
+-- Its name calls it verified, a keyword is there twice (`store_stub.claims`):
+-- problems with their cause and word, and the engine's English.
 local claims = false
+-- The store refuses the next publish for its description's mark glyph
+-- (`store_stub.refuse_listing`), as the edge says it.
+local refuse_listing = false
 -- Lists without `total`, as a store from before it counted them.
 local no_total = false
 
@@ -672,7 +675,8 @@ stub.prepare = function(id: string): any
 			problems = (function(): { any }
 				local out = {}
 				if claims then
-					table.insert(out, { rule = "bad_listing", field = "name", words = "Its name says \"verified\": only the store marks a plugin verified" })
+					table.insert(out, { rule = "bad_listing", field = "name", cause = "mark_word", word = "Verified", words = "Its name says \"verified\": only the store marks a plugin verified" })
+					table.insert(out, { rule = "bad_listing", field = "keywords", cause = "repeated", word = "timer", words = "It has at most 8 keywords, each once" })
 				end
 				for _, p in problems do
 					if store_checked or force_problem:peek() or (p.rule ~= "not_newer" and p.rule ~= "version_exists") then
@@ -685,9 +689,6 @@ stub.prepare = function(id: string): any
 				local out = {}
 				if notes then
 					table.insert(out, { rule = "no_notes", words = "CHANGELOG.md has no section for 1.2.0" })
-				end
-				if claims then
-					table.insert(out, { rule = "claims_zeron", field = "description", words = "Its description says \"by Zeron\": only Zeron's own plugins may, and the store refuses it from anyone else" })
 				end
 				if typed then
 					table.insert(out, { rule = "raw_html", path = "README.md", line = 3, words = "README.md line 3 has HTML; the store shows it as text. Use Markdown for pictures and headings." })
@@ -707,6 +708,10 @@ stub.publish = function(id: string, hash: string, ticket: string): any
 	note(`publish:{id}:{hash}:{ticket}`)
 	return answer(function(): any
 		refused_as_you()
+		if refuse_listing then
+			refuse_listing = false
+			return { ok = false, error = "bad_listing", field = "description", cause = "mark_glyph", word = "✅" }
+		end
 		local p = mine[id]
 		if not p then
 			p = { id = id, name = "Pomodoro clock", version = prepared_version, versions = {} }
@@ -928,8 +933,15 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "store_stub.refuse_listing",
+	title = "Store: the next publish is refused for its description's mark",
+	run = function()
+		refuse_listing = true
+	end,
+}
+ui.command {
 	id = "store_stub.claims",
-	title = "Store: your plugin's name says verified, its description says it's from Zeron",
+	title = "Store: your plugin's name says verified, a keyword is there twice",
 	run = function()
 		claims = true
 	end,
