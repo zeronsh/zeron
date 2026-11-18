@@ -349,6 +349,164 @@ stub.prereleases = function(id: string, on: boolean): any
 		return {}
 	end)
 end
+-- Your own: Pomodoro clock (yours, on this device) in the store, a version
+-- approved, one turned down with the reviewer's words; its deploy keys.
+local mine: { [string]: any } = {
+	["pomodoro-clock"] = {
+		id = "pomodoro-clock",
+		name = "Pomodoro clock",
+		version = "1.0.0",
+		listing = "listed",
+		author = { username = "you", badges = {} },
+		versions = {
+			{ version = "1.1.0", status = "rejected", published_at = NOW - 3 * DAY, review = { state = "rejected", message = "It reads every chat's messages but only needs the title. Ask for less." } },
+			{ version = "1.0.0", status = "approved", published_at = NOW - 20 * DAY, review = { state = "approved" } },
+		},
+	},
+}
+local keys: { [string]: { any } } = {
+	["pomodoro-clock"] = {
+		{ key = "k_gh", name = "GitHub Actions", created_at = NOW - 10 * DAY, last_used_at = NOW - 2 * DAY },
+	},
+}
+-- What the engine finds checking your plugin's folder; `store_stub.fixed`
+-- makes it all there.
+local problems: { any } = {
+	{ rule = "missing_listing", field = "icon", words = "The store needs an icon" },
+	{ rule = "missing_readme", words = "README.md is missing" },
+}
+local prepared_version = "1.2.0"
+local signed_in_again = false
+
+stub.mine = function(): any
+	note("mine")
+	return answer(function(): any
+		local out = {}
+		for _, p in mine do
+			table.insert(out, p)
+		end
+		return { plugins = out }
+	end)
+end
+stub.prepare = function(id: string): any
+	note(`prepare:{id}`)
+	return answer(function(): any
+		local ok = #problems == 0
+		return {
+			id = id,
+			name = "Pomodoro clock",
+			version = prepared_version,
+			hash = `{id}-{prepared_version}`,
+			ok = ok,
+			problems = table.clone(problems),
+			warnings = { { rule = "no_notes", words = "CHANGELOG.md has no section for 1.2.0" } },
+			package = { files = 4, bytes = 9120 },
+			ticket = if ok then `ticket-{prepared_version}` else nil,
+		}
+	end)
+end
+stub.publish = function(id: string, hash: string, ticket: string): any
+	note(`publish:{id}:{hash}:{ticket}`)
+	return answer(function(): any
+		local p = mine[id]
+		if not p then
+			p = { id = id, name = "Pomodoro clock", version = prepared_version, versions = {} }
+			mine[id] = p
+		end
+		table.insert(p.versions, 1, { version = prepared_version, status = "pending", published_at = NOW, review = { state = "pending" } })
+		return { ok = true, id = id, version = prepared_version, status = "pending" }
+	end)
+end
+stub.version_action = function(id: string, version: string, action: string): any
+	note(`version:{id}:{version}:{action}`)
+	return answer(function(): any
+		for _, v in mine[id].versions do
+			if v.version == version then
+				v.status = if action == "withdraw" then "withdrawn" elseif action == "yank" then "yanked" else "approved"
+				v.review = nil
+			end
+		end
+		return {}
+	end)
+end
+stub.keys = function(id: string): any
+	note(`keys:{id}`)
+	return answer(function(): any
+		return { keys = table.clone(keys[id] or {}) }
+	end)
+end
+-- A new key needs a fresh sign-in: the first ask waits until
+-- `store_stub.signed_in_again`, as the host's StepUp does.
+stub.create_key = function(args: any): any
+	note(`create_key:{args.id}:{args.name}:{if args.expires then "expires" else "never"}`)
+	local p: any = { settled = false, waiters = {} }
+	local function settle()
+		p.settled = true
+		local k = { key = `k_{#(keys[args.id] or {}) + 1}`, name = args.name, created_at = NOW, expires_at = args.expires }
+		keys[args.id] = keys[args.id] or {}
+		table.insert(keys[args.id], k)
+		p.value = { ok = true, key = k.key, secret = "zpk_live_3f9a1c7e0b2d4f6a8c1e3a5b7d9f0e2c" }
+		for _, w in p.waiters do
+			w()
+		end
+	end
+	local function check()
+		if signed_in_again then
+			settle()
+			return
+		end
+		ui.after(50, check)
+	end
+	ui.after(50, check)
+	function p.after(_self: any, ok: ((any) -> ())?, bad: ((any) -> ())?)
+		local function tell()
+			if p.err then
+				if bad then
+					bad(p.err)
+				end
+			elseif ok then
+				ok(p.value)
+			end
+		end
+		if p.settled then
+			tell()
+		else
+			table.insert(p.waiters, tell)
+		end
+	end
+	return p
+end
+stub.cancel_step_up = function()
+	note("cancel_step_up")
+end
+stub.revoke_key = function(id: string, key: string): any
+	note(`revoke_key:{id}:{key}`)
+	return answer(function(): any
+		local out = {}
+		for _, k in keys[id] or {} do
+			if k.key ~= key then
+				table.insert(out, k)
+			end
+		end
+		keys[id] = out
+		return { revoked = key }
+	end)
+end
+ui.command {
+	id = "store_stub.fixed",
+	title = "Store: your plugin's folder has all the store needs",
+	run = function()
+		problems = {}
+	end,
+}
+ui.command {
+	id = "store_stub.signed_in_again",
+	title = "Store: the fresh sign-in lands",
+	run = function()
+		signed_in_again = true
+	end,
+}
+
 -- (The engine's `compatible` judged again, as for an older Zeron.)
 ui.command {
 	id = "store_stub.old_zeron",

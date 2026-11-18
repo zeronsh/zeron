@@ -3910,7 +3910,154 @@
       "works_here": "This version of Zeron",
       "prereleases": "Try pre-releases",
       "prereleases_body": "Updates include versions its author is still testing.",
-      "couldnt_prereleases": "Couldn't change {name}'s pre-releases"
+      "couldnt_prereleases": "Couldn't change {name}'s pre-releases",
+      "publish_link": "Publish…",
+      "publish_title": "Publish {name}",
+      "publish_body": "Send a version to the plugin store. Zeron's reviewers read every version before anyone else can install it; you can use it on your own devices straight away.",
+      "checks_title": "What the store needs",
+      "check": {
+        "readme": "A README",
+        "description": "A description",
+        "icon": "An icon",
+        "categories": "A category",
+        "version": "A version the store takes",
+        "newer": "Newer than the last",
+        "newer_than": "The store checks it's newer than {version} as you submit it.",
+        "newer_first": "This is the first version you're sending."
+      },
+      "fix": {
+        "missing_readme": "Add README.md to its folder: it's the plugin's page in the store.",
+        "not_semver": "Give it a version of three numbers, like 1.2.0, in zeron-plugin.json.",
+        "id_reserved": "Zeron keeps this name for itself or someone else. Copy the plugin under another id.",
+        "too_large": "It's bigger than the store takes. Leave out what it doesn't need.",
+        "binary_file": "It holds a file that isn't text or a picture: the reviewer looks at it closely.",
+        "no_notes": "CHANGELOG.md has nothing for this version: people see no notes for the update.",
+        "other": "Something here isn't what the store takes.",
+        "missing_listing": {
+          "icon": "Add an SVG icon and name it in zeron-plugin.json (\"icon\").",
+          "categories": "Choose a category in zeron-plugin.json (\"categories\").",
+          "description": "Say what it does in zeron-plugin.json (\"description\").",
+          "name": "Give it a name in zeron-plugin.json (\"name\").",
+          "keywords": "Add keywords in zeron-plugin.json (\"keywords\").",
+          "screenshots": "Add its pictures in zeron-plugin.json (\"screenshots\").",
+          "homepage": "Add its website in zeron-plugin.json (\"homepage\").",
+          "repository": "Add where its source is in zeron-plugin.json (\"repository\").",
+          "license": "Name its license in zeron-plugin.json (\"license\")."
+        },
+        "bad_listing": {
+          "icon": "Its icon must be an SVG of at most 32 KB.",
+          "categories": "Choose one or two of the store's categories.",
+          "description": "Keep its description to 300 characters.",
+          "name": "Keep its name to 64 characters.",
+          "keywords": "Use at most 8 keywords, lowercase, 32 characters each.",
+          "screenshots": "Use at most 8 pictures, each a PNG or JPEG in its folder.",
+          "homepage": "Its website must be an https link.",
+          "repository": "Its source must be an https link.",
+          "license": "Keep its license to 64 characters."
+        }
+      },
+      "check_again": "Check again",
+      "check_failed": "Couldn't check it",
+      "fix_first": "Fix what's marked, save, and check again.",
+      "submit": "Submit for review",
+      "submit_version": "Submit {version} for review",
+      "submit_note": "{n, plural, one {# file is} other {# files are}} sent, signed as yours, exactly as checked.",
+      "sent_toast": "Sent {name} {version} for review",
+      "sent": {
+        "needs_username": "Claim a username first: every plugin in the store is by @someone.",
+        "id_taken": "Someone else already publishes a plugin with this id.",
+        "id_reserved": "Zeron keeps this id for itself or someone else.",
+        "not_semver": "Its version isn't three numbers, like 1.2.0.",
+        "version_exists": "You've sent this version already. Give it a new one.",
+        "not_newer": "Its version must be newer than the last you sent.",
+        "bad_package": "The store couldn't read the package.",
+        "bad_signature": "Its signature doesn't match its files. Check again and resend.",
+        "key_not_allowed": "It's signed with a key the store doesn't know as yours.",
+        "missing_readme": "The store needs a README.md.",
+        "missing_listing": "The store needs its description, icon and category.",
+        "too_large": "It's bigger than the store takes.",
+        "rate_limited": "Too many tries for now. Try again in a minute.",
+        "suspended": "This plugin is suspended in the store.",
+        "changed": "Its folder changed after it was checked. Check it again.",
+        "signed_out": "Sign in to Zeron to publish.",
+        "offline": "Can't reach the plugin store."
+      },
+      "your_versions": "Versions you've sent",
+      "no_versions": "Nothing sent yet",
+      "no_versions_body": "Versions you send show here with where their review stands.",
+      "versions_failed": "Couldn't see your versions",
+      "sign_in_to_see": "Sign in to see your versions",
+      "status": {
+        "pending": "In review",
+        "approved": "Approved",
+        "rejected": "Not approved",
+        "withdrawn": "Withdrawn",
+        "yanked": "No new installs",
+        "removed": "Taken down"
+      },
+      "reviewer_said": "{date} · “{words}”",
+      "action": {
+        "withdraw": "Withdraw",
+        "yank": "Stop new installs",
+        "unyank": "Allow installs again"
+      },
+      "action_failed": "Couldn't change that version",
+      "confirm": {
+        "withdraw": {
+          "title": "Withdraw {name} {version}?",
+          "body": "It leaves the review queue. A version once sent keeps its number: send the next one under a new version."
+        },
+        "yank": {
+          "title": "Stop new installs of {name} {version}?",
+          "body": "Nobody can install it anymore. Those who have it keep it working. You can allow installs again later."
+        },
+        "unyank": {
+          "title": "Allow installs of {name} {version}?",
+          "body": "It can be installed again."
+        }
+      },
+      "summary": {
+        "none": "Not in the plugin store",
+        "none_listed": "In review for the plugin store",
+        "listed": "{version} in the plugin store",
+        "in_review": "{version} in review",
+        "unknown": "Share it in the plugin store"
+      },
+      "keys": "Deploy keys",
+      "keys_body": "A CI job, a GitHub Action say, publishes new versions with a key instead of your session. A key publishes this plugin alone, and every version still waits for review.",
+      "keys_none": "No keys yet.",
+      "keys_failed": "Couldn't see its keys",
+      "key": {
+        "new": "New key…",
+        "new_title": "New deploy key",
+        "new_body": "Zeron may ask you to sign in again first.",
+        "name": "Name",
+        "name_placeholder": "GitHub Actions",
+        "expiry_label": "Ends",
+        "expiry": {
+          "30": "In 30 days",
+          "90": "In 90 days",
+          "365": "In a year",
+          "never": "Never"
+        },
+        "create": "Create key",
+        "signing_in": "Sign in in your browser to make the key.",
+        "stop_waiting": "Stop waiting",
+        "timed_out": "The sign-in didn't finish. Try again.",
+        "secret_title": "Copy your key now",
+        "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets. Anyone with it can send versions of this plugin as you.",
+        "copy": "Copy",
+        "copied": "Key copied",
+        "done": "I've copied it",
+        "made": "Made {date}",
+        "used": "last used {date}",
+        "never_used": "never used",
+        "ends": "ends {date}",
+        "revoke": "Revoke",
+        "revoke_title": "Revoke {name}?",
+        "revoke_body": "Anything publishing with it stops working at once. Versions it already sent stay as they are.",
+        "revoke_failed": "Couldn't revoke the key"
+      }
     }
   },
   "templates": {

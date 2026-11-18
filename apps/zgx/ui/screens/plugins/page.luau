@@ -37,6 +37,7 @@ local visits = require("@app/screens/settings/visits")
 local nav = require("@app/screens/plugins/nav")
 local browse = require("@app/screens/plugins/browse")
 local listing = require("@app/screens/plugins/listing")
+local publish = require("@app/screens/plugins/publish")
 
 local M = {}
 
@@ -429,7 +430,37 @@ local UpdateLink = ui.component(function(props: { now: State<any> }): Node
 	})
 end)
 
+-- Publish…, at the end of an own plugin's line in Yours saying where it
+-- stands in the store: link-like, as Update is, so the row's controls stay
+-- where every row has them.
+local PublishLink = ui.component(function(props: { now: State<any> }): Node
+	local now = props.now
+	return ui.row {
+		role = "button",
+		label = ui.t("plugins.store.publish_link"),
+		focusable = true,
+		shrink = 0,
+		cursor = "pointer",
+		color = "$text.primary",
+		hover = { color = "$accent" },
+		on_click = function()
+			nav.open_publish(now:peek().id)
+		end,
+		ui.text {
+			ui.t("plugins.store.publish_link"),
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			weight = "$font.weight.medium",
+			underline = true,
+			underline_offset = 4,
+		},
+	}
+end)
+
 local function row(p: state.Item, _i: number, now: State<any>): Node
+	-- (Rows are built for their tab: Yours' own plugins, made on this
+	-- device, say where they stand in the store.)
+	local publishing = tab:peek() == "yours" and device_now() == nil and (p.own == true or p.author.kind == "you") and not (p :: any).builtin
 	return ds.Settings.Row {
 		label = function(): string
 			return now:get().name
@@ -454,9 +485,12 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 		-- (Someone else's: a newer version found where it came from.)
 		detail = function(): string?
 			local it = now:get()
+			if publishing then
+				return publish.summary(it.id) or ui.t("plugins.store.summary.unknown"):get()
+			end
 			return words.grants(it) or words.update(it)
 		end,
-		detail_action = UpdateLink { now = now },
+		detail_action = if publishing then PublishLink { now = now } else UpdateLink { now = now },
 		truncate = true,
 		-- Its version, centred on the row beside its controls; before it,
 		-- Unverified for one whose maker Zeron can't vouch for.
@@ -729,6 +763,12 @@ function M.View(): Node
 		shown_id:get()
 		check_updates()
 	end)
+	-- Yours shown: where your plugins stand in the store, read again.
+	ui.effect(function()
+		if tab:get() == "yours" and nav.view:get() == "catalog" then
+			publish.load()
+		end
+	end)
 	-- A device shown that was away coming back: looked at again.
 	local was_online: boolean? = nil
 	ui.effect(function()
@@ -751,6 +791,10 @@ function M.View(): Node
 			local id = string.match(v, "^store:(.+)$")
 			if id then
 				return ui.column { w_full = true, items = "center", listing.Page { plugin = id, here = here } }
+			end
+			local own = string.match(v, "^publish:(.+)$")
+			if own then
+				return ui.column { w_full = true, items = "center", publish.Page { plugin = own, here = here } }
 			end
 			return ui.column { w_full = true, items = "center", catalog() }
 		end, { w_full = true, enter = { opacity = { 0, 1 }, y = { 6, 0 }, duration = 160 }, exit = { opacity = 0, duration = 80 }, mode = "wait" }),

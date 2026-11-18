@@ -32,6 +32,19 @@ devices("0.4.2")
 
 local model: { any } = {
 	{
+		id = "pomodoro-clock",
+		name = "Pomodoro clock",
+		version = "1.2.0",
+		description = "A pomodoro in the title bar.",
+		author = { kind = "you" },
+		status = "on",
+		permissions = { "ui.add" },
+		allowed = { "ui.add" },
+		ask = {},
+		hash = "pomodoro-clock-1",
+		own = true,
+	},
+	{
 		id = "branch-badge",
 		name = "Branch badge",
 		version = "1.1.0",

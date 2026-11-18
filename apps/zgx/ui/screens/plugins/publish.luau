@@ -1,0 +1,581 @@
+--!strict
+-- Publishing one of yours to the plugin store, a page under Settings →
+-- Plugins (from its row in Yours): what the store needs, checked on this
+-- device (the engine's `PreparePluginPublish`), each thing missing said
+-- with what to do about it; then Submit, which sends exactly what was
+-- checked for review (`PublishPlugin` with its one-time ticket: a folder
+-- changed since asks to check again). Under it, every version you've sent
+-- and where its review stands, the reviewer's words when it wasn't
+-- approved, and what you can still do with each (withdraw one in review,
+-- stop new installs of one approved, allow them again). Then its deploy
+-- keys: what a CI job publishes with instead of your session, made after a
+-- fresh sign-in, its secret shown once.
+--
+-- Yours' rows say where each of yours stands in the store (`summary`),
+-- read once a visit (`load`).
+--
+--   publish.Page { plugin, here }
+--   publish.load()          your plugins in the store, read again
+--   publish.summary(id)     "1.2.0 in the plugin store · 1.3.0 in review", or
+--                           "Not in the plugin store" (nil: not known yet)
+
+local ds = require("@ds")
+local locale = require("@ds/locale")
+local store = require("@app/screens/plugins/store")
+local state = require("@app/screens/plugins/state")
+local words = require("@app/screens/plugins/words")
+local nav = require("@app/screens/plugins/nav")
+
+local M = {}
+
+-- Your plugins in the store, as last read: "loading", "ready", or why not
+-- ("offline", "signed_out", the store's words), and the plugins by id.
+local mine = ui.state("store_mine", { state = "idle", plugins = {} } :: { state: string, plugins: { [string]: any } })
+local loading = false
+
+function M.load()
+	if loading then
+		return
+	end
+	loading = true
+	if mine:peek().state == "idle" then
+		mine:set({ state = "loading", plugins = {} })
+	end
+	store.mine():after(function(r: any)
+		loading = false
+		local by_id: { [string]: any } = {}
+		for _, p in (if type(r) == "table" and type(r.plugins) == "table" then r.plugins else {}) :: { any } do
+			if type(p) == "table" and store.valid_id(p.id) then
+				by_id[p.id] = p
+			end
+		end
+		mine:set({ state = "ready", plugins = by_id })
+	end, function(err: any)
+		loading = false
+		local m = if type(err) == "table" then err.message else err
+		-- (What was read stays shown; the next visit asks again.)
+		if mine:peek().state ~= "ready" then
+			mine:set({ state = if type(m) == "string" and m ~= "" then m else "failed", plugins = {} })
+		end
+	end)
+end
+
+-- A version's state as the store keeps it: its review's, else its own.
+local function status_of(v: any): string
+	local s = v.status
+	if type(v.review) == "table" and type(v.review.state) == "string" and (s == nil or s == "pending") then
+		s = v.review.state
+	end
+	return if type(s) == "string" then s else "pending"
+end
+
+local STATUS_TONE: { [string]: string } = {
+	pending = "accent",
+	approved = "success",
+	rejected = "danger",
+	withdrawn = "neutral",
+	yanked = "neutral",
+	removed = "warning",
+}
+
+function M.summary(id: string): string?
+	local now = mine:get()
+	if now.state ~= "ready" then
+		return nil
+	end
+	local p = now.plugins[id]
+	if not p then
+		return ui.t("plugins.store.summary.none"):get()
+	end
+	local parts: { string } = {}
+	local listed, waiting = nil :: string?, nil :: string?
+	for _, v in (if type(p.versions) == "table" then p.versions else {}) :: { any } do
+		local s = status_of(v)
+		if s == "approved" and listed == nil then
+			listed = v.version
+		elseif s == "pending" and waiting == nil then
+			waiting = v.version
+		end
+	end
+	if listed then
+		table.insert(parts, ui.t("plugins.store.summary.listed", { version = listed }):get())
+	end
+	if waiting then
+		table.insert(parts, ui.t("plugins.store.summary.in_review", { version = waiting }):get())
+	end
+	if #parts == 0 then
+		return ui.t("plugins.store.summary.none_listed"):get()
+	end
+	return table.concat(parts, " · ")
+end
+
+-- What a check that didn't pass asks of you, in Zeron's words where it
+-- knows the rule (and the field), else the engine's.
+local FIELDS: { [string]: boolean } = { icon = true, categories = true, description = true, name = true, keywords = true, screenshots = true, homepage = true, repository = true, license = true }
+local function fix_of(p: any): string
+	local rule, field = p.rule, p.field
+	if (rule == "missing_listing" or rule == "bad_listing") and type(field) == "string" and FIELDS[field] then
+		return ui.t(`plugins.store.fix.{rule}.{field}`):get()
+	elseif rule == "missing_readme" or rule == "not_semver" or rule == "id_reserved" or rule == "too_large" or rule == "binary_file" or rule == "no_notes" then
+		return ui.t(`plugins.store.fix.{rule}`):get()
+	end
+	return if type(p.words) == "string" and p.words ~= "" then string.sub(p.words, 1, 400) else ui.t("plugins.store.fix.other"):get()
+end
+
+-- The store's own words for what went wrong as it was sent, where Zeron
+-- knows them.
+local SENT: { [string]: boolean } = {
+	needs_username = true,
+	id_taken = true,
+	id_reserved = true,
+	not_semver = true,
+	version_exists = true,
+	not_newer = true,
+	bad_package = true,
+	bad_signature = true,
+	key_not_allowed = true,
+	missing_readme = true,
+	missing_listing = true,
+	too_large = true,
+	rate_limited = true,
+	suspended = true,
+	changed = true,
+	signed_out = true,
+	offline = true,
+}
+function M.failure(message: any): string
+	local m = if type(message) == "string" then message else ""
+	local word = string.match(m, "^([%l_]+):") or string.match(m, "^([%l_]+)$")
+	if word and SENT[word] then
+		return ui.t(`plugins.store.sent.{word}`):get()
+	end
+	return words.failure(m)
+end
+
+local function said(node: Node): Node
+	return ui.column { w_full = true, py = "$space.6", px = "$space.4", node }
+end
+
+-- One line of the checks: a mark, what it is, and what to do.
+local function check_row(ok: boolean | "later", title: string | Message, detail: (string | Message | () -> string)?): Node
+	local icon = if ok == true then "check-circle" elseif ok == "later" then "clock-circle" else "danger-triangle"
+	local tone = if ok == true then "$zeron.tone.success.ink" elseif ok == "later" then "$text.tertiary" else "$zeron.tone.warning.ink"
+	return ui.row {
+		w_full = true,
+		px = "$space.4",
+		py = "$space.3",
+		gap = "$space.3",
+		items = "start",
+		ui.div { pt = "$zeron.space.hair", color = tone, ds.Icon { name = icon :: any, size = 16 } },
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			gap = "$zeron.space.hair",
+			ui.text { title, text_size = "$font.size.md", line_height = "$font.line.md", color = "$text.primary", wrap = true },
+			if detail then ui.text { detail, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.secondary", wrap = true } else nil,
+		},
+	}
+end
+
+-- What the store needs, in the order a person fixes them; each passes
+-- unless one of the engine's problems names it.
+local CHECKS: { { id: string, rule: string, field: string? } } = {
+	{ id = "readme", rule = "missing_readme" },
+	{ id = "description", rule = "listing", field = "description" },
+	{ id = "icon", rule = "listing", field = "icon" },
+	{ id = "categories", rule = "listing", field = "categories" },
+	{ id = "version", rule = "not_semver" },
+}
+
+local function matches(check: { id: string, rule: string, field: string? }, p: any): boolean
+	if check.rule == "listing" then
+		return (p.rule == "missing_listing" or p.rule == "bad_listing") and p.field == check.field
+	end
+	return p.rule == check.rule
+end
+
+M.Page = ui.component(function(props: { plugin: string, here: any }): Node
+	local id = props.plugin
+	-- The checks: "checking", "ready" (with `prepared`), or why not.
+	local phase = ui.use_state("checking")
+	local prepared = ui.use_state(nil :: any)
+	local sending = ui.use_state(false)
+	local sent_error = ui.use_state("")
+	local acting = ui.use_state(nil :: string?)
+	local confirming = ui.use_state(nil :: any)
+	local confirm_open = ui.use_state(false)
+	local function plugin(): state.Item?
+		for _, p in state.list:get() do
+			if p.id == id then
+				return p
+			end
+		end
+		return nil
+	end
+	local function name(): string
+		local p = plugin()
+		return if p then p.name else id
+	end
+
+	local function check()
+		phase:set("checking")
+		sent_error:set("")
+		store.prepare(id):after(function(r: any)
+			prepared:set(r)
+			phase:set("ready")
+		end, function(err: any)
+			local m = if type(err) == "table" then err.message else err
+			phase:set(if type(m) == "string" and m ~= "" then m else "failed")
+		end)
+	end
+	ui.on_mount(function()
+		check()
+		M.load()
+	end)
+
+	local function submit()
+		local r = prepared:peek()
+		if sending:peek() or type(r) ~= "table" or r.ok ~= true or type(r.ticket) ~= "string" then
+			return
+		end
+		sending:set(true)
+		sent_error:set("")
+		store.publish(id, r.hash, r.ticket):after(function(done: any)
+			sending:set(false)
+			local v = if type(done) == "table" and type(done.version) == "string" then done.version else r.version
+			ds.toast.show { title = ui.t("plugins.store.sent_toast", { name = name(), version = v or "" }), tone = "success" }
+			-- (Its ticket is spent: checked again for the next one.)
+			check()
+			M.load()
+		end, function(err: any)
+			sending:set(false)
+			local m = if type(err) == "table" then err.message else err
+			sent_error:set(M.failure(m))
+			if type(m) == "string" and string.match(m, "^changed") then
+				check()
+			end
+		end)
+	end
+
+	-- What the checks found.
+	local function checks(): Node
+		local r = prepared:peek() or {}
+		local problems: { any } = if type(r.problems) == "table" then r.problems else {}
+		local rows: { Node } = {}
+		local used: { [any]: boolean } = {}
+		local function add(node: Node)
+			if #rows > 0 then
+				table.insert(rows, ds.Settings.Rule())
+			end
+			table.insert(rows, node)
+		end
+		for _, c in CHECKS do
+			local found: any = nil
+			for _, p in problems do
+				if type(p) == "table" and matches(c, p) then
+					found = p
+					used[p] = true
+				end
+			end
+			add(check_row(found == nil, ui.t(`plugins.store.check.{c.id}`), if found then fix_of(found) else nil))
+		end
+		-- Newer than the last: the store's to say, as it's sent (the last
+		-- one sent that wasn't turned down or withdrawn, as your versions
+		-- come in).
+		add(check_row("later", ui.t("plugins.store.check.newer"), function(): string
+			local p = mine:get().plugins[id]
+			for _, v in (if p and type(p.versions) == "table" then p.versions else {}) :: { any } do
+				local s = status_of(v)
+				if s ~= "rejected" and s ~= "withdrawn" then
+					return ui.t("plugins.store.check.newer_than", { version = v.version }):get()
+				end
+			end
+			return ui.t("plugins.store.check.newer_first"):get()
+		end))
+		-- Anything else in the way, in the engine's words.
+		for _, pr in problems do
+			if type(pr) == "table" and not used[pr] then
+				add(check_row(false, fix_of(pr), if type(pr.path) == "string" then pr.path else nil))
+			end
+		end
+		local warnings: { any } = if type(r.warnings) == "table" then r.warnings else {}
+		local notes: { Node } = {}
+		for _, w in warnings do
+			if type(w) == "table" then
+				table.insert(notes, ui.text {
+					if type(w.path) == "string" then `{fix_of(w)} ({w.path})` else fix_of(w),
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+					wrap = true,
+				})
+			end
+		end
+		return ui.column {
+			w_full = true,
+			gap = "$space.3",
+			ds.Settings.Section {
+				title = ui.t("plugins.store.checks_title"),
+				ds.Settings.Group { ui.column { id = "publish-checks", w_full = true, table.unpack(rows) } },
+			},
+			if #notes > 0 then ui.column { w_full = true, gap = "$space.1", px = ds.Settings.inset(), table.unpack(notes) } else nil,
+			ui.row {
+				w_full = true,
+				gap = "$space.3",
+				items = "center",
+				pl = ds.Settings.inset(),
+				ui.text {
+					function(): string
+						if sent_error:get() ~= "" then
+							return sent_error:get()
+						end
+						local now = prepared:get() or {}
+						if now.ok == true then
+							local pkg = now.package
+							local files = if type(pkg) == "table" and type(pkg.files) == "number" then pkg.files else 0
+							return ui.t("plugins.store.submit_note", { n = files }):get()
+						end
+						return ui.t("plugins.store.fix_first"):get()
+					end,
+					id = "publish-note",
+					grow = 1,
+					min_w = 0,
+					wrap = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = function(): string
+						return if sent_error:get() ~= "" then "$zeron.tone.danger.ink" else "$text.tertiary"
+					end,
+				},
+				ds.Button {
+					tone = "secondary",
+					size = "md",
+					on_click = check,
+					ui.t("plugins.store.check_again"),
+				},
+				ds.Button {
+					id = "publish-submit",
+					tone = "primary",
+					size = "md",
+					disabled = function(): boolean
+						local now = prepared:get() or {}
+						return now.ok ~= true or type(now.ticket) ~= "string"
+					end,
+					busy = function(): boolean
+						return sending:get()
+					end,
+					on_click = submit,
+					function(): string
+						local v = (prepared:get() or {}).version
+						return if type(v) == "string" and v ~= ""
+							then ui.t("plugins.store.submit_version", { version = v }):get()
+							else ui.t("plugins.store.submit"):get()
+					end,
+				},
+			},
+		}
+	end
+
+	local function checks_body(key: string): Node
+		if key == "ready" then
+			return checks()
+		elseif key == "checking" then
+			return ds.Settings.Group {
+				ds.SkeletonRow { lead = 16, title = 140, line = 0 },
+				ds.Settings.Rule(),
+				ds.SkeletonRow { lead = 16, title = 110, line = 0 },
+				ds.Settings.Rule(),
+				ds.SkeletonRow { lead = 16, title = 160, line = 0 },
+			}
+		end
+		return ds.Callout {
+			tone = "danger",
+			title = ui.t("plugins.store.check_failed"),
+			body = M.failure(key),
+			action = { label = ui.t("plugins.store.try_again"), on_click = check },
+		}
+	end
+
+	-- Its versions in the store, newest first.
+	local versions = ui.computed(function(): { any }
+		local p = mine:get().plugins[id]
+		local out = {}
+		for _, v in (if p and type(p.versions) == "table" then p.versions else {}) :: { any } do
+			if type(v) == "table" and type(v.version) == "string" then
+				table.insert(out, v)
+			end
+		end
+		return out
+	end)
+	local function act(v: any, action: string)
+		acting:set(`{v.version}:{action}`)
+		store.version_action(id, v.version, action):after(function()
+			acting:set(nil)
+			M.load()
+		end, function(err: any)
+			acting:set(nil)
+			local m = if type(err) == "table" then err.message else err
+			ds.toast.show { title = ui.t("plugins.store.action_failed"), body = M.failure(m), tone = "warning" }
+		end)
+	end
+	local function version_row(first: any, _i: number, now: State<any>): Node
+		local function action_of(): string?
+			local s = status_of(now:get())
+			return if s == "pending" then "withdraw" elseif s == "approved" then "yank" elseif s == "yanked" then "unyank" else nil
+		end
+		return ds.Settings.Row {
+			label = first.version,
+			-- (Each state its own badge: its tone is its state's.)
+			badge = ui.switch(function(): string
+				local s = status_of(now:get())
+				return if STATUS_TONE[s] then s else "pending"
+			end, (function(): { [string]: Node }
+				local out: { [string]: Node } = {}
+				for s, tone in STATUS_TONE do
+					out[s] = ds.Badge { ui.t(`plugins.store.status.{s}`), tone = tone :: any, size = "sm" }
+				end
+				return out
+			end)()),
+			description = function(): string
+				local v = now:get()
+				local at = v.published_at
+				local when = if type(at) == "number" then locale.date(at / 1000) else ""
+				-- The reviewer's words, when it wasn't approved or was taken down.
+				local review = v.review
+				local why = if type(review) == "table" then (review.message or review.reason) else nil
+				if type(why) == "string" and why ~= "" and (status_of(v) == "rejected" or status_of(v) == "removed") then
+					return ui.t("plugins.store.reviewer_said", { date = when, words = string.sub(why, 1, 600) }):get()
+				end
+				return when
+			end,
+			control = ui.switch(function(): string
+				return action_of() or "none"
+			end, {
+				none = ui.div {},
+				withdraw = ds.Button {
+					tone = "secondary",
+					size = "sm",
+					busy = function(): boolean
+						return acting:get() == `{first.version}:withdraw`
+					end,
+					on_click = function()
+						confirming:set({ version = now:peek(), action = "withdraw" })
+						confirm_open:set(true)
+					end,
+					ui.t("plugins.store.action.withdraw"),
+				},
+				yank = ds.Button {
+					tone = "secondary",
+					size = "sm",
+					busy = function(): boolean
+						return acting:get() == `{first.version}:yank`
+					end,
+					on_click = function()
+						confirming:set({ version = now:peek(), action = "yank" })
+						confirm_open:set(true)
+					end,
+					ui.t("plugins.store.action.yank"),
+				},
+				unyank = ds.Button {
+					tone = "secondary",
+					size = "sm",
+					busy = function(): boolean
+						return acting:get() == `{first.version}:unyank`
+					end,
+					on_click = function()
+						act(now:peek(), "unyank")
+					end,
+					ui.t("plugins.store.action.unyank"),
+				},
+			}),
+		}
+	end
+	local function history(): Node
+		return ds.Settings.Section {
+			title = ui.t("plugins.store.your_versions"),
+			ui.presence(function(): string
+				local s = mine:get().state
+				if s == "ready" then
+					return if #versions:get() > 0 then "list" else "none"
+				end
+				return s
+			end, function(key: string): Node
+				if key == "list" then
+					return ds.Settings.Each(versions, version_row, {
+						key = function(v: any): string
+							return v.version
+						end,
+					})
+				elseif key == "none" then
+					return ds.Settings.Group { said(ds.EmptyState { icon = "widget", title = ui.t("plugins.store.no_versions"), body = ui.t("plugins.store.no_versions_body"), size = "sm" }) }
+				elseif key == "loading" or key == "idle" then
+					return ds.Settings.Group { ds.SkeletonRow { lead = 0, title = 60, line = 140, trail = 70 } }
+				end
+				return ds.Callout {
+					tone = "neutral",
+					icon = if key == "offline" then "wifi-off" else nil,
+					title = if key == "signed_out" then ui.t("plugins.store.sign_in_to_see") else ui.t("plugins.store.versions_failed"),
+					body = M.failure(key),
+					action = { label = ui.t("plugins.store.try_again"), on_click = M.load },
+				}
+			end, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
+		}
+	end
+
+	local keys_view = require("@app/screens/plugins/keys")
+
+	return ui.column {
+		w_full = true,
+		ds.Settings.SubPage {
+			where = ds.Settings.Back {
+				label = ui.t("plugins.page.title"),
+				on_click = function()
+					nav.back()
+				end,
+			},
+			ds.Settings.Page {
+				title = function(): string
+					return ui.t("plugins.store.publish_title", { name = name() }):get()
+				end,
+				description = ui.t("plugins.store.publish_body"),
+				ui.presence(function(): string
+					local p = phase:get()
+					return if p == "checking" or p == "ready" then p else `failed:{p}`
+				end, function(key: string): Node
+					return checks_body(if string.match(key, "^failed:") then string.sub(key, 8) else key)
+				end, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
+				history(),
+				keys_view.Section { plugin = id, here = props.here },
+			},
+		},
+		ds.Dialog {
+			open = confirm_open,
+			title = function(): string
+				local c = confirming:get()
+				if not c then
+					return ""
+				end
+				return ui.t(`plugins.store.confirm.{c.action}.title`, { name = name(), version = c.version.version }):get()
+			end,
+			body = function(): string
+				local c = confirming:get()
+				return if c then ui.t(`plugins.store.confirm.{c.action}.body`):get() else ""
+			end,
+			confirm = {
+				label = function(): string
+					local c = confirming:get()
+					return if c then ui.t(`plugins.store.action.{c.action}`):get() else ""
+				end,
+				on_click = function()
+					local c = confirming:peek()
+					confirming:set(nil)
+					if c then
+						act(c.version, c.action)
+					end
+				end,
+			},
+		},
+	}
+end)
+
+return M

@@ -3910,7 +3910,154 @@
       "works_here": "当前版本的 Zeron",
       "prereleases": "试用预发布版本",
       "prereleases_body": "更新时包括作者仍在测试的版本。",
-      "couldnt_prereleases": "无法更改{name}的预发布设置"
+      "couldnt_prereleases": "无法更改{name}的预发布设置",
+      "publish_link": "发布…",
+      "publish_title": "发布{name}",
+      "publish_body": "把一个版本发送到插件商店。每个版本都要经过 Zeron 审核人员审阅，之后其他人才能安装；你自己的设备可以立即使用。",
+      "checks_title": "商店需要的内容",
+      "check": {
+        "readme": "README",
+        "description": "描述",
+        "icon": "图标",
+        "categories": "类别",
+        "version": "商店接受的版本号",
+        "newer": "比上一个版本新",
+        "newer_than": "提交时商店会检查它是否比 {version} 新。",
+        "newer_first": "这是你发送的第一个版本。"
+      },
+      "fix": {
+        "missing_readme": "在它的文件夹里添加 README.md：这是它在商店里的页面。",
+        "not_semver": "在 zeron-plugin.json 里给它一个由三个数字组成的版本号，例如 1.2.0。",
+        "id_reserved": "这个名字被 Zeron 或他人保留了。请换一个 id 复制这个插件。",
+        "too_large": "它超出了商店允许的大小。去掉不需要的内容。",
+        "binary_file": "它包含一个既不是文本也不是图片的文件：审核人员会仔细查看。",
+        "no_notes": "CHANGELOG.md 里没有这个版本的内容：更新时大家看不到说明。",
+        "other": "这里有些内容不符合商店的要求。",
+        "missing_listing": {
+          "icon": "添加一个 SVG 图标，并在 zeron-plugin.json 里写明（\"icon\"）。",
+          "categories": "在 zeron-plugin.json 里选择一个类别（\"categories\"）。",
+          "description": "在 zeron-plugin.json 里说明它的用途（\"description\"）。",
+          "name": "在 zeron-plugin.json 里给它起个名字（\"name\"）。",
+          "keywords": "在 zeron-plugin.json 里添加关键词（\"keywords\"）。",
+          "screenshots": "在 zeron-plugin.json 里添加图片（\"screenshots\"）。",
+          "homepage": "在 zeron-plugin.json 里添加网站（\"homepage\"）。",
+          "repository": "在 zeron-plugin.json 里写明源代码位置（\"repository\"）。",
+          "license": "在 zeron-plugin.json 里写明许可证（\"license\"）。"
+        },
+        "bad_listing": {
+          "icon": "图标必须是不超过 32 KB 的 SVG。",
+          "categories": "从商店的类别中选择一到两个。",
+          "description": "描述不能超过 300 个字符。",
+          "name": "名字不能超过 64 个字符。",
+          "keywords": "最多 8 个关键词，小写，每个不超过 32 个字符。",
+          "screenshots": "最多 8 张图片，每张都是文件夹里的 PNG 或 JPEG。",
+          "homepage": "网站必须是 https 链接。",
+          "repository": "源代码地址必须是 https 链接。",
+          "license": "许可证不能超过 64 个字符。"
+        }
+      },
+      "check_again": "重新检查",
+      "check_failed": "无法检查",
+      "fix_first": "修正标出的问题，保存后重新检查。",
+      "submit": "提交审核",
+      "submit_version": "提交 {version} 审核",
+      "submit_note": "{n, plural, other {将发送 # 个文件}}，以你的签名、与检查时完全一致。",
+      "sent_toast": "已提交{name} {version}审核",
+      "sent": {
+        "needs_username": "请先设定用户名：商店里的每个插件都署名 @某人。",
+        "id_taken": "已经有人用这个 id 发布了插件。",
+        "id_reserved": "这个 id 被 Zeron 或他人保留了。",
+        "not_semver": "版本号不是三个数字，例如 1.2.0。",
+        "version_exists": "这个版本你已经发送过了。请换一个新版本号。",
+        "not_newer": "版本号必须比你上次发送的新。",
+        "bad_package": "商店无法读取这个包。",
+        "bad_signature": "签名与文件不符。请重新检查后再发送。",
+        "key_not_allowed": "它的签名密钥不被商店认作是你的。",
+        "missing_readme": "商店需要 README.md。",
+        "missing_listing": "商店需要描述、图标和类别。",
+        "too_large": "它超出了商店允许的大小。",
+        "rate_limited": "尝试次数过多。请一分钟后再试。",
+        "suspended": "这个插件在商店里已被暂停。",
+        "changed": "检查之后文件夹有改动。请重新检查。",
+        "signed_out": "请登录 Zeron 再发布。",
+        "offline": "无法连接插件商店。"
+      },
+      "your_versions": "你发送过的版本",
+      "no_versions": "还没有发送过",
+      "no_versions_body": "你发送的版本会显示在这里，并附上审核进度。",
+      "versions_failed": "无法查看你的版本",
+      "sign_in_to_see": "登录后查看你的版本",
+      "status": {
+        "pending": "审核中",
+        "approved": "已通过",
+        "rejected": "未通过",
+        "withdrawn": "已撤回",
+        "yanked": "停止新安装",
+        "removed": "已下架"
+      },
+      "reviewer_said": "{date} · “{words}”",
+      "action": {
+        "withdraw": "撤回",
+        "yank": "停止新安装",
+        "unyank": "重新允许安装"
+      },
+      "action_failed": "无法更改这个版本",
+      "confirm": {
+        "withdraw": {
+          "title": "撤回{name} {version}？",
+          "body": "它会离开审核队列。发送过的版本号不能再用：下一个请用新版本号。"
+        },
+        "yank": {
+          "title": "停止{name} {version}的新安装？",
+          "body": "之后没人能再安装它。已经安装的人仍然可以使用。你以后可以重新允许安装。"
+        },
+        "unyank": {
+          "title": "重新允许安装{name} {version}？",
+          "body": "它又可以被安装了。"
+        }
+      },
+      "summary": {
+        "none": "未发布到插件商店",
+        "none_listed": "正在等待插件商店审核",
+        "listed": "{version} 已在插件商店",
+        "in_review": "{version} 审核中",
+        "unknown": "把它分享到插件商店"
+      },
+      "keys": "部署密钥",
+      "keys_body": "CI 任务（例如 GitHub Action）可以用密钥代替你的登录来发布新版本。一个密钥只能发布这个插件，每个版本仍需审核。",
+      "keys_none": "还没有密钥。",
+      "keys_failed": "无法查看它的密钥",
+      "key": {
+        "new": "新建密钥…",
+        "new_title": "新建部署密钥",
+        "new_body": "Zeron 可能会先请你重新登录。",
+        "name": "名称",
+        "name_placeholder": "GitHub Actions",
+        "expiry_label": "到期",
+        "expiry": {
+          "30": "30 天后",
+          "90": "90 天后",
+          "365": "一年后",
+          "never": "永不"
+        },
+        "create": "创建密钥",
+        "signing_in": "请在浏览器中登录以创建密钥。",
+        "stop_waiting": "停止等待",
+        "timed_out": "登录没有完成。请再试一次。",
+        "secret_title": "现在复制你的密钥",
+        "secret_body": "Zeron 只显示这一次。请把它放进 CI 的机密设置里。拿到它的人可以以你的名义发送这个插件的版本。",
+        "copy": "复制",
+        "copied": "密钥已复制",
+        "done": "我已复制",
+        "made": "创建于 {date}",
+        "used": "上次使用 {date}",
+        "never_used": "从未使用",
+        "ends": "{date} 到期",
+        "revoke": "吊销",
+        "revoke_title": "吊销{name}？",
+        "revoke_body": "用它发布的流程会立即停止。它已经发送的版本保持不变。",
+        "revoke_failed": "无法吊销密钥"
+      }
     }
   },
   "templates": {
