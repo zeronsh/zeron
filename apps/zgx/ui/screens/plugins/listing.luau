@@ -34,7 +34,6 @@ local ds = require("@ds")
 local FoldButton = require("@ds/fold_button").FoldButton
 local Lightbox = require("@ds/lightbox")
 local Links = require("@ds/links")
-local Markdown = require("@ds/markdown")
 local locale = require("@ds/locale")
 local store = require("@app/screens/plugins/store")
 local state = require("@app/screens/plugins/state")
@@ -42,6 +41,7 @@ local words = require("@app/screens/plugins/words")
 local asks_view = require("@app/screens/plugins/asks")
 local nav = require("@app/screens/plugins/nav")
 local consent = require("@screens/plugins/consent")
+local untrusted = require("@app/screens/plugins/untrusted")
 local browse = require("@app/screens/plugins/browse")
 local plugin_settings = require("@app/screens/plugins/settings")
 local sessions = require("@account/sessions")
@@ -105,32 +105,6 @@ local function package_path(src: string): string?
 		return nil
 	end
 	return path
-end
-
--- A README cut into pieces of about `PIECE` bytes, each ending where a
--- paragraph does (a blank line), never inside a fenced code block.
-local PIECE = 64 * 1024
-local function readme_pieces(text: string): { string }
-	local out: { string } = {}
-	local piece: { string } = {}
-	local size = 0
-	local fenced = false
-	for line in string.gmatch(text .. "\n", "([^\n]*)\n") do
-		if string.match(line, "^%s*```") or string.match(line, "^%s*~~~") then
-			fenced = not fenced
-		end
-		table.insert(piece, line)
-		size += #line + 1
-		if size >= PIECE and not fenced and string.match(line, "^%s*$") then
-			table.insert(out, table.concat(piece, "\n"))
-			piece = {}
-			size = 0
-		end
-	end
-	if #piece > 0 then
-		table.insert(out, table.concat(piece, "\n"))
-	end
-	return out
 end
 
 local function said(node: Node): Node
@@ -223,7 +197,8 @@ local Notes = ui.component(function(props: { text: () -> string, lines: number, 
 					color = "$text.primary",
 				}
 			end
-			return Markdown { text = props.text, small = true, foreign = true }
+			-- (Bounded as the store's every text: screens/plugins/untrusted.)
+			return untrusted.View { text = props.text(), what = "notes", small = true, auto = true }
 		end, { w_full = true })
 	else
 		body = ui.column {
@@ -242,16 +217,18 @@ local Notes = ui.component(function(props: { text: () -> string, lines: number, 
 						body_h:set(size.h)
 					end
 				end,
-				Markdown {
-					text = function(): string
-						if open:get() then
-							return props.text()
-						end
-						return (start())
-					end,
-					small = true,
-					foreign = true,
-				},
+				-- (Folded, its start alone; open, the whole, a piece a frame:
+				-- bounded as the store's every text, screens/plugins/untrusted.)
+				ui.presence(function(): string
+					return if open:get() then "open" else "folded"
+				end, function(key: string): Node
+					return untrusted.View {
+						text = if key == "open" then props.text() else (start()),
+						what = "notes",
+						small = true,
+						auto = true,
+					}
+				end, { w_full = true }),
 			},
 		}
 	end
@@ -977,12 +954,12 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	end
 
 	-- The README: the app's Markdown, its pictures the package's own. A
-	-- long one (the store takes 512 KB) is drawn a piece at a time, each
-	-- piece ending at a paragraph's end outside any code block: the first
-	-- at once, the rest as asked (Show more), so no frame lays out half a
-	-- megabyte of prose.
-	local pieces = readme_pieces(if type(first.readme) == "string" then string.sub(first.readme, 1, 512 * 1024) else "")
-	local shown_pieces = ui.use_state(1)
+	-- long one (the store takes 512 KB), or one built to cost, is drawn a
+	-- piece at a time (screens/plugins/untrusted: pieces by cost and size,
+	-- plain text past its budget): the first at once, the rest as asked
+	-- (Show more), so no frame lays out half a megabyte, and no text makes
+	-- the page fail to draw.
+	local readme_text = if type(first.readme) == "string" then string.sub(first.readme, 1, 512 * 1024) else ""
 	local function picture(src: string): any
 		-- A picture of its package, through the store; anything else is its
 		-- link (`false`), never fetched from where it points.
@@ -1001,13 +978,6 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		return plain(heading) == plain(d().name or id)
 	end
 	local function readme(): Node
-		local list = ui.computed(function(): { number }
-			local out = {}
-			for i = 1, math.min(shown_pieces:get(), #pieces) do
-				table.insert(out, i)
-			end
-			return out
-		end)
 		return ds.Settings.Section {
 			title = ui.t("plugins.store.about"),
 			ds.Settings.Group {
@@ -1016,44 +986,19 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					w_full = true,
 					px = "$space.4",
 					py = "$space.4",
-					gap = "$space.4",
-					ui.each(list, function(i: number): Node
-						return Markdown {
-							-- (Its author's words: links are links, never Zeron's chips.)
-							foreign = true,
-							text = pieces[i],
-							image = picture,
-							-- (Under the page's own title: its headings a level
-							-- down, none larger than the name; a `# Name` that
-							-- opens it, the name again, left out; its pictures
-							-- with the page's corner.)
-							heading_step = 1,
-							drop_title = if i == 1 then same_name else nil,
-							picture_radius = "$radius.lg",
-						}
-					end, {
-						key = function(i: number): number
-							return i
-						end,
-					}),
-					ui.show(function(): boolean
-						return shown_pieces:get() < #pieces
-					end, ui.row {
-						id = "store-readme-more",
-						-- (The page's one way to open more of a text in place,
-						-- as a version's notes do.)
-						FoldButton {
-							label = function(): string
-								return ui.t("plugins.store.readme_more"):get()
-							end,
-							open = function(): boolean
-								return false
-							end,
-							on_click = function()
-								shown_pieces:set(shown_pieces:peek() + 1)
-							end,
-						},
-					}),
+					untrusted.View {
+						text = readme_text,
+						what = "readme",
+						image = picture,
+						-- (Under the page's own title: its headings a level
+						-- down, none larger than the name; a `# Name` that
+						-- opens it, the name again, left out; its pictures
+						-- with the page's corner.)
+						heading_step = 1,
+						drop_title = same_name,
+						picture_radius = "$radius.lg",
+						more_id = "store-readme-more",
+					},
 				},
 			},
 		}
@@ -1349,7 +1294,10 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						w_full = true,
 						gap = "$space.2",
 						ui.text { ui.t("plugins.store.whats_new"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" },
-						Markdown { text = notes, small = true, foreign = true },
+						-- (Bounded as the store's every text: screens/plugins/untrusted.)
+						ui.presence(notes, function(text: string): Node
+							return untrusted.View { text = text, what = "notes", small = true, auto = true }
+						end, { w_full = true }),
 					}),
 					ui.presence(function(): string
 						local a, r = changed("added"), changed("removed")

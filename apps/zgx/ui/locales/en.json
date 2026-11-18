@@ -4096,7 +4096,9 @@
       "count": "{n, plural, one {# plugin} other {# plugins}}",
       "list_title": "Plugins",
       "categories_back": "Earlier categories",
-      "categories_more": "More categories"
+      "categories_more": "More categories",
+      "plain_readme": "This README is drawn as plain text past here: it's too long or too deeply nested to lay out.",
+      "plain_notes": "These notes are drawn as plain text past here: they're too long or too deeply nested to lay out."
     }
   },
   "templates": {

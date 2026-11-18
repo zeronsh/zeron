@@ -4096,7 +4096,9 @@
       "count": "{n, plural, other {# 个插件}}",
       "list_title": "插件",
       "categories_back": "前面的分类",
-      "categories_more": "更多分类"
+      "categories_more": "更多分类",
+      "plain_readme": "此处以下的 README 以纯文本显示：它太长或嵌套太深，无法排版。",
+      "plain_notes": "此处以下的更新说明以纯文本显示：它太长或嵌套太深，无法排版。"
     }
   },
   "templates": {
