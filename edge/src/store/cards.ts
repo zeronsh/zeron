@@ -1,20 +1,18 @@
 /**
- * The catalog's shapes (contract "Shapes", amendments 1 and 11): a
- * `PluginCard` for lists, `VersionInfo` for versions. Who wrote a plugin
- * is read live from the user directory, never from the manifest: its
- * current username, and whether it holds the operator badge `verified`.
+ * The catalog's shapes (contract "Shapes", amendments 1, 11 and 20): a
+ * `PluginCard` for lists, `VersionInfo` for versions. Who wrote a plugin is
+ * read live from the user directory, never from the manifest: its current
+ * username and its badges (granted by operators). There is no separate
+ * "verified": publishing needs a username, so every listing is by a known
+ * account.
  */
 import type { Env } from "../env";
 import { userDirectoryStub } from "../user-directory";
 import type { StoreAuthor } from "../user-directory";
 import { type PluginRow, type VersionRow, parseList } from "./db";
 
-/** The operator badge (`/admin/badges`) that reads as a verified publisher. */
-export const VERIFIED_BADGE = "verified";
-
 export interface Author {
   readonly username: string | null;
-  readonly verified: boolean;
   readonly badges: readonly { readonly id: string; readonly name: string; readonly icon: string | null }[];
 }
 
@@ -26,7 +24,6 @@ export const authorsOf = async (env: Env, userIds: readonly string[]): Promise<R
 
 export const authorCard = (found: StoreAuthor | undefined): Author => ({
   username: found?.username ?? null,
-  verified: found?.username != null && found.badges.some((b) => b.id === VERIFIED_BADGE),
   badges: found?.badges ?? []
 });
 

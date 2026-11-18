@@ -1,5 +1,7 @@
+import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { ADMIN, PNG, author, call, listed, makePackage, publish, randomLetters, uniqueId } from "./store-helpers";
+import { packageBytesKey, packageStateKey } from "../../src/store/serve";
+import { ADMIN, PNG, author, call, listed, makePackage, publish, randomLetters, uniqueId, adminCall } from "./store-helpers";
 
 type Card = { id: string; name: string; version: string; installs: number; author: { username: string }; icon: string | null; featured: boolean };
 const json = async <T = Record<string, unknown>>(res: Response) => (await res.json()) as T;
@@ -22,7 +24,7 @@ describe("store catalog", () => {
       version: "1.0.0",
       summary: `The ${id} plugin.`,
       icon: `/store/v1/plugins/${id}/files/1.0.0/icon.svg`,
-      author: { username: a.username, verified: false, badges: [] },
+      author: { username: a.username, badges: [] },
       categories: ["productivity"],
       keywords: [tag],
       installs: 0,
@@ -50,9 +52,9 @@ describe("store catalog", () => {
     expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions`)).status).toBe(404);
     expect((await call(undefined, "GET", "/store/v1/plugins/nope-not-here")).status).toBe(404);
     expect((await call(undefined, "GET", "/store/v1/plugins/Bad..Id")).status).toBe(404);
-    expect((await call(ADMIN, "POST", `/store/v1/admin/submissions/${id}/1.0.0/approve`)).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.0.0/approve`)).status).toBe(200);
     expect((await call(undefined, "GET", `/store/v1/plugins/${id}`)).status).toBe(200);
-    expect((await call(ADMIN, "POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "Looking into it." })).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "Looking into it." })).status).toBe(200);
     const gone = await call(undefined, "GET", `/store/v1/plugins/${id}`);
     expect([gone.status, (await json(gone)).error]).toEqual([404, "not_found"]);
     expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.0.0/package`)).status).toBe(404);
@@ -129,7 +131,7 @@ describe("store catalog", () => {
     expect((await list(`keyword=${tag}&featured=true`, a.userId)).items).toEqual([]);
     const before = await list("featured=true&sort=new");
     expect(before.items.map((c) => c.id)).not.toContain(chatOne);
-    expect((await call(ADMIN, "POST", `/store/v1/admin/plugins/${chatOne}/feature`, { featured: true })).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${chatOne}/feature`, { featured: true })).status).toBe(200);
     expect((await list(`keyword=${tag}&featured=true`, a.userId)).items.map((c) => [c.id, c.featured])).toEqual([[chatOne, true]]);
     // The featured row's first page is purged on the change.
     expect((await list("featured=true&sort=new")).items.map((c) => c.id)).toContain(chatOne);
@@ -164,7 +166,7 @@ describe("store catalog", () => {
     expect((await publish(a.userId, id, await makePackage({ id, version: "1.1.0", signer: a.signer }))).status).toBe(201);
     // Pending changes nothing public.
     expect((await json<Card>(await call(undefined, "GET", `/store/v1/plugins/${id}`))).version).toBe("1.0.0");
-    expect((await call(ADMIN, "POST", `/store/v1/admin/submissions/${id}/1.1.0/approve`)).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.1.0/approve`)).status).toBe(200);
     expect((await json<Card>(await call(undefined, "GET", `/store/v1/plugins/${id}`))).version).toBe("1.1.0");
     expect((await call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.1.0/yank`)).status).toBe(200);
     const after = await json<Card & { versions: { version: string; yanked: boolean }[] }>(await call(undefined, "GET", `/store/v1/plugins/${id}`));
@@ -200,8 +202,8 @@ describe("store packages and files", () => {
     expect(own.status).toBe(200);
     expect(own.headers.get("cache-control")).toBe("private, no-store");
     expect(new Uint8Array(await own.arrayBuffer())).toEqual(pkg);
-    expect((await call(ADMIN, "GET", path)).status).toBe(200);
-    expect((await call(ADMIN, "POST", `/store/v1/admin/submissions/${id}/1.0.0/approve`)).status).toBe(200);
+    expect((await adminCall("GET", path)).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.0.0/approve`)).status).toBe(200);
     const pub = await call(undefined, "GET", path);
     expect(pub.status).toBe(200);
     expect(pub.headers.get("content-type")).toBe("application/octet-stream");
@@ -234,8 +236,8 @@ describe("store packages and files", () => {
     expect(page.headers.get("content-type")).toBe("application/octet-stream");
     expect(page.headers.get("content-disposition")).toBe('attachment; filename="page.html"');
     expect(await page.text()).toBe(html);
-    expect((await file("deep/dir/x.luau", ADMIN)).status).toBe(200);
-    expect(await (await file("deep/dir/x.luau", ADMIN)).text()).toBe("return 1");
+    const asAdmin = await adminCall("GET", `/store/v1/plugins/${id}/files/1.0.0/deep/dir/x.luau`);
+    expect([asAdmin.status, await asAdmin.text()]).toEqual([200, "return 1"]);
   });
 
   it("refuses paths that leave the version, and never reads outside it", async () => {
@@ -247,5 +249,56 @@ describe("store packages and files", () => {
       expect([400, 404], p).toContain(res.status);
     }
     expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/files/9.9.9/icon.svg`)).status).toBe(404);
+  });
+
+  it("checks a version's state before serving it: a takedown lands within the state's TTL, with the bytes still cached", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    const path = `/store/v1/plugins/${id}/versions/1.0.0/package`;
+    const first = await call(undefined, "GET", path);
+    expect([first.status, first.headers.get("cache-control")]).toEqual([200, "public, max-age=60"]);
+    const sha = first.headers.get("etag")!.replaceAll('"', "");
+    // Removed where no purge reaches (another data center): the state here is
+    // still the cached one, for at most its 60 s.
+    await env.STORE_DB.prepare("UPDATE versions SET status = 'removed' WHERE plugin_id = ?").bind(id).run();
+    expect((await call(undefined, "GET", path)).status).toBe(200);
+    // The state's TTL passes: gone, though the bytes are still cached.
+    const cache = await caches.open("store");
+    expect(await cache.delete(packageStateKey(id, "1.0.0"))).toBe(true);
+    expect((await call(undefined, "GET", path)).status).toBe(404);
+    expect(await cache.match(packageBytesKey(sha))).toBeDefined();
+  });
+
+  it("never lets a packaged path reach another plugin's cache keys", async () => {
+    const victim = await author();
+    const evil = await author();
+    const victimId = uniqueId("victim");
+    const evilId = uniqueId("evil");
+    await listed(victim, victimId, "1.0.0");
+    const tricks = [`%2e%2e/%2e%2e/%2e%2e/package/${victimId}/1.0.0`, `%2e%2e/%2e%2e/%2e%2e/%2e%2e/plugins/${victimId}`, "%2E%2E/%2E%2E/%2E%2E/%2E%2E/categories"];
+    await listed(evil, evilId, "1.0.0", { files: Object.fromEntries(tricks.map((t) => [t, PNG])) });
+    for (const t of tricks) {
+      const res = await call(undefined, "GET", `/store/v1/plugins/${evilId}/files/1.0.0/${t.split("/").map(encodeURIComponent).join("/")}`);
+      expect(res.status, t).toBe(200);
+      expect(res.headers.get("content-type")).toBe("image/png");
+    }
+    const detail = await call(undefined, "GET", `/store/v1/plugins/${victimId}`);
+    expect([detail.status, detail.headers.get("content-type")]).toEqual([200, "application/json; charset=utf-8"]);
+    const pkg = await call(undefined, "GET", `/store/v1/plugins/${victimId}/versions/1.0.0/package`);
+    expect(pkg.headers.get("content-type")).toBe("application/octet-stream");
+    expect((await call(undefined, "GET", "/store/v1/categories")).headers.get("content-type")).toBe("application/json; charset=utf-8");
+  });
+
+  it("answers a HEAD without ever caching an empty body for a GET", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    for (const path of [`/store/v1/plugins/${id}/versions/1.0.0/package`, `/store/v1/plugins/${id}/files/1.0.0/shots/one.png`, `/store/v1/plugins/${id}`]) {
+      const head = await call(undefined, "HEAD", path);
+      expect([head.status, (await head.arrayBuffer()).byteLength], path).toEqual([200, 0]);
+      const get = await call(undefined, "GET", path);
+      expect((await get.arrayBuffer()).byteLength, path).toBeGreaterThan(0);
+    }
   });
 });

@@ -10,6 +10,28 @@ import { PAYLOAD_PREFIX, sha256Hex } from "../../src/store/package";
 export const ADMIN = "user_storeadmin1";
 export const ADMIN2 = "user_storeadmin2";
 
+export const SITE = "https://site.test";
+
+/**
+ * An admin's request, as the web site's admin pages make it: the staff
+ * session's cookie, the site's Origin and its CSRF token (admin is by web
+ * session only, amendment 27; a bearer is refused). Until the identity
+ * lane's web sessions merge, the session is principal.ts's stand-in for the
+ * test admins in STORE_ADMIN_USERS; then this signs them in on the web
+ * (identity-helpers.ts `webSignIn` + `grantAdmin`).
+ */
+export const adminCall = (method: string, path: string, body?: unknown, who = ADMIN) =>
+  SELF.fetch(`https://edge.test${path}`, {
+    method,
+    headers: {
+      cookie: `__Host-zeron_session=store-test.${who}`,
+      origin: SITE,
+      "x-csrf-token": "store-test",
+      ...(body === undefined ? {} : { "content-type": "application/json" })
+    },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+
 export const newUserId = () => `user_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 export const directory = () => env.USER_DIRECTORY!.get(env.USER_DIRECTORY!.idFromName("users1"));
 
@@ -154,7 +176,7 @@ export const publish = (bearer: string, id: string, pkg: Uint8Array) => call(bea
 export const listed = async (who: { userId: string; signer: Signer }, id: string, version: string, options: Partial<PackageOptions> = {}) => {
   const res = await publish(who.userId, id, await makePackage({ id, version, signer: who.signer, ...options }));
   expect(res.status, await res.clone().text()).toBe(201);
-  const ok = await call(ADMIN, "POST", `/store/v1/admin/submissions/${id}/${version}/approve`);
+  const ok = await adminCall("POST", `/store/v1/admin/submissions/${id}/${version}/approve`);
   expect(ok.status, await ok.clone().text()).toBe(200);
 };
 

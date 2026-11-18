@@ -31,7 +31,7 @@ import { purge } from "./cache";
 import { authorCard, authorsOf, pluginCard, versionInfo, parseStoredJson } from "./cards";
 import { type ConsentItem, consentDiff } from "./consent";
 import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, versionRow } from "./db";
-import { answer, fail, notFound, objectBody } from "./http";
+import { answer, fail, notFound, objectBody, refusedBody } from "./http";
 import { readBody, requireAdmin, revokeDeployKeys } from "./principal";
 import { decodeSegment } from "./serve";
 import { foldUsername } from "../username";
@@ -408,7 +408,7 @@ const audit = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   });
 };
 
-const reservations = async (request: Request, env: Env, db: D1Database, adminId: string, rest: readonly string[]): Promise<Response> => {
+const reservations = async (request: Request, env: Env, db: D1Database, adminId: string, rest: readonly string[], body: Record<string, unknown> | undefined): Promise<Response> => {
   if (rest.length === 0 && request.method === "GET") {
     const rows = (await db.prepare("SELECT * FROM reservations ORDER BY id").all<{ id: string; user_id: string | null; note: string | null; created_at: number }>()).results;
     const names = await usernames(env, rows.flatMap((r) => (r.user_id ? [r.user_id] : [])));
@@ -416,7 +416,6 @@ const reservations = async (request: Request, env: Env, db: D1Database, adminId:
   }
   const now = Date.now();
   if (rest.length === 0 && request.method === "POST") {
-    const body = objectBody(await readBody(request, MAX_BODY));
     const id = body?.id;
     if (typeof id !== "string" || !ID_RE.test(id)) return fail(400, "bad_request", "id is a plugin id.");
     let userId: string | null = null;
@@ -457,7 +456,12 @@ export const handleAdmin = async (request: Request, env: Env, db: D1Database, ur
   const [, section, a, b, c, d] = parts;
   const get = request.method === "GET";
   const post = request.method === "POST";
-  const body = post ? objectBody(await readBody(request, MAX_BODY)) : undefined;
+  let body: Record<string, unknown> | undefined;
+  if (post) {
+    const raw = await readBody(request, MAX_BODY);
+    if (typeof raw === "string") return refusedBody(raw);
+    body = objectBody(raw);
+  }
 
   if (section === "queue" && parts.length === 2 && get) return queue(env, db, url);
   if (section === "submissions" && a && b) {
@@ -479,6 +483,6 @@ export const handleAdmin = async (request: Request, env: Env, db: D1Database, ur
     if (parts.length === 4 && post && b === "resolve" && a && /^[0-9]{1,15}$/.test(a)) return resolveReport(db, admin.userId, Number(a), body);
   }
   if (section === "audit" && parts.length === 2 && get) return audit(env, db, url);
-  if (section === "reservations") return reservations(request, env, db, admin.userId, parts.slice(2));
+  if (section === "reservations") return reservations(request, env, db, admin.userId, parts.slice(2), body);
   return notFound();
 };

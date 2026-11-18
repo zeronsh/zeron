@@ -20,7 +20,7 @@ import { firstPageKeys } from "./catalog";
 import { authorCard, authorsOf, pluginCard, versionInfo } from "./cards";
 import { cacheKey, purge } from "./cache";
 import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, parseList, pluginRow, relist, versionRow } from "./db";
-import { answer, fail, notFound, objectBody, rateLimited } from "./http";
+import { answer, fail, notFound, objectBody, rateLimited, refusedBody } from "./http";
 import { authenticatePublisher, optionalUser, readBody } from "./principal";
 import { allowWrite } from "./publish";
 import { decodeSegment, versionFileKeys } from "./serve";
@@ -84,13 +84,13 @@ export const pluginCacheKeys = async (db: D1Database, p: PluginRow, versions: re
   const after = await pluginRow(db, p.id);
   for (const c of parseList(after?.categories ?? null)) categories.add(c);
   const files = await Promise.all(versions.map((v) => versionFileKeys(db, p.id, v)));
-  return [cacheKey(`plugins/${p.id}`), cacheKey(`plugins/${p.id}/versions`), ...firstPageKeys([...categories]), ...files.flat()];
+  return [cacheKey(["plugins", p.id]), cacheKey(["plugins", p.id, "versions"]), ...firstPageKeys([...categories]), ...files.flat()];
 };
 
 export const handleAuthorAction = async (request: Request, env: Env, db: D1Database, id: string, versionSegment: string, action: AuthorAction): Promise<Response> => {
   const publisher = await authenticatePublisher(request, env);
   if (publisher instanceof Response) return publisher;
-  if (publisher.via !== "session") return fail(403, "forbidden", "Withdrawing, yanking and unyanking need a signed-in session.");
+  if (publisher.via !== "session") return fail(403, "key_not_allowed", "Withdrawing, yanking and unyanking need a signed-in session.");
   if (!(await allowWrite(env, publisher.userId))) return rateLimited();
   const versionText = decodeSegment(versionSegment);
   const plugin = await pluginRow(db, id);
@@ -142,7 +142,9 @@ export const handleReport = async (request: Request, env: Env, db: D1Database, i
   const caller = await optionalUser(request, env);
   if (!caller) return fail(401, "unauthenticated", "Sign in to report a plugin.");
   if (!(await allowWrite(env, caller.userId))) return rateLimited();
-  const body = objectBody(await readBody(request, 8 * 1024));
+  const raw = await readBody(request, 8 * 1024);
+  if (typeof raw === "string") return refusedBody(raw);
+  const body = objectBody(raw);
   const reason = body?.reason;
   const text = body?.text ?? "";
   const version = body?.version ?? null;
@@ -163,10 +165,16 @@ export const handleReport = async (request: Request, env: Env, db: D1Database, i
     .prepare(
       `INSERT INTO reports (plugin_id, version, reporter_id, reason, text, created_at)
        SELECT ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM reports WHERE reporter_id = ? AND created_at > ?) < ?
+         AND NOT EXISTS (SELECT 1 FROM reports WHERE plugin_id = ? AND reporter_id = ? AND status = 'open')
        RETURNING id`
     )
-    .bind(id, version, caller.userId, reason, text, now, caller.userId, now - 86_400_000, REPORTS_PER_DAY)
+    .bind(id, version, caller.userId, reason, text, now, caller.userId, now - 86_400_000, REPORTS_PER_DAY, id, caller.userId)
     .first<{ id: number }>();
-  if (!inserted) return fail(429, "rate_limited", "Too many reports today. Try again tomorrow.");
+  if (!inserted) {
+    // Another report of theirs landed meanwhile, or the day's limit.
+    const raced = await db.prepare("SELECT id FROM reports WHERE plugin_id = ? AND reporter_id = ? AND status = 'open'").bind(id, caller.userId).first<{ id: number }>();
+    if (raced) return answer({ id: raced.id, status: "open" });
+    return fail(429, "rate_limited", "Too many reports today. Try again tomorrow.");
+  }
   return answer({ id: inserted.id, status: "open" }, 201);
 };

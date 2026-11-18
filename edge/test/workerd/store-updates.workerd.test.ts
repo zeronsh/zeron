@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { ADMIN, author, call, listed, makePackage, publish, uniqueId } from "./store-helpers";
+import { ADMIN, author, call, listed, makePackage, publish, uniqueId, adminCall } from "./store-helpers";
 
 type Updates = { updates: Record<string, unknown>[]; blocked: Record<string, unknown>[] };
 const json = async <T>(res: Response) => (await res.json()) as T;
@@ -23,7 +23,7 @@ describe("POST /store/v1/updates", () => {
     const installed = { id, version: "1.0.0", hash: await hashOf(id, "1.0.0") };
     const old = await check({ zeron: "0.4.2", plugins: [installed] });
     expect(old.updates).toEqual([
-      expect.objectContaining({ id, version: "1.1.0", added: ["links.open"], removed: [], prerelease: false, hash: await hashOf(id, "1.1.0"), key: a.signer.key, notes: "- What changed in 1.1.0." })
+      expect.objectContaining({ id, version: "1.1.0", added: ["links.open"], removed: [], prerelease: false, hash: await hashOf(id, "1.1.0"), key: a.signer.key, publisher: a.username, notes: "- What changed in 1.1.0." })
     ]);
     expect(old.updates[0]).not.toHaveProperty("in_review");
     expect((await check({ zeron: "0.5.0", plugins: [installed] })).updates[0]).toMatchObject({ version: "1.2.0" });
@@ -53,13 +53,13 @@ describe("POST /store/v1/updates", () => {
     await listed(a, id, "1.0.0");
     await listed(a, id, "1.1.0");
     const bad = await hashOf(id, "1.1.0");
-    expect((await call(ADMIN, "POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/remove`, { block: true, reason: "It sends your files away." })).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/remove`, { block: true, reason: "It sends your files away." })).status).toBe(200);
     const res = await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: bad }] });
     expect(res.blocked).toEqual([{ id, version: "1.1.0", reason: "It sends your files away." }]);
     expect(res.updates).toEqual([]);
     expect((await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: "0".repeat(64) }] })).blocked).toEqual([]);
     // Suspended: no updates, blocks still said.
-    expect((await call(ADMIN, "POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "x" })).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "x" })).status).toBe(200);
     const suspended = await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: bad }, ] });
     expect(suspended.blocked).toHaveLength(1);
     expect((await check({ zeron: "0.4.0", plugins: [{ id, version: "0.9.0", hash: "0".repeat(64) }] })).updates).toEqual([]);

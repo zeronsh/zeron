@@ -23,10 +23,10 @@ import { isReservedUsername, skeleton } from "../username";
 import { type FileKind, fileKind, isText, runChecks } from "./checks";
 import { type ConsentItem, consentItem } from "./consent";
 import { VERSION_ORDER, filesKey, packageKey, pluginRow } from "./db";
-import { fail, answer, rateLimited } from "./http";
+import { fail, answer, rateLimited, refusedBody } from "./http";
 import { type Listing, type Problem, checkListing, listingOf } from "./listing";
 import { PackageRefusal, verifyPackage } from "./package";
-import { type Publisher, authenticatePublisher, readBody, signingKeyAllowed } from "./principal";
+import { MAX_PUBLISH_BODY_BYTES, type Publisher, authenticatePublisher, readBody, signingKeyAllowed } from "./principal";
 import { isPrerelease, preKey, precedenceText } from "./semver";
 
 /**
@@ -36,7 +36,7 @@ import { isPrerelease, preKey, precedenceText } from "./semver";
  * (docs/plugin-store-limits.md): about 60 MB at its peak, 0.3 s of CPU.
  * Below the engine's own 50 MB of files.
  */
-export const STORE_MAX_PACKAGE_BYTES = 20 * 1024 * 1024;
+export const STORE_MAX_PACKAGE_BYTES = MAX_PUBLISH_BODY_BYTES;
 
 /** Versions an account may submit, across its plugins. */
 export const PUBLISHES_PER_HOUR = 10;
@@ -98,7 +98,8 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   if (!publisher.username) return fail(403, "needs_username", "Publishing needs a username: every listing reads \"by @username\".");
 
   const body = await readBody(request, STORE_MAX_PACKAGE_BYTES);
-  if (!body) return fail(413, "too_large", `The store takes packages up to ${STORE_MAX_PACKAGE_BYTES / (1024 * 1024)} MB.`);
+  if (body === "body_mismatch") return refusedBody(body);
+  if (body === "too_large") return fail(413, "too_large", `The store takes packages up to ${STORE_MAX_PACKAGE_BYTES / (1024 * 1024)} MB.`);
   let pkg;
   try {
     pkg = await verifyPackage(body, STORE_MAX_PACKAGE_BYTES);

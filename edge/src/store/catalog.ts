@@ -14,7 +14,7 @@
  * An unknown or suspended plugin is 404 `not_found` to the public.
  */
 import type { Env } from "../env";
-import { FILE_TTL, LIST_TTL, cacheKey, throughCache } from "./cache";
+import { LIST_TTL, cacheKey, throughCache } from "./cache";
 import { authorCard, authorsOf, fileUrl, packageUrl, permissionsOf, pluginCard, versionInfo } from "./cards";
 import { LISTED, PUBLIC_STATUSES, type PluginRow, VERSION_ORDER, type VersionRow, parseList, pluginRow } from "./db";
 import { answer, fail, notFound } from "./http";
@@ -79,7 +79,7 @@ export const firstPageKeys = (categories: readonly string[]): string[] => {
   for (const sort of ["popular", "updated", "new"] as const) {
     for (const featured of [false, true]) {
       for (const category of [undefined, ...categories]) {
-        keys.push(cacheKey("plugins", listParams({ terms: [], category, keyword: undefined, featured, sort, limit: DEFAULT_LIMIT, cursor: undefined })));
+        keys.push(cacheKey(["plugins"], listParams({ terms: [], category, keyword: undefined, featured, sort, limit: DEFAULT_LIMIT, cursor: undefined })));
       }
     }
   }
@@ -191,19 +191,19 @@ export const handleCatalog = async (request: Request, env: Env, db: D1Database, 
   if (request.method !== "GET" && request.method !== "HEAD") return undefined;
   // /store/v1/categories
   if (parts.length === 3 && parts[2] === "categories") {
-    return throughCache(request, cacheKey("categories"), FILE_TTL, async () => answer({ categories: CATEGORIES }, 200, publicCache(FILE_TTL)));
+    return throughCache(request, cacheKey(["categories"]), LIST_TTL, async () => answer({ categories: CATEGORIES }, 200, publicCache(LIST_TTL)));
   }
   if (parts[2] !== "plugins") return undefined;
   if (parts.length === 3) {
     const lq = parseListQuery(url);
     if (lq instanceof Response) return lq;
-    return throughCache(request, cacheKey("plugins", listParams(lq)), LIST_TTL, () => listPlugins(env, db, lq));
+    return throughCache(request, cacheKey(["plugins"], listParams(lq)), LIST_TTL, () => listPlugins(env, db, lq));
   }
   const id = parts[3]!;
   if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(id)) return notFound();
-  if (parts.length === 4) return throughCache(request, cacheKey(`plugins/${id}`), LIST_TTL, () => pluginDetail(env, db, id));
+  if (parts.length === 4) return throughCache(request, cacheKey(["plugins", id]), LIST_TTL, () => pluginDetail(env, db, id));
   if (parts.length === 5 && parts[4] === "versions") {
-    return throughCache(request, cacheKey(`plugins/${id}/versions`), LIST_TTL, () => pluginVersions(db, id));
+    return throughCache(request, cacheKey(["plugins", id, "versions"]), LIST_TTL, () => pluginVersions(db, id));
   }
   return undefined;
 };

@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { PUBLISHES_PER_HOUR } from "../../src/store/publish";
-import { ADMIN, author, call, makePackage, member, newSigner, publish, uniqueId } from "./store-helpers";
+import { ADMIN, author, call, makePackage, member, newSigner, publish, uniqueId, adminCall } from "./store-helpers";
 
 const json = async (res: Response) => (await res.json()) as Record<string, unknown>;
 
@@ -15,7 +15,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     const body = await json(res);
     expect(body).toMatchObject({ id, version: "1.0.0", status: "pending" });
     const checks = body.checks as { id: string; level: string }[];
-    expect(checks.map((c) => c.id)).toEqual(expect.arrayContaining(["signature", "manifest", "size", "version", "newer", "readme", "binary", "asks"]));
+    expect(checks.map((c) => c.id)).toEqual(expect.arrayContaining(["signature", "manifest", "size", "version", "newer", "readme", "binary_file", "asks"]));
     expect(checks.every((c) => c.level === "ok" || c.level === "warn")).toBe(true);
     const row = await env.STORE_DB.prepare("SELECT * FROM versions WHERE plugin_id = ?").bind(id).first<Record<string, unknown>>();
     expect(row).toMatchObject({ status: "pending", publisher_id: a.userId, via: "session", signer_key: a.signer.key, package_bytes: pkg.length });
@@ -101,11 +101,11 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     const a = await author();
     const b = await author();
     const kept = uniqueId("kept");
-    expect((await call(ADMIN, "POST", "/store/v1/admin/reservations", { id: kept, note: "for a partner" })).status).toBe(200);
+    expect((await adminCall("POST", "/store/v1/admin/reservations", { id: kept, note: "for a partner" })).status).toBe(200);
     const refused = await publish(a.userId, kept, await makePackage({ id: kept, version: "1.0.0", signer: a.signer }));
     expect((await json(refused)).error).toBe("id_reserved");
     const given = "github-helper";
-    expect((await call(ADMIN, "POST", "/store/v1/admin/reservations", { id: given, to_username: b.username })).status).toBe(200);
+    expect((await adminCall("POST", "/store/v1/admin/reservations", { id: given, to_username: b.username })).status).toBe(200);
     expect((await publish(a.userId, given, await makePackage({ id: given, version: "1.0.0", signer: a.signer }))).status).toBe(403);
     expect((await publish(b.userId, given, await makePackage({ id: given, version: "1.0.0", signer: b.signer }))).status).toBe(201);
   });
@@ -138,7 +138,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       [tampered, 400, "bad_signature", "tampered"],
       [await makePackage({ id, version: "1.0.0", signer: a.signer, manifest: { permissions: ["root"] } }), 400, "bad_package", "bad_manifest"],
       [await makePackage({ id, version: "1.0.0", signer: a.signer, files: { "../evil": "x" } }), 400, "bad_package", "bad_file"],
-      [await makePackage({ id, version: "1.0.0", signer: a.signer, manifest: { entry: "missing.luau" } }), 400, "bad_package", "missing_entry"],
+      [await makePackage({ id, version: "1.0.0", signer: a.signer, manifest: { entry: "missing.luau" } }), 400, "bad_package", "bad_manifest"],
       [await makePackage({ id: `${id}-x`, version: "1.0.0", signer: a.signer }), 400, "bad_package", "id_mismatch"]
     ];
     for (const [pkg, status, error, reason] of cases) {
@@ -158,14 +158,15 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       [{}, { "README.md": undefined }, "missing_readme"],
       [{ description: undefined }, {}, "missing_listing"],
       [{ icon: undefined }, {}, "missing_listing"],
-      [{ icon: "init.luau" }, {}, "missing_listing"],
+      [{ icon: "init.luau" }, {}, "bad_listing"],
       [{ categories: [] }, {}, "missing_listing"],
-      [{ categories: ["games"] }, {}, "missing_listing"],
-      [{ categories: ["git", "chat", "agents"] }, {}, "missing_listing"],
-      [{ keywords: ["Upper"] }, {}, "missing_listing"],
-      [{ screenshots: ["init.luau"] }, {}, "missing_listing"],
-      [{ homepage: "http://example.com" }, {}, "missing_listing"],
-      [{ engines: { zeron: ">= 0.4" } }, {}, "missing_listing"]
+      [{ categories: ["games"] }, {}, "bad_listing"],
+      [{ categories: ["git", "chat", "agents"] }, {}, "bad_listing"],
+      [{ keywords: ["Upper"] }, {}, "bad_listing"],
+      [{ screenshots: ["init.luau"] }, {}, "bad_listing"],
+      [{ homepage: "http://example.com" }, {}, "bad_listing"],
+      [{ engines: { zeron: ">= 0.4" } }, {}, "bad_listing"],
+      [{ description: "x".repeat(201) }, {}, "bad_listing"]
     ];
     for (const [manifest, files, error] of cases) {
       const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer, manifest, files }));
@@ -187,7 +188,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     expect((await json(await go("2.0.2-rc.1"))).error).toBe("not_newer");
     expect((await go("2.1.0-beta.2")).status).toBe(201);
     // A rejected version doesn't stand in the way, but its number stays taken.
-    expect((await call(ADMIN, "POST", `/store/v1/admin/submissions/${id}/2.1.0-beta.2/reject`, { reason: "broken", message: "It crashes." })).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/2.1.0-beta.2/reject`, { reason: "broken", message: "It crashes." })).status).toBe(200);
     const same = await go("2.1.0-beta.2");
     expect([same.status, (await json(same)).status]).toEqual([201, "rejected"]);
     const changed = await publish(a.userId, id, await makePackage({ id, version: "2.1.0-beta.2", signer: a.signer, files: { "init.luau": "return 3" } }));
@@ -216,7 +217,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     const a = await author();
     const id = uniqueId();
     expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
-    expect((await call(ADMIN, "POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "Malware." })).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "Malware." })).status).toBe(200);
     const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.1", signer: a.signer }));
     expect([res.status, (await json(res)).error]).toEqual([403, "suspended"]);
   });

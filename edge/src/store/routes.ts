@@ -18,6 +18,7 @@ import { fail, notFound, rateLimited } from "./http";
 import { handlePublish } from "./publish";
 import { serveFile, servePackage } from "./serve";
 import { handleUpdates } from "./updates";
+import { withSessionCookie } from "./principal";
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 
@@ -26,9 +27,18 @@ const allowRead = async (request: Request, env: Env): Promise<boolean> => {
   return !ip || !env.STORE_READS || (await env.STORE_READS.limit({ key: ip })).success;
 };
 
+/** What a deploy key's signed request may reach (amendment 6): publishing
+ * a version, and its plugin's state. */
+const deployKeyMayCall = (method: string, parts: readonly string[]): boolean =>
+  (method === "POST" && parts[2] === "plugins" && parts.length === 5 && parts[4] === "versions") ||
+  (method === "GET" && parts[2] === "me" && parts[3] === "plugins" && parts.length === 4);
+
 const route = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, url: URL, parts: readonly string[]): Promise<Response> => {
   const method = request.method;
   const read = method === "GET" || method === "HEAD";
+  if (/^ZeronKey\s/i.test(request.headers.get("authorization") ?? "") && !deployKeyMayCall(method, parts)) {
+    return fail(403, "key_not_allowed", "A deploy key can publish its plugin's versions and read its state, nothing else.");
+  }
   if (parts[2] === "admin") return handleAdmin(request, env, db, url, parts.slice(2));
   if (parts[2] === "me" && parts[3] === "plugins" && parts.length === 4 && read) return handleMyPlugins(request, env, db);
   if (parts[2] === "updates" && parts.length === 3 && method === "POST") {
@@ -63,11 +73,14 @@ export const handleStoreRoute = async (request: Request, env: Env, url: URL): Pr
   if (parts[2] === "plugins" && parts[4] === "keys") return undefined;
   const db = env.STORE_DB;
   const bucket = env.PLUGIN_STORE;
-  if (!db || !bucket) return fail(503, "unavailable", "The plugin store isn't set up on this server.");
+  if (!db || !bucket) return withSessionCookie(request, fail(503, "unavailable", "The plugin store isn't set up on this server."));
+  let response: Response;
   try {
-    return await route(request, env, db, bucket, url, parts);
+    response = await route(request, env, db, bucket, url, parts);
   } catch (e) {
     console.error("store: a request failed", request.method, url.pathname, String(e));
-    return fail(500, "internal", "Something went wrong. Try again.");
+    response = fail(500, "internal", "Something went wrong. Try again.");
   }
+  // A staff session's rotated cookie rides on every answer, errors included.
+  return withSessionCookie(request, response);
 };

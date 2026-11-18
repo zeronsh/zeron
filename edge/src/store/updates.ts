@@ -1,6 +1,6 @@
 /**
  * `POST /store/v1/updates { zeron, plugins: [{ id, version, hash, prerelease? }] }`
- * → { updates: [{ id, version, hash, key, sha256, bytes, prerelease, notes, added, removed, in_review? }],
+ * → { updates: [{ id, version, hash, key, publisher, sha256, bytes, prerelease, notes, added, removed, in_review? }],
  *     blocked: [{ id, version, reason }] }
  *
  * One request for every store-installed plugin on a device. For each, the
@@ -19,8 +19,9 @@
  * store doesn't know, against nothing).
  */
 import type { Env } from "../env";
+import { authorsOf } from "./cards";
 import { type ConsentItem, consentDiff } from "./consent";
-import { fail, answer, objectBody } from "./http";
+import { fail, answer, objectBody, refusedBody } from "./http";
 import { optionalUser, readBody } from "./principal";
 import { type Version, comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
 
@@ -83,7 +84,9 @@ const parseRequest = (body: Record<string, unknown> | undefined): { zeron: Versi
 };
 
 export const handleUpdates = async (request: Request, env: Env, db: D1Database): Promise<Response> => {
-  const parsed = parseRequest(objectBody(await readBody(request, MAX_BODY)));
+  const raw = await readBody(request, MAX_BODY);
+  if (typeof raw === "string") return refusedBody(raw);
+  const parsed = parseRequest(objectBody(raw));
   if (typeof parsed === "string") return fail(400, "bad_request", parsed);
   const caller = await optionalUser(request, env);
   if (parsed.plugins.length === 0) return answer({ updates: [], blocked: [] });
@@ -100,7 +103,13 @@ export const handleUpdates = async (request: Request, env: Env, db: D1Database):
       .all<Row>()
   ).results;
   const byPlugin = new Map<string, Row[]>();
-  for (const row of rows) byPlugin.set(row.plugin_id, [...(byPlugin.get(row.plugin_id) ?? []), row]);
+  for (const row of rows) {
+    const list = byPlugin.get(row.plugin_id);
+    if (list) list.push(row);
+    else byPlugin.set(row.plugin_id, [row]);
+  }
+  // Who owns each plugin now (amendment 25): a device asks again when it changes.
+  const owners = await authorsOf(env, [...new Set(rows.map((r) => r.owner_id))]);
 
   const updates: unknown[] = [];
   const blocked: unknown[] = [];
@@ -132,6 +141,7 @@ export const handleUpdates = async (request: Request, env: Env, db: D1Database):
       version: best.row.version,
       hash: best.row.content_hash,
       key: best.row.signer_key,
+      publisher: owners[best.row.owner_id]?.username ?? null,
       sha256: best.row.package_sha256,
       bytes: best.row.package_bytes,
       prerelease: best.row.is_release === 0,

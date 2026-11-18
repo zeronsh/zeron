@@ -20,7 +20,14 @@ export const rateLimited = (): Response =>
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": NO_STORE, "retry-after": "60" }
   });
 
-/** A JSON body of at most `max` bytes that is an object, or undefined. */
+/** A body `readBody` refused: past its cap, or (a deploy key's signed
+ * request) not the body that was signed. */
+export const refusedBody = (reason: "too_large" | "body_mismatch"): Response =>
+  reason === "too_large"
+    ? fail(413, "too_large", "The request body is too large.")
+    : fail(401, "invalid_signature", "The body isn't the one that was signed.");
+
+/** A JSON body that is an object, or undefined. */
 export const objectBody = (bytes: Uint8Array | undefined): Record<string, unknown> | undefined => {
   if (!bytes) return undefined;
   try {
