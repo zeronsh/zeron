@@ -702,7 +702,7 @@ The store lists plugins people made, on zeron.sh/plugins and in Settings → Plu
 
 ### What the store needs
 
-- **`README.md`** in the plugin's folder, at most 512 KB: its page. CommonMark and GitHub's tables, task lists and strikethrough. Raw HTML (`<p align="center">`, `<details>`, `<img>`, `<br>`) and footnotes (`[^1]`) aren't drawn: both stores show them as the characters typed, and the publish check says where (`raw_html`, `footnote`, in README.md or CHANGELOG.md). Use Markdown for pictures and headings. Pictures are files in the plugin, by a relative path (`![Board](shots/board.png)`); a picture from elsewhere shows as a link, because what's shown is what was reviewed. Links open in the browser.
+- **`README.md`** in the plugin's folder, at most 512 KB: its page. CommonMark and GitHub's tables, task lists and strikethrough. Raw HTML (`<p align="center">`, `<details>`, `<img>`, `<br>`) and footnotes (`[^1]`) aren't drawn: both stores show them as the characters typed, and the publish check says where (`raw_html`, `footnote`, in README.md or CHANGELOG.md). Use Markdown for pictures and headings. Display math (a `$$` block, or a fence marked `math`) is drawn in Zeron but shown as typed on the store's website, and the check says so too (`math`). Pictures are files in the plugin, by a relative path (`![Board](shots/board.png)`); a picture from elsewhere shows as a link, because what's shown is what was reviewed. Links open in the browser.
 - **`description`**: one line, at most 300 characters. It's the plugin's summary on its card. The `name` is at most 64.
 - **`icon`**: an SVG file in the plugin, at most 32 KB.
 - **`categories`**: one or two of `agents`, `appearance`, `chat`, `developer-tools`, `git`, `integrations`, `productivity`, `utilities`.
@@ -798,7 +798,7 @@ Every refusal from the store, or from Zeron about the store, reads `"<word>: <wo
 | `changed` | the plugin changed since it was checked: check it again |
 | `not_published` | a deploy key is for a plugin you already have in the store |
 | `step_up_required` | making a deploy key needs a fresh sign-in begun for it (`StepUp {for: "deploy_key"}`): each key its own, and no other sign-in's |
-| `bad_package`, `id_reserved`, `not_semver`, `missing_readme`, `missing_listing`, `bad_listing`, `too_large` | the store's rules (`check_plugin`); `binary_file`, `no_notes`, `raw_html` and `footnote` are warnings |
+| `bad_package`, `id_reserved`, `not_semver`, `missing_readme`, `missing_listing`, `bad_listing`, `too_large` | the store's rules (`check_plugin`); `binary_file`, `no_notes`, `raw_html`, `footnote` and `math` are warnings |
 | `needs_username`, `id_taken`, `version_exists`, `suspended` | the store refused the submission |
 | `key_not_allowed`, `key_revoked`, `key_expired`, `invalid_signature`, `unauthenticated` | the store refused the deploy key |
 | `unauthenticated`, `forbidden` | the store turned away who's asking (a 401 or 403 that said no more): for a signed-in person, sign in again |

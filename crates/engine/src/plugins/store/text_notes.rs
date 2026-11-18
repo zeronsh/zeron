@@ -1,5 +1,6 @@
 //! What the stores show as typed: a README's or CHANGELOG's raw HTML and
-//! footnotes. Both stores draw one subset of Markdown, and an author learns
+//! footnotes, and on the website display math. Both stores draw one subset
+//! of Markdown, and an author learns
 //! what falls outside it from the publish check (advice, never a failure),
 //! not from their own page.
 //!
@@ -13,6 +14,10 @@ use crate::plugins::listing::Problem;
 pub const RAW_HTML: &str = "raw_html";
 /// One with a footnote (`[^1]`, or its `[^1]: …`): shown as typed.
 pub const FOOTNOTE: &str = "footnote";
+/// One with display math (a `$$` line opening a block, or a fence whose
+/// info string is `math`): the website shows it as typed, Zeron draws it.
+/// (Inline `$…$` is never noted: prices and shell variables read alike.)
+pub const MATH: &str = "math";
 
 /// Elements a README might use, as a tag's name is matched (lowercase):
 /// prose with a `<` (`a < b`, `<Ctrl>`) names none of them.
@@ -100,11 +105,12 @@ const ELEMENTS: &[&str] = &[
     "wbr",
 ];
 
-/// `file`'s notes for `text`: one for raw HTML and one for footnotes, each
-/// naming the first line it was seen on.
+/// `file`'s notes for `text`: one each for raw HTML, footnotes and display
+/// math, naming the first line it was seen on.
 pub fn notes(file: &str, text: &str) -> Vec<Problem> {
     let mut html: Option<usize> = None;
     let mut footnote: Option<usize> = None;
+    let mut math: Option<usize> = None;
     let mut fence: Option<(u8, usize)> = None;
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
@@ -117,6 +123,9 @@ pub fn notes(file: &str, text: &str) -> Vec<Problem> {
         {
             match fence {
                 None => {
+                    if math.is_none() && body[run..].trim().eq_ignore_ascii_case("math") {
+                        math = Some(number);
+                    }
                     fence = Some((mark, run));
                     continue;
                 }
@@ -139,31 +148,40 @@ pub fn notes(file: &str, text: &str) -> Vec<Problem> {
         if footnote.is_none() && has_footnote(&prose) {
             footnote = Some(number);
         }
-        if html.is_some() && footnote.is_some() {
+        // (A `$$` in a code span is blanked out of `prose` already.)
+        if math.is_none() && prose.trim_start().starts_with("$$") {
+            math = Some(number);
+        }
+        if html.is_some() && footnote.is_some() && math.is_some() {
             break;
         }
     }
-    let note = |rule: &'static str, line: usize, what: &str, instead: &str| Problem {
+    let note = |rule: &'static str, words: String| Problem {
         rule,
         field: None,
         path: Some(file.to_owned()),
-        words: format!("{file} line {line} has {what}; the store shows it as text. {instead}"),
+        words,
+    };
+    let as_text = |line: usize, what: &str, instead: &str| {
+        format!("{file} line {line} has {what}; the store shows it as text. {instead}")
     };
     let mut out = Vec::new();
     if let Some(line) = html {
         out.push(note(
             RAW_HTML,
-            line,
-            "HTML",
-            "Use Markdown for pictures and headings.",
+            as_text(line, "HTML", "Use Markdown for pictures and headings."),
         ));
     }
     if let Some(line) = footnote {
         out.push(note(
             FOOTNOTE,
-            line,
-            "a footnote",
-            "Write the note into the text instead.",
+            as_text(line, "a footnote", "Write the note into the text instead."),
+        ));
+    }
+    if let Some(line) = math {
+        out.push(note(
+            MATH,
+            format!("{file} line {line} has math; the store's website shows it as typed (Zeron itself draws it)."),
         ));
     }
     out
@@ -326,6 +344,38 @@ mod tests {
             both.iter().map(|(rule, _)| *rule).collect::<Vec<_>>(),
             [RAW_HTML, FOOTNOTE]
         );
+    }
+
+    #[test]
+    fn display_math_is_noted_once_at_its_first_line() {
+        let math = |text: &str| {
+            said(text)
+                .into_iter()
+                .filter(|(rule, _)| *rule == MATH)
+                .map(|(_, words)| words)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            math("# Focus\n\nIt sums:\n\n$$\nx^2 + y^2\n$$\n\n$$ a = b $$\n"),
+            ["README.md line 5 has math; the store's website shows it as typed (Zeron itself draws it).".to_owned()]
+        );
+        assert_eq!(
+            math("Area:\n\n```math\n\\pi r^2\n```\n"),
+            ["README.md line 3 has math; the store's website shows it as typed (Zeron itself draws it).".to_owned()]
+        );
+        assert_eq!(math("~~~ Math\nx\n~~~").len(), 1);
+        // Never inline dollars, nor `$$` in code.
+        for text in [
+            "It costs $5 and $10.",
+            "Set $HOME, then run `echo $PATH`.",
+            "Totals: $$ are on us.",
+            "```\n$$\nx\n$$\n```",
+            "Write `$$` around it.",
+            "    $$ indented code",
+            "```js\nconst math = 1;\n```",
+        ] {
+            assert_eq!(math(text), Vec::<String>::new(), "{text:?}");
+        }
     }
 
     #[test]
