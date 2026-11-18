@@ -4083,7 +4083,9 @@
       "keys_publish_first": "Send its first version from this computer; a deploy key can send the ones after it.",
       "version_installs": "Version {version} · {n, plural, one {# install} other {# installs}}",
       "show_installed": "Show it in Installed",
-      "readme_more": "Show more"
+      "readme_more": "Show more",
+      "version_meta": "Version {version} · {date} · {n, plural, one {# install} other {# installs}}",
+      "details": "Details"
     }
   },
   "templates": {

@@ -4083,7 +4083,9 @@
       "keys_publish_first": "请先从这台电脑发送第一个版本；之后的版本可以由部署密钥发送。",
       "version_installs": "版本 {version} · {n, plural, other {# 次安装}}",
       "show_installed": "在“已安装”中查看",
-      "readme_more": "显示更多"
+      "readme_more": "显示更多",
+      "version_meta": "版本 {version} · {date} · {n, plural, other {# 次安装}}",
+      "details": "详细信息"
     }
   },
   "templates": {

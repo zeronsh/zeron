@@ -63,10 +63,17 @@ local function web(url: any): string?
 	return nil
 end
 
--- "github.com/ada/focus", for a link's words.
+-- "github.com/ada/focus", for a link's words: a long one kept to its
+-- start and its end, "…" between (its whole in its tooltip).
+local SHOWN_URL = 56
 local function shown_url(url: string): string
 	local w = string.gsub(url, "^https?://", "")
 	w = string.gsub(w, "/$", "")
+	if utf8.len(w) and (utf8.len(w) :: number) > SHOWN_URL then
+		local head = string.sub(w, 1, utf8.offset(w, 33) - 1)
+		local tail = string.sub(w, utf8.offset(w, -20) :: number)
+		w = `{head}…{tail}`
+	end
 	return w
 end
 
@@ -369,6 +376,33 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		return ""
 	end
 
+	-- Its keywords: each one narrows Browse to it.
+	local function keywords(): Node
+		local list: { string } = {}
+		for _, k in (if type(first.keywords) == "table" then first.keywords else {}) :: { any } do
+			if type(k) == "string" and k ~= "" and #list < 8 then
+				table.insert(list, k)
+			end
+		end
+		if #list == 0 then
+			return ui.div {}
+		end
+		local chips: { Node } = {}
+		for _, k in list do
+			table.insert(chips, ds.Tag {
+				function(): string
+					return k
+				end :: any,
+				size = "sm",
+				on_click = function()
+					browse.show_keyword(k)
+					nav.back()
+				end,
+			})
+		end
+		return ui.row { id = "store-keywords", gap = "$space.2", flex_wrap = true, px = ds.Settings.inset(), table.unpack(chips) }
+	end
+
 	-- The page's head: its tile at the left of its name (as every row's
 	-- is), who made it, its version and how many have it under the name,
 	-- and the one thing to do at the right, ending on the content edge
@@ -428,13 +462,23 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					},
 					browse.badges(d),
 				},
+				-- Its version, the day that version came out (the Versions
+				-- list's day for it) and how many have it.
 				ui.text {
 					function(): string
 						local n = d().installs
-						return ui.t("plugins.store.version_installs", {
-							version = d().version or "",
-							n = if type(n) == "number" then math.max(0, math.floor(n)) else 0,
-						}):get()
+						local count = if type(n) == "number" then math.max(0, math.floor(n)) else 0
+						local version = d().version or ""
+						local at: number? = nil
+						for _, v in (if type(d().versions) == "table" then d().versions else {}) :: { any } do
+							if type(v) == "table" and v.version == version and type(v.published_at) == "number" then
+								at = v.published_at
+							end
+						end
+						if at then
+							return ui.t("plugins.store.version_meta", { version = version, date = locale.date(at / 1000), n = count }):get()
+						end
+						return ui.t("plugins.store.version_installs", { version = version, n = count }):get()
 					end,
 					tabular = true,
 					text_size = "$font.size.sm",
@@ -476,6 +520,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			line_height = 20,
 			color = "$text.secondary",
 		}),
+		keywords(),
 		ui.show(function(): boolean
 			return note() ~= ""
 		end, ui.text {
@@ -631,8 +676,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		if #items == 0 then
 			return ui.div {}
 		end
-		return ds.Settings.Group {
-			ui.column { id = "store-facts", w_full = true, px = "$space.4", py = "$space.3", ds.KeyValue { items = items, key_width = 96 } },
+		return ds.Settings.Section {
+			title = ui.t("plugins.store.details"),
+			ds.Settings.Group {
+				ui.column { id = "store-facts", w_full = true, px = "$space.4", py = "$space.3", ds.KeyValue { items = items, key_width = 96 } },
+			},
 		}
 	end
 
@@ -699,7 +747,10 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		}
 	end
 
-	-- Its screenshots, side by side, each opening the set in the lightbox.
+	-- Its screenshots, side by side, each opening the set in the lightbox:
+	-- 16:10 thumbnails as wide as two and a bit fill the page's column, so
+	-- the next one shows at its edge to say there are more; the strip as
+	-- tall as they are, its first at the cards' edge.
 	local function shots(): Node
 		local list: { string } = {}
 		for _, s in (if type(first.screenshots) == "table" then first.screenshots else {}) :: { any } do
@@ -710,6 +761,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		if #list == 0 then
 			return ui.div {}
 		end
+		local measure = (ui.theme.get("zeron.settings.measure") :: number?) or 640
+		local gap = (ui.theme.get("space.3") :: number?) or 12
+		local w = math.floor((measure - 2 * gap) / 2.4)
+		local h = math.floor(w * 10 / 16)
+		local radius = (ui.theme.get("radius.lg") :: number?) or 12
 		local function items(): { any }
 			local out = {}
 			for _, path in list do
@@ -727,7 +783,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				return if src == false then "\0none" else (src or "")
 			end, function(src: string): Node
 				if src == "" then
-					return ds.Skeleton { w = 200, h = 125, rounded = "$radius.lg" }
+					return ds.Skeleton { w = w, h = h, rounded = "$radius.lg" }
 				elseif src == "\0none" then
 					return ui.div {}
 				end
@@ -741,24 +797,20 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					group = `store:{id}`,
 					index = index,
 					items = items,
-					radius = 10,
-					w = 200,
-					h = 125,
+					radius = radius,
+					w = w,
+					h = h,
 					ui.image { src = src, w_full = true, h_full = true, fit = "cover", aria_hidden = true },
 				}
 			end))
 		end
-		return ds.Settings.Section {
-			title = ui.t("plugins.store.pictures"),
-			ui.scroll_x {
-				id = "store-shots",
-				w_full = true,
-				-- (As tall as its pictures: nothing under them.)
-				h = 125,
-				fade = { 12, 12 },
-				fade_overflow = true,
-				ui.row { gap = "$space.3", px = ds.Settings.inset(1), table.unpack(thumbs) },
-			},
+		return ui.scroll_x {
+			id = "store-shots",
+			w_full = true,
+			h = h,
+			fade = { 12, 12 },
+			fade_overflow = true,
+			ui.row { gap = "$space.3", table.unpack(thumbs) },
 		}
 	end
 
@@ -840,33 +892,6 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				end,
 			}),
 		}
-	end
-
-	-- Its keywords: each one narrows Browse to it.
-	local function keywords(): Node
-		local list: { string } = {}
-		for _, k in (if type(first.keywords) == "table" then first.keywords else {}) :: { any } do
-			if type(k) == "string" and k ~= "" and #list < 8 then
-				table.insert(list, k)
-			end
-		end
-		if #list == 0 then
-			return ui.div {}
-		end
-		local chips: { Node } = {}
-		for _, k in list do
-			table.insert(chips, ds.Tag {
-				function(): string
-					return k
-				end :: any,
-				size = "sm",
-				on_click = function()
-					browse.show_keyword(k)
-					nav.back()
-				end,
-			})
-		end
-		return ui.row { id = "store-keywords", gap = "$space.2", flex_wrap = true, px = ds.Settings.inset(), table.unpack(chips) }
 	end
 
 	-- What changes with the update, read before it: the changelog and what
@@ -1017,12 +1042,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			w_full = true,
 			gap = "$space.6",
 			offer,
-			keywords(),
+			shots(),
+			readme(),
+			asks(),
 			facts(),
 			prerelease,
-			readme(),
-			shots(),
-			asks(),
 			history(),
 			ui.row {
 				w_full = true,

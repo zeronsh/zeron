@@ -82,9 +82,18 @@ test("the facts say only what the head doesn't, and a requirement once", functio
 	expect(n).to_be(1)
 end)
 
-test("the pictures' strip is as tall as its pictures", function()
+test("the pictures' strip: 16:10 thumbnails, two and a bit across the column, the strip as tall as they are, at the cards' edge", function()
 	local app = page("focus-timer")
-	expect(box(app, "#store-shots").h).to_be(125)
+	local strip = box(app, "#store-shots")
+	local thumb = box(app, '#store-shots >> role:button "Open header.png"')
+	local card = box(app, "#store-readme")
+	-- (The README's box is 1 in from its card's edge.)
+	expect(math.abs(strip.x - (card.x - 1)) < 0.6).to_be(true)
+	expect(strip.h).to_be(thumb.h)
+	expect(math.abs(thumb.w / thumb.h - 1.6) < 0.02).to_be(true)
+	expect(math.abs(thumb.x - strip.x) < 0.6).to_be(true)
+	-- Two whole and the next one showing at the column's edge.
+	expect(strip.w > 2 * thumb.w + 2 * 12 and strip.w < 3 * thumb.w + 2 * 12).to_be(true)
 end)
 
 test("Browse's filters are controls on the card's even inset, settings-select wide, one line whatever comes", function()
