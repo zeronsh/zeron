@@ -558,7 +558,7 @@ local function view(plugin: string): Node
 		end
 		return nil
 	end
-	-- Unverified, at the top right, for one whose maker Zeron can't vouch
+	-- Unknown author, at the top right, for one whose maker Zeron can't vouch
 	-- for (as its row says). (The page built again as that changes: a
 	-- trail there takes the header's gap, hidden or not, so the title and
 	-- the line under it keep Zeron's pages' whole width while there's none.)

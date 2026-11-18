@@ -3615,9 +3615,14 @@
         "available": "Update available: {version}.",
         "available_unversioned": "Update available:.",
         "added": "It also asks to {list}; you'll be asked first.",
-        "removed": "It no longer asks to {list}."
+        "removed": "It no longer asks to {list}.",
+        "held": "{version} is waiting: it takes verified updates only.",
+        "unverified": "Update available: {version}, not verified yet.",
+        "held_plugin": "{version} is waiting: this plugin takes verified updates only.",
+        "held_computer": "{version} is waiting: this computer takes verified updates only.",
+        "held_device": "{version} is waiting: {device} takes verified updates only."
       },
-      "unverified": "Unverified",
+      "unverified": "Unknown author",
       "from": "From {where}",
       "from_file": "From a file",
       "more": "and {n} more",
@@ -3641,7 +3646,8 @@
         "changes": "Parts of Zeron it changes",
         "replaces": "Screens it replaces",
         "changes_since": "Also changes, since you allowed it"
-      }
+      },
+      "store_unverified_unversioned": "Zeron hasn't verified this version yet."
     },
     "page": {
       "title": "Plugins",
@@ -3664,6 +3670,7 @@
       "builtin": "{name} is part of Zeron",
       "remove_named": "Remove {name}",
       "update": "Update",
+      "update_asks": "Update…",
       "updating": "Updating…",
       "none_yours": "None of yours yet",
       "none": "No plugins yet",
@@ -3706,6 +3713,7 @@
       "unknown_why": "Zeron can't tell who made it. Allow it only if you trust where it came from.",
       "nothing": "Nothing to allow",
       "asks_nothing": "It asks for nothing beyond running in its own space.",
+      "nothing_new": "It asks for nothing beyond what you allowed.",
       "allow_title": "Allow {name}?",
       "tampered": "Changed since you allowed it",
       "asks_again": "It now also asks to:",
@@ -3848,7 +3856,10 @@
       "invalid_name": "Give the key a shorter name.",
       "invalid_expiry": "Choose when the key ends again.",
       "invalid_proof": "The store couldn't check the new key. Try again.",
-      "bad_csrf": "The store refused a request it couldn't trust. Try again."
+      "bad_csrf": "The store refused a request it couldn't trust. Try again.",
+      "not_owner": "Some of those plugins aren't yours in the store.",
+      "invalid_scope": "Choose at least one of your plugins for it.",
+      "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others."
     },
     "store": {
       "browse": "Browse",
@@ -3862,9 +3873,34 @@
       "update_to": "Update to {version}",
       "install": "Install",
       "install_on": "Install on {device}",
+      "install_version": "Install {version}",
+      "install_version_on": "Install {version} on {device}",
+      "link_version_missing": "The store has no version {version} of it.",
+      "link_version_unread": "Couldn't see {version} in the store.",
+      "link_version_superseded": "{version} takes no new installs: replaced by {by} before it was verified.",
+      "link_version_yanked": "{version} takes no new installs.",
+      "link_version_taken_down": "Zeron took {version} down.",
+      "link_version_removed": "{version} was removed from the store.",
+      "link_version_for": "This link is for {version}. The newest is {newest}.",
+      "show_newest": "Show the newest",
       "turn_on": "Turn on",
       "open_settings": "Open settings",
       "category_label": "Category",
+      "all_categories": "All categories",
+      "not_verified_yet": "Zeron hasn't verified {version} yet.",
+      "installed_was_verified": "The version you have, {installed}, was verified.",
+      "update_instead": "Update to {version} instead",
+      "not_verified_line": "{version} isn't verified yet. {verified} is.",
+      "none_verified": "No version of this plugin is verified yet.",
+      "install_instead": "Install {version} instead",
+      "verified_on": "Verified on {date}",
+      "not_verified": "Not verified",
+      "all_versions_plain": "Show all versions",
+      "versions_failed_toast": "Couldn't read its other versions",
+      "verified": "Verified",
+      "verified_only": "Verified only",
+      "category_count": "{name} ({n})",
+      "order_label": "Order",
       "sort": {
         "relevance": "Best match",
         "popular": "Most installed",
@@ -3892,7 +3928,7 @@
       "try_another": "Try other words, or fewer filters.",
       "clear": "Clear search",
       "empty_title": "No plugins in the store yet",
-      "empty_body": "Plugins people share appear here once they're reviewed.",
+      "empty_body": "Plugins people publish appear here.",
       "not_found_title": "This plugin isn't in the store",
       "not_found_body": "It may have been taken down, or the link is wrong.",
       "browse_all": "Browse plugins",
@@ -3983,8 +4019,8 @@
         "bad_listing": {
           "icon": "Its icon must be an SVG of at most 32 KB.",
           "categories": "Choose one or two of the store's categories.",
-          "description": "Keep its description to 300 characters.",
-          "name": "Keep its name to 64 characters.",
+          "description": "Keep its description to one line of 300 characters, with nothing hidden in it, and don't call it verified: the store does that.",
+          "name": "Keep its name to 64 characters, with nothing hidden in it, and don't call it verified: the store does that.",
           "keywords": "Use at most 8 keywords, lowercase, 32 characters each.",
           "screenshots": "Use at most 8 pictures, each a PNG or JPEG in its folder.",
           "homepage": "Its website must be an https link.",
@@ -3997,36 +4033,27 @@
       "check_again": "Check again",
       "check_failed": "Couldn't check it",
       "fix_first": "Fix what's marked, save, and check again.",
-      "submit": "Submit for review",
-      "submit_version": "Submit {version} for review",
+      "submit": "Publish",
+      "submit_version": "Publish {version}",
       "submit_note": "{n, plural, one {# file is} other {# files are}} sent, signed as yours, exactly as checked.",
-      "sent_toast": "Sent {name} {version} for review",
+      "sent_toast": "{name} {version} is in the plugin store",
       "your_versions": "Versions you've sent",
       "no_versions": "Nothing sent yet.",
       "versions_failed": "Couldn't see your versions",
       "sign_in_to_see": "Sign in to see your versions",
       "at_line": "{path}, line {line}",
-      "sign_in_to_see_keys": "Sign in to see its keys",
+      "sign_in_to_see_keys": "Sign in to see your keys",
       "status": {
-        "pending": "In review",
-        "approved": "Approved",
-        "rejected": "Not approved",
-        "withdrawn": "Withdrawn",
         "yanked": "No new installs",
-        "removed": "Taken down"
+        "taken_down": "Taken down",
+        "removed": "Removed"
       },
-      "reviewer_said": "{date} · “{words}”",
       "action": {
-        "withdraw": "Withdraw",
         "yank": "Stop new installs",
         "unyank": "Allow installs again"
       },
       "action_failed": "Couldn't change that version",
       "confirm": {
-        "withdraw": {
-          "title": "Withdraw {name} {version}?",
-          "body": "It leaves the review queue. A version once sent keeps its number: send the next one under a new version."
-        },
         "yank": {
           "title": "Stop new installs of {name} {version}?",
           "body": "Nobody can install it anymore. Those who have it keep it working. You can allow installs again later."
@@ -4038,17 +4065,19 @@
       },
       "summary": {
         "none": "Not in the plugin store",
-        "listed": "{version} in the plugin store",
-        "in_review": "{version} in review",
         "unknown": "Share it in the plugin store",
+        "listed_verified": "{version} in the plugin store, verified",
+        "listed_waiting": "{version} in the plugin store, not verified yet",
+        "listed_declined": "{version} in the plugin store, not verified",
         "no_installs": "{version}: no new installs",
-        "not_approved": "{version} not approved",
-        "taken_down": "{version} taken down"
+        "taken_down": "{version} taken down",
+        "newest_verified": "{version} is the newest verified",
+        "none_verified": "nothing verified yet"
       },
       "keys": "Deploy keys",
-      "keys_body": "A deploy key lets a CI job, such as a GitHub Action, send new versions of this plugin without your session; each still waits for review.",
+      "keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each key publishes the plugins chosen when it's made.",
       "keys_none": "No keys yet.",
-      "keys_failed": "Couldn't see its keys",
+      "keys_failed": "Couldn't see your keys",
       "key": {
         "new": "New key…",
         "new_title": "New deploy key",
@@ -4067,9 +4096,7 @@
         "stop_waiting": "Stop waiting",
         "timed_out": "The sign-in didn't finish. Try again.",
         "secret_title": "Copy your key now",
-        "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets. Anyone with it can send versions of this plugin as you.",
-        "copy": "Copy",
-        "copied": "Key copied",
+        "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets. Anyone with it can publish versions of the plugins it's for, as you.",
         "done": "I've copied it",
         "ends": "Ends {date}",
         "revoke": "Revoke",
@@ -4081,7 +4108,21 @@
         "no_end": "Doesn't expire",
         "ends_today": "Ends today",
         "ends_tomorrow": "Ends tomorrow",
-        "ends_in": "{n, plural, one {Ends in # day} other {Ends in # days}}"
+        "ends_in": "{n, plural, one {Ends in # day} other {Ends in # days}}",
+        "last_used_on": "Last used {date} on {plugin}",
+        "scope": {
+          "label": "Can publish",
+          "all": "All your plugins",
+          "chosen": "Chosen plugins",
+          "one": "{name}",
+          "two": "{a} and {b}",
+          "all_now": "All your plugins: {n} today, and any you publish later",
+          "more": "{a}, {b} and {n} more",
+          "every": "{list} and {last}",
+          "show_all": "Show all",
+          "fewer": "Show fewer"
+        },
+        "not_used_made": "Not used yet · made {date}"
       },
       "unblock_title": "Turn {name} back on?",
       "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",
@@ -4089,14 +4130,13 @@
       "update_new_owner": "It has a new publisher, @{username}. Zeron asks you to allow it again after it updates.",
       "update_new_owner_unnamed": "It has a new publisher. Zeron asks you to allow it again after it updates.",
       "update_new_key": "This version is signed with a different key than the one you have.",
-      "update_in_review": "This version is still in review: only your own devices are offered it.",
-      "keys_publish_first": "Send its first version from this computer; a deploy key can send the ones after it.",
+      "update_asks_first": "Zeron asks you to allow it before it updates.",
+      "keys_publish_first": "Publish one of your plugins from this computer first.",
       "version_installs": "Version {version} · {n, plural, one {# install} other {# installs}}",
       "show_installed": "Show it in Installed",
       "readme_more": "Show more",
       "version_meta": "Version {version} · {date} · {n, plural, one {# install} other {# installs}}",
       "details": "Details",
-      "all": "All",
       "has_version": "You have {version}",
       "has_version_on": "{device} has {version}",
       "off_note": "Turned off",
@@ -4107,10 +4147,62 @@
       "all_versions": "Show all {n} versions",
       "count": "{n, plural, one {# plugin} other {# plugins}}",
       "list_title": "Plugins",
-      "categories_back": "Earlier categories",
-      "categories_more": "More categories",
       "plain_readme": "This README is drawn as plain text past here: it's too long or too deeply nested to lay out.",
-      "plain_notes": "These notes are drawn as plain text past here: they're too long or too deeply nested to lay out."
+      "plain_notes": "These notes are drawn as plain text past here: they're too long or too deeply nested to lay out.",
+      "review": {
+        "waiting": "Not verified yet",
+        "declined": "Not verified",
+        "declined_said": "The reviewer's note: “{words}”"
+      },
+      "superseded": "Replaced by {version} before it was verified",
+      "sent_toast_body": "It shows as not verified until a reviewer has read it.",
+      "updates_label": "Updates",
+      "updates_body": "Take every new version of this plugin, or only the ones Zeron has verified.",
+      "updates_newest": "Newest version",
+      "updates_verified": "Verified versions only",
+      "couldnt_updates": "Couldn't change {name}'s updates",
+      "updates_device": "Same as this computer",
+      "updates_follows_newest": "Follows this computer: newest version.",
+      "updates_follows_verified": "Follows this computer: verified versions only.",
+      "updates_section": "Plugin store",
+      "updates_all_label": "Updates",
+      "updates_all_body": "Take every new version, or only the ones Zeron has verified.",
+      "couldnt_updates_all": "Couldn't change which updates your plugins take",
+      "installed_was_verified_plain": "The version you have was verified.",
+      "newest_verified_is": "{version} is the newest version Zeron has verified.",
+      "cause": {
+        "field": {
+          "name": "name",
+          "description": "description",
+          "keywords": "keywords"
+        },
+        "too_long": {
+          "name": "Its name is longer than 64 characters.",
+          "description": "Its description is longer than 300 characters."
+        },
+        "not_one_line": {
+          "description": "Its description must be one line."
+        },
+        "unseen_char": {
+          "any": "Its {field} has a hidden character, {word}. Take it out."
+        },
+        "mark_word": {
+          "any": "Its {field} calls it “{word}”. The store's mark says that; take the word out or say what was verified.",
+          "keywords": "The keyword “{word}” is the store's mark. Take it out."
+        },
+        "mark_glyph": {
+          "any": "Its {field} has “{word}”, which reads as the store's mark. Take it out."
+        },
+        "keyword_shape": {
+          "keywords": "The keyword “{word}” must be lowercase letters, digits, dashes and single spaces, at most 32 characters."
+        },
+        "too_many": {
+          "keywords": "Use at most 8 keywords."
+        },
+        "repeated": {
+          "keywords": "The keyword “{word}” is there twice."
+        }
+      }
     }
   },
   "templates": {

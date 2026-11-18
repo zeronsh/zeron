@@ -124,6 +124,33 @@ fn invisible(c: char) -> bool {
 
 /// The plugin as the sheet shows it: its own words bounded and plain
 /// (`plain`), its version only if it reads as one.
+/// Whether `version` reads as a version (`1.2.0`, `0.3.0-beta.1`): a
+/// version anywhere the app shows or takes one (a link's too).
+pub(crate) fn version_reads(version: &str) -> bool {
+    (1..=VERSION).contains(&version.len()) && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
+}
+
+/// The store id of an unverified store version waiting here, else nil.
+fn unverified_store(item: &Json) -> Option<String> {
+    if item["source"]["kind"].as_str() != Some("store") || item["source"]["verified"].as_bool() != Some(false) {
+        return None;
+    }
+    item["source"]["id"].as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
+/// The newest verified version the store has, which an unverified store
+/// version waiting here could take instead, as the engine's item names it
+/// (an update's offer, or a first install's source). With its store id.
+/// None named, none is offered: the engine installs only the one it names.
+fn verified_alternative(item: &Json) -> Option<(String, String)> {
+    let store = unverified_store(item)?;
+    let alt = item["update"]["verified_alternative"]["version"]
+        .as_str()
+        .or_else(|| item["source"]["verified_alternative"]["version"].as_str())
+        .filter(|v| version_reads(v))?;
+    Some((store, alt.to_string()))
+}
+
 fn bounded(item: &Json) -> Json {
     let mut item = item.clone();
     let words = |v: &mut Json, most: usize| {
@@ -134,10 +161,16 @@ fn bounded(item: &Json) -> Json {
     words(&mut item["name"], NAME);
     words(&mut item["description"], WORDS);
     let version = item["version"].as_str().unwrap_or("");
-    let reads = (1..=VERSION).contains(&version.len())
-        && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'));
-    if !reads {
+    if !version_reads(version) {
         item["version"] = json!("");
+    }
+    // (The verified version it could take instead, said in the sheet: a
+    // version as a version reads, else none.)
+    for under in ["update", "source"] {
+        let alt = &mut item[under]["verified_alternative"];
+        if alt.is_object() && !version_reads(alt["version"].as_str().unwrap_or("")) {
+            *alt = Json::Null;
+        }
     }
     let tools = |list: &mut Json| {
         for tool in list.as_array_mut().into_iter().flatten() {
@@ -332,6 +365,43 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
             }
         });
     });
+    // "Install 1.2.0 instead": the newest verified version in place of the
+    // unverified one waiting (the sheet shown, as it is), on its device.
+    // The engine takes the version from the item it showed (never the
+    // script's, nor this host's), checks the store says it's verified, and
+    // refuses a changed item. What it then is waits here as any install
+    // does; nothing waiting, the window closes.
+    let (weak, window, out, ons, ids) = (Rc::downgrade(bridge), cx.window.clone(), shared.clone(), on.clone(), id.clone());
+    host.action("plugins.install_verified", move |arg| {
+        let Some(b) = weak.upgrade() else { return };
+        let id = arg.field("id").map(text).unwrap_or_default();
+        let hash = arg.field("hash").map(text).unwrap_or_default();
+        let on = ons.borrow().clone();
+        let Some(item) = showable(&b, &id, &on).filter(|item| *ids.borrow() == id && item.hash() == hash && item.status() == "pending") else {
+            return;
+        };
+        let Some((_, version)) = verified_alternative(&item.json) else { return };
+        out.set(shown(&b, &id, &on, true, None));
+        let (weak, window, out) = (Rc::downgrade(&b), window.clone(), out.clone());
+        engine::get().spawn(async move {
+            let device = on.as_ref().map(|(d, _)| d.as_str());
+            eprintln!("zeron-zgx: plugins: {id} {version} installed in place of an unverified version");
+            let params = remote::addressed(device, json!({ "id": id, "hash": hash }));
+            let result = engine::get().call("InstallVerifiedPlugin", params).await;
+            let Some(b) = weak.upgrade() else { return };
+            match result {
+                Ok(_) if showable(&b, &id, &on).is_none() => {
+                    window.close();
+                }
+                Ok(_) => {
+                    out.set(shown(&b, &id, &on, false, None));
+                }
+                Err(error) => {
+                    out.set(shown(&b, &id, &on, false, Some(&said(&error, &on))));
+                }
+            }
+        });
+    });
     let (weak, out, ons, ids) = (Rc::downgrade(bridge), shared.clone(), on.clone(), id.clone());
     host.action("plugins.reinstall", move |arg| {
         let Some(b) = weak.upgrade() else { return };
@@ -437,6 +507,29 @@ fn said(error: &str, on: &On) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Install 1.2.0 instead" takes the version the engine's item names,
+    /// for an unverified store version alone; a version that doesn't read
+    /// as one is never said nor installed.
+    #[test]
+    fn the_verified_version_instead_is_the_engine_s_and_reads_as_a_version() {
+        let update = json!({ "source": { "kind": "store", "id": "focus-timer", "verified": false }, "update": { "verified_alternative": { "version": "1.2.1" } } });
+        assert_eq!(verified_alternative(&update), Some(("focus-timer".into(), "1.2.1".into())));
+        let first = json!({ "source": { "kind": "store", "id": "fresh", "verified": false, "verified_alternative": { "version": "0.0.9" } } });
+        assert_eq!(verified_alternative(&first), Some(("fresh".into(), "0.0.9".into())));
+        // (One that names none: the store is asked.)
+        let none = json!({ "source": { "kind": "store", "id": "fresh", "verified": false, "verified_alternative": null } });
+        assert_eq!(verified_alternative(&none), None);
+        assert_eq!(unverified_store(&none), Some("fresh".into()));
+        let verified = json!({ "source": { "kind": "store", "id": "fresh", "verified": true, "verified_alternative": { "version": "0.1.0" } } });
+        assert_eq!(verified_alternative(&verified), None);
+        let git = json!({ "source": { "kind": "git", "verified": false }, "update": { "verified_alternative": { "version": "1.0.0" } } });
+        assert_eq!(verified_alternative(&git), None);
+        let odd = json!({ "source": { "kind": "store", "id": "x", "verified": false }, "update": { "verified_alternative": { "version": "✓ Zeron" } } });
+        assert_eq!(verified_alternative(&odd), None);
+        assert!(bounded(&odd)["update"]["verified_alternative"].is_null());
+        assert_eq!(bounded(&update)["update"]["verified_alternative"]["version"], "1.2.1");
+    }
 
     /// R27: a plugin's name, version and tools' words can't pass for
     /// Zeron's own on the sheet (a version reading "✓ Zeron", a name

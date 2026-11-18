@@ -301,27 +301,38 @@ test("an install that fails keeps the dialog, to try again", function()
 	expect(app:state("calls")).never.to_contain("rate_limited")
 end)
 
-test("one Zeron can't vouch for says Unverified by its version, and where it came from", function()
+test("one Zeron can't vouch for says Unknown author by its version, and where it came from", function()
 	local app = open()
 	local function badges(): number
-		local _, n = string.gsub(app:tree(), '"Unverified"', "")
+		local _, n = string.gsub(app:tree(), '"Unknown author"', "")
 		return n
 	end
 	-- Zeron's own, yours and a verified author's: never.
 	app:command("builtin")
 	app:frames(20)
 	expect(badges()).to_be(0)
-	-- Someone Zeron can't vouch for: one badge, theirs.
+	-- Someone Zeron can't vouch for, from nowhere named: its badge says it,
+	-- once; no byline saying it again.
 	app:command("arrive")
 	app:frames(20)
 	expect(badges()).to_be(1)
-	expect(app:tree()).to_contain("Unknown author")
-	-- Where it came from, once known, in place of "Unknown author".
+	local function card_h(): number
+		return tonumber((app:tree("#catalog-card"):match("^%s*@%d+ #catalog%-card %-?[%d.]+,%-?[%d.]+ [%d.]+x([%d.]+)"))) or 0
+	end
+	local function y_of(words: string): number
+		return tonumber((app:tree("#catalog-card"):match(`text "{words}[^"]*" %-?[%d.]+,(%-?[%d.]+)`))) or 0
+	end
+	local bare = card_h()
+	-- (Its next line a name's step under its name, as its neighbours'.)
+	expect(y_of("Waiting for you") - y_of("Ping")).to_be(20)
+	-- Where it came from, once known: its byline, the badge kept.
 	app:command("ping_from_github")
 	app:frames(20)
 	expect(app:tree()).to_contain("From github.com/eve/ping")
-	expect(app:tree()).never.to_contain("Unknown author")
 	expect(badges()).to_be(1)
+	expect(y_of("From github") - y_of("Ping")).to_be(20)
+	-- (The line and its step alone come and go: 16 and 2.)
+	expect(card_h() - bare).to_be(18)
 end)
 
 

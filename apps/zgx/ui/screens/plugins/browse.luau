@@ -1,8 +1,9 @@
 --!strict
 -- Settings → Plugins → Browse: the plugin store, searched on its servers.
--- The page's catalog card (ds.Settings.CatalogCard) with its search, a bar
--- of what narrows it (one category, a keyword, the order), and under it the
--- store's plugins a page at a time, more asked as the page scrolls near the
+-- The list's head says how many and holds what narrows and orders it (a
+-- category, the order); the page's catalog card (ds.Settings.CatalogCard)
+-- holds its search (a keyword beside it) and under it the store's plugins
+-- a page at a time, more asked as the page scrolls near the
 -- end (`ui.paged`, keyset cursors), in a list that builds only the rows
 -- that show. With nothing searched or chosen, a few plugins Zeron
 -- features stand over the card.
@@ -25,11 +26,15 @@ local nav = require("@app/screens/plugins/nav")
 
 local M = {}
 
--- What's asked: the words searched, a category, a keyword, the order ("":
--- the store's own for what's asked, relevance for words, else popular).
+-- What's asked: the words searched, a category, a keyword, a publisher
+-- (a username, from a plugin's page), whether verified plugins only, the
+-- order ("": the store's own for what's asked, relevance for words, else
+-- popular).
 local query = ui.state("store_query", "")
 local category = ui.state("store_category", "")
 local keyword = ui.state("store_keyword", "")
+local author = ui.state("store_author", "")
+local verified_only = ui.state("store_verified_only", false)
 local sort = ui.state("store_sort", "")
 -- Whether Browse has been looked at this run: until then nothing is asked
 -- (the page's other tabs never ask the store).
@@ -61,7 +66,7 @@ local function order(): string
 end
 
 local function narrowed(): boolean
-	return trimmed(query:get()) ~= "" or category:get() ~= "" or keyword:get() ~= ""
+	return trimmed(query:get()) ~= "" or category:get() ~= "" or keyword:get() ~= "" or author:get() ~= "" or verified_only:get()
 end
 
 local function reason(err: any): string
@@ -70,7 +75,8 @@ local function reason(err: any): string
 end
 
 -- The store's plugins, a page at a time. Keyed by what the first page
--- reads (the settled words, the category, the keyword, the order): a
+-- reads (the settled words, the category, the keyword, the publisher,
+-- verified only, the order): a
 -- change asks again from the start, the rows shown staying until it
 -- answers. A later page leaves out any already shown (a plugin updated
 -- while paging moves up the "recently updated" order).
@@ -83,6 +89,8 @@ listing = ui.paged(function(cursor: string?): any
 		q = trimmed(settled:get()),
 		category = if category:get() ~= "" then category:get() else nil,
 		keyword = if keyword:get() ~= "" then keyword:get() else nil,
+		author = if author:get() ~= "" then author:get() else nil,
+		verified = if verified_only:get() then true else nil,
 		sort = order(),
 		cursor = cursor,
 		limit = store.PAGE,
@@ -146,8 +154,9 @@ local featured_pages = ui.paged(function(_cursor: string?): any
 	return { items = out, next = nil }
 end)
 
--- The categories the store has, asked once a run.
-local categories = ui.state("store_categories", {} :: { { id: string, name: string } })
+-- The categories the store has, asked once a run, each with how many
+-- listed plugins it holds when the store says.
+local categories = ui.state("store_categories", {} :: { { id: string, name: string, count: number? } })
 local asked_categories = false
 local function load_categories()
 	if asked_categories then
@@ -158,7 +167,11 @@ local function load_categories()
 		local list = {}
 		for _, c in (if type(r) == "table" and type(r.categories) == "table" then r.categories else {}) :: { any } do
 			if type(c) == "table" and type(c.id) == "string" then
-				table.insert(list, { id = c.id, name = if type(c.name) == "string" then c.name else c.id })
+				table.insert(list, {
+					id = c.id,
+					name = if type(c.name) == "string" then c.name else c.id,
+					count = if type(c.count) == "number" and c.count >= 0 then math.floor(c.count) else nil,
+				})
 			end
 		end
 		categories:set(list)
@@ -256,38 +269,136 @@ function M.Tile(props: { card: State<store.Card> | () -> store.Card, size: numbe
 	end)
 end
 
+-- The store's mark beside its name: "Verified" when the store has verified
+-- the version the card offers (what the store's answer says, for this
+-- visit: the catalog's, never a sheet's decision). Nil when it hasn't.
+function M.verified_mark(card: () -> store.Card): Node
+	return ui.show(function(): boolean
+		return card().verified == true
+	end, ds.Badge { ui.t("plugins.store.verified"), class = "store-verified", tone = "success", size = "sm" })
+end
+
+-- A version's state as the store keeps it (listed, yanked, taken down,
+-- removed), its review apart: the store verifies; it doesn't gate. (An
+-- older answer says `yanked` alone.)
+function M.version_state(v: any): string
+	if type(v.status) == "string" and v.status ~= "" then
+		return v.status
+	end
+	return if v.yanked == true then "yanked" else "listed"
+end
+
+-- Where its review stands: "verified"; "declined" in its author's view
+-- alone (`owner`: told why), for the public never learns of a decline;
+-- else "waiting".
+function M.version_review(v: any, owner: boolean?): string
+	if v.verified == true then
+		return "verified"
+	end
+	local r = v.review
+	return if owner and type(r) == "table" and r.decision == "declined" then "declined" else "waiting"
+end
+
+-- A version's badge beside its number, in every list of versions (a
+-- plugin's page, Publish's): its state's when it takes no new installs,
+-- was taken down or removed; else its review's ("Verified", "Not verified
+-- yet", its author's "Not verified"), so the eye runs down the numbers and
+-- reads which are verified.
+local STATE_TONE: { [string]: string } = {
+	yanked = "info",
+	taken_down = "warning",
+	removed = "neutral",
+}
+local REVIEW_TONE: { [string]: string } = {
+	waiting = "warning",
+	declined = "danger",
+}
+function M.version_badge(version: () -> any, owner: boolean?): Node
+	return ui.switch(function(): string
+		local v = version()
+		local s = M.version_state(v)
+		return if STATE_TONE[s] then s else M.version_review(v, owner)
+	end, (function(): { [string]: Node }
+		local out: { [string]: Node } = {}
+		for s, tone in STATE_TONE do
+			out[s] = ds.Badge { ui.t(`plugins.store.status.{s}`), tone = tone :: any, size = "sm" }
+		end
+		for r, tone in REVIEW_TONE do
+			out[r] = ds.Badge { ui.t(`plugins.store.review.{r}`), tone = tone :: any, size = "sm" }
+		end
+		out.verified = ds.Badge { ui.t("plugins.store.verified"), class = "store-verified", tone = "success", size = "sm" }
+		return out
+	end)())
+end
+
 -- Its account's badges (what Zeron's operators granted it, as its member
--- card shows them), beside its name: each its name, quiet.
-function M.badges(card: () -> store.Card): Node
-	local function names(): { string }
-		local out: { string } = {}
-		local a: any = card().author
-		for _, b in (if type(a) == "table" and type(a.badges) == "table" then a.badges else {}) :: { any } do
-			local name = if type(b) == "table" then b.name else b
-			if type(name) == "string" and name ~= "" and #out < 3 then
-				table.insert(out, string.sub(name, 1, 40))
+-- card shows them): their names, at most three, each once.
+local function account_badges(card: store.Card): { string }
+	local out: { string } = {}
+	local a: any = card.author
+	for _, b in (if type(a) == "table" and type(a.badges) == "table" then a.badges else {}) :: { any } do
+		local name = if type(b) == "table" then b.name else b
+		if type(name) == "string" and name ~= "" and #out < 3 then
+			name = string.sub(name, 1, 40)
+			if not table.find(out, name) then
+				table.insert(out, name)
 			end
 		end
-		return out
 	end
-	local list = ui.computed(names)
+	return out
+end
+
+-- An account's badge: the app's (ink on its wash, as Devices' "This
+-- device"), its words drawn as they are (a store's are never a template).
+local function account_badge(name: string): Node
+	return ds.Badge {
+		function(): string
+			return name
+		end,
+		tone = "neutral",
+		size = "sm",
+	}
+end
+
+-- Its badges beside its name on its page: the store's mark first, then
+-- its account's, each its name, quiet (wrapping with who made it).
+function M.badges(card: () -> store.Card): Node
+	local list = ui.computed(function(): { string }
+		return account_badges(card())
+	end)
 	return ui.row {
 		gap = "$space.1",
 		items = "center",
-		ui.each(list, function(name: string): Node
-			return ds.Badge {
-				function(): string
-					return name
-				end,
-				tone = "neutral",
-				look = "outline",
-				size = "sm",
-			}
-		end, {
+		M.verified_mark(card),
+		ui.each(list, account_badge, {
 			key = function(name: string): string
 				return name
 			end,
 		}),
+	}
+end
+
+-- The same on a list's row, each whole or absent (ds/settings `badges`):
+-- in a narrow row the account's go first, then the mark, never cut.
+function M.row_badges(card: () -> store.Card): ds.RowBadges
+	return {
+		keys = function(): { string }
+			local out: { string } = {}
+			local c = card()
+			if c.verified == true then
+				table.insert(out, "verified")
+			end
+			for _, name in account_badges(c) do
+				table.insert(out, `account:{name}`)
+			end
+			return out
+		end,
+		badge = function(key: string): Node
+			if key == "verified" then
+				return ds.Badge { ui.t("plugins.store.verified"), class = "store-verified", tone = "success", size = "sm" }
+			end
+			return account_badge(string.sub(key, #"account:" + 1))
+		end,
 	}
 end
 
@@ -305,7 +416,7 @@ local function row(first: store.Card, _i: State<number>, now: State<store.Card>)
 		label = function(): string
 			return now:get().name
 		end,
-		badge = M.badges(card),
+		badges = M.row_badges(card),
 		byline = function(): string
 			return M.byline(now:get())
 		end,
@@ -329,52 +440,41 @@ local function row(first: store.Card, _i: State<number>, now: State<store.Card>)
 	}
 end
 
--- The store's categories, the card's row under its search: the app's quiet
--- tabs (All first) across the card's width, their first's words on the
--- rows' text edge. Too many for the room (a narrow pane, a longer
--- language), they run sideways and the edge hiding some shows a chevron
--- that pages them (ds/pager). One Tab stop, the arrows between them.
-local function category_tabs(): Node
-	local tabs = ui.presence(function(): string
-		return if #categories:get() > 0 then "ready" else "waiting"
-	end, function(key: string): Node
-		-- (The store's list arrives once: built then, the tabs its own.)
-		local options: { any } = { { value = "", label = ui.t("plugins.store.all") } }
-		if key == "ready" then
-			for _, c in categories:peek() do
-				local name = M.category_name(c.id)
-				table.insert(options, { value = c.id, label = name })
-			end
+-- The list head's Selects' width (the app's small Select, as Settings'
+-- smaller choices): enough for the longest, "Developer tools" and
+-- "Recently updated".
+local SELECT_W = 160
+
+-- The store's categories: the app's small Select in the list's head beside
+-- Order, "All categories" first (nine of them don't fit across a pane as
+-- tabs, and a row that scrolls in every window is worse than a choice).
+local function category_control(): Node
+	local function options(): { any }
+		local out: { any } = { { value = "", label = ui.t("plugins.store.all_categories"):get() } }
+		for _, c in categories:get() do
+			local name = M.category_name(c.id)
+			table.insert(out, {
+				value = c.id,
+				-- (How many listed plugins it holds, when the store says.)
+				label = if type(c.count) == "number" then ui.t("plugins.store.category_count", { name = name, n = c.count }):get() else name,
+			})
 		end
-		return ds.Tabs {
+		return out
+	end
+	return ui.div {
+		id = "store-category",
+		ds.Select {
 			value = category,
-			label = ui.t("plugins.store.category_label"),
-			look = "pill",
-			-- (The filter row's size: all nine of the store's at a pane's
-			-- full width.)
-			size = "xs",
 			options = options,
-		}
-	end)
-	-- (An xs tab's words are 8 inside it, so 8 here puts the first's on the
-	-- rows' 16; 8 at the end as well.)
-	return ui.row {
-		id = "store-filters",
-		w_full = true,
-		py = "$space.1",
-		px = "$space.2",
-		ds.Pager {
-			id = "store-categories",
-			back = ui.t("plugins.store.categories_back"),
-			more = ui.t("plugins.store.categories_more"),
-			tabs,
+			size = "sm",
+			w = SELECT_W,
+			name = ui.t("plugins.store.category_label"),
 		},
 	}
 end
 
--- The order the list is in: the list's section's own action at its title's
--- end, quiet (no fill at rest, so the chosen category is the one filled
--- thing above the rows), saying the order and opening the choice.
+-- The order the list is in: the list's section's own control at its
+-- title's end, saying the order and opening the choice.
 local function order_control(): Node
 	local function sort_items(): { any }
 		local out: { any } = {}
@@ -408,39 +508,70 @@ local function order_control(): Node
 			sort:set(v)
 		end
 	end)
-	return ds.Dropdown {
-		value = sort_value :: any,
-		items = sort_items,
-		search = false,
-		plain = true,
-		placement = { side = "bottom", align = "end" },
-		trigger = function(menu: any): Node
-			return ds.Button {
-				id = "store-order",
-				tone = "ghost",
-				size = "xs",
-				expanded = function(): boolean
-					return menu.open:get()
-				end,
-				on_click = menu.toggle,
-				ui.row {
-					gap = "$space.1",
-					items = "center",
-					ui.text {
-						function(): string
-							return ui.t(`plugins.store.sort.{shown_sort:get()}`):get()
-						end,
-					},
-					-- (Its ink, not its box, on the content edge: the down
-					-- chevron's stroke ends at 18.375 of its 24, so it moves
-					-- out by the rest, as a settings row's chevron does.)
-					ui.div {
-						x = ui.raw(14 * (1 - 18.375 / 24), "the down chevron's ink on the edge, not its box"),
-						ds.Icon { name = "alt-arrow-down", size = 14, aria_hidden = true },
-					},
-				},
-			}
-		end,
+	-- (The app's choice of a few words: a Select, small, as Settings'
+	-- smaller choices are.)
+	return ui.div {
+		id = "store-order",
+		ds.Select {
+			value = sort_value :: any,
+			options = sort_items,
+			size = "sm",
+			w = SELECT_W,
+			name = ui.t("plugins.store.order_label"),
+		},
+	}
+end
+
+-- The list's head: its count as the title at the left, and at the right
+-- what narrows and orders it, in this order: Verified only, Category,
+-- Order. Where the pane can't hold
+-- the title and them on one line, they go on a line of their own under the
+-- title, ending on the content edge as they do beside it.
+local list_w = ui.state("store_list_w", 0)
+-- (Verified only's own width, as its words make it: the Selects' are fixed.)
+local check_w = ui.state("store_check_w", 0)
+-- (The least the count's words keep beside them: "1,234 plugins".)
+local TITLE_LEAST = 120
+local function gap(): number
+	return (ui.theme.get("space.2") :: number?) or 8
+end
+-- The controls' width side by side, from what they are (never from where
+-- they're placed, which follows from it).
+local function controls_w(): number
+	return check_w:get() + 2 * SELECT_W + 2 * gap()
+end
+local function head_on_one_line(): boolean
+	local w, c = list_w:get(), check_w:get()
+	-- (Not yet measured: on one line, as a wide pane has it.)
+	if w <= 0 or c <= 0 then
+		return true
+	end
+	return w - 2 * ds.Settings.TEXT_INSET >= controls_w() + ((ui.theme.get("space.3") :: number?) or 12) + TITLE_LEAST
+end
+-- `wrap`: on a line of its own, Verified only going over the Selects (which
+-- stay together) where even that line can't hold them, all ending on the
+-- content edge.
+local function head_controls(wrap: boolean): Node
+	return ui.row {
+		id = "store-head-controls",
+		w_full = wrap,
+		flex_wrap = wrap,
+		justify = "end",
+		gap = "$space.2",
+		items = "center",
+		-- (The app's checkbox, its words its own: a filter that is on or off.)
+		ui.div {
+			id = "store-verified-only",
+			shrink = 0,
+			on_resize = function(size: { w: number, h: number })
+				if math.abs(size.w - check_w:peek()) >= 0.5 then
+					check_w:set(size.w)
+				end
+			end,
+			ds.Checkbox { value = verified_only, label = ui.t("plugins.store.verified_only") },
+		},
+		-- (The two Selects one unit: they never part on a wrap.)
+		ui.row { shrink = 0, gap = "$space.2", items = "center", category_control(), order_control() },
 	}
 end
 
@@ -449,6 +580,8 @@ local function clear()
 	query:set("")
 	category:set("")
 	keyword:set("")
+	author:set("")
+	verified_only:set(false)
 end
 
 local function said(node: Node): Node
@@ -608,6 +741,11 @@ local function feature(first: store.Card, _i: number, now: State<store.Card>): N
 		end,
 		-- (A list row's head: its tile at a row's size.)
 		lead = M.Tile { card = now, size = 32 },
+		-- (The mark as everywhere, on the line under the name, with who
+		-- made it: the name has its line to itself.)
+		badge = M.verified_mark(function(): store.Card
+			return now:get()
+		end),
 		on_click = function()
 			nav.open_listing(now:peek().id)
 		end,
@@ -688,34 +826,55 @@ M.View = ui.component(function(): Node
 		end, { w_full = true })),
 		-- The store's plugins: a section, its title how many what's asked
 		-- matches (the store's `total`; "Plugins" while it isn't known, or
-		-- from a store that doesn't count), its action the order; then the
-		-- card: the search, the categories, the rows. (Its head is one
+		-- from a store that doesn't count), its controls the category and the
+		-- order; then the card: the search, the rows. (Its head is one
 		-- height loading or loaded: nothing under it moves.)
-		ui.column { id = "store-list", w_full = true, ds.Settings.Section {
+		ui.column { id = "store-list", w_full = true, on_resize = function(size: { w: number, h: number })
+			if math.abs(size.w - list_w:peek()) >= 0.5 then
+				list_w:set(size.w)
+			end
+		end, ds.Settings.Section {
 			title = function(): string
 				local n = total:get()
 				return if n and n > 0 then ui.t("plugins.store.count", { n = n }):get() else ui.t("plugins.store.list_title"):get()
 			end,
-			trail = order_control(),
-			-- (Order on the title's line, adding nothing to it.)
-			trail_on_line = true,
+			-- (What narrows and orders it, at the title's end; in a narrow
+			-- pane, on a line of its own under the title.)
+			trail = ui.show(head_on_one_line, head_controls(false)),
+			ui.show(function(): boolean
+				return not head_on_one_line()
+			end, ui.row { w_full = true, px = ds.Settings.inset(), head_controls(true) }),
 			ds.Settings.CatalogCard {
 				id = "store-card",
 				search = { value = query, placeholder = ui.t("plugins.store.search") },
-				-- The keyword a plugin's page narrowed it to: one token, removable.
+				-- What a plugin's page narrowed it to (its keyword, its
+				-- publisher): a token each, removable.
 				search_trail = ui.show(function(): boolean
-					return keyword:get() ~= ""
-				end, ds.Tag {
-					function(): string
-						return keyword:get()
-					end :: any,
-					size = "sm",
-					selected = true,
-					on_remove = function()
-						keyword:set("")
-					end,
+					return keyword:get() ~= "" or author:get() ~= ""
+				end, ui.row {
+					gap = "$space.1",
+					items = "center",
+					ui.show(function(): boolean
+						return keyword:get() ~= ""
+					end, ds.Tag {
+						function(): string
+							return keyword:get()
+						end :: any,
+						on_remove = function()
+							keyword:set("")
+						end,
+					}),
+					ui.show(function(): boolean
+						return author:get() ~= ""
+					end, ds.Tag {
+						function(): string
+							return `@{author:get()}`
+						end :: any,
+						on_remove = function()
+							author:set("")
+						end,
+					}),
 				}),
-				filters = category_tabs(),
 				body = ui.presence(body_key, inside, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 			},
 		} },
@@ -727,7 +886,16 @@ end)
 function M.show_keyword(k: string)
 	query:set("")
 	category:set("")
+	author:set("")
 	keyword:set(k)
+end
+
+-- For a plugin's page's publisher: Browse narrowed to their plugins.
+function M.show_author(username: string)
+	query:set("")
+	category:set("")
+	keyword:set("")
+	author:set(username)
 end
 
 -- (Tests.)

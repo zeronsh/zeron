@@ -66,6 +66,7 @@ pub const BLOCKED: &[&str] = &[
     "plugins.store.create_key",
     "plugins.store.revoke_key",
     "plugins.store.prereleases",
+    "plugins.store.updates",
     "plugins.store.report",
     "templates.use",
     "templates.create",

@@ -110,9 +110,35 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 	local unknown = not (it.author and (it.author.kind == "you" or it.author.kind == "verified"))
 	local claimable = unknown and it.status ~= "tampered" and not elsewhere
 	local v = version(it)
+	-- From the store, and the store hasn't verified this version (its own
+	-- record, read as it was installed): a warning here, where the person
+	-- decides, with the newest verified version to take instead where the
+	-- engine names one. It asks even when it asks nothing new.
+	local store_source = type(it.source) == "table" and it.source.kind == "store"
+	local unverified = store_source and it.source.verified == false
+	-- The newest verified one, as the engine names it: an update's offer,
+	-- or a first install's source. Pressing it, the engine installs the one
+	-- its item names: never this script's.
+	local offered = if not unverified then nil
+		elseif type(it.update) == "table" and type(it.update.verified_alternative) == "table" then it.update.verified_alternative.version
+		elseif type(it.source.verified_alternative) == "table" then it.source.verified_alternative.version
+		else nil
+	local alternative: string? = if type(offered) == "string" and offered ~= "" then offered else nil
+	-- The version an update replaces here, when its own record said
+	-- verified (the engine's `source.replaced`): named, as the update
+	-- sheet names it.
+	local replaced: any = if type(it.source) == "table" then it.source.replaced else nil
+	local replaced_verified: string? = if type(replaced) == "table" and replaced.verified == true and type(replaced.version) == "string" and string.match(replaced.version, "^[%w%.%+%-]+$") and #replaced.version <= 32
+		then replaced.version
+		else nil
+	-- Asking again for nothing beyond what was allowed (an unverified
+	-- version always asks): the engine says so; one line.
+	local nothing_new = it.nothing_new == true
 
 	local asks: Node
-	if #lines == 0 and #grew == 0 then
+	if nothing_new and #grew == 0 then
+		asks = ui.text { ui.t("plugins.consent.nothing_new"), text_size = "$font.size.md", color = "$text.secondary", wrap = true }
+	elseif #lines == 0 and #grew == 0 then
 		asks = ui.text { ui.t("plugins.consent.asks_nothing"), text_size = "$font.size.md", color = "$text.secondary", wrap = true }
 	elseif #lines == 0 then
 		asks = ui.div {}
@@ -272,6 +298,34 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 						tone = "warning",
 						title = if it.status == "tampered" then ui.t("plugins.consent.tampered") else ui.t("plugins.words.unverified"),
 						body = why_unknown(it),
+					}
+					else nil,
+				if unverified
+					then ui.div {
+						id = "consent-unverified",
+						w_full = true,
+						ds.Callout {
+							tone = "warning",
+							title = ui.t("plugins.store.not_verified_yet", { version = v or "" }),
+							-- (A body wherever there's an action, so the action sits
+							-- under the words as the update sheet's does: an update
+							-- from a verified version says so; else the verified one
+							-- offered is named. Neither: the title alone.)
+							body = if replaced_verified
+								then ui.t("plugins.store.installed_was_verified", { installed = replaced_verified })
+								elseif type(it.update) == "table" and it.update.installed_verified == true
+								then ui.t("plugins.store.installed_was_verified_plain")
+								elseif alternative and not elsewhere then ui.t("plugins.store.newest_verified_is", { version = alternative })
+								else nil,
+							action = if alternative and not elsewhere
+								then {
+									label = ui.t("plugins.store.install_instead", { version = alternative }),
+									on_click = function()
+										ui.invoke("plugins.install_verified", { id = it.id, hash = it.hash })
+									end,
+								}
+								else nil,
+						},
 					}
 					else nil,
 				if #grew > 0 then section(ui.t("plugins.consent.grew"), grew) else nil,

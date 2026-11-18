@@ -2,9 +2,9 @@
 -- real page's search, tabs, updates, and its loading, empty and failed states.
 -- Browse is the store's catalog on the page's own pieces: the featured
 -- (`Settings.Feature` on a `Shelf`), then the list's section, how many as
--- its title and the order its action, its card with a keyword narrowed to
--- beside its search and the categories (`Pager` paging them when they don't
--- fit) (`Settings.CatalogCard`), its rows built as they show
+-- its title and the category and the order its controls, its card with a
+-- keyword narrowed to beside its search (`Settings.CatalogCard`), its rows
+-- built as they show
 -- (`Settings.ListRows`);
 -- a plugin opens a page under it (`Settings.SubPage`, `Settings.Back`).
 
@@ -69,7 +69,6 @@ local function browse(): Node
 			end,
 		}
 	end
-	local ORDERS = { popular = "Most installed", updated = "Recently updated", new = "Newest" }
 	return ui.column {
 		w_full = true,
 		gap = "$space.6",
@@ -94,41 +93,43 @@ local function browse(): Node
 				end,
 			},
 		}),
-		-- The list: a section, how many as its title, the order its quiet
-		-- action; the card's search, its categories (ds.Pager pages them
-		-- when they don't fit), its rows.
+		-- The list: a section, how many as its title, the category and the
+		-- order its controls; the card's search, its rows.
 		ds.Settings.Section {
 			title = function(): string
 				return `{#found:get()} plugins`
 			end,
-			trail_on_line = true,
-			trail = ds.Dropdown {
-				value = order :: any,
-				search = false,
-				plain = true,
-				placement = { side = "bottom", align = "end" },
-				items = {
-					{ value = "popular", label = "Most installed" },
-					{ value = "updated", label = "Recently updated" },
-					{ value = "new", label = "Newest" },
+			trail = ui.row {
+				gap = "$space.2",
+				items = "center",
+				ds.Select {
+					value = category,
+					size = "sm",
+					w = 160,
+					name = "Category",
+					options = {
+						{ value = "", label = "All categories" },
+						{ value = "agents", label = "Agents" },
+						{ value = "appearance", label = "Appearance" },
+						{ value = "chat", label = "Chat" },
+						{ value = "developer-tools", label = "Developer tools" },
+						{ value = "git", label = "Git" },
+						{ value = "integrations", label = "Integrations" },
+						{ value = "productivity", label = "Productivity" },
+						{ value = "utilities", label = "Utilities" },
+					},
 				},
-				trigger = function(menu: any): Node
-					return ds.Button {
-						tone = "ghost",
-						size = "xs",
-						on_click = menu.toggle,
-						ui.row {
-							gap = "$space.1",
-							items = "center",
-							ui.text {
-								function(): string
-									return ORDERS[order:get()] or ""
-								end,
-							},
-							ds.Icon { name = "alt-arrow-down", size = 14, aria_hidden = true },
-						},
-					}
-				end,
+				ds.Select {
+					value = order,
+					size = "sm",
+					w = 160,
+					name = "Order",
+					options = {
+						{ value = "popular", label = "Most installed" },
+						{ value = "updated", label = "Recently updated" },
+						{ value = "new", label = "Newest" },
+					},
+				},
 			},
 			ds.Settings.CatalogCard {
 				search = { value = query, placeholder = "Search plugins" },
@@ -138,40 +139,10 @@ local function browse(): Node
 					function(): string
 						return keyword:get()
 					end :: any,
-					size = "sm",
-					selected = true,
 					on_remove = function()
 						keyword:set("")
 					end,
 				}),
-				-- (An xs tab's words are 8 inside it, so 8 here puts the
-				-- first's on the rows' 16.)
-				filters = ui.row {
-					w_full = true,
-					py = "$space.1",
-					px = "$space.2",
-					ds.Pager {
-						back = "Earlier categories",
-						more = "More categories",
-						ds.Tabs {
-							value = category,
-							label = "Category",
-							look = "pill",
-							size = "xs",
-							options = {
-								{ value = "", label = "All" },
-								{ value = "agents", label = "Agents" },
-								{ value = "appearance", label = "Appearance" },
-								{ value = "chat", label = "Chat" },
-								{ value = "developer-tools", label = "Developer tools" },
-								{ value = "git", label = "Git" },
-								{ value = "integrations", label = "Integrations" },
-								{ value = "productivity", label = "Productivity" },
-								{ value = "utilities", label = "Utilities" },
-							},
-						},
-					},
-				},
 				body = ds.Settings.ListRows(found, function(p: any): Node
 					return ds.Settings.Row {
 						label = p.name,

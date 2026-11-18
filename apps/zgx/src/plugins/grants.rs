@@ -126,7 +126,7 @@ pub fn replaceable(module: &str) -> bool {
 /// selector, as zgx reads one: a target naming a module or everything (`*`)
 /// is never given (zgx's `OverrideElement` doesn't reach modules anyway); nor
 /// Zeron's plugin placeholders (`.plugin-…`: a plugin's tabs, pages and the
-/// Unverified badge, each plugin's own through "panel.tabs" and
+/// Unknown author badge, each plugin's own through "panel.tabs" and
 /// "pages.add" alone). The engine refuses such a manifest too
 /// (`change_target_problem`); this holds whatever it lists.
 pub fn change_target(target: &str) -> bool {

@@ -496,7 +496,7 @@ function M.author(item: any): string
 		return s("plugins.words.author.verified", { username = a.username })
 	end
 	-- (Who made it can't be told: where it came from instead, beside the
-	-- Unverified badge.)
+	-- Unknown author badge.)
 	return M.from(item.source) or s("plugins.words.author.unknown")
 end
 
@@ -543,12 +543,29 @@ function M.about(item: any): string
 	elseif item.status == "tampered" then
 		return s("plugins.words.about.tampered")
 	elseif item.status == "pending" then
+		-- (Waiting only because the store hasn't verified this version, the
+		-- engine says (`nothing_new`): that, and nothing it doesn't ask.)
+		if item.nothing_new == true and M.store_unverified(item) then
+			return M.store_unverified(item) :: string
+		end
 		if item.allowed and #item.allowed > 0 then
 			return s("plugins.words.about.asks_more")
 		end
 		return s("plugins.words.about.waiting")
 	end
 	return if item.description and item.description ~= "" then item.description else s("plugins.words.about.no_description")
+end
+
+-- A store plugin running a version the store hasn't verified (its install
+-- record's word): said on its row. Nil for any other.
+function M.store_unverified(item: any): string?
+	local src = item.source
+	if type(src) ~= "table" or src.kind ~= "store" or src.verified ~= false or item.builtin then
+		return nil
+	end
+	-- (The sheets' sentence, the same words.)
+	local v = if type(item.version) == "string" and item.version ~= "" then item.version else nil
+	return if v then s("plugins.store.not_verified_yet", { version = v }) else s("plugins.words.store_unverified_unversioned")
 end
 
 -- What one of Zeron's own is allowed, said under its description: they're
@@ -599,6 +616,7 @@ local FAILURES: { [string]: boolean } = {
 	incompatible = true,
 	paths_collide = true,
 	needs_person = true,
+	not_verified = true,
 	store_unreachable = true,
 	not_in_store = true,
 	store_mismatch = true,
@@ -634,6 +652,8 @@ local FAILURES: { [string]: boolean } = {
 	replayed_request = true,
 	body_mismatch = true,
 	too_many_keys = true,
+	not_owner = true,
+	invalid_scope = true,
 	key_taken = true,
 	invalid_name = true,
 	invalid_expiry = true,
@@ -659,12 +679,24 @@ end
 -- description: its version and what it changes in what it asks (new asks
 -- are allowed in the consent window after it's updated). Nil when there's
 -- none.
-function M.update(item: any): string?
+-- A store update the store hasn't verified says so on the row, held or
+-- not, so Update is never a surprise; held (verified updates only, never
+-- taken unasked), whose rule that is: `whose` "plugin" (its own choice),
+-- "computer" (it follows this computer's), "device" (it follows the
+-- device shown's, `device` its name), or nil (not known).
+function M.update(item: any, whose: ("plugin" | "computer" | "device")?, device: string?): string?
 	local update = item.update
 	if type(update) ~= "table" or item.builtin then
 		return nil
 	end
 	local version = if type(update.version) == "string" and update.version ~= "" then update.version else nil
+	if update.held == true and version then
+		if whose == "device" and device and device ~= "" then
+			return s("plugins.words.update.held_device", { version = version, device = device })
+		end
+		local key = if whose == "plugin" then "held_plugin" elseif whose == "computer" then "held_computer" else "held"
+		return s(`plugins.words.update.{key}`, { version = version })
+	end
 	if type(update.refused) == "string" then
 		return if version
 			then s("plugins.words.update.refused", { version = version, reason = reason_words(update.refused) })
@@ -677,8 +709,11 @@ function M.update(item: any): string?
 		end
 		return if #out > 0 then table.concat(out, s("plugins.words.list_sep")) else nil
 	end
+	local unverified = update.verified == false and version ~= nil
 	local parts = {
-		if version then s("plugins.words.update.available", { version = version }) else s("plugins.words.update.available_unversioned"),
+		if unverified then s("plugins.words.update.unverified", { version = version })
+			elseif version then s("plugins.words.update.available", { version = version })
+			else s("plugins.words.update.available_unversioned"),
 	}
 	local added = said(update.added)
 	if added then

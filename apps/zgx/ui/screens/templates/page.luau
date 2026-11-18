@@ -16,7 +16,7 @@
 -- from a package is checked where it came from for a newer version as the
 -- page opens (the engine checks every few hours too); a row with one says
 -- so and has Update. One whose maker Zeron can't vouch for says
--- Unverified beside its version, and where it came from under its name.
+-- Unknown author beside its version, and where it came from under its name.
 --
 -- Each row is its template's as the list changes: its colours' preview, its
 -- name and version, who made it and how it stands (in use, broken with why,
@@ -410,7 +410,7 @@ local function controls(t: state.Template, now: State<any>): Node
 	return ui.row {
 		gap = "$space.2",
 		items = "center",
-		-- Unverified, before its version, for one whose maker Zeron can't
+		-- Unknown author, before its version, for one whose maker Zeron can't
 		-- vouch for.
 		ui.show(function(): boolean
 			return unverified(now:get())
@@ -459,9 +459,15 @@ local function row(t: state.Template, _i: number, now: State<any>): Node
 			description = function(): string
 				return about(now:get())
 			end,
-			-- Who made it, on its own line.
+			-- Who made it, on its own line; for one whose author can't be
+			-- told and that came from nowhere named, none: its Unknown author
+			-- badge says it.
 			byline = function(): string
-				return author(now:get())
+				local t = now:get()
+				if unverified(t) and words.from(t.imported and t.imported.source) == nil then
+					return ""
+				end
+				return author(t)
 			end,
 			lead = preview(t),
 			badge = ui.show(function(): boolean

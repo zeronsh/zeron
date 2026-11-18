@@ -15,11 +15,10 @@
 --   store_stub.one_shot    Focus timer has one screenshot (store_stub.three_shots: three)
 --   store_stub.id_reserved the plugin's id is one the store keeps (its site's pages)
 --   store_stub.no_total    lists come without `total` (how many match)
---   store_stub.few_categories  the store has three categories (before Browse opens)
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
 --   store_stub.html_and_footnote  your plugin's README has HTML and math, its CHANGELOG a footnote (advice)
 --   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
---   store_stub.many_keys   Pomodoro clock has ten deploy keys: names of every length,
+--   store_stub.many_keys   the account has ten deploy keys: names of every length,
 --                          one ending today, one tomorrow, one in five days
 --   store_stub.long_featured   the first featured says 300 characters of itself, the second nothing
 
@@ -38,6 +37,12 @@ local notes = true
 -- Its README's HTML and math, and its CHANGELOG's footnote, said
 -- (`store_stub.html_and_footnote`).
 local typed = false
+-- Its name calls it verified, a keyword is there twice (`store_stub.claims`):
+-- problems with their cause and word, and the engine's English.
+local claims = false
+-- The store refuses the next publish for its description's mark glyph
+-- (`store_stub.refuse_listing`), as the edge says it.
+local refuse_listing = false
 -- Lists without `total`, as a store from before it counted them.
 local no_total = false
 
@@ -195,6 +200,10 @@ for i, name in WORDS do
 		updated_at = NOW - i * DAY,
 		installs = (80 - i) * 137 + (i % 7) * 3,
 		featured = i == 1 or i == 4 or i == 9,
+		-- (Two in three verified, the featured among them; of the rest, every
+		-- other has an older version that is.)
+		verified = i % 3 ~= 2,
+		verified_version = if i % 3 ~= 2 then `1.{i % 4}.0` elseif i % 2 == 0 then "1.0.0" else nil,
 	}
 	local e: Entry = {
 		card = card,
@@ -210,8 +219,8 @@ for i, name in WORDS do
 			package = { bytes = 24_000 + i * 310, sha256 = string.rep("a", 64), hash = `{id}-hash` },
 		},
 		versions = {
-			{ version = card.version, status = "approved", published_at = card.updated_at, notes = "- Faster.\n- Fewer words." },
-			{ version = "1.0.0", status = "approved", published_at = (card.updated_at :: number) - 30 * DAY, notes = "- The first one." },
+			{ version = card.version, status = "listed", verified = card.verified == true, verified_at = if card.verified then card.updated_at else nil, published_at = card.updated_at, notes = "- Faster.\n- Fewer words." },
+			{ version = "1.0.0", status = "listed", verified = card.verified_version ~= nil, verified_at = if card.verified_version then (card.updated_at :: number) - 29 * DAY else nil, published_at = (card.updated_at :: number) - 30 * DAY, notes = "- The first one." },
 		},
 	}
 	table.insert(entries, e)
@@ -273,7 +282,7 @@ do
 		versions = {},
 	}
 	for i = 0, 11 do
-		table.insert(e.versions, { version = `10.20.{30 - i}`, status = "approved", published_at = NOW - i * DAY, notes = notes })
+		table.insert(e.versions, { version = `10.20.{30 - i}`, status = "listed", verified = i % 2 == 1, verified_at = if i % 2 == 1 then NOW - i * DAY + DAY // 2 else nil, published_at = NOW - i * DAY, notes = notes })
 	end
 	table.insert(entries, 1, e)
 	by_id.extremes = e
@@ -352,9 +361,9 @@ do
 	f.detail.permissions = { asks = { "ui.add", "notifications", "network" }, network_hosts = { "api.example.com" } }
 	f.detail.engines = { zeron = ">=0.3.0" }
 	f.versions = {
-		{ version = "1.2.0", status = "approved", published_at = NOW - 2 * DAY, notes = "- Pauses when you leave the chat.\n- Says when it's done." },
-		{ version = "1.1.0", status = "approved", published_at = NOW - 20 * DAY, notes = "- A bell." },
-		{ version = "1.0.0", status = "approved", published_at = NOW - 60 * DAY, notes = "- The first one." },
+		{ version = "1.2.0", status = "listed", verified = true, verified_at = NOW - DAY, published_at = NOW - 2 * DAY, notes = "- Pauses when you leave the chat.\n- Says when it's done." },
+		{ version = "1.1.0", status = "yanked", yanked = true, yanked_by = "superseded", superseded_by = "1.2.0", verified = false, published_at = NOW - 20 * DAY, notes = "- A bell." },
+		{ version = "1.0.0", status = "listed", verified = true, verified_at = NOW - 59 * DAY, published_at = NOW - 60 * DAY, notes = "- The first one." },
 	}
 end
 -- One that needs a later Zeron: the engine says so, in its words.
@@ -385,6 +394,12 @@ local function search(q: store.Query): any
 		end
 		if ok and q.featured then
 			ok = c.featured == true
+		end
+		if ok and q.verified then
+			ok = c.verified == true
+		end
+		if ok and q.author and q.author ~= "" then
+			ok = (c.author :: any).username == q.author
 		end
 		if ok then
 			table.insert(out, e)
@@ -428,7 +443,7 @@ end
 
 local stub = store :: any
 stub.search = function(q: store.Query): any
-	note(`search:q={q.q or ""},category={q.category or ""},keyword={q.keyword or ""},sort={q.sort or ""},cursor={q.cursor or ""}{if q.featured then ",featured" else ""}`)
+	note(`search:q={q.q or ""},category={q.category or ""},keyword={q.keyword or ""},sort={q.sort or ""},cursor={q.cursor or ""}{if q.featured then ",featured" else ""}{if q.author then `,author={q.author}` else ""}{if q.verified then ",verified" else ""}`)
 	local asked = table.clone(q)
 	return answer(function(): any
 		return search(asked)
@@ -438,6 +453,39 @@ end
 -- hostile author's text: `store_stub_readme`, `store_stub_notes`).
 local given_readme = ui.state("store_stub_readme", "")
 local given_notes = ui.state("store_stub_notes", "")
+-- (A detail's first page of versions, as the store gives it.)
+local VERSIONS_PAGE = 5
+-- The store's superseding rule, kept by every list here so each is one the
+-- store could hold: publishing a version stops new installs of every older
+-- listed one it hasn't verified ("superseded", by the one published next).
+-- A release is superseded by the next release; a pre-release by the next
+-- version of either kind. Newest first.
+local function supersede(versions: { any })
+	local function pre(v: any): boolean
+		return string.find(v.version, "-", 1, true) ~= nil
+	end
+	for i, v in versions do
+		if v.status == "listed" and v.verified ~= true then
+			for j = i - 1, 1, -1 do
+				local newer = versions[j]
+				if pre(v) or not pre(newer) then
+					v.status = "yanked"
+					v.yanked = true
+					v.yanked_by = "superseded"
+					v.superseded_by = newer.version
+					break
+				end
+			end
+		end
+	end
+end
+for _, e in entries do
+	supersede(e.versions)
+end
+
+-- Which updates each plugin takes here ("newest", the default, or
+-- "verified"), as the store page reads it (`installed.updates`).
+local updates_pref: { [string]: string } = {}
 stub.detail = function(id: string, for_zeron: string?): any
 	note(if for_zeron then `detail:{id}:for_zeron={for_zeron}` else `detail:{id}`)
 	return answer(function(): any
@@ -446,7 +494,12 @@ stub.detail = function(id: string, for_zeron: string?): any
 		for k, v in e.detail do
 			d[k] = v
 		end
-		d.versions = e.versions
+		-- (What this device has of it, as the engine adds: which updates it
+		-- takes here.)
+		d.installed = { updates = updates_pref[id] or "newest" }
+		-- (Its first page of versions, newest first; the rest by cursor.)
+		d.versions = table.move(e.versions, 1, math.min(VERSIONS_PAGE, #e.versions), 1, {})
+		d.versions_next_cursor = if #e.versions > VERSIONS_PAGE then tostring(VERSIONS_PAGE) else nil
 		if id == "focus-timer" and given_readme:peek() ~= "" then
 			d.readme = given_readme:peek()
 		end
@@ -459,10 +512,43 @@ stub.detail = function(id: string, for_zeron: string?): any
 		return d
 	end)
 end
+stub.versions = function(id: string, cursor: string?, limit: number?): any
+	note(`versions:{id}:{cursor or ""}`)
+	return answer(function(): any
+		local e = entry(id)
+		local from = tonumber(cursor or "0") or 0
+		local n = math.min(limit or 20, 50)
+		local out = table.move(e.versions, from + 1, math.min(from + n, #e.versions), 1, {})
+		return { versions = out, total = #e.versions, next_cursor = if from + n < #e.versions then tostring(from + n) else nil }
+	end)
+end
+-- One version's record, as the store gives it; one it hasn't, `not_found`.
+stub.version = function(id: string, version: string): any
+	note(`version:{id}:{version}`)
+	return answer(function(): any
+		for _, v in entry(id).versions do
+			if v.version == version then
+				return v
+			end
+		end
+		error({ message = "not_found" }, 0)
+	end)
+end
 stub.categories = function(): any
 	note("categories")
 	return answer(function(): any
-		return { categories = CATEGORIES }
+		-- (Each with how many listed plugins it holds, as the store counts.)
+		local out = {}
+		for _, c in CATEGORIES do
+			local n = 0
+			for _, e in entries do
+				if table.find(e.card.categories or {}, c.id) then
+					n += 1
+				end
+			end
+			table.insert(out, { id = c.id, name = c.name, count = n })
+		end
+		return { categories = out }
 	end, true)
 end
 -- Pictures: the package's own, as files kept here (made-up: the app's own
@@ -491,14 +577,35 @@ stub.report = function(id: string, reason: string, text: string): any
 		return {}
 	end)
 end
+-- (What the engine keeps of it, as the host shares it.)
+local store_updates = ui.shared("plugins.store_updates", { device = "newest", plugins = {} } :: any)
+if store_updates:peek() == nil then
+	store_updates:set({ device = "newest", plugins = {} })
+end
+stub.set_updates = function(id: string?, prefer: string?): any
+	note(`updates:{id or "device"}:{prefer or "default"}`)
+	return answer(function(): any
+		local now = table.clone(store_updates:peek() or { device = "newest", plugins = {} })
+		now.plugins = table.clone(now.plugins or {})
+		if id then
+			updates_pref[id] = prefer
+			now.plugins[id] = prefer
+		else
+			now.device = prefer or "newest"
+		end
+		store_updates:set(now)
+		return { prefer = prefer or "newest" }
+	end)
+end
 stub.prereleases = function(id: string, on: boolean): any
 	note(`prereleases:{id}:{tostring(on)}`)
 	return answer(function(): any
 		return {}
 	end)
 end
--- Your own: Pomodoro clock (yours, on this device) in the store, a version
--- approved, one turned down with the reviewer's words; its deploy keys.
+-- Your own: Pomodoro clock (yours, on this device) in the store: 1.0.0
+-- verified; 1.0.5, never verified, replaced by 1.1.0 (superseded: no new
+-- installs); 1.1.0, listed, a reviewer declined to verify it, their words.
 local mine: { [string]: any } = {
 	["pomodoro-clock"] = {
 		id = "pomodoro-clock",
@@ -507,15 +614,16 @@ local mine: { [string]: any } = {
 		listing = "listed",
 		author = { username = "you", badges = {} },
 		versions = {
-			{ version = "1.1.0", status = "rejected", published_at = NOW - 3 * DAY, review = { state = "rejected", message = "It reads every chat's messages but only needs the title. Ask for less." } },
-			{ version = "1.0.0", status = "approved", published_at = NOW - 20 * DAY, review = { state = "approved" } },
+			{ version = "1.1.0", status = "listed", verified = false, published_at = NOW - 3 * DAY, via = "device", review = { decided = true, decision = "declined", reason = "asks_too_much", message = "It reads every chat's messages but only needs the title. Ask for less.", decided_at = NOW - 2 * DAY } },
+			{ version = "1.0.5", status = "yanked", yanked_by = "superseded", superseded = { at = NOW - 3 * DAY, by = "1.1.0" }, verified = false, published_at = NOW - 9 * DAY, via = "device", review = { decided = false } },
+			{ version = "1.0.0", status = "listed", verified = true, verified_at = NOW - 19 * DAY, published_at = NOW - 20 * DAY, via = "device", review = { decided = true, decision = "verified", decided_at = NOW - 19 * DAY } },
 		},
 	},
 }
-local keys: { [string]: { any } } = {
-	["pomodoro-clock"] = {
-		{ key = "k_gh", name = "GitHub Actions", created_at = NOW - 10 * DAY, last_used_at = NOW - 2 * DAY },
-	},
+-- The account's deploy keys, each with its scope (all its plugins, or
+-- some) and the plugin it last published.
+local keys: { any } = {
+	{ key = "k_gh", name = "GitHub Actions", scope = { all = true }, created_at = NOW - 10 * DAY, last_used_at = NOW - 2 * DAY, last_used_plugin = "pomodoro-clock" },
 }
 -- What the engine finds checking your plugin's folder; `store_stub.fixed`
 -- makes it all there.
@@ -555,7 +663,7 @@ end
 stub.prepare = function(id: string): any
 	note(`prepare:{id}`)
 	return answer(function(): any
-		local ok = #problems == 0
+		local ok = #problems == 0 and not claims
 		return {
 			id = id,
 			name = "Pomodoro clock",
@@ -566,6 +674,10 @@ stub.prepare = function(id: string): any
 			-- newer-than answer.)
 			problems = (function(): { any }
 				local out = {}
+				if claims then
+					table.insert(out, { rule = "bad_listing", field = "name", cause = "mark_word", word = "Verified", words = "Its name says \"verified\": only the store marks a plugin verified" })
+					table.insert(out, { rule = "bad_listing", field = "keywords", cause = "repeated", word = "timer", words = "It has at most 8 keywords, each once" })
+				end
 				for _, p in problems do
 					if store_checked or force_problem:peek() or (p.rule ~= "not_newer" and p.rule ~= "version_exists") then
 						table.insert(out, p)
@@ -596,13 +708,28 @@ stub.publish = function(id: string, hash: string, ticket: string): any
 	note(`publish:{id}:{hash}:{ticket}`)
 	return answer(function(): any
 		refused_as_you()
+		if refuse_listing then
+			refuse_listing = false
+			return { ok = false, error = "bad_listing", field = "description", cause = "mark_glyph", word = "✅" }
+		end
 		local p = mine[id]
 		if not p then
 			p = { id = id, name = "Pomodoro clock", version = prepared_version, versions = {} }
 			mine[id] = p
 		end
-		table.insert(p.versions, 1, { version = prepared_version, status = "pending", published_at = NOW, review = { state = "pending" } })
-		return { ok = true, id = id, version = prepared_version, status = "pending" }
+		-- Listed at once, not verified; every older listed one that isn't
+		-- verified takes no new installs from now (superseded).
+		local superseded = {}
+		for _, v in p.versions do
+			if v.status == "listed" and v.verified ~= true then
+				v.status = "yanked"
+				v.yanked_by = "superseded"
+				v.superseded = { at = NOW, by = prepared_version }
+				table.insert(superseded, v.version)
+			end
+		end
+		table.insert(p.versions, 1, { version = prepared_version, status = "listed", verified = false, published_at = NOW, via = "device", review = { decided = false } })
+		return { ok = true, id = id, version = prepared_version, status = "listed", verified = false, superseded = superseded, url = `https://zeron.example/plugins/{id}` }
 	end)
 end
 stub.version_action = function(id: string, version: string, action: string): any
@@ -610,30 +737,36 @@ stub.version_action = function(id: string, version: string, action: string): any
 	return answer(function(): any
 		for _, v in mine[id].versions do
 			if v.version == version then
-				v.status = if action == "withdraw" then "withdrawn" elseif action == "yank" then "yanked" else "approved"
-				v.review = nil
+				-- (Its author's own yank and unyank: never a superseded one's.)
+				if action == "yank" then
+					v.status = "yanked"
+					v.yanked_by = "author"
+				elseif action == "unyank" and v.yanked_by == "author" then
+					v.status = "listed"
+					v.yanked_by = nil
+				end
 			end
 		end
 		return {}
 	end)
 end
-stub.keys = function(id: string): any
-	note(`keys:{id}`)
+stub.keys = function(): any
+	note("keys")
 	return answer(function(): any
 		refused_as_you()
-		return { keys = table.clone(keys[id] or {}) }
+		return { keys = table.clone(keys) }
 	end)
 end
 -- A new key needs a fresh sign-in: the first ask waits until
 -- `store_stub.signed_in_again`, as the host's StepUp does.
 stub.create_key = function(args: any): any
-	note(`create_key:{args.id}:{args.name}:{if args.expires then "expires" else "never"}`)
+	local scope = if args.scope and args.scope.all then "all" else table.concat((args.scope and args.scope.plugins) or {}, ",")
+	note(`create_key:{scope}:{args.name}:{if args.expires then "expires" else "never"}`)
 	local p: any = { settled = false, waiters = {} }
 	local function settle()
 		p.settled = true
-		local k = { key = `k_{#(keys[args.id] or {}) + 1}`, name = args.name, created_at = NOW, expires_at = args.expires }
-		keys[args.id] = keys[args.id] or {}
-		table.insert(keys[args.id], k)
+		local k = { key = `k_{#keys + 1}`, name = args.name, scope = args.scope, created_at = NOW, expires_at = args.expires }
+		table.insert(keys, k)
 		p.value = { ok = true, key = k.key, secret = "zpk_live_3f9a1c7e0b2d4f6a8c1e3a5b7d9f0e2c" }
 		for _, w in p.waiters do
 			w()
@@ -668,17 +801,17 @@ end
 stub.cancel_step_up = function()
 	note("cancel_step_up")
 end
-stub.revoke_key = function(id: string, key: string): any
-	note(`revoke_key:{id}:{key}`)
+stub.revoke_key = function(key: string): any
+	note(`revoke_key:{key}`)
 	return answer(function(): any
 		local out = {}
-		for _, k in keys[id] or {} do
+		for _, k in keys do
 			if k.key ~= key then
 				table.insert(out, k)
 			end
 		end
-		keys[id] = out
-		return { revoked = key }
+		keys = out
+		return { revoked = true }
 	end)
 end
 ui.command {
@@ -800,10 +933,46 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "store_stub.refuse_listing",
+	title = "Store: the next publish is refused for its description's mark",
+	run = function()
+		refuse_listing = true
+	end,
+}
+ui.command {
+	id = "store_stub.claims",
+	title = "Store: your plugin's name says verified, a keyword is there twice",
+	run = function()
+		claims = true
+	end,
+}
+ui.command {
 	id = "store_stub.no_notes",
 	title = "Store: nothing to note on your plugin's folder",
 	run = function()
 		notes = false
+	end,
+}
+-- Keys granted to 1, 2, 3, 14 and 50 of yours, their ids store ids at
+-- full length (40): what a row says of each, and of every one in place.
+ui.command {
+	id = "store_stub.wide_keys",
+	title = "Store: keys for 1, 2, 3, 14 and 50 plugins",
+	run = function()
+		local list = {}
+		for i, n in { 1, 2, 3, 14, 50 } do
+			local ids = {}
+			for j = 1, n do
+				table.insert(ids, string.sub(string.format("a-plugin-with-a-long-store-id-number-%02d", j), 1, 40))
+			end
+			table.insert(list, {
+				key = string.sub(string.format("w%02dAbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_", i), 1, 43),
+				name = `For {n}`,
+				scope = { plugins = ids },
+				created_at = NOW - i * DAY,
+			})
+		end
+		keys = list
 	end,
 }
 ui.command {
@@ -840,16 +1009,17 @@ ui.command {
 			elseif i % 3 == 0 then
 				ends = noon + 90 * DAY
 			end
-			table.insert(list, { key = key, name = name, created_at = NOW - i * DAY, last_used_at = if i % 2 == 0 then NOW - DAY else nil, expires_at = ends })
+			table.insert(list, {
+				key = key,
+				name = name,
+				scope = if i % 2 == 0 then { all = true } else { plugins = { "pomodoro-clock" } },
+				created_at = NOW - i * DAY,
+				last_used_at = if i % 2 == 0 then NOW - DAY else nil,
+				last_used_plugin = if i % 2 == 0 then "pomodoro-clock" else nil,
+				expires_at = ends,
+			})
 		end
-		keys["pomodoro-clock"] = list
-	end,
-}
-ui.command {
-	id = "store_stub.few_categories",
-	title = "Store: three categories",
-	run = function()
-		CATEGORIES = table.move(CATEGORIES, 1, 3, 1, {})
+		keys = list
 	end,
 }
 ui.command {
@@ -896,7 +1066,11 @@ ui.command {
 	run = function()
 		local f = by_id["focus-timer"]
 		f.card.version = "1.3.0"
-		table.insert(f.versions, 1, { version = "1.3.0", status = "approved", published_at = NOW, notes = "- Longer breaks." })
+		-- (Listed at once; not verified yet, 1.2.0 still the verified one.)
+		f.card.verified = false
+		f.card.verified_version = "1.2.0"
+		table.insert(f.versions, 1, { version = "1.3.0", status = "listed", verified = false, published_at = NOW, notes = "- Longer breaks." })
+		supersede(f.versions)
 	end,
 }
 

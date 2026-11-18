@@ -166,6 +166,45 @@ local PLUGINS: { [string]: any } = {
 			settings_changed = false,
 		},
 	},
+	-- From the plugin store, a version the store hasn't verified: an update
+	-- asking nothing new, a verified one between; and a first install with
+	-- none to offer.
+	timer = {
+		id = "timer",
+		name = "Focus timer",
+		version = "1.3.0",
+		hash = "timer-13",
+		status = "pending",
+		author = { kind = "verified", username = "ada" },
+		-- (What it replaces here, its own record verified: the engine's
+		-- `source.replaced`.)
+		source = { kind = "store", id = "focus-timer", publisher = "ada", verified = false, replaced = { version = "1.2.0", verified = true } },
+		permissions = { "ui.add" },
+		allowed = { "ui.add" },
+		ask = {},
+		nothing_new = true,
+		update = { version = "1.3.0", verified = false, installed_verified = true, verified_alternative = { version = "1.2.1" } },
+	},
+	fresh = {
+		id = "fresh",
+		name = "Fresh",
+		version = "0.1.0",
+		hash = "fresh-1",
+		status = "pending",
+		author = { kind = "verified", username = "mara" },
+		-- (The newest verified one, as the engine names it beside a
+		-- first install the store hasn't verified.)
+		source = {
+			kind = "store",
+			id = "fresh",
+			publisher = "mara",
+			verified = false,
+			verified_alternative = { version = "0.0.9", added = {}, removed = {} },
+		},
+		permissions = { "ui.add" },
+		allowed = {},
+		ask = { "ui.add" },
+	},
 	-- Asking for everything: more than the window holds.
 	long = {
 		id = "long",
@@ -208,6 +247,10 @@ ui.actions {
 		note(`reinstall:{arg.id}:{arg.hash}`)
 		shown:set({ busy = false, item = table.clone(PLUGINS[arg.id]), error = "rate_limited: GitHub is turning away requests from this device for now" } :: any)
 	end,
+	["plugins.install_verified"] = function(arg: any)
+		note(`install_verified:{arg.id}:{arg.hash}`)
+		show(nil)
+	end,
 	["plugins.sign"] = function(arg: any)
 		note(`sign:{arg.id}`)
 		PLUGINS[arg.id].author = { kind = "you" }
@@ -235,6 +278,8 @@ ui.command {
 }
 ui.command { id = "wide", title = "Show Composer kit", run = function() show("wide") end }
 ui.command { id = "grown", title = "Show Gh helper, grown", run = function() show("grown") end }
+ui.command { id = "timer", title = "Show Focus timer 1.3.0, not verified", run = function() show("timer") end }
+ui.command { id = "fresh", title = "Show Fresh, a first install not verified", run = function() show("fresh") end }
 ui.command { id = "long", title = "Show Everything", run = function() show("long") end }
 ui.command { id = "sync_devbox", title = "Show Checkout sync, on Devbox", run = function() show("sync", "Devbox") end }
 ui.command {

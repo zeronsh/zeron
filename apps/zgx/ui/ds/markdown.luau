@@ -130,6 +130,10 @@ export type Props = {
 	-- every link is drawn as a link, never as one of Zeron's own chips (a
 	-- chat, a file, a picture, a skill), whatever its target says.
 	foreign: boolean?,
+	-- Its code blocks open fitted to its width, long lines wrapping (a
+	-- secret shown once, read whole by eye): each block's own, its toggle
+	-- changing that block alone, never the choice kept for every block.
+	code_fit: boolean?,
 	-- A document shown under a page's own title (a store plugin's README):
 	-- its headings drawn `heading_step` levels down in size, its `#` as a
 	-- `##` is (and said so to assistive technology), so none outweighs the
@@ -346,6 +350,8 @@ type Ctx = {
 	source: (() -> string)?,
 	-- Props' `foreign`: links are links, never chips.
 	foreign: boolean?,
+	-- Props' `code_fit`: code blocks open fitted, each its own.
+	code_fit: boolean?,
 	-- Props' `heading_step` and `picture_radius`.
 	heading_step: number?,
 	picture_radius: string?,
@@ -1165,8 +1171,11 @@ end
 -- quiet panel.
 -- (`class` and `provide`: what plugins place it by, and read where they
 -- do; `block` gives them.)
-local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil? }): Node
+-- (`fitted`: it opens fitted, its toggle its own: `Props.code_fit`.)
+local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil?, fitted: boolean? }): Node
 	local copied = ui.use_state(false)
+	local own_fit = ui.use_state(true)
+	local fitting = if props.fitted then own_fit else fit
 	local stop: (() -> ())? = nil
 	local text = code_shown(props.text)
 	local function copy()
@@ -1211,7 +1220,7 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 				min_w = 0,
 			},
 			ToggleButton {
-				on = fit,
+				on = fitting,
 				label = locale.t("ds.markdown.fit_content") :: any,
 				icon = "wrap-text",
 				size = "sm",
@@ -1244,7 +1253,7 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 			},
 		},
 		ui.presence(function(): boolean
-			return fit:get()
+			return fitting:get()
 		end, function(fitted: boolean): Node
 			if fitted then
 				return ui.column { w_full = true, min_w = 0, code_text(text, props.lang, true, props.find, props.veil) }
@@ -1541,6 +1550,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 				text = b.text,
 				find = find,
 				veil = code_veil,
+				fitted = ctx ~= nil and ctx.code_fit == true,
 				class = if lang ~= "" then `md-code lang-{lang}` else "md-code",
 			},
 		}
@@ -1830,7 +1840,7 @@ end
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.foreign or props.heading_step or props.picture_radius
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.foreign or props.code_fit or props.heading_step or props.picture_radius
 		then {
 			image = props.image,
 			image_size = props.image_size,
@@ -1844,6 +1854,7 @@ return function(props: Props): Node
 			group = props.group,
 			small = props.small,
 			foreign = props.foreign,
+			code_fit = props.code_fit,
 			heading_step = props.heading_step,
 			picture_radius = props.picture_radius,
 		}

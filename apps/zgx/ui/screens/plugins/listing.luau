@@ -174,7 +174,7 @@ end
 -- few lines aren't worth a fold), unless `whole` says the folded body isn't
 -- all there is. `next` (open): whether there's a next piece to show, and
 -- the way to show it, beside Show less. Folded again, the control is
--- brought back into view (or `on_fold` does what's wanted instead).
+-- brought back into view, focused.
 type FoldProps = {
 	height: number,
 	slack: number?,
@@ -182,7 +182,6 @@ type FoldProps = {
 	body: (open: boolean) -> Node,
 	whole: (() -> boolean)?,
 	next: untrusted.Handle?,
-	on_fold: (() -> ())?,
 	class: string,
 	button_class: string,
 	next_id: string?,
@@ -282,7 +281,7 @@ local Fold = ui.component(function(props: FoldProps): Node
 					-- view as it's laid out again. Focusing the row hands
 					-- focus to its first control, and zgx scrolls the least
 					-- that shows it.)
-					ui.after(0, props.on_fold or function()
+					ui.after(0, function()
 						local el = controls:peek()
 						if el then
 							el:blur()
@@ -296,7 +295,7 @@ local Fold = ui.component(function(props: FoldProps): Node
 	}
 end)
 
-local Notes = ui.component(function(props: { text: () -> string, lines: number, on_fold: (() -> ())? }): Node
+local Notes = ui.component(function(props: { text: () -> string, lines: number }): Node
 	local function start(): (string, boolean)
 		return start_of(props.text(), NOTES_START)
 	end
@@ -319,7 +318,6 @@ local Notes = ui.component(function(props: { text: () -> string, lines: number, 
 					auto = true,
 				}
 			end,
-			on_fold = props.on_fold,
 			class = "store-notes",
 			button_class = "store-notes-more",
 		}
@@ -364,11 +362,7 @@ local Notes = ui.component(function(props: { text: () -> string, lines: number, 
 				return open:get()
 			end,
 			on_click = function()
-				local folding = open:peek()
-				open:set(not folding)
-				if folding and props.on_fold then
-					ui.after(0, props.on_fold)
-				end
+				open:set(not open:peek())
 			end,
 			class = "store-notes-more",
 			place = { self = "start" },
@@ -407,6 +401,103 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			end)
 		end
 	end)
+
+	-- The version a link chose (`zeron://open/plugin/<id>?version=<v>`):
+	-- its record, from the versions' first page or else the store's answer
+	-- for it. Install acts on it and says so; one that takes no new
+	-- installs (or that the store hasn't) leaves Install off and says why.
+	-- Fail closed: until its record is read, Install waits.
+	local chosen = ui.use_state({ version = nil, state = "none", record = nil } :: any)
+	ui.effect(function()
+		local v = nav.linked_version(id)
+		if v == chosen:peek().version then
+			return
+		end
+		if v == nil then
+			chosen:set({ version = nil, state = "none", record = nil })
+			return
+		end
+		for _, rec in (if type(d().versions) == "table" then d().versions else {}) :: { any } do
+			if type(rec) == "table" and rec.version == v then
+				chosen:set({ version = v, state = "ok", record = rec })
+				return
+			end
+		end
+		chosen:set({ version = v, state = "loading", record = nil })
+		store.version(id, v):after(function(rec: any)
+			if chosen:peek().version == v then
+				local found = type(rec) == "table" and rec.version == v
+				chosen:set({ version = v, state = if found then "ok" else "missing", record = if found then rec else nil })
+			end
+		end, function(err: any)
+			if chosen:peek().version == v then
+				local m = if type(err) == "table" then err.message else err
+				local word = if type(m) == "string" then string.match(m, "^([%l_]+)") else nil
+				chosen:set({ version = v, state = if word == "not_found" or word == "not_in_store" then "missing" else "failed", record = nil })
+			end
+		end)
+	end)
+	-- The version the page speaks of and Install acts on: the chosen one
+	-- while its record is coming or read, else (nil) the newest. One the
+	-- store hasn't, or couldn't say, leaves the plugin's ordinary page.
+	local function chosen_version(): string?
+		local c = chosen:get()
+		return if c.version and (c.state == "ok" or c.state == "loading") then c.version else nil
+	end
+	-- Whether Install may act: nothing chosen, or one the store hasn't
+	-- (the ordinary page); a chosen one once read and listed. Until its
+	-- record is read, or when it couldn't be, Install waits.
+	local function chosen_installable(): boolean
+		local c = chosen:get()
+		if c.version == nil or c.state == "missing" then
+			return true
+		end
+		return c.state == "ok" and browse.version_state(c.record) == "listed"
+	end
+	-- The sentence under the summary about the version a link chose, or
+	-- "": where the person is (a version not the newest), why it takes no
+	-- installs, or that the store hasn't it (or couldn't say).
+	local function chosen_said(): string
+		local c = chosen:get()
+		local v = c.version
+		if v == nil or c.state == "loading" then
+			return ""
+		elseif c.state == "missing" then
+			return ui.t("plugins.store.link_version_missing", { version = v }):get()
+		elseif c.state == "failed" then
+			return ui.t("plugins.store.link_version_unread", { version = v }):get()
+		end
+		local rec = c.record
+		local st = browse.version_state(rec)
+		if st == "yanked" and rec.yanked_by == "superseded" and type(rec.superseded_by) == "string" and rec.superseded_by ~= "" then
+			return ui.t("plugins.store.link_version_superseded", { version = v, by = rec.superseded_by }):get()
+		elseif st == "yanked" then
+			return ui.t("plugins.store.link_version_yanked", { version = v }):get()
+		elseif st == "taken_down" then
+			return ui.t("plugins.store.link_version_taken_down", { version = v }):get()
+		elseif st == "removed" then
+			return ui.t("plugins.store.link_version_removed", { version = v }):get()
+		elseif v ~= d().version then
+			return ui.t("plugins.store.link_version_for", { version = v, newest = d().version or "" }):get()
+		end
+		return ""
+	end
+	-- The version the head speaks of, and whether the store verified it
+	-- (nil: nothing to say of it: a chosen one still being read, or one
+	-- that takes no installs, its sentence saying why).
+	local function head_version(): string
+		return chosen_version() or d().version or ""
+	end
+	local function head_verified(): boolean?
+		local c = chosen:get()
+		if chosen_version() then
+			if c.state ~= "ok" or browse.version_state(c.record) ~= "listed" then
+				return nil
+			end
+			return c.record.verified == true
+		end
+		return d().verified
+	end
 
 	-- What the device shown has of it: this store plugin (installed from
 	-- the store); another plugin that has its id (from a file, a link)
@@ -472,12 +563,16 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		return "install"
 	end
 
-	local function install()
+	-- (`version`: one of its versions the person chose, else the one the
+	-- page offers.)
+	local function install(version: string?)
 		if busy:peek() then
 			return
 		end
 		busy:set(true)
-		local p: any = state.install({ store = id, version = d().version, device = here.device() } :: any)
+		-- (A string alone: as a click's handler it's handed the click.)
+		local chosen = if type(version) == "string" then version else d().version
+		local p: any = state.install({ store = id, version = chosen, device = here.device() } :: any)
 		if p == nil then
 			busy:set(false)
 			return
@@ -558,12 +653,24 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		if kind == "install" or kind == "incompatible" or kind == "away" or kind == "other" then
 			return primary {
 				id = "store-install",
-				disabled = kind ~= "install",
+				disabled = function(): boolean
+					return kind ~= "install" or not chosen_installable()
+				end,
 				busy = function(): boolean
 					return busy:get()
 				end,
-				on_click = install,
+				on_click = function()
+					install(chosen_version())
+				end,
+				-- (A version a link chose: named, "Install 1.2.0"; never one
+				-- the store hasn't.)
 				function(): string
+					local v = chosen_version()
+					if v then
+						return if here.device()
+							then ui.t("plugins.store.install_version_on", { version = v, device = here.device_name() }):get()
+							else ui.t("plugins.store.install_version", { version = v }):get()
+					end
 					return if here.device()
 						then ui.t("plugins.store.install_on", { device = here.device_name() }):get()
 						else ui.t("plugins.store.install"):get()
@@ -576,6 +683,10 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					return updating:get()
 				end,
 				on_click = function()
+					-- (Its offer read again as the sheet opens: whether the
+					-- store has verified it, as of now, not of the last
+					-- check hours ago.)
+					state.check_updates(here.device(), id)
 					update_open:set(true)
 				end,
 				function(): string
@@ -768,6 +879,90 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		})
 	end
 
+	-- When the version the page offers isn't verified: a plain line saying
+	-- so (the page informs; the sheets, where a person decides, warn), and
+	-- the newest verified one, a link of its own to install it instead.
+	local function verified_version(): string?
+		local v = d().verified_version
+		return if type(v) == "string" and v ~= "" and v ~= head_version() then v else nil
+	end
+	-- The sentence about the version a link chose, under the summary where
+	-- the page's other sentences about a version are, and the way back to
+	-- the newest (dropping the choice) wherever it isn't the newest.
+	local function chosen_line(): Node
+		return ui.show(function(): boolean
+			return chosen_said() ~= ""
+		end, ui.row {
+			id = "store-chosen-line",
+			w_full = true,
+			px = ds.Settings.inset(),
+			flex_wrap = true,
+			items = "center",
+			gap = "$space.2",
+			ui.text {
+				chosen_said,
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
+			},
+			ui.show(function(): boolean
+				return chosen_version() ~= nil
+			end, ds.Settings.InlineLink {
+				role = "button",
+				label = ui.t("plugins.store.show_newest"),
+				on_click = function()
+					nav.drop_linked_version()
+				end,
+			}),
+		})
+	end
+	local function verified_line(): Node
+		return ui.show(function(): boolean
+			return head_verified() == false
+		end, ui.row {
+			id = "store-verified-line",
+			w_full = true,
+			px = ds.Settings.inset(),
+			flex_wrap = true,
+			items = "center",
+			gap = "$space.2",
+			ui.text {
+				function(): string
+					local v = verified_version()
+					return if v
+						then ui.t("plugins.store.not_verified_line", { version = head_version(), verified = v }):get()
+						else ui.t("plugins.store.none_verified"):get()
+				end,
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
+			},
+			ui.show(function(): boolean
+				local v = verified_version()
+				local it: any = item()
+				return v ~= nil and not here.away() and not other() and (it == nil or it.version ~= v)
+			-- (The app's one look for a link ending a sentence, as a version
+			-- row's Install: doing something here, a button.)
+			end, ds.Settings.InlineLink {
+				role = "button",
+				label = function(): string
+					return ui.t("plugins.store.install_instead", { version = verified_version() or "" }):get()
+				end,
+				disabled = function(): boolean
+					return busy:get()
+				end,
+				on_click = function()
+					local v = verified_version()
+					if v then
+						install(v)
+					end
+				end,
+			}),
+		})
+	end
+
 	-- Its keywords: each one narrows Browse to it.
 	local function keywords(): Node
 		local list: { string } = {}
@@ -788,7 +983,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				size = "sm",
 				on_click = function()
 					browse.show_keyword(k)
-					nav.back()
+					nav.show_browse()
 				end,
 			})
 		end
@@ -852,15 +1047,34 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						gap = "$space.2",
 						items = "center",
 						flex_wrap = true,
-						ui.text {
-							function(): string
-								return browse.author(d())
-							end,
-							text_size = "$font.size.sm",
-							line_height = "$font.line.sm",
-							color = "$text.secondary",
+						-- (Who made it: a link to their plugins in Browse, as a
+						-- keyword narrows it to its own.)
+						ui.div {
+							id = "store-author",
+							ds.Link {
+								function(): string
+									return browse.author(d())
+								end,
+								size = "sm",
+								tone = "quiet",
+								on_click = function()
+									local a: any = d().author
+									local name = if type(a) == "table" and type(a.username) == "string" then a.username else ""
+									if name ~= "" then
+										browse.show_author(name)
+										nav.show_browse()
+									end
+								end,
+							},
 						},
-						browse.badges(d),
+						-- (The mark from the version it speaks of: a chosen one's
+						-- own record.)
+						browse.badges(function(): any
+							if chosen_version() == nil then
+								return d()
+							end
+							return { verified = head_verified() == true, author = d().author }
+						end),
 					},
 					-- Its version, the day that version came out (the Versions
 					-- list's day for it) and how many have it.
@@ -868,9 +1082,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						function(): string
 							local n = d().installs
 							local count = if type(n) == "number" then math.max(0, math.floor(n)) else 0
-							local version = d().version or ""
+							-- (A version a link chose: its own number and day.)
+							local version = head_version()
 							local at: number? = nil
-							for _, v in (if type(d().versions) == "table" then d().versions else {}) :: { any } do
+							local c = chosen:get()
+							if chosen_version() and c.state == "ok" and type(c.record.published_at) == "number" then
+								at = c.record.published_at
+							end
+							for _, v in (if at == nil and type(d().versions) == "table" then d().versions else {}) :: { any } do
 								if type(v) == "table" and v.version == version and type(v.published_at) == "number" then
 									at = v.published_at
 								end
@@ -933,6 +1152,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			line_height = 20,
 			color = "$text.secondary",
 		}),
+		chosen_line(),
+		verified_line(),
 		keywords(),
 		cannot(),
 		-- A version Zeron took down: why, and the way back.
@@ -975,10 +1196,75 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			pre_on:set(want)
 		end
 	end)
+	-- Which updates it takes on the device shown: the same as this
+	-- computer's choice (Installed's), the newest version, or only versions
+	-- the store has verified. This device's from what the engine keeps;
+	-- another device's, its page's word for it (no "same as this computer"
+	-- there: the page says what's in effect).
+	local function local_prefs(): any
+		return if here.device() == nil then state.store_updates:get() else nil
+	end
+	local function chosen_updates(): string
+		local prefs = local_prefs()
+		if prefs then
+			local own = if type(prefs.plugins) == "table" then prefs.plugins[id] else nil
+			return if own == "newest" or own == "verified" then own else "device"
+		end
+		return if type(first.installed) == "table" and first.installed.updates == "verified" then "verified" else "newest"
+	end
+	local updates = ui.use_state(chosen_updates())
+	ui.effect(function()
+		local now = chosen_updates()
+		if updates:peek() ~= now then
+			updates:set(now)
+		end
+	end)
+	local function update_options(): { any }
+		local out: { any } = {}
+		local prefs = local_prefs()
+		if prefs then
+			table.insert(out, { value = "device", label = ui.t("plugins.store.updates_device"):get() })
+		end
+		table.insert(out, { value = "newest", label = ui.t("plugins.store.updates_newest"):get() })
+		table.insert(out, { value = "verified", label = ui.t("plugins.store.updates_verified"):get() })
+		return out
+	end
 	local prerelease = ui.show(function(): boolean
 		local it: any = item()
 		return it ~= nil and type(it.source) == "table" and it.source.kind == "store"
 	end, ds.Settings.Group {
+		ds.Settings.Row {
+			label = ui.t("plugins.store.updates_label"),
+			description = ui.t("plugins.store.updates_body"),
+			-- (What's in effect, under it: following this computer, which
+			-- choice that is, named once, here. Its own choice: none.)
+			detail = function(): string?
+				local prefs = local_prefs()
+				if prefs and updates:get() == "device" then
+					return if prefs.device == "verified"
+						then ui.t("plugins.store.updates_follows_verified"):get()
+						else ui.t("plugins.store.updates_follows_newest"):get()
+				end
+				return nil
+			end,
+			control = ui.div {
+				id = "store-updates",
+				ds.Select {
+					value = updates,
+					size = "sm",
+					w = 200,
+					name = ui.t("plugins.store.updates_label"),
+					options = update_options,
+					on_change = function(v: any)
+						local was = chosen_updates()
+						store.set_updates(id, if v == "device" then nil else v, here.device()):after(function(_: any) end, function(err: any)
+							updates:set(was)
+							here.failed(ui.t("plugins.store.couldnt_updates", { name = d().name or id }))(err)
+						end)
+					end,
+				},
+			},
+		},
 		ds.Settings.Row {
 			label = ui.t("plugins.store.prereleases"),
 			description = ui.t("plugins.store.prereleases_body"),
@@ -1276,15 +1562,40 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	-- a bound so Report is always near. The latest's notes to about ten
 	-- lines, Show more opening the rest in place; each older one's first
 	-- line, opening whole in place; the latest few, Show all the rest.
+	-- (The detail's first page, then the rest by cursor once asked for.)
+	local more_versions = ui.use_state({} :: { any })
+	local versions_cursor = ui.use_state((first.versions_next_cursor :: string?))
 	local versions = ui.computed(function(): { store.Version }
 		local out: { store.Version } = {}
-		for _, v in (if type(d().versions) == "table" then d().versions else {}) :: { any } do
-			if type(v) == "table" and type(v.version) == "string" and (v.status == nil or v.status == "approved" or v.status == "yanked") then
-				table.insert(out, v)
+		local seen: { [string]: boolean } = {}
+		local function add(list: any)
+			for _, v in (if type(list) == "table" then list else {}) :: { any } do
+				if type(v) == "table" and type(v.version) == "string" and not seen[v.version] and (v.status == nil or v.status == "listed" or v.status == "yanked") then
+					seen[v.version] = true
+					table.insert(out, v)
+				end
 			end
 		end
+		add(d().versions)
+		add(more_versions:get())
 		return out
 	end)
+	local function fetch_versions(cursor: string)
+		store.versions(id, cursor, 50):after(function(r: any)
+			local now = table.clone(more_versions:peek())
+			for _, v in (if type(r) == "table" and type(r.versions) == "table" then r.versions else {}) :: { any } do
+				table.insert(now, v)
+			end
+			more_versions:set(now)
+			local next = if type(r) == "table" and type(r.next_cursor) == "string" and r.next_cursor ~= "" then r.next_cursor else nil
+			versions_cursor:set(next)
+			if next then
+				fetch_versions(next)
+			end
+		end, function(err: any)
+			here.failed(ui.t("plugins.store.versions_failed_toast"))(err)
+		end)
+	end
 	local all_versions = ui.use_state(false)
 	local listed = ui.computed(function(): { store.Version }
 		local all = versions:get()
@@ -1293,40 +1604,86 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end
 		return table.move(all, 1, VERSIONS_FIRST, 1, {})
 	end)
+	-- What a version's row offers at its line's end: "installed" (the one
+	-- this device has), "install" (one it can take here), else "none".
+	local function version_action(v: any): string
+		local it: any = item()
+		if it ~= nil and not other() and it.version == v.version then
+			return "installed"
+		end
+		return if browse.version_state(v) == "listed" and not here.away() and not other() and compatible() then "install" else "none"
+	end
 	local function version_row(first_v: store.Version, _i: number, now: State<store.Version>): Node
 		local latest = (versions:peek()[1] or {}).version == first_v.version
 		local function notes(): string
 			local n = now:get().notes
 			return if type(n) == "string" then string.sub(n, 1, NOTES_MOST) else ""
 		end
-		local row = ui.ref()
-		-- Folded from far down a long one: the control that folded it
-		-- brought back into view, focus on it again. (Focusing the row hands
-		-- focus to its first control, Show more, and zgx scrolls the least
-		-- that shows it; nothing moves when it's in view.)
-		-- Once the pin passes zgx #2234: `row:scroll_into_view { block = "start" }`, its head first ("nearest" would align a too-tall row's end).
-		local function keep_in_view()
-			local el = row:peek()
-			if el then
-				el:blur()
-				el:focus()
-			end
-		end
-		return ui.column { ref = row, class = "store-version", w_full = true, ds.Settings.Row {
+		return ui.column { class = "store-version", w_full = true, ds.Settings.Row {
 			label = function(): string
 				return now:get().version
 			end,
-			badge = ui.show(function(): boolean
-				return now:get().yanked == true or now:get().status == "yanked"
-			end, ds.Badge { ui.t("plugins.store.status.yanked"), tone = "info", size = "sm" }),
+			-- (As every list of versions has it, Publish's too: the public's
+			-- view, a version nobody verified "Not verified yet".)
+			badge = browse.version_badge(function(): any
+				return now:get()
+			end),
 			description = function(): string
 				local at = now:get().published_at
 				return if type(at) == "number" then locale.date(at / 1000) else ""
 			end,
+			-- Why it takes no new installs when it was replaced, when the
+			-- store verified it (its badge says whether), and whether it's
+			-- the one this device has; any other listed one, installed from
+			-- here.
+			detail = function(): string?
+				local v: any = now:get()
+				local parts: { string } = {}
+				-- (Replaced before the store verified it, as the store says.)
+				if browse.version_state(v) == "yanked" and v.yanked_by == "superseded" and type(v.superseded_by) == "string" and v.superseded_by ~= "" then
+					table.insert(parts, ui.t("plugins.store.superseded", { version = v.superseded_by }):get())
+				end
+				if v.verified == true and type(v.verified_at) == "number" then
+					table.insert(parts, ui.t("plugins.store.verified_on", { date = locale.date(v.verified_at / 1000) }):get())
+				end
+				return if #parts > 0 then table.concat(parts, " · ") else nil
+			end,
+			-- At its line's end: Install on every row that can be installed,
+			-- verified or not (the newest's too, beside the head's button);
+			-- "Installed" there on the one this device has.
+			detail_action = ui.switch(function(): string
+				return version_action(now:get())
+			end, {
+				none = ui.div {},
+				install = ds.Settings.InlineLink {
+					-- (Doing something here: a button, as Installed's Update.)
+					role = "button",
+					label = ui.t("plugins.store.install"),
+					disabled = function(): boolean
+						return busy:get()
+					end,
+					on_click = function()
+						install(now:peek().version)
+					end,
+				},
+				installed = ui.text {
+					ui.t("plugins.store.installed"),
+					class = "store-version-installed",
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					weight = "$font.weight.medium",
+					color = "$text.secondary",
+				},
+			}),
+			detail_action_shows = function(): boolean
+				return version_action(now:get()) ~= "none"
+			end,
 			stacked = true,
 			control = ui.show(function(): boolean
 				return notes() ~= ""
-			end, Notes { text = notes, lines = if latest then NOTES_LINES else 1, on_fold = keep_in_view }),
+			-- (Folded from far down a long one, its own control is brought
+			-- back into view, focused: the fold's way.)
+			end, Notes { text = notes, lines = if latest then NOTES_LINES else 1 }),
 		} }
 	end
 	local function history(): Node
@@ -1338,18 +1695,26 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				end,
 			}),
 			ui.show(function(): boolean
-				return not all_versions:get() and #versions:get() > VERSIONS_FIRST
+				return not all_versions:get() and (#versions:get() > VERSIONS_FIRST or versions_cursor:get() ~= nil)
 			end, ui.row {
 				px = ds.Settings.inset(),
 				FoldButton {
+					-- (How many, once the store has said: more pages to come,
+					-- "All versions" alone.)
 					label = function(): string
-						return ui.t("plugins.store.all_versions", { n = #versions:get() }):get()
+						return if versions_cursor:get() ~= nil
+							then ui.t("plugins.store.all_versions_plain"):get()
+							else ui.t("plugins.store.all_versions", { n = #versions:get() }):get()
 					end,
 					open = function(): boolean
 						return all_versions:get()
 					end,
 					on_click = function()
 						all_versions:set(true)
+						local c = versions_cursor:peek()
+						if c then
+							fetch_versions(c)
+						end
 					end,
 					class = "store-all-versions",
 				},
@@ -1359,6 +1724,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 
 	-- What changes with the update, read before it: the changelog and what
 	-- it asks for more or no longer.
+	-- The newest verified version an unverified update offers beside it
+	-- (the offer's own `verified_alternative`), else nil.
+	local function verified_alternative(): string?
+		local it: any = item()
+		local u = if it then it.update else nil
+		local alt = if type(u) == "table" and type(u.verified_alternative) == "table" then u.verified_alternative.version else nil
+		return if type(alt) == "string" and alt ~= "" then alt else nil
+	end
 	local function update_dialog(): Node
 		local function notes(): string
 			local it: any = item()
@@ -1397,12 +1770,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					gap = "$space.4",
 					-- A new publisher, by name (asked again after it updates), a
 					-- version signed with another key than yours (said, never in
-					-- the way: the store took it), and a version still in review
-					-- (offered only to its author).
+					-- the way: the store took it), and a version the store
+					-- hasn't verified (a warning, here where the person
+					-- decides: from the offer's own record, with the verified
+					-- one to take instead where there is one).
 					ui.show(function(): boolean
 						local it: any = item()
 						local u = if it then it.update else nil
-						return type(u) == "table" and (u.new_owner == true or u.new_key == true or u.in_review == true)
+						return type(u) == "table" and (u.new_owner == true or u.new_key == true or u.verified == false)
 					end, ui.column {
 						w_full = true,
 						gap = "$space.2",
@@ -1426,17 +1801,47 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 							tone = "warning",
 							title = ui.t("plugins.store.update_new_key"),
 						}),
-						ui.show(function(): boolean
+						-- (Keyed by what it says: its words and its action are
+						-- the offer's.)
+						ui.presence(function(): string
 							local it: any = item()
-							return it ~= nil and type(it.update) == "table" and it.update.in_review == true
-						end, ui.text {
-							ui.t("plugins.store.update_in_review"),
-							w_full = true,
-							wrap = true,
-							text_size = "$font.size.sm",
-							line_height = "$font.line.sm",
-							color = "$text.secondary",
-						}),
+							local u = if it then it.update else nil
+							if type(u) ~= "table" or u.verified ~= false then
+								return ""
+							end
+							local had = if u.installed_verified == true and type(it.version) == "string" then it.version else ""
+							return `{u.version or ""}|{had}|{verified_alternative() or ""}`
+						end, function(key: string): Node
+							if key == "" then
+								return ui.div {}
+							end
+							local v, had, alt = string.match(key, "^([^|]*)|([^|]*)|([^|]*)$")
+							return ui.div {
+								class = "store-update-unverified",
+								w_full = true,
+								ds.Callout {
+									tone = "warning",
+									title = ui.t("plugins.store.not_verified_yet", { version = v or "" }),
+									-- (What follows Update, said before it: the consent
+									-- window asks, as the sheet's other callouts say.)
+									body = function(): string
+										local asks = ui.t("plugins.store.update_asks_first"):get()
+										return if had and had ~= ""
+											then ui.t("plugins.store.installed_was_verified", { installed = had }):get() .. " " .. asks
+											else asks
+									end,
+									action = if alt and alt ~= ""
+										then {
+											label = ui.t("plugins.store.update_instead", { version = alt }),
+											on_click = function()
+												update_open:set(false)
+												install(alt)
+											end,
+										}
+										else nil,
+								},
+							}
+						end, { w_full = true }),
 					}),
 					ui.show(function(): boolean
 						return notes() ~= ""

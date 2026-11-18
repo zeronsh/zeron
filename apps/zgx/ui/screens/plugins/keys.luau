@@ -1,24 +1,26 @@
 --!strict
--- A plugin's deploy keys, on its publishing page (screens/plugins/publish):
--- what a CI job (a GitHub Action) publishes its new versions with instead
--- of your session. A section with New key… on its title's line; each key a
--- row: its name on a line of its own (wrapping, as a row's name does), when
--- it was last used and when it ends under it (within 14 days of its end,
--- how soon, the line in the warning's ink), and at the row's end the key
--- shortened (`M.short`, as the store's site shows it) in the code face, a
--- column down the rows, then Revoke. Revoked keys aren't listed. A new one is made by the
--- engine (`CreateDeployKey`) after a fresh sign-in in the browser when the
--- store asks for one; its secret is shown here once, to copy, and kept
--- nowhere.
+-- The account's deploy keys, at the end of Yours: what a CI job (a GitHub
+-- Action) publishes new versions with instead of your session, each for
+-- the plugins it was made for (its scope: all of yours, those you publish
+-- later too, or the ones chosen), fixed when it's made. A section with New
+-- key… at its title's end; each key a row: its name on a line of its own,
+-- when it was last used (and on which plugin) and when it ends under it
+-- (within 14 days of its end, how soon, the line in the warning's ink), its
+-- scope under that, and at the row's end the key shortened (`M.short`, as
+-- the store's site shows it) in the code face, a column down the rows, then
+-- Revoke. Revoked keys aren't listed. A new one is made by the engine
+-- (`CreateDeployKey`) after a fresh sign-in in the browser begun for it;
+-- its secret is shown here once, to copy, and kept nowhere.
 --
--- A key can only publish versions of this plugin, and every version still
--- waits for review: what it can't do is said where it's made.
+-- A key never publishes a plugin's first version: that comes from a
+-- signed-in device.
 --
---   keys.Section { plugin, here, published }  (`published`: whether a version
---                                             of it has been sent, a key's
---                                             first condition)
+--   keys.Section { plugins }  (`plugins`: yours in the store, { id, name },
+--                             what a scope chooses from; none, no key yet)
 
 local ds = require("@ds")
+local field = require("@ds/field")
+local Markdown = require("@ds/markdown")
 local locale = require("@ds/locale")
 local store = require("@app/screens/plugins/store")
 
@@ -58,14 +60,70 @@ function M.short(key: string): string
 	return `{string.sub(key, 1, 8)}…{string.sub(key, -4)}`
 end
 
-M.Section = ui.component(function(props: { plugin: string, here: any, published: () -> boolean }): Node
-	local id = props.plugin
+export type Owned = { id: string, name: string }
+
+-- A key's scope in words: all of yours, or the plugins it names (by name
+-- where they're yours; two by name, more by how many).
+-- Which of yours a key publishes, by name ("A, B and 2 more"; `whole`:
+-- every one, "A, B, C and D"), or all of them.
+local function scope_names(scope: any, plugins: { Owned }): { string }
+	local names: { string } = {}
+	for _, id in (if type(scope) == "table" and type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do
+		local name = id
+		for _, p in plugins do
+			if p.id == id then
+				name = p.name
+			end
+		end
+		table.insert(names, name)
+	end
+	return names
+end
+
+local function scope_words(scope: any, plugins: { Owned }, whole: boolean?): string
+	if type(scope) ~= "table" or scope.all == true then
+		return ui.t("plugins.store.key.scope.all_now", { n = #plugins }):get()
+	end
+	if whole then
+		local names = scope_names(scope, plugins)
+		if #names > 2 then
+			local last = table.remove(names) :: string
+			return ui.t("plugins.store.key.scope.every", { list = table.concat(names, ui.t("plugins.words.list_sep"):get()), last = last }):get()
+		end
+	end
+	local names: { string } = {}
+	for _, id in (if type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do
+		local name = id
+		for _, p in plugins do
+			if p.id == id then
+				name = p.name
+			end
+		end
+		table.insert(names, name)
+	end
+	if #names == 1 then
+		return ui.t("plugins.store.key.scope.one", { name = names[1] }):get()
+	elseif #names == 2 then
+		return ui.t("plugins.store.key.scope.two", { a = names[1], b = names[2] }):get()
+	end
+	return ui.t("plugins.store.key.scope.more", { a = names[1], b = names[2], n = #names - 2 }):get()
+end
+
+M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
+	local function published(): boolean
+		return #props.plugins() > 0
+	end
 	-- "loading", "ready", or why not.
 	local phase = ui.use_state("loading")
+	-- The keys whose every plugin is shown by name, in place.
+	local whole_scope = ui.use_state({} :: { [string]: boolean })
 	local list = ui.use_state({} :: { any })
 	local making = ui.use_state(false)
 	local name = ui.use_state("")
 	local expiry = ui.use_state("90")
+	-- Its scope: "all" of yours, or "chosen", those ticked.
+	local scope_kind = ui.use_state("all")
+	local chosen = ui.use_state({} :: { [string]: boolean })
 	-- Making one: "idle", "busy" (asked; perhaps signing in), or why not.
 	local made_phase = ui.use_state("idle")
 	local secret = ui.use_state(nil :: string?)
@@ -80,7 +138,7 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 	local revoke_open = ui.use_state(false)
 
 	local function load()
-		store.keys(id):after(function(r: any)
+		store.keys():after(function(r: any)
 			local out = {}
 			for _, k in (if type(r) == "table" and type(r.keys) == "table" then r.keys else {}) :: { any } do
 				if type(k) == "table" and type(k.key) == "string" and k.revoked_at == nil then
@@ -103,9 +161,22 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 		end
 	end)
 
+	local function chosen_ids(): { string }
+		local out: { string } = {}
+		local picked = chosen:get()
+		for _, p in props.plugins() do
+			if picked[p.id] then
+				table.insert(out, p.id)
+			end
+		end
+		return out
+	end
+	local function ready_to_make(): boolean
+		return (string.match(name:get(), "%S")) ~= nil and (scope_kind:get() == "all" or #chosen_ids() > 0)
+	end
 	local function create()
 		local n = string.match(name:peek(), "^%s*(.-)%s*$") or ""
-		if n == "" or made_phase:peek() == "busy" then
+		if n == "" or made_phase:peek() == "busy" or not ready_to_make() then
 			return
 		end
 		local days: number? = nil
@@ -116,10 +187,13 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 		end
 		made_phase:set("busy")
 		local expires = if days then (os.time() + days * 86400) * 1000 else nil
-		store.create_key({ id = id, name = n, expires = expires }):after(function(r: any)
+		local scope: store.Scope = if scope_kind:peek() == "all" then { all = true } else { plugins = chosen_ids() }
+		store.create_key({ name = n, scope = scope, expires = expires }):after(function(r: any)
 			made_phase:set("idle")
 			making:set(false)
 			name:set("")
+			scope_kind:set("all")
+			chosen:set({})
 			if type(r) == "table" and type(r.secret) == "string" and r.secret ~= "" then
 				secret:set(r.secret)
 				secret_open:set(true)
@@ -143,6 +217,16 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 			description = function(): string
 				local k = now:get()
 				local used = day_of(k.last_used_at)
+				-- (Where it was last used, by the plugin's name where it's yours.)
+				local on: string? = nil
+				if type(k.last_used_plugin) == "string" and k.last_used_plugin ~= "" then
+					on = k.last_used_plugin
+					for _, p in props.plugins() do
+						if p.id == on then
+							on = p.name
+						end
+					end
+				end
 				local ends = day_of(k.expires_at)
 				-- About to end: how soon, after whether it's still in use (so
 				-- whether it must be replaced first).
@@ -153,10 +237,33 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 					elseif n == 1 then ui.t("plugins.store.key.ends_tomorrow"):get()
 					else ui.t("plugins.store.key.ends_in", { n = n }):get()
 				return table.concat({
-					if used then ui.t("plugins.store.key.last_used", { date = used }):get() else ui.t("plugins.store.key.not_used"):get(),
+					if used and on then ui.t("plugins.store.key.last_used_on", { date = used, plugin = on }):get()
+						elseif used then ui.t("plugins.store.key.last_used", { date = used }):get()
+						elseif day_of(k.created_at) then ui.t("plugins.store.key.not_used_made", { date = day_of(k.created_at) }):get()
+						else ui.t("plugins.store.key.not_used"):get(),
 					ending,
 				}, " · ")
 			end,
+			-- Which of yours it publishes, wrapping, never cut: past two, by
+			-- the first two and how many more, and every one in place with
+			-- the line's own link (a key's plugins are fixed once it's made).
+			detail = function(): string
+				return scope_words(now:get().scope, props.plugins(), whole_scope:get()[first.key] == true)
+			end,
+			detail_link = if type(first.scope) == "table" and first.scope.all ~= true and type(first.scope.plugins) == "table" and #first.scope.plugins > 2
+				then {
+					-- (Acting in place: a button.)
+					role = "button",
+					label = function(): string
+						return if whole_scope:get()[first.key] then ui.t("plugins.store.key.scope.fewer"):get() else ui.t("plugins.store.key.scope.show_all"):get()
+					end,
+					on_click = function()
+						local now_open = table.clone(whole_scope:peek())
+						now_open[first.key] = if now_open[first.key] then nil else true
+						whole_scope:set(now_open)
+					end,
+				}
+				else nil,
 			-- (About to end, the line is in the warning's ink, one status
 			-- line; only its "Ends…" once the line can be a rich one:
 			-- zgx-asks/rich-span-boundary-break.)
@@ -174,9 +281,10 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 						return M.short(now:get().key)
 					end,
 					class = "key-short",
+					-- (A key's short form as Settings shows a signing key's.)
 					font = "$font.mono",
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
+					text_size = "$font.size.xs",
+					line_height = "$font.line.xs",
 					color = "$text.tertiary",
 					-- (A row is its key's: the key never changes under it.)
 					tooltip = first.key,
@@ -198,7 +306,7 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 		if key == "ready" then
 			-- (Nothing sent yet: what comes first, whatever's listed.)
 			return ui.presence(function(): string
-				return if props.published() and #list:get() > 0 then "list" else "none"
+				return if published() and #list:get() > 0 then "list" else "none"
 			end, function(shown: string): Node
 				if shown == "list" then
 					return ds.Settings.Each(list, key_row, {
@@ -212,7 +320,7 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 					ui.text {
 						id = "keys-none",
 						function(): string
-							return if props.published() then ui.t("plugins.store.keys_none"):get() else ui.t("plugins.store.keys_publish_first"):get()
+							return if published() then ui.t("plugins.store.keys_none"):get() else ui.t("plugins.store.keys_publish_first"):get()
 						end,
 						w_full = true,
 						px = "$space.4",
@@ -257,21 +365,25 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 		ds.Settings.Section {
 			title = ui.t("plugins.store.keys"),
 			description = ui.t("plugins.store.keys_body"),
-			trail_on_line = true,
 			-- (The section's own action, at its title's end; a key sends the
-			-- versions after the first, which comes from this computer.)
-			trail = ds.Button {
-				id = "keys-new",
-				tone = "ghost",
-				size = "xs",
-				disabled = function(): boolean
-					return not props.published()
-				end,
-				on_click = function()
-					made_phase:set("idle")
-					making:set(true)
-				end,
-				ui.t("plugins.store.key.new"),
+			-- versions after a plugin's first, which comes from a device.)
+			trail = ui.div {
+				-- (Its words on the content edge past its own padding, as
+				-- Settings' section actions.)
+				mr = ui.raw(-((ui.theme.get("zeron.space.snug") :: number?) or 10), "the ghost's own padding"),
+				ds.Button {
+					id = "keys-new",
+					tone = "ghost",
+					size = "sm",
+					disabled = function(): boolean
+						return not published()
+					end,
+					on_click = function()
+						made_phase:set("idle")
+						making:set(true)
+					end,
+					ui.t("plugins.store.key.new"),
+				},
 			},
 			ui.presence(function(): string
 				return phase:get()
@@ -294,7 +406,7 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 					return made_phase:get() == "busy"
 				end,
 				disabled = function(): boolean
-					return (string.match(name:get(), "%S")) == nil
+					return not ready_to_make()
 				end,
 				on_click = create,
 			},
@@ -306,6 +418,54 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 				w_full = true,
 			},
 			ds.Select { value = expiry, label = ui.t("plugins.store.key.expiry_label"), options = expiry_options, w_full = true },
+			-- What it publishes: all of yours (those you publish later too),
+			-- or the ones ticked. Fixed once it's made. Labelled as the
+			-- Name and Ends fields above it are (ds/field).
+			field.wrap {
+				label = ui.t("plugins.store.key.scope.label"),
+				w_full = true,
+				box = ui.column {
+					id = "key-scope",
+					w_full = true,
+					gap = "$space.2",
+					ds.Segmented {
+						value = scope_kind,
+						label = ui.t("plugins.store.key.scope.label"),
+						options = {
+							{ value = "all", label = ui.t("plugins.store.key.scope.all") },
+							{ value = "chosen", label = ui.t("plugins.store.key.scope.chosen") },
+						},
+					},
+					ui.show(function(): boolean
+						return scope_kind:get() == "chosen"
+					end, ui.column {
+						w_full = true,
+						gap = "$space.1",
+						ui.each(ui.computed(function(): { Owned }
+							return props.plugins()
+						end), function(p: Owned): Node
+							local on = ui.computed(function(): boolean
+								return chosen:get()[p.id] == true
+							end)
+							return ds.Checkbox {
+								value = function(): boolean
+									return on:get()
+								end,
+								on_change = function(v: boolean)
+									local next = table.clone(chosen:peek())
+									next[p.id] = if v then true else nil
+									chosen:set(next)
+								end,
+								label = p.name,
+							}
+						end, {
+							key = function(p: Owned): string
+								return p.id
+							end,
+						}),
+					}),
+				},
+			},
 			ui.show(function(): boolean
 				return made_phase:get() == "busy"
 			end, ui.row {
@@ -366,46 +526,21 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 					secret_open:set(false)
 				end,
 			},
-			ui.row {
+			-- The secret as the app shows a line of code to copy: a chat
+			-- reply's code block (mono, its own Copy), drawn by ds/markdown
+			-- from one fence labelled "key", opened wrapped so the whole key
+			-- shows at once to check by eye (`code_fit`; its toggle its own).
+			-- (A deploy key's characters never close it.)
+			ui.div {
 				id = "key-secret",
 				w_full = true,
-				gap = "$space.2",
-				items = "center",
-				p = "$space.2",
-				pl = "$space.3",
-				rounded = "$radius.lg",
-				bg = "$surface.sunken",
-				border = 1,
-				border_color = "$zeron.well.edge",
-				-- (One line in the code face, scrolling sideways: never broken
-				-- inside the token. Copy is what takes it.)
-				ui.scroll_x {
-					grow = 1,
-					min_w = 0,
-					fade = { 12, 12 },
-					fade_overflow = true,
-					ui.text {
-						function(): string
-							return secret:get() or ""
-						end,
-						font = "$font.mono",
-						text_size = "$font.size.sm",
-						line_height = "$font.line.sm",
-						color = "$text.primary",
-						selectable = true,
-					},
-				},
-				ds.Button {
-					tone = "secondary",
-					size = "sm",
-					on_click = function()
-						local s = secret:peek()
-						if s then
-							ui.clipboard.write(s)
-							ds.toast.show { title = ui.t("plugins.store.key.copied"), tone = "success" }
-						end
+				Markdown {
+					text = function(): string
+						-- (`key`: a name the highlighter doesn't know, so the
+						-- block's label reads "key" over the plain text.)
+						return "```key\n" .. (secret:get() or "") .. "\n```"
 					end,
-					ui.t("plugins.store.key.copy"),
+					code_fit = true,
 				},
 			},
 		},
@@ -423,7 +558,7 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 					local k = revoking:peek()
 					revoking:set(nil)
 					if k then
-						store.revoke_key(id, k.key):after(function()
+						store.revoke_key(k.key):after(function()
 							load()
 						end, function(err: any)
 							local m = if type(err) == "table" then err.message else err

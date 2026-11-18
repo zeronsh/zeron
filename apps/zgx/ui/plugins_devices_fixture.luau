@@ -74,6 +74,9 @@ end
 
 -- The devbox, reachable or not (`unreachable`: its engine doesn't answer).
 local reachable = true
+-- Which updates the devbox's store plugins take, as its list says
+-- (`devbox_verified_only`: verified versions only).
+local devbox_updates: any = nil
 
 local function find(list: { any }, id: string): any
 	for _, p in list do
@@ -92,7 +95,7 @@ local function publish_remote(device: string?)
 		for _, p in DEVBOX do
 			table.insert(list, table.clone(p))
 		end
-		state.remote:set({ device = device, state = "ready", list = list } :: any)
+		state.remote:set({ device = device, state = "ready", list = list, store_updates = devbox_updates } :: any)
 	else
 		state.remote:set({ device = device, state = "offline", list = {} } :: any)
 	end
@@ -175,6 +178,19 @@ ui.command {
 	title = "The devbox answers again",
 	run = function()
 		reachable = true
+	end,
+}
+
+ui.command {
+	id = "devbox_verified_only",
+	title = "The devbox takes verified updates only; its Pulse waits for 2.1.0",
+	run = function()
+		devbox_updates = { device = "verified", plugins = {} }
+		table.insert(DEVBOX, plugin("pulse", "Pulse", "on", {
+			source = { kind = "store", id = "pulse", publisher = "ada", verified = true },
+			update = { version = "2.1.0", added = {}, removed = {}, verified = false, held = true },
+		}))
+		publish_remote(state.device())
 	end,
 }
 

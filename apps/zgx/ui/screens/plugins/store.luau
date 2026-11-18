@@ -16,10 +16,14 @@
 --   store.search { q?, category?, keyword?, sort?, cursor?, limit?, featured? }
 --       { items = { Card }, next_cursor? }   sort: "relevance" | "popular" |
 --                                            "updated" | "new"
---   store.detail(id, for_zeron?)  Detail, every version; whether it works
---                             with Zeron `for_zeron` (the device shown's), else
---                             this one (rejects "not_in_store")
---   store.categories()        { categories = { { id, name } } }
+--   store.detail(id, for_zeron?)  Detail, its first page of versions
+--                             (`versions_next_cursor` for more), whether it's
+--                             verified and its newest verified version; whether
+--                             it works with Zeron `for_zeron` (the device
+--                             shown's), else this one (rejects "not_in_store")
+--   store.versions(id, cursor?, limit?)  { versions, total, next_cursor? }
+--   store.version(id, version)  Version
+--   store.categories()        { categories = { { id, name, count? } } }
 --   store.picture(id, version, path)  { src }: a picture of its package, as
 --                             the engine keeps it here
 --   store.icon(id, version, path)     { svg }: its icon, or nil
@@ -33,11 +37,12 @@
 --                             field?, path?, words } }, warnings, listing,
 --                             notes, package = { files, bytes }, ticket? }
 --   store.publish(id, hash, ticket)  { id, version, status, checks }
---   store.keys(id)            { keys = { Key } }
---   store.create_key { id, name, expires? }   { key, secret } once: a fresh
---                             sign-in first when the store asks for one
+--   store.keys()              { keys = { Key } }, the account's
+--   store.create_key { name, scope, expires? }   { key, secret } once: a fresh
+--                             sign-in first (`scope`: { all = true } or
+--                             { plugins = { ids } })
 --   store.cancel_step_up()    stops waiting for that sign-in
---   store.revoke_key(id, key)
+--   store.revoke_key(key)
 --
 -- Shapes (the plan's contract and its amendments,
 -- docs/plans/2026-11-17-plugin-store.md):
@@ -69,6 +74,10 @@ export type Card = {
 	updated_at: number?,
 	installs: number?,
 	featured: boolean?,
+	-- Whether the store has verified `version` (its newest listed one), and
+	-- the newest version it has verified (nil: none yet).
+	verified: boolean?,
+	verified_version: string?,
 }
 export type Version = {
 	version: string,
@@ -79,11 +88,18 @@ export type Version = {
 	yanked: boolean?,
 	prerelease: boolean?,
 	review: { state: string?, reason: string?, message: string?, decided_at: number? }?,
+	-- Whether the store has verified it, and when.
+	verified: boolean?,
+	verified_at: number?,
 }
 export type Query = {
 	q: string?,
 	category: string?,
 	keyword: string?,
+	-- One publisher's plugins (a username), and whether only plugins whose
+	-- newest version is verified.
+	author: string?,
+	verified: boolean?,
 	sort: string?,
 	cursor: string?,
 	limit: number?,
@@ -101,6 +117,15 @@ function M.detail(id: string, for_zeron: string?): any
 	return ui.call("plugins.store.detail", if for_zeron then { id = id, for_zeron = for_zeron } else id)
 end
 
+-- A page of a plugin's versions, newest first (`cursor` from the detail's
+-- `versions_next_cursor`, then each page's `next_cursor`), and one version.
+function M.versions(id: string, cursor: string?, limit: number?): any
+	return ui.call("plugins.store.versions", { id = id, cursor = cursor, limit = limit })
+end
+function M.version(id: string, version: string): any
+	return ui.call("plugins.store.version", { id = id, version = version })
+end
+
 function M.categories(): any
 	return ui.call("plugins.store.categories", nil)
 end
@@ -115,6 +140,12 @@ end
 
 function M.prereleases(id: string, on: boolean, device: string?): any
 	return ui.call("plugins.store.prereleases", { id = id, on = on, device = device })
+end
+
+-- Which updates a plugin takes on the device shown ("newest", the default,
+-- or "verified"); with no id, the device's own choice (nil: the default).
+function M.set_updates(id: string?, prefer: ("newest" | "verified")?, device: string?): any
+	return ui.call("plugins.store.updates", { id = id, prefer = prefer, device = device })
 end
 
 function M.report(id: string, reason: string, text: string): any
@@ -137,11 +168,12 @@ function M.publish(id: string, hash: string, ticket: string): any
 	return ui.call("plugins.store.publish", { id = id, hash = hash, ticket = ticket })
 end
 
-function M.keys(id: string): any
-	return ui.call("plugins.store.keys", id)
+function M.keys(): any
+	return ui.call("plugins.store.keys", nil)
 end
 
-function M.create_key(args: { id: string, name: string, expires: number? }): any
+export type Scope = { all: boolean?, plugins: { string }? }
+function M.create_key(args: { name: string, scope: Scope, expires: number? }): any
 	return ui.call("plugins.store.create_key", args)
 end
 
@@ -149,8 +181,8 @@ function M.cancel_step_up()
 	ui.invoke("plugins.store.cancel_step_up", nil)
 end
 
-function M.revoke_key(id: string, key: string): any
-	return ui.call("plugins.store.revoke_key", { id = id, key = key })
+function M.revoke_key(key: string): any
+	return ui.call("plugins.store.revoke_key", { key = key })
 end
 
 -- What a report may say is wrong (the store's list).

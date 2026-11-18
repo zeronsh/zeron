@@ -3615,9 +3615,14 @@
         "available": "有可用更新：{version}。",
         "available_unversioned": "有可用更新。",
         "added": "它还请求{list}；将先征求你的许可。",
-        "removed": "它不再请求{list}。"
+        "removed": "它不再请求{list}。",
+        "held": "{version} 正在等待：它只接受已验证的更新。",
+        "unverified": "有可用更新：{version}，尚未验证。",
+        "held_plugin": "{version} 正在等待：这个插件只接受已验证的更新。",
+        "held_computer": "{version} 正在等待：这台电脑只接受已验证的更新。",
+        "held_device": "{version} 正在等待：{device} 只接受已验证的更新。"
       },
-      "unverified": "未验证",
+      "unverified": "作者未知",
       "from": "来自 {where}",
       "from_file": "来自文件",
       "more": "另有 {n} 项",
@@ -3641,7 +3646,8 @@
         "changes": "它更改的 Zeron 部分",
         "replaces": "它替换的界面",
         "changes_since": "自你允许以来还更改"
-      }
+      },
+      "store_unverified_unversioned": "Zeron 尚未验证这个版本。"
     },
     "page": {
       "title": "插件",
@@ -3664,6 +3670,7 @@
       "builtin": "{name}是 Zeron 的一部分",
       "remove_named": "移除 {name}",
       "update": "更新",
+      "update_asks": "更新…",
       "updating": "正在更新…",
       "none_yours": "你还没有插件",
       "none": "暂无插件",
@@ -3706,6 +3713,7 @@
       "unknown_why": "Zeron 无法确定制作者。仅在信任来源时允许。",
       "nothing": "无需授权",
       "asks_nothing": "除了在自己的空间中运行外，它没有请求其他权限。",
+      "nothing_new": "它没有请求你已允许之外的任何东西。",
       "allow_title": "允许 {name}？",
       "tampered": "自你允许后已发生更改",
       "asks_again": "它现在还请求：",
@@ -3848,7 +3856,10 @@
       "invalid_name": "请给密钥一个短一点的名字。",
       "invalid_expiry": "请重新选择密钥的到期时间。",
       "invalid_proof": "商店无法验证新密钥。请再试一次。",
-      "bad_csrf": "商店拒绝了一个无法信任的请求。请再试一次。"
+      "bad_csrf": "商店拒绝了一个无法信任的请求。请再试一次。",
+      "not_owner": "其中有些插件在商店里不属于你。",
+      "invalid_scope": "请至少为它选择一个你的插件。",
+      "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。"
     },
     "store": {
       "browse": "浏览",
@@ -3862,9 +3873,34 @@
       "update_to": "更新到 {version}",
       "install": "安装",
       "install_on": "安装到{device}",
+      "install_version": "安装 {version}",
+      "install_version_on": "将 {version} 安装到{device}",
+      "link_version_missing": "商店里没有它的 {version} 版本。",
+      "link_version_unread": "无法在商店中查看 {version}。",
+      "link_version_superseded": "{version} 不再接受新安装：在验证前已被 {by} 取代。",
+      "link_version_yanked": "{version} 不再接受新安装。",
+      "link_version_taken_down": "Zeron 已下架 {version}。",
+      "link_version_removed": "{version} 已从商店移除。",
+      "link_version_for": "这个链接指向 {version}。最新版本是 {newest}。",
+      "show_newest": "查看最新版本",
       "turn_on": "打开",
       "open_settings": "打开设置",
       "category_label": "类别",
+      "all_categories": "所有类别",
+      "not_verified_yet": "Zeron 尚未验证 {version}。",
+      "installed_was_verified": "你现有的版本 {installed} 已验证。",
+      "update_instead": "改为更新到 {version}",
+      "not_verified_line": "{version} 尚未验证。{verified} 已验证。",
+      "none_verified": "这个插件还没有经过验证的版本。",
+      "install_instead": "改为安装 {version}",
+      "verified_on": "{date} 已验证",
+      "not_verified": "未验证",
+      "all_versions_plain": "显示所有版本",
+      "versions_failed_toast": "无法读取它的其他版本",
+      "verified": "已验证",
+      "verified_only": "仅显示已验证",
+      "category_count": "{name}（{n}）",
+      "order_label": "排序",
       "sort": {
         "relevance": "最相关",
         "popular": "安装最多",
@@ -3892,7 +3928,7 @@
       "try_another": "换个词试试，或者少用几个筛选条件。",
       "clear": "清除搜索",
       "empty_title": "商店里还没有插件",
-      "empty_body": "大家分享的插件通过审核后会出现在这里。",
+      "empty_body": "大家发布的插件会出现在这里。",
       "not_found_title": "商店里没有这个插件",
       "not_found_body": "它可能已被下架，或者链接有误。",
       "browse_all": "浏览插件",
@@ -3983,8 +4019,8 @@
         "bad_listing": {
           "icon": "图标必须是不超过 32 KB 的 SVG。",
           "categories": "从商店的类别中选择一到两个。",
-          "description": "描述不能超过 300 个字符。",
-          "name": "名字不能超过 64 个字符。",
+          "description": "描述只能有一行、不超过 300 个字符，不能含隐藏字符，也不要说它已验证：这由商店来标注。",
+          "name": "名字不能超过 64 个字符，不能含隐藏字符，也不要说它已验证：这由商店来标注。",
           "keywords": "最多 8 个关键词，小写，每个不超过 32 个字符。",
           "screenshots": "最多 8 张图片，每张都是文件夹里的 PNG 或 JPEG。",
           "homepage": "网站必须是 https 链接。",
@@ -3997,36 +4033,27 @@
       "check_again": "重新检查",
       "check_failed": "无法检查",
       "fix_first": "修正标出的问题，保存后重新检查。",
-      "submit": "提交审核",
-      "submit_version": "提交 {version} 审核",
+      "submit": "发布",
+      "submit_version": "发布 {version}",
       "submit_note": "{n, plural, other {将发送 # 个文件}}，以你的签名、与检查时完全一致。",
-      "sent_toast": "已提交{name} {version}审核",
+      "sent_toast": "{name} {version} 已在插件商店",
       "your_versions": "你发送过的版本",
       "no_versions": "还没有发送过版本。",
       "versions_failed": "无法查看你的版本",
       "sign_in_to_see": "登录后查看你的版本",
       "at_line": "{path}，第 {line} 行",
-      "sign_in_to_see_keys": "登录后查看它的密钥",
+      "sign_in_to_see_keys": "登录后查看你的密钥",
       "status": {
-        "pending": "审核中",
-        "approved": "已通过",
-        "rejected": "未通过",
-        "withdrawn": "已撤回",
         "yanked": "停止新安装",
-        "removed": "已下架"
+        "taken_down": "已下架",
+        "removed": "已移除"
       },
-      "reviewer_said": "{date} · “{words}”",
       "action": {
-        "withdraw": "撤回",
         "yank": "停止新安装",
         "unyank": "重新允许安装"
       },
       "action_failed": "无法更改这个版本",
       "confirm": {
-        "withdraw": {
-          "title": "撤回{name} {version}？",
-          "body": "它会离开审核队列。发送过的版本号不能再用：下一个请用新版本号。"
-        },
         "yank": {
           "title": "停止{name} {version}的新安装？",
           "body": "之后没人能再安装它。已经安装的人仍然可以使用。你以后可以重新允许安装。"
@@ -4038,17 +4065,19 @@
       },
       "summary": {
         "none": "未发布到插件商店",
-        "listed": "{version} 已在插件商店",
-        "in_review": "{version} 审核中",
         "unknown": "把它分享到插件商店",
+        "listed_verified": "{version} 已在插件商店，已验证",
+        "listed_waiting": "{version} 已在插件商店，尚未验证",
+        "listed_declined": "{version} 已在插件商店，未通过验证",
         "no_installs": "{version} 已停止新安装",
-        "not_approved": "{version} 未通过审核",
-        "taken_down": "{version} 已下架"
+        "taken_down": "{version} 已下架",
+        "newest_verified": "{version} 是最新的已验证版本",
+        "none_verified": "还没有已验证的版本"
       },
       "keys": "部署密钥",
-      "keys_body": "部署密钥让 CI 任务（例如 GitHub Action）不用你的登录也能发送这个插件的新版本；每个版本仍需审核。",
+      "keys_body": "部署密钥让 CI 任务（例如 GitHub Action）无需你的会话即可发布你插件的新版本。每个密钥只发布创建时选定的插件。",
       "keys_none": "还没有密钥。",
-      "keys_failed": "无法查看它的密钥",
+      "keys_failed": "无法查看你的密钥",
       "key": {
         "new": "新建密钥…",
         "new_title": "新建部署密钥",
@@ -4067,9 +4096,7 @@
         "stop_waiting": "停止等待",
         "timed_out": "登录没有完成。请再试一次。",
         "secret_title": "现在复制你的密钥",
-        "secret_body": "Zeron 只显示这一次。请把它放进 CI 的机密设置里。拿到它的人可以以你的名义发送这个插件的版本。",
-        "copy": "复制",
-        "copied": "密钥已复制",
+        "secret_body": "这是 Zeron 唯一一次显示它。请把它放进 CI 的密钥中。任何拿到它的人都能以你的身份发布它所对应插件的版本。",
         "done": "我已复制",
         "ends": "{date} 到期",
         "revoke": "吊销",
@@ -4081,7 +4108,21 @@
         "no_end": "永不过期",
         "ends_today": "今天到期",
         "ends_tomorrow": "明天到期",
-        "ends_in": "{n, plural, other {# 天后到期}}"
+        "ends_in": "{n, plural, other {# 天后到期}}",
+        "last_used_on": "{date} 用于 {plugin}",
+        "scope": {
+          "label": "可以发布",
+          "all": "你的所有插件",
+          "chosen": "选定的插件",
+          "one": "{name}",
+          "two": "{a} 和 {b}",
+          "all_now": "你的所有插件：目前 {n} 个，以及以后发布的",
+          "more": "{a}、{b} 等 {n} 个",
+          "every": "{list} 和 {last}",
+          "show_all": "全部显示",
+          "fewer": "收起"
+        },
+        "not_used_made": "尚未使用 · 创建于 {date}"
       },
       "unblock_title": "重新打开{name}？",
       "unblock_body": "Zeron 已将这个版本从商店下架。它会按你之前的允许在这里再次运行。",
@@ -4089,14 +4130,13 @@
       "update_new_owner": "它有了新的发布者 @{username}。更新后 Zeron 会再次请你允许。",
       "update_new_owner_unnamed": "它有了新的发布者。更新后 Zeron 会再次请你允许。",
       "update_new_key": "这个版本的签名密钥与你现有版本的不同。",
-      "update_in_review": "这个版本还在审核中：只提供给你自己的设备。",
-      "keys_publish_first": "请先从这台电脑发送第一个版本；之后的版本可以由部署密钥发送。",
+      "update_asks_first": "更新前 Zeron 会先请你允许。",
+      "keys_publish_first": "请先从这台电脑发布你的一个插件。",
       "version_installs": "版本 {version} · {n, plural, other {# 次安装}}",
       "show_installed": "在“已安装”中查看",
       "readme_more": "显示更多",
       "version_meta": "版本 {version} · {date} · {n, plural, other {# 次安装}}",
       "details": "详细信息",
-      "all": "全部",
       "has_version": "你已安装 {version}",
       "has_version_on": "{device} 已安装 {version}",
       "off_note": "已关闭",
@@ -4107,10 +4147,62 @@
       "all_versions": "显示全部 {n} 个版本",
       "count": "{n, plural, other {# 个插件}}",
       "list_title": "插件",
-      "categories_back": "前面的分类",
-      "categories_more": "更多分类",
       "plain_readme": "此处以下的 README 以纯文本显示：它太长或嵌套太深，无法排版。",
-      "plain_notes": "此处以下的更新说明以纯文本显示：它太长或嵌套太深，无法排版。"
+      "plain_notes": "此处以下的更新说明以纯文本显示：它太长或嵌套太深，无法排版。",
+      "review": {
+        "waiting": "尚未验证",
+        "declined": "未验证",
+        "declined_said": "审核者的说明：“{words}”"
+      },
+      "superseded": "在验证前已被 {version} 取代",
+      "sent_toast_body": "在审核者看过之前，它会显示为未验证。",
+      "updates_label": "更新",
+      "updates_body": "接受这个插件的每个新版本，或只接受 Zeron 已验证的版本。",
+      "updates_newest": "最新版本",
+      "updates_verified": "仅已验证的版本",
+      "couldnt_updates": "无法更改 {name} 的更新设置",
+      "updates_device": "与这台电脑相同",
+      "updates_follows_newest": "跟随这台电脑：最新版本。",
+      "updates_follows_verified": "跟随这台电脑：仅已验证的版本。",
+      "updates_section": "插件商店",
+      "updates_all_label": "更新",
+      "updates_all_body": "接受每个新版本，或只接受 Zeron 已验证的版本。",
+      "couldnt_updates_all": "无法更改插件接受的更新",
+      "installed_was_verified_plain": "你现有的版本已验证。",
+      "newest_verified_is": "{version} 是 Zeron 已验证的最新版本。",
+      "cause": {
+        "field": {
+          "name": "名字",
+          "description": "描述",
+          "keywords": "关键词"
+        },
+        "too_long": {
+          "name": "名字超过 64 个字符。",
+          "description": "描述超过 300 个字符。"
+        },
+        "not_one_line": {
+          "description": "描述只能有一行。"
+        },
+        "unseen_char": {
+          "any": "{field}里有一个隐藏字符 {word}。请删掉它。"
+        },
+        "mark_word": {
+          "any": "{field}里说它“{word}”。这由商店的标记来说明；请删掉这个词，或说明验证的是什么。",
+          "keywords": "关键词“{word}”是商店的标记。请删掉它。"
+        },
+        "mark_glyph": {
+          "any": "{field}里有“{word}”，看起来像商店的标记。请删掉它。"
+        },
+        "keyword_shape": {
+          "keywords": "关键词“{word}”只能使用小写字母、数字、连字符和单个空格，最多 32 个字符。"
+        },
+        "too_many": {
+          "keywords": "最多使用 8 个关键词。"
+        },
+        "repeated": {
+          "keywords": "关键词“{word}”重复了。"
+        }
+      }
     }
   },
   "templates": {

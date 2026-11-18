@@ -6,13 +6,17 @@
 //! through MCP; this only carries its answers, as src/acp_registry.rs does
 //! the registry's. Method by method (crates/rpc `STORE_*`):
 //!
-//!   plugins.store.search { q?, category?, keyword?, sort?, cursor?, limit?, featured? }
+//!   plugins.store.search { q?, category?, keyword?, author?, sort?, cursor?, limit?, featured?, verified? }
 //!                                     StoreSearch
 //!   plugins.store.detail(id | { id, for_zeron })  StorePlugin { id,
-//!                                     versions: true, for_zeron? }: the
-//!                                     detail, every version, `compatible`
+//!                                     for_zeron? }: the detail, its first
+//!                                     page of versions (`versions_next_cursor`
+//!                                     for the rest), `compatible`
 //!                                     (`incompatible`: why not), judged for
 //!                                     the device shown's Zeron
+//!   plugins.store.versions { id, cursor?, limit? }  StoreVersions: a page
+//!                                     of its versions, newest first
+//!   plugins.store.version { id, version }  StoreVersion: one
 //!   plugins.store.categories          StoreCategories
 //!   plugins.store.picture { id, version, path }  StoreFile: `{ src }`, the
 //!                                     file the engine keeps (a picture only)
@@ -20,17 +24,22 @@
 //!                                     text (an SVG of at most 32 KB, as an
 //!                                     installed plugin's icon)
 //!   plugins.store.prereleases { id, on, device? }  SetPluginPrereleases
+//!   plugins.store.updates { id?, prefer?, device? }  SetPluginUpdates: a
+//!                                     plugin's (or with no id the device's)
+//!                                     "newest" or "verified" updates
 //!   plugins.store.mine                StoreMyPlugins
 //!   plugins.store.version_action { id, version, action }  StoreVersionAction
 //!   plugins.store.prepare(id)         PreparePluginPublish
 //!   plugins.store.publish { id, hash, ticket }  PublishPlugin
-//!   plugins.store.keys(id)            ListDeployKeys
-//!   plugins.store.create_key { id, name, expires? }  CreateDeployKey, a
+//!   plugins.store.keys()              ListDeployKeys: the account's
+//!   plugins.store.create_key { name, scope, expires? }  CreateDeployKey
+//!                                     (`scope`: `{ all = true }` or
+//!                                     `{ plugins = { ids } }`), a
 //!                                     fresh sign-in begun for it first
 //!                                     (StepUp `for: "deploy_key"`, each one
 //!                                     a key's); `cancel_step_up` stops
 //!                                     waiting for it
-//!   plugins.store.revoke_key { id, key }  RevokeDeployKey
+//!   plugins.store.revoke_key { key }  RevokeDeployKey
 //!   plugins.store.report { id, reason, text }  StoreReport
 //!
 //! Each rejects with the engine's words ("offline", "not_in_store", a store
@@ -87,7 +96,7 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         let e = e.clone();
         async move {
             let mut params = json!({});
-            for key in ["q", "category", "keyword", "sort", "cursor"] {
+            for key in ["q", "category", "keyword", "author", "sort", "cursor"] {
                 if let Some(v) = arg.field(key).map(text).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
                     params[key] = json!(v);
                 }
@@ -100,6 +109,10 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             }
             if matches!(arg.field("featured"), Some(Value::Bool(true))) {
                 params["featured"] = json!(true);
+            }
+            // (Only plugins whose newest version the store has verified.)
+            if matches!(arg.field("verified"), Some(Value::Bool(true))) {
+                params["verified"] = json!(true);
             }
             ask(&e, "StoreSearch", params).await
         }
@@ -114,11 +127,38 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
                 _ => arg.field("id").map(text).unwrap_or_default(),
             };
             let id = store_id(&id).ok_or("not_in_store")?;
-            let mut params = json!({ "id": id, "versions": true });
+            let mut params = json!({ "id": id });
             if let Some(zeron) = arg.field("for_zeron").map(text).filter(|v| version_ok(v)) {
                 params["for_zeron"] = json!(zeron);
             }
             ask(&e, "StorePlugin", params).await
+        }
+    });
+    let e = engine.clone();
+    host.async_action("plugins.store.versions", move |arg| {
+        let e = e.clone();
+        async move {
+            let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
+            let mut params = json!({ "id": id });
+            if let Some(cursor) = arg.field("cursor").map(text).filter(|c| !c.is_empty()) {
+                params["cursor"] = json!(cursor);
+            }
+            if let Some(Value::Num(n)) = arg.field("limit")
+                && n.is_finite()
+                && *n >= 1.0
+            {
+                params["limit"] = json!((*n as u64).min(50));
+            }
+            ask(&e, "StoreVersions", params).await
+        }
+    });
+    let e = engine.clone();
+    host.async_action("plugins.store.version", move |arg| {
+        let e = e.clone();
+        async move {
+            let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
+            let version = arg.field("version").map(text).filter(|v| version_ok(v)).ok_or("not_in_store")?;
+            ask(&e, "StoreVersion", json!({ "id": id, "version": version })).await
         }
     });
     let e = engine.clone();
@@ -162,6 +202,29 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         }
     });
     let e = engine.clone();
+    host.async_action("plugins.store.updates", move |arg| {
+        let e = e.clone();
+        async move {
+            crate::plugins::preview::refuse("plugins.store.updates")?;
+            // (A plugin's own choice, or with no id the device's; `prefer`
+            // nil: as the device does, or for the device the default.)
+            let id = arg.field("id").map(text).unwrap_or_default();
+            let device = super::remote::device_of(&arg);
+            let mut params = json!({});
+            if !id.is_empty() {
+                params["id"] = json!(store_id(&id).ok_or("not_in_store")?);
+            }
+            params["prefer"] = match arg.field("prefer").map(text).as_deref() {
+                Some("newest") => json!("newest"),
+                Some("verified") => json!("verified"),
+                None | Some("") => Json::Null,
+                Some(_) => return Err("invalid".into()),
+            };
+            let reply = e("SetPluginUpdates", params, device).await?;
+            Ok(json_value(&reply))
+        }
+    });
+    let e = engine.clone();
     host.async_action("plugins.store.mine", move |_| {
         let e = e.clone();
         async move {
@@ -179,7 +242,9 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let version = arg.field("version").map(text).filter(|v| version_ok(v)).ok_or("not_in_store")?;
             let action = arg.field("action").map(text).unwrap_or_default();
-            if !["withdraw", "yank", "unyank"].contains(&action.as_str()) {
+            // (Its author's: stop new installs, allow them again. Withdrawing
+            // is gone: a version is listed as it's published.)
+            if !["yank", "unyank"].contains(&action.as_str()) {
                 return Err("invalid".into());
             }
             answer(&e, "StoreVersionAction", json!({ "id": id, "version": version, "action": action })).await
@@ -202,18 +267,24 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let hash = arg.field("hash").map(text).unwrap_or_default();
             let ticket = arg.field("ticket").map(text).unwrap_or_default();
-            answer(&e, "PublishPlugin", json!({ "id": id, "hash": hash, "ticket": ticket })).await
+            let reply = e("PublishPlugin", json!({ "id": id, "hash": hash, "ticket": ticket }), None).await?;
+            // (A listing refused for a cause it names: the page says which,
+            // in its own words, so the refusal comes as the answer.)
+            if let Some(refused) = listing_refusal(&reply) {
+                return Ok(json_value(&refused));
+            }
+            answered(&reply)?;
+            Ok(json_value(&reply))
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.keys", move |id| {
+    host.async_action("plugins.store.keys", move |_| {
         let e = e.clone();
         async move {
-            // (Your own account: your keys' names, fingerprints and when
-            // they were last used.)
+            // (Your own account: your keys' names, fingerprints, scopes and
+            // when they were last used.)
             crate::plugins::preview::refuse("plugins.store.keys")?;
-            let id = store_id(&text(&id)).ok_or("not_in_store")?;
-            ask(&e, "ListDeployKeys", json!({ "id": id })).await
+            ask(&e, "ListDeployKeys", json!({})).await
         }
     });
     let e = engine.clone();
@@ -221,12 +292,12 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         let e = e.clone();
         async move {
             crate::plugins::preview::refuse("plugins.store.create_key")?;
-            let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let name: String = arg.field("name").map(text).unwrap_or_default().trim().chars().take(64).collect();
             if name.is_empty() {
                 return Err("invalid_name".into());
             }
-            let mut params = json!({ "id": id, "name": name });
+            let scope = key_scope(arg.field("scope")).ok_or("invalid_scope")?;
+            let mut params = json!({ "name": name, "scope": scope });
             if let Some(Value::Num(at)) = arg.field("expires")
                 && at.is_finite()
                 && *at > 0.0
@@ -244,9 +315,8 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         let e = e.clone();
         async move {
             crate::plugins::preview::refuse("plugins.store.revoke_key")?;
-            let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let key = arg.field("key").map(text).filter(|k| !k.is_empty() && k.len() <= 128).ok_or("not_in_store")?;
-            answer(&e, "RevokeDeployKey", json!({ "id": id, "key": key })).await
+            answer(&e, "RevokeDeployKey", json!({ "key": key })).await
         }
     });
     let e = engine;
@@ -308,6 +378,32 @@ fn answered(reply: &Json) -> Result<(), String> {
     Err(if message.is_empty() { word.to_string() } else { format!("{word}: {message}") })
 }
 
+/// The causes a refused listing may name (crates/engine plugins/listing.rs
+/// `cause::ALL`): the page has a sentence for each.
+const LISTING_CAUSES: &[&str] = &["too_long", "not_one_line", "unseen_char", "mark_word", "mark_glyph", "keyword_shape", "too_many", "repeated"];
+/// The listing fields those causes are about.
+const LISTING_FIELDS: &[&str] = &["name", "description", "keywords"];
+
+/// A publish refused for a listing's field and a cause the page knows,
+/// `{ ok = false, error, field, cause, word? }`, each bounded: a known
+/// field and cause, the word plain, one line, at most 64 characters. Any
+/// other refusal is an error as before (`answered`).
+fn listing_refusal(reply: &Json) -> Option<Json> {
+    if reply["ok"].as_bool() != Some(false) {
+        return None;
+    }
+    let field = reply["field"].as_str().filter(|f| LISTING_FIELDS.contains(f))?;
+    let cause = reply["cause"].as_str().filter(|c| LISTING_CAUSES.contains(c))?;
+    let mut out = json!({ "ok": false, "error": "bad_listing", "field": field, "cause": cause });
+    if let Some(word) = reply["word"].as_str() {
+        let word: String = word.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(64).collect();
+        if !word.is_empty() {
+            out["word"] = json!(word);
+        }
+    }
+    Some(out)
+}
+
 /// A file of a package, as a README or a listing names it: relative,
 /// inside it (no `..`, no `/` first, no scheme, no `\\`, no escapes, no
 /// NUL), at most 512 bytes. (The engine checks it against the version's
@@ -364,6 +460,27 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
         tx.send(work());
     });
     rx.recv().await
+}
+
+/// A deploy key's scope as the store takes it: `{ all: true }` (every
+/// plugin of the account's, those it publishes later too), or
+/// `{ plugins: [ids] }`, one to fifty store ids, each once (a duplicate
+/// refused, never dropped). Anything else is no scope.
+fn key_scope(scope: Option<&Value>) -> Option<Json> {
+    let scope = scope?;
+    if matches!(scope.field("all"), Some(Value::Bool(true))) {
+        return Some(json!({ "all": true }));
+    }
+    let Some(Value::List(items)) = scope.field("plugins") else { return None };
+    let mut ids: Vec<String> = Vec::new();
+    for item in items.iter() {
+        let id = store_id(&text(item))?;
+        if ids.contains(&id) {
+            return None;
+        }
+        ids.push(id);
+    }
+    (1..=50).contains(&ids.len()).then(|| json!({ "plugins": ids }))
 }
 
 /// A deploy key made after a fresh sign-in in the browser begun for it
@@ -434,7 +551,7 @@ mod tests {
             }
         }
         assert!(guarded >= 9, "{guarded}");
-        for read in ["plugins.store.search", "plugins.store.detail", "plugins.store.categories", "plugins.store.picture", "plugins.store.icon"] {
+        for read in ["plugins.store.search", "plugins.store.detail", "plugins.store.versions", "plugins.store.version", "plugins.store.categories", "plugins.store.picture", "plugins.store.icon"] {
             assert!(!crate::plugins::preview::BLOCKED.contains(&read), "{read} only reads the catalog");
         }
     }
@@ -465,6 +582,23 @@ mod tests {
         assert_eq!(answered(&json!({ "ok": false, "error": "not_newer", "message": "1.0.0 is older" })).unwrap_err(), "not_newer: 1.0.0 is older");
         assert_eq!(answered(&json!({ "ok": false, "error": "changed" })).unwrap_err(), "changed");
         assert_eq!(answered(&json!({ "ok": false })).unwrap_err(), "failed");
+    }
+
+    /// A publish refused for a listing's field and cause comes to the page
+    /// as its answer, bounded; anything else stays an error.
+    #[test]
+    fn a_listing_refusal_names_its_field_cause_and_word_bounded() {
+        let refused = json!({ "ok": false, "error": "bad_listing", "message": "Its name says \"Verified\"", "field": "name", "cause": "mark_word", "word": "Verified" });
+        assert_eq!(listing_refusal(&refused), Some(json!({ "ok": false, "error": "bad_listing", "field": "name", "cause": "mark_word", "word": "Verified" })));
+        // The word plain, one line, at most 64 characters.
+        let long = json!({ "ok": false, "field": "description", "cause": "unseen_char", "word": format!("U+200B\n{}", "x".repeat(100)) });
+        let word = listing_refusal(&long).unwrap()["word"].as_str().unwrap().to_owned();
+        assert!(!word.contains('\n') && word.chars().count() == 64, "{word}");
+        // None: a field or cause the page doesn't know, no cause, or not a refusal.
+        assert_eq!(listing_refusal(&json!({ "ok": false, "field": "icon", "cause": "too_long" })), None);
+        assert_eq!(listing_refusal(&json!({ "ok": false, "field": "name", "cause": "claims_zeron" })), None);
+        assert_eq!(listing_refusal(&json!({ "ok": false, "error": "not_newer" })), None);
+        assert_eq!(listing_refusal(&json!({ "ok": true, "field": "name", "cause": "too_long" })), None);
     }
 
     #[test]

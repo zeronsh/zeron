@@ -95,11 +95,22 @@ fn a_plugin_s_page_asks_for_every_version_and_this_device_s_zeron() {
         r#"ui.call("plugins.store.detail", { id = "focus-timer", for_zeron = "0.4.2" })"#,
         json!({ "id": "focus-timer", "compatible": false, "incompatible": "Needs Zeron 0.5.0 or later" }),
     );
-    assert_eq!(asked, vec![("StorePlugin".into(), json!({ "id": "focus-timer", "versions": true, "for_zeron": "0.4.2" }), None)]);
+    assert_eq!(asked, vec![("StorePlugin".into(), json!({ "id": "focus-timer", "for_zeron": "0.4.2" }), None)]);
     assert!(out.contains("compatible=false") && out.contains("incompatible=Needs Zeron 0.5.0"), "{out}");
     // This device's own: no `for_zeron`.
     let (_, asked) = run(r#"ui.call("plugins.store.detail", "focus-timer")"#, json!({}));
-    assert_eq!(asked[0].1, json!({ "id": "focus-timer", "versions": true }));
+    assert_eq!(asked[0].1, json!({ "id": "focus-timer" }));
+}
+
+#[test]
+fn a_plugin_s_versions_are_read_a_page_or_one_at_a_time() {
+    let (_, asked) = run(r#"ui.call("plugins.store.versions", { id = "focus-timer", cursor = "c2", limit = 500 })"#, json!({ "versions": [] }));
+    assert_eq!(asked[0], ("StoreVersions".into(), json!({ "id": "focus-timer", "cursor": "c2", "limit": 50 }), None));
+    let (_, asked) = run(r#"ui.call("plugins.store.version", { id = "focus-timer", version = "1.2.0" })"#, json!({}));
+    assert_eq!(asked[0], ("StoreVersion".into(), json!({ "id": "focus-timer", "version": "1.2.0" }), None));
+    let (out, asked) = run(r#"ui.call("plugins.store.version", { id = "focus-timer", version = "../x" })"#, json!({}));
+    assert_eq!(out, "err:not_in_store");
+    assert!(asked.is_empty());
 }
 
 #[test]
@@ -117,6 +128,14 @@ fn a_search_sends_what_was_asked_and_nothing_empty() {
     );
     assert_eq!(asked[0].0, "StoreSearch");
     assert_eq!(asked[0].1, json!({ "q": "timer", "sort": "popular", "limit": 50, "featured": true }));
+    // A publisher's plugins, verified ones alone; false and empty are left out.
+    let (_, asked) = run(
+        r#"ui.call("plugins.store.search", { author = " ada ", verified = true, keyword = "" })"#,
+        json!({ "items": [] }),
+    );
+    assert_eq!(asked[0].1, json!({ "author": "ada", "verified": true }));
+    let (_, asked) = run(r#"ui.call("plugins.store.search", { verified = false })"#, json!({ "items": [] }));
+    assert_eq!(asked[0].1, json!({}));
 }
 
 #[test]
@@ -145,13 +164,35 @@ fn a_report_carries_its_reason_and_words_and_only_the_store_s_reasons() {
 }
 
 #[test]
-fn a_deploy_key_that_isn_t_allowed_yet_says_so() {
+fn a_deploy_key_that_isn_t_allowed_says_so() {
     let (out, asked) = run(
-        r#"ui.call("plugins.store.create_key", { id = "focus", name = "CI" })"#,
-        json!({ "ok": false, "error": "not_published", "message": "Publish a version first" }),
+        r#"ui.call("plugins.store.create_key", { name = "CI", scope = { plugins = { "focus", "timer" } } })"#,
+        json!({ "ok": false, "error": "not_owner", "message": "Not yours: timer" }),
     );
-    assert_eq!(asked[0], ("CreateDeployKey".into(), json!({ "id": "focus", "name": "CI" }), None));
-    assert_eq!(out, "err:not_published: Publish a version first");
+    assert_eq!(asked[0], ("CreateDeployKey".into(), json!({ "name": "CI", "scope": { "plugins": ["focus", "timer"] } }), None));
+    assert_eq!(out, "err:not_owner: Not yours: timer");
+}
+
+#[test]
+fn a_deploy_key_s_scope_is_all_or_one_to_fifty_store_ids_each_once() {
+    let (_, asked) = run(r#"ui.call("plugins.store.create_key", { name = "CI", scope = { all = true } })"#, json!({ "ok": true }));
+    assert_eq!(asked[0].1, json!({ "name": "CI", "scope": { "all": true } }));
+    for bad in [
+        r#"{ name = "CI" }"#,
+        r#"{ name = "CI", scope = { plugins = {} } }"#,
+        r#"{ name = "CI", scope = { plugins = { "focus", "focus" } } }"#,
+        r#"{ name = "CI", scope = { plugins = { "../etc" } } }"#,
+        r#"{ name = "CI", scope = { all = false } }"#,
+    ] {
+        let (out, asked) = run(&format!(r#"ui.call("plugins.store.create_key", {bad})"#), json!({ "ok": true }));
+        assert_eq!(out, "err:invalid_scope", "{bad}");
+        assert!(asked.is_empty(), "{bad}");
+    }
+    // The account's keys, and one revoked by its key alone.
+    let (_, asked) = run(r#"ui.call("plugins.store.keys", nil)"#, json!({ "keys": [] }));
+    assert_eq!(asked[0], ("ListDeployKeys".into(), json!({}), None));
+    let (_, asked) = run(r#"ui.call("plugins.store.revoke_key", { key = "k_gh" })"#, json!({ "ok": true }));
+    assert_eq!(asked[0], ("RevokeDeployKey".into(), json!({ "key": "k_gh" }), None));
 }
 
 #[test]
@@ -159,7 +200,7 @@ fn a_deploy_key_s_sign_in_is_begun_for_a_deploy_key() {
     // (Every reply says a sign-in is needed, its page no https one: the
     // browser never opens, the call ends there.)
     let (out, asked) = run(
-        r#"ui.call("plugins.store.create_key", { id = "focus", name = "CI" })"#,
+        r#"ui.call("plugins.store.create_key", { name = "CI", scope = { all = true } })"#,
         json!({ "ok": false, "error": "step_up_required", "url": "about:blank" }),
     );
     let methods: Vec<&str> = asked.iter().map(|(m, _, _)| m.as_str()).collect();
@@ -180,6 +221,19 @@ fn a_preview_reads_the_catalog_but_never_your_own_account() {
     assert!(out.starts_with("ok:"), "{out}");
     assert_eq!(asked[0].0, "StoreSearch");
     crate::plugins::preview::set(None);
+}
+
+#[test]
+fn which_updates_a_plugin_or_the_device_takes_is_newest_or_verified() {
+    let (_, asked) = run(r#"ui.call("plugins.store.updates", { id = "focus", prefer = "verified", device = "devbox" })"#, json!({ "prefer": "verified" }));
+    assert_eq!(asked[0], ("SetPluginUpdates".into(), json!({ "id": "focus", "prefer": "verified" }), Some("devbox".into())));
+    let (_, asked) = run(r#"ui.call("plugins.store.updates", { prefer = "newest", device = "devbox" })"#, json!({}));
+    assert_eq!(asked[0], ("SetPluginUpdates".into(), json!({ "prefer": "newest" }), Some("devbox".into())));
+    let (_, asked) = run(r#"ui.call("plugins.store.updates", { id = "focus" })"#, json!({}));
+    assert_eq!(asked[0].1, json!({ "id": "focus", "prefer": null }));
+    let (out, asked) = run(r#"ui.call("plugins.store.updates", { id = "focus", prefer = "anything" })"#, json!({}));
+    assert_eq!(out, "err:invalid");
+    assert!(asked.is_empty());
 }
 
 #[test]

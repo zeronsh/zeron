@@ -90,6 +90,10 @@ export type PageProps = {
 -- An aside's column, by default.
 local ASIDE = 180
 
+-- The page's section step: between its sections, its aside and them, and
+-- a catalog's card and what a tab puts under it.
+local SECTION_STEP = "$space.6"
+
 function M.Page(props: PageProps): Node
 	local children: { any } = {}
 	for _, c in ipairs(props :: any) do
@@ -104,7 +108,7 @@ function M.Page(props: PageProps): Node
 		grow = 1,
 		min_w = 0,
 		w_full = if props.aside then top else true,
-		gap = "$space.6",
+		gap = SECTION_STEP,
 		table.unpack(children),
 	}
 	local body: Node
@@ -115,7 +119,7 @@ function M.Page(props: PageProps): Node
 		-- (the aside after the groups, so over them is a reversed column).
 		body = ui.div {
 			w_full = true,
-			gap = "$space.6",
+			gap = SECTION_STEP,
 			direction = function(): Direction
 				return if top() then "column_reverse" else "row"
 			end,
@@ -186,14 +190,6 @@ export type SectionProps = {
 	title: (string | Message | () -> string)?,
 	description: (string | Message | () -> string)?,
 	trail: Node?,
-	-- The trail centred on the title's line without adding to its height
-	-- (a 24 action beside a 14 title): title to description 4 and title
-	-- to card 8 with or without one (the plugin store's pages). Without it,
-	-- the title's row is as tall as its trail, as Settings' sections have it.
-	-- It's a ghost (xs): its words end on the content edge, text lined up
-	-- with text, and its wash hangs past by its end padding, showing under
-	-- the pointer and the ring.
-	trail_on_line: boolean?,
 	[number]: Child,
 }
 
@@ -209,25 +205,7 @@ function M.Section(props: SectionProps): Node
 			-- title stands over what it names.
 			px = M.inset(),
 			gap = "$space.1",
-			if props.title
-				then SectionTitle {
-					props.title,
-					trail = if props.trail and props.trail_on_line
-						then ui.column {
-							-- (A line high, the trail centred in it, standing out
-							-- of it above and below alike; and past the content
-							-- edge by a ghost xs button's end padding, so its
-							-- words, not its box, end on it.)
-							h = "$font.line.xs",
-							shrink = 0,
-							justify = "center",
-							mr = ui.raw(-((ui.theme.get("zeron.space.tight") :: number?) or 6), "a ghost xs trail's end padding: its words on the content edge, its wash past it"),
-							props.trail,
-						}
-						else props.trail,
-					heading = 2,
-				}
-				else nil,
+			if props.title then SectionTitle { props.title, trail = props.trail, heading = 2 } else nil,
 			if props.description then Hint { props.description } else nil,
 		}
 	end
@@ -486,8 +464,8 @@ function M.truncated_row_h(lead: number?, byline: boolean?): number
 end
 
 -- One thing set apart, a card of its own that opens it (the plugin store's
--- featured plugins): its tile beside its name over who made it (a list
--- row's head), then two lines of what it is, on the card's text edge. One
+-- featured plugins): its tile beside its name over who made it and its
+-- `badge` (a small one, its line's height), then two lines of what it is, on the card's text edge. One
 -- height whatever it says (the two lines held for it); its width a shelf's
 -- (ds/shelf, `M.FEATURE_MIN` its least: the tile, and a name and its two
 -- lines a readable measure beside and under it). The whole card is one
@@ -540,22 +518,24 @@ function M.Feature(props: FeatureProps): Node
 					grow = 1,
 					min_w = 0,
 					gap = "$zeron.space.hair",
+					FadeText {
+						props.label,
+						min_w = 0,
+						text_size = "$font.size.md",
+						line_height = "$font.line.md",
+						weight = "$font.weight.medium",
+						color = "$text.primary",
+					},
+					-- (Who made it, and its badge after: the name's line its
+					-- own at every card width. The small badge is the line's
+					-- height, so the card's stays one.)
 					ui.row {
 						gap = "$space.2",
 						items = "center",
 						min_w = 0,
-						FadeText {
-							props.label,
-							shrink = 1,
-							min_w = 0,
-							text_size = "$font.size.md",
-							line_height = "$font.line.md",
-							weight = "$font.weight.medium",
-							color = "$text.primary",
-						},
-						props.badge,
+						FadeText { props.byline or "", shrink = 1, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
+						if props.badge then ui.div { shrink = 0, props.badge } else nil,
 					},
-					FadeText { props.byline or "", min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
 				},
 			},
 			-- (Two lines held whatever it says: one height for every card.)
@@ -676,6 +656,8 @@ M.InlineLink = ui.component(function(props: InlineLinkProps): Node
 	}
 end)
 
+export type RowBadges = { keys: () -> { string }, badge: (key: string) -> Node }
+
 export type RowProps = {
 	label: string | Message | () -> string,
 	description: (string | Message | () -> string)?,
@@ -684,6 +666,13 @@ export type RowProps = {
 	lead: Node?,
 	-- Right after the name, on its line ("You", "In use").
 	badge: Node?,
+	-- After the name, on its line, each whole or absent, never cut (the
+	-- store's "Verified", then an account's badges): `keys`, the ones it
+	-- has, in order; `badge`, the one a key names. As many show as fit
+	-- while the name keeps `NAME_LEAST`, so the last go first. A key names
+	-- the same words on every row that has it: its width, measured once, is
+	-- known to the next row as it comes.
+	badges: RowBadges?,
 	control: Node?,
 	-- The control under the text, full width.
 	stacked: boolean?,
@@ -713,7 +702,8 @@ export type RowProps = {
 	private_label: boolean?,
 	private_description: boolean?,
 	-- Who made it, on a line of its own under the name, over the
-	-- description, in the same quiet ink (a plugin's, a template's).
+	-- description, in the same quiet ink (a plugin's, a template's). As a
+	-- function, the line shows only while it says something.
 	byline: (string | Message | () -> string)?,
 	-- A second line under the description, in its tertiary ink, wrapped
 	-- whole even in a truncating row (what a built-in plugin is allowed).
@@ -721,59 +711,169 @@ export type RowProps = {
 	-- At the detail line's end, while it shows: a small action of its own
 	-- (a plugin's Update), so the row's control stays the same on every row.
 	detail_action: Node?,
+	-- Whether `detail_action` shows: the line then shows for it, with the
+	-- detail's words or none (a version's Install, on a row with nothing
+	-- else to say). Without it, the line shows only with words.
+	detail_action_shows: (() -> boolean)?,
 	-- The sentence's own link, right after the detail's last word and
 	-- wrapping with it as one sentence does (Publish… after where a plugin
 	-- stands in the store): a link in the text's own ink, underlined.
-	detail_link: { label: string | Message, on_click: () -> () }?,
+	-- (`role`: "button" for one that acts in place, as a list shown whole.)
+	detail_link: { label: string | Message | () -> string, on_click: () -> (), role: ("link" | "button")? }?,
 }
 
+-- The least a row's name keeps beside its badges: past it, the last badge
+-- goes, then the one before (ds/settings `badges`).
+local NAME_LEAST = 96
+-- Each badge's width (without its gap), by its key: as last measured on
+-- any row.
+local badge_w: { [string]: number } = {}
+
+-- A row's name and its badges, each whole or absent (`RowProps.badges`).
+-- Each is measured in a box of its own, its gap before it; the box is that
+-- wide while it fits and none while it doesn't (its badge invisible, kept
+-- only to be measured). Until its width is known it is absent.
+local BadgedName = ui.component(function(props: { name: Node, badges: RowBadges }): Node
+	local line_w = ui.use_state(0)
+	-- (Moves when a width does: what's shown reads it.)
+	local measured = ui.use_state(0)
+	local keys = ui.computed(function(): { string }
+		return props.badges.keys()
+	end)
+	-- The gap before a badge: the name's step before the first, a
+	-- badge's between the next (as `badge`'s and a row of badges').
+	local function gap(first: boolean): number
+		return (ui.theme.get(if first then "space.2" else "space.1") :: number?) or (if first then 8 else 4)
+	end
+	-- Its box's width shown: the badge and its gap; nil while unmeasured.
+	local function width(key: string, first: boolean): number?
+		measured:get()
+		local w = badge_w[key]
+		return if w then w + gap(first) else nil
+	end
+	local function shown(key: string): boolean
+		local room = line_w:get() - NAME_LEAST
+		local used = 0
+		for j, k in keys:get() do
+			local w = width(k, j == 1)
+			if w == nil then
+				return false
+			end
+			used += w
+			if k == key then
+				return used <= room
+			end
+		end
+		return false
+	end
+	local function first(key: string): boolean
+		return keys:get()[1] == key
+	end
+	return ui.row {
+		w_full = true,
+		items = "center",
+		min_w = 0,
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(size.w - line_w:peek()) >= 0.5 then
+				line_w:set(size.w)
+			end
+		end,
+		props.name,
+		ui.each(keys, function(key: string): Node
+			return ui.row {
+				shrink = 0,
+				overflow = "hidden",
+				-- (The badge at the box's end: its gap before it.)
+				justify = "end",
+				w = function(): number
+					return if shown(key) then width(key, first(key)) or 0 else 0
+				end,
+				ui.div {
+					shrink = 0,
+					-- (Unshown, it keeps its size, to be measured, and is
+					-- neither drawn, hit nor read.)
+					invisible = function(): boolean
+						return not shown(key)
+					end,
+					on_resize = function(size: { w: number, h: number })
+						if size.w > 0 and math.abs(size.w - (badge_w[key] or -1)) >= 0.5 then
+							badge_w[key] = size.w
+							measured:set(measured:peek() + 1)
+						end
+					end,
+					props.badges.badge(key),
+				},
+			}
+		end, {
+			key = function(key: string): string
+				return key
+			end,
+		}),
+	}
+end)
+
+-- A row's byline, on a line of its own; one given as a function shows
+-- only while it has words (nothing to say of who made it: no line).
+local function byline_line(props: RowProps): Node
+	local line = if props.truncate
+		then FadeText { props.byline, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
+		else ui.text { props.byline, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
+	local byline = props.byline
+	if type(byline) ~= "function" then
+		return line
+	end
+	return ui.show(function(): boolean
+		local words = (byline :: () -> string)()
+		return type(words) == "string" and words ~= ""
+	end, line)
+end
+
 function M.Row(props: RowProps): Node
+	local name = if props.private_label
+		then PrivateText {
+			props.label,
+			truncate = props.truncate,
+			grow = if props.truncate then 1 else nil,
+			text_size = "$font.size.md",
+			line_height = "$font.line.md",
+			weight = "$font.weight.medium",
+			color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
+		}
+		elseif props.truncate
+		then FadeText {
+			props.label,
+			-- (With a badge, only as wide as the name, so the badge sits
+			-- right after it; it still shrinks to fade.)
+			grow = if props.badge or props.badges then nil else 1,
+			shrink = 1,
+			min_w = 0,
+			text_size = "$font.size.md",
+			line_height = "$font.line.md",
+			weight = "$font.weight.medium",
+			color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
+		}
+		else ui.text {
+			props.label,
+			text_size = "$font.size.md",
+			line_height = "$font.line.md",
+			weight = if props.quiet then "$font.weight.regular" else "$font.weight.medium",
+			color = if props.danger then "$zeron.tone.danger.ink" elseif props.quiet then "$text.secondary" else "$text.primary",
+			wrap = true,
+		}
 	local text = ui.column {
 		grow = 1,
 		min_w = 0,
 		gap = "$zeron.space.hair",
-		ui.row {
-			gap = "$space.2",
-			items = "center",
-			min_w = 0,
-			if props.private_label
-				then PrivateText {
-					props.label,
-					truncate = props.truncate,
-					grow = if props.truncate then 1 else nil,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
-					weight = "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
-				}
-				elseif props.truncate
-				then FadeText {
-					props.label,
-					-- (With a badge, only as wide as the name, so the badge sits
-					-- right after it; it still shrinks to fade.)
-					grow = if props.badge then nil else 1,
-					shrink = 1,
-					min_w = 0,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
-					weight = "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
-				}
-				else ui.text {
-					props.label,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
-					weight = if props.quiet then "$font.weight.regular" else "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" elseif props.quiet then "$text.secondary" else "$text.primary",
-					wrap = true,
-				},
-			props.badge,
-		},
-		if props.byline and props.truncate
-			then FadeText { props.byline, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
-			elseif props.byline
-			then ui.text { props.byline, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
-			else nil,
+		if props.badges
+			then BadgedName { name = name, badges = props.badges }
+			else ui.row {
+				gap = "$space.2",
+				items = "center",
+				min_w = 0,
+				name,
+				props.badge,
+			},
+		if props.byline then byline_line(props) else nil,
 		if props.description and props.private_description
 			then PrivateText {
 				props.description,
@@ -790,7 +890,7 @@ function M.Row(props: RowProps): Node
 		if props.detail
 			then ui.show(function(): boolean
 				local d = control.value(props.detail)
-				return type(d) == "string" and d ~= ""
+				return (type(d) == "string" and d ~= "") or (props.detail_action_shows ~= nil and props.detail_action_shows())
 			end, if props.detail_link
 				-- (One rich paragraph, the link its last span, is the drawing
 				-- this wants: zgx-asks/rich-span-boundary-break. Meanwhile the
@@ -821,7 +921,7 @@ function M.Row(props: RowProps): Node
 						color = "$text.tertiary",
 						wrap = true,
 					},
-					M.InlineLink { label = props.detail_link.label, on_click = props.detail_link.on_click },
+					M.InlineLink { label = props.detail_link.label, on_click = props.detail_link.on_click, role = props.detail_link.role },
 				}
 				else ui.row {
 					w_full = true,
@@ -1239,20 +1339,21 @@ export type CatalogProps = {
 	-- terms: Plugins' Browse). Each is built as its tab is chosen; it has
 	-- the same card to hand, `Settings.CatalogCard`.
 	views: { [string]: () -> Node }?,
+	-- What a tab adds under its card, by value, a section's step below it
+	-- (Plugins' Yours: the account's deploy keys).
+	below: { [string]: () -> Node }?,
 }
 
 -- A Catalog's card: its search heading it (a quiet field inset evenly,
 -- its corner the card's less its edge and that inset, for its focus
--- ring, as the board's), then, under a hairline, what the page puts
--- there: `filters` (a bar of choices that narrow it, inset as the rows'
--- words are) and its `body` (the rows, or what it says instead).
+-- ring, as the board's), then, under a hairline, its `body` (the rows, or
+-- what it says instead).
 export type CatalogCardProps = {
 	id: string?,
 	search: { value: State<string>, placeholder: string | Message },
 	-- At the search's end, on its line: what narrows it besides its words
 	-- (an active keyword's token).
 	search_trail: Node?,
-	filters: Node?,
 	body: Node,
 }
 
@@ -1291,8 +1392,6 @@ function M.CatalogCard(props: CatalogCardProps): Node
 		overflow = "hidden",
 		search,
 		M.Rule(),
-		if props.filters then props.filters else nil,
-		if props.filters then M.Rule() else nil,
 		props.body,
 	}
 end
@@ -1403,7 +1502,24 @@ function M.Catalog(props: CatalogProps): Node
 		if own then
 			return own()
 		end
-		return card()
+		if not props.below then
+			return card()
+		end
+		local below = props.below
+		return ui.column {
+			w_full = true,
+			gap = SECTION_STEP,
+			card(),
+			-- (Only a tab with something under it: nothing, no gap.)
+			ui.show(function(): boolean
+				return below[tab:get()] ~= nil
+			end, ui.presence(function(): string
+				local t = tab:get()
+				return if below[t] then t else ""
+			end, function(t: string): Node
+				return if t ~= "" then below[t]() else ui.div {}
+			end, { w_full = true })),
+		}
 	end
 	local column: { any } = {
 		w_full = true,

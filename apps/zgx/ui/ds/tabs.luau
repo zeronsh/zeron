@@ -20,10 +20,7 @@ export type Props = {
 	value: State<any>,
 	options: { Option },
 	look: Look?,
-	-- `xs`: a filter row's pills (the plugin store's categories), at the
-	-- design system's xs height (24, as Button's and IconButton's) with
-	-- 8 either side of the words, so more of them fit beside each other.
-	size: ("xs" | "sm" | "md")?,
+	size: ("sm" | "md")?,
 	-- What assistive technology calls the list.
 	label: Label?,
 	-- The hairline under underline tabs, across the row's whole width.
@@ -46,8 +43,7 @@ return ui.component(function(props: Props): Node
 	local look: Look = props.look or "underline"
 	local size = props.size or "md"
 	local pill = look == "pill"
-	local small = size == "sm" or size == "xs"
-	local H = if pill then (if size == "xs" then 24 elseif size == "sm" then 26 else 30) else (if small then 32 else 36)
+	local H = if pill then (if size == "sm" then 26 else 30) else (if size == "sm" then 32 else 36)
 	local refs: { any } = {}
 	local tabs: { Node } = {}
 	local index = ui.computed(function(): number
@@ -133,7 +129,7 @@ return ui.component(function(props: Props): Node
 				disabled = o.disabled,
 				cursor = if o.disabled then nil else "pointer",
 				h = H,
-				px = if pill then (if size == "xs" then "$space.2" else "$space.3") else "$space.1",
+				px = if pill then "$space.3" else "$space.1",
 				gap = "$zeron.space.tight",
 				items = "center",
 				shrink = 0,
@@ -173,10 +169,10 @@ return ui.component(function(props: Props): Node
 						return hovered:get() and not chosen()
 					end)
 					else nil,
-				if o.icon then ui.div { y = -0.5, Icon { name = o.icon, size = if small then 14 else 16 } } else nil,
+				if o.icon then ui.div { y = -0.5, Icon { name = o.icon, size = if size == "sm" then 14 else 16 } } else nil,
 				ui.text {
 					o.label,
-					text_size = if small then "$font.size.sm" else "$font.size.md",
+					text_size = if size == "sm" then "$font.size.sm" else "$font.size.md",
 					weight = "$font.weight.medium",
 				},
 				count,

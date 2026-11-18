@@ -133,10 +133,6 @@ export type Props = {
 	-- anything (a chip with nothing to choose: "No project").
 	say: (() -> (string | Message)?)?,
 	empty: ((query: string) -> Empty)?,
-	-- Its items their names alone, no tile, the chosen one in the selected
-	-- state: a few words to choose between (an order), where a letter tile
-	-- would say nothing and an icon something else.
-	plain: boolean?,
 	-- A panel that opens folded on its chosen item: while `expanded` is
 	-- false the head and the search fold away and every item but the chosen
 	-- one folds to nothing (clipped, out of sight), and they open around it
@@ -1283,7 +1279,7 @@ return ui.component(function(props: Props): Node
 							tall = item.description ~= nil,
 							opacity = if item.disabled then ui.raw(0.45, "a choice out of reach, dimmed") else nil,
 							cursor = if item.disabled then "default" else nil,
-							if props.plain then nil else tile(item),
+							tile(item),
 							if item.description
 								then ui.column {
 									grow = 1,

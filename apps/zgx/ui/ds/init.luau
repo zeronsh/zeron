@@ -32,6 +32,8 @@ export type ComposerUsage = composer.Usage
 export type ComposerFixed = composer.Fixed
 export type CardLayer = member_card.Layer
 export type CardBadge = member_card.Badge
+local settings = require("@self/settings")
+export type RowBadges = settings.RowBadges
 local card_wall = require("@self/card_wall")
 local onboarding_frame = require("@self/onboarding_frame")
 export type OnboardingStep = onboarding_frame.StepProps
@@ -106,7 +108,6 @@ return {
 	glass = require("@self/glass").style,
 	SectionTitle = require("@self/section_title"),
 	Shelf = require("@self/shelf").Shelf,
-	Pager = require("@self/pager").Pager,
 	Hint = require("@self/hint"),
 	-- Primitives: fields, choices, notices, overlays, and the pieces
 	-- settings, onboarding and the git pages are built from.

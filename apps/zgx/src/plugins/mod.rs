@@ -292,6 +292,9 @@ pub struct Bridge {
     /// (`plugin.<id>.settings`, its own, read only).
     settings: RefCell<settings::Book>,
     settings_list: Shared,
+    /// Which updates the store's plugins take on this device (the
+    /// engine's `store_updates`: `{ device, plugins = { id = … } }`).
+    store_updates: Shared,
     settings_own: RefCell<HashMap<String, Shared>>,
     /// The main window's dialogs (a folder setting's).
     dialogs: zgx_desktop::FileDialogs,
@@ -640,6 +643,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         stores: RefCell::default(),
         settings: RefCell::new(settings::Book::new(settings::storage_dir())),
         settings_list: host.shared("plugins.settings", vlist(Vec::new())),
+        store_updates: host.shared("plugins.store_updates", Value::Nil),
         settings_own: RefCell::default(),
         dialogs: cx.dialogs.clone(),
         costs: RefCell::default(),
@@ -865,6 +869,9 @@ pub fn prepare_live() -> PathBuf {
 pub const USE_ZERON_TEMPLATE: &str = "zeron.use-zeron-template";
 /// The host's own "Keep <template>…": the keep sheet for the one in preview.
 pub const KEEP_TEMPLATE: &str = "zeron.keep-template";
+/// The host's own "Deploy keys" (a publish notice's button): Settings →
+/// Plugins → Yours, where the account's deploy keys are.
+pub const OPEN_DEPLOY_KEYS: &str = "zeron.open-deploy-keys";
 
 /// One of the host's own commands (its menu items and its toasts' buttons:
 /// never a script's, `zeron.` being the host's).
@@ -884,6 +891,7 @@ pub fn host_command(id: &str) {
                 template_consent::keep(&b, &p.id);
             }
         }
+        OPEN_DEPLOY_KEYS => crate::links::show(crate::links::Target::PluginsTab("yours")),
         other => eprintln!("zeron-zgx: no host command {other}"),
     }
 }
@@ -1431,6 +1439,37 @@ impl Bridge {
             {
                 host_bar::notice(host_bar::Notice::key(notice["kind"].as_str().unwrap_or(""), notice["device"].as_str(), words));
             }
+        }
+        // Which updates the store's plugins take here, as the engine keeps it.
+        if frame["store_updates"].is_object() {
+            self.store_updates.set(json_value(&frame["store_updates"]));
+        }
+        // Versions of the account's plugins published somewhere other than
+        // here (another device, a deploy key): said once each, staying, and
+        // let go of at the engine once said (it keeps them until then, so
+        // one published while Zeron was closed is said when it opens).
+        let mut said: Vec<String> = Vec::new();
+        for notice in frame["store_notices"].as_array().into_iter().flatten() {
+            if let Some(id) = notice["id"].as_str().filter(|id| !id.is_empty()) {
+                if self.told.borrow_mut().insert(format!("store-notice:{id}")) {
+                    let name = notice["name"].as_str().or(notice["plugin"].as_str()).unwrap_or("");
+                    host_bar::notice(host_bar::Notice::published(
+                        name,
+                        notice["version"].as_str().unwrap_or(""),
+                        notice["via"].as_str().unwrap_or(""),
+                        notice["key_name"].as_str(),
+                        notice["words"].as_str().unwrap_or(""),
+                    ));
+                }
+                said.push(id.to_owned());
+            }
+        }
+        if !said.is_empty() {
+            crate::engine::get().spawn(async move {
+                if let Err(error) = crate::engine::get().call("AckStoreNotices", json!({ "ids": said })).await {
+                    eprintln!("zeron-zgx: plugins: couldn't let go of store notices: {error}");
+                }
+            });
         }
         // One removed, or put back from elsewhere under the same id, starts
         // afresh: nothing it left (its queues, what it set, its saved state)
@@ -3569,7 +3608,14 @@ impl Bridge {
                 let me = me.clone();
                 async move { crate::plugins::preview::refuse("plugins.update")?;
                     let (id, device) = remote::id_and_device(&arg);
-                    let reply = call_on(&me, device, "UpdatePlugin", json!({ "id": id })).await?;
+                    // (`verified_only`: a one-click update, which never
+                    // takes an unverified version unasked: the engine
+                    // refuses it `not_verified`, for its own question.)
+                    let mut params = json!({ "id": id });
+                    if matches!(arg.field("verified_only"), Some(Value::Bool(true))) {
+                        params["verified_only"] = json!(true);
+                    }
+                    let reply = call_on(&me, device, "UpdatePlugin", params).await?;
                     Ok(json_value(&reply))
                 }
             }
@@ -3581,7 +3627,12 @@ impl Bridge {
             move |arg| {
                 let me = me.clone();
                 async move {
-                    let reply = call_on(&me, remote::device_of(&arg), "CheckPluginUpdates", json!({})).await?;
+                    // (One plugin's, fresh for a sheet about to show it: `id`.)
+                    let mut params = json!({});
+                    if let Some(id) = arg.field("id").map(text).and_then(|i| catalog::store_id(&i)) {
+                        params["id"] = json!(id);
+                    }
+                    let reply = call_on(&me, remote::device_of(&arg), "CheckPluginUpdates", params).await?;
                     Ok(json_value(&reply))
                 }
             }

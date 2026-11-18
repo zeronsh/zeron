@@ -2,21 +2,20 @@
 -- Publishing one of yours to the plugin store, a page under Settings →
 -- Plugins (from its row in Yours): what the store needs, checked on this
 -- device (the engine's `PreparePluginPublish`), each thing missing said
--- with what to do about it; then Submit, which sends exactly what was
--- checked for review (`PublishPlugin` with its one-time ticket: a folder
--- changed since asks to check again). Under it, every version you've sent
--- and where its review stands, the reviewer's words when it wasn't
--- approved, and what you can still do with each (withdraw one in review,
--- stop new installs of one approved, allow them again). Then its deploy
--- keys: what a CI job publishes with instead of your session, made after a
--- fresh sign-in, its secret shown once.
+-- with what to do about it; then Submit, which publishes exactly what was
+-- checked (`PublishPlugin` with its one-time ticket: a folder changed since
+-- asks to check again), listed at once, not verified until a reviewer has
+-- read it. Under it, every version you've sent: whether the store has
+-- verified it, the reviewer's words when they declined to, why one takes no
+-- new installs, and what you can still do (stop new installs of a listed
+-- one, allow them again).
 --
 -- Yours' rows say where each of yours stands in the store (`summary`),
 -- read once a visit (`load`).
 --
 --   publish.Page { plugin, here }
 --   publish.load()          your plugins in the store, read again
---   publish.summary(id)     "1.2.0 in the plugin store · 1.3.0 in review", or
+--   publish.summary(id)     "1.2.0 in the plugin store, verified", or
 --                           "Not in the plugin store" (nil: not known yet)
 
 local ds = require("@ds")
@@ -25,6 +24,7 @@ local store = require("@app/screens/plugins/store")
 local state = require("@app/screens/plugins/state")
 local words = require("@app/screens/plugins/words")
 local nav = require("@app/screens/plugins/nav")
+local browse = require("@app/screens/plugins/browse")
 
 local M = {}
 
@@ -60,24 +60,37 @@ function M.load()
 	end)
 end
 
--- A version's state as the store keeps it: its review's, else its own.
+-- A version's state and its review, as every list of versions reads them
+-- (screens/plugins/browse): the author's view, a decline said.
 local function status_of(v: any): string
-	local s = v.status
-	if type(v.review) == "table" and type(v.review.state) == "string" and (s == nil or s == "pending") then
-		s = v.review.state
+	return browse.version_state(v)
+end
+local function review_of(v: any): string
+	return browse.version_review(v, true)
+end
+local function superseded_by(v: any): string?
+	if v.yanked_by ~= "superseded" then
+		return nil
 	end
-	return if type(s) == "string" then s else "pending"
+	local by = if type(v.superseded) == "table" then v.superseded.by else v.superseded_by
+	return if type(by) == "string" and by ~= "" then by else nil
 end
 
-local STATUS_TONE: { [string]: string } = {
-	pending = "accent",
-	approved = "success",
-	rejected = "danger",
-	withdrawn = "neutral",
-	-- (Approved, no longer offered: not the same as pulled before review.)
-	yanked = "info",
-	removed = "warning",
-}
+-- Yours in the store, by name: what a deploy key's scope chooses from.
+function M.owned(): { { id: string, name: string } }
+	local out: { { id: string, name: string } } = {}
+	local now = mine:get()
+	if now.state ~= "ready" then
+		return out
+	end
+	for id, p in now.plugins do
+		table.insert(out, { id = id, name = if type(p.name) == "string" and p.name ~= "" then p.name else id })
+	end
+	table.sort(out, function(a, b): boolean
+		return string.lower(a.name) < string.lower(b.name)
+	end)
+	return out
+end
 
 function M.summary(id: string): string?
 	local now = mine:get()
@@ -88,30 +101,40 @@ function M.summary(id: string): string?
 	if not p then
 		return ui.t("plugins.store.summary.none"):get()
 	end
-	-- Newest first: the version people install (or, stopped, the one
-	-- that was), and the newest past it that's still yours to hear about:
-	-- in review, not approved, taken down. (One you withdrew isn't news.)
-	local listed, stopped, news = nil :: string?, nil :: string?, nil :: { version: string, state: string }?
+	-- Newest first: the version people install (or, stopped, the one that
+	-- was) and whether the store has verified it; and one past it taken
+	-- down, yours to hear about.
+	local listed, stopped, down = nil :: any, nil :: string?, nil :: string?
 	for _, v in (if type(p.versions) == "table" then p.versions else {}) :: { any } do
 		local st = status_of(v)
-		if st == "approved" then
-			listed = v.version
+		if st == "listed" then
+			listed = v
 			break
 		elseif st == "yanked" and stopped == nil then
 			stopped = v.version
-		elseif news == nil and stopped == nil and (st == "pending" or st == "rejected" or st == "removed") then
-			news = { version = v.version, state = st }
+		elseif st == "taken_down" and down == nil and stopped == nil then
+			down = v.version
 		end
 	end
 	local parts: { string } = {}
 	if listed then
-		table.insert(parts, ui.t("plugins.store.summary.listed", { version = listed }):get())
+		table.insert(parts, ui.t(`plugins.store.summary.listed_{review_of(listed)}`, { version = listed.version }):get())
+		-- (Not verified: the newest that is, what people are offered beside it.)
+		if review_of(listed) ~= "verified" then
+			local newest: string? = nil
+			for _, v in (if type(p.versions) == "table" then p.versions else {}) :: { any } do
+				if v.verified == true and status_of(v) == "listed" then
+					newest = v.version
+					break
+				end
+			end
+			table.insert(parts, if newest then ui.t("plugins.store.summary.newest_verified", { version = newest }):get() else ui.t("plugins.store.summary.none_verified"):get())
+		end
 	elseif stopped then
 		table.insert(parts, ui.t("plugins.store.summary.no_installs", { version = stopped }):get())
 	end
-	if news then
-		local key = if news.state == "pending" then "in_review" elseif news.state == "rejected" then "not_approved" else "taken_down"
-		table.insert(parts, ui.t(`plugins.store.summary.{key}`, { version = news.version }):get())
+	if down then
+		table.insert(parts, ui.t("plugins.store.summary.taken_down", { version = down }):get())
 	end
 	if #parts == 0 then
 		return ui.t("plugins.store.summary.none"):get()
@@ -122,8 +145,59 @@ end
 -- What a check that didn't pass asks of you, in Zeron's words where it
 -- knows the rule (and the field), else the engine's.
 local FIELDS: { [string]: boolean } = { icon = true, categories = true, description = true, name = true, keywords = true, screenshots = true, homepage = true, repository = true, license = true }
+-- Why a listing's name, description or keywords were refused, by the cause
+-- the engine names, its word shown as written (bounded, plain); nil for a
+-- cause or field it doesn't name, the words below covering every cause.
+local CAUSES: { [string]: boolean } = {
+	too_long = true,
+	not_one_line = true,
+	unseen_char = true,
+	mark_word = true,
+	mark_glyph = true,
+	keyword_shape = true,
+	too_many = true,
+	repeated = true,
+}
+local CAUSE_FIELDS: { [string]: boolean } = { name = true, description = true, keywords = true }
+local OWN_WORDS: { [string]: boolean } = {
+	["too_long.name"] = true,
+	["too_long.description"] = true,
+	["not_one_line.description"] = true,
+	["mark_word.keywords"] = true,
+	["keyword_shape.keywords"] = true,
+	["too_many.keywords"] = true,
+	["repeated.keywords"] = true,
+}
+function M.cause_words(p: any): string?
+	local field, cause = p.field, p.cause
+	if type(field) ~= "string" or not CAUSE_FIELDS[field] or type(cause) ~= "string" or not CAUSES[cause] then
+		return nil
+	end
+	-- (Plain, one line, at most 64 characters, as the host bounds it.)
+	local word = ""
+	if type(p.word) == "string" then
+		word = string.gsub(string.gsub(p.word, "%c", " "), "%s+", " ")
+		word = string.sub(string.match(word, "^%s*(.-)%s*$") or "", 1, 64)
+	end
+	-- (A cause about a word, without one: the field's covering words.)
+	local needs_word = cause == "unseen_char" or cause == "mark_word" or cause == "mark_glyph" or cause == "keyword_shape" or cause == "repeated"
+	if needs_word and word == "" then
+		return nil
+	end
+	-- (Its own words where the field is part of them; else one sentence
+	-- for any field, the field named in it.)
+	if OWN_WORDS[`{cause}.{field}`] then
+		return ui.t(`plugins.store.cause.{cause}.{field}`, { word = word }):get()
+	end
+	return ui.t(`plugins.store.cause.{cause}.any`, { word = word, field = ui.t(`plugins.store.cause.field.{field}`):get() }):get()
+end
+
 local function fix_of(p: any): string
 	local rule, field = p.rule, p.field
+	local caused = if rule == "bad_listing" then M.cause_words(p) else nil
+	if caused then
+		return caused
+	end
 	if (rule == "missing_listing" or rule == "bad_listing") and type(field) == "string" and FIELDS[field] then
 		return ui.t(`plugins.store.fix.{rule}.{field}`):get()
 	elseif rule == "missing_readme" or rule == "not_semver" or rule == "id_reserved" or rule == "too_large" or rule == "binary_file" or rule == "no_notes" or rule == "raw_html" or rule == "footnote" or rule == "math" or rule == "not_newer" or rule == "version_exists" then
@@ -263,8 +337,15 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 		sent_error:set("")
 		store.publish(id, r.hash, r.ticket):after(function(done: any)
 			sending:set(false)
+			-- (Refused for a listing's field and cause: said in its words.)
+			if type(done) == "table" and done.ok == false then
+				sent_error:set(M.cause_words(done) or M.failure("bad_listing"))
+				return
+			end
 			local v = if type(done) == "table" and type(done.version) == "string" then done.version else r.version
-			ds.toast.show { title = ui.t("plugins.store.sent_toast", { name = name(), version = v or "" }), tone = "success" }
+			-- (Listed at once: it shows as not verified until a reviewer has
+			-- read it.)
+			ds.toast.show { title = ui.t("plugins.store.sent_toast", { name = name(), version = v or "" }), body = ui.t("plugins.store.sent_toast_body"), tone = "success" }
 			-- (Its ticket is spent: checked again for the next one.)
 			check()
 			M.load()
@@ -453,53 +534,55 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 		end)
 	end
 	local function version_row(first: any, _i: number, now: State<any>): Node
+		-- (Its author's: stop new installs of a listed one, allow them
+		-- again of one they stopped; a superseded one is for good.)
 		local function action_of(): string?
-			local s = status_of(now:get())
-			return if s == "pending" then "withdraw" elseif s == "approved" then "yank" elseif s == "yanked" then "unyank" else nil
+			local v = now:get()
+			local s = status_of(v)
+			return if s == "listed" then "yank" elseif s == "yanked" and v.yanked_by ~= "superseded" then "unyank" else nil
 		end
 		return ds.Settings.Row {
 			label = function(): string
 				return now:get().version
 			end,
-			-- (Each state its own badge: its tone is its state's.)
-			badge = ui.switch(function(): string
-				local s = status_of(now:get())
-				return if STATUS_TONE[s] then s else "pending"
-			end, (function(): { [string]: Node }
-				local out: { [string]: Node } = {}
-				for s, tone in STATUS_TONE do
-					out[s] = ds.Badge { ui.t(`plugins.store.status.{s}`), tone = tone :: any, size = "sm" }
-				end
-				return out
-			end)()),
+			-- (As every list of versions has it: its state's badge, else its
+			-- review's, the store's mark when it's verified.)
+			badge = browse.version_badge(function(): any
+				return now:get()
+			end, true),
 			description = function(): string
+				local at = now:get().published_at
+				return if type(at) == "number" then locale.date(at / 1000) else ""
+			end,
+			-- Where its review stands, and why it takes no new installs when
+			-- the store stopped them: the reviewer's words are yours alone.
+			detail = function(): string?
 				local v = now:get()
-				local at = v.published_at
-				local when = if type(at) == "number" then locale.date(at / 1000) else ""
-				-- The reviewer's words, when it wasn't approved or was taken down.
-				local review = v.review
-				local why = if type(review) == "table" then (review.message or review.reason) else nil
-				if type(why) == "string" and why ~= "" and (status_of(v) == "rejected" or status_of(v) == "removed") then
-					return ui.t("plugins.store.reviewer_said", { date = when, words = string.sub(why, 1, 600) }):get()
+				local by = superseded_by(v)
+				if by then
+					return ui.t("plugins.store.superseded", { version = by }):get()
 				end
-				return when
+				local s = status_of(v)
+				if s == "taken_down" or s == "removed" then
+					return nil
+				end
+				local r = review_of(v)
+				if r == "verified" then
+					return if type(v.verified_at) == "number" then ui.t("plugins.store.verified_on", { date = locale.date(v.verified_at / 1000) }):get() else nil
+				elseif r == "declined" then
+					local review = v.review
+					local why = if type(review) == "table" then (review.message or review.reason) else nil
+					return if type(why) == "string" and why ~= ""
+						then ui.t("plugins.store.review.declined_said", { words = string.sub(why, 1, 600) }):get()
+						else nil
+				end
+				-- (Waiting: its badge says it.)
+				return nil
 			end,
 			control = ui.switch(function(): string
 				return action_of() or "none"
 			end, {
 				none = ui.div {},
-				withdraw = ds.Button {
-					tone = "secondary",
-					size = "sm",
-					busy = function(): boolean
-						return acting:get() == `{first.version}:withdraw`
-					end,
-					on_click = function()
-						confirming:set({ version = now:peek(), action = "withdraw" })
-						confirm_open:set(true)
-					end,
-					ui.t("plugins.store.action.withdraw"),
-				},
 				yank = ds.Button {
 					tone = "secondary",
 					size = "sm",
@@ -578,8 +661,6 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 		}
 	end
 
-	local keys_view = require("@app/screens/plugins/keys")
-
 	return ui.column {
 		w_full = true,
 		ds.Settings.SubPage {
@@ -599,16 +680,20 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 				-- again the section's own action at its title's end.
 				ds.Settings.Section {
 					title = ui.t("plugins.store.checks_title"),
-					trail_on_line = true,
-					trail = ds.Button {
-						id = "publish-check-again",
-						tone = "ghost",
-						size = "xs",
-						disabled = function(): boolean
-							return phase:get() == "checking"
-						end,
-						on_click = check,
-						ui.t("plugins.store.check_again"),
+					-- (The app's section action: a ghost, small, its words on
+					-- the content edge past its own padding, as Settings'.)
+					trail = ui.div {
+						mr = ui.raw(-((ui.theme.get("zeron.space.snug") :: number?) or 10), "the ghost's own padding"),
+						ds.Button {
+							id = "publish-check-again",
+							tone = "ghost",
+							size = "sm",
+							disabled = function(): boolean
+								return phase:get() == "checking"
+							end,
+							on_click = check,
+							ui.t("plugins.store.check_again"),
+						},
 					},
 					ui.presence(function(): string
 						local p = phase:get()
@@ -618,13 +703,6 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 					end, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 				},
 				history(),
-				keys_view.Section {
-					plugin = id,
-					here = props.here,
-					published = function(): boolean
-						return #versions:get() > 0
-					end,
-				},
 			},
 		},
 		ds.Dialog {
