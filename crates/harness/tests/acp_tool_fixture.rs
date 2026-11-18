@@ -72,6 +72,7 @@ fn server(name: &str, command: &Path, tool: &str) -> McpServer {
         ]
         .into_iter()
         .collect(),
+        http: None,
     }
 }
 

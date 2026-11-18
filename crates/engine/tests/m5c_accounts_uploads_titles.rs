@@ -633,7 +633,7 @@ async fn grok_devin_opencode_and_pi_logins_swap_round_trip() {
         snapshot
             .accounts
             .iter()
-            .find(|a| a.harness == harness && a.active)
+            .find(|a| a.harness == harness && a.active && a.auth_kind != Some(zeron_proto::AgentAuthKind::ApiKey))
             .map(|a| a.id.clone())
             .expect("live login listed")
     };
@@ -653,10 +653,11 @@ async fn grok_devin_opencode_and_pi_logins_swap_round_trip() {
     write(&pi_file, pi("bob"));
     let second = accounts.list(false).await.expect("list");
     for (harness, _) in &ann {
+        // (OpenCode's OpenRouter key is a login of its own provider.)
         let rows: Vec<_> = second
             .accounts
             .iter()
-            .filter(|a| a.harness == *harness)
+            .filter(|a| a.harness == *harness && a.auth_kind != Some(zeron_proto::AgentAuthKind::ApiKey))
             .collect();
         assert_eq!(rows.len(), 2, "{harness:?} keeps both logins");
         assert_eq!(rows.iter().filter(|a| a.active).count(), 1);
@@ -716,8 +717,8 @@ async fn hermes_credential_pool_is_listed_read_only() {
     let pool = serde_json::json!({
         "active_provider": "nous",
         "credential_pool": { "nous": [
-            { "id": "b", "label": "second@nous.ai", "auth_type": "oauth", "priority": 1, "access_token": "t2" },
-            { "id": "a", "label": "first@nous.ai", "auth_type": "oauth", "priority": 0, "access_token": "t1" },
+            { "id": "b", "label": "second@nous.ai", "auth_type": "oauth", "priority": 1, "source": "device_code", "access_token": "t2" },
+            { "id": "a", "label": "first@nous.ai", "auth_type": "oauth", "priority": 0, "source": "device_code", "access_token": "t1" },
         ]}
     })
     .to_string();
@@ -1174,16 +1175,16 @@ async fn rpc_dispatch_for_m5c_methods() {
     assert!(snapshot["accounts"].is_array());
     assert!(snapshot["warnings"].is_array());
 
-    // The provider param reaches the engine: Pi's Claude login is refused
-    // with its reason (no port bound, no network).
+    // The provider param reaches the engine: OpenCode's Claude login (it
+    // has none) is refused with its reason (no port bound, no network).
     let refused = client
         .call(
             methods::START_AGENT_LOGIN,
-            serde_json::json!({ "harness": "pi", "provider": "anthropic" }),
+            serde_json::json!({ "harness": "opencode", "provider": "anthropic" }),
         )
         .await
-        .expect_err("pi claude login is not offered");
-    assert!(refused.to_string().contains("/login"), "{refused}");
+        .expect_err("opencode has no claude login");
+    assert!(refused.to_string().contains("API key"), "{refused}");
 
     // Login lifecycle: start (loopback browser flow, like the CLI's own
     // automatic login) → poll pending → cancel → gone.

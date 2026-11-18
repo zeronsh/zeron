@@ -65,8 +65,16 @@ export const callerDevice = async (
 
 /** A `/device/{deviceId}/ws` dial forwarded into the device's room (`d2/`,
  * the same staging→prod identity break as `s2/`), with the calling device
- * stamped when the dial proves it. */
-export const dialDeviceRoom = async (env: Env, auth: Verified, request: Request, url: URL, deviceId: string): Promise<Response> => {
+ * stamped when the dial proves it, and a runner's revocation epoch when its
+ * reach is what admitted it (runner-revocation.ts). */
+export const dialDeviceRoom = async (
+  env: Env,
+  auth: Verified,
+  request: Request,
+  url: URL,
+  deviceId: string,
+  runnerEpoch?: number
+): Promise<Response> => {
   const role = url.searchParams.get("role") === "host" ? "host" : "client";
   const connId = url.searchParams.get("connId") ?? crypto.randomUUID();
   const caller = role === "client" ? await callerDevice(env, auth, url, deviceId, connId) : undefined;
@@ -78,6 +86,7 @@ export const dialDeviceRoom = async (env: Env, auth: Verified, request: Request,
     "/ws",
     `?role=${role}&connId=${encodeURIComponent(connId)}`,
     undefined,
-    caller
+    caller,
+    runnerEpoch
   );
 };

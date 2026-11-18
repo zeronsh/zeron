@@ -12,7 +12,7 @@
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         use std::{path::PathBuf, process::Command};
-        let source = "../../crates/ui/src/dictation/permission.m";
+        let source = "native/dictation_permission.m";
         println!("cargo:rerun-if-changed={source}");
         let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
         let object = out.join("dictation-permission.o");

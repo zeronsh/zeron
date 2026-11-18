@@ -408,7 +408,7 @@ impl Harness for CursorHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             let cwd = (!request.cwd.is_empty()).then(|| std::path::Path::new(&request.cwd));
             crate::executable::spawn_error(e, cwd, || exe.display().to_string())
         })?;
@@ -605,6 +605,7 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                 default: false,
                 id,
                 label,
+                provider: None,
                 description: str_of(item, "description"),
                 reasoning_levels: Vec::new(),
                 options,
@@ -1105,6 +1106,8 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
                             is_error,
                             output: None,
                             diff: None,
+                            preview_paths: Vec::new(),
+                            image_payloads: Vec::new(),
                             exit_code: None,
                         }),
                     ];

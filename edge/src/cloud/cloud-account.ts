@@ -31,6 +31,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { AUTH_USER_HEADER, type Env } from "../env";
 import { encodeHlc } from "../registry-core";
+import type { RunnerReach } from "../registry-runner";
 import { mintRunnerToken, type RunnerToken } from "../runner-token";
 import { cloudIndexStub } from "./cloud-index";
 import {
@@ -160,6 +161,9 @@ export interface CloudStatusView {
   readonly machines: readonly MachineSpec[];
   /** The account's default: what new sessions start on. */
   readonly machine: SandboxMachine;
+  /** The account's default for new sessions: whether they reach the
+   * person's other devices (registry-runner.ts). */
+  readonly reach: RunnerReach;
 }
 
 /** Subscription statuses that still grant the plan (a failed renewal stays
@@ -210,6 +214,9 @@ export interface CloudSessionView {
   readonly sandbox?: { readonly provider: string; readonly id: string };
   /** The size it is on, or will come back on when it was picked asleep. */
   readonly machine: SandboxMachine;
+  /** Whether it reaches the person's other devices, or only itself and its
+   * delegates (registry-runner.ts). Only the person changes it. */
+  readonly reach: RunnerReach;
   /** Omitted until its engine first reports. `usedGiB` holds its high-water
    * mark while a resumed disk is still copying in (design doc, "Disk"). */
   readonly disk?: { readonly usedGiB: number; readonly capacityGiB: number; readonly level: DiskLevel };
@@ -357,6 +364,9 @@ interface AccountRecord {
    * the user's pick (`PUT /cloud/{org}/machine`) or an operator's
    * (`POST /admin/cloud/machine`), whichever came last. */
   machine?: SandboxMachine;
+  /** The reach new sessions start with (`PUT /cloud/{org}/reach`); absent:
+   * `devices`. */
+  reach?: RunnerReach;
   /** Operator-set caps for this account (`POST /admin/cloud/limits`), over
    * `CLOUD_MAX_AWAKE` / `CLOUD_MAX_SESSIONS`. */
   maxAwake?: number;
@@ -433,6 +443,9 @@ interface SessionRecord {
   machine?: SandboxMachine;
   /** Picked while it sleeps: the next resume moves it there. */
   pendingMachine?: SandboxMachine;
+  /** What it reaches beyond its machine, as the registry enforces it
+   * (`setSessionReach`); absent: `devices` (sessions from before choosing). */
+  reach?: RunnerReach;
   /** A resume was refused for want of disk. Never retried on its own and
    * never upsized on its own: credits change, so the user picks. */
   wakeBlocked?: { reason: "disk_too_small"; neededGiB: number };
@@ -454,6 +467,11 @@ interface SessionRecord {
 }
 
 const ACCOUNT_KEY = "account";
+/** Why a machine can't change a reach: it's the person's call. */
+const REACH_IS_THE_PERSONS = "Only you can change what a Cloud chat reaches.";
+/** Calls to the registry one reach change makes at most (each closes a
+ * bounded number of rooms). */
+const REACH_PUSH_TRIES = 5;
 /** Earlier logical device ids remembered for moving connections over. */
 const RETIRED_DEVICES_KEPT = 8;
 /** While a machine is awake, credits are re-checked this often. */
@@ -519,6 +537,8 @@ export class CloudAccount extends DurableObject<Env> {
   private readonly sessions = new Map<string, SessionRecord>();
   /** session device id → chat id */
   private readonly byDevice = new Map<string, string>();
+  /** The reach change in flight (`setSessionReach`): the next waits for it. */
+  private reachChanges: Promise<void> = Promise.resolve();
   private tablesReady = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -649,7 +669,8 @@ export class CloudAccount extends DurableObject<Env> {
       available: true,
       credits: Math.floor(this.balance() * 100) / 100,
       machines: MACHINES,
-      machine: this.defaultMachine()
+      machine: this.defaultMachine(),
+      reach: this.acct.reach ?? "devices"
     };
   }
 
@@ -749,6 +770,7 @@ export class CloudAccount extends DurableObject<Env> {
       createdAt: s.createdAt,
       ...(s.provider && s.sandboxId ? { sandbox: { provider: s.provider, id: s.sandboxId } } : {}),
       machine: this.shownMachine(s),
+      reach: s.reach ?? "devices",
       ...(disk ? { disk } : {}),
       ...(s.wakeStage && Date.now() - s.wakeStage.at < WAKE_STAGE_TTL_MS ? { stage: s.wakeStage.stage } : {}),
       ...(s.wakeBlocked ? { wakeBlocked: { reason: s.wakeBlocked.reason, neededGiB: s.wakeBlocked.neededGiB } } : {}),
@@ -939,6 +961,101 @@ export class CloudAccount extends DurableObject<Env> {
     return this.okAccount();
   }
 
+  /** `PUT /cloud/{org}/reach`: the reach this user's new sessions start
+   * with. Sessions keep theirs. The person's alone: never a machine's. */
+  async setDefaultReach(caller: CloudCaller, reach: RunnerReach): Promise<CloudResult<CloudStatusView>> {
+    if (caller.deviceId !== undefined) return fail(403, "forbidden", REACH_IS_THE_PERSONS);
+    if (!this.bind(caller)) return fail(403, "forbidden", "Not your Cloud.");
+    this.acct.reach = reach;
+    await this.saveAccount();
+    return this.okAccount();
+  }
+
+  /**
+   * `POST …/sessions/{chatId}/reach {reach}`: whether that session reaches
+   * the person's other devices. The person's alone: a machine never changes
+   * its own reach or another's. The registry enforces it, so it is told
+   * first; the record follows once it holds there. Isolating also closes
+   * the machine out of every chat and device it reached
+   * (runner-revocation.ts); one that couldn't all be closed yet answers 503
+   * and is finished by trying again.
+   */
+  async setSessionReach(caller: CloudCaller, chatId: string, reach: RunnerReach): Promise<CloudResult<CloudSessionView>> {
+    if (caller.deviceId !== undefined) return fail(403, "forbidden", REACH_IS_THE_PERSONS);
+    const s = this.session(caller, chatId);
+    if ("ok" in s) return s;
+    if (s.pendingDelete || s.state === "deleting") return fail(409, "deleting", "That Cloud chat is being deleted.");
+    // One change at a time, so the registry and the record end on the same one.
+    const run = this.reachChanges.then(async (): Promise<CloudResult<CloudSessionView>> => {
+      const applied = await this.pushReach(s.deviceId, reach);
+      if (applied === "failed") return fail(503, "unavailable", "Couldn't change what this Cloud chat reaches; try again.");
+      if (this.sessions.get(chatId) === s) {
+        s.reach = reach;
+        await this.saveSession(s);
+      }
+      if (applied === "pending") {
+        return fail(503, "unavailable", "This Cloud chat is isolated, but some of its connections are still open; try again.");
+      }
+      return this.okSession(s);
+    });
+    this.reachChanges = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  /**
+   * Tell the user's registry runner `deviceId`'s reach, where it is
+   * enforced. `applied` once it holds everywhere; `pending` when the reach
+   * holds but rooms it reached are still to be closed (each call closes a
+   * bounded number: it is asked a few times); `failed` when the registry
+   * didn't take it.
+   */
+  private async pushReach(deviceId: string, reach: RunnerReach): Promise<"applied" | "pending" | "failed"> {
+    const { orgId, userId } = this.acct;
+    if (!orgId || !userId) return "failed";
+    const room = this.env.REGISTRY_ROOMS.get(this.env.REGISTRY_ROOMS.idFromName(`reg1/${orgId}/${userId}`));
+    let taken = false;
+    for (let attempt = 0; attempt < REACH_PUSH_TRIES; attempt++) {
+      try {
+        const res = await room.fetch(
+          new Request("https://registry/runner-reach", {
+            method: "POST",
+            headers: { [AUTH_USER_HEADER]: userId, "content-type": "application/json" },
+            body: JSON.stringify({ device: deviceId, reach })
+          })
+        );
+        if (!res.ok) throw new Error(`registry ${res.status}`);
+        taken = true;
+        if (((await res.json()) as { pending?: unknown }).pending === 0) return "applied";
+      } catch (e) {
+        console.warn("cloud: setting a session's reach failed", deviceId, String(e));
+        break;
+      }
+    }
+    return taken ? "pending" : "failed";
+  }
+
+  /** A deleted session's machine: the registry forgets its reach. */
+  private async forgetReach(deviceId: string): Promise<void> {
+    const { orgId, userId } = this.acct;
+    if (!orgId || !userId) return;
+    const room = this.env.REGISTRY_ROOMS.get(this.env.REGISTRY_ROOMS.idFromName(`reg1/${orgId}/${userId}`));
+    try {
+      const res = await room.fetch(
+        new Request("https://registry/runner-forget", {
+          method: "POST",
+          headers: { [AUTH_USER_HEADER]: userId, "content-type": "application/json" },
+          body: JSON.stringify({ device: deviceId })
+        })
+      );
+      if (!res.ok) throw new Error(`registry ${res.status}`);
+    } catch (e) {
+      console.warn("cloud: forgetting a deleted session's reach failed", deviceId, String(e));
+    }
+  }
+
   /** Turn Cloud on: mint and register the logical device. Instant — machines
    * are per session. */
   async enable(caller: CloudCaller): Promise<CloudResult<CloudStatusView>> {
@@ -1068,7 +1185,8 @@ export class CloudAccount extends DurableObject<Env> {
     repo: RepoInput,
     edgeUrl: string,
     baseBranch?: string,
-    parentChatId?: string
+    parentChatId?: string,
+    reach: RunnerReach = this.acct.reach ?? "devices"
   ): Promise<CloudResult<CloudSessionView>> {
     const off = this.accountOf(caller);
     if (off) return off;
@@ -1124,10 +1242,18 @@ export class CloudAccount extends DurableObject<Env> {
       activeRuns: 0,
       clients: 0,
       lastTtlExtendAt: now,
-      ...(parentChatId !== undefined ? { parentChatId } : {})
+      ...(parentChatId !== undefined ? { parentChatId } : {}),
+      reach
     };
     this.sessions.set(chatId, s);
     this.byDevice.set(s.deviceId, chatId);
+    // Isolated from its first token: the registry knows before the machine
+    // exists (a `devices` reach is what it reads for a device it never heard of).
+    if (reach === "isolated" && (await this.pushReach(s.deviceId, reach)) !== "applied") {
+      if (this.sessions.get(chatId) === s) this.sessions.delete(chatId);
+      this.byDevice.delete(s.deviceId);
+      return fail(503, "unavailable", "Couldn't start an isolated Cloud chat; try again.");
+    }
     // Before the laptop learns the device: its first send nudges this room
     // while the machine is still booting, and must queue, not 404.
     await this.claimDeviceRoom(s.deviceId, caller.userId);
@@ -1253,7 +1379,9 @@ export class CloudAccount extends DurableObject<Env> {
           { fullName: parent.repo.fullName, cloneUrl: parent.repo.cloneUrl, defaultBranch: parent.repo.defaultBranch },
           edgeUrl,
           branch ?? parent.baseBranch,
-          parentChatId
+          parentChatId,
+          // A delegate reaches what its parent does, whatever it asks.
+          parent.reach ?? "devices"
         );
     if (!started.ok) return started;
     const s = this.sessions.get(chatId);
@@ -1679,6 +1807,7 @@ export class CloudAccount extends DurableObject<Env> {
   /** The session is gone; its metering rows stay (its month is still billed). */
   private async finishSessionDelete(s: SessionRecord): Promise<void> {
     await this.dropSession(s);
+    await this.forgetReach(s.deviceId);
     await this.sweepStaleDevices();
     const sql = this.sql();
     const now = Date.now();
@@ -1702,8 +1831,13 @@ export class CloudAccount extends DurableObject<Env> {
     const chatId = this.byDevice.get(deviceId);
     const s = chatId ? this.sessions.get(chatId) : undefined;
     if (!s || !this.matches(caller) || s.pendingDelete || s.state === "deleting") return false;
-    // A machine wakes only the sessions it started (its delegates).
-    if (caller.deviceId !== undefined && s.parentChatId !== this.byDevice.get(caller.deviceId)) return false;
+    // A Cloud machine's send wakes any of the person's sessions, as their
+    // other devices' do, while its reach is theirs; isolated, only the
+    // sessions it started (its delegates).
+    if (caller.deviceId !== undefined) {
+      const from = this.sessionByDevice(caller.deviceId);
+      if (!from || ((from.reach ?? "devices") === "isolated" && s.parentChatId !== from.chatId)) return false;
+    }
     if (s.state === "ready") {
       // A send to a machine that's up. If it goes dark before its next
       // heartbeat, that heartbeat never reports the turn this started.

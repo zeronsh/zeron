@@ -82,6 +82,8 @@ pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     processes: std::sync::Arc<background::BackgroundWork>,
+    /// The agent process's pid (0: none, or not known).
+    agent_pid: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl TurnControl {
@@ -99,6 +101,20 @@ impl TurnControl {
     pub fn set_background(&self, tasks: usize) {
         self.background
             .store(tasks, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Driver: the agent CLI process the runtime runs now (`None` once it
+    /// has gone). The host checks its live children before stopping an idle
+    /// runtime ([`process::unexpected_descendants`]), whatever the agent
+    /// reports of its background work.
+    pub fn set_agent_pid(&self, pid: Option<u32>) {
+        self.agent_pid
+            .store(pid.unwrap_or(0), std::sync::atomic::Ordering::Release);
+    }
+
+    /// Host: the agent CLI's pid, while the driver knows it.
+    pub fn agent_pid(&self) -> Option<u32> {
+        Some(self.agent_pid.load(std::sync::atomic::Ordering::Acquire)).filter(|pid| *pid != 0)
     }
 
     /// Host: the runtime reports live background work, so retiring it now
@@ -299,6 +315,22 @@ pub trait Harness: Send + Sync {
     fn wakes_on_background(&self) -> bool {
         false
     }
+    /// Whether a runtime parked between turns, with nothing pending, may be
+    /// stopped once idle a short while (the engine's `AGENT_IDLE_STOP`) and
+    /// its session resumed by the next message — for drivers whose resume
+    /// is proven to bring the whole context back. Elsewhere the runtime
+    /// stays warm for the long idle window, as before.
+    fn stops_when_idle(&self) -> bool {
+        false
+    }
+    /// The stdio MCP servers the agent starts on its own, from its user's
+    /// configuration, beyond the ones in the run request: children of its
+    /// process that aren't background work ([`process::unexpected_descendants`]).
+    /// Never their `env`. Blocking (reads files); once per run, off the
+    /// async threads.
+    fn configured_mcp_servers(&self, _request: &RunRequest) -> Vec<process::KnownServer> {
+        Vec::new()
+    }
     /// Whether this driver honors [`TurnControl::stop_turn`]: it ends only
     /// the in-flight turn (`Done { Interrupted }`) and the runtime stays up
     /// with its background work. Otherwise stopping a turn tears the runtime
@@ -339,7 +371,9 @@ pub trait Harness: Send + Sync {
     }
     /// The [`AccessMode`]s this driver honors, least to most trusting. A
     /// request for any other runs with full access (the composer offers
-    /// only these).
+    /// only these), except Auto: it falls back only to a stricter mode
+    /// listed here, and the engine refuses it when there is none
+    /// ([`AccessMode::honored_by`]).
     fn access_modes(&self) -> &[AccessMode] {
         &[AccessMode::FullAccess]
     }
@@ -394,6 +428,40 @@ pub trait Harness: Send + Sync {
         ))
     }
 
+    /// Whether this driver can start a new chat's runtime before its first
+    /// message ([`Harness::prewarm`]): a process that parks with no prompt,
+    /// as a session does between turns, and reaches no model until it gets
+    /// one.
+    fn prewarms(&self) -> bool {
+        false
+    }
+
+    /// A warm start: launch the runtime `request` describes (its prompt is
+    /// ignored) and park it under `key`, asking no model anything, until
+    /// [`Harness::run_warm`] takes it or [`Harness::discard_warm`] ends it.
+    /// A runtime already parked under `key` is ended first. Nothing else
+    /// ever ends it: the caller owns its lifetime (the engine's leases).
+    async fn prewarm(&self, _key: &str, _request: RunRequest) -> Result<(), HarnessError> {
+        Err(HarnessError::Protocol("warm start unsupported".into()))
+    }
+
+    /// [`Harness::run`], in the runtime parked under `key` when it launched
+    /// with this very configuration; otherwise that runtime is ended and a
+    /// fresh one starts, as `run` would.
+    async fn run_warm(
+        &self,
+        key: &str,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.discard_warm(key).await;
+        self.run(request, controls).await
+    }
+
+    /// End the runtime parked under `key`, if any, returning once it has
+    /// (Claude: after any login refresh in flight is saved, never mid-way).
+    async fn discard_warm(&self, _key: &str) {}
+
     /// Bootstrap without a synthetic user prompt; providers opt in explicitly.
     async fn start_idle(
         &self,
@@ -418,6 +486,7 @@ pub mod approval;
 pub mod archive_install;
 mod background;
 pub use background::{MarkOutcome, MarkRefused, OutputSource};
+pub mod bounded_file;
 mod catalog;
 mod catalog_failure;
 pub(crate) mod code_signature;
@@ -449,6 +518,16 @@ pub mod windows_process;
 /// the current process. This lets GUI/service launches find user-installed
 /// CLIs such as Homebrew's `gh` without changing the daemon's own environment.
 pub fn compose_login_shell_path(cmd: &mut tokio::process::Command) {
+    compose_path(cmd.as_std_mut(), std::iter::empty());
+    apply_login_shell_env(cmd.as_std_mut());
+}
+
+/// The user's own PATH (the login shell's, with this process's) and the
+/// login shell's TLS, SSH-agent and locale variables, for a child that runs
+/// whatever the user would type: a shell running an agent's command. Unlike
+/// [`compose_child_path`], no executable's directory goes first (the
+/// shell's own `/bin` must not shadow the user's toolchain).
+pub fn compose_user_path(cmd: &mut process::Command) {
     compose_path(cmd.as_std_mut(), std::iter::empty());
     apply_login_shell_env(cmd.as_std_mut());
 }
@@ -784,6 +863,15 @@ pub(crate) async fn shutdown_agent(
 /// terminated, descendants included — at once for a child with no stdin
 /// pipe, one whose stdin is still held elsewhere, or one that ignores EOF.
 pub(crate) async fn shutdown_child(child: &mut process::Child, kill_grace: std::time::Duration) {
+    let pid = child.id();
+    end_child(child, kill_grace).await;
+    // Off the engine's agent ledger only once it is gone.
+    if let Some(pid) = pid {
+        process::registry::forget(pid);
+    }
+}
+
+async fn end_child(child: &mut process::Child, kill_grace: std::time::Duration) {
     #[cfg(windows)]
     {
         if !matches!(child.try_wait(), Ok(Some(_))) && child.stdin_eof_coming().await {
