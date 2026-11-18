@@ -43,6 +43,19 @@ local function publishing(): any
 	return app
 end
 
+-- What a row of yours has always said stays: an update found where it came
+-- from, its line and Update, as on Installed; the store's line and
+-- Publish… when there's nothing else to say.
+test("one of yours with an update found keeps its update line and Update on Yours", function()
+	local app = yours()
+	expect(app:has('role:link "Publish…"')).to_be(true)
+	app:command("store.own_update")
+	settle(app)
+	local tree = app:tree("#fixture-scroll")
+	expect(tree).to_contain("Update available: 1.1.0.")
+	expect(app:has('role:button "Update"')).to_be(true)
+end)
+
 test("each of yours in Yours says where it stands in the store, with Publish…", function()
 	local app = yours()
 	local tree = app:tree()

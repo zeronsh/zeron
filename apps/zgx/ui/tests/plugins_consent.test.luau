@@ -377,3 +377,16 @@ test("the store warning's action is under its words, whether an update or a firs
 		expect(`{case[1]} {tonumber(button_y) >= tonumber(body_y) + tonumber(body_h)}`).to_be(`{case[1]} true`)
 	end
 end)
+
+-- "Nothing beyond what you allowed" is the store's line alone: a re-ask
+-- only because the store hasn't verified the version. A file's or a link's
+-- re-ask lists its asks, as it always has, whatever the engine says.
+test("a git plugin's re-ask lists its asks as it always has, never the store's nothing-new line", function()
+	local app = open()
+	app:command("rekeyed")
+	app:frames(20)
+	local sheet = app:tree("#consent")
+	expect(sheet).never.to_contain("It asks for nothing beyond what you allowed.")
+	expect(sheet).to_contain("It now also asks to:")
+	expect(app:has("#consent-unverified")).to_be(false)
+end)

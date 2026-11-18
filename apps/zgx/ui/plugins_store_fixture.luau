@@ -235,6 +235,16 @@ ui.command {
 		publish()
 	end,
 }
+-- Your own Pomodoro clock: a newer version found where it came from.
+ui.command {
+	id = "store.own_update",
+	title = "A newer Pomodoro clock is found where it came from",
+	run = function()
+		local p = find("pomodoro-clock")
+		p.update = { version = "1.1.0", added = {}, removed = {} }
+		publish()
+	end,
+}
 -- Focus timer waits for you again, asking for more than you allowed.
 ui.command {
 	id = "store.asks_more",
