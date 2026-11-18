@@ -39,8 +39,9 @@ const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 /// The most pages of the take-down feed one check reads.
 const TAKEDOWN_PAGES: usize = 20;
 /// How often an account with no plugins has its publishes looked over (one
-/// with plugins: at each take-down check).
-const PUBLISHES_IDLE: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+/// with plugins: at each take-down check; and a publish from here looks at
+/// the next).
+const PUBLISHES_IDLE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 /// The most plugins one update check asks about (the edge's limit).
 pub const MAX_UPDATE_PLUGINS: usize = 200;
 /// What a report may say it's about (contract amendment 13).
@@ -637,6 +638,9 @@ impl Plugins {
         match client.publish(id, raw, &caller).await {
             Ok(mut reply) => {
                 reply["ok"] = json!(true);
+                // The account has a plugin now: its publishes are looked over
+                // at the next check, not an idle hour on.
+                *lock(&self.inner.publishes_checked) = None;
                 // (Live at once: its page on the store's website.)
                 reply["url"] = json!(client.page_url(id));
                 reply

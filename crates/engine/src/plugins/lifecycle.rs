@@ -33,6 +33,15 @@ const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// device within this and the feed's 60 s of cache).
 const TAKEDOWN_EVERY: Duration = Duration::from_secs(15 * 60);
 
+/// [`TAKEDOWN_EVERY`], or `ZERON_TAKEDOWN_EVERY_SECS` (a local end-to-end
+/// run, which can't wait 15 minutes), also the wait before the first read.
+fn takedown_every() -> (Duration, Duration) {
+    match std::env::var("ZERON_TAKEDOWN_EVERY_SECS").ok().and_then(|s| s.parse::<u64>().ok()).filter(|s| *s > 0) {
+        Some(secs) => (Duration::from_secs(secs), Duration::from_secs(secs)),
+        None => (FIRST_CHECK, TAKEDOWN_EVERY),
+    }
+}
+
 #[derive(Deserialize)]
 struct InstallParams {
     #[serde(default)]
@@ -695,15 +704,16 @@ impl Plugins {
         });
         lock(&self.inner.tasks).push(task);
         let weak = std::sync::Arc::downgrade(&self.inner);
+        let (first, every) = takedown_every();
         let feed = runtime.spawn(async move {
-            tokio::time::sleep(FIRST_CHECK).await;
+            tokio::time::sleep(first).await;
             loop {
                 let Some(inner) = weak.upgrade() else { return };
                 let plugins = Plugins { inner };
                 plugins.check_takedowns().await;
                 plugins.check_publishes().await;
                 drop(plugins);
-                tokio::time::sleep(TAKEDOWN_EVERY).await;
+                tokio::time::sleep(every).await;
             }
         });
         lock(&self.inner.tasks).push(feed);
