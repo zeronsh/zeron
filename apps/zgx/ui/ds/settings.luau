@@ -178,8 +178,10 @@ function M.Page(props: PageProps): Node
 end
 
 export type SectionProps = {
-	title: (string | Message)?,
-	description: (string | Message)?,
+	-- (A function of either follows what it reads: a title that's an
+	-- item's name as it's renamed.)
+	title: (string | Message | () -> string)?,
+	description: (string | Message | () -> string)?,
 	trail: Node?,
 	[number]: Child,
 }
