@@ -389,10 +389,13 @@ const baseOf = (p: FakePlugin, v: FakeVersion) => p.versions.find((x) => x !== v
  */
 function queue(url: URL): Response {
   const view = url.searchParams.get("state") ?? "undecided";
-  if (!["undecided", "verified", "declined", "all"].includes(view)) return fail(400, "bad_request", "Unknown state.");
-  // (Undecided: listed, not yanked by the superseding rule; nothing that leaves the queue unread can be installed.)
+  if (!["undecided", "verified", "declined", "all", "taken_down"].includes(view)) return fail(400, "bad_request", "Unknown state.");
+  // (Undecided: listed, not yanked by the superseding rule; nothing that leaves the queue unread can be installed.
+  // Taken down: those not restored, edge 566c2a5ba.)
   const fits = (v: FakeVersion) =>
-    shown(v) && (view === "all" || (view === "undecided" ? !v.review.decided && v.yanked_by !== "superseded" : view === "verified" ? v.verified : v.review.decision === "declined"));
+    view === "taken_down"
+      ? v.status === "taken_down"
+      : shown(v) && (view === "all" || (view === "undecided" ? !v.review.decided && v.yanked_by !== "superseded" : view === "verified" ? v.verified : v.review.decision === "declined"));
   const row = (p: FakePlugin, v: FakeVersion, earlier: number) => {
     const base = baseOf(p, v);
     const asked = (v.manifest.permissions as string[]) ?? [];
@@ -417,6 +420,8 @@ function queue(url: URL): Response {
       submitted_at: v.published_at,
       published_at: v.published_at,
       publisher: { id: author(p.owner).id, username: userOf(p.owner).username },
+      // (The plugin's installs, in every state: edge 566c2a5ba.)
+      installs: p.installs,
       ...(base ? { base: base.version } : {}),
       new_asks: asked.filter((a) => !had.includes(a)),
       checks: { ok: v.checks.filter((c) => c.level === "ok").length, warn: v.checks.filter((c) => c.level === "warn").length, fail: v.checks.filter((c) => c.level === "fail").length },
@@ -435,8 +440,10 @@ function queue(url: URL): Response {
   });
   if (view === "undecided" && state.queueAs === "empty") items.length = 0;
   if (view === "undecided" && typeof state.queueAs === "number") items.push(...filler(state.queueAs - items.length));
-  // Plugins with open reports first; then oldest waiting first.
-  items.sort((a, b) => Number(b.reports > 0) - Number(a.reports > 0) || a.submitted_at - b.submitted_at);
+  // Plugins with open reports first; then oldest waiting first. (Taken down: the newest take-down first.)
+  const downAt = (item: { plugin: { id: string }; version: string }) => state.plugins.find((p) => p.id === item.plugin.id)?.versions.find((v) => v.version === item.version)?.removal?.at ?? 0;
+  if (view === "taken_down") items.sort((a, b) => downAt(b) - downAt(a));
+  else items.sort((a, b) => Number(b.reports > 0) - Number(a.reports > 0) || a.submitted_at - b.submitted_at);
   return json(paged(items, url, "items"));
 }
 
@@ -480,6 +487,7 @@ function filler(n: number) {
       submitted_at: NOW - (i * 5.5 + 1) * 3_600_000,
       published_at: NOW - (i * 5.5 + 1) * 3_600_000,
       publisher: { id: `pub_${i}`, username },
+      installs: (i * 137) % 5000,
       ...(update ? { base: `1.${i % 4}.0` } : {}),
       icon: null,
       new_asks: update && i % 5 === 1 ? (i % 2 ? ["commands"] : ["network"]) : [],
@@ -509,6 +517,9 @@ function submission(id: string, version: string): Response {
       id: author(p.owner).id,
       username: owner.username,
       created_at: owner.created_at,
+      // (When the account first listed a version, and its listed plugins, how many with a verified version: edge 566c2a5ba.)
+      first_published_at: theirs.length ? Math.min(...theirs.map(({ v: y }) => y.published_at)) : null,
+      plugins: { total: state.plugins.filter((x) => x.owner === p.owner && listed(x)).length, verified: state.plugins.filter((x) => x.owner === p.owner && listed(x) && x.versions.some((y) => y.verified)).length },
       decisions: { verified: theirs.filter(({ v: y }) => y.review.decision === "verified").length, declined: theirs.filter(({ v: y }) => y.review.decision === "declined").length },
       recent: theirs
         .map(({ plugin: x, v: y }) => ({ plugin_id: x.id, version: y.version, status: y.status, verified: y.verified, published_at: y.published_at }))

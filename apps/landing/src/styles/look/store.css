@@ -264,6 +264,8 @@ a.card:focus-visible { outline-offset: 3px; }
 .rank { width: 20px; flex: none; font: 500 13px/20px var(--mono); color: var(--text-3); text-align: center; }
 
 /* ---- a page's own word when there is nothing, or the store didn't answer ---- */
+/* A list's pages: Previous, where you are, Next (Browse, Versions, the queue). */
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 28px; padding-top: 20px; box-shadow: 0 -1px 0 var(--line); font-size: 13px; color: var(--text-3); }
 .empty { padding: 28px 0 8px; }
 .empty h2 { font-size: 19px; line-height: 26px; }
 .empty p { margin-top: 4px; color: var(--text-2); max-width: 36em; }

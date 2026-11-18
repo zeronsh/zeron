@@ -139,3 +139,41 @@ if (me) {
     })
     .catch(() => undefined);
 }
+
+// ── Questions before doing (a version under review) ────────────────────
+// An opener is a link to its question as a page of its own; with this, it
+// opens the question's dialog in place instead.
+document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element) || event.defaultPrevented) return;
+  const opener = event.target.closest<HTMLElement>("[data-dialog]");
+  if (!opener || (event instanceof MouseEvent && (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0))) return;
+  const dialog = document.getElementById(opener.dataset.dialog ?? "");
+  if (!(dialog instanceof HTMLDialogElement) || typeof dialog.showModal !== "function") return;
+  event.preventDefault();
+  dialog.showModal();
+});
+// (A click on the dim closes it, where `closedby` isn't known yet.)
+for (const dialog of document.querySelectorAll<HTMLDialogElement>("dialog.question")) {
+  if (typeof (dialog as { closedBy?: unknown }).closedBy === "string") continue;
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+}
+// Don't verify: the author's view of it, as it's written (components/kit/Decline.astro).
+for (const part of document.querySelectorAll<HTMLElement>("[data-decline]")) {
+  const reason = part.querySelector<HTMLSelectElement>("select[name=reason]");
+  const message = part.querySelector<HTMLTextAreaElement>("textarea[name=message]");
+  const said = part.querySelector<HTMLElement>("[data-said]");
+  const label = part.querySelector<HTMLElement>("[data-reason-label]");
+  if (!reason || !message || !said || !label) continue;
+  const show = () => {
+    const words = message.value.trim();
+    said.textContent = words ? `“${words}”` : (said.dataset.empty ?? "");
+    said.classList.toggle("is-empty", !words);
+    const chosen = reason.selectedOptions[0];
+    label.textContent = chosen?.value ? (chosen.textContent ?? "") : (label.dataset.empty ?? "");
+  };
+  reason.addEventListener("change", show);
+  message.addEventListener("input", show);
+  show();
+}

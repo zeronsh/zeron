@@ -380,6 +380,8 @@ describe("public pages are the same for everyone (so a shared cache can keep the
   test("signed in or not, admin or not, the bytes are the same", async () => {
     const people = [undefined, await site.signIn("user_ada"), await site.signIn("user_grace")];
     for (const path of ["/plugins", "/plugins?category=git", "/plugins/focus-timer", "/plugins/session-badges", "/plugins/sitemap.xml"]) {
+      // (Drawn once first: a README still being drawn for the first visitor is shown as its text to one who comes meanwhile.)
+      await html(path);
       const bodies = await Promise.all(people.map(async (cookie) => (await html(path, cookie)).body));
       expect(new Set(bodies).size, path).toBe(1);
       const csp = await Promise.all(people.map(async (cookie) => (await site.fetch(path, cookie ? { headers: { cookie } } : {})).headers.get("set-cookie")));
@@ -640,6 +642,22 @@ describe("the admin pages can't be told from pages that don't exist", () => {
     expect((await html(path)).response.status).toBe(404);
   });
 
+  test("a version with a build, \"+\" and all, is found by its address: its page and its files", async () => {
+    const built = "1.2.0+build.7";
+    try {
+      await site.fake("rename", { id: "focus-timer", from: "1.2.0", to: built });
+      const cookie = await site.signIn("user_kai");
+      const page = await html(`/plugins/focus-timer/versions/${encodeURIComponent(built)}`, cookie);
+      expect(page.response.status).toBe(200);
+      expect(page.body).toContain(built);
+      const icon = await site.fetch(`/plugins/focus-timer/files/${encodeURIComponent(built)}/icon.svg`);
+      expect(icon.status).toBe(200);
+      await icon.arrayBuffer();
+    } finally {
+      await site.fake("rename", { id: "focus-timer", from: built, to: "1.2.0" });
+    }
+  });
+
   test("a version the link can't name is never named on its button: Open in Zeron, and the app chooses", async () => {
     // (33 characters and a "+": the app's link carries 32 at most; the "+" also comes through the address as %2B.)
     const long = "1.0.0-rc.1+build.20261118.0123456";
@@ -649,11 +667,8 @@ describe("the admin pages can't be told from pages that don't exist", () => {
       const page = (await html("/plugins/worst-case-listing-at-every-limit-xyz12", cookie)).body;
       expect(page).not.toContain(`Install ${long} instead`);
       expect(page).not.toContain("?version=");
-      const older = await html(`/plugins/worst-case-listing-at-every-limit-xyz12/versions/${encodeURIComponent(long)}`, cookie);
-      expect(older.response.status).toBe(200);
-      expect(older.body).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install>');
-      expect(older.body).toMatch(/data-install>[^]*?Open in Zeron\s*<\/a>/);
-      expect(older.body).not.toContain(`Install ${long}`);
+      // (Its own page: no version is that long, so no address names one: the site's 404.)
+      expect((await html(`/plugins/worst-case-listing-at-every-limit-xyz12/versions/${encodeURIComponent(long)}`, cookie)).response.status).toBe(404);
       const versions = (await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions", cookie)).body;
       expect(versions).toContain(`href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12">Open in Zeron<span class="sr-only"> for ${long}</span></a>`);
     } finally {
@@ -834,7 +849,7 @@ describe("forms", () => {
     const page = await html(back, await site.signIn("user_grace"));
     expect(page.body).toContain(">Say what &lt;it&gt; does, &amp; why.</textarea>");
     expect(page.body).toMatch(/<option value="listing" selected/);
-    expect((await html("/admin/plugins/focus-timer/1.3.0-beta.1", await site.signIn("user_grace"))).body).toContain("Not verified yet");
+    expect((await html("/admin/plugins/focus-timer/1.3.0-beta.1", await site.signIn("user_grace"))).body).toContain("Live, not read yet");
   });
 
   test("a non-admin's post, signed in or not, is the 404 page and nothing more", async () => {
@@ -855,7 +870,7 @@ describe("forms", () => {
     const overview = await html(here, grace);
     inert(overview.body);
     expect(overview.body).toContain("&lt;/p&gt;&lt;script&gt;alert(&#39;tool&#39;)&lt;/script&gt;&lt;img src=x onerror=alert(&#39;tool&#39;)&gt;");
-    expect(overview.body).toContain("Notes for 1.1.0");
+    expect(overview.body).toContain("What the author says changed");
     const files = await html(`${here}?view=files&path=${encodeURIComponent("docs/<b>notes</b> #1 100%.md")}`, grace);
     inert(files.body);
     expect(files.body).toContain("&lt;b&gt;notes&lt;/b&gt; #1 100%.md");
@@ -1035,38 +1050,54 @@ describe("Discover", () => {
 
 describe("the staff's side: the queue, a submission, the decision", () => {
   /** The rows of a table, each its cells' text. */
-  const rowsOf = (body: string, table: string) => {
-    const at = body.indexOf(`class="table ${table}`);
-    const tbody = body.slice(body.indexOf("<tbody>", at), body.indexOf("</tbody>", at));
-    return tbody.split("<tr").slice(1);
-  };
 
-  test("the queue: a table, reported first, then the longest waiting, its count in the title; a badge only where a row needs a look", async () => {
+  /** The queue's rows (each a version), as the look draws them. */
+  const queueRows = (body: string) => body.slice(body.indexOf('<div class="card q">'), body.indexOf("</main>")).split('<div class="qr">').slice(1);
+
+  test("the queue: reported first, then the longest waiting, its count on its tab; each row what it asks for against its newest verified version", async () => {
     const grace = await site.signIn("user_grace");
     const { body } = await html("/admin/plugins", grace);
-    const rows = rowsOf(body, "comfortable queue");
-    const total = Number(body.match(/Queue<span class="title-count"> · (\d+)<\/span>/)![1]);
+    const rows = queueRows(body);
+    const total = Number(body.match(/aria-current="page">Waiting<span class="num">(\d+)<\/span>/)![1]);
     expect(rows).toHaveLength(total);
     // (Amendment 45: plugins with open reports first, then the oldest.)
-    const reported = rows.map((r) => /title="Open reports on this plugin/.test(r));
+    const reported = rows.map((r) => /<span class="state bad">\d+ reports?<\/span>/.test(r));
     expect(reported.some(Boolean)).toBe(true);
     expect(reported).toEqual([...reported].sort((a, b) => Number(b) - Number(a)));
     for (const part of [rows.filter((_, i) => reported[i]), rows.filter((_, i) => !reported[i])]) {
       const sent = part.map((r) => Date.parse(r.match(/<time datetime="([^"]+)"/)![1]!));
       expect(sent).toEqual([...sent].sort((a, b) => a - b));
     }
-    // An update that asks for more (here a far-reaching ask among them): the danger's badge.
-    const worst = rows.find((r) => r.includes("worst-case-listing-at-every-limit-xyz12"))!;
-    expect(worst).toContain("Update");
-    // (Against its newest verified version, 1.1.0: verified, then stopped by its author.)
-    expect(worst).toMatch(/<span class="badge sm bad" title="New since 1\.1\.0: [^"]*messages\.send[^"]*">Asks for more<\/span>/);
-    // Nothing new, but a host swapped inside an ask it had: "Asks changed".
-    const xss = rows.find((r) => r.includes(">xss-probe<"))!;
-    expect(xss).toMatch(/<span class="badge sm warn" title="What it asks for changed inside since 1\.0\.0">Asks changed<\/span>/);
-    // A new plugin asks for everything it asks for: said by its kind, not a badge.
-    const first = rows.find((r) => r.includes(">first-light<"))!;
-    expect(first).toContain("None verified yet");
-    expect(first).not.toContain("badge");
+    // An update that asks for more: each new ask marked "+", a far-reaching one in the danger's ink.
+    const worst = rows.find((r) => r.includes("/admin/plugins/worst-case-listing-at-every-limit-xyz12/"))!;
+    expect(worst).toContain("<span>Asks for more than 1.1.0</span>");
+    expect(worst).toMatch(/<li class="add risky">[^<]+<span class="sr-only"> \(new\)<\/span><\/li>/);
+    expect(worst).toMatch(/<li class="add">[^<]+<span class="sr-only"> \(new\)<\/span><\/li>/);
+    // Nothing new, but a host swapped inside an ask it had.
+    const xss = rows.find((r) => r.includes("/admin/plugins/xss-probe/"))!;
+    expect(xss).toContain("<span>What it asks for changed inside since 1.0.0</span>");
+    // A first version: everything it asks for, none of it marked new against nothing.
+    const first = rows.find((r) => r.includes("/admin/plugins/first-light/"))!;
+    expect(first).toContain("<span>Nothing verified yet</span>");
+    expect(first).toMatch(/<ul aria-label="What it asks for"><li>[^<]+<\/li>/);
+    expect(first).not.toContain('class="add');
+    // Each says how many have the plugin, beside who sent it.
+    for (const r of rows) expect(r).toMatch(/<div class="by">by [^<]+ · [\d,]+ installs?/);
+    // Every row opens its version, its link naming the version too.
+    for (const r of rows) expect(r).toMatch(/<a href="\/admin\/plugins\/[a-z0-9-]+\/[^"]+">.*?<span class="sr-only"> [^<]+<\/span><\/a>/);
+    // (A name's controls that turn text around are dropped: "Probe \u202Eevil" reads as written, never around its version.)
+    expect(body).not.toContain("\u202E");
+    // The staff pages sit beside the lists as tabs: Reports with how many are open.
+    expect(body).toMatch(/<a href="\/admin\/reports">Reports<span class="num">\d+<\/span><\/a>/);
+    expect(body).toContain('<a href="/admin/audit">Log</a>');
+  });
+
+  test("Taken down: versions taken down and not restored, the latest first, a tab of its own", async () => {
+    const { body } = await html("/admin/plugins?state=taken_down", await site.signIn("user_grace"));
+    expect(body).toMatch(/<a href="\/admin\/plugins\?state=taken_down" aria-current="page">Taken down<\/a>/);
+    const rows = queueRows(body);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.some((r) => r.includes("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.2.0"))).toBe(true);
   });
 
   test("an empty queue says so; forty fit one page, with no pager", async () => {
@@ -1074,11 +1105,11 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     try {
       await site.queueAs("empty");
       const empty = await html("/admin/plugins", grace);
-      expect(empty.body).toContain("Nothing to verify");
-      expect(empty.body).toMatch(/Queue<span class="title-count"> · 0<\/span>/);
+      expect(empty.body).toContain("Nothing waiting");
+      expect(empty.body).toMatch(/aria-current="page">Waiting<span class="num">0<\/span>/);
       await site.queueAs(40);
       const forty = await html("/admin/plugins", grace);
-      expect(rowsOf(forty.body, "comfortable queue")).toHaveLength(40);
+      expect(queueRows(forty.body)).toHaveLength(40);
       expect(forty.body).not.toContain('class="pager"');
     } finally {
       await site.queueAs(null);
@@ -1087,50 +1118,55 @@ describe("the staff's side: the queue, a submission, the decision", () => {
 
   test("a version to verify: what it asks for against the newest verified version, what moved first, the risky in the danger's ink", async () => {
     const { body } = await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", await site.signIn("user_grace"));
-    expect(body).toContain("Against 1.1.0, the newest verified version: 2 new asks, 2 asks changed inside, its MCP server, its service and a setting that grants changed.");
-    const rows = body.slice(body.indexOf('class="weigh"'), body.indexOf('id="checks"')).split('class="weigh-row').slice(1);
-    const titles = rows.map((r) => r.match(/<p class="title">([^<]+)/)![1]!.trim());
+    expect(body).toContain("Compared with 1.1.0, the newest verified version: 2 new asks, 2 asks changed inside, its MCP server, its service and a setting that grants changed.");
+    const rows = body.slice(body.indexOf('<ul class="asklist">'), body.indexOf('id="said"')).split('<li class="ar').slice(1);
+    const titles = rows.map((r) => r.match(/<div class="t">([^<]+)/)![1]!.trim());
     expect(titles.slice(0, 4)).toEqual(["Send you notifications", "Connect to these places", "Run python3, git, jq, bash on your computer as you", "Send messages to your agents as you"]);
-    expect(rows[0]).toContain('<span class="badge sm info">New</span>');
-    expect(rows[2]).toMatch(/^ risky"/);
-    expect(rows[2]).toContain('<span class="badge sm info">Changed</span>');
-    expect(rows[2]).toMatch(/<span class="plus" aria-hidden="true">\+<\/span><span>bash/);
-    expect(rows[1]).toMatch(/<span class="minus" aria-hidden="true">−<\/span><span class="t-3">\*/);
+    expect(rows[0]).toMatch(/^ new"/);
+    expect(rows[0]).toContain('<span class="state no">New in 1.5.0</span>');
+    expect(rows[2]).toMatch(/^ risky new"/);
+    expect(rows[2]).toContain('<span class="state no">Changed</span>');
+    expect(rows[2]).toMatch(/<li class="add"><code>bash<\/code><span class="sr-only"> \(new\)<\/span><\/li>/);
+    expect(rows[1]).toMatch(/<li class="del"><code>\*/);
     // Then what it binds past its asks (amendment 41), risky, its MCP server and service whole, before and after.
     expect(titles.slice(4, 7)).toEqual(["Its MCP server changed", "Its service changed", "A setting that grants access changed"]);
-    expect(rows.slice(4, 7).every((r) => r.startsWith(" risky"))).toBe(true);
-    expect(rows[4]).toMatch(/<dt>Before<\/dt><dd><span>node server\.js<\/span><span>API_URL=https:\/\/api\.[^<]+<\/span><\/dd>/);
-    expect(rows[4]).toContain("<span>node server.js --listen 0.0.0.0:7777</span>");
-    expect(rows[5]).toContain("<dd><span>services/sync.luau</span></dd>");
+    expect(rows.slice(4, 7).every((r) => r.startsWith(" risky new"))).toBe(true);
+    expect(rows[4]).toMatch(/<dt>Before<\/dt><dd><code>node server\.js<\/code><code>API_URL=https:\/\/api\.[^<]+<\/code><\/dd>/);
+    expect(rows[4]).toContain("<code>node server.js --listen 0.0.0.0:7777</code>");
+    expect(rows[5]).toContain("<dd><code>services/sync.luau</code></dd>");
     // Then what is as before, quieter.
-    expect(rows.slice(7).every((r) => r.startsWith(" same"))).toBe(true);
+    expect(rows.slice(7).every((r) => / same"/.test(r.slice(0, 20)) && r.includes('<span class="same">Same as 1.1.0</span>'))).toBe(true);
   });
 
-  test("the decision: Verify, the one primary, asks once with what there is to weigh; Don't verify asks for a reason and words, showing the author's view; Take down and Remove ask why; a verified version's are only those two", async () => {
+  test("the decision: Mark verified, the one primary, asks once with what there is to weigh; Don't verify asks for a reason and words, showing the author's view; Take down and Remove ask why; a verified version's are only those two", async () => {
     const grace = await site.signIn("user_grace");
+    const railOf = (body: string) => body.slice(body.indexOf('<aside class="rail rv-rail"'), body.indexOf("</aside>", body.indexOf('<aside class="rail rv-rail"')));
     const pending = (await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", grace)).body;
-    const rail = pending.slice(pending.indexOf('<aside class="decide'), pending.indexOf("</aside>"));
-    expect(rail.match(/btn primary/g)).toHaveLength(1);
-    expect(rail).toContain('<a class="btn primary" href="/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0/verify" data-dialog="approve">Verify…</a>');
-    const ask = pending.slice(pending.indexOf('<dialog class="dialog sm" id="approve"'), pending.indexOf("</dialog>", pending.indexOf('id="approve"')));
+    const rail = railOf(pending);
+    expect(rail.match(/btn pri/g)).toHaveLength(1);
+    expect(rail).toMatch(/<a class="btn pri" href="\/admin\/plugins\/worst-case-listing-at-every-limit-xyz12\/1\.5\.0\/verify" data-dialog="approve">.*?Mark 1\.5\.0 verified<\/a>/s);
+    const ask = pending.slice(pending.indexOf('<dialog class="question sm" id="approve"'), pending.indexOf("</dialog>", pending.indexOf('id="approve"')));
     expect(ask).toContain("Everyone installing it sees it&#39;s verified");
     expect(ask).toContain('<p class="weigh-line bad">2 new asks · 2 asks changed · Its MCP server, its service and a setting that grants changed · 1 check to look at</p>');
     // (Verify has the focus: a clean update is a click, then Enter.)
-    expect(ask).toContain('<button class="btn primary" type="submit" autofocus>Verify</button>');
-    expect(rail).toContain("<dt>This author</dt><dd>");
-    expect(rail).toContain('data-dialog="reject">Don\'t verify…</a>');
+    expect(ask).toContain('<button class="btn pri" type="submit" autofocus>Verify</button>');
+    // The author: publishing since, and their plugins; never how many of theirs were or weren't verified (Wing's ruling).
+    expect(rail).toMatch(/<dt>Publishing since<\/dt><dd>[A-Z][a-z]{2} \d{1,2}, \d{4}<\/dd>/);
+    expect(rail).toMatch(/<dt>Plugins<\/dt><dd>\d+(, (all verified|verified|\d+ with a verified version))?<\/dd>/);
+    expect(rail).not.toMatch(/\d+ verified ·|not verified<\/dd>/);
+    expect(rail).toContain('data-dialog="reject">Don\'t verify, with a note…</a>');
     // (Listed already: a harmful or misplaced one is taken down or removed whether or not it's decided.)
-    expect(rail).toContain('data-dialog="take-down">Take down…</a>');
-    expect(rail).toContain('data-dialog="remove">Remove…</a>');
+    expect(rail).toContain('data-dialog="take-down">Take this version down…</a>');
+    expect(rail).toContain('data-dialog="remove">Remove it…</a>');
     expect(pending).toContain('<select id="reject-reason" name="reason" required>');
     expect(pending).toContain('<option value="" disabled selected>Choose a reason</option>');
     expect(pending).toContain("What @ada reads");
-    // (The raw manifest, folded.)
-    expect(pending).toMatch(/<details class="fold">\s*<summary>/);
+    // (The manifest as signed: the first of its files.)
+    expect((await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0?view=files", grace)).body).toContain('<p class="file-head"><code>zeron-plugin.json</code>');
     const verified = (await html("/admin/plugins/focus-timer/1.2.0", grace)).body;
-    const verifiedRail = verified.slice(verified.indexOf('<aside class="decide'), verified.indexOf("</aside>"));
-    expect(verifiedRail).toContain('data-dialog="take-down">Take down…</a>');
-    expect(verifiedRail).toContain('data-dialog="remove">Remove…</a>');
+    const verifiedRail = railOf(verified);
+    expect(verifiedRail).toContain('data-dialog="take-down">Take this version down…</a>');
+    expect(verifiedRail).toContain('data-dialog="remove">Remove it…</a>');
     expect(verifiedRail).not.toContain("/verify");
     expect(verifiedRail).not.toContain("/decline");
     // Without the script, the same question as a page, the author's view on it too.
@@ -1142,7 +1178,7 @@ describe("the staff's side: the queue, a submission, the decision", () => {
   test("a version taken down is restored by staff, and says so", async () => {
     const grace = await site.signIn("user_grace");
     const before = (await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.2.0", grace)).body;
-    const rail = before.slice(before.indexOf('<aside class="decide'), before.indexOf("</aside>"));
+    const rail = before.slice(before.indexOf('<aside class="rail rv-rail"'), before.indexOf("</aside>", before.indexOf('<aside class="rail rv-rail"')));
     expect(rail).toContain("/1.2.0/restore");
     expect(rail).not.toContain("/verify");
     const response = await post("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.2.0/restore", grace, { csrf: tokenOf(before), reason: "Its author fixed the host." });
@@ -1220,20 +1256,32 @@ describe("the review of the web store: what it found, held", () => {
   test("a form's body past what any form sends is never parsed: 413, or the staff's 404 to anyone but an admin", async () => {
     const big = "note=" + "x".repeat(2 * 1024 * 1024);
     const headers = (cookie: string) => ({ cookie, origin: "https://zeron.sh", "content-type": "application/x-www-form-urlencoded", "content-length": String(big.length) });
+    // (The site answers before it takes the body, as it should; the test's client then sometimes can't finish
+    // sending and reports EPIPE in place of the answer. That alone is tried again: every answer read is checked.)
+    const send = async (path: string, cookie: string): Promise<Response> => {
+      for (let tries = 1; ; tries++) {
+        try {
+          return await site.fetch(path, { method: "POST", headers: headers(cookie), body: big });
+        } catch (error) {
+          const code = (error as { cause?: { code?: string } }).cause?.code;
+          if (tries >= 5 || (code !== "EPIPE" && code !== "ECONNRESET")) throw error;
+        }
+      }
+    };
     const kai = await site.signIn("user_kai");
-    expect((await site.fetch("/plugins/theme-sync/report", { method: "POST", headers: headers(kai), body: big })).status).toBe(413);
+    expect((await send("/plugins/theme-sync/report", kai)).status).toBe(413);
     const grace = await site.signIn("user_grace");
-    expect((await site.fetch("/admin/reports/1", { method: "POST", headers: headers(grace), body: big })).status).toBe(413);
+    expect((await send("/admin/reports/1", grace)).status).toBe(413);
     // To anyone else, under /admin: the same answer whether a page is there or not, the body unread.
     const ada = await site.signIn("user_ada");
     for (const path of ["/admin/reports/1", "/admin/nothing-here"]) {
       const started = performance.now();
-      const response = await site.fetch(path, { method: "POST", headers: headers(ada), body: big });
+      const response = await send(path, ada);
       expect(response.status, path).toBe(404);
       expect(performance.now() - started, path).toBeLessThan(2_000);
     }
     // A session that ended: off to sign in, the body unread, nothing of it carried along.
-    const ended = await site.fetch("/admin/reports/1", { method: "POST", headers: headers("__Host-zeron_session=x"), body: big });
+    const ended = await send("/admin/reports/1", "__Host-zeron_session=x");
     expect(ended.status).toBe(303);
     expect(ended.headers.get("location")).toBe(`/auth/web/login?${new URLSearchParams({ return_to: "/admin/reports/1" })}`);
   });

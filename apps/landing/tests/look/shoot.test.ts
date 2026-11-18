@@ -60,11 +60,24 @@ const SHOTS: Shot[] = [
   // (Fifty, the most a key may name, every one of them Ada's: its list open.)
   { page: "account", as: "keys-fifty", path: "/account/keys", user: "user_ada", fake: [["many", { on: "1" }]], act: async (page) => { await page.locator("details.every", { hasText: "Show all 50" }).locator("summary").click(); } },
   { page: "account", as: "keys-signed-out", path: "/account/keys" },
+  // The staff's: the queue waiting (reported first, every kind of row), empty, and a list already read.
+  { page: "staff", as: "queue", path: "/admin/plugins", user: "user_grace" },
+  { page: "staff", as: "queue-empty", path: "/admin/plugins", user: "user_grace", fake: [["queue", { as: "empty" }]] },
+  { page: "staff", as: "verified", path: "/admin/plugins?state=verified", user: "user_grace" },
+  // A version under review: waiting, asking for more in every way; waiting, asking for one thing more; its files; its changes;
+  // Don't verify, asked; verified; taken down.
+  { page: "staff", as: "review", path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", user: "user_grace" },
+  { page: "staff", as: "review-small", path: "/admin/plugins/session-badges/1.2.1", user: "user_grace" },
+  { page: "staff", as: "review-files", path: "/admin/plugins/xss-probe/1.1.0?view=files", user: "user_grace" },
+  { page: "staff", as: "review-changes", path: "/admin/plugins/xss-probe/1.1.0?view=changes", user: "user_grace" },
+  { page: "staff", as: "review-decline", path: "/admin/plugins/session-badges/1.2.1", user: "user_grace", act: async (page) => { await page.locator('a[data-dialog="reject"]').first().click(); await page.locator("#reject-message").fill("The README doesn't say what it reads, or where it sends it."); } },
+  { page: "staff", as: "review-verified", path: "/admin/plugins/focus-timer/1.2.0", user: "user_grace" },
+  { page: "staff", as: "review-taken-down", path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.2.0", user: "user_grace" },
   { page: "account", as: "keys-none", path: "/account/keys", user: "user_noor" },
   { page: "account", as: "revoke", path: "/account/keys/Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", user: "user_ada" },
   { page: "account", as: "new-key", path: "/account/keys", user: "user_ada", widths: [1440, 390], act: async (page) => { await page.getByRole("button", { name: "New key" }).click(); } },
 ];
-const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}], ["many", {}]];
+const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}], ["many", {}], ["queue", {}]];
 
 let site: Site;
 let browser: Browser;

@@ -8,8 +8,8 @@ describe("plugin ids", () => {
 });
 
 describe("versions", () => {
-  test.each(["1.0.0", "0.3.0-beta.1", "1.2.3+build.5", "10.20.30-rc.1+x"])("%s is strict semver", (v) => expect(isVersion(v)).toBe(true));
-  test.each(["1.0", "01.0.0", "1.0.0-", "v1.0.0", "1.0.0-01", "..", "1.0.0/../x", `1.0.0-${"a".repeat(70)}`])("%s isn't", (v) => expect(isVersion(v)).toBe(false));
+  test.each(["1.0.0", "0.3.0-beta.1", "1.2.3+build.5", "10.20.30-rc.1+x", "1.0.0-rc.1+build.20261118.012345"])("%s is strict semver", (v) => expect(isVersion(v)).toBe(true));
+  test.each(["1.0", "01.0.0", "1.0.0-", "v1.0.0", "1.0.0-01", "..", "1.0.0/../x", `1.0.0-${"a".repeat(70)}`, "1.0.0-rc.1+build.20261118.0123456"])("%s isn't", (v) => expect(isVersion(v)).toBe(false));
   test("a version from an address gets its \"+\" back (decodeURI leaves %2B), and nothing else", () => {
     expect(versionParam(decodeURI("/" + encodeURIComponent("1.2.3+build.5")).slice(1))).toBe("1.2.3+build.5");
     expect(versionParam("1.2.3%2bx")).toBe("1.2.3+x");

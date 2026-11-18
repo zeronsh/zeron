@@ -166,7 +166,6 @@
 /* (Its words end where Install's words end: the small button's 12 of padding in.) */
 .v .off { padding-right: 12px; font-size: 13px; line-height: 32px; color: var(--text-3); white-space: nowrap; }
 .v.old .vno a { color: var(--text-2); }
-.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 28px; padding-top: 20px; box-shadow: 0 -1px 0 var(--line); font-size: 13px; color: var(--text-3); }
 
 /* ---- What it asks for, all of it ---- */
 .warnline { margin-top: 18px; padding: 12px 14px; border-radius: 12px; background: var(--danger-wash); color: var(--danger); font-size: 14px; line-height: 20px; max-width: 44em; }

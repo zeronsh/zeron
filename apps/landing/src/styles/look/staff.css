@@ -1,0 +1,223 @@
+/* The staff pages: the queue and a version under review (the prototype's queue.css and review.css). */
+
+/* The tabs: the queue's lists and the staff pages beside them; on a phone, sideways. */
+.staff-tabs { overflow-x: auto; scrollbar-width: none; }
+.staff-tabs a { flex: none; }
+
+/* ---- The queue: what arrived, what it asks for against its newest verified version, how long it has waited ---- */
+.q { margin-top: 28px; }
+.q ul { padding: 0; list-style: none; }
+.qr { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) 176px 84px; gap: 32px; align-items: start; padding: 20px 24px; transition: background-color 0.12s var(--ease); }
+.q li + li .qr, .qr.h + ul .qr { box-shadow: 0 -1px 0 var(--line); }
+.qr.h { padding-top: 14px; padding-bottom: 12px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+/* (The whole row opens it: its name's link stretched over the row; "Read" is that link's look.) */
+.qr:has(.nm a:hover) { background: color-mix(in srgb, var(--sunken) 55%, transparent); }
+.qr .nm a::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.qr .nm a:focus-visible { outline: none; }
+.qr:has(.nm a:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 4px; }
+.qr .who { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
+.qr .who > div { min-width: 0; }
+.qr .nm { font-weight: 550; letter-spacing: -0.005em; line-height: 22px; text-wrap: balance; overflow-wrap: anywhere; }
+.qr .nm b { font: 550 13.5px/22px var(--mono); letter-spacing: -0.01em; color: var(--text-2); margin-left: 4px; white-space: nowrap; }
+.qr .by { margin-top: 2px; font-size: 13px; line-height: 20px; color: var(--text-3); overflow-wrap: anywhere; }
+.chg { min-width: 0; font-size: 14px; line-height: 22px; }
+.chg .lead1 { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-weight: 500; }
+.chg ul { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; color: var(--text-2); }
+.chg li { position: relative; padding-left: 18px; line-height: 20px; }
+.chg li::before { content: ""; position: absolute; left: 4px; top: 8px; width: 4px; height: 4px; border-radius: 50%; background: var(--text-3); }
+.chg li.add { color: var(--warn); }
+.chg li.add::before { content: "+"; top: 0; left: 1px; width: auto; height: auto; background: none; font: 600 14px/20px var(--mono); }
+.chg li.risky { color: var(--danger); }
+.chg small { display: block; margin-top: 4px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.wait { font-size: 14px; line-height: 22px; }
+.wait small { display: block; margin-top: 2px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.qr .read { justify-self: end; margin-top: -4px; pointer-events: none; }
+.qr:has(.nm a:hover) .read { box-shadow: var(--shadow-2); }
+
+@media (max-width: 1024px) {
+  .qr { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) 132px; gap: 24px; }
+  .qr .read, .qr.h > :last-child { display: none; }
+}
+@media (max-width: 720px) {
+  .qr.h { display: none; }
+  .qr { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 18px 20px; }
+  .chg { padding-left: 58px; }
+  .wait { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding-left: 58px; color: var(--text-2); }
+  .wait small { margin: 0; }
+}
+
+/* ---- A version under review ---- */
+/* (The file tree, a file and its changes, and the decision's fields keep their own styles, written to the
+   console's names for colours: here those names are the look's.) */
+:root { --field-bg: var(--surface); --border: var(--line); --diff-added: var(--verified); --diff-added-wash: var(--verified-wash); --diff-removed: var(--danger); --diff-removed-wash: var(--danger-wash); --hover: var(--sunken); --selected: var(--sunken); --radius-md: 8px; --tone-accent: var(--accent); --tone-accent-wash: color-mix(in srgb, var(--accent) 14%, transparent); --tone-warning: var(--warn); }
+.rv { padding-bottom: 24px; }
+/* (The crumbs' last, the version here, cut as the plugin pages' crumbs are: the head below says it whole.) */
+.rv .crumbs > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rv-head { align-items: center; }
+.rv-head > .state { flex: none; }
+.rv-head h1 .name { text-wrap: balance; }
+.rv-cols { margin-top: 36px; }
+.rv-main > .tabs { margin-bottom: 32px; }
+.rv-main > section + section { margin-top: 48px; }
+.rv-main h2 { font-size: 19px; line-height: 26px; }
+.sub2 { margin-top: 2px; font-size: 14px; line-height: 20px; color: var(--text-3); }
+.sub2.pad { margin: 0; padding: 14px 18px; }
+
+/* What it asks for: what's new or changed first, each said against the newest verified version. */
+.rv .asklist { margin-top: 14px; }
+.rv .ar.new { background: color-mix(in srgb, var(--warn-wash) 45%, transparent); }
+.rv .ar.new .t { font-weight: 550; }
+.rv .ar.same .t { font-weight: 450; }
+.rv .asklist > .ar:first-child { border-radius: 16px 16px 0 0; }
+.rv .asklist > .ar:last-child { border-radius: 0 0 16px 16px; }
+.rv .asklist > .ar:only-child { border-radius: 16px; }
+.rv .ar > .state { flex: none; }
+.rv .ar > .same { flex: none; font-size: 13px; line-height: 22px; color: var(--text-3); white-space: nowrap; }
+/* (Before and after side by side, each as wide as the other; under one another on a phone.) */
+.before-after { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin-top: 8px; font-size: 13px; line-height: 20px; }
+.before-after dt { color: var(--text-3); }
+.before-after dd { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin: 4px 0 0; }
+.before-after dd code { max-width: 100%; }
+.moved { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; padding: 0; list-style: none; font-size: 13px; line-height: 20px; color: var(--text-2); }
+.moved li { position: relative; padding-left: 18px; overflow-wrap: anywhere; }
+.moved li::before { position: absolute; left: 2px; top: 0; font: 600 13px/20px var(--mono); }
+.moved .add::before { content: "+"; color: var(--warn); }
+.moved .alt::before { content: "~"; color: var(--warn); }
+.moved .del::before { content: "−"; color: var(--text-3); }
+.moved .del code { text-decoration: line-through; color: var(--text-3); }
+.moved code, .before-after code { font: 500 12.5px/20px var(--mono); padding: 1px 6px; border-radius: 5px; background: var(--sunken); color: var(--text); overflow-wrap: anywhere; }
+
+/* What its author says changed. */
+.prose.said { padding-top: 10px; font-size: 15px; line-height: 24px; }
+
+/* Its files: what changed since the newest verified version, marked; the rest folded. */
+.fh { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.files { margin-top: 14px; border-radius: 16px; }
+.flist { display: flex; flex-direction: column; padding: 6px; list-style: none; }
+.flist a { display: flex; align-items: center; gap: 12px; min-height: 34px; padding: 6px 12px; border-radius: 9px; transition: background-color 0.12s var(--ease); }
+.flist a:hover { background: var(--sunken); }
+.flist a:focus-visible { outline-offset: -2px; }
+.fn { min-width: 0; font: 500 13px/20px var(--mono); letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.flist a.removed .fn { text-decoration: line-through; color: var(--text-3); }
+.flist .d, .dh .d { margin-left: auto; flex: none; display: flex; gap: 8px; font: 500 12.5px/20px var(--mono); color: var(--text-3); }
+.m { flex: none; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 5px; font: 600 10.5px/1 var(--mono); }
+.m.add { color: var(--verified); background: var(--verified-wash); }
+.m.mod { color: var(--warn); background: var(--warn-wash); }
+.m.del { color: var(--danger); background: var(--danger-wash); }
+em.pl { font-style: normal; color: var(--verified); }
+em.mi { font-style: normal; color: var(--danger); }
+.unchanged { box-shadow: 0 -1px 0 var(--line); }
+.unchanged summary { display: flex; align-items: center; gap: 6px; padding: 12px 18px; font-size: 13px; line-height: 20px; color: var(--text-2); font-weight: 500; list-style: none; cursor: pointer; border-radius: 0 0 16px 16px; }
+.unchanged summary::-webkit-details-marker { display: none; }
+.unchanged summary:hover { color: var(--text); }
+.unchanged summary svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
+.unchanged[open] summary svg { transform: rotate(-90deg); }
+.unchanged .flist { padding-top: 0; }
+
+/* What the checks found: what to look at first. */
+.checks { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; padding: 0; list-style: none; font-size: 15px; line-height: 22px; }
+.checks li { display: flex; align-items: flex-start; gap: 12px; overflow-wrap: anywhere; }
+.checks li > svg { flex: none; width: 18px; height: 18px; margin-top: 2px; fill: none; stroke: var(--verified); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.checks .warn > svg { stroke: var(--warn); }
+.checks .fail { color: var(--danger); }
+.checks .fail > svg { stroke: var(--danger); }
+.rv-main > .checks { margin: -12px 0 28px; }
+
+/* Its listing, as visitors will see it. */
+.rv-summary { margin-top: 16px; font-size: 16px; line-height: 24px; color: var(--text-2); max-width: 40em; }
+.rv-shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 16px; padding: 0; list-style: none; }
+.rv-shots img { display: block; width: 100%; height: auto; border-radius: 12px; box-shadow: var(--shadow-1); }
+#listing .prose { padding-top: 20px; }
+#listing .warnline { margin-top: 16px; }
+
+/* Files and Changes, views of their own. */
+.files-view { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 20px; align-items: start; }
+.tree-pane { position: sticky; top: 84px; max-height: calc(100vh - 104px); overflow: auto; padding: 8px; border-radius: 16px; }
+.file-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-bottom: 12px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.file-head code { font: 500 13px/20px var(--mono); color: var(--text); overflow-wrap: anywhere; }
+.file-head .more { display: inline-flex; align-items: center; gap: 2px; color: var(--text-2); font-weight: 500; }
+.file-head .more svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.file-picture { display: block; max-width: 100%; margin-bottom: 12px; border-radius: 12px; box-shadow: var(--shadow-1); }
+.changes-view { display: flex; flex-direction: column; gap: 16px; }
+.change-block { overflow: hidden; border-radius: 16px; scroll-margin-top: 84px; }
+.dh { display: flex; align-items: center; gap: 12px; padding: 12px 18px; font-size: 13px; line-height: 20px; box-shadow: 0 1px 0 var(--line); }
+.dh .fn:hover { text-decoration: underline; text-underline-offset: 3px; }
+.change-block .diff { border-radius: 0; box-shadow: none; background: none; }
+/* (On an added or removed line's wash, its numbers and its comments a step darker, to read.) */
+.change-block .diff :is(.added, .removed) :is(.n, .hljs-comment) { color: var(--text-2); }
+
+/* The decision, which never scrolls away; then who sent it, what's reported, its versions. */
+.decide { display: flex; flex-direction: column; gap: 10px; padding: 20px; border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-2); }
+.decide h2 { font-size: 15px; line-height: 22px; }
+.decide p { font-size: 14px; line-height: 21px; color: var(--text-2); }
+.decide p.t3 { color: var(--text-3); }
+.decide > p:last-of-type:not(.stops) { margin-bottom: 6px; }
+.decide .btn { width: 100%; }
+.decide .btn.pri .seal { width: 17px; height: 17px; }
+.decide .stops { display: flex; justify-content: center; flex-wrap: wrap; gap: 4px 18px; margin-top: 4px; }
+.down { font-size: 13px; line-height: 20px; font-weight: 500; color: var(--danger); border-radius: 4px; }
+.down.quiet { color: var(--text-2); }
+.down:hover { text-decoration: underline; text-underline-offset: 3px; }
+.said-was { margin: 0; padding: 12px 14px; border-radius: 12px; background: var(--sunken); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
+.said-was footer { margin-top: 4px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.rv-rail .facts a { border-radius: 4px; }
+.rv-rail .facts a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.rlist { display: flex; flex-direction: column; gap: 8px; padding: 0; list-style: none; }
+.rlist a { display: grid; justify-items: start; gap: 6px; padding: 12px 14px; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-1); transition: box-shadow 0.12s var(--ease); }
+.rlist a:hover { box-shadow: var(--shadow-2); }
+.rlist .rt { font-size: 14px; line-height: 20px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.rlist small { font-size: 13px; line-height: 20px; color: var(--text-3); }
+.vmini { display: flex; flex-direction: column; margin: -4px -10px 0; padding: 0; list-style: none; }
+.vmini a { display: grid; grid-template-columns: 88px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 38px; padding: 6px 10px; border-radius: 9px; font-size: 13px; line-height: 20px; color: var(--text-3); transition: background-color 0.12s var(--ease); }
+.vmini a:hover { background: color-mix(in srgb, var(--sunken) 60%, transparent); }
+.vmini a[aria-current] { background: var(--surface); box-shadow: var(--shadow-1); }
+.vmini b { font: 600 13px/20px var(--mono); color: var(--text); overflow-wrap: anywhere; }
+.vmini .state { justify-self: start; }
+.rv-rail .more { display: inline-flex; align-items: center; gap: 2px; margin-top: 10px; font-size: 13px; color: var(--text-2); font-weight: 500; }
+.rv-rail .more svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.rv-rail .more:hover { color: var(--text); }
+.decide-bar { display: none; }
+
+/* A question before a decision: a dialog, its fields, the author's view of what they'll read. */
+dialog.question { margin: auto; width: min(540px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 24px; border: 0; border-radius: 20px; background: var(--surface); color: var(--text); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--line); overflow: auto; }
+dialog.question.sm { width: min(440px, calc(100vw - 32px)); }
+dialog.question::backdrop { background: rgba(0, 0, 0, 0.36); }
+.question h2 { font-size: 19px; line-height: 26px; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.question form > p { margin-top: 8px; font-size: 14px; line-height: 21px; color: var(--text-2); }
+.question .weigh-line { margin-top: 14px; padding: 10px 12px; border-radius: 10px; font-size: 13.5px; line-height: 20px; }
+.question .weigh-line.warn { color: var(--warn); background: var(--warn-wash); }
+.question .weigh-line.bad { color: var(--danger); background: var(--danger-wash); }
+.question .body { display: grid; gap: 16px; margin-top: 18px; }
+.question .field-label { display: block; margin-bottom: 6px; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); }
+.question .field { position: relative; }
+.question .field select, .question .field textarea { display: block; width: 100%; padding: 9px 12px; border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
+.question .field select { appearance: none; padding-right: 36px; height: 40px; }
+.question .field textarea { resize: vertical; min-height: 96px; }
+.question .field select:focus-visible, .question .field textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.question .field .chevron { position: absolute; right: 12px; top: 50%; translate: 0 -50%; color: var(--text-3); pointer-events: none; }
+.question .field-hint { margin-top: 6px; font-size: 12.5px; line-height: 18px; color: var(--text-3); }
+.question .preview { padding: 12px 14px; border-radius: 12px; background: var(--sunken); }
+.question .preview .line { display: flex; align-items: center; gap: 8px; font: 600 13px/20px var(--mono); }
+.question .preview .badge { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 11px; font: 550 12px/1 var(--sans); color: var(--warn); background: var(--warn-wash); }
+.question .preview .said { margin-top: 6px; font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
+.question .preview .said.is-empty { color: var(--text-3); }
+.question .preview .who { margin-top: 4px; font-size: 12.5px; line-height: 18px; color: var(--text-3); }
+.question .answers { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+
+@media (max-width: 1024px) {
+  .files-view { grid-template-columns: minmax(0, 1fr); }
+  .tree-pane { position: static; max-height: none; }
+}
+@media (max-width: 860px) {
+  .rv-head { flex-wrap: wrap; }
+  .rv { padding-bottom: 8px; }
+  .decide-bar { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 8px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(12px); box-shadow: 0 -1px 0 var(--line); }
+  .decide-bar .btn { flex: 1; padding: 0 10px; }
+}
+@media (max-width: 720px) {
+  .rv .ar { flex-wrap: wrap; }
+  .rv .ar > .state, .rv .ar > .same { margin-left: 32px; }
+  .before-after { grid-template-columns: minmax(0, 1fr); }
+  .question .answers { flex-direction: column-reverse; }
+  .question .answers .btn { width: 100%; }
+}

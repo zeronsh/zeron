@@ -66,7 +66,6 @@
 .res .ft .state { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .count { color: var(--text-3); font-size: 13px; line-height: 20px; white-space: nowrap; }
 
-.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 28px; padding-top: 20px; box-shadow: 0 -1px 0 var(--line); font-size: 13px; color: var(--text-3); }
 
 /* The phone's order and filters: two disclosures, each opening a small panel under it (no script). */
 .fbar { display: none; }

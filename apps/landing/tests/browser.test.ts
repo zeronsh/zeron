@@ -91,19 +91,18 @@ const PAGES: [string, string | undefined][] = [
 /** The states a page opens into: each must be as clean as the page. */
 const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>][] = [
   ["Verify, asked once", "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", "user_grace", async (page) => {
-    // (Exact: "Don't verify…" holds the words too, and comes first in a phone's bar.)
-    await page.getByRole("link", { name: "Verify…", exact: true }).first().click();
+    await page.getByRole("link", { name: /^Mark .+ verified$/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
     expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Verify");
   }],
   ["Don't verify, written", "/admin/plugins/session-badges/1.2.1", "user_grace", async (page) => {
-    await page.getByRole("link", { name: "Don't verify…" }).first().click();
+    await page.getByRole("link", { name: /^Don't verify/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
     await page.getByRole("dialog").getByLabel("Reason").selectOption("listing");
     await page.getByRole("dialog").getByLabel("For the author").fill("Say what each panel shows.");
   }],
   ["Take down", "/admin/plugins/focus-timer/1.2.0", "user_grace", async (page) => {
-    await page.getByRole("link", { name: "Take down…" }).first().click();
+    await page.getByRole("link", { name: /^Take (this version )?down…$/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
   ["closing a report", "/admin/reports", "user_grace", async (page) => {
@@ -111,7 +110,7 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
   ["Remove", "/admin/plugins/focus-timer/1.2.0", "user_grace", async (page) => {
-    await page.getByRole("link", { name: "Remove…" }).first().click();
+    await page.getByRole("link", { name: /^Remove( it)?…$/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
   ["New key, where a key is made", "/account/keys", "user_ada", async (page) => {
@@ -236,7 +235,7 @@ describe("an author's words stay in their place", () => {
   test("a right-to-left override in a name reorders nothing after it", async () => {
     const { page, context } = await open("/admin/plugins/xss-probe/1.1.0", { as: "user_grace" });
     try {
-      const [name, version] = await Promise.all([page.locator("h1 > span").first().boundingBox(), page.locator("h1 > .v").boundingBox()]);
+      const [name, version] = await Promise.all([page.locator("h1 > .name").first().boundingBox(), page.locator("h1 > .vnum").boundingBox()]);
       expect(version!.x).toBeGreaterThanOrEqual(name!.x + name!.width - 1);
     } finally {
       await context.close();

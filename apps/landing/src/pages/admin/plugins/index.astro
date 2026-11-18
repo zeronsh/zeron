@@ -1,19 +1,28 @@
 ---
-// The queue (amendment 45): versions to verify, the ones no reviewer has
-// decided, at most two rows a plugin (its newest undecided release, and its
-// newest undecided pre-release when newer; each says how many it superseded), plugins with open reports first, then the longest waiting, as a
-// table (styles/app.css .queue). Every version is listed already; a
-// reviewer verifies it, or doesn't. Verified, Not verified and All, a
-// segment each. Admins only; to anyone else this address is the site's 404,
-// signed in or not.
-import PluginTile from "../../../components/store/PluginTile.astro";
-import Toast from "../../../components/kit/Toast.astro";
-import Glyph from "../../../components/ui/Glyph.astro";
-import App from "../../../layouts/App.astro";
+// The queue (amendment 45; the prototype's queue): versions people can
+// already install that no reviewer has read, at most two rows a plugin (its
+// newest undecided release, and its newest undecided pre-release when newer;
+// each says how many earlier ones it stands for), plugins with open reports
+// first, then the longest waiting. Each row: the version and who published
+// it; what it asks for against its newest verified version (what's new
+// marked "+", a first version's every ask); how long it has waited. Verified
+// and Not verified are lists of their own, and Taken down; All answers at
+// its address.
+// The staff pages sit beside them as tabs. Admins only; to anyone else this
+// address is the site's 404, signed in or not.
+import Flash from "../../../components/look/Flash.astro";
+import Icon from "../../../components/look/Icon.astro";
+import StaffHead from "../../../components/look/StaffHead.astro";
+import Tile from "../../../components/look/Tile.astro";
+import Words from "../../../components/look/Words.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
+import "../../../styles/look/staff.css";
 import { takeFlash } from "../../../lib/store/flash.ts";
-import { count, dateTime, day, waitedFor } from "../../../lib/store/format.ts";
+import { count, dateTime, day, unbidi, waitedFor } from "../../../lib/store/format.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { pagerOf, placeOf } from "../../../lib/store/paging.ts";
+import { permission } from "../../../lib/store/permissions.ts";
 import { RISKY_ASKS } from "../../../lib/store/review.ts";
 import { adminSession } from "../../../lib/store/session.ts";
 import type { QueueItem, QueueState } from "../../../lib/store/types.ts";
@@ -23,128 +32,122 @@ export const prerender = false;
 const session = await adminSession(Astro);
 if (!session) return new Response(null, { status: 404 });
 privatePage(Astro);
-const toast = takeFlash(Astro.cookies);
+const flash = takeFlash(Astro.cookies);
 
-const VIEWS: Record<QueueState, string> = { undecided: "To verify", verified: "Verified", declined: "Not verified", all: "All" };
-type View = QueueState;
+const LISTS: Record<QueueState, { label: string; lead: string }> = {
+  undecided: { label: "Waiting", lead: "Versions people can already install that nobody at Zeron has read. Reported ones come first, then the longest waiting." },
+  verified: { label: "Verified", lead: "Versions a reviewer read and Zeron verified, the oldest first." },
+  declined: { label: "Not verified", lead: "Versions a reviewer read and didn't verify. Each stays listed, without the check; its author has the reviewer's note." },
+  all: { label: "All", lead: "Every listed version, the oldest first." },
+  taken_down: { label: "Taken down", lead: "Versions taken down as harmful and not restored, the latest first. Each is off on the devices that had it; restoring one lists it again, unread." },
+};
 const asked = Astro.url.searchParams.get("state");
-const status: View = asked && Object.hasOwn(VIEWS, asked) ? (asked as View) : "undecided";
+const status: QueueState = asked && Object.hasOwn(LISTS, asked) ? (asked as QueueState) : "undecided";
 const waiting = status === "undecided";
 const keep: Record<string, string> = waiting ? {} : { state: status };
 const place = placeOf(Astro.url);
-const result = await Astro.locals.edge.queue(status, place.cursor);
+const edge = Astro.locals.edge;
+// (The tabs' counts: how many wait, and how many reports are open; the waiting count is this list's own when it's the one shown.)
+const [result, waitingList, openReports] = await Promise.all([edge.queue(status, place.cursor), waiting ? null : edge.queue("undecided"), edge.reports("open")]);
 // A cursor from another list (or an old one): back to its first page.
 if (!result.ok && result.error === "bad_cursor") return Astro.redirect(waiting ? "/admin/plugins" : `/admin/plugins?state=${status}`, 303);
 const items = result.ok ? result.data.items : [];
 const pager = result.ok ? pagerOf("/admin/plugins", keep, place, result.data, items.length) : null;
-const viewHref = (v: View) => (v === "undecided" ? "/admin/plugins" : `/admin/plugins?state=${v}`);
-const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent(item.plugin.id)}/${encodeURIComponent(item.version)}`;
-
-/**
- * A badge only where a row needs a look (amendment 40): open reports on the
- * plugin; checks that failed; an update that asks for more than its last
- * verified version (in the danger's ink when what it adds reaches far), or
- * whose asks changed inside; earlier undecided versions this row stands for.
- * A row with none asks for exactly what the verified version did.
- */
-const flags = (item: QueueItem): { label: string; tone: string; title?: string }[] => [
-  ...(item.reports > 0 ? [{ label: item.reports === 1 ? "Reported" : `${item.reports} reports`, tone: "bad", title: "Open reports on this plugin: it's shown first" }] : []),
-  ...(item.checks.fail > 0 ? [{ label: item.checks.fail === 1 ? "A check failed" : `${item.checks.fail} checks failed`, tone: "bad" }] : []),
-  ...(item.base && item.new_asks.length > 0
-    ? [{ label: "Asks for more", tone: item.new_asks.some((a) => RISKY_ASKS.has(a)) ? "bad" : "warn", title: `New since ${item.base}: ${item.new_asks.join(", ")}` }]
-    : item.base && item.asks_changed
-      ? [{ label: "Asks changed", tone: "warn", title: `What it asks for changed inside since ${item.base}` }]
-      : []),
-  ...(item.earlier_undecided > 0 ? [{ label: `+${item.earlier_undecided} earlier`, tone: "", title: `It superseded ${item.earlier_undecided} earlier ${item.earlier_undecided === 1 ? "version" : "versions"} no reviewer decided: they take no new installs, and each still opens from the plugin's page` }] : []),
+const waitingTotal = waiting ? (result.ok ? result.data.total : null) : waitingList?.ok ? waitingList.data.total : null;
+const listHref = (s: QueueState) => (s === "undecided" ? "/admin/plugins" : `/admin/plugins?state=${s}`);
+const tabs = [
+  ...(["undecided", "verified", "declined", "taken_down"] as const).map((s) => ({ label: LISTS[s].label, href: listHref(s), n: s === "undecided" ? waitingTotal : null, current: s === status })),
+  { label: "Reports", href: "/admin/reports", n: openReports.ok ? openReports.data.total : null },
+  { label: "Reserved ids", href: "/admin/reservations" },
+  { label: "Log", href: "/admin/audit" },
 ];
+const now = Date.now();
+
+/** An ask by its name alone, in the app's words (permissions.ts): what a row can say without the version's manifest. */
+const ask = (name: string) => permission({ asks: [name] }, name).title;
+/** What a row says about what it asks for, against its newest verified version (its base). */
+function change(item: QueueItem) {
+  if (!item.base) return { line: "Nothing verified yet", asks: item.new_asks, marked: false };
+  if (item.new_asks.length > 0) return { line: `Asks for more than ${item.base}`, asks: item.new_asks, marked: true };
+  if (item.asks_changed) return { line: `What it asks for changed inside since ${item.base}`, asks: [], marked: false };
+  return { line: `Asks for the same as ${item.base}`, asks: [], marked: false };
+}
+const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent(item.plugin.id)}/${encodeURIComponent(item.version)}`;
 ---
 
-<App title="Queue · Review · Zeron" description="The plugin review queue." noindex current="queue" session={session}>
-  <h1 slot="title" class="t-title">Queue{result.ok && <span class="title-count"> · {count(result.data.total)}</span>}</h1>
-  <nav slot="tools" class="segmented" aria-label="Versions by state">
-    {(Object.keys(VIEWS) as View[]).map((v) => <a href={viewHref(v)} aria-current={v === status ? "page" : undefined}>{VIEWS[v]}</a>)}
-  </nav>
-
-  {
-    !result.ok ? (
-      <div class="panel">
-        <div class="empty" role="status">
-          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
-          <div class="words"><h2>The queue can't be loaded right now</h2><p>Try again in a moment.</p></div>
-          <div class="actions"><a class="btn secondary sm" href={viewHref(status)}>Try again</a></div>
-        </div>
-      </div>
-    ) : items.length === 0 ? (
-      <div class="panel">
-        <div class="empty">
-          <span class="tile"><Glyph name={waiting ? "check-circle" : "inbox"} size={20} /></span>
-          <div class="words">
-            <h2>{waiting ? "Nothing to verify" : "Nothing here yet"}</h2>
-            <p>{waiting ? "New versions show here as they're published, the longest waiting first." : status === "all" ? "Every listed version shows here." : `Versions ${status === "verified" ? "verified" : "a reviewer didn't verify"} show here.`}</p>
+<Store title={`${LISTS[status].label} · Review · Zeron`} description="The plugin review queue." noindex current="review" session={session}>
+  <div class="wrap acct">
+    <StaffHead title="Review" lead={LISTS[status].lead} tabs={tabs}>
+      <Flash flash={flash} />
+      {
+        !result.ok ? (
+          <div class="empty" role="status">
+            <h2>The queue can't be loaded right now</h2>
+            <p>Try again in a moment.</p>
+            <a class="btn sec" href={listHref(status)}>Try again</a>
           </div>
-        </div>
-      </div>
-    ) : (
-      <>
-        <div class="panel">
-          <table class="table comfortable queue">
-            <caption class="sr-only">{VIEWS[status]}, {waiting ? "reported first, then the longest waiting" : "the oldest first"}</caption>
-            <colgroup><col /><col class="version" /><col class="author" /><col class="kind" /><col class="flags" /><col class="waited" /></colgroup>
-            <thead>
-              <tr>
-                <th scope="col">Plugin</th>
-                <th scope="col">Version</th>
-                <th scope="col">Published by</th>
-                <th scope="col">Kind</th>
-                <th scope="col"><span class="sr-only">Needs a look</span></th>
-                <th scope="col" class="end">{waiting ? "Waited" : "Published"}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => {
-                // (Weighed against its newest verified version; with none, it's the first to verify.)
-                const kind = item.base ? "Update" : "None verified yet";
-                const who = item.publisher?.username ? `@${item.publisher.username}` : null;
-                const when = waiting ? waitedFor(item.submitted_at) : day(item.submitted_at);
-                const marks = flags(item);
-                return (
-                  <tr>
-                    <td>
-                      <span class="cell-main">
-                        <PluginTile id={item.plugin.id} name={item.plugin.name} icon={item.icon ?? null} version={item.version} size={32} class="plugin-tile" />
-                        <span class="cell-words">
-                          <a class="name name-link" href={submissionHref(item)}>{item.plugin.name}<span class="sr-only"> {item.version}</span></a>
-                          <span class="id">{item.plugin.id}</span>
-                          <span class="meta">
-                            <span class="t-mono">{item.version}</span>
-                            <span>{who ?? "No username"}</span>
-                            <span>{kind}</span>
-                            <time datetime={new Date(item.submitted_at).toISOString()} title={dateTime(item.submitted_at)}>{when}</time>
-                            {marks.map((m) => <span class:list={["badge sm", m.tone]} title={m.title}>{m.label}</span>)}
-                          </span>
-                        </span>
-                      </span>
-                    </td>
-                    <td class="version" title={item.base ? `Weighed against ${item.base}, its newest verified version` : undefined}>{item.version}</td>
-                    <td class="author">{who ?? <span class="faint">No username</span>}</td>
-                    <td class="kind" title={item.base ? `From ${item.base}` : undefined}>{kind}</td>
-                    <td><span class="flags-cell">{marks.map((m) => <span class:list={["badge sm", m.tone]} title={m.title}>{m.label}</span>)}</span></td>
-                    <td class="end muted"><time datetime={new Date(item.submitted_at).toISOString()} title={dateTime(item.submitted_at)}>{when}</time></td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        {pager && (pager.previous || pager.next) && (
-          <nav class="pager" aria-label="Pages">
-            {pager.previous ? <a class="btn secondary sm" href={pager.previous} rel="prev"><Glyph name="alt-arrow-left" size={14} />Previous</a> : <span class="btn secondary sm" aria-disabled="true"><Glyph name="alt-arrow-left" size={14} />Previous</span>}
-            <span class="where">{pager.where}</span>
-            {pager.next ? <a class="btn secondary sm" href={pager.next} rel="next">Next<Glyph name="alt-arrow-right" size={14} /></a> : <span class="btn secondary sm" aria-disabled="true">Next<Glyph name="alt-arrow-right" size={14} /></span>}
-          </nav>
-        )}
-      </>
-    )
-  }
-  <Toast toast={toast} />
-</App>
+        ) : items.length === 0 ? (
+          <div class="empty">
+            <h2>{waiting ? "Nothing waiting" : status === "taken_down" ? "Nothing taken down" : "Nothing here yet"}</h2>
+            <p>{waiting ? "New versions show here as they're published, the longest waiting first." : status === "all" ? "Every listed version shows here." : status === "taken_down" ? "A version taken down as harmful shows here until it's restored." : `Versions ${status === "verified" ? "Zeron verified" : "a reviewer didn't verify"} show here.`}</p>
+          </div>
+        ) : (
+          <>
+            <div class="card q">
+              <div class="qr h" aria-hidden="true"><span>Version</span><span>Since its newest verified</span><span>{waiting ? "Waiting" : "Published"}</span><span></span></div>
+              <ul aria-label={`${LISTS[status].label}, ${waiting ? "reported first, then the longest waiting" : "the oldest first"}`}>
+                {items.map((item) => {
+                  const c = change(item);
+                  const who = item.publisher?.username ? `@${item.publisher.username}` : "an account with no username";
+                  const unread = item.earlier_undecided;
+                  return (
+                    <li>
+                      <div class="qr">
+                        <div class="who">
+                          <Tile id={item.plugin.id} name={item.plugin.name} icon={item.icon} version={item.version} />
+                          <div>
+                            <div class="nm"><a href={submissionHref(item)}><Words text={unbidi(item.plugin.name)} /><span class="sr-only"> {item.version}</span></a> <b aria-hidden="true">{item.version}</b></div>
+                            <div class="by">by {who}{item.installs !== undefined && ` · ${item.installs === 1 ? "1 install" : `${count(item.installs)} installs`}`}{item.prerelease && " · pre-release"}</div>
+                          </div>
+                        </div>
+                        <div class="chg">
+                          <div class="lead1">
+                            {item.reports > 0 && <span class="state bad">{item.reports === 1 ? "1 report" : `${count(item.reports)} reports`}</span>}
+                            {item.checks.fail > 0 && <span class="state bad">{item.checks.fail === 1 ? "A check failed" : `${count(item.checks.fail)} checks failed`}</span>}
+                            <span>{c.line}</span>
+                          </div>
+                          {c.asks.length > 0 && (
+                            <ul aria-label={c.marked ? `New since ${item.base}` : "What it asks for"}>
+                              {c.asks.map((a) => (
+                                <li class:list={{ add: c.marked, risky: RISKY_ASKS.has(a) }}>
+                                  {ask(a)}
+                                  {c.marked && <span class="sr-only"> (new)</span>}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                        <div class="wait">
+                          <div><time datetime={new Date(item.submitted_at).toISOString()} title={dateTime(item.submitted_at)}>{waiting ? waitedFor(item.submitted_at, now) : day(item.submitted_at, now)}</time></div>
+                          {unread > 0 && <small>{unread === 1 ? "1 earlier version unread" : `${count(unread)} earlier versions unread`}</small>}
+                        </div>
+                        <span class="btn sec sm read" aria-hidden="true">Read<Icon name="arrow" /></span>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+            {pager && (pager.previous || pager.next) && (
+              <nav class="pager" aria-label="Pages">
+                {pager.previous ? <a class="btn sec sm" href={pager.previous} rel="prev"><Icon name="left" />Previous</a> : <span class="btn sec sm" aria-disabled="true"><Icon name="left" />Previous</span>}
+                <span class="num">{pager.where}</span>
+                {pager.next ? <a class="btn sec sm" href={pager.next} rel="next">Next<Icon name="arrow" /></a> : <span class="btn sec sm" aria-disabled="true">Next<Icon name="arrow" /></span>}
+              </nav>
+            )}
+          </>
+        )
+      }
+    </StaffHead>
+  </div>
+</Store>

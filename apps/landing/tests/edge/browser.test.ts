@@ -121,7 +121,7 @@ describe("a reviewer, start to finish", () => {
 
       await page.goto(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
       // (Verify asks once, its own button focused: a clean update is a click, then Enter.)
-      await page.getByRole("complementary", { name: "Decision" }).getByRole("link", { name: "Verify…", exact: true }).click();
+      await page.getByRole("complementary", { name: "Decision" }).getByRole("link", { name: "Mark 1.0.0 verified", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Verify focus timer 1.0.0?" });
       await expect.poll(() => dialog.isVisible()).toBe(true);
       expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Verify");
@@ -129,7 +129,9 @@ describe("a reviewer, start to finish", () => {
       await page.waitForURL(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
       await expect.poll(() => page.getByText(VERIFIED).isVisible()).toBe(true);
 
-      await page.getByRole("button", { name: "Sign out" }).click();
+      // (Sign out is in your menu, under your name in the bar.)
+      await page.locator(".top button[data-me]").click();
+      await page.locator("#me-menu").getByRole("button", { name: "Sign out" }).click();
       await page.waitForURL(`${edge.origin}/`);
       expect(await session(context)).toBeUndefined();
       await page.goto(`${edge.origin}/admin/plugins`);

@@ -417,18 +417,19 @@ describe("an update", () => {
     expect(mine.body).not.toContain("/versions/1.1.0/unyank");
     const queue = await grace.get("/admin/plugins");
     expect(queue.body).not.toContain("/admin/plugins/focus-timer/1.1.0");
-    expect(queue.body).toContain("+1 earlier");
+    expect(queue.body).toContain("1 earlier version unread");
     // In public too, from an edge that says why (dc45c3606 on); an older one says only that it takes none.
     const publicly = await new Browser().get("/plugins/focus-timer/versions/1.1.0");
     expect(publicly.response.status).toBe(200);
     expect(publicly.body).toMatch(process.env.E2E_OLD_EDGE ? /It takes no new installs\./ : /Replaced by 1\.2\.0 before it was verified\. Those who have it keep it working\./);
     const overview = await grace.get("/admin/plugins/focus-timer/1.2.0");
-    expect(overview.body).toContain("Update from 1.0.0, its newest verified version");
-    expect(overview.body).toContain("New or changed since 1.0.0");
-    expect(overview.body).toMatch(/Send messages to your agents as you\s*<span class="badge sm info">New<\/span>/);
+    expect(overview.body).toContain("Compared with 1.0.0, the newest verified version");
+    const sends = overview.body.split('<li class="ar').find((r) => r.includes("Send messages to your agents as you"))!;
+    expect(sends).toMatch(/^ risky new"/);
+    expect(sends).toContain('<span class="state no">New in 1.2.0</span>');
     // What it binds past its asks, from the edge's diff (amendment 41): a service where there was none.
     expect(overview.body).toContain("It adds a service");
-    expect(overview.body).toMatch(/<dt>Before<\/dt><dd><span>none<\/span><\/dd><\/div><div><dt>After<\/dt><dd><span>service\.luau<\/span><\/dd>/);
+    expect(overview.body).toMatch(/<dt>Before<\/dt><dd><code>none<\/code><\/dd><\/div><div><dt>After<\/dt><dd><code>service\.luau<\/code><\/dd>/);
     const changes = await grace.get("/admin/plugins/focus-timer/1.2.0?view=changes");
     expect(changes.response.status).toBe(200);
     expect(changes.body).toContain("init.luau");

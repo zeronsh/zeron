@@ -1,36 +1,44 @@
 ---
-// One version, as a reviewer weighs it, in that order: the public page's
-// head; what it asks for, marked against the newest verified version; what
-// changed (its notes, its files); its listing as visitors will see it; the
-// raw manifest, folded. Beside it, the decision, which never scrolls away
-// (amendment 45: it is listed already): Verify, Don't verify (a reason,
-// words, and the author's view of them), Take down (harmful: turned off on
-// devices) or Remove. Its files and its changes line by line are views of
-// their own. Admins only; anyone else gets the site's 404.
+// One version, as a reviewer weighs it (the prototype's review), in that
+// order: its head (who sent it, how, how many have it, where it stands);
+// what it asks for, against its newest verified version, what moved first;
+// what its author says changed; its files, what changed marked; what the
+// checks found; its listing as visitors will see it. Beside it, the
+// decision, which never scrolls away (amendment 45: it is listed already):
+// Mark verified, Don't verify (a reason, words, and the author's view of
+// them), Take down (harmful: turned off on devices) or Remove; then the
+// author, the plugin's open reports and its versions. Its files and its
+// changes line by line are views of their own. Admins only; anyone else
+// gets the site's 404.
+import AppIcon from "../../../../components/look/AppIcon.astro";
+import Icon from "../../../../components/look/Icon.astro";
+import Seal from "../../../../components/look/Seal.astro";
+import Tile from "../../../../components/look/Tile.astro";
+import Words from "../../../../components/look/Words.astro";
 import Decline from "../../../../components/kit/Decline.astro";
-import Strip from "../../../../components/kit/Strip.astro";
 import TakeDown from "../../../../components/kit/TakeDown.astro";
-import Toast from "../../../../components/kit/Toast.astro";
 import CodeView from "../../../../components/store/CodeView.astro";
 import DiffView from "../../../../components/store/DiffView.astro";
 import FileTree from "../../../../components/store/FileTree.astro";
-import PluginTile from "../../../../components/store/PluginTile.astro";
-import Glyph from "../../../../components/ui/Glyph.astro";
-import App from "../../../../layouts/App.astro";
+import Flash from "../../../../components/look/Flash.astro";
+import Store from "../../../../layouts/Store.astro";
+import "../../../../styles/look/plugin.css";
+import "../../../../styles/look/staff.css";
 import { reasonLabel, toWeigh, versionAsk } from "../../../../lib/store/admin.ts";
 import { takeFlash } from "../../../../lib/store/flash.ts";
-import { age, bytes, count, dateTime, day, unbidi, waitedFor } from "../../../../lib/store/format.ts";
+import { bytes, count, date, dateTime, day, since, unbidi, waitedFor } from "../../../../lib/store/format.ts";
+import { hueClass } from "../../../../lib/store/hue.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
 import { drawingChecks } from "../../../../lib/store/drawing.ts";
 import { drawn } from "../../../../lib/store/rendered.ts";
 import { HighlightBudget } from "../../../../lib/store/highlight.ts";
 import { isPluginId, isVersion, versionParam } from "../../../../lib/store/names.ts";
 import { compared, together } from "../../../../lib/store/permissions.ts";
-import { changedFiles, countRows, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, pictureType, readText, type DiffRow } from "../../../../lib/store/review.ts";
+import { changedFiles, countRows, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestFile, manifestText, pictureType, readText, type DiffRow } from "../../../../lib/store/review.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
-import { toneClass, verificationState, versionState } from "../../../../lib/store/states.ts";
 import { fileUrl, memberUrl, pictureUrl, pluginUrl } from "../../../../lib/store/urls.ts";
-import type { Check, PackageFile } from "../../../../lib/store/types.ts";
+import { reportReasonWords, statusWords, store } from "../../../../lib/store/words.ts";
+import type { Check, PackageFile, VersionInfo } from "../../../../lib/store/types.ts";
 
 export const prerender = false;
 
@@ -41,16 +49,16 @@ const session = await adminSession(Astro);
 if (!session) return new Response(null, { status: 404 });
 
 const edge = Astro.locals.edge;
-const result = await edge.submission(id, version);
+// (The plugin's own staff record beside it: its open reports and its versions, for the rail.)
+const [result, record] = await Promise.all([edge.submission(id, version), edge.adminPlugin(id)]);
 if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
 privatePage(Astro);
-const toast = takeFlash(Astro.cookies);
+const flash = takeFlash(Astro.cookies);
 const s = result.ok ? result.data : null;
-/** Its name: the plugin's (a card), else what this version lists. */
-const name = s?.plugin.name ?? s?.version.name ?? (typeof s?.manifest.name === "string" ? s.manifest.name : id);
+/** Its name: the plugin's (a card), else what this version lists; never with a control that turns text around. */
+const name = unbidi(s?.plugin.name ?? s?.version.name ?? (typeof s?.manifest.name === "string" ? s.manifest.name : id));
 
 // Its views: the submission, its files, its changes (an update's alone).
-// (The README had a view of its own; it's the listing's part now.)
 const VIEWS = { overview: "Overview", files: "Files", changes: "Changes" } as const;
 type View = keyof typeof VIEWS;
 const askedView = Astro.url.searchParams.get("view");
@@ -66,7 +74,7 @@ const files = s ? [await manifestFile(manifest), ...s.files] : [];
 const changes = s?.base ? changedFiles(files, [await manifestFile(baseManifest), ...s.base_files]) : [];
 const changeOf = new Map(changes.map((c) => [c.path, c.change]));
 const unchanged = s?.base ? files.filter((f) => !changeOf.has(f.path)) : [];
-const CHANGE = { added: { label: "New", tone: "ok" }, modified: { label: "Changed", tone: "warn" }, removed: { label: "Removed", tone: "bad" } } as const;
+const CHANGE = { added: { mark: "A", label: "New", tone: "add" }, modified: { mark: "M", label: "Changed", tone: "mod" }, removed: { mark: "D", label: "Removed", tone: "del" } } as const;
 
 // The file viewer: exactly the file asked for (one of the edge's list, by
 // its own path: never another in its place), else the manifest. A picture
@@ -153,18 +161,19 @@ const checks = [...drawing, ...(s?.checks ?? [])];
 const toLook = checks.filter((c) => c.level !== "ok");
 const failed = checks.filter((c) => c.level === "fail").length;
 const passed = checks.length - toLook.length;
-const manifestMoved = s?.base ? manifestChanges(s.manifest, s.base.manifest).map((m) => m.key) : [];
+const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n === 1 ? one : many}`;
+const asksSaid = s?.base
+  ? moved.length || weighed.dropped.length
+    ? `Compared with ${s.base.version}, the newest verified version: ${[moved.filter((l) => l.change === "new").length && `${plural(moved.filter((l) => l.change === "new").length, "new ask")}`, moved.filter((l) => l.change === "changed" && !l.bound).length && `${plural(moved.filter((l) => l.change === "changed" && !l.bound).length, "ask")} changed inside`, weighed.dropped.length && `${plural(weighed.dropped.length, "ask")} dropped`, moved.some((l) => l.bound) && `${together(moved.filter((l) => l.bound).map((l) => l.bound!))} changed`].filter(Boolean).join(", ")}.`
+    : `Nothing new since ${s.base.version}, the newest verified version.`
+  : "Its first version: everything it asks for is new.";
 
 // Where it stands, and whether it's verified (amendment 45): listed (or
 // yanked) versions can be verified (undecided or declined), declined
-// (undecided only), taken down or removed; one taken down or removed, none.
-const state = s ? versionState(s.version) : null;
-const verification = s ? verificationState(s.version) : null;
+// (undecided only), taken down or removed; one taken down can be restored.
 const review = s?.version.review;
 const shown = s?.version.status === "listed" || s?.version.status === "yanked";
-// (A version taken down can be restored: listed again, unverified.)
 const restorable = s?.version.status === "taken_down";
-const restore = versionAsk("restore", name, version);
 const verifiable = shown && !s?.version.verified;
 const declinable = shown && review?.decided === false;
 const pending = verifiable || declinable;
@@ -176,354 +185,365 @@ const weigh = s ? toWeigh({ ...s, checks }) : null;
 const reject = versionAsk("decline", name, version);
 const takeDown = versionAsk("take_down", name, version);
 const remove = versionAsk("remove", name, version);
-const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n === 1 ? one : many}`;
+const restore = versionAsk("restore", name, version);
+
+/** Where a version stands, in one pill: stopped, verified, read and not verified, replaced unread, or live and not read yet. */
+function pill(v: Pick<VersionInfo, "status" | "verified" | "yanked_by"> & { review?: { decided?: boolean; decision?: string | null } }): { tone: string; label: string; seal?: boolean } {
+  if (v.status === "taken_down" || v.status === "removed") return { tone: "bad", label: statusWords(v.status) };
+  if (v.verified) return { tone: "ok", label: store("plugins.store.verified"), seal: true };
+  if (v.review?.decision === "declined") return { tone: "bad", label: store("plugins.store.not_verified") };
+  if (v.status === "yanked") return { tone: "quiet", label: v.yanked_by === "superseded" ? "Replaced unread" : statusWords("yanked") };
+  return { tone: "no", label: "Live, not read yet" };
+}
+const standing = s ? pill(s.version) : null;
+// (The list it's on, for the crumbs: waiting, verified or not verified; one stopped is on none.)
+const list = !s || !shown ? null : s.version.verified ? { label: "Verified", href: "/admin/plugins?state=verified" } : review?.decision === "declined" ? { label: "Not verified", href: "/admin/plugins?state=declined" } : { label: "Waiting", href: "/admin/plugins" };
+const now = Date.now();
+const via = s?.version.via === "deploy_key" ? (s.version.deploy_key?.name ? ` with the key “${s.version.deploy_key.name}”` : " with a deploy key") : s?.version.via === "device" ? " from one of their devices" : "";
+const openReports = record.ok ? record.data.reports.filter((r) => r.status === "open") : null;
+const VERSIONS_SHOWN = 8;
+const versions = record.ok ? record.data.versions : null;
 ---
 
-<App title={`${name} ${version} · Review · Zeron`} description="A version to verify." noindex current="queue" session={session}>
-  <nav slot="title" class="crumbs" aria-label="Where this is">
-    <a href="/admin/plugins">Queue</a><Glyph name="alt-arrow-right" size={12} />
-    {view === "overview" ? <span aria-current="page">{unbidi(name)} {version}</span> : <><a href={here}>{unbidi(name)} {version}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{VIEWS[view]}</span></>}
-  </nav>
-  {
-    s && (
-      <nav slot="tools" class="segmented" aria-label="What to read">
-        <a href={viewHref("overview")} aria-current={view === "overview" ? "page" : undefined}>Overview</a>
-        <a href={viewHref("files")} aria-current={view === "files" ? "page" : undefined}>Files <span class="t-3">{count(files.length)}</span></a>
-        {s.base && <a href={viewHref("changes")} aria-current={view === "changes" ? "page" : undefined}>Changes <span class="t-3">{count(changes.length)}</span></a>}
-      </nav>
-    )
-  }
-
-  {
-    !s ? (
-      <div class="panel">
+<Store title={`${name} ${version} · Review · Zeron`} description="A version to verify." noindex current="review" session={session} class={hueClass(id)}>
+  <div class="wrap rv">
+    <nav class="crumbs" aria-label="Where this is">
+      <a href="/admin/plugins">Review</a><Icon name="chev" />
+      {list && <><a href={list.href}>{list.label}</a><Icon name="chev" /></>}
+      {view === "overview" ? <span aria-current="page">{name} {version}</span> : <><a href={here}>{name} {version}</a><Icon name="chev" /><span aria-current="page">{VIEWS[view]}</span></>}
+    </nav>
+    <Flash flash={flash} />
+    {
+      !s ? (
         <div class="empty" role="status">
-          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
-          <div class="words"><h2>This submission can't be loaded right now</h2><p>Try again in a moment.</p></div>
-          <div class="actions"><a class="btn secondary sm" href={Astro.url.pathname + Astro.url.search}>Try again</a></div>
+          <h1>This version can't be loaded right now</h1>
+          <p>Try again in a moment.</p>
+          <a class="btn sec" href={Astro.url.pathname + Astro.url.search}>Try again</a>
         </div>
-      </div>
-    ) : (
-      <div class="review">
-        <header class="review-head">
-          <PluginTile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size={56} class="plugin-tile" />
-          <div class="who">
-            <h1 class="t-title"><span>{unbidi(name)}</span> <span class="v">{version}</span></h1>
-            <p class="meta">
-              <span>by {author ? <a href={memberUrl(author)}>@{author}</a> : "an account with no username"}</span>
-              <span class="dot" aria-hidden="true">·</span>
-              {/* (Weighed against its newest verified version; with none, everything it asks for is new.) */}
-              <span>{s.base ? `Update from ${s.base.version}, its newest verified version` : "None verified yet"}</span>
-              {s.version.prerelease && <span class="badge sm">Pre-release</span>}
-              <span class="dot" aria-hidden="true">·</span>
-              <a href={`/admin/plugins/${encodeURIComponent(id)}`}><code>{id}</code></a>
-            </p>
-          </div>
-        </header>
-
-        <aside class="decide panel" aria-label="Decision">
-          <p class="state">
-            {state && <span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>}
-            {verification && <span class:list={["badge sm", toneClass(verification.tone)]}>{verification.label}</span>}
-            {review?.decided === false && shown ? (
-              <span>waited <time datetime={new Date(s.version.published_at).toISOString()} title={dateTime(s.version.published_at)}>{waitedFor(s.version.published_at)}</time></span>
-            ) : (
-              decided && <span><time datetime={new Date(decided).toISOString()} title={dateTime(decided)}>{day(decided)}</time></span>
-            )}
-          </p>
-          {review?.message && (
-            <p class="said">
-              “{review.message}”
-              <span class="who">{[review.reason && reasonLabel(review.reason), review.decided_at && `reviewed ${day(review.decided_at)}`].filter(Boolean).join(" · ")}</span>
-            </p>
-          )}
-          {s.version.removal?.reason && (
-            <p class="said">
-              “{s.version.removal.reason}”
-              <span class="who">{`${s.version.status === "taken_down" ? "taken down" : "removed"} ${day(s.version.removal.at)}`}</span>
-            </p>
-          )}
-          {s.superseded && <p class="t-caption">Superseded by {s.superseded.by} {day(s.superseded.at)}{s.version.yanked_by === "superseded" ? ": it takes no new installs until it's verified." : "."}</p>}
-          {restorable && <div class="buttons"><a class="btn secondary" href={`${here}/restore`}>{restore.confirm}…</a></div>}
-          {(pending || removable) && (
-            <div class="buttons">
-              {verifiable && <a class="btn primary" href={`${here}/verify`} data-dialog="approve">Verify…</a>}
-              {declinable && <a class="btn secondary" href={`${here}/decline`} data-dialog="reject">Don't verify…</a>}
-              {removable && <a class="btn secondary" href={`${here}/take_down`} data-dialog="take-down">Take down…</a>}
-              {removable && <a class="btn secondary" href={`${here}/remove`} data-dialog="remove">Remove…</a>}
+      ) : (
+        <>
+          <header class="head one rv-head">
+            <Tile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size="l" />
+            <div class="txt">
+              <h1><span class="name"><Words text={name} /></span> <b class="vnum mono">{version}</b></h1>
+              <p class="by">
+                <span>by {author ? <a href={memberUrl(author)}><b>@{author}</b></a> : "an account with no username"}</span>
+                <i aria-hidden="true"></i>
+                <span>Published <time datetime={new Date(s.version.published_at).toISOString()} title={dateTime(s.version.published_at)}>{since(s.version.published_at, now, true).replace(/^(Yesterday|Just now)/, (w) => w.toLowerCase())}</time>{via}</span>
+                <i aria-hidden="true"></i>
+                <span class="num">{s.plugin.installs === 1 ? "1 install" : `${count(s.plugin.installs)} installs`}</span>
+                {s.version.prerelease && <><i aria-hidden="true"></i><span>Pre-release</span></>}
+              </p>
             </div>
-          )}
-          <dl class="facts">
-            <div><dt>Published by</dt><dd>{author ? <a href={memberUrl(author)}>@{author}</a> : "No username"}</dd></div>
-            <div><dt>Account</dt><dd>{age(s.publisher.created_at) || "Deleted"}</dd></div>
-            <div><dt>This author</dt><dd>{count(s.publisher.decisions.verified)} verified · {count(s.publisher.decisions.declined)} not verified</dd></div>
-            <div>
-              <dt>Checks</dt>
-              <dd>
-                <a href={`${viewHref("overview")}#checks`} class:list={{ bad: failed > 0, warn: failed === 0 && toLook.length > 0 }}>
-                  {failed > 0 ? `${count(failed)} failed` : toLook.length > 0 ? `${count(toLook.length)} to look at` : "All passed"}
-                </a>
-              </dd>
-            </div>
-          </dl>
-        </aside>
+            {standing && <span class:list={["state", standing.tone]}>{standing.seal && <Seal quiet />}{standing.label}</span>}
+          </header>
 
-        <div class="review-main">
-          {view !== "overview" && drawing.length > 0 && (
-            <ul class="panel checks-list" role="list" aria-label="What the checks found">
-              {drawing.map((c) => (
-                <li class={c.level}>
-                  <Glyph name="close-circle" size={16} />
-                  <span>{c.message}<span class="sr-only"> (failed)</span></span>
-                </li>
-              ))}
-            </ul>
-          )}
-          {view === "overview" && (
-            <>
-              <section class="section" id="asks" aria-labelledby="asks-heading">
-                <div class="section-head">
-                  <div class="words">
-                    <h2 id="asks-heading">What it asks for</h2>
-                    <p>{s.base ? (moved.length || weighed.dropped.length ? `Against ${s.base.version}, the newest verified version: ${[moved.filter((l) => l.change === "new").length && `${plural(moved.filter((l) => l.change === "new").length, "new ask")}`, moved.filter((l) => l.change === "changed" && !l.bound).length && `${plural(moved.filter((l) => l.change === "changed" && !l.bound).length, "ask")} changed inside`, weighed.dropped.length && `${plural(weighed.dropped.length, "ask")} dropped`, moved.some((l) => l.bound) && `${together(moved.filter((l) => l.bound).map((l) => l.bound!))} changed`].filter(Boolean).join(", ")}.` : `Nothing new since ${s.base.version}, the newest verified version.`) : "Its first version: everything it asks for is new."}</p>
-                  </div>
-                </div>
-                <div class="panel">
-                  {weighed.lines.length === 0 ? (
-                    <p class="panel-pad t-text t-2">It asks for nothing beyond running in its own space.</p>
-                  ) : (
-                    <div class="weigh">
-                      {s.base && moved.length > 0 && <p class="weigh-group">New or changed since {s.base.version}</p>}
-                      {(s.base ? moved : weighed.lines).map((l) => (
-                        <div class:list={["weigh-row", { risky: l.risky }]}>
-                          <Glyph name={l.icon} size={16} />
-                          <p class="title">
-                            {l.title}
-                            {l.change && <span class="badge sm info">{l.change === "new" ? "New" : "Changed"}</span>}
-                            {l.risky && <span class="sr-only"> (gives it a lot of reach)</span>}
-                          </p>
-                          {l.detail && <p class="detail">{l.detail}</p>}
-                          {l.was || l.now ? (
-                            <dl class="before-after">
-                              <div><dt>Before</dt><dd>{l.was?.map((x) => <span>{x}</span>)}</dd></div>
-                              <div><dt>After</dt><dd>{l.now?.map((x) => <span>{x}</span>)}</dd></div>
-                            </dl>
-                          ) : l.change === "changed" && (l.added || l.altered || l.removed) ? (
-                            <ul class="moved" role="list">
-                              {l.added?.map((x) => <li><span class="plus" aria-hidden="true">+</span><span>{x}<span class="sr-only"> (new)</span></span></li>)}
-                              {l.altered?.map((x) => <li><span class="tilde" aria-hidden="true">~</span><span>{x}<span class="t-3"> tells agents something else</span></span></li>)}
-                              {l.removed?.map((x) => <li><span class="minus" aria-hidden="true">−</span><span class="t-3">{x}<span class="sr-only"> (dropped)</span></span></li>)}
-                            </ul>
-                          ) : (
-                            (l.literal || l.items) && (
-                              <ul class="named" role="list">
-                                {l.literal?.map((x) => <li>{x}</li>)}
-                                {l.items?.map((x) => <li>{x.name}{x.description && <span class="t-3"> · {x.description}</span>}</li>)}
-                              </ul>
-                            )
-                          )}
-                        </div>
-                      ))}
-                      {s.base && same.length > 0 && <p class="weigh-group">As in {s.base.version}</p>}
-                      {s.base && same.map((l) => (
-                        <div class:list={["weigh-row same", { risky: l.risky }]}>
-                          <Glyph name={l.icon} size={16} />
-                          <p class="title">{l.title}{l.risky && <span class="sr-only"> (gives it a lot of reach)</span>}</p>
-                          {(l.literal || l.items) && (
-                            <ul class="named" role="list">
-                              {l.literal?.map((x) => <li>{x}</li>)}
-                              {l.items?.map((x) => <li>{x.name}{x.description && <span class="t-3"> · {x.description}</span>}</li>)}
-                            </ul>
-                          )}
-                        </div>
-                      ))}
-                      {weighed.dropped.length > 0 && <p class="weigh-group">No longer asks</p>}
-                      {weighed.dropped.map((l) => (
-                        <div class="weigh-row same">
-                          <Glyph name={l.icon} size={16} />
-                          <p class="title"><del>{l.title}</del></p>
-                        </div>
-                      ))}
+          <div class="cols2 rv-cols">
+            <div class="rv-main">
+              <nav class="tabs" aria-label="What to read">
+                <a href={viewHref("overview")} aria-current={view === "overview" ? "page" : undefined}>Overview</a>
+                <a href={viewHref("files")} aria-current={view === "files" ? "page" : undefined}>Files<span class="num">{count(files.length)}</span></a>
+                {s.base && <a href={viewHref("changes")} aria-current={view === "changes" ? "page" : undefined}>Changes<span class="num">{count(changes.length)}</span></a>}
+              </nav>
+
+              {view !== "overview" && drawing.length > 0 && (
+                <ul class="checks" aria-label="What the checks found">
+                  {drawing.map((c) => <li class="fail"><Icon name="x" /><span>{c.message}<span class="sr-only"> (failed)</span></span></li>)}
+                </ul>
+              )}
+
+              {view === "overview" && (
+                <>
+                  <section id="asks" aria-labelledby="asks-h">
+                    <h2 id="asks-h">What it asks for</h2>
+                    <p class="sub2">{asksSaid}</p>
+                    {weighed.lines.length === 0 ? (
+                      <p class="asklist-none">It asks for nothing beyond running in its own space.</p>
+                    ) : (
+                      <ul class="asklist">
+                        {[...(s.base ? moved : weighed.lines), ...(s.base ? same : [])].map((l) => (
+                          <li class:list={["ar", { risky: l.risky, new: l.change, same: s.base && !l.change }]}>
+                            <AppIcon name={l.icon} />
+                            <div>
+                              <div class="t">{l.title}{l.risky && <span class="sr-only"> (gives it a lot of reach)</span>}</div>
+                              {l.detail && <small>{l.detail}</small>}
+                              {l.was || l.now ? (
+                                <dl class="before-after">
+                                  <div><dt>Before</dt><dd>{l.was?.map((x) => <code>{x}</code>)}</dd></div>
+                                  <div><dt>After</dt><dd>{l.now?.map((x) => <code>{x}</code>)}</dd></div>
+                                </dl>
+                              ) : l.change === "changed" && (l.added || l.altered || l.removed) ? (
+                                <ul class="moved">
+                                  {l.added?.map((x) => <li class="add"><code>{x}</code><span class="sr-only"> (new)</span></li>)}
+                                  {l.altered?.map((x) => <li class="alt"><code>{x}</code> <span>tells agents something else</span></li>)}
+                                  {l.removed?.map((x) => <li class="del"><code>{x}</code><span class="sr-only"> (dropped)</span></li>)}
+                                </ul>
+                              ) : (
+                                <>
+                                  {l.literal && <ul class="literal">{l.literal.map((x) => <li><code>{x}</code></li>)}</ul>}
+                                  {l.items && <ul class="items">{l.items.map((x) => <li><code>{x.name}</code>{x.description && <span>{x.description}</span>}</li>)}</ul>}
+                                </>
+                              )}
+                            </div>
+                            {s.base && (l.change ? <span class="state no">{l.change === "new" ? `New in ${version}` : "Changed"}</span> : <span class="same">Same as {s.base.version}</span>)}
+                          </li>
+                        ))}
+                        {weighed.dropped.map((l) => (
+                          <li class="ar same">
+                            <AppIcon name={l.icon} />
+                            <div><div class="t"><del>{l.title}</del></div></div>
+                            <span class="same">No longer asks</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </section>
+
+                  <section id="said" aria-labelledby="said-h">
+                    <h2 id="said-h">What the author says changed</h2>
+                    {notes ? <div class="prose said" set:html={notes} /> : <p class="sub2">No notes for this version.</p>}
+                  </section>
+
+                  <section id="changed" aria-labelledby="changed-h">
+                    <div class="fh">
+                      <div>
+                        <h2 id="changed-h">Files</h2>
+                        <p class="sub2">
+                          {plural(files.length, "file")}, {bytes(files.reduce((n, f) => n + f.bytes, 0))}.{" "}
+                          {s.base ? (changes.length === 0 ? `None changed since ${s.base.version}.` : `${[changes.filter((c) => c.change === "modified").length && `${count(changes.filter((c) => c.change === "modified").length)} changed`, changes.filter((c) => c.change === "added").length && `${count(changes.filter((c) => c.change === "added").length)} added`, changes.filter((c) => c.change === "removed").length && `${count(changes.filter((c) => c.change === "removed").length)} taken out`].filter(Boolean).join(", ")} since ${s.base.version}.`) : "Its first version: every file is new."}
+                        </p>
+                      </div>
+                      {s.base && changes.length > 0 && <a class="btn sec sm" href={viewHref("changes")}>Read the changes<Icon name="arrow" /></a>}
                     </div>
-                  )}
-                </div>
-              </section>
+                    <div class="card files">
+                      <ul class="flist">
+                        {(s.base ? changes.map((c) => ({ path: c.path, bytes: (c.now ?? c.before)!.bytes, change: c.change as keyof typeof CHANGE | null, binary: (c.now ?? c.before)!.binary })) : files.map((f) => ({ path: f.path, bytes: f.bytes, change: null, binary: f.binary }))).map((f) => (
+                          <li>
+                            <a href={f.change ? `${viewHref("changes")}#change-${encodeURIComponent(f.path)}` : viewHref("files", { path: f.path })} class:list={{ removed: f.change === "removed" }}>
+                              {f.change && <span class:list={["m", CHANGE[f.change].tone]} title={CHANGE[f.change].label}>{CHANGE[f.change].mark}<span class="sr-only"> ({CHANGE[f.change].label})</span></span>}
+                              <span class="fn">{f.path}</span>
+                              {f.binary && <span class="state no">Not text</span>}
+                              <span class="d num">{bytes(f.bytes)}</span>
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                      {unchanged.length > 0 && (
+                        <details class="unchanged">
+                          <summary>{plural(unchanged.length, "file")} as in {s.base!.version}<Icon name="chev" /></summary>
+                          <ul class="flist">
+                            {unchanged.map((f) => (
+                              <li>
+                                <a href={viewHref("files", { path: f.path })}>
+                                  <span class="fn">{f.path}</span>
+                                  {f.binary && <span class="state no">Not text</span>}
+                                  <span class="d num">{bytes(f.bytes)}</span>
+                                </a>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                    </div>
+                  </section>
 
-              <section class="section" id="checks" aria-labelledby="checks-heading">
-                <div class="section-head">
-                  <div class="words">
-                    <h2 id="checks-heading">What the checks found</h2>
-                    <p>{toLook.length === 0 ? `All ${count(checks.length)} passed.` : `${count(passed)} passed; ${failed > 0 ? `${count(failed)} failed` : ""}${failed > 0 && toLook.length > failed ? ", " : ""}${toLook.length > failed ? `${count(toLook.length - failed)} to look at` : ""}.`}</p>
-                  </div>
+                  <section id="checks" aria-labelledby="checks-h">
+                    <h2 id="checks-h">Checks</h2>
+                    <p class="sub2">Run when it was published. They pass or fail on their own; they don't stand in for reading it. {toLook.length === 0 ? `All ${count(checks.length)} passed.` : `${count(passed)} passed; ${[failed > 0 && `${count(failed)} failed`, toLook.length > failed && `${count(toLook.length - failed)} to look at`].filter(Boolean).join(", ")}.`}</p>
+                    {checks.length > 0 && (
+                      <ul class="checks">
+                        {[...toLook, ...checks.filter((c) => c.level === "ok")].map((c) => (
+                          <li class={c.level}>
+                            <Icon name={c.level === "ok" ? "check" : c.level === "warn" ? "flag" : "x"} />
+                            <span>{c.message}<span class="sr-only"> ({c.level === "ok" ? "passed" : c.level === "warn" ? "to look at" : "failed"})</span></span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </section>
+
+                  <section id="listing" aria-labelledby="listing-h">
+                    <div class="fh">
+                      <div>
+                        <h2 id="listing-h">Its listing</h2>
+                        <p class="sub2">As visitors will see it on its page.</p>
+                      </div>
+                      {s.plugin.version && <a class="btn ghost sm" href={pluginUrl(id)}>Its page now<Icon name="out" /></a>}
+                    </div>
+                    {s.version.summary && <p class="rv-summary">{s.version.summary}</p>}
+                    {pictures.length > 0 && (
+                      <ul class="rv-shots">
+                        {pictures.map((src, i) => <li><img src={src} alt={`${name}: picture ${i + 1} of ${pictures.length}`} loading="lazy" /></li>)}
+                      </ul>
+                    )}
+                    {readme ? <div class="prose" set:html={readme} /> : <p class="warnline">It has no README the store can show.</p>}
+                  </section>
+                </>
+              )}
+
+              {view === "files" && viewing && (
+                <div class="files-view">
+                  <nav class="card tree-pane" aria-label="Files">
+                    <FileTree nodes={fileTree(files)} current={viewing.path} href={(p) => viewHref("files", { path: p })} changes={changeOf} />
+                  </nav>
+                  <section class="viewer" aria-label={viewing.path || "File"}>
+                    <p class="file-head">
+                      <code>{viewing.path}</code>
+                      {viewing.file && <span class="num">{bytes(viewing.file.bytes)}</span>}
+                      {changeOf.get(viewing.path) && s.base && <a class="more" href={`${viewHref("changes")}#change-${encodeURIComponent(viewing.path)}`}>Its changes since {s.base.version}<Icon name="chev" /></a>}
+                    </p>
+                    {viewing.picture && <img class="file-picture" src={viewing.picture} alt={viewing.path} />}
+                    {viewing.content === "picture" ? null : viewing.content === null ? (
+                      <p class="sub2">It couldn't be read.</p>
+                    ) : "missing" in viewing.content ? (
+                      <p class="sub2">This version has no file at that path.</p>
+                    ) : "binary" in viewing.content ? (
+                      <p class="warnline">Not text, so not shown. Binary files can hold code: ask what it's for.</p>
+                    ) : "tooBig" in viewing.content ? (
+                      <p class="sub2">Too big to show here.</p>
+                    ) : (
+                      <CodeView text={viewing.content.text} language={languageOf(viewing.path)} label={viewing.path} />
+                    )}
+                  </section>
                 </div>
-                {toLook.length > 0 && (
-                  <ul class="panel checks-list" role="list">
-                    {toLook.map((c) => (
-                      <li class={c.level}>
-                        <Glyph name={c.level === "warn" ? "danger-triangle" : "close-circle"} size={16} />
-                        <span>{c.message}<span class="sr-only"> ({c.level === "warn" ? "to look at" : "failed"})</span></span>
+              )}
+
+              {view === "changes" && s.base && (
+                <section class="changes-view" aria-label={`Changes since ${s.base.version}`}>
+                  <p class="sub2">{changes.length === 0 ? `No file changed since ${s.base.version}.` : `${plural(changes.length, "file")} changed since ${s.base.version}.`}</p>
+                  {diffs.map((d) => {
+                    const n = d.rows ? countRows(d.rows) : null;
+                    return (
+                      <article class="card change-block" id={`change-${encodeURIComponent(d.path)}`}>
+                        <header class="dh">
+                          <span class:list={["m", CHANGE[d.change].tone]} title={CHANGE[d.change].label}>{CHANGE[d.change].mark}<span class="sr-only"> ({CHANGE[d.change].label})</span></span>
+                          <a class="fn" href={viewHref("files", { path: d.path })}>{d.path}</a>
+                          {n && <span class="d num"><em class="pl">+{n.added}</em><em class="mi">−{n.removed}</em></span>}
+                        </header>
+                        {d.rows ? d.rows.length > 0 ? <DiffView rows={d.rows} language={languageOf(d.path)} budget={diffHighlight} /> : <p class="sub2 pad">Only its bytes changed.</p> : <p class="sub2 pad">{d.note}</p>}
+                      </article>
+                    );
+                  })}
+                </section>
+              )}
+            </div>
+
+            <aside class="rail rv-rail" aria-label="Decision">
+              <div class="decide" id="decide">
+                <h2>{pending ? "Your decision" : "Where it stands"}</h2>
+                {verifiable && <p>Verifying puts the check on {version} for everyone, and it keeps it. If something is wrong, say what, and the author gets your note.</p>}
+                {review?.decided === false && shown && <p class="t3">Waiting <time datetime={new Date(s.version.published_at).toISOString()} title={dateTime(s.version.published_at)}>{waitedFor(s.version.published_at, now)}</time>.</p>}
+                {review?.message && (
+                  <blockquote class="said-was">
+                    <p>“{review.message}”</p>
+                    <footer>{[review.reason && reasonLabel(review.reason), decided && `read ${day(decided, now)}`].filter(Boolean).join(" · ")}</footer>
+                  </blockquote>
+                )}
+                {!review?.message && s.version.verified && decided && <p class="t3">Verified {day(decided, now)}.</p>}
+                {s.version.removal?.reason && (
+                  <blockquote class="said-was">
+                    <p>“{s.version.removal.reason}”</p>
+                    <footer>{`${s.version.status === "taken_down" ? "Taken down" : "Removed"} ${day(s.version.removal.at, now)}`}</footer>
+                  </blockquote>
+                )}
+                {s.superseded && <p class="t3">Replaced by {s.superseded.by} {day(s.superseded.at, now)}{s.version.yanked_by === "superseded" ? ": it takes no new installs until it's verified." : "."}</p>}
+                {verifiable && <a class="btn pri" href={`${here}/verify`} data-dialog="approve"><Seal quiet />Mark {version} verified</a>}
+                {declinable && <a class="btn sec" href={`${here}/decline`} data-dialog="reject">Don't verify, with a note…</a>}
+                {restorable && <a class="btn sec" href={`${here}/restore`}>{restore.confirm}…</a>}
+                {removable && (
+                  <p class="stops">
+                    <a class="down" href={`${here}/take_down`} data-dialog="take-down">Take this version down…</a>
+                    <a class="down quiet" href={`${here}/remove`} data-dialog="remove">Remove it…</a>
+                  </p>
+                )}
+              </div>
+              <section aria-labelledby="author-h">
+                <h2 class="rail-h" id="author-h">The author</h2>
+                <dl class="facts">
+                  <dt>Account</dt><dd>{author ? <a href={memberUrl(author)}>@{author}</a> : "No username"}</dd>
+                  {/* (When they first listed a version, and their plugins: never how many of theirs were or weren't verified, Wing's ruling. An older edge: when the account was made.) */}
+                  {s.publisher.first_published_at !== undefined ? (
+                    <><dt>Publishing since</dt><dd>{s.publisher.first_published_at ? date(s.publisher.first_published_at) : "This is the first"}</dd></>
+                  ) : (
+                    <><dt>Account since</dt><dd>{s.publisher.created_at ? date(s.publisher.created_at) : "Deleted"}</dd></>
+                  )}
+                  {s.publisher.plugins && <><dt>Plugins</dt><dd>{count(s.publisher.plugins.total)}{s.publisher.plugins.total > 0 && `, ${s.publisher.plugins.verified === s.publisher.plugins.total ? (s.publisher.plugins.total === 1 ? "verified" : "all verified") : `${count(s.publisher.plugins.verified)} with a verified version`}`}</dd></>}
+                </dl>
+              </section>
+              <div class="rule"></div>
+              <section aria-labelledby="reports-h">
+                <h2 class="rail-h" id="reports-h">Reports on this plugin</h2>
+                {openReports === null ? (
+                  <p class="none">They can't be loaded right now.</p>
+                ) : openReports.length === 0 ? (
+                  <p class="none">None open.</p>
+                ) : (
+                  <ul class="rlist">
+                    {openReports.slice(0, 5).map((r) => (
+                      <li>
+                        <a href={`/admin/reports/${encodeURIComponent(String(r.id))}`}>
+                          <span class="state bad">{reportReasonWords(r.reason)}</span>
+                          <span class="rt">{r.text}</span>
+                          <small>{r.version ? `${r.version} · ` : ""}{day(r.created_at, now)}</small>
+                        </a>
                       </li>
                     ))}
                   </ul>
                 )}
               </section>
-
-              <section class="section" id="changed" aria-labelledby="changed-heading">
-                <div class="section-head">
-                  <div class="words">
-                    <h2 id="changed-heading">What changed</h2>
-                    <p>{s.base ? (changes.length === 0 ? `No file changed since ${s.base.version}.` : `Since ${s.base.version}: ${plural(changes.length, "file")} added, changed or taken out.`) : "Its first version: every file is new."}</p>
-                  </div>
-                  {s.base && changes.length > 0 && <a class="btn secondary sm" href={viewHref("changes")}>Read the changes</a>}
-                </div>
-                <div class="panel panel-pad notes-panel">
-                  <h3 class="t-label">Notes for {version}</h3>
-                  {notes ? <div class="prose notes" set:html={notes} /> : <p class="t-text t-3">No notes for this version.</p>}
-                </div>
-                <div class="panel">
-                  <table class="table files-table">
-                    <caption class="sr-only">Its files{s.base ? `, against ${s.base.version}` : ""}</caption>
-                    <colgroup><col />{s.base && <col class="change" />}<col class="size" /></colgroup>
-                    <thead><tr><th scope="col">File</th>{s.base && <th scope="col">Since {s.base.version}</th>}<th scope="col" class="end">Size</th></tr></thead>
-                    <tbody>
-                      {(s.base ? changes.map((c) => ({ path: c.path, bytes: (c.now ?? c.before)!.bytes, change: c.change as keyof typeof CHANGE | null, binary: (c.now ?? c.before)!.binary })) : files.map((f) => ({ path: f.path, bytes: f.bytes, change: null, binary: f.binary }))).map((f) => (
-                        <tr class:list={{ removed: f.change === "removed" }}>
-                          <td class="path"><a href={f.change ? `${viewHref("changes")}#change-${encodeURIComponent(f.path)}` : viewHref("files", { path: f.path })}>{f.path}</a>{f.binary && <span class="badge sm warn">Not text</span>}</td>
-                          {s.base && <td>{f.change && <span class:list={["badge sm", CHANGE[f.change].tone]}>{CHANGE[f.change].label}</span>}</td>}
-                          <td class="end size">{bytes(f.bytes)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {unchanged.length > 0 && (
-                    <details class="unchanged">
-                      <summary>{plural(unchanged.length, "file")} as in {s.base!.version}<Glyph name="alt-arrow-down" size={12} /></summary>
-                      <table class="table files-table">
-                        <caption class="sr-only">Files as in {s.base!.version}</caption>
-                        <colgroup><col /><col class="change" /><col class="size" /></colgroup>
-                        <tbody>
-                          {unchanged.map((f) => (
-                            <tr>
-                              <td class="path"><a href={viewHref("files", { path: f.path })}>{f.path}</a>{f.binary && <span class="badge sm warn">Not text</span>}</td>
-                              <td />
-                              <td class="end size">{bytes(f.bytes)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </details>
-                  )}
-                </div>
-              </section>
-
-              <section class="section" id="listing" aria-labelledby="listing-heading">
-                <div class="section-head">
-                  <div class="words">
-                    <h2 id="listing-heading">Its listing</h2>
-                    <p>As visitors will see it on its page.</p>
-                  </div>
-                  {s.plugin.version && <a class="btn ghost sm" href={pluginUrl(id)}>Its page now<Glyph name="arrow-up-right" size={12} /></a>}
-                </div>
-                <div class="review-listing">
-                  {s.version.summary && <p class="summary">{s.version.summary}</p>}
-                  <Strip name={name} pictures={pictures} />
-                  {readme ? <div class="prose" set:html={readme} /> : <p class="notice warn"><Glyph name="danger-triangle" size={16} /><span>It has no README the store can show.</span></p>}
-                </div>
-              </section>
-
-              <section class="section" id="manifest" aria-labelledby="manifest-heading">
-                <h2 id="manifest-heading" class="sr-only">Its manifest</h2>
-                <details class="fold">
-                  <summary>
-                    <span>{MANIFEST_FILE}</span>
-                    <span class="what">As signed · {bytes(files[0]!.bytes)}{manifestMoved.length > 0 && ` · changed since ${s.base!.version}: ${manifestMoved.join(", ")}`}</span>
-                    <Glyph name="alt-arrow-down" size={14} />
-                  </summary>
-                  <CodeView text={manifest} language="json" label={MANIFEST_FILE} />
-                </details>
-              </section>
-            </>
-          )}
-
-          {view === "files" && viewing && (
-            <div class="files-view">
-              <nav class="panel tree-pane" aria-label="Files">
-                <FileTree nodes={fileTree(files)} current={viewing.path} href={(p) => viewHref("files", { path: p })} changes={changeOf} />
-              </nav>
-              <section class="viewer" aria-label={viewing.path || "File"}>
-                <p class="file-head">
-                  <code>{viewing.path}</code>
-                  {viewing.file && <span class="num">{bytes(viewing.file.bytes)}</span>}
-                  {changeOf.get(viewing.path) && <a href={`${viewHref("changes")}#change-${encodeURIComponent(viewing.path)}`}>See its changes</a>}
-                </p>
-                {viewing.picture && <img class="file-picture" src={viewing.picture} alt={viewing.path} />}
-                {viewing.content === "picture" ? null : viewing.content === null ? (
-                  <p class="t-text t-3">It couldn't be read.</p>
-                ) : "missing" in viewing.content ? (
-                  <p class="t-text t-3">This version has no file at that path.</p>
-                ) : "binary" in viewing.content ? (
-                  <p class="notice warn"><Glyph name="danger-triangle" size={16} /><span>Not text, so not shown. Binary files can hold code: ask what it's for.</span></p>
-                ) : "tooBig" in viewing.content ? (
-                  <p class="t-text t-3">Too big to show here.</p>
+              <div class="rule"></div>
+              <section aria-labelledby="versions-h">
+                <h2 class="rail-h" id="versions-h">Its versions</h2>
+                {versions === null ? (
+                  <p class="none">They can't be loaded right now.</p>
                 ) : (
-                  <CodeView text={viewing.content.text} language={languageOf(viewing.path)} label={viewing.path} />
+                  <>
+                    <ul class="vmini">
+                      {versions.slice(0, VERSIONS_SHOWN).map((v) => {
+                        const p = pill(v);
+                        return (
+                          <li>
+                            <a href={`/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(v.version)}`} aria-current={v.version === version ? "page" : undefined}>
+                              <b>{v.version}</b>
+                              <span class:list={["state", p.tone]}>{p.seal && <Seal quiet />}{p.label}</span>
+                              <time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at, now)}</time>
+                            </a>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    <a class="more" href={`/admin/plugins/${encodeURIComponent(id)}`}>{versions.length > VERSIONS_SHOWN ? `All ${count(versions.length)} versions` : "The plugin's staff page"}<Icon name="chev" /></a>
+                  </>
                 )}
               </section>
-            </div>
-          )}
-
-          {view === "changes" && s.base && (
-            <section class="changes-view" aria-label={`Changes since ${s.base.version}`}>
-              <p class="t-text t-2">{changes.length === 0 ? `No file changed since ${s.base.version}.` : `${plural(changes.length, "file")} changed since ${s.base.version}.`}</p>
-              {diffs.map((d) => {
-                const n = d.rows ? countRows(d.rows) : null;
-                return (
-                  <article class="change-block" id={`change-${encodeURIComponent(d.path)}`}>
-                    <header class="change-head">
-                      <span class:list={["badge sm", CHANGE[d.change].tone]}>{CHANGE[d.change].label}</span>
-                      <a href={viewHref("files", { path: d.path })}>{d.path}</a>
-                      {n && (
-                        <span class="counts num">
-                          <span class="plus">+{n.added}</span> <span class="minus">−{n.removed}</span>
-                        </span>
-                      )}
-                    </header>
-                    {d.rows ? d.rows.length > 0 ? <DiffView rows={d.rows} language={languageOf(d.path)} budget={diffHighlight} /> : <p class="t-text t-3">Only its bytes changed.</p> : <p class="t-text t-3">{d.note}</p>}
-                  </article>
-                );
-              })}
-            </section>
-          )}
-        </div>
-      </div>
-    )
-  }
+            </aside>
+          </div>
+        </>
+      )
+    }
+  </div>
 
   {
     s && (pending || removable) && (
       <div class="decide-bar">
-        {removable && <a class="btn secondary" href={`${here}/take_down`} data-dialog="take-down">Take down…</a>}
-        {/* (Three fit a phone's bar: Remove joins it once the version is decided; until then it's the rail's and its own page's.) */}
-        {removable && !pending && <a class="btn secondary" href={`${here}/remove`} data-dialog="remove">Remove…</a>}
-        {declinable && <a class="btn secondary" href={`${here}/decline`} data-dialog="reject">Don't verify…</a>}
-        {verifiable && <a class="btn primary" href={`${here}/verify`} data-dialog="approve">Verify…</a>}
+        {removable && <a class="btn sec" href={`${here}/take_down`} data-dialog="take-down">Take down…</a>}
+        {declinable && <a class="btn sec" href={`${here}/decline`} data-dialog="reject">Don't verify…</a>}
+        {verifiable && <a class="btn pri" href={`${here}/verify`} data-dialog="approve">Verify…</a>}
       </div>
     )
   }
 
   {
     s && verifiable && (
-      <dialog class="dialog sm" id="approve" aria-labelledby="approve-title" closedby="any">
+      <dialog class="question sm" id="approve" aria-labelledby="approve-title" closedby="any">
         <form method="post" action={`${here}/verify`}>
           <input type="hidden" name="csrf" value={session.csrf} />
-          <div class="head">
-            <h2 id="approve-title">{unbidi(approve.title)}</h2>
-            {approve.words.map((w) => <p>{w}</p>)}
-            {weigh && <p class:list={["weigh-line", weigh.tone]}>{weigh.text}</p>}
-          </div>
+          <h2 id="approve-title">{unbidi(approve.title)}</h2>
+          {approve.words.map((w) => <p>{w}</p>)}
+          {weigh && <p class:list={["weigh-line", weigh.tone]}>{weigh.text}</p>}
           <div class="answers">
-            <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate>Cancel</button>
-            <button class="btn primary" type="submit" autofocus>{approve.confirm}</button>
+            <button class="btn sec" type="submit" formmethod="dialog" formnovalidate>Cancel</button>
+            <button class="btn pri" type="submit" autofocus>{approve.confirm}</button>
           </div>
         </form>
       </dialog>
@@ -531,16 +551,14 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
   }
   {
     s && declinable && (
-      <dialog class="dialog" id="reject" aria-labelledby="reject-title" closedby="any">
+      <dialog class="question" id="reject" aria-labelledby="reject-title" closedby="any">
         <form method="post" action={`${here}/decline`}>
           <input type="hidden" name="csrf" value={session.csrf} />
-          <div class="head">
-            <h2 id="reject-title">{unbidi(reject.title)}</h2>
-            {reject.words.map((w) => <p>{w}</p>)}
-          </div>
+          <h2 id="reject-title">{unbidi(reject.title)}</h2>
+          {reject.words.map((w) => <p>{w}</p>)}
           <Decline id="reject" version={version} author={author} />
           <div class="answers">
-            <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+            <button class="btn sec" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
             <button class="btn danger" type="submit">{reject.confirm}</button>
           </div>
         </form>
@@ -549,16 +567,14 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
   }
   {
     s && removable && (
-      <dialog class="dialog" id="take-down" aria-labelledby="take-down-title" closedby="any">
+      <dialog class="question" id="take-down" aria-labelledby="take-down-title" closedby="any">
         <form method="post" action={`${here}/take_down`}>
           <input type="hidden" name="csrf" value={session.csrf} />
-          <div class="head">
-            <h2 id="take-down-title">{unbidi(takeDown.title)}</h2>
-            {takeDown.words.map((w) => <p>{w}</p>)}
-          </div>
+          <h2 id="take-down-title">{unbidi(takeDown.title)}</h2>
+          {takeDown.words.map((w) => <p>{w}</p>)}
           <TakeDown id="take-down" harmful />
           <div class="answers">
-            <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+            <button class="btn sec" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
             <button class="btn danger" type="submit">{takeDown.confirm}</button>
           </div>
         </form>
@@ -567,21 +583,18 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
   }
   {
     s && removable && (
-      <dialog class="dialog" id="remove" aria-labelledby="remove-title" closedby="any">
+      <dialog class="question" id="remove" aria-labelledby="remove-title" closedby="any">
         <form method="post" action={`${here}/remove`}>
           <input type="hidden" name="csrf" value={session.csrf} />
-          <div class="head">
-            <h2 id="remove-title">{unbidi(remove.title)}</h2>
-            {remove.words.map((w) => <p>{w}</p>)}
-          </div>
+          <h2 id="remove-title">{unbidi(remove.title)}</h2>
+          {remove.words.map((w) => <p>{w}</p>)}
           <TakeDown id="remove" harmful={false} />
           <div class="answers">
-            <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+            <button class="btn sec" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
             <button class="btn danger" type="submit">{remove.confirm}</button>
           </div>
         </form>
       </dialog>
     )
   }
-  <Toast toast={toast} />
-</App>
+</Store>

@@ -304,7 +304,7 @@ export type ReportReason = (typeof REPORT_REASONS)[number];
 // ── Admin ───────────────────────────────────────────────────────────────
 
 /** The staff queue's view (amendment 45): versions no reviewer has decided, or those verified, or declined, or all. */
-export type QueueState = "undecided" | "verified" | "declined" | "all";
+export type QueueState = "undecided" | "verified" | "declined" | "all" | "taken_down";
 
 /**
  * One row of the queue: oldest first, versions with open reports first; in
@@ -338,6 +338,8 @@ export interface QueueItem {
    */
   asks_changed: boolean;
   checks: { ok: number; warn: number; fail: number };
+  /** The plugin's installs (edge 566c2a5ba; absent from an older edge). */
+  installs?: number;
 }
 
 export interface QueuePage {
@@ -355,8 +357,12 @@ export interface Publisher {
   id?: string;
   username: string | null;
   created_at: Created;
-  /** Reviewers' decisions on this publisher's versions. */
+  /** Reviewers' decisions on this publisher's versions (never shown: Wing's ruling). */
   decisions: { verified: number; declined: number };
+  /** When the account first listed a version, or null (edge 566c2a5ba; absent from an older edge). */
+  first_published_at?: number | null;
+  /** Its listed plugins, and how many of them have a verified version (edge 566c2a5ba). */
+  plugins?: { total: number; verified: number };
   recent: { plugin_id: string; version: string; status: VersionStatus; verified: boolean; published_at?: number; reason?: string | null }[];
 }
 
