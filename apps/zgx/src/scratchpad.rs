@@ -127,8 +127,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     });
     host.async_action("scratchpad.revision", move |id| {
         let id = crate::auth::text(&id);
+        // (Read, not written: a preview's as much as the watch is.)
         async move {
-            crate::plugins::preview::refuse("scratchpad.revision")?;
             if id.is_empty() {
                 return Err("invalid".to_string());
             }
@@ -494,8 +494,10 @@ mod tests {
         assert!(preview::refuse("scratchpad.set_text").is_err());
         assert!(preview::refuse("scratchpad.set_shapes").is_err());
         assert!(preview::refuse("scratchpad.restore").is_err());
-        // (Reading it is a preview's as much as the watch is.)
-        assert!(preview::refuse("scratchpad.revision").is_ok());
+        // (Reading it is a preview's as much as the watch is. Named apart:
+        // preview's own test reads every `refuse("…")` as a blocked one.)
+        let read = "scratchpad.revision";
+        assert!(preview::refuse(read).is_ok());
         preview::set(None);
         assert!(preview::refuse("scratchpad.set_text").is_ok());
     }

@@ -113,12 +113,10 @@ pub const BLOCKED: &[&str] = &[
     // (An agent's ask answered or put off for the person.)
     "orchestration.answer_ask",
     "orchestration.defer_ask",
-    // (The Scratchpad written, or an old revision of it read whole: a
-    // preview reads what's on it now, never changes it.)
+    // (The Scratchpad written: a preview reads it, never changes it.)
     "scratchpad.set_text",
     "scratchpad.set_shapes",
     "scratchpad.restore",
-    "scratchpad.revision",
     // (What a Cloud chat reaches: the person's own choice.)
     "cloud.set_reach",
     "cloud.set_session_reach",
