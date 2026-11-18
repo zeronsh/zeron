@@ -199,10 +199,15 @@ pub const STANDING_OTHER: &[&str] = &[
     "\u{516c}\u{8a8d}", "\u{acf5}\u{c778}",
 ];
 
-/// In a description, the words that alone aren't the mark but say it near a
-/// word for the plugin (rule 2: "已认证插件", "認証済みプラグイン", "공식
-/// 플러그인"): [`STANDING_OTHER`]'s.
-pub const AMBIGUOUS: &[&str] = STANDING_OTHER;
+/// The words that alone aren't the mark but say it near a word for the
+/// plugin (rule 2: "已认证插件", "認証済みプラグイン", "공식 플러그인"), or
+/// alone as a sentence. Not the bare nouns 认证/認證/認証/인증 ("双因素认证插件"
+/// is a two-factor authentication plugin) nor 確認済/확인됨 ("checked"): those
+/// are claims only beside "zeron" ([`STANDING_OTHER`]).
+pub const AMBIGUOUS: &[&str] = &[
+    "\u{516c}\u{5f0f}", "\u{516c}\u{8a8d}", "\u{acf5}\u{c2dd}", "\u{acf5}\u{c778}",
+    "\u{5df2}\u{8ba4}\u{8bc1}", "\u{5df2}\u{8a8d}\u{8b49}", "\u{8a8d}\u{8a3c}\u{6e08}", "\u{c778}\u{c99d}\u{b428}",
+];
 
 /// Words for the plugin itself, by language (rule 2), folded as the text
 /// is: whole words where words are spaced (a phrase's words in order), and
@@ -515,25 +520,23 @@ fn name_mark(text: &str) -> Option<String> {
     if let Some(word) = MARK_WORDS.iter().find(|word| readings.iter().any(|reading| spelled(reading, word))) {
         return Some((*word).to_owned());
     }
-    // A word that alone isn't the mark, directly before a word for the
-    // plugin (a space allowed): "认证插件", "공인 플러그인", "公認プラグイン".
-    let cjk_plugin_words: Vec<Vec<char>> = PLUGIN_WORDS.iter().filter(|(_, substring, _)| *substring).flat_map(|(_, _, words)| words.iter().map(|w| folded_word(w))).collect();
+    // A word that alone isn't the mark, within two words of a word for the
+    // plugin ("已认证插件", "公式 Git 拡張", "공식 Git 플러그인"), or the
+    // whole name ("인증됨").
     for word in AMBIGUOUS {
         let wanted = folded_word(word);
-        let before_plugin = readings.iter().any(|reading| {
-            spans(reading, &wanted, true).into_iter().any(|(_, end)| {
-                let rest: Vec<char> = reading[end..].iter().copied().skip_while(|c| separator(*c)).collect();
-                cjk_plugin_words.iter().any(|p| rest.starts_with(p))
-            })
+        let said = readings.iter().any(|reading| {
+            let reading = Reading::new(reading.clone(), folded_word);
+            spans(&reading.text, &wanted, true).into_iter().any(|span| reading.said_of(span, true, false))
         });
-        if before_plugin {
+        if said {
             return Some((*word).to_owned());
         }
     }
     // In the store's other languages.
     let kana = has_kana(text);
     OTHER_LANGUAGES.iter().flat_map(|(_, substring, words)| words.iter().map(move |w| (*substring, w))).find_map(|(substring, word)| {
-        if word.with_kana && !kana {
+        if word.with_kana && !kana && !lone_cjk(&folded, &folded_word(listed(word.word).0)) {
             return None;
         }
         let (listed_word, stem) = listed(word.word);
@@ -549,6 +552,15 @@ fn name_mark(text: &str) -> Option<String> {
             })
         })
     })
+}
+
+/// Whether the word `word` (folded) is the only CJK in `text`: no other Han
+/// ideograph, no kana, no Hangul. A lone 公式 among Latin can't be Chinese
+/// prose ("formula"): "公式Git" reads as "official Git".
+fn lone_cjk(text: &[char], word: &[char]) -> bool {
+    let cjk = |c: &char| han(*c) || matches!(*c, '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' | '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{AC00}'..='\u{D7AF}');
+    let others = text.iter().filter(|c| cjk(c)).count();
+    others == word.len() && word.iter().all(cjk)
 }
 
 fn has_kana(text: &str) -> bool {
@@ -702,8 +714,14 @@ impl Reading {
 
     /// Whether a mark word at `span` is said of the plugin itself (or of
     /// the store, or Zeron). `ambiguous`: a word that alone isn't the mark
-    /// (rule 2 and 4 only).
+    /// (rule 2, 4, and alone as a sentence). `first_word`: whether being the
+    /// text's first word says it (not in Chinese, Japanese and Korean, which
+    /// put the modifier first: "検証済みのコミット" are verified commits).
     fn said_of_plugin(&self, span: (usize, usize), ambiguous: bool) -> bool {
+        self.said_of(span, ambiguous, !ambiguous)
+    }
+
+    fn said_of(&self, span: (usize, usize), ambiguous: bool, first_word: bool) -> bool {
         let Some((first, last)) = self.covers(span) else { return false };
         // 4: beside "zeron", "the store", "the plugin store". No negation
         // lifts it.
@@ -716,15 +734,12 @@ impl Reading {
         if NEGATIONS.iter().any(|n| self.before_is(first, n) || (!inside.is_empty() && inside.ends_with(&(self.form)(n)))) {
             return false;
         }
+        // 1: alone as a sentence (any of them); or the text's first word.
+        if self.alone((first, last), span) {
+            return true;
+        }
         if !ambiguous {
-            // 1: the text's first word, or alone as a sentence.
-            if first == 0 {
-                return true;
-            }
-            let from = self.text[..span.0].iter().rposition(|c| SENTENCE_ENDS.contains(c)).map_or(0, |at| at + 1);
-            let to = self.text[span.1..].iter().position(|c| SENTENCE_ENDS.contains(c)).map_or(self.text.len(), |at| span.1 + at);
-            let alone = self.words.iter().enumerate().filter(|(_, w)| w.0 >= from && w.1 <= to).all(|(n, _)| (first..=last).contains(&n));
-            if alone {
+            if first_word && first == 0 {
                 return true;
             }
             // 3: directly after a word that says it of the subject.
@@ -732,13 +747,16 @@ impl Reading {
                 return true;
             }
         }
-        // 2: within two words of a word for the plugin, nothing ending a
+        // 2: within two words of a word for the plugin (or, for a mark word,
+        // of a word that says it's certified: "官方认证"), nothing ending a
         // sentence between.
-        PLUGIN_WORDS.iter().any(|(_, substring, words)| {
+        let certified: &[&str] = if ambiguous { &[] } else { STANDING_OTHER };
+        let neighbours = PLUGIN_WORDS.iter().map(|(lang, substring, words)| (*lang, *substring, *words)).chain(std::iter::once(("standing", true, certified)));
+        neighbours.into_iter().any(|(_, substring, words)| {
             words.iter().any(|word| {
                 let (word, stem) = listed(word);
                 let wanted = (self.form)(word);
-                let found: Vec<(usize, usize)> = if *substring {
+                let found: Vec<(usize, usize)> = if substring {
                     spans(&self.text, &wanted, true)
                 } else {
                     self.phrase_spans(&wanted, stem)
@@ -756,6 +774,13 @@ impl Reading {
                 })
             })
         })
+    }
+
+    /// Whether every word of the sentence holding `span` is one it covers.
+    fn alone(&self, (first, last): (usize, usize), span: (usize, usize)) -> bool {
+        let from = self.text[..span.0].iter().rposition(|c| SENTENCE_ENDS.contains(c)).map_or(0, |at| at + 1);
+        let to = self.text[span.1..].iter().position(|c| SENTENCE_ENDS.contains(c)).map_or(self.text.len(), |at| span.1 + at);
+        self.words.iter().enumerate().filter(|(_, w)| w.0 >= from && w.1 <= to).all(|(n, _)| (first..=last).contains(&n))
     }
 
     /// Where a word or phrase of spaced words is, whole word by word (its
@@ -810,9 +835,19 @@ fn description_mark(text: &str) -> Option<String> {
             }
         }
         for (_, substring, words) in OTHER_LANGUAGES {
-            for word in words.iter().filter(|w| w.description == InDescription::Folded) {
+            for word in words.iter() {
                 let (listed_word, stem) = listed(word.word);
-                if let Some((start, end)) = spelled_spans(&reading.text, &folded_word(listed_word), *substring, stem).into_iter().find(|span| reading.said_of_plugin(*span, false)) {
+                let lone = word.with_kana && lone_cjk(&reading.text, &folded_word(listed_word));
+                let said = |span: &(usize, usize)| match word.description {
+                    InDescription::Folded => reading.said_of(*span, false, !substring),
+                    // 公式 alone among Latin: the mark, wherever it stands.
+                    InDescription::NameOnly if lone => reading.said_of(*span, false, true),
+                    // An ordinary word too: only alone as a sentence
+                    // ("Verifiziert.", "Offiziell.").
+                    InDescription::NameOnly => reading.covers(*span).is_some_and(|words| reading.alone(words, *span)),
+                    InDescription::Accented => false,
+                };
+                if let Some((start, end)) = spelled_spans(&reading.text, &folded_word(listed_word), *substring, stem).into_iter().find(said) {
                     return Some(if stem { reading.text[start..end].iter().collect() } else { word.word.to_owned() });
                 }
             }
@@ -1137,9 +1172,11 @@ mod tests {
             ("\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}: 5 \u{444}\u{430}\u{439}\u{43b}\u{43e}\u{432}", Some("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}"), None),
             ("\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", Some("\u{5b98}\u{65b9}"), Some("\u{5b98}\u{65b9}")),
             ("\u{975e}\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", Some("\u{5b98}\u{65b9}"), None),
-            ("\u{5df2}\u{9a8c}\u{8bc1}\u{7684}\u{7b14}\u{8bb0}", Some("\u{5df2}\u{9a8c}\u{8bc1}"), Some("\u{5df2}\u{9a8c}\u{8bc1}")),
+            // (Chinese puts the modifier first: "verified notes" isn't said of
+            // the plugin by standing first.)
+            ("\u{5df2}\u{9a8c}\u{8bc1}\u{7684}\u{7b14}\u{8bb0}", Some("\u{5df2}\u{9a8c}\u{8bc1}"), None),
             ("\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", Some("\u{516c}\u{5f0f}"), Some("\u{516c}\u{5f0f}")),
-            ("\u{691c}\u{8a3c}\u{6e08}\u{307f}\u{306e}\u{30e1}\u{30e2}", Some("\u{691c}\u{8a3c}\u{6e08}"), Some("\u{691c}\u{8a3c}\u{6e08}")),
+            ("\u{691c}\u{8a3c}\u{6e08}\u{307f}\u{306e}\u{30e1}\u{30e2}", Some("\u{691c}\u{8a3c}\u{6e08}"), None),
             ("\u{ac80}\u{c99d}\u{b428} \u{d50c}\u{b7ec}\u{adf8}\u{c778}", Some("\u{ac80}\u{c99d}\u{b428}"), Some("\u{ac80}\u{c99d}\u{b428}")),
         ] {
             assert_eq!(mark_claim(text, true).as_deref(), name, "{text} (name)");
@@ -1233,11 +1270,12 @@ mod tests {
         for name in [
             "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{439}", "\u{434}\u{43b}\u{44f} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{445}",
             "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e}", "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}", "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{445}",
-            "Verifi\u{441}ado", "0ficial", "\u{516c}\u{8a8d}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{acf5}\u{c778} \u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}",
+            "Verifi\u{441}ado", "0ficial", "\u{516c}\u{8a8d}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{acf5}\u{c778} \u{d50c}\u{b7ec}\u{adf8}\u{c778}",
         ] {
             assert!(mark_claim(name, true).is_some(), "{name}");
         }
-        for name in ["\u{6570}\u{5b66}\u{516c}\u{5f0f}", "\u{516c}\u{5f0f}\u{7f16}\u{8f91}\u{5668}", "\u{c218}\u{d559} \u{acf5}\u{c2dd}", "\u{acf5}\u{c2dd} \u{acc4}\u{c0b0}\u{ae30}"] {
+        // (认证插件 is also an authentication plugin: 双因素认证插件.)
+        for name in ["\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}", "\u{6570}\u{5b66}\u{516c}\u{5f0f}", "\u{516c}\u{5f0f}\u{7f16}\u{8f91}\u{5668}", "\u{c218}\u{d559} \u{acf5}\u{c2dd}", "\u{acf5}\u{c2dd} \u{acc4}\u{c0b0}\u{ae30}"] {
             assert_eq!(mark_claim(name, true), None, "{name}");
         }
     }
