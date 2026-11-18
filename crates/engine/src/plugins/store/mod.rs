@@ -23,7 +23,9 @@ use super::signing;
 use client::{PackageRecord, Publisher, reason};
 
 pub use device::{MAX_UPDATE_PLUGINS, REPORT_REASONS, handles};
-pub(in crate::plugins) use device::{StoreHandle, publishes_idle};
+pub(in crate::plugins) use device::StoreHandle;
+#[cfg(test)]
+pub(in crate::plugins) use device::publishes_idle;
 
 /// Whether `name` reads as a username: 1 to 40 letters, digits, `_` and `-`.
 pub fn username(name: &str) -> bool {
