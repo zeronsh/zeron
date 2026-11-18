@@ -41,6 +41,7 @@ local function shapes(size: number): { any }
 		{ "a table", "| a | b |\n|---|---|\n" .. lines(size // 16, function(k) return "| x" .. k .. " | y |" end) },
 		{ "an open fence", "```\n" .. string.rep("code line\n", size // 10) },
 		{ "prose", string.sub(string.rep(para, size // #para + 1), 1, size) },
+		{ "a run of blanks", string.rep(" ", size // 2) .. string.rep(" \n", size // 4) },
 	}
 end
 
@@ -103,5 +104,24 @@ test("a 64 KiB note built to cost opens in full with no error, a piece a frame",
 	settle(app)
 	app:click(".store-notes-more[1]")
 	settle(app, 800)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a piece drawn plain starts and ends on its own text, wherever the cut fell", function()
+	-- (Headings a blank line apart, as `store_stub.hostile_readme`: the cut
+	-- to plain falls on a blank line.)
+	local app = page(string.sub(string.rep("Heading\n=======\n\n", 32768), 1, 512 * KIB))
+	settle(app)
+	for _ = 1, 60 do
+		if app:has(".untrusted-plain") then
+			break
+		end
+		local y = tonumber((app:tree("#store-readme-more"):match(" [%d.]+,([%-%d.]+) "))) or 0
+		app:scroll("#fixture-scroll", y - 450)
+		app:frames(2)
+		app:click('#store-readme-more >> role:button "Show more"')
+		app:frames(3)
+	end
+	expect(app:tree(".untrusted-plain[1]")).to_contain('text "Heading')
 	expect(app:error()).to_be(nil)
 end)

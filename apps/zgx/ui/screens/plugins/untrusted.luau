@@ -139,6 +139,33 @@ function M.cutter(text: string): Cutter
 	return self :: Cutter
 end
 
+-- A plain piece without the blank lines at its ends (where a cut falls
+-- decides them, so the space round the text would too). Found byte by byte:
+-- a pattern such as `%s+$` over a run of spaces is tried at every byte of it.
+function M.trimmed(text: string): string
+	local first, last = 1, #text
+	-- (From the start: past whole blank lines, never into the first line's
+	-- own indent.)
+	local i = 1
+	while i <= last do
+		local b = string.byte(text, i)
+		if b == NL then
+			first = i + 1
+		elseif b ~= SPACE and b ~= TAB and b ~= 13 then
+			break
+		end
+		i += 1
+	end
+	while last >= first do
+		local b = string.byte(text, last)
+		if b ~= NL and b ~= SPACE and b ~= TAB and b ~= 13 then
+			break
+		end
+		last -= 1
+	end
+	return string.sub(text, first, last)
+end
+
 -- Every piece of `text` (tests; a view cuts its own as it shows them).
 function M.pieces(text: string): { Piece }
 	local out: { Piece } = {}
@@ -235,7 +262,7 @@ M.View = ui.component(function(props: ViewProps): Node
 						else nil,
 					ui.text {
 						class = "untrusted-plain",
-						p.text,
+						M.trimmed(p.text),
 						literal = true,
 						w_full = true,
 						wrap = true,
