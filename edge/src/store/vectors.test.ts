@@ -149,7 +149,11 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
       const manifest = readManifest(json(c.manifest) as JsonObject);
       const { problems, warnings } = checkListing(manifest, files, isText);
       const shape = (list: { rule: string; field: string | null; path: string | null }[]) => list.map((p) => ({ field: p.field, path: p.path, rule: p.rule }));
-      expect(shape(problems), c.name).toEqual(c.problems);
+      // The edge's answer: `edge_problems` where the edge refuses more than a
+      // device (look-alike mark words), else the device's.
+      expect(shape(problems), c.name).toEqual(c.edge_problems ?? c.problems);
+      // And the device's check, without the look-alikes, exactly.
+      expect(shape(checkListing(manifest, files, isText, false).problems), `${c.name} (device)`).toEqual(c.problems);
       expect(shape(warnings), c.name).toEqual(c.warnings);
       // What a listing that passes keeps: the fields as stored.
       if (problems.length === 0) {

@@ -91,6 +91,65 @@ const isControl = (ch: string): boolean => {
  * them), which `name`, `description` and `keywords` refuse (amendment 31). */
 const UNSEEN = /[\p{Cc}\p{Cf}]/u;
 
+/**
+ * The store's mark (amendment 45): a listing's name or description may not
+ * claim it. The shared rule (data file `mark_claims`, listing.rs
+ * `mark_claim`): the text read as NFKC, lowercased, then NFKD without its
+ * nonspacing marks (`markText`); a claim is any of the glyphs anywhere, or
+ * one of the words with no ASCII letter or digit right before or after it.
+ */
+const MARK_GLYPHS: readonly string[] = STORE_DATA.mark_claims.glyphs;
+const MARK_WORDS: readonly string[] = STORE_DATA.mark_claims.words;
+const ASCII_WORD = /[A-Za-z0-9]/;
+
+export const markText = (text: string): string =>
+  text.normalize("NFKC").toLowerCase().normalize("NFKD").replace(/\p{Mn}/gu, "");
+
+/** The first of the mark's words in `folded` as a whole word, if any. */
+const markWord = (folded: string): string | undefined =>
+  MARK_WORDS.find((word) => {
+    for (let at = folded.indexOf(word); at !== -1; at = folded.indexOf(word, at + 1)) {
+      const before = folded[at - 1];
+      const after = folded[at + word.length];
+      if (!(before !== undefined && ASCII_WORD.test(before)) && !(after !== undefined && ASCII_WORD.test(after))) return true;
+    }
+    return false;
+  });
+
+/**
+ * Letters of other scripts that read as Latin ones at a glance, each to the
+ * Latin letter it passes for: Cyrillic and Greek (and a few Latin
+ * variants), lowercase, after `markText` (so capitals and accented forms
+ * are already folded here). Only letters that look like the Latin one in
+ * ordinary type, so honest text in those scripts never spells a mark word.
+ */
+const LOOKALIKES: Readonly<Record<string, string>> = {
+  // Cyrillic
+  "а": "a", "е": "e", "і": "i", "ј": "j", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x", "ѕ": "s", "һ": "h",
+  "ԁ": "d", "ԛ": "q", "ԝ": "w", "ӏ": "l", "ѵ": "v", "ү": "y", "к": "k",
+  // Greek
+  "α": "a", "ε": "e", "ι": "i", "ο": "o", "ν": "v", "ρ": "p", "υ": "u", "χ": "x", "κ": "k", "ϲ": "c", "ϳ": "j", "ϝ": "f",
+  // Latin variants NFKC leaves alone
+  "ı": "i", "ɩ": "i", "ɑ": "a", "ɡ": "g", "ʟ": "l",
+  // Armenian
+  "օ": "o", "ս": "u", "ց": "g"
+};
+const LOOKALIKE_RE = new RegExp(`[${Object.keys(LOOKALIKES).join("")}]`, "gu");
+
+/**
+ * What in `text` claims the store's mark, if anything: the shared rule's
+ * glyph or word, or (`lookalikes`, the edge's alone: a device's check has
+ * no skeleton) a mark word spelled with letters of another script that pass
+ * for Latin ones, e.g. a Cyrillic е in "verified". The vectors' cases with
+ * `edge_problems` hold the edge to the second.
+ */
+export const markClaim = (text: string, lookalikes = true): string | undefined => {
+  const folded = markText(text);
+  const glyph = [...folded].find((ch) => MARK_GLYPHS.includes(ch));
+  if (glyph !== undefined) return glyph;
+  return markWord(folded) ?? (lookalikes ? markWord(folded.replace(LOOKALIKE_RE, (ch) => LOOKALIKES[ch]!)) : undefined);
+};
+
 /** (The fold of a path, as the store and devices compare paths: paths.ts.) */
 export { foldPath } from "./paths";
 
@@ -228,7 +287,10 @@ export const zeronRange = (raw: ReadonlyMap<string, Json>): { range: string | nu
 export const checkListing = (
   manifest: Manifest,
   files: ReadonlyMap<string, Uint8Array>,
-  isText: (bytes: Uint8Array) => boolean
+  isText: (bytes: Uint8Array) => boolean,
+  /** The edge's look-alike reading of the mark's words (`markClaim`); off,
+   * the device's check exactly. */
+  lookalikes = true
 ): { problems: Problem[]; warnings: Problem[] } => {
   const problems: Problem[] = [];
   const warnings: Problem[] = [];
@@ -242,6 +304,10 @@ export const checkListing = (
   if (!parseVersion(manifest.version)) problems.push(problem("not_semver", "version", `"${manifest.version}" isn't a version (MAJOR.MINOR.PATCH)`));
   if (chars(manifest.name) > MAX_NAME_LEN) problems.push(problem("bad_listing", "name", `Its name is longer than ${MAX_NAME_LEN} characters`));
   else if (UNSEEN.test(manifest.name)) problems.push(problem("bad_listing", "name", "Its name has a control or invisible formatting character"));
+  else {
+    const claim = markClaim(manifest.name, lookalikes);
+    if (claim !== undefined) problems.push(problem("bad_listing", "name", `Its name says "${claim}": only the store marks a plugin verified`));
+  }
   if (manifest.entry !== "" && !files.has(manifest.entry)) problems.push(problem("bad_package", "entry", `Its entry file ${manifest.entry} is missing`));
 
   const readme = files.get(README_FILE);
@@ -257,6 +323,10 @@ export const checkListing = (
   else if (chars(description) > MAX_DESCRIPTION_LEN || description.includes("\n")) {
     problems.push(problem("bad_listing", "description", `Its description is one line of at most ${MAX_DESCRIPTION_LEN} characters`));
   } else if (UNSEEN.test(description)) problems.push(problem("bad_listing", "description", "Its description has a control or invisible formatting character"));
+  else {
+    const claim = markClaim(description, lookalikes);
+    if (claim !== undefined) problems.push(problem("bad_listing", "description", `Its description says "${claim}": only the store marks a plugin verified`));
+  }
   const icon = raw.get("icon");
   if (icon === undefined || icon === null) problems.push(problem("missing_listing", "icon", 'It needs an "icon": an SVG file in it'));
   else if (typeof icon === "string") {

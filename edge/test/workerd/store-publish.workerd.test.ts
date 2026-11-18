@@ -334,7 +334,12 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       [{ screenshots: ["init.luau"] }, {}, "bad_listing"],
       [{ homepage: "http://example.com" }, {}, "bad_listing"],
       [{ engines: { zeron: ">= 0.4" } }, {}, "bad_listing"],
-      [{ description: "x".repeat(301) }, {}, "bad_listing"]
+      [{ description: "x".repeat(301) }, {}, "bad_listing"],
+      // The store's mark (amendment 45), and its look-alikes (the edge's alone).
+      [{ name: "Verified Focus" }, {}, "bad_listing"],
+      [{ description: "Boards ✅" }, {}, "bad_listing"],
+      [{ name: "Vеrified Focus" }, {}, "bad_listing"],
+      [{ description: "The οfficial board." }, {}, "bad_listing"]
     ];
     for (const [manifest, files, error] of cases) {
       const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer, manifest, files }));
