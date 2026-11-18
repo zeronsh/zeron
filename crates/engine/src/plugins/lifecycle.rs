@@ -247,6 +247,22 @@ impl Plugins {
         Ok(dir)
     }
 
+    /// Whether the call being served is the person's: this device's app, or
+    /// another of their devices as the edge verified the link. An agent's
+    /// (or an unverified dial's) isn't.
+    pub(in crate::plugins) fn by_person() -> bool {
+        super::reviews::Origin::of(&zeron_rpc::caller()).is_some()
+    }
+
+    /// The refusal when an agent would replace installed store plugin
+    /// `name`'s code: an update is the person's click.
+    pub(in crate::plugins) fn needs_person(name: &str) -> RpcError {
+        failed(install::failure(
+            install::reason::NEEDS_PERSON,
+            format!("{name} is installed already: only the person updates it, in Zeron's window (check_plugin_updates tells them there's an update)"),
+        ))
+    }
+
     /// Install a verified package, keep the decisions right, and say what
     /// changed.
     pub(in crate::plugins) async fn install_package(&self, package: Package, source: Source) -> Result<RpcReply, RpcError> {
@@ -269,6 +285,7 @@ impl Plugins {
         // whoever owns its id there (store to store, the store's record
         // decides; into the store from elsewhere, the same username).
         let mut rotated_from = None;
+        let person = Self::by_person();
         if let Some(entry) = self.entry(&id) {
             if entry.item.builtin {
                 return Err(failed(super::manifest::RESERVED_ID_ERROR));
@@ -277,6 +294,11 @@ impl Plugins {
                 return Err(failed(format!(
                     "You're making a plugin called {id} on this device. Remove or rename it first to install this one."
                 )));
+            }
+            // From the store over one installed: new code under what the
+            // person allowed, so theirs to do (as `UpdatePlugin` is).
+            if source.store().is_some() && !person {
+                return Err(Self::needs_person(&entry.item.name));
             }
             old_binding = entry.binding().map(str::to_owned);
             if let Some(key) = entry.key().filter(|k| *k != package.key) {
@@ -374,8 +396,9 @@ impl Plugins {
             if state.blocked.get(&id).is_some_and(|b| b.version != version) {
                 state.blocked.remove(&id);
             }
-            // Installing a pre-release from the store takes its later ones.
-            if from_store && super::version::Version::parse(&version).is_ok_and(|v| v.is_prerelease()) {
+            // Installing a pre-release from the store takes its later ones
+            // (the person's choice: an agent's install never opts them in).
+            if from_store && person && super::version::Version::parse(&version).is_ok_and(|v| v.is_prerelease()) {
                 state.prerelease.insert(id.clone());
             }
         })?;

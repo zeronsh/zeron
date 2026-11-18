@@ -940,7 +940,9 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::READ_COMMAND_OUTPUT
             | methods::STOP_COMMAND
             | methods::LIST_BACKGROUND_COMMANDS
-            // Plugins: authoring, installing (lands waiting for the person),
+            // Plugins: authoring, installing (lands waiting for the person;
+            // over one installed from the store it's refused, `needs_person`:
+            // an update is the person's, `UpdatePlugin`),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their
             // tools.

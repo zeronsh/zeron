@@ -88,6 +88,9 @@ pub mod reason {
     pub const NO_SOURCE: &str = "no_source";
     /// Its `engines.zeron` leaves this Zeron out (or can't be read).
     pub const INCOMPATIBLE: &str = "incompatible";
+    /// Replacing an installed store plugin's code is the person's to do
+    /// (an update they click), never an agent's.
+    pub const NEEDS_PERSON: &str = "needs_person";
     // The store's words (`store::client::reason`): `store_unreachable`,
     // `not_in_store`, `store_error`, `store_mismatch`; and the edge's own.
 }

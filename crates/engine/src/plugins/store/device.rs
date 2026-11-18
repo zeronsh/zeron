@@ -579,6 +579,13 @@ impl Plugins {
     /// record, then installed as any package (the same consent window).
     pub(in crate::plugins) async fn install_from_store(&self, id: &str, version: Option<&str>, reinstalling: bool) -> Result<RpcReply, RpcError> {
         let id = id.trim();
+        // (Before fetching anything: `install_package` refuses it too.)
+        if !reinstalling && !Self::by_person() {
+            self.rescan().await;
+            if let Some(entry) = self.entry(id).filter(|e| !e.item.builtin && !e.item.own) {
+                return Err(Self::needs_person(&entry.item.name));
+            }
+        }
         let (package, source) = self.fetch_from_store(id, version, reinstalling).await?;
         let reply = self.install_package(package, source).await?;
         // Counted once per account (the edge's to say): a new install here.

@@ -55,6 +55,11 @@ impl Device {
         }
     }
 
+    /// `method` as `caller` sends it (an agent's MCP server, another device).
+    async fn call_as(&self, caller: zeron_rpc::Caller, method: &str, params: Value) -> Result<Value, String> {
+        zeron_rpc::with_caller(caller, self.call(method, params)).await
+    }
+
     async fn item(&self, id: &str) -> Value {
         let list = self.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
         list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == id).cloned().unwrap_or(Value::Null)
@@ -321,6 +326,50 @@ async fn a_store_plugin_changed_on_disk_is_told_by_its_signature_alone() {
 
 fn sha256(bytes: &[u8]) -> String {
     zeron_engine::plugins::signing::sha256_hex(bytes)
+}
+
+#[tokio::test]
+async fn an_agent_never_replaces_an_installed_store_plugin_or_opts_it_into_pre_releases() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "approved", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    let before = d.item("focus").await;
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "approved", "");
+    store.add("ada", &package_of(&key, "focus", "2.0.0-beta.1", &["ui.add"], "return 3", json!({})), "approved", "");
+    let agent = || zeron_rpc::Caller::Agent { chat: Some("c1".into()) };
+
+    // An agent's install over it, latest or a pre-release: refused, nothing changed.
+    for params in [json!({ "store": "focus" }), json!({ "store": "focus", "version": "2.0.0-beta.1" })] {
+        let refused = d.call_as(agent(), methods::INSTALL_PLUGIN, params.clone()).await.unwrap_err();
+        assert_eq!(word(&refused), "needs_person", "{params}: {refused}");
+        let now = d.item("focus").await;
+        assert_eq!((now["version"].as_str(), now["hash"].as_str(), now["status"].as_str()), (Some("1.0.0"), before["hash"].as_str(), Some("on")));
+        assert!(now.get("prerelease").is_none(), "an agent never opts the person into pre-releases");
+    }
+    // (Nothing was fetched for it.)
+    let fetched = |v: &str| store.state.lock().unwrap().requests.iter().any(|(_, path, _)| path.ends_with(&format!("/{v}/package")));
+    assert!(!fetched("1.1.0") && !fetched("2.0.0-beta.1"));
+
+    // An agent's first install of another plugin still lands, waiting for
+    // the person, and doesn't opt them in either.
+    store.add("ada", &package_of(&key, "lab", "0.1.0-beta.1", &["ui.add"], "return 1", json!({})), "approved", "");
+    let landed = d.call_as(agent(), methods::INSTALL_PLUGIN, json!({ "store": "lab", "version": "0.1.0-beta.1" })).await.unwrap();
+    assert_eq!((landed["update"].as_bool(), landed["waiting"].as_bool()), (Some(false), Some(true)));
+    assert!(d.item("lab").await.get("prerelease").is_none());
+
+    // The person's own: from another of their devices (as the edge verified
+    // the link), and from this one, the update and the pre-release go in.
+    let peer = zeron_rpc::Caller::Peer { device: Some("dev-2".into()) };
+    let updated = d.call_as(peer, methods::INSTALL_PLUGIN, json!({ "store": "focus", "version": "1.1.0" })).await.unwrap();
+    assert_eq!((updated["update"].as_bool(), updated["plugin"]["version"].as_str()), (Some(true), Some("1.1.0")));
+    let unverified = zeron_rpc::Caller::Peer { device: None };
+    assert_eq!(word(&d.call_as(unverified, methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err()), "needs_person");
+    let beta = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus", "version": "2.0.0-beta.1" })).await.unwrap();
+    assert_eq!(beta["plugin"]["version"], "2.0.0-beta.1");
+    assert_eq!(d.item("focus").await["prerelease"], true, "the person's pre-release install takes its later ones");
 }
 
 #[tokio::test]
