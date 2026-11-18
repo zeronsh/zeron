@@ -16,6 +16,7 @@
  * already). A response for a request with a user must not be cached.
  */
 import type { Env } from "../env";
+import { hasRole } from "../roles";
 import { userDirectoryStub } from "../user-directory";
 import { bearerUser, cookieSession, forbidden, headerBearer, unauthenticated } from "./identity/callers";
 import { verifySignedRequest } from "./identity/signed-request";
@@ -61,8 +62,7 @@ export const requireAdmin = async (req: Request, env: Env): Promise<{ userId: st
     if (!token) return /^ZeronKey\s/i.test(header) ? forbidden("A deploy key can't do this.") : unauthenticated();
     const user = await bearerUser(env, token);
     if (user instanceof Response) return user;
-    const directory = userDirectoryStub(env);
-    if (!directory || !(await directory.hasRole(user.userId, "admin"))) return forbidden();
+    if (!(await hasRole(env, user.userId, "admin"))) return forbidden();
     return { userId: user.userId };
   }
   const session = await cookieSession(req, env, true);
