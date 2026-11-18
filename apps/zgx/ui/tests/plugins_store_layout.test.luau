@@ -494,17 +494,20 @@ test("twelve versions of 64 KB of notes each keep Report within a screen of Vers
 	-- The latest few, the latest's notes to about ten lines; Show all for
 	-- the rest.
 	expect(app:count("#store-shots") <= 1).to_be(true)
-	expect(app:has('role:button "Show all 12 versions"')).to_be(true)
+	-- (Its first page of five from the detail: how many there are isn't
+	-- known until the rest is read.)
+	expect(app:has('role:button "Show all versions"')).to_be(true)
 	expect(report.y - versions.y < 900).to_be(true)
-	app:click('role:button "Show all 12 versions"')
+	app:click('role:button "Show all versions"')
 	settle(app)
 	app:scroll(SCROLL, 1e6)
 	settle(app)
 	versions = box(app, 'role:group "Versions"')
 	report = box(app, 'role:link "Report this plugin"')
 	expect(app:has('role:button "Show all 12 versions"')).to_be(false)
-	-- (Each older one a line of its notes.)
-	expect(report.y - versions.y < 2 * 900).to_be(true)
+	-- (Each older one a line of its notes, and a line saying whether the
+	-- store has verified it, 20 each.)
+	expect(report.y - versions.y < 2 * 900 + 12 * 20).to_be(true)
 end)
 
 -- Publish… for Pomodoro clock, from Yours; `before` runs first (a stub's

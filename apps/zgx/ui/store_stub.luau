@@ -213,8 +213,8 @@ for i, name in WORDS do
 			package = { bytes = 24_000 + i * 310, sha256 = string.rep("a", 64), hash = `{id}-hash` },
 		},
 		versions = {
-			{ version = card.version, status = "approved", published_at = card.updated_at, notes = "- Faster.\n- Fewer words." },
-			{ version = "1.0.0", status = "approved", published_at = (card.updated_at :: number) - 30 * DAY, notes = "- The first one." },
+			{ version = card.version, status = "listed", verified = card.verified == true, verified_at = if card.verified then card.updated_at else nil, published_at = card.updated_at, notes = "- Faster.\n- Fewer words." },
+			{ version = "1.0.0", status = "listed", verified = card.verified_version ~= nil, verified_at = if card.verified_version then (card.updated_at :: number) - 29 * DAY else nil, published_at = (card.updated_at :: number) - 30 * DAY, notes = "- The first one." },
 		},
 	}
 	table.insert(entries, e)
@@ -276,7 +276,7 @@ do
 		versions = {},
 	}
 	for i = 0, 11 do
-		table.insert(e.versions, { version = `10.20.{30 - i}`, status = "approved", published_at = NOW - i * DAY, notes = notes })
+		table.insert(e.versions, { version = `10.20.{30 - i}`, status = "listed", verified = i % 2 == 1, verified_at = if i % 2 == 1 then NOW - i * DAY + DAY // 2 else nil, published_at = NOW - i * DAY, notes = notes })
 	end
 	table.insert(entries, 1, e)
 	by_id.extremes = e
@@ -355,9 +355,9 @@ do
 	f.detail.permissions = { asks = { "ui.add", "notifications", "network" }, network_hosts = { "api.example.com" } }
 	f.detail.engines = { zeron = ">=0.3.0" }
 	f.versions = {
-		{ version = "1.2.0", status = "approved", published_at = NOW - 2 * DAY, notes = "- Pauses when you leave the chat.\n- Says when it's done." },
-		{ version = "1.1.0", status = "approved", published_at = NOW - 20 * DAY, notes = "- A bell." },
-		{ version = "1.0.0", status = "approved", published_at = NOW - 60 * DAY, notes = "- The first one." },
+		{ version = "1.2.0", status = "listed", verified = true, verified_at = NOW - DAY, published_at = NOW - 2 * DAY, notes = "- Pauses when you leave the chat.\n- Says when it's done." },
+		{ version = "1.1.0", status = "yanked", yanked = true, verified = false, published_at = NOW - 20 * DAY, notes = "- A bell." },
+		{ version = "1.0.0", status = "listed", verified = true, verified_at = NOW - 59 * DAY, published_at = NOW - 60 * DAY, notes = "- The first one." },
 	}
 end
 -- One that needs a later Zeron: the engine says so, in its words.
@@ -447,6 +447,8 @@ end
 -- hostile author's text: `store_stub_readme`, `store_stub_notes`).
 local given_readme = ui.state("store_stub_readme", "")
 local given_notes = ui.state("store_stub_notes", "")
+-- (A detail's first page of versions, as the store gives it.)
+local VERSIONS_PAGE = 5
 stub.detail = function(id: string, for_zeron: string?): any
 	note(if for_zeron then `detail:{id}:for_zeron={for_zeron}` else `detail:{id}`)
 	return answer(function(): any
@@ -455,7 +457,9 @@ stub.detail = function(id: string, for_zeron: string?): any
 		for k, v in e.detail do
 			d[k] = v
 		end
-		d.versions = e.versions
+		-- (Its first page of versions, newest first; the rest by cursor.)
+		d.versions = table.move(e.versions, 1, math.min(VERSIONS_PAGE, #e.versions), 1, {})
+		d.versions_next_cursor = if #e.versions > VERSIONS_PAGE then tostring(VERSIONS_PAGE) else nil
 		if id == "focus-timer" and given_readme:peek() ~= "" then
 			d.readme = given_readme:peek()
 		end
@@ -466,6 +470,16 @@ stub.detail = function(id: string, for_zeron: string?): any
 			d.versions[1] = first
 		end
 		return d
+	end)
+end
+stub.versions = function(id: string, cursor: string?, limit: number?): any
+	note(`versions:{id}:{cursor or ""}`)
+	return answer(function(): any
+		local e = entry(id)
+		local from = tonumber(cursor or "0") or 0
+		local n = math.min(limit or 20, 50)
+		local out = table.move(e.versions, from + 1, math.min(from + n, #e.versions), 1, {})
+		return { versions = out, total = #e.versions, next_cursor = if from + n < #e.versions then tostring(from + n) else nil }
 	end)
 end
 stub.categories = function(): any
@@ -909,7 +923,10 @@ ui.command {
 	run = function()
 		local f = by_id["focus-timer"]
 		f.card.version = "1.3.0"
-		table.insert(f.versions, 1, { version = "1.3.0", status = "approved", published_at = NOW, notes = "- Longer breaks." })
+		-- (Listed at once; not verified yet, 1.2.0 still the verified one.)
+		f.card.verified = false
+		f.card.verified_version = "1.2.0"
+		table.insert(f.versions, 1, { version = "1.3.0", status = "listed", verified = false, published_at = NOW, notes = "- Longer breaks." })
 	end,
 }
 

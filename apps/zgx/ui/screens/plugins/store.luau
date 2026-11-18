@@ -16,10 +16,14 @@
 --   store.search { q?, category?, keyword?, sort?, cursor?, limit?, featured? }
 --       { items = { Card }, next_cursor? }   sort: "relevance" | "popular" |
 --                                            "updated" | "new"
---   store.detail(id, for_zeron?)  Detail, every version; whether it works
---                             with Zeron `for_zeron` (the device shown's), else
---                             this one (rejects "not_in_store")
---   store.categories()        { categories = { { id, name } } }
+--   store.detail(id, for_zeron?)  Detail, its first page of versions
+--                             (`versions_next_cursor` for more), whether it's
+--                             verified and its newest verified version; whether
+--                             it works with Zeron `for_zeron` (the device
+--                             shown's), else this one (rejects "not_in_store")
+--   store.versions(id, cursor?, limit?)  { versions, total, next_cursor? }
+--   store.version(id, version)  Version
+--   store.categories()        { categories = { { id, name, count? } } }
 --   store.picture(id, version, path)  { src }: a picture of its package, as
 --                             the engine keeps it here
 --   store.icon(id, version, path)     { svg }: its icon, or nil
@@ -83,6 +87,9 @@ export type Version = {
 	yanked: boolean?,
 	prerelease: boolean?,
 	review: { state: string?, reason: string?, message: string?, decided_at: number? }?,
+	-- Whether the store has verified it, and when.
+	verified: boolean?,
+	verified_at: number?,
 }
 export type Query = {
 	q: string?,
@@ -107,6 +114,15 @@ end
 
 function M.detail(id: string, for_zeron: string?): any
 	return ui.call("plugins.store.detail", if for_zeron then { id = id, for_zeron = for_zeron } else id)
+end
+
+-- A page of a plugin's versions, newest first (`cursor` from the detail's
+-- `versions_next_cursor`, then each page's `next_cursor`), and one version.
+function M.versions(id: string, cursor: string?, limit: number?): any
+	return ui.call("plugins.store.versions", { id = id, cursor = cursor, limit = limit })
+end
+function M.version(id: string, version: string): any
+	return ui.call("plugins.store.version", { id = id, version = version })
 end
 
 function M.categories(): any

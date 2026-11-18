@@ -95,11 +95,22 @@ fn a_plugin_s_page_asks_for_every_version_and_this_device_s_zeron() {
         r#"ui.call("plugins.store.detail", { id = "focus-timer", for_zeron = "0.4.2" })"#,
         json!({ "id": "focus-timer", "compatible": false, "incompatible": "Needs Zeron 0.5.0 or later" }),
     );
-    assert_eq!(asked, vec![("StorePlugin".into(), json!({ "id": "focus-timer", "versions": true, "for_zeron": "0.4.2" }), None)]);
+    assert_eq!(asked, vec![("StorePlugin".into(), json!({ "id": "focus-timer", "for_zeron": "0.4.2" }), None)]);
     assert!(out.contains("compatible=false") && out.contains("incompatible=Needs Zeron 0.5.0"), "{out}");
     // This device's own: no `for_zeron`.
     let (_, asked) = run(r#"ui.call("plugins.store.detail", "focus-timer")"#, json!({}));
-    assert_eq!(asked[0].1, json!({ "id": "focus-timer", "versions": true }));
+    assert_eq!(asked[0].1, json!({ "id": "focus-timer" }));
+}
+
+#[test]
+fn a_plugin_s_versions_are_read_a_page_or_one_at_a_time() {
+    let (_, asked) = run(r#"ui.call("plugins.store.versions", { id = "focus-timer", cursor = "c2", limit = 500 })"#, json!({ "versions": [] }));
+    assert_eq!(asked[0], ("StoreVersions".into(), json!({ "id": "focus-timer", "cursor": "c2", "limit": 50 }), None));
+    let (_, asked) = run(r#"ui.call("plugins.store.version", { id = "focus-timer", version = "1.2.0" })"#, json!({}));
+    assert_eq!(asked[0], ("StoreVersion".into(), json!({ "id": "focus-timer", "version": "1.2.0" }), None));
+    let (out, asked) = run(r#"ui.call("plugins.store.version", { id = "focus-timer", version = "../x" })"#, json!({}));
+    assert_eq!(out, "err:not_in_store");
+    assert!(asked.is_empty());
 }
 
 #[test]

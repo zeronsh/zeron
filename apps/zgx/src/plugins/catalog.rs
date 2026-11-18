@@ -9,10 +9,14 @@
 //!   plugins.store.search { q?, category?, keyword?, author?, sort?, cursor?, limit?, featured?, verified? }
 //!                                     StoreSearch
 //!   plugins.store.detail(id | { id, for_zeron })  StorePlugin { id,
-//!                                     versions: true, for_zeron? }: the
-//!                                     detail, every version, `compatible`
+//!                                     for_zeron? }: the detail, its first
+//!                                     page of versions (`versions_next_cursor`
+//!                                     for the rest), `compatible`
 //!                                     (`incompatible`: why not), judged for
 //!                                     the device shown's Zeron
+//!   plugins.store.versions { id, cursor?, limit? }  StoreVersions: a page
+//!                                     of its versions, newest first
+//!   plugins.store.version { id, version }  StoreVersion: one
 //!   plugins.store.categories          StoreCategories
 //!   plugins.store.picture { id, version, path }  StoreFile: `{ src }`, the
 //!                                     file the engine keeps (a picture only)
@@ -118,11 +122,38 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
                 _ => arg.field("id").map(text).unwrap_or_default(),
             };
             let id = store_id(&id).ok_or("not_in_store")?;
-            let mut params = json!({ "id": id, "versions": true });
+            let mut params = json!({ "id": id });
             if let Some(zeron) = arg.field("for_zeron").map(text).filter(|v| version_ok(v)) {
                 params["for_zeron"] = json!(zeron);
             }
             ask(&e, "StorePlugin", params).await
+        }
+    });
+    let e = engine.clone();
+    host.async_action("plugins.store.versions", move |arg| {
+        let e = e.clone();
+        async move {
+            let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
+            let mut params = json!({ "id": id });
+            if let Some(cursor) = arg.field("cursor").map(text).filter(|c| !c.is_empty()) {
+                params["cursor"] = json!(cursor);
+            }
+            if let Some(Value::Num(n)) = arg.field("limit")
+                && n.is_finite()
+                && *n >= 1.0
+            {
+                params["limit"] = json!((*n as u64).min(50));
+            }
+            ask(&e, "StoreVersions", params).await
+        }
+    });
+    let e = engine.clone();
+    host.async_action("plugins.store.version", move |arg| {
+        let e = e.clone();
+        async move {
+            let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
+            let version = arg.field("version").map(text).filter(|v| version_ok(v)).ok_or("not_in_store")?;
+            ask(&e, "StoreVersion", json!({ "id": id, "version": version })).await
         }
     });
     let e = engine.clone();
@@ -438,7 +469,7 @@ mod tests {
             }
         }
         assert!(guarded >= 9, "{guarded}");
-        for read in ["plugins.store.search", "plugins.store.detail", "plugins.store.categories", "plugins.store.picture", "plugins.store.icon"] {
+        for read in ["plugins.store.search", "plugins.store.detail", "plugins.store.versions", "plugins.store.version", "plugins.store.categories", "plugins.store.picture", "plugins.store.icon"] {
             assert!(!crate::plugins::preview::BLOCKED.contains(&read), "{read} only reads the catalog");
         }
     }

@@ -174,7 +174,7 @@ end
 -- few lines aren't worth a fold), unless `whole` says the folded body isn't
 -- all there is. `next` (open): whether there's a next piece to show, and
 -- the way to show it, beside Show less. Folded again, the control is
--- brought back into view (or `on_fold` does what's wanted instead).
+-- brought back into view, focused.
 type FoldProps = {
 	height: number,
 	slack: number?,
@@ -182,7 +182,6 @@ type FoldProps = {
 	body: (open: boolean) -> Node,
 	whole: (() -> boolean)?,
 	next: untrusted.Handle?,
-	on_fold: (() -> ())?,
 	class: string,
 	button_class: string,
 	next_id: string?,
@@ -282,7 +281,7 @@ local Fold = ui.component(function(props: FoldProps): Node
 					-- view as it's laid out again. Focusing the row hands
 					-- focus to its first control, and zgx scrolls the least
 					-- that shows it.)
-					ui.after(0, props.on_fold or function()
+					ui.after(0, function()
 						local el = controls:peek()
 						if el then
 							el:blur()
@@ -296,7 +295,7 @@ local Fold = ui.component(function(props: FoldProps): Node
 	}
 end)
 
-local Notes = ui.component(function(props: { text: () -> string, lines: number, on_fold: (() -> ())? }): Node
+local Notes = ui.component(function(props: { text: () -> string, lines: number }): Node
 	local function start(): (string, boolean)
 		return start_of(props.text(), NOTES_START)
 	end
@@ -319,7 +318,6 @@ local Notes = ui.component(function(props: { text: () -> string, lines: number, 
 					auto = true,
 				}
 			end,
-			on_fold = props.on_fold,
 			class = "store-notes",
 			button_class = "store-notes-more",
 		}
@@ -364,11 +362,7 @@ local Notes = ui.component(function(props: { text: () -> string, lines: number, 
 				return open:get()
 			end,
 			on_click = function()
-				local folding = open:peek()
-				open:set(not folding)
-				if folding and props.on_fold then
-					ui.after(0, props.on_fold)
-				end
+				open:set(not open:peek())
 			end,
 			class = "store-notes-more",
 			place = { self = "start" },
@@ -472,12 +466,16 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		return "install"
 	end
 
-	local function install()
+	-- (`version`: one of its versions the person chose, else the one the
+	-- page offers.)
+	local function install(version: string?)
 		if busy:peek() then
 			return
 		end
 		busy:set(true)
-		local p: any = state.install({ store = id, version = d().version, device = here.device() } :: any)
+		-- (A string alone: as a click's handler it's handed the click.)
+		local chosen = if type(version) == "string" then version else d().version
+		local p: any = state.install({ store = id, version = chosen, device = here.device() } :: any)
 		if p == nil then
 			busy:set(false)
 			return
@@ -768,6 +766,54 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		})
 	end
 
+	-- When the version the page offers isn't verified: a plain line saying
+	-- so (the page informs; the sheets, where a person decides, warn), and
+	-- the newest verified one, a link of its own to install it instead.
+	local function verified_version(): string?
+		local v = d().verified_version
+		return if type(v) == "string" and v ~= "" and v ~= d().version then v else nil
+	end
+	local function verified_line(): Node
+		return ui.show(function(): boolean
+			return d().verified == false
+		end, ui.row {
+			id = "store-verified-line",
+			w_full = true,
+			px = ds.Settings.inset(),
+			flex_wrap = true,
+			items = "center",
+			gap = "$space.2",
+			ui.text {
+				function(): string
+					local v = verified_version()
+					return if v
+						then ui.t("plugins.store.not_verified_line", { version = d().version or "", verified = v }):get()
+						else ui.t("plugins.store.none_verified"):get()
+				end,
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
+			},
+			ui.show(function(): boolean
+				local v = verified_version()
+				local it: any = item()
+				return v ~= nil and not here.away() and not other() and (it == nil or it.version ~= v)
+			end, ds.Link {
+				function(): string
+					return ui.t("plugins.store.install_instead", { version = verified_version() or "" }):get()
+				end,
+				size = "sm",
+				on_click = function()
+					local v = verified_version()
+					if v then
+						install(v)
+					end
+				end,
+			}),
+		})
+	end
+
 	-- Its keywords: each one narrows Browse to it.
 	local function keywords(): Node
 		local list: { string } = {}
@@ -945,6 +991,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			line_height = 20,
 			color = "$text.secondary",
 		}),
+		verified_line(),
 		keywords(),
 		cannot(),
 		-- A version Zeron took down: why, and the way back.
@@ -1288,15 +1335,40 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	-- a bound so Report is always near. The latest's notes to about ten
 	-- lines, Show more opening the rest in place; each older one's first
 	-- line, opening whole in place; the latest few, Show all the rest.
+	-- (The detail's first page, then the rest by cursor once asked for.)
+	local more_versions = ui.use_state({} :: { any })
+	local versions_cursor = ui.use_state((first.versions_next_cursor :: string?))
 	local versions = ui.computed(function(): { store.Version }
 		local out: { store.Version } = {}
-		for _, v in (if type(d().versions) == "table" then d().versions else {}) :: { any } do
-			if type(v) == "table" and type(v.version) == "string" and (v.status == nil or v.status == "approved" or v.status == "yanked") then
-				table.insert(out, v)
+		local seen: { [string]: boolean } = {}
+		local function add(list: any)
+			for _, v in (if type(list) == "table" then list else {}) :: { any } do
+				if type(v) == "table" and type(v.version) == "string" and not seen[v.version] and (v.status == nil or v.status == "listed" or v.status == "yanked") then
+					seen[v.version] = true
+					table.insert(out, v)
+				end
 			end
 		end
+		add(d().versions)
+		add(more_versions:get())
 		return out
 	end)
+	local function fetch_versions(cursor: string)
+		store.versions(id, cursor, 50):after(function(r: any)
+			local now = table.clone(more_versions:peek())
+			for _, v in (if type(r) == "table" and type(r.versions) == "table" then r.versions else {}) :: { any } do
+				table.insert(now, v)
+			end
+			more_versions:set(now)
+			local next = if type(r) == "table" and type(r.next_cursor) == "string" and r.next_cursor ~= "" then r.next_cursor else nil
+			versions_cursor:set(next)
+			if next then
+				fetch_versions(next)
+			end
+		end, function(err: any)
+			here.failed(ui.t("plugins.store.versions_failed_toast"))(err)
+		end)
+	end
 	local all_versions = ui.use_state(false)
 	local listed = ui.computed(function(): { store.Version }
 		local all = versions:get()
@@ -1311,20 +1383,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			local n = now:get().notes
 			return if type(n) == "string" then string.sub(n, 1, NOTES_MOST) else ""
 		end
-		local row = ui.ref()
-		-- Folded from far down a long one: the control that folded it
-		-- brought back into view, focus on it again. (Focusing the row hands
-		-- focus to its first control, Show more, and zgx scrolls the least
-		-- that shows it; nothing moves when it's in view.)
-		-- Once the pin passes zgx #2234: `row:scroll_into_view { block = "start" }`, its head first ("nearest" would align a too-tall row's end).
-		local function keep_in_view()
-			local el = row:peek()
-			if el then
-				el:blur()
-				el:focus()
-			end
-		end
-		return ui.column { ref = row, class = "store-version", w_full = true, ds.Settings.Row {
+		return ui.column { class = "store-version", w_full = true, ds.Settings.Row {
 			label = function(): string
 				return now:get().version
 			end,
@@ -1335,10 +1394,47 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				local at = now:get().published_at
 				return if type(at) == "number" then locale.date(at / 1000) else ""
 			end,
+			-- Whether the store has verified it, and whether it's the one
+			-- this device has; any other listed one, installed from here.
+			detail = function(): string?
+				local v: any = now:get()
+				local parts: { string } = {}
+				if v.status ~= "yanked" then
+					if v.verified == true then
+						table.insert(parts, if type(v.verified_at) == "number"
+							then ui.t("plugins.store.verified_on", { date = locale.date(v.verified_at / 1000) }):get()
+							else ui.t("plugins.store.verified"):get())
+					else
+						table.insert(parts, ui.t("plugins.store.not_verified"):get())
+					end
+				end
+				local it: any = item()
+				if it ~= nil and not other() and it.version == v.version then
+					table.insert(parts, ui.t("plugins.store.installed"):get())
+				end
+				return if #parts > 0 then table.concat(parts, " · ") else nil
+			end,
+			detail_action = ui.show(function(): boolean
+				local v: any = now:get()
+				local it: any = item()
+				return v.status ~= "yanked" and not here.away() and not other() and compatible() and (it == nil or it.version ~= v.version)
+			end, ds.Settings.InlineLink {
+				-- (Doing something here: a button, as Installed's Update.)
+				role = "button",
+				label = ui.t("plugins.store.install"),
+				disabled = function(): boolean
+					return busy:get()
+				end,
+				on_click = function()
+					install(now:peek().version)
+				end,
+			}),
 			stacked = true,
 			control = ui.show(function(): boolean
 				return notes() ~= ""
-			end, Notes { text = notes, lines = if latest then NOTES_LINES else 1, on_fold = keep_in_view }),
+			-- (Folded from far down a long one, its own control is brought
+			-- back into view, focused: the fold's way.)
+			end, Notes { text = notes, lines = if latest then NOTES_LINES else 1 }),
 		} }
 	end
 	local function history(): Node
@@ -1350,18 +1446,26 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				end,
 			}),
 			ui.show(function(): boolean
-				return not all_versions:get() and #versions:get() > VERSIONS_FIRST
+				return not all_versions:get() and (#versions:get() > VERSIONS_FIRST or versions_cursor:get() ~= nil)
 			end, ui.row {
 				px = ds.Settings.inset(),
 				FoldButton {
+					-- (How many, once the store has said: more pages to come,
+					-- "All versions" alone.)
 					label = function(): string
-						return ui.t("plugins.store.all_versions", { n = #versions:get() }):get()
+						return if versions_cursor:get() ~= nil
+							then ui.t("plugins.store.all_versions_plain"):get()
+							else ui.t("plugins.store.all_versions", { n = #versions:get() }):get()
 					end,
 					open = function(): boolean
 						return all_versions:get()
 					end,
 					on_click = function()
 						all_versions:set(true)
+						local c = versions_cursor:peek()
+						if c then
+							fetch_versions(c)
+						end
 					end,
 					class = "store-all-versions",
 				},
