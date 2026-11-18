@@ -1235,6 +1235,145 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_dir(dir.path().join(INCOMING_DIR)).unwrap().count(), 0, "nothing left half-way");
     }
 
+    /// A hostile package on the disk Zeron's people run: macOS's APFS, which
+    /// ignores case and Unicode normalization when it compares names. Each
+    /// package is real and signed, and installed as a sideloaded one is (no
+    /// store's check before it). Where its paths name one file twice on this
+    /// disk, it's refused with a word, nothing left in the plugins folder and
+    /// nothing staged; where they don't, what's installed is exactly what
+    /// was signed. (Only on macOS: elsewhere the disk tells these names apart
+    /// and none of them collide.)
+    #[cfg(target_os = "macos")]
+    mod on_a_folding_disk {
+        use super::*;
+
+        /// Whether this disk opens `b` as `a`, once `a` exists.
+        fn folds(a: &str, b: &str) -> bool {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(a), b"x").unwrap();
+            dir.path().join(b).exists()
+        }
+
+        /// `files` (and an entry), signed, installed into an empty plugins
+        /// folder: what came of it, the folder, and the package.
+        fn install_files(files: &[(&str, &[u8])]) -> (Result<Option<Replaced>, String>, tempfile::TempDir, Package) {
+            let dir = tempfile::tempdir().unwrap();
+            let (key, _) = SigningKey::generate().unwrap();
+            let mut all = BTreeMap::new();
+            all.insert("init.luau".to_string(), b"return 1".to_vec());
+            for (rel, bytes) in files {
+                all.insert(rel.to_string(), bytes.to_vec());
+            }
+            let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&all));
+            let package = parse(package::pack(FORMAT, &manifest, &all).unwrap()).expect("a signed package Zeron takes");
+            // (A file's, sideloaded: no store looked at it first.)
+            let source: Source = serde_json::from_value(json!({ "kind": "file", "version": "", "installed_at": 0 })).unwrap();
+            (install(dir.path(), &package, &source, None), dir, package)
+        }
+
+        /// Refused, with a word, and nothing left: no plugin, nothing staged.
+        fn fails_closed(result: Result<Option<Replaced>, String>, dir: &Path, word: &str) {
+            assert_eq!(result.map(|_| ()).unwrap_err(), word);
+            let left: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+            assert_eq!(left, [INCOMING_DIR], "nothing in the plugins folder but its (empty) staging room");
+            assert_eq!(std::fs::read_dir(dir.join(INCOMING_DIR)).unwrap().count(), 0, "nothing staged behind");
+        }
+
+        /// Installed, and on disk exactly what was signed, Zeron's own files
+        /// (its manifest, where it came from) Zeron's.
+        fn installs_as_signed(result: Result<Option<Replaced>, String>, dir: &Path, package: &Package) {
+            result.unwrap();
+            let folder = dir.join("focus");
+            let check = scan::inspect(&folder, true);
+            assert_eq!((check.sig, check.hash.clone()), (SigCheck::Valid(package.key.clone()), package.hash.clone()));
+            let source: Source = serde_json::from_slice(&std::fs::read(folder.join(SOURCE_FILE)).unwrap()).unwrap();
+            assert_eq!(source.kind, "file");
+            for (rel, bytes) in &package.files {
+                assert_eq!(&std::fs::read(folder.join(rel)).unwrap(), bytes, "{rel} on disk is what was signed");
+            }
+        }
+
+        const CHANGED: &str = "It changed while it was being installed";
+        const UNWRITABLE: &str = "Couldn't write its files";
+
+        #[test]
+        fn two_files_differing_only_in_case_are_refused() {
+            assert!(folds("a.luau", "A.luau"), "this disk ignores case");
+            let (result, dir, _) = install_files(&[("a.luau", b"return 'lower'"), ("A.luau", b"return 'upper'")]);
+            fails_closed(result, dir.path(), CHANGED);
+        }
+
+        #[test]
+        fn two_names_equal_once_normalized_are_refused() {
+            let (composed, decomposed) = ("caf\u{e9}.luau", "cafe\u{301}.luau");
+            assert!(folds(composed, decomposed), "this disk ignores Unicode normalization");
+            let (result, dir, _) = install_files(&[(composed, b"return 'composed'"), (decomposed, b"return 'decomposed'")]);
+            fails_closed(result, dir.path(), CHANGED);
+        }
+
+        #[test]
+        fn a_file_and_a_folder_that_fold_alike_are_refused() {
+            // Either order the package lists them in (`Lib/…` before `lib`,
+            // `Lib` before `lib/…`).
+            let (result, dir, _) = install_files(&[("lib", b"a file"), ("Lib/x.luau", b"return 1")]);
+            fails_closed(result, dir.path(), UNWRITABLE);
+            let (result, dir, _) = install_files(&[("Lib", b"a file"), ("lib/x.luau", b"return 1")]);
+            fails_closed(result, dir.path(), UNWRITABLE);
+        }
+
+        #[test]
+        fn a_file_that_folds_onto_the_manifest_is_refused() {
+            assert!(folds("zeron-plugin.json", "Zeron-Plugin.json"));
+            let (result, dir, _) = install_files(&[("Zeron-Plugin.json", br#"{ "id": "focus", "permissions": ["commands"] }"#)]);
+            fails_closed(result, dir.path(), CHANGED);
+            // And by Unicode's case folding alone (the long s, `ſ`, is `s`):
+            // refused where this disk folds it so, else its own file.
+            let long_s = "zeron-plugin.j\u{17f}on";
+            let (result, dir, package) = install_files(&[(long_s, b"{}")]);
+            if folds("zeron-plugin.json", long_s) {
+                fails_closed(result, dir.path(), CHANGED);
+            } else {
+                installs_as_signed(result, dir.path(), &package);
+            }
+        }
+
+        #[test]
+        fn a_name_that_would_be_a_dot_name_is_refused_or_is_its_own_file() {
+            // Refused before anything's written: a dot name is never a
+            // package's (`plain_path`), nor one ending in a dot or a space,
+            // which APFS keeps but Windows drops.
+            for rel in [".source.json", ".Source.json", ".\u{17f}ource.json", "x.luau.", "x.luau ", "lib./x.luau"] {
+                let mut files = BTreeMap::new();
+                files.insert("init.luau".to_string(), b"return 1".to_vec());
+                files.insert(rel.to_string(), b"{}".to_vec());
+                let (key, _) = SigningKey::generate().unwrap();
+                let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&files));
+                assert!(parse(package::pack(FORMAT, &manifest, &files).unwrap()).is_err(), "{rel:?} is never a package's path");
+            }
+            // A fullwidth dot, a one-dot leader, a zero-width space before
+            // the dot: APFS keeps each apart from `.source.json`, so each is
+            // a file of its own, installed as signed, Zeron's own beside it.
+            for rel in ["\u{ff0e}source.json", "\u{2024}source.json", "\u{200b}.source.json"] {
+                assert!(!folds(".source.json", rel), "{rel:?} is its own name on this disk");
+                let (result, dir, package) = install_files(&[(rel, br#"{ "kind": "store" }"#)]);
+                installs_as_signed(result, dir.path(), &package);
+            }
+        }
+
+        #[test]
+        fn what_is_installed_is_always_what_was_signed() {
+            // Every case above, at once: still refused, nothing left.
+            let (result, dir, _) = install_files(&[
+                ("a.luau", b"1"),
+                ("A.luau", b"2"),
+                ("caf\u{e9}.luau", b"3"),
+                ("cafe\u{301}.luau", b"4"),
+                ("Zeron-Plugin.json", b"{}"),
+            ]);
+            fails_closed(result, dir.path(), CHANGED);
+        }
+    }
+
     /// R23: an update was any package with another hash under the same key,
     /// so the author's key (or whoever holds it) could roll a plugin back to
     /// an older, vulnerable version.
