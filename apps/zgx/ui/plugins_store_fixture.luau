@@ -95,19 +95,12 @@ s.install = function(from: any): any
 end
 -- The consent window, as its own window's host shares it (src/plugins/
 -- consent.rs): shown over the page at its own size while it asks, as Zeron
--- opens it over the main window. Its answers are the host's.
+-- opens it over the main window, for what it says. (Its Allow and Decline
+-- are answered by that window's host alone, never by a main window's
+-- scripts, so none answers them here: src/plugins/grants.rs.)
 local consent = require("@screens/plugins/consent")
 local consent_shown = ui.shared("consent", { busy = false } :: any)
 ui.actions {
-	["plugins.decide"] = function(arg: any)
-		stub.note(`decide:{arg.id}:{tostring(arg.allow)}`)
-		local p = find(arg.id)
-		if p then
-			p.status = if arg.allow then "on" else "off"
-			publish()
-		end
-		consent_shown:set({ busy = false })
-	end,
 	["plugins.install_verified"] = function(arg: any)
 		stub.note(`install_verified:{arg.id}:{arg.hash}`)
 		consent_shown:set({ busy = false })
@@ -138,6 +131,9 @@ s.update = function(id: string, _device: string?, verified_only: boolean?): any
 			p.version = u.version
 			p.hash = `{id}-{u.version}`
 			p.status = "pending"
+			-- (Asking again only because it isn't verified, as the engine
+			-- says of it.)
+			p.nothing_new = true
 			p.update = nil
 			p.source = { kind = "store", id = id, publisher = "ada", verified = false, replaced = { version = from, verified = was_verified } }
 			publish()
@@ -236,6 +232,17 @@ ui.command {
 		p.status = "on"
 		p.allowed = p.permissions
 		p.ask = {}
+		publish()
+	end,
+}
+-- Focus timer waits for you again, asking for more than you allowed.
+ui.command {
+	id = "store.asks_more",
+	title = "Focus timer waits, asking for more than you allowed",
+	run = function()
+		local p = find("focus-timer")
+		p.status = "pending"
+		p.ask = { "clipboard" }
 		publish()
 	end,
 }
@@ -409,7 +416,10 @@ return ui.column {
 			border = 1,
 			border_color = "$zeron.settings.edge",
 			shadow = "$shadow.lg",
-			bg = "$background",
+			-- (Its own window's glass is over the desktop, not this page:
+			-- here, the app's solid surface, so the page doesn't show
+			-- through what it says.)
+			bg = "$zeron.menu.solid",
 			consent.View(),
 		},
 	}),

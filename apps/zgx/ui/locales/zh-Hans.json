@@ -3619,7 +3619,8 @@
         "held": "{version} 正在等待：它只接受已验证的更新。",
         "unverified": "有可用更新：{version}，尚未验证。",
         "held_plugin": "{version} 正在等待：这个插件只接受已验证的更新。",
-        "held_computer": "{version} 正在等待：这台电脑只接受已验证的更新。"
+        "held_computer": "{version} 正在等待：这台电脑只接受已验证的更新。",
+        "held_device": "{version} 正在等待：{device} 只接受已验证的更新。"
       },
       "unverified": "未验证",
       "from": "来自 {where}",
@@ -4118,7 +4119,10 @@
           "one": "{name}",
           "two": "{a} 和 {b}",
           "all_now": "你的所有插件：目前 {n} 个，以及以后发布的",
-          "more": "{a}、{b} 等 {n} 个"
+          "more": "{a}、{b} 等 {n} 个",
+          "every": "{list} 和 {last}",
+          "show_all": "全部显示",
+          "fewer": "收起"
         },
         "not_used_made": "尚未使用 · 创建于 {date}"
       },

@@ -820,6 +820,27 @@ test("an unverified update is said on its row, and its Update stages it for the 
 	expect(sheet).to_contain("Zeron hasn't verified 1.3.0 yet.")
 	expect(sheet).to_contain("The version you have, 1.2.0, was verified.")
 	expect(app:has('#fixture-consent-window >> role:button "Install 1.2.1 instead"')).to_be(true)
+	-- The row behind it says only why it waits, once: nothing it doesn't ask.
+	local page_tree = app:tree("#fixture-scroll")
+	expect(page_tree).never.to_contain("Asks for more than you allowed.")
+	local _, n = string.gsub(page_tree, "Zeron hasn't verified 1.3.0 yet.", "")
+	expect(n).to_be(1)
+end)
+
+-- One that does ask for more says so, as before.
+test("a waiting plugin that asks for more than was allowed says so on its row", function()
+	local app = page("Focus timer")
+	app:click('#store-offer >> role:button "Install"')
+	app:command("store.install_done")
+	app:command("store.allowed")
+	settle(app)
+	app:click('role:button "Back to Plugins"')
+	settle(app)
+	app:click('role:tab "Installed"')
+	settle(app)
+	app:command("store.asks_more")
+	settle(app)
+	expect(app:tree("#fixture-scroll")).to_contain("Asks for more than you allowed.")
 end)
 
 -- A verified update still takes one click, verified only.

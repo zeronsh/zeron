@@ -64,9 +64,32 @@ export type Owned = { id: string, name: string }
 
 -- A key's scope in words: all of yours, or the plugins it names (by name
 -- where they're yours; two by name, more by how many).
-local function scope_words(scope: any, plugins: { Owned }): string
+-- Which of yours a key publishes, by name ("A, B and 2 more"; `whole`:
+-- every one, "A, B, C and D"), or all of them.
+local function scope_names(scope: any, plugins: { Owned }): { string }
+	local names: { string } = {}
+	for _, id in (if type(scope) == "table" and type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do
+		local name = id
+		for _, p in plugins do
+			if p.id == id then
+				name = p.name
+			end
+		end
+		table.insert(names, name)
+	end
+	return names
+end
+
+local function scope_words(scope: any, plugins: { Owned }, whole: boolean?): string
 	if type(scope) ~= "table" or scope.all == true then
 		return ui.t("plugins.store.key.scope.all_now", { n = #plugins }):get()
+	end
+	if whole then
+		local names = scope_names(scope, plugins)
+		if #names > 2 then
+			local last = table.remove(names) :: string
+			return ui.t("plugins.store.key.scope.every", { list = table.concat(names, ui.t("plugins.words.list_sep"):get()), last = last }):get()
+		end
 	end
 	local names: { string } = {}
 	for _, id in (if type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do
@@ -92,6 +115,8 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 	end
 	-- "loading", "ready", or why not.
 	local phase = ui.use_state("loading")
+	-- The keys whose every plugin is shown by name, in place.
+	local whole_scope = ui.use_state({} :: { [string]: boolean })
 	local list = ui.use_state({} :: { any })
 	local making = ui.use_state(false)
 	local name = ui.use_state("")
@@ -219,10 +244,26 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 					ending,
 				}, " · ")
 			end,
-			-- Which of yours it publishes.
+			-- Which of yours it publishes, wrapping, never cut: past two, by
+			-- the first two and how many more, and every one in place with
+			-- the line's own link (a key's plugins are fixed once it's made).
 			detail = function(): string
-				return scope_words(now:get().scope, props.plugins())
+				return scope_words(now:get().scope, props.plugins(), whole_scope:get()[first.key] == true)
 			end,
+			detail_link = if type(first.scope) == "table" and first.scope.all ~= true and type(first.scope.plugins) == "table" and #first.scope.plugins > 2
+				then {
+					-- (Acting in place: a button.)
+					role = "button",
+					label = function(): string
+						return if whole_scope:get()[first.key] then ui.t("plugins.store.key.scope.fewer"):get() else ui.t("plugins.store.key.scope.show_all"):get()
+					end,
+					on_click = function()
+						local now_open = table.clone(whole_scope:peek())
+						now_open[first.key] = if now_open[first.key] then nil else true
+						whole_scope:set(now_open)
+					end,
+				}
+				else nil,
 			-- (About to end, the line is in the warning's ink, one status
 			-- line; only its "Ends…" once the line can be a rich one:
 			-- zgx-asks/rich-span-boundary-break.)

@@ -787,3 +787,42 @@ test("a row's badges are whole or absent: both, then Verified alone, then none, 
 	end
 	expect(`{seen.both} {seen.verified} {seen.none}`).to_be("true true true")
 end)
+
+-- A key granted to many plugins says which, never cut: one or two by name,
+-- past that the first two and how many more, and every one in place with
+-- the line's own Show all (wrapping inside the row), at any count to 50.
+test("a key's plugins are named whole at any count, every one shown in place with Show all", function()
+	local app = keys_page(function(a: any)
+		a:command("store_stub.wide_keys")
+	end)
+	local ID = "a-plugin-with-a-long-store-id-number-"
+	app:scroll(SCROLL, 1e6)
+	settle(app)
+	local tree = app:tree("#fixture-scroll")
+	-- Each line of names inside the page's column, wrapping (two lines past
+	-- one name), never wider.
+	for line in tree:gmatch(`[^\n]*text "{ID}[^\n]*`) do
+		local x, w = line:match(" (%-?[%d.]+),%-?[%d.]+ ([%d.]+)x")
+		expect(tonumber(x) + tonumber(w) <= 1000).to_be(true)
+	end
+	expect(tree).to_contain(`text "{ID}01" `)
+	-- Past two: the line's own Show all, on each such row alone.
+	expect(app:count('role:button "Show all"')).to_be(3)
+	-- Every one of the fifty, in place.
+	for _ = 1, 3 do
+		app:scroll(SCROLL, 1e6)
+		settle(app)
+		app:click('role:button "Show all"[1]')
+		settle(app)
+	end
+	-- (The whole sentence, its last two names joined by "and".)
+	local whole = app:tree("#fixture-scroll")
+	expect(whole).to_contain("Show fewer")
+	expect(app:has(`role:button "Show all"`)).to_be(false)
+	expect(app:count('role:button "Show fewer"')).to_be(3)
+	app:scroll(SCROLL, 1e6)
+	settle(app)
+	app:click('role:button "Show fewer"[3]')
+	settle(app)
+	expect(app:count('role:button "Show all"')).to_be(1)
+end)

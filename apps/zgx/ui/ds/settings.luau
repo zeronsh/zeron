@@ -717,7 +717,8 @@ export type RowProps = {
 	-- The sentence's own link, right after the detail's last word and
 	-- wrapping with it as one sentence does (Publish… after where a plugin
 	-- stands in the store): a link in the text's own ink, underlined.
-	detail_link: { label: string | Message, on_click: () -> () }?,
+	-- (`role`: "button" for one that acts in place, as a list shown whole.)
+	detail_link: { label: string | Message | () -> string, on_click: () -> (), role: ("link" | "button")? }?,
 }
 
 -- The least a row's name keeps beside its badges: past it, the last badge
@@ -907,7 +908,7 @@ function M.Row(props: RowProps): Node
 						color = "$text.tertiary",
 						wrap = true,
 					},
-					M.InlineLink { label = props.detail_link.label, on_click = props.detail_link.on_click },
+					M.InlineLink { label = props.detail_link.label, on_click = props.detail_link.on_click, role = props.detail_link.role },
 				}
 				else ui.row {
 					w_full = true,

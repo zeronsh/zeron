@@ -3619,7 +3619,8 @@
         "held": "{version} is waiting: it takes verified updates only.",
         "unverified": "Update available: {version}, not verified yet.",
         "held_plugin": "{version} is waiting: this plugin takes verified updates only.",
-        "held_computer": "{version} is waiting: this computer takes verified updates only."
+        "held_computer": "{version} is waiting: this computer takes verified updates only.",
+        "held_device": "{version} is waiting: {device} takes verified updates only."
       },
       "unverified": "Unverified",
       "from": "From {where}",
@@ -4118,7 +4119,10 @@
           "one": "{name}",
           "two": "{a} and {b}",
           "all_now": "All your plugins: {n} today, and any you publish later",
-          "more": "{a}, {b} and {n} more"
+          "more": "{a}, {b} and {n} more",
+          "every": "{list} and {last}",
+          "show_all": "Show all",
+          "fewer": "Show fewer"
         },
         "not_used_made": "Not used yet · made {date}"
       },

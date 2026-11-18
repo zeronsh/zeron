@@ -187,16 +187,17 @@ local function choose_file()
 end
 
 -- Whose rule holds a store plugin's unverified update back: its own
--- choice, or this computer's (the engine's `store_updates`, this device's
--- alone: another's isn't known here).
-local function held_by(it: any): ("plugin" | "computer")?
-	if device() ~= nil then
+-- choice, or the device's (the engine's `store_updates`: this device's,
+-- or the one shown's from its list; nil when its engine doesn't say).
+local function held_by(it: any): ("plugin" | "computer" | "device")?
+	local on = device()
+	local prefs: any = if on then state.remote:get().store_updates else state.store_updates:get()
+	if type(prefs) ~= "table" then
 		return nil
 	end
-	local prefs: any = state.store_updates:get()
 	local store_id = if type(it.source) == "table" then it.source.id else nil
-	local own = if type(prefs) == "table" and type(prefs.plugins) == "table" and type(store_id) == "string" then prefs.plugins[store_id] else nil
-	return if own == "verified" then "plugin" else "computer"
+	local own = if type(prefs.plugins) == "table" and type(store_id) == "string" then prefs.plugins[store_id] else nil
+	return if own == "verified" then "plugin" elseif on then "device" else "computer"
 end
 
 local function update(id: string, name: string)
@@ -485,7 +486,9 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 				return publish.summary(it.id) or ui.t("plugins.store.summary.unknown"):get()
 			end
 			-- (And a store version running that the store hasn't verified.)
-			return words.grants(it) or words.update(it, held_by(it)) or words.store_unverified(it)
+			-- (Waiting for nothing new, its line under the name says it.)
+			return words.grants(it) or words.update(it, held_by(it), device_name())
+				or (if it.status == "pending" and it.nothing_new == true then nil else words.store_unverified(it))
 		end,
 		detail_action = if publishing then nil else UpdateLink { now = now },
 		-- (Publish… is its sentence's own link: right after its last word,

@@ -941,6 +941,28 @@ ui.command {
 		notes = false
 	end,
 }
+-- Keys granted to 1, 2, 3, 14 and 50 of yours, their ids store ids at
+-- full length (40): what a row says of each, and of every one in place.
+ui.command {
+	id = "store_stub.wide_keys",
+	title = "Store: keys for 1, 2, 3, 14 and 50 plugins",
+	run = function()
+		local list = {}
+		for i, n in { 1, 2, 3, 14, 50 } do
+			local ids = {}
+			for j = 1, n do
+				table.insert(ids, string.sub(string.format("a-plugin-with-a-long-store-id-number-%02d", j), 1, 40))
+			end
+			table.insert(list, {
+				key = string.sub(string.format("w%02dAbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_", i), 1, 43),
+				name = `For {n}`,
+				scope = { plugins = ids },
+				created_at = NOW - i * DAY,
+			})
+		end
+		keys = list
+	end,
+}
 ui.command {
 	id = "store_stub.many_keys",
 	title = "Store: ten deploy keys",

@@ -95,7 +95,12 @@ M.waiting = ui.computed(function(): number
 end)
 
 -- Another device's, as the host watches it.
-M.remote = ui.shared("plugins.remote", { state = "idle", list = {} } :: { device: string?, state: string, list: { Item } })
+-- (`store_updates`: which updates that device's store plugins take, as
+-- its list says, when its engine says.)
+M.remote = ui.shared(
+	"plugins.remote",
+	{ state = "idle", list = {} } :: { device: string?, state: string, list: { Item }, store_updates: { device: string?, plugins: { [string]: string }? }? }
+)
 -- Which updates the store's plugins take on this device, as the engine
 -- keeps it: the device's ("newest", the default, or "verified") and each
 -- plugin's own, where it has one (nil: as the device).

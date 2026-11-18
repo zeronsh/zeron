@@ -543,6 +543,11 @@ function M.about(item: any): string
 	elseif item.status == "tampered" then
 		return s("plugins.words.about.tampered")
 	elseif item.status == "pending" then
+		-- (Waiting only because the store hasn't verified this version, the
+		-- engine says (`nothing_new`): that, and nothing it doesn't ask.)
+		if item.nothing_new == true and M.store_unverified(item) then
+			return M.store_unverified(item) :: string
+		end
 		if item.allowed and #item.allowed > 0 then
 			return s("plugins.words.about.asks_more")
 		end
@@ -678,15 +683,18 @@ end
 -- A store update the store hasn't verified says so on the row, held or
 -- not, so Update is never a surprise; held (verified updates only, never
 -- taken unasked), whose rule that is: `whose` "plugin" (its own choice),
--- "computer" (it follows this computer's), or nil (another device's: not
--- known here).
-function M.update(item: any, whose: ("plugin" | "computer")?): string?
+-- "computer" (it follows this computer's), "device" (it follows the
+-- device shown's, `device` its name), or nil (not known).
+function M.update(item: any, whose: ("plugin" | "computer" | "device")?, device: string?): string?
 	local update = item.update
 	if type(update) ~= "table" or item.builtin then
 		return nil
 	end
 	local version = if type(update.version) == "string" and update.version ~= "" then update.version else nil
 	if update.held == true and version then
+		if whose == "device" and device and device ~= "" then
+			return s("plugins.words.update.held_device", { version = version, device = device })
+		end
 		local key = if whose == "plugin" then "held_plugin" elseif whose == "computer" then "held_computer" else "held"
 		return s(`plugins.words.update.{key}`, { version = version })
 	end

@@ -28,18 +28,24 @@ pub struct Remote {
     target: RefCell<Option<String>>,
     state: Cell<&'static str>,
     items: RefCell<Vec<Item>>,
+    /// Which updates the device's store plugins take (its list's
+    /// `store_updates`, as this device's own), for its held lines.
+    store_updates: RefCell<Json>,
     watch: RefCell<Option<Watch>>,
     /// Bumped each time it's asked to look: answers to an older ask go.
     generation: Cell<u64>,
 }
 
-fn value(device: Option<&str>, state: &str, items: &[Item]) -> Value {
+fn value(device: Option<&str>, state: &str, items: &[Item], store_updates: &Json) -> Value {
     let mut fields = vec![
         ("state", Value::from(state)),
         ("list", vlist(items.iter().map(|i| json_value(&i.json)).collect())),
     ];
     if let Some(device) = device {
         fields.push(("device", Value::from(device)));
+    }
+    if store_updates.is_object() {
+        fields.push(("store_updates", json_value(store_updates)));
     }
     Value::record(fields)
 }
@@ -58,13 +64,14 @@ impl Remote {
             target: RefCell::default(),
             state: Cell::new("idle"),
             items: RefCell::default(),
+            store_updates: RefCell::new(Json::Null),
             watch: RefCell::default(),
             generation: Cell::new(0),
         }
     }
 
     pub fn initial() -> Value {
-        value(None, "idle", &[])
+        value(None, "idle", &[], &Json::Null)
     }
 
     pub fn target(&self) -> Option<String> {
@@ -80,7 +87,7 @@ impl Remote {
     }
 
     fn publish(&self) {
-        self.shared.set(value(self.target.borrow().as_deref(), self.state.get(), &self.items.borrow()));
+        self.shared.set(value(self.target.borrow().as_deref(), self.state.get(), &self.items.borrow(), &self.store_updates.borrow()));
     }
 
     /// The device's list (`{ dirs, plugins }`), in name order as this
@@ -94,6 +101,8 @@ impl Remote {
             .collect();
         list.sort_by_key(|a| a.name().to_lowercase());
         *self.items.borrow_mut() = list;
+        // (A frame without it, an older engine's: none known.)
+        *self.store_updates.borrow_mut() = if frame["store_updates"].is_object() { frame["store_updates"].clone() } else { Json::Null };
         self.state.set("ready");
     }
 
@@ -118,6 +127,7 @@ pub fn retarget(bridge: &Rc<Bridge>, target: Option<String>) {
     if !same {
         *r.target.borrow_mut() = target.clone();
         r.items.borrow_mut().clear();
+        *r.store_updates.borrow_mut() = Json::Null;
         r.state.set(if target.is_some() { "loading" } else { "idle" });
         r.publish();
         if let Some(c) = &*bridge.consent.borrow() {
@@ -239,6 +249,18 @@ pub fn id_and_device(arg: &Value) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Another device's list says which updates its store plugins take,
+    /// as this device's does: its held lines can say whose rule it is.
+    #[test]
+    fn another_device_s_frame_carries_its_update_choice() {
+        let prefs = json!({ "device": "verified", "plugins": { "focus-timer": "newest" } });
+        let shown = value(Some("devbox"), "ready", &[], &prefs);
+        let said = shown.field("store_updates").map(|v| format!("{v:?}")).unwrap_or_default();
+        assert!(said.contains("verified") && said.contains("focus-timer"), "{shown:?}");
+        // (An older engine's frame, without it: none said.)
+        assert!(value(Some("devbox"), "ready", &[], &Json::Null).field("store_updates").is_none());
+    }
 
     #[test]
     fn calls_are_addressed_only_to_another_device() {
