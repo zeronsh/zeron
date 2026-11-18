@@ -77,6 +77,19 @@ pub struct State {
     pub without_bytes: bool,
     /// Answer the next package download with a 302 to this URL.
     pub redirect_package: Option<String>,
+    /// Fields laid over every card, page and plugin of yours it answers (a
+    /// hostile store's words).
+    pub card_extra: Value,
+}
+
+/// `card` with the store's `card_extra` laid over it.
+fn carded(state: &State, mut card: Value) -> Value {
+    if let (Some(card), Some(extra)) = (card.as_object_mut(), state.card_extra.as_object()) {
+        for (k, v) in extra {
+            card.insert(k.clone(), v.clone());
+        }
+    }
+    card
 }
 
 /// A version's package size as the store's records give it.
@@ -270,7 +283,7 @@ impl FakeStore {
                     .filter(|(_, p)| !featured_only || p.featured)
                     .filter_map(|(id, p)| {
                         let v = p.versions.iter().rev().find(|v| v.status == "approved")?;
-                        Some(json!({ "id": id, "name": id, "version": v.version, "author": p.author(), "featured": p.featured }))
+                        Some(carded(&state, json!({ "id": id, "name": id, "version": v.version, "author": p.author(), "featured": p.featured })))
                     })
                     .collect();
                 // (One page: the total is what it lists.)
@@ -280,12 +293,12 @@ impl FakeStore {
                 let state = self.state.lock().unwrap();
                 let Some(p) = state.plugins.get(*id) else { return not_found() };
                 let Some(v) = p.versions.iter().rev().find(|v| v.status == "approved") else { return not_found() };
-                json_reply(200, json!({
+                json_reply(200, carded(&state, json!({
                     "id": id, "name": id, "version": v.version,
                     "author": p.author(),
                     "engines": { "zeron": v.engines },
                     "package": { "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v), "key": v.key },
-                }))
+                })))
             }
             ("GET", ["store", "v1", "plugins", id, "versions"]) => {
                 let state = self.state.lock().unwrap();
@@ -429,13 +442,13 @@ impl FakeStore {
                     .plugins
                     .iter()
                     .filter(|(id, p)| p.owner == owner && scope.as_deref().is_none_or(|s| s == id.as_str()))
-                    .map(|(id, p)| json!({
+                    .map(|(id, p)| carded(&state, json!({
                         "id": id, "author": p.author(),
                         "versions": p.versions.iter().map(|v| json!({
                             "version": v.version, "status": v.status, "yanked": v.status == "yanked",
                             "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v), "key": v.key,
                         })).collect::<Vec<_>>(),
-                    }))
+                    })))
                     .collect();
                 json_reply(200, json!({ "plugins": plugins }))
             }

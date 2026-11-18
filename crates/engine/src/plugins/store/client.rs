@@ -20,6 +20,7 @@ use serde_json::Value;
 
 use super::deploy_key::DeployKey;
 use crate::plugins::install::{self, failure};
+use crate::plugins::listing;
 use crate::plugins::package::MAX_PACKAGE_BYTES;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -514,7 +515,7 @@ fn object(bytes: &[u8]) -> Result<Value, String> {
 fn refusal(status: u16, body: &[u8]) -> String {
     let value: Value = serde_json::from_slice(body).unwrap_or_default();
     let word = value["error"].as_str().filter(|w| !w.is_empty() && w.len() <= 64 && w.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
-    let message: String = value["message"].as_str().unwrap_or("").chars().filter(|c| !c.is_control()).take(500).collect();
+    let message: String = value["message"].as_str().unwrap_or("").chars().filter(|c| !listing::unseen_char(*c)).take(500).collect();
     match (word, status) {
         // The body changed on its way (a proxy, a broken connection): sending
         // it again is the fix.

@@ -297,6 +297,32 @@ async fn a_package_is_read_no_further_than_its_record_says() {
 }
 
 #[tokio::test]
+async fn a_hostile_store_s_words_reach_no_dialog_with_controls_or_direction_marks() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "approved", "");
+    let hostile = "Focus\u{202e}draoB\u{1b}[2J\nok\u{200b}";
+    store.state.lock().unwrap().card_extra = json!({
+        "name": hostile, "summary": hostile, "description": hostile, "license": hostile,
+        "author": { "username": hostile, "badges": [] }, "categories": [hostile], "keywords": [hostile],
+    });
+    let unseen = |text: &str| text.chars().any(zeron_engine::plugins::listing::unseen_char);
+    let clean = |card: &Value| {
+        ["name", "summary", "description", "license"].iter().all(|k| card[k].as_str().is_some_and(|t| !unseen(t) && t.contains("draoB")))
+            && !unseen(card["author"]["username"].as_str().unwrap())
+            && !unseen(card["categories"][0].as_str().unwrap())
+            && !unseen(card["keywords"][0].as_str().unwrap())
+    };
+    let d = device(&store, Some("ada"));
+    let found = d.call(methods::STORE_SEARCH, json!({})).await.unwrap();
+    assert!(clean(&found["items"][0]), "{found}");
+    let page = d.call(methods::STORE_PLUGIN, json!({ "id": "focus", "versions": true })).await.unwrap();
+    assert!(clean(&page), "{page}");
+    let mine = d.call(methods::STORE_MY_PLUGINS, json!({})).await.unwrap();
+    assert!(clean(&mine["plugins"][0]), "{mine}");
+}
+
+#[tokio::test]
 async fn a_store_answer_that_redirects_is_never_followed() {
     let store = FakeStore::start().await;
     let elsewhere = FakeStore::start().await;

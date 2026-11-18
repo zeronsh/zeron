@@ -164,6 +164,36 @@ fn invisible(c: char) -> bool {
     matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}')
 }
 
+/// A store card or plugin page as this device passes it on: its one-line
+/// words (name, summary, description, license, the author's username,
+/// categories, keywords) without control or format characters, and its
+/// versions' notes without any but line breaks. The edge refuses them in a
+/// listing; a hostile or broken answer still can't draw them in a dialog.
+fn clean_card(card: &mut Value) {
+    let one_line = |text: &str| text.chars().filter(|c| !listing::unseen_char(*c)).collect::<String>();
+    let Some(object) = card.as_object_mut() else { return };
+    for key in ["name", "summary", "description", "license"] {
+        if let Some(Value::String(text)) = object.get_mut(key) {
+            *text = one_line(text);
+        }
+    }
+    if let Some(Value::String(name)) = object.get_mut("author").and_then(|a| a.get_mut("username")) {
+        *name = one_line(name);
+    }
+    for key in ["categories", "keywords"] {
+        for item in object.get_mut(key).and_then(Value::as_array_mut).into_iter().flatten() {
+            if let Value::String(text) = item {
+                *text = one_line(text);
+            }
+        }
+    }
+    for version in object.get_mut("versions").and_then(Value::as_array_mut).into_iter().flatten() {
+        if let Some(Value::String(text)) = version.get_mut("notes") {
+            *text = text.chars().filter(|c| *c == '\n' || !listing::unseen_char(*c)).collect();
+        }
+    }
+}
+
 /// Words from the store, made safe to keep and show: one line, no control
 /// or direction-changing characters, not too long.
 fn plain(text: &str, max: usize) -> String {
@@ -253,6 +283,7 @@ impl Plugins {
                 self.rescan().await;
                 if let Some(items) = reply.get_mut("items").and_then(Value::as_array_mut) {
                     for item in items {
+                        clean_card(item);
                         if let Some(installed) = item["id"].as_str().and_then(|id| self.installed_here(id)) {
                             item["installed"] = installed;
                         }
@@ -269,6 +300,7 @@ impl Plugins {
                     let (versions, _) = client.versions(&p.id, &caller).await.map_err(failed)?;
                     reply["versions"] = versions.get("versions").cloned().unwrap_or(json!([]));
                 }
+                clean_card(&mut reply);
                 let zeron = match p.for_zeron.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
                     Some(v) => Version::parse(v).map_err(failed)?,
                     None => version::zeron(),
@@ -361,7 +393,11 @@ impl Plugins {
             }
             methods::STORE_MY_PLUGINS => {
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
-                RpcReply::value(&client.my_plugins(&caller).await.map_err(failed)?)
+                let mut reply = client.my_plugins(&caller).await.map_err(failed)?;
+                for plugin in reply.get_mut("plugins").and_then(Value::as_array_mut).into_iter().flatten() {
+                    clean_card(plugin);
+                }
+                RpcReply::value(&reply)
             }
             methods::STORE_VERSION_ACTION => {
                 let p: VersionActionParams = parse_params(params)?;
