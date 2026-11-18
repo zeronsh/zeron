@@ -288,6 +288,8 @@ M.View = ui.component(function(props: {
 	-- working rings' steps.
 	local ptick = ui.use_state(0)
 	local status_tick = ui.use_state(0)
+	-- Each marker's own title's version (a rename wakes that marker alone).
+	local title_versions: { [string]: State<number> } = {}
 	local run = ui.use_state(0)
 	local woke_at = 0
 	local holding = false
@@ -458,11 +460,17 @@ M.View = ui.component(function(props: {
 			-- live push): the status layer drawn again, nothing else; a
 			-- name, a fade, a colour, a message in flight: the rest too.
 			local marks, colours = #next_m.arcs ~= #fmodel.arcs, false
+			-- (Names alone: the drawing again and each renamed node's own
+			-- label, not every node's place and label.)
+			local renamed: { string } = {}
 			fmodel.arcs = next_m.arcs
 			for i, n in next_m.nodes do
 				local o = fmodel.nodes[i]
-				if o.title ~= n.title or o.fade ~= n.fade or o.provider ~= n.provider then
+				if o.fade ~= n.fade or o.provider ~= n.provider then
 					marks = true
+				end
+				if o.title ~= n.title then
+					table.insert(renamed, n.id)
 				end
 				if o.hue ~= n.hue or o.device ~= n.device then
 					colours = true
@@ -473,6 +481,16 @@ M.View = ui.component(function(props: {
 			if colours or marks then
 				version:set(version:peek() + 1)
 				tick:set(tick:peek() + 1)
+			elseif #renamed > 0 then
+				ui.batch(function()
+					for _, id in renamed do
+						local v = title_versions[id]
+						if v then
+							v:set(v:peek() + 1)
+						end
+					end
+					tick:set(tick:peek() + 1)
+				end)
 			end
 			status_tick:set(status_tick:peek() + 1)
 			return
@@ -1825,6 +1843,13 @@ M.View = ui.component(function(props: {
 		return out
 	end)
 	local function marker(item: any): Node
+		local title_v = ui.use_state(0)
+		title_versions[item.id] = title_v
+		ui.on_cleanup(function()
+			if title_versions[item.id] == title_v then
+				title_versions[item.id] = nil
+			end
+		end)
 		local function at(): (number, number)
 			version:get()
 			geo:get()
@@ -1839,6 +1864,7 @@ M.View = ui.component(function(props: {
 			class = `orch-force-node orch-force-{item.kind}`,
 			label = function(): string
 				version:get()
+				title_v:get()
 				local i = fmodel.index[item.id]
 				local n = i and fmodel.nodes[i]
 				local t = if n then n.title else ""
