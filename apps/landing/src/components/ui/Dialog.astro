@@ -56,6 +56,8 @@ const { id, title, tone = "default" } = Astro.props;
   h2 { font-size: 17px; font-weight: 600; line-height: 1.35; letter-spacing: -0.01em; }
   .body { margin-top: 8px; font-size: 14.5px; line-height: 1.55; color: var(--text-2); }
   .body :global(p + p) { margin-top: 8px; }
+  /* The answer (a form) a step below the words that ask. */
+  .body :global(p + form) { margin-top: 20px; }
   .body :global(.answers) { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 24px; }
   @media (prefers-reduced-motion: no-preference) {
     .dialog[open] { animation: dialog-in 0.18s var(--ease-out); }

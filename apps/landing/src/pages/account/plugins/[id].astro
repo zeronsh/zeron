@@ -73,7 +73,7 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
           <section aria-labelledby="versions-heading" class="block">
             <h2 id="versions-heading">Versions</h2>
             <div class="table-wrap">
-              <table>
+              <table class="stack-table">
                 <thead>
                   <tr>
                     <th scope="col">Version</th>
@@ -115,7 +115,7 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
                             )}
                           </div>
                         </td>
-                        <td class="when">
+                        <td class="when" data-label="Submitted">
                           <time datetime={new Date(v.published_at).toISOString()} title={date(v.published_at)}>{ago(v.published_at)}</time>
                         </td>
                         <td class="do">
@@ -154,7 +154,7 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
               <p class="none">No deploy keys yet.</p>
             ) : (
               <div class="table-wrap">
-                <table>
+                <table class="stack-table">
                   <thead>
                     <tr>
                       <th scope="col">Name</th>
@@ -175,9 +175,9 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
                             {revoked && <Badge size="sm">Revoked</Badge>}
                             {expired && <Badge size="sm">Expired</Badge>}
                           </th>
-                          <td><code title={k.key}>{short(k.key)}</code></td>
-                          <td class="when">{k.last_used_at ? ago(k.last_used_at) : "Never"}</td>
-                          <td class="when">{revoked ? `Revoked ${ago(k.revoked_at!)}` : k.expires_at ? date(k.expires_at) : "Never"}</td>
+                          <td data-label="Key"><code title={k.key}>{short(k.key)}</code></td>
+                          <td class="when" data-label="Last used">{k.last_used_at ? ago(k.last_used_at) : "Never"}</td>
+                          <td class="when" data-label="Expires">{revoked ? `Revoked ${ago(k.revoked_at!)}` : k.expires_at ? date(k.expires_at) : "Never"}</td>
                           <td class="do">
                             {!revoked && (
                               <a class="do-link danger" href={`${here}/keys/${encodeURIComponent(k.key)}`} data-dialog={`revoke-${k.key}`}>

@@ -44,7 +44,7 @@ const ACTIONS: Record<string, string> = {
         <p class="quiet">Nothing yet.</p>
       ) : (
         <div class="table-wrap">
-          <table>
+          <table class="stack-table">
             <thead>
               <tr>
                 <th scope="col">When</th>
@@ -57,7 +57,7 @@ const ACTIONS: Record<string, string> = {
               {entries.map((e) => (
                 <tr>
                   <td class="when"><time datetime={new Date(e.at).toISOString()}>{dateTime(e.at)}</time></td>
-                  <td>{e.actor.username ? `@${e.actor.username}` : e.actor.user_id}</td>
+                  <td data-label="By">{e.actor.username ? `@${e.actor.username}` : e.actor.user_id}</td>
                   <td>
                     {ACTIONS[e.action] ?? e.action}{" "}
                     {e.plugin_id && (

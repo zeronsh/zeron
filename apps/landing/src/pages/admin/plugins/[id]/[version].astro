@@ -334,7 +334,7 @@ const failing = checks.filter((c) => c.level === "fail").length;
               <Dialog id="reject" title={`Reject ${s.plugin.name} ${version}?`} tone="danger">
                 <p>The author reads your reason and your words, in Zeron and on the web. They can publish a new version.</p>
                 <ConfirmForm action={`${here}/reject`} csrf={session.csrf} confirm="Reject" tone="danger" mode="dialog" back={here}>
-                  <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} visibleLabel />
+                  <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} field />
                   <Field name="message" label="For the author" multiline required maxlength={2000} hint="Say what to change, plainly. They'll read it as you write it." />
                 </ConfirmForm>
               </Dialog>

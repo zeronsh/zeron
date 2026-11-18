@@ -49,7 +49,7 @@ const href = (s: View, c?: string) => `/admin/plugins${s === "pending" && !c ? "
         </div>
       ) : (
         <div class="table-wrap">
-          <table>
+          <table class="stack-table">
             <thead>
               <tr>
                 <th scope="col">Plugin</th>
@@ -69,8 +69,8 @@ const href = (s: View, c?: string) => `/admin/plugins${s === "pending" && !c ? "
                     </a>
                     <span class="sub">{item.base ? `Update from ${item.base}` : "First listing"} · <code>{item.id}</code></span>
                   </th>
-                  <td>{item.publisher.username ? `@${item.publisher.username}` : <span class="faint">No username</span>}</td>
-                  <td class="when">
+                  <td data-label="By">{item.publisher.username ? `@${item.publisher.username}` : <span class="faint">No username</span>}</td>
+                  <td class="when" data-label="Submitted">
                     <time datetime={new Date(item.submitted_at).toISOString()} title={date(item.submitted_at)}>{ago(item.submitted_at)}</time>
                   </td>
                   <td>

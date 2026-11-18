@@ -23,7 +23,8 @@ const { title, action, csrf, confirm, tone, back } = Astro.props;
 </section>
 
 <style>
-  .ask { display: grid; gap: 12px; max-width: 520px; margin: clamp(24px, 6vw, 72px) auto 0; padding: 28px; background: var(--menu-solid); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--border), var(--dialog-shadow); }
+  /* A card in the page (the site's), where the dialog would have floated. */
+  .ask { display: grid; gap: 12px; max-width: 520px; margin: clamp(24px, 6vw, 72px) auto 0; padding: 28px; background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
   .ask h1 { font-size: 20px; letter-spacing: -0.015em; }
   .words { font-size: 14.5px; line-height: 1.55; color: var(--text-2); }
   .words :global(p + p) { margin-top: 8px; }

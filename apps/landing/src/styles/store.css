@@ -100,6 +100,8 @@
 /* The store's pages open a little closer to the nav than the home page's sections. */
 .store { padding-block: clamp(32px, 5vw, 64px) 0; }
 .store.tool { padding-top: 16px; }
+/* A tool page's title is a heading over work, not a headline. */
+.store.tool h1 { font-size: clamp(26px, 2.8vw, 32px); letter-spacing: -0.025em; }
 .store h1 { font-size: clamp(30px, 3.6vw, 44px); font-weight: 600; line-height: 1.08; letter-spacing: -0.032em; }
 
 /* Numbers that change hold still. */
@@ -168,6 +170,21 @@
 .readme .footnotes ol { margin-top: 0; }
 .readme sup { font-size: 0.75em; line-height: 0; }
 .readme sup a { text-decoration: none; }
+
+/* A table on a phone: each row stacked, its first cell and its action
+   (.do) on the first line, the rest under them; the column heads go to
+   screen readers only (each row still reads in order). */
+@media (max-width: 640px) {
+  .store .stack-table, .store .stack-table tbody { display: block; }
+  .store .stack-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .store .stack-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 6px 12px; padding: 14px 16px; }
+  .store .stack-table tr + tr { border-top: 1px solid var(--line); }
+  /* (Over the pages' own cell rules, which are scoped and so outrank this: in this layout a cell has no padding or rule of its own.) */
+  .store .stack-table :is(th, td) { display: block; grid-column: 1 / -1; padding: 0 !important; border: 0 !important; min-width: 0; text-align: left; }
+  .store .stack-table tr > :first-child { grid-column: 1; }
+  .store .stack-table tr > .do { grid-column: 2; grid-row: 1; text-align: right; }
+  .store .stack-table [data-label]::before { content: attr(data-label) " "; color: var(--text-3); }
+}
 
 /* What only someone without a script needs (a choice's Go button). */
 @media (scripting: enabled) {

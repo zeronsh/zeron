@@ -10,15 +10,17 @@ interface Props {
   value?: string;
   /** Shows its label beside it, not only to screen readers. */
   visibleLabel?: boolean;
+  /** A field in a form: its label above it, the field's well, the form's width (as Field). */
+  field?: boolean;
   /** The form is sent as soon as a choice is made (with a script; else its button). */
   autosubmit?: boolean;
   id?: string;
 }
-const { name, label, options, value, visibleLabel = false, autosubmit = false, id } = Astro.props;
+const { name, label, options, value, visibleLabel = false, field = false, autosubmit = false, id } = Astro.props;
 ---
 
-<label class:list={["select", { inline: visibleLabel }]}>
-  <span class:list={[visibleLabel ? "caption" : "sr-only"]}>{label}</span>
+<label class:list={["select", { inline: visibleLabel, field }]}>
+  <span class:list={[field ? "field-label" : visibleLabel ? "caption" : "sr-only"]}>{label}</span>
   <span class="box">
     <select name={name} id={id} data-autosubmit={autosubmit ? "" : undefined}>
       {options.map((o) => <option value={o.value} selected={o.value === value}>{o.label}</option>)}
@@ -50,4 +52,12 @@ const { name, label, options, value, visibleLabel = false, autosubmit = false, i
   select:active { background: var(--secondary-active); }
   select:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 80%, white); outline-offset: 2px; }
   option { color: var(--text); background: var(--menu-solid); }
+
+  /* As a form's field: the label over it, cut into the page like Field's. */
+  .field { display: grid; gap: 6px; }
+  .field-label { font-size: 13px; font-weight: 500; color: var(--text); }
+  .field .box { display: flex; }
+  .field select { width: 100%; height: 36px; font-weight: 400; background: var(--field-bg); box-shadow: inset 0 0 0 1px var(--field-edge); transition: background-color 0.12s, box-shadow 0.12s; }
+  .field select:hover { background: var(--field-hover); box-shadow: inset 0 0 0 1px var(--field-edge-hover); }
+  .field select:focus-visible { outline: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 80%, white), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 </style>

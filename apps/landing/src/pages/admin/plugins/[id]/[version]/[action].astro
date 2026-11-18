@@ -46,7 +46,7 @@ const ask = ASK[action];
       {
         action === "reject" && (
           <>
-            <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} visibleLabel />
+            <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} field />
             <Field name="message" label="For the author" multiline required maxlength={2000} hint="Say what to change, plainly. They'll read it as you write it." />
           </>
         )
