@@ -2,9 +2,11 @@
 // Six states, six tones, none shared: in review (info), approved (success),
 // not approved (warning: the author's to fix), withdrawn (neutral), no new
 // installs (accent), taken down (danger).
-import type { Tone } from "../../components/ui/Badge.astro";
 import type { Listing, PluginStatus, VersionInfo } from "./types.ts";
 import { statusWords } from "./words.ts";
+
+/** A badge's tone: its ink on its wash (app.css .badge, by toneClass). */
+export type Tone = "neutral" | "accent" | "info" | "success" | "warning" | "danger";
 
 export function versionState(v: Pick<VersionInfo, "status" | "review">): { label: string; tone: Tone; about: string } {
   switch (v.status) {

@@ -2,9 +2,18 @@
 // "/" to the search; the list as a drawer on a phone; and, on a public page
 // (the same for everyone, so drawn without you), who you are at the list's
 // foot and the staff's group, read from your session once the page is in.
-import "./store.ts";
+// (A module: its names are its own.)
+export {};
 
 document.documentElement.classList.add("js");
+
+// A form whose fields are all at their defaults sends no empty values, so
+// the address it opens stays short ("/plugins/all?sort=new", not "q=&sort=new").
+for (const form of document.querySelectorAll<HTMLFormElement>("form[data-tidy]")) {
+  form.addEventListener("formdata", (event) => {
+    for (const [name, value] of [...event.formData.entries()]) if (value === "") event.formData.delete(name);
+  });
+}
 
 const sidebar = document.querySelector<HTMLElement>(".sidebar");
 const opener = document.querySelector<HTMLAnchorElement>("[data-drawer-open]");
