@@ -66,9 +66,11 @@ export type Props = {
 	track: ((block: Ref) -> () -> ())?,
 	-- A document's own (a file's preview): what a picture's `src` shows
 	-- from (a file `ui.image` loads), or nil while it can't (its alt text
-	-- shows); a picture opens in the lightbox. Without it, pictures are
-	-- their alt text (a reply's).
-	image: ((src: string) -> string?)?,
+	-- shows); a picture opens in the lightbox. `false`: never one here (a
+	-- store README's picture from the web): drawn as its link, as a
+	-- reply's picture it won't show is. Without it, pictures are their alt
+	-- text (a reply's).
+	image: ((src: string) -> (string | false)?)?,
 	-- The size a picture is asked to show at, in points (an HTML `<img>`'s
 	-- width and height, a 2x picture's half): never larger than that, the
 	-- column still the limit. Without it, a picture's own size.
@@ -279,7 +281,7 @@ end
 -- (`tasks`: each task item's place among them, from the latest parse.)
 type Ctx = {
 	veil: Veil?,
-	image: ((src: string) -> string?)?,
+	image: ((src: string) -> (string | false)?)?,
 	image_size: ((src: string) -> (number?, number?))?,
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Links.Entry }?)?,
@@ -1599,14 +1601,20 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 		-- A document's picture: at its own size, never past the column; a
 		-- click looks at it whole.
 		local resolve, wanted = ctx.image, b.src
+		-- (What the resolver refuses: a key no file is, as its link.)
+		local REFUSED = "\0link"
 		return ui.div {
 			class = "md-image",
 			min_w = 0,
 			ui.presence(function(): string
-			return resolve(wanted) or ""
+			local got = resolve(wanted)
+			return if got == false then REFUSED else (got or "")
 		end, function(src: string): Node
 			if src == "" then
 				return alt
+			elseif src == REFUSED then
+				local words = if b.alt ~= "" then b.alt else (string.match(wanted, "([^/]+)$") or wanted)
+				return runs({ { x = words, a = wanted } :: any }, nil, ctx)
 			end
 			local name = if b.alt ~= "" then b.alt else (string.match(wanted, "([^/]+)$") or wanted)
 			local w, h = nil :: number?, nil :: number?

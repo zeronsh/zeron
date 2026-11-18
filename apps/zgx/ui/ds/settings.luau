@@ -325,8 +325,49 @@ export type EachListOptions = {
 	text: ((item: any) -> string)?,
 }
 
-function M.EachList(list: State<{ any }>, row: (item: any, i: State<number>, now: State<any>) -> Node, opts: EachListOptions): Node
+-- `EachList`'s rows alone, for a card of the caller's (a Catalog's,
+-- under its search): the same list, hairlines and building of only what
+-- shows. `wash`: each row washed edge to edge under the pointer
+-- (`CatalogRow`), as a Catalog's rows are.
+export type ListRowsOptions = EachListOptions & { wash: boolean? }
+
+function M.ListRows(list: State<{ any }>, row: (item: any, i: State<number>, now: State<any>) -> Node, opts: ListRowsOptions): Node
 	local text = opts.text
+	return ui.list {
+		data = list,
+		key = opts.key,
+		heights = function(): { number }
+			local out: { number } = {}
+			for i, item in list:get() do
+				out[i] = opts.height(item) + (if i > 1 then 1 else 0)
+			end
+			return out
+		end,
+		row_text = if text
+			then function(i: number): string
+				local item = list:peek()[i]
+				return if item ~= nil then text(item) else ""
+			end
+			else nil,
+		w_full = true,
+		virtualize = "ancestor",
+		row = function(item: any, i: State<number>, now: State<any>): Node
+			local made = row(item, i, now)
+			return ui.column {
+				w_full = true,
+				ui.show(
+					function(): boolean
+						return i:get() > 1
+					end,
+					M.Rule()
+				),
+				if opts.wash then CatalogRow { row = made } else made,
+			}
+		end,
+	}
+end
+
+function M.EachList(list: State<{ any }>, row: (item: any, i: State<number>, now: State<any>) -> Node, opts: EachListOptions): Node
 	return ui.show(
 		function(): boolean
 			return #list:get() > 0
@@ -338,37 +379,7 @@ function M.EachList(list: State<{ any }>, row: (item: any, i: State<number>, now
 			border = 1,
 			border_color = "$zeron.settings.edge",
 			overflow = "hidden",
-			ui.list {
-				data = list,
-				key = opts.key,
-				heights = function(): { number }
-					local out: { number } = {}
-					for i, item in list:get() do
-						out[i] = opts.height(item) + (if i > 1 then 1 else 0)
-					end
-					return out
-				end,
-				row_text = if text
-					then function(i: number): string
-						local item = list:peek()[i]
-						return if item ~= nil then text(item) else ""
-					end
-					else nil,
-				w_full = true,
-				virtualize = "ancestor",
-				row = function(item: any, i: State<number>, now: State<any>): Node
-					return ui.column {
-						w_full = true,
-						ui.show(
-							function(): boolean
-								return i:get() > 1
-							end,
-							M.Rule()
-						),
-						row(item, i, now),
-					}
-				end,
-			},
+			M.ListRows(list, row, opts),
 		}
 	)
 end
@@ -377,13 +388,141 @@ end
 -- so its height is known; a line with nothing to say still takes its height):
 -- its padding round its words or its `lead`, at the row's least. In the
 -- window's text size, which scales the lines.
-function M.truncated_row_h(lead: number?): number
+-- The way back from a page under another (an agent of the registry, a
+-- plugin of the store): the page it came from, a quiet link led by a
+-- chevron over the title. `label` names that page.
+export type BackProps = { label: string | Message, on_click: () -> () }
+
+function M.Back(props: BackProps): Node
+	local label = props.label
+	return ui.row {
+		self = "start",
+		gap = "$space.1",
+		items = "center",
+		cursor = "pointer",
+		role = "button",
+		focusable = true,
+		label = locale.t("ds.settings.back", {
+			page = function(): string
+				return if type(label) == "string" then label else (label :: any):get()
+			end,
+		}),
+		color = "$text.tertiary",
+		hover = { color = "$text.primary" },
+		focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = 2 },
+		on_click = props.on_click,
+		Icon { name = "alt-arrow-left", size = 14 },
+		ui.text { label, text_size = "$font.size.sm", line_height = "$font.line.sm" },
+	}
+end
+
+-- A page under another: where it stands (`Back`), over the page, at a
+-- Settings page's measure, on its parent's middle.
+function M.SubPage(props: { where: Node, [number]: Child }): Node
+	local children: { any } = {}
+	for _, c in ipairs(props :: any) do
+		table.insert(children, c)
+	end
+	return ui.column {
+		w_full = true,
+		self = "center",
+		-- (A theme number, read as it is built: max_w takes points.)
+		max_w = ui.theme.get("zeron.settings.measure") :: number?,
+		gap = "$space.4",
+		props.where,
+		table.unpack(children),
+	}
+end
+
+-- (`byline`: with a Row's byline over that line, a line more.)
+function M.truncated_row_h(lead: number?, byline: boolean?): number
 	local scaled = look.text_theme() or {}
 	local function token(name: string, default: number): number
 		return scaled[name] or (ui.theme.get(name) :: number?) or default
 	end
 	local words = token("font.line.md", 18) + token("zeron.space.hair", 2) + token("font.line.sm", 16)
+	if byline then
+		words += token("zeron.space.hair", 2) + token("font.line.sm", 16)
+	end
 	return math.max(token("zeron.settings.row", 52), 2 * token("space.3", 12) + math.max(words, lead or 0))
+end
+
+-- One thing set apart, a card of its own that opens it (the plugin store's
+-- featured plugins): its tile over its name, who made it, and two lines of
+-- what it is; as wide as its row gives it (`Feature`s side by side in a
+-- wrapping row share it), at least `MIN_FEATURE`. The card is a settings
+-- card; under the pointer it takes the rows' wash, edge to edge inside its
+-- edge, its corner the card's less that edge.
+local MIN_FEATURE = 180
+export type FeatureProps = {
+	label: string | Message | () -> string,
+	byline: (string | Message | () -> string)?,
+	description: (string | Message | () -> string)?,
+	lead: Node?,
+	badge: Node?,
+	on_click: () -> (),
+}
+
+function M.Feature(props: FeatureProps): Node
+	return ui.column {
+		class = "settings-feature",
+		grow = 1,
+		basis = 0,
+		min_w = MIN_FEATURE,
+		rounded = "$radius.xl",
+		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
+		border = 1,
+		border_color = "$zeron.settings.edge",
+		ui.column {
+			role = "button",
+			label = props.label,
+			focusable = true,
+			cursor = "pointer",
+			w_full = true,
+			grow = 1,
+			p = "$space.4",
+			gap = "$space.3",
+			rounded = ui.raw(control.nest("$radius.xl", 1), "the card's corner less its edge"),
+			hover = { bg = "$hover" },
+			active = { bg = "$pressed" },
+			focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 },
+			on_click = props.on_click,
+			props.lead,
+			ui.column {
+				w_full = true,
+				gap = "$zeron.space.hair",
+				ui.row {
+					gap = "$space.2",
+					items = "center",
+					min_w = 0,
+					FadeText {
+						props.label,
+						shrink = 1,
+						min_w = 0,
+						text_size = "$font.size.md",
+						line_height = "$font.line.md",
+						weight = "$font.weight.medium",
+						color = "$text.primary",
+					},
+					props.badge,
+				},
+				if props.byline
+					then FadeText { props.byline, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
+					else nil,
+			},
+			if props.description
+				then ui.text {
+					props.description,
+					w_full = true,
+					wrap = true,
+					lines = 2,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.secondary",
+				}
+				else nil,
+		},
+	}
 end
 
 export type RowProps = {
@@ -902,7 +1041,58 @@ export type CatalogProps = {
 	none: (tab: string) -> Node,
 	hint: { id: string?, text: string | Message }?,
 	overlays: { Node }?,
+	-- Tabs the page draws itself under the tabs, by value, in place of the
+	-- card and of `states` (a catalog from elsewhere, searched on its own
+	-- terms: Plugins' Browse). Each is built as its tab is chosen; it has
+	-- the same card to hand, `Settings.CatalogCard`.
+	views: { [string]: () -> Node }?,
 }
+
+-- A Catalog's card: its search heading it (a quiet field inset evenly,
+-- its corner the card's less its edge and that inset, for its focus
+-- ring, as the board's), then, under a hairline, what the page puts
+-- there: `filters` (a bar of choices that narrow it, inset as the rows'
+-- words are) and its `body` (the rows, or what it says instead).
+export type CatalogCardProps = {
+	id: string?,
+	search: { value: State<string>, placeholder: string | Message },
+	filters: Node?,
+	body: Node,
+}
+
+function M.CatalogCard(props: CatalogCardProps): Node
+	local search = ui.div {
+		w_full = true,
+		shrink = 0,
+		p = "$space.1",
+		theme = { radius = { md = control.nest("$radius.xl", 1, "$space.1") } },
+		-- (Its glyph's ink on the rows' edge, over their tiles: the rows' inset
+		-- less the card's edge, this inset and the glyph's own side bearing.)
+		SearchField {
+			value = props.search.value,
+			placeholder = props.search.placeholder,
+			name = props.search.placeholder,
+			size = "sm",
+			quiet = true,
+			w_full = true,
+			pl = M.TEXT_INSET - 1 - ((ui.theme.get("space.1") :: number?) or 4) - SEARCH_INK,
+		},
+	}
+	return ui.column {
+		id = props.id,
+		w_full = true,
+		rounded = "$radius.xl",
+		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
+		border = 1,
+		border_color = "$zeron.settings.edge",
+		overflow = "hidden",
+		search,
+		M.Rule(),
+		if props.filters then props.filters else nil,
+		if props.filters then M.Rule() else nil,
+		props.body,
+	}
+end
 
 -- The tabs' far end: New, and Import… before it when the page has one.
 local function trail(props: CatalogProps): Node?
@@ -984,39 +1174,13 @@ function M.Catalog(props: CatalogProps): Node
 		end
 		return rows()
 	end
-	-- The search heading the card: a quiet field inset evenly, its corner the
-	-- card's less its edge and that inset (for its focus ring), as the board's.
-	local search = ui.div {
-		w_full = true,
-		shrink = 0,
-		p = "$space.1",
-		theme = { radius = { md = control.nest("$radius.xl", 1, "$space.1") } },
-		-- (Its glyph's ink on the rows' edge, over their tiles: the rows' inset
-		-- less the card's edge, this inset and the glyph's own side bearing.)
-		SearchField {
-			value = query,
-			placeholder = props.search.placeholder,
-			name = props.search.placeholder,
-			size = "sm",
-			quiet = true,
-			w_full = true,
-			pl = M.TEXT_INSET - 1 - ((ui.theme.get("space.1") :: number?) or 4) - SEARCH_INK,
-		},
-	}
 	local function card(): Node
-		return ui.column {
+		return M.CatalogCard {
 			id = "catalog-card",
-			w_full = true,
-			rounded = "$radius.xl",
-			bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
-			border = 1,
-			border_color = "$zeron.settings.edge",
-			overflow = "hidden",
-			search,
-			M.Rule(),
+			search = props.search,
 			-- One swap for what's under it: a tab is a page of its own; within
 			-- it, found or not. (Asked again with rows showing, they stay.)
-			ui.presence(function(): string
+			body = ui.presence(function(): string
 				local s = props.status()
 				if #props.found:get() > 0 then
 					return `list:{tab:get()}`
@@ -1028,6 +1192,10 @@ function M.Catalog(props: CatalogProps): Node
 		}
 	end
 	local function body(key: string): Node
+		local view = string.match(key, "^view:(.+)$")
+		if view and props.views and props.views[view] then
+			return props.views[view]()
+		end
 		local own = props.states and props.states[key]
 		if own then
 			return own()
@@ -1061,6 +1229,10 @@ function M.Catalog(props: CatalogProps): Node
 		-- The card (searched, loading or not), or a state of the page's own
 		-- in its place.
 		ui.presence(function(): string
+			local t = tab:get()
+			if props.views and props.views[t] then
+				return `view:{t}`
+			end
 			local s = props.status()
 			return if props.states and props.states[s] then s else "card"
 		end, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),

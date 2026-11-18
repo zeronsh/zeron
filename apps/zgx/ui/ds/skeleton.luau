@@ -28,7 +28,9 @@ end
 -- end. Each bar stands in its line's own height (a Settings.Row's name on
 -- its line, its description on the next), so the row is as tall as the one
 -- that replaces it and nothing moves when it does.
-function M.Row(props: { lead: number?, title: number?, line: number?, trail: number? }): Node
+-- `byline`: a line of its own between the name and the line under it (who
+-- made it, a Row's `byline`), its width.
+function M.Row(props: { lead: number?, title: number?, byline: number?, line: number?, trail: number? }): Node
 	local lead = props.lead or 32
 	return ui.row {
 		w_full = true,
@@ -43,6 +45,7 @@ function M.Row(props: { lead: number?, title: number?, line: number?, trail: num
 			min_w = 0,
 			gap = "$zeron.space.hair",
 			ui.div { h = "$font.line.md", justify = "center", M.Bar { w = props.title or 140 } },
+			if props.byline then ui.div { h = "$font.line.sm", justify = "center", M.Bar { w = props.byline, h = 8 } } else nil,
 			if props.line ~= 0 then ui.div { h = "$font.line.sm", justify = "center", M.Bar { w = props.line or 240, h = 8 } } else nil,
 		},
 		if props.trail then M.Bar { w = props.trail, h = 24, rounded = "$radius.lg" } else nil,

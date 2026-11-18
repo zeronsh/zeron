@@ -11,6 +11,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 | Ask | What users see today |
 |---|---|
+| [ancestor-list-fading-in](ancestor-list-fading-in/ASK.md) | A list that scrolls with the page around it (the plugin store's Browse) shows an empty card as it fades in, until the page scrolls. |
 | [shader-compile-first-draw](shader-compile-first-draw/ASK.md) | The window freezes 70-360 ms when the first session of a launch starts working (its status ring's shader compiles in the frame). |
 | [inline-node](inline-node/ASK.md) | Inline math (and inline chips, emoji images) can't sit in a paragraph's line. |
 | [windows-caption-buttons](windows-caption-buttons/ASK.md) | Windows' caption glyphs stay the system's light or dark (invisible on a light Zeron on a dark system), come from an icon font (tofu on Windows 10), disagree with their hit test when the window is zoomed, are fixed at 32 tall, and Maximise shows on a fixed-size window. |

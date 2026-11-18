@@ -34,10 +34,14 @@ local words = require("@app/screens/plugins/words")
 local plugin_settings = require("@app/screens/plugins/settings")
 local devices_page = require("@app/screens/settings/devices")
 local visits = require("@app/screens/settings/visits")
+local nav = require("@app/screens/plugins/nav")
+local browse = require("@app/screens/plugins/browse")
+local listing = require("@app/screens/plugins/listing")
 
 local M = {}
 
-local tab = ui.state("plugins_tab", "installed")
+-- (Kept where a link reaches it too: screens/plugins/nav.)
+local tab = nav.tab
 local query = ui.state("plugins_query", "")
 -- The plugin Remove was asked of, and its device (nil: this one), kept as
 -- the dialog opened.
@@ -626,34 +630,7 @@ end
 -- The page: ds.Settings.Catalog's search, tabs, card and states (the
 -- Templates page is the same), with this page's device choice, rows, empty
 -- state, offline states and dialogs.
-function M.View(): Node
-	-- Once a visit: another device shown is looked at again (its list as
-	-- it is now; it may have been away).
-	visits.once("plugins", function()
-		local d = device()
-		if d then
-			state.target(d)
-		end
-	end)
-	-- As a device is shown: its plugins' sources, for a newer version.
-	local shown_id = ui.computed(function(): string
-		return device() or ""
-	end)
-	ui.effect(function()
-		shown_id:get()
-		check_updates()
-	end)
-	-- A device shown that was away coming back: looked at again.
-	local was_online: boolean? = nil
-	ui.effect(function()
-		local d = shown_device()
-		local id = device()
-		local online = d ~= nil and d.online ~= false
-		if id and online and was_online == false and state.remote:peek().state == "offline" then
-			state.target(id)
-		end
-		was_online = if id then online else nil
-	end)
+local function catalog(): Node
 	return ds.Settings.Catalog {
 		title = ui.t("plugins.page.title"),
 		description = ui.t("plugins.page.description"),
@@ -667,6 +644,7 @@ function M.View(): Node
 			options = {
 				{ value = "installed", label = ui.t("plugins.page.installed"), count = count("installed") },
 				{ value = "yours", label = ui.t("plugins.page.yours"), count = count("yours") },
+				{ value = "browse", label = ui.t("plugins.store.browse") },
 			},
 		},
 		-- (No New for now: your own plugins arrive by an agent or the
@@ -705,6 +683,12 @@ function M.View(): Node
 			end,
 			away = away_notice,
 		},
+		-- The store, searched on its own terms (screens/plugins/browse).
+		views = {
+			browse = function(): Node
+				return browse.View {}
+			end,
+		},
 		found = found,
 		row = row,
 		-- (By device and id: another device's rows are its own.)
@@ -713,6 +697,63 @@ function M.View(): Node
 		end,
 		none = none,
 		overlays = dialogs(),
+	}
+end
+
+-- What a store plugin's page and publishing one of yours need of this
+-- page: the device shown, its name, whether it's away, and its outcomes.
+local here = {
+	device = device,
+	device_name = device_name,
+	away = away,
+	settled = settled,
+	failed = failed,
+}
+
+function M.View(): Node
+	-- Once a visit: another device shown is looked at again (its list as
+	-- it is now; it may have been away). The page opens on its tabs, unless
+	-- a link opened a plugin's page as Settings came up.
+	visits.once("plugins", function()
+		nav.arrive()
+		local d = device()
+		if d then
+			state.target(d)
+		end
+	end)
+	-- As a device is shown: its plugins' sources, for a newer version.
+	local shown_id = ui.computed(function(): string
+		return device() or ""
+	end)
+	ui.effect(function()
+		shown_id:get()
+		check_updates()
+	end)
+	-- A device shown that was away coming back: looked at again.
+	local was_online: boolean? = nil
+	ui.effect(function()
+		local d = shown_device()
+		local id = device()
+		local online = d ~= nil and d.online ~= false
+		if id and online and was_online == false and state.remote:peek().state == "offline" then
+			state.target(id)
+		end
+		was_online = if id then online else nil
+	end)
+	-- Its tabs, or one plugin's page under them (a store plugin, or
+	-- publishing one of yours), each on the page's middle.
+	return ui.column {
+		w_full = true,
+		items = "center",
+		ui.presence(function(): string
+			return nav.view:get()
+		end, function(v: string): Node
+			local id = string.match(v, "^store:(.+)$")
+			if id then
+				return ui.column { w_full = true, items = "center", listing.Page { id = id, here = here } }
+			end
+			return ui.column { w_full = true, items = "center", catalog() }
+		end, { w_full = true, enter = { opacity = { 0, 1 }, y = { 6, 0 }, duration = 160 }, exit = { opacity = 0, duration = 80 }, mode = "wait" }),
 	}
 end
 
