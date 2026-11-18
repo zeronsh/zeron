@@ -112,6 +112,13 @@ const pageOf = <R>(rows: R[], limit: number, after: Keyset | undefined, key: (ro
   };
 };
 
+/** A page's rows and its list's `total` (amendment 38): what the filter
+ * matches, whichever page this is, read in one batch so the two agree. */
+const withTotal = async <R>(db: D1Database, page: D1PreparedStatement, count: D1PreparedStatement): Promise<{ rows: R[]; total: number }> => {
+  const [rows, counted] = await db.batch<unknown>([page, count]);
+  return { rows: rows!.results as R[], total: (counted!.results[0] as { n: number }).n };
+};
+
 /** Who each of `ids` is, as admin views show a person: publisher id and username. */
 const people = async (env: Env, ids: readonly string[]): Promise<Record<string, { id: string; username: string | null }>> => {
   const found = await authorsOf(env, ids);
@@ -131,8 +138,13 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   // with what a reviewer triages by (amendment 35): the version it would
   // replace, what it newly asks for since, and its checks by level.
   const ks = keysetSql("v.submitted_at", "v.rowid", status === "pending", after);
-  const rows = (
-    await db
+  const all = status === "all";
+  const { rows, total } = await withTotal<{
+    rid: number; plugin_id: string; version: string; status: string; submitted_at: number; publisher_id: string; checks: string; permissions: string;
+    name: string; is_release: number; base_version: string | null; base_permissions: string | null;
+  }>(
+    db,
+    db
       .prepare(
         `SELECT v.rowid AS rid, v.plugin_id, v.version, v.status, v.submitted_at, v.publisher_id, v.checks, v.permissions,
                 v.name, v.is_release, b.version AS base_version, b.permissions AS base_permissions
@@ -140,12 +152,10 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
          WHERE (? = 'all' OR v.status = ?) ${ks.where}
          ORDER BY ${ks.order} LIMIT ?`
       )
-      .bind(status, status, ...ks.binds, limit + 1)
-      .all<{
-        rid: number; plugin_id: string; version: string; status: string; submitted_at: number; publisher_id: string; checks: string; permissions: string;
-        name: string; is_release: number; base_version: string | null; base_permissions: string | null;
-      }>()
-  ).results;
+      .bind(status, status, ...ks.binds, limit + 1),
+    // (versions_queue serves a state's count.)
+    all ? db.prepare("SELECT COUNT(*) AS n FROM versions") : db.prepare("SELECT COUNT(*) AS n FROM versions WHERE status = ?").bind(status)
+  );
   const { page, links } = pageOf(rows, limit, after, (r) => [r.submitted_at, r.rid]);
   const names = await people(env, page.map((r) => r.publisher_id));
   return answer({
@@ -165,6 +175,7 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
         checks: { ok: count("ok"), warn: count("warn"), fail: count("fail") }
       };
     }),
+    total,
     ...links
   });
 };
@@ -450,17 +461,19 @@ const reports = async (env: Env, db: D1Database, url: URL): Promise<Response> =>
   const limit = limitOf(url);
   if (limit === null) return fail(400, "bad_request", `limit is 1 to ${PAGE}.`);
   const ks = keysetSql("r.id", "r.id", false, after);
-  const rows = (
-    await db
+  const { rows, total } = await withTotal<ReportRow>(
+    db,
+    db
       .prepare(
         `SELECT ${REPORT_COLUMNS} FROM reports r LEFT JOIN plugins p ON p.id = r.plugin_id
          WHERE (? = 'all' OR r.status = ?) ${ks.where} ORDER BY ${ks.order} LIMIT ?`
       )
-      .bind(status, status, ...ks.binds, limit + 1)
-      .all<ReportRow>()
-  ).results;
+      .bind(status, status, ...ks.binds, limit + 1),
+    // (reports_open serves a status's count.)
+    status === "all" ? db.prepare("SELECT COUNT(*) AS n FROM reports") : db.prepare("SELECT COUNT(*) AS n FROM reports WHERE status = ?").bind(status)
+  );
   const { page, links } = pageOf(rows, limit, after, (r) => [r.id, r.id]);
-  return answer({ reports: await reportItems(env, page), ...links });
+  return answer({ reports: await reportItems(env, page), total, ...links });
 };
 
 const resolveReport = async (db: D1Database, adminId: string, reportId: number, body: Record<string, unknown> | undefined): Promise<Response> => {
@@ -488,12 +501,16 @@ const audit = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   const ks = keysetSql("seq", "seq", false, after);
   const pluginFilter = url.searchParams.get("plugin");
   if (pluginFilter !== null && !ID_RE.test(pluginFilter)) return fail(400, "bad_request", "plugin is a plugin id.");
-  const rows = (
-    await db
-      .prepare(`SELECT * FROM audit WHERE (? IS NULL OR plugin_id = ?) ${ks.where} ORDER BY ${ks.order} LIMIT ?`)
-      .bind(pluginFilter, pluginFilter, ...ks.binds, limit + 1)
-      .all<{ seq: number; at: number; actor_id: string; action: string; plugin_id: string | null; version: string | null; detail: string | null }>()
-  ).results;
+  // One plugin's log by its index (audit_plugin), or the whole log.
+  const byPlugin = pluginFilter === null ? [] : [pluginFilter];
+  const conditions = [...(pluginFilter === null ? [] : ["plugin_id = ?"]), ...(ks.where ? [ks.where.replace(/^AND /, "")] : [])];
+  const { rows, total } = await withTotal<{ seq: number; at: number; actor_id: string; action: string; plugin_id: string | null; version: string | null; detail: string | null }>(
+    db,
+    db
+      .prepare(`SELECT * FROM audit ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY ${ks.order} LIMIT ?`)
+      .bind(...byPlugin, ...ks.binds, limit + 1),
+    db.prepare(`SELECT COUNT(*) AS n FROM audit ${pluginFilter === null ? "" : "WHERE plugin_id = ?"}`).bind(...byPlugin)
+  );
   const { page, links } = pageOf(rows, limit, after, (r) => [r.seq, r.seq]);
   const names = await people(env, page.map((r) => r.actor_id));
   return answer({
@@ -506,6 +523,7 @@ const audit = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
       version: r.version,
       detail: parseStoredJson(r.detail, null)
     })),
+    total,
     ...links
   });
 };

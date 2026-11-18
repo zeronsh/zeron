@@ -100,7 +100,7 @@ const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Res
     after = decodeCursor(lq.cursor, filter);
     if (!after) return fail(400, "bad_cursor", "That cursor isn't from this list.");
   }
-  if (lq.q && lq.terms.length === 0) return answer({ items: [] }, 200, publicCache(LIST_TTL));
+  if (lq.q && lq.terms.length === 0) return answer({ items: [], total: 0 }, 200, publicCache(LIST_TTL));
   // Each clause with its own binds, assembled in SQL order.
   const joins: { sql: string; binds: unknown[] }[] = [];
   const where: { sql: string; binds: unknown[] }[] = [{ sql: LISTED, binds: [] }];
@@ -124,8 +124,17 @@ const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Res
       WHERE ${where.map((w) => w.sql).join(" AND ")}
     ) ${keyset.sql}
     ORDER BY sort_key ${forwardAsc ? "ASC" : "DESC"}, seq ${back ? "ASC" : "DESC"} LIMIT ?`;
-  const ordered = [...joins.flatMap((j) => j.binds), ...where.flatMap((w) => w.binds), ...keyset.binds];
-  const rows = (await db.prepare(sql).bind(...ordered, lq.limit + 1).all<PluginRow & { sort_key: number }>()).results;
+  const filterBinds = [...joins.flatMap((j) => j.binds), ...where.flatMap((w) => w.binds)];
+  // `total` (amendment 38): what the same filter matches, whichever page
+  // this is, read in the same batch as the page so the two agree. Only
+  // listed plugins count, as only they are shown.
+  const countSql = `SELECT COUNT(*) AS n FROM plugins p ${joins.map((j) => j.sql).join(" ")} WHERE ${where.map((w) => w.sql).join(" AND ")}`;
+  const [pageResult, countResult] = await db.batch<unknown>([
+    db.prepare(sql).bind(...filterBinds, ...keyset.binds, lq.limit + 1),
+    db.prepare(countSql).bind(...filterBinds)
+  ]);
+  const rows = pageResult!.results as (PluginRow & { sort_key: number })[];
+  const total = (countResult!.results[0] as { n: number }).n;
   const more = rows.length > lq.limit;
   const page = rows.slice(0, lq.limit);
   if (back) page.reverse();
@@ -139,6 +148,7 @@ const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Res
   return answer(
     {
       items: page.map((p) => pluginCard(p, authorCard(authors[p.owner_id]!))),
+      total,
       ...(hasNext && last ? { next_cursor: encodeCursor(filter, last.sort_key, last.seq) } : {}),
       ...(hasPrev && first ? { prev_cursor: encodeCursor(filter, first.sort_key, first.seq, "prev") } : {})
     },

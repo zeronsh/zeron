@@ -404,30 +404,38 @@ describe("store author routes", () => {
       back.unshift(...page.entries.map((e) => e.seq));
     }
     expect(back).toEqual(all);
+    // One total, whichever page.
+    for (const q of ["", `&cursor=${(await get("")).next_cursor}`]) expect(((await get(q)) as Page & { total: number }).total).toBe(7);
     expect((await adminCall("GET", "/store/v1/admin/audit?limit=0")).status).toBe(400);
   });
 });
 
 describe("admin lists page both ways (amendment 29)", () => {
   /** Walk a list forward with next_cursor, then back with prev_cursor:
-   * the same pages, the first with no prev_cursor. */
+   * the same pages, the first with no prev_cursor, and every page's
+   * `total` the number of items walked (amendment 38). */
   const walk = async (path: string, items: (page: any) => unknown[]) => {
-    type Page = { next_cursor?: string; prev_cursor?: string };
+    type Page = { total: number; next_cursor?: string; prev_cursor?: string };
+    const totals: number[] = [];
     const get = async (cursor?: string) => (await (await adminCall("GET", `${path}${path.includes("?") ? "&" : "?"}limit=2${cursor ? `&cursor=${cursor}` : ""}`)).json()) as Page;
     const forward: unknown[][] = [];
     let page = await get();
     expect(page.prev_cursor, `${path}: the first page`).toBeUndefined();
     forward.push(items(page));
+    totals.push(page.total);
     while (page.next_cursor) {
       page = await get(page.next_cursor);
       forward.push(items(page));
+      totals.push(page.total);
     }
     const back: unknown[][] = [items(page)];
     while (page.prev_cursor) {
       page = await get(page.prev_cursor);
       back.unshift(items(page));
+      totals.push(page.total);
     }
     expect(back, path).toEqual(forward);
+    expect(new Set(totals), `${path}: one total on every page`).toEqual(new Set([forward.flat().length]));
     return forward.flat();
   };
 
@@ -447,6 +455,32 @@ describe("admin lists page both ways (amendment 29)", () => {
     for (const r of readers) expect((await call(r.userId, "POST", `/store/v1/plugins/${listedId}/reports`, { reason: "broken", text: "x" })).status).toBe(201);
     const reported = (await walk("/store/v1/admin/reports", (p) => p.reports.map((r: any) => r.id))) as number[];
     expect(reported.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("each with its total: per state, per status, per plugin, moving as they change", async () => {
+    const a = await author();
+    const id = uniqueId("totals");
+    await pending(a, id, "1.0.0");
+    const total = async (path: string) => ((await (await adminCall("GET", path)).json()) as { total: number }).total;
+    const count = (sql: string, ...binds: unknown[]) => env.STORE_DB.prepare(sql).bind(...binds).first<number>("n");
+    const pendingBefore = await total("/store/v1/admin/queue");
+    expect(pendingBefore).toBe(await count("SELECT COUNT(*) AS n FROM versions WHERE status = 'pending'"));
+    expect(await total("/store/v1/admin/queue?status=all")).toBe(await count("SELECT COUNT(*) AS n FROM versions"));
+    const approvedBefore = await total("/store/v1/admin/queue?status=approved");
+    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.0.0/approve`)).status).toBe(200);
+    expect([await total("/store/v1/admin/queue"), await total("/store/v1/admin/queue?status=approved")]).toEqual([pendingBefore - 1, approvedBefore + 1]);
+    // Reports by status.
+    const openBefore = await total("/store/v1/admin/reports");
+    const reader = await author();
+    const made = (await (await call(reader.userId, "POST", `/store/v1/plugins/${id}/reports`, { reason: "broken", text: "x" })).json()) as { id: number };
+    expect(await total("/store/v1/admin/reports")).toBe(openBefore + 1);
+    const dismissedBefore = await total("/store/v1/admin/reports?status=dismissed");
+    expect((await adminCall("POST", `/store/v1/admin/reports/${made.id}/resolve`, { resolution: "dismissed" })).status).toBe(200);
+    expect([await total("/store/v1/admin/reports"), await total("/store/v1/admin/reports?status=dismissed")]).toEqual([openBefore, dismissedBefore + 1]);
+    expect(await total("/store/v1/admin/reports?status=all")).toBe(await count("SELECT COUNT(*) AS n FROM reports"));
+    // The audit log, one plugin's and the whole.
+    expect(await total(`/store/v1/admin/audit?plugin=${id}`)).toBe(2);
+    expect(await total("/store/v1/admin/audit")).toBe(await count("SELECT COUNT(*) AS n FROM audit"));
   });
 });
 

@@ -9,7 +9,7 @@ const json = async <T = Record<string, unknown>>(res: Response) => (await res.js
 const list = async (query: string, bearer?: string) => {
   const res = await call(bearer, "GET", `/store/v1/plugins?${query}`);
   expect(res.status, await res.clone().text()).toBe(200);
-  return json<{ items: Card[]; next_cursor?: string; prev_cursor?: string }>(res);
+  return json<{ items: Card[]; total: number; next_cursor?: string; prev_cursor?: string }>(res);
 };
 
 describe("store catalog", () => {
@@ -107,6 +107,45 @@ describe("store catalog", () => {
     expect((await call(undefined, "GET", "/store/v1/plugins?limit=51")).status).toBe(400);
     expect((await call(undefined, "GET", "/store/v1/plugins?sort=random")).status).toBe(400);
     expect((await call(undefined, "GET", "/store/v1/plugins?category=games")).status).toBe(400);
+  });
+
+  it("gives every page of a list the same total, counting only what is listed", async () => {
+    const a = await author();
+    const tag = `t${randomLetters(8)}`;
+    const ids = [uniqueId(), uniqueId(), uniqueId(), uniqueId()];
+    for (const id of ids) await listed(a, id, "1.0.0", { manifest: { keywords: [tag], description: `Has ${tag} inside.` } });
+    // Neither a pending plugin nor a suspended one counts for anyone.
+    const quiet = uniqueId();
+    expect((await publish(a.userId, quiet, await makePackage({ id: quiet, version: "1.0.0", signer: a.signer, manifest: { keywords: [tag] } }))).status).toBe(201);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${ids[3]}/suspend`, { reason: "Looking." })).status).toBe(200);
+    for (const query of [`keyword=${tag}&limit=1`, `q=${tag}&limit=1`]) {
+      const totals: number[] = [];
+      let page = await list(query);
+      totals.push(page.total);
+      for (let i = 0; i < 2; i++) {
+        page = await list(`${query}&cursor=${encodeURIComponent(page.next_cursor!)}`);
+        totals.push(page.total);
+      }
+      // Back from page 3, too.
+      totals.push((await list(`${query}&cursor=${encodeURIComponent(page.prev_cursor!)}`)).total);
+      expect(totals, query).toEqual([3, 3, 3, 3]);
+      // Signed in (owner included), the catalog counts the same.
+      expect((await list(query, a.userId)).total, query).toBe(3);
+    }
+    expect((await list(`q=zzzz${randomLetters(10)}`)).total).toBe(0);
+  });
+
+  it("changes the total when a plugin is approved or taken down", async () => {
+    const a = await author();
+    const before = (await list("")).total;
+    expect(before).toBe(await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM plugins WHERE status = 'active' AND listed_version IS NOT NULL").first("n"));
+    const id = uniqueId();
+    expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    expect((await list("")).total).toBe(before);
+    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.0.0/approve`)).status).toBe(200);
+    expect((await list("")).total).toBe(before + 1);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/remove`, { block: true, reason: "Harmful." })).status).toBe(200);
+    expect((await list("")).total).toBe(before);
   });
 
   it("searches name, summary, keywords, author and README, best match first, by prefix", async () => {
