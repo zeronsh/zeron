@@ -402,7 +402,8 @@ Agreed after the plan was first written. Newest last.
     and only known picture types inline.
 15. **CLI names**: `zeron plugin key create|list|revoke <id>`.
 16. **Deploy keys and sideloading.** `GET /plugin-keys/:key` for a deploy
-    key adds `kind: "deploy"`, `plugin`, `expires_at`, `expired`, and
+    key adds `kind: "deploy"`, `plugin`, `expiresAt`, `expired` (that
+    endpoint keeps its existing camelCase), and
     answers `verified: true` only when the lookup names that key's plugin
     (`?plugin=<id>`). Without it, or revoked, or expired: `verified: false`.
     So a leaked deploy key for one plugin can never vouch for an update to
@@ -418,3 +419,42 @@ Agreed after the plan was first written. Newest last.
     `pluginOwner(env, id)`; identity exports `revokeDeployKeys(env, id)`.
     Signed requests carry no query string. The store never serves or stores
     a cached response for a request that has a signed-in caller.
+19. **Reserved ids**: the engine's reserved ids, the built-in plugins' ids,
+    anything `username.ts` reserves, and any id whose lookalike skeleton
+    matches an existing plugin's. An admin can grant a reserved id to one
+    account: `GET /store/v1/admin/reservations`, `POST
+    /store/v1/admin/reservations { id, to_username | null, note }`.
+20. **Author** on a card is `{ username, badges }`. There is no separate
+    `verified` flag: publishing needs a username, so every listing is by a
+    known account; badges (granted by operators, as today) say the rest.
+21. **Newer**: a release must be above every release that is not rejected
+    or withdrawn; a pre-release above every version that is not. Equal
+    precedence (build metadata ignored) is `version_exists`.
+22. **Listing limits**: description ≤ 300, name ≤ 64, 1–2 categories,
+    keywords ≤ 8 (1–32 characters, lowercase), screenshots ≤ 8 (valid PNG or
+    JPEG), icon an SVG ≤ 32 KB, README ≤ 512 KB, a version's notes ≤ 64 KB,
+    `homepage` / `repository` https ≤ 2048, license ≤ 64.
+23. **A takedown is prompt everywhere.** Lists and details may be up to 60 s
+    stale. A package or file is served only after the version's state is
+    checked (a state read may itself be cached for at most 60 s); the bytes
+    may be cached longer because they never change.
+24. **Signer rule at publish** lives in `principal.ts`
+    (`signingKeyAllowed(env, publisher, id, key)`): with a session, the
+    package's key is a live device key of the caller, or the caller's live
+    deploy key for that plugin; with a deploy key, the package's key is that
+    key and its scope is that plugin.
+25. **`updates[]` entries carry `publisher`** (the current owner's
+    username) beside `key`, `hash`, `sha256` and `bytes`, so a device can
+    tell a changed owner and ask again. An offer without it is refused by
+    the device as `store_mismatch`.
+26. **A signed request also sends `X-Zeron-Content-SHA256: <hex>`**, the
+    same body hash that is in the signing string (the string is unchanged).
+    The edge checks key, signature and replay before it reads any body, then
+    refuses a body that does not hash to that value. Nothing is read or
+    allocated for a request that is not authentic.
+27. **Admin is by web session only.** Admin routes do not accept a bearer:
+    a bearer skips the staff session's short lifetime, rotation and CSRF
+    checks, and any local process an engine hands its token to holds one.
+28. **After a transfer**, a former owner's deploy key no longer reads as
+    verified for the plugin (verified needs the key's maker to own the
+    plugin now), and the current owner can list and revoke every key of it.
