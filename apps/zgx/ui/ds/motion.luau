@@ -16,6 +16,8 @@
 
 local prefers = require("@self/prefers")
 
+local preference = require("@self/preference")
+
 local M = {}
 
 -- Reduce motion: the one place every animation asks. On with the system's
@@ -23,7 +25,7 @@ local M = {}
 -- then nothing travels: a move lands at once, a fade is a short crossfade,
 -- and what a state change shows is right on the next frame. Tracked: read in
 -- a binding or computed, it follows a change of either.
-M.reduce = ui.persist("motion_reduce", false)
+M.reduce = preference.kept(ui.persist("motion_reduce", false), "motion_reduce")
 function M.reduced(): boolean
 	return M.reduce:get() or prefers.reduced_motion:get()
 end

@@ -205,6 +205,12 @@ async fn a_version_for_another_zeron_is_never_installed() {
     std::fs::write(dir.path().join("later.zeron-plugin"), other).unwrap();
     let path = dir.path().join("later.zeron-plugin").display().to_string();
     assert_eq!(word(&d.call(methods::INSTALL_PLUGIN, json!({ "path": path })).await.unwrap_err()), "incompatible");
+    // One that names no `engines` installs exactly as before.
+    let plain = package_of(&key, "plain", "1", &[], "return 1", json!({}));
+    std::fs::write(dir.path().join("plain.zeron-plugin"), plain).unwrap();
+    let path = dir.path().join("plain.zeron-plugin").display().to_string();
+    let installed = d.call(methods::INSTALL_PLUGIN, json!({ "path": path })).await.unwrap();
+    assert_eq!((installed["plugin"]["version"].as_str(), installed["update"].as_bool()), (Some("1"), Some(false)));
 }
 
 #[tokio::test]
@@ -315,6 +321,26 @@ async fn a_store_plugin_changed_on_disk_is_told_by_its_signature_alone() {
 
 fn sha256(bytes: &[u8]) -> String {
     zeron_engine::plugins::signing::sha256_hex(bytes)
+}
+
+#[tokio::test]
+async fn a_featured_search_lists_only_the_featured_ones_in_the_store_s_order() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    for id in ["alpha", "beta", "gamma"] {
+        store.add("ada", &package_of(&key, id, "1.0.0", &[], "return 1", json!({})), "approved", "");
+    }
+    store.feature("gamma");
+    store.feature("alpha");
+    let device = device(&store, Some("bob"));
+    let ids = |reply: Value| reply["items"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let featured = device.call(methods::STORE_SEARCH, json!({ "featured": true })).await.unwrap();
+    assert_eq!(ids(featured), ["alpha", "gamma"], "only the featured ones, in the order the store lists them");
+    let path = store.state.lock().unwrap().requests.last().unwrap().1.clone();
+    assert_eq!(path, "/store/v1/plugins?featured=true");
+    let every = device.call(methods::STORE_SEARCH, json!({ "featured": false })).await.unwrap();
+    assert_eq!(ids(every), ["alpha", "beta", "gamma"]);
+    assert_eq!(store.state.lock().unwrap().requests.last().unwrap().1, "/store/v1/plugins", "false asks for no filter");
 }
 
 #[tokio::test]

@@ -337,6 +337,9 @@ pub fn expose_surface(host: &ScriptHost) {
     for (key, capability) in grants::SHARED_READ {
         host.expose_shared_read(*key, capability.map(|c| Capability::Named(c.into())));
     }
+    for key in grants::PREFERENCES {
+        host.expose_shared_read(format!("zeron.preference.{key}"), None);
+    }
     for (key, capability) in grants::SHARED_WRITE {
         host.expose_shared(*key, Some(Capability::Named((*capability).into())));
     }

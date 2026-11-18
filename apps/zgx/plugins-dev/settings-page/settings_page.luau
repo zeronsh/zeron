@@ -126,6 +126,20 @@ local Editor = ui.component(function(props: { id: string }): Node
 	local function text_problem(): string?
 		return snippets.text_problem(text:get(), kind:get())
 	end
+	-- A field says what's wrong only once it's been typed in or left:
+	-- never on one nobody has touched (a new snippet's empty text).
+	local name_said = ui.use_state(false)
+	local text_said = ui.use_state(false)
+	ui.effect(function()
+		if name:get() ~= start.name and not name_said:peek() then
+			name_said:set(true)
+		end
+	end)
+	ui.effect(function()
+		if text:get() ~= start.text and not text_said:peek() then
+			text_said:set(true)
+		end
+	end)
 	local save_name = keep_as_typed(name, function(): string
 		return held().name
 	end, name_problem, function(v: string)
@@ -199,8 +213,11 @@ local Editor = ui.component(function(props: { id: string }): Node
 					name = "Name",
 					size = "sm",
 					w = 220,
-					error = name_problem,
+					error = function(): string?
+						return if name_said:get() then name_problem() else nil
+					end,
 					on_commit = function()
+						name_said:set(true)
 						save_name()
 					end,
 				},
@@ -216,70 +233,81 @@ local Editor = ui.component(function(props: { id: string }): Node
 					options = { { value = "text", label = "Text" }, { value = "template", label = "Template" } },
 				},
 			},
-			Settings.Row {
-				label = "Text",
-				description = "What goes in the message box.",
-				stacked = true,
-				control = TextArea {
-					value = text,
-					name = "Text",
-					rows = 3,
-					max_rows = 10,
-					w_full = true,
-					error = text_problem,
-					count = {
-						of = function(): number
-							return #text:get()
-						end,
-						soft = snippets.MAX_TEXT - 200,
-						max = snippets.MAX_TEXT,
-					},
-				},
-			},
-			-- A template's alone: try it, and see what it puts in.
-			ui.show(is_template, ui.column {
+			-- (With the rows that hang off it, in one column: the card draws its
+			-- hairline once, before the column, and each row that comes brings
+			-- its own.)
+			ui.column {
 				w_full = true,
-				Settings.Rule(),
 				Settings.Row {
-					label = "Try it",
-					description = function(): string
-						if text_problem() ~= nil then
-							return "Fix the text first."
-						end
-						return if tried:get() ~= nil then "What it puts in the message box now:" else "See what it puts in the message box now."
-					end,
-					control = Button {
-						"Try it",
-						tone = "secondary",
-						size = "sm",
-						disabled = function(): boolean
-							return text_problem() ~= nil
+					label = "Text",
+					description = "What goes in the message box.",
+					stacked = true,
+					control = TextArea {
+						value = text,
+						name = "Text",
+						rows = 3,
+						max_rows = 10,
+						w_full = true,
+						error = function(): string?
+							return if text_said:get() then text_problem() else nil
 						end,
-						on_click = function()
-							tried:set(snippets.fill({ id = id, name = name:peek(), text = text:peek(), kind = kind:peek() }))
-						end,
+						-- Out of the limit itself, warning as it nears it.
+						count = {
+							of = function(): number
+								return #text:get()
+							end,
+							max = snippets.MAX_TEXT,
+							say = function(n: number): (string?, boolean?)
+								return `{n}/{snippets.MAX_TEXT}`, n > snippets.MAX_TEXT - 200
+							end,
+						},
 					},
 				},
-				ui.show(function(): boolean
-					return tried:get() ~= nil
-				end, ui.column {
-					id = "snippets-tried",
+				-- A template's alone: try it, and see what it puts in.
+				ui.show(is_template, ui.column {
 					w_full = true,
-					px = "$space.4",
-					pb = "$space.3",
-					ui.text {
-						function(): string
-							return tried:get() or ""
+					Settings.Rule(),
+					Settings.Row {
+						label = "Try it",
+						description = function(): string
+							if text_problem() ~= nil then
+								return "Fix the text first."
+							end
+							return if tried:get() ~= nil then "What it puts in the message box now:" else "See what it puts in the message box now."
 						end,
-						w_full = true,
-						wrap = true,
-						selectable = true,
-						text_size = "$font.size.sm",
-						line_height = "$font.line.sm",
-						color = "$text.secondary",
+						control = Button {
+							"Try it",
+							tone = "secondary",
+							size = "sm",
+							disabled = function(): boolean
+								return text_problem() ~= nil
+							end,
+							on_click = function()
+								tried:set(snippets.fill({ id = id, name = name:peek(), text = text:peek(), kind = kind:peek() }))
+							end,
+						},
 					},
+					ui.show(function(): boolean
+						return tried:get() ~= nil
+					end, ui.column {
+						id = "snippets-tried",
+						w_full = true,
+						px = "$space.4",
+						pb = "$space.3",
+						ui.text {
+							function(): string
+								return tried:get() or ""
+							end,
+							w_full = true,
+							wrap = true,
+							selectable = true,
+							text_size = "$font.size.sm",
+							line_height = "$font.line.sm",
+							color = "$text.secondary",
+						},
+					}),
 				}),
-			}),
+			},
 		},
 	}
 end)
@@ -293,7 +321,7 @@ zeron.settings_page {
 			Settings.Section {
 				title = "Snippets",
 				description = "Choose one to change it.",
-				trail = Button { "New snippet", tone = "secondary", size = "sm", on_click = new_snippet },
+				trail = Button { "New snippet", tone = "ghost", size = "sm", on_click = new_snippet },
 				-- The button they're used from, hidden by the row above: a way
 				-- to show it again, from here.
 				ui.show(function(): boolean
@@ -328,7 +356,7 @@ zeron.settings_page {
 							size = "sm",
 							icon = "document-add",
 							title = "No snippets yet",
-							body = "Keep text you use often, and put it in the message box with a click.",
+							body = "Text you use often, a click away in the message box.",
 							action = { label = "Add your first snippet", on_click = new_snippet },
 						},
 					},

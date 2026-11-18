@@ -48,11 +48,44 @@ pub fn read(dir: &Path) -> Result<Prepared, String> {
         read.insert(rel.clone(), bytes);
     }
     let hash = signing::content_hash(&manifest, &package::hashes(&read));
-    let (problems, warnings) = listing::check(&manifest, &read);
+    let (mut problems, warnings) = listing::check(&manifest, &read);
+    problems.extend(sizes(&manifest, &read));
     let notes = read
         .get(listing::CHANGELOG)
         .and_then(|bytes| listing::changelog_notes(&String::from_utf8_lossy(bytes), &manifest.version));
     Ok(Prepared { manifest, files: read, hash, problems, warnings, notes })
+}
+
+/// What the store bounds a package by as it's uploaded (amendment 34): the
+/// file's size, and its manifest's (as written in it, signature included)
+/// size and number of values. Measured on the package as it would be sent:
+/// a signature is the same size whoever signs, so any key measures it.
+fn sizes(manifest: &Manifest, files: &BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    let Some(measure) = SigningKey::from_seed(&[0; 32]) else { return problems };
+    let signed = measure.sign_manifest(&manifest.unsigned_value(), &package::hashes(files));
+    let manifest_bytes = serde_json::to_vec(&signed).map_or(0, |b| b.len());
+    if manifest_bytes > listing::MAX_MANIFEST_JSON_BYTES || listing::count_values(&signed) > listing::MAX_MANIFEST_VALUES {
+        problems.push(Problem {
+            rule: listing::rule::TOO_LARGE,
+            field: Some("manifest"),
+            path: None,
+            words: "Its manifest is too big for the store (1 MB and 100,000 values, its signature included)".into(),
+        });
+    }
+    let total: usize = files.values().map(Vec::len).sum();
+    // (Skipped past the engine's own limit: `listing::check` says so.)
+    if total as u64 <= files::MAX_BYTES
+        && package::pack(FORMAT, &signed, files).is_ok_and(|raw| raw.len() > listing::MAX_PUBLISH_BYTES)
+    {
+        problems.push(Problem {
+            rule: listing::rule::TOO_LARGE,
+            field: Some("package"),
+            path: None,
+            words: "It's too big for the store: its package is over 20 MB".into(),
+        });
+    }
+    problems
 }
 
 impl Prepared {
@@ -94,6 +127,41 @@ impl Prepared {
             "package": { "files": self.files.len(), "bytes": bytes },
         })
     }
+}
+
+/// Whether `version` is one the store will take beside the versions it
+/// already has of the plugin (`versions`: `/me/plugins`' `[{version,
+/// status}]`), as amendment 21 says: equal precedence to any version
+/// submitted is `version_exists`; a release must be above every release
+/// that isn't rejected or withdrawn, a pre-release above every version that
+/// isn't, else `not_newer`. (The store has the last word: this is what it
+/// said a moment ago.)
+pub fn newer_problem(version: &str, versions: &[Value]) -> Option<Problem> {
+    use crate::plugins::version::Version;
+    let mine = Version::parse(version).ok()?;
+    let mut above: Option<Version> = None;
+    for v in versions {
+        let Some(theirs) = v["version"].as_str().and_then(|t| Version::parse(t).ok()) else { continue };
+        if theirs == mine {
+            return Some(Problem {
+                rule: "version_exists",
+                field: Some("version"),
+                path: None,
+                words: format!("Version {version} was submitted already: a version is submitted once, so give this one a new number"),
+            });
+        }
+        let counts = !matches!(v["status"].as_str(), Some("rejected" | "withdrawn")) && (mine.is_prerelease() || !theirs.is_prerelease());
+        if counts && above.as_ref().is_none_or(|a| &theirs > a) {
+            above = Some(theirs);
+        }
+    }
+    let above = above.filter(|a| &mine < a)?;
+    Some(Problem {
+        rule: "not_newer",
+        field: Some("version"),
+        path: None,
+        words: format!("Version {version} isn't later than {above}, which the store has"),
+    })
 }
 
 /// Each problem as one line: `rule (field): words`.
@@ -147,6 +215,42 @@ mod tests {
         assert_eq!(again.hash, prepared.hash, "the content hash leaves the signature out");
         assert_eq!(install::parse(again.pack(key.signing_key()).unwrap()).unwrap().key, key.public());
         assert_eq!(again.shown()["ok"], true);
+    }
+
+    /// Amendment 34: the store's own bounds, said before anything is sent.
+    #[test]
+    fn the_store_s_size_bounds_are_checked_here() {
+        let (mut manifest, mut files) = listed();
+        let dir = folder(&manifest, &files);
+        assert!(read(dir.path()).unwrap().ok());
+        // Over 20 MB as uploaded (16 MB of bytes is over 21 MB as base64).
+        files.insert("data.bin".into(), vec![0; 16 * 1024 * 1024]);
+        let dir = folder(&manifest, &files);
+        let rules: Vec<_> = read(dir.path()).unwrap().problems.iter().map(|p| (p.rule, p.field)).collect();
+        assert_eq!(rules, vec![("too_large", Some("package"))]);
+        files.remove("data.bin");
+        // Over 100,000 values in its manifest.
+        manifest["x-table"] = json!(vec![0; listing::MAX_MANIFEST_VALUES]);
+        let dir = folder(&manifest, &files);
+        let rules: Vec<_> = read(dir.path()).unwrap().problems.iter().map(|p| (p.rule, p.field)).collect();
+        assert_eq!(rules, vec![("too_large", Some("manifest"))]);
+        assert_eq!(listing::count_values(&json!({ "a": [1, 2], "b": { "c": null } })), 6);
+    }
+
+    /// Amendment 21, as the store says it.
+    #[test]
+    fn a_version_is_newer_as_the_store_counts_it() {
+        let have = |list: &[(&str, &str)]| -> Vec<Value> { list.iter().map(|(v, s)| json!({ "version": v, "status": s })).collect() };
+        let rule = |version: &str, list: &[(&str, &str)]| newer_problem(version, &have(list)).map(|p| p.rule);
+        let store = [("1.0.0", "approved"), ("1.1.0", "rejected"), ("1.2.0-beta.1", "pending")];
+        assert_eq!(rule("1.0.1", &store), None, "a release above every release that counts (1.1.0 was rejected)");
+        assert_eq!(rule("0.9.0", &store), Some("not_newer"));
+        assert_eq!(rule("1.1.0", &store), Some("version_exists"), "rejected, it's still submitted");
+        assert_eq!(rule("1.0.0+build.2", &store), Some("version_exists"), "build metadata isn't a new version");
+        assert_eq!(rule("1.2.0-beta.0", &store), Some("not_newer"), "a pre-release is above every version that counts");
+        assert_eq!(rule("1.2.0-beta.2", &store), None);
+        assert_eq!(rule("1.1.5", &[("1.1.0", "withdrawn"), ("1.0.0", "approved")]), None);
+        assert_eq!(rule("1.0.0", &[]), None, "a first version");
     }
 
     #[test]

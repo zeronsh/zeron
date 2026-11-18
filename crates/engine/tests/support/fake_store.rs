@@ -48,6 +48,8 @@ pub struct StoredPlugin {
     pub owner_account: String,
     pub versions: Vec<StoredVersion>,
     pub installs: u32,
+    /// Featured by staff (the edge's `featured_at`).
+    pub featured: bool,
 }
 
 #[derive(Default)]
@@ -70,6 +72,9 @@ pub struct State {
     /// Reports: `(id, body)`.
     pub reports: Vec<(String, Value)>,
 }
+
+/// Who sent a request: a username, and the plugin a deploy key is for.
+type Who = (String, Option<String>);
 
 #[derive(Clone)]
 pub struct FakeStore {
@@ -169,6 +174,11 @@ impl FakeStore {
         self.state.lock().unwrap().plugins.get_mut(id).unwrap().owner_account = account.to_owned();
     }
 
+    /// Staff feature it.
+    pub fn feature(&self, id: &str) {
+        self.state.lock().unwrap().plugins.get_mut(id).unwrap().featured = true;
+    }
+
     pub fn add_deploy_key(&self, public: &str, id: &str, owner: &str) {
         self.state.lock().unwrap().deploy_keys.insert(public.to_owned(), (id.to_owned(), owner.to_owned()));
     }
@@ -179,7 +189,7 @@ impl FakeStore {
 
     /// Who a request is: a session's username, or a deploy key's owner (with
     /// the plugin it's scoped to).
-    fn who(&self, method: &str, path: &str, headers: &BTreeMap<String, String>, body: &[u8]) -> Result<Option<(String, Option<String>)>, (u16, Value)> {
+    fn who(&self, method: &str, path: &str, headers: &BTreeMap<String, String>, body: &[u8]) -> Result<Option<Who>, (u16, Value)> {
         let Some(auth) = headers.get("authorization") else { return Ok(None) };
         if let Some(token) = auth.strip_prefix("Bearer ") {
             return Ok(token.strip_prefix("session:").map(|u| (u.to_owned(), None)));
@@ -234,12 +244,16 @@ impl FakeStore {
             ("GET", ["store", "v1", "categories"]) => json_reply(200, json!({ "categories": [{ "id": "productivity", "name": "Productivity" }] })),
             ("GET", ["store", "v1", "plugins"]) => {
                 let state = self.state.lock().unwrap();
+                let query = path.split_once('?').map_or("", |(_, q)| q);
+                let featured_only = query.split('&').any(|pair| pair == "featured=true");
+                // (As the edge: `featured=true` filters; the order is the listing's.)
                 let items: Vec<Value> = state
                     .plugins
                     .iter()
+                    .filter(|(_, p)| !featured_only || p.featured)
                     .filter_map(|(id, p)| {
                         let v = p.versions.iter().rev().find(|v| v.status == "approved")?;
-                        Some(json!({ "id": id, "name": id, "version": v.version, "author": p.author() }))
+                        Some(json!({ "id": id, "name": id, "version": v.version, "author": p.author(), "featured": p.featured }))
                     })
                     .collect();
                 json_reply(200, json!({ "items": items }))
@@ -342,7 +356,7 @@ impl FakeStore {
                         }));
                     }
                 }
-                updates.extend(state.offer_anyway.drain(..));
+                updates.append(&mut state.offer_anyway);
                 json_reply(200, json!({ "updates": updates, "blocked": blocked }))
             }
             ("POST", ["store", "v1", "plugins", id, "versions"]) => {

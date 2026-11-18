@@ -63,7 +63,7 @@ zeron.settings_page {
 			Settings.Section {
 				title = zeron.t("settings.items.title") :: any,
 				description = zeron.t("settings.items.description") :: any,
-				trail = Button { zeron.t("settings.items.add"), tone = "secondary", size = "sm", on_click = add },
+				trail = Button { zeron.t("settings.items.add"), tone = "ghost", size = "sm", on_click = add },
 				ui.show(function(): boolean
 					return #list:get() > 0
 				end, Settings.Each(list, item_row, {

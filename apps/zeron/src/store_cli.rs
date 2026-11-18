@@ -68,10 +68,28 @@ pub fn code(word: &str) -> i32 {
     }
 }
 
+/// What to do about each word the store answers a deploy key's request
+/// with, in one plain line (the store's own words are for its logs).
+fn plain_line(word: &str) -> Option<&'static str> {
+    Some(match word {
+        "replayed_request" => "The store had this exact request already. Run it again.",
+        "stale_request" => "This machine's clock is more than five minutes off. Set it right, then run it again.",
+        "key_revoked" => "That deploy key was revoked. Make a new one (`zeron plugin key create <id>`) and put its secret in ZERON_DEPLOY_KEY.",
+        "key_expired" => "That deploy key has expired. Make a new one (`zeron plugin key create <id>`) and put its secret in ZERON_DEPLOY_KEY.",
+        "invalid_signature" => "The store couldn't check this request's signature. Copy the deploy key's secret again from where it was shown.",
+        "key_not_allowed" => "That deploy key can't do this: it publishes its own plugin and reads its status, nothing else.",
+        "unauthenticated" => "The store doesn't know that deploy key, or nobody is signed in. Make a key with `zeron plugin key create <id>`.",
+        "too_many_keys" => "This plugin has as many live deploy keys as it can (10). Revoke one first (`zeron plugin key revoke <id> <key>`).",
+        "body_mismatch" => "What reached the store isn't what was signed (it changed on the way). Run it again.",
+        _ => return None,
+    })
+}
+
 /// A failure from the store or the engine, as an exit.
 fn failed(error: &str) -> anyhow::Error {
     let word = install::reason_of(error).unwrap_or("");
-    exit(if word.is_empty() { REFUSED } else { code(word) }, error.to_owned())
+    let message = plain_line(word).map_or_else(|| error.to_owned(), |line| format!("{word}: {line}"));
+    exit(if word.is_empty() { REFUSED } else { code(word) }, message)
 }
 
 /// The deploy key in `ZERON_DEPLOY_KEY`, when one is set (an empty variable
@@ -110,7 +128,25 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
     let caller = Caller::DeployKey(key.clone());
     match command {
         PluginCommand::Publish { target, dry_run } => {
-            let prepared = read(&folder(&target, data_dir)?)?;
+            let mut prepared = read(&folder(&target, data_dir)?)?;
+            // Newer than what the store has (a deploy key reads its plugin's
+            // state), asked only of a plugin that meets the rules here; the
+            // store has the last word if it can't be asked.
+            let asked = if prepared.ok() { Some(store.my_plugins(&caller).await) } else { None };
+            match asked.unwrap_or_else(|| Err(String::new())) {
+                Ok(mine) => {
+                    let versions = mine["plugins"].as_array().into_iter().flatten().find(|p| p["id"] == prepared.manifest.id.as_str()).map(|p| p["versions"].clone());
+                    if let Some(Value::Array(versions)) = versions
+                        && let Some(problem) = publish::newer_problem(&prepared.manifest.version, &versions)
+                    {
+                        prepared.problems.push(problem);
+                    }
+                }
+                Err(error) if !error.is_empty() => {
+                    eprintln!("note: couldn't ask the store which versions it has: it has the last word on whether this one is newer")
+                }
+                Err(_) => {}
+            }
             say(&prepared);
             if !prepared.ok() {
                 return Err(exit(RULES, problems_line(&prepared)));
@@ -399,5 +435,15 @@ mod tests {
         assert_eq!(code("store_unreachable"), UNREACHABLE);
         assert_eq!(code("rate_limited"), UNREACHABLE);
         assert_eq!(code("something_new"), REFUSED);
+        assert_eq!(code("key_revoked"), REFUSED);
+        assert_eq!(code("key_expired"), REFUSED);
+        assert_eq!(code("too_many_keys"), REFUSED);
+        assert_eq!(code("stale_request"), SETUP);
+        assert_eq!(code("replayed_request"), UNREACHABLE);
+        // Each signed-request word reads as one plain line, word first.
+        for word in ["replayed_request", "stale_request", "key_revoked", "key_expired", "invalid_signature", "key_not_allowed", "unauthenticated", "too_many_keys", "body_mismatch"] {
+            let said = failed(&format!("{word}: the store's own words")).to_string();
+            assert!(said.starts_with(&format!("{word}: ")) && !said.contains('\n') && !said.contains("the store's own words"), "{said}");
+        }
     }
 }

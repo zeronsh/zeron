@@ -558,91 +558,97 @@ local function view(plugin: string): Node
 		end
 		return nil
 	end
-	return ds.Settings.Page {
-		title = name,
-		-- Unverified, at the top right, for one whose maker Zeron can't
-		-- vouch for (as its row says).
-		trail = ui.show(function(): boolean
-			return words.unverified(item())
-		end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
-		trail_top = true,
-		description = function(): string
-			local e = M.of(plugin)
-			if e and type(e.description) == "string" and e.description ~= "" then
-				return e.description
-			end
-			return ui.t("plugins.settings.description", { name = name() }):get()
-		end,
-		private_head = true,
-		-- What it declares, drawn by Zeron, out of plugins' reach.
-		ui.show(function(): boolean
-			local e = M.of(plugin)
-			return e ~= nil and #e.settings > 0
-		end, ui.column {
-			hook = false,
-			w_full = true,
-			ui.presence(function(): string
-				return shape(M.of(plugin))
-			end, function(_key: string): Node
+	-- Unverified, at the top right, for one whose maker Zeron can't vouch
+	-- for (as its row says). (The page built again as that changes: a
+	-- trail there takes the header's gap, hidden or not, so the title and
+	-- the line under it keep Zeron's pages' whole width while there's none.)
+	return ui.presence(function(): string
+		return if words.unverified(item()) then "unverified" else "vouched"
+	end, function(vouch: string): Node
+		-- (On the room's middle, as every Settings page: a presence's own
+		-- `items` doesn't reach inside what it builds.)
+		return ui.column { w_full = true, items = "center", ds.Settings.Page {
+			title = name,
+			trail = if vouch == "unverified" then ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" } else nil,
+			trail_top = true,
+			description = function(): string
 				local e = M.of(plugin)
-				if not e then
-					return ui.div {}
+				if e and type(e.description) == "string" and e.description ~= "" then
+					return e.description
 				end
-				local out: { Node } = {}
-				for _, run in sections(e.settings) do
-					local rows: { Node } = {}
-					for _, s in run.settings do
-						if s.kind == "wallpaper" then
-							table.insert(rows, WallpaperRows { plugin = plugin, setting = s, name = e.name })
-							continue
-						end
-						local permission = if s.kind == "permission" then permissions.KNOWN[s.permission or ""] else nil
-						table.insert(
-							rows,
-							search.anchor(
-								s.id,
-								ds.Settings.Row {
-									-- (A permission's words Zeron's, read as they're drawn.)
-									label = if permission
-										then function(): string
-											return label_of(s)
-										end
-										else label_of(s),
-									description = if permission
-										then function(): string
-											return permission.description(e.name)
-										end
-										else description_of(plugin, s),
-									control = ui.row {
-										gap = "$space.2",
-										items = "center",
-										if permission then nil else status_badge(plugin, s.id),
-										Control { plugin = plugin, setting = s, name = e.name },
-									},
-								}
+				return ui.t("plugins.settings.description", { name = name() }):get()
+			end,
+			private_head = true,
+			-- What it declares, drawn by Zeron, out of plugins' reach.
+			ui.show(function(): boolean
+				local e = M.of(plugin)
+				return e ~= nil and #e.settings > 0
+			end, ui.column {
+				hook = false,
+				w_full = true,
+				ui.presence(function(): string
+					return shape(M.of(plugin))
+				end, function(_key: string): Node
+					local e = M.of(plugin)
+					if not e then
+						return ui.div {}
+					end
+					local out: { Node } = {}
+					for _, run in sections(e.settings) do
+						local rows: { Node } = {}
+						for _, s in run.settings do
+							if s.kind == "wallpaper" then
+								table.insert(rows, WallpaperRows { plugin = plugin, setting = s, name = e.name })
+								continue
+							end
+							local permission = if s.kind == "permission" then permissions.KNOWN[s.permission or ""] else nil
+							table.insert(
+								rows,
+								search.anchor(
+									s.id,
+									ds.Settings.Row {
+										-- (A permission's words Zeron's, read as they're drawn.)
+										label = if permission
+											then function(): string
+												return label_of(s)
+											end
+											else label_of(s),
+										description = if permission
+											then function(): string
+												return permission.description(e.name)
+											end
+											else description_of(plugin, s),
+										control = ui.row {
+											gap = "$space.2",
+											items = "center",
+											if permission then nil else status_badge(plugin, s.id),
+											Control { plugin = plugin, setting = s, name = e.name },
+										},
+									}
+								)
 							)
-						)
+						end
+						-- (Zeron's note under permission rows: whose permissions they are.)
+						local asks = false
+						for _, s in run.settings do
+							asks = asks or s.kind == "permission"
+						end
+						table.insert(out, ds.Settings.Section {
+							title = run.title,
+							description = if asks then permissions.note() else nil,
+							ds.Settings.Group(rows :: any),
+						})
 					end
-					-- (Zeron's note under permission rows: whose permissions they are.)
-					local asks = false
-					for _, s in run.settings do
-						asks = asks or s.kind == "permission"
-					end
-					table.insert(out, ds.Settings.Section {
-						title = run.title,
-						description = if asks then permissions.note() else nil,
-						ds.Settings.Group(rows :: any),
-					})
-				end
-				return ui.column { w_full = true, gap = "$space.6", table.unpack(out) }
-			end, { w_full = true }),
-		}),
-		-- What it draws itself, after what it declares.
-		ui.show(function(): boolean
-			local e = M.of(plugin)
-			return e ~= nil and e.page ~= nil
-		end, own_page(plugin, name())),
-	}
+					return ui.column { w_full = true, gap = "$space.6", table.unpack(out) }
+				end, { w_full = true }),
+			}),
+			-- What it draws itself, after what it declares.
+			ui.show(function(): boolean
+				local e = M.of(plugin)
+				return e ~= nil and e.page ~= nil
+			end, own_page(plugin, name())),
+		} }
+	end, { w_full = true })
 end
 
 -- The pages, after Zeron's own, under "Plugins". (A template whose

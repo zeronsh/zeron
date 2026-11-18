@@ -225,6 +225,13 @@ impl Rig {
         self.book.borrow().values(plugin).get(id).cloned().unwrap_or(Json::Null)
     }
 
+    /// How many nodes `target` names.
+    fn count(&mut self, target: &str) -> usize {
+        self.app.frames(1);
+        let target = zgx_script::driver::parse(target).unwrap();
+        zgx_script::driver::find_all(&self.app.ui, &self.app.handle, &target).map(|n| n.len()).unwrap_or(0)
+    }
+
     /// The window's whole tree (`tree` keeps to its first 200 lines).
     fn tree(&mut self) -> String {
         self.app.frames(1);
@@ -303,13 +310,19 @@ fn snippets_edits_its_list_with_master_detail_validation_and_a_result() {
     assert!(rig.app.find("#snippets-list >> \"Standup\"").is_some());
     let review_row = rig.app.find("#snippets-list >> role:button \"Ask for a review\"");
     assert!(rig.line("textbox \"Name\"").contains("Ask for a review"), "{}", rig.tree());
-    // A text snippet has no Try it.
+    // A text snippet has no Try it; its card a hairline between each of its
+    // three rows, once.
     assert!(rig.app.find("role:button \"Try it\"").is_none());
+    assert_eq!(rig.count("#snippets-editor >> .settings-rule"), 2);
+    // Its count reads out of the real limit.
+    assert!(rig.tree().contains("/2000") && !rig.tree().contains("/1800"), "{}", rig.tree());
     // Another chosen: open under the list; the list's rows stay as they were.
     rig.app.click("#snippets-list >> role:button \"Standup\"");
     rig.frames(20);
     assert!(rig.line("textbox \"Name\"").contains("Standup"));
     assert_eq!(rig.app.find("#snippets-list >> role:button \"Ask for a review\""), review_row, "the list's rows, in place");
+    // A template's Try it comes with its own hairline, and only one.
+    assert_eq!(rig.count("#snippets-editor >> .settings-rule"), 3);
     // A template tries itself: what it puts in, drawn under its row.
     rig.app.click("role:button \"Try it\"");
     rig.frames(10);
@@ -328,6 +341,12 @@ fn snippets_edits_its_list_with_master_detail_validation_and_a_result() {
     rig.frames(20);
     assert_eq!(kept(&rig).as_array().unwrap().len(), 3);
     assert!(rig.line("textbox \"Name\"").contains("New snippet"), "{}", rig.tree());
+    // Nobody has typed in its empty text yet: nothing said against it.
+    assert!(!rig.tree().contains("Write what it puts in the message box."), "{}", rig.tree());
+    rig.app.fill("role:textbox \"Text\"", "x");
+    rig.app.fill("role:textbox \"Text\"", "");
+    rig.frames(10);
+    assert!(rig.tree().contains("Write what it puts in the message box."), "once typed in, it says so: {}", rig.tree());
     // A name another has is said, and not kept; one of its own is.
     rig.app.fill("role:textbox \"Name\"", "standup");
     rig.app.keys("enter");
@@ -824,4 +843,84 @@ zeron.settings_page { build = function() return widgets("settings") end }
     // the window's size.
     assert_eq!(got[0][0], Some((380., 152.)));
     assert_eq!(got[0][1], Some((1200., 1400.)));
+}
+
+/// What the person sets that the design system follows reaches the copy lent
+/// to a plugin, at once, set through Zeron's own controls with the plugin's
+/// page open in the window: frosted glass, the accent, the accent throughout,
+/// reduce motion, the text size, hiding email addresses (ds/preference). And
+/// a plugin can't change one.
+#[test]
+fn what_the_person_sets_in_appearance_reaches_a_plugin_s_design_system() {
+    let dir = written(
+        "looks",
+        json!({ "id": "looks", "name": "Looks", "version": "1.0.0", "entry": "init.luau", "permissions": [] }),
+        r#"
+local zeron = require("./zeron")("looks")
+local material = require("@ds/material")
+local motion = require("@ds/motion")
+local look = require("@ds/look")
+local PrivateText = require("@ds/private_text")
+local Button = require("@ds/button")
+local function said(id, read)
+	return ui.text { id = id, function() return tostring(read()) end }
+end
+zeron.settings_page {
+	build = function()
+		return ui.column {
+			id = "looks-page",
+			said("looks-frosted", function() return material.frosted:get() end),
+			said("looks-accent", function() return look.accent:get() end),
+			said("looks-accented", function() return look.accented:get() end),
+			said("looks-reduce", function() return motion.reduce:get() end),
+			said("looks-text-size", function() return look.text_size:get() end),
+			said("looks-hidden", function() return PrivateText.hidden:get() end),
+			Button { "Change it", on_click = function()
+				local ok = pcall(function() material.frosted:set(not material.frosted:peek()) end)
+				zeron.toast(if ok then "changed" else "refused")
+			end },
+		}
+	end,
+}
+"#,
+    );
+    let mut rig = Rig::new(&[dir]);
+    let shown = |rig: &mut Rig| -> Vec<String> {
+        ["looks-frosted", "looks-accent", "looks-accented", "looks-reduce", "looks-text-size", "looks-hidden"].iter().map(|id| rig.app.text(id)).collect()
+    };
+    let go = |rig: &mut Rig, page: &str| {
+        rig.app.scroll(NAV, -2000.);
+        rig.frames(5);
+        rig.app.scroll(NAV, if page == "Looks" { 2000. } else { 0. });
+        rig.frames(5);
+        rig.app.click(&format!("{NAV} >> role:tab \"{page}\""));
+        rig.frames(30);
+    };
+    rig.open("Looks");
+    let before = shown(&mut rig);
+    // (The fixture's own: hide emails off, the rest their defaults.)
+    assert_eq!(before, ["true", "default", "true", "false", "13", "false"], "the app's values, not the plugin's own defaults");
+    // Each through Zeron's own control, then back to the plugin's page.
+    go(&mut rig, "Appearance");
+    rig.app.click(&format!("{PAGE} >> role:switch \"Frosted glass\""));
+    rig.app.click(&format!("{PAGE} >> role:switch \"Accent color throughout\""));
+    rig.app.click(&format!("{PAGE} >> role:switch \"Reduce motion\""));
+    rig.app.click(&format!("{PAGE} >> role:radio \"Green\""));
+    rig.frames(10);
+    rig.app.click(&format!("{PAGE} >> role:button \"Interface text size\""));
+    rig.frames(20);
+    rig.app.click("role:menuitem \"15 pt\"");
+    rig.frames(10);
+    go(&mut rig, "General");
+    rig.app.click(&format!("{PAGE} >> role:switch \"Hide email addresses\""));
+    rig.frames(10);
+    go(&mut rig, "Looks");
+    assert_eq!(shown(&mut rig), ["false", "green", "false", "true", "15", "true"], "{}", rig.tree());
+    // A plugin can't change one: refused, the app's as it was.
+    rig.app.click("role:button \"Change it\"");
+    rig.frames(10);
+    let toast = rig.heard.borrow().iter().rev().find(|(k, _)| k == "plugin.looks.toast").map(|(_, v)| v.clone());
+    assert_eq!(toast, Some(json!("refused")));
+    assert_eq!(rig.app.text("looks-frosted"), "false");
+    assert_eq!(rig.app.error(), None);
 }

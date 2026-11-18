@@ -43,6 +43,23 @@ pub const MAX_README_BYTES: usize = 512 * 1024;
 pub const MAX_CHANGELOG_BYTES: usize = 512 * 1024;
 /// The manifest's canonical JSON, without its signature.
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
+/// What the store takes, as uploaded: the `.zeron-plugin` file (amendment
+/// 34). Sideloaded packages keep the engine's larger limit.
+pub const MAX_PUBLISH_BYTES: usize = 20 * 1024 * 1024;
+/// The manifest as it's written in the package (its signature included).
+pub const MAX_MANIFEST_JSON_BYTES: usize = 1024 * 1024;
+/// JSON values in that manifest: every value counted once (the manifest
+/// itself, each member's value, each array element), keys not.
+pub const MAX_MANIFEST_VALUES: usize = 100_000;
+
+/// The JSON values in `value`, itself included (keys aren't values).
+pub fn count_values(value: &Value) -> usize {
+    1 + match value {
+        Value::Array(items) => items.iter().map(count_values).sum(),
+        Value::Object(map) => map.values().map(count_values).sum(),
+        _ => 0,
+    }
+}
 /// A version's notes (its CHANGELOG.md section).
 pub const MAX_NOTES_BYTES: usize = 64 * 1024;
 /// Screenshots are PNG or JPEG pictures.
@@ -162,8 +179,9 @@ impl Listing {
         Self {
             categories: texts(raw.get("categories")),
             keywords: texts(raw.get("keywords")),
-            homepage: text(raw.get("homepage")),
-            repository: text(raw.get("repository")),
+            // As the store keeps them: the parsed URL's text.
+            homepage: text(raw.get("homepage")).map(|u| store_link(&u).unwrap_or(u)),
+            repository: text(raw.get("repository")).map(|u| store_link(&u).unwrap_or(u)),
             license: text(raw.get("license")),
             screenshots: texts(raw.get("screenshots")),
             icon: text(raw.get("icon")),
@@ -198,19 +216,21 @@ pub fn reserved_for_store(id: &str) -> bool {
         || manifest::check_id(id).is_err_and(|e| e == manifest::RESERVED_ID_ERROR)
 }
 
-/// An `https://` link without spaces or control characters, of a sensible
-/// length, with a host.
-fn https_url(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://") else {
-        return false;
-    };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    url.len() <= MAX_URL_LEN
-        && !host.is_empty()
-        && !host.starts_with('.')
-        && host.contains('.')
-        && !host.contains(['@', '\\'])
-        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+/// A `homepage` or `repository` as the store takes one (amendment 31):
+/// `https://`, at most [`MAX_URL_LEN`], no backslash, whitespace, control
+/// character or `user:password@` part, and parsing as a URL (WHATWG). The
+/// parsed URL's text is what's kept: `https://example.com` is kept as
+/// `https://example.com/`.
+pub fn store_link(url: &str) -> Option<String> {
+    if !url.starts_with("https://")
+        || url.len() > MAX_URL_LEN
+        || url.chars().any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    let parsed = url::Url::parse(url).ok()?;
+    let plain = parsed.scheme() == "https" && parsed.host().is_some() && parsed.username().is_empty() && parsed.password().is_none();
+    plain.then(|| parsed.to_string())
 }
 
 /// Whether `text` has a control or format character (Unicode Cc or Cf:
@@ -219,13 +239,6 @@ fn https_url(url: &str) -> bool {
 fn unseen(text: &str) -> bool {
     use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
     text.chars().any(|c| matches!(c.general_category(), GeneralCategory::Control | GeneralCategory::Format))
-}
-
-/// A link exactly as it parses (WHATWG URL): `https:\\evil.com` reads as
-/// `https://evil.com/`, so it's refused, as is anything a reader would see
-/// differently from what a browser opens.
-fn exact_url(url: &str) -> bool {
-    url::Url::parse(url).is_ok_and(|parsed| parsed.as_str() == url)
 }
 
 /// A path as macOS and Windows compare it: Unicode NFC, then
@@ -518,7 +531,7 @@ pub fn check(
     for field in ["homepage", "repository"] {
         match raw.get(field) {
             None | Some(Value::Null) => {}
-            Some(Value::String(url)) if https_url(url) && exact_url(url) => {}
+            Some(Value::String(url)) if store_link(url).is_some() => {}
             Some(_) => problems.push(Problem::new(
                 BAD_LISTING,
                 Some(if field == "homepage" {
@@ -861,10 +874,17 @@ pub(crate) mod tests {
         assert_eq!(with("name", serde_json::json!("Focus\u{202e}draoB")), bad("name"));
         assert_eq!(with("name", serde_json::json!("Focus\u{200b}Board")), bad("name"));
         assert_eq!(with("description", serde_json::json!("A board\u{2066}.")), bad("description"));
-        assert_eq!(with("homepage", serde_json::json!("https://example.com")), bad("homepage"), "parses as https://example.com/");
-        assert_eq!(with("homepage", serde_json::json!("https://Example.com/x")), bad("homepage"));
-        assert_eq!(with("homepage", serde_json::json!("https://example.com/")), vec![]);
-        assert_eq!(with("repository", serde_json::json!("https://github.com/a/b?x=1#y")), vec![]);
+        for (written, kept) in [
+            ("https://example.com", "https://example.com/"),
+            ("https://Example.com/x/../y", "https://example.com/y"),
+            ("https://github.com/a/b?x=1#y", "https://github.com/a/b?x=1#y"),
+        ] {
+            assert_eq!(with("homepage", serde_json::json!(written)), vec![], "{written}");
+            assert_eq!(store_link(written).as_deref(), Some(kept));
+        }
+        for refused in ["https:\\\\evil.com", "https://user:pw@example.com/", "https://user@example.com/", "https://exa mple.com/", "http://example.com/", "https://example.com/\u{7}"] {
+            assert_eq!(with("homepage", serde_json::json!(refused)), bad("homepage"), "{refused}");
+        }
         // Two paths that are one file on a Mac or a Windows machine.
         for (a, b) in [("README.md", "readme.md"), ("caf\u{e9}.txt", "cafe\u{301}.txt"), ("shots/a.png", "Shots/A.png"), ("x.txt", "x.txt.")] {
             let mut two = files.clone();
