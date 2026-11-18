@@ -20,8 +20,9 @@ describe("store versions", () => {
   it("holds the store's limits on top of semver's", () => {
     expect(parseVersion("9007199254740991.0.0")?.major).toBe(Number.MAX_SAFE_INTEGER);
     expect(parseVersion("9007199254740992.0.0")).toBeUndefined();
-    expect(parseVersion(`1.0.0-${"a".repeat(122)}`)).toBeDefined();
-    expect(parseVersion(`1.0.0-${"a".repeat(123)}`)).toBeUndefined();
+    // At most 32 characters (f9e0dedb3; was 128).
+    expect(parseVersion(`1.0.0-${"a".repeat(26)}`)).toBeDefined();
+    expect(parseVersion(`1.0.0-${"a".repeat(27)}`)).toBeUndefined();
     expect(precedenceText(v("1.2.3-rc.1+build.5"))).toBe("1.2.3-rc.1");
     expect(comparePrecedence(v("1.0.0+a"), v("1.0.0+b"))).toBe(0);
   });

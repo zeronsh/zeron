@@ -34441,7 +34441,7 @@
       "2.1.0",
       "2.1.1"
     ],
-    "max_len": 128,
+    "max_len": 32,
     "max_number": 9007199254740991,
     "order": [
       "0.0.1",
@@ -34566,13 +34566,8 @@
         "pre": ""
       },
       {
-        "build": "",
         "input": "9007199254740991.9007199254740991.9007199254740991",
-        "major": 9007199254740991,
-        "minor": 9007199254740991,
-        "ok": true,
-        "patch": 9007199254740991,
-        "pre": ""
+        "ok": false
       },
       {
         "input": "",
@@ -34664,15 +34659,15 @@
       },
       {
         "build": "",
-        "input": "1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "input": "1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaa",
         "major": 1,
         "minor": 0,
         "ok": true,
         "patch": 0,
-        "pre": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "pre": "aaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       {
-        "input": "1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "input": "1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "ok": false
       },
       {
@@ -35005,13 +35000,8 @@
         "ok": false
       },
       {
-        "build": "99999999999999999999999999999999",
         "input": "1.0.0+99999999999999999999999999999999",
-        "major": 1,
-        "minor": 0,
-        "ok": true,
-        "patch": 0,
-        "pre": ""
+        "ok": false
       },
       {
         "input": "a.b.c",
@@ -35077,13 +35067,8 @@
         "pre": "beta.11"
       },
       {
-        "build": "788",
         "input": "1.2.3----RC-SNAPSHOT.12.9.1--.12+788",
-        "major": 1,
-        "minor": 2,
-        "ok": true,
-        "patch": 3,
-        "pre": "---RC-SNAPSHOT.12.9.1--.12"
+        "ok": false
       },
       {
         "build": "meta",
@@ -35095,13 +35080,8 @@
         "pre": "---R-S.12.9.1--.12"
       },
       {
-        "build": "0.build.1-rc.10000aaa-kk-0.1",
         "input": "1.0.0+0.build.1-rc.10000aaa-kk-0.1",
-        "major": 1,
-        "minor": 0,
-        "ok": true,
-        "patch": 0,
-        "pre": ""
+        "ok": false
       },
       {
         "input": "99999999999999999999999.999999999.99999999",
@@ -35266,13 +35246,8 @@
         "pre": "alpha.beta"
       },
       {
-        "build": "build.1-aef.1-its-okay",
         "input": "1.0.0-alpha-a.b-c-somethinglong+build.1-aef.1-its-okay",
-        "major": 1,
-        "minor": 0,
-        "ok": true,
-        "patch": 0,
-        "pre": "alpha-a.b-c-somethinglong"
+        "ok": false
       }
     ]
   },

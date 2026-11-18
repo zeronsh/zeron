@@ -100,6 +100,33 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/versions/1.0.0/package`)).status).toBe(200);
   });
 
+  it("asks again, after the objects are written, that the signing key is still live", async () => {
+    const a = await author();
+    const id = uniqueId("revoked");
+    const pkg = await makePackage({ id, version: "1.0.0", signer: a.signer });
+    // The key is revoked while the package is being written to R2.
+    let revoked = false;
+    const revoking = new Proxy(env.PLUGIN_STORE, {
+      get: (target, prop) =>
+        prop === "put"
+          ? async (...args: Parameters<R2Bucket["put"]>) => {
+              if (!revoked) {
+                revoked = true;
+                expect((await call(a.userId, "DELETE", `/plugin-keys/${a.signer.key}`)).status).toBe(200);
+              }
+              return target.put(...args);
+            }
+          : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target)
+    }) as R2Bucket;
+    const request = new Request(`https://edge.test/store/v1/plugins/${id}/versions`, { method: "POST", headers: { authorization: `Bearer ${a.userId}` }, body: pkg });
+    const res = await handlePublish(request, env as never, env.STORE_DB, revoking, id);
+    expect([res.status, ((await res.json()) as { error: string }).error]).toEqual([403, "key_not_allowed"]);
+    expect(revoked).toBe(true);
+    // Nothing landed, and the objects are the sweep's to judge.
+    expect(await env.STORE_DB.prepare("SELECT 1 FROM versions WHERE plugin_id = ?").bind(id).first()).toBeNull();
+    expect((await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM object_orphans WHERE key LIKE ?").bind(`pkg/${id}/%`).first<number>("n"))).toBe(1);
+  });
+
   it("never lets the sweep take a retry's objects while its batch is on the way", async () => {
     const a = await author();
     const id = uniqueId("retry");
@@ -323,6 +350,9 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       [{ version: "1.0" }, {}, "not_semver"],
       [{ version: "01.0.0" }, {}, "not_semver"],
       [{ version: "9007199254740992.0.0" }, {}, "not_semver"],
+      // At most 32 characters (f9e0dedb3).
+      [{ version: `1.0.0-${"a".repeat(27)}` }, {}, "not_semver"],
+      [{ version: "1.0.0+9999999999999999999999999999999" }, {}, "not_semver"],
       [{}, { "README.md": undefined }, "missing_readme"],
       [{ description: undefined }, {}, "missing_listing"],
       [{ icon: undefined }, {}, "missing_listing"],
@@ -346,6 +376,16 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer, manifest, files }));
       expect([res.status, (await json(res)).error], JSON.stringify(manifest) + JSON.stringify(files)).toEqual([400, error]);
     }
+  });
+
+  it("takes a version of exactly 32 characters, and serves it", async () => {
+    const a = await author();
+    const id = uniqueId();
+    const version = `1.0.0-${"a".repeat(26)}`;
+    expect(version).toHaveLength(32);
+    expect((await publish(a.userId, id, await makePackage({ id, version, signer: a.signer }))).status).toBe(201);
+    expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions/${version}`)).status).toBe(200);
+    expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions/${version}/package`)).status).toBe(200);
   });
 
   it("refuses a version not later than every version the plugin has, in any state", async () => {
