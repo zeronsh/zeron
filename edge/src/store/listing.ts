@@ -14,44 +14,35 @@ import { cleanImage } from "../image-check";
 import { type Json, type JsonObject, canonicalJson, isArray, isObject } from "./json";
 import { MANIFEST_FILE, type Manifest, RESERVED_ID_ERROR, idProblem, isRustWhitespace, rustTrim, rustTrimStart } from "./manifest";
 import { MAX_BYTES, MAX_FILES } from "./package";
+import { LIMITS, STORE_DATA } from "./data";
 import { plainPath } from "./paths";
 import { type Range, type Version, parseRange, parseVersion } from "./semver";
 
 /** The fixed list (contract amendment 4), with the words shown for each. */
-export const CATEGORIES: readonly { readonly id: string; readonly name: string }[] = [
-  { id: "agents", name: "Agents" },
-  { id: "appearance", name: "Appearance" },
-  { id: "chat", name: "Chat" },
-  { id: "developer-tools", name: "Developer tools" },
-  { id: "git", name: "Git" },
-  { id: "integrations", name: "Integrations" },
-  { id: "productivity", name: "Productivity" },
-  { id: "utilities", name: "Utilities" }
-];
+export const CATEGORIES: readonly { readonly id: string; readonly name: string }[] = STORE_DATA.categories;
 export const isCategory = (id: string): boolean => CATEGORIES.some((c) => c.id === id);
 
 /** Zeron's own plugins' ids: nobody publishes them. */
-export const BUILTIN_IDS: readonly string[] = ["git", "github", "parallax-scenes"];
+export const BUILTIN_IDS: readonly string[] = STORE_DATA.builtin_ids;
 
 export const README_FILE = "README.md";
 export const CHANGELOG_FILE = "CHANGELOG.md";
-export const MAX_CATEGORIES = 2;
-export const MAX_KEYWORDS = 8;
-export const MAX_KEYWORD_LEN = 32;
-export const MAX_SCREENSHOTS = 8;
-export const MAX_URL_LEN = 2048;
-export const MAX_LICENSE_LEN = 64;
-export const MAX_NAME_LEN = 64;
-export const MAX_DESCRIPTION_LEN = 300;
-export const MAX_ICON_BYTES = 32 * 1024;
-export const SCREENSHOT_TYPES = ["png", "jpg", "jpeg"];
-/** Amendment 31: README.md and CHANGELOG.md at most 512 KB each, the
- * canonical manifest at most 256 KB. */
-export const MAX_README_BYTES = 512 * 1024;
-export const MAX_CHANGELOG_BYTES = 512 * 1024;
-export const MAX_MANIFEST_BYTES = 256 * 1024;
-/** The store's own: a version's notes live in its row. */
-export const MAX_NOTES_BYTES = 64 * 1024;
+export const MAX_CATEGORIES = LIMITS.max_categories;
+export const MAX_KEYWORDS = LIMITS.max_keywords;
+export const MAX_KEYWORD_LEN = LIMITS.max_keyword_len;
+export const MAX_SCREENSHOTS = LIMITS.max_screenshots;
+export const MAX_URL_LEN = LIMITS.max_url_len;
+export const MAX_LICENSE_LEN = LIMITS.max_license_len;
+export const MAX_NAME_LEN = LIMITS.max_name_len;
+export const MAX_DESCRIPTION_LEN = LIMITS.max_description_len;
+export const MAX_ICON_BYTES = LIMITS.max_icon_bytes;
+export const SCREENSHOT_TYPES: readonly string[] = LIMITS.screenshot_types;
+/** README.md and CHANGELOG.md, a version's notes, the canonical manifest
+ * without its signature (amendments 22, 31). */
+export const MAX_README_BYTES = LIMITS.max_readme_bytes;
+export const MAX_CHANGELOG_BYTES = LIMITS.max_changelog_bytes;
+export const MAX_MANIFEST_BYTES = LIMITS.max_manifest_bytes;
+export const MAX_NOTES_BYTES = LIMITS.max_notes_bytes;
 
 export type ListingRule =
   | "bad_package"
@@ -259,7 +250,7 @@ export const checkListing = (
 
   const readme = files.get(README_FILE);
   if (!readme) problems.push(problem("missing_readme", null, "It needs a README.md: its page in the store"));
-  else if (readme.length > MAX_README_BYTES) problems.push(problem("bad_listing", "readme", `Its README.md is at most ${MAX_README_BYTES / 1024} KB`, README_FILE));
+  else if (readme.length > MAX_README_BYTES) problems.push(problem("too_large", null, `Its README.md is at most ${MAX_README_BYTES / 1024} KB`, README_FILE));
   else {
     const text = decodeText(readme);
     if (text === undefined || rustTrim(text) === "") problems.push(problem("missing_readme", null, "Its README.md is empty or isn't text", README_FILE));
@@ -343,7 +334,7 @@ export const checkListing = (
   const changelog = files.get(CHANGELOG_FILE);
   const notes = changelog && changelog.length <= MAX_CHANGELOG_BYTES ? changelogNotes(lossy.decode(changelog), manifest.version) : undefined;
   if (notes !== undefined && byteLength(notes) > MAX_NOTES_BYTES) {
-    problems.push(problem("bad_listing", "changelog", `This version's notes in CHANGELOG.md are at most ${MAX_NOTES_BYTES / 1024} KB`, CHANGELOG_FILE));
+    problems.push(problem("too_large", null, `This version's notes in CHANGELOG.md are at most ${MAX_NOTES_BYTES / 1024} KB`, CHANGELOG_FILE));
   }
   if (changelog && changelog.length <= MAX_CHANGELOG_BYTES && notes === undefined) {
     warnings.push(problem("no_notes", null, `CHANGELOG.md has no section for ${manifest.version}: this version shows without notes`, CHANGELOG_FILE));

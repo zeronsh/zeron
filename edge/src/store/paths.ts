@@ -5,9 +5,10 @@
  * folder on every system. The store builds R2 keys only from paths that
  * pass `plainPath`.
  */
+import { LIMITS } from "./data";
 
 /** The longest package path, in UTF-8 bytes. */
-export const MAX_PATH = 1024;
+export const MAX_PATH = LIMITS.max_path;
 
 const encoder = new TextEncoder();
 

@@ -123,7 +123,7 @@ describe("store listing", () => {
     expect(rules({ keywords: ["timer", "deep work"], homepage: "https://example.com/", engines: { zeron: ">=0.4.0" } })).toEqual([]);
     const ok = listingOf(manifest({ keywords: ["timer"], engines: { zeron: ">=0.4.0" } }), files());
     expect(ok).toMatchObject({ summary: "Focus.", icon: "icon.svg", categories: ["productivity"], keywords: ["timer"], engines: ">=0.4.0", readme: "# Hi", notes: null });
-    expect(rules({}, { "README.md": `# Big\n${"x".repeat(512 * 1024)}` })).toEqual(["bad_listing"]);
+    expect(rules({}, { "README.md": `# Big\n${"x".repeat(512 * 1024)}` })).toEqual(["too_large"]);
     expect(rules({}, { "CHANGELOG.md": `## 1.0.0\n${"x".repeat(512 * 1024)}` })).toEqual(["too_large"]);
     expect(rules({ x: "y".repeat(256 * 1024) })).toEqual(["too_large"]);
     expect(rules({ icon: "../icon.svg" })).toEqual(["bad_listing"]);

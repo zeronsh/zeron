@@ -22,17 +22,19 @@
  * Then the content hash: sha256 of `canonical(manifest without signature) +
  * "\n" + canonical(file hashes)`.
  */
+
 import { type Json, type JsonObject, JsonError, canonicalJson, isObject, parseJson } from "./json";
 import { MANIFEST_FILE, type Manifest, idProblem, readManifest } from "./manifest";
+import { LIMITS } from "./data";
 import { plainPath } from "./paths";
 import { Scanner, decodeBase64String, decodedBound as spanBound, stringIs, stringText } from "./scan";
 
 export const FORMAT = "zeron-plugin:v1";
 export const PAYLOAD_PREFIX = "zeron-plugin:v1\n";
-export const MAX_FILES = 2000;
-export const MAX_BYTES = 50 * 1024 * 1024;
+export const MAX_FILES = LIMITS.max_files;
+export const MAX_BYTES = LIMITS.max_bytes;
 /** package.rs `MAX_PACKAGE_BYTES`: the engine's own ceiling. */
-export const MAX_PACKAGE_BYTES = Math.floor((MAX_BYTES * 4) / 3) + 1024 * 1024;
+export const MAX_PACKAGE_BYTES = LIMITS.max_package_bytes;
 
 /** Why a package was refused: install.rs's reason words, plus the plugin
  * level ones (`bad_manifest`, `bad_id`, `missing_entry`), as the engine's
@@ -253,8 +255,8 @@ const byCodePoint = (a: string, b: string): number => {
 /** The longest manifest JSON the store reads (bytes as written), and the
  * most values in it: bounds on what building it can cost. The canonical
  * manifest is held to 256 KB as a listing rule (listing.ts). */
-export const MAX_MANIFEST_JSON = 1024 * 1024;
-export const MAX_MANIFEST_VALUES = 100_000;
+export const MAX_MANIFEST_JSON = LIMITS.max_manifest_json_bytes;
+export const MAX_MANIFEST_VALUES = LIMITS.max_manifest_values;
 /** A file's path is at most 1,024 bytes, and each takes at most six bytes
  * of JSON (`\u0041`): a longer key is no path, read or not. */
 const MAX_KEY_JSON = 6 * 1024 + 6;

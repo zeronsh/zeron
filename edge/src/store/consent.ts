@@ -5,33 +5,18 @@
  *
  * The ratings come from crates/plugin-guard: `commands::risk`,
  * `full_control`, `held_to_its_own_rules` and `net::risky`/`names_exactly`.
- * Their tables are copied below until the engine lane's generated
- * docs/plugin-package-vectors.json carries them as data; then this module
- * reads them from there (and its `consent_items` vectors hold both sides).
+ * Their tables are the engine's own, from docs/plugin-store-data.json
+ * (data.ts); the `consent_items` vectors hold both sides to them.
  */
+import { STORE_DATA } from "./data";
 import type { Manifest, ToolSpec } from "./manifest";
 import { namesExactly, riskyHost } from "./manifest";
 
-/** Programs known to neither run others nor write files (plugin-guard
- * `CONTAINED`). */
-export const contained: readonly string[] = [
-  "basename", "cat", "cksum", "cut", "date", "df", "dirname", "du", "echo", "false", "file", "grep", "head",
-  "hostname", "id", "jq", "ls", "md5", "md5sum", "nproc", "printenv", "printf", "ps", "pwd", "readlink",
-  "realpath", "sha1sum", "sha256sum", "shasum", "sleep", "stat", "sw_vers", "tail", "tr", "true", "uname",
-  "uptime", "wc", "which", "whoami"
-];
-
-/** Shells and interpreters (plugin-guard `FULL_CONTROL`). */
-export const fullControlNames: readonly string[] = [
-  "ash", "bash", "bun", "cmd", "csh", "dash", "deno", "elixir", "erl", "fish", "ksh", "lua", "luajit", "node", "nodejs",
-  "osascript", "perl", "php", "powershell", "pwsh", "python", "pypy", "ruby", "sh", "swift", "tclsh",
-  "tcsh", "wscript", "cscript", "zsh"
-];
-
-/** Programs held to rules of their own (plugin-guard `held_to_its_own_rules`). */
-export const heldNames: readonly string[] = ["git", "gh"];
-/** The extensions a program's name loses (plugin-guard `normalized`). */
-export const windowsExtensions: readonly string[] = [".exe", ".cmd", ".bat", ".com"];
+/** The ratings' tables (plugin-guard's), as the engine exports them. */
+export const contained: readonly string[] = STORE_DATA.consent.contained;
+export const fullControlNames: readonly string[] = STORE_DATA.consent.full_control;
+export const heldNames: readonly string[] = STORE_DATA.consent.held_to_its_own_rules;
+export const windowsExtensions: readonly string[] = STORE_DATA.consent.windows_extensions;
 
 /** plugin-guard `normalized`: lowercase ASCII, no Windows extension. */
 export const normalizedProgram = (program: string): string => {

@@ -12,56 +12,48 @@ import { isText } from "./checks";
 import { consentItem, contained, fullControlNames, heldNames, windowsExtensions } from "./consent";
 import { JsonError, type JsonObject, canonicalJson, isObject, parseJsonText } from "./json";
 import {
-  BUILTIN_IDS,
-  CATEGORIES,
-  MAX_CATEGORIES,
-  MAX_DESCRIPTION_LEN,
-  MAX_ICON_BYTES,
-  MAX_KEYWORDS,
-  MAX_KEYWORD_LEN,
-  MAX_LICENSE_LEN,
-  MAX_NAME_LEN,
-  MAX_NOTES_BYTES,
-  MAX_README_BYTES,
-  MAX_SCREENSHOTS,
-  MAX_URL_LEN,
-  SCREENSHOT_TYPES,
   changelogNotes,
-  checkListing
+  checkListing,
+  listingOf
 } from "./listing";
-import { MAX_HOSTS, RESERVED_IDS, idProblem, readManifest } from "./manifest";
-import { MAX_BYTES, MAX_FILES, MAX_PACKAGE_BYTES, PackageRefusal, checkSignature, contentHash, signaturePayload, verifyPackage } from "./package";
-import { MAX_PATH, plainPath } from "./paths";
-import { MAX_RANGE_LENGTH, MAX_VERSION_LENGTH, comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
+import { idProblem, readManifest } from "./manifest";
+import { PackageRefusal, checkSignature, contentHash, signaturePayload, verifyPackage } from "./package";
+import { plainPath } from "./paths";
+import { comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
+import { STORE_DATA } from "./data";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-const here = dirname(fileURLToPath(import.meta.url));
-const v: any = JSON.parse(readFileSync(resolve(here, "../../../docs/plugin-package-vectors.json"), "utf8"));
-
 const fromB64 = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, "base64"));
+const here = dirname(fileURLToPath(import.meta.url));
+/** `{ parts: [...] }` written for a long string: its parts joined, each a
+ * string or `{ repeat, count }` (the vectors' `about` says so). */
+const joinParts = (parts: any[]): string => parts.map((p: any) => (typeof p === "string" ? p : String(p.repeat).repeat(p.count))).join("");
+const expand = (value: any): any => {
+  if (Array.isArray(value)) return value.map(expand);
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value);
+    if (keys.length === 1 && keys[0] === "parts" && Array.isArray(value.parts)) {
+      return joinParts(value.parts);
+    }
+    return Object.fromEntries(keys.map((k) => [k, expand(value[k])]));
+  }
+  return value;
+};
+const rawVectors: any = JSON.parse(readFileSync(resolve(here, "../../../docs/plugin-package-vectors.json"), "utf8"));
+const v: any = expand(JSON.parse(readFileSync(resolve(here, "../../../docs/plugin-package-vectors.json"), "utf8")));
+/** A `files_b64` value: base64, or (written as parts) its text's UTF-8 bytes. */
+const fileBytes = (raw: unknown, written: unknown): Uint8Array =>
+  written && typeof written === "object" ? new TextEncoder().encode(raw as string) : fromB64(raw as string);
+
+
 const hashesOf = (files: Record<string, string>) => new Map(Object.entries(files));
 /** A manifest given as JSON text (so number spellings survive), or a value. */
 const json = (m: unknown) => (typeof m === "string" ? parseJsonText(m) : parseJsonText(JSON.stringify(m)));
 
 describe("engine vectors (docs/plugin-package-vectors.json)", () => {
-  it("is the file the engine makes", () => {
-    expect([v.format, v.package_format, v.payload_prefix]).toEqual(["zeron-plugin-package-vectors:v1", "zeron-plugin:v1", "zeron-plugin:v1\n"]);
-  });
-
-  it("limits, categories, built-in and reserved ids", () => {
-    const l = v.limits;
-    const ours: Record<string, number> = {
-      max_files: MAX_FILES, max_bytes: MAX_BYTES, max_package_bytes: MAX_PACKAGE_BYTES, max_path: MAX_PATH, max_hosts: MAX_HOSTS,
-      max_categories: MAX_CATEGORIES, max_description_len: MAX_DESCRIPTION_LEN, max_icon_bytes: MAX_ICON_BYTES, max_keywords: MAX_KEYWORDS,
-      max_keyword_len: MAX_KEYWORD_LEN, max_license_len: MAX_LICENSE_LEN, max_name_len: MAX_NAME_LEN, max_screenshots: MAX_SCREENSHOTS,
-      max_url_len: MAX_URL_LEN, max_version_len: MAX_VERSION_LENGTH, max_range_len: MAX_RANGE_LENGTH, max_number: Number.MAX_SAFE_INTEGER,
-      max_readme_bytes: MAX_README_BYTES, max_notes_bytes: MAX_NOTES_BYTES
-    };
-    for (const [k, value] of Object.entries(ours)) if (k in l) expect(value, k).toBe(Number(l[k]));
-    expect(SCREENSHOT_TYPES).toEqual(l.screenshot_types);
-    expect(CATEGORIES).toEqual(v.categories);
-    expect(BUILTIN_IDS).toEqual(v.builtin_ids);
-    expect(RESERVED_IDS).toEqual(v.reserved_ids);
+  it("is the file the engine makes, beside its data file", () => {
+    expect(v.format).toBe("zeron-plugin-package-vectors:v1");
+    expect([STORE_DATA.format, STORE_DATA.package_format, STORE_DATA.payload_prefix]).toEqual(["zeron-plugin-store-data:v1", "zeron-plugin:v1", "zeron-plugin:v1\n"]);
   });
 
   it("canonical JSON", () => {
@@ -89,10 +81,12 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
   });
 
   it("packages", async () => {
-    for (const c of v.packages) {
+    for (const [i, c] of v.packages.entries()) {
       let got: unknown;
       try {
-        const p = await verifyPackage(fromB64(c.package_b64));
+        // (`package_parts`: the package's text, in parts; its UTF-8 bytes.)
+        const raw = c.package_parts !== undefined ? new TextEncoder().encode(joinParts(rawVectors.packages[i].package_parts)) : fromB64(c.package_b64);
+        const p = await verifyPackage(raw);
         got = { ok: true, id: p.manifest.id, version: p.manifest.version, key: p.key, hash: p.hash, sha256: p.sha256, files: p.files.size };
       } catch (e) {
         if (!(e instanceof PackageRefusal)) throw e;
@@ -123,6 +117,8 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
     const order: string[] = v.semver.order;
     for (let i = 1; i < order.length; i++) expect(comparePrecedence(parseVersion(order[i - 1]!)!, parseVersion(order[i]!)!), `${order[i - 1]} < ${order[i]}`).toBe(-1);
     for (const c of v.semver.compare) expect(comparePrecedence(parseVersion(c.a)!, parseVersion(c.b)!), `${c.a} vs ${c.b}`).toBe(c.cmp);
+    const corpus: string[] = v.semver.corpus_order ?? [];
+    for (let i = 1; i < corpus.length; i++) expect(comparePrecedence(parseVersion(corpus[i - 1]!)!, parseVersion(corpus[i]!)!), `${corpus[i - 1]} < ${corpus[i]}`).toBe(-1);
     for (const c of v.newer) expect(comparePrecedence(parseVersion(c.candidate)!, parseVersion(c.installed)!) > 0, `${c.candidate} over ${c.installed}`).toBe(c.newer);
   });
 
@@ -135,12 +131,22 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
   });
 
   it("listing rules", () => {
-    for (const c of v.listing) {
-      const files = new Map(Object.entries(c.files_b64 as Record<string, string>).map(([p, b]) => [p, fromB64(b)]));
-      const { problems, warnings } = checkListing(readManifest(json(c.manifest) as JsonObject), files, isText);
+    for (const [i, c] of v.listing.entries()) {
+      const written = rawVectors.listing[i].files_b64 as Record<string, unknown>;
+      const files = new Map(Object.entries(c.files_b64 as Record<string, string>).map(([p, b]) => [p, fileBytes(b, written[p])]));
+      const manifest = readManifest(json(c.manifest) as JsonObject);
+      const { problems, warnings } = checkListing(manifest, files, isText);
       const shape = (list: { rule: string; field: string | null; path: string | null }[]) => list.map((p) => ({ field: p.field, path: p.path, rule: p.rule }));
       expect(shape(problems), c.name).toEqual(c.problems);
       expect(shape(warnings), c.name).toEqual(c.warnings);
+      // What a listing that passes keeps: the fields as stored.
+      if (problems.length === 0) {
+        const kept = listingOf(manifest, files);
+        expect("rule" in kept ? kept : {
+          categories: kept.categories, engines_zeron: kept.engines, homepage: kept.homepage, icon: kept.icon,
+          keywords: kept.keywords, license: kept.license, repository: kept.repository, screenshots: kept.screenshots
+        }, c.name).toEqual(Object.fromEntries(Object.entries({ homepage: null, repository: null, license: null, engines_zeron: null, ...c.listing })));
+      }
     }
   });
 
@@ -148,11 +154,13 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
     for (const c of v.changelog) expect(changelogNotes(c.changelog, c.version) ?? null, c.version).toBe(c.notes);
   });
 
-  it("consent: the tables, and each item", () => {
-    expect(contained).toEqual(v.consent.contained);
-    expect(fullControlNames).toEqual(v.consent.full_control);
-    expect(heldNames).toEqual(v.consent.held_to_its_own_rules);
-    expect(windowsExtensions).toEqual(v.consent.windows_extensions);
+  it("consent: each item, from the data file's tables", () => {
+    expect([contained, fullControlNames, heldNames, windowsExtensions]).toEqual([
+      STORE_DATA.consent.contained,
+      STORE_DATA.consent.full_control,
+      STORE_DATA.consent.held_to_its_own_rules,
+      STORE_DATA.consent.windows_extensions
+    ]);
     for (const c of v.consent_items) expect(consentItem(readManifest(json(c.manifest) as JsonObject)), c.name).toEqual(c.item);
   });
 });
