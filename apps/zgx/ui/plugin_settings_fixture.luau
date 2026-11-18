@@ -105,10 +105,9 @@ local function publish()
 		local v = model.stored[s.id]
 		values[s.id] = if v == nil then s.default else v
 	end
-	pstate.now:set({
-		state = "ready",
-		dirs = { plugins = "/tmp/plugins", templates = "/tmp/templates" },
-		list = {
+	-- (Built in turn, so no entry is a hole in the list.)
+	local rows: { any } = {}
+	for _, row in {
 			{
 				id = "settings-demo",
 				name = "Greeter",
@@ -137,21 +136,6 @@ local function publish()
 					hash = "parallax-scenes-1",
 				}
 				else nil,
-			if model.tally
-				then {
-					id = "tally",
-					name = "Tally",
-					version = "1.0.0",
-					description = "Counters for the day.",
-					author = { kind = "you" },
-					status = "on",
-					permissions = {},
-					allowed = {},
-					ask = {},
-					hash = "tally-1",
-					own = true,
-				}
-				else nil,
 			if model.backdrops
 				then {
 					id = "backdrops",
@@ -166,7 +150,28 @@ local function publish()
 					hash = "backdrops-1",
 				}
 				else nil,
-		} :: { any },
+		} :: { any } do
+		table.insert(rows, row)
+	end
+	if model.tally then
+		table.insert(rows, {
+			id = "tally",
+			name = "Tally",
+			version = "1.0.0",
+			description = "Counters for the day.",
+			author = { kind = "you" },
+			status = "on",
+			permissions = {},
+			allowed = {},
+			ask = {},
+			hash = "tally-1",
+			own = true,
+		})
+	end
+	pstate.now:set({
+		state = "ready",
+		dirs = { plugins = "/tmp/plugins", templates = "/tmp/templates" },
+		list = rows,
 	})
 	local list: { any } = {}
 	if model.on then

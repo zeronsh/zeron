@@ -28,10 +28,11 @@
 --
 -- `page` says the plugin draws a page of its own too (its SDK's
 -- `zeron.settings_page`): `{ keywords, problem? }`. It's drawn after the
--- declared rows, in a sealed region (zgx's `ui.sealed`) holding the
--- plugin's own box (`ui.plugin_page`): no plugin reaches into the region or
--- over it, only this plugin fills its box, and nothing it draws gets out of
--- it. A build that failed (`problem`) is said over it, in Zeron's words,
+-- declared rows, in a placeholder only that plugin fills (as its pages and
+-- tabs are: `.plugin-settings.plugin-<id>`), in the page's own flow, so it
+-- can do whatever they can (a dialog over the window, a lightbox, a
+-- popover). The page's header and its declared rows stay out of plugins'
+-- reach. A build that failed (`problem`) is said over it, in Zeron's words,
 -- the declared rows still there. Search finds it by `keywords` too.
 
 local ds = require("@ds")
@@ -447,14 +448,14 @@ local function shape(e: Entry?): string
 		end
 		table.insert(parts, table.concat({ s.id, s.kind, s.label or "", s.permission or "", s.description or "", s.section or "", s.style or "", s.unit or "", s.placeholder or "", table.concat(opts, ",") }, "\1"))
 	end
-	-- (A page of its own coming or going is another page too; its words and
-	-- how it built never are.)
-	return table.concat(parts, "\0") .. (if e.page then "\2page" else "")
+	return table.concat(parts, "\0")
 end
 
--- What a plugin draws on its page itself, after its declared rows: its box
--- in a sealed region, and over it, while its last build failed, Zeron's
--- word of it.
+-- What a plugin draws on its page itself, after its declared rows: a
+-- placeholder that it alone fills (`.plugin-settings.plugin-<id>`, its
+-- SDK's `zeron.settings_page`), as its pages and tabs are, its node drawn in
+-- the page's own flow; and over it, while its last build failed, Zeron's
+-- word of it (out of plugins' reach, as the rows are).
 local function own_page(plugin: string, name: string): Node
 	local function problem(): string?
 		local e = M.of(plugin)
@@ -462,22 +463,26 @@ local function own_page(plugin: string, name: string): Node
 		return if type(p) == "string" and p ~= "" then p else nil
 	end
 	return ui.column {
-		id = "plugin-settings-page",
+		-- (A class, not an id: no plugin's `ui.change` names a `.plugin-…`.)
+		class = "plugin-settings-page",
 		w_full = true,
 		gap = "$space.4",
 		ui.show(function(): boolean
 			return problem() ~= nil
-		end, ds.Callout {
-			tone = "warning",
-			title = ui.t("plugins.settings.page_failed", { name = name }),
-			body = function(): string
-				return problem() or ""
-			end,
-		}),
-		ui.sealed {
-			label = ui.t("plugins.settings.page_label", { name = name }):get(),
+		end, ui.column {
+			hook = false,
 			w_full = true,
-			ui.plugin_page { plugin = plugin, w_full = true },
+			ds.Callout {
+				tone = "warning",
+				title = ui.t("plugins.settings.page_failed", { name = name }),
+				body = function(): string
+					return problem() or ""
+				end,
+			},
+		}),
+		ui.column {
+			class = `plugin-settings plugin-{plugin}`,
+			w_full = true,
 		},
 	}
 end
@@ -568,65 +573,75 @@ local function view(plugin: string): Node
 			end
 			return ui.t("plugins.settings.description", { name = name() }):get()
 		end,
-		ui.presence(function(): string
-			return shape(M.of(plugin))
-		end, function(_key: string): Node
+		private_head = true,
+		-- What it declares, drawn by Zeron, out of plugins' reach.
+		ui.show(function(): boolean
 			local e = M.of(plugin)
-			if not e then
-				return ui.div {}
-			end
-			local out: { Node } = {}
-			for _, run in sections(e.settings) do
-				local rows: { Node } = {}
-				for _, s in run.settings do
-					if s.kind == "wallpaper" then
-						table.insert(rows, WallpaperRows { plugin = plugin, setting = s, name = e.name })
-						continue
-					end
-					local permission = if s.kind == "permission" then permissions.KNOWN[s.permission or ""] else nil
-					table.insert(
-						rows,
-						search.anchor(
-							s.id,
-							ds.Settings.Row {
-								-- (A permission's words Zeron's, read as they're drawn.)
-								label = if permission
-									then function(): string
-										return label_of(s)
-									end
-									else label_of(s),
-								description = if permission
-									then function(): string
-										return permission.description(e.name)
-									end
-									else description_of(plugin, s),
-								control = ui.row {
-									gap = "$space.2",
-									items = "center",
-									if permission then nil else status_badge(plugin, s.id),
-									Control { plugin = plugin, setting = s, name = e.name },
-								},
-							}
+			return e ~= nil and #e.settings > 0
+		end, ui.column {
+			hook = false,
+			w_full = true,
+			ui.presence(function(): string
+				return shape(M.of(plugin))
+			end, function(_key: string): Node
+				local e = M.of(plugin)
+				if not e then
+					return ui.div {}
+				end
+				local out: { Node } = {}
+				for _, run in sections(e.settings) do
+					local rows: { Node } = {}
+					for _, s in run.settings do
+						if s.kind == "wallpaper" then
+							table.insert(rows, WallpaperRows { plugin = plugin, setting = s, name = e.name })
+							continue
+						end
+						local permission = if s.kind == "permission" then permissions.KNOWN[s.permission or ""] else nil
+						table.insert(
+							rows,
+							search.anchor(
+								s.id,
+								ds.Settings.Row {
+									-- (A permission's words Zeron's, read as they're drawn.)
+									label = if permission
+										then function(): string
+											return label_of(s)
+										end
+										else label_of(s),
+									description = if permission
+										then function(): string
+											return permission.description(e.name)
+										end
+										else description_of(plugin, s),
+									control = ui.row {
+										gap = "$space.2",
+										items = "center",
+										if permission then nil else status_badge(plugin, s.id),
+										Control { plugin = plugin, setting = s, name = e.name },
+									},
+								}
+							)
 						)
-					)
+					end
+					-- (Zeron's note under permission rows: whose permissions they are.)
+					local asks = false
+					for _, s in run.settings do
+						asks = asks or s.kind == "permission"
+					end
+					table.insert(out, ds.Settings.Section {
+						title = run.title,
+						description = if asks then permissions.note() else nil,
+						ds.Settings.Group(rows :: any),
+					})
 				end
-				-- (Zeron's note under permission rows: whose permissions they are.)
-				local asks = false
-				for _, s in run.settings do
-					asks = asks or s.kind == "permission"
-				end
-				table.insert(out, ds.Settings.Section {
-					title = run.title,
-					description = if asks then permissions.note() else nil,
-					ds.Settings.Group(rows :: any),
-				})
-			end
-			-- What it draws itself, after what it declares.
-			if e.page then
-				table.insert(out, own_page(plugin, e.name))
-			end
-			return ui.column { w_full = true, gap = "$space.6", table.unpack(out) }
-		end, { w_full = true }),
+				return ui.column { w_full = true, gap = "$space.6", table.unpack(out) }
+			end, { w_full = true }),
+		}),
+		-- What it draws itself, after what it declares.
+		ui.show(function(): boolean
+			local e = M.of(plugin)
+			return e ~= nil and e.page ~= nil
+		end, own_page(plugin, name())),
 	}
 end
 
@@ -652,7 +667,8 @@ local function pages(): { shell.Page }
 			icon = "widget",
 			tile = { label = e.name, hue = words.hue(plugin), svg = icon_of(plugin) },
 			group = "Plugins",
-			private = true,
+			-- (Not private whole: its header and its rows are, each; what it
+			-- draws itself is its own, `own_page`.)
 			view = function(): Node
 				return view(plugin)
 			end,

@@ -84,12 +84,6 @@ pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "p
 /// Each plugin's own shared state, to read (`plugin.<id>.<name>`).
 pub const OWN_SHARED: &[&str] = &["calls", "inbox", "records", "github", "store", "settings", "locales", "menu_items", "composed", "drafts"];
 
-/// The slot a plugin gives its own settings page to (zgx's: what
-/// `ui.plugin_page` shows in a sealed region, that plugin's alone). Open to
-/// every plugin, as settings need no permission: nothing given there shows
-/// anywhere but its own box on its own Settings page.
-pub const SETTINGS_PAGE_SLOT: &str = "plugin_page";
-
 /// The capability naming plugin `id`'s own calls and actions.
 pub fn own(id: &str) -> Capability {
     Capability::Named(format!("plugin:{id}"))
@@ -103,6 +97,13 @@ pub fn tab_selector(id: &str) -> String {
 /// Where plugin `id`'s pages are drawn, as the SDK places them.
 pub fn page_selector(id: &str) -> String {
     format!(".plugin-page.plugin-{id}")
+}
+
+/// Where plugin `id`'s settings page of its own is drawn (`zeron.settings_page`,
+/// after its declared rows), as the SDK places it: every plugin may fill its
+/// own, as settings need no permission.
+pub fn settings_selector(id: &str) -> String {
+    format!(".plugin-settings.plugin-{id}")
 }
 
 /// May `module` be replaced by a plugin allowed "ui.replace"? Granted as
@@ -207,7 +208,8 @@ fn classes(target: &str) -> impl Iterator<Item = &str> {
 /// What a plugin asking `permissions` (all allowed), with these `change`
 /// targets and `replace` modules, may do.
 pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace: &[String]) -> Vec<Capability> {
-    let mut out = vec![own(id)];
+    // Its own calls, and its own settings page's placeholder (no permission).
+    let mut out = vec![own(id), Capability::OverrideElement(settings_selector(id))];
     let named = |name: &str| Capability::Named(name.into());
     for permission in permissions {
         match permission.as_str() {
@@ -287,9 +289,24 @@ mod tests {
         v.iter().map(|x| x.to_string()).collect()
     }
 
+    /// Its own settings page's placeholder, every plugin's.
+    fn mine(id: &str) -> Capability {
+        Capability::OverrideElement(settings_selector(id))
+    }
+
+    #[test]
+    fn every_plugin_fills_its_own_settings_page_and_no_other() {
+        let got = capabilities("ledger", &[], &[], &[]);
+        assert!(got.contains(&Capability::OverrideElement(".plugin-settings.plugin-ledger".into())));
+        assert!(!got.iter().any(|c| matches!(c, Capability::OverrideElement(t) if t.contains("plugin-other"))));
+        // Nor is another's ever given by a manifest's `ui.change`.
+        assert!(!change_target(".plugin-settings.plugin-other"));
+        assert!(!change_target(".plugin-settings-page"));
+    }
+
     #[test]
     fn a_plugin_with_nothing_allowed_reaches_only_its_own() {
-        assert_eq!(capabilities("focus", &[], &[], &[]), vec![own("focus")]);
+        assert_eq!(capabilities("focus", &[], &[], &[]), vec![own("focus"), mine("focus")]);
     }
 
     #[test]
@@ -304,6 +321,7 @@ mod tests {
             got,
             vec![
                 own("focus"),
+                mine("focus"),
                 Capability::Named("zeron.ui.add".into()),
                 Capability::OverrideElement(".session-row".into()),
                 Capability::Named("zeron.sidebar.filter".into()),
@@ -328,7 +346,7 @@ mod tests {
                 "@ds/button",
             ]),
         );
-        assert_eq!(got, vec![own("x"), Capability::OverrideModule("@app/screens/shell/sidebar".into())]);
+        assert_eq!(got, vec![own("x"), mine("x"), Capability::OverrideModule("@app/screens/shell/sidebar".into())]);
     }
 
     #[test]
@@ -338,6 +356,7 @@ mod tests {
             got,
             vec![
                 own("prs"),
+                mine("prs"),
                 Capability::OverrideElement(".plugin-tab.plugin-prs".into()),
                 Capability::OverrideElement(".plugin-page.plugin-prs".into()),
             ]
@@ -379,6 +398,7 @@ mod tests {
             got,
             vec![
                 own("x"),
+                mine("x"),
                 Capability::OverrideElement("#composer-toolbar".into()),
                 Capability::OverrideElement("hook:sidebar.sessions".into()),
                 Capability::OverrideElement("\"Send @ once\"".into()),
@@ -410,7 +430,7 @@ mod tests {
     #[test]
     fn only_draft_reads_the_draft() {
         let draft = Capability::Named("zeron.draft".into());
-        assert_eq!(capabilities("stash", &s(&["draft"]), &[], &[]), vec![own("stash"), draft.clone()]);
+        assert_eq!(capabilities("stash", &s(&["draft"]), &[], &[]), vec![own("stash"), mine("stash"), draft.clone()]);
         assert!(!capabilities("x", &s(&["compose"]), &[], &[]).contains(&draft));
         assert!(SHARED_READ.contains(&("zeron.draft", Some("zeron.draft"))));
     }
@@ -418,7 +438,7 @@ mod tests {
     #[test]
     fn listed_targets_without_the_permission_give_nothing() {
         let got = capabilities("x", &[], &s(&["#titlebar-actions"]), &s(&["@app/screens/chat"]));
-        assert_eq!(got, vec![own("x")]);
+        assert_eq!(got, vec![own("x"), mine("x")]);
     }
 
     /// Allowing and claiming a plugin, and installing someone else's

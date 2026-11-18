@@ -876,8 +876,9 @@ return function(id: string): any
 
 	-- A settings page of its own (no permission): drawn by `build` under
 	-- the header Zeron draws (its icon, name, description) and its declared
-	-- rows, in Settings, under Plugins, while it's on, in a box of its own
-	-- that only it fills and nothing it draws gets out of. Settings search
+	-- rows, in Settings, under Plugins, while it's on, in a place only it
+	-- fills, where it can do what its pages and tabs can (a dialog over the
+	-- window, a lightbox, a popover). Settings search
 	-- finds it by the plugin's name and `keywords` (text, or `zeron.t(…)`).
 	--   zeron.settings_page {
 	--     keywords = { "accounts", "rules" },
@@ -990,7 +991,12 @@ return function(id: string): any
 			ui.invoke(`{prefix}.settings_page`, { op = "built", error = if ok then "Its build returned nothing" else tostring(node) })
 			return ui.div {}
 		end)
-		ui.contribute("plugin_page", Page {})
+		-- In the placeholder Zeron draws for it after its declared rows,
+		-- which only this plugin may fill (as its pages and tabs are).
+		local ok, why = pcall(ui.contribute, { target = `.plugin-settings.plugin-{id}`, replace = Page {} })
+		if not ok then
+			ui.invoke(`{prefix}.problem`, { error = tostring(why), at = "settings page" })
+		end
 	end
 	-- Told of each change as it comes (not of the values it starts with).
 	local setting_listeners: { (id: string, value: any, was: any) -> () } = {}

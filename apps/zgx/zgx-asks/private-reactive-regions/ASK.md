@@ -4,7 +4,7 @@
 
 **Seen on:** zgx `b80a8af1` (Zeron's pin), macOS, headless.
 
-**Who sees it.** Zeron marks a plugin's Settings page private (screens/shell/settings sets `hook = false` round a `private` page) so that no plugin draws into another plugin's settings. The page's rows are built in a `ui.presence` (keyed by what the plugin declares). A plugin allowed `ui.change` on `#setting-show` replaces another plugin's "Show" row on that page, and one allowed `ui.add` adds anything after any row there. Zeron's other private pages (Cloud, Billing) build parts in `ui.show` and `ui.each` too. Found while testing Zeron's plugin-drawn settings pages (src/plugins/settings_page_tests.rs); the plugin's own part of such a page is in `ui.sealed`, which holds.
+**Who sees it.** Zeron marks a plugin's Settings page private (screens/shell/settings sets `hook = false` round a `private` page) so that no plugin draws into another plugin's settings. The page's rows are built in a `ui.presence` (keyed by what the plugin declares). A plugin allowed `ui.change` on `#setting-show` replaces another plugin's "Show" row on that page, and one allowed `ui.add` adds anything after any row there. Zeron's other private pages (Cloud, Billing) build parts in `ui.show` and `ui.each` too. Found while testing Zeron's plugin-drawn settings pages (src/plugins/settings_page_tests.rs).
 
 **Today.**
 
@@ -19,4 +19,4 @@
 
 **Repro:** `ZGX_CHECK=0 zgx test zgx-asks/private-reactive-regions/repro`. A `hook = false` column with a part built bare and one built by each region, and a plugin (`plugins/reach`, granted `override:*` in `zgx.json`) replacing each part and adding after it. It fails at `in-presence` (and, past it, `in-show` and `in-each-r1`).
 
-**Meanwhile (Zeron):** a page's own part a plugin draws (`zeron.settings_page`) is in `ui.sealed`. The declared rows on a plugin's page, and Zeron's other private pages, are as they were: not changed here, since moving them into `ui.sealed` changes how they're drawn (a top layer). The coordinator decides.
+**Meanwhile (Zeron):** nothing changed; Zeron's pages are as they were. (`ui.sealed` holds, but it draws what it seals in a top layer and confines a plugin's page in it, so it isn't the fix for these pages.)

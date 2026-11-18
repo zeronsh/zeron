@@ -50,8 +50,9 @@
 //! set (a folder it may be pointed at counts toward what it's allowed).
 //!
 //! A plugin may also draw a page of its own there (`zeron.settings_page`):
-//! under Zeron's header and its declared rows, in a sealed box only it fills
-//! (zgx's `ui.plugin_page`). Its SDK declares it ([`Book::declare_page`],
+//! under Zeron's header and its declared rows, in a placeholder only it
+//! fills (`.plugin-settings.plugin-<id>`, as its pages and tabs are). Its SDK
+//! declares it ([`Book::declare_page`],
 //! with the words Settings search finds it by) and says how each build went
 //! ([`Book::page_built`]): one that failed is said in the page's place.
 

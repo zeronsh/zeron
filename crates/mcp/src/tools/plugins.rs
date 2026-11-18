@@ -184,13 +184,14 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: PLUGIN_STATUS,
-            description: "Where a Zeron plugin's UI landed, to check your work without a person: its status (on, off, pending review, tampered, broken, and why), what it was allowed, and, from Zeron's window on this device, each zeron.place it made (its selector, how, how many elements it matched and their boxes in the window), what its row in Settings says (a node that needs what its place doesn't give, places this template doesn't have, an error that stopped it) and its pages. With snapshot: true, also a PNG of the window cut to around its nodes (the whole window when none shows): read the file at `snapshot` to look. With page: \"settings\", its settings page instead: Settings is opened on it if it isn't, the PNG is the page as Settings shows it (Zeron's header and declared rows, then what zeron.settings_page draws), and `hints` lists what its code uses off Zeron's design system (raw colours, sizes, corners or spacing where a token goes), to compare with Zeron's own pages. Edit the plugin, save, and ask again.",
+            description: "Where a Zeron plugin's UI landed, to check your work without a person: its status (on, off, pending review, tampered, broken, and why), what it was allowed, and, from Zeron's window on this device, each zeron.place it made (its selector, how, how many elements it matched and their boxes in the window), what its row in Settings says (a node that needs what its place doesn't give, places this template doesn't have, an error that stopped it) and its pages. With snapshot: true, also a PNG of the window cut to around its nodes (the whole window when none shows): read the file at `snapshot` to look. With page: \"settings\", its settings page instead: the PNG is the page as Settings shows it, when the window shows it (open: true opens Settings on it first; the window is never moved otherwise) (Zeron's header and declared rows, then what zeron.settings_page draws), and `hints` lists what its code uses off Zeron's design system (raw colours, sizes, corners or spacing where a token goes), to compare with Zeron's own pages. Edit the plugin, save, and ask again.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "The plugin's id, from list_plugins." },
                     "snapshot": { "type": "boolean", "description": "Also save a picture of where it shows." },
-                    "page": { "type": "string", "enum": ["settings"], "description": "\"settings\": its settings page (with snapshot, a picture of it as Settings shows it), and hints of what it uses off Zeron's design system." }
+                    "page": { "type": "string", "enum": ["settings"], "description": "\"settings\": its settings page (with snapshot, a picture of it as Settings shows it), and hints of what it uses off Zeron's design system." },
+                    "open": { "type": "boolean", "description": "With page: \"settings\" and snapshot: open Settings on its page in the window first, to picture it." }
                 },
                 "required": ["id"]
             }),
@@ -597,6 +598,8 @@ impl Tools {
             snapshot: bool,
             #[serde(default)]
             page: Option<String>,
+            #[serde(default)]
+            open: bool,
         }
         let args: Args = parse(args)?;
         if args.page.as_deref().is_some_and(|p| p != "settings") {
@@ -605,6 +608,9 @@ impl Tools {
         let mut asked = json!({ "id": args.id, "snapshot": args.snapshot });
         if let Some(page) = args.page {
             asked["page"] = json!(page);
+            if args.open {
+                asked["open"] = json!(true);
+            }
         }
         self.zeron
             .call_rpc(methods::PLUGIN_STATUS, asked)
@@ -1257,6 +1263,11 @@ mod tests {
         assert_eq!(
             last_call(&engine),
             (methods::PLUGIN_STATUS.to_owned(), json!({ "id": "focus", "snapshot": true, "page": "settings" }))
+        );
+        tools.call(PLUGIN_STATUS, json!({ "id": "focus", "snapshot": true, "page": "settings", "open": true })).await.unwrap();
+        assert_eq!(
+            last_call(&engine),
+            (methods::PLUGIN_STATUS.to_owned(), json!({ "id": "focus", "snapshot": true, "page": "settings", "open": true }))
         );
         assert!(tools.call(PLUGIN_STATUS, json!({ "id": "focus", "page": "sidebar" })).await.is_err());
         let map = tools.call(DESCRIBE_ELEMENTS, json!({})).await.unwrap();

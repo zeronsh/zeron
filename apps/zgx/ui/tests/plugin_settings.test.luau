@@ -417,10 +417,10 @@ test("a plugin's page says Unverified at its top right when Zeron can't vouch fo
 end)
 
 -- A page a plugin draws itself (`zeron.settings_page`): after its declared
--- rows, in a sealed box only it fills (its own drawing: src/plugins/
+-- rows, in a placeholder only it fills (its own drawing: src/plugins/
 -- examples_tests `a_plugin_draws_its_own_settings_page…`). Here, what Zeron
 -- draws round it.
-local OWN = "#plugin-settings-page"
+local OWN = ".plugin-settings-page"
 
 -- Where `part`'s line is in the page's tree, from the top (0: not there).
 local function at(app: any, part: string): number
@@ -434,16 +434,33 @@ local function at(app: any, part: string): number
 	return 0
 end
 
-test("a plugin's own page is drawn after what it declares, in a box of its own", function()
+-- The box of what `scope` names (its tree's first line).
+local function box(app: any, scope: string): { x: number, y: number, w: number, h: number }
+	local first = string.match(app:tree(scope), "[^\n]+") or ""
+	local x, y, w, h = first:match("(%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+	return { x = tonumber(x) or 0, y = tonumber(y) or 0, w = tonumber(w) or 0, h = tonumber(h) or 0 }
+end
+
+test("a plugin's own page is drawn after what it declares, in a place of its own", function()
 	local app = greeter(open())
 	expect(app:has(OWN)).to_be(false)
 	app:command("greeter_page")
 	app:frames(20)
 	expect(app:has(OWN)).to_be(true)
-	-- Zeron's header and every declared row first, then its box.
-	local title, last_row, own = at(app, 'heading "Greeter"'), at(app, "#setting-album"), at(app, OWN)
-	expect(title > 0 and title < last_row and last_row < own).to_be(true)
-	expect(app:tree(OWN)).to_contain('dialog "Settings drawn by Greeter"')
+	-- Zeron's header and every declared row first, then its place, a
+	-- section's gap (32) under the last card, as wide as the cards (what
+	-- Zeron says at its top shows where it starts).
+	local title, last_row = at(app, 'heading "Greeter"'), at(app, "#setting-album")
+	expect(title > 0 and title < last_row).to_be(true)
+	app:command("greeter_page_fails")
+	app:frames(20)
+	local card, said = box(app, '#settings-page >> role:group "More"'), box(app, `{OWN} >> role:alert`)
+	expect(math.abs(said.y - (card.y + card.h) - 32) < 0.5).to_be(true)
+	expect(math.abs(said.x - card.x) < 0.5 and math.abs(said.w - card.w) < 0.5).to_be(true)
+	app:command("greeter_page_builds")
+	app:frames(20)
+	-- (Its placeholder, which Greeter alone fills: none drawn in this fixture.)
+	expect(app:has(`{OWN} >> .plugin-settings.plugin-settings-demo`)).to_be(true)
 	-- Nothing said over it while it builds.
 	expect(app:tree(OWN)).never.to_contain("couldn't be shown")
 	expect(app:error()).to_be_nil()
@@ -488,7 +505,7 @@ test("a plugin with only a page of its own is listed, and goes when it's off", f
 	expect(page).to_contain('heading "Tally"')
 	expect(page).to_contain("Settings for the Tally plugin.")
 	expect(app:has(OWN)).to_be(true)
-	-- No declared rows: no card of Zeron's over its box.
+	-- No declared rows: no card of Zeron's over its place.
 	expect(app:count(`{PAGE} >> .settings-rule`)).to_be(0)
 	expect(page).never.to_contain(' group "')
 	app:command("tally_off")

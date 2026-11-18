@@ -24,7 +24,7 @@ use super::{
 
 const NAV: &str = "#settings-nav";
 const PAGE: &str = "#settings-page";
-const OWN: &str = "#plugin-settings-page";
+const OWN: &str = ".plugin-settings-page";
 
 /// What a plugin said of its page (`settings_page`), taken after the frame
 /// it was said in, as the bridge takes it after the turn.
@@ -255,10 +255,10 @@ fn snippets_draws_its_own_page_after_its_declared_rows_and_fills_its_room() {
     let (row, own, drawn) = (rig.app.bounds("#setting-insert"), rig.app.bounds(OWN), rig.app.bounds("#snippets-list"));
     assert!(drawn.y >= row.y + row.height, "after the declared rows: {row:?} then {drawn:?}");
     assert!(drawn.height > 100., "its rows take their room: {drawn:?}");
-    // As wide as Zeron's own cards, and its box as tall as what it drew.
+    // As wide as Zeron's cards, and its place as tall as what it drew.
     let card = rig.app.bounds(&format!("{PAGE} >> role:group \"Message box\""));
     assert!((drawn.width - card.width).abs() < 1. && (drawn.x - card.x).abs() < 1., "{card:?} {drawn:?}");
-    assert!(own.height >= drawn.height, "its box holds it: {own:?} {drawn:?}");
+    assert!(own.height >= drawn.height, "its place holds it: {own:?} {drawn:?}");
     // Its sections apart at the page's rhythm, as Zeron's are ($space.6).
     let (first, editor) = (rig.app.bounds(&format!("{PAGE} >> role:group \"Snippets\"")), rig.app.bounds("#snippets-editor"));
     assert!((editor.y - (first.y + first.height) - 32.).abs() < 0.5, "{first:?} then {editor:?}");
@@ -556,31 +556,31 @@ fn turning_the_plugin_off_takes_its_page_and_its_place_in_settings() {
 #[test]
 fn another_plugin_reaches_nothing_of_a_plugin_s_own_page() {
     // A plugin allowed to add and change anywhere it names, aiming at what
-    // Snippets draws on its page, and at its box.
+    // Snippets draws on its page, and at its placeholder.
     let hostile = written(
         "hostile",
         json!({ "id": "hostile", "name": "Hostile", "version": "1.0.0", "entry": "init.luau",
                 "permissions": ["ui.add", "ui.change"],
-                "ui": { "change": ["#snippets-list", "role:button \"New snippet\"", "#plugin-settings-page"] } }),
+                "ui": { "change": ["#snippets-list", "role:button \"New snippet\""] } }),
         r##"
 local zeron = require("./zeron")("hostile")
 for _, at in { "#snippets-list", 'role:button "New snippet"' } do
 	zeron.place { at = at, replace = function() return ui.text { id = "hostile-replaced", "Gotcha" } end }
 	zeron.place { at = at, after = function() return ui.text { id = "hostile-added", "Gotcha" } end }
 end
--- Its own page given to the slot: shown in its own box alone, never another's.
-ui.contribute("plugin_page", ui.text { id = "hostile-page", "Not yours" })
--- Last (zgx refuses it, failing what's after it): the box, replaced whole.
-ui.contribute { target = "#plugin-settings-page", replace = ui.text { id = "hostile-box", "Gotcha" } }
+-- Another's placeholder, filled: zgx refuses it (only its plugin may).
+local ok, why = pcall(ui.contribute, { target = ".plugin-settings.plugin-settings-page", replace = ui.text { id = "hostile-page", "Not yours" } })
+zeron.toast(if ok then "filled" else `refused: {why}`)
 "##,
     );
     let mut rig = Rig::new(&[example("settings-page"), hostile]);
     rig.open("Snippets");
-    for id in ["hostile-replaced", "hostile-added", "hostile-page", "hostile-box"] {
+    for id in ["hostile-replaced", "hostile-added", "hostile-page"] {
         assert!(rig.app.find(&format!("#{id}")).is_none(), "{id} reached Snippets' page: {}", rig.tree());
     }
-    // zgx refuses to take the box away; what Snippets drew is all there.
-    assert!(rig.app.error().is_some_and(|e| e.starts_with("hostile:") && e.contains("decision")), "{:?}", rig.app.error());
+    let toast = rig.heard.borrow().iter().find(|(k, _)| k == "plugin.hostile.toast").map(|(_, v)| v.as_str().unwrap_or_default().to_string()).unwrap_or_default();
+    assert!(toast.starts_with("refused"), "{toast}");
+    // What Snippets drew is all there.
     assert!(rig.app.find("#snippets-list >> role:button \"Standup\"").is_some(), "{}", rig.tree());
     assert!(rig.app.find("role:button \"New snippet\"").is_some());
 }
@@ -676,4 +676,121 @@ fn the_guide_s_model_page_works_as_written() {
     assert!(rig.app.find("#feed-editor").is_none());
     assert!(rig.tree().contains("No feeds yet"));
     assert_eq!(rig.app.error(), None);
+}
+
+/// A settings page can do what a page of its own (`zeron.page`) can: the same
+/// code on both, each overlay opened in turn (a dialog over the window, the
+/// lightbox, a popover wider than the page's column, a select's menu, a
+/// tooltip, a hover card), and as much of each shows on one as on the other.
+/// `--nocapture` prints the table.
+#[test]
+fn a_settings_page_opens_whatever_a_page_of_its_own_does() {
+    let png = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/assets/favicons/flint.png");
+    let widgets = format!(
+        r##"
+local Dialog = require("@ds/dialog").Dialog
+local Lightbox = require("@ds/lightbox")
+local Select = require("@ds/select")
+local Button = require("@ds/button")
+local HoverCard = require("@ds/hover_card")
+local PNG = "{png}"
+return function(p: string): Node
+	local dialog = ui.use_state(false)
+	local pop = ui.use_state(false)
+	local choice = ui.use_state("o1")
+	local opts = {{}}
+	for i = 1, 14 do table.insert(opts, {{ value = `o{{i}}`, label = `Option {{i}}` }}) end
+	return ui.column {{ id = `{{p}}-probe`, w_full = true, gap = "$space.2",
+		Lightbox.Host(),
+		Button {{ `Dialog {{p}}`, on_click = function() dialog:set(true) end }},
+		Dialog {{ open = dialog, title = `Delete {{p}}?`, body = "It can't be undone.", tone = "danger", confirm = {{ label = "Delete", on_click = function() end }} }},
+		Button {{ `Picture {{p}}`, on_click = function() Lightbox.open({{ {{ src = PNG, name = "flint", w = 512, h = 512 }} }}, 1) end }},
+		ui.popover {{ open = pop, label = `Wide {{p}}`, anchor = Button {{ `Popover {{p}}`, on_click = function() pop:set(true) end }},
+			ui.div {{ id = `{{p}}-wide`, w = 1000, h = 120 }} }},
+		ui.row {{ w_full = true, justify = "end", Select {{ value = choice, options = opts, name = `Select {{p}}`, w = 168 }} }},
+		ui.div {{ id = `{{p}}-tip`, w = 60, h = 20, tooltip = "A tip, the same on both" }},
+		ui.div {{ id = `{{p}}-card`, w = 60, h = 20, tooltip = HoverCard.Card {{ id = `{{p}}-card-body`, w = 520, h = 160 }} }},
+	}}
+end
+"##,
+        png = "flint.png"
+    );
+    let dir = written(
+        "probe",
+        json!({ "id": "probe", "name": "Probe", "version": "1.0.0", "entry": "init.luau", "permissions": ["pages.add"],
+                "settings": [{ "id": "on", "kind": "switch", "label": "On", "default": true }] }),
+        r#"
+local zeron = require("./zeron")("probe")
+local widgets = require("./widgets")
+zeron.page { id = "probe", title = "Probe", build = function() return ui.column { w_full = true, h_full = true, widgets("page") } end }
+zeron.settings_page { build = function() return widgets("settings") end }
+"#,
+    );
+    std::fs::write(dir.join("widgets.luau"), widgets).unwrap();
+    std::fs::copy(&png, dir.join("flint.png")).unwrap();
+    let mut rig = Rig::new(&[dir]);
+    rig.frames(10);
+    // How much of what `shows` names shows, once `open` is clicked (or, with
+    // `hover`, rested on twice: a window's first tooltip waits a frame more).
+    fn shown(rig: &mut Rig, open: &str, shows: &str, hover: bool) -> Option<(f32, f32)> {
+        let rounds = if hover { 2 } else { 1 };
+        let mut out = None;
+        for _ in 0..rounds {
+            if hover {
+                rig.app.hover(open);
+                rig.frames(120);
+                std::thread::sleep(std::time::Duration::from_millis(900));
+                rig.frames(60);
+            } else {
+                rig.app.click(open);
+                rig.frames(40);
+            }
+            out = rig.app.find(shows).and_then(|n| rig.app.ui.scene.borrow().visible_bounds(n)).map(|v| (v.width.round(), v.height.round()));
+            if hover {
+                rig.app.hover("#shell");
+                rig.frames(30);
+            } else {
+                rig.app.keys("escape");
+                rig.frames(40);
+            }
+        }
+        out
+    }
+    let cases = |side: &str| -> Vec<(String, String, String, bool)> {
+        vec![
+            ("a dialog".into(), format!("role:button \"Dialog {side}\""), format!("role:dialog \"Delete {side}?\""), false),
+            ("the lightbox".into(), format!("role:button \"Picture {side}\""), "role:dialog".into(), false),
+            ("a popover wider than the column".into(), format!("role:button \"Popover {side}\""), format!("#{side}-wide"), false),
+            ("a select's menu".into(), format!("role:button \"Select {side}\""), "role:menuitem \"Option 1\"".into(), false),
+            ("a tooltip".into(), format!("#{side}-tip"), "\"A tip, the same on both\"".into(), true),
+            ("a hover card".into(), format!("#{side}-card"), format!("#{side}-card-body"), true),
+        ]
+    };
+    let mut got: Vec<Vec<Option<(f32, f32)>>> = Vec::new();
+    for side in ["settings", "page"] {
+        if side == "page" {
+            rig.app.host.shared("plugins.pages", Value::Nil).set(json_value(&json!([{ "plugin": "probe", "plugin_name": "Probe", "id": "probe", "title": "Probe" }])));
+            rig.frames(10);
+            rig.app.host.run_command("router.back");
+            rig.frames(30);
+            rig.app.click(".plugin-page-row");
+            rig.frames(40);
+        } else {
+            rig.open("Probe");
+        }
+        got.push(cases(side).iter().map(|(_, open, shows, hover)| shown(&mut rig, open, shows, *hover)).collect());
+        assert_eq!(rig.app.error(), None, "{side}");
+    }
+    let names: Vec<String> = cases("settings").into_iter().map(|c| c.0).collect();
+    for (i, name) in names.iter().enumerate() {
+        eprintln!("{name:36} settings page {:?}   its own page {:?}", got[0][i], got[1][i]);
+    }
+    for (i, name) in names.iter().enumerate() {
+        assert!(got[1][i].is_some(), "{name} shows on a page of its own");
+        assert_eq!(got[0][i], got[1][i], "{name}: as much shows on its settings page as on a page of its own");
+    }
+    // Over the window, not cut to the page: the dialog whole, the lightbox
+    // the window's size.
+    assert_eq!(got[0][0], Some((380., 152.)));
+    assert_eq!(got[0][1], Some((1200., 1400.)));
 }

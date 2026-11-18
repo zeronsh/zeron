@@ -635,13 +635,13 @@ zeron.settings_page {
 }
 ```
 
-- **It's yours alone.** It draws in a box only your plugin fills, in your plugin's sandbox. What you draw stays in the box, your dialogs too (menus still open over the window). No other plugin reaches into it.
+- **It's yours alone, and as free as your pages.** Zeron draws a place for it that only your plugin fills, as it does for your pages and tabs, and what you build there runs in your plugin's sandbox. It can do what they can: a dialog over the window, the lightbox, popovers, menus, tooltips. No other plugin reaches into it, and Zeron's header and rows above it are out of every plugin's reach.
 - **One value with the row.** Keep what the person sets in your declared settings where you can: Zeron keeps it, checks it and tells you (`zeron.on_setting`), and its row and your control move together. Zeron draws a row for each declared setting already, so don't draw it again: a control of yours is for what's tied to one (a notice that turns it back on, a choice inside a list's detail). `page.bind(id)` is a setting as a state a control takes (`page.bind(id, { wait = 600 })` for a text field: kept once the typing stops). `zeron.setting(id):set(value)` sets one (a promise of the value kept, or why not). Each is checked as Zeron's row checks it (a choice's options, a number's bounds), and one that doesn't fit is refused. A `folder` is the person's to choose: `page.choose_folder(id)` opens Zeron's dialog. Keep the rest (a list, records) in `zeron.store` or `zeron.db`. A plugin sets only its own.
 - **It takes the page's width and grows down.** Settings scrolls it. Don't give it a height or a scroll of its own.
-- **When it fails.** A build that errors draws nothing, and Zeron says "<Name>'s settings couldn't be shown" with the error in its place; your declared rows stay, and your row in Settings → Plugins and `plugin_status` say it too. A build that runs past its time budget is stopped, and your plugin is turned off until it changes; its page stays, saying why. Fix it and save.
+- **When it fails.** A build that errors draws nothing, and Zeron says "<Name>'s settings couldn't be shown" with the error in its place; your declared rows stay, and your row in Settings → Plugins and `plugin_status` say it too. A build that runs past its time budget is stopped, and your plugin is turned off until it changes. A plugin turned off because it failed keeps its settings page, its rows and why it stopped, if it drew a page of its own. Fix it and save.
 - **Search** finds the page by your plugin's name and its `keywords` (text, or `zeron.t(…)`), and opens it.
 - **Starting one:** `create_plugin { id, name, settings_page = true }` makes a plugin with a page already built this way (`settings_page.luau`, its words in `locales/en.json`): change it from there. `plugins-dev/settings-page` (Snippets) is a whole one to copy: a list you edit, the one chosen open under it, rows that come with a choice, a field's error, an action and its result, a declared setting set from the page.
-- **Checking it:** `plugin_status { id, page = "settings", snapshot = true }` opens Settings on your page and pictures it as Settings shows it, Zeron's rows over yours, and lists as `hints` what your code uses off the design system. Set the picture beside one of Zeron's pages (Settings → Notifications) and match it.
+- **Checking it:** `plugin_status { id, page = "settings", snapshot = true }` pictures your page as Settings shows it, Zeron's rows over yours, while the window shows it (`open = true` opens Settings on it first; otherwise the window is never moved), and lists as `hints` what your code uses off the design system. Set the picture beside one of Zeron's pages (Settings → Notifications) and match it.
 
 ### Match Zeron's pages
 
@@ -830,7 +830,7 @@ zeron.toast(zeron.s("timer.done"))
    - each place it made: its selector, how many elements it matched and their boxes;
    - what its Settings row says (a need its place doesn't give, places this template lacks, an error);
    - with `snapshot`, a PNG of the window around its nodes. Read the file at `snapshot`;
-   - with `page = "settings"`, its settings page instead: Settings opens on it, the PNG is the page as Settings shows it (Zeron's header and rows, then what you draw), and `hints` lists what your code uses off Zeron's design system. Set the picture beside one of Zeron's pages and match it.
+   - with `page = "settings"`, its settings page instead: the PNG is the page as Settings shows it (Zeron's header and rows, then what you draw), while the window shows it (`open = true` opens Settings on it first), and `hints` lists what your code uses off Zeron's design system. Set the picture beside one of Zeron's pages and match it.
 4. **Fix and save**, then ask again. Matched 0? Check the selector against `describe_elements`. A need? Place it inside something that provides it.
 
 `list_plugins` lists them all. Selectors that aren't stable may move; templates may rename elements. `plugin_status` and Settings show "Not shown in this template" when yours aren't there.

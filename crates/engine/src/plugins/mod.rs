@@ -2296,6 +2296,10 @@ impl Plugins {
                     /// `"settings"`: its settings page, as Settings shows it.
                     #[serde(default)]
                     page: Option<String>,
+                    /// Open Settings on that page to picture it (else the
+                    /// window is never moved).
+                    #[serde(default)]
+                    open: bool,
                 }
                 let p: StatusParams = parse_params(params)?;
                 self.rescan().await;
@@ -2326,7 +2330,7 @@ impl Plugins {
                 match self
                     .inner
                     .tools
-                    .call(&entry.item.id, tool, serde_json::json!({ "page": p.page }), None, STATUS_TIMEOUT)
+                    .call(&entry.item.id, tool, serde_json::json!({ "page": p.page, "open": p.open }), None, STATUS_TIMEOUT)
                     .await
                 {
                     Ok(window) => {

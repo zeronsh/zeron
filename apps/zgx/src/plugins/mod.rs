@@ -323,11 +323,6 @@ pub fn expose_surface(host: &ScriptHost) {
     // (replacing is "ui.change"'s, an OverrideElement of the selector as
     // written).
     host.require_contribution_capability(Capability::Named(grants::UI_ADD.into()));
-    // But a plugin's own settings page (`zeron.settings_page`), which needs
-    // no permission, as settings don't: zgx shows what a plugin gives
-    // `plugin_page` only in that plugin's own sealed box on its Settings
-    // page (`ui.plugin_page`), nowhere else, so it reaches nothing of Zeron's.
-    host.expose_hook(format!("slot:{}", grants::SETTINGS_PAGE_SLOT), None);
     // What a file or a reply's block is, as an element gives it: a token
     // (`tokens`), never the path or the text.
     tokens::install(host);
@@ -2166,7 +2161,7 @@ impl Bridge {
         if let Some(tool @ ("@status" | "@snapshot")) = call["tool"].as_str() {
             // (`page = "settings"`: its settings page, as Settings shows it.)
             if call["args"]["page"] == "settings" {
-                self.settings_status(&plugin, id, tool == "@snapshot");
+                self.settings_status(&plugin, id, tool == "@snapshot", call["args"]["open"] == true);
                 return;
             }
             self.status_call(&plugin, id, tool == "@snapshot");
@@ -3227,9 +3222,9 @@ impl Bridge {
     /// what its Luau uses off the design system (hints, never a block), and,
     /// with `snapshot`, a picture of its settings page as Settings shows it,
     /// Zeron's header and rows over what it draws, to set beside Zeron's
-    /// own pages. Settings is opened on the page first if it isn't (the
-    /// answer says so).
-    fn settings_status(&self, plugin: &str, id: String, snapshot: bool) {
+    /// own pages, if the window shows the page; with `open`, Settings is
+    /// opened on it first (the answer says so). Never moved otherwise.
+    fn settings_status(&self, plugin: &str, id: String, snapshot: bool, open: bool) {
         let mut out = self.host_status(plugin);
         let page = settings::page_id(plugin);
         if let Some(dir) = self.item(plugin).and_then(|i| i.json["snapshot"].as_str().map(PathBuf::from)) {
@@ -3250,6 +3245,11 @@ impl Bridge {
             return;
         }
         let shown = settings::page_shown(&self.route(), plugin);
+        if !shown && !open {
+            out["snapshot_error"] = json!(format!("Its settings page isn't showing in the window. Ask again with open: true to open Settings on it ({page}), or have the person open it."));
+            answer_tool(id, true, out, String::new());
+            return;
+        }
         if !shown {
             self.request("open", "", json_value(&json!({ "settings": page })));
             out["opened"] = json!(format!("Settings opened on its page ({page}) to picture it"));

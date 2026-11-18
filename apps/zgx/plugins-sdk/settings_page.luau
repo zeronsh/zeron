@@ -7,8 +7,8 @@
 -- Build it as Zeron's pages are (the guide's "Settings pages"): from
 -- @ds/settings' Section, Group and Row and Zeron's controls, tokens only,
 -- a list of sections. Check it with plugin_status { page = "settings",
--- snapshot = true }: a picture of the page, and hints of anything off the
--- design system.
+-- snapshot = true, open = true }: a picture of the page, and hints of
+-- anything off the design system.
 
 local zeron = require("./zeron")("PLUGIN_ID")
 local Settings = require("@ds/settings")
