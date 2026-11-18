@@ -145,25 +145,39 @@ fn class_of(letter: char) -> BTreeSet<char> {
     chars
 }
 
-/// Whether `word`'s letters, each a character of its class or a pair, match
-/// `text` from `at` to an end with no ASCII letter or digit right after.
-fn spells(text: &[char], at: usize, word: &[char]) -> bool {
-    let Some((&letter, rest)) = word.split_first() else {
-        return !ascii_word(text.get(at));
-    };
-    if text.get(at).is_some_and(|c| class_of(letter).contains(c)) && spells(text, at + 1, rest) {
-        return true;
-    }
-    PAIRS.iter().filter(|(l, _)| *l == letter).any(|(_, pair)| {
-        let pair: Vec<char> = pair.chars().collect();
-        pair.iter().enumerate().all(|(n, p)| text.get(at + n).is_some_and(|c| lookalikes_of(*p).contains(c))) && spells(text, at + pair.len(), rest)
-    })
+/// An apostrophe as a phrase may be written: ' ’ ʼ.
+fn apostrophe(c: char) -> bool {
+    matches!(c, '\'' | '\u{2019}' | '\u{02BC}')
 }
 
-/// Whether `text` spells `word` with look-alikes, as a whole word.
-fn spelled(text: &[char], word: &str) -> bool {
-    let word: Vec<char> = word.chars().collect();
-    (0..text.len()).any(|at| !ascii_word(at.checked_sub(1).and_then(|b| text.get(b))) && spells(text, at, &word))
+/// Whether `spelling`, each letter a character of its class or a pair, an
+/// apostrophe any of [`apostrophe`]'s, a space any run of separators but
+/// an apostrophe, matches `text` from `at` to an end with no ASCII letter or
+/// digit right after.
+fn spells(text: &[char], at: usize, spelling: &[char]) -> bool {
+    let Some((&letter, rest)) = spelling.split_first() else {
+        return !ascii_word(text.get(at));
+    };
+    match letter {
+        ' ' => (at..text.len()).take_while(|n| separator(text[*n]) && !apostrophe(text[*n])).any(|last| spells(text, last + 1, rest)),
+        '\'' => text.get(at).is_some_and(|c| apostrophe(*c)) && spells(text, at + 1, rest),
+        _ => {
+            if text.get(at).is_some_and(|c| class_of(letter).contains(c)) && spells(text, at + 1, rest) {
+                return true;
+            }
+            PAIRS.iter().filter(|(l, _)| *l == letter).any(|(_, pair)| {
+                let pair: Vec<char> = pair.chars().collect();
+                pair.iter().enumerate().all(|(n, p)| text.get(at + n).is_some_and(|c| lookalikes_of(*p).contains(c))) && spells(text, at + pair.len(), rest)
+            })
+        }
+    }
+}
+
+/// Whether `text` spells `words` (a word, or a phrase) with look-alikes,
+/// whole.
+fn spelled(text: &[char], words: &str) -> bool {
+    let spelling: Vec<char> = words.chars().collect();
+    (0..text.len()).any(|at| !ascii_word(at.checked_sub(1).and_then(|b| text.get(b))) && spells(text, at, &spelling))
 }
 
 /// `text` with each run of single characters, apart by 1 to
@@ -221,29 +235,15 @@ pub fn mark_claim(text: &str) -> Option<String> {
     MARK_WORDS.iter().find(|word| readings.iter().any(|reading| spelled(reading, word))).map(|word| (*word).to_owned())
 }
 
-/// Which of [`ZERON_PHRASES`] `text` says, if any: folded as
-/// [`mark_claim`] folds, each run of separators but the apostrophe read as
-/// one space (’ and ʼ as '), the phrase whole.
+/// Which of [`ZERON_PHRASES`] `text` says, if any, read as the mark's words
+/// are: folded as [`mark_claim`] folds, each letter itself or a look-alike,
+/// its apostrophe any of ' ’ ʼ, each space any run of separators but an
+/// apostrophe, whole, in the text or with its spaced letters read as one
+/// word ("Git by Zer0n", "Z.E.R.O.N. approved").
 pub fn claims_zeron(text: &str) -> Option<String> {
-    let mut plain = String::new();
-    for c in folded(text) {
-        let c = if matches!(c, '\u{2019}' | '\u{02BC}') { '\'' } else { c };
-        if c != '\'' && separator(c) {
-            if !plain.ends_with(' ') {
-                plain.push(' ');
-            }
-        } else {
-            plain.push(c);
-        }
-    }
-    ZERON_PHRASES
-        .iter()
-        .find(|phrase| {
-            plain.match_indices(**phrase).any(|(at, _)| {
-                !ascii_word(plain[..at].chars().next_back().as_ref()) && !ascii_word(plain[at + phrase.len()..].chars().next().as_ref())
-            })
-        })
-        .map(|phrase| (*phrase).to_owned())
+    let folded = folded(text);
+    let readings = [folded.clone(), unspaced(&folded)];
+    ZERON_PHRASES.iter().find(|phrase| readings.iter().any(|reading| spelled(reading, phrase))).map(|phrase| (*phrase).to_owned())
 }
 
 #[cfg(test)]
@@ -356,10 +356,23 @@ mod tests {
             ("Zeron\u{2019}s own notes", Some("zeron's own")),
             ("A Zeron approved board", Some("zeron approved")),
             ("zeron\u{2014}recommended", Some("zeron recommended")),
+            ("Git by Zer0n", Some("by zeron")),
+            ("Git by Z\u{435}ron", Some("by zeron")),
+            ("Z.E.R.O.N. approved", Some("zeron approved")),
+            ("Git by Z e r o n", Some("by zeron")),
+            ("Zeron  -  certified", Some("zeron certified")),
+            ("Zeron\u{2bc}s own", Some("zeron's own")),
+            ("Notes from Zer\u{fe0f}on", Some("from zeron")),
+            ("Git b\u{443} Zeron", Some("by zeron")),
+            ("Git by \u{1d22}\u{1d07}\u{280}\u{1d0f}\u{274}", Some("by zeron")),
             ("Notes for Zeron", None),
             ("Works with Zeron", None),
             ("Zeronaut tools", None),
             ("by zeronaut", None),
+            ("A board by Zenon", None),
+            ("Lazeron approved", None),
+            ("from zero n", None),
+            ("Zeron notes", None),
         ] {
             assert_eq!(claims_zeron(text).as_deref(), claim, "{text}");
         }
@@ -376,14 +389,15 @@ mod tests {
         std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/src/plugins/mark_lookalikes.rs"), source).unwrap();
     }
 
-    /// For each letter of the mark's words, every character that passes for
+    /// For each letter of the mark's words and Zeron's phrases, every
+    /// character that passes for
     /// it, folded as [`mark_text`] folds and as written (kept unless it is,
     /// or folds to, an ASCII letter, which the words match already): from
     /// confusables.txt, every single-character source whose prototype folds
     /// to that letter, then the Latin small capitals and the digit 3 for e.
     fn generate(text: &str, sha256: &str) -> String {
         let version = text.lines().find_map(|l| l.strip_prefix("# Version: ")).unwrap_or("unknown").trim().to_owned();
-        let letters: BTreeSet<char> = MARK_WORDS.iter().flat_map(|w| w.chars()).collect();
+        let letters: BTreeSet<char> = MARK_WORDS.iter().chain(ZERON_PHRASES).flat_map(|w| w.chars()).filter(char::is_ascii_lowercase).collect();
         let mut table: std::collections::BTreeMap<char, BTreeSet<char>> = letters.iter().map(|l| (*l, BTreeSet::new())).collect();
         // Each kept as folded here and as written, so a runtime whose case
         // data is older or newer than this one's (a new letter it doesn't
@@ -419,7 +433,9 @@ mod tests {
         // The Latin letter small capitals, which UTS #39 doesn't list as
         // passing for the lowercase letters they look like.
         for (letter, cp) in [
-            ('a', 0x1d00), ('c', 0x1d04), ('d', 0x1d05), ('e', 0x1d07), ('f', 0xa730), ('i', 0x026a), ('l', 0x029f), ('o', 0x1d0f), ('r', 0x0280), ('v', 0x1d20),
+            ('a', 0x1d00), ('b', 0x0299), ('c', 0x1d04), ('d', 0x1d05), ('e', 0x1d07), ('f', 0xa730), ('g', 0x0262), ('h', 0x029c), ('i', 0x026a), ('j', 0x1d0a),
+            ('k', 0x1d0b), ('l', 0x029f), ('m', 0x1d0d), ('n', 0x0274), ('o', 0x1d0f), ('p', 0x1d18), ('q', 0xa7af), ('r', 0x0280), ('s', 0xa731), ('t', 0x1d1b),
+            ('u', 0x1d1c), ('v', 0x1d20), ('w', 0x1d21), ('y', 0x028f), ('z', 0x1d22),
         ] {
             add(letter, &char::from_u32(cp).unwrap().to_string());
         }
@@ -435,7 +451,7 @@ mod tests {
         let escape = |c: char| if c.is_ascii_alphanumeric() { c.to_string() } else { format!("\\u{{{:x}}}", c as u32) };
         let rows: Vec<String> = table.iter().map(|(l, set)| format!("    ('{l}', \"{}\"),", set.iter().map(|c| escape(*c)).collect::<String>())).collect();
         format!(
-            "//! Generated by `mark.rs` (`lookalikes_are_current`) from Unicode's\n//! confusables.txt: do not edit. For each letter of the mark's words, the\n//! characters that pass for it, folded as `mark_text` folds them.\n\npub const SOURCE: &str = \"UTS #39 confusables.txt\";\npub const SOURCE_VERSION: &str = \"{version}\";\npub const SOURCE_SHA256: &str = \"{sha256}\";\n\npub const LOOKALIKES: &[(char, &str)] = &[\n{}\n];\n",
+            "//! Generated by `mark.rs` (`lookalikes_are_current`) from Unicode's\n//! confusables.txt: do not edit. For each letter of the mark's words and\n//! Zeron's phrases, the characters that pass for it, folded as `mark_text` folds them.\n\npub const SOURCE: &str = \"UTS #39 confusables.txt\";\npub const SOURCE_VERSION: &str = \"{version}\";\npub const SOURCE_SHA256: &str = \"{sha256}\";\n\npub const LOOKALIKES: &[(char, &str)] = &[\n{}\n];\n",
             rows.join("\n")
         )
     }
