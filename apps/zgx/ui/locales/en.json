@@ -3914,7 +3914,7 @@
       "try_another": "Try other words, or fewer filters.",
       "clear": "Clear search",
       "empty_title": "No plugins in the store yet",
-      "empty_body": "Plugins people share appear here once they're reviewed.",
+      "empty_body": "Plugins people publish appear here.",
       "not_found_title": "This plugin isn't in the store",
       "not_found_body": "It may have been taken down, or the link is wrong.",
       "browse_all": "Browse plugins",
