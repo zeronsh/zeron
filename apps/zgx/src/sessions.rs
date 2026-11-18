@@ -43,6 +43,9 @@
 //!                                  engine's words for why not
 //!   sessions.archive(id), sessions.unarchive(id)
 //!   sessions.rename({ id, title })
+//!   sessions.retitle(id)           a new title the titler writes from the
+//!                                  chat's own messages, or the engine's
+//!                                  words for why not
 //!   sessions.seen(id) (an action)  its finished state seen, on every device
 //!   sessions.places({ pinned, sections }) (an action)
 //!                                  where sessions should be put by hand, as
@@ -867,6 +870,14 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let title = args.field("title").map(text).unwrap_or_default();
         let params = json!({ "op": "renameChat", "chatId": id, "title": title.trim() });
         async move { a.mutate(params).await.map_err(String::from) }
+    });
+    host.async_action("sessions.retitle", move |id| {
+        async move {
+            engine::get()
+                .call("RetitleChat", json!({ "chatId": text(&id) }))
+                .await
+                .map(|_| Value::Nil)
+        }
     });
     let a = s.clone();
     host.async_action("sessions.rename_project", move |args| {

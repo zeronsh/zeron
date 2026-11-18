@@ -2458,7 +2458,8 @@
         "delete": "删除…",
         "rename": "重命名…",
         "remove": "移除…",
-        "edit_project": "编辑项目…"
+        "edit_project": "编辑项目…",
+        "retitle": "重新生成标题"
       },
       "project": {
         "rename_title": "重命名项目",
@@ -2532,7 +2533,8 @@
         "couldnt_delete": "无法删除“{title}”",
         "rename_title": "重命名会话",
         "name": "名称",
-        "name_placeholder": "会话名称"
+        "name_placeholder": "会话名称",
+        "couldnt_retitle": "无法为“{title}”生成标题"
       }
     },
     "boundary": {

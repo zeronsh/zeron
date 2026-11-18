@@ -663,6 +663,11 @@ impl SessionsEngine {
         let _ = self.inner.titles.set(titles);
     }
 
+    /// The chat auto-titler once wired (`set_titles` at engine assembly).
+    pub fn titles(&self) -> Option<crate::titles::TitleGenerator> {
+        self.inner.titles.get().cloned()
+    }
+
     /// End the live run of every chat whose row leaves the workspace (called
     /// once at engine assembly). Nobody can message a deleted chat, so a run
     /// parked after its last turn only held its agent process tree — and that
