@@ -45,22 +45,22 @@ describe("reading the catalog's address", () => {
 
 describe("the catalog's addresses", () => {
   test("defaults are left out, the rest in a fixed order", () => {
-    expect(catalogHref({})).toBe("/plugins");
-    expect(catalogHref({ sort: "popular" })).toBe("/plugins");
-    expect(catalogHref({ q: "x", sort: "relevance" })).toBe("/plugins?q=x");
-    expect(catalogHref({ cursor: "c", sort: "new", keyword: "k", category: "git", q: "a b" })).toBe("/plugins?q=a+b&category=git&keyword=k&sort=new&cursor=c");
+    expect(catalogHref({})).toBe("/plugins/all");
+    expect(catalogHref({ sort: "popular" })).toBe("/plugins/all");
+    expect(catalogHref({ q: "x", sort: "relevance" })).toBe("/plugins/all?q=x");
+    expect(catalogHref({ cursor: "c", sort: "new", keyword: "k", category: "git", q: "a b" })).toBe("/plugins/all?q=a+b&category=git&keyword=k&sort=new&cursor=c");
   });
 
   test("an address that says more than it means has a plain one", () => {
     const params = new URLSearchParams("sort=popular&utm_source=x");
-    expect(canonicalSearch(params, read("sort=popular&utm_source=x"))).toBe("/plugins");
+    expect(canonicalSearch(params, read("sort=popular&utm_source=x"))).toBe("/plugins/all");
     const clean = new URLSearchParams("q=x&sort=new");
     expect(canonicalSearch(clean, read("q=x&sort=new"))).toBeNull();
   });
 
   test("Previous and Next keep the search and carry the cursor", () => {
     const state = read("q=timer&category=git");
-    expect(pageHref(state, "NEXT")).toBe("/plugins?q=timer&category=git&cursor=NEXT");
+    expect(pageHref(state, "NEXT")).toBe("/plugins/all?q=timer&category=git&cursor=NEXT");
     expect(pageHref(state, undefined)).toBeNull();
   });
 });

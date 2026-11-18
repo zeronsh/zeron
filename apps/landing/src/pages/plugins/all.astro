@@ -1,0 +1,148 @@
+---
+// All plugins: every listed plugin, or a category's, or a search's, a page
+// at a time, as a dense list whose columns line up. Public and the same for
+// everyone (no cookie read), so the Worker cache keeps each address for
+// half a minute and serves it stale for another while it asks again.
+import PluginTile from "../../components/store/PluginTile.astro";
+import Glyph from "../../components/ui/Glyph.astro";
+import App from "../../layouts/App.astro";
+import { canonicalSearch, catalogHref, effectiveSort, PAGE_SIZE, pageHref, readCatalog } from "../../lib/store/catalog.ts";
+import { count } from "../../lib/store/format.ts";
+import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
+import { CATEGORIES } from "../../lib/store/nav.ts";
+import type { Sort } from "../../lib/store/types.ts";
+import { pluginUrl } from "../../lib/store/urls.ts";
+import { store } from "../../lib/store/words.ts";
+
+export const prerender = false;
+
+const edge = Astro.locals.edge;
+const categoriesResult = await edge.categories();
+const categories = categoriesResult.ok ? categoriesResult.data.categories : [];
+const state = readCatalog(Astro.url.searchParams, categoriesResult.ok ? categories : null);
+
+// An address that says more than it means is sent to the one that says it plainly.
+const canonical = canonicalSearch(Astro.url.searchParams, state);
+if (canonical && categoriesResult.ok) return Astro.redirect(canonical, 301);
+
+const sort = effectiveSort(state);
+const page = await edge.catalog({ q: state.q || undefined, category: state.category ?? undefined, keyword: state.keyword ?? undefined, sort, cursor: state.cursor ?? undefined, limit: PAGE_SIZE });
+
+// A cursor from another search, or an old one: this search's first page.
+if (!page.ok && page.error === "bad_cursor") return Astro.redirect(catalogHref({ ...state, cursor: null }), 303);
+if (page.ok) publicPage(Astro, [CATALOG_TAG]);
+else Astro.response.status = page.error === "bad_request" ? 400 : 503;
+
+// Categories by the app's names (the fixed list), else the edge's. A row
+// shows the one its plugin is filed under first.
+const categoryName = (id: string) => CATEGORIES.find((c) => c.id === id)?.label ?? categories.find((c) => c.id === id)?.name ?? id;
+const items = page.ok ? page.data.items : [];
+const next = page.ok ? pageHref(state, page.data.next_cursor) : null;
+const previous = page.ok ? (page.data.prev_cursor ? pageHref(state, page.data.prev_cursor) : state.cursor ? catalogHref({ ...state, cursor: null }) : null) : null;
+// The count, when the list says it exactly (one page of it): the edge gives no total.
+// (None at all, the empty state says so instead.)
+const exact = page.ok && !state.cursor && !page.data.next_cursor && page.data.items.length > 0;
+
+const sorts = (["relevance", "popular", "updated", "new"] as Sort[]).filter((s) => s !== "relevance" || state.q);
+const heading = state.q ? `Results for “${state.q}”` : state.category ? categoryName(state.category) : state.keyword ? `Tagged “${state.keyword}”` : "All plugins";
+const title = state.q ? `“${state.q}” · Plugins · Zeron` : state.category ? `${categoryName(state.category)} plugins · Zeron` : "All plugins · Zeron";
+const description = state.category
+  ? `Plugins for Zeron in ${categoryName(state.category)}: reviewed before they're listed, installed in a click.`
+  : "Every plugin for Zeron: panels, commands, tools for your agents and more. Each one is reviewed before it's listed.";
+// Search results and later pages stay out of search engines; the list and its categories don't.
+const noindex = Boolean(state.q || state.cursor || state.keyword);
+const here = `${Astro.url.pathname}${Astro.url.search}`;
+---
+
+<App title={title} description={description} noindex={noindex} canonical={catalogHref({ category: state.category })} current={state.category ?? (state.q || state.keyword ? null : "all")} query={state.q}>
+  <Fragment slot="title">
+    <h1 class="t-title">{heading}</h1>
+    {exact && <span class="count-line">{items.length === 1 ? "1 plugin" : `${count(items.length)} plugins`}</span>}
+  </Fragment>
+  {
+    page.ok && items.length > 0 && (
+      <nav slot="tools" class="segmented" aria-label={store("plugins.store.sort_label")}>
+        {sorts.map((s) => (
+          <a href={catalogHref({ ...state, sort: s, cursor: null })} aria-current={s === sort ? "page" : undefined}>{store(`plugins.store.sort.${s}`)}</a>
+        ))}
+      </nav>
+    )
+  }
+
+  {
+    !page.ok ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h2 class="t-heading">{store("plugins.store.failed_title")}</h2><p>{store("plugins.store.failed_body")}</p></div>
+          <div class="actions"><a class="btn secondary sm" href={here}>{store("plugins.store.try_again")}</a></div>
+        </div>
+      </div>
+    ) : items.length === 0 ? (
+      <div class="panel">
+        <div class="empty">
+          <span class="tile"><Glyph name={state.q ? "magnifer" : "widget"} size={20} /></span>
+          {state.q ? (
+            <div class="words"><h2 class="t-heading">{store("plugins.store.nothing_matches", { query: state.q })}</h2><p>{store("plugins.store.try_another")}</p></div>
+          ) : state.category || state.keyword ? (
+            <div class="words"><h2 class="t-heading">{store("plugins.store.nothing_here")}</h2><p>{store("plugins.store.empty_body")}</p></div>
+          ) : (
+            <div class="words"><h2 class="t-heading">{store("plugins.store.empty_title")}</h2><p>{store("plugins.store.empty_body")}</p></div>
+          )}
+          {state.q ? (
+            <div class="actions"><a class="btn secondary sm" href={catalogHref({ category: state.category, keyword: state.keyword })}>{store("plugins.store.clear")}</a></div>
+          ) : state.category || state.keyword ? (
+            <div class="actions"><a class="btn secondary sm" href={catalogHref({})}>All plugins</a></div>
+          ) : null}
+        </div>
+      </div>
+    ) : (
+      <>
+        <div class="panel" data-list>
+          <table class="table comfortable plugins">
+            <caption class="sr-only">{heading}</caption>
+            <colgroup><col /><col class="by" /><col class="category" /><col class="installs" /></colgroup>
+            <thead>
+              <tr><th scope="col">Plugin</th><th scope="col">{store("plugins.store.fact.by")}</th><th scope="col">{store("plugins.store.fact.category")}</th><th scope="col" class="end">{store("plugins.store.fact.installs")}</th></tr>
+            </thead>
+            <tbody class="rows">
+              {items.map((p) => (
+                <tr>
+                  <td>
+                    <span class="cell-main">
+                      <PluginTile id={p.id} name={p.name} icon={p.icon} version={p.version} size={32} class="plugin-tile" />
+                      <span class="cell-words">
+                        <a class="name name-link" href={pluginUrl(p.id)}>{p.name}</a>
+                        <span class="line">{p.summary}</span>
+                        <span class="meta">{p.author.username ? `@${p.author.username}` : "Unnamed author"} · {count(p.installs)} installs</span>
+                      </span>
+                    </span>
+                  </td>
+                  <td class="by">{p.author.username ? `@${p.author.username}` : "—"}</td>
+                  <td class="category">{p.categories[0] ? categoryName(p.categories[0]) : "—"}</td>
+                  <td class="installs end">{count(p.installs)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tbody class="skeleton-rows" aria-hidden="true">
+              {items.map(() => (
+                <tr>
+                  <td><span class="cell-main"><span class="skeleton sk-tile" /><span class="sk-words"><span class="skeleton sk-name" /><span class="skeleton sk-line" /></span></span></td>
+                  <td class="by"><span class="skeleton sk-short" /></td>
+                  <td class="category"><span class="skeleton sk-short" /></td>
+                  <td class="installs end"><span class="skeleton sk-num" /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {(previous || next) && (
+          <nav class="pager" aria-label="Pages">
+            {previous ? <a class="btn secondary sm" href={previous} rel="prev" data-loads><Glyph name="alt-arrow-left" size={14} />Previous</a> : <span class="btn secondary sm" aria-disabled="true"><Glyph name="alt-arrow-left" size={14} />Previous</span>}
+            {next ? <a class="btn secondary sm" href={next} rel="next" data-loads>Next<Glyph name="alt-arrow-right" size={14} /></a> : <span class="btn secondary sm" aria-disabled="true">Next<Glyph name="alt-arrow-right" size={14} /></span>}
+          </nav>
+        )}
+      </>
+    )
+  }
+</App>

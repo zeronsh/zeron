@@ -4,6 +4,7 @@
 // What a page may use is what is here; nothing else.
 import App from "../layouts/App.astro";
 import Glyph from "../components/ui/Glyph.astro";
+import { BROWSE, CATEGORIES, PUBLISH, REVIEW } from "../lib/store/nav.ts";
 
 export const prerender = false;
 
@@ -34,11 +35,11 @@ const INKS = [
   ["text-off", "0.28", "Disabled words"],
 ];
 const TONES = [
-  ["ok", "emerald 300 on 400 at 14%"],
-  ["warn", "amber 300 on 400 at 14%"],
-  ["bad", "red 300 on 400 at 15%"],
-  ["info", "blue 300 on 400 at 14%"],
-  ["accent", "violet 300 on the accent at 20%"],
+  ["ok", "emerald 300 #91dab5 on 400 #5dc496 at 14%"],
+  ["warn", "amber 300 #f5c283 on 400 #e9a64b at 14%"],
+  ["bad", "red 300 #ffada6 on 400 #f9837b at 15%"],
+  ["info", "blue 300 #a3c8fe on 400 #74acfe at 14%"],
+  ["accent", "violet 300 #c6bbfe on the accent at 20%"],
 ];
 const TYPE = [
   ["t-title", "20 / 26 · 600", "A page's title, in the header"],
@@ -52,9 +53,9 @@ const TYPE = [
 const SPACE = [4, 8, 12, 16, 24, 32];
 const RADII = [
   [4, "a small badge, a key cap, a segment"],
-  [6, "a nav row, a small control, a badge, the segmented track"],
-  [8, "a control, a tile at 32"],
-  [12, "a card: the list, the page, a panel, a toast"],
+  [6, "a nav row, a small control, a badge, the segmented track, a tile from 32 to 55"],
+  [8, "a control (6 at 28)"],
+  [12, "a card: the list, the page, a panel, a toast; a tile from 56"],
   [16, "a dialog, a sheet"],
 ];
 const STATES = ["rest", "is-hover", "is-focus", "is-active", "disabled"] as const;
@@ -120,8 +121,32 @@ const stateName = { rest: "Rest", "is-hover": "Hover", "is-focus": "Focus", "is-
     </section>
 
     <section class="block">
+      <h2 class="t-heading">Measure</h2>
+      <p class="t-text t-2">The page's column. A list or a table grows with the page's card to 1120 and stops there, centred in the card; reading (a README, the publishing guide) stops at 720. The header's title and controls stand on the same column's edges as the body under them, so a page has one pair of edges, never one for its header and another for its body. At 1440 the column is 1108 (the card, 1156, less 24 a side); at 1920, 1120.</p>
+      <div class="panel panel-pad measures">
+        <div class="measure list"><span class="t-mono t-2">list · 1120</span></div>
+        <div class="measure prose"><span class="t-mono t-2">prose · 720</span></div>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Search</h2>
+      <p class="t-text t-2">One field, at the top of the list on every page, the same everywhere. What it does: it leads to All plugins with what was typed (/plugins/all?q=…), where the header reads the query (“Results for …”) and its count, the sort gains Best match, and the field still holds the words. “/” anywhere but in a field puts you in it; Escape empties it, and a second Escape leaves it. On a phone, the top bar's Search opens the list with the field focused. Without the script it is a plain form that does the same.</p>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Icons</h2>
+      <p class="t-text t-2">The app's own, never look-alikes: each from apps/zgx/ui/assets/icons/ui, as ds/icon_svgs.luau carries it (src/data/icons.json holds the same SVG, byte for byte: nav.test.ts checks every one). Drawn at 16 in the list (14 in a small field), stroke 1.5 at 24 (the set's own), in the text's ink.</p>
+      <div class="panel icons">
+        {[...BROWSE, ...CATEGORIES, ...PUBLISH, ...REVIEW].map((item) => (
+          <div class="row"><Glyph name={item.icon} size={16} /><span class="words"><span class="label">{item.label}</span></span><span class="end t-mono t-3">{item.icon}</span></div>
+        ))}
+      </div>
+    </section>
+
+    <section class="block">
       <h2 class="t-heading">Buttons</h2>
-      <p class="t-text t-2">32 high, 12 in, 13 medium, an 8 corner (md). xs 24 · sm 28 (6 corner) · lg 40. Primary is the way on, one a view; danger only to confirm what can't be undone.</p>
+      <p class="t-text t-2">32 high, 12 in, 13 medium, an 8 corner (md). xs 24 · sm 28 (6 corner) · lg 40. Primary is the way on, one a view; danger only to confirm what can't be undone. Danger is the app's destructive (zeron.destructive): the palette's red 600 #c54744, 500 #e4605b under the pointer, 700 #a13735 held, white words.</p>
       <div class="panel grid-states">
         <span />
         {STATES.map((s) => <span class="t-caption t-3">{stateName[s]}</span>)}
@@ -186,7 +211,7 @@ const stateName = { rest: "Rest", "is-hover": "Hover", "is-focus": "Focus", "is-
 
     <section class="block">
       <h2 class="t-heading">Badges and tiles</h2>
-      <p class="t-text t-2">20 high, 6 in, 12 medium, corner 6; small 16, 4 in, 11, corner 4. A tile: a plugin's mark on the quiet wash, 32 (corner 8), 40 and 56 (12).</p>
+      <p class="t-text t-2">20 high, 6 in, 12 medium, corner 6; small 16, 4 in, 11, corner 4. A tile: a mark on the quiet wash, its corner the app's (ds/tile.luau): 4 under 32, 6 from 32, 12 from 56. A plugin with no icon: its initial on its hue, the palette's 500 inked in its 50.</p>
       <div class="line-up">
         <span class="badge">Neutral</span><span class="badge ok">Approved</span><span class="badge warn">In review</span><span class="badge bad">Not approved</span><span class="badge info">Pre-release</span><span class="badge accent">Featured</span>
         <span class="badge sm">sm</span><span class="badge sm ok dot">Listed</span><span class="badge sm warn dot">No new installs</span>
@@ -396,5 +421,11 @@ const stateName = { rest: "Rest", "is-hover": "Hover", "is-focus": "Focus", "is-
   .sheet.static { position: static; height: auto; width: min(360px, 100%); }
 
   .w128 { width: 128px; } .w48 { width: 48px; }
+  .measures { display: grid; gap: 8px; }
+  .measure { height: 32px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: var(--accent-wash); box-shadow: inset 0 0 0 1px var(--accent-edge); }
+  .measure.list { width: 100%; max-width: 1120px; }
+  .measure.prose { width: 100%; max-width: 720px; }
+  .icons { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); }
+  .icons .row { min-height: 40px; padding: 8px 16px; border-top: 1px solid var(--line-faint); }
   .skeleton.right { margin-left: auto; }
 </style>

@@ -227,7 +227,7 @@ describe("an author's words, from a real package", () => {
     }
     await grace.post("/admin/plugins/probe/1.0.0/approve", { csrf: await grace.token("/admin/plugins/probe/1.0.0") });
     expect(grace.flash()).toBe("approved");
-    for (const path of ["/plugins", "/plugins/probe", "/plugins?q=probe"]) {
+    for (const path of ["/plugins", "/plugins/all", "/plugins/probe", "/plugins/all?q=probe"]) {
       const { response, body } = await new Browser().get(path);
       expect(response.status, path).toBe(200);
       inert(body);
@@ -242,15 +242,17 @@ describe("an author's words, from a real package", () => {
 
 describe("the catalog, from the edge's real listing", () => {
   test("lists what's approved, and only that", async () => {
-    const { response, body } = await new Browser().get("/plugins");
-    expect(response.status).toBe(200);
-    expect(body).toContain('href="/plugins/focus-timer"');
-    expect(body).toContain('href="/plugins/pr-review"');
-    expect(body).not.toContain('href="/plugins/theme-sync"');
-    const git = await new Browser().get("/plugins?category=git");
+    for (const path of ["/plugins", "/plugins/all"]) {
+      const { response, body } = await new Browser().get(path);
+      expect(response.status, path).toBe(200);
+      expect(body, path).toContain('href="/plugins/focus-timer"');
+      expect(body, path).toContain('href="/plugins/pr-review"');
+      expect(body, path).not.toContain('href="/plugins/theme-sync"');
+    }
+    const git = await new Browser().get("/plugins/all?category=git");
     expect(git.body).toContain('href="/plugins/pr-review"');
     expect(git.body).not.toContain('href="/plugins/focus-timer"');
-    const search = await new Browser().get("/plugins?q=focus");
+    const search = await new Browser().get("/plugins/all?q=focus");
     expect(search.body).toContain('href="/plugins/focus-timer"');
   });
 
@@ -439,7 +441,7 @@ describe("the audit log", () => {
 });
 
 describe("every page, with what the real edge holds", () => {
-  const PUBLIC = ["/plugins", "/plugins?category=productivity", "/plugins?keyword=focus", "/plugins?sort=new", "/plugins/focus-timer", "/plugins/probe", "/plugins/sitemap.xml"];
+  const PUBLIC = ["/plugins", "/plugins/all", "/plugins/all?category=productivity", "/plugins/all?keyword=focus", "/plugins/all?sort=new", "/plugins/focus-timer", "/plugins/probe", "/plugins/sitemap.xml"];
   const MEMBER = ["/account", "/account/plugins/focus-timer", "/account/plugins/theme-sync", "/account/plugins/focus-timer/versions/1.0.0/yank", "/plugins/focus-timer/report"];
   const STAFF = [
     "/admin/plugins",

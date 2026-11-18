@@ -44,27 +44,44 @@
   --accent: #9277b0;
   --ring: rgb(146 119 176 / 0.6); /* focus.ring */
 
-  /* Tones (zeron.tone): pale inks, faint washes, edges between. */
-  --ok-ink: #6ee7b7; --ok-wash: rgb(52 211 153 / 0.14); --ok-edge: rgb(52 211 153 / 0.3);
-  --warn-ink: #fcd34d; --warn-wash: rgb(251 191 36 / 0.14); --warn-edge: rgb(251 191 36 / 0.3);
-  --bad-ink: #fca5a5; --bad-wash: rgb(248 113 113 / 0.15); --bad-edge: rgb(248 113 113 / 0.32);
-  --info-ink: #93c5fd; --info-wash: rgb(96 165 250 / 0.14); --info-edge: rgb(96 165 250 / 0.3);
-  --accent-ink: #c4b5fd; --accent-wash: rgb(146 119 176 / 0.2); --accent-edge: rgb(146 119 176 / 0.4);
+  /* Tones (zeron.tone, the app's own palette, ds/palette.luau): the 300
+     step's ink on the 400 step's faint wash. */
+  --ok-ink: #91dab5; --ok-wash: rgb(93 196 150 / 0.14); --ok-edge: rgb(93 196 150 / 0.3); /* emerald */
+  --warn-ink: #f5c283; --warn-wash: rgb(233 166 75 / 0.14); --warn-edge: rgb(233 166 75 / 0.3); /* amber */
+  --bad-ink: #ffada6; --bad-wash: rgb(249 131 123 / 0.15); --bad-edge: rgb(249 131 123 / 0.32); /* red */
+  --info-ink: #a3c8fe; --info-wash: rgb(116 172 254 / 0.14); --info-edge: rgb(116 172 254 / 0.3); /* blue */
+  --accent-ink: #c6bbfe; --accent-wash: rgb(146 119 176 / 0.2); --accent-edge: rgb(146 119 176 / 0.4); /* violet 300 on the accent */
 
   /* Buttons (zeron.primary, secondary, destructive). */
   --primary: #ececee; --primary-hover: #ffffff; --primary-active: #d2d2d7; --primary-ink: #0b0b0c;
   --secondary: #ffffff14; --secondary-hover: #ffffff1f; --secondary-active: #ffffff29;
-  --danger: #dc2626; --danger-hover: #ef4444; --danger-active: #b91c1c;
+  /* (zeron.destructive: the palette's red 600, 500 under the pointer, 700 held.) */
+  --danger: #c54744; --danger-hover: #e4605b; --danger-active: #a13735;
 
   /* Code (zeron.syntax: the palette's 300s, structure in the text's ink). */
   --code-text: rgb(237 237 239 / 0.9);
-  --code-keyword: #c4b5fd; --code-function: #93c5fd; --code-type: #fcd34d; --code-string: #86efac;
-  --code-number: #fdba74; --code-property: #fecdd3; --code-tag: #fca5a5; --code-attribute: #fde047;
+  --code-keyword: #c6bbfe; --code-function: #a3c8fe; --code-type: #f5c283; --code-string: #9edaa5;
+  --code-number: #ffb58f; --code-property: #ffced3; --code-tag: #ffada6; --code-attribute: #e6d288;
   /* (The app's comment ink is 0.46: 0.58 here, for AA.) */
   --code-comment: rgb(237 237 239 / 0.58);
   --code-punct: rgb(237 237 239 / 0.6);
-  --diff-added: #34d399; --diff-removed: #f87171;
-  --diff-added-wash: rgb(52 211 153 / 0.12); --diff-removed-wash: rgb(248 113 113 / 0.12);
+  --diff-added: #5dc496; --diff-removed: #f9837b; /* emerald 400, red 400 */
+  --diff-added-wash: rgb(93 196 150 / 0.12); --diff-removed-wash: rgb(249 131 123 / 0.12);
+
+  /* A plugin's tile without an icon: its initial on its hue (the palette's
+     500, inked in its 50), as the app's (screens/plugins/words.luau). */
+  --hue-indigo: #7584f4; --hue-indigo-ink: #f4f6fe;
+  --hue-rose: #e25e76; --hue-rose-ink: #fef4f5;
+  --hue-sky: #149dd2; --hue-sky-ink: #eff9fe;
+  --hue-emerald: #27ac7a; --hue-emerald-ink: #effaf4;
+  --hue-amber: #d68d0a; --hue-amber-ink: #fef6ec;
+  --hue-violet: #9579ee; --hue-violet-ink: #f7f6fe;
+  --hue-orange: #e07434; --hue-orange-ink: #fef5f0;
+  --hue-teal: #18aa99; --hue-teal-ink: #effaf7;
+  /* (What components/store/PluginTile.astro reads, under these names.) */
+  --secondary-bg: var(--wash);
+  --border-subtle: var(--line-faint);
+  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px; --radius-xl: 12px;
 
   --sans: var(--font-sans);
   --mono: var(--font-mono);
@@ -100,6 +117,7 @@ code, pre, kbd, samp { font-family: var(--mono); }
 .num, td, .tabular { font-variant-numeric: tabular-nums; }
 /* (Hidden means hidden: a component's own display never shows it.) */
 [hidden] { display: none !important; }
+.ink-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 /* An author's words keep their reordering to themselves. */
 .app :where(a, span, b, strong, em, code, bdi, time, label, dt, dd, li, td, th, p, h1, h2, h3) { unicode-bidi: isolate; }
@@ -135,7 +153,18 @@ code, pre, kbd, samp { font-family: var(--mono); }
   border-radius: 12px;
   box-shadow: inset 0 0 0 1px var(--line-faint);
 }
-.sidebar-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; scrollbar-width: thin; scrollbar-color: rgb(237 237 239 / 0.26) transparent; }
+/* Its brand and search stay; its rows scroll under them, faded 12 at each
+   end (the app's list's fade); its foot (you) stays. */
+.sidebar-top { padding: 8px 8px 0; }
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 8px 12px;
+  mask-image: linear-gradient(transparent, #000 12px, #000 calc(100% - 12px), transparent);
+  scrollbar-width: thin;
+  scrollbar-color: rgb(237 237 239 / 0.26) transparent;
+}
 .sidebar-foot { padding: 8px; display: grid; gap: 4px; }
 
 /* The page's card: it scrolls on its own; its header stays. */
@@ -149,23 +178,26 @@ code, pre, kbd, samp { font-family: var(--mono); }
   scrollbar-width: thin;
   scrollbar-color: rgb(237 237 239 / 0.26) transparent;
 }
+/* The header runs the card's width (its hairline edge to edge); what is in
+   it keeps to the page's column, so header and body share their edges. */
 .page-head {
   position: sticky;
   top: 0;
   z-index: 2;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: var(--head-h);
   padding: 12px 24px;
   /* (The card's own fill over the window, solid, so what scrolls under it doesn't show.) */
   background: color-mix(in srgb, #ffffff 5.9%, var(--window));
   border-bottom: 1px solid var(--line-faint);
   border-radius: 12px 12px 0 0;
 }
-.page-head .lead { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.head-row { display: flex; align-items: center; gap: 12px; min-height: 32px; }
+.page-head .lead { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
 .page-head .tools { display: flex; align-items: center; gap: 8px; flex: none; }
 .page-body { padding: 24px 24px 32px; }
+/* The page's column: a list's or a table's grows to 1120 and stops,
+   centred in the card; reading (a README) stops at 720. */
+.column { max-width: 1120px; margin-inline: auto; }
+.column.prose { max-width: 720px; }
 
 /* The brand: the mark and "Plugins", on a row's grid, 40 high so its middle
    is the page header's (4 + 8 + 20 = 4 + 28). */
@@ -202,7 +234,8 @@ code, pre, kbd, samp { font-family: var(--mono); }
   align-items: center;
   gap: 8px;
   height: 30px;
-  padding: 0 8px 0 5px;
+  /* (6 in: the face's middle on the rows' icon column, 8 + 6 + 10 = 8 + 8 + 8.) */
+  padding: 0 8px 0 6px;
   border-radius: 8px;
   color: var(--text);
 }
@@ -213,6 +246,9 @@ a.account:hover { background: var(--hover); }
 .account.is-pending .name::before { content: ""; display: block; width: 72px; height: 12px; border-radius: 4px; background: var(--hover); }
 .colophon { display: flex; gap: 6px; padding: 0 8px; color: var(--text-3); font-size: 11px; line-height: 14px; }
 .colophon a:hover { color: var(--text); }
+/* (Each link a 24 target, as WCAG 2.2 asks, its words still 11.) */
+.colophon { align-items: center; }
+.colophon a { display: inline-flex; align-items: center; min-height: 24px; }
 
 /* ── The phone: a top bar, the list in a drawer ────────────────────────── */
 
@@ -252,10 +288,12 @@ a.account:hover { background: var(--hover); }
   }
   .topbar .brand { padding: 0 4px; }
   .topbar .spacer { flex: 1; }
-  .page-head { position: static; padding: 16px; border-radius: 0; background: transparent; flex-wrap: wrap; min-height: 0; border-bottom: 0; }
+  .page-head { position: static; padding: 16px; border-radius: 0; background: transparent; border-bottom: 0; }
+  .head-row { flex-wrap: wrap; }
   .page-head .tools { width: 100%; }
-  .page-head .tools > .segmented { flex: 1; }
-  .page-head .tools > .segmented > * { flex: 1; justify-content: center; }
+  /* (The sort across the phone, its segments sharing it; past its width it scrolls.) */
+  .page-head .tools > .segmented { flex: 1; overflow-x: auto; scrollbar-width: none; }
+  .page-head .tools > .segmented > * { flex: 1 0 auto; justify-content: center; }
   .page-body { padding: 0 16px 32px; }
   /* A phone's list is touched: rows at the large control's 40, names at 15. */
   .sidebar .nav-row { height: 40px; font-size: 15px; line-height: 20px; }
@@ -370,10 +408,11 @@ a.account:hover { background: var(--hover); }
 .badge.info { background: var(--info-wash); color: var(--info-ink); }
 .badge.accent { background: var(--accent-wash); color: var(--accent-ink); }
 
-/* An icon tile: a plugin's (or a row's) mark on a quiet wash, 8 a side round it at 32. */
-.tile { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 8px; background: var(--wash); color: var(--text); }
-.tile.s20 { width: 20px; height: 20px; border-radius: 5px; }
-.tile.s40 { width: 40px; height: 40px; border-radius: 10px; }
+/* An icon tile: a mark on the quiet wash. Its corner as the app's
+   (ds/tile.luau): 4 under 32, 6 from 32, 12 from 56. */
+.tile { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 6px; background: var(--wash); color: var(--text); }
+.tile.s20 { width: 20px; height: 20px; border-radius: 4px; }
+.tile.s40 { width: 40px; height: 40px; border-radius: 6px; }
 .tile.s56 { width: 56px; height: 56px; border-radius: 12px; }
 
 /* ── Groups: panels, lists, tables ─────────────────────────────────────── */
@@ -403,7 +442,9 @@ a.row:focus-visible { outline-offset: -2px; }
 
 /* A table: a 32 head of labels, rows 40 (52 comfortable, 32 dense), cells 12
    apart, 16 in at the ends; hairlines between rows, washed under the pointer. */
-.table { width: 100%; border-collapse: collapse; }
+/* (Borders kept apart, not collapsed: a collapsed border is shared half and
+   half by the rows it parts, which leaves a row 52.5 high.) */
+.table { width: 100%; border-collapse: separate; border-spacing: 0; }
 .table th { height: 32px; padding: 0 12px; text-align: left; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-2); white-space: nowrap; border-bottom: 1px solid var(--line-faint); }
 .table td { height: 40px; padding: 0 12px; font-size: 13px; line-height: 18px; vertical-align: middle; }
 .table tr > :first-child { padding-left: 16px; }
@@ -474,3 +515,53 @@ a.row:focus-visible { outline-offset: -2px; }
 .toast .what { flex: 1; min-width: 0; font-size: 13px; line-height: 18px; font-weight: 500; }
 /* (Its close, 24 high, centred on the first 18 line: (24 − 18) / 2 over it.) */
 .toast > .btn { margin-block: -3px; }
+
+/* ── A list of plugins ─────────────────────────────────────────────────── */
+
+/* All plugins, a category, a search: a table in a panel, a plugin a row,
+   the row one link. 52 a row: its 32 tile 10 above and under. Its columns
+   line up down the whole list: the plugin (tile, name, its line) takes what
+   is left; by 160; category 144; installs 96 at the right, tabular. */
+.plugins { table-layout: fixed; }
+.plugins col.by { width: 160px; }
+.plugins col.category { width: 144px; }
+.plugins col.installs { width: 96px; }
+.plugins tbody tr { position: relative; }
+.plugins .cell-main { gap: 12px; }
+.plugins .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plugins .line, .plugins td.by, .plugins td.category { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plugins .line { font-size: 12px; line-height: 16px; color: var(--text-3); }
+.plugins td.by, .plugins td.category { color: var(--text-2); }
+.plugins .meta { display: none; }
+/* (The row is the name's link, stretched over it.) */
+.plugins .name-link::after { content: ""; position: absolute; inset: 0; }
+.plugins .name-link:focus-visible { outline: 0; }
+.plugins .name-link:focus-visible::after { outline: 2px solid var(--ring); outline-offset: -2px; }
+.plugins .tile-wrap { display: contents; }
+/* Loading the next page: its rows' places held, the same heights. */
+.plugins .sk-tile { width: 32px; height: 32px; border-radius: 6px; flex: none; }
+.plugins .sk-name { width: 144px; height: 12px; }
+.plugins .sk-line { width: 288px; height: 10px; }
+.plugins .sk-short { width: 72px; height: 12px; }
+.plugins .sk-num { width: 48px; height: 12px; margin-left: auto; }
+.plugins .sk-words { display: grid; gap: 8px; }
+[aria-busy="true"] .rows { display: none; }
+.skeleton-rows { display: none; }
+[aria-busy="true"] .skeleton-rows { display: table-row-group; }
+
+/* The count beside the title, on its baseline. */
+.count-line { color: var(--text-3); font-size: 13px; line-height: 18px; white-space: nowrap; }
+
+@media (max-width: 899px) {
+  /* A phone's list, as the app's: a 40 tile, the name at 15, its line at 13,
+     who and how many at 12 under; 12 above and under. */
+  .plugins thead, .plugins col.by, .plugins col.category, .plugins col.installs, .plugins td.by, .plugins td.category, .plugins td.installs { display: none; }
+  .plugins tbody td { height: auto; padding: 12px 16px; }
+  .plugins .cell-main { align-items: flex-start; }
+  .plugins .plugin-tile { width: 40px; height: 40px; }
+  .plugins .name { font-size: 15px; line-height: 20px; }
+  .plugins .line { font-size: 13px; line-height: 18px; }
+  .plugins .meta { display: block; font-size: 12px; line-height: 16px; color: var(--text-3); }
+  .plugins .cell-words { gap: 2px; }
+  .plugins .sk-line { width: 200px; }
+}

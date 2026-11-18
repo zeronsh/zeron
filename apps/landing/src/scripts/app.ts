@@ -88,3 +88,32 @@ if (account) {
     .catch(() => undefined)
     .finally(() => account.classList.remove("is-pending"));
 }
+
+// ── The search field ───────────────────────────────────────────────────
+// It leads to All plugins with what was typed (its form's action); "/"
+// puts you in it (above); Escape empties it, and a second Escape leaves it.
+search?.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  event.stopPropagation();
+  if (search.value) search.value = "";
+  else search.blur();
+});
+
+// ── A list, while the next one comes ──────────────────────────────────
+// Anything that leads to another of the list's pages (Next, Previous, a
+// sort, a category, a search) holds its rows' places with skeletons of
+// their heights until the page is here, so nothing jumps.
+const list = document.querySelector<HTMLElement>("[data-list]");
+if (list) {
+  const busy = () => list.setAttribute("aria-busy", "true");
+  document.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
+    if (!link || link.target) return;
+    const to = new URL(link.href, location.href);
+    if (to.origin === location.origin && to.pathname === "/plugins/all" && to.href !== location.href) busy();
+  });
+  search?.form?.addEventListener("submit", busy);
+  // (Back to this page from the next: whole again.)
+  addEventListener("pageshow", () => list.removeAttribute("aria-busy"));
+}

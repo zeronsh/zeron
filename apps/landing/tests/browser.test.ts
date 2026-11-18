@@ -31,13 +31,14 @@ async function violations(page: Page) {
 
 const PAGES: [string, string | undefined][] = [
   ["/plugins", undefined],
-  ["/plugins?q=zzzzqqq", undefined],
-  ["/plugins?category=git", undefined],
+  ["/plugins/all", undefined],
+  ["/plugins/all?q=zzzzqqq", undefined],
+  ["/plugins/all?category=git", undefined],
   ["/plugins/focus-timer", undefined],
   ["/plugins/pr-radar", undefined],
   ["/plugins/xss-probe", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12", undefined],
-  ["/plugins?q=git", undefined],
+  ["/plugins/all?q=git", undefined],
   ["/plugins/theme-sync/report", "user_kai"],
   ["/account", "user_ada"],
   ["/account", "user_lin"],
@@ -248,22 +249,44 @@ describe("by keyboard", () => {
     }
   });
 
-  test("the catalog's sort sends its form without a button; the button is there without a script", async () => {
-    const { page, context } = await open("/plugins");
+  test("All plugins: the sort and Next are links; while the next page comes, its rows' places are held", async () => {
+    const { page, context } = await open("/plugins/all");
     try {
-      await page.getByLabel("Sort by").selectOption("new");
-      await page.waitForURL(/\/plugins\?sort=new$/);
-      expect(await page.getByRole("button", { name: "Search" }).isVisible()).toBe(false);
+      // (The click and what it does at once, read before the next page can arrive.)
+      const now = await page.evaluate(() => {
+        const rows = document.querySelectorAll(".plugins .rows tr").length;
+        const rowHeight = document.querySelector(".plugins .rows tr")!.getBoundingClientRect().height;
+        [...document.querySelectorAll<HTMLAnchorElement>(".segmented a")].find((a) => a.textContent === "Newest")!.click();
+        const skeleton = document.querySelector(".plugins .skeleton-rows")!;
+        return { rows, rowHeight, heldHeight: skeleton.querySelector("tr")!.getBoundingClientRect().height, busy: document.querySelector("[data-list]")!.getAttribute("aria-busy"), shown: getComputedStyle(skeleton).display, held: skeleton.querySelectorAll("tr").length };
+      });
+      expect(now.busy).toBe("true");
+      // The skeleton rows stand where the rows were, as many and as tall.
+      expect(now.shown).toBe("table-row-group");
+      expect(now.held).toBe(now.rows);
+      expect(now.heldHeight).toBe(now.rowHeight);
+      await page.waitForURL(/\/plugins\/all\?sort=new$/);
+      expect(await page.locator("[data-list]").getAttribute("aria-busy")).toBeNull();
     } finally {
       await context.close();
     }
-    const noScript = await browser.newContext({ javaScriptEnabled: false });
+  });
+
+  test("the search field: / puts you in it, Escape empties it, Enter leads to All plugins", async () => {
+    const { page, context } = await open("/plugins/all?category=git");
     try {
-      const page = await noScript.newPage();
-      await page.goto(new URL("/plugins", site.url).href);
-      expect(await page.getByRole("button", { name: "Search" }).isVisible()).toBe(true);
+      await page.keyboard.press("/");
+      const field = page.getByRole("searchbox", { name: "Search plugins" });
+      await expect.poll(() => field.evaluate((el) => el === document.activeElement)).toBe(true);
+      await page.keyboard.type("timer");
+      await page.keyboard.press("Escape");
+      expect(await field.inputValue()).toBe("");
+      await page.keyboard.type("timer");
+      await page.keyboard.press("Enter");
+      await page.waitForURL(/\/plugins\/all\?q=timer$/);
+      expect(await page.getByRole("heading", { level: 1 }).textContent()).toBe("Results for “timer”");
     } finally {
-      await noScript.close();
+      await context.close();
     }
   });
 });

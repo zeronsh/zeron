@@ -18,6 +18,9 @@ import type { PluginCard as Card, Sort } from "../../lib/store/types.ts";
 
 export const prerender = false;
 
+// A search, a category or a sort is All plugins' (/plugins/all); /plugins is the store's front.
+if (Astro.url.search) return Astro.redirect(`/plugins/all${Astro.url.search}`, 301);
+
 const edge = Astro.locals.edge;
 const categoriesResult = await edge.categories();
 const categories = categoriesResult.ok ? categoriesResult.data.categories : [];

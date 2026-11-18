@@ -28,8 +28,12 @@ interface Props {
   current?: string | null;
   /** Undefined on a public page (the script fills in who you are); null or a session on a private one. */
   session?: WebSession | null;
+  /** What the search field holds (a search's own page). */
+  query?: string;
+  /** The page's column: a list's (1120) or a reading one's (720). */
+  measure?: "list" | "prose";
 }
-const { title, description, noindex = false, canonical, current = null, session } = Astro.props;
+const { title, description, noindex = false, canonical, current = null, session, query = "", measure = "list" } = Astro.props;
 const isPublic = session === undefined;
 const staff = session?.roles.includes("admin") ?? false;
 const here = `${Astro.url.pathname}${Astro.url.search}`;
@@ -56,13 +60,16 @@ const row = (item: NavItem) => ({ ...item, on: item.id === current });
 
     <div class="shell">
       <nav class="sidebar" id="nav" aria-label="Plugins">
-        <div class="sidebar-scroll">
+        <!-- What stays while the rows scroll: the brand and the search. -->
+        <div class="sidebar-top">
           <a class="brand" href="/plugins"><Mark /><span>Plugins</span></a>
           <form class="field sm search" role="search" action="/plugins/all" method="get" data-tidy>
             <Glyph name="magnifer" size={14} />
-            <input type="search" name="q" placeholder={store("plugins.store.search")} aria-label={store("plugins.store.search")} autocomplete="off" data-search />
+            <input type="search" name="q" value={query || undefined} placeholder={store("plugins.store.search")} aria-label={store("plugins.store.search")} autocomplete="off" enterkeyhint="search" data-search />
             <kbd class="kbd" aria-hidden="true">/</kbd>
           </form>
+        </div>
+        <div class="sidebar-scroll">
           <div class="nav">
             <p class="nav-heading">{store("plugins.store.browse")}</p>
             {BROWSE.map(row).map((item) => (
@@ -105,12 +112,21 @@ const row = (item: NavItem) => ({ ...item, on: item.id === current });
 
       <main class="page" id="main">
         <header class="page-head">
-          <div class="lead"><slot name="title" /></div>
-          {Astro.slots.has("tools") && <div class="tools"><slot name="tools" /></div>}
+          <div class:list={["column", "head-row", measure]}>
+            <div class="lead"><slot name="title" /></div>
+            {Astro.slots.has("tools") && <div class="tools"><slot name="tools" /></div>}
+          </div>
         </header>
-        <div class="page-body"><slot /></div>
+        <div class="page-body"><div class:list={["column", measure]}><slot /></div></div>
       </main>
     </div>
+    <!-- Icons a plugin ships are drawn through this: any colour in, the text's ink out. -->
+    <svg class="ink-defs" aria-hidden="true" focusable="false">
+      <filter id="store-ink" color-interpolation-filters="sRGB">
+        <feFlood flood-color="#ededef" result="ink"></feFlood>
+        <feComposite in="ink" in2="SourceGraphic" operator="in"></feComposite>
+      </filter>
+    </svg>
     <script>
       import "../scripts/app.ts";
     </script>

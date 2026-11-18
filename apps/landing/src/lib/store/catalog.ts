@@ -1,4 +1,5 @@
-// The catalog's address: what /plugins?… asks for, read strictly (anything
+// The list's address: what /plugins/all?… asks for (every plugin, a
+// category's, a search's), read strictly (anything
 // it can't use is dropped, never passed on), and the addresses of the
 // pages around it. A page's address is the whole of its state, so a search
 // can be shared, and Previous and Next are links.
@@ -6,6 +7,8 @@
 import type { Category, Sort } from "./types.ts";
 
 export const PAGE_SIZE = 24;
+/** Where the list of every plugin is (/plugins itself is Discover). */
+export const LIST = "/plugins/all";
 const SORTS: readonly Sort[] = ["relevance", "popular", "updated", "new"];
 export const SORT_LABELS: Record<Sort, string> = {
   relevance: "Best match",
@@ -53,7 +56,7 @@ export function readCatalog(params: URLSearchParams, categories: readonly Catego
 /** Whether the state's address says anything it shouldn't (it's then sent to the clean one). */
 export function canonicalSearch(params: URLSearchParams, state: CatalogState): string | null {
   const clean = catalogHref(state);
-  const asked = `/plugins${params.size ? `?${params}` : ""}`;
+  const asked = `${LIST}${params.size ? `?${params}` : ""}`;
   return clean === asked ? null : clean;
 }
 
@@ -66,7 +69,7 @@ export function catalogHref(state: Partial<CatalogState>): string {
   const sort = state.sort ?? null;
   if (sort && sort !== effectiveSort({ q: state.q ?? "", sort: null })) params.set("sort", sort);
   if (state.cursor) params.set("cursor", state.cursor);
-  return `/plugins${params.size ? `?${params}` : ""}`;
+  return `${LIST}${params.size ? `?${params}` : ""}`;
 }
 
 /** The same search on another page (or its first: `cursor` null). */

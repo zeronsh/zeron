@@ -76,7 +76,7 @@ describe("the site's own pages", () => {
   });
 });
 
-describe("the catalog", () => {
+describe("the store's front (/plugins)", () => {
   test("public, cached for a minute at most, no inline script, a strict CSP", async () => {
     const { response, body } = await html("/plugins");
     expect(response.status).toBe(200);
@@ -91,41 +91,76 @@ describe("the catalog", () => {
     expect(body).toContain('id="featured-heading"');
   });
 
-  test("Next and Previous are real addresses that carry the cursor", async () => {
-    const first = await html("/plugins");
-    const next = /<a class="page"[^>]* href="([^"]+)" rel="next"/.exec(first.body)?.[1]?.replaceAll("&amp;", "&");
-    expect(next).toMatch(/^\/plugins\?cursor=/);
+});
+
+describe("All plugins (/plugins/all)", () => {
+  /** The plugins a list's page shows, in order. */
+  const listed = (body: string) => [...body.matchAll(/class="name name-link" href="\/plugins\/([^"]+)"/g)].map((m) => m[1]);
+
+  test("public, cached for a minute at most, a strict CSP; the columns, a row a plugin", async () => {
+    const { response, body } = await html("/plugins/all");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("public, max-age=30");
+    expect(response.headers.get("cloudflare-cdn-cache-control")).toBe("public, max-age=30, stale-while-revalidate=30");
+    expect(response.headers.get("content-security-policy")).toMatch(/script-src 'self';/);
+    expect(hasInlineScript(body)).toBe(false);
+    inert(body);
+    expect(body).toMatch(/<th scope="col">Plugin<\/th><th scope="col">By<\/th><th scope="col">Category<\/th><th scope="col" class="end">Installs<\/th>/);
+    expect(listed(body)).toHaveLength(24);
+    expect(body).toContain('aria-current="page"><span class="glyph g16"');
+  });
+
+  test("Next and Previous are real addresses that carry the cursor, and come back to the same list", async () => {
+    const first = await html("/plugins/all");
+    const next = /href="([^"]+)" rel="next"/.exec(first.body)?.[1]?.replaceAll("&amp;", "&");
+    expect(next).toMatch(/^\/plugins\/all\?cursor=/);
+    expect(first.body).toMatch(/<span class="btn secondary sm" aria-disabled="true">.*Previous<\/span>/);
     const second = await html(next!);
     expect(second.response.status).toBe(200);
-    expect(second.body).not.toContain('id="featured-heading"');
-    const previous = /<a class="page"[^>]* href="([^"]+)" rel="prev"/.exec(second.body)?.[1]?.replaceAll("&amp;", "&");
-    expect(previous).toMatch(/^\/plugins\?cursor=/);
-    const back = await html(previous!);
-    // (Back is the first page's list, without the featured row.)
-    const listed = (body: string) => [...body.matchAll(/class="follow" href="\/plugins\/([^"]+)"/g)].map((m) => m[1]).slice(-24);
-    expect(listed(back.body)).toEqual(listed(first.body));
+    expect(listed(second.body)).not.toEqual(listed(first.body));
+    const previous = /href="([^"]+)" rel="prev"/.exec(second.body)?.[1]?.replaceAll("&amp;", "&");
+    expect(previous).toMatch(/^\/plugins\/all/);
+    expect(listed((await html(previous!)).body)).toEqual(listed(first.body));
   });
 
-  test("search, category, keyword, sort", async () => {
-    expect((await html("/plugins?q=timer")).body).toContain("Focus timer");
-    const empty = await html("/plugins?q=zzzzqqq");
-    expect(empty.body).toContain("No plugins match “zzzzqqq”");
-    const git = await html("/plugins?category=git");
-    expect(git.body).toContain("PR Radar");
-    expect(git.body).not.toContain("Token meter");
-    expect(git.body).toContain('<link rel="canonical" href="https://zeron.sh/plugins?category=git">');
-    expect((await html("/plugins?keyword=github")).body).toContain("PR Radar");
+  test("the sort is a row of real addresses, the chosen one marked; a search adds Best match", async () => {
+    const { body } = await html("/plugins/all");
+    expect(body).toMatch(/<a href="\/plugins\/all" aria-current="page">Most installed<\/a><a href="\/plugins\/all\?sort=updated">Recently updated<\/a><a href="\/plugins\/all\?sort=new">Newest<\/a>/);
+    const search = await html("/plugins/all?q=timer");
+    expect(search.body).toMatch(/aria-current="page">Best match<\/a>/);
   });
 
-  test("an address that says more than it means is sent to the plain one", async () => {
-    const response = await site.fetch("/plugins?sort=popular&utm_source=x");
-    expect(response.status).toBe(301);
-    expect(response.headers.get("location")).toBe("/plugins");
+  test("search, category, keyword; the count when the list says it exactly", async () => {
+    const timer = await html("/plugins/all?q=timer");
+    expect(listed(timer.body)).toContain("focus-timer");
+    expect(timer.body).toContain("Results for “timer”");
+    expect(timer.body).toMatch(/class="count-line">\d+ plugins?</);
+    // (The field keeps the words.)
+    expect(timer.body).toContain('name="q" value="timer"');
+    const empty = await html("/plugins/all?q=zzzzqqq");
+    expect(empty.body).toContain("Nothing matches “zzzzqqq”");
+    expect(empty.body).toContain('href="/plugins/all">Clear search</a>');
+    expect(empty.body).not.toContain("count-line");
+    const git = await html("/plugins/all?category=git");
+    expect(listed(git.body)).toContain("pr-radar");
+    expect(listed(git.body)).not.toContain("token-meter");
+    expect(git.body).toContain('<link rel="canonical" href="https://zeron.sh/plugins/all?category=git">');
+    expect(git.body).toMatch(/<a class="nav-row" href="\/plugins\/all\?category=git" aria-current="page">/);
+    expect(listed((await html("/plugins/all?keyword=github")).body)).toContain("pr-radar");
   });
 
-  test("search results stay out of search engines; the store doesn't", async () => {
-    expect((await html("/plugins?q=timer")).body).toContain('<meta name="robots" content="noindex, nofollow">');
-    expect((await html("/plugins")).body).not.toContain('name="robots"');
+  test("an address that says more than it means is sent to the plain one; /plugins?… is All plugins'", async () => {
+    for (const [asked, plain] of [["/plugins/all?sort=popular&utm_source=x", "/plugins/all"], ["/plugins?q=timer", "/plugins/all?q=timer"], ["/plugins?category=git", "/plugins/all?category=git"]]) {
+      const response = await site.fetch(asked!);
+      expect(response.status, asked).toBe(301);
+      expect(response.headers.get("location"), asked).toBe(plain);
+    }
+  });
+
+  test("search results stay out of search engines; the list and its categories don't", async () => {
+    expect((await html("/plugins/all?q=timer")).body).toContain('<meta name="robots" content="noindex, nofollow">');
+    expect((await html("/plugins/all")).body).not.toContain('name="robots"');
+    expect((await html("/plugins/all?category=git")).body).not.toContain('name="robots"');
   });
 });
 
