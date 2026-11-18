@@ -1,6 +1,6 @@
 # Zeron
 
-コーディングエージェント（Claude Code、Codex、Cursor、Devin、Grok、Hermes、Pi、Antigravity）をデフォルトではローカルで管理し、必要に応じて複数デバイス間で同期することもできます。
+コーディングエージェント（Claude Code、Codex、Cursor、Devin、Grok、Hermes、Pi、Oh My Pi、Antigravity）をデフォルトではローカルで管理し、必要に応じて複数デバイス間で同期することもできます。
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | 日本語 | [Español](README.es.md)*
 

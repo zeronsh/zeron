@@ -1,24 +1,57 @@
 use super::{normalize::string, rpc::Client};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex, PoisonError};
-use tokio::{sync::oneshot, task::JoinSet};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, PoisonError},
+};
+use tokio::{
+    sync::oneshot,
+    task::{AbortHandle, JoinSet},
+};
 use zeron_proto::{UserInputAnswer, UserInputQuestion};
-pub(super) type Input =
+pub(crate) type Input =
     dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync;
-#[derive(Default)]
-pub(super) struct Dialogs {
+pub(crate) struct Dialogs {
+    label: &'static str,
     pub input: Option<Arc<Input>>,
     tasks: JoinSet<()>,
     /// Dialog ids Pi still waits on; whoever removes an id answers it, once.
     open: Arc<Mutex<Vec<Value>>>,
+    /// Each open dialog's task by id, so OMP's `cancel` can close just that one.
+    aborts: HashMap<String, AbortHandle>,
+}
+impl Default for Dialogs {
+    fn default() -> Self {
+        Self::new("Pi")
+    }
 }
 impl Dialogs {
+    pub fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            input: None,
+            tasks: JoinSet::new(),
+            open: Arc::default(),
+            aborts: HashMap::new(),
+        }
+    }
     pub fn request(&mut self, client: Client, frame: &Value) {
         let method = string(frame, "method").to_owned();
+        if method == "cancel" {
+            // OMP already resolved the dialog (timeout or abort); close it unanswered.
+            let target = string(frame, "targetId");
+            self.lock()
+                .retain(|pending| pending.as_str() != Some(target));
+            if let Some(task) = self.aborts.remove(target) {
+                task.abort();
+            }
+            return;
+        }
         if !matches!(method.as_str(), "select" | "confirm" | "input" | "editor") {
             return;
         }
         while self.tasks.try_join_next().is_some() {}
+        self.aborts.retain(|_, task| !task.is_finished());
         let id = frame["id"].clone();
         let Some(input) = &self.input else {
             let _ = client.send(json!({"type":"extension_ui_response","id":id,"cancelled":true}));
@@ -38,7 +71,7 @@ impl Dialogs {
         let message = string(frame, "message");
         let question = UserInputQuestion {
             id: uuid::Uuid::new_v4().to_string(),
-            header: "Pi".into(),
+            header: self.label.into(),
             question: if message.is_empty() {
                 title.into()
             } else {
@@ -65,7 +98,8 @@ impl Dialogs {
         let answer = (input)(vec![question]);
         self.lock().push(id.clone());
         let open = Arc::clone(&self.open);
-        self.tasks.spawn(async move {
+        let key = string(frame, "id").to_owned();
+        let task = self.tasks.spawn(async move {
             let deadline = async {
                 match timeout {
                     Some(timeout) => tokio::time::sleep(timeout).await,
@@ -95,11 +129,13 @@ impl Dialogs {
                 let _ = client.send(response);
             }
         });
+        self.aborts.insert(key, task);
     }
     /// Close every open dialog. The process may live on (a turn ended, an
     /// interrupt), and an extension awaiting its dialog would wait forever,
     /// so each is answered `cancelled` first.
     pub fn cancel(&mut self, client: &Client) {
+        self.aborts.clear();
         self.tasks.abort_all();
         for id in std::mem::take(&mut *self.lock()) {
             let _ = client.send(json!({"type":"extension_ui_response","id":id,"cancelled":true}));
@@ -119,7 +155,7 @@ mod tests {
     async fn timeout_cancels_instead_of_selecting_and_drops_the_input_receiver() {
         let (writer, peer) = tokio::io::duplex(4096);
         let (_peer_writer, reader) = tokio::io::duplex(4096);
-        let transport = super::super::rpc::Transport::new(writer, reader);
+        let transport = super::super::rpc::Transport::new("Pi", writer, reader);
         let (bridge, mut requests) = tokio::sync::mpsc::unbounded_channel();
         let mut dialogs = Dialogs::default();
         dialogs.input = Some(Arc::new(move |_| {
@@ -171,7 +207,7 @@ mod tests {
     async fn zero_timeout_waits_and_negative_timeout_is_already_over() {
         let (writer, peer) = tokio::io::duplex(4096);
         let (_peer_writer, reader) = tokio::io::duplex(4096);
-        let transport = super::super::rpc::Transport::new(writer, reader);
+        let transport = super::super::rpc::Transport::new("Pi", writer, reader);
         let (bridge, mut requests) = tokio::sync::mpsc::unbounded_channel();
         let mut dialogs = Dialogs {
             input: Some(Arc::new(move |_| {
@@ -226,7 +262,7 @@ mod tests {
     async fn a_timeout_too_large_for_a_duration_waits_like_none() {
         let (writer, peer) = tokio::io::duplex(4096);
         let (_peer_writer, reader) = tokio::io::duplex(4096);
-        let transport = super::super::rpc::Transport::new(writer, reader);
+        let transport = super::super::rpc::Transport::new("Pi", writer, reader);
         let (bridge, mut requests) = tokio::sync::mpsc::unbounded_channel();
         let mut dialogs = Dialogs {
             input: Some(Arc::new(move |_| {
@@ -260,5 +296,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(serde_json::from_str::<Value>(&reply).unwrap()["id"], "huge");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_request_closes_only_its_target_dialog() {
+        let (writer, _peer) = tokio::io::duplex(4096);
+        let (_peer_writer, reader) = tokio::io::duplex(4096);
+        let transport = super::super::rpc::Transport::new("Oh My Pi", writer, reader);
+        let (bridge, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let mut dialogs = Dialogs::new("Oh My Pi");
+        dialogs.input = Some(Arc::new(move |questions: Vec<UserInputQuestion>| {
+            assert_eq!(questions[0].header, "Oh My Pi");
+            let (tx, rx) = oneshot::channel();
+            bridge.send(tx).unwrap();
+            rx
+        }));
+        for id in ["kept", "closed"] {
+            dialogs.request(
+                transport.client.clone(),
+                &json!({"id":id, "method":"input"}),
+            );
+        }
+        let kept = requests.recv().await.unwrap();
+        let mut closed = requests.recv().await.unwrap();
+        dialogs.request(
+            transport.client.clone(),
+            &json!({"method":"cancel", "targetId":"closed"}),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), closed.closed())
+            .await
+            .unwrap();
+        assert!(!kept.is_closed());
     }
 }

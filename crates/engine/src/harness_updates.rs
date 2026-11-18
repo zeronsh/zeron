@@ -508,6 +508,12 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: Some(&["update", "--self"]),
             manual_command: "pi update --self",
         },
+        HarnessId::Omp => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Npm("@oh-my-pi/pi-coding-agent"),
+            update_args: Some(&["update"]),
+            manual_command: "omp update",
+        },
         HarnessId::Opencode => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Opencode,
@@ -4621,6 +4627,18 @@ esac
         assert_eq!(installed_version(HarnessId::Muse, "Muse Code 1.4.14").as_deref(), Some("1.4.14"));
         // Only Muse goes by this: another tool's first version stands.
         assert_eq!(installed_version(HarnessId::Codex, "codex 0.155.1 (x 1.0.0-R2)").as_deref(), Some("0.155.1"));
+    }
+
+    #[test]
+    fn omp_checks_its_own_package_and_updates_itself() {
+        // Owner-aware like Pi: a project's copy is the project's to update,
+        // not `omp update`'s.
+        let project = std::path::Path::new("/work/app/node_modules/.bin/omp");
+        assert!(!super::can_apply_update(HarnessId::Omp, project));
+        assert_eq!(
+            super::manual_update_command(HarnessId::Omp, project, false).as_deref(),
+            Some(super::ownership::Manual::Project.instruction())
+        );
     }
 
     #[test]
