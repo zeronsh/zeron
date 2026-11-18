@@ -9,14 +9,18 @@ import { isVersionAction, REJECT_REASONS, VERSION_FLASH, versionRequest } from "
 import { done, field, flashFor, formOf, tokenMatches } from "../../../../../lib/store/forms.ts";
 import { privatePage } from "../../../../../lib/store/http.ts";
 import { isPluginId, isVersion } from "../../../../../lib/store/names.ts";
-import { adminSession } from "../../../../../lib/store/session.ts";
+import { adminOrResume, resumed, wasCut } from "../../../../../lib/store/resume.ts";
 
 export const prerender = false;
 
 const { id, version, action } = Astro.params;
 if (!isPluginId(id) || !isVersion(version) || !isVersionAction(action)) return new Response(null, { status: 404 });
-const session = await adminSession(Astro);
-if (!session) return new Response(null, { status: 404 });
+/** What each action's form has a person type: kept across a sign-in. */
+const TYPED = { approve: [], reject: ["reason", "message"], remove: ["reason", "block"] } as const;
+// (A session that ended while the form was open: sign in again and come
+// back to this question with the answer as typed. Anyone else: the 404.)
+const session = await adminOrResume(Astro, { path: Astro.url.pathname, fields: TYPED[action] });
+if (session instanceof Response) return session;
 const submission = `/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(version)}`;
 const back = action === "remove" ? `/admin/plugins/${encodeURIComponent(id)}` : submission;
 
@@ -42,21 +46,24 @@ const ask = ASK[action];
 <Store title={`${ask.title} · Zeron`} description={ask.title} noindex tool>
   <div class="wrap">
     <ConfirmPage title={ask.title} action={Astro.url.pathname} csrf={session.csrf} confirm={ask.confirm} tone={ask.tone} back={back}>
-      <p slot="words">{ask.words}</p>
+      <Fragment slot="words">
+        <p>{ask.words}</p>
+        {wasCut(Astro.url) && <p class="cut">You signed in again. What you wrote was longer than could be kept through that, so its end is missing: check it before you send it.</p>}
+      </Fragment>
       {
         action === "reject" && (
           <>
-            <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} field />
-            <Field name="message" label="For the author" multiline required maxlength={2000} hint="Say what to change, plainly. They'll read it as you write it." />
+            <Select name="reason" label="Reason" options={REJECT_REASONS.map((r) => ({ value: r.value, label: r.label }))} value={resumed(Astro.url, "reason")} field />
+            <Field name="message" label="For the author" multiline required maxlength={2000} value={resumed(Astro.url, "message")} hint="Say what to change, plainly. They'll read it as you write it." />
           </>
         )
       }
       {
         action === "remove" && (
           <>
-            <Field name="reason" label="Why" multiline required maxlength={2000} hint="Its author reads this, and so does anyone whose device turns it off." />
+            <Field name="reason" label="Why" multiline required maxlength={2000} value={resumed(Astro.url, "reason")} hint="Its author reads this, and so does anyone whose device turns it off." />
             <label class="check">
-              <input type="checkbox" name="block" />
+              <input type="checkbox" name="block" checked={resumed(Astro.url, "block") === "on"} />
               <span>Also turn it off on the devices that have it. People can turn it back on; it's theirs.</span>
             </label>
           </>
@@ -67,6 +74,7 @@ const ask = ASK[action];
 </Store>
 
 <style>
+  .cut { color: var(--tone-warning); }
   .check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 1.5; color: var(--text-2); cursor: pointer; }
   .check input { margin-top: 3px; accent-color: var(--destructive-bg); }
 </style>

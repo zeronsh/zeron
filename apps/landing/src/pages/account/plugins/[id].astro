@@ -146,6 +146,7 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
                 </p>
                 <pre tabindex="0"><code>zeron plugin key create {plugin.id}</code></pre>
                 <p>The secret is shown once there. Put it in your CI's secrets; it never comes here.</p>
+                <p>A key can only be made for a plugin you already publish, so its first version comes from your computer; your CI takes over after that.</p>
               </div>
             </div>
             {keys === null ? (

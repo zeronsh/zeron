@@ -8,14 +8,16 @@ import { isPluginAction, PLUGIN_FLASH, pluginRequest } from "../../../../../lib/
 import { done, field, flashFor, formOf, tokenMatches } from "../../../../../lib/store/forms.ts";
 import { privatePage } from "../../../../../lib/store/http.ts";
 import { isPluginId } from "../../../../../lib/store/names.ts";
-import { adminSession } from "../../../../../lib/store/session.ts";
+import { adminOrResume, resumed, wasCut } from "../../../../../lib/store/resume.ts";
 
 export const prerender = false;
 
 const { id, action } = Astro.params;
 if (!isPluginId(id) || !isPluginAction(action)) return new Response(null, { status: 404 });
-const session = await adminSession(Astro);
-if (!session) return new Response(null, { status: 404 });
+/** What each action's form has a person type: kept across a sign-in. */
+const TYPED = { suspend: ["reason"], restore: [], feature: [], unfeature: [], transfer: ["to_username"] } as const;
+const session = await adminOrResume(Astro, { path: Astro.url.pathname, fields: TYPED[action] });
+if (session instanceof Response) return session;
 const back = `/admin/plugins/${encodeURIComponent(id)}`;
 
 if (Astro.request.method === "POST") {
@@ -42,9 +44,16 @@ const ask = ASK[action];
 <Store title={`${ask.title} · Zeron`} description={ask.title} noindex tool>
   <div class="wrap">
     <ConfirmPage title={ask.title} action={Astro.url.pathname} csrf={session.csrf} confirm={ask.confirm} tone={ask.tone} back={back}>
-      <p slot="words">{ask.words}</p>
-      {action === "suspend" && <Field name="reason" label="Why" multiline required maxlength={2000} hint="Its author reads this." />}
-      {action === "transfer" && <Field name="to_username" label="New owner's username" required maxlength={21} placeholder="@username" />}
+      <Fragment slot="words">
+        <p>{ask.words}</p>
+        {wasCut(Astro.url) && <p class="cut">You signed in again. What you wrote was longer than could be kept through that, so its end is missing: check it before you send it.</p>}
+      </Fragment>
+      {action === "suspend" && <Field name="reason" label="Why" multiline required maxlength={2000} value={resumed(Astro.url, "reason")} hint="Its author reads this." />}
+      {action === "transfer" && <Field name="to_username" label="New owner's username" required maxlength={21} value={resumed(Astro.url, "to_username", 21)} placeholder="@username" />}
     </ConfirmPage>
   </div>
 </Store>
+
+<style>
+  .cut { color: var(--tone-warning); }
+</style>

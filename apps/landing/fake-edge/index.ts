@@ -6,7 +6,7 @@
 
 import { audit, CATEGORIES, DAY, keys, NOW, plugins, reports, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
 
-const COOKIE = "__Host-zeron_web";
+const COOKIE = "__Host-zeron_session";
 
 const state = {
   plugins: plugins(),
@@ -494,7 +494,16 @@ async function route(request: Request): Promise<Response> {
     if (parts[2] === "session" && method === "GET") {
       const s = session(request);
       if (!s) return fail(401, "signed_out");
-      return json({ user: { name: s.user.name, email: `${s.user.id.slice(5)}@example.com` }, username: s.user.username, roles: s.user.roles, csrf: s.csrf, expires_at: NOW + DAY, fresh_sign_in: false });
+      // A staff session rotates as it's used, as the edge's do
+      // (edge/src/web-session.ts): a new token, the old one still good for a
+      // moment (here, for the fake's life). Nobody else's ever rotates.
+      let cookie: string | null = null;
+      if (s.user.roles.length > 0) {
+        const rotated = crypto.randomUUID();
+        state.sessions.set(rotated, { user: s.user.id, csrf: s.csrf });
+        cookie = `${COOKIE}=${rotated}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=1800`;
+      }
+      return json({ user: { name: s.user.name, email: `${s.user.id.slice(5)}@example.com` }, username: s.user.username, roles: s.user.roles, csrf: s.csrf, expires_at: NOW + DAY, fresh_sign_in: false }, 200, cookie ? { "set-cookie": cookie } : {});
     }
     return notFound();
   }

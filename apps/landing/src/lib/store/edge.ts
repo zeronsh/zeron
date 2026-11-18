@@ -47,6 +47,11 @@ export interface CatalogQuery {
 
 /** One visitor's view of the edge: built per request from what they sent. */
 export class Edge {
+  /**
+   * Cookies the edge set while answering (a session rotates as it is
+   * used): the middleware passes each back to the browser with the page.
+   */
+  readonly setCookies: string[] = [];
   readonly #binding: EdgeBinding;
   readonly #origin: string;
   readonly #cookie: string | null;
@@ -97,7 +102,7 @@ export class Edge {
    */
   file(id: string, version: string, path: string, signedIn: boolean): Promise<Response> {
     const url = `/store/v1/plugins/${segment(id)}/files/${segment(version)}/${path.split("/").map(segment).join("/")}`;
-    return this.#binding.fetch(this.#request(url, { method: "GET", signedIn }));
+    return this.#send(this.#request(url, { method: "GET", signedIn }));
   }
 
   // ── Signed in ─────────────────────────────────────────────────────────
@@ -182,10 +187,18 @@ export class Edge {
     return new Request(new URL(path, this.#origin), { method: options.method, headers, body, redirect: "manual" });
   }
 
+  /** A request to the edge; any cookie it sets is kept for the browser. */
+  async #send(request: Request): Promise<Response> {
+    const response = await this.#binding.fetch(request);
+    // (Only a signed-in call carries a cookie, so only one can rotate it.)
+    if (request.headers.has("cookie")) this.setCookies.push(...response.headers.getSetCookie());
+    return response;
+  }
+
   async #json<T>(path: string, options: { method?: string; signedIn?: boolean; csrf?: string; body?: unknown } = {}): Promise<Result<T>> {
     let response: Response;
     try {
-      response = await this.#binding.fetch(this.#request(path, { method: "GET", ...options }));
+      response = await this.#send(this.#request(path, { method: "GET", ...options }));
     } catch {
       return { ok: false, status: 502, error: "unknown" };
     }

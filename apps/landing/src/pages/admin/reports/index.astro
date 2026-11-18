@@ -11,6 +11,7 @@ import Store from "../../../layouts/Store.astro";
 import { takeFlash } from "../../../lib/store/flash.ts";
 import { ago, date } from "../../../lib/store/format.ts";
 import { privatePage } from "../../../lib/store/http.ts";
+import { resumed } from "../../../lib/store/resume.ts";
 import { adminSession } from "../../../lib/store/session.ts";
 import { reasonWords } from "../../../lib/store/states.ts";
 
@@ -25,6 +26,9 @@ const cursor = Astro.url.searchParams.get("cursor");
 const result = await Astro.locals.edge.reports(open ? "open" : "all", cursor && /^[A-Za-z0-9_-]{1,512}$/.test(cursor) ? cursor : undefined);
 const reports = result.ok ? result.data.reports.filter((r) => (open ? r.status === "open" : r.status !== "open")) : [];
 const base = open ? "/admin/reports" : "/admin/reports?status=closed";
+// A note typed before signing in again comes back to its report.
+const resumedReport = resumed(Astro.url, "report", 64);
+const resumedNote = resumed(Astro.url, "note", 500);
 ---
 
 <Store title="Reports · Zeron" description="Reports about plugins." noindex tool toast={toast}>
@@ -63,7 +67,7 @@ const base = open ? "/admin/reports" : "/admin/reports?status=closed";
                 <form class="resolve" method="post" action={`/admin/reports/${encodeURIComponent(r.id)}`}>
                   <input type="hidden" name="csrf" value={session.csrf} />
                   <label class="sr-only" for={`note-${r.id}`}>Note on what was done</label>
-                  <input class="note-field" id={`note-${r.id}`} name="note" maxlength="500" placeholder="What was done (optional)" />
+                  <input class="note-field" id={`note-${r.id}`} name="note" maxlength="500" placeholder="What was done (optional)" value={r.id === resumedReport ? resumedNote : undefined} />
                   <Action tone="secondary" size="md" name="resolution" value="dismissed">Dismiss</Action>
                   <Action tone="primary" size="md" name="resolution" value="actioned">Acted on it</Action>
                 </form>

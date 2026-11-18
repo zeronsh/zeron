@@ -11,6 +11,7 @@ import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/
 import { takeFlash } from "../../../lib/store/flash.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId } from "../../../lib/store/names.ts";
+import { hadSession, resumed, signInAndResume } from "../../../lib/store/resume.ts";
 import { requireSession } from "../../../lib/store/session.ts";
 import { REPORT_REASONS } from "../../../lib/store/types.ts";
 import { pluginUrl } from "../../../lib/store/urls.ts";
@@ -19,9 +20,13 @@ export const prerender = false;
 
 const { id } = Astro.params;
 if (!isPluginId(id)) return new Response(null, { status: 404 });
-const session = await requireSession(Astro);
-if (session instanceof Response) return session;
 const here = `${pluginUrl(id)}/report`;
+const session = await requireSession(Astro);
+if (session instanceof Response) {
+  // Signed out while writing: sign in, and come back to the report as it was.
+  if (Astro.request.method === "POST" && hadSession(Astro.request)) return signInAndResume(Astro, here, await formOf(Astro.request), ["reason", "text"]);
+  return session;
+}
 
 if (Astro.request.method === "POST") {
   const form = await formOf(Astro.request);
@@ -75,7 +80,7 @@ const REASONS: Record<(typeof REPORT_REASONS)[number], { label: string; about: s
               <legend>What's wrong?</legend>
               {REPORT_REASONS.map((r, i) => (
                 <label class="choice">
-                  <input type="radio" name="reason" value={r} required checked={i === 0} />
+                  <input type="radio" name="reason" value={r} required checked={resumed(Astro.url, "reason") ? resumed(Astro.url, "reason") === r : i === 0} />
                   <span>
                     <b>{REASONS[r].label}</b>
                     <span class="about">{REASONS[r].about}</span>
@@ -83,7 +88,7 @@ const REASONS: Record<(typeof REPORT_REASONS)[number], { label: string; about: s
                 </label>
               ))}
             </fieldset>
-            <Field name="text" label="What happened" multiline maxlength={2000} hint="What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it." />
+            <Field name="text" label="What happened" multiline maxlength={2000} value={resumed(Astro.url, "text")} hint="What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it." />
             <div class="answers">
               <a class="cancel" href={pluginUrl(id)}>Cancel</a>
               <Action tone="danger">Send report</Action>

@@ -21,6 +21,9 @@ const html = async (path: string, cookie?: string) => {
 const post = (path: string, cookie: string, fields: Record<string, string>, origin = "https://zeron.sh") =>
   site.fetch(path, { method: "POST", headers: { cookie, origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields).toString() });
 
+/** The one-shot message a response set, as a cookie to send back. */
+const flashOf = (response: Response) => response.headers.getSetCookie().find((c) => c.startsWith("__Host-zeron_flash="))?.split(";")[0] ?? "";
+
 /** The session's CSRF token, as a page carries it in its forms. */
 const tokenOf = (body: string) => /name="csrf" value="([^"]+)"/.exec(body)?.[1] ?? "";
 
@@ -208,7 +211,7 @@ describe("package files", () => {
       const response = await site.fetch(path, { headers: { cookie: await site.signIn(user) } });
       expect(response.status, user).toBe(200);
       expect(response.headers.get("cache-control"), user).toBe("private, no-store");
-      expect(response.headers.get("cloudflare-cdn-cache-control"), user).not.toMatch(/public/);
+      expect(response.headers.get("cloudflare-cdn-cache-control") ?? "", user).not.toMatch(/public/);
     }
   });
 });
@@ -240,9 +243,17 @@ describe("signed-in pages", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
-    expect(response.headers.get("cloudflare-cdn-cache-control")).not.toMatch(/public/);
+    expect(response.headers.get("cloudflare-cdn-cache-control") ?? "").not.toMatch(/public/);
     expect(body).toContain("Session badges");
     expect(hasInlineScript(body)).toBe(false);
+  });
+
+  test("a session the edge rotates goes back to the browser, and that page is kept by no one", async () => {
+    // (The edge rotates a staff session as it's used.)
+    const { response } = await html("/admin/plugins", await site.signIn("user_grace"));
+    expect(response.headers.getSetCookie().join("\n")).toMatch(/__Host-zeron_session=[\w-]+; Path=\/; HttpOnly; Secure; SameSite=Lax/);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("cloudflare-cdn-cache-control") ?? "").not.toMatch(/public/);
   });
 
   test("someone else's plugin is the 404 page", async () => {
@@ -301,7 +312,7 @@ describe("forms", () => {
     const ada = await site.signIn("user_ada");
     const response = await post("/account/plugins/session-badges/versions/1.2.1/withdraw", ada, { csrf: "not-the-token" });
     expect(response.status).toBe(303);
-    const after = await html("/account/plugins/session-badges", `${ada}; ${response.headers.get("set-cookie")!.split(";")[0]}`);
+    const after = await html("/account/plugins/session-badges", `${ada}; ${flashOf(response)}`);
     expect(after.body).toContain("The page was open too long. Try again.");
     expect(after.body).toMatch(/1\.2\.1<\/th>\s*<td[^>]*>[^]*?In review/);
   });
@@ -314,14 +325,13 @@ describe("forms", () => {
     const response = await post("/account/plugins/session-badges/versions/1.2.1/withdraw", ada, { csrf: tokenOf(ask.body) });
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe("/account/plugins/session-badges");
-    const flash = response.headers.get("set-cookie")!;
-    expect(flash).toMatch(/^__Host-zeron_flash=withdrawn; .*Secure/);
-    const cookie = `${ada}; ${flash.split(";")[0]}`;
+    expect(response.headers.getSetCookie().find((c) => c.startsWith("__Host-zeron_flash="))).toMatch(/^__Host-zeron_flash=withdrawn; .*Secure/);
+    const cookie = `${ada}; ${flashOf(response)}`;
     const after = await html("/account/plugins/session-badges", cookie);
     expect(after.body).toContain("Withdrawn from review.");
     expect(after.body).toMatch(/1\.2\.1<\/th>\s*<td[^>]*>[^]*?Withdrawn/);
     // (Said once: the page that shows it clears it.)
-    expect(after.response.headers.get("set-cookie")).toMatch(/__Host-zeron_flash=[^;]*;.*(Max-Age=0|Expires=Thu, 01 Jan 1970)/);
+    expect(after.response.headers.getSetCookie().join("\n")).toMatch(/__Host-zeron_flash=[^;]*;.*(Max-Age=0|Expires=Thu, 01 Jan 1970)/);
   });
 
   test("an admin approves a first submission and it's listed", async () => {
@@ -334,6 +344,30 @@ describe("forms", () => {
     expect(response.headers.get("set-cookie")).toMatch(/zeron_flash=approved/);
     expect((await html("/plugins/voice-memos")).response.status).toBe(200);
     expect((await html("/admin/audit", grace)).body).toMatch(/Approved\s*<a href="\/admin\/plugins\/voice-memos\/0\.1\.0"/);
+  });
+
+  test("an admin whose session ended keeps what they typed through signing in again", async () => {
+    const expired = "__Host-zeron_session=ended-long-ago";
+    const fields = { csrf: "stale", reason: "listing", message: "Say what <it> does, & why." };
+    const response = await post("/admin/plugins/focus-timer/1.3.0-beta.1/reject", expired, fields);
+    expect(response.status).toBe(303);
+    const location = new URL(response.headers.get("location")!, "https://zeron.sh");
+    expect(location.pathname).toBe("/auth/web/login");
+    const back = location.searchParams.get("return_to")!;
+    expect(back).toBe("/admin/plugins/focus-timer/1.3.0-beta.1/reject?reason=listing&message=Say+what+%3Cit%3E+does%2C+%26+why.");
+    // Signed in again, the question comes back with the answer as typed (and nothing was done meanwhile).
+    const page = await html(back, await site.signIn("user_grace"));
+    expect(page.body).toContain(">Say what &lt;it&gt; does, &amp; why.</textarea>");
+    expect(page.body).toMatch(/<option value="listing" selected/);
+    expect((await html("/admin/plugins/focus-timer/1.3.0-beta.1", await site.signIn("user_grace"))).body).toContain("In review");
+  });
+
+  test("a non-admin's post, signed in or not, is the 404 page and nothing more", async () => {
+    for (const cookie of [await site.signIn("user_ada"), "theme=dark"]) {
+      const response = await post("/admin/plugins/focus-timer/1.3.0-beta.1/reject", cookie, { csrf: "x", reason: "listing", message: "m" });
+      expect(response.status).toBe(404);
+      expect(response.headers.get("location")).toBeNull();
+    }
   });
 
   test("rejecting needs a reason and words for the author", async () => {
@@ -355,8 +389,7 @@ describe("forms", () => {
     const csrf = tokenOf(page.body);
     expect((await post("/plugins/theme-sync/report", kai, { csrf, reason: "bogus", text: "x" })).headers.get("set-cookie")).toMatch(/bad_input/);
     const sent = await post("/plugins/theme-sync/report", kai, { csrf, reason: "broken", text: "It <script>breaks</script> the sidebar." });
-    const flash = sent.headers.get("set-cookie")!.split(";")[0];
-    expect((await html("/plugins/theme-sync/report", `${kai}; ${flash}`)).body).toContain("Thanks for telling us");
+    expect((await html("/plugins/theme-sync/report", `${kai}; ${flashOf(sent)}`)).body).toContain("Thanks for telling us");
     const reports = await html("/admin/reports", await site.signIn("user_grace"));
     expect(reports.body).toContain("It &lt;script&gt;breaks&lt;/script&gt; the sidebar.");
   });
