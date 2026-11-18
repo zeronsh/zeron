@@ -3379,7 +3379,19 @@ impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // An agent's chats: capped at its own access, runs as the chat is
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
-        let params = self.agent_gate(method, params)?;
+        let mut params = self.agent_gate(method, params)?;
+        // Another device changing this one's plugins: only for the person
+        // there (its engine says so, `zeron_rpc::BY_PERSON`), never for an
+        // agent on it.
+        if zeron_rpc::person_only_from_peer(method)
+            && matches!(zeron_rpc::caller(), zeron_rpc::Caller::Peer { .. })
+            && params.get(zeron_rpc::BY_PERSON) != Some(&serde_json::Value::Bool(true))
+        {
+            return Err(RpcError::Failed(crate::plugins::install::failure(
+                crate::plugins::install::reason::NEEDS_PERSON,
+                "Changing plugins on another device is the person's, from Zeron's window (Settings → Plugins)",
+            )));
+        }
         // Machine stats: answered here, or asked of another of the
         // account's devices with its own deadline and error words.
         if method == methods::DEVICE_STATS {
@@ -3392,6 +3404,11 @@ impl RpcService for EngineRpc {
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
+            // Whether the person asked (this device's own app), said for the
+            // device there, over anything the caller put in it.
+            if zeron_rpc::person_only_from_peer(method) {
+                params[zeron_rpc::BY_PERSON] = serde_json::Value::Bool(zeron_rpc::caller().is_local());
+            }
             // A file on this device can't be read there: another device
             // installs from a link.
             if method == methods::INSTALL_PLUGIN && params.get("path").is_some_and(|p| !p.is_null()) {

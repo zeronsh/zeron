@@ -110,6 +110,9 @@ pub struct State {
     /// Events at or below this `seq` are forgotten (older than the feed
     /// keeps): asking after one answers a reset.
     pub feed_floor: u64,
+    /// The `head` the feed answers instead of its last event's (a broken
+    /// or hostile store: events past it).
+    pub feed_head: Option<u64>,
     /// The last time the store's clock gave (`State::tick`).
     pub clock: i64,
     /// Version records answered without `verified` (a broken or hostile
@@ -530,7 +533,7 @@ impl FakeStore {
             }
             ("GET", ["store", "v1", "takedowns"]) => {
                 let state = self.state.lock().unwrap();
-                let head = state.events.last().map_or(0, |e| e.0);
+                let head = state.feed_head.unwrap_or_else(|| state.events.last().map_or(0, |e| e.0));
                 let after: Option<u64> = query.get("after").and_then(|a| a.parse().ok());
                 match after {
                     Some(after) if after >= state.feed_floor => {

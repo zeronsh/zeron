@@ -480,6 +480,19 @@ async fn one_device_installs_and_allows_a_plugin_on_another() {
     // An agent can't send one there.
     let refused = as_agent(&a, methods::STAGE_PLUGIN_PACKAGE, json!({ "targetDeviceId": "device-b", "data": "aGk=" })).await;
     assert!(refused.is_err(), "{refused:?}");
+    // Nor change B's plugins any other way: B takes a change only when A's
+    // own app asked, which A's engine says (`zeron_rpc::BY_PERSON`), and an
+    // agent can't say it for itself.
+    for params in [
+        json!({ "targetDeviceId": "device-b", "store": "hello-devices" }),
+        json!({ "targetDeviceId": "device-b", "url": "https://example.com/hello.zeron-plugin" }),
+        json!({ "targetDeviceId": "device-b", "reinstall": "hello-devices" }),
+        json!({ "targetDeviceId": "device-b", "url": "https://example.com/hello.zeron-plugin", "byPerson": true }),
+    ] {
+        let refused = as_agent(&a, methods::INSTALL_PLUGIN, params.clone()).await;
+        assert!(refused.as_ref().is_err_and(|e| e.contains("needs_person")), "{params}: {refused:?}");
+    }
+    assert_eq!(listed(&b, None, "hello-devices").await.unwrap()["status"], "pending", "nothing changed on B");
 
     // A's consent window shows it as B lists it: what B read of it.
     let item = listed(&a, Some("device-b"), "hello-devices").await.unwrap();

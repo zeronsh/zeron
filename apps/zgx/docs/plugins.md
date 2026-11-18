@@ -654,7 +654,7 @@ zeron.toast(zeron.s("timer.done"))
 A plugin travels as its folder, signed. The person installs it from the store (Settings → Plugins → Browse) or with Settings → Plugins → Install…; an agent uses these tools:
 
 - **`search_plugins { query?, category?, keyword?, author?, verified?, sort? }`** searches the store, and **`get_store_plugin { id }`** reads a plugin's page there: its README, what it asks for, its versions (each `verified` or not), `verified_version` (the newest Zeron has verified) and whether it works with this Zeron (`compatible`). Say what it asks for, and whether it's verified, before you suggest it.
-- **`install_plugin { store = id }`** installs it from the store. An agent installs only versions Zeron has verified: without a `version`, the newest verified one; a `version` it names must be verified too, else it's the person's to install from the plugin's page (`needs_person`). Zeron checks it's exactly what the store's record says (its files, its version, who signed it) before anything is written (`store_mismatch` when it isn't).
+- **`install_plugin { store = id }`** installs it from the store. An agent installs only versions Zeron has verified: without a `version`, the newest verified one; a `version` it names must be verified too, else it's the person's to install from the plugin's page (`needs_person`). A plugin installed from the store is the person's to replace, from the store, a file or a link, and to install again; and an agent changes plugins only on its own device (`needs_person` either way). Zeron checks it's exactly what the store's record says (its files, its version, who signed it) before anything is written (`store_mismatch` when it isn't).
 - **`install_plugin { path }`** installs a `.zeron-plugin` file. **`install_plugin { url, ref?, folder? }`** installs from a link:
   - a link to a `.zeron-plugin` file;
   - a GitHub release (`…/releases/latest`, `…/releases/tag/<tag>`), from its `.zeron-plugin` asset;
@@ -708,7 +708,7 @@ On a device, a version that isn't verified says so: on its page, on the consent 
 - **`description`**: one line, at most 300 characters. It's the plugin's summary on its card. The `name` is at most 64.
 - **`icon`**: an SVG file in the plugin, at most 32 KB.
 - **`categories`**: one or two of `agents`, `appearance`, `chat`, `developer-tools`, `git`, `integrations`, `productivity`, `utilities`.
-- **`version`**: strict semver: `MAJOR.MINOR.PATCH`, optionally `-prerelease` and `+build` (`1.2.0`, `2.0.0-beta.1`). No `v`, no leading zeros.
+- **`version`**: strict semver: `MAJOR.MINOR.PATCH`, optionally `-prerelease` and `+build` (`1.2.0`, `2.0.0-beta.1`), at most 32 characters. No `v`, no leading zeros.
 - **`id`**: not one of Zeron's own plugins' (`git`, `github`, `parallax-scenes`), not starting with `zeron`, and not a name that looks like a brand's. The first account to publish an id owns it.
 - A username on your Zeron account, so the store can say "by @username".
 

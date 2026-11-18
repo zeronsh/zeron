@@ -11,7 +11,7 @@
 //! CLI for the plugin as checked (`reviews::Kind::Publish`), so what's sent
 //! is what the person saw checked.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -947,11 +947,15 @@ impl Plugins {
     /// Whether the store's record says version `version` of `id` (content
     /// `hash`) is verified, asked now (an update about to be taken): `false`
     /// when the store can't be reached, so taking it asks you. A record that
-    /// can't be read, names other content, or is gone refuses the update:
-    /// it never fails open.
+    /// can't be read, names other content, is gone, or isn't installable
+    /// (yanked, superseded, not listed) refuses the update: it never fails
+    /// open.
     pub(in crate::plugins) async fn verified_now(&self, id: &str, version: &str, hash: &str) -> Result<bool, String> {
         let Ok((client, caller)) = self.store_reader() else { return Ok(false) };
         match client.version(id, version, &caller).await {
+            Ok((_, record)) if record.status != "listed" || record.yanked => {
+                Err(failure(client::reason::NOT_IN_STORE, format!("Version {version} of {id} can't be installed any more")))
+            }
             Ok((_, record)) if record.hash.eq_ignore_ascii_case(hash) => Ok(record.verified),
             Ok(_) => Err(failure(client::reason::STORE_MISMATCH, format!("The store's record of {id} {version} names other content than the update found, so it wasn't taken"))),
             Err(error) if install::reason_of(&error) == Some(client::reason::STORE_UNREACHABLE) => Ok(false),
@@ -991,17 +995,20 @@ impl Plugins {
     }
 
     /// The take-down feed after the last event applied here: each take-down
-    /// of a version installed here turns it off, each restore lifts that.
-    /// With no place in the feed (a new device, or one gone longer than the
-    /// feed keeps), the full update check says what's blocked now, and the
-    /// feed carries on from its head. Nothing about what's installed is
-    /// sent.
+    /// of a version installed here turns it off, each restore lifts that,
+    /// and either ends its mark (a restored version is unverified until
+    /// verified again); a take-down of an update kept here drops it. With
+    /// no place in the feed (a new device, one gone longer than the feed
+    /// keeps, or a place past the feed's head), the full update check says
+    /// what's blocked now and which marks have ended, and the feed carries
+    /// on from its head. Only events after the place and at most the head
+    /// count. Nothing about what's installed is sent.
     pub async fn check_takedowns(&self) {
         self.rescan().await;
         if self.store_candidates(None).is_empty() {
             return;
         }
-        let Ok((client, _)) = self.store_reader() else { return };
+        let Ok((client, caller)) = self.store_reader() else { return };
         let mut after = lock(&self.inner.state).takedowns_after;
         // (At most a few pages a check; the next one carries on.)
         for _ in 0..TAKEDOWN_PAGES {
@@ -1012,19 +1019,30 @@ impl Plugins {
                     return;
                 }
             };
-            if feed.reset || after.is_none() {
+            if feed.reset || after.is_none_or(|a| a > feed.head) {
                 let (_, errors) = self.check_store_updates(None).await;
                 if errors.is_empty() {
+                    self.end_marks(&client, &caller).await;
                     let _ = self.update_state(|state| state.takedowns_after = Some(feed.head));
                 }
                 return;
             }
-            let Some(last) = feed.events.iter().map(|e| e.seq).max() else { return };
+            let events: Vec<_> = feed.events.iter().filter(|e| after.is_none_or(|a| e.seq > a) && e.seq <= feed.head).collect();
+            let Some(last) = events.iter().map(|e| e.seq).max() else { return };
             let candidates = self.store_candidates(None);
             let mut down: BTreeMap<&str, (&Candidate, String)> = BTreeMap::new();
             let mut restored: Vec<&Candidate> = Vec::new();
-            for event in feed.events.iter().filter(|e| after.is_none_or(|a| e.seq > a)) {
+            for event in events {
+                // An update kept here that's taken down isn't taken.
+                if event.kind == "take_down"
+                    && let Some(c) = candidates.iter().find(|c| c.id == event.id)
+                    && install::found(&self.inner.plugins_dir, &c.id, &c.hash).is_some_and(|f| same_version(&f.version, &event.version))
+                {
+                    install::forget_found(&self.inner.plugins_dir, &c.id);
+                }
                 let Some(c) = candidates.iter().find(|c| c.id == event.id && same_version(&event.version, &c.version)) else { continue };
+                // Taken down or restored, in whatever order: no mark.
+                self.unmark(c);
                 match event.kind.as_str() {
                     "take_down" => {
                         restored.retain(|r| r.id != c.id);
@@ -1109,6 +1127,9 @@ impl Plugins {
         let mut blocks = Vec::new();
         // The plugins the store answered about (offline batches aren't).
         let mut answered: Vec<&Candidate> = Vec::new();
+        // Those with an entry it sent that couldn't be read: whatever block
+        // they have stays (it fails closed).
+        let mut unread: BTreeSet<&str> = BTreeSet::new();
         // At most the edge's limit per request.
         for batch in candidates.chunks(MAX_UPDATE_PLUGINS) {
             let ask = UpdatesAsk {
@@ -1127,9 +1148,14 @@ impl Plugins {
                 }
             };
             answered.extend(batch.iter());
-            for unreadable in reply.unreadable.iter().flatten() {
-                if let Some(c) = by_id.get(unreadable.as_str()) {
-                    errors.push(said(c, &failure(client::reason::STORE_ERROR, "The store's answer about it couldn't be read")));
+            for unreadable in &reply.unreadable {
+                match unreadable.as_deref().and_then(|id| by_id.get(id)) {
+                    Some(c) => {
+                        unread.insert(c.id.as_str());
+                        errors.push(said(c, &failure(client::reason::STORE_ERROR, "The store's answer about it couldn't be read")));
+                    }
+                    // (Whose, it doesn't say: none of this batch's blocks lifts.)
+                    None => unread.extend(batch.iter().map(|c| c.id.as_str())),
                 }
             }
             blocks.extend(reply.blocked);
@@ -1152,7 +1178,7 @@ impl Plugins {
             }
         }
         // A block here the store no longer names (restored): lifted.
-        let lifted: Vec<&Candidate> = answered.into_iter().filter(|c| !blocked.contains_key(c.id.as_str())).collect();
+        let lifted: Vec<&Candidate> = answered.into_iter().filter(|c| !blocked.contains_key(c.id.as_str()) && !unread.contains(c.id.as_str())).collect();
         self.unblock(&lifted);
         if !blocked.is_empty() {
             self.block(blocked.into_values().collect()).await;
@@ -1347,12 +1373,44 @@ impl Plugins {
         }
     }
 
+    /// `c`'s installed version is no longer verified here: its install
+    /// record says so (`verified`, `verified_at`), and the list shows it.
+    fn unmark(&self, c: &Candidate) {
+        let Some(entry) = self.entry(&c.id).filter(|e| e.item.version == c.version && e.item.hash.eq_ignore_ascii_case(&c.hash)) else { return };
+        let dir = Path::new(&entry.item.dir);
+        if let Some(mut source) = Source::load(dir)
+            && let Some(store) = source.store.as_mut().filter(|s| s.verified)
+        {
+            store.verified = false;
+            store.verified_at = None;
+            if source.save(dir).is_ok() {
+                tracing::info!(plugin = %c.id, version = %c.version, "store: the version installed is no longer verified");
+                self.kick(super::super::Kick::Rescan);
+            }
+        }
+    }
+
+    /// After the feed starts over (its events missed): each version
+    /// installed here marked verified whose own record, read now, says it
+    /// isn't (taken down and restored meanwhile) loses its mark.
+    async fn end_marks(&self, client: &StoreClient, caller: &Caller) {
+        for c in self.store_candidates(None).iter().filter(|c| c.verified) {
+            if let Ok((_, record)) = client.version(&c.id, &c.version, caller).await
+                && !record.verified
+            {
+                self.unmark(c);
+            }
+        }
+    }
+
     fn block_one(&self, c: &Candidate, reason: &str) {
         // Still the version the store blocked (not one installed while the
         // check was out).
         if self.entry(&c.id).is_none_or(|e| e.item.version != c.version || e.item.hash != c.hash) {
             return;
         }
+        // A blocked version shows no mark (turned back on, it still has none).
+        self.unmark(c);
         let mut newly = false;
         let saved = self.update_state(|state| {
             if state.blocked.get(&c.id).is_some_and(|b| same_version(&b.version, &c.version)) {
