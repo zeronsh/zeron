@@ -718,6 +718,12 @@ pub mod methods {
     /// (checked first when none was found yet). Refused when someone else
     /// signed it or it was changed; new permissions wait for you again.
     pub const UPDATE_PLUGIN: &str = "UpdatePlugin";
+    /// `{id, hash}` → `InstallPlugin`'s reply: a consent sheet's "install
+    /// the verified version instead", for plugin `id` as shown (`hash`). The
+    /// version is the engine's own (the item's `update.verified_alternative`
+    /// or `source.verified_alternative`), its record fetched now, refused
+    /// `not_verified` unless it says verified. The person's, never an agent's.
+    pub const INSTALL_VERIFIED_PLUGIN: &str = "InstallVerifiedPlugin";
     /// `{id, to?}` → `{path, bytes}`: a plugin as a `.zeron-plugin` package
     /// (an own plugin is re-signed first), into the folder or file `to`
     /// (absolute), else `<data dir>/plugin-exports`. Only this device's own
@@ -1273,7 +1279,7 @@ mod tests {
         // pre-releases here (Settings → Plugins' device switcher); reading
         // the catalog, publishing, versions, reports and deploy keys are
         // this device's own, and never an agent's but to read and check.
-        for method in [methods::INSTALL_PLUGIN, methods::CHECK_PLUGIN_UPDATES, methods::UPDATE_PLUGIN, methods::SET_PLUGIN_OFF, methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES] {
+        for method in [methods::INSTALL_PLUGIN, methods::CHECK_PLUGIN_UPDATES, methods::UPDATE_PLUGIN, methods::INSTALL_VERIFIED_PLUGIN, methods::SET_PLUGIN_OFF, methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES] {
             assert!(!local_only(method), "{method}");
         }
         assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({ "store": "focus" })));
@@ -1285,7 +1291,7 @@ mod tests {
         ] {
             assert!(local_only(method), "{method}");
         }
-        for method in [methods::PUBLISH_PLUGIN, methods::STORE_VERSION_ACTION, methods::STORE_REPORT, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY, methods::LIST_DEPLOY_KEYS, methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES, methods::ACK_STORE_NOTICES] {
+        for method in [methods::PUBLISH_PLUGIN, methods::STORE_VERSION_ACTION, methods::STORE_REPORT, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY, methods::LIST_DEPLOY_KEYS, methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES, methods::ACK_STORE_NOTICES, methods::INSTALL_VERIFIED_PLUGIN, methods::UPDATE_PLUGIN] {
             assert!(!agent_allowed(method), "{method}");
         }
         assert!(!local_only(methods::PLUGIN_DELIVER));

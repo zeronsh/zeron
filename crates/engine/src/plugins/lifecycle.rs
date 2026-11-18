@@ -43,6 +43,12 @@ fn takedown_every() -> (Duration, Duration) {
 }
 
 #[derive(Deserialize)]
+struct VerifiedInsteadParams {
+    id: String,
+    hash: String,
+}
+
+#[derive(Deserialize)]
 struct InstallParams {
     #[serde(default)]
     path: Option<String>,
@@ -105,6 +111,7 @@ pub fn handles(method: &str) -> bool {
             | methods::STAGE_PLUGIN_PACKAGE
             | methods::CHECK_PLUGIN_UPDATES
             | methods::UPDATE_PLUGIN
+            | methods::INSTALL_VERIFIED_PLUGIN
             | methods::EXPORT_PLUGIN
     )
 }
@@ -204,6 +211,10 @@ impl Plugins {
             methods::UPDATE_PLUGIN => {
                 let p: UpdateParams = parse_params(params)?;
                 self.update(&p.id, p.verified_only).await
+            }
+            methods::INSTALL_VERIFIED_PLUGIN => {
+                let p: VerifiedInsteadParams = parse_params(params)?;
+                self.install_verified_alternative(p.id.trim(), &p.hash).await
             }
             methods::EXPORT_PLUGIN => {
                 let p: ExportParams = parse_params(params)?;
@@ -581,6 +592,15 @@ impl Plugins {
         if entry.item.builtin {
             return Err(failed("Built-in plugins update when Zeron does"));
         }
+        // An update is the person's (or their other device's): never an
+        // agent's, whatever let the call through.
+        if !Self::by_person() {
+            return Err(Self::needs_person(&entry.item.name));
+        }
+        // A plugin this device takes verified updates of takes nothing its
+        // record doesn't say is verified, now: not when the store can't be
+        // asked either.
+        let verified_only = verified_only || (entry.store.is_some() && lock(&self.inner.state).updates_for(id) == super::status::UpdatePreference::Verified);
         let mut found = install::found(&self.inner.plugins_dir, id, &entry.item.hash);
         if found.is_none() {
             let checked = self.check_updates(Some(id)).await;

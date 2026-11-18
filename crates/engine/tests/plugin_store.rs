@@ -852,3 +852,88 @@ async fn a_record_that_doesn_t_say_verified_never_reads_as_verified() {
     assert_eq!(page["installed"]["verified"], false, "{page}");
     assert_eq!(d.item("focus").await["source"]["verified"], false);
 }
+
+#[tokio::test]
+async fn a_first_install_s_sheet_offers_the_verified_version_instead_and_installs_it_by_its_record() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "- First.");
+    // Verified, but for another Zeron: not one this device can offer.
+    store.add("ada", &package_of(&key, "focus", "1.0.5", &["ui.add"], "return 2", json!({ "engines": { "zeron": ">=99.0.0" } })), "verified", "");
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add", "links.open"], "return 3", json!({})), "listed", "");
+    let d = device(&store, Some("bob"));
+    let installed = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    let source = &installed["plugin"]["source"];
+    assert_eq!(source["verified"], false, "{installed}");
+    assert_eq!(source["verified_alternative"], json!({ "version": "1.0.0", "added": [], "removed": ["links.open"], "notes": "- First.", "verified_at": 1 }), "{installed}");
+    let hash = installed["plugin"]["hash"].as_str().unwrap().to_owned();
+
+    // Only the person, only for the item as shown.
+    let agent = d.call_as(zeron_rpc::Caller::Agent { chat: None }, methods::INSTALL_VERIFIED_PLUGIN, json!({ "id": "focus", "hash": hash })).await;
+    assert!(agent.is_err(), "{agent:?}");
+    assert!(d.call(methods::INSTALL_VERIFIED_PLUGIN, json!({ "id": "focus", "hash": "0".repeat(64) })).await.is_err());
+    // Its record no longer says verified when it's taken: refused.
+    store.state.lock().unwrap().plugins.get_mut("focus").unwrap().versions[0].verified = false;
+    let refused = d.call(methods::INSTALL_VERIFIED_PLUGIN, json!({ "id": "focus", "hash": hash })).await.unwrap_err();
+    assert_eq!(word(&refused), "not_verified", "{refused}");
+    assert_eq!(d.item("focus").await["version"], "1.1.0");
+    store.verify("focus", "1.0.0");
+    let instead = d.call(methods::INSTALL_VERIFIED_PLUGIN, json!({ "id": "focus", "hash": hash })).await.unwrap();
+    assert_eq!((instead["plugin"]["version"].as_str(), instead["plugin"]["source"]["verified"].as_bool()), (Some("1.0.0"), Some(true)), "{instead}");
+    assert!(instead["plugin"]["source"].get("verified_alternative").is_none());
+}
+
+#[tokio::test]
+async fn an_update_s_sheet_installs_its_verified_alternative_by_the_engine_s_own_word() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "verified", "");
+    store.add("ada", &package_of(&key, "focus", "1.2.0", &["ui.add"], "return 3", json!({})), "listed", "");
+    assert_eq!(d.check().await["updates"][0]["verified_alternative"]["version"], "1.1.0");
+    let hash = d.item("focus").await["hash"].clone();
+    let instead = d.call(methods::INSTALL_VERIFIED_PLUGIN, json!({ "id": "focus", "hash": hash })).await.unwrap();
+    assert_eq!((instead["plugin"]["version"].as_str(), instead["plugin"]["source"]["verified"].as_bool()), (Some("1.1.0"), Some(true)), "{instead}");
+}
+
+#[tokio::test]
+async fn with_the_store_unreachable_nothing_unverified_gets_through() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "verified", "");
+    // (a) Set to take verified updates: 1.1.0 is staged (its offer said
+    // verified); with the store unreachable when it's taken, its record
+    // can't say so: held.
+    d.call(methods::SET_PLUGIN_UPDATES, json!({ "id": "focus", "prefer": "verified" })).await.unwrap();
+    assert_eq!(d.check().await["updates"][0]["version"], "1.1.0");
+    store.offline.store(true, std::sync::atomic::Ordering::SeqCst);
+    let held = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap_err();
+    assert_eq!(word(&held), "not_verified", "{held}");
+    // (b) An update-all doesn't take it either.
+    d.call(methods::SET_PLUGIN_UPDATES, json!({ "id": "focus", "prefer": null })).await.unwrap();
+    let bulk = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus", "verified_only": true })).await.unwrap_err();
+    assert_eq!(word(&bulk), "not_verified", "{bulk}");
+    // (c) An agent can do nothing with it: not update, not install over it,
+    // not take a verified version instead.
+    let agent = || zeron_rpc::Caller::Agent { chat: Some("c1".into()) };
+    let hash = d.item("focus").await["hash"].clone();
+    for (method, params) in [
+        (methods::UPDATE_PLUGIN, json!({ "id": "focus" })),
+        (methods::INSTALL_PLUGIN, json!({ "store": "focus", "version": "1.1.0" })),
+        (methods::INSTALL_VERIFIED_PLUGIN, json!({ "id": "focus", "hash": hash })),
+    ] {
+        let refused = d.call_as(agent(), method, params).await.unwrap_err();
+        assert!(matches!(word(&refused), "needs_person" | "review_needed") || refused.contains("person"), "{method}: {refused}");
+    }
+    assert_eq!(d.item("focus").await["version"], "1.0.0");
+    // The person, on their own, takes it: marked not verified, and it asks.
+    let taken = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
+    assert_eq!((taken["plugin"]["source"]["verified"].as_bool(), taken["plugin"]["status"].as_str()), (Some(false), Some("pending")), "{taken}");
+}

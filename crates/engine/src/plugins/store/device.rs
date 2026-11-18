@@ -38,6 +38,9 @@ const CACHED_VERSIONS: usize = 3;
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 /// The most pages of the take-down feed one check reads.
 const TAKEDOWN_PAGES: usize = 20;
+/// At most this many pages of versions (50 each) are looked through for a
+/// verified version to offer instead.
+const ALTERNATIVE_PAGES: usize = 4;
 /// How often an account with no plugins has its publishes looked over (one
 /// with plugins: at each take-down check; and a publish from here looks at
 /// the next).
@@ -754,6 +757,34 @@ impl Plugins {
     /// `version`. Verified as a file is, then checked against the store's
     /// record, then installed as any package (the same consent window).
     pub(in crate::plugins) async fn install_from_store(&self, id: &str, version: Option<&str>, reinstalling: bool) -> Result<RpcReply, RpcError> {
+        self.install_store_version(id, version, reinstalling, false).await
+    }
+
+    /// The verified version a sheet offers instead of the unverified one it
+    /// asks about (`InstallVerifiedPlugin {id, hash}`): the version from
+    /// this engine's own state for that item as shown (`hash`), an update's
+    /// alternative or a first install's, never a caller's word; its record
+    /// fetched now, and refused (`not_verified`) unless it says verified.
+    pub(in crate::plugins) async fn install_verified_alternative(&self, id: &str, hash: &str) -> Result<RpcReply, RpcError> {
+        self.rescan().await;
+        let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
+        if !Self::by_person() {
+            return Err(Self::needs_person(&entry.item.name));
+        }
+        if !entry.item.hash.eq_ignore_ascii_case(hash.trim()) {
+            return Err(failed("It changed since it was shown: look again"));
+        }
+        let from_update = install::found(&self.inner.plugins_dir, id, &entry.item.hash).and_then(|f| f.verified_alternative).map(|a| a.version);
+        let from_install = entry.store.as_ref().filter(|s| !s.verified).and_then(|s| s.verified_alternative.as_ref()).map(|a| a.version.clone());
+        let Some(version) = from_update.or(from_install) else {
+            return Err(failed(failure(install::reason::NOT_VERIFIED, format!("{} has no verified version to install instead", entry.item.name))));
+        };
+        self.install_store_version(id, Some(&version), false, true).await
+    }
+
+    /// [`Self::install_from_store`]; `verified_only`: refused unless the
+    /// version's record, fetched now, says verified.
+    async fn install_store_version(&self, id: &str, version: Option<&str>, reinstalling: bool, verified_only: bool) -> Result<RpcReply, RpcError> {
         let id = id.trim();
         manifest::check_id(id).map_err(failed)?;
         let person = Self::by_person();
@@ -778,11 +809,24 @@ impl Plugins {
         if wanted.is_empty() {
             return Err(failed(failure(client::reason::NOT_IN_STORE, format!("The store lists no version of {id}"))));
         }
-        let (package, source) = self.fetch_version(&client, &caller, id, &wanted, reinstalling, &detail.author).await?;
+        let (package, mut source) = self.fetch_version(&client, &caller, id, &wanted, reinstalling, &detail.author).await?;
+        let verified = source.store().is_some_and(|s| s.verified);
         // The mark is the record's, fetched just now: an agent's install of
         // a version it doesn't carry is the person's to make.
-        if !person && !reinstalling && !source.store().is_some_and(|s| s.verified) {
+        if !person && !reinstalling && !verified {
             return Err(agent_unverified(id, &wanted));
+        }
+        if verified_only && !verified {
+            return Err(failed(failure(install::reason::NOT_VERIFIED, format!("The store's record of {id} {wanted} doesn't say it's verified, so it wasn't installed"))));
+        }
+        if verified_only && let Some(store) = source.store.as_mut() {
+            store.instead_of_unverified = true;
+        }
+        // Not verified: the verified version its sheet can offer instead.
+        if !verified
+            && let Some(store) = source.store.as_mut()
+        {
+            store.verified_alternative = self.verified_alternative(&client, &caller, id, &wanted, &package.manifest.permissions, &detail.author).await;
         }
         let reply = self.install_package(package, source).await?;
         // Counted once per account (the edge's to say): a new install here.
@@ -841,6 +885,42 @@ impl Plugins {
             .map_err(failed)?;
         let source = Source { kind: STORE.into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: Some(store) };
         Ok((package, source))
+    }
+
+    /// The newest verified version of `id` this Zeron can run, other than
+    /// `asked` (whose asks are `asks`), for a sheet's "instead": its record
+    /// says verified, it's listed, and its package (fetched and checked as
+    /// any install's) asks `added` and `removed` against `asked`. None when
+    /// there's none, or the store can't say.
+    async fn verified_alternative(&self, client: &StoreClient, caller: &Caller, id: &str, asked: &str, asks: &[String], publisher: &client::Publisher) -> Option<install::Alternative> {
+        let zeron = version::zeron();
+        let mut cursor: Option<String> = None;
+        for _ in 0..ALTERNATIVE_PAGES {
+            let page = client.versions(id, cursor.as_deref(), Some(50), caller).await.ok()?;
+            let found = page["versions"].as_array().into_iter().flatten().find(|v| {
+                v["verified"] == true
+                    && v["status"] == "listed"
+                    && v["yanked"] != true
+                    && v["version"].as_str().is_some_and(|x| !same_version(x, asked))
+                    && version::accepts(v["engines"]["zeron"].as_str(), &zeron).is_ok()
+            });
+            if let Some(found) = found {
+                let version = found["version"].as_str()?.to_owned();
+                let (package, source) = self.fetch_version(client, caller, id, &version, false, publisher).await.ok()?;
+                // (Its own record, fetched with the package, says so too.)
+                source.store().filter(|s| s.verified)?;
+                let change = install::grant_change(asks, &package.manifest.permissions);
+                return Some(install::Alternative {
+                    version: plain(&version, 64),
+                    added: change.added,
+                    removed: change.removed,
+                    notes: notes(found["notes"].as_str().unwrap_or_default(), listing::MAX_NOTES_BYTES),
+                    verified_at: found["verified_at"].as_i64(),
+                });
+            }
+            cursor = Some(page["next_cursor"].as_str()?.to_owned());
+        }
+        None
     }
 
     /// Whether the store's record says version `version` of `id` (content
@@ -1115,7 +1195,7 @@ impl Plugins {
             if package.hash != offer.hash || offer.key.as_deref().is_some_and(|k| k != package.key) {
                 return Err(failure(client::reason::STORE_MISMATCH, "The update kept isn't the store's"));
             }
-            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified: offer.verified };
+            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified: offer.verified, verified_alternative: None, instead_of_unverified: false };
             (package, store)
         } else {
             let raw = client.package(&c.id, &offer.version, caller, record.bytes).await?;

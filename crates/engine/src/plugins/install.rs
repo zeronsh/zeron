@@ -174,6 +174,15 @@ pub struct StoreSource {
     /// without it reads as not verified: it never fails open.
     #[serde(default)]
     pub verified: bool,
+    /// Installed not verified: the newest verified version this Zeron can
+    /// run, other than it, as the store said at install (for its consent
+    /// sheet's "instead"; installing it asks its own record again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_alternative: Option<Alternative>,
+    /// (Not kept.) The person chose this verified version instead of the
+    /// unverified one installed: it may be older than that one.
+    #[serde(skip)]
+    pub instead_of_unverified: bool,
 }
 
 impl StoreSource {
@@ -213,6 +222,9 @@ impl Source {
             value["id"] = json!(store.id);
             value["publisher"] = json!(store.publisher);
             value["verified"] = json!(store.verified);
+            if !store.verified {
+                value["verified_alternative"] = json!(store.verified_alternative);
+            }
         }
         value
     }
@@ -432,7 +444,11 @@ pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_f
         // are refused: an old version's holes stay closed.
         // (From the store, by precedence: a build of the same version isn't later.)
         let later = if source.store().is_some() { newer_by_precedence } else { newer };
-        if replaced.hash != package.hash && !later(&package.manifest.version, &replaced.version) {
+        // But the verified version the person chose instead of an
+        // unverified one installed from the store (its sheet's "instead").
+        let instead = source.store().is_some_and(|s| s.instead_of_unverified && s.verified)
+            && Source::load(&dir).is_some_and(|installed| installed.store().is_some_and(|s| !s.verified));
+        if replaced.hash != package.hash && !instead && !later(&package.manifest.version, &replaced.version) {
             return Err(not_newer(&package.manifest.version, &replaced.version));
         }
         Some(replaced)
