@@ -146,7 +146,7 @@ test("three or more show two whole and the next at the column's end, the strip a
 	expect(third.x < column.x + column.w and third.x + third.w > column.x + column.w).to_be(true)
 end)
 
-test("Browse's list: its head's order on the content edge, the categories across the card, the first's words on the text edge, nothing moving as it loads", function()
+test("Browse's list: its head's category and order, the app's small Selects side by side, the order's box on the content edge, nothing moving as it loads", function()
 	local app = mounted()
 	app:command("store_stub.hold")
 	app:click('role:tab "Browse"')
@@ -159,24 +159,18 @@ test("Browse's list: its head's order on the content edge, the categories across
 	expect(math.abs(order.x + order.w - content) < 0.6).to_be(true)
 	expect(order.h).to_be(28)
 	local search_before = box(app, '#store-card >> role:textbox "Search plugins"').y
-	local bar_before = box(app, "#store-filters").h
 	local card_before = card.y
+	-- The category beside it, the same Select, 8 apart, on its line.
+	local category = box(app, "#store-category")
+	expect(category.w).to_be(160)
+	expect(category.h).to_be(28)
+	expect(math.abs(order.x - 8 - (category.x + category.w)) < 0.6).to_be(true)
+	expect(category.y).to_be(order.y)
 	app:command("store_stub.release")
 	settle(app, 500)
-	local all = app:tree('#store-filters >> role:tab "All"'):match("[^\n]+") or ""
-	local first_tab = box(app, '#store-filters >> role:tab "All"')
-	-- (A tab's words are 4 inside it.)
-	expect(math.abs(first_tab.x + 4 - text) < 0.6).to_be(true)
-	expect(box(app, "#store-filters").h).to_be(bar_before)
 	expect(box(app, '#store-card >> role:textbox "Search plugins"').y).to_be(search_before)
 	expect(box(app, "#store-card").y).to_be(card_before)
-	expect(all).never.to_contain("All categories")
-	-- The categories run the card's width, from edge to edge of its row.
-	local tabs = box(app, "#store-categories")
-	expect(math.abs(tabs.x - (card.x + 1 + 12)) < 0.6).to_be(true)
-	expect(math.abs(tabs.x + tabs.w - (card.x + card.w - 1 - 12)) < 0.6).to_be(true)
-	-- (The app's tabs, as Settings' are: 36.)
-	expect(box(app, '#store-filters >> role:tab "All"').h).to_be(36)
+	expect(app:tree("#store-category")).to_contain("All categories")
 end)
 
 test("the featured hold their room as they come, one height each, and stand a section's step from the list", function()
@@ -249,72 +243,43 @@ test("the featured never wrap: three across while each keeps its least, else run
 	end
 end)
 
-test("the categories that fit show no chevron; more than fit, the edge hiding them pages them, and the keys bring one into view", function()
-	local app = mounted()
-	app:command("store_stub.few_categories")
-	app:click('role:tab "Browse"')
-	app:wait("#store-rows", { timeout_ms = 3000 })
-	settle(app, 500)
-	expect(app:has(".pager-more")).to_be(false)
-	expect(app:has(".pager-back")).to_be(false)
-end)
-
-test("more categories than fit: a chevron at the hiding edge pages them on and back; the arrows choose, and bring the chosen into view", function()
+test("the list's head holds its count, then the category and the order at its end; where they don't fit beside it, on a line of their own under it", function()
 	local app = mounted()
 	app:click('role:tab "Browse"')
 	app:wait("#store-rows", { timeout_ms = 3000 })
 	settle(app, 500)
-	local view = box(app, "#store-categories")
-	local function shown(name: string): boolean
-		local tab = box(app, `#store-categories >> role:tab "{name}"`)
-		return tab.x >= view.x - 0.5 and tab.x + tab.w <= view.x + view.w + 0.5
-	end
-	expect(app:has(".pager-more")).to_be(true)
-	expect(app:has(".pager-back")).to_be(false)
-	expect(shown("Utilities")).to_be(false)
-	-- (The run's view stops short of the chevron: no word under it.)
-	local function view_box(): { x: number, y: number, w: number, h: number }
-		local line = app:tree("#store-categories"):match("[^\n]+\n([^\n]+)") or ""
-		local x, y, w, h = line:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
-		return { x = tonumber(x) or 0, y = tonumber(y) or 0, w = tonumber(w) or 0, h = tonumber(h) or 0 }
-	end
-	expect(view_box().x + view_box().w <= box(app, 'role:button "More categories"').x).to_be(true)
-	app:click('role:button "More categories"')
-	settle(app)
-	expect(app:has(".pager-back")).to_be(true)
-	local back = box(app, 'role:button "Earlier categories"')
-	expect(view_box().x >= back.x + back.w).to_be(true)
-	-- (The same in a narrow pane, a 496 column: both chevrons, the run
-	-- between them.)
-	app:resize(560, 900)
-	settle(app)
-	if app:has('role:button "More categories"') then
-		expect(view_box().x + view_box().w <= box(app, 'role:button "More categories"').x).to_be(true)
-		app:click('role:button "More categories"')
+	for _, width in { 1000, 560, 480 } do
+		app:resize(width, 900)
 		settle(app)
+		local title = box(app, '#store-list >> role:heading')
+		local category, order = box(app, "#store-category"), box(app, "#store-order")
+		local card = box(app, "#store-card")
+		-- (The order ends on the content edge either way.)
+		expect(`{width}: {math.abs(order.x + order.w - (card.x + card.w - INSET)) < 0.6}`).to_be(`{width}: true`)
+		if width >= 560 then
+			-- One line: the count's words end before the category begins,
+			-- all centred on it.
+			expect(`{width}: {title.x + title.w <= category.x}`).to_be(`{width}: true`)
+			expect(`{width}: {math.abs((title.y + title.h / 2) - (order.y + order.h / 2)) < 0.6}`).to_be(`{width}: true`)
+		else
+			-- Two: the controls 8 under the count, the card 8 under them.
+			expect(`{width}: {category.y - (title.y + title.h)}`).to_be(`{width}: 8`)
+			expect(`{width}: {card.y - (order.y + order.h)}`).to_be(`{width}: 8`)
+		end
 	end
-	if app:has(".pager-more") then
-		expect(view_box().x + view_box().w <= box(app, 'role:button "More categories"').x).to_be(true)
-	end
-	if app:has(".pager-back") then
-		local b = box(app, 'role:button "Earlier categories"')
-		expect(view_box().x >= b.x + b.w).to_be(true)
-	end
+	-- Choosing a category narrows the list, and All categories widens it.
 	app:resize(1000, 900)
 	settle(app)
-	app:click('role:button "Earlier categories"')
+	app:click("#store-category")
+	app:frames(10)
+	app:click('role:menuitem "Git"')
 	settle(app)
-	expect(app:has(".pager-back")).to_be(false)
-	-- The keys: one Tab stop, the arrows choosing; End to the last, in view.
-	app:click('#store-categories >> role:tab "All"')
+	expect(app:state("store_category")).to_be("git")
+	app:click("#store-category")
+	app:frames(10)
+	app:click('role:menuitem "All categories"')
 	settle(app)
-	app:key("ArrowRight")
-	settle(app)
-	expect(app:state("store_category")).to_be("agents")
-	app:key("End")
-	settle(app)
-	expect(app:state("store_category")).to_be("utilities")
-	expect(shown("Utilities")).to_be(true)
+	expect(app:state("store_category")).to_be("")
 end)
 
 test("a skeleton that waits too long rests: the first load's, the next page's and a plugin page's", function()

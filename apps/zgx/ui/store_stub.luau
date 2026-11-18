@@ -15,7 +15,6 @@
 --   store_stub.one_shot    Focus timer has one screenshot (store_stub.three_shots: three)
 --   store_stub.id_reserved the plugin's id is one the store keeps (its site's pages)
 --   store_stub.no_total    lists come without `total` (how many match)
---   store_stub.few_categories  the store has three categories (before Browse opens)
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
 --   store_stub.html_and_footnote  your plugin's README has HTML and math, its CHANGELOG a footnote (advice)
 --   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
@@ -843,13 +842,6 @@ ui.command {
 			table.insert(list, { key = key, name = name, created_at = NOW - i * DAY, last_used_at = if i % 2 == 0 then NOW - DAY else nil, expires_at = ends })
 		end
 		keys["pomodoro-clock"] = list
-	end,
-}
-ui.command {
-	id = "store_stub.few_categories",
-	title = "Store: three categories",
-	run = function()
-		CATEGORIES = table.move(CATEGORIES, 1, 3, 1, {})
 	end,
 }
 ui.command {

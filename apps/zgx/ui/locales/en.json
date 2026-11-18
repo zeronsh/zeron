@@ -3865,6 +3865,7 @@
       "turn_on": "Turn on",
       "open_settings": "Open settings",
       "category_label": "Category",
+      "all_categories": "All categories",
       "order_label": "Order",
       "sort": {
         "relevance": "Best match",
@@ -4097,7 +4098,6 @@
       "readme_more": "Show more",
       "version_meta": "Version {version} · {date} · {n, plural, one {# install} other {# installs}}",
       "details": "Details",
-      "all": "All",
       "has_version": "You have {version}",
       "has_version_on": "{device} has {version}",
       "off_note": "Turned off",
@@ -4108,8 +4108,6 @@
       "all_versions": "Show all {n} versions",
       "count": "{n, plural, one {# plugin} other {# plugins}}",
       "list_title": "Plugins",
-      "categories_back": "Earlier categories",
-      "categories_more": "More categories",
       "plain_readme": "This README is drawn as plain text past here: it's too long or too deeply nested to lay out.",
       "plain_notes": "These notes are drawn as plain text past here: they're too long or too deeply nested to lay out."
     }

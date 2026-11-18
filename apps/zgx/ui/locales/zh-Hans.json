@@ -3865,6 +3865,7 @@
       "turn_on": "打开",
       "open_settings": "打开设置",
       "category_label": "类别",
+      "all_categories": "所有类别",
       "order_label": "排序",
       "sort": {
         "relevance": "最相关",
@@ -4097,7 +4098,6 @@
       "readme_more": "显示更多",
       "version_meta": "版本 {version} · {date} · {n, plural, other {# 次安装}}",
       "details": "详细信息",
-      "all": "全部",
       "has_version": "你已安装 {version}",
       "has_version_on": "{device} 已安装 {version}",
       "off_note": "已关闭",
@@ -4108,8 +4108,6 @@
       "all_versions": "显示全部 {n} 个版本",
       "count": "{n, plural, other {# 个插件}}",
       "list_title": "插件",
-      "categories_back": "前面的分类",
-      "categories_more": "更多分类",
       "plain_readme": "此处以下的 README 以纯文本显示：它太长或嵌套太深，无法排版。",
       "plain_notes": "此处以下的更新说明以纯文本显示：它太长或嵌套太深，无法排版。"
     }

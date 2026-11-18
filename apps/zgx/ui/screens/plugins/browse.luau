@@ -1,8 +1,9 @@
 --!strict
 -- Settings → Plugins → Browse: the plugin store, searched on its servers.
--- The page's catalog card (ds.Settings.CatalogCard) with its search, a bar
--- of what narrows it (one category, a keyword, the order), and under it the
--- store's plugins a page at a time, more asked as the page scrolls near the
+-- The list's head says how many and holds what narrows and orders it (a
+-- category, the order); the page's catalog card (ds.Settings.CatalogCard)
+-- holds its search (a keyword beside it) and under it the store's plugins
+-- a page at a time, more asked as the page scrolls near the
 -- end (`ui.paged`, keyset cursors), in a list that builds only the rows
 -- that show. With nothing searched or chosen, a few plugins Zeron
 -- features stand over the card.
@@ -329,43 +330,26 @@ local function row(first: store.Card, _i: State<number>, now: State<store.Card>)
 	}
 end
 
--- The store's categories, the card's row under its search: the app's quiet
--- tabs (All first) across the card's width, their first's words on the
--- rows' text edge. Too many for the room (a narrow pane, a longer
--- language), they run sideways and the edge hiding some shows a chevron
--- that pages them (ds/pager). One Tab stop, the arrows between them.
-local function category_tabs(): Node
-	local tabs = ui.presence(function(): string
-		return if #categories:get() > 0 then "ready" else "waiting"
-	end, function(key: string): Node
-		-- (The store's list arrives once: built then, the tabs its own.)
-		local options: { any } = { { value = "", label = ui.t("plugins.store.all") } }
-		if key == "ready" then
-			for _, c in categories:peek() do
-				local name = M.category_name(c.id)
-				table.insert(options, { value = c.id, label = name })
-			end
+-- The store's categories: the app's small Select in the list's head beside
+-- Order, "All categories" first (nine of them don't fit across a pane as
+-- tabs, and a row that scrolls in every window is worse than a choice).
+local function category_control(): Node
+	local function options(): { any }
+		local out: { any } = { { value = "", label = ui.t("plugins.store.all_categories"):get() } }
+		for _, c in categories:get() do
+			table.insert(out, { value = c.id, label = M.category_name(c.id) })
 		end
-		return ds.Tabs {
+		return out
+	end
+	return ui.div {
+		id = "store-category",
+		ds.Select {
 			value = category,
-			label = ui.t("plugins.store.category_label"),
-			-- (The app's tabs, underlined, as Settings' and a diff's are; the
-			-- card's own rule under them is their line.)
-			rule = false,
 			options = options,
-		}
-	end)
-	-- (A tab's words are 4 inside it, so 12 here puts the first's on the
-	-- rows' 16; 12 at the end as well. Its bar sits on the card's rule.)
-	return ui.row {
-		id = "store-filters",
-		w_full = true,
-		px = "$space.3",
-		ds.Pager {
-			id = "store-categories",
-			back = ui.t("plugins.store.categories_back"),
-			more = ui.t("plugins.store.categories_more"),
-			tabs,
+			size = "sm",
+			-- (As Order's: wide enough for the longest, "Developer tools".)
+			w = 160,
+			name = ui.t("plugins.store.category_label"),
 		},
 	}
 end
@@ -418,6 +402,38 @@ local function order_control(): Node
 			w = 160,
 			name = ui.t("plugins.store.order_label"),
 		},
+	}
+end
+
+-- The list's head: its count as the title at the left, and at the right
+-- what narrows and orders it, in this order: Verified only (a Switch, when
+-- the store's search takes it), Category, Order. Where the pane can't hold
+-- the title and them on one line, they go on a line of their own under the
+-- title, ending on the content edge as they do beside it.
+local list_w = ui.state("store_list_w", 0)
+local controls_w = ui.state("store_controls_w", 0)
+-- (The least the count's words keep beside them: "1,234 plugins".)
+local TITLE_LEAST = 120
+local function head_on_one_line(): boolean
+	local w, c = list_w:get(), controls_w:get()
+	-- (Not yet measured: on one line, as a wide pane has it.)
+	if w <= 0 or c <= 0 then
+		return true
+	end
+	return w - 2 * ds.Settings.TEXT_INSET >= c + ((ui.theme.get("space.3") :: number?) or 12) + TITLE_LEAST
+end
+local function head_controls(): Node
+	return ui.row {
+		id = "store-head-controls",
+		gap = "$space.2",
+		items = "center",
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(size.w - controls_w:peek()) >= 0.5 then
+				controls_w:set(size.w)
+			end
+		end,
+		category_control(),
+		order_control(),
 	}
 end
 
@@ -665,15 +681,24 @@ M.View = ui.component(function(): Node
 		end, { w_full = true })),
 		-- The store's plugins: a section, its title how many what's asked
 		-- matches (the store's `total`; "Plugins" while it isn't known, or
-		-- from a store that doesn't count), its action the order; then the
-		-- card: the search, the categories, the rows. (Its head is one
+		-- from a store that doesn't count), its controls the category and the
+		-- order; then the card: the search, the rows. (Its head is one
 		-- height loading or loaded: nothing under it moves.)
-		ui.column { id = "store-list", w_full = true, ds.Settings.Section {
+		ui.column { id = "store-list", w_full = true, on_resize = function(size: { w: number, h: number })
+			if math.abs(size.w - list_w:peek()) >= 0.5 then
+				list_w:set(size.w)
+			end
+		end, ds.Settings.Section {
 			title = function(): string
 				local n = total:get()
 				return if n and n > 0 then ui.t("plugins.store.count", { n = n }):get() else ui.t("plugins.store.list_title"):get()
 			end,
-			trail = order_control(),
+			-- (What narrows and orders it, at the title's end; in a narrow
+			-- pane, on a line of its own under the title.)
+			trail = ui.show(head_on_one_line, head_controls()),
+			ui.show(function(): boolean
+				return not head_on_one_line()
+			end, ui.row { w_full = true, justify = "end", px = ds.Settings.inset(), head_controls() }),
 			ds.Settings.CatalogCard {
 				id = "store-card",
 				search = { value = query, placeholder = ui.t("plugins.store.search") },
@@ -688,7 +713,6 @@ M.View = ui.component(function(): Node
 						keyword:set("")
 					end,
 				}),
-				filters = category_tabs(),
 				body = ui.presence(body_key, inside, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 			},
 		} },

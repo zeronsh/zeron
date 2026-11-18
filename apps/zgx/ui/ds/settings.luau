@@ -1217,16 +1217,14 @@ export type CatalogProps = {
 
 -- A Catalog's card: its search heading it (a quiet field inset evenly,
 -- its corner the card's less its edge and that inset, for its focus
--- ring, as the board's), then, under a hairline, what the page puts
--- there: `filters` (a bar of choices that narrow it, inset as the rows'
--- words are) and its `body` (the rows, or what it says instead).
+-- ring, as the board's), then, under a hairline, its `body` (the rows, or
+-- what it says instead).
 export type CatalogCardProps = {
 	id: string?,
 	search: { value: State<string>, placeholder: string | Message },
 	-- At the search's end, on its line: what narrows it besides its words
 	-- (an active keyword's token).
 	search_trail: Node?,
-	filters: Node?,
 	body: Node,
 }
 
@@ -1265,8 +1263,6 @@ function M.CatalogCard(props: CatalogCardProps): Node
 		overflow = "hidden",
 		search,
 		M.Rule(),
-		if props.filters then props.filters else nil,
-		if props.filters then M.Rule() else nil,
 		props.body,
 	}
 end
