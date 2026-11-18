@@ -371,46 +371,47 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 					secret_open:set(false)
 				end,
 			},
-			ui.row {
+			-- (The design system's sunken surface: a well the secret sits in.)
+			ds.Surface {
 				id = "key-secret",
+				kind = "sunken",
 				w_full = true,
-				gap = "$space.2",
-				items = "center",
 				p = "$space.2",
 				pl = "$space.3",
-				rounded = "$radius.lg",
-				bg = "$surface.sunken",
-				border = 1,
-				border_color = "$zeron.well.edge",
-				-- (One line in the code face, scrolling sideways: never broken
-				-- inside the token. Copy is what takes it.)
-				ui.scroll_x {
-					grow = 1,
-					min_w = 0,
-					fade = { 12, 12 },
-					fade_overflow = true,
-					ui.text {
-						function(): string
-							return secret:get() or ""
-						end,
-						font = "$font.mono",
-						text_size = "$font.size.sm",
-						line_height = "$font.line.sm",
-						color = "$text.primary",
-						selectable = true,
+				ui.row {
+					w_full = true,
+					gap = "$space.2",
+					items = "center",
+					-- (One line in the code face, scrolling sideways: never broken
+					-- inside the token. Copy is what takes it.)
+					ui.scroll_x {
+						grow = 1,
+						min_w = 0,
+						fade = { 12, 12 },
+						fade_overflow = true,
+						ui.text {
+							function(): string
+								return secret:get() or ""
+							end,
+							font = "$font.mono",
+							text_size = "$font.size.sm",
+							line_height = "$font.line.sm",
+							color = "$text.primary",
+							selectable = true,
+						},
 					},
-				},
-				ds.Button {
-					tone = "secondary",
-					size = "sm",
-					on_click = function()
-						local s = secret:peek()
-						if s then
-							ui.clipboard.write(s)
-							ds.toast.show { title = ui.t("plugins.store.key.copied"), tone = "success" }
-						end
-					end,
-					ui.t("plugins.store.key.copy"),
+					ds.Button {
+						tone = "secondary",
+						size = "sm",
+						on_click = function()
+							local s = secret:peek()
+							if s then
+								ui.clipboard.write(s)
+								ds.toast.show { title = ui.t("plugins.store.key.copied"), tone = "success" }
+							end
+						end,
+						ui.t("plugins.store.key.copy"),
+					},
 				},
 			},
 		},
