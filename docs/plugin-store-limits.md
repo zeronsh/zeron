@@ -85,3 +85,62 @@ peaked at 280 MB for 20 MB without these):
 
 Re-run the script after changing the pipeline:
 `node edge/scripts/store-package-limit.mjs [MB …] [--no-r2]`.
+
+## With the identity lane's body reader
+
+The store reads bodies through `readBody` (`edge/src/store/principal.ts`),
+which the identity lane's version replaces at the merge. That reader keeps
+every chunk and then joins them, never allocating from `Content-Length`, so
+the body is briefly held twice. Measured that way (`--chunks`):
+
+| Package | Peak over idle | CPU |
+|---:|---:|---:|
+| 10 MB | 37 MB | 150 ms |
+| 20 MB | 72 MB | 280 ms |
+
+20 MB still fits with room; the limit stands.
+
+## Hostile bodies
+
+A body need not be a package. Each shape below is valid-looking JSON at the
+size given, sent signed in with a username (`--shape=…`, with `--chunks`).
+The first version of the parser built a JavaScript value for every JSON
+value; the store now checks the whole document without building it
+(`edge/src/store/scan.ts`), builds only the manifest (at most 1 MB of JSON
+and 100,000 values, else `too_large`), and decodes file data from the
+request's bytes.
+
+| Shape | Size | Before: peak / CPU | Now: peak / CPU | Answer now |
+|---|---:|---:|---:|---|
+| a package plus `"x":[0,0,0,…]` | 8 MB | 243 MB / 830 ms | 23 MB / 110 ms | accepted (an unknown member, as the engine) |
+| | 20 MB | 527 MB / 3,040 ms | 57 MB / 250 ms | accepted |
+| a package plus `"x":0.000…001` (one number) | 8 MB | 261 MB / 480 ms | 23 MB / 60 ms | accepted |
+| | 20 MB | 536 MB / 1,090 ms | 56 MB / 160 ms | accepted |
+| a package plus `"x":[{},{},…]` | 8 MB | 378 MB / 1,010 ms | 23 MB / 100 ms | accepted |
+| | 20 MB | 876 MB / 2,660 ms | 57 MB / 200 ms | accepted |
+| a file's data of `\/\/\/…` | 8 MB | 155 MB / 270 ms | 29 MB / 100 ms | `bad_file` |
+| | 20 MB | 323 MB / 610 ms | 72 MB / 220 ms | `bad_file` |
+| a manifest holding `[0,0,0,…]` | 8 MB | 384 MB / 1,890 ms | 23 MB / 100 ms | `too_large` |
+| | 20 MB | 837 MB / 4,240 ms | 57 MB / 240 ms | `too_large` |
+| `files` with a million empty keys | 22 MB | — | 69 MB / 180 ms | `too_large` (past 2,000) |
+
+Every "before" row is past a Worker's 128 MB, so it would have ended the
+isolate and every request on it; every "now" row is the body itself held
+twice by the reader, then freed, and linear CPU.
+
+## What else an author's text meets
+
+Every pattern run on text a publisher controls is linear or bounded:
+
+- the package's JSON: one pass (`scan.ts`); a number's range is worked out
+  from at most 800 of its digits; the manifest is parsed under the bounds
+  above;
+- `CHANGELOG.md`: refused past 512 KB before it is read; notes are found by
+  a line scan with no regular expression (`listing.ts` `changelogNotes`);
+- `README.md`: refused past 512 KB, then decoded once;
+- `ui.change` selectors and network hosts: refused past 200 and 253 bytes
+  before any parsing, then scanned with simple patterns;
+- keywords, URLs, names, descriptions, paths: single-class patterns
+  (`/^[a-z0-9 -]+$/`, `/[\p{Cc}\p{Cf}]/u`), each linear, on fields the
+  listing rules bound;
+- search terms (`?q`, at most 200 characters): `/[\p{L}\p{N}]+/gu`, linear.
