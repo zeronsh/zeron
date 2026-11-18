@@ -464,8 +464,8 @@ function M.truncated_row_h(lead: number?, byline: boolean?): number
 end
 
 -- One thing set apart, a card of its own that opens it (the plugin store's
--- featured plugins): its tile beside its name over who made it (a list
--- row's head), then two lines of what it is, on the card's text edge. One
+-- featured plugins): its tile beside its name over who made it and its
+-- `badge` (a small one, its line's height), then two lines of what it is, on the card's text edge. One
 -- height whatever it says (the two lines held for it); its width a shelf's
 -- (ds/shelf, `M.FEATURE_MIN` its least: the tile, and a name and its two
 -- lines a readable measure beside and under it). The whole card is one
@@ -518,22 +518,24 @@ function M.Feature(props: FeatureProps): Node
 					grow = 1,
 					min_w = 0,
 					gap = "$zeron.space.hair",
+					FadeText {
+						props.label,
+						min_w = 0,
+						text_size = "$font.size.md",
+						line_height = "$font.line.md",
+						weight = "$font.weight.medium",
+						color = "$text.primary",
+					},
+					-- (Who made it, and its badge after: the name's line its
+					-- own at every card width. The small badge is the line's
+					-- height, so the card's stays one.)
 					ui.row {
 						gap = "$space.2",
 						items = "center",
 						min_w = 0,
-						FadeText {
-							props.label,
-							shrink = 1,
-							min_w = 0,
-							text_size = "$font.size.md",
-							line_height = "$font.line.md",
-							weight = "$font.weight.medium",
-							color = "$text.primary",
-						},
-						props.badge,
+						FadeText { props.byline or "", shrink = 1, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
+						if props.badge then ui.div { shrink = 0, props.badge } else nil,
 					},
-					FadeText { props.byline or "", min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
 				},
 			},
 			-- (Two lines held whatever it says: one height for every card.)
@@ -654,6 +656,8 @@ M.InlineLink = ui.component(function(props: InlineLinkProps): Node
 	}
 end)
 
+export type RowBadges = { keys: () -> { string }, badge: (key: string) -> Node }
+
 export type RowProps = {
 	label: string | Message | () -> string,
 	description: (string | Message | () -> string)?,
@@ -662,6 +666,13 @@ export type RowProps = {
 	lead: Node?,
 	-- Right after the name, on its line ("You", "In use").
 	badge: Node?,
+	-- After the name, on its line, each whole or absent, never cut (the
+	-- store's "Verified", then an account's badges): `keys`, the ones it
+	-- has, in order; `badge`, the one a key names. As many show as fit
+	-- while the name keeps `NAME_LEAST`, so the last go first. A key names
+	-- the same words on every row that has it: its width, measured once, is
+	-- known to the next row as it comes.
+	badges: RowBadges?,
 	control: Node?,
 	-- The control under the text, full width.
 	stacked: boolean?,
@@ -705,48 +716,141 @@ export type RowProps = {
 	detail_link: { label: string | Message, on_click: () -> () }?,
 }
 
+-- The least a row's name keeps beside its badges: past it, the last badge
+-- goes, then the one before (ds/settings `badges`).
+local NAME_LEAST = 96
+-- Each badge's width (without its gap), by its key: as last measured on
+-- any row.
+local badge_w: { [string]: number } = {}
+
+-- A row's name and its badges, each whole or absent (`RowProps.badges`).
+-- Each is measured in a box of its own, its gap before it; the box is that
+-- wide while it fits and none while it doesn't (its badge invisible, kept
+-- only to be measured). Until its width is known it is absent.
+local BadgedName = ui.component(function(props: { name: Node, badges: RowBadges }): Node
+	local line_w = ui.use_state(0)
+	-- (Moves when a width does: what's shown reads it.)
+	local measured = ui.use_state(0)
+	local keys = ui.computed(function(): { string }
+		return props.badges.keys()
+	end)
+	-- The gap before a badge: the name's step before the first, a
+	-- badge's between the next (as `badge`'s and a row of badges').
+	local function gap(first: boolean): number
+		return (ui.theme.get(if first then "space.2" else "space.1") :: number?) or (if first then 8 else 4)
+	end
+	-- Its box's width shown: the badge and its gap; nil while unmeasured.
+	local function width(key: string, first: boolean): number?
+		measured:get()
+		local w = badge_w[key]
+		return if w then w + gap(first) else nil
+	end
+	local function shown(key: string): boolean
+		local room = line_w:get() - NAME_LEAST
+		local used = 0
+		for j, k in keys:get() do
+			local w = width(k, j == 1)
+			if w == nil then
+				return false
+			end
+			used += w
+			if k == key then
+				return used <= room
+			end
+		end
+		return false
+	end
+	local function first(key: string): boolean
+		return keys:get()[1] == key
+	end
+	return ui.row {
+		w_full = true,
+		items = "center",
+		min_w = 0,
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(size.w - line_w:peek()) >= 0.5 then
+				line_w:set(size.w)
+			end
+		end,
+		props.name,
+		ui.each(keys, function(key: string): Node
+			return ui.row {
+				shrink = 0,
+				overflow = "hidden",
+				-- (The badge at the box's end: its gap before it.)
+				justify = "end",
+				w = function(): number
+					return if shown(key) then width(key, first(key)) or 0 else 0
+				end,
+				ui.div {
+					shrink = 0,
+					-- (Unshown, it keeps its size, to be measured, and is
+					-- neither drawn, hit nor read.)
+					invisible = function(): boolean
+						return not shown(key)
+					end,
+					on_resize = function(size: { w: number, h: number })
+						if size.w > 0 and math.abs(size.w - (badge_w[key] or -1)) >= 0.5 then
+							badge_w[key] = size.w
+							measured:set(measured:peek() + 1)
+						end
+					end,
+					props.badges.badge(key),
+				},
+			}
+		end, {
+			key = function(key: string): string
+				return key
+			end,
+		}),
+	}
+end)
+
 function M.Row(props: RowProps): Node
+	local name = if props.private_label
+		then PrivateText {
+			props.label,
+			truncate = props.truncate,
+			grow = if props.truncate then 1 else nil,
+			text_size = "$font.size.md",
+			line_height = "$font.line.md",
+			weight = "$font.weight.medium",
+			color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
+		}
+		elseif props.truncate
+		then FadeText {
+			props.label,
+			-- (With a badge, only as wide as the name, so the badge sits
+			-- right after it; it still shrinks to fade.)
+			grow = if props.badge or props.badges then nil else 1,
+			shrink = 1,
+			min_w = 0,
+			text_size = "$font.size.md",
+			line_height = "$font.line.md",
+			weight = "$font.weight.medium",
+			color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
+		}
+		else ui.text {
+			props.label,
+			text_size = "$font.size.md",
+			line_height = "$font.line.md",
+			weight = if props.quiet then "$font.weight.regular" else "$font.weight.medium",
+			color = if props.danger then "$zeron.tone.danger.ink" elseif props.quiet then "$text.secondary" else "$text.primary",
+			wrap = true,
+		}
 	local text = ui.column {
 		grow = 1,
 		min_w = 0,
 		gap = "$zeron.space.hair",
-		ui.row {
-			gap = "$space.2",
-			items = "center",
-			min_w = 0,
-			if props.private_label
-				then PrivateText {
-					props.label,
-					truncate = props.truncate,
-					grow = if props.truncate then 1 else nil,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
-					weight = "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
-				}
-				elseif props.truncate
-				then FadeText {
-					props.label,
-					-- (With a badge, only as wide as the name, so the badge sits
-					-- right after it; it still shrinks to fade.)
-					grow = if props.badge then nil else 1,
-					shrink = 1,
-					min_w = 0,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
-					weight = "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
-				}
-				else ui.text {
-					props.label,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
-					weight = if props.quiet then "$font.weight.regular" else "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" elseif props.quiet then "$text.secondary" else "$text.primary",
-					wrap = true,
-				},
-			props.badge,
-		},
+		if props.badges
+			then BadgedName { name = name, badges = props.badges }
+			else ui.row {
+				gap = "$space.2",
+				items = "center",
+				min_w = 0,
+				name,
+				props.badge,
+			},
 		if props.byline and props.truncate
 			then FadeText { props.byline, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
 			elseif props.byline

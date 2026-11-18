@@ -24,6 +24,7 @@ local store = require("@app/screens/plugins/store")
 local state = require("@app/screens/plugins/state")
 local words = require("@app/screens/plugins/words")
 local nav = require("@app/screens/plugins/nav")
+local browse = require("@app/screens/plugins/browse")
 
 local M = {}
 
@@ -59,19 +60,13 @@ function M.load()
 	end)
 end
 
--- A version's state as the store keeps it (listed, yanked, taken down,
--- removed), its review apart: the store verifies; it doesn't gate.
+-- A version's state and its review, as every list of versions reads them
+-- (screens/plugins/browse): the author's view, a decline said.
 local function status_of(v: any): string
-	return if type(v.status) == "string" then v.status else "listed"
+	return browse.version_state(v)
 end
--- Its review: "verified", "declined" (a reviewer declined to verify it, the
--- author alone told why), else "waiting".
 local function review_of(v: any): string
-	if v.verified == true then
-		return "verified"
-	end
-	local r = v.review
-	return if type(r) == "table" and r.decision == "declined" then "declined" else "waiting"
+	return browse.version_review(v, true)
 end
 local function superseded_by(v: any): string?
 	if v.yanked_by ~= "superseded" then
@@ -80,19 +75,6 @@ local function superseded_by(v: any): string?
 	local by = if type(v.superseded) == "table" then v.superseded.by else v.superseded_by
 	return if type(by) == "string" and by ~= "" then by else nil
 end
-
--- A state's badge beside its version: one taking no new installs, taken
--- down, removed; else where its review stands (the store's mark when it's
--- verified).
-local STATUS_TONE: { [string]: string } = {
-	yanked = "info",
-	taken_down = "warning",
-	removed = "neutral",
-}
-local REVIEW_TONE: { [string]: string } = {
-	waiting = "warning",
-	declined = "danger",
-}
 
 -- Yours in the store, by name: what a deploy key's scope chooses from.
 function M.owned(): { { id: string, name: string } }
@@ -507,26 +489,11 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 			label = function(): string
 				return now:get().version
 			end,
-			-- (The store's mark when it's verified; else its state's badge,
-			-- its tone the state's; listed and waiting, none.)
-			badge = ui.switch(function(): string
-				local v = now:get()
-				local s = status_of(v)
-				if STATUS_TONE[s] then
-					return s
-				end
-				return review_of(v)
-			end, (function(): { [string]: Node }
-				local out: { [string]: Node } = {}
-				for s, tone in STATUS_TONE do
-					out[s] = ds.Badge { ui.t(`plugins.store.status.{s}`), tone = tone :: any, size = "sm" }
-				end
-				for r, tone in REVIEW_TONE do
-					out[r] = ds.Badge { ui.t(`plugins.store.review.{r}`), tone = tone :: any, size = "sm" }
-				end
-				out.verified = ds.Badge { ui.t("plugins.store.verified"), class = "store-verified", tone = "success", size = "sm" }
-				return out
-			end)()),
+			-- (As every list of versions has it: its state's badge, else its
+			-- review's, the store's mark when it's verified.)
+			badge = browse.version_badge(function(): any
+				return now:get()
+			end, true),
 			description = function(): string
 				local at = now:get().published_at
 				return if type(at) == "number" then locale.date(at / 1000) else ""

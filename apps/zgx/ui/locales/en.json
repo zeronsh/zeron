@@ -3616,7 +3616,10 @@
         "available_unversioned": "Update available:.",
         "added": "It also asks to {list}; you'll be asked first.",
         "removed": "It no longer asks to {list}.",
-        "held": "{version} is out, not verified yet: this plugin takes verified updates only."
+        "held": "{version} is out, not verified yet: it takes verified updates only.",
+        "unverified": "{version} is out, not verified yet.",
+        "held_plugin": "{version} is out, not verified yet: this plugin takes verified updates only.",
+        "held_computer": "{version} is out, not verified yet: this computer takes verified updates only."
       },
       "unverified": "Unverified",
       "from": "From {where}",
@@ -3643,8 +3646,7 @@
         "replaces": "Screens it replaces",
         "changes_since": "Also changes, since you allowed it"
       },
-      "store_unverified": "Version {version} isn't verified by the plugin store.",
-      "store_unverified_unversioned": "This version isn't verified by the plugin store."
+      "store_unverified_unversioned": "Zeron hasn't verified this version yet."
     },
     "page": {
       "title": "Plugins",
@@ -4115,6 +4117,7 @@
       "update_new_owner": "It has a new publisher, @{username}. Zeron asks you to allow it again after it updates.",
       "update_new_owner_unnamed": "It has a new publisher. Zeron asks you to allow it again after it updates.",
       "update_new_key": "This version is signed with a different key than the one you have.",
+      "update_asks_first": "Zeron asks you to allow it before it updates.",
       "keys_publish_first": "Publish one of your plugins from this computer first.",
       "version_installs": "Version {version} · {n, plural, one {# install} other {# installs}}",
       "show_installed": "Show it in Installed",
@@ -4138,19 +4141,20 @@
         "declined": "Not verified",
         "declined_said": "The reviewer's note: “{words}”"
       },
-      "superseded": "Replaced by {version} before it was verified: no new installs",
+      "superseded": "Replaced by {version} before it was verified",
       "sent_toast_body": "It shows as not verified until a reviewer has read it.",
       "updates_label": "Updates",
       "updates_body": "Which new versions it updates to on this computer.",
       "updates_newest": "Newest version",
       "updates_verified": "Verified versions only",
       "couldnt_updates": "Couldn't change {name}'s updates",
-      "updates_device": "Same as this computer",
+      "updates_device": "Same as this computer ({choice})",
       "updates_section": "Plugin store",
       "updates_all_label": "Updates",
       "updates_all_body": "Which new versions your plugins from the store update to on this computer.",
       "couldnt_updates_all": "Couldn't change which updates your plugins take",
-      "installed_was_verified_plain": "The version you have was verified."
+      "installed_was_verified_plain": "The version you have was verified.",
+      "newest_verified_is": "{version} is the newest version Zeron has verified."
     }
   },
   "templates": {

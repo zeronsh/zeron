@@ -725,3 +725,59 @@ test("a deploy key's secret is one line in the code face, never broken inside it
 	local text_h = tonumber(line:match('text "zpk_[^"]*" [%-%d.]+,[%-%d.]+ [%d.]+x([%d.]+)')) or 0
 	expect(text_h <= 20).to_be(true)
 end)
+
+-- A row's badges are whole or absent, never cut: in a narrowing row the
+-- name keeps its floor and the account's badge goes first, then the
+-- mark. Focus timer has both (the stub's "Maintainer" for @ada).
+test("a row's badges are whole or absent: both, then Verified alone, then none, never cut", function()
+	local seen = { both = false, verified = false, none = false }
+	local whole: { [string]: number } = {}
+	for _, width in { 1000, 760, 560, 480, 440, 400, 360, 330, 300 } do
+		local app = mount("plugins_store_fixture.luau")
+		app:resize(width, 900)
+		app:frames(10)
+		app:click('role:tab "Browse"')
+		app:wait("#store-rows", { timeout_ms = 3000 })
+		settle(app, 400)
+		expect(app:error()).to_be_nil()
+		local row = app:tree('#store-rows >> role:button "Focus timer"')
+		local rx, _, rw = row:match('button "Focus timer" (%-?%d+),(%-?%d+) (%d+)x')
+		local text_x = tonumber(row:match('text "by @ada[^"]*" (%-?%d+),'))
+		assert(rx and text_x, `{width}: {row}`)
+		local function badge(words: string): (boolean, number?, number?)
+			local line = row:match(`text "{words}"[^\n]*`)
+			if not line then
+				return false, nil, nil
+			end
+			local x, w = line:match(" (%-?%d+),%-?%d+ (%d+)x")
+			return not line:find("hidden", 1, true), tonumber(x), tonumber(w)
+		end
+		local v_on, v_x, v_w = badge("Verified")
+		local m_on, m_x, m_w = badge("Maintainer")
+		-- (Maintainer never without Verified: the last go first.)
+		expect(`{width}: {m_on and not v_on}`).to_be(`{width}: false`)
+		for words, on in { Verified = v_on, Maintainer = m_on } do
+			local x = if words == "Verified" then v_x else m_x
+			local w = if words == "Verified" then v_w else m_w
+			if on then
+				-- Whole: its own width, inside the row, past the name's floor
+				-- (or where it stands beside a name that is whole).
+				whole[words] = whole[words] or w
+				expect(`{width} {words} w={w}`).to_be(`{width} {words} w={whole[words]}`)
+				expect(`{width} {words} inside={(x :: number) + (w :: number) <= tonumber(rx) + tonumber(rw)}`).to_be(`{width} {words} inside=true`)
+			end
+		end
+		if v_on then
+			expect(`{width}: {(v_x :: number) - text_x >= 80}`).to_be(`{width}: true`)
+		end
+		if v_on and m_on then
+			seen.both = true
+			expect(`{width}: {(m_x :: number) >= (v_x :: number) + (v_w :: number)}`).to_be(`{width}: true`)
+		elseif v_on then
+			seen.verified = true
+		else
+			seen.none = true
+		end
+	end
+	expect(`{seen.both} {seen.verified} {seen.none}`).to_be("true true true")
+end)

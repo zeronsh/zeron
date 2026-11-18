@@ -452,6 +452,34 @@ local given_readme = ui.state("store_stub_readme", "")
 local given_notes = ui.state("store_stub_notes", "")
 -- (A detail's first page of versions, as the store gives it.)
 local VERSIONS_PAGE = 5
+-- The store's superseding rule, kept by every list here so each is one the
+-- store could hold: publishing a version stops new installs of every older
+-- listed one it hasn't verified ("superseded", by the one published next).
+-- A release is superseded by the next release; a pre-release by the next
+-- version of either kind. Newest first.
+local function supersede(versions: { any })
+	local function pre(v: any): boolean
+		return string.find(v.version, "-", 1, true) ~= nil
+	end
+	for i, v in versions do
+		if v.status == "listed" and v.verified ~= true then
+			for j = i - 1, 1, -1 do
+				local newer = versions[j]
+				if pre(v) or not pre(newer) then
+					v.status = "yanked"
+					v.yanked = true
+					v.yanked_by = "superseded"
+					v.superseded_by = newer.version
+					break
+				end
+			end
+		end
+	end
+end
+for _, e in entries do
+	supersede(e.versions)
+end
+
 -- Which updates each plugin takes here ("newest", the default, or
 -- "verified"), as the store page reads it (`installed.updates`).
 local updates_pref: { [string]: string } = {}
@@ -996,6 +1024,7 @@ ui.command {
 		f.card.verified = false
 		f.card.verified_version = "1.2.0"
 		table.insert(f.versions, 1, { version = "1.3.0", status = "listed", verified = false, published_at = NOW, notes = "- Longer breaks." })
+		supersede(f.versions)
 	end,
 }
 

@@ -653,7 +653,7 @@ test("a version the store hasn't verified says so plainly under the summary, off
 	local line = app:tree("#store-verified-line")
 	expect(line).to_contain("1.2.0 isn't verified yet. 1.0.0 is.")
 	expect(app:has("#store-header >> .store-verified")).to_be(false)
-	app:click('#store-verified-line >> role:link "Install 1.0.0 instead"')
+	app:click('#store-verified-line >> role:button "Install 1.0.0 instead"')
 	settle(app)
 	expect(calls(app)).to_contain("install:todo-sweep@1.0.0")
 	-- Sentry traces: none verified, nothing to offer.
@@ -725,7 +725,7 @@ test("a store plugin's page chooses which updates it takes here: the same as thi
 	app:command("store.install_done")
 	app:command("store.allowed")
 	settle(app)
-	expect(app:tree("#store-updates")).to_contain('text "Same as this computer"')
+	expect(app:tree("#store-updates")).to_contain('text "Same as this computer (Newest version)"')
 	local y = tonumber((app:tree("#store-updates"):match(" %-?[%d.]+,(%-?[%d.]+) "))) or 0
 	app:scroll("#fixture-scroll", y - 400)
 	app:frames(10)
@@ -737,7 +737,7 @@ test("a store plugin's page chooses which updates it takes here: the same as thi
 	-- Back to the device's: its own choice cleared.
 	app:click("#store-updates")
 	app:frames(10)
-	app:click('role:menuitem "Same as this computer"')
+	app:click('role:menuitem "Same as this computer (Newest version)"')
 	settle(app)
 	expect(calls(app)).to_contain("updates:focus-timer:default")
 	-- An unverified one it leaves waiting is said on its row in Installed,
@@ -750,7 +750,12 @@ test("a store plugin's page chooses which updates it takes here: the same as thi
 	settle(app)
 	app:click('role:tab "Installed"')
 	settle(app)
-	expect(app:tree()).to_contain("1.3.0 is out, not verified yet")
+	-- (Following this computer: its rule, said as whose.)
+	expect(app:tree()).to_contain("1.3.0 is out, not verified yet: this computer takes verified")
+	-- Its own choice: said as its own.
+	app:set_state("plugins.store_updates", { device = "newest", plugins = { ["focus-timer"] = "verified" } })
+	settle(app)
+	expect(app:tree()).to_contain("1.3.0 is out, not verified yet: this plugin takes verified")
 end)
 
 test("Installed sets which updates this device's store plugins take, and says when one runs a version the store hasn't verified", function()
@@ -764,7 +769,8 @@ test("Installed sets which updates this device's store plugins take, and says wh
 	settle(app)
 	app:click('role:tab "Installed"')
 	settle(app)
-	expect(app:tree()).to_contain("isn't verified by the plugin store")
+	-- (The sheets' sentence.)
+	expect(app:tree()).to_contain("Zeron hasn't verified 1.2.0 yet.")
 	app:scroll("#fixture-scroll", 1e6)
 	app:frames(10)
 	-- Newest version unless you choose otherwise.
@@ -776,13 +782,37 @@ test("Installed sets which updates this device's store plugins take, and says wh
 	expect(calls(app)).to_contain("updates:device:verified")
 end)
 
-test("an update one click won't take, not verified, opens its plugin's page with its update sheet", function()
+-- An unverified update offered is said on its row before any click; its
+-- Update stages it (not one click's verified-only), and the consent window
+-- asks: the one place a person allows an unverified version.
+test("an unverified update is said on its row, and its Update stages it for the consent window to ask", function()
 	local app = page("Focus timer")
 	app:click('#store-offer >> role:button "Install"')
 	app:command("store.install_done")
 	app:command("store.allowed")
 	app:command("store.update_unverified")
-	app:command("store.update_refused_unverified")
+	settle(app)
+	app:click('role:button "Back to Plugins"')
+	settle(app)
+	app:click('role:tab "Installed"')
+	settle(app)
+	expect(app:tree()).to_contain("1.3.0 is out, not verified yet.")
+	app:click('role:button "Update"')
+	settle(app, 600)
+	expect(calls(app)).to_contain("update:focus-timer")
+	expect(calls(app)).never.to_contain("update:focus-timer:verified_only")
+	-- Still Installed: no page and no sheet of its own between.
+	expect(app:state("plugins_view")).to_be("catalog")
+	expect(app:has("role:dialog")).to_be(false)
+end)
+
+-- A verified update still takes one click, verified only.
+test("a verified update's Update takes it in one click, verified only", function()
+	local app = page("Focus timer")
+	app:click('#store-offer >> role:button "Install"')
+	app:command("store.install_done")
+	app:command("store.allowed")
+	app:command("store.update_new_key")
 	settle(app)
 	app:click('role:button "Back to Plugins"')
 	settle(app)
@@ -791,6 +821,64 @@ test("an update one click won't take, not verified, opens its plugin's page with
 	app:click('role:button "Update"')
 	settle(app, 600)
 	expect(calls(app)).to_contain("update:focus-timer:verified_only")
-	expect(app:state("plugins_view")).to_be("store:focus-timer")
-	expect(app:tree("role:dialog")).to_contain("Zeron hasn't verified 1.3.0 yet.")
+end)
+
+-- The store can verify the version running later: the row reads it again.
+test("a running version the store later verifies loses its line", function()
+	local app = page("Focus timer")
+	app:click('#store-offer >> role:button "Install"')
+	app:command("store.install_done")
+	app:command("store.allowed")
+	app:command("store.running_unverified")
+	settle(app)
+	app:click('role:button "Back to Plugins"')
+	settle(app)
+	app:click('role:tab "Installed"')
+	settle(app)
+	expect(app:tree()).to_contain("Zeron hasn't verified 1.2.0 yet.")
+	app:command("store.running_verified")
+	settle(app)
+	expect(app:tree()).never.to_contain("hasn't verified")
+end)
+
+-- A plugin's Versions say at a glance which are verified: each version's
+-- badge beside its number, as Publish's list has it ("Verified", "Not
+-- verified yet", or why it takes no new installs), the day under it. The
+-- public never learns of a decline: never "Not verified" alone. Every
+-- list is one the store could hold: an unverified version older than a
+-- newer one was replaced.
+test("a plugin's versions each carry their badge beside the number, in the public's words, as a store could hold them", function()
+	local app = page("Focus timer")
+	app:set_state("plugins_view", "store:extremes")
+	app:wait("#store-header", { timeout_ms = 3000 })
+	settle(app)
+	app:scroll("#fixture-scroll", 1e6)
+	settle(app)
+	app:click('role:button "Show all versions"')
+	settle(app, 600)
+	local badges: { string } = {}
+	local tree = app:tree('role:group "Versions"')
+	for line in tree:gmatch("[^\n]+") do
+		local words = line:match('text "(Verified)"') or line:match('text "(Not verified yet)"') or line:match('text "(No new installs)"')
+		if words then
+			table.insert(badges, words)
+		end
+	end
+	-- 10.20.30 (the newest, not verified yet), then verified and replaced
+	-- in turn: twelve badges, one a version.
+	expect(#badges).to_be(12)
+	expect(badges[1]).to_be("Not verified yet")
+	expect(badges[2]).to_be("Verified")
+	expect(badges[3]).to_be("No new installs")
+	expect(tree).to_contain("Replaced by 10.20.29 before it was verified")
+	expect(tree).never.to_contain("before it was verified: no new installs")
+	expect(tree).never.to_contain('text "Not verified"')
+	-- The badge on its number's line, after it.
+	local nx, ny, nw = tree:match('text "10%.20%.29" (%-?%d+),(%-?%d+) (%d+)x')
+	local bx, by = tree:match('text "10%.20%.29" [^\n]*\n[^\n]*text "Verified" (%-?%d+),(%-?%d+)')
+	assert(nx and bx, tree)
+	expect(tonumber(bx) :: number > tonumber(nx) + tonumber(nw)).to_be(true)
+	expect(math.abs(tonumber(by) - tonumber(ny)) <= 3).to_be(true)
+	-- No Install on a replaced one; only the newest unverified one takes it.
+	expect(app:count('.store-version >> role:button "Install"') <= 6).to_be(true)
 end)

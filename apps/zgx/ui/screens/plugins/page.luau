@@ -186,18 +186,34 @@ local function choose_file()
 	end)
 end
 
+-- Whose rule holds a store plugin's unverified update back: its own
+-- choice, or this computer's (the engine's `store_updates`, this device's
+-- alone: another's isn't known here).
+local function held_by(it: any): ("plugin" | "computer")?
+	if device() ~= nil then
+		return nil
+	end
+	local prefs: any = state.store_updates:get()
+	local store_id = if type(it.source) == "table" then it.source.id else nil
+	local own = if type(prefs) == "table" and type(prefs.plugins) == "table" and type(store_id) == "string" then prefs.plugins[store_id] else nil
+	return if own == "verified" then "plugin" else "computer"
+end
+
 local function update(id: string, name: string)
 	updating:set(id)
-	-- (A store plugin's one click takes a verified update alone: one the
-	-- store hasn't verified opens its page's update sheet, its own question.)
+	-- (A store plugin's one click takes a verified update alone. One the
+	-- store hasn't verified is staged, and the consent window asks, with
+	-- its warning and the verified one to take instead: the one place a
+	-- person allows an unverified version.)
 	local it: any = nil
 	for _, i in (if device() then state.remote:peek().list else state.now:peek().list) or {} do
 		if i.id == id then
 			it = i
 		end
 	end
-	local store_id = if it and type(it.source) == "table" and it.source.kind == "store" and type(it.source.id) == "string" then it.source.id else nil
-	local p: any = state.update(id, device(), store_id ~= nil)
+	local from_store = it ~= nil and type(it.source) == "table" and it.source.kind == "store"
+	local unverified = from_store and type(it.update) == "table" and it.update.verified == false
+	local p: any = state.update(id, device(), from_store and not unverified)
 	if p == nil then
 		updating:set(nil)
 		return
@@ -207,11 +223,6 @@ local function update(id: string, name: string)
 		settled("plugins.page.updated_toast", "plugins.page.updated_toast_version")(done)
 	end, function(err: any)
 		updating:set(nil)
-		local m = if type(err) == "table" then err.message else err
-		if store_id and type(m) == "string" and string.match(m, "^not_verified") then
-			nav.open_update(store_id)
-			return
-		end
 		failed(ui.t("plugins.page.couldnt_update", { name = name }))(err)
 	end)
 end
@@ -467,7 +478,7 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 				return publish.summary(it.id) or ui.t("plugins.store.summary.unknown"):get()
 			end
 			-- (And a store version running that the store hasn't verified.)
-			return words.grants(it) or words.update(it) or words.store_unverified(it)
+			return words.grants(it) or words.update(it, held_by(it)) or words.store_unverified(it)
 		end,
 		detail_action = if publishing then nil else UpdateLink { now = now },
 		-- (Publish… is its sentence's own link: right after its last word,

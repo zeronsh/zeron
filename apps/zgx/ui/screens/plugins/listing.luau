@@ -382,13 +382,6 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local busy = ui.use_state(false)
 	local updating = ui.use_state(false)
 	local update_open = ui.use_state(false)
-	-- (Opened for its update sheet, an update one click wouldn't take.)
-	ui.on_mount(function()
-		if nav.take_update(id) then
-			state.check_updates(props.here.device(), id)
-			update_open:set(true)
-		end
-	end)
 	local report_open = ui.use_state(false)
 	local report_reason = ui.use_state(store.REPORT_REASONS[1])
 	local report_text = ui.use_state("")
@@ -810,11 +803,16 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				local v = verified_version()
 				local it: any = item()
 				return v ~= nil and not here.away() and not other() and (it == nil or it.version ~= v)
-			end, ds.Link {
-				function(): string
+			-- (The app's one look for a link ending a sentence, as a version
+			-- row's Install: doing something here, a button.)
+			end, ds.Settings.InlineLink {
+				role = "button",
+				label = function(): string
 					return ui.t("plugins.store.install_instead", { version = verified_version() or "" }):get()
 				end,
-				size = "sm",
+				disabled = function(): boolean
+					return busy:get()
+				end,
 				on_click = function()
 					local v = verified_version()
 					if v then
@@ -1072,7 +1070,9 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		local out: { any } = {}
 		local prefs = local_prefs()
 		if prefs then
-			table.insert(out, { value = "device", label = ui.t("plugins.store.updates_device"):get() })
+			-- (What this computer's choice is, said in it.)
+			local device_word = if prefs.device == "verified" then ui.t("plugins.store.updates_verified"):get() else ui.t("plugins.store.updates_newest"):get()
+			table.insert(out, { value = "device", label = ui.t("plugins.store.updates_device", { choice = device_word }):get() })
 		end
 		table.insert(out, { value = "newest", label = ui.t("plugins.store.updates_newest"):get() })
 		table.insert(out, { value = "verified", label = ui.t("plugins.store.updates_verified"):get() })
@@ -1452,31 +1452,28 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			label = function(): string
 				return now:get().version
 			end,
-			badge = ui.show(function(): boolean
-				return now:get().yanked == true or now:get().status == "yanked"
-			end, ds.Badge { ui.t("plugins.store.status.yanked"), tone = "info", size = "sm" }),
+			-- (As every list of versions has it, Publish's too: the public's
+			-- view, a version nobody verified "Not verified yet".)
+			badge = browse.version_badge(function(): any
+				return now:get()
+			end),
 			description = function(): string
 				local at = now:get().published_at
 				return if type(at) == "number" then locale.date(at / 1000) else ""
 			end,
-			-- Whether the store has verified it, and whether it's the one
-			-- this device has; any other listed one, installed from here.
+			-- Why it takes no new installs when it was replaced, when the
+			-- store verified it (its badge says whether), and whether it's
+			-- the one this device has; any other listed one, installed from
+			-- here.
 			detail = function(): string?
 				local v: any = now:get()
 				local parts: { string } = {}
-				-- (Replaced before the store verified it: why it takes no new
-				-- installs, as the store says it.)
-				if v.status == "yanked" and v.yanked_by == "superseded" and type(v.superseded_by) == "string" and v.superseded_by ~= "" then
+				-- (Replaced before the store verified it, as the store says.)
+				if browse.version_state(v) == "yanked" and v.yanked_by == "superseded" and type(v.superseded_by) == "string" and v.superseded_by ~= "" then
 					table.insert(parts, ui.t("plugins.store.superseded", { version = v.superseded_by }):get())
 				end
-				if v.status ~= "yanked" then
-					if v.verified == true then
-						table.insert(parts, if type(v.verified_at) == "number"
-							then ui.t("plugins.store.verified_on", { date = locale.date(v.verified_at / 1000) }):get()
-							else ui.t("plugins.store.verified"):get())
-					else
-						table.insert(parts, ui.t("plugins.store.not_verified"):get())
-					end
+				if v.verified == true and type(v.verified_at) == "number" then
+					table.insert(parts, ui.t("plugins.store.verified_on", { date = locale.date(v.verified_at / 1000) }):get())
 				end
 				local it: any = item()
 				if it ~= nil and not other() and it.version == v.version then
@@ -1487,7 +1484,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			detail_action = ui.show(function(): boolean
 				local v: any = now:get()
 				local it: any = item()
-				return v.status ~= "yanked" and not here.away() and not other() and compatible() and (it == nil or it.version ~= v.version)
+				return browse.version_state(v) == "listed" and not here.away() and not other() and compatible() and (it == nil or it.version ~= v.version)
 			end, ds.Settings.InlineLink {
 				-- (Doing something here: a button, as Installed's Update.)
 				role = "button",
@@ -1643,7 +1640,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 								ds.Callout {
 									tone = "warning",
 									title = ui.t("plugins.store.not_verified_yet", { version = v or "" }),
-									body = if had and had ~= "" then ui.t("plugins.store.installed_was_verified", { installed = had }) else nil,
+									-- (What follows Update, said before it: the consent
+									-- window asks, as the sheet's other callouts say.)
+									body = function(): string
+										local asks = ui.t("plugins.store.update_asks_first"):get()
+										return if had and had ~= ""
+											then ui.t("plugins.store.installed_was_verified", { installed = had }):get() .. " " .. asks
+											else asks
+									end,
 									action = if alt and alt ~= ""
 										then {
 											label = ui.t("plugins.store.update_instead", { version = alt }),

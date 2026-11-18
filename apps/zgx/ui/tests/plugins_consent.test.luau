@@ -338,17 +338,40 @@ test("a store version the store hasn't verified asks even for nothing new, warns
 	expect(app:state("calls")).to_contain("install_verified:timer:timer-13")
 end)
 
-test("a first install the store hasn't verified warns, offering the store's newest verified version, asked as it shows", function()
+test("a first install the store hasn't verified warns, offering the newest verified version the engine names", function()
 	local app = open()
 	app:command("fresh")
 	app:frames(20)
 	expect(app:tree("#consent-unverified")).to_contain("Zeron hasn't verified 0.1.0 yet.")
-	expect(app:state("calls")).to_contain("store_verified:fresh")
 	expect(app:has('#consent-unverified >> role:button "Install 0.0.9 instead"')).to_be(true)
+	-- One request, the item's: the engine takes the version from it.
+	app:frames(ARMED)
+	app:click('#consent-unverified >> role:button "Install 0.0.9 instead"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("install_verified:fresh:fresh-1")
+	expect(app:state("calls")).never.to_contain("store_verified")
 	-- What it asks, as any first install's.
 	expect(app:tree("#consent")).never.to_contain("nothing beyond what you allowed")
 	-- And one from elsewhere, or verified, says nothing of it.
 	app:command("focus")
 	app:frames(20)
 	expect(app:has("#consent-unverified")).to_be(false)
+end)
+
+-- The warning's action sits under its words in every case with one, as
+-- the update sheet's: a body says what the action rests on (the version
+-- you have was verified; else the verified one offered).
+test("the store warning's action is under its words, whether an update or a first install", function()
+	for _, case in { { "timer", "The version you have was verified.", "Install 1.2.1 instead" }, { "fresh", "0.0.9 is the newest version Zeron has verified.", "Install 0.0.9 instead" } } do
+		local app = open()
+		app:command(case[1])
+		app:frames(20)
+		local tree = app:tree("#consent-unverified")
+		local _, title_y = tree:match('text "Zeron hasn\'t verified[^"]*" (%-?%d+),(%-?%d+)')
+		local _, body_y, _, body_h = tree:match(`text "{case[2]}" (%-?%d+),(%-?%d+) (%d+)x(%d+)`)
+		local _, button_y = tree:match(`button "{case[3]}" (%-?%d+),(%-?%d+)`)
+		assert(title_y and body_y and button_y, `{case[1]}: {tree}`)
+		expect(`{case[1]} {tonumber(body_y) > tonumber(title_y)}`).to_be(`{case[1]} true`)
+		expect(`{case[1]} {tonumber(button_y) >= tonumber(body_y) + tonumber(body_h)}`).to_be(`{case[1]} true`)
+	end
 end)

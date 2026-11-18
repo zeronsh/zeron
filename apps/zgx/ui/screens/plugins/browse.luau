@@ -278,45 +278,127 @@ function M.verified_mark(card: () -> store.Card): Node
 	end, ds.Badge { ui.t("plugins.store.verified"), class = "store-verified", tone = "success", size = "sm" })
 end
 
--- Its badges beside its name: the store's mark first, then its account's
--- (what Zeron's operators granted it, as its member card shows them), each
--- its name, quiet.
-function M.badges(card: () -> store.Card): Node
-	local function names(): { string }
-		local out: { string } = {}
-		local a: any = card().author
-		for _, b in (if type(a) == "table" and type(a.badges) == "table" then a.badges else {}) :: { any } do
-			local name = if type(b) == "table" then b.name else b
-			if type(name) == "string" and name ~= "" and #out < 3 then
-				table.insert(out, string.sub(name, 1, 40))
+-- A version's state as the store keeps it (listed, yanked, taken down,
+-- removed), its review apart: the store verifies; it doesn't gate. (An
+-- older answer says `yanked` alone.)
+function M.version_state(v: any): string
+	if type(v.status) == "string" and v.status ~= "" then
+		return v.status
+	end
+	return if v.yanked == true then "yanked" else "listed"
+end
+
+-- Where its review stands: "verified"; "declined" in its author's view
+-- alone (`owner`: told why), for the public never learns of a decline;
+-- else "waiting".
+function M.version_review(v: any, owner: boolean?): string
+	if v.verified == true then
+		return "verified"
+	end
+	local r = v.review
+	return if owner and type(r) == "table" and r.decision == "declined" then "declined" else "waiting"
+end
+
+-- A version's badge beside its number, in every list of versions (a
+-- plugin's page, Publish's): its state's when it takes no new installs,
+-- was taken down or removed; else its review's ("Verified", "Not verified
+-- yet", its author's "Not verified"), so the eye runs down the numbers and
+-- reads which are verified.
+local STATE_TONE: { [string]: string } = {
+	yanked = "info",
+	taken_down = "warning",
+	removed = "neutral",
+}
+local REVIEW_TONE: { [string]: string } = {
+	waiting = "warning",
+	declined = "danger",
+}
+function M.version_badge(version: () -> any, owner: boolean?): Node
+	return ui.switch(function(): string
+		local v = version()
+		local s = M.version_state(v)
+		return if STATE_TONE[s] then s else M.version_review(v, owner)
+	end, (function(): { [string]: Node }
+		local out: { [string]: Node } = {}
+		for s, tone in STATE_TONE do
+			out[s] = ds.Badge { ui.t(`plugins.store.status.{s}`), tone = tone :: any, size = "sm" }
+		end
+		for r, tone in REVIEW_TONE do
+			out[r] = ds.Badge { ui.t(`plugins.store.review.{r}`), tone = tone :: any, size = "sm" }
+		end
+		out.verified = ds.Badge { ui.t("plugins.store.verified"), class = "store-verified", tone = "success", size = "sm" }
+		return out
+	end)())
+end
+
+-- Its account's badges (what Zeron's operators granted it, as its member
+-- card shows them): their names, at most three, each once.
+local function account_badges(card: store.Card): { string }
+	local out: { string } = {}
+	local a: any = card.author
+	for _, b in (if type(a) == "table" and type(a.badges) == "table" then a.badges else {}) :: { any } do
+		local name = if type(b) == "table" then b.name else b
+		if type(name) == "string" and name ~= "" and #out < 3 then
+			name = string.sub(name, 1, 40)
+			if not table.find(out, name) then
+				table.insert(out, name)
 			end
 		end
-		return out
 	end
-	local list = ui.computed(names)
+	return out
+end
+
+-- An account's badge: the app's (ink on its wash, as Devices' "This
+-- device"), its words drawn as they are (a store's are never a template).
+local function account_badge(name: string): Node
+	return ds.Badge {
+		function(): string
+			return name
+		end,
+		tone = "neutral",
+		size = "sm",
+	}
+end
+
+-- Its badges beside its name on its page: the store's mark first, then
+-- its account's, each its name, quiet (wrapping with who made it).
+function M.badges(card: () -> store.Card): Node
+	local list = ui.computed(function(): { string }
+		return account_badges(card())
+	end)
 	return ui.row {
 		gap = "$space.1",
 		items = "center",
-		-- (In a very narrow column they give way with the name, rather
-		-- than leave it no room at all.)
-		shrink = 1,
-		min_w = 0,
-		overflow = "hidden",
 		M.verified_mark(card),
-		ui.each(list, function(name: string): Node
-			return ds.Badge {
-				function(): string
-					return name
-				end,
-				-- (The app's badge: ink on its wash, as Devices' "This device".)
-				tone = "neutral",
-				size = "sm",
-			}
-		end, {
+		ui.each(list, account_badge, {
 			key = function(name: string): string
 				return name
 			end,
 		}),
+	}
+end
+
+-- The same on a list's row, each whole or absent (ds/settings `badges`):
+-- in a narrow row the account's go first, then the mark, never cut.
+function M.row_badges(card: () -> store.Card): ds.RowBadges
+	return {
+		keys = function(): { string }
+			local out: { string } = {}
+			local c = card()
+			if c.verified == true then
+				table.insert(out, "verified")
+			end
+			for _, name in account_badges(c) do
+				table.insert(out, `account:{name}`)
+			end
+			return out
+		end,
+		badge = function(key: string): Node
+			if key == "verified" then
+				return ds.Badge { ui.t("plugins.store.verified"), class = "store-verified", tone = "success", size = "sm" }
+			end
+			return account_badge(string.sub(key, #"account:" + 1))
+		end,
 	}
 end
 
@@ -334,7 +416,7 @@ local function row(first: store.Card, _i: State<number>, now: State<store.Card>)
 		label = function(): string
 			return now:get().name
 		end,
-		badge = M.badges(card),
+		badges = M.row_badges(card),
 		byline = function(): string
 			return M.byline(now:get())
 		end,
@@ -657,9 +739,13 @@ local function feature(first: store.Card, _i: number, now: State<store.Card>): N
 		description = function(): string
 			return now:get().summary or ""
 		end,
-		-- (A list row's head: its tile at a row's size. No mark: the store
-		-- features only plugins it has verified, so it would say nothing.)
+		-- (A list row's head: its tile at a row's size.)
 		lead = M.Tile { card = now, size = 32 },
+		-- (The mark as everywhere, on the line under the name, with who
+		-- made it: the name has its line to itself.)
+		badge = M.verified_mark(function(): store.Card
+			return now:get()
+		end),
 		on_click = function()
 			nav.open_listing(now:peek().id)
 		end,

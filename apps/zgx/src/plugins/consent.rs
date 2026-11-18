@@ -140,7 +140,7 @@ fn unverified_store(item: &Json) -> Option<String> {
 /// The newest verified version the store has, which an unverified store
 /// version waiting here could take instead, as the engine's item names it
 /// (an update's offer, or a first install's source). With its store id.
-/// (Where the item names none, `newest_verified` asks the store.)
+/// None named, none is offered: the engine installs only the one it names.
 fn verified_alternative(item: &Json) -> Option<(String, String)> {
     let store = unverified_store(item)?;
     let alt = item["update"]["verified_alternative"]["version"]
@@ -148,14 +148,6 @@ fn verified_alternative(item: &Json) -> Option<(String, String)> {
         .or_else(|| item["source"]["verified_alternative"]["version"].as_str())
         .filter(|v| version_reads(v))?;
     Some((store, alt.to_string()))
-}
-
-/// The store's newest verified version of `store`, asked now (this visit's
-/// answer, never kept), on `device`'s engine: none when there's none, it
-/// doesn't read as a version, or it's the version waiting (`waiting`).
-async fn newest_verified(device: Option<&str>, store: &str, waiting: &str) -> Option<String> {
-    let reply = engine::get().call("StorePlugin", remote::addressed(device, json!({ "id": store }))).await.ok()?;
-    reply["verified_version"].as_str().filter(|v| version_reads(v) && *v != waiting).map(str::to_owned)
 }
 
 fn bounded(item: &Json) -> Json {
@@ -373,9 +365,11 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
         });
     });
     // "Install 1.2.0 instead": the newest verified version in place of the
-    // unverified one waiting (the sheet shown, as it is), on its device. The
-    // version is the engine's item's, never the script's. What it then is
-    // waits here as any install does; nothing waiting, the window closes.
+    // unverified one waiting (the sheet shown, as it is), on its device.
+    // The engine takes the version from the item it showed (never the
+    // script's, nor this host's), checks the store says it's verified, and
+    // refuses a changed item. What it then is waits here as any install
+    // does; nothing waiting, the window closes.
     let (weak, window, out, ons, ids) = (Rc::downgrade(bridge), cx.window.clone(), shared.clone(), on.clone(), id.clone());
     host.action("plugins.install_verified", move |arg| {
         let Some(b) = weak.upgrade() else { return };
@@ -385,27 +379,14 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
         let Some(item) = showable(&b, &id, &on).filter(|item| *ids.borrow() == id && item.hash() == hash && item.status() == "pending") else {
             return;
         };
-        let Some(store) = unverified_store(&item.json) else { return };
-        let offered = verified_alternative(&item.json).map(|(_, v)| v);
-        let waiting = item.json["version"].as_str().unwrap_or("").to_owned();
+        let Some((_, version)) = verified_alternative(&item.json) else { return };
         out.set(shown(&b, &id, &on, true, None));
         let (weak, window, out) = (Rc::downgrade(&b), window.clone(), out.clone());
         engine::get().spawn(async move {
             let device = on.as_ref().map(|(d, _)| d.as_str());
-            // (An update's offer names it; a first install's, the store now.)
-            let version = match offered {
-                Some(v) => Some(v),
-                None => newest_verified(device, &store, &waiting).await,
-            };
-            let Some(version) = version else {
-                if let Some(b) = weak.upgrade() {
-                    out.set(shown(&b, &id, &on, false, None));
-                }
-                return;
-            };
             eprintln!("zeron-zgx: plugins: {id} {version} installed in place of an unverified version");
-            let params = remote::addressed(device, json!({ "store": store, "version": version }));
-            let result = engine::get().call("InstallPlugin", params).await;
+            let params = remote::addressed(device, json!({ "id": id, "hash": hash }));
+            let result = engine::get().call("InstallVerifiedPlugin", params).await;
             let Some(b) = weak.upgrade() else { return };
             match result {
                 Ok(_) if showable(&b, &id, &on).is_none() => {
@@ -419,28 +400,6 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
                 }
             }
         });
-    });
-    // The newest verified version, for the sheet to offer: asked of the
-    // store as it shows a first install's (an update's offer names its own),
-    // the sheet shown alone. Pressing it asks again (above): never what the
-    // script says.
-    let (weak, ons, ids) = (Rc::downgrade(bridge), on.clone(), id.clone());
-    host.async_action("plugins.store_verified", move |arg| {
-        let (weak, ons, ids) = (weak.clone(), ons.clone(), ids.clone());
-        async move {
-            let b = weak.upgrade().ok_or("gone")?;
-            let id = arg.field("id").map(text).unwrap_or_default();
-            let hash = arg.field("hash").map(text).unwrap_or_default();
-            let on = ons.borrow().clone();
-            let item = showable(&b, &id, &on).filter(|item| *ids.borrow() == id && item.hash() == hash && item.status() == "pending").ok_or("gone")?;
-            let store = unverified_store(&item.json).ok_or("gone")?;
-            let waiting = item.json["version"].as_str().unwrap_or("").to_owned();
-            let device = on.as_ref().map(|(d, _)| d.clone());
-            Ok(match newest_verified(device.as_deref(), &store, &waiting).await {
-                Some(v) => Value::from(v.as_str()),
-                None => Value::Nil,
-            })
-        }
     });
     let (weak, out, ons, ids) = (Rc::downgrade(bridge), shared.clone(), on.clone(), id.clone());
     host.action("plugins.reinstall", move |arg| {

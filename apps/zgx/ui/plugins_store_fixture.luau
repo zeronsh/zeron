@@ -233,6 +233,29 @@ ui.command {
 		publish()
 	end,
 }
+-- The store verifies the version Focus timer runs, later: the engine reads
+-- its record again.
+ui.command {
+	id = "store.running_verified",
+	title = "The store verifies the version Focus timer runs",
+	run = function()
+		local p = find("focus-timer")
+		p.source = { kind = "store", id = "focus-timer", publisher = "ada", verified = true }
+		publish()
+	end,
+}
+-- Focus timer by a publisher Zeron can't vouch for (its key unknown: a
+-- transfer, or a key revoked), at a version the store hasn't verified.
+ui.command {
+	id = "store.running_unverified_unknown",
+	title = "Focus timer, its publisher's key unknown, runs a version the store hasn't verified",
+	run = function()
+		local p = find("focus-timer")
+		p.author = { kind = "unknown" }
+		p.source = { kind = "store", id = "focus-timer", publisher = "ada", verified = false }
+		publish()
+	end,
+}
 -- Updating Focus timer in one click is refused: its update isn't verified.
 ui.command {
 	id = "store.update_refused_unverified",

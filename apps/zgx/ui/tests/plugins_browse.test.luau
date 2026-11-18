@@ -450,14 +450,36 @@ test("a plugin's publisher, on its page, narrows Browse to their plugins: one re
 	expect(last).never.to_contain("author=")
 end)
 
-test("each category says how many plugins it holds; the featured carry no mark, every one being verified", function()
+test("each category says how many plugins it holds", function()
 	local app = open()
 	app:click("#store-category")
 	app:frames(10)
 	expect(app:has('role:menuitem "Git (9)"')).to_be(true)
-	app:key("Escape")
-	app:frames(5)
-	expect(app:has("#store-featured >> .store-verified")).to_be(false)
+end)
+
+-- The mark means the same on every surface: a featured card has it as a
+-- row does, on the line under its name with who made it, so the name has
+-- its line to itself at every card width.
+test("a featured card carries the mark on the line under its name, beside who made it", function()
+	for _, w in { 1000, 760 } do
+		local app = mount("plugins_store_fixture.luau")
+		app:resize(w, 900)
+		app:frames(10)
+		app:click('role:tab "Browse"')
+		app:wait("#store-featured", { timeout_ms = 3000 })
+		settle(app)
+		local card = app:tree('#store-featured >> role:button "Focus timer"')
+		local function at(pattern: string): (number?, number?, number?)
+			local x, y, bw = card:match(pattern .. " (%-?%d+),(%-?%d+) (%d+)x")
+			return tonumber(x), tonumber(y), tonumber(bw)
+		end
+		local by_x, by_y, by_w = at('text "by [^"]*"')
+		local mark_x, mark_y = at('text "Verified"')
+		assert(by_y and mark_y and by_x and by_w and mark_x, `{w}: {card}`)
+		-- (The byline's line, under the name's; after the byline.)
+		expect(`{w}: {math.abs(mark_y - by_y) <= 2}`).to_be(`{w}: true`)
+		expect(`{w}: {mark_x >= by_x + by_w}`).to_be(`{w}: true`)
+	end
 end)
 
 test("a plugin's publisher opens Browse narrowed to them however its page was opened", function()

@@ -3616,7 +3616,10 @@
         "available_unversioned": "有可用更新。",
         "added": "它还请求{list}；将先征求你的许可。",
         "removed": "它不再请求{list}。",
-        "held": "{version} 已推出，尚未验证：这个插件只接受已验证的更新。"
+        "held": "{version} 已推出，尚未验证：它只接受已验证的更新。",
+        "unverified": "{version} 已推出，尚未验证。",
+        "held_plugin": "{version} 已推出，尚未验证：这个插件只接受已验证的更新。",
+        "held_computer": "{version} 已推出，尚未验证：这台电脑只接受已验证的更新。"
       },
       "unverified": "未验证",
       "from": "来自 {where}",
@@ -3643,8 +3646,7 @@
         "replaces": "它替换的界面",
         "changes_since": "自你允许以来还更改"
       },
-      "store_unverified": "版本 {version} 未经插件商店验证。",
-      "store_unverified_unversioned": "这个版本未经插件商店验证。"
+      "store_unverified_unversioned": "Zeron 尚未验证这个版本。"
     },
     "page": {
       "title": "插件",
@@ -4115,6 +4117,7 @@
       "update_new_owner": "它有了新的发布者 @{username}。更新后 Zeron 会再次请你允许。",
       "update_new_owner_unnamed": "它有了新的发布者。更新后 Zeron 会再次请你允许。",
       "update_new_key": "这个版本的签名密钥与你现有版本的不同。",
+      "update_asks_first": "更新前 Zeron 会先请你允许。",
       "keys_publish_first": "请先从这台电脑发布你的一个插件。",
       "version_installs": "版本 {version} · {n, plural, other {# 次安装}}",
       "show_installed": "在“已安装”中查看",
@@ -4138,19 +4141,20 @@
         "declined": "未验证",
         "declined_said": "审核者的说明：“{words}”"
       },
-      "superseded": "在验证前已被 {version} 取代：不再接受新安装",
+      "superseded": "在验证前已被 {version} 取代",
       "sent_toast_body": "在审核者看过之前，它会显示为未验证。",
       "updates_label": "更新",
       "updates_body": "它在这台电脑上更新到哪些新版本。",
       "updates_newest": "最新版本",
       "updates_verified": "仅已验证的版本",
       "couldnt_updates": "无法更改 {name} 的更新设置",
-      "updates_device": "与这台电脑相同",
+      "updates_device": "与这台电脑相同（{choice}）",
       "updates_section": "插件商店",
       "updates_all_label": "更新",
       "updates_all_body": "你从商店安装的插件在这台电脑上更新到哪些新版本。",
       "couldnt_updates_all": "无法更改插件接受的更新",
-      "installed_was_verified_plain": "你现有的版本已验证。"
+      "installed_was_verified_plain": "你现有的版本已验证。",
+      "newest_verified_is": "{version} 是 Zeron 已验证的最新版本。"
     }
   },
   "templates": {

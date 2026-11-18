@@ -10,9 +10,6 @@
 --                           `by_link`: a link opened it (`nav.linked()`)
 --   nav.open_publish(id)    publishing one of yours (Yours its way back)
 --   nav.back()              the tabs again
---   nav.open_update(id)     a store plugin's page with its update sheet open
---                           (an update one click won't take: not verified)
---   nav.take_update(id)     for that page: whether to open its sheet (once)
 --   nav.show_browse()       Browse, wherever a page was opened from (what
 --                           a plugin's keyword or publisher narrowed it to)
 --   nav.show_tab(tab)       a tab, whatever page was open (a notice's
@@ -66,23 +63,6 @@ function M.back()
 	opened:set(false)
 	linked:set(nil)
 	M.view:set("catalog")
-end
-
--- A store plugin's page, its update sheet to open as it shows.
-local update_sheet = ui.state("plugins_view_update_sheet", nil :: string?)
-function M.open_update(id: string)
-	if not valid(id) then
-		return
-	end
-	M.open_listing(id)
-	update_sheet:set(id)
-end
-function M.take_update(id: string): boolean
-	if update_sheet:peek() ~= id then
-		return false
-	end
-	update_sheet:set(nil)
-	return true
 end
 
 local TABS = { installed = true, yours = true, browse = true }

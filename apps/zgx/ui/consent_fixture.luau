@@ -190,7 +190,15 @@ local PLUGINS: { [string]: any } = {
 		hash = "fresh-1",
 		status = "pending",
 		author = { kind = "verified", username = "mara" },
-		source = { kind = "store", id = "fresh", publisher = "mara", verified = false },
+		-- (The newest verified one, as the engine names it beside a
+		-- first install the store hasn't verified.)
+		source = {
+			kind = "store",
+			id = "fresh",
+			publisher = "mara",
+			verified = false,
+			verified_alternative = { version = "0.0.9", added = {}, removed = {} },
+		},
 		permissions = { "ui.add" },
 		allowed = {},
 		ask = { "ui.add" },
@@ -222,17 +230,6 @@ end
 -- (`on`: another device it's on, by name, as the host says it.)
 local function show(id: string?, on: string?)
 	shown:set({ busy = false, item = if id then table.clone(PLUGINS[id]) else nil, device_name = on } :: any)
-end
-
--- The store's newest verified version of a first install's, as the
--- window's host asks it: Fresh has one, 0.0.9.
-consent.store_verified = function(id: string, _hash: string): any
-	note(`store_verified:{id}`)
-	return {
-		after = function(_self: any, ok: (any) -> (), _bad: any)
-			ok(if id == "fresh" then "0.0.9" else nil)
-		end,
-	}
 end
 
 ui.actions {

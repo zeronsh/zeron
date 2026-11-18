@@ -558,8 +558,9 @@ function M.store_unverified(item: any): string?
 	if type(src) ~= "table" or src.kind ~= "store" or src.verified ~= false or item.builtin then
 		return nil
 	end
+	-- (The sheets' sentence, the same words.)
 	local v = if type(item.version) == "string" and item.version ~= "" then item.version else nil
-	return if v then s("plugins.words.store_unverified", { version = v }) else s("plugins.words.store_unverified_unversioned")
+	return if v then s("plugins.store.not_verified_yet", { version = v }) else s("plugins.words.store_unverified_unversioned")
 end
 
 -- What one of Zeron's own is allowed, said under its description: they're
@@ -674,16 +675,20 @@ end
 -- description: its version and what it changes in what it asks (new asks
 -- are allowed in the consent window after it's updated). Nil when there's
 -- none.
-function M.update(item: any): string?
+-- A store update the store hasn't verified says so on the row, held or
+-- not, so Update is never a surprise; held (verified updates only, never
+-- taken unasked), whose rule that is: `whose` "plugin" (its own choice),
+-- "computer" (it follows this computer's), or nil (another device's: not
+-- known here).
+function M.update(item: any, whose: ("plugin" | "computer")?): string?
 	local update = item.update
 	if type(update) ~= "table" or item.builtin then
 		return nil
 	end
 	local version = if type(update.version) == "string" and update.version ~= "" then update.version else nil
-	-- (Waiting: this plugin takes verified updates only, and the newer
-	-- version isn't verified. Said; never taken unasked.)
 	if update.held == true and version then
-		return s("plugins.words.update.held", { version = version })
+		local key = if whose == "plugin" then "held_plugin" elseif whose == "computer" then "held_computer" else "held"
+		return s(`plugins.words.update.{key}`, { version = version })
 	end
 	if type(update.refused) == "string" then
 		return if version
@@ -697,8 +702,11 @@ function M.update(item: any): string?
 		end
 		return if #out > 0 then table.concat(out, s("plugins.words.list_sep")) else nil
 	end
+	local unverified = update.verified == false and version ~= nil
 	local parts = {
-		if version then s("plugins.words.update.available", { version = version }) else s("plugins.words.update.available_unversioned"),
+		if unverified then s("plugins.words.update.unverified", { version = version })
+			elseif version then s("plugins.words.update.available", { version = version })
+			else s("plugins.words.update.available_unversioned"),
 	}
 	local added = said(update.added)
 	if added then

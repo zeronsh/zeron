@@ -32,13 +32,6 @@ local M = {}
 -- How long a sheet shows before Allow takes a click.
 M.ARM_MS = 800
 
--- The store's newest verified version of a first install waiting (the
--- window's host asks the store, for the sheet shown): a promise of it, or
--- of nil.
-function M.store_verified(id: string, hash: string): any
-	return ui.call("plugins.store_verified", { id = id, hash = hash })
-end
-
 local consent = ui.shared("consent", { busy = false } :: any)
 
 local function item(): any
@@ -123,24 +116,14 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 	-- engine names one. It asks even when it asks nothing new.
 	local store_source = type(it.source) == "table" and it.source.kind == "store"
 	local unverified = store_source and it.source.verified == false
-	-- The newest verified one: an update's offer names it, as a first
-	-- install's source does; where neither does, the window's host asks the
-	-- store as the sheet shows (this visit's answer). Pressing it takes the
-	-- engine's word again: never this script's.
+	-- The newest verified one, as the engine names it: an update's offer,
+	-- or a first install's source. Pressing it, the engine installs the one
+	-- its item names: never this script's.
 	local offered = if not unverified then nil
 		elseif type(it.update) == "table" and type(it.update.verified_alternative) == "table" then it.update.verified_alternative.version
 		elseif type(it.source.verified_alternative) == "table" then it.source.verified_alternative.version
 		else nil
-	local alternative = ui.use_state(if type(offered) == "string" and offered ~= "" then offered else nil :: string?)
-	ui.on_mount(function()
-		if unverified and alternative:peek() == nil and not elsewhere then
-			M.store_verified(it.id, it.hash):after(function(v: any)
-				if type(v) == "string" and v ~= "" then
-					alternative:set(v)
-				end
-			end, function(_: any) end)
-		end
-	end)
+	local alternative: string? = if type(offered) == "string" and offered ~= "" then offered else nil
 	-- Asking again for nothing beyond what was allowed (an unverified
 	-- version always asks): the engine says so; one line.
 	local nothing_new = it.nothing_new == true
@@ -314,28 +297,26 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 					then ui.div {
 						id = "consent-unverified",
 						w_full = true,
-						-- (Keyed by the verified one offered: its action once known.)
-						ui.presence(function(): string
-							return alternative:get() or ""
-						end, function(alt: string): Node
-							return ds.Callout {
-								tone = "warning",
-								title = ui.t("plugins.store.not_verified_yet", { version = v or "" }),
-								-- (An update from a version that was verified: said, as
-								-- the update sheet says it.)
-								body = if type(it.update) == "table" and it.update.installed_verified == true
-									then ui.t("plugins.store.installed_was_verified_plain")
-									else nil,
-								action = if alt ~= "" and not elsewhere
-									then {
-										label = ui.t("plugins.store.install_instead", { version = alt }),
-										on_click = function()
-											ui.invoke("plugins.install_verified", { id = it.id, hash = it.hash })
-										end,
-									}
-									else nil,
-							}
-						end, { w_full = true }),
+						ds.Callout {
+							tone = "warning",
+							title = ui.t("plugins.store.not_verified_yet", { version = v or "" }),
+							-- (A body wherever there's an action, so the action sits
+							-- under the words as the update sheet's does: an update
+							-- from a verified version says so; else the verified one
+							-- offered is named. Neither: the title alone.)
+							body = if type(it.update) == "table" and it.update.installed_verified == true
+								then ui.t("plugins.store.installed_was_verified_plain")
+								elseif alternative and not elsewhere then ui.t("plugins.store.newest_verified_is", { version = alternative })
+								else nil,
+							action = if alternative and not elsewhere
+								then {
+									label = ui.t("plugins.store.install_instead", { version = alternative }),
+									on_click = function()
+										ui.invoke("plugins.install_verified", { id = it.id, hash = it.hash })
+									end,
+								}
+								else nil,
+						},
 					}
 					else nil,
 				if #grew > 0 then section(ui.t("plugins.consent.grew"), grew) else nil,
