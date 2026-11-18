@@ -48,6 +48,8 @@ pub struct StoredPlugin {
     pub owner_account: String,
     pub versions: Vec<StoredVersion>,
     pub installs: u32,
+    /// Featured by staff (the edge's `featured_at`).
+    pub featured: bool,
 }
 
 #[derive(Default)]
@@ -172,6 +174,11 @@ impl FakeStore {
         self.state.lock().unwrap().plugins.get_mut(id).unwrap().owner_account = account.to_owned();
     }
 
+    /// Staff feature it.
+    pub fn feature(&self, id: &str) {
+        self.state.lock().unwrap().plugins.get_mut(id).unwrap().featured = true;
+    }
+
     pub fn add_deploy_key(&self, public: &str, id: &str, owner: &str) {
         self.state.lock().unwrap().deploy_keys.insert(public.to_owned(), (id.to_owned(), owner.to_owned()));
     }
@@ -237,12 +244,16 @@ impl FakeStore {
             ("GET", ["store", "v1", "categories"]) => json_reply(200, json!({ "categories": [{ "id": "productivity", "name": "Productivity" }] })),
             ("GET", ["store", "v1", "plugins"]) => {
                 let state = self.state.lock().unwrap();
+                let query = path.split_once('?').map_or("", |(_, q)| q);
+                let featured_only = query.split('&').any(|pair| pair == "featured=true");
+                // (As the edge: `featured=true` filters; the order is the listing's.)
                 let items: Vec<Value> = state
                     .plugins
                     .iter()
+                    .filter(|(_, p)| !featured_only || p.featured)
                     .filter_map(|(id, p)| {
                         let v = p.versions.iter().rev().find(|v| v.status == "approved")?;
-                        Some(json!({ "id": id, "name": id, "version": v.version, "author": p.author() }))
+                        Some(json!({ "id": id, "name": id, "version": v.version, "author": p.author(), "featured": p.featured }))
                     })
                     .collect();
                 json_reply(200, json!({ "items": items }))

@@ -235,13 +235,14 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: SEARCH_PLUGINS,
-            description: "Search the Zeron plugin store: plugins made by people, each reviewed by Zeron before it's listed. Each result has its id (what install_plugin's `store` takes), name, summary, author (by @username), categories, keywords, latest version and installs, and `installed` when it's on this device already. Filter by `category` or `keyword`; `sort` is relevance (with a query), popular, updated or new. Page with `cursor` (the reply's next_cursor). Read one's page with get_store_plugin before suggesting it.",
+            description: "Search the Zeron plugin store: plugins made by people, each reviewed by Zeron before it's listed. Each result has its id (what install_plugin's `store` takes), name, summary, author (by @username), categories, keywords, latest version and installs, and `installed` when it's on this device already. Filter by `category` or `keyword`, or `featured` for only the ones Zeron features; `sort` is relevance (with a query), popular, updated or new. Page with `cursor` (the reply's next_cursor). Read one's page with get_store_plugin before suggesting it.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Words to look for in names, summaries, keywords, authors and READMEs." },
                     "category": { "type": "string", "description": "One of the store's categories (agents, appearance, chat, developer-tools, git, integrations, productivity, utilities)." },
                     "keyword": { "type": "string" },
+                    "featured": { "type": "boolean", "description": "Only the plugins Zeron features." },
                     "sort": { "type": "string", "enum": ["relevance", "popular", "updated", "new"] },
                     "cursor": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
@@ -722,13 +723,14 @@ impl Tools {
             query: Option<String>,
             category: Option<String>,
             keyword: Option<String>,
+            featured: Option<bool>,
             sort: Option<String>,
             cursor: Option<String>,
             limit: Option<u32>,
         }
         let args: Args = parse(args)?;
         let params = json!({
-            "q": args.query, "category": args.category, "keyword": args.keyword,
+            "q": args.query, "category": args.category, "keyword": args.keyword, "featured": args.featured,
             "sort": args.sort, "cursor": args.cursor, "limit": args.limit,
         });
         let reply = self.zeron.call_rpc(methods::STORE_SEARCH, params).await.map_err(plain)?;
@@ -1042,6 +1044,8 @@ mod tests {
         assert!(found["plugins"][0].get("icon").is_none(), "said briefly");
         assert_eq!(found["next_cursor"], "c2");
         assert_eq!(last_call(&engine).1["q"], "focus");
+        tools.call(SEARCH_PLUGINS, json!({ "featured": true })).await.unwrap();
+        assert_eq!(last_call(&engine).1["featured"], true);
 
         let page = tools.call(GET_STORE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
         assert_eq!((page["readme"].as_str(), page.get("package")), (Some("# Focus"), None));

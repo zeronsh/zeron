@@ -722,8 +722,10 @@ pub mod methods {
     // A plugin from the store installs with `InstallPlugin {store, version?}`
     // and updates with `CheckPluginUpdates` / `UpdatePlugin` as any other.
 
-    /// `{q?, category?, keyword?, sort?, cursor?, limit?}` → `{items:
-    /// [PluginCard + installed?: {version, status, store}], next_cursor?}`.
+    /// `{q?, category?, keyword?, featured?, sort?, cursor?, limit?}` →
+    /// `{items: [PluginCard + installed?: {version, status, store}],
+    /// next_cursor?}`. `featured: true` lists only the plugins staff feature,
+    /// in the store's order; false or absent lists every one.
     pub const STORE_SEARCH: &str = "StoreSearch";
     /// `{id, versions?, for_zeron?}` → the store's `PluginDetail` (with every
     /// version the caller may see when `versions`), `installed?: {version,

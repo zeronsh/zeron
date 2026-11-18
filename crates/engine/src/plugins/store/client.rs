@@ -85,6 +85,10 @@ pub struct Search {
     pub category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyword: Option<String>,
+    /// Only the plugins staff feature (`featured=true`); false or absent:
+    /// every listed plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub featured: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,6 +104,7 @@ impl Search {
             ("q", self.q.as_deref()),
             ("category", self.category.as_deref()),
             ("keyword", self.keyword.as_deref()),
+            ("featured", (self.featured == Some(true)).then_some("true")),
             ("sort", self.sort.as_deref()),
             ("cursor", self.cursor.as_deref()),
             ("limit", limit.as_deref()),
@@ -483,6 +488,9 @@ mod tests {
         let search = Search { q: Some("git & review".into()), limit: Some(500), sort: Some(" ".into()), ..Default::default() };
         assert_eq!(search.query(), "?q=git%20%26%20review&limit=50");
         assert_eq!(Search::default().query(), "");
+        let featured = |featured| Search { featured, category: Some("git".into()), ..Default::default() }.query();
+        assert_eq!(featured(Some(true)), "?category=git&featured=true");
+        assert_eq!((featured(Some(false)), featured(None)), ("?category=git".into(), "?category=git".into()));
     }
 
     #[test]
