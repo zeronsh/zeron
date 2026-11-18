@@ -47,6 +47,15 @@ export const onRequest = defineMiddleware(async (context, next) => {
   if (canonical !== sent.pathname) {
     return new Response(null, { status: 301, headers: { location: `${canonical}${sent.search}`, "cache-control": "public, max-age=3600" } });
   }
+  // An address under /admin that no page has (pages/admin/[...rest].ts),
+  // once it's in its one form: the site's 404 page, for an admin too.
+  // (Answered here, not by the route: Astro puts the 404 page in only for a
+  // page's or the middleware's empty 404, never an endpoint's.) Only an
+  // admin gets this far, so it is theirs alone: never kept, and carrying
+  // the session the edge rotated, if it did (secure).
+  if (context.routePattern === "/admin/[...rest]") {
+    return secure(context.cache, new Response(null, { status: 404, headers: { "cache-control": "private, no-store" } }), edge.setCookies);
+  }
   return secure(context.cache, await next(), edge.setCookies);
 });
 

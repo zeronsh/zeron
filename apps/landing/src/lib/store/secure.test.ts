@@ -43,10 +43,11 @@ describe("a response that carries a cookie is kept by no one", () => {
     expect(response.headers.getSetCookie()).toEqual([ROTATED]);
   });
 
-  test("the same for a 404 that carries one", async () => {
+  test("the same for a 404 that carries one, and the cookie goes back on it", async () => {
     const response = await served(404, [ROTATED]);
     expect(response.headers.get("cdn-cache-control")).toBeNull();
     expect(response.headers.get("cache-tag")).toBeNull();
     expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.getSetCookie()).toEqual([ROTATED]);
   });
 });

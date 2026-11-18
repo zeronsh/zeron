@@ -456,6 +456,25 @@ describe("the admin pages can't be told from pages that don't exist", () => {
     }
   });
 
+  test("an admin who opens an address no staff page has sees the site's 404 page, not an empty one", async () => {
+    const grace = await site.signIn("user_grace");
+    for (const path of ["/admin/nothing-here", "/admin/plugins/no-such-plugin", "/admin/nothing-here"]) {
+      const response = await site.fetch(path, { headers: { cookie: grace } });
+      expect(response.status, path).toBe(404);
+      expect(await response.text(), path).toBe(readFileSync(new URL("../dist/client/404.html", import.meta.url), "utf8"));
+      // (An admin's answer, theirs alone: kept by no cache.)
+      expect(response.headers.get("cache-control"), path).toBe("private, no-store");
+      expect(response.headers.get("cloudflare-cdn-cache-control") ?? "", path).not.toMatch(/public/);
+    }
+    // A fresh admin session whose first use is such an address: its answer kept by no one, and any
+    // session the edge rotated meanwhile goes back on it (secure.test.ts holds the cookie's way through).
+    const fresh = await site.signIn("user_grace");
+    const first = await site.fetch("/admin/nothing-here", { headers: { cookie: fresh } });
+    expect(first.status).toBe(404);
+    expect(first.headers.get("cache-control")).toBe("private, no-store");
+    for (const cookie of first.headers.getSetCookie()) expect(cookie).toMatch(/^__Host-zeron_session=[\w-]+; Path=\/; Secure; HttpOnly; SameSite=Lax/);
+  });
+
   test("an admin sees them, never cached, never indexed", async () => {
     const grace = await site.signIn("user_grace");
     for (const path of PATHS) {
