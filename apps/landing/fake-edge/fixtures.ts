@@ -26,15 +26,16 @@ export const USERS: FakeUser[] = [
   { id: "user_mo", name: "Mo", username: "mo-dev", roles: [], created_at: NOW - 6 * DAY, badges: [] },
 ];
 
+// The store's fixed list (contract amendment 4); the names are the fake's.
 export const CATEGORIES = [
-  { id: "git", name: "Git and GitHub" },
   { id: "agents", name: "Agents" },
-  { id: "chat", name: "Chats" },
+  { id: "appearance", name: "Appearance" },
+  { id: "chat", name: "Chat" },
+  { id: "developer-tools", name: "Developer tools" },
+  { id: "git", name: "Git" },
+  { id: "integrations", name: "Integrations" },
   { id: "productivity", name: "Productivity" },
-  { id: "appearance", name: "Look and feel" },
-  { id: "services", name: "Services" },
-  { id: "developer", name: "Developer tools" },
-  { id: "fun", name: "Fun" },
+  { id: "utilities", name: "Utilities" },
 ];
 
 export type Status = "pending" | "approved" | "rejected" | "withdrawn" | "yanked" | "removed";
@@ -45,7 +46,7 @@ export interface FakeVersion {
   published_at: number;
   notes: string | null;
   engines: { zeron?: string } | null;
-  review?: { reason?: string; message?: string; decided_at?: number; blocked?: boolean };
+  review?: { state: Status; reason?: string; message?: string; decided_at?: number };
   checks: { id: string; level: "ok" | "warn" | "fail"; message: string }[];
   manifest: Record<string, unknown>;
   files: Record<string, string>;
@@ -245,7 +246,7 @@ const SPECS: Spec[] = [
     icon: "issues",
     accent: "#7584f4",
     part: "panel",
-    categories: ["services", "productivity"],
+    categories: ["integrations", "productivity"],
     keywords: ["linear", "issues", "tickets"],
     permissions: ["ui.add", "panel.tabs", "network", "tools", "links.open"],
     network: ["api.linear.app"],
@@ -280,7 +281,7 @@ const SPECS: Spec[] = [
     icon: "shell",
     accent: "#f9837b",
     part: "composer",
-    categories: ["developer"],
+    categories: ["developer-tools"],
     keywords: ["shell", "scripts", "terminal"],
     permissions: ["ui.add", "commands", "compose", "tools"],
     commands: ["bash", "make"],
@@ -297,7 +298,7 @@ const SPECS: Spec[] = [
     icon: "database",
     accent: "#149dd2",
     part: "panel",
-    categories: ["developer", "agents"],
+    categories: ["developer-tools", "agents"],
     keywords: ["postgres", "sql", "database"],
     permissions: ["ui.add", "panel.tabs", "network", "native", "tools"],
     network: ["localhost:5432", "db.internal.example.com"],
@@ -348,12 +349,34 @@ const SPECS: Spec[] = [
     age: 7,
   },
   {
+    // Every listing limit at once (contract amendment 22): the worst a card,
+    // a row or a heading has to hold.
+    id: "worst-case-listing-at-every-limit-xyz12",
+    name: "Averyveryverylongpluginnamewithoutanyspacesatallthatkeepsgoing64",
+    summary: "Every limit at once: a name of sixty-four characters with no spaces to break at, this description at three hundred characters, eight keywords of thirty-two characters, two categories, so each card, row and control is seen at its worst before anyone else sees it there. Every limit at once: a name of",
+    icon: "book",
+    accent: "#e9a64b",
+    part: "panel",
+    categories: ["developer-tools", "integrations"],
+    keywords: ['eywordthatisthirtytwocharacters0', 'eywordthatisthirtytwocharacters1', 'eywordthatisthirtytwocharacters2', 'eywordthatisthirtytwocharacters3', 'eywordthatisthirtytwocharacters4', 'eywordthatisthirtytwocharacters5', 'eywordthatisthirtytwocharacters6', 'eywordthatisthirtytwocharacters7'],
+    permissions: ["ui.add", "network", "commands", "tools"],
+    commands: ["python3", "git", "jq"],
+    network: ["api.averyveryverylongsubdomainname.example.com", "localhost:8080", "*"],
+    tools: [{ name: "a_tool_with_a_long_name_for_agents_to_call", description: "Every limit at once: a name of sixty-four characters with no spaces to break at, this description at three hundred characters, eight keywords of thirty-two characters, two categories, so each card, ro" }],
+    homepage: "https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    repository: "https://github.com/ada/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    license: "LicenseRef-A-Very-Long-License-Identifier-That-Goes-On-And-On",
+    installs: 7000,
+    featured: true,
+    age: 12,
+  },
+  {
     // A plugin whose words try to break the page.
     id: "xss-probe",
     name: `<img src=x onerror="alert('name')"> Probe`,
     summary: `"><script>alert('summary')</script> A plugin whose every word tries to escape the page.`,
     icon: "flame",
-    categories: ["fun"],
+    categories: ["utilities"],
     keywords: [`"><svg onload=alert(1)>`, "javascript:alert(1)", "normal"],
     permissions: ["ui.add", "ui.replace", "network"],
     ui: { replace: ["@app/screens/chat/composer"] },
@@ -419,7 +442,7 @@ Footnote[^x"><script>].
       { version: "1.0.0", status: "approved", ago: 70 },
       { version: "1.1.0", status: "yanked", ago: 40, notes: "Broke the sidebar on narrow windows." },
       { version: "1.1.1", status: "approved", ago: 39, notes: "Fixed the sidebar on narrow windows." },
-      { version: "1.2.0", status: "rejected", ago: 5, notes: "Shows the cost of each chat.", permissions: ["ui.add", "sessions.read", "network"], network: ["*"], review: { reason: "network_unexplained", message: "It asks to reach any site, but the README doesn't say why. Name the hosts it needs, or say what it sends where.", decided_at: NOW - 4 * DAY } },
+      { version: "1.2.0", status: "rejected", ago: 5, notes: "Shows the cost of each chat.", permissions: ["ui.add", "sessions.read", "network"], network: ["*"], review: { state: "rejected", reason: "asks_too_much", message: "It asks to reach any site, but the README doesn't say why. Name the hosts it needs, or say what it sends where.", decided_at: NOW - 4 * DAY } },
       { version: "1.2.1", status: "pending", ago: 2, notes: "Shows the cost of each chat, from your agents' own usage.", permissions: ["ui.add", "sessions.read", "usage.read"] },
     ],
   },
@@ -445,7 +468,7 @@ Footnote[^x"><script>].
     name: "Crypto ticker",
     summary: "Prices in your title bar.",
     icon: "graph",
-    categories: ["fun"],
+    categories: ["utilities"],
     keywords: ["prices"],
     permissions: ["ui.add", "network"],
     network: ["*"],
@@ -458,10 +481,10 @@ Footnote[^x"><script>].
 
 // Many more, for paging and sorting.
 const MORE: [string, string, string, keyof typeof ICONS | null, string[]][] = [
-  ["cloud-costs", "Cloud costs", "What your cloud spent today, beside the chat that spent it.", "cloud", ["services"]],
-  ["docs-lookup", "Docs lookup", "Look a function up in the docs your project uses.", "book", ["developer"]],
-  ["map-pins", "Map pins", "Pin a chat to the place it's about.", "map", ["fun"]],
-  ["key-guard", "Key guard", "Warns before a chat pastes something that looks like a secret.", "key", ["developer", "chat"]],
+  ["cloud-costs", "Cloud costs", "What your cloud spent today, beside the chat that spent it.", "cloud", ["integrations"]],
+  ["docs-lookup", "Docs lookup", "Look a function up in the docs your project uses.", "book", ["developer-tools"]],
+  ["map-pins", "Map pins", "Pin a chat to the place it's about.", "map", ["utilities"]],
+  ["key-guard", "Key guard", "Warns before a chat pastes something that looks like a secret.", "key", ["developer-tools", "chat"]],
   ["green-build", "Green build", "Your CI's status in the title bar.", "leaf", ["git"]],
   ["translate-reply", "Translate reply", "Read an agent's answer in your own language.", "translate", ["chat"]],
   ["night-shift", "Night shift", "Warmer colours after dark.", "palette", ["appearance"]],
@@ -469,17 +492,17 @@ const MORE: [string, string, string, keyof typeof ICONS | null, string[]][] = [
   ["ping-me", "Ping me", "A notification when an agent has been waiting on you too long.", "bell", ["agents"]],
   ["quick-links", "Quick links", "Your team's links, one keystroke away.", null, ["productivity"]],
   ["diff-stats", "Diff stats", "Lines changed by each chat, in its header.", "graph", ["git"]],
-  ["sprint-board", "Sprint board", "Your sprint as a page in the sidebar.", "calendar", ["productivity", "services"]],
-  ["emoji-status", "Emoji status", "An emoji for each chat's mood.", null, ["fun", "appearance"]],
-  ["log-tail", "Log tail", "Follow a log file in a chat's panel.", "shell", ["developer"]],
-  ["sentry-traces", "Sentry traces", "Pull a stack trace and its release into the chat.", "flame", ["services", "developer"]],
-  ["weather", "Weather", "The weather where you are, in the title bar.", "cloud", ["fun"]],
+  ["sprint-board", "Sprint board", "Your sprint as a page in the sidebar.", "calendar", ["productivity", "integrations"]],
+  ["emoji-status", "Emoji status", "An emoji for each chat's mood.", null, ["utilities", "appearance"]],
+  ["log-tail", "Log tail", "Follow a log file in a chat's panel.", "shell", ["developer-tools"]],
+  ["sentry-traces", "Sentry traces", "Pull a stack trace and its release into the chat.", "flame", ["integrations", "developer-tools"]],
+  ["weather", "Weather", "The weather where you are, in the title bar.", "cloud", ["utilities"]],
   ["word-count", "Word count", "Counts the words in the message box.", null, ["chat"]],
   ["branch-namer", "Branch namer", "Names a chat's branch from what it's about.", "radar", ["git", "agents"]],
   ["meeting-mode", "Meeting mode", "Quiets every notification while your calendar says you're busy.", "calendar", ["productivity"]],
   ["model-switch", "Model switch", "Switches a chat's model when a turn gets hard.", "bolt", ["agents"]],
-  ["focus-music", "Focus music", "Plays something calm while agents work.", "mic", ["fun"]],
-  ["api-console", "API console", "Try a request and hand the answer to your agent.", "bolt", ["developer", "services"]],
+  ["focus-music", "Focus music", "Plays something calm while agents work.", "mic", ["utilities"]],
+  ["api-console", "API console", "Try a request and hand the answer to your agent.", "bolt", ["developer-tools", "integrations"]],
 ];
 
 for (const [i, [id, name, summary, icon, categories]] of MORE.entries()) {
@@ -536,7 +559,7 @@ export interface FakeAudit {
 
 export function audit(): FakeAudit[] {
   return [
-    { id: "aud_3", at: NOW - 4 * DAY, actor: "user_grace", action: "reject", plugin_id: "session-badges", version: "1.2.0", detail: "network_unexplained" },
+    { id: "aud_3", at: NOW - 4 * DAY, actor: "user_grace", action: "reject", plugin_id: "session-badges", version: "1.2.0", detail: "asks_too_much" },
     { id: "aud_2", at: NOW - 9 * DAY, actor: "user_grace", action: "approve", plugin_id: "focus-timer", version: "1.2.0", detail: null },
     { id: "aud_1", at: NOW - 20 * DAY, actor: "user_grace", action: "suspend", plugin_id: "crypto-ticker", version: null, detail: "Sends what you type to a third party." },
   ];

@@ -35,7 +35,7 @@ const removable = (status: string) => status === "approved" || status === "yanke
 const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
 ---
 
-<Store title={`${a?.plugin.name ?? id} · Review · Zeron`} description="A plugin, for its reviewers." noindex toast={toast}>
+<Store title={`${a?.plugin.name ?? id} · Review · Zeron`} description="A plugin, for its reviewers." noindex tool toast={toast}>
   <div class="wrap one">
     <AccountBar session={session} current="queue">
       <a class="back" href="/admin/plugins"><Glyph name="alt-arrow-left" size={12} />Review</a>
@@ -105,7 +105,6 @@ const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
                       <td>
                         <span class="state">
                           <Badge tone={versionState(v).tone} size="sm">{versionState(v).label}</Badge>
-                          {v.review?.blocked && <Badge tone="danger" size="sm">Turned off on devices</Badge>}
                           {v.review?.reason && <span class="reason">{reasonWords(v.review.reason)}</span>}
                         </span>
                       </td>

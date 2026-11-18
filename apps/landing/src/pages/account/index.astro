@@ -22,7 +22,7 @@ const result = await Astro.locals.edge.myPlugins();
 const plugins = result.ok ? result.data.plugins : [];
 ---
 
-<Store title="Your plugins · Zeron" description="The plugins you publish." noindex toast={toast}>
+<Store title="Your plugins · Zeron" description="The plugins you publish." noindex tool toast={toast}>
   <div class="wrap account">
     <AccountBar session={session} current="mine">
       <h1>Your plugins</h1>

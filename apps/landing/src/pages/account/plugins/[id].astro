@@ -41,7 +41,7 @@ const dialogId = (action: string, version: string) => `${action}-${version.repla
 const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
 ---
 
-<Store title={`${plugin?.name ?? id} · Your plugins · Zeron`} description="One of your plugins." noindex toast={toast}>
+<Store title={`${plugin?.name ?? id} · Your plugins · Zeron`} description="One of your plugins." noindex tool toast={toast}>
   <div class="wrap mine">
     <AccountBar session={session} current="mine">
       <a class="back" href="/account"><Glyph name="alt-arrow-left" size={12} />Your plugins</a>
@@ -144,7 +144,7 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
                 <p>
                   <b>Make a key on your computer</b>, where its secret is made and stays: in Zeron, open <b>Settings</b> → <b>Plugins</b> → <b>Yours</b> → <b>{plugin.name}</b> → <b>Deploy keys</b>, or run:
                 </p>
-                <pre><code>zeron plugin keys add {plugin.id}</code></pre>
+                <pre><code>zeron plugin key create {plugin.id}</code></pre>
                 <p>The secret is shown once there. Put it in your CI's secrets; it never comes here.</p>
               </div>
             </div>

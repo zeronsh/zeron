@@ -27,7 +27,7 @@ const reports = result.ok ? result.data.reports.filter((r) => (open ? r.status =
 const base = open ? "/admin/reports" : "/admin/reports?status=closed";
 ---
 
-<Store title="Reports · Zeron" description="Reports about plugins." noindex toast={toast}>
+<Store title="Reports · Zeron" description="Reports about plugins." noindex tool toast={toast}>
   <div class="wrap reports-page">
     <AccountBar session={session} current="reports">
       <h1>Reports</h1>
@@ -73,7 +73,7 @@ const base = open ? "/admin/reports" : "/admin/reports?status=closed";
         </ul>
       )
     }
-    {result.ok && <Pagination label="More reports" next={result.data.next_cursor ? `${base}${open ? "?" : "&"}cursor=${encodeURIComponent(result.data.next_cursor)}` : null} previous={cursor ? base : null} />}
+    {result.ok && <Pagination label="More reports" next={result.data.next_cursor ? `${base}${open ? "?" : "&"}cursor=${encodeURIComponent(result.data.next_cursor)}` : null} previous={result.data.prev_cursor ? `${base}${open ? "?" : "&"}cursor=${encodeURIComponent(result.data.prev_cursor)}` : cursor ? base : null} />}
   </div>
 </Store>
 

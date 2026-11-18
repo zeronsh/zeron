@@ -3,6 +3,7 @@
 // a time. Public and the same for everyone (no cookie is read), so the
 // Worker cache keeps each address for half a minute and serves it stale
 // for another while it asks again: at most a minute old.
+import CategoryNav from "../../components/store/CategoryNav.astro";
 import FeaturedCard from "../../components/store/FeaturedCard.astro";
 import PluginCard from "../../components/store/PluginCard.astro";
 import Action from "../../components/ui/Action.astro";
@@ -82,6 +83,8 @@ const noindex = Boolean(state.q || state.cursor || state.keyword);
       </div>
     </form>
 
+    <CategoryNav state={state} categories={categories} look="row" />
+
     {
       front && featuredItems.length > 0 && (
         <section class="featured" aria-labelledby="featured-heading">
@@ -94,16 +97,7 @@ const noindex = Boolean(state.q || state.cursor || state.keyword);
     }
 
     <div class="layout">
-      <nav class="categories" aria-label="Categories">
-        <a href={catalogHref({ q: state.q, keyword: state.keyword, sort: state.sort })} aria-current={!state.category ? "page" : undefined}>All</a>
-        {
-          categories.map((c) => (
-            <a href={catalogHref({ q: state.q, keyword: state.keyword, sort: state.sort, category: c.id })} aria-current={state.category === c.id ? "page" : undefined}>
-              {c.name}
-            </a>
-          ))
-        }
-      </nav>
+      <CategoryNav state={state} categories={categories} look="rail" />
 
       <section class="results" aria-labelledby="results-heading">
         <div class="results-head">
@@ -153,7 +147,8 @@ const noindex = Boolean(state.q || state.cursor || state.keyword);
 
 <style>
   .catalog { display: grid; gap: 32px; }
-  .intro { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 32px; flex-wrap: wrap; }
+  /* "Your plugins" sits on the title's baseline, at the search row's right edge. */
+  .intro { display: flex; align-items: baseline; justify-content: space-between; gap: 16px 32px; flex-wrap: wrap; }
   .intro .lead { max-width: 34em; margin-top: 12px; }
   .mine { display: inline-flex; align-items: center; gap: 6px; height: 32px; font-size: 14px; font-weight: 500; color: var(--text-2); transition: color 0.12s; }
   .mine:hover { color: var(--text); }
@@ -168,11 +163,6 @@ const noindex = Boolean(state.q || state.cursor || state.keyword);
   .featured-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 
   .layout { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 32px; align-items: start; }
-  /* The categories: the app's menu rows, a wash under the pointer, firmer on the one shown. */
-  .categories { position: sticky; top: 24px; display: grid; gap: 2px; margin-left: -12px; }
-  .categories a { display: flex; align-items: center; height: 34px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text-2); border-radius: var(--radius-lg); transition: background-color 0.12s, color 0.12s; }
-  .categories a:hover { color: var(--text); background: var(--hover); }
-  .categories a[aria-current="page"] { color: var(--text); background: var(--selected); }
 
   .results { display: grid; gap: 16px; min-width: 0; }
   .results-head { display: flex; align-items: center; gap: 12px; min-height: 34px; flex-wrap: wrap; }
@@ -192,17 +182,24 @@ const noindex = Boolean(state.q || state.cursor || state.keyword);
 
   @media (max-width: 1080px) {
     .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .featured-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .featured-grid > :global(:nth-child(3)) { display: none; }
+    /* Narrower, the featured cards are a row to scroll, the next one peeking. */
+    .featured { container-type: inline-size; }
+    .featured-grid {
+      grid-template-columns: none;
+      grid-auto-flow: column;
+      grid-auto-columns: calc((100cqw - 16px) / 2.2);
+      margin-right: calc(-1 * var(--gutter));
+      padding: 0 var(--gutter) 4px 0;
+      overflow-x: auto;
+      scroll-snap-type: x mandatory;
+      scrollbar-width: none;
+    }
+    .featured-grid > :global(*) { scroll-snap-align: start; }
   }
   @media (max-width: 800px) {
     .layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-    /* On a narrow screen the categories are a row to scroll. */
-    .categories { position: static; display: flex; gap: 6px; margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter); overflow-x: auto; scrollbar-width: none; }
-    .categories a { flex: none; height: 32px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); border-radius: 16px; }
-    .categories a[aria-current="page"] { color: var(--primary-text); background: var(--primary-bg); box-shadow: none; }
-    .featured-grid { grid-template-columns: minmax(0, 1fr); }
-    .featured-grid > :global(:nth-child(n + 2)) { display: none; }
+    .featured-grid { grid-auto-columns: 84cqw; gap: 12px; }
+    .featured-grid { --featured-height: 0; --featured-visual: 120px; }
   }
   @media (max-width: 600px) {
     .grid { grid-template-columns: minmax(0, 1fr); }

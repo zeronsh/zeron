@@ -14,10 +14,12 @@ interface Props {
   description: string;
   noindex?: boolean;
   canonical?: string;
+  /** A page for doing (account, admin): it opens closer under the nav. */
+  tool?: boolean;
   /** What just happened (a flash after a form), said once. */
   toast?: { message: string; tone?: "success" | "danger" } | null;
 }
-const { title, description, noindex = false, canonical, toast = null } = Astro.props;
+const { title, description, noindex = false, canonical, tool = false, toast = null } = Astro.props;
 ---
 
 <!doctype html>
@@ -28,7 +30,7 @@ const { title, description, noindex = false, canonical, toast = null } = Astro.p
   </head>
   <body>
     <Nav downloads="/#downloads" stars={false} />
-    <main class="store"><slot /></main>
+    <main class:list={["store", { tool }]}><slot /></main>
     <Footer />
     <Toast message={toast?.message ?? null} tone={toast?.tone} />
     <!-- Icons a plugin ships are drawn through this: any colour in, the text's ink out. -->

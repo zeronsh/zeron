@@ -22,7 +22,7 @@ import { REJECT_REASONS } from "../../../../lib/store/admin.ts";
 import { takeFlash } from "../../../../lib/store/flash.ts";
 import { age, ago, bytes } from "../../../../lib/store/format.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
-import { renderMarkdown } from "../../../../lib/store/markdown.ts";
+import { renderedOnce } from "../../../../lib/store/rendered.ts";
 import { isPluginId, isVersion, packagePath } from "../../../../lib/store/names.ts";
 import { grew } from "../../../../lib/store/permissions.ts";
 import { changedFiles, countRows, diffRows, fileTree, isPicture, languageOf, manifestChanges, readText, type DiffRow } from "../../../../lib/store/review.ts";
@@ -51,12 +51,16 @@ const view: View = askedView && Object.hasOwn(VIEWS, askedView) ? (askedView as 
 const here = `/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(version)}`;
 const viewHref = (v: View, extra: Record<string, string> = {}) => `${here}${v === "overview" && !Object.keys(extra).length ? "" : `?${new URLSearchParams({ view: v, ...extra })}`}`;
 
-const changes = s?.base ? changedFiles(s.files, s.base.files) : [];
+const changes = s?.base ? changedFiles(s.files, s.base_files) : [];
 const changeOf = new Map(changes.map((c) => [c.path, c.change]));
 
 // README, as it will show in the store (its pictures through the file
 // route, which lets an admin see a pending version's).
-const readme = s && view === "readme" ? renderMarkdown(s.readme, { file: (p) => fileUrl(id, version, p), demote: true }) : "";
+let readme = "";
+if (s && view === "readme") {
+  const file = await readText(await edge.file(id, version, "README.md", true));
+  readme = file && "text" in file ? await renderedOnce(id, version, "readme", file.text, { file: (p) => fileUrl(id, version, p), demote: true }) : "";
+}
 
 // The file viewer: the file asked for, else the manifest.
 let viewing: { path: string; content: { text: string } | { binary: true } | { tooBig: true } | { picture: string } | null } | null = null;
@@ -100,7 +104,7 @@ const checks = s?.checks ?? [];
 const failing = checks.filter((c) => c.level === "fail").length;
 ---
 
-<Store title={`${s?.plugin.name ?? id} ${version} · Review · Zeron`} description="A submission in review." noindex toast={toast}>
+<Store title={`${s?.plugin.name ?? id} ${version} · Review · Zeron`} description="A submission in review." noindex tool toast={toast}>
   <div class="wrap review">
     <AccountBar session={session} current="queue">
       <a class="back" href="/admin/plugins"><Glyph name="alt-arrow-left" size={12} />Review</a>
@@ -169,14 +173,37 @@ const failing = checks.filter((c) => c.level === "fail").length;
                         <p class="label">Manifest changes</p>
                         <dl>
                           {manifestDiff.map((m) => (
-                            <div class:list={{ risky: m.risky }}>
+                            <div>
                               <dt>
                                 <code>{m.key}</code>
-                                {m.risky && <Badge tone="danger" size="sm">reach</Badge>}
+                                {m.reach && <span class="reach">decides what it can reach</span>}
                               </dt>
                               <dd>
-                                {m.before !== null && <code class="was">{m.before}</code>}
-                                {m.after !== null && <code class="now">{m.after}</code>}
+                                {m.added && m.removed ? (
+                                  <ul class="items" role="list">
+                                    {m.added.map((i) => (
+                                      <li class:list={["added", { risky: i.risky }]}>
+                                        <span class="sign" aria-hidden="true">+</span>
+                                        <code>{i.item}</code>
+                                        <span class="sr-only">added</span>
+                                        {i.risky && <Badge tone="danger" size="sm" icon="danger-triangle">More reach</Badge>}
+                                      </li>
+                                    ))}
+                                    {m.removed.map((i) => (
+                                      <li class="removed">
+                                        <span class="sign" aria-hidden="true">−</span>
+                                        <code>{i.item}</code>
+                                        <span class="sr-only">removed</span>
+                                      </li>
+                                    ))}
+                                    {m.added.length === 0 && m.removed.length === 0 && <li class="same">Same items, in another order</li>}
+                                  </ul>
+                                ) : null}
+                                <details class="raw" open={!(m.added && m.removed)}>
+                                  <summary>Before and after</summary>
+                                  {m.before !== null ? <code class="was">{m.before}</code> : <span class="none">Not there before</span>}
+                                  {m.after !== null ? <code class="now">{m.after}</code> : <span class="none">Taken out</span>}
+                                </details>
                               </dd>
                             </div>
                           ))}
@@ -200,7 +227,6 @@ const failing = checks.filter((c) => c.level === "fail").length;
                   <dl class="facts">
                     <div><dt>Approved</dt><dd class="num">{s.publisher.decisions.approved}</dd></div>
                     <div><dt>Not approved</dt><dd class="num">{s.publisher.decisions.rejected}</dd></div>
-                    <div><dt>Taken down</dt><dd class="num">{s.publisher.decisions.removed}</dd></div>
                   </dl>
                   {s.publisher.recent.length > 0 && (
                     <ul class="recent" role="list">
@@ -236,7 +262,7 @@ const failing = checks.filter((c) => c.level === "fail").length;
           {view === "readme" && (
             <section class="readme-view" aria-label="README as it will show">
               <p class="quiet">As it will show on its page.</p>
-              <div class="readme" set:html={readme} />
+              {readme ? <div class="readme" set:html={readme} /> : <p class="flag"><Glyph name="danger-triangle" size={16} />It has no README.md the store can show.</p>}
             </section>
           )}
 
@@ -349,17 +375,34 @@ const failing = checks.filter((c) => c.level === "fail").length;
   .faint { color: var(--text-3); }
   .label { font-size: 13px; font-weight: 500; color: var(--text-2); }
   .manifest { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
-  .manifest dl { display: grid; gap: 10px; }
-  .manifest dl > div { display: grid; gap: 4px; }
-  .manifest dt { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-  .manifest dd { display: grid; gap: 2px; }
-  .manifest dd code { display: block; padding: 4px 8px; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; border-radius: var(--radius-sm); }
+  .manifest dl { display: grid; gap: 14px; }
+  .manifest dl > div { display: grid; gap: 6px; }
+  .manifest dt { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
+  .reach { font-size: 12px; color: var(--text-3); }
+  .manifest dd { display: grid; gap: 6px; }
+  .items { display: grid; gap: 2px; }
+  .items li { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 0 8px; font-size: 12.5px; border-radius: var(--radius-sm); }
+  .items .sign { width: 10px; font-family: var(--mono); font-weight: 600; }
+  .items code { overflow-wrap: anywhere; }
+  .items .added { color: var(--text); background: var(--diff-added-wash); }
+  .items .added .sign { color: var(--diff-added); }
+  .items .added.risky { background: var(--tone-danger-wash); }
+  .items .added.risky .sign, .items .added.risky code { color: var(--tone-danger); }
+  .items .removed { color: var(--text-3); }
+  .items .removed .sign { color: var(--diff-removed); }
+  .items .same { color: var(--text-3); }
+  .raw summary { font-size: 12px; color: var(--text-3); cursor: pointer; }
+  .raw summary:hover { color: var(--text-2); }
+  .raw[open] { display: grid; gap: 2px; }
+  .raw[open] summary { margin-bottom: 4px; }
+  .raw code { display: block; padding: 4px 8px; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; border-radius: var(--radius-sm); }
+  .raw .none { font-size: 12px; color: var(--text-3); }
   .was { color: var(--text-2); background: var(--diff-removed-wash); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--diff-removed) 60%, transparent); }
   .now { color: var(--text); background: var(--diff-added-wash); }
   .who { display: flex; align-items: baseline; gap: 10px; font-size: 15px; }
   .who a { font-weight: 600; color: var(--text); }
   .who a:hover { color: var(--accent-soft); }
-  .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .facts > div { display: grid; gap: 2px; padding: 10px 12px; background: var(--surface); border-radius: var(--radius-lg); }
   .facts dt { font-size: 12px; color: var(--text-3); }
   .facts dd { font-size: 18px; font-weight: 600; }

@@ -62,29 +62,75 @@ export function changedFiles(files: readonly PackageFile[], base: readonly Packa
   return out.sort((a, b) => a.path.localeCompare(b.path, "en"));
 }
 
-export interface ManifestChange {
-  key: string;
-  before: string | null;
-  after: string | null;
-  /** Something that widens what it can do: called out. */
+export interface ManifestItem {
+  item: string;
+  /** It widens what the plugin can do. */
   risky: boolean;
 }
 
-/** Manifest fields that decide what a plugin can reach; a change to one is called out. */
+export interface ManifestChange {
+  key: string;
+  /** Compact JSON either side (null: not there), for the record. */
+  before: string | null;
+  after: string | null;
+  /** For a list (or an object of lists): what came and went, item by item. */
+  added: ManifestItem[] | null;
+  removed: ManifestItem[] | null;
+  /** The field decides what it can reach. */
+  reach: boolean;
+}
+
+/** Manifest fields that decide what a plugin can reach. */
 const REACH = new Set(["permissions", "commands", "network", "mcp", "service", "ui", "tools", "entry"]);
 /** Written by signing, and different every time: not a change anyone made. */
 const IGNORED = new Set(["signature", "version"]);
+/** Permissions that let it act beyond its own space (the consent sheet's risky asks). */
+const RISKY_ASKS = new Set(["ui.replace", "commands", "native", "service", "accounts.switch", "accounts.pin", "models.set", "messages.send", "devices"]);
 
-/** Each top-level manifest field that differs, as compact JSON either side. */
+/** A field as items, when it is a list (or an object of lists, or a list of named things); else null. */
+function items(key: string, value: unknown): string[] | null {
+  if (value === undefined) return [];
+  if (Array.isArray(value)) {
+    if (value.every((v) => typeof v === "string" || typeof v === "number")) return value.map(String);
+    if (value.every((v) => v && typeof v === "object" && typeof (v as { name?: unknown }).name === "string")) return value.map((v) => String((v as { name: string }).name));
+    return null;
+  }
+  if (value && typeof value === "object" && key !== "settings") {
+    const out: string[] = [];
+    for (const [k, v] of Object.entries(value)) {
+      if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) return null;
+      for (const x of v) out.push(`${k}: ${x}`);
+    }
+    return out;
+  }
+  return null;
+}
+
+/** Whether adding `item` to `key` lets it do more than it could. */
+const riskyItem = (key: string, item: string) => (key === "permissions" ? RISKY_ASKS.has(item) : key === "commands" || key === "network" || key === "tools" || (key === "ui" && item.startsWith("replace:")));
+
+/** Each top-level manifest field that differs; the ones that decide its reach first. */
 export function manifestChanges(now: Record<string, unknown>, before: Record<string, unknown>): ManifestChange[] {
   const keys = [...new Set([...Object.keys(before), ...Object.keys(now)])].filter((k) => !IGNORED.has(k)).sort();
   const out: ManifestChange[] = [];
   for (const key of keys) {
     const a = key in before ? stable(before[key]) : null;
     const b = key in now ? stable(now[key]) : null;
-    if (a !== b) out.push({ key, before: a, after: b, risky: REACH.has(key) });
+    if (a === b) continue;
+    const was = items(key, before[key]);
+    const is = items(key, now[key]);
+    const listed = was !== null && is !== null;
+    out.push({
+      key,
+      before: a,
+      after: b,
+      added: listed ? is.filter((x) => !was.includes(x)).map((item) => ({ item, risky: riskyItem(key, item) })) : null,
+      removed: listed ? was.filter((x) => !is.includes(x)).map((item) => ({ item, risky: false })) : null,
+      reach: REACH.has(key),
+    });
   }
-  return out.sort((x, y) => Number(y.risky) - Number(x.risky));
+  const weight = (c: ManifestChange) => (c.added?.some((i) => i.risky) ? 2 : c.reach ? 1 : 0);
+  return out.sort((x, y) => weight(y) - weight(x));
 }
 
 /** JSON with its keys in order, so two equal values read the same. */

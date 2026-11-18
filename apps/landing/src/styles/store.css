@@ -84,6 +84,7 @@
 
 /* The store's pages open a little closer to the nav than the home page's sections. */
 .store { padding-block: clamp(32px, 5vw, 64px) 0; }
+.store.tool { padding-top: 16px; }
 .store h1 { font-size: clamp(30px, 3.6vw, 44px); font-weight: 600; line-height: 1.08; letter-spacing: -0.032em; }
 
 /* Numbers that change hold still. */
@@ -157,3 +158,6 @@
 @media (scripting: enabled) {
   .js-hidden { display: none !important; }
 }
+
+/* A README the parser couldn't finish: its text, as written. */
+.readme pre.plain { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }

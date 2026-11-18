@@ -4,9 +4,10 @@
 // extension and never by what the file claims, and each is sandboxed: an
 // SVG opened on its own runs nothing here.
 //
-// An approved version's files are public and never change (a version
-// belongs to its content for good), so they are kept a year. A pending
-// one's are its owner's and the admins': asked for again with the
+// A public file is kept as the edge says, and by shared caches for a
+// minute at most: the edge checks the version's state before it serves a
+// file, so a version taken down stops showing within that (amendment 23).
+// A pending one's are its owner's and the admins': asked for again with the
 // visitor's cookie, and kept by no one.
 import type { APIRoute } from "astro";
 import { isPluginId, isVersion, packagePath } from "../../../../../lib/store/names.ts";
@@ -23,7 +24,8 @@ const PICTURES: Record<string, string> = {
   svg: "image/svg+xml",
 };
 
-const YEAR = 31_536_000;
+/** The most a shared cache keeps a public file (seconds). */
+const SHARED = 60;
 
 const notFound = () => new Response(null, { status: 404 });
 
@@ -41,8 +43,7 @@ export const GET: APIRoute = async ({ params, request, locals, cache }) => {
     answer = await locals.edge.file(id, version, path, true);
   }
   if (!answer.ok || !answer.body) return notFound();
-  // The Worker cache keeps a public one as long as the browser may.
-  if (open) cache.set({ maxAge: YEAR });
+  if (open) cache.set({ maxAge: SHARED });
 
   return new Response(answer.body, {
     headers: {
@@ -50,7 +51,7 @@ export const GET: APIRoute = async ({ params, request, locals, cache }) => {
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
       "content-disposition": "inline",
       "cross-origin-resource-policy": "same-origin",
-      "cache-control": open ? `public, max-age=${YEAR}, immutable` : "private, no-store",
+      "cache-control": open ? (answer.headers.get("cache-control") ?? `public, max-age=${SHARED}`) : "private, no-store",
     },
   });
 };

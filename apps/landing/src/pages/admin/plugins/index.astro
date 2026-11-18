@@ -30,7 +30,7 @@ const items = result.ok ? result.data.items : [];
 const href = (s: View, c?: string) => `/admin/plugins${s === "pending" && !c ? "" : `?${new URLSearchParams({ ...(s !== "pending" ? { status: s } : {}), ...(c ? { cursor: c } : {}) })}`}`;
 ---
 
-<Store title="Review · Zeron" description="The plugin review queue." noindex toast={toast}>
+<Store title="Review · Zeron" description="The plugin review queue." noindex tool toast={toast}>
   <div class="wrap admin">
     <AccountBar session={session} current="queue">
       <h1>Review</h1>
@@ -100,7 +100,7 @@ const href = (s: View, c?: string) => `/admin/plugins${s === "pending" && !c ? "
         </div>
       )
     }
-    {result.ok && <Pagination label="More of the queue" next={result.data.next_cursor ? href(status, result.data.next_cursor) : null} previous={cursor ? href(status) : null} />}
+    {result.ok && <Pagination label="More of the queue" next={result.data.next_cursor ? href(status, result.data.next_cursor) : null} previous={result.data.prev_cursor ? href(status, result.data.prev_cursor) : cursor ? href(status) : null} />}
   </div>
 </Store>
 

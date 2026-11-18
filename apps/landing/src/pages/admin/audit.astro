@@ -31,7 +31,7 @@ const ACTIONS: Record<string, string> = {
 };
 ---
 
-<Store title="Audit log · Zeron" description="What admins did." noindex>
+<Store title="Audit log · Zeron" description="What admins did." noindex tool>
   <div class="wrap audit">
     <AccountBar session={session} current="audit">
       <h1>Audit log</h1>
@@ -75,7 +75,7 @@ const ACTIONS: Record<string, string> = {
         </div>
       )
     }
-    {result.ok && <Pagination label="More of the log" next={result.data.next_cursor ? `/admin/audit?cursor=${encodeURIComponent(result.data.next_cursor)}` : null} previous={cursor ? "/admin/audit" : null} />}
+    {result.ok && <Pagination label="More of the log" next={result.data.next_cursor ? `/admin/audit?cursor=${encodeURIComponent(result.data.next_cursor)}` : null} previous={result.data.prev_cursor ? `/admin/audit?cursor=${encodeURIComponent(result.data.prev_cursor)}` : cursor ? "/admin/audit" : null} />}
   </div>
 </Store>
 

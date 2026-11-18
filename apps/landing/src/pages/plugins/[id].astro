@@ -11,7 +11,7 @@ import Glyph from "../../components/ui/Glyph.astro";
 import Store from "../../layouts/Store.astro";
 import { ago, bytes, compatibility, count, date } from "../../lib/store/format.ts";
 import { publicPage } from "../../lib/store/http.ts";
-import { renderMarkdown } from "../../lib/store/markdown.ts";
+import { renderedOnce } from "../../lib/store/rendered.ts";
 import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
 import { fileUrl, memberUrl, pluginUrl } from "../../lib/store/urls.ts";
 import type { VersionInfo } from "../../lib/store/types.ts";
@@ -20,6 +20,9 @@ export const prerender = false;
 
 const { id } = Astro.params;
 if (!isPluginId(id)) return new Response(null, { status: 404 });
+// One address per plugin: a query can't make the page (or its README) be
+// made again, and can't split its cache.
+if (Astro.url.search) return Astro.redirect(pluginUrl(id), 301);
 
 const edge = Astro.locals.edge;
 const [result, versionsResult, categoriesResult] = await Promise.all([edge.plugin(id), edge.versions(id), edge.categories()]);
@@ -34,9 +37,9 @@ let versions: (VersionInfo & { html: string | null })[] = [];
 if (plugin) {
   publicPage(Astro);
   const file = (version: string) => (path: string) => fileUrl(plugin.id, version, path);
-  readme = renderMarkdown(plugin.readme, { file: file(plugin.version), demote: true });
+  readme = await renderedOnce(plugin.id, plugin.version, "readme", plugin.readme, { file: file(plugin.version), demote: true });
   const all = versionsResult.ok ? versionsResult.data.versions : plugin.versions;
-  versions = all.map((v) => ({ ...v, html: v.notes ? renderMarkdown(v.notes, { file: file(v.version), demote: true }) : null }));
+  versions = await Promise.all(all.map(async (v) => ({ ...v, html: v.notes ? await renderedOnce(plugin.id, v.version, "notes", v.notes, { file: file(v.version), demote: true }) : null })));
 }
 const categories = categoriesResult.ok ? new Map(categoriesResult.data.categories.map((c) => [c.id, c.name])) : new Map<string, string>();
 const RECENT = 4;
@@ -81,7 +84,6 @@ const structured = plugin
                 <span>
                   by <a href={memberUrl(plugin.author.username)}>@{plugin.author.username}</a>
                 </span>
-                {!plugin.author.verified && <Badge tone="warning" icon="danger-triangle" size="sm">Unverified</Badge>}
                 {plugin.author.badges.map((b) => <Badge size="sm" title={b.description}>{b.name}</Badge>)}
               </p>
               <p class="summary">{plugin.summary}</p>

@@ -41,10 +41,9 @@ export interface Badge {
   description?: string;
 }
 
+/** Who publishes it (amendment 20): every listing is by an account with a username. */
 export interface Author {
   username: string;
-  /** The account's key signed it and the account holds that username. */
-  verified: boolean;
   badges: Badge[];
 }
 
@@ -88,13 +87,12 @@ export interface Permissions {
 export type VersionStatus = "pending" | "approved" | "rejected" | "withdrawn" | "yanked" | "removed";
 
 export interface Review {
+  state: VersionStatus;
   /** Why, as a stable word (rejected or removed). */
   reason?: string;
   /** What the reviewer wrote for the author. */
   message?: string;
   decided_at?: number;
-  /** Removed and blocked: devices turn it off at their next check. */
-  blocked?: boolean;
 }
 
 export type CheckLevel = "ok" | "warn" | "fail";
@@ -113,6 +111,11 @@ export interface VersionInfo {
   notes: string | null;
   engines: { zeron?: string } | null;
   yanked: boolean;
+  /** What was signed (amendment 1). */
+  key?: string;
+  hash?: string;
+  sha256?: string;
+  bytes?: number;
   /** The owner's and an admin's view. */
   review?: Review;
   checks?: Check[];
@@ -122,6 +125,8 @@ export interface PackageInfo {
   bytes: number;
   sha256: string;
   hash: string;
+  /** The public key that signed it (b64url). */
+  key?: string;
 }
 
 export interface PluginDetail extends PluginCard {
@@ -154,12 +159,13 @@ export interface Category {
 // ── The signed-in web session (/auth/web/session) ───────────────────────
 
 export interface WebSession {
-  user: { id: string; name?: string; avatar?: string };
+  user: { name?: string; email?: string; avatar?: string };
   username: string | null;
   roles: string[];
   /** The token every form posts back (checked by the edge with Origin). */
   csrf: string;
-  expires_at?: number;
+  expires_at: number;
+  fresh_sign_in?: boolean;
 }
 
 // ── The author's own ────────────────────────────────────────────────────
@@ -204,13 +210,13 @@ export interface QueueItem {
 export interface QueuePage {
   items: QueueItem[];
   next_cursor?: string;
+  prev_cursor?: string;
 }
 
 export interface Publisher {
-  user_id: string;
   username: string | null;
   created_at: number;
-  decisions: { approved: number; rejected: number; removed: number };
+  decisions: { approved: number; rejected: number };
   recent: { id: string; version: string; status: VersionStatus; decided_at: number | null }[];
 }
 
@@ -240,11 +246,12 @@ export interface Submission {
   publisher: Publisher;
   /** The signed manifest, as submitted. */
   manifest: Record<string, unknown>;
-  readme: string;
   permissions: Permissions;
   files: PackageFile[];
-  /** The last approved version, which the diff is against, or null. */
-  base: { version: string; manifest: Record<string, unknown>; files: PackageFile[] } | null;
+  /** The last approved version, which the diff is against, when there is one. */
+  base?: { version: string; manifest: Record<string, unknown> } | null;
+  /** The base's files. */
+  base_files: PackageFile[];
   permissions_diff: PermissionsDiff | null;
   checks: Check[];
 }
@@ -254,6 +261,7 @@ export type PluginStatus = "listed" | "unlisted" | "suspended" | "removed";
 export interface AdminPlugin {
   plugin: PluginCard;
   status: PluginStatus;
+  featured: boolean;
   owner: { user_id: string; username: string | null; created_at: number };
   versions: VersionInfo[];
   reports: Report[];
@@ -277,6 +285,7 @@ export interface Report {
 export interface ReportsPage {
   reports: Report[];
   next_cursor?: string;
+  prev_cursor?: string;
 }
 
 export interface AuditEntry {
@@ -292,4 +301,5 @@ export interface AuditEntry {
 export interface AuditPage {
   entries: AuditEntry[];
   next_cursor?: string;
+  prev_cursor?: string;
 }

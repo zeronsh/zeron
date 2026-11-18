@@ -15,9 +15,7 @@ export function versionState(v: Pick<VersionInfo, "status" | "review">): { label
     case "yanked":
       return { label: "No longer offered", tone: "neutral", about: "Nobody new gets it. Anyone who has it keeps it." };
     case "removed":
-      return v.review?.blocked
-        ? { label: "Taken down", tone: "danger", about: "Removed by the store, and turned off on the devices that have it." }
-        : { label: "Taken down", tone: "danger", about: "Removed by the store. Anyone who has it keeps it." };
+      return { label: "Taken down", tone: "danger", about: "Removed from the store by its reviewers." };
   }
 }
 

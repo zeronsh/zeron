@@ -73,7 +73,7 @@ function card(p: FakePlugin, version: FakeVersion | undefined = latest(p)) {
     name: String(m.name),
     summary: String(m.description),
     icon: typeof m.icon === "string" ? m.icon : null,
-    author: { username: owner.username ?? "", verified: owner.username !== null, badges: owner.badges },
+    author: { username: owner.username ?? "", badges: owner.badges },
     categories: (m.categories as string[]) ?? [],
     keywords: (m.keywords as string[]) ?? [],
     version: v.version,
@@ -102,6 +102,7 @@ function permissions(m: Record<string, unknown>) {
 }
 
 function versionInfo(v: FakeVersion, full: boolean) {
+  const bytes = Object.values(v.files).reduce((n, f) => n + f.length, 0);
   return {
     version: v.version,
     status: v.status,
@@ -109,6 +110,10 @@ function versionInfo(v: FakeVersion, full: boolean) {
     notes: v.notes,
     engines: v.engines,
     yanked: v.status === "yanked",
+    key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq",
+    hash: `b3:${hash(v.version + bytes)}`,
+    sha256: hash(JSON.stringify(v.manifest)).slice(0, 64),
+    bytes,
     ...(full ? { checks: v.checks, ...(v.review ? { review: v.review } : {}) } : {}),
   };
 }
@@ -127,7 +132,7 @@ function detail(p: FakePlugin) {
     repository: (m.repository as string) ?? null,
     license: (m.license as string) ?? null,
     versions: p.versions.filter((x) => x.status === "approved" || x.status === "yanked").slice(0, 5).map((x) => versionInfo(x, false)),
-    package: { bytes, sha256: "9f2c1e4b7a0d3c6f8e1b4a7d0c3f6e9b2a5d8c1f4e7b0a3d6c9f2e5b8a1d4c7f", hash: "b3:7d1e4a9c2f5b8e1d4a7c0f3b6e9d2a5c" },
+    package: { bytes, sha256: "9f2c1e4b7a0d3c6f8e1b4a7d0c3f6e9b2a5d8c1f4e7b0a3d6c9f2e5b8a1d4c7f", hash: "b3:7d1e4a9c2f5b8e1d4a7c0f3b6e9d2a5c", key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq" },
   };
 }
 
@@ -230,7 +235,9 @@ function file(request: Request, id: string, version: string, path: string): Resp
       "content-type": TYPES[ext] ?? "application/octet-stream",
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
       "x-content-type-options": "nosniff",
-      "cache-control": open ? "public, max-age=31536000, immutable" : "private, no-store",
+      // (The edge checks the version's state before it serves a file, and
+      // keeps that state at most a minute: amendment 23.)
+      "cache-control": open ? "public, max-age=60" : "private, no-store",
     },
   });
 }
@@ -302,7 +309,7 @@ function queue(url: URL): Response {
   );
   // Oldest waiting first.
   items.sort((a, b) => a.submitted_at - b.submitted_at);
-  return json({ items });
+  return json(paged(items, url, "items"));
 }
 
 function submission(id: string, version: string): Response {
@@ -320,17 +327,16 @@ function submission(id: string, version: string): Response {
     plugin: card(p, v),
     version: versionInfo(v, true),
     publisher: {
-      user_id: owner.id,
       username: owner.username,
       created_at: owner.created_at,
-      decisions: { approved: decided.filter((d) => d.status === "approved" || d.status === "yanked").length, rejected: decided.filter((d) => d.status === "rejected").length, removed: decided.filter((d) => d.status === "removed").length },
+      decisions: { approved: decided.filter((d) => d.status === "approved" || d.status === "yanked").length, rejected: decided.filter((d) => d.status === "rejected").length },
       recent: decided.filter((d) => d.status !== "pending").slice(0, 6),
     },
     manifest: v.manifest,
-    readme: v.files["README.md"] ?? "",
     permissions: permissionsNow,
     files: files(v),
-    base: base ? { version: base.version, manifest: base.manifest, files: files(base) } : null,
+    base: base ? { version: base.version, manifest: base.manifest } : null,
+    base_files: base ? files(base) : [],
     permissions_diff: permissionsBase
       ? {
           asks_added: added(permissionsNow.asks, permissionsBase.asks),
@@ -372,7 +378,7 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
     if (v.status !== "pending") return fail(409, "conflict", `It's ${v.status}.`);
     if (parts[3] === "approve") {
       v.status = "approved";
-      v.review = { decided_at: Date.now() };
+      v.review = { state: "approved", decided_at: Date.now() };
       if (p.status === "unlisted") p.status = "listed";
       log(who.user, "approve", p.id, v.version, null);
       return json(versionInfo(v, true));
@@ -380,7 +386,7 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
     if (parts[3] === "reject") {
       if (!text("reason") || !text("message")) return fail(400, "bad_request", "A reason and a message for the author are needed.");
       v.status = "rejected";
-      v.review = { reason: text("reason"), message: text("message"), decided_at: Date.now() };
+      v.review = { state: "rejected", reason: text("reason"), message: text("message"), decided_at: Date.now() };
       log(who.user, "reject", p.id, v.version, text("reason"));
       return json(versionInfo(v, true));
     }
@@ -395,7 +401,7 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
       if (!v) return notFound();
       if (!text("reason")) return fail(400, "bad_request", "A reason is needed.");
       v.status = "removed";
-      v.review = { reason: text("reason"), decided_at: Date.now(), blocked: input.block === true };
+      v.review = { state: "removed", reason: text("reason"), decided_at: Date.now() };
       log(who.user, input.block === true ? "remove_block" : "remove", p.id, v.version, text("reason"));
       return json(versionInfo(v, true));
     }
@@ -488,7 +494,7 @@ async function route(request: Request): Promise<Response> {
     if (parts[2] === "session" && method === "GET") {
       const s = session(request);
       if (!s) return fail(401, "signed_out");
-      return json({ user: { id: s.user.id, name: s.user.name }, username: s.user.username, roles: s.user.roles, csrf: s.csrf, expires_at: NOW + DAY });
+      return json({ user: { name: s.user.name, email: `${s.user.id.slice(5)}@example.com` }, username: s.user.username, roles: s.user.roles, csrf: s.csrf, expires_at: NOW + DAY, fresh_sign_in: false });
     }
     return notFound();
   }
@@ -549,6 +555,7 @@ async function route(request: Request): Promise<Response> {
       if (!p) return notFound();
       return json({
         plugin: card(p),
+        featured: p.featured,
         status: p.status,
         owner: { ...person(p.owner), created_at: userOf(p.owner).created_at },
         versions: p.versions.map((v) => versionInfo(v, true)),
@@ -557,11 +564,23 @@ async function route(request: Request): Promise<Response> {
     }
     if (b === "reports") {
       const status = url.searchParams.get("status") ?? "open";
-      return json({ reports: state.reports.filter((r) => status === "all" || r.status === status).map(reportView) });
+      return json(paged(state.reports.filter((r) => status === "all" || r.status === status).map(reportView), url, "reports"));
     }
-    if (b === "audit") return json({ entries: state.audit.map((x) => ({ ...x, actor: person(x.actor) })) });
+    if (b === "audit") return json(paged(state.audit.map((x) => ({ ...x, actor: person(x.actor) })), url, "entries"));
   }
   return notFound();
+}
+
+/** A page of an admin list, with cursors both ways (amendment 29). */
+function paged<T>(all: T[], url: URL, field: string, limit = 20): Record<string, unknown> {
+  const cursor = url.searchParams.get("cursor");
+  const start = cursor ? Math.max(0, Number(atob(cursor.replace(/-/g, "+").replace(/_/g, "/"))) || 0) : 0;
+  const at = (n: number) => btoa(String(n)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return {
+    [field]: all.slice(start, start + limit),
+    ...(start + limit < all.length ? { next_cursor: at(start + limit) } : {}),
+    ...(start > 0 ? { prev_cursor: at(Math.max(0, start - limit)) } : {}),
+  };
 }
 
 function reportView(r: (typeof state.reports)[number]) {

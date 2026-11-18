@@ -28,7 +28,7 @@ if (Astro.request.method !== "GET") return new Response(null, { status: 405, hea
 privatePage(Astro);
 ---
 
-<Store title={`${ask.title} · Zeron`} description={ask.title} noindex>
+<Store title={`${ask.title} · Zeron`} description={ask.title} noindex tool>
   <div class="wrap">
     <ConfirmPage title={ask.title} action={Astro.url.pathname} csrf={session.csrf} confirm={ask.confirm} tone={ask.tone} back={back}>
       <Fragment slot="words">{ask.words.map((w) => <p>{w}</p>)}</Fragment>

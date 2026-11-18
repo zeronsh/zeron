@@ -15,7 +15,7 @@ const { name, pictures } = Astro.props;
 {
   pictures.length > 0 && (
     <div class="shots" data-shots>
-      <ul class="strip" role="list">
+      <ul class="strip" role="list" data-count={Math.min(pictures.length, 3)} aria-label={`${name} screenshots`}>
         {pictures.map((src, i) => (
           <li>
             <a class="shot" href={src} data-shot={i} aria-label={`Screenshot ${i + 1} of ${pictures.length}, larger`}>
@@ -90,19 +90,31 @@ const { name, pictures } = Astro.props;
 </script>
 
 <style>
+  /* The strip starts on the content's left edge and runs to the window's
+     right edge, so it reads as a row to scroll, not a row that stopped
+     short. Two pictures fill the content's width; with more, the next one
+     peeks in. (Widths are of the content: its container.) */
+  .shots { container-type: inline-size; }
   .strip {
+    --gap: 12px;
     display: flex;
-    gap: 12px;
-    margin-inline: calc(-1 * var(--gutter));
-    padding: 2px var(--gutter);
+    gap: var(--gap);
+    margin-right: calc(50% - 50vw);
+    padding: 2px var(--gutter) 10px 0;
     overflow-x: auto;
     scroll-snap-type: x mandatory;
-    scroll-padding-inline: var(--gutter);
     scrollbar-width: thin;
     scrollbar-color: var(--line-strong) transparent;
   }
   .strip li { flex: none; scroll-snap-align: start; }
-  .shot { display: block; width: min(560px, 78vw); border-radius: 12px; overflow: hidden; box-shadow: 0 0 0 1px var(--line); transition: box-shadow 0.2s; }
+  .strip[data-count="1"] li { width: min(100cqw, 760px); }
+  .strip[data-count="2"] li { width: calc((100cqw - var(--gap)) / 2); }
+  .strip[data-count="3"] li { width: calc((100cqw - var(--gap)) / 2.3); }
+  @media (max-width: 700px) {
+    .strip[data-count] li { width: 86cqw; }
+    .strip[data-count="1"] li { width: 100cqw; }
+  }
+  .shot { display: block; border-radius: 12px; overflow: hidden; box-shadow: 0 0 0 1px var(--line); transition: box-shadow 0.2s; }
   .shot:hover { box-shadow: 0 0 0 1px var(--line-strong); }
   .shot:focus-visible { outline-offset: 2px; border-radius: 12px; }
   .shot img { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; background: var(--surface); }

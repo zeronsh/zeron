@@ -114,13 +114,23 @@ const processor = unified()
 const sanitize = unified().use(rehypeSanitize, SCHEMA).freeze();
 const stringify = unified().use(rehypeStringify, { allowDangerousHtml: false }).freeze();
 
-/** Markdown in, safe HTML out. */
+/** Bump when the HTML this makes changes, so kept renderings are made again. */
+export const RENDERER = 1;
+
+/**
+ * Markdown in, safe HTML out. A document the parser can't finish (nesting
+ * deep enough to exhaust the stack) is shown as its plain text instead.
+ */
 export function renderMarkdown(markdown: string, options: RenderOptions): string {
-  const tree = processor.runSync(processor.parse(markdown)) as Root;
-  point(tree, options);
-  const clean = sanitize.runSync(tree) as Root;
-  finish(clean, options);
-  return stringify.stringify(clean);
+  try {
+    const tree = processor.runSync(processor.parse(markdown)) as Root;
+    point(tree, options);
+    const clean = sanitize.runSync(tree) as Root;
+    finish(clean, options);
+    return stringify.stringify(clean);
+  } catch {
+    return stringify.stringify({ type: "root", children: [{ type: "element", tagName: "pre", properties: { className: ["plain"] }, children: [{ type: "text", value: markdown }] }] });
+  }
 }
 
 // ── point ──────────────────────────────────────────────────────────────
