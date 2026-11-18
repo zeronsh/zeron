@@ -667,10 +667,11 @@ test("a key within 14 days of its end says how soon, after when it was last used
 	-- (Both facts: is it still in use, and how soon it ends.)
 	-- (Its date as this time zone says it.)
 	expect(tree:find('"Last used [^"]+ · Ends today"') ~= nil).to_be(true)
-	expect(tree).to_contain('"Not used yet · Ends tomorrow"')
+	-- (Not used: when it was made instead.)
+	expect(tree:find('"Not used yet · made [^"]+ · Ends tomorrow"') ~= nil).to_be(true)
 	expect(tree:find('"Last used [^"]+ · Ends in 5 days"') ~= nil).to_be(true)
 	-- (Further off: its date, after when it was last used.)
-	expect(tree).to_contain("Not used yet · Doesn't expire")
+	expect(tree:find("Not used yet · made [^\"]+ · Doesn't expire") ~= nil).to_be(true)
 end)
 
 test("with nothing sent, its versions say so in one quiet line in their card, as its keys do", function()

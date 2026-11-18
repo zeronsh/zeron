@@ -65,7 +65,7 @@ export type Owned = { id: string, name: string }
 -- where they're yours; two by name, more by how many).
 local function scope_words(scope: any, plugins: { Owned }): string
 	if type(scope) ~= "table" or scope.all == true then
-		return ui.t("plugins.store.key.scope.all"):get()
+		return ui.t("plugins.store.key.scope.all_now", { n = #plugins }):get()
 	end
 	local names: { string } = {}
 	for _, id in (if type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do
@@ -82,7 +82,7 @@ local function scope_words(scope: any, plugins: { Owned }): string
 	elseif #names == 2 then
 		return ui.t("plugins.store.key.scope.two", { a = names[1], b = names[2] }):get()
 	end
-	return ui.t("plugins.store.key.scope.some", { n = #names }):get()
+	return ui.t("plugins.store.key.scope.more", { a = names[1], b = names[2], n = #names - 2 }):get()
 end
 
 M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
@@ -213,6 +213,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 				return table.concat({
 					if used and on then ui.t("plugins.store.key.last_used_on", { date = used, plugin = on }):get()
 						elseif used then ui.t("plugins.store.key.last_used", { date = used }):get()
+						elseif day_of(k.created_at) then ui.t("plugins.store.key.not_used_made", { date = day_of(k.created_at) }):get()
 						else ui.t("plugins.store.key.not_used"):get(),
 					ending,
 				}, " · ")
@@ -480,14 +481,16 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 			},
 			-- The secret as the app shows a line of code to copy: a chat
 			-- reply's code block (mono, scrolling sideways, never broken, its
-			-- own Copy), drawn by ds/markdown from one fence. (A deploy key's
-			-- characters never close it.)
+			-- own Copy), drawn by ds/markdown from one fence labelled "key". (A
+			-- deploy key's characters never close it.)
 			ui.div {
 				id = "key-secret",
 				w_full = true,
 				Markdown {
 					text = function(): string
-						return "```\n" .. (secret:get() or "") .. "\n```"
+						-- (`key`: a name the highlighter doesn't know, so the
+						-- block's label reads "key" over the plain text.)
+						return "```key\n" .. (secret:get() or "") .. "\n```"
 					end,
 				},
 			},

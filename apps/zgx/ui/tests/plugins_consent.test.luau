@@ -327,6 +327,8 @@ test("a store version the store hasn't verified asks even for nothing new, warns
 	app:frames(20)
 	local sheet = app:tree("#consent")
 	expect(app:tree("#consent-unverified")).to_contain("Zeron hasn't verified 1.3.0 yet.")
+	-- (It updates one that was: said, as the update sheet says it.)
+	expect(app:tree("#consent-unverified")).to_contain("The version you have was verified.")
 	-- Nothing beyond what was allowed: said, not listed again.
 	expect(sheet).to_contain("It asks for nothing beyond what you allowed.")
 	-- Allow still answers; the verified one is the other way.

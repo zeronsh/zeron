@@ -4056,7 +4056,9 @@
         "listed_waiting": "{version} 已在插件商店，尚未验证",
         "listed_declined": "{version} 已在插件商店，未通过验证",
         "no_installs": "{version} 已停止新安装",
-        "taken_down": "{version} 已下架"
+        "taken_down": "{version} 已下架",
+        "newest_verified": "{version} 是最新的已验证版本",
+        "none_verified": "还没有已验证的版本"
       },
       "keys": "部署密钥",
       "keys_body": "部署密钥让 CI 任务（例如 GitHub Action）无需你的会话即可发布你插件的新版本。每个密钥只发布创建时选定的插件。",
@@ -4100,8 +4102,10 @@
           "chosen": "选定的插件",
           "one": "{name}",
           "two": "{a} 和 {b}",
-          "some": "你的 {n} 个插件"
-        }
+          "all_now": "你的所有插件：目前 {n} 个，以及以后发布的",
+          "more": "{a}、{b} 等 {n} 个"
+        },
+        "not_used_made": "尚未使用 · 创建于 {date}"
       },
       "unblock_title": "重新打开{name}？",
       "unblock_body": "Zeron 已将这个版本从商店下架。它会按你之前的允许在这里再次运行。",
@@ -4128,9 +4132,9 @@
       "plain_readme": "此处以下的 README 以纯文本显示：它太长或嵌套太深，无法排版。",
       "plain_notes": "此处以下的更新说明以纯文本显示：它太长或嵌套太深，无法排版。",
       "review": {
-        "waiting": "等待审核",
-        "declined": "未验证：审核者拒绝验证",
-        "declined_said": "未验证：“{words}”"
+        "waiting": "尚未验证",
+        "declined": "未验证",
+        "declined_said": "审核者的说明：“{words}”"
       },
       "superseded": "在验证前已被 {version} 取代：不再接受新安装",
       "sent_toast_body": "在审核者看过之前，它会显示为未验证。",
@@ -4143,7 +4147,8 @@
       "updates_section": "插件商店",
       "updates_all_label": "来自插件商店的更新",
       "updates_all_body": "你从商店安装的插件在这台设备上接受哪些新版本。每个插件也可以在自己的页面上单独设置。",
-      "couldnt_updates_all": "无法更改插件接受的更新"
+      "couldnt_updates_all": "无法更改插件接受的更新",
+      "installed_was_verified_plain": "你现有的版本已验证。"
     }
   },
   "templates": {

@@ -85,7 +85,8 @@ test("Publish sends what was checked with its ticket: listed at once, waiting fo
 	settle(app)
 	expect(calls(app)).to_contain("publish:pomodoro-clock:pomodoro-clock-1.2.0:ticket-1.2.0")
 	local tree = app:tree()
-	expect(tree).to_contain("Waiting for a reviewer")
+	-- (Its badge says where its review stands.)
+	expect(tree).to_contain("Not verified yet")
 	-- 1.1.0, never verified, takes no new installs now: said why.
 	expect(tree).to_contain("Replaced by 1.2.0 before it was verified")
 	-- Yours says it too.
@@ -116,7 +117,7 @@ end)
 test("each version says whether the store verified it, the reviewer's words when they declined, and why one takes no new installs", function()
 	local app = publishing()
 	local tree = app:tree()
-	expect(tree).to_contain("Not verified:")
+	expect(tree).to_contain("The reviewer's note:")
 	expect(tree).to_contain("It reads every chat")
 	expect(tree).to_contain("Verified on")
 	expect(tree).to_contain("Replaced by 1.1.0 before it was verified")

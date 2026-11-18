@@ -81,12 +81,17 @@ local function superseded_by(v: any): string?
 	return if type(by) == "string" and by ~= "" then by else nil
 end
 
--- A state's badge beside its version (listed has none of its own; the
--- store's mark says it's verified).
+-- A state's badge beside its version: one taking no new installs, taken
+-- down, removed; else where its review stands (the store's mark when it's
+-- verified).
 local STATUS_TONE: { [string]: string } = {
 	yanked = "info",
 	taken_down = "warning",
 	removed = "neutral",
+}
+local REVIEW_TONE: { [string]: string } = {
+	waiting = "warning",
+	declined = "danger",
 }
 
 -- Yours in the store, by name: what a deploy key's scope chooses from.
@@ -132,6 +137,17 @@ function M.summary(id: string): string?
 	local parts: { string } = {}
 	if listed then
 		table.insert(parts, ui.t(`plugins.store.summary.listed_{review_of(listed)}`, { version = listed.version }):get())
+		-- (Not verified: the newest that is, what people are offered beside it.)
+		if review_of(listed) ~= "verified" then
+			local newest: string? = nil
+			for _, v in (if type(p.versions) == "table" then p.versions else {}) :: { any } do
+				if v.verified == true and status_of(v) == "listed" then
+					newest = v.version
+					break
+				end
+			end
+			table.insert(parts, if newest then ui.t("plugins.store.summary.newest_verified", { version = newest }):get() else ui.t("plugins.store.summary.none_verified"):get())
+		end
 	elseif stopped then
 		table.insert(parts, ui.t("plugins.store.summary.no_installs", { version = stopped }):get())
 	end
@@ -499,11 +515,14 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 				if STATUS_TONE[s] then
 					return s
 				end
-				return if review_of(v) == "verified" then "verified" else "none"
+				return review_of(v)
 			end, (function(): { [string]: Node }
-				local out: { [string]: Node } = { none = ui.div {} }
+				local out: { [string]: Node } = {}
 				for s, tone in STATUS_TONE do
 					out[s] = ds.Badge { ui.t(`plugins.store.status.{s}`), tone = tone :: any, size = "sm" }
+				end
+				for r, tone in REVIEW_TONE do
+					out[r] = ds.Badge { ui.t(`plugins.store.review.{r}`), tone = tone :: any, size = "sm" }
 				end
 				out.verified = ds.Badge { ui.t("plugins.store.verified"), class = "store-verified", tone = "success", size = "sm" }
 				return out
@@ -532,9 +551,10 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 					local why = if type(review) == "table" then (review.message or review.reason) else nil
 					return if type(why) == "string" and why ~= ""
 						then ui.t("plugins.store.review.declined_said", { words = string.sub(why, 1, 600) }):get()
-						else ui.t("plugins.store.review.declined"):get()
+						else nil
 				end
-				return ui.t("plugins.store.review.waiting"):get()
+				-- (Waiting: its badge says it.)
+				return nil
 			end,
 			control = ui.switch(function(): string
 				return action_of() or "none"

@@ -139,11 +139,14 @@ fn unverified_store(item: &Json) -> Option<String> {
 
 /// The newest verified version the store has, which an unverified store
 /// version waiting here could take instead, as the engine's item names it
-/// (an update's offer). With its store id. (A first install's isn't on the
-/// item: `newest_verified` asks the store.)
+/// (an update's offer, or a first install's source). With its store id.
+/// (Where the item names none, `newest_verified` asks the store.)
 fn verified_alternative(item: &Json) -> Option<(String, String)> {
     let store = unverified_store(item)?;
-    let alt = item["update"]["verified_alternative"]["version"].as_str().filter(|v| version_reads(v))?;
+    let alt = item["update"]["verified_alternative"]["version"]
+        .as_str()
+        .or_else(|| item["source"]["verified_alternative"]["version"].as_str())
+        .filter(|v| version_reads(v))?;
     Some((store, alt.to_string()))
 }
 
@@ -552,10 +555,12 @@ mod tests {
     fn the_verified_version_instead_is_the_engine_s_and_reads_as_a_version() {
         let update = json!({ "source": { "kind": "store", "id": "focus-timer", "verified": false }, "update": { "verified_alternative": { "version": "1.2.1" } } });
         assert_eq!(verified_alternative(&update), Some(("focus-timer".into(), "1.2.1".into())));
-        // (A first install's isn't on the item: the store is asked.)
-        let first = json!({ "source": { "kind": "store", "id": "fresh", "verified": false } });
-        assert_eq!(verified_alternative(&first), None);
-        assert_eq!(unverified_store(&first), Some("fresh".into()));
+        let first = json!({ "source": { "kind": "store", "id": "fresh", "verified": false, "verified_alternative": { "version": "0.0.9" } } });
+        assert_eq!(verified_alternative(&first), Some(("fresh".into(), "0.0.9".into())));
+        // (One that names none: the store is asked.)
+        let none = json!({ "source": { "kind": "store", "id": "fresh", "verified": false, "verified_alternative": null } });
+        assert_eq!(verified_alternative(&none), None);
+        assert_eq!(unverified_store(&none), Some("fresh".into()));
         let verified = json!({ "source": { "kind": "store", "id": "fresh", "verified": true, "verified_alternative": { "version": "0.1.0" } } });
         assert_eq!(verified_alternative(&verified), None);
         let git = json!({ "source": { "kind": "git", "verified": false }, "update": { "verified_alternative": { "version": "1.0.0" } } });

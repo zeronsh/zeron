@@ -123,10 +123,14 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 	-- engine names one. It asks even when it asks nothing new.
 	local store_source = type(it.source) == "table" and it.source.kind == "store"
 	local unverified = store_source and it.source.verified == false
-	-- The newest verified one: an update's offer names it; a first
-	-- install's, the window's host asks the store as the sheet shows (this
-	-- visit's answer), and pressing it asks again: never this script's word.
-	local offered = if unverified and type(it.update) == "table" and type(it.update.verified_alternative) == "table" then it.update.verified_alternative.version else nil
+	-- The newest verified one: an update's offer names it, as a first
+	-- install's source does; where neither does, the window's host asks the
+	-- store as the sheet shows (this visit's answer). Pressing it takes the
+	-- engine's word again: never this script's.
+	local offered = if not unverified then nil
+		elseif type(it.update) == "table" and type(it.update.verified_alternative) == "table" then it.update.verified_alternative.version
+		elseif type(it.source.verified_alternative) == "table" then it.source.verified_alternative.version
+		else nil
 	local alternative = ui.use_state(if type(offered) == "string" and offered ~= "" then offered else nil :: string?)
 	ui.on_mount(function()
 		if unverified and alternative:peek() == nil and not elsewhere then
@@ -317,6 +321,11 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 							return ds.Callout {
 								tone = "warning",
 								title = ui.t("plugins.store.not_verified_yet", { version = v or "" }),
+								-- (An update from a version that was verified: said, as
+								-- the update sheet says it.)
+								body = if type(it.update) == "table" and it.update.installed_verified == true
+									then ui.t("plugins.store.installed_was_verified_plain")
+									else nil,
 								action = if alt ~= "" and not elsewhere
 									then {
 										label = ui.t("plugins.store.install_instead", { version = alt }),

@@ -4056,7 +4056,9 @@
         "listed_waiting": "{version} in the plugin store, not verified yet",
         "listed_declined": "{version} in the plugin store, not verified",
         "no_installs": "{version}: no new installs",
-        "taken_down": "{version} taken down"
+        "taken_down": "{version} taken down",
+        "newest_verified": "{version} is the newest verified",
+        "none_verified": "nothing verified yet"
       },
       "keys": "Deploy keys",
       "keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each key publishes the plugins chosen when it's made.",
@@ -4100,8 +4102,10 @@
           "chosen": "Chosen plugins",
           "one": "{name}",
           "two": "{a} and {b}",
-          "some": "{n, plural, one {# of your plugins} other {# of your plugins}}"
-        }
+          "all_now": "All your plugins: {n} today, and any you publish later",
+          "more": "{a}, {b} and {n} more"
+        },
+        "not_used_made": "Not used yet · made {date}"
       },
       "unblock_title": "Turn {name} back on?",
       "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",
@@ -4128,9 +4132,9 @@
       "plain_readme": "This README is drawn as plain text past here: it's too long or too deeply nested to lay out.",
       "plain_notes": "These notes are drawn as plain text past here: they're too long or too deeply nested to lay out.",
       "review": {
-        "waiting": "Waiting for a reviewer",
-        "declined": "Not verified: a reviewer declined to verify it",
-        "declined_said": "Not verified: “{words}”"
+        "waiting": "Not verified yet",
+        "declined": "Not verified",
+        "declined_said": "The reviewer's note: “{words}”"
       },
       "superseded": "Replaced by {version} before it was verified: no new installs",
       "sent_toast_body": "It shows as not verified until a reviewer has read it.",
@@ -4143,7 +4147,8 @@
       "updates_section": "Plugin store",
       "updates_all_label": "Updates from the plugin store",
       "updates_all_body": "Which newer versions your plugins from the store take on this device. Each one can choose its own on its page.",
-      "couldnt_updates_all": "Couldn't change which updates your plugins take"
+      "couldnt_updates_all": "Couldn't change which updates your plugins take",
+      "installed_was_verified_plain": "The version you have was verified."
     }
   },
   "templates": {
