@@ -516,13 +516,21 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 			return if a.key == true then a.error else nil
 		end,
 		-- (The face is the address's: a new one only if the address changes.
-		-- An API key has no face: its provider's mark, in the add rows' well.)
+		-- An API key has no face: its provider's mark, in the add rows' well;
+		-- one its provider refused, the danger's glyph, as a failed sign-in.)
 		lead = if row:peek().key == true
-			then M.disc(
-				if KEY_PROVIDERS[row:peek().provider or ""]
-					then Mark { name = KEY_PROVIDERS[row:peek().provider or ""].mark :: any, size = 16, bare = true }
-					else Icon { name = "keyboard", size = 16 }
-			)
+			then ui.presence(function(): string
+				return if row:get().error then "refused" else "key"
+			end, function(kind: string): Node
+				if kind == "refused" then
+					return M.disc(Icon { name = "danger-triangle", size = 16 }, "danger")
+				end
+				return M.disc(
+					if KEY_PROVIDERS[row:peek().provider or ""]
+						then Mark { name = KEY_PROVIDERS[row:peek().provider or ""].mark :: any, size = 16, bare = true }
+						else Icon { name = "keyboard", size = 16 }
+				)
+			end)
 			else ui.presence(email, function(e: string): Node
 				return Avatar { seed = e, size = 32, label = locale.t("ds.provider_card.account") }
 			end),
