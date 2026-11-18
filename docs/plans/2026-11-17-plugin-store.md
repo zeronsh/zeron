@@ -358,11 +358,16 @@ Agreed after the plan was first written. Newest last.
    `paths`, `manifests`, `semver { parse, order, compare }`, `ranges`,
    `deploy_key { secret, public, proof_message, proof, request }`. The engine
    lane generates it; both sides' tests run every vector.
-8. **Web session**: `GET /auth/web/session` → `200 { user: { id, name,
-   avatar? }, username, roles, csrf, expires_at }` or `401 { error:
-   "signed_out" }`. `csrf` is the token forms carry; mutations take it as the
-   `X-CSRF-Token` header or a `csrf` form field (`POST /auth/web/logout` is a
-   plain form post). `return_to` is a same-site path or it is refused.
+8. **Web session**: `GET /auth/web/session` → `200 { user: { name, email,
+   avatar? }, username, roles, csrf, expires_at, fresh_sign_in }` or `401 {
+   error: "signed_out" }` (no user id). `csrf` is the token forms carry;
+   cookie-authenticated mutations take it as the `X-CSRF-Token` header or a
+   `csrf` form field (`POST /auth/web/logout` is a plain form post), and must
+   carry an `Origin` equal to the site's. `return_to` is a same-site path or
+   it is refused. Sessions live in `users1`, so deleting an account revokes
+   its sessions, roles and keys in one transaction. The site forwards
+   Cookie, Origin and the token to the edge over its service binding;
+   `zeron.sh/store/v1/*` is not routed to the edge.
 9. **`PluginDetail.permissions` is the consent sheet's item**, ratings
    included, so the web and the app say what a plugin asks for with one
    wording: `{ asks, ui: { change, replace }, commands, commands_anything,
@@ -396,3 +401,20 @@ Agreed after the plan was first written. Newest last.
     `Content-Security-Policy: sandbox; default-src 'none'` and `nosniff`,
     and only known picture types inline.
 15. **CLI names**: `zeron plugin key create|list|revoke <id>`.
+16. **Deploy keys and sideloading.** `GET /plugin-keys/:key` for a deploy
+    key adds `kind: "deploy"`, `plugin`, `expires_at`, `expired`, and
+    answers `verified: true` only when the lookup names that key's plugin
+    (`?plugin=<id>`). Without it, or revoked, or expired: `verified: false`.
+    So a leaked deploy key for one plugin can never vouch for an update to
+    another plugin by the same author, on new engines or old ones. The
+    engine passes `?plugin=` on every lookup.
+17. **A deploy key needs an owned plugin.** Keys can be made only for an id
+    its account already owns, so a plugin's first submission comes from the
+    author's machine and CI takes over after. A transfer revokes the
+    plugin's deploy keys.
+18. **Edge seams**: `principal.ts` exports `readBody(req, maxBytes)` (cached
+    per request, the only way a store route reads a body, since a signed
+    request's body is hashed before it is trusted); the store exports
+    `pluginOwner(env, id)`; identity exports `revokeDeployKeys(env, id)`.
+    Signed requests carry no query string. The store never serves or stores
+    a cached response for a request that has a signed-in caller.
