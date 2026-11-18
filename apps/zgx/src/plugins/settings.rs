@@ -203,6 +203,53 @@ pub fn fit(setting: &Setting, value: &Json) -> Option<Json> {
     }
 }
 
+/// Why `value` is past `setting`'s own bounds (a number under its `min` or
+/// over its `max`, text longer than [`MAX_TEXT`]), or none: what a plugin's
+/// page is refused, where `fit` would keep the nearest.
+fn out_of_bounds(setting: &Setting, value: &Json) -> Option<String> {
+    let j = &setting.json;
+    match setting.kind.as_str() {
+        "number" => {
+            let n = number(Some(value))?;
+            let show = |b: f64| if b.fract() == 0.0 { format!("{b:.0}") } else { b.to_string() };
+            if let Some(min) = number(j.get("min")).filter(|min| n < *min) {
+                return Some(format!("at least {}", show(min)));
+            }
+            number(j.get("max")).filter(|max| n > *max).map(|max| format!("at most {}", show(max)))
+        }
+        "text" => value.as_str().filter(|t| t.chars().count() > MAX_TEXT).map(|_| format!("at most {MAX_TEXT} characters")),
+        _ => None,
+    }
+}
+
+/// How often a plugin's page may set its own values: [`PACED`] changes a
+/// second each, the rest refused until the second is out (each is written
+/// to its file and told to the page: a loop setting one would do nothing
+/// else).
+pub const PACED: usize = 20;
+
+/// The changes each plugin's page made in the last second (`Book::set_own`'s
+/// pace, the bridge's).
+#[derive(Default)]
+pub struct Pace {
+    at: HashMap<String, std::collections::VecDeque<std::time::Instant>>,
+}
+
+impl Pace {
+    /// Whether plugin `plugin` may set another now.
+    pub fn allow(&mut self, plugin: &str, now: std::time::Instant) -> bool {
+        let times = self.at.entry(plugin.to_string()).or_default();
+        while times.front().is_some_and(|t| now.duration_since(*t) >= std::time::Duration::from_secs(1)) {
+            times.pop_front();
+        }
+        if times.len() >= PACED {
+            return false;
+        }
+        times.push_back(now);
+        true
+    }
+}
+
 /// The settings `manifest` declares, each checked: one that isn't a
 /// setting (no id, an unknown kind, a choice with no options, an id used
 /// already, a permission row of a plugin not Zeron's own: `builtin`) is
@@ -579,6 +626,11 @@ impl Book {
         if !value.is_null() && fit(setting, value).is_none() {
             return Err(format!("That doesn't fit {id} (a {})", setting.kind));
         }
+        // (Out of its bounds is refused, as its row refuses it, never kept
+        // as the nearest: Zeron's row says "At most 120", it doesn't round.)
+        if let Some(why) = out_of_bounds(setting, value) {
+            return Err(format!("{id}: {why}"));
+        }
         let was = self.values(plugin).get(id).cloned();
         self.set(plugin, id, value)?;
         Ok(self.values(plugin).get(id) != was.as_ref())
@@ -953,8 +1005,11 @@ mod tests {
         assert_eq!(book.values("demo")["tone"], "dry");
         let kept: Json = serde_json::from_str(&std::fs::read_to_string(dir.join("demo.settings.json")).unwrap()).unwrap();
         assert_eq!(kept, json!({ "tone": "dry" }));
-        assert_eq!(book.set_own("demo", "every", &json!(9000)), Ok(true));
-        assert_eq!(book.values("demo")["every"], 600.0, "kept within its bounds, as the row keeps it");
+        assert!(book.set_own("demo", "every", &json!(9000)).unwrap_err().contains("at most 600"), "past its bounds: refused, as its row refuses it");
+        assert!(book.set_own("demo", "every", &json!(5)).unwrap_err().contains("at least 30"));
+        assert_eq!(book.set_own("demo", "every", &json!(120)), Ok(true));
+        assert_eq!(book.values("demo")["every"], 120.0);
+        assert!(book.set_own("demo", "greeting", &json!("x".repeat(MAX_TEXT + 1))).unwrap_err().contains("characters"));
         // What doesn't fit, isn't declared, or isn't the plugin's to set.
         assert!(book.set_own("demo", "tone", &json!("loud")).unwrap_err().contains("doesn't fit"));
         assert!(book.set_own("demo", "keys", &json!("shift+k")).is_err());
@@ -967,6 +1022,17 @@ mod tests {
         assert_eq!(book.set_own("demo", "tone", &Json::Null), Ok(true));
         assert_eq!(book.values("demo")["tone"], "warm");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_plugin_s_page_sets_so_many_a_second_and_no_more() {
+        let mut pace = Pace::default();
+        let t0 = std::time::Instant::now();
+        assert!((0..PACED).all(|_| pace.allow("demo", t0)));
+        assert!(!pace.allow("demo", t0), "the next in the same second is refused");
+        assert!(pace.allow("another", t0), "each plugin its own");
+        assert!(!pace.allow("demo", t0 + std::time::Duration::from_millis(999)));
+        assert!(pace.allow("demo", t0 + std::time::Duration::from_secs(1)), "a second on, again");
     }
 
     #[test]

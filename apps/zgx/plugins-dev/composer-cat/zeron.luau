@@ -869,7 +869,16 @@ return function(id: string): any
 			return (settings_now:peek() or {})[key]
 		end
 		function box.set(_self: any, value: any): any
-			return ui.call(`{prefix}.setting_set`, { id = key, value = if value == nil then ui.null else value })
+			local asked: any = ui.call(`{prefix}.setting_set`, { id = key, value = if value == nil then ui.null else value })
+			-- A refusal (a value that doesn't fit, too many at once) said, as
+			-- the plugin's, never left unheard: an unheard one would stop the
+			-- plugin. The promise is still the caller's to follow.
+			if asked ~= nil and asked.after then
+				asked:after(nil, function(why: any)
+					print(`{id}: {key} wasn't set: {why}`)
+				end)
+			end
+			return asked
 		end
 		return box
 	end
@@ -904,9 +913,8 @@ return function(id: string): any
 		local function send(v: any)
 			local asked: any = box:set(v)
 			if asked ~= nil and asked.after then
-				-- (Refused: back to what's held.)
-				asked:after(nil, function(why: any)
-					print(`{id}: {key} wasn't set: {why}`)
+				-- (Refused, and said: back to what's held.)
+				asked:after(nil, function()
 					if now:peek() ~= box:peek() then
 						now:set(box:peek())
 					end
@@ -973,7 +981,14 @@ return function(id: string): any
 				plugin = id,
 				bind = bind,
 				choose_folder = function(key: string): any
-					return ui.call(`{prefix}.setting_folder`, { id = key })
+					local asked: any = ui.call(`{prefix}.setting_folder`, { id = key })
+					-- (Refused, its dialog open already, say: said, never unheard.)
+					if asked ~= nil and asked.after then
+						asked:after(nil, function(why: any)
+							print(`{id}: {key}'s folder wasn't asked for: {why}`)
+						end)
+					end
+					return asked
 				end,
 			}
 			local started = os.clock()

@@ -126,10 +126,13 @@ impl Rig {
                 {
                     // Its own settings, from its page: the book's, as the bridge's.
                     let (book, list, own, id, heard) = (b.clone(), list.clone(), own.clone(), id.clone(), h.clone());
+                    let pace = Rc::new(RefCell::new(super::settings::Pace::default()));
                     host.async_action(format!("plugin.{id}.setting_set"), move |v: Value| {
                         let asked = value_json(&v);
                         heard.borrow_mut().push((format!("plugin.{id}.setting_set"), asked.clone()));
-                        let done = book.borrow_mut().set_own(&id, asked["id"].as_str().unwrap_or_default(), &asked["value"]);
+                        // (Paced as the bridge paces it.)
+                        let paced = pace.borrow_mut().allow(&id, std::time::Instant::now());
+                        let done = if paced { book.borrow_mut().set_own(&id, asked["id"].as_str().unwrap_or_default(), &asked["value"]) } else { Err("too many".to_string()) };
                         let answer = done.map(|changed| {
                             if changed {
                                 publish(&book, &list, &own);
@@ -392,6 +395,9 @@ zeron.settings_page {
 			Button { "Sneak a folder", on_click = function() zeron.setting("dir"):set("/") end },
 			Button { "Choose a folder", on_click = function() page.choose_folder("dir") end },
 			Button { "Another's", on_click = function() ui.call("plugin.other.setting_set", { id = "tone", value = "dry" }) end },
+			Button { "Flood", on_click = function()
+				for i = 1, 60 do zeron.setting("loud"):set(i % 2 == 0) end
+			end },
 		}
 	end,
 }
@@ -428,10 +434,11 @@ fn a_page_sets_its_own_values_alone_each_checked_and_heard_once() {
     // Checked as the row checks: within its bounds; what doesn't fit refused.
     rig.app.click("role:button \"Too loud\"");
     rig.frames(10);
-    assert_eq!(rig.value("binder", "level"), json!(5.0));
+    assert_eq!(rig.value("binder", "level"), json!(2.0), "past its bounds: refused, as its row refuses it");
     rig.app.click("role:button \"Bad level\"");
     rig.frames(10);
-    assert_eq!(rig.value("binder", "level"), json!(5.0));
+    assert_eq!(rig.value("binder", "level"), json!(2.0));
+    assert_eq!(rig.app.error(), None, "a refused set is said as the plugin's, never left to stop it");
     // A folder is the person's: refused set, chosen in the dialog.
     rig.app.click("role:button \"Sneak a folder\"");
     rig.frames(10);
@@ -439,6 +446,13 @@ fn a_page_sets_its_own_values_alone_each_checked_and_heard_once() {
     rig.app.click("role:button \"Choose a folder\"");
     rig.frames(10);
     assert_eq!(rig.value("binder", "dir"), json!("/Users/me/Picked"));
+    // A flood of changes is paced: so many a second, the rest refused.
+    let asked_before = rig.heard.borrow().iter().filter(|(k, _)| k == "plugin.binder.setting_set").count();
+    rig.app.click("role:button \"Flood\"");
+    rig.frames(10);
+    let asked = rig.heard.borrow().iter().filter(|(k, _)| k == "plugin.binder.setting_set").count() - asked_before;
+    assert_eq!(asked, 60, "every one asked");
+    assert_eq!(rig.app.error(), None, "the refused ones are its page's to hear, not Settings'");
     // Another plugin's values are out of its reach.
     rig.app.click("role:button \"Another's\"");
     rig.frames(10);
@@ -518,6 +532,8 @@ zeron.settings_page {
     assert!(tree.contains("Spin's settings couldn't be shown"), "{tree}");
     assert!(tree.contains("time budget"), "{tree}");
     assert!(rig.app.find(&format!("{PAGE} >> role:switch \"Go faster\"")).is_some(), "its declared rows still there: {tree}");
+    // Withdrawn, it draws nothing: its place is Zeron's own again, empty.
+    assert!(rig.app.find(".plugin-settings.plugin-spin").is_some(), "its place, not filled: {tree}");
 }
 
 #[test]

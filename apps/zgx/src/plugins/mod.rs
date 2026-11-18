@@ -304,6 +304,8 @@ pub struct Bridge {
     reviewed: Cell<bool>,
     /// The plugins whose folder dialog (`plugin.<id>.setting_folder`) is open.
     folder_asking: RefCell<HashSet<String>>,
+    /// How often each plugin's page sets its own values (`settings::Pace`).
+    settings_pace: RefCell<settings::Pace>,
     /// Another device's plugins, shown by Settings → Plugins' switcher
     /// (`plugins.remote`; never loaded here).
     pub(crate) remote: remote::Remote,
@@ -643,6 +645,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         consent: RefCell::default(),
         reviewed: Cell::new(false),
         folder_asking: RefCell::default(),
+        settings_pace: RefCell::default(),
         remote: remote::Remote::new(host.shared("plugins.remote", remote::Remote::initial())),
         me: RefCell::default(),
         first_load: Cell::new(true),
@@ -2507,6 +2510,9 @@ impl Bridge {
                     let b = me.upgrade().ok_or("The window closed")?;
                     let asked = value_json(&asked);
                     let id = asked["id"].as_str().unwrap_or_default().to_string();
+                    if !b.settings_pace.borrow_mut().allow(&plugin, Instant::now()) {
+                        return Err(format!("Too many changes at once: {} a second at most", settings::PACED));
+                    }
                     let changed = b.settings.borrow_mut().set_own(&plugin, &id, &asked["value"])?;
                     if changed {
                         b.publish_settings(true, std::slice::from_ref(&plugin));
