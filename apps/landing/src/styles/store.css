@@ -102,6 +102,8 @@
    readers included (.sr-only is absolutely placed), so nothing escapes it
    to widen the page. */
 .store :where(.table-wrap, .table-scroll, .code, .diff) { position: relative; }
+/* Code shows the characters it has: ">=" is two, never the font's one "≥". */
+.store :where(code, pre, kbd) { font-variant-ligatures: none; }
 
 /* The store's pages open a little closer to the nav than the home page's sections. */
 .store { padding-block: clamp(32px, 5vw, 64px) 0; }
