@@ -60,7 +60,13 @@ impl Env {
     /// One check: `PASS` or `FAIL`, the run going on either way.
     fn check(&self, step: &str, what: &str, ok: bool, detail: impl std::fmt::Display) {
         if ok {
-            println!("PASS {step} {what}");
+            // (What the edge said, when it's short: the words matter too.)
+            let said = detail.to_string();
+            if !said.is_empty() && said.len() <= 160 && !said.contains('\n') {
+                println!("PASS {step} {what} [{said}]");
+            } else {
+                println!("PASS {step} {what}");
+            }
         } else {
             let line = format!("FAIL {step} {what}: {detail}");
             println!("{line}");
