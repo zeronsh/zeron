@@ -285,3 +285,56 @@ test("Publish…, a row's inline link, shows the app's focus ring when the keys 
 	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(true)
 	expect(app:has(".settings-inline-link >> .inline-link-plain")).to_be(false)
 end)
+
+test("a session that ended mid-page: its keys say to sign in, never couldn't, and Submit says so in its line", function()
+	for _, word in { "signed_out", "unauthenticated", "forbidden" } do
+		local app = publishing()
+		app:command("store_stub.fixed")
+		app:click('role:button "Check again"')
+		settle(app)
+		-- (The page open, then the store no longer takes the session.)
+		app:set_state("store_stub_account_fails", word)
+		app:click("#publish-submit")
+		settle(app)
+		expect(`{word}: {app:tree("#publish-note")}`).to_contain("This needs you signed in to Zeron.")
+		-- Its keys, read again (back, then Publish… again), say to sign in.
+		app:click('role:button "Back to Plugins"')
+		settle(app)
+		app:click('role:link "Publish…"')
+		settle(app, 600)
+		local tree = app:tree()
+		for _, said in { "Sign in to see its keys", "This needs you signed in to Zeron." } do
+			expect(`{word}: {said} {tree:find(said, 1, true) ~= nil}`).to_be(`{word}: {said} true`)
+		end
+		for _, never in { "Couldn't see its keys", "The store didn't know who sent it.", "The store didn't allow it.", `"{word}"` } do
+			expect(`{word}: {never} {tree:find(never, 1, true) ~= nil}`).to_be(`{word}: {never} false`)
+		end
+		-- Signed in again: Try again reads them.
+		app:set_state("store_stub_account_fails", "")
+		while app:has('role:button "Try again"') do
+			local y = tonumber((app:tree('role:button "Try again"[1]'):match(" %-?[%d.]+,(%-?[%d.]+) "))) or 0
+			app:scroll("#fixture-scroll", y - 400)
+			app:frames(5)
+			app:click('role:button "Try again"[1]')
+			settle(app, 600)
+		end
+		expect(app:error()).to_be_nil()
+		expect(app:tree()).never.to_contain("Sign in to see its keys")
+	end
+end)
+
+test("signed out before Yours is read, its versions say to sign in", function()
+	for _, word in { "signed_out", "unauthenticated", "forbidden" } do
+		local app = mount("plugins_store_fixture.luau")
+		app:resize(1000, 900)
+		app:frames(10)
+		app:set_state("store_stub_account_fails", word)
+		app:click('role:tab "Yours"')
+		settle(app)
+		app:click('role:link "Publish…"')
+		settle(app, 600)
+		local tree = app:tree()
+		expect(`{word} {tree:find("Sign in to see your versions", 1, true) ~= nil}`).to_be(`{word} true`)
+		expect(`{word} {tree:find("Couldn't see your versions", 1, true) ~= nil}`).to_be(`{word} false`)
+	end
+end)

@@ -155,6 +155,34 @@ fn a_deploy_key_that_isn_t_allowed_yet_says_so() {
 }
 
 #[test]
+fn a_deploy_key_s_sign_in_is_begun_for_a_deploy_key() {
+    // (Every reply says a sign-in is needed, its page no https one: the
+    // browser never opens, the call ends there.)
+    let (out, asked) = run(
+        r#"ui.call("plugins.store.create_key", { id = "focus", name = "CI" })"#,
+        json!({ "ok": false, "error": "step_up_required", "url": "about:blank" }),
+    );
+    let methods: Vec<&str> = asked.iter().map(|(m, _, _)| m.as_str()).collect();
+    assert_eq!(methods, ["CreateDeployKey", "StepUp"]);
+    assert_eq!(asked[1].1, json!({ "for": "deploy_key" }));
+    assert_eq!(out, "err:failed");
+}
+
+#[test]
+fn a_preview_reads_the_catalog_but_never_your_own_account() {
+    crate::plugins::preview::set(Some(crate::plugins::preview::Preview { id: "dusk".into(), name: "Dusk".into() }));
+    for call in [r#"ui.call("plugins.store.mine", nil)"#, r#"ui.call("plugins.store.keys", "focus")"#] {
+        let (out, asked) = run(call, json!({ "plugins": [], "keys": [] }));
+        assert!(out.starts_with("err:Dusk is a preview."), "{call}: {out}");
+        assert!(asked.is_empty(), "{call} reached the engine: {asked:?}");
+    }
+    let (out, asked) = run(r#"ui.call("plugins.store.search", { q = "timer" })"#, json!({ "items": [] }));
+    assert!(out.starts_with("ok:"), "{out}");
+    assert_eq!(asked[0].0, "StoreSearch");
+    crate::plugins::preview::set(None);
+}
+
+#[test]
 fn pre_releases_go_to_the_device_chosen() {
     let (_, asked) = run(r#"ui.call("plugins.store.prereleases", { id = "focus", on = true, device = "devbox" })"#, json!({}));
     assert_eq!(asked[0], ("SetPluginPrereleases".into(), json!({ "id": "focus", "on": true }), Some("devbox".into())));

@@ -17,6 +17,7 @@
 --   store_stub.no_total    lists come without `total` (how many match)
 --   store_stub.few_categories  the store has three categories (before Browse opens)
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
+--   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
 --   store_stub.many_keys   Pomodoro clock has ten deploy keys: names of every length,
 --                          one ending today, one tomorrow, one in five days
 --   store_stub.long_featured   the first featured says 300 characters of itself, the second nothing
@@ -429,6 +430,10 @@ stub.search = function(q: store.Query): any
 		return search(asked)
 	end)
 end
+-- A README, and a latest version's notes, a test sets for Focus timer (a
+-- hostile author's text: `store_stub_readme`, `store_stub_notes`).
+local given_readme = ui.state("store_stub_readme", "")
+local given_notes = ui.state("store_stub_notes", "")
 stub.detail = function(id: string, for_zeron: string?): any
 	note(if for_zeron then `detail:{id}:for_zeron={for_zeron}` else `detail:{id}`)
 	return answer(function(): any
@@ -438,6 +443,15 @@ stub.detail = function(id: string, for_zeron: string?): any
 			d[k] = v
 		end
 		d.versions = e.versions
+		if id == "focus-timer" and given_readme:peek() ~= "" then
+			d.readme = given_readme:peek()
+		end
+		if id == "focus-timer" and given_notes:peek() ~= "" and d.versions[1] then
+			local first = table.clone(d.versions[1])
+			first.notes = given_notes:peek()
+			d.versions = table.clone(d.versions)
+			d.versions[1] = first
+		end
 		return d
 	end)
 end
@@ -512,9 +526,21 @@ local store_checked = true
 local force_problem = ui.state("store_stub_force_problem", false)
 local signed_in_again = false
 
+-- (Tests: your own account's calls, yours, a version sent, a plugin's keys,
+-- failing with this word as the engine gives it, alone: a session that
+-- ended says `unauthenticated` or `forbidden`.)
+local account_fails = ui.state("store_stub_account_fails", "")
+local function refused_as_you()
+	local word = account_fails:peek()
+	if word ~= "" then
+		error({ message = word }, 0)
+	end
+end
+
 stub.mine = function(): any
 	note("mine")
 	return answer(function(): any
+		refused_as_you()
 		local out = {}
 		for _, p in mine do
 			table.insert(out, p)
@@ -554,6 +580,7 @@ end
 stub.publish = function(id: string, hash: string, ticket: string): any
 	note(`publish:{id}:{hash}:{ticket}`)
 	return answer(function(): any
+		refused_as_you()
 		local p = mine[id]
 		if not p then
 			p = { id = id, name = "Pomodoro clock", version = prepared_version, versions = {} }
@@ -578,6 +605,7 @@ end
 stub.keys = function(id: string): any
 	note(`keys:{id}`)
 	return answer(function(): any
+		refused_as_you()
 		return { keys = table.clone(keys[id] or {}) }
 	end)
 end
@@ -738,6 +766,15 @@ ui.command {
 	title = "Store: later pages overlap",
 	run = function()
 		overlap = true
+	end,
+}
+-- (For a picture: a hostile author's README, setext headings at the
+-- store's 512 KiB, Markdown to its budget and plain text past it.)
+ui.command {
+	id = "store_stub.hostile_readme",
+	title = "Store: Focus timer's README is 512 KiB of setext headings",
+	run = function()
+		given_readme:set(string.sub(string.rep("Heading\n=======\n\n", 32768), 1, 512 * 1024))
 	end,
 }
 ui.command {

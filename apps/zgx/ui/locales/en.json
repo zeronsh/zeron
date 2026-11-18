@@ -3807,6 +3807,8 @@
       "up_to_date": "It's up to date.",
       "no_source": "Where it came from isn't known any more, so it can't be installed again from there. Remove it, then install it again.",
       "incompatible": "This version doesn't work with this version of Zeron.",
+      "paths_collide": "Two of its files would be one file on some computers, so it can't be installed.",
+      "needs_person": "It's installed already. Only you can update it, here in Zeron.",
       "store_unreachable": "Zeron can't reach the plugin store right now. Try again in a moment.",
       "not_in_store": "This plugin, or this version of it, isn't in the plugin store.",
       "store_mismatch": "What came isn't what the plugin store reviewed, so it wasn't installed.",
@@ -3834,6 +3836,7 @@
       "key_expired": "That deploy key has ended.",
       "invalid_signature": "The store didn't accept the key's signature.",
       "unauthenticated": "The store didn't know who sent it.",
+      "forbidden": "The store didn't allow it.",
       "stale_request": "This computer's clock is more than five minutes out. Set it right and try again.",
       "replayed_request": "That was already sent. Send it again.",
       "body_mismatch": "It changed on its way to the store. Send it again.",
@@ -3996,6 +3999,7 @@
       "no_versions": "Nothing sent yet.",
       "versions_failed": "Couldn't see your versions",
       "sign_in_to_see": "Sign in to see your versions",
+      "sign_in_to_see_keys": "Sign in to see its keys",
       "status": {
         "pending": "In review",
         "approved": "Approved",
@@ -4041,7 +4045,7 @@
       "key": {
         "new": "New key…",
         "new_title": "New deploy key",
-        "new_body": "Zeron may ask you to sign in again first.",
+        "new_body": "Zeron will ask you to sign in again first.",
         "name": "Name",
         "name_placeholder": "GitHub Actions",
         "expiry_label": "Ends",
@@ -4077,6 +4081,7 @@
       "unblock_body_reason": "Zeron took this version down from the store: {reason} It runs again here, as you allowed it.",
       "update_new_owner": "It has a new publisher, @{username}. Zeron asks you to allow it again after it updates.",
       "update_new_owner_unnamed": "It has a new publisher. Zeron asks you to allow it again after it updates.",
+      "update_new_key": "This version is signed with a different key than the one you have.",
       "update_in_review": "This version is still in review: only your own devices are offered it.",
       "keys_publish_first": "Send its first version from this computer; a deploy key can send the ones after it.",
       "version_installs": "Version {version} · {n, plural, one {# install} other {# installs}}",
@@ -4096,7 +4101,9 @@
       "count": "{n, plural, one {# plugin} other {# plugins}}",
       "list_title": "Plugins",
       "categories_back": "Earlier categories",
-      "categories_more": "More categories"
+      "categories_more": "More categories",
+      "plain_readme": "This README is drawn as plain text past here: it's too long or too deeply nested to lay out.",
+      "plain_notes": "These notes are drawn as plain text past here: they're too long or too deeply nested to lay out."
     }
   },
   "templates": {

@@ -26,9 +26,9 @@
 //!   plugins.store.publish { id, hash, ticket }  PublishPlugin
 //!   plugins.store.keys(id)            ListDeployKeys
 //!   plugins.store.create_key { id, name, expires? }  CreateDeployKey, a
-//!                                     fresh sign-in first when the store
-//!                                     asks for one (StepUp, as deleting the
-//!                                     account does); `cancel_step_up` stops
+//!                                     fresh sign-in begun for it first
+//!                                     (StepUp `for: "deploy_key"`, each one
+//!                                     a key's); `cancel_step_up` stops
 //!                                     waiting for it
 //!   plugins.store.revoke_key { id, key }  RevokeDeployKey
 //!   plugins.store.report { id, reason, text }  StoreReport
@@ -164,7 +164,12 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
     let e = engine.clone();
     host.async_action("plugins.store.mine", move |_| {
         let e = e.clone();
-        async move { ask(&e, "StoreMyPlugins", json!({})).await }
+        async move {
+            // (Your own account, not the catalog: every version of yours,
+            // pending and rejected ones with the reviewers' reasons.)
+            crate::plugins::preview::refuse("plugins.store.mine")?;
+            ask(&e, "StoreMyPlugins", json!({})).await
+        }
     });
     let e = engine.clone();
     host.async_action("plugins.store.version_action", move |arg| {
@@ -204,6 +209,9 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
     host.async_action("plugins.store.keys", move |id| {
         let e = e.clone();
         async move {
+            // (Your own account: your keys' names, fingerprints and when
+            // they were last used.)
+            crate::plugins::preview::refuse("plugins.store.keys")?;
             let id = store_id(&text(&id)).ok_or("not_in_store")?;
             ask(&e, "ListDeployKeys", json!({ "id": id })).await
         }
@@ -358,9 +366,11 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
     rx.recv().await
 }
 
-/// A deploy key made: at once if the session may, else after a fresh
-/// sign-in in the browser (StepUp), asked again each second until it lands,
-/// is cancelled, or ten minutes pass.
+/// A deploy key made after a fresh sign-in in the browser begun for it
+/// (StepUp `for: "deploy_key"`; every key asks, and each sign-in makes one
+/// key), asked again each second until it lands, is cancelled, or ten
+/// minutes pass. Asked once first, so what makes no key at all (not
+/// published yet, not yours) is said before the browser opens.
 async fn create_key(e: &Engine, params: Json) -> Result<Value, String> {
     let reply = e("CreateDeployKey", params.clone(), None).await?;
     if reply["ok"].as_bool() != Some(false) || reply["error"].as_str() != Some("step_up_required") {
@@ -371,7 +381,7 @@ async fn create_key(e: &Engine, params: Json) -> Result<Value, String> {
         n.set(n.get() + 1);
         n.get()
     });
-    let sign_in = e("StepUp", json!({}), None).await?;
+    let sign_in = e("StepUp", json!({ "for": "deploy_key" }), None).await?;
     let url = sign_in["url"].as_str().unwrap_or_default();
     if !url.starts_with("https://") {
         return Err("failed".into());
@@ -406,8 +416,9 @@ mod seam_tests;
 mod tests {
     use super::*;
 
-    /// Every store call that sends, changes or reports anything as you is
-    /// refused while a template is only being previewed.
+    /// Every store call that sends, changes or reports anything as you, or
+    /// reads your own account (your plugins, your keys), is refused while a
+    /// template is only being previewed; the public catalog stays open.
     #[test]
     fn a_preview_can_t_act_as_you_in_the_store() {
         let source = include_str!("catalog.rs");
@@ -422,9 +433,9 @@ mod tests {
                 guarded += 1;
             }
         }
-        assert!(guarded >= 7, "{guarded}");
-        for read in ["plugins.store.search", "plugins.store.detail", "plugins.store.mine", "plugins.store.keys"] {
-            assert!(!crate::plugins::preview::BLOCKED.contains(&read), "{read} only reads");
+        assert!(guarded >= 9, "{guarded}");
+        for read in ["plugins.store.search", "plugins.store.detail", "plugins.store.categories", "plugins.store.picture", "plugins.store.icon"] {
+            assert!(!crate::plugins::preview::BLOCKED.contains(&read), "{read} only reads the catalog");
         }
     }
 

@@ -597,6 +597,8 @@ local FAILURES: { [string]: boolean } = {
 	-- (The plugin store's, as the engine says them: every word of
 	-- docs/plugins.md "Reason words".)
 	incompatible = true,
+	paths_collide = true,
+	needs_person = true,
 	store_unreachable = true,
 	not_in_store = true,
 	store_mismatch = true,
@@ -624,6 +626,7 @@ local FAILURES: { [string]: boolean } = {
 	key_expired = true,
 	invalid_signature = true,
 	unauthenticated = true,
+	forbidden = true,
 	stale_request = true,
 	replayed_request = true,
 	body_mismatch = true,

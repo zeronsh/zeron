@@ -34,13 +34,14 @@ local ds = require("@ds")
 local FoldButton = require("@ds/fold_button").FoldButton
 local Lightbox = require("@ds/lightbox")
 local Links = require("@ds/links")
-local Markdown = require("@ds/markdown")
 local locale = require("@ds/locale")
 local store = require("@app/screens/plugins/store")
 local state = require("@app/screens/plugins/state")
 local words = require("@app/screens/plugins/words")
 local asks_view = require("@app/screens/plugins/asks")
 local nav = require("@app/screens/plugins/nav")
+local consent = require("@screens/plugins/consent")
+local untrusted = require("@app/screens/plugins/untrusted")
 local browse = require("@app/screens/plugins/browse")
 local plugin_settings = require("@app/screens/plugins/settings")
 local sessions = require("@account/sessions")
@@ -106,32 +107,6 @@ local function package_path(src: string): string?
 	return path
 end
 
--- A README cut into pieces of about `PIECE` bytes, each ending where a
--- paragraph does (a blank line), never inside a fenced code block.
-local PIECE = 64 * 1024
-local function readme_pieces(text: string): { string }
-	local out: { string } = {}
-	local piece: { string } = {}
-	local size = 0
-	local fenced = false
-	for line in string.gmatch(text .. "\n", "([^\n]*)\n") do
-		if string.match(line, "^%s*```") or string.match(line, "^%s*~~~") then
-			fenced = not fenced
-		end
-		table.insert(piece, line)
-		size += #line + 1
-		if size >= PIECE and not fenced and string.match(line, "^%s*$") then
-			table.insert(out, table.concat(piece, "\n"))
-			piece = {}
-			size = 0
-		end
-	end
-	if #piece > 0 then
-		table.insert(out, table.concat(piece, "\n"))
-	end
-	return out
-end
-
 local function said(node: Node): Node
 	return ui.column { w_full = true, py = "$space.6", px = "$space.4", node }
 end
@@ -149,6 +124,18 @@ local NOTES_MOST = 64 * 1024
 -- (About ten lines' worth of the source: what the fold shows, and more.)
 local NOTES_START = 2048
 local FADE_LINES = 1.5
+-- About, folded: 1,200 high, about a screen and a half of the pane in
+-- Zeron's own window (820 high, the pane under its bar about 780), so
+-- the page past it (Details, Versions, Report) is a scroll away, whatever
+-- the author wrote; shown whole when at most 240 taller (ten of its lines,
+-- `zeron.prose.line` 24), not folded for the sake of a few lines. Folded,
+-- its first piece ends at `ABOUT_LINES` lines that aren't blank: each is
+-- 20 high or more (a code line 20, prose and a list's 24, a heading more),
+-- so 72 reach past the fold and its slack (1,440), and it lays out about
+-- what the fold shows, never the 36,000 a whole first piece could.
+local ABOUT_FOLD = 1200
+local ABOUT_SLACK = 240
+local ABOUT_LINES = 72
 
 -- A text's start: up to `most` bytes, ended at a line's end where it can
 -- be; and whether that's all of it.
@@ -181,31 +168,173 @@ local function first_line(text: string): string
 	return ""
 end
 
-local Notes = ui.component(function(props: { text: () -> string, lines: number, on_fold: (() -> ())? }): Node
+-- A text folded at a height: no taller than `height`, its end fading, with
+-- Show more under it; open, all of it, and Show less (a version's notes,
+-- About). Shown whole when it's at most `slack` taller than the fold (a
+-- few lines aren't worth a fold), unless `whole` says the folded body isn't
+-- all there is. `next` (open): whether there's a next piece to show, and
+-- the way to show it, beside Show less. Folded again, the control is
+-- brought back into view (or `on_fold` does what's wanted instead).
+type FoldProps = {
+	height: number,
+	slack: number?,
+	fade: number,
+	body: (open: boolean) -> Node,
+	whole: (() -> boolean)?,
+	next: untrusted.Handle?,
+	on_fold: (() -> ())?,
+	class: string,
+	button_class: string,
+	next_id: string?,
+}
+local Fold = ui.component(function(props: FoldProps): Node
 	local open = ui.use_state(false)
-	local line = (ui.theme.get("zeron.prose.small.line") :: number?) or 20
-	local folded_h = props.lines * line
 	local body_h = ui.use_state(0)
-	local function start(): (string, boolean)
-		return start_of(props.text(), NOTES_START)
+	local slack = props.slack or 0
+	local controls = ui.ref()
+	local function whole(): boolean
+		return if props.whole then props.whole() else true
 	end
-	-- Whether there's more than the fold shows.
+	-- Whether there's more than the fold shows, as known: a body not yet
+	-- measured isn't said to be more (no fade, no Show more, for a moment).
 	local function more(): boolean
-		local _, whole = start()
-		if props.lines == 1 then
-			local text = props.text()
-			local rest = string.gsub(text, "^%s*[^\n]*", "", 1)
-			return string.match(rest, "%S") ~= nil
-		end
-		return not whole or body_h:get() > folded_h + 0.5
+		return not whole() or (body_h:get() > 0 and body_h:get() > props.height + slack + 0.5)
 	end
 	local function folded(): boolean
 		return not open:get() and more()
 	end
-	local body: Node
-	if props.lines == 1 then
-		-- (An older version's: its first line's words, then the whole.)
-		body = ui.presence(function(): string
+	-- (Held at the fold until it's measured: never drawn taller, then cut.)
+	local function clipped(): boolean
+		return not open:get() and (body_h:get() == 0 or more())
+	end
+	local function next_shown(): boolean
+		return open:get() and props.next ~= nil and props.next.more:get()
+	end
+	return ui.column {
+		class = props.class,
+		w_full = true,
+		gap = "$space.2",
+		ui.column {
+			w_full = true,
+			-- (Clipped only while folded: open, what overhangs its box is
+			-- drawn, as a heading's last descender is past its -6.)
+			overflow = function(): string
+				return if clipped() then "hidden" else "visible"
+			end,
+			max_h = function(): number
+				return if clipped() then props.height else 1e7
+			end,
+			fade = function(): { number }
+				return { 0, if folded() then props.fade else 0 }
+			end,
+			ui.column {
+				w_full = true,
+				on_resize = function(size: { w: number, h: number })
+					if math.abs(size.h - body_h:peek()) >= 0.5 then
+						body_h:set(size.h)
+					end
+				end,
+				ui.presence(function(): string
+					return if open:get() then "open" else "folded"
+				end, function(key: string): Node
+					return props.body(key == "open")
+				end, { w_full = true }),
+			},
+		},
+		ui.show(function(): boolean
+			return open:get() or more()
+		end, ui.row {
+			ref = controls,
+			gap = "$space.4",
+			items = "center",
+			self = "start",
+			ui.show(next_shown, ui.row {
+				id = props.next_id,
+				FoldButton {
+					label = function(): string
+						return ui.t("plugins.store.readme_more"):get()
+					end,
+					open = function(): boolean
+						return false
+					end,
+					on_click = function()
+						local h = props.next
+						if h and h.next then
+							h.next()
+						end
+					end,
+				},
+			}),
+			FoldButton {
+				label = function(): string
+					return if open:get() then ui.t("plugins.store.show_less"):get() else ui.t("plugins.store.readme_more"):get()
+				end,
+				open = function(): boolean
+					return open:get()
+				end,
+				on_click = function()
+					local folding = open:peek()
+					open:set(not folding)
+					if not folding then
+						return
+					end
+					-- (Folded from far down a long one: brought back into
+					-- view as it's laid out again. Focusing the row hands
+					-- focus to its first control, and zgx scrolls the least
+					-- that shows it.)
+					ui.after(0, props.on_fold or function()
+						local el = controls:peek()
+						if el then
+							el:blur()
+							el:focus()
+						end
+					end)
+				end,
+				class = props.button_class,
+			},
+		}),
+	}
+end)
+
+local Notes = ui.component(function(props: { text: () -> string, lines: number, on_fold: (() -> ())? }): Node
+	local function start(): (string, boolean)
+		return start_of(props.text(), NOTES_START)
+	end
+	if props.lines ~= 1 then
+		local line = (ui.theme.get("zeron.prose.small.line") :: number?) or 20
+		return Fold {
+			height = props.lines * line,
+			fade = line * FADE_LINES,
+			whole = function(): boolean
+				local _, whole = start()
+				return whole
+			end,
+			-- (Folded, its start alone; open, the whole, a piece a frame:
+			-- bounded as the store's every text, screens/plugins/untrusted.)
+			body = function(open: boolean): Node
+				return untrusted.View {
+					text = if open then props.text() else (start()),
+					what = "notes",
+					small = true,
+					auto = true,
+				}
+			end,
+			on_fold = props.on_fold,
+			class = "store-notes",
+			button_class = "store-notes-more",
+		}
+	end
+	-- (An older version's: its first line's words, then the whole.)
+	local open = ui.use_state(false)
+	local function more(): boolean
+		local rest = string.gsub(props.text(), "^%s*[^\n]*", "", 1)
+		return string.match(rest, "%S") ~= nil
+	end
+	return ui.column {
+		class = "store-notes",
+		w_full = true,
+		gap = "$space.2",
+		ui.presence(function(): string
 			return if open:get() then "open" else "line"
 		end, function(key: string): Node
 			if key == "line" then
@@ -222,43 +351,9 @@ local Notes = ui.component(function(props: { text: () -> string, lines: number, 
 					color = "$text.primary",
 				}
 			end
-			return Markdown { text = props.text, small = true, foreign = true }
-		end, { w_full = true })
-	else
-		body = ui.column {
-			w_full = true,
-			overflow = "hidden",
-			max_h = function(): number
-				return if folded() then folded_h else 1e7
-			end,
-			fade = function(): { number }
-				return { 0, if folded() then line * FADE_LINES else 0 }
-			end,
-			ui.column {
-				w_full = true,
-				on_resize = function(size: { w: number, h: number })
-					if math.abs(size.h - body_h:peek()) >= 0.5 then
-						body_h:set(size.h)
-					end
-				end,
-				Markdown {
-					text = function(): string
-						if open:get() then
-							return props.text()
-						end
-						return (start())
-					end,
-					small = true,
-					foreign = true,
-				},
-			},
-		}
-	end
-	return ui.column {
-		class = "store-notes",
-		w_full = true,
-		gap = "$space.2",
-		body,
+			-- (Bounded as the store's every text: screens/plugins/untrusted.)
+			return untrusted.View { text = props.text(), what = "notes", small = true, auto = true }
+		end, { w_full = true }),
 		ui.show(function(): boolean
 			return open:get() or more()
 		end, FoldButton {
@@ -271,8 +366,6 @@ local Notes = ui.component(function(props: { text: () -> string, lines: number, 
 			on_click = function()
 				local folding = open:peek()
 				open:set(not folding)
-				-- (Folded from far down a long one: its version brought back
-				-- into view, as it's laid out again.)
 				if folding and props.on_fold then
 					ui.after(0, props.on_fold)
 				end
@@ -300,6 +393,20 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local report_text = ui.use_state("")
 	local unblocking = ui.use_state(false)
 	local unblock_open = ui.use_state(false)
+	-- Opened by a link (`zeron://open/plugin/<id>`), the page's one action
+	-- takes no click until it has shown a moment, the consent window's own
+	-- (`consent.ARM_MS`), disabled meanwhile as Allow is there: a page that
+	-- comes forward under a click mid-way never takes it. Opened from
+	-- inside Zeron, it acts at once.
+	local by_link = nav.linked(id)
+	local armed = ui.use_state(not by_link)
+	ui.on_mount(function()
+		if by_link then
+			ui.after(consent.ARM_MS, function()
+				armed:set(true)
+			end)
+		end
+	end)
 
 	-- What the device shown has of it: this store plugin (installed from
 	-- the store); another plugin that has its id (from a file, a link)
@@ -426,8 +533,21 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 
 	-- (Every one of them the same button: the page's primary, small, as a
 	-- row's controls are.)
+	-- (And none takes a click before it's armed.)
 	local function primary(props: { [any]: any }): Node
 		props.tone, props.size, props.class = "primary", "sm", "store-action"
+		local given, click = props.disabled, props.on_click
+		props.disabled = function(): boolean
+			if not armed:get() then
+				return true
+			end
+			return if type(given) == "function" then given() == true else given == true
+		end
+		props.on_click = function(...)
+			if armed:peek() and click then
+				click(...)
+			end
+		end
 		return ds.Button(props :: any)
 	end
 	-- The one button, by what it does now: the page's one primary action,
@@ -949,12 +1069,12 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	end
 
 	-- The README: the app's Markdown, its pictures the package's own. A
-	-- long one (the store takes 512 KB) is drawn a piece at a time, each
-	-- piece ending at a paragraph's end outside any code block: the first
-	-- at once, the rest as asked (Show more), so no frame lays out half a
-	-- megabyte of prose.
-	local pieces = readme_pieces(if type(first.readme) == "string" then string.sub(first.readme, 1, 512 * 1024) else "")
-	local shown_pieces = ui.use_state(1)
+	-- long one (the store takes 512 KB), or one built to cost, is drawn a
+	-- piece at a time (screens/plugins/untrusted: pieces by cost and size,
+	-- plain text past its budget): the first at once, the rest as asked
+	-- (Show more), so no frame lays out half a megabyte, and no text makes
+	-- the page fail to draw.
+	local readme_text = if type(first.readme) == "string" then string.sub(first.readme, 1, 512 * 1024) else ""
 	local function picture(src: string): any
 		-- A picture of its package, through the store; anything else is its
 		-- link (`false`), never fetched from where it points.
@@ -972,14 +1092,17 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local function same_name(heading: string): boolean
 		return plain(heading) == plain(d().name or id)
 	end
+	-- (Folded: its start alone, and whether that's all of it, known as the
+	-- page is built (a scan of at most `ABOUT_LINES` lines); open: the whole
+	-- first piece, the rest a piece at a time as asked.)
+	local about_whole = (function(): boolean
+		local c = untrusted.cutter(readme_text, ABOUT_LINES)
+		c:next()
+		return c.done
+	end)()
+	local pieces_shown = untrusted.handle()
 	local function readme(): Node
-		local list = ui.computed(function(): { number }
-			local out = {}
-			for i = 1, math.min(shown_pieces:get(), #pieces) do
-				table.insert(out, i)
-			end
-			return out
-		end)
+		local line = (ui.theme.get("zeron.prose.line") :: number?) or 24
 		return ds.Settings.Section {
 			title = ui.t("plugins.store.about"),
 			ds.Settings.Group {
@@ -988,44 +1111,35 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					w_full = true,
 					px = "$space.4",
 					py = "$space.4",
-					gap = "$space.4",
-					ui.each(list, function(i: number): Node
-						return Markdown {
-							-- (Its author's words: links are links, never Zeron's chips.)
-							foreign = true,
-							text = pieces[i],
-							image = picture,
-							-- (Under the page's own title: its headings a level
-							-- down, none larger than the name; a `# Name` that
-							-- opens it, the name again, left out; its pictures
-							-- with the page's corner.)
-							heading_step = 1,
-							drop_title = if i == 1 then same_name else nil,
-							picture_radius = "$radius.lg",
-						}
-					end, {
-						key = function(i: number): number
-							return i
+					Fold {
+						height = ABOUT_FOLD,
+						slack = ABOUT_SLACK,
+						fade = line * FADE_LINES,
+						whole = function(): boolean
+							return about_whole
 						end,
-					}),
-					ui.show(function(): boolean
-						return shown_pieces:get() < #pieces
-					end, ui.row {
-						id = "store-readme-more",
-						-- (The page's one way to open more of a text in place,
-						-- as a version's notes do.)
-						FoldButton {
-							label = function(): string
-								return ui.t("plugins.store.readme_more"):get()
-							end,
-							open = function(): boolean
-								return false
-							end,
-							on_click = function()
-								shown_pieces:set(shown_pieces:peek() + 1)
-							end,
-						},
-					}),
+						body = function(open: boolean): Node
+							return untrusted.View {
+								text = readme_text,
+								what = "readme",
+								image = picture,
+								-- (Under the page's own title: its headings a level
+								-- down, none larger than the name; a `# Name` that
+								-- opens it, the name again, left out; its pictures
+								-- with the page's corner.)
+								heading_step = 1,
+								drop_title = same_name,
+								picture_radius = "$radius.lg",
+								first_lines = if open then nil else ABOUT_LINES,
+								only_first = not open,
+								handle = if open then pieces_shown else nil,
+							}
+						end,
+						next = pieces_shown,
+						class = "store-about",
+						button_class = "store-about-fold",
+						next_id = "store-readme-more",
+					},
 				},
 			},
 		}
@@ -1281,12 +1395,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				ui.column {
 					w_full = true,
 					gap = "$space.4",
-					-- A new publisher, by name (asked again after it updates),
-					-- and a version still in review (offered only to its author).
+					-- A new publisher, by name (asked again after it updates), a
+					-- version signed with another key than yours (said, never in
+					-- the way: the store took it), and a version still in review
+					-- (offered only to its author).
 					ui.show(function(): boolean
 						local it: any = item()
 						local u = if it then it.update else nil
-						return type(u) == "table" and (u.new_owner == true or u.in_review == true)
+						return type(u) == "table" and (u.new_owner == true or u.new_key == true or u.in_review == true)
 					end, ui.column {
 						w_full = true,
 						gap = "$space.2",
@@ -1302,6 +1418,13 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 									then ui.t("plugins.store.update_new_owner", { username = name }):get()
 									else ui.t("plugins.store.update_new_owner_unnamed"):get()
 							end,
+						}),
+						ui.show(function(): boolean
+							local it: any = item()
+							return it ~= nil and type(it.update) == "table" and it.update.new_key == true
+						end, ds.Callout {
+							tone = "warning",
+							title = ui.t("plugins.store.update_new_key"),
 						}),
 						ui.show(function(): boolean
 							local it: any = item()
@@ -1321,7 +1444,10 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						w_full = true,
 						gap = "$space.2",
 						ui.text { ui.t("plugins.store.whats_new"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" },
-						Markdown { text = notes, small = true, foreign = true },
+						-- (Bounded as the store's every text: screens/plugins/untrusted.)
+						ui.presence(notes, function(text: string): Node
+							return untrusted.View { text = text, what = "notes", small = true, auto = true }
+						end, { w_full = true }),
 					}),
 					ui.presence(function(): string
 						local a, r = changed("added"), changed("removed")
@@ -1392,8 +1518,10 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			gap = "$space.6",
 			offer,
 			shots(),
-			readme(),
+			-- (What it asks for before its author's own words: what a person
+			-- weighs first, never pushed down by a README.)
 			asks(),
+			readme(),
 			facts(),
 			prerelease,
 			history(),
