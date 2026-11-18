@@ -693,6 +693,7 @@ local Lightbox = require("@ds/lightbox")
 local Select = require("@ds/select")
 local Button = require("@ds/button")
 local HoverCard = require("@ds/hover_card")
+local ContextMenu = require("@ds/context_menu")
 local PNG = "{png}"
 return function(p: string): Node
 	local dialog = ui.use_state(false)
@@ -709,6 +710,8 @@ return function(p: string): Node
 			ui.div {{ id = `{{p}}-wide`, w = 1000, h = 120 }} }},
 		ui.row {{ w_full = true, justify = "end", Select {{ value = choice, options = opts, name = `Select {{p}}`, w = 168 }} }},
 		ui.div {{ id = `{{p}}-tip`, w = 60, h = 20, tooltip = "A tip, the same on both" }},
+		ContextMenu {{ items = function() return {{ {{ label = "Copy the same on both", on_select = function() end }} }} end,
+			Button {{ `Context {{p}}` }} }},
 		ui.div {{ id = `{{p}}-card`, w = 60, h = 20, tooltip = HoverCard.Card {{ id = `{{p}}-card-body`, w = 520, h = 160 }} }},
 	}}
 end
@@ -732,11 +735,22 @@ zeron.settings_page { build = function() return widgets("settings") end }
     rig.frames(10);
     // How much of what `shows` names shows, once `open` is clicked (or, with
     // `hover`, rested on twice: a window's first tooltip waits a frame more).
+    // (`keys`: focused, then the Menu key's Shift+F10, as a context menu
+    // opens from the keys.)
     fn shown(rig: &mut Rig, open: &str, shows: &str, hover: bool) -> Option<(f32, f32)> {
         let rounds = if hover { 2 } else { 1 };
         let mut out = None;
+        let (open, keys) = match open.strip_prefix("keys:") {
+            Some(at) => (at, true),
+            None => (open, false),
+        };
         for _ in 0..rounds {
-            if hover {
+            if keys {
+                rig.app.click(open);
+                rig.frames(10);
+                rig.app.keys("shift+f10");
+                rig.frames(40);
+            } else if hover {
                 rig.app.hover(open);
                 rig.frames(120);
                 std::thread::sleep(std::time::Duration::from_millis(900));
@@ -764,6 +778,7 @@ zeron.settings_page { build = function() return widgets("settings") end }
             ("a select's menu".into(), format!("role:button \"Select {side}\""), "role:menuitem \"Option 1\"".into(), false),
             ("a tooltip".into(), format!("#{side}-tip"), "\"A tip, the same on both\"".into(), true),
             ("a hover card".into(), format!("#{side}-card"), format!("#{side}-card-body"), true),
+            ("a context menu".into(), format!("keys:role:button \"Context {side}\""), "role:menuitem \"Copy the same on both\"".into(), false),
         ]
     };
     let mut got: Vec<Vec<Option<(f32, f32)>>> = Vec::new();

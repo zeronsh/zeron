@@ -4,7 +4,7 @@
 
 **Seen on:** zgx `b80a8af1` (Zeron's pin), macOS, headless.
 
-**Who sees it.** Zeron marks a plugin's Settings page private (screens/shell/settings sets `hook = false` round a `private` page) so that no plugin draws into another plugin's settings. The page's rows are built in a `ui.presence` (keyed by what the plugin declares). A plugin allowed `ui.change` on `#setting-show` replaces another plugin's "Show" row on that page, and one allowed `ui.add` adds anything after any row there. Zeron's other private pages (Cloud, Billing) build parts in `ui.show` and `ui.each` too. Found while testing Zeron's plugin-drawn settings pages (src/plugins/settings_page_tests.rs).
+**Who sees it.** Zeron keeps a plugin's Settings page's header and declared rows private (`hook = false`, screens/plugins/settings) so that no plugin draws into another plugin's settings. The rows are built in a `ui.presence` (keyed by what the plugin declares). A plugin allowed `ui.change` on `#setting-show` replaces another plugin's "Show" row on that page, and one allowed `ui.add` adds anything after any row there. Zeron's other private pages (Cloud, Billing) build parts in `ui.show` and `ui.each` too. Found while testing Zeron's plugin-drawn settings pages (src/plugins/settings_page_tests.rs).
 
 **Today.**
 
