@@ -690,8 +690,44 @@ const MORE: [string, string, string, keyof typeof ICONS | null, string[]][] = [
   ["meeting-mode", "Meeting mode", "Quiets every notification while your calendar says you're busy.", "calendar", ["productivity"]],
   ["model-switch", "Model switch", "Switches a chat's model when a turn gets hard.", "bolt", ["agents"]],
   ["focus-music", "Focus music", "Plays something calm while agents work.", "mic", ["utilities"]],
-  ["api-console", "API console", "Try a request and hand the answer to your agent.", "bolt", ["developer-tools", "integrations"]],
+  ["api-console", "API console", "Try a request and hand the answer to your agent.", "shell", ["developer-tools", "integrations"]],
 ];
+
+// Thirty more of Ada's, only while a test asks for them (POST /_fake/many?on=1): a key for fifty
+// plugins, the most a key may name, as a real author's would look, every one of them hers.
+const MANY: [string, string, string, keyof typeof ICONS | null, string[]][] = [
+  ["branch-sweeper", "Branch sweeper", "Deletes the branches whose chats are done.", "leaf", ["git"]],
+  ["changelog-check", "Changelog check", "Says when a change has no changelog line.", "book", ["git"]],
+  ["chat-export", "Chat export", "Saves a chat as Markdown.", "database", ["chat"]],
+  ["ci-watch", "CI watch", "Follows a pull request's checks in its chat.", "radar", ["git", "integrations"]],
+  ["code-owners", "Code owners", "Who owns the files a chat is changing.", "key", ["git"]],
+  ["commit-coach", "Commit coach", "A commit message from the chat's changes.", "issues", ["git"]],
+  ["context-gauge", "Context gauge", "How full each chat's context is.", "meter", ["agents"]],
+  ["daily-digest", "Daily digest", "What your agents did yesterday, each morning.", "calendar", ["productivity"]],
+  ["dark-sky", "Dark sky", "A darker dark for late nights.", "palette", ["appearance"]],
+  ["deploy-button", "Deploy button", "Deploy from a chat's header.", "bolt", ["integrations"]],
+  ["dependency-alerts", "Dependency alerts", "Warns when a chat adds a package with a known problem.", "flame", ["developer-tools"]],
+  ["error-first", "Error first", "A build's first error, at the top of its chat.", "graph", ["developer-tools"]],
+  ["fix-later", "Fix later", "Saves a TODO from a chat to your list.", null, ["productivity"]],
+  ["git-blame", "Git blame", "Who last changed a line, and in which chat.", "shell", ["git"]],
+  ["hand-off", "Hand off", "Passes a chat to a teammate with a note.", "bell", ["chat"]],
+  ["issue-from-chat", "Issue from chat", "Opens an issue from what a chat found.", "issues", ["integrations"]],
+  ["lint-on-save", "Lint on save", "Runs your linter when an agent saves.", "leaf", ["developer-tools"]],
+  ["local-time", "Local time", "Your teammates' time of day beside their names.", "map", ["utilities"]],
+  ["mute-hours", "Mute hours", "No notifications outside your hours.", "bell", ["productivity"]],
+  ["pair-mode", "Pair mode", "Two agents, one chat, taking turns.", "translate", ["agents"]],
+  ["port-finder", "Port finder", "Which process holds a port, and its chat.", "radar", ["developer-tools"]],
+  ["prompt-library", "Prompt library", "Your saved prompts, one keystroke away.", "book", ["chat"]],
+  ["readme-lint", "README lint", "Checks a README against the store's listing rules.", null, ["developer-tools"]],
+  ["schema-peek", "Schema peek", "A table's columns, beside the query that uses them.", "database", ["developer-tools"]],
+  ["screen-share", "Screen share", "Shares one chat, not your screen.", "mic", ["chat"]],
+  ["snippet-shelf", "Snippet shelf", "Keeps the code an agent wrote that you want again.", null, ["productivity"]],
+  ["test-runner", "Test runner", "Runs the tests a chat touched.", "timer", ["developer-tools"]],
+  ["token-budget", "Token budget", "Stops a chat at the budget you set.", "meter", ["agents"]],
+  ["voice-notes", "Voice notes", "Speak a message; it's typed as you talk.", "mic", ["chat"]],
+  ["work-log", "Work log", "A day's chats, as a list of what got done.", "calendar", ["productivity"]],
+];
+export const MANY_IDS = MANY.map(([id]) => id);
 
 for (const [i, [id, name, summary, icon, categories]] of MORE.entries()) {
   SPECS.push({
@@ -724,6 +760,13 @@ SPECS.push(
   // README, 64 KB notes): the page must still answer at once, showing them as text.
   { id: "slow-words", name: "Slow words", summary: "Its README and notes are built to be slow to draw.", icon: null, categories: ["utilities"], keywords: ["slow"], permissions: ["ui.add"], owner: "user_mo", installs: 3, age: 7, screenshots: 0, readme: "- a\n+ b\n".repeat(65_536), history: [{ version: "1.0.0", status: "verified", ago: 7, notes: ">".repeat(65_536) }, { version: "1.1.0", status: "verified", ago: 5, notes: "[".repeat(13_107) + "a" + "](b)".repeat(13_107) }, { version: "1.2.0", status: "undecided", ago: 1, notes: `|${"a|".repeat(64)}\n|${"-|".repeat(64)}\n${"a\n".repeat(32_000)}`, files: { "src/nest.js": "`${\n".repeat(300) + "`${".repeat(130) }, shots: ["../../../../account/me.json"] }] },
 );
+
+/** Ada's thirty more (MANY), built as every other plugin is. */
+export function manyMore(): FakePlugin[] {
+  return MANY.map(([id, name, summary, icon, categories], i) =>
+    build({ id, name, summary, icon, categories, keywords: [id.split("-")[0]!], permissions: ["ui.add"], owner: "user_ada", installs: 40 + i * 7, age: 20 + i, screenshots: 0, history: [{ version: "1.0.0", status: "verified", ago: 20 + i }] }),
+  );
+}
 
 export function plugins(): FakePlugin[] {
   return SPECS.map(build).map((p) => (p.id === "crypto-ticker" ? { ...p, suspend_reason: "Sends what you type to a third party." } : p));
@@ -785,12 +828,13 @@ export function keys(): FakeKey[] {
   // (Keys for many of Ada's plugins: the keys page names three, then counts, and lists the rest on request.)
   const adas = plugins().filter((p) => p.owner === "user_ada").map((p) => p.id).sort();
   return [
-    { owner: "user_ada", scope: { plugins: adas.slice(0, 14) }, last_used_plugin: "focus-timer", key: "Mn4pQ7rS1tU2vW3xY5zA6bC8dE9fG0hJ2kL3mN4oP5q", name: "GitHub Actions, the monorepo", created_at: NOW - 30 * DAY, last_used_at: NOW - 2 * 3_600_000, expires_at: NOW + 300 * DAY, revoked_at: null },
-    { owner: "user_ada", scope: { plugins: adas.slice(0, 4) }, last_used_plugin: null, key: "Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", name: "Docs site build", created_at: NOW - 6 * DAY, last_used_at: null, expires_at: null, revoked_at: null },
+    // (Each key's first three, as its row draws them, three different plugins: no two tiles alike side by side.)
+    { owner: "user_ada", scope: { plugins: adas.slice(6) }, last_used_plugin: "focus-timer", key: "Mn4pQ7rS1tU2vW3xY5zA6bC8dE9fG0hJ2kL3mN4oP5q", name: "GitHub Actions, the monorepo", created_at: NOW - 30 * DAY, last_used_at: NOW - 2 * 3_600_000, expires_at: NOW + 300 * DAY, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: ["cloud-costs", "standup-notes", "token-meter", "weather"] }, last_used_plugin: null, key: "Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", name: "Docs site build", created_at: NOW - 6 * DAY, last_used_at: null, expires_at: null, revoked_at: null },
     { owner: "user_ada", scope: { plugins: adas.slice(4, 6) }, last_used_plugin: "focus-timer", key: "Rr7sT8uV9wX0yZ1aB2cD3eF4gH5iJ6kL7mN8oP9qR0s", name: "An old runner, ended", created_at: NOW - 400 * DAY, last_used_at: NOW - 40 * DAY, expires_at: NOW - 5 * DAY, revoked_at: null },
-    // (Three, named in full; and fifty, the most a key may name: its ids past Ada's own are plugins' ids as an edge keeps them.)
-    { owner: "user_ada", scope: { plugins: adas.slice(6, 9) }, last_used_plugin: null, key: "Tt1uV2wX3yZ4aB5cD6eF7gH8iJ9kL0mN1oP2qR3sT4u", name: "Three of them", created_at: NOW - 3 * DAY, last_used_at: null, expires_at: NOW + 200 * DAY, revoked_at: null },
-    { owner: "user_ada", scope: { plugins: [...adas, ...Array.from({ length: 50 - adas.length }, (_, i) => `a-plugin-with-a-long-id-${String(i).padStart(2, "0")}`)].sort() }, last_used_plugin: null, key: "Ww5xY6zA7bC8dE9fG0hJ1kL2mN3oP4qR5sT6uV7wX8y", name: "Every one", created_at: NOW - 1 * DAY, last_used_at: null, expires_at: null, revoked_at: null },
+    // (Three, named in full; and every one of Ada's by name: twenty, or fifty, the most a key may name, with /_fake/many.)
+    { owner: "user_ada", scope: { plugins: ["agent-relay", "quick-links", "theme-sync"] }, last_used_plugin: null, key: "Tt1uV2wX3yZ4aB5cD6eF7gH8iJ9kL0mN1oP2qR3sT4u", name: "Three of them", created_at: NOW - 3 * DAY, last_used_at: null, expires_at: NOW + 200 * DAY, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: adas }, last_used_plugin: null, key: "Ww5xY6zA7bC8dE9fG0hJ1kL2mN3oP4qR5sT6uV7wX8y", name: "Every one", created_at: NOW - 1 * DAY, last_used_at: null, expires_at: null, revoked_at: null },
     { owner: "user_ada", scope: { plugins: ["focus-timer"] }, last_used_plugin: "focus-timer", key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq", name: "GitHub Actions", created_at: NOW - 50 * DAY, last_used_at: NOW - 9 * DAY, expires_at: NOW + 315 * DAY, revoked_at: null },
     { owner: "user_ada", scope: { all: true }, last_used_plugin: "session-badges", key: "Zt8nQ1wE4rT7yU0iO3pA6sD9fG2hJ5kL8zX1cV4bN7m", name: "Old laptop script", created_at: NOW - 110 * DAY, last_used_at: NOW - 100 * DAY, expires_at: null, revoked_at: NOW - 60 * DAY },
     // The worst case's ten: live and revoked, used and never, ending soon and never.

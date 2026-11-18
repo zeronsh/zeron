@@ -5,7 +5,7 @@
 // fixtures' accounts in place of WorkOS.
 
 import { SITE_IDS } from "../src/lib/store/names.ts";
-import { audit, CATEGORIES, DAY, keys, NOW, plugins, reports, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
+import { audit, CATEGORIES, DAY, keys, MANY_IDS, manyMore, NOW, plugins, reports, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
 
 const COOKIE = "__Host-zeron_session";
 
@@ -23,6 +23,8 @@ const state = {
   sessions: new Map<string, { user: string; csrf: string; rotated?: boolean }>(),
   /** The queue as a screenshot asks for it (POST /_fake/queue, astro dev's /_dev/queue): empty, or this long. Null: as it is. */
   queueAs: null as null | "empty" | number,
+  /** A version answered with another's record (POST /_fake/loose?on=1): a page must say only what the record names. */
+  loose: false,
   /** The store as if it were down (POST /_fake/down?on=1): every /store/v1 read and write a 503. */
   down: false,
   /** A plugin shown with no pictures (POST /_fake/bare?id=…, empty for none): Featured with one that has none. */
@@ -767,6 +769,28 @@ async function route(request: Request): Promise<Response> {
     state.empty = url.searchParams.get("on") === "1";
     return json({ empty: state.empty });
   }
+  // (One plugin's version under another name, everywhere it is named: POST /_fake/rename?id=…&from=…&to=…. A version the app's link can't carry, without a fixture of its own.)
+  // (Ada's thirty more, and her "Every one" key naming all fifty: POST /_fake/many?on=1; without on=1, as before.)
+  if (parts[0] === "_fake" && parts[1] === "many" && method === "POST") {
+    const on = url.searchParams.get("on") === "1";
+    const extra = new Set(MANY_IDS);
+    state.plugins = state.plugins.filter((p) => !extra.has(p.id));
+    if (on) state.plugins.push(...manyMore());
+    const every = state.keys.find((k) => k.owner === "user_ada" && k.name === "Every one");
+    if (every) every.scope = { plugins: state.plugins.filter((p) => p.owner === "user_ada").map((p) => p.id).sort() };
+    return json({ many: on });
+  }
+  if (parts[0] === "_fake" && parts[1] === "loose" && method === "POST") {
+    state.loose = url.searchParams.get("on") === "1";
+    return json({ loose: state.loose });
+  }
+  if (parts[0] === "_fake" && parts[1] === "rename" && method === "POST") {
+    const [id, from, to] = ["id", "from", "to"].map((k) => url.searchParams.get(k) ?? "");
+    const i = state.plugins.findIndex((p) => p.id === id);
+    if (i < 0 || !from || !to) return fail(400, "bad_request", "id, from and to.");
+    state.plugins[i] = JSON.parse(JSON.stringify(state.plugins[i]).replaceAll(JSON.stringify(from), JSON.stringify(to)));
+    return json({ renamed: to });
+  }
   if (parts[0] === "_fake" && parts[1] === "down" && method === "POST") {
     state.down = url.searchParams.get("on") === "1";
     return json({ down: state.down });
@@ -818,7 +842,7 @@ async function route(request: Request): Promise<Response> {
   }
   if (a === "plugins" && b && c === "versions" && d && e === undefined && method === "GET") {
     const p = state.plugins.find((x) => x.id === b);
-    const v = p && listed(p) ? p.versions.find((x) => x.version === d && shown(x)) : undefined;
+    const v = p && listed(p) ? p.versions.find((x) => (state.loose || x.version === d) && shown(x)) : undefined;
     return v ? json(versionInfo(v, false), 200, { "cache-control": "public, max-age=30" }) : notFound();
   }
   if (a === "plugins" && b && c === "files" && d && parts.length > 6 && method === "GET") return file(request, b, d, parts.slice(6).join("/"));

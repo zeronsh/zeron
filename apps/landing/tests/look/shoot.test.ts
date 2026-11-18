@@ -57,12 +57,14 @@ const SHOTS: Shot[] = [
   { page: "account", as: "plugins-none", path: "/account", user: "user_noor" },
   { page: "account", as: "keys", path: "/account/keys", user: "user_ada" },
   { page: "account", as: "keys-all-open", path: "/account/keys", user: "user_ada", act: async (page) => { await page.locator("details.every summary").first().click(); await page.locator("details.gone summary").click(); } },
+  // (Fifty, the most a key may name, every one of them Ada's: its list open.)
+  { page: "account", as: "keys-fifty", path: "/account/keys", user: "user_ada", fake: [["many", { on: "1" }]], act: async (page) => { await page.locator("details.every", { hasText: "Show all 50" }).locator("summary").click(); } },
   { page: "account", as: "keys-signed-out", path: "/account/keys" },
   { page: "account", as: "keys-none", path: "/account/keys", user: "user_noor" },
   { page: "account", as: "revoke", path: "/account/keys/Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", user: "user_ada" },
   { page: "account", as: "new-key", path: "/account/keys", user: "user_ada", widths: [1440, 390], act: async (page) => { await page.getByRole("button", { name: "New key" }).click(); } },
 ];
-const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}]];
+const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}], ["many", {}]];
 
 let site: Site;
 let browser: Browser;

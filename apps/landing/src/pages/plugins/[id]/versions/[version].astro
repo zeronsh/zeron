@@ -15,7 +15,7 @@ import "../../../../styles/look/plugin.css";
 import { bytes, compatibility, date, day } from "../../../../lib/store/format.ts";
 import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
 import { hueClass } from "../../../../lib/store/hue.ts";
-import { isPluginId, isPrerelease, isVersion } from "../../../../lib/store/names.ts";
+import { isPluginId, isPrerelease, isVersion, versionParam } from "../../../../lib/store/names.ts";
 import { drawn, keepable } from "../../../../lib/store/rendered.ts";
 import { satisfies } from "../../../../lib/store/semver.ts";
 import { stoppedWhy } from "../../../../lib/store/states.ts";
@@ -25,14 +25,15 @@ import { statusWords, store } from "../../../../lib/store/words.ts";
 export const prerender = false;
 
 const id = Astro.params.id ?? "";
-const version = Astro.params.version ?? "";
+const version = versionParam(Astro.params.version) ?? "";
 const edge = Astro.locals.edge;
 const [plugin, found, latestZeron] = isPluginId(id) ? await Promise.all([edge.plugin(id), isVersion(version) ? edge.version(id, version) : null, edge.latestRelease()]) : [null, null, null];
 const pluginMissing = !plugin || (!plugin.ok && plugin.error === "not_found") || (plugin.ok && !plugin.data.version);
-const versionMissing = !pluginMissing && (!found || (!found.ok && found.error === "not_found"));
+// (A record that names another version is a version not in the store: the page says only what the record names.)
+const versionMissing = !pluginMissing && (!found || (!found.ok && found.error === "not_found") || (found.ok && found.data.version !== version));
 const down = !pluginMissing && !versionMissing && (!plugin!.ok || !found!.ok);
 const p = !pluginMissing && plugin!.ok ? plugin!.data : null;
-const v = found?.ok ? found.data : null;
+const v = found?.ok && !versionMissing ? found.data : null;
 
 let notes = "";
 if (p && v) {

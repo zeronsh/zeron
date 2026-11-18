@@ -20,7 +20,7 @@ import { pagerOf, placeOf } from "../../../../lib/store/paging.ts";
 import { loadPlugin } from "../../../../lib/store/plugin-page.ts";
 import { drawn, keepable, type Drawn } from "../../../../lib/store/rendered.ts";
 import type { VersionInfo } from "../../../../lib/store/types.ts";
-import { appUrl, fileUrl, pluginUrl } from "../../../../lib/store/urls.ts";
+import { appUrl, fileUrl, linkable, pluginUrl } from "../../../../lib/store/urls.ts";
 import { statusWords, store } from "../../../../lib/store/words.ts";
 
 export const prerender = false;
@@ -96,7 +96,7 @@ const pager = page.state === "ok" && page.versions ? pagerOf(`${pluginUrl(asked)
                         {notes.get(v.version) ? <div class="notes prose" set:html={notes.get(v.version)} /> : <p class="notes t3">No notes for this version.</p>}
                       </div>
                       <div class="act">
-                        {v.yanked ? <span class="off">Can't be installed</span> : <a class:list={["btn sm", newest ? "sec" : "ghost"]} href={appUrl(page.plugin.id, newest ? undefined : v.version)}>{store("plugins.store.install_version", { version: v.version })}</a>}
+                        {v.yanked ? <span class="off">Can't be installed</span> : <a class:list={["btn sm", newest ? "sec" : "ghost"]} href={appUrl(page.plugin.id, newest ? undefined : v.version)}>{newest || linkable(v.version) ? store("plugins.store.install_version", { version: v.version }) : <>Open in Zeron<span class="sr-only"> for {v.version}</span></>}</a>}
                       </div>
                     </li>
                   );

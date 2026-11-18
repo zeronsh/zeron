@@ -46,7 +46,14 @@ export const memberUrl = (username: string) => `/@${encodeURIComponent(username)
  * 32): one that doesn't is left out, and the link opens the plugin.
  */
 export const appUrl = (id: string, version?: string) =>
-  `zeron://open/plugin/${encodeURIComponent(id)}${version && /^[A-Za-z0-9.+-]{1,32}$/.test(version) ? `?version=${version}` : ""}`;
+  `zeron://open/plugin/${encodeURIComponent(id)}${version && linkable(version) ? `?version=${version}` : ""}`;
+
+/**
+ * Whether Zeron's link can name this version. One it can't is never named
+ * on the button either: a label that names a version the link drops would
+ * open the newest under another's name (the identity lane's finding).
+ */
+export const linkable = (version: string) => /^[A-Za-z0-9.+-]{1,32}$/.test(version);
 
 /** Sign in, then come back to `path` (a path on this site, never anywhere else). */
 export const signInUrl = (path: string) => `/auth/web/login?${new URLSearchParams({ return_to: sitePath(path) })}`;

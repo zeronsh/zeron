@@ -36,7 +36,7 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .row .r { text-align: right; }
 .who { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .who > div { min-width: 0; }
-.who .nm { font-weight: 550; letter-spacing: -0.005em; line-height: 22px; }
+.who .nm { font-weight: 550; letter-spacing: -0.005em; line-height: 22px; text-wrap: balance; }
 .who .id { font: 450 12.5px/18px var(--mono); color: var(--text-3); margin-top: 2px; overflow-wrap: anywhere; }
 .ver { font-size: 14px; line-height: 20px; padding-top: 1px; min-width: 0; }
 .ver .top1 { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; min-height: 24px; }
@@ -54,33 +54,43 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 
 /* ---- Deploy keys ---- */
 .keys { margin-top: 28px; }
-.key { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.25fr) minmax(0, 1fr) 132px 72px; gap: 32px; align-items: center; padding: 20px 24px; }
+/* "Can publish" is two tracks: the tiles' (as wide as a key for many draws them: three tiles and
+   the count's, less the gap past it, so its words sit 12px from them) and its words'. A key for one
+   to three plugins, or all, spans both; a key for many puts its count and "Show all" in the words'
+   track, one under the other, and the whole list opens under the row. */
+.key { --gap: 32px; --tiles: calc(114px + 12px - var(--gap)); display: grid; grid-template-columns: minmax(0, 1.15fr) var(--tiles) minmax(0, 0.75fr) minmax(0, 1fr) 132px 72px; column-gap: var(--gap); align-items: center; padding: 20px 24px; }
+.key > .scope, .key.h > .sc { grid-column: span 2; }
 .keys li + li.key, .key.h + ul .key { box-shadow: 0 -1px 0 var(--line); }
 .key.h { padding-top: 14px; padding-bottom: 12px; font-size: 13px; line-height: 20px; color: var(--text-3); }
 .key .kname { min-width: 0; }
-.key .nm { font-weight: 550; letter-spacing: -0.005em; overflow-wrap: anywhere; }
+.key .nm { font-weight: 550; letter-spacing: -0.005em; overflow-wrap: anywhere; text-wrap: balance; }
 .key .id { margin-top: 2px; font: 450 12.5px/18px var(--mono); color: var(--text-3); }
 .scope { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
 .scope .tiles { display: flex; flex: none; padding-top: 2px; }
 .scope .tiles .tile { margin-left: -6px; box-shadow: 0 0 0 2.5px var(--surface), inset 0 0 0 1px color-mix(in oklch, currentColor 12%, transparent); }
 .scope .tiles .tile:first-child { margin-left: 0; }
 /* A key for many plugins: three tiles, a count, and the whole list on request. */
-.scope .tiles .more { width: auto; min-width: 32px; padding: 0 7px 0 9px; background: var(--sunken); color: var(--text-2); font: 600 11.5px/1 var(--sans); letter-spacing: -0.01em; box-shadow: 0 0 0 2.5px var(--surface); font-variant-numeric: tabular-nums; }
+.scope .tiles .more { width: 36px; padding: 0; background: var(--sunken); color: var(--text-2); font: 600 11.5px/1 var(--sans); letter-spacing: -0.01em; box-shadow: 0 0 0 2.5px var(--surface); font-variant-numeric: tabular-nums; }
 .scope .w { min-width: 0; font-size: 14px; line-height: 20px; }
-.scope .w .names { overflow-wrap: anywhere; }
+.scope .w .names { overflow-wrap: anywhere; text-wrap: balance; }
 .scope .w small { display: block; font-size: 13px; color: var(--text-3); }
 .all { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 27%; background: var(--sunken); color: var(--text-2); flex: none; }
 .all svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.key .every { grid-column: 2 / -1; margin-top: -14px; }
+.scope.many, .scope.many .w, .scope.many .every { display: contents; }
+.key:has(.many) > :is(.kname, .used, .ends, .btn) { grid-row: 1 / 3; }
+.scope.many .tiles { grid-column: 2; grid-row: 1 / 3; align-self: center; margin-right: calc(12px - var(--gap)); padding: 0; }
+.scope.many .count { grid-column: 3; grid-row: 1; }
+.scope.many summary { grid-column: 3; grid-row: 2; justify-self: start; }
+.scope.many .every::details-content { grid-column: 2 / -1; grid-row: 3; }
 .every summary { display: inline-flex; align-items: center; gap: 2px; font-size: 13px; line-height: 20px; color: var(--text-2); font-weight: 500; list-style: none; cursor: pointer; border-radius: 4px; }
 .every summary::-webkit-details-marker { display: none; }
 .every summary:hover { color: var(--text); }
 .every summary svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
 .every[open] summary svg { transform: rotate(-90deg); }
-.plist { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding: 12px; border-radius: 14px; background: var(--sunken); list-style: none; }
-.pl { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; max-width: 100%; padding: 4px 12px 4px 5px; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-1); font-size: 13px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; }
+.plist { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding: 12px; border-radius: 14px; background: var(--sunken); list-style: none; }
+.pl { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; max-width: 100%; padding: 4px 12px 4px 5px; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-1); font-size: 13px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; text-wrap: balance; }
 .used { font-size: 14px; line-height: 20px; min-width: 0; }
-.used small { display: block; font-size: 13px; color: var(--text-3); overflow-wrap: anywhere; }
+.used small { display: block; font-size: 13px; color: var(--text-3); overflow-wrap: anywhere; text-wrap: balance; }
 .ends { font-size: 14px; line-height: 20px; color: var(--text-2); }
 .key .btn { justify-self: end; margin-right: -10px; }
 .key.was { color: var(--text-2); }
@@ -119,7 +129,7 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 @media (max-width: 1024px) {
   .row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 0.9fr) 16px; gap: 24px; }
   .row .n, .row.h .r { display: none; }
-  .key { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 0.9fr) 112px 72px; gap: 20px; }
+  .key { --gap: 20px; grid-template-columns: minmax(0, 1fr) var(--tiles) minmax(0, 0.6fr) minmax(0, 0.9fr) 112px 72px; }
 }
 @media (max-width: 860px) {
   .acct .hd { flex-direction: column; align-items: flex-start; gap: 20px; }
@@ -133,7 +143,13 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
   .key { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px 20px; align-items: start; }
   .key .kname { grid-column: 1; grid-row: 1; }
   .key .btn { grid-column: 2; grid-row: 1; }
-  .key .scope, .key .used, .key .ends, .key .every { grid-column: 1 / -1; grid-row: auto; margin: 0; }
+  .key .scope, .key .used, .key .ends { grid-column: 1 / -1; grid-row: auto; margin: 0; }
+  .key:has(.many) > :is(.used, .ends) { grid-row: auto; }
+  /* (A key for many, full width: its tiles, its count over "Show all", the list under them.) */
+  .key .scope.many { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; }
+  .scope.many .tiles { grid-column: 1; margin-right: 0; }
+  .scope.many .count, .scope.many summary { grid-column: 2; }
+  .scope.many .every::details-content { grid-column: 1 / -1; }
   .key .used { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
   .how { grid-template-columns: minmax(0, 1fr); gap: 24px; }
 }

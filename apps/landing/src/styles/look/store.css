@@ -156,6 +156,8 @@ h3 { font-size: 15px; line-height: 22px; font-weight: 600; letter-spacing: -0.00
 .micro { font-size: 12px; line-height: 16px; }
 .t2 { color: var(--text-2); } .t3 { color: var(--text-3); }
 .name { overflow-wrap: anywhere; }
+/* A word too long for any column breaks inside itself, evenly where its line is balanced (Words.astro). */
+.lw { word-break: break-all; }
 
 /* ---- a plugin's tile and stage ---- */
 .tile {

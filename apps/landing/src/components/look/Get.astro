@@ -7,7 +7,7 @@
 // "Nothing happened?" opens how to get Zeron, and opens by itself when the
 // page sees the link went nowhere (scripts/store.ts).
 import { compatibility, day, since } from "../../lib/store/format.ts";
-import { appUrl } from "../../lib/store/urls.ts";
+import { appUrl, linkable } from "../../lib/store/urls.ts";
 import { store } from "../../lib/store/words.ts";
 import Seal from "./Seal.astro";
 import ZeronMark from "./ZeronMark.astro";
@@ -30,8 +30,10 @@ interface Props {
   off?: { needs: string | undefined; latest: string } | null;
 }
 const { id, name, version, newest, verified, verifiedAt, publishedAt, verifiedVersion, verifiedVersionAt, off } = Astro.props;
-const label = newest ? "Install in Zeron" : store("plugins.store.install_version", { version });
-const href = appUrl(id, newest ? undefined : version);
+// (A version the link can't name isn't named on the button either: Zeron's page chooses.)
+const named = !newest && linkable(version) ? version : undefined;
+const label = newest ? "Install in Zeron" : named ? store("plugins.store.install_version", { version: named }) : "Open in Zeron";
+const href = appUrl(id, named);
 const now = Date.now();
 ---
 
@@ -62,8 +64,12 @@ const now = Date.now();
           {verifiedVersion ? (
             <>
               <b>{store("plugins.store.not_verified_line", { version, verified: verifiedVersion })}</b>{" "}
-              <a href={appUrl(id, verifiedVersion)}>{store("plugins.store.install_instead", { version: verifiedVersion })}</a>
-              {verifiedVersionAt ? `, verified ${day(verifiedVersionAt, now)}.` : "."}
+              {linkable(verifiedVersion) && (
+                <>
+                  <a href={appUrl(id, verifiedVersion)}>{store("plugins.store.install_instead", { version: verifiedVersion })}</a>
+                  {verifiedVersionAt ? `, verified ${day(verifiedVersionAt, now)}.` : "."}
+                </>
+              )}
             </>
           ) : (
             <>

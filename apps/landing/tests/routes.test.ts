@@ -615,6 +615,51 @@ describe("the admin pages can't be told from pages that don't exist", () => {
     expect(versions).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12?version=1.0.0">Install 1.0.0</a>');
     expect(versions.match(/<span class="off">Can't be installed<\/span>/g)).toHaveLength(2);
   });
+
+  test("a version's page says only what the store's record names: a crafted address puts no words in its mouth", async () => {
+    const crafted = "1.0.0-verified.by.zeron.call.us";
+    const path = `/plugins/focus-timer/versions/${crafted}`;
+    // (Its words: the page's text and title, not the addresses it links to, which are this one.)
+    const words = (body: string) => body.replace(/="[^"]*"/g, "");
+    try {
+      // (An edge that answers with another version's record: the version isn't in the store.)
+      await site.fake("loose", { on: "1" });
+      const other = await html(path);
+      expect(other.response.status).toBe(404);
+      expect(words(other.body)).not.toContain("call.us");
+      await site.fake("loose");
+      // (A store that doesn't answer: its page, naming no version.)
+      await site.fake("down", { on: "1" });
+      const down = await html(path);
+      expect(down.response.status).toBe(503);
+      expect(words(down.body)).not.toContain("call.us");
+    } finally {
+      await site.fake("loose");
+      await site.fake("down");
+    }
+    expect((await html(path)).response.status).toBe(404);
+  });
+
+  test("a version the link can't name is never named on its button: Open in Zeron, and the app chooses", async () => {
+    // (33 characters and a "+": the app's link carries 32 at most; the "+" also comes through the address as %2B.)
+    const long = "1.0.0-rc.1+build.20261118.0123456";
+    try {
+      await site.fake("rename", { id: "worst-case-listing-at-every-limit-xyz12", from: "1.0.0", to: long });
+      const cookie = await site.signIn("user_kai");
+      const page = (await html("/plugins/worst-case-listing-at-every-limit-xyz12", cookie)).body;
+      expect(page).not.toContain(`Install ${long} instead`);
+      expect(page).not.toContain("?version=");
+      const older = await html(`/plugins/worst-case-listing-at-every-limit-xyz12/versions/${encodeURIComponent(long)}`, cookie);
+      expect(older.response.status).toBe(200);
+      expect(older.body).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install>');
+      expect(older.body).toMatch(/data-install>[^]*?Open in Zeron\s*<\/a>/);
+      expect(older.body).not.toContain(`Install ${long}`);
+      const versions = (await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions", cookie)).body;
+      expect(versions).toContain(`href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12">Open in Zeron<span class="sr-only"> for ${long}</span></a>`);
+    } finally {
+      await site.fake("rename", { id: "worst-case-listing-at-every-limit-xyz12", from: long, to: "1.0.0" });
+    }
+  });
 });
 
 describe("forms", () => {
@@ -686,20 +731,27 @@ describe("forms", () => {
     const { body } = await html("/account/keys", await site.signIn("user_ada"));
     // Twelve live, each with Revoke; five revoked or ended, in their group.
     expect(body.match(/<a class="btn ghost sm" href="\/account\/keys\/[\w-]+">Revoke/g)).toHaveLength(12);
-    // (Three named in full; fifty counted, every one on request.)
+    // (Three named in full; all twenty of Ada's by name, counted, every one on request.)
     expect(body).toMatch(/<div class="names">[^<,]+, [^<,]+, [^<,]+<\/div><small>3 plugins<\/small>/);
-    expect(body).toContain("<div>50 plugins</div>");
-    expect(body).toContain('<span class="tile s more">+47</span>');
+    expect(body).toContain('<div class="count">20 plugins</div>');
+    expect(body).toContain('<span class="tile s more">+17</span>');
     expect(body).toMatch(/<details class="gone"><summary>Revoked and ended keys · 5/);
     expect(body).toMatch(/<span class="state quiet">Ended [A-Z][a-z]{2} \d{1,2}<\/span>/);
     for (const m of body.matchAll(/<div class="id" title="([^"]+)">([^<]+)<\/div>/g)) expect(m[2]).toBe(`${m[1]!.slice(0, 6)}…${m[1]!.slice(-4)}`);
     // All of yours; one to three named in full; past three, three tiles, "+n", and every one on request.
     expect(body).toMatch(/All your plugins<\/div><small>\d+ today, and any you publish later<\/small>/);
-    expect(body).toMatch(/<div class="names">[^<]+ and [^<]+<\/div><small>2 plugins<\/small>/);
-    const many = body.slice(body.indexOf("GitHub Actions, the monorepo"), body.indexOf("</li>\n", body.indexOf('<ul class="plist"')));
+    // (A name with no spaces breaks inside itself, evenly; every other word only at its spaces. "on" stays with the plugin it names.)
+    const long = "Averyveryverylongpluginnamewithoutanyspacesatallthatkeepsgoing64";
+    expect(body).toContain(`<div class="names">Focus\u00a0timer and <span class="lw">${long}</span></div><small>2 plugins</small>`);
+    // (A short name is kept whole: names break between one another.)
+    expect(body).toContain('<div class="names">Agent\u00a0relay, Quick\u00a0links, Theme\u00a0sync</div>');
+    expect(body).toContain(`<small>on\u00a0<span class="lw">${long}</span></small>`);
+    expect(body).toContain("<small>on\u00a0Focus timer</small>");
+    // (Past three: the count, and "Show all" under it in the same column; the list in the same scope.)
+    const many = body.slice(body.indexOf("GitHub Actions, the monorepo"), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
+    expect(many).toContain('<div class="scope many">');
     expect(many).toContain('<span class="tile s more">+11</span>');
-    expect(many).toContain("<div>14 plugins</div>");
-    expect(many).toMatch(/<summary>Show all 14/);
+    expect(many).toMatch(/<div class="count">14 plugins<\/div><details class="every"><summary>Show all 14/);
     const list = body.slice(body.indexOf('<ul class="plist"'), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
     expect(list.match(/<li class="pl">/g)).toHaveLength(14);
     expect(body).not.toMatch(/text-overflow|…<\/div><small>\d+ plugins?/);
@@ -708,6 +760,22 @@ describe("forms", () => {
     // A key is made on your computer: New key says where, and nothing here makes or shows a secret.
     expect(body).toContain('<div class="menu newkey" id="new-key" popover>');
     expect(body).not.toMatch(/zpk_[A-Za-z0-9]/);
+  });
+
+  test("a key for fifty plugins, the most a key may name: three tiles, +47, and all fifty, by name, on request", async () => {
+    try {
+      await site.fake("many", { on: "1" });
+      const { body } = await html("/account/keys", await site.signIn("user_ada"));
+      const every = body.slice(body.indexOf(">Every one<"), body.indexOf("</ul>", body.indexOf(">Every one<")));
+      expect(every).toContain('<div class="count">50 plugins</div>');
+      expect(every).toContain('<span class="tile s more">+47</span>');
+      expect(every.match(/<li class="pl">/g)).toHaveLength(50);
+      // (Every one a plugin of hers, by its name: never an id in its place.)
+      expect(every).not.toMatch(/<li class="pl">.*?<span>[a-z0-9-]+<\/span><\/li>/);
+    } finally {
+      await site.fake("many");
+    }
+    expect((await html("/account/keys", await site.signIn("user_ada"))).body).toContain('<div class="count">20 plugins</div>');
   });
 
   test("revoking a key asks first, then the key stops", async () => {

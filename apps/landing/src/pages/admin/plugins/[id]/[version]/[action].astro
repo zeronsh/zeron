@@ -12,13 +12,14 @@ import { isVersionAction, toWeigh, VERSION_FLASH, versionAsk, versionRequest } f
 import { unbidi } from "../../../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, fromElsewhere, tokenMatches } from "../../../../../lib/store/forms.ts";
 import { privatePage, purge } from "../../../../../lib/store/http.ts";
-import { isPluginId, isVersion } from "../../../../../lib/store/names.ts";
+import { isPluginId, isVersion, versionParam } from "../../../../../lib/store/names.ts";
 import { resumed, wasCut } from "../../../../../lib/store/resume.ts";
 import { adminSession } from "../../../../../lib/store/session.ts";
 
 export const prerender = false;
 
-const { id, version, action } = Astro.params;
+const { id, action } = Astro.params;
+const version = versionParam(Astro.params.version);
 if (!isPluginId(id) || !isVersion(version) || !isVersionAction(action)) return new Response(null, { status: 404 });
 // (The middleware's admin gate let only an admin this far.)
 const session = await adminSession(Astro);

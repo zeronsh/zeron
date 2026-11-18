@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { appUrl, fileUrl, httpsUrl, signInUrl, sitePath } from "./urls.ts";
+import { appUrl, linkable, fileUrl, httpsUrl, signInUrl, sitePath } from "./urls.ts";
 
 test.each([
   ["/account", "/account"],
@@ -30,6 +30,8 @@ test("the app's link names only a store id", () => {
   expect(appUrl("focus-timer", "1.2.0+build.7")).toBe("zeron://open/plugin/focus-timer?version=1.2.0+build.7");
   expect(appUrl("focus-timer", "1.2.0&x=1")).toBe("zeron://open/plugin/focus-timer");
   expect(appUrl("focus-timer", "1".repeat(33))).toBe("zeron://open/plugin/focus-timer");
+  expect(linkable("1.0.0-rc.1+build.20261118.0123456789")).toBe(false);
+  expect(linkable("1.0.0-rc.1+build.7")).toBe(true);
 });
 
 test("a file's address encodes each part", () => {

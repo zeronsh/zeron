@@ -11,6 +11,7 @@ import Icon from "../../components/look/Icon.astro";
 import Seal from "../../components/look/Seal.astro";
 import SignInPlease from "../../components/look/SignInPlease.astro";
 import Tile from "../../components/look/Tile.astro";
+import Words from "../../components/look/Words.astro";
 import Store from "../../layouts/Store.astro";
 import "../../styles/look/account.css";
 import { count, day, since } from "../../lib/store/format.ts";
@@ -107,7 +108,7 @@ const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "remov
                         <a class:list={["row", hueClass(p.id), { off: gone(p) }]} href={`/account/plugins/${encodeURIComponent(p.id)}`}>
                           <div class="who">
                             <Tile id={p.id} name={p.name} icon={p.icon} version={v?.version ?? null} />
-                            <div><div class="nm name">{p.name}</div><div class="id">{p.id}</div></div>
+                            <div><div class="nm name"><Words text={p.name} /></div><div class="id">{p.id}</div></div>
                           </div>
                           <div class="ver">
                             <div class="top1">

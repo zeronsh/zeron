@@ -378,7 +378,8 @@ describe("an author's pages", () => {
     expect(keys.body).toContain(`/account/keys/${key}`);
     // (What it may publish, by the plugins' own names: the package's.)
     // (Two plugins, named in full: the app's "{a} and {b}".)
-    expect(keys.body).toContain('<div class="names">focus timer and pr review</div><small>2 plugins</small>');
+    // (Each short name kept whole on its line: names break between one another.)
+    expect(keys.body).toContain('<div class="names">focus\u00a0timer and pr\u00a0review</div><small>2 plugins</small>');
     const csrf = await adaOnWeb.token("/account/keys");
     const revoked = await adaOnWeb.post(`/account/keys/${key}`, { csrf });
     expect(revoked.status).toBe(303);
