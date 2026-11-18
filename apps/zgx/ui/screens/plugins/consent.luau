@@ -110,9 +110,26 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 	local unknown = not (it.author and (it.author.kind == "you" or it.author.kind == "verified"))
 	local claimable = unknown and it.status ~= "tampered" and not elsewhere
 	local v = version(it)
+	-- From the store, and the store hasn't verified this version (its own
+	-- record, read as it was installed): a warning here, where the person
+	-- decides, with the newest verified version to take instead where the
+	-- engine names one. It asks even when it asks nothing new.
+	local store_source = type(it.source) == "table" and it.source.kind == "store"
+	local unverified = store_source and it.source.verified == false
+	local function verified_alternative(): string?
+		local alt = (type(it.update) == "table" and type(it.update.verified_alternative) == "table" and it.update.verified_alternative.version)
+			or (type(it.source.verified_alternative) == "table" and it.source.verified_alternative.version)
+		return if type(alt) == "string" and alt ~= "" then alt else nil
+	end
+	local alternative = if unverified then verified_alternative() else nil
+	-- Asking again for nothing beyond what was allowed (an unverified
+	-- version always asks): said in one line.
+	local nothing_new = again and (it.ask == nil or #it.ask == 0)
 
 	local asks: Node
-	if #lines == 0 and #grew == 0 then
+	if nothing_new and #grew == 0 then
+		asks = ui.text { ui.t("plugins.consent.nothing_new"), text_size = "$font.size.md", color = "$text.secondary", wrap = true }
+	elseif #lines == 0 and #grew == 0 then
 		asks = ui.text { ui.t("plugins.consent.asks_nothing"), text_size = "$font.size.md", color = "$text.secondary", wrap = true }
 	elseif #lines == 0 then
 		asks = ui.div {}
@@ -272,6 +289,24 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 						tone = "warning",
 						title = if it.status == "tampered" then ui.t("plugins.consent.tampered") else ui.t("plugins.words.unverified"),
 						body = why_unknown(it),
+					}
+					else nil,
+				if unverified
+					then ui.div {
+						id = "consent-unverified",
+						w_full = true,
+						ds.Callout {
+							tone = "warning",
+							title = ui.t("plugins.store.not_verified_yet", { version = v or "" }),
+							action = if alternative and not elsewhere
+								then {
+									label = ui.t("plugins.store.install_instead", { version = alternative }),
+									on_click = function()
+										ui.invoke("plugins.install_verified", { id = it.id, hash = it.hash })
+									end,
+								}
+								else nil,
+						},
 					}
 					else nil,
 				if #grew > 0 then section(ui.t("plugins.consent.grew"), grew) else nil,

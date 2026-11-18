@@ -320,3 +320,32 @@ test("a long sheet scrolls, with Allow and Not now held below it", function()
 	app:frames(10)
 	expect(app:state("calls")).to_contain("decide:long:true:long-1")
 end)
+
+test("a store version the store hasn't verified asks even for nothing new, warns, and offers the verified one instead", function()
+	local app = open()
+	app:command("timer")
+	app:frames(20)
+	local sheet = app:tree("#consent")
+	expect(app:tree("#consent-unverified")).to_contain("Zeron hasn't verified 1.3.0 yet.")
+	-- Nothing beyond what was allowed: said, not listed again.
+	expect(sheet).to_contain("It asks for nothing beyond what you allowed.")
+	-- Allow still answers; the verified one is the other way.
+	app:frames(ARMED)
+	app:click('#consent-unverified >> role:button "Install 1.2.1 instead"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("install_verified:timer:timer-13")
+end)
+
+test("a first install the store hasn't verified warns, with nothing to offer instead when there's no verified version", function()
+	local app = open()
+	app:command("fresh")
+	app:frames(20)
+	expect(app:tree("#consent-unverified")).to_contain("Zeron hasn't verified 0.1.0 yet.")
+	expect(app:has("#consent-unverified >> role:button")).to_be(false)
+	-- What it asks, as any first install's.
+	expect(app:tree("#consent")).never.to_contain("nothing beyond what you allowed")
+	-- And one from elsewhere, or verified, says nothing of it.
+	app:command("focus")
+	app:frames(20)
+	expect(app:has("#consent-unverified")).to_be(false)
+end)

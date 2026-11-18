@@ -1475,6 +1475,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 
 	-- What changes with the update, read before it: the changelog and what
 	-- it asks for more or no longer.
+	-- The newest verified version an unverified update offers beside it
+	-- (the offer's own `verified_alternative`), else nil.
+	local function verified_alternative(): string?
+		local it: any = item()
+		local u = if it then it.update else nil
+		local alt = if type(u) == "table" and type(u.verified_alternative) == "table" then u.verified_alternative.version else nil
+		return if type(alt) == "string" and alt ~= "" then alt else nil
+	end
 	local function update_dialog(): Node
 		local function notes(): string
 			local it: any = item()
@@ -1513,12 +1521,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					gap = "$space.4",
 					-- A new publisher, by name (asked again after it updates), a
 					-- version signed with another key than yours (said, never in
-					-- the way: the store took it), and a version still in review
-					-- (offered only to its author).
+					-- the way: the store took it), and a version the store
+					-- hasn't verified (a warning, here where the person
+					-- decides: from the offer's own record, with the verified
+					-- one to take instead where there is one).
 					ui.show(function(): boolean
 						local it: any = item()
 						local u = if it then it.update else nil
-						return type(u) == "table" and (u.new_owner == true or u.new_key == true or u.in_review == true)
+						return type(u) == "table" and (u.new_owner == true or u.new_key == true or u.verified == false)
 					end, ui.column {
 						w_full = true,
 						gap = "$space.2",
@@ -1542,17 +1552,40 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 							tone = "warning",
 							title = ui.t("plugins.store.update_new_key"),
 						}),
-						ui.show(function(): boolean
+						-- (Keyed by what it says: its words and its action are
+						-- the offer's.)
+						ui.presence(function(): string
 							local it: any = item()
-							return it ~= nil and type(it.update) == "table" and it.update.in_review == true
-						end, ui.text {
-							ui.t("plugins.store.update_in_review"),
-							w_full = true,
-							wrap = true,
-							text_size = "$font.size.sm",
-							line_height = "$font.line.sm",
-							color = "$text.secondary",
-						}),
+							local u = if it then it.update else nil
+							if type(u) ~= "table" or u.verified ~= false then
+								return ""
+							end
+							local had = if u.installed_verified == true and type(it.version) == "string" then it.version else ""
+							return `{u.version or ""}|{had}|{verified_alternative() or ""}`
+						end, function(key: string): Node
+							if key == "" then
+								return ui.div {}
+							end
+							local v, had, alt = string.match(key, "^([^|]*)|([^|]*)|([^|]*)$")
+							return ui.div {
+								class = "store-update-unverified",
+								w_full = true,
+								ds.Callout {
+									tone = "warning",
+									title = ui.t("plugins.store.not_verified_yet", { version = v or "" }),
+									body = if had and had ~= "" then ui.t("plugins.store.installed_was_verified", { installed = had }) else nil,
+									action = if alt and alt ~= ""
+										then {
+											label = ui.t("plugins.store.update_instead", { version = alt }),
+											on_click = function()
+												update_open:set(false)
+												install(alt)
+											end,
+										}
+										else nil,
+								},
+							}
+						end, { w_full = true }),
 					}),
 					ui.show(function(): boolean
 						return notes() ~= ""

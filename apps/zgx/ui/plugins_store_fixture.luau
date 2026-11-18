@@ -182,10 +182,10 @@ ui.command {
 }
 ui.command {
 	id = "store.update_new_owner",
-	title = "A newer Focus timer from a new publisher, still in review",
+	title = "A newer Focus timer from a new publisher",
 	run = function()
 		local p = find("focus-timer")
-		p.update = { version = "1.3.0", added = {}, removed = {}, notes = "- Longer breaks.", new_owner = true, in_review = true }
+		p.update = { version = "1.3.0", added = {}, removed = {}, notes = "- Longer breaks.", new_owner = true }
 		publish()
 	end,
 }
@@ -195,6 +195,15 @@ ui.command {
 	run = function()
 		local p = find("focus-timer")
 		p.update = { version = "1.3.0", added = {}, removed = {}, notes = "- Longer breaks.", new_key = true }
+		publish()
+	end,
+}
+ui.command {
+	id = "store.update_unverified",
+	title = "A newer Focus timer the store hasn't verified, the version you have verified, a verified one between",
+	run = function()
+		local p = find("focus-timer")
+		p.update = { version = "1.3.0", added = {}, removed = {}, notes = "- Longer breaks.", verified = false, installed_verified = true, verified_alternative = { version = "1.2.1" } }
 		publish()
 	end,
 }
