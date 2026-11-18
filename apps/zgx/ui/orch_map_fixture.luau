@@ -8,6 +8,9 @@ ui.theme.strict("warn")
 local ds = require("@ds")
 ds.setup()
 require("@app/screens/shell/route").launched:set(true)
+-- (A session opened from the Map is told to the chat store first, which asks
+-- the host to watch it: no host here.)
+require("@app/screens/chat/store").open = function() end
 
 local sessions = require("@account/sessions")
 local orchestration = require("@account/orchestration")

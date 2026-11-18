@@ -698,6 +698,7 @@ impl zeron_harness::Harness for NoteHarness {
             description: None,
             reasoning_levels: vec![],
             options: vec![],
+            provider: None,
         };
         Ok(vec![model("opus"), model("haiku"), model("sonnet")])
     }

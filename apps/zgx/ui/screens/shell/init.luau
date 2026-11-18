@@ -137,8 +137,15 @@ return function(): Node
 		local find: any = boundary.load("@app/screens/chat/find")
 		return find ~= nil and find.open ~= nil and (find.open :: any)() == true
 	end
+	-- ⌘N: the new chat, its composer given the keys in the same step (one
+	-- composer, its draft now the new chat's), so a key typed straight after
+	-- is the new chat's, never the one left.
 	runs["shell.new_chat"] = function()
 		route.new_chat()
+		local shared: any = boundary.load("@app/screens/chat/shared")
+		if shared and shared.focus then
+			shared.focus:add(1)
+		end
 	end
 	runs["shell.palette"] = function()
 		view.palette:set(not view.palette:peek())

@@ -164,16 +164,53 @@ struct Entry {
     /// by a part patch): the rest are as they were built. None: not known
     /// (it came whole, or grew a text).
     patched: Option<std::collections::HashSet<String>>,
+    /// Its json's sum and its size as JSON, each worked out once and kept
+    /// until it changes (`json_mut`): a chat opened again says what it holds
+    /// by its sums, and one let go of is weighed (`let_go_weight`), on every
+    /// switch, and a long reply's json is hundreds of kilobytes.
+    kept_sum: std::cell::Cell<Option<u64>>,
+    kept_bytes: std::cell::Cell<Option<usize>>,
 }
 
 impl Entry {
     fn new(json: Json) -> Self {
-        Self { id: json["id"].as_str().unwrap_or_default().into(), json: Some(json), sum: 0, patched: None }
+        Self {
+            id: json["id"].as_str().unwrap_or_default().into(),
+            json: Some(json),
+            sum: 0,
+            patched: None,
+            kept_sum: std::cell::Cell::new(None),
+            kept_bytes: std::cell::Cell::new(None),
+        }
     }
 
     /// What it is now, to tell it from another copy of it.
     fn sum(&self) -> u64 {
-        self.json.as_ref().map_or(self.sum, sum_of)
+        let Some(json) = &self.json else { return self.sum };
+        if let Some(sum) = self.kept_sum.get() {
+            return sum;
+        }
+        let sum = sum_of(json);
+        self.kept_sum.set(Some(sum));
+        sum
+    }
+
+    /// How many bytes its json takes as JSON (none, settled).
+    fn json_bytes(&self) -> usize {
+        let Some(json) = &self.json else { return 0 };
+        if let Some(bytes) = self.kept_bytes.get() {
+            return bytes;
+        }
+        let bytes = serde_json::to_vec(json).map_or(0, |b| b.len());
+        self.kept_bytes.set(Some(bytes));
+        bytes
+    }
+
+    /// Its json, to change: what was worked out from it goes.
+    fn json_mut(&mut self) -> Option<&mut Json> {
+        self.kept_sum.set(None);
+        self.kept_bytes.set(None);
+        self.json.as_mut()
     }
 }
 
@@ -265,7 +302,12 @@ impl zgx_script::Unfold for FoldedEntry {
         let json = lz4_flex::block::decompress_size_prepended(&self.bytes).ok();
         let entry = json.and_then(|bytes| serde_json::from_slice::<Json>(&bytes).ok()).unwrap_or(Json::Null);
         let RowContext { doc, device, model } = &*self.context;
-        built_entry(&entry, doc, device.as_deref(), model.as_deref()).unwrap_or(Value::Nil)
+        // (Opened as it comes into view, after Settings' compact transcript
+        // may have been turned on: laid out compact as well, whichever shows.)
+        COMPACT_ANYWAY.set(true);
+        let row = built_entry(&entry, doc, device.as_deref(), model.as_deref()).unwrap_or(Value::Nil);
+        COMPACT_ANYWAY.set(false);
+        row
     }
 }
 
@@ -290,14 +332,241 @@ struct Built {
     subagents: Option<Rc<[Value]>>,
     /// Folded, its compressed bytes' length (what a chat kept is weighed by).
     folded: usize,
+    /// A long reply's blocks, held here rather than in its row (`set_aside`).
+    aside: Option<Rc<Aside>>,
+}
+
+/// A long settled reply's blocks and tools, kept out of its row. A script is
+/// handed a table for every value of a row it reads, so a reply of a thousand
+/// steps cost its 2,000 blocks' and 1,000 tools' tables each time its chat
+/// opened (about 3 ms of a long thread's open on an M5 Max, more than all it
+/// builds), though its end alone shows. Its row says its runs instead
+/// (ds/transcript's windowed runs: each its first block's id, how many
+/// blocks, a guess at its height, a sum of what it holds), and the
+/// transcript asks for a run's blocks as it builds that run
+/// (`chat.reply_run`), the end's alone as it opens.
+struct Aside {
+    /// Each run: its key (its first block's id) and its blocks.
+    runs: Vec<(Rc<str>, Rc<[Value]>)>,
+    blocks: Rc<[Value]>,
+}
+
+/// More blocks than this, a settled reply's are set aside (ds/transcript's
+/// LONG_REPLY, past which it windows them).
+const LONG_REPLY: usize = 48;
+/// ds/transcript's runs: a block whose id falls on RUN starts one, and none
+/// runs past RUN_MOST.
+const RUN: u64 = 32;
+const RUN_MOST: usize = 64;
+
+thread_local! {
+    /// The long replies set aside, by their entry's id: the latest built of
+    /// each, while a view's rows (or a chat kept) hold it.
+    static ASIDE: RefCell<rustc_hash::FxHashMap<Rc<str>, std::rc::Weak<Aside>>> = RefCell::default();
+}
+
+/// Whether block `id` starts a run (ds/transcript's `starts_run`: the same
+/// sum, so both cut a reply into the same runs).
+fn starts_run(id: &str) -> bool {
+    id.bytes().fold(0u64, |h, b| (h * 31 + u64::from(b)) % 1_000_003) % RUN == 0
+}
+
+/// About how tall a block will be before it's laid out (ds/transcript's
+/// `guess_block`, the same arithmetic).
+fn guess_block(block: &Value) -> f64 {
+    let s = |key: &str| match block.field(key) {
+        Some(Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
+    match s("kind").as_deref() {
+        Some("text") => {
+            let (mut h, mut chars, mut code, mut fenced) = (0f64, 0usize, 0usize, false);
+            let paragraph = |h: &mut f64, chars: &mut usize| {
+                if *chars > 0 {
+                    *h += (*chars as f64 / 85.).ceil() * 24. + 16.;
+                    *chars = 0;
+                }
+            };
+            let text = s("text").unwrap_or_else(|| Rc::from(""));
+            for line in text.split('\n') {
+                if line.trim_start().starts_with("```") {
+                    if fenced {
+                        h += code as f64 * 19. + 56. + 16.;
+                        code = 0;
+                    } else {
+                        paragraph(&mut h, &mut chars);
+                    }
+                    fenced = !fenced;
+                } else if fenced {
+                    code += 1;
+                } else if line.trim().is_empty() {
+                    paragraph(&mut h, &mut chars);
+                } else {
+                    chars += line.len() + 1;
+                }
+            }
+            paragraph(&mut h, &mut chars);
+            (h - 16.).max(24.)
+        }
+        Some("tools" | "work") => {
+            let live = matches!(block.field("live"), Some(Value::Bool(true)));
+            let tools = block.field("tools").map_or(0, |t| t.list().len());
+            if live { 26. * tools.max(1) as f64 } else { 26. }
+        }
+        _ => 240.,
+    }
+}
+
+/// What a block holds, summed: its id, its kind, its words' length, its
+/// tools' count and line (a run built again comes back as the same run, and
+/// isn't asked for again, unless one of these moved).
+fn block_sum(block: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    for key in ["id", "kind", "summary", "live"] {
+        match block.field(key) {
+            Some(Value::Str(s)) => s.hash(&mut h),
+            Some(Value::Bool(b)) => b.hash(&mut h),
+            _ => 0u8.hash(&mut h),
+        }
+    }
+    match block.field("text") {
+        Some(Value::Str(s)) => s.len().hash(&mut h),
+        _ => 0usize.hash(&mut h),
+    }
+    block.field("tools").map_or(0, |t| t.list().len()).hash(&mut h);
+    h.finish()
+}
+
+/// `row` (an entry's, built whole) with its blocks and tools set aside, if
+/// it's a settled reply of more than LONG_REPLY blocks; else as it is.
+fn set_aside(row: Value) -> (Value, Option<Rc<Aside>>) {
+    let Value::Map(fields) = &row else { return (row, None) };
+    let field = |key: &str| fields.iter().find(|(k, _)| &**k == key).map(|(_, v)| v);
+    let settled = matches!(field("role"), Some(Value::Str(r)) if &**r == "assistant")
+        && matches!(field("streaming"), Some(Value::Bool(false)));
+    let (Some(Value::Str(id)), Some(Value::List(blocks))) = (field("id"), field("blocks")) else {
+        return (row, None);
+    };
+    if !settled || blocks.len() <= LONG_REPLY {
+        return (row, None);
+    }
+    let id_of = |b: &Value| match b.field("id") {
+        Some(Value::Str(s)) => s.clone(),
+        _ => Rc::from(""),
+    };
+    // Cut as ds/transcript cuts them: a run ends before a block that starts
+    // one, or once it holds RUN_MOST.
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    let mut from = 0;
+    for i in 1..blocks.len() {
+        if i - from >= RUN_MOST || starts_run(&id_of(&blocks[i])) {
+            cuts.push((from, i));
+            from = i;
+        }
+    }
+    cuts.push((from, blocks.len()));
+    let mut runs = Vec::with_capacity(cuts.len());
+    let mut listed = Vec::with_capacity(cuts.len());
+    for (from, to) in cuts {
+        let slice: Rc<[Value]> = blocks[from..to].iter().cloned().collect();
+        let key = id_of(&slice[0]);
+        let guess = slice.iter().map(|b| guess_block(b) + 12.).sum::<f64>() - 12.;
+        let sum = slice.iter().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(block_sum(b)));
+        listed.push(Value::record([
+            ("key", Value::Str(key.clone())),
+            ("n", Value::Num(slice.len() as f64)),
+            ("guess", Value::Num(guess.max(0.))),
+            ("sum", Value::from(format!("{sum:x}").as_str())),
+        ]));
+        runs.push((key, slice));
+    }
+    let aside = Rc::new(Aside { runs, blocks: blocks.clone() });
+    let mut kept: Vec<(&str, Value)> =
+        fields.iter().filter(|(k, _)| !matches!(&**k, "blocks" | "tools")).map(|(k, v)| (&**k, v.clone())).collect();
+    kept.push(("runs", Value::List(listed.into())));
+    ASIDE.with_borrow_mut(|held| {
+        if held.len() >= 64 {
+            held.retain(|_, a| a.strong_count() > 0);
+        }
+        held.insert(id.clone(), Rc::downgrade(&aside));
+    });
+    (Value::record(kept), Some(aside))
+}
+
+/// The reply set aside as `id`, while something holds it.
+fn aside_of(id: &str) -> Option<Rc<Aside>> {
+    ASIDE.with_borrow(|held| held.get(id).and_then(std::rc::Weak::upgrade))
+}
+
+fn text_field(arg: &Value, key: &str) -> Rc<str> {
+    match arg.field(key) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => Rc::from(""),
+    }
+}
+
+/// A long reply's run (`{ id, key }`), as `chat.reply_run` hands it to the
+/// transcript building it: its blocks; nil once the reply is let go of.
+pub(crate) fn reply_run(arg: &Value) -> Value {
+    let key = text_field(arg, "key");
+    aside_of(&text_field(arg, "id"))
+        .and_then(|aside| aside.runs.iter().find(|(k, _)| *k == key).map(|(_, blocks)| Value::List(blocks.clone())))
+        .unwrap_or(Value::Nil)
+}
+
+/// A long reply's blocks, all of them (`chat.reply_blocks`, given its id):
+/// what a find in the chat reads. Nil once the reply is let go of.
+pub(crate) fn reply_blocks(id: &Value) -> Value {
+    let Value::Str(id) = id else { return Value::Nil };
+    aside_of(id).map_or(Value::Nil, |aside| Value::List(aside.blocks.clone()))
+}
+
+/// The key of the run of a long reply (`{ id, block }`) that holds that
+/// block (`chat.reply_run_of`), nil if none does.
+pub(crate) fn reply_run_of(arg: &Value) -> Value {
+    let block = text_field(arg, "block");
+    aside_of(&text_field(arg, "id"))
+        .and_then(|aside| {
+            let holds = |b: &Value| matches!(b.field("id"), Some(Value::Str(s)) if *s == block);
+            aside.runs.iter().find(|(_, blocks)| blocks.iter().any(holds)).map(|(k, _)| Value::Str(k.clone()))
+        })
+        .unwrap_or(Value::Nil)
+}
+
+/// A long reply's blocks, set aside from its row (`set_aside`), for the
+/// scripts: a run as the transcript builds it, all of them for a find, and
+/// which run holds a block.
+pub(crate) fn reply_functions(host: &ScriptHost) {
+    host.function("chat.reply_run", |arg| reply_run(&arg));
+    host.function("chat.reply_blocks", |id| reply_blocks(&id));
+    host.function("chat.reply_run_of", |arg| reply_run_of(&arg));
+}
+
+/// `entry`'s row as a view builds it whole (a long settled reply's blocks
+/// set aside), and what holds what was set aside, for as long as it's kept.
+#[cfg(test)]
+pub(crate) fn built_as_shown(entry: &Json, model: Option<&str>) -> (Option<Value>, Option<Rc<dyn std::any::Any>>) {
+    let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: model.map(Into::into) });
+    let built = built_for(entry, &context, false);
+    (built.row, built.aside.map(|aside| aside as Rc<dyn std::any::Any>))
 }
 
 /// `entry` built: its row, folded if `fold`, which a row that shows or may
-/// change isn't. What it shows of it is read as the row is, and held in `Built`.
+/// change isn't. What it shows of it is read as the row is, and held in
+/// `Built`. Built whole, a long settled reply's blocks are set aside there
+/// (`set_aside`).
 fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
     let RowContext { doc, device, model } = &**context;
     let row = built_entry(entry, doc, device.as_deref(), model.as_deref());
     let subagents = row.as_ref().and_then(subagents_in);
+    let (row, aside) = match row {
+        Some(row) if !fold => {
+            let (row, aside) = set_aside(row);
+            (Some(row), aside)
+        }
+        row => (row, None),
+    };
     let mut folded = 0;
     let row = match row {
         Some(_) if fold && entry["status"].as_str() != Some("streaming") => match (entry["id"].as_str(), serde_json::to_vec(entry)) {
@@ -316,7 +585,7 @@ fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
         },
         row => row,
     };
-    Built { row, subagents, folded }
+    Built { row, subagents, folded, aside }
 }
 
 /// A long chat's settled entries, as a worker thread makes them: what they fold
@@ -502,11 +771,7 @@ const LET_GO_PER_ENTRY: usize = 512;
 /// from it.
 fn let_go_weight(entries: &[Entry], built: &HashMap<Rc<str>, Built>) -> usize {
     let folded: usize = built.values().map(|b| b.folded).sum();
-    let whole: usize = entries
-        .iter()
-        .filter_map(|e| e.json.as_ref())
-        .map(|json| serde_json::to_vec(json).map_or(0, |b| b.len()))
-        .sum();
+    let whole: usize = entries.iter().map(Entry::json_bytes).sum();
     folded + entries.len() * LET_GO_PER_ENTRY + 2 * whole
 }
 
@@ -755,6 +1020,19 @@ impl Pending {
     }
 }
 
+/// The transcript's rows with each id once, the first kept: its list is keyed
+/// by `id`, and a key shown twice is one it can't place (zgx's virtual list
+/// panics, and the transcript stops updating until the chat is opened
+/// again). A prompt pending here comes after the transcript's own rows, so
+/// the engine's copy of it is the one kept.
+fn one_row_per_id(list: &mut Vec<Value>) {
+    let mut ids: std::collections::HashSet<Rc<str>> = std::collections::HashSet::with_capacity(list.len());
+    list.retain(|row| match row.field("id") {
+        Some(Value::Str(id)) => ids.insert(id.clone()),
+        _ => true,
+    });
+}
+
 /// An edit lease on a queued message (the engine's `BeginQueuedMessageEdit`).
 #[derive(Clone)]
 struct Lease {
@@ -871,6 +1149,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         }
     });
 
+    reply_functions(host);
     let v = view.clone();
     host.action("chat.open", move |id| {
         let id = text(&id);
@@ -1039,6 +1318,11 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // app's `stop_background_task`): whether it's stopping.
     host.async_action("chat.stop_task", move |args| async move { stop_task(args).await.map_err(String::from) });
     host.async_action("chat.stop_waiting", move |id| async move { stop_waiting(text(&id)).await.map_err(String::from) });
+    // A new chat's agent, started before its first message (screens/chat/warm).
+    host.async_action("chat.warm", move |args| async move { warm(args).await.map_err(String::from) });
+    host.async_action("chat.unwarm", move |args| async move { unwarm(args).await.map_err(String::from) });
+    host.async_action("chat.warm_cleared", move |args| async move { warm_cleared(args).await.map_err(String::from) });
+    host.action("chat.warm_taken", move |id| warm_taken(&text(&id)));
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
@@ -1607,10 +1891,18 @@ impl Chats {
     }
 
     /// Settings' compact transcript turned on or off (`chat.compact`): the
-    /// replies being written are built again, with or without its layout.
+    /// rows built whole are built again, with or without its layout (one
+    /// folded lays itself out both ways as it opens: `FoldedEntry`). A
+    /// row has it only while it shows: a long reply's compact layout is the
+    /// whole reply again, built and handed to the scripts each time it opens.
     fn compact_shown(&self, on: bool) {
         if COMPACT_SHOWN.replace(on) == on {
             return;
+        }
+        for held in self.let_go.borrow_mut().iter_mut() {
+            for e in held.entries.iter().filter(|e| e.json.is_some()) {
+                held.built.remove(&e.id);
+            }
         }
         for view in self.views() {
             let rebuilt = {
@@ -1618,7 +1910,7 @@ impl Chats {
                 let Some(open) = slot.as_mut() else { continue };
                 let Open { entries, built, .. } = open;
                 let mut any = false;
-                for e in entries.iter().filter(|e| e["status"].as_str() == Some("streaming")) {
+                for e in entries.iter().filter(|e| e.json.is_some()) {
                     any |= built.remove(&e.id).is_some();
                 }
                 any
@@ -2099,6 +2391,11 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, looks: &HashMap<
             ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),
             ("status", Value::from(status)),
             ("error", error.map_or(Value::Nil, Value::from)),
+            // It has an auto mode of its own: the access picker offers Auto.
+            (
+                "auto",
+                Value::Bool(h["accessModes"].as_array().is_some_and(|m| m.iter().any(|x| x == "auto"))),
+            ),
         ]));
         for m in list.into_iter().flatten() {
             models.push(model_value(id, m));
@@ -2195,6 +2492,15 @@ fn model_value(harness: &str, m: &Json) -> Value {
     // The agent's own default (Claude lists best-first, not default-first).
     if m["default"].as_bool() == Some(true) {
         fields.push(("default", Value::Bool(true)));
+    }
+    // Where it's served from, for an agent reaching models through several
+    // providers (Pi signed in to Codex and OpenCode): its id and its name.
+    let provider = &m["provider"];
+    if let (Some(pid), Some(name)) = (provider["id"].as_str(), provider["name"].as_str())
+        && !pid.is_empty()
+        && !name.is_empty()
+    {
+        fields.push(("provider", Value::record([("id", Value::from(pid)), ("name", Value::from(name))])));
     }
     Value::record(fields)
 }
@@ -2476,13 +2782,26 @@ impl View {
                     };
                     for entry in tail {
                         let id = entry["id"].as_str().unwrap_or_default().to_owned();
-                        open.built.remove(id.as_str());
+                        let fresh = Entry::new(entry);
                         match open.entries.iter_mut().find(|e| *e.id == *id) {
-                            Some(held) => *held = Entry::new(entry),
-                            None => open.entries.push(Entry::new(entry)),
+                            // The same as the row it has (most of a tail, a
+                            // chat opened again): what was built from it
+                            // stays, so nothing showing is made again.
+                            Some(held) if held.sum() == fresh.sum() => {}
+                            Some(held) => {
+                                open.built.remove(id.as_str());
+                                *held = fresh;
+                            }
+                            None => {
+                                open.built.remove(id.as_str());
+                                open.entries.push(fresh);
+                            }
                         }
                     }
                     open.heard = true;
+                    // (A prompt sent from here that the tail brought: the
+                    // engine's copy now shows, so this one goes.)
+                    self.drop_arrived_prompts(open);
                     break 'applied Ok(Change::Rows);
                 } else {
                     open.has_whole = false;
@@ -2531,14 +2850,7 @@ impl View {
             }
             if result.is_ok() {
                 open.heard = true;
-                let ids: Vec<&str> = open.entries.iter().map(|e| &*e.id).collect();
-                let mut pending = self.pending.borrow_mut();
-                if let Some(prompts) = pending.get_mut(&open.id) {
-                    prompts.retain(|p| !ids.contains(&p.id.as_str()));
-                    if prompts.is_empty() {
-                        pending.remove(&open.id);
-                    }
-                }
+                self.drop_arrived_prompts(open);
             }
             result
         };
@@ -2554,6 +2866,20 @@ impl View {
                 self.publish_session();
             }
             Err(()) => self.resubscribe(),
+        }
+    }
+
+    /// Prompts sent from here that the transcript now has: the engine's copy
+    /// shows from now on, so this device's own goes (both would be two rows
+    /// with one id, which the transcript's list can't show).
+    fn drop_arrived_prompts(&self, open: &Open) {
+        let ids: std::collections::HashSet<&str> = open.entries.iter().map(|e| &*e.id).collect();
+        let mut pending = self.pending.borrow_mut();
+        if let Some(prompts) = pending.get_mut(&open.id) {
+            prompts.retain(|p| !ids.contains(p.id.as_str()));
+            if prompts.is_empty() {
+                pending.remove(&open.id);
+            }
         }
     }
 
@@ -2797,6 +3123,7 @@ impl View {
             if let Some(pending) = self.pending.borrow().get(&open.id) {
                 list.extend(pending.iter().map(Pending::value));
             }
+            one_row_per_id(&mut list);
             list
         };
         // The list first: a reply that ended takes its words into its row
@@ -2937,37 +3264,24 @@ impl View {
             self.mark_failed(&id, &message_id, None);
             return Err("missing");
         }
-        if fresh {
-            engine::get()
-                .call("Mutate", json!({ "op": "setChatConfig", "chatId": id, "config": config }))
-                .await
-                .map_err(|e| {
-                    eprintln!("zeron-zgx: chat: a new chat's config wasn't set: {e}");
-                    self.mark_failed(&id, &message_id, None);
-                    engine::outcome(&e)
-                })?;
-        }
+        // A chat just made: its config goes out now, and its first message
+        // right behind it rather than after its answer. Awaited first, the
+        // message waited out the frame that builds the new chat's page
+        // (the answer is read once that frame is done). The message carries
+        // the same agent and model, and the engine stamps them on a chat
+        // whose config hasn't landed yet, so the two may land in any order.
+        // Not when the agent changes from the one the chat was made with (a
+        // side chat takes its parent's): the engine refuses that switch
+        // while a turn runs, and the message starts one. Then the config is
+        // awaited first, and the message goes only once it has landed.
+        let set_config = fresh.then(|| json!({ "op": "setChatConfig", "chatId": id, "config": config }));
+        let switching = fresh && changes_agent(&chat["config"], &config);
         let field = |key: &str| req.field(key).map(text).filter(|s| !s.is_empty());
         let cwd = field("cwd")
             .or_else(|| chat["cwd"].as_str().map(Into::into))
             .unwrap_or_else(|| "~".into());
-        let mut request = json!({
-            "prompt": prompt,
-            "harness": config["harness"],
-            "model": config["model"],
-            "reasoning": config["reasoning"],
-            "modelOptions": config.get("modelOptions").cloned().unwrap_or(json!({})),
-            "cwd": cwd,
-            "sandbox": "workspace-write",
-            "autoApprove": false,
-            "resume": null,
-        });
-        if let Some(access) = config.get("access") {
-            request["access"] = access.clone();
-        }
-        if let Some(plan) = config.get("plan") {
-            request["plan"] = plan.clone();
-        }
+        let mut request = run_request(&config, &cwd);
+        request["prompt"] = json!(prompt);
         if !paths.is_empty() {
             request["attachments"] = json!(paths);
         }
@@ -2979,7 +3293,23 @@ impl View {
             });
         }
         let run = json!({ "kind": "run", "messageId": message_id, "request": request });
-        let sent = command_with(&id, run.clone(), &transfers).await;
+        let sent = match set_config {
+            Some(params) => {
+                let engine = engine::get();
+                match first_send(switching, engine.call("Mutate", params), command_with(&id, run.clone(), &transfers)).await {
+                    Ok(sent) => sent,
+                    Err(e) => {
+                        // Refused (a turn already running, a host too old to
+                        // switch provider): the message never went, and the
+                        // person is told, as for any send that fails.
+                        eprintln!("zeron-zgx: chat: {id}: a new chat's agent wasn't set: {e}");
+                        self.mark_failed(&id, &message_id, None);
+                        return Err(engine::outcome(&e));
+                    }
+                }
+            }
+            None => command_with(&id, run.clone(), &transfers).await,
+        };
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
             if let Some(pending) = self.pending.borrow_mut().get_mut(&id)
@@ -3514,8 +3844,202 @@ async fn stop_waiting(id: String) -> Result<Value, Outcome> {
     Ok(Value::Bool(answer["stopped"].as_bool() == Some(true)))
 }
 
+thread_local! {
+    /// New chats' warm starts asked of this app, by chat id: each ask's
+    /// number (a newer one, a stop or the send taking it makes an older
+    /// one's pending start or stop moot).
+    static WARM: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
+
+/// How long a new chat's start waits after the person opened it, so the
+/// page's first frames are drawn before the agent's startup takes a core.
+const WARM_OPEN_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
+/// A cleared draft keeps its agent this long.
+const WARM_CLEARED: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// This ask's number for `id`.
+fn warm_ask(id: &str) -> u64 {
+    WARM.with(|w| {
+        let mut w = w.borrow_mut();
+        let n = w.entry(id.to_owned()).or_insert(0);
+        *n += 1;
+        *n
+    })
+}
+
+/// Whether ask `n` of `id` is still the latest.
+fn warm_latest(id: &str, n: u64) -> bool {
+    WARM.with(|w| w.borrow().get(id).is_some_and(|at| *at == n))
+}
+
+/// The engine's `WarmStart` request for a new chat's agent: the run its first
+/// send will make (`send`: a just-made chat's config is the composer's
+/// picks), its prompt aside. `req` as the composer sends (`store.Request`:
+/// model, effort, options, access, plan, cwd, device). `None` when it can't
+/// start early: no agent picked, a chat that exists already, or one that
+/// will run on another device (a warm start there would outlive this app's
+/// quit).
+fn warm_request(chats: &Chats, id: &str, req: &Value) -> Option<Json> {
+    if chats.chat(id).is_some() {
+        return None;
+    }
+    let field = |key: &str| req.field(key).map(text).filter(|s| !s.is_empty());
+    let here = chats.here.borrow().clone()?;
+    if field("device").is_some_and(|device| device != here) {
+        return None;
+    }
+    let config = merged_config(&Json::Null, req);
+    if config["harness"].is_null() {
+        return None;
+    }
+    Some(run_request(&config, &field("cwd").unwrap_or_else(|| "~".into())))
+}
+
+/// The run a chat with `config` makes in `cwd`, its prompt empty: what a send
+/// sends (`send`), and what a new chat's warm start launches early.
+fn run_request(config: &Json, cwd: &str) -> Json {
+    let mut request = json!({
+        "prompt": "",
+        "harness": config["harness"],
+        "model": config["model"],
+        "reasoning": config["reasoning"],
+        "modelOptions": config.get("modelOptions").cloned().unwrap_or(json!({})),
+        "cwd": cwd,
+        "sandbox": "workspace-write",
+        "autoApprove": false,
+        "resume": null,
+    });
+    if let Some(access) = config.get("access") {
+        request["access"] = access.clone();
+    }
+    if let Some(plan) = config.get("plan") {
+        request["plan"] = plan.clone();
+    }
+    request
+}
+
+/// A new chat's agent started before its first message (the engine's
+/// `WarmStart`), for the id it will be made with: `{ id, req, typed }`.
+/// Opened and not typed into, it starts [`WARM_OPEN_SETTLE`] later. Its
+/// outcome word, or nil when nothing can warm (see [`warm_request`]) or a
+/// newer ask, a stop or the send took over.
+async fn warm(args: Value) -> Result<Value, Outcome> {
+    if std::env::var("ZERON_WARM_START").is_ok_and(|v| v == "0") {
+        return Ok(Value::Nil);
+    }
+    let id = args.field("id").map(text).filter(|id| plain_id(id)).ok_or("missing")?;
+    let Some(req) = args.field("req") else { return Err("missing") };
+    let typed = args.field("typed").is_some_and(Value::truthy);
+    let chats = CHATS.with(Rc::clone);
+    let Some(request) = warm_request(&chats, &id, &req) else {
+        return Ok(Value::Nil);
+    };
+    let n = warm_ask(&id);
+    if !typed {
+        zgx::timer::sleep(WARM_OPEN_SETTLE).await;
+        if !warm_latest(&id, n) {
+            return Ok(Value::Nil);
+        }
+    }
+    let answer = engine::get()
+        .call("WarmStart", json!({ "chatId": id, "request": request, "typed": typed }))
+        .await
+        .map_err(|e| engine::outcome(&e))?;
+    Ok(answer["outcome"].as_str().map(Value::from).unwrap_or(Value::Nil))
+}
+
+/// Stop a warm start: `{ id }`.
+async fn unwarm(args: Value) -> Result<Value, Outcome> {
+    let id = args.field("id").map(text).filter(|id| plain_id(id)).ok_or("missing")?;
+    WARM.with(|w| w.borrow_mut().remove(&id));
+    engine::get()
+        .call("WarmStop", json!({ "chatId": id }))
+        .await
+        .map_err(|e| engine::outcome(&e))?;
+    Ok(Value::Nil)
+}
+
+/// The send took the warm start of `id`: a start or stop still pending for
+/// it is moot (the engine hands it to the chat's run).
+fn warm_taken(id: &str) {
+    WARM.with(|w| w.borrow_mut().remove(id));
+}
+
+/// A warm start's draft was cleared: stopped [`WARM_CLEARED`] later unless
+/// it's asked for again (typed into) meanwhile. `{ id }`.
+async fn warm_cleared(args: Value) -> Result<Value, Outcome> {
+    let id = args.field("id").map(text).filter(|id| plain_id(id)).ok_or("missing")?;
+    let n = WARM.with(|w| w.borrow().get(&id).copied());
+    let Some(n) = n else { return Ok(Value::Nil) };
+    zgx::timer::sleep(WARM_CLEARED).await;
+    if !warm_latest(&id, n) {
+        return Ok(Value::Nil);
+    }
+    unwarm(json_value(json!({ "id": id }))).await
+}
+
+fn json_value(json: Json) -> Value {
+    Value::from_json(&json.to_string()).unwrap_or(Value::Nil)
+}
+
+/// An id a chat may be made with (`sessions.create`'s).
+fn plain_id(id: &str) -> bool {
+    (8..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
     command_with(chat, command, &[]).await
+}
+
+/// Whether `next` runs another agent than the `current` config names (one
+/// that names none changes nothing the engine would refuse).
+fn changes_agent(current: &Json, next: &Json) -> bool {
+    current["harness"].as_str().is_some_and(|harness| next["harness"].as_str() != Some(harness))
+}
+
+/// A new chat's config (`configure`) and first message (`send`). Switching
+/// agent, the config is awaited first: refused, the message never goes and
+/// the refusal is the answer. Otherwise both go out at once ([`both`]), the
+/// config first, and the message's answer stands (it carries the same agent
+/// and model; a config that didn't land is only logged).
+async fn first_send<C, S>(switching: bool, configure: C, send: S) -> Result<S::Output, String>
+where
+    C: Future<Output = Result<Json, String>>,
+    S: Future,
+{
+    if switching {
+        configure.await?;
+        return Ok(send.await);
+    }
+    let (configured, sent) = both(configure, send).await;
+    if let Err(e) = configured {
+        eprintln!("zeron-zgx: chat: a new chat's config wasn't set: {e}");
+    }
+    Ok(sent)
+}
+
+/// Both futures, polled together (`a` first each time), and both answers.
+async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
+    let (mut a, mut b) = (std::pin::pin!(a), std::pin::pin!(b));
+    let (mut done_a, mut done_b) = (None, None);
+    std::future::poll_fn(move |cx| {
+        if done_a.is_none()
+            && let std::task::Poll::Ready(out) = a.as_mut().poll(cx)
+        {
+            done_a = Some(out);
+        }
+        if done_b.is_none()
+            && let std::task::Poll::Ready(out) = b.as_mut().poll(cx)
+        {
+            done_b = Some(out);
+        }
+        if done_a.is_some() && done_b.is_some() {
+            std::task::Poll::Ready((done_a.take().unwrap(), done_b.take().unwrap()))
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await
 }
 
 /// [`command`], with the files the engine delivers for it.
@@ -3697,6 +4221,7 @@ fn merged_config(config: &Json, args: &Value) -> Json {
         match access.as_str() {
             "supervised" => c["access"] = json!("supervised"),
             "edits" => c["access"] = json!("auto-accept-edits"),
+            "auto" => c["access"] = json!("auto"),
             _ => {
                 if let Some(map) = c.as_object_mut() {
                     map.remove("access");
@@ -4607,13 +5132,16 @@ fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
     let folded = bytes.as_ref().map_or(0, |bytes| bytes.len());
     let row = bytes.map(|bytes| Value::folded(entry.id.clone(), FoldedEntry { bytes, context: context.clone() }));
     let subagents = (!subagents.is_empty()).then(|| subagents.iter().map(SubagentOff::value).collect());
-    built.insert(entry.id.clone(), Built { row, subagents, folded });
+    built.insert(entry.id.clone(), Built { row, subagents, folded, aside: None });
 }
 
 /// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
 fn settle(entry: &mut Entry, at: usize, older_todo: &mut Option<(usize, Json)>) {
+    if entry.json.is_none() {
+        return;
+    }
+    entry.sum = entry.sum();
     let Some(json) = entry.json.take() else { return };
-    entry.sum = sum_of(&json);
     if older_todo.as_ref().is_none_or(|(place, _)| *place < at)
         && let Some(part) = latest_todo(std::iter::once(&json))
     {
@@ -4653,6 +5181,9 @@ thread_local! {
     static PATCHED: RefCell<Option<rustc_hash::FxHashSet<String>>> = const { RefCell::new(None) };
     /// Settings' compact transcript is on (`chat.compact`).
     static COMPACT_SHOWN: Cell<bool> = const { Cell::new(false) };
+    /// A folded row opening (`FoldedEntry`): laid out compact too, whether
+    /// or not that shows, as it can't be built again when it turns on.
+    static COMPACT_ANYWAY: Cell<bool> = const { Cell::new(false) };
 }
 
 /// `build`, with `patched` (the parts changed since the entry's row was last
@@ -4837,7 +5368,7 @@ fn apply_counted(entries: &mut Vec<Entry>, frame: &mut Json, counted: bool) -> R
             .ok_or(())?;
         // (A settled entry growing again: its whole copy is the engine's.)
         entry.patched = None;
-        let entry = entry.json.as_mut().ok_or(())?;
+        let entry = entry.json_mut().ok_or(())?;
         let streaming = entry["status"].as_str() == Some("streaming");
         let part = entry["parts"]
             .as_array_mut()
@@ -4884,7 +5415,7 @@ fn apply_counted(entries: &mut Vec<Entry>, frame: &mut Json, counted: bool) -> R
         let at = patch["at"].as_u64().ok_or(())? as usize;
         let part = &patch["part"];
         let id = part["id"].as_str().ok_or(())?.to_owned();
-        let json = entry.json.as_mut().ok_or(())?;
+        let json = entry.json_mut().ok_or(())?;
         let parts = json["parts"].as_array_mut().ok_or(())?;
         if at < parts.len() && parts[at]["id"].as_str() == Some(&id) {
             parts[at] = part.clone();
@@ -4966,6 +5497,56 @@ fn entry_text(entry: &Json) -> String {
         out.push_str(&words);
     }
     out
+}
+
+/// Whether a user entry is only Claude Code's note on a picture a tool read
+/// (`[Image: original WxH, displayed at WxH. …]`, `[Image: source: …]`), as
+/// zeron-harness's `is_synthetic_user_text` reads it: nothing else in it.
+fn image_note_only(entry: &Json) -> bool {
+    let mut notes = 0;
+    for p in entry["parts"].as_array().into_iter().flatten() {
+        match p["kind"].as_str() {
+            Some("text") => {
+                let text = p["text"].as_str().unwrap_or_default().trim();
+                if text.is_empty() {
+                    continue;
+                }
+                if !is_image_note(text) {
+                    return false;
+                }
+                notes += 1;
+            }
+            _ => return false,
+        }
+    }
+    notes > 0
+}
+
+/// The CLI's image note exactly (zeron-harness's `is_image_note`): one
+/// line, `[Image: source: <path>]` (the path may be followed by `, original
+/// WxH, displayed at WxH. …`), or `[Image: original WxH, displayed at WxH.
+/// …]`. Something a person typed that only starts and ends like one
+/// (`[Image: source: shot.png] why is button [x]`) is not it.
+fn is_image_note(text: &str) -> bool {
+    if text.contains('\n') {
+        return false;
+    }
+    let Some(rest) = text.strip_prefix("[Image: ").and_then(|rest| rest.strip_suffix(']')) else {
+        return false;
+    };
+    if let Some(path) = rest.strip_prefix("source: ") {
+        return !path.trim().is_empty() && !path.contains(['[', ']']);
+    }
+    fn dimensions(text: &str) -> Option<&str> {
+        let (width, rest) = text.split_once('x')?;
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        (!width.is_empty() && width.bytes().all(|b| b.is_ascii_digit()) && digits > 0).then(|| &rest[digits..])
+    }
+    rest.strip_prefix("original ")
+        .and_then(dimensions)
+        .and_then(|rest| rest.strip_prefix(", displayed at "))
+        .and_then(dimensions)
+        .is_some_and(|rest| !rest.contains(['[', ']']))
 }
 
 /// A transcript's subagents: each spawn that names its doc, once, in the order they
@@ -5100,6 +5681,13 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .filter_map(|p| p["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            // Claude Code's note on a picture a tool read (its size as the
+            // model saw it), which a subagent's transcript kept as a message
+            // before the engine learned it isn't one: not something anyone
+            // said, so no bubble.
+            if image_note_only(entry) {
+                return None;
+            }
             // A message from another chat: its routing header is the agent's to
             // read; the transcript shows who sent it, over its words.
             let sender = zeron_proto::agent_messages::agent_message_sender(&text);
@@ -5191,10 +5779,13 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             if let Some(ms) = entry["durationMs"].as_f64() {
                 fields.push(("worked", Value::Num((ms / 1000.).round().max(1.))));
             }
-            // The same reply laid out for Settings' compact transcript (one
-            // being written, only while that shows: built with each of its
-            // changes, it'd cost each the whole reply again).
-            if (!streaming || COMPACT_SHOWN.get())
+            // The same reply laid out for Settings' compact transcript, only
+            // while that shows (`Chats::compact_shown` builds rows again as it
+            // turns on): it's the whole reply again, which a long reply built
+            // and handed to the scripts as it opened (a 1,000-step reply, a
+            // second copy of its 2,000 blocks and 1,000 tools). A folded row
+            // opening has it either way (`COMPACT_ANYWAY`).
+            if (COMPACT_SHOWN.get() || (COMPACT_ANYWAY.get() && !streaming))
                 && let Some(compact) = compact_blocks(entry)
             {
                 fields.push(("compact", compact));
@@ -6010,6 +6601,24 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
     if part["isError"].as_bool() == Some(true) {
         fields.push(("failed", Value::Bool(true)));
     }
+    // Auto's reviewer on it: reviewing, approved, denied or timed-out, its
+    // risk and why (as the agent's reviewer said). A status this build
+    // doesn't know (a newer peer's) shows nothing rather than a bare key.
+    if let Some(status) = part["review"]["status"]
+        .as_str()
+        .filter(|s| matches!(*s, "reviewing" | "approved" | "denied" | "timed-out"))
+    {
+        let text = |key: &str| {
+            part["review"][key]
+                .as_str()
+                .filter(|t| !t.trim().is_empty())
+                .map_or(Value::Nil, Value::from)
+        };
+        fields.push((
+            "review",
+            Value::record([("status", Value::from(status)), ("risk", text("risk")), ("reason", text("reason"))]),
+        ));
+    }
     // A subagent's spawn: the doc it runs in (its lane, a panel tab of its
     // own), how it stands, and its tab's title (the shipping app's).
     if kind == "agent"
@@ -6243,6 +6852,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let access = match config["access"].as_str() {
         Some("supervised") => "supervised",
         Some("auto-accept-edits") => "edits",
+        Some("auto") => "auto",
         _ => "full",
     };
     let fast = fast_in(&config["modelOptions"]);
@@ -6285,6 +6895,10 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         // Its folder on that device (a reply's pictures resolve by it).
         ("cwd", s(&chat["cwd"])),
         ("harness", Value::from(harness)),
+        // The agent the chat records (nil until its config is known, where
+        // `harness` stands in as Claude Code): whose `/` commands and skills
+        // its composer lists when its model isn't in the catalog shown.
+        ("agent", s(&config["harness"])),
         ("model", model),
         ("model_label", model_label),
         ("effort", s(&config["reasoning"])),
@@ -6592,8 +7206,19 @@ fn seen_would_change(chat: &Json, session: &Json, now: chrono::DateTime<chrono::
     })
 }
 
-/// "Jul 1, 4:12 PM", in this Mac's time zone (the shipping app's
-/// `format_timestamp`).
+/// "Jul 1, 4:12 PM": a local time's month (0-based), day, hour and minute,
+/// as the shipping app's `format_timestamp` reads.
+fn clock(month0: u32, day: u32, hour: u32, minute: u32) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month = MONTHS.get(month0 as usize).copied().unwrap_or("Jan");
+    let twelve = match hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{month} {day}, {twelve}:{minute:02} {}", if hour < 12 { "AM" } else { "PM" })
+}
+
+/// [`clock`] for `at` (seconds since 1970) in this machine's time zone.
 #[cfg(unix)]
 fn stamp(at: i64) -> Option<String> {
     #[repr(C)]
@@ -6626,21 +7251,47 @@ fn stamp(at: i64) -> Option<String> {
         }
         tm.assume_init()
     };
-    let hour = match tm.hour % 12 {
-        0 => 12,
-        h => h,
+    Some(clock(tm.mon as u32, tm.mday as u32, tm.hour as u32, tm.min as u32))
+}
+
+/// [`clock`] for `at` (seconds since 1970) in this machine's time zone: on
+/// Windows through its own conversion (it has no `localtime_r`). Without
+/// it every message's time was missing there, and with it the hover strip
+/// that holds Copy.
+#[cfg(windows)]
+fn stamp(at: i64) -> Option<String> {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    if at <= 0 {
+        return None;
+    }
+    // FILETIME counts 100 ns from 1601-01-01 (11,644,473,600 s before 1970).
+    let ticks = (at as u64).checked_add(11_644_473_600)?.checked_mul(10_000_000)?;
+    let file = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
     };
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let month = MONTHS.get(tm.mon as usize).copied().unwrap_or("Jan");
-    Some(format!(
-        "{month} {}, {hour}:{:02} {}",
-        tm.mday,
-        tm.min,
-        if tm.hour < 12 { "AM" } else { "PM" }
+    // SAFETY: both calls read only the structs passed in and write only the
+    // caller's SYSTEMTIMEs; a null zone means the machine's current one.
+    let local = unsafe {
+        let mut utc: SYSTEMTIME = std::mem::zeroed();
+        let mut local: SYSTEMTIME = std::mem::zeroed();
+        if FileTimeToSystemTime(&file, &mut utc) == 0
+            || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0
+        {
+            return None;
+        }
+        local
+    };
+    Some(clock(
+        u32::from(local.wMonth).checked_sub(1)?,
+        u32::from(local.wDay),
+        u32::from(local.wHour),
+        u32::from(local.wMinute),
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn stamp(_at: i64) -> Option<String> {
     None
 }
@@ -6704,6 +7355,21 @@ mod stream_tests;
 
 #[cfg(test)]
 mod tests {
+    /// A message's time reads as the shipping app's, on every platform: the
+    /// formatting, and a real local time from `stamp` (Windows included,
+    /// where it once was always missing and hid the message's hover strip).
+    #[test]
+    fn a_messages_time_reads_like_the_shipping_apps_on_every_platform() {
+        assert_eq!(super::clock(6, 1, 16, 12), "Jul 1, 4:12 PM");
+        assert_eq!(super::clock(0, 9, 0, 5), "Jan 9, 12:05 AM");
+        assert_eq!(super::clock(11, 31, 12, 0), "Dec 31, 12:00 PM");
+        let at = super::stamp(1_794_600_000).expect("a time for a real moment");
+        let (month, rest) = at.split_once(' ').unwrap();
+        assert!(["Nov", "Dec"].contains(&month), "{at}");
+        assert!(rest.ends_with(" AM") || rest.ends_with(" PM"), "{at}");
+        assert_eq!(super::stamp(0), None);
+    }
+
     /// Opening a chat marks it seen only while that changes something any
     /// viewport reads (its last message, its terminal's report, the end of
     /// its sleep): a chat looked at already writes nothing, so its devices'
@@ -6837,6 +7503,45 @@ mod tests {
         assert!(super::apply(&mut entries, &mut words).is_err());
     }
 
+    /// An entry's sum and size are kept between switches (a long reply's
+    /// json is hashed and weighed once, not on every open and let-go), and
+    /// what changes it (words appended, a part patched) changes them too:
+    /// a reopen that said the old sum would be sent nothing new.
+    #[test]
+    fn an_entrys_kept_sum_and_size_follow_its_changes() {
+        let entry = serde_json::json!({ "id": "a", "role": "assistant", "status": "streaming", "parts": [
+            { "id": "t", "kind": "text", "text": "Hel" },
+            { "id": "k", "kind": "tool", "call": { "kind": "read", "path": "x" } },
+        ] });
+        let mut entries = vec![super::Entry::new(entry)];
+        let fresh = |e: &super::Entry| {
+            let json = e.json.as_ref().unwrap();
+            (super::sum_of(json), serde_json::to_vec(json).unwrap().len())
+        };
+        let first = (entries[0].sum(), entries[0].json_bytes());
+        assert_eq!(first, fresh(&entries[0]));
+        assert_eq!(entries[0].kept_sum.get(), Some(first.0), "kept once worked out");
+        assert_eq!(entries[0].kept_bytes.get(), Some(first.1), "kept once worked out");
+        // Words appended.
+        let mut words = serde_json::json!({ "append": [{ "entry": "a", "part": "t", "text": "lo", "len": 5 }] });
+        super::apply(&mut entries, &mut words).unwrap();
+        let grown = (entries[0].sum(), entries[0].json_bytes());
+        assert_eq!(grown, fresh(&entries[0]));
+        assert_ne!(grown, first);
+        // A part patched.
+        let mut patch = serde_json::json!({ "parts": [{ "entry": "a", "at": 1, "part":
+            { "id": "k", "kind": "tool", "call": { "kind": "read", "path": "y" } }, "len": 2 }] });
+        super::apply(&mut entries, &mut patch).unwrap();
+        let patched = (entries[0].sum(), entries[0].json_bytes());
+        assert_eq!(patched, fresh(&entries[0]));
+        assert_ne!(patched.0, grown.0);
+        // Settled: its sum as it was, its json gone and weighing nothing.
+        let mut older = None;
+        let mut settled = entries.pop().unwrap();
+        super::settle(&mut settled, 0, &mut older);
+        assert_eq!((settled.sum(), settled.json_bytes()), (patched.0, 0));
+    }
+
     /// The worker's fold, kept, is what folding here keeps.
     #[test]
     fn the_worker_folds_as_the_window_would() {
@@ -6901,7 +7606,11 @@ mod tests {
             ],
         });
         let context = Rc::new(super::RowContext { doc: "chat".into(), device: None, model: Some("Opus".into()) });
+        // (Built whole while compact shows: a folded row opens laid out
+        // compact either way, `COMPACT_ANYWAY`.)
+        super::COMPACT_SHOWN.set(true);
         let whole = super::built_for(&entry, &context, false);
+        super::COMPACT_SHOWN.set(false);
         let folded = super::built_for(&entry, &context, true);
         let Some(Value::Folded(_)) = folded.row else { panic!("folded") };
         let (whole_row, folded_row) = (whole.row.unwrap(), folded.row.unwrap());
@@ -7103,6 +7812,94 @@ mod tests {
         assert_eq!(words.lines().count(), 30);
     }
 
+    /// A new side chat switched from its parent's agent: its config is
+    /// awaited before its first message goes, and a refusal (a turn already
+    /// running, a host too old to switch) stops the message and is the
+    /// answer. The same agent: both go out in one poll, and a config that
+    /// didn't land leaves the sent message standing.
+    #[test]
+    fn a_new_chat_switching_agent_sends_its_message_only_once_the_config_landed() {
+        use std::task::{Context, Poll, Waker};
+        let claude = json!({ "harness": "claude-code", "model": "opus" });
+        let codex = json!({ "harness": "codex", "model": "gpt" });
+        assert!(super::changes_agent(&claude, &codex));
+        assert!(!super::changes_agent(&claude, &json!({ "harness": "claude-code", "model": "sonnet" })));
+        assert!(!super::changes_agent(&Json::Null, &codex), "made with no agent: nothing to refuse");
+
+        // Config, then message, never both at once.
+        let log = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (config_gate, a, b) = (Rc::new(std::cell::Cell::new(false)), log.clone(), log.clone());
+        let gate = config_gate.clone();
+        let configure = std::future::poll_fn(move |_| {
+            if gate.get() {
+                a.borrow_mut().push("config landed");
+                Poll::Ready(Ok::<Json, String>(Json::Null))
+            } else {
+                Poll::Pending
+            }
+        });
+        let send = async move {
+            b.borrow_mut().push("message");
+            "sent"
+        };
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut sending = std::pin::pin!(super::first_send(true, configure, send));
+        assert!(sending.as_mut().poll(&mut cx).is_pending());
+        assert!(log.borrow().is_empty(), "the message went before the config landed");
+        config_gate.set(true);
+        assert_eq!(sending.as_mut().poll(&mut cx), Poll::Ready(Ok("sent")));
+        assert_eq!(*log.borrow(), ["config landed", "message"]);
+
+        // Refused: the message never goes, and the refusal is the answer.
+        let went = Rc::new(std::cell::Cell::new(false));
+        let w = went.clone();
+        let refused = std::pin::pin!(super::first_send(
+            true,
+            async { Err::<Json, String>("Wait for the current turn to finish before switching provider".into()) },
+            async move { w.set(true) },
+        ))
+        .poll(&mut cx);
+        assert!(matches!(refused, Poll::Ready(Err(ref e)) if e.contains("switching provider")));
+        assert!(!went.get());
+
+        // The same agent: one poll sends both, and the message's answer stands.
+        let went = Rc::new(std::cell::Cell::new(false));
+        let w = went.clone();
+        let together = std::pin::pin!(super::first_send(
+            false,
+            async { Err::<Json, String>("offline".into()) },
+            async move {
+                w.set(true);
+                "sent"
+            },
+        ))
+        .poll(&mut cx);
+        assert_eq!(together, Poll::Ready(Ok("sent")));
+        assert!(went.get());
+    }
+
+    /// A new chat's config and first message go out in the same poll, the
+    /// config first, and both answers come back (`both`).
+    #[test]
+    fn both_sends_the_first_then_the_second_in_one_poll() {
+        use std::task::{Context, Poll, Waker};
+        let sent = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (a, b) = (sent.clone(), sent.clone());
+        let mut joined = std::pin::pin!(super::both(
+            async move {
+                a.borrow_mut().push("config");
+                1
+            },
+            async move {
+                b.borrow_mut().push("message");
+                2
+            },
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(joined.as_mut().poll(&mut cx), Poll::Ready((1, 2)));
+        assert_eq!(*sent.borrow(), vec!["config", "message"]);
+    }
+
     /// 2026-11-11, work-laptop: a queued message on the Mac hosting it said
     /// "being edited on another device" while the app didn't know yet which
     /// device it was on. Only a known, different owner is another device.
@@ -7147,6 +7944,42 @@ mod tests {
         chats.catalog_on("mac");
         assert!(chats.remote.borrow().is_none());
         assert!(chats.catalog_value().field("device").is_none());
+    }
+
+    /// A new chat's warm start asks the engine for the very run its first
+    /// send will make, the prompt aside; never for a chat that exists, one
+    /// that will run on another device, or with no agent picked.
+    #[test]
+    fn a_warm_start_is_asked_only_for_a_new_chat_here_as_its_send_would_run() {
+        let chats = Chats::default();
+        let req = |fields: Json| Value::from_json(&fields.to_string()).unwrap();
+        let ask = req(json!({
+            "model": "claude-code/opus", "effort": "high", "cwd": "/tmp/atlas",
+            "device": "mac", "access": "edits", "plan": true,
+        }));
+        assert!(warm_request(&chats, "new-chat-1", &ask).is_none(), "this device not known yet");
+        *chats.here.borrow_mut() = Some("mac".into());
+        let request = warm_request(&chats, "new-chat-1", &ask).expect("a new chat here");
+        let mut sent = run_request(&merged_config(&Json::Null, &ask), "/tmp/atlas");
+        sent["prompt"] = json!("");
+        assert_eq!(request, sent, "the run its send makes");
+        assert_eq!(request["harness"], "claude-code");
+        assert_eq!(request["model"], "opus");
+        assert_eq!(request["reasoning"], "high");
+        assert_eq!(request["access"], "auto-accept-edits");
+        assert_eq!(request["plan"], true);
+        assert_eq!(request["prompt"], "");
+        // No project, no device named: here, in its own folder.
+        let projectless = warm_request(&chats, "new-chat-1", &req(json!({ "model": "claude-code/opus" })));
+        assert_eq!(projectless.expect("here")["cwd"], "~");
+        for (why, fields) in [
+            ("another device", json!({ "model": "claude-code/opus", "device": "box" })),
+            ("no agent picked", json!({ "cwd": "/tmp/atlas" })),
+        ] {
+            assert!(warm_request(&chats, "new-chat-1", &req(fields)).is_none(), "{why}");
+        }
+        chats.chats.borrow_mut().insert("s1".into(), json!({ "id": "s1", "deviceId": "mac" }));
+        assert!(warm_request(&chats, "s1", &ask).is_none(), "a chat that exists");
     }
 
     /// A look at another device's catalog answers for itself alone: once the
@@ -7380,6 +8213,23 @@ mod tests {
         assert_eq!(label(&chats).as_deref(), Some("Kimi K3"));
         let model = session_value(&chats, &open, false).field("model").map(text);
         assert_eq!(model.as_deref(), Some("pi/kimi-k3"));
+    }
+
+    /// The composer asks a chat's own agent for its `/` list: the harness its
+    /// config records, also without a model or before its device's catalog;
+    /// none until the config is known (not `harness`'s Claude Code stand-in).
+    #[test]
+    fn a_sessions_agent_is_its_recorded_harness() {
+        let chats = Chats::default();
+        let open = Open { id: "c".into(), ..Open::default() };
+        let agent = |chats: &Chats| session_value(chats, &open, false).field("agent").map(text).filter(|a| !a.is_empty());
+        assert_eq!(agent(&chats), None);
+        chats.chats.borrow_mut().insert(
+            "c".into(),
+            json!({ "id": "c", "deviceId": "laptop", "config": { "harness": "codex" } }),
+        );
+        assert_eq!(agent(&chats).as_deref(), Some("codex"));
+        assert!(matches!(session_value(&chats, &open, false).field("model"), None | Some(Value::Nil)));
     }
 
     #[test]
@@ -7747,6 +8597,33 @@ mod tests {
     }
 
     #[test]
+    fn claude_codes_image_note_is_no_message() {
+        let user = |text: &str| {
+            json!({ "id": "u", "role": "user", "createdAt": 1_788_900_000_000_i64,
+                "parts": [{ "id": "t", "kind": "text", "text": text }] })
+        };
+        for note in [
+            "[Image: original 1884x2066, displayed at 1824x2000. Multiply coordinates by 1.03 to map to original image.]",
+            "[Image: source: /home/me/scratch/test.png]",
+            "  [Image: source: /a.png, original 10x10, displayed at 10x10.]\n",
+        ] {
+            assert!(message(&user(note), None).is_none(), "{note} showed");
+        }
+        // Words of its own around it, or a note-like line that isn't one, show.
+        assert!(message(&user("Look: [Image: original 10x10, displayed at 10x10.]"), None).is_some());
+        assert!(message(&user("[Image: the logo]"), None).is_some());
+        for typed in [
+            "[Image: source: shot.png] why is button [x]",
+            "[Image: original mockup attached]\nmatch it exactly [urgent]",
+            "[Image: original mockup attached]",
+            "[Image: original 10x10, displayed at big]",
+            "[Image: source: ]",
+        ] {
+            assert!(message(&user(typed), None).is_some(), "{typed} hidden");
+        }
+    }
+
+    #[test]
     fn a_transcript_s_subagents_are_listed_once_each_in_order() {
         let tool = |r: &str, title: &str| {
             Value::record([("id", Value::from(r)), ("subagent", Value::record([("ref", Value::from(r)), ("title", Value::from(title))]))])
@@ -7987,6 +8864,12 @@ mod tests {
         assert!(model_value("claude-code", &claude).field("default").is_none());
         let marked = json!({ "id": "claude-opus-5-5", "default": true });
         assert!(matches!(model_value("claude-code", &marked).field("default"), Some(Value::Bool(true))));
+        // A model's provider rides along when the agent names one, and only then.
+        assert!(model_value("claude-code", &marked).field("provider").is_none());
+        let pi = json!({ "id": "openai-codex/gpt-5.5", "label": "GPT-5.5", "provider": { "id": "openai-codex", "name": "Codex" } });
+        let provider = model_value("pi", &pi).field("provider").cloned().expect("a provider");
+        assert_eq!(provider.field("id").map(text).as_deref(), Some("openai-codex"));
+        assert_eq!(provider.field("name").map(text).as_deref(), Some("Codex"));
     }
 
     #[test]
@@ -8074,6 +8957,33 @@ mod tests {
         // No work, no group.
         let plain = json!({ "id": "b", "role": "assistant", "status": "complete", "parts": [text("t", "Hi.")] });
         assert!(compact_blocks(&plain).is_none());
+    }
+
+    /// A reply's compact layout is its whole work again (a 1,000-step reply:
+    /// a second copy of its blocks and tools), built and handed to the
+    /// scripts each time it opened: it's there only while Settings' compact
+    /// transcript shows, and in a folded row opening, which can't be built
+    /// again as it turns on.
+    #[test]
+    fn a_reply_is_laid_out_compact_only_while_that_shows() {
+        let reply = json!({ "id": "a", "role": "assistant", "status": "complete", "durationMs": 5_000,
+            "parts": [{ "id": "p1", "kind": "text", "text": "Looking." },
+                { "id": "k1", "kind": "tool", "isError": false, "resolved": true, "call": { "kind": "exec", "command": "ls" } },
+                { "id": "p2", "kind": "text", "text": "Done." }] });
+        let compact = |row: &Value| row.field("compact").is_some_and(|v| !matches!(v, Value::Nil));
+        assert!(!COMPACT_SHOWN.get());
+        let row = built_entry(&reply, "doc", None, None).expect("a row");
+        assert!(!compact(&row), "no compact layout while it doesn't show");
+        assert!(row.field("blocks").is_some());
+        COMPACT_SHOWN.set(true);
+        let shown = built_entry(&reply, "doc", None, None).expect("a row");
+        COMPACT_SHOWN.set(false);
+        assert!(compact(&shown), "laid out compact while that shows");
+        // Folded, it has it as it opens, either way.
+        let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: None });
+        let Built { row: Some(folded), .. } = built_for(&reply, &context, true) else { panic!("a folded row") };
+        assert!(matches!(folded, Value::Folded(_)));
+        assert!(folded.field("compact").is_some_and(|v| !matches!(v, Value::Nil)), "a folded row opens laid out compact too");
     }
 
     #[test]
@@ -8679,6 +9589,75 @@ mod tests {
         view.heard_frame(json!({ "reset": [prompt("u0"), reply("a0"), prompt("u1"), reply("a1")] }));
         assert!(!view.open.borrow().as_ref().unwrap().has_whole);
         assert!(!rows().contains("tail engine.log"), "the whole copy replaces it: {}", rows());
+    }
+
+    /// A prompt sent from here that a reopened chat's opening tail brings
+    /// shows once: the engine's copy, the one pending here let go. Shown twice
+    /// it was two rows with one id, and zgx's virtual list panicked
+    /// ("duplicate virtual list child key"), freezing the transcript.
+    #[test]
+    fn a_prompt_the_opening_tail_brings_shows_once() {
+        use super::{Entry, Open, Pending, View, draft_value};
+        use serde_json::json;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let text = |id: &str, words: &str| json!({ "id": format!("{id}p"), "kind": "text", "text": words });
+        let prompt = |id: &str| json!({ "id": id, "role": "user", "parts": [text(id, "go")], "createdAt": 1_762_000_000_000_i64 });
+        let reply = |id: &str| json!({ "id": id, "role": "assistant", "status": "complete", "parts": [text(id, "done")], "createdAt": 1_762_000_000_000_i64 });
+        let held: Vec<Entry> = [prompt("u0"), reply("a0")].into_iter().map(Entry::new).collect();
+        let view = Rc::new(View {
+            session: app.host.shared("t.session", Value::Nil),
+            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            draft: app.host.shared("t.draft", draft_value("", "")),
+            rpc: RefCell::default(),
+            open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            snapshot: Cell::new(false),
+            session_only: Cell::new(false),
+        });
+        view.pending.borrow_mut().insert(
+            "c".into(),
+            vec![Pending {
+                id: "u1".into(),
+                words: "go".into(),
+                paths: Vec::new(),
+                waiting: "sending",
+                retry: None,
+                at: None,
+                held: false,
+                row: false,
+                transfers: Vec::new(),
+            }],
+        );
+        let ids = || -> Vec<String> {
+            match view.messages.signal().with_untracked(Clone::clone) {
+                Value::List(rows) => rows.iter().filter_map(|r| r.field("id")).map(super::text).collect(),
+                other => panic!("rows: {other:?}"),
+            }
+        };
+        view.publish_messages();
+        assert_eq!(ids(), ["u0", "a0", "u1"], "the prompt shows at once, pending here");
+        // The engine's opening tail, the prompt in it.
+        view.heard_frame(json!({ "reset": [reply("a0"), prompt("u1")], "historyPending": true, "count": 2 }));
+        assert_eq!(ids(), ["u0", "a0", "u1"], "once, the engine's copy");
+        assert!(view.pending.borrow().get("c").is_none(), "the copy pending here is let go");
+    }
+
+    /// Rows that would share an id (the transcript's list is keyed by it)
+    /// show once, the first kept: a pending prompt after the transcript's
+    /// copy of it, or an entry twice over.
+    #[test]
+    fn rows_sharing_an_id_show_once() {
+        use zgx_script::Value;
+        let row = |id: &str, text: &str| Value::record([("id", Value::from(id)), ("text", Value::from(text))]);
+        let mut list = vec![row("u1", "engine"), row("a1", "reply"), Value::record([("text", Value::from("no id"))]), row("u1", "here")];
+        super::one_row_per_id(&mut list);
+        let texts: Vec<String> = list.iter().filter_map(|r| r.field("text")).map(super::text).collect();
+        assert_eq!(texts, ["engine", "reply", "no id"]);
     }
 
     /// A chat opened shows its rows once its transcript has come (this

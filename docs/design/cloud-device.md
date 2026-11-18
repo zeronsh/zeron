@@ -130,38 +130,88 @@ next token refresh fails and that engine goes dark within one token lifetime.
 
 The sandbox runs full-access agents on arbitrary repository code, so anything that can read
 `runner-key` can mint runner tokens. A runner token therefore acts as **its session's device**
-(the JWT's verified `dev` claim), never as the whole user — and never as a neighbouring
-session. Enforced at the edge:
+(the JWT's verified `dev` claim), never as the whole user. What else it reaches is its
+session's **reach**, which only the person sets:
+
+- **`devices`** (the default). Like any of the person's devices, it reaches their other
+  devices and every one of their chats: a Cloud chat's agent lists and messages chats on the
+  laptop, starts chats there, and runs commands on any online device (`run_command`), as an
+  agent on the laptop can. Through a client link to one of their computers that is that
+  computer's whole remote interface, so a compromised session can act as the person while
+  one of their computers is online.
+- **`isolated`**. Its own machine, and the delegates it starts (below): it sees no other
+  chat, touches none, and reaches no other device's room.
+
+The account's default is `PUT /cloud/{org}/reach {reach}` (Settings → Cloud); a session takes
+it at creation unless the composer picks one (`POST /cloud/{org}/sessions {…, reach}`), and
+`POST /cloud/{org}/sessions/{chatId}/reach {reach}` changes one session's (the composer's
+place menu). A delegate always takes its parent's reach, whatever it asks. Runner bearers are
+refused on all three (no `/cloud/*` but delegation; `CloudAccount` refuses any machine
+caller too), and on the engine they are local-only methods (`CloudSetReach`,
+`CloudSessionSetReach`): neither an agent's token nor another device (a Cloud machine among
+them) may call them, and a reach named in an agent's `CreateChat` is ignored.
+
+The reach is enforced where it is kept, in the user's registry (`RegistryRoom`, meta
+`runnerReach:{device}`, absent = `devices`); `CloudAccount` tells it first and records it
+once it holds. Enforced at the edge:
 
 - **Paths** (`edge/src/runner-policy.ts`, 403): no `/auth/*` org routes, no `/cloud/*`, no
-  `/vault/*` except `POST /vault/{org}/grant` for its own device. `/device/{id}/*` only for its
-  own id; for any other device only `GET /device/{id}/status` (read-only liveness) — no
-  client/host sockets, nudges or sidecars. No legacy loro rooms (`/session`, `/tail`,
-  `/stats`, `/diff`, `/snapshot`, `/append`, `/workspace`). On `/registry/{org}` only row sync
-  (`ws`, `GET rows`, `POST push`) — no `stats`, `push-target` (APNs titles) or `reset`.
-- **Chat-scoped data** (`edge/src/runner-access.ts`): `/chat2/{chatId}/*` and
-  `/blob/{chatId}/*` only while registry row `chats/{chatId}` is live and its
-  `fields.deviceId` equals the runner's device; otherwise 403 `not_host`. Positive answers are
-  cached per isolate for ≤5 min; refusals are never cached.
+  `/vault/*` except `POST /vault/{org}/grant` for its own device. `/device/{id}/*` fully for
+  its own id; for any other device a client socket (`ws`, role client — that device's RPC
+  surface: chats, terminals, files) and the command nudge as its reach allows (below), and
+  `GET /device/{id}/status` — never the host role or that device's sidecars. No legacy loro
+  rooms (`/session`, `/tail`, `/stats`, `/diff`, `/snapshot`, `/append`, `/workspace`). On
+  `/registry/{org}` only row sync (`ws`, `GET rows`, `POST push`) — no `stats`,
+  `push-target` (APNs titles) or `reset`.
+- **Other chats and devices** (`edge/src/runner-access.ts`, asking the registry's
+  `/runner-admit`): in either reach, the chats it hosts and its delegates' (a subagent's doc
+  by the chat that spawned it), and its delegates' Cloud machines. With `devices`, also any
+  live chat and any of the person's devices; such an admission carries the runner's
+  revocation epoch, and the room is recorded. Only admissions that hold in every reach are
+  cached (per isolate, 5 minutes); the rest are asked each time, so a change takes effect at
+  once. Covers `/chat2/{chatId}/*`, `/blob/{chatId}/*`, attachment blobs, and another
+  device's `ws`/`nudge`.
+- **Revocation** (`edge/src/runner-revocation.ts`): isolating a session bumps its epoch and
+  sends each recorded room a drop; a `ChatRoom` or `DeviceRoom` closes the runner's sockets
+  admitted at an older epoch (4403) and remembers the epoch, refusing a dial admitted before
+  the change that arrives after it. Its registry sockets close too (1012), and its next
+  state is `full`, so what it held of other devices' rows goes. A room whose drop fails stays
+  recorded, and the change answers 503 until a retry closes it.
 - **Registry** (`edge/src/registry-runner.ts`; the Worker stamps `x-zeron-runner-device`
-  on runner forwards and strips any inbound value). Writes: `devices` only its own row;
-  `chats`, `spaces`, `sessions` only when the existing live row is hosted by the runner AND
-  the row after the op still is (no claiming, handing away or ownerless rows); deletes need a
-  live owned row; tombstones are never revived; every other kind (`preferences`,
-  `sidebarPins`, anything new) is refused. Refused ops are skipped individually (an
-  `{t:"error", code:"not_owner"}` frame each, plus `rejected` in the ack); the rest of the
-  batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): every `devices`
-  row, the hosted rows the runner owns, the projects (spaces) of the chats it hosts, and
-  tombstones of hosted kinds (they carry no fields); laptop chats, other projects and other
-  sessions' chats and session rows — titles, previews, status — never reach it.
+  on runner forwards and strips any inbound value). Writes, either reach: `devices` only its
+  own row; `chats`, `spaces`, `sessions` when the existing live row is hosted by the runner
+  AND the row after the op still is (no claiming, handing away or ownerless rows); a
+  delegate's chat and session rows may be deleted; deletes otherwise need a live owned row;
+  tombstones are never revived; every other kind (`preferences`, `sidebarPins`, anything
+  new) is refused. With `devices`, a chat hosted elsewhere may have any field set but its
+  host (`deviceId`: a chat is never re-homed), and a new chat row may be hosted by any device
+  (a chat it starts there); isolated, a delegate may only be renamed or archived. Another
+  device's `spaces` and `sessions` rows stay its own. Refused ops are skipped individually
+  (an `{t:"error", code:"not_owner"}` frame each, plus `rejected` in the ack); the rest of
+  the batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): with
+  `devices`, every `devices`, `chats`, `spaces` and `sessions` row; isolated, every
+  `devices` row, the rows it hosts, the projects of the chats it hosts, its delegates and
+  their session rows, and tombstones; never the user's own kinds. A machine whose view
+  changed (a reach changed, or one that synced while it saw only its own rows) holds a
+  cursor that doesn't match what it now sees, so its next state is `full`
+  (`RegistryRoom.runnerBehind`, recorded per device as the seq it was sent at; sent again,
+  at most three times, until the machine's cursor passes that seq).
   Presence is unfiltered, but a runner socket's presence/attribution device is pinned to its
   verified id.
+- **Waking**: a Cloud machine's send (`POST /device/{id}/nudge`) wakes any of the person's
+  sleeping sessions while its reach is `devices`, as their other devices' sends do; isolated,
+  only its delegates (`CloudAccount.autoWake`).
+- **Engine** (`crates/engine/src/rpc/agent_gate.rs`): what an agent may do is the same on
+  Cloud as on a computer. It runs commands (`RunCommand`, `ReadCommandOutput`, `StopCommand`,
+  `ListBackgroundCommands`, here or on another device) only from a chat with full access (what every
+  harness already runs unconfined). A command running on a Cloud machine counts as background work in its heartbeat,
+  so the machine stays awake for it.
 
 User bearers are unaffected by all of the above.
 
 #### Delegation
 
-The one widening: a session's machine may start and manage **delegates** of the chat it runs
+A session's machine may start and manage **delegates** of the chat it runs
 (Zeron MCP `create_chat { cloud: true }`), one level deep. A delegate is a Cloud session of
 its own, on its own machine, recorded with `parentChatId` = the parent's chat.
 
@@ -173,21 +223,24 @@ its own, on its own machine, recorded with `parentChatId` = the parent's chat.
   hold: credits, and `CLOUD_MAX_AWAKE` machines at once. A runner request without
   `parentChatId` is refused (a machine never acts as the user).
 - **Its chat row** is written by the edge, as the user (`chats/{chatId}`: the new machine as
-  host, `parentChatId`, the parent's `spaceId`, `roomGen: 2`, the asked-for `config`): a
-  runner may write only rows it hosts, and only the edge knows which machine it just made.
+  host, `parentChatId`, the parent's `spaceId`, `roomGen: 2`, the asked-for `config`): only
+  the edge knows which machine it just made.
 - **Manage** (`DELETE /cloud/{org}/sessions/{chatId}`, `POST …/{wake|sleep}`): only sessions
   whose `parentChatId` is its chat. Retry, the session list, projects, billing and Cloud
   on/off stay the user's.
-- **See and reach**: the registry shows the runner its delegates' chat and session rows
-  (`RunnerScope.children`), and lets it rename, archive or delete them — never re-home them.
-  `/chat2/{chatId}/*` and `/blob/{chatId}/*` admit it when it hosts the chat's parent
-  (`/chat-host` answers `parentHost`). `/device/{id}/*` admits a client socket (never the host
-  role) and the command nudge for a device hosting one of its delegates
-  (`runnerDeviceGate`, via the registry's `/device-parents`). No other main chat — on the
-  laptop or another session — becomes visible.
+- **Delete**: the registry lets it delete its delegates' chat and session rows
+  (`runnerChildren`) — never re-home them.
 
-A stolen runner key therefore reaches at most: starting machines on the repository its
-session already has (bounded by credits and the awake limit), and its own delegates.
+A stolen runner key therefore reaches what any of the person's devices reaches. Directly, at
+the edge: their chats (reading them, messaging them, starting chats on their devices) and
+starting machines on the repository its session already has (bounded by credits and the awake
+limit); the edge still refuses it the account (`/auth/*`, `/cloud/*`), the vault beyond its own
+grant, hosting another device's room, and the person's preferences. But through a client link
+to one of their online computers it reaches that computer's whole RPC surface, which acts with
+that computer's own session: running commands and opening terminals there, its files, and the
+calls that computer makes for the person (account, vault, Cloud and billing). So in practice a
+compromised session machine can act as the person while any of their computers is online —
+the trade-off accepted for Cloud chats working with every device as a computer's chats do.
 
 ### Workflows (Cloudflare Workflows)
 
@@ -439,12 +492,12 @@ machine (`ZERON_DEVICE_PLATFORM=cloud`) keeps none of them: going back there is 
 downloads anyway. Other Linux installs keep the newest older one, to go back to by hand. Never
 `current`, the running executable's folder, or a newer version (an update being staged).
 
-A Cloud machine doesn't keep the release's `zeron-engine` either: it's the desktop app's background
-engine (78 MB), and the unit runs `zeron headless`, which links the engine. The installer and the
-updater leave it out, and the tidy and the pre-sleep cleanup remove it from versions installed before.
-Measured on staging (send to first output, n=8 each), a machine on one version went from a median of
-17.5 s to 14.2 s once neither it nor Codex's downloads came back with each wake; its wake downloaded
-225 MB, 205 of them the engine it runs.
+A Cloud machine keeps the release's `zeron-engine` (78 MB). From 2026-11-07 to 2026-11-15 the
+installer, the updater and the tidy left it out, when the unit's `zeron headless` linked the engine;
+since 0.3.0 the release's `zeron` is the zgx app, whose `zeron headless` runs that `zeron-engine`, so
+a machine without it exited at once and never enrolled. The installer keeps it now, and a repair
+(`~/.zeron/repair-engine`, the unit's `ExecStartPre=-`, set up by the installer and every wake) puts
+it back before each start if an older updater left it out (edge/src/cloud/install-script.ts).
 
 A longer wake reads as updating: the engine says so (`POST /runner/wake-stage`), `CloudSession.stage`
 is `updating` while it lasts (a stage nobody clears stops showing after 10 minutes), the desktop's

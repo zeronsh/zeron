@@ -12,14 +12,7 @@ on:
       native:
         type: boolean
         default: true
-      frame-source:
-        type: boolean
-        default: true
       ios:
-        type: boolean
-        default: true
-      fixtures:
-        description: Also run the WebKit browser and preview fixtures (pull requests that touch them; always otherwise).
         type: boolean
         default: true
       skip:
@@ -41,8 +34,8 @@ env:
 # rustc 1.98.0 and another 1.98.1) and rust-cache keys include the rustc version, so a job that lands
 # on an older image would otherwise miss the cache that `main` seeded.
 jobs:
-  # Updater and preview tests, native UI regressions and the two native WebKit fixtures. Everything is
-  # compiled once (one cargo invocation, so dependencies are built once) and then run.
+  # Updater, preview, CoreText and `zeron` command-line tests. Everything is compiled once (one cargo
+  # invocation, so dependencies are built once) and then run.
   macos-native:
     if: inputs.native
     runs-on: macos-latest
@@ -73,110 +66,26 @@ jobs:
           mkdir -p "$bin"
           tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$bin" cargo-nextest
           echo "$bin" >> "$GITHUB_PATH"
-      # The app (`-p zeron --bins`) is compiled with the tests, sharing their zeron-ui
-      # build: a separate `cargo build -p zeron` rebuilt zeron-ui without the fixture
-      # feature (and a `cargo check` before that recompiled every dependency).
-      - name: Build tests and the application
+      # The `zeron` binaries (`-p zeron --bins`) are compiled with the tests.
+      - name: Build tests and the binaries
         run: |
           cargo nextest run --config-file scripts/ci/nextest.toml --no-run --locked \
-            -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text -p zeron \
-            --features zeron-ui/browser-fixture --lib --bins --tests
-      - name: Build fixtures
-        if: inputs.fixtures
-        run: |
-          cargo build --locked -p zeron-update -p zeron-preview -p zeron-ui \
-            --features zeron-ui/browser-fixture --example browser-fixture --example preview-fixture
-      - name: Updater, preview, CoreText and native UI regressions
+            -p zeron-update -p zeron-preview -p zeron-text -p zeron \
+            --lib --bins --tests
+      - name: Updater, preview, CoreText and command-line tests
         run: |
           # zeron-text's coretext tests are macOS-only (#![cfg(target_os = "macos")]); its other
-          # tests run on Linux in ios-core. The attachment filters cover file staging, chips and
-          # external Finder drops, whose paths and file metadata are platform-specific.
+          # tests run on Linux in ios-core.
           cargo nextest run --config-file scripts/ci/nextest.toml --no-fail-fast --locked \
-            -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text -p zeron \
-            --features zeron-ui/browser-fixture --lib --bins --tests \
-            -E 'package(zeron-update) | package(zeron-preview) | binary_id(zeron-text::coretext) | binary_id(zeron::cli) | (binary_id(zeron-ui) & (test(native_diff_font_geometry) | test(/notify::tests::/) | test(/^attachments::tests::/) | test(/composer::attachment_chip_tests::/) | test(/shell::chat_dropzone_tests::/) | test(=queue::tests::queue_rows_label_attachment_chips_and_file_only_sends) | test(=transcript::tests::user_bubbles_project_attachment_chips_in_place_of_the_strip) | test(=transcript::tests::sent_chips_show_upload_progress_until_their_bytes_land)))'
-      - name: Native browser regression and screenshots
-        if: inputs.fixtures
-        timeout-minutes: 7
-        env:
-          RUST_BACKTRACE: 1
-          FIXTURE_ATTEMPT_TIMEOUT: 110
-        run: |
-          scripts/ci/run-macos-fixture.sh target/debug/examples/browser-fixture "$RUNNER_TEMP/browser-captures"
-          test -f "$RUNNER_TEMP/browser-captures/result.txt"
-      - name: Persistent browser profiles across app launches
-        if: inputs.fixtures
-        timeout-minutes: 5
-        run: python3 scripts/test-browser-storage.py --fixture target/debug/examples/browser-fixture
-      - name: Upload browser screenshots
-        if: ${{ inputs.fixtures && always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: browser-macos-captures
-          path: ${{ runner.temp }}/browser-captures*
-          if-no-files-found: ignore
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        if: inputs.fixtures
-        with:
-          node-version: 24
-      - name: Install preview fixture server
-        if: inputs.fixtures
-        run: npm ci --prefix edge
-      - name: Project discovery, stable URLs and HMR in native WebKit
-        if: inputs.fixtures
-        timeout-minutes: 5
-        env:
-          ZERON_PREVIEW_AUTO_OPEN: 1
-        run: |
-          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" scripts/ci/run-macos-fixture.sh target/debug/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
-          test -f "$RUNNER_TEMP/preview-captures/result.txt"
-      - name: Upload preview screenshots
-        if: ${{ inputs.fixtures && always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: preview-macos-captures
-          path: ${{ runner.temp }}/preview-captures*
-          if-no-files-found: ignore
+            -p zeron-update -p zeron-preview -p zeron-text -p zeron \
+            --lib --bins --tests \
+            -E 'package(zeron-update) | package(zeron-preview) | binary_id(zeron-text::coretext) | binary_id(zeron::cli)'
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-macos-native
-
-  # gpui_macos lives in the pinned GPUI checkout, a separate workspace with its own cache.
-  macos-frame-source:
-    if: inputs.frame-source
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Rust toolchain
-        run: |
-          rustup update stable --no-self-update
-          rustup show active-toolchain || rustup toolchain install
-      - name: Check out pinned GPUI for native frame-source tests
-        shell: bash
-        run: |
-          rev=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["dependencies"]["gpui"]["rev"])')
-          git init frame-source-tests
-          git -C frame-source-tests remote add origin https://github.com/zeronsh/zui
-          git -C frame-source-tests fetch --depth=1 origin "$rev"
-          git -C frame-source-tests checkout --detach FETCH_HEAD
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
-          workspaces: frame-source-tests
-      - name: Native frame-source recovery regression
-        working-directory: frame-source-tests
-        run: cargo test --locked -p gpui_macos --test frame_source_recovery
-      - name: Record the pass (CI skips this job while its inputs stay the same)
-        if: inputs.pass-key != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: rust-toolchain.toml
-          key: ${{ inputs.pass-key }}-macos-frame-source
 
   # The iOS checks that do not need Apple tooling run on Linux: Rust mobile core tests, and "the
   # committed Swift bindings are current" (the UniFFI metadata is identical for any target, so the

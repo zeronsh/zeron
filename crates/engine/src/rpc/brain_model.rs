@@ -140,6 +140,7 @@ mod tests {
             reasoning_levels: vec![],
             options: vec![],
             default: false,
+            provider: None,
         }
     }
 

@@ -10,6 +10,9 @@ ds.setup()
 ui.state("shell_route_path", "/control")
 require("@app/screens/shell/route").launched:set(true)
 require("@app/control_world")()
+-- (No window chrome to restyle in a test host, as shell_fixture says.)
+local actions = require("@app/screens/onboarding/actions");
+(actions :: any).apply_scheme = function() end
 -- (What the shell around the page asks of the host: Settings' calls, and the
 -- composer's catalog, answered here.)
 require("./settings_stub")

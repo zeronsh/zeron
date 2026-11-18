@@ -15,6 +15,7 @@
 
 local motion = require("@self/motion")
 local Icon = require("@self/icon")
+local Mark = require("@self/mark")
 local FadeText = require("@self/fade_text")
 local Menu = require("@self/menu")
 local control = require("@self/control")
@@ -25,7 +26,9 @@ local locale = require("@self/locale")
 -- (An option's label, line and group may be messages, `ui.t`, in a list
 -- given as a table; a function's list reads them as strings, as a state
 -- holds no message. The placeholder, label, hint and name take messages.)
-export type Option = { value: any, label: string | Message, icon: Icon.Name?, description: (string | Message)?, disabled: boolean?, group: (string | Message)? }
+-- (`mark`: a ds.Mark's name in the icon's place, drawn bare in the text's
+-- ink: a model provider's.)
+export type Option = { value: any, label: string | Message, icon: Icon.Name?, mark: string?, description: (string | Message)?, disabled: boolean?, group: (string | Message)? }
 export type Props = {
 	value: State<any>,
 	-- The choices: a list, or a function of one, followed as it changes
@@ -86,7 +89,7 @@ return ui.component(function(props: Props): Node
 		local list = options()
 		local icons, tall, grouped = false, false, false
 		for _, o in list do
-			icons = icons or o.icon ~= nil
+			icons = icons or o.icon ~= nil or o.mark ~= nil
 			tall = tall or o.description ~= nil
 			grouped = grouped or o.group ~= nil
 		end
@@ -149,6 +152,15 @@ return ui.component(function(props: Props): Node
 			end
 			return false
 		end,
+		ui.presence(function(): string
+				local o = chosen()
+				return if o and o.mark then o.mark else ""
+			end, function(mark: string): Node
+				if mark == "" then
+					return ui.div {}
+				end
+				return ui.div { shrink = 0, y = -0.5, color = "$text.secondary", Mark { name = mark, size = control.ICON[size], bare = true } }
+			end),
 		ui.show(function(): boolean
 				local o = chosen()
 				return o ~= nil and o.icon ~= nil
@@ -187,7 +199,7 @@ return ui.component(function(props: Props): Node
 
 	-- A glyph's box at the button's icon size, so the name after it starts
 	-- where the button's does.
-	local function glyph(name: Icon.Name?, ink: string?): Node
+	local function glyph(name: Icon.Name?, ink: string?, mark: string?): Node
 		local side = control.ICON[size]
 		return ui.div {
 			w = side,
@@ -197,7 +209,7 @@ return ui.component(function(props: Props): Node
 			items = "center",
 			justify = "center",
 			color = ink or "$text.secondary",
-			if name then Icon { name = name, size = side } else nil,
+			if mark then Mark { name = mark, size = side, bare = true } elseif name then Icon { name = name, size = side } else nil,
 		}
 	end
 
@@ -218,7 +230,7 @@ return ui.component(function(props: Props): Node
 					props.on_change(o.value)
 				end
 			end,
-			if has_icons then glyph(o.icon, if enabled then nil else "$text.disabled") else nil,
+			if has_icons then glyph(o.icon, if enabled then nil else "$text.disabled", o.mark) else nil,
 			if o.description
 				then ui.column {
 					grow = 1,

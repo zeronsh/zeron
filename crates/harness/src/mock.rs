@@ -25,6 +25,143 @@ fn fanout_count(prompt: &str) -> Option<usize> {
     Some(count.clamp(1, 200))
 }
 
+/// The step count a `/longthread [N]` prompt asks for (1,000 when bare).
+fn longthread_count(prompt: &str) -> Option<usize> {
+    let rest = prompt.trim().strip_prefix("/longthread")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let count = rest.trim().parse().unwrap_or(1000);
+    Some(count.clamp(1, 20_000))
+}
+
+/// The `/longthread` reply: ademark's A11 thread (bench/replay's
+/// `long-2000`), `count` steps each a short text (one in five with a code
+/// block) and a call reading one small file, the last text holding
+/// `LONGTHREAD-END`. Streamed unpaced, as the replay is.
+fn longthread_events(count: usize) -> Vec<AgentEvent> {
+    let mut events = Vec::with_capacity(count * 3 + 2);
+    for n in 1..=count {
+        let mut text = format!(
+            "Step {n} of {count}. I read src/invoices.ts and noted what step {n} needs from it."
+        );
+        if n % 5 == 0 {
+            text.push_str(concat!(
+                "\n\n```ts\n",
+                "function summarize(invoice: Invoice): InvoiceSummary {\n",
+                "  const total = invoiceTotal(invoice);\n",
+                "  return { id: invoice.id, totalCents: total };\n",
+                "}\n",
+                "```"
+            ));
+        }
+        events.push(AgentEvent::TextDelta { text });
+        let id = format!("toolu_long_{n:04}");
+        events.push(AgentEvent::ToolCall {
+            id: id.clone(),
+            call: zeron_proto::ToolCall::ReadFile {
+                path: "/private/tmp/ademark-recording/arena/src/invoices.ts".into(),
+            },
+        });
+        events.push(AgentEvent::ToolResult {
+            id,
+            is_error: false,
+            output: Some("export function invoiceTotal() {}\n".into()),
+            diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
+            exit_code: None,
+        });
+    }
+    events.push(AgentEvent::TextDelta {
+        text: "All steps done. LONGTHREAD-END".into(),
+    });
+    events.push(AgentEvent::Done {
+        status: DoneStatus::Completed,
+        result: None,
+        error: None,
+        session_id: None,
+    });
+    events
+}
+
+/// The seconds a `/stream [SECONDS]` prompt asks for (180 when bare).
+fn stream_seconds(prompt: &str) -> Option<u64> {
+    let rest = prompt.trim().strip_prefix("/stream")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let seconds = rest.trim().parse().unwrap_or(180);
+    Some(seconds.clamp(1, 3600))
+}
+
+/// How often a `/stream` reply's chunks come, and how many characters each
+/// holds: ademark's A7 replay, 80 tokens a second in 50 ms chunks (four
+/// tokens of about four characters).
+const STREAM_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+const STREAM_CHARS: usize = 16;
+
+/// The `/stream` reply's text: ademark's A7 stream (bench/replay's
+/// `stream-1`), one reply of text, code blocks and a diff block, as long as
+/// `seconds` of chunks at its pace.
+fn stream_text(seconds: u64) -> String {
+    let want = seconds as usize * (1000 / STREAM_EVERY.as_millis() as usize) * STREAM_CHARS;
+    let mut text = String::with_capacity(want + 512);
+    let mut n = 0;
+    while text.len() < want {
+        n += 1;
+        text.push_str(&format!(
+            "Section {n}. The invoice totals are summed per customer before the \
+             discount applies, so `invoiceTotal` stays the one place that rounds. \
+             The reports read the same totals, which keeps the **monthly** view and \
+             the export in step.\n\n"
+        ));
+        if n % 3 == 0 {
+            text.push_str(concat!(
+                "```ts\n",
+                "export function invoiceTotal(invoice: Invoice): number {\n",
+                "  const lines = invoice.lines.map((l) => l.quantity * l.unitCents);\n",
+                "  return Math.round(lines.reduce((a, b) => a + b, 0));\n",
+                "}\n",
+                "```\n\n",
+            ));
+        }
+        if n == 7 {
+            text.push_str(concat!(
+                "```diff\n",
+                "-  return total;\n",
+                "+  return Math.round(total);\n",
+                "```\n\n",
+            ));
+        }
+    }
+    text
+}
+
+/// The `/stream` reply, paced: `STREAM_CHARS` characters every
+/// `STREAM_EVERY`, then the end of the turn.
+fn stream_events(seconds: u64) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    let chars: Vec<char> = stream_text(seconds).chars().collect();
+    let chunks: Vec<String> = chars
+        .chunks(STREAM_CHARS)
+        .map(|c| c.iter().collect())
+        .collect();
+    futures::stream::iter(chunks)
+        .then(|text| async move {
+            tokio::time::sleep(STREAM_EVERY).await;
+            Ok(AgentEvent::TextDelta { text })
+        })
+        .chain(futures::stream::once(async {
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            })
+        }))
+        .boxed()
+}
+
 /// The message a `/error <message>` prompt fails the run with.
 fn scripted_error(prompt: &str) -> Option<&str> {
     let message = prompt.trim().strip_prefix("/error ")?.trim();
@@ -106,6 +243,8 @@ fn fanout_settle(i: usize) -> Vec<AgentEvent> {
             is_error: failed,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: None,
         },
         fanout_tag(
@@ -205,6 +344,7 @@ impl Harness for MockHarness {
                 default: false,
                 id: "mock-1".into(),
                 label: "Mock 1".into(),
+                provider: None,
                 description: None,
                 reasoning_levels: vec![ReasoningLevel::Medium],
                 options: vec![],
@@ -215,6 +355,7 @@ impl Harness for MockHarness {
                 default: false,
                 id: "mock-fable-5".into(),
                 label: "Fable 5".into(),
+                provider: None,
                 description: None,
                 reasoning_levels: vec![
                     ReasoningLevel::Low,
@@ -335,6 +476,8 @@ impl Harness for MockHarness {
                             is_error: false,
                             output: Some("test result: ok. 128 passed; 0 failed".into()),
                             diff: None,
+                            preview_paths: Vec::new(),
+                            image_payloads: Vec::new(),
                             exit_code: None,
                         });
                         send("All 128 tests pass.");
@@ -384,6 +527,18 @@ impl Harness for MockHarness {
         // `ZERON_MOCK_DELAY_MS` apart, 2.5s by default.
         // `/error <message>`: the run fails with that message (error cards
         // for any provider failure, without a real provider).
+        // `/longthread [N]`: ademark's A11 long thread, N steps of a text
+        // and a file read (1,000 when bare), for timing a long chat's open.
+        if let Some(count) = longthread_count(&request.prompt) {
+            let events = longthread_events(count).into_iter().map(Ok);
+            return Ok(futures::stream::iter(events).boxed());
+        }
+        // `/stream [SECONDS]`: ademark's A7 stream, one reply of text, code
+        // and a diff at 80 tokens a second in 50 ms chunks, for SECONDS (180
+        // when bare), for what a window spends while agents stream.
+        if let Some(seconds) = stream_seconds(&request.prompt) {
+            return Ok(stream_events(seconds));
+        }
         if let Some(message) = scripted_error(&request.prompt) {
             let events = vec![
                 Ok(AgentEvent::Error {
@@ -567,6 +722,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     },
                 ]
@@ -606,6 +763,8 @@ impl Harness for MockHarness {
                     is_error: false,
                     output: None,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 };
                 let done = AgentEvent::Done {
@@ -772,6 +931,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     },
                 ]
@@ -829,6 +990,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     });
                     events.push(AgentEvent::TextDelta {
@@ -1007,6 +1170,8 @@ fn background_run(
                 },
             });
             let _ = tx.send(AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: format!("{id}-call"),
                 is_error: false,
                 output: Some(format!("Command running in background with ID: {id}")),
@@ -1224,6 +1389,8 @@ fn long_tool_run(
                         pid.unwrap_or(0)
                     )),
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 });
                 turn.set_background_processes(vec![zeron_proto::BackgroundTask {
@@ -1285,6 +1452,8 @@ fn long_tool_run(
                     String::new()
                 }),
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: (!stopped).then_some(0),
             });
             if stopped {
@@ -1339,6 +1508,48 @@ mod tests {
         assert_eq!(fanout_count("/fanout 9000"), Some(200));
         assert_eq!(fanout_count("/fanouts"), None);
         assert_eq!(fanout_count("Walk me through the pipeline"), None);
+    }
+
+    #[test]
+    fn stream_is_a7s_reply_at_its_pace() {
+        assert_eq!(stream_seconds("/stream"), Some(180));
+        assert_eq!(stream_seconds(" /stream 30 "), Some(30));
+        assert_eq!(stream_seconds("/streams"), None);
+        let text = stream_text(10);
+        // 10 s of 16-character chunks every 50 ms, and a paragraph more.
+        assert!((3200..3800).contains(&text.len()), "{}", text.len());
+        assert!(text.contains("```ts") && text.contains("```diff"));
+    }
+
+    #[test]
+    fn longthread_is_a11s_thread() {
+        assert_eq!(longthread_count("/longthread"), Some(1000));
+        assert_eq!(longthread_count(" /longthread 20 "), Some(20));
+        assert_eq!(longthread_count("/longthreads"), None);
+        let events = longthread_events(10);
+        let texts: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let reads = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ToolCall {
+                        call: zeron_proto::ToolCall::ReadFile { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!((texts.len(), reads), (11, 10));
+        assert!(texts[4].contains("```ts"), "one text in five holds code");
+        assert!(texts[10].ends_with("LONGTHREAD-END"));
+        assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
     }
 
     #[test]

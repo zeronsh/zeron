@@ -34,6 +34,10 @@
 
 mod antigravity_paths;
 mod devin_models;
+mod hermes_names;
+/// How long Hermes's model names may take to read before the list goes
+/// out with ids.
+const HERMES_NAMING_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 mod normalize;
 mod permission;
 mod subagent;
@@ -265,6 +269,7 @@ fn grok_spec() -> AcpAgentSpec {
                 default: false,
                 id: "grok-4.5".into(),
                 label: "Grok 4.5".into(),
+                provider: None,
                 description: Some("xAI's coding model — 500k context".into()),
                 reasoning_levels: vec![
                     ReasoningLevel::Low,
@@ -343,6 +348,7 @@ fn devin_spec() -> AcpAgentSpec {
                     default: false,
                     id: "swe-1-7-medium".into(),
                     label: "SWE-1.7 Medium".into(),
+                    provider: None,
                     description: Some("Devin's default coding model".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
@@ -351,6 +357,7 @@ fn devin_spec() -> AcpAgentSpec {
                     default: false,
                     id: "claude-fable-5-1-high".into(),
                     label: "Claude Fable 5.1 High".into(),
+                    provider: None,
                     description: Some("Anthropic's frontier model through Devin".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
@@ -359,6 +366,7 @@ fn devin_spec() -> AcpAgentSpec {
                     default: false,
                     id: "adaptive".into(),
                     label: "Adaptive".into(),
+                    provider: None,
                     description: Some("Devin picks the model per request".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
@@ -502,6 +510,7 @@ fn hermes_spec() -> AcpAgentSpec {
                     default: false,
                     id: "hermes-4-405b".into(),
                     label: "Hermes 4 405B".into(),
+                    provider: None,
                     description: Some("Nous Research's hybrid-reasoning flagship".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
@@ -510,6 +519,7 @@ fn hermes_spec() -> AcpAgentSpec {
                     default: false,
                     id: "hermes-4-70b".into(),
                     label: "Hermes 4 70B".into(),
+                    provider: None,
                     description: Some("Faster Hermes 4 — same post-training, 70B".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
@@ -1213,6 +1223,7 @@ fn antigravity_spec() -> AcpAgentSpec {
                     default: false,
                     id: "gemini-3.7-flash".into(),
                     label: "Gemini 3.7 Flash".into(),
+                    provider: None,
                     description: None,
                     reasoning_levels: vec![Low, Medium, High],
                     options: Vec::new(),
@@ -1221,6 +1232,7 @@ fn antigravity_spec() -> AcpAgentSpec {
                     default: false,
                     id: "gemini-3.1-pro".into(),
                     label: "Gemini 3.1 Pro".into(),
+                    provider: None,
                     description: None,
                     reasoning_levels: vec![Low, High],
                     options: Vec::new(),
@@ -1682,6 +1694,44 @@ pub struct AcpHarness {
     models_cache: crate::catalog::Catalog,
     workspace_commands: crate::skills::CommandDiscovery,
     devin_models: std::sync::Arc<devin_models::Catalog>,
+    /// Agents started before their chat's first message ([`Harness::prewarm`]),
+    /// by key: launched, their handshake left to the run.
+    warm: std::sync::Mutex<std::collections::HashMap<String, WarmAgent>>,
+}
+
+/// A parked warm start: the agent process and what it was launched with
+/// (its folder, MCP server and environment: all `spawn_agent` takes).
+struct WarmAgent {
+    cwd: String,
+    mcp: Option<zeron_proto::McpServer>,
+    env: std::collections::BTreeMap<String, String>,
+    spawned: Spawned,
+}
+
+/// What `spawn_agent` hands a run.
+type Spawned = (Option<ScratchDir>, Child, crate::StderrTail, CancellationToken);
+
+fn lock_warm<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// End a warm start no message reached.
+async fn retire_warm(warm: WarmAgent, kill_grace: Duration) {
+    let (scratch, mut child, _, _) = warm.spawned;
+    drop(child.stdin.take());
+    child.shutdown(kill_grace).await;
+    drop(scratch);
+}
+
+/// [`retire_warm`], in the background.
+fn spawn_retire(warm: WarmAgent, kill_grace: Duration) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(retire_warm(warm, kill_grace));
+        }
+        // (No runtime: the child is killed on drop.)
+        Err(_) => drop(warm),
+    }
 }
 
 impl AcpHarness {
@@ -1703,16 +1753,17 @@ impl AcpHarness {
             models_cache: crate::catalog::Catalog::default(),
             workspace_commands: crate::skills::CommandDiscovery::default(),
             devin_models: Default::default(),
+            warm: Default::default(),
         }
     }
 
-    /// The access mode `request` runs with: its own when this agent honors
-    /// it, else full access — as is any auto-approve run.
-    fn access_for(&self, request: &RunRequest) -> AccessMode {
-        if request.auto_approve || !self.spec.access_modes.contains(&request.access) {
-            AccessMode::FullAccess
+    /// Resolve access before launching. Auto must never become full access
+    /// just because an agent cannot honor it.
+    fn access_for(&self, request: &RunRequest) -> Option<AccessMode> {
+        if request.auto_approve {
+            Some(AccessMode::FullAccess)
         } else {
-            request.access
+            request.access.honored_by(self.spec.access_modes)
         }
     }
 
@@ -1866,7 +1917,7 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             let home = std::env::var_os("HOME");
             let cwd = home.as_deref().map(std::path::Path::new);
             crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&exe))
@@ -1998,7 +2049,7 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         if let Some(stderr) = child.stderr.take() {
@@ -2281,7 +2332,7 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         let (client, incoming) = match (child.stdin.take(), child.stdout.take()) {
@@ -2369,9 +2420,9 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut login = cmd
-            .spawn()
-            .map_err(|e| crate::executable::spawn_error(e, None, || crate::executable::binary_hint(exe)))?;
+        let mut login = crate::process::spawn_agent(&mut cmd).map_err(|e| {
+            crate::executable::spawn_error(e, None, || crate::executable::binary_hint(exe))
+        })?;
         let mut readers = Vec::new();
         if let Some(out) = login.stdout.take() {
             readers.push(tokio::spawn(report_lines(out, on_progress.clone())));
@@ -2682,7 +2733,7 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let child = cmd.spawn().map_err(|e| {
+        let child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             let cwd = cwd.filter(|c| !c.is_empty()).map(std::path::Path::new);
             crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&exe))
         })?;
@@ -2824,6 +2875,9 @@ impl AcpHarness {
                 .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
                 .await?;
             let mut models = models_from_session(&session, &(self.spec.models)());
+            if self.spec.id == HarnessId::Hermes {
+                hermes_names::fold_context_variants(&mut models);
+            }
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
             for model in &mut models {
@@ -2845,7 +2899,36 @@ impl AcpHarness {
         let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
         drain.abort();
         client.close_stdin_for_teardown();
-        child.shutdown(self.kill_grace).await;
+        // Hermes's names come from a file, read on a blocking thread while
+        // the agent shuts down: neither waits on the other, and no async
+        // worker is held by file reads.
+        let result = match result {
+            Ok(Ok(models)) if self.spec.id == HarnessId::Hermes => {
+                // (Named within a few seconds, or kept as they are: a slow
+                // disk never holds up the model list.)
+                let unnamed = models.clone();
+                let naming = tokio::task::spawn_blocking(move || {
+                    let mut models = models;
+                    hermes_names::name_models(&mut models);
+                    models
+                });
+                child.shutdown(self.kill_grace).await;
+                match tokio::time::timeout(HERMES_NAMING_WAIT, naming).await {
+                    Ok(Ok(models)) => Ok(Ok(models)),
+                    Ok(Err(error)) => Ok(Err(HarnessError::Protocol(format!(
+                        "naming Hermes models failed: {error}"
+                    )))),
+                    Err(_) => {
+                        tracing::debug!("naming Hermes models took too long; models keep their ids");
+                        Ok(Ok(unnamed))
+                    }
+                }
+            }
+            result => {
+                child.shutdown(self.kill_grace).await;
+                result
+            }
+        };
         match result {
             Ok(inner) => inner,
             Err(_) => {
@@ -2892,6 +2975,56 @@ fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
 /// unmatched models keep fast mode etc.; the catalog only enriches matched
 /// ids with label/description/per-model ladders.
 fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model> {
+    let mut models = models_from_session_wire(session_response, catalog);
+    for model in &mut models {
+        split_provider_label(model);
+    }
+    models
+}
+
+/// A model an agent names `<provider>:<model>` and labels
+/// `<Provider> · <model>` (Hermes: `anthropic:claude-fable-5.1`, "Anthropic ·
+/// claude-fable-5.1"): its label is the model, and its provider rides on
+/// `provider`, named as people say it (`openai-codex` → Codex, as for Pi and
+/// OpenCode), else as the agent wrote it. The picker shows it beside the
+/// name, like every agent that reaches models through several providers.
+fn split_provider_label(model: &mut Model) {
+    if model.provider.is_some() {
+        return;
+    }
+    let Some((pid, _)) = model.id.split_once(':') else {
+        return;
+    };
+    let Some((written, name)) = model.label.split_once(" \u{b7} ") else {
+        return;
+    };
+    let (pid, written, name) = (pid.trim(), written.trim(), name.trim());
+    if pid.is_empty() || written.is_empty() || name.is_empty() {
+        return;
+    }
+    let known = crate::pi::provider_name(pid);
+    // (A name the map only spelled out from the id reads worse than the
+    // agent's own: keep the agent's then.)
+    let spelled = pid
+        .split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let provider_name = if known == spelled { written.to_owned() } else { known };
+    model.label = name.to_owned();
+    model.provider = Some(zeron_proto::ModelProvider {
+        id: pid.to_owned(),
+        name: provider_name,
+    });
+}
+
+fn models_from_session_wire(session_response: &Value, catalog: &[Model]) -> Vec<Model> {
     let config_options = session_response
         .get("configOptions")
         .and_then(Value::as_array)
@@ -2947,6 +3080,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 .or_else(|| name.map(str::to_owned))
                 .or_else(|| known.map(|m| m.label.clone()))
                 .unwrap_or_else(|| id.to_owned()),
+            provider: None,
             description: aliased
                 .and_then(|m| m.description.clone())
                 .or_else(|| description.map(str::to_owned))
@@ -3140,6 +3274,7 @@ impl Harness for AcpHarness {
     /// the session mode chosen at launch, so a new mode gets a new agent.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
+            && self.access_for(next).is_some()
             && self.access_for(live) == self.access_for(next)
             && (next.model.is_some() || live.model.is_none())
             && (next.reasoning.is_some() || live.reasoning.is_none())
@@ -3346,15 +3481,93 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let (scratch, mut child, stderr_tail, sign_in_prompted) = self
-            .spawn_agent(
-                Some(&request.cwd),
-                true,
-                &[],
-                request.mcp.as_ref(),
-                &request.env,
-            )
+        self.run_spawned(request, controls, None).await
+    }
+
+    /// An ACP agent asks no model anything until `session/prompt`: launched
+    /// early, its process's own startup is done by the first message (the
+    /// handshake, `initialize` and `session/new`, stays the run's: an agent's
+    /// sign-in prompt belongs to a run the person sees).
+    fn prewarms(&self) -> bool {
+        true
+    }
+
+    async fn prewarm(&self, key: &str, request: RunRequest) -> Result<(), HarnessError> {
+        self.discard_warm(key).await;
+        // (Never an install on the way: a warm start only uses what's there.)
+        let spawned = self
+            .spawn_agent(Some(&request.cwd), false, &[], request.mcp.as_ref(), &request.env)
             .await?;
+        let warm = WarmAgent {
+            cwd: request.cwd.clone(),
+            mcp: request.mcp.clone(),
+            env: request.env.clone(),
+            spawned,
+        };
+        if let Some(old) = lock_warm(&self.warm).insert(key.to_owned(), warm) {
+            spawn_retire(old, self.kill_grace);
+        }
+        Ok(())
+    }
+
+    async fn run_warm(
+        &self,
+        key: &str,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let mut warm = lock_warm(&self.warm).remove(key);
+        let alive = warm
+            .as_mut()
+            .is_some_and(|w| matches!(w.spawned.1.try_wait(), Ok(None)));
+        let spawned = match warm {
+            Some(w) if alive && w.cwd == request.cwd && w.mcp == request.mcp && w.env == request.env => {
+                Some(w.spawned)
+            }
+            Some(w) => {
+                tracing::info!(target: "zeron_harness::acp", key, "warm start not used; starting afresh");
+                spawn_retire(w, self.kill_grace);
+                None
+            }
+            None => None,
+        };
+        self.run_spawned(request, controls, spawned).await
+    }
+
+    async fn discard_warm(&self, key: &str) {
+        let warm = lock_warm(&self.warm).remove(key);
+        if let Some(warm) = warm {
+            retire_warm(warm, self.kill_grace).await;
+        }
+    }
+}
+
+impl AcpHarness {
+    async fn run_spawned(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        spawned: Option<Spawned>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let access = self.access_for(&request).ok_or_else(|| {
+            HarnessError::Protocol(format!(
+                "{} cannot run in Auto or a stricter access mode. Choose another agent or explicitly select Full access.",
+                self.spec.display_name
+            ))
+        })?;
+        let (scratch, mut child, stderr_tail, sign_in_prompted) = match spawned {
+            Some(spawned) => spawned,
+            None => {
+                self.spawn_agent(
+                    Some(&request.cwd),
+                    true,
+                    &[],
+                    request.mcp.as_ref(),
+                    &request.env,
+                )
+                .await?
+            }
+        };
         let stdin = child
             .stdin
             .take()
@@ -3405,7 +3618,7 @@ impl Harness for AcpHarness {
             incoming,
             event_tx,
             controls,
-            access: self.access_for(&request),
+            access,
             request,
             harness: self.spec.id,
             agent_name: self.spec.display_name,
@@ -3560,28 +3773,47 @@ fn cancel_params(harness: HarnessId, session_id: &str) -> Value {
 /// config, never from here.
 #[cfg(test)]
 fn acp_mcp_servers(mcp: Option<&zeron_proto::McpServer>) -> Vec<Value> {
-    acp_session_mcp_servers(mcp, &[])
+    acp_session_mcp_servers(mcp, &[], false)
+}
+
+/// Whether the agent takes HTTP MCP servers in `session/new`
+/// (`agentCapabilities.mcpCapabilities.http`).
+fn takes_http_mcp(init: &Value) -> bool {
+    init.pointer("/agentCapabilities/mcpCapabilities/http")
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 /// [`acp_mcp_servers`] plus the plugins' native servers
-/// ([`RunRequest::extra_mcp`]), Zeron's own first.
+/// ([`RunRequest::extra_mcp`]), Zeron's own first. With `http` (the agent
+/// takes HTTP servers), Zeron's own is the engine's endpoint
+/// (`{type: "http", name, url, headers: [{name, value}]}`) and no process
+/// starts; otherwise its stdio command — the engine's `mcp-proxy`.
 fn acp_session_mcp_servers(
     mcp: Option<&zeron_proto::McpServer>,
     extras: &[zeron_proto::McpServer],
+    http: bool,
 ) -> Vec<Value> {
+    let pairs = |map: &std::collections::BTreeMap<String, String>| {
+        map.iter()
+            .map(|(name, value)| json!({ "name": name, "value": value }))
+            .collect::<Vec<_>>()
+    };
     mcp.into_iter()
         .chain(extras)
-        .map(|mcp| {
-            json!({
+        .map(|mcp| match mcp.http.as_ref().filter(|_| http) {
+            Some(endpoint) => json!({
+                "type": "http",
+                "name": mcp.name,
+                "url": endpoint.url,
+                "headers": pairs(&endpoint.headers),
+            }),
+            None => json!({
                 "name": mcp.name,
                 "command": mcp.command,
                 "args": mcp.args,
-                "env": mcp
-                    .env
-                    .iter()
-                    .map(|(name, value)| json!({ "name": name, "value": value }))
-                    .collect::<Vec<_>>(),
-            })
+                "env": pairs(&mcp.env),
+            }),
         })
         .collect()
 }
@@ -3664,14 +3896,24 @@ fn strip_trailing_parenthetical(name: &str) -> &str {
 /// variants in either hint spelling. Exact match first (with the 1M compose
 /// when the run selects the 1M window), then a family-token fallback that
 /// prefers a variant matching the requested context window.
-fn pick_model_value(requested: &str, available: &[&str], context_1m: bool) -> Option<String> {
-    if context_1m {
-        for composed in [format!("{requested}[1m]"), format!("{requested}-1m")] {
+fn pick_model_value(requested: &str, available: &[&str], window: Option<&str>) -> Option<String> {
+    // The chosen window's variant when the agent lists one: `<model>[1m]` /
+    // `<model>-1m` (Claude), `<model>-900k` (Hermes's Codex variants). The
+    // default window has none, and runs the model itself.
+    if let Some(window) = window
+        .map(str::to_ascii_lowercase)
+        .filter(|w| !w.is_empty())
+    {
+        for composed in [
+            format!("{requested}[{window}]"),
+            format!("{requested}-{window}"),
+        ] {
             if available.contains(&composed.as_str()) {
                 return Some(composed);
             }
         }
     }
+    let context_1m = window.is_some_and(|w| w.eq_ignore_ascii_case("1m"));
     if available.contains(&requested) {
         return Some(requested.to_owned());
     }
@@ -3772,11 +4014,8 @@ fn validate_config_model_selection(
         .iter()
         .filter_map(|choice| choice.get("value").and_then(Value::as_str))
         .collect();
-    let context_1m = model_options
-        .get("contextWindow")
-        .and_then(Value::as_str)
-        .is_some_and(|window| window.eq_ignore_ascii_case("1m"));
-    if pick_model_value(requested, &available, context_1m).is_some() {
+    let window = model_options.get("contextWindow").and_then(Value::as_str);
+    if pick_model_value(requested, &available, window).is_some() {
         return Ok(());
     }
     Err(HarnessError::Protocol(format!(
@@ -3842,10 +4081,7 @@ fn config_option_sets(
     else {
         return Vec::new();
     };
-    let context_1m = model_options
-        .get("contextWindow")
-        .and_then(Value::as_str)
-        .is_some_and(|w| w.eq_ignore_ascii_case("1m"));
+    let window = model_options.get("contextWindow").and_then(Value::as_str);
     let mut sets = Vec::new();
     for option in options {
         let Some(config_id) = option.get("id").and_then(Value::as_str) else {
@@ -3865,7 +4101,7 @@ fn config_option_sets(
 
         let wanted: Option<Value> = match (kind, category) {
             ("select", Some("model")) => model
-                .and_then(|m| pick_model_value(m, &available, context_1m))
+                .and_then(|m| pick_model_value(m, &available, window))
                 .map(Value::String),
             // Full access: unattended parity with the retired custom
             // adapters (claude bypassPermissions / codex approvalPolicy
@@ -4479,7 +4715,11 @@ async fn open_session(
 ) -> Result<(String, Value), HarnessError> {
     let params = json!({
         "cwd": request.cwd,
-        "mcpServers": acp_session_mcp_servers(request.mcp.as_ref(), &request.extra_mcp),
+        "mcpServers": acp_session_mcp_servers(
+            request.mcp.as_ref(),
+            &request.extra_mcp,
+            takes_http_mcp(init),
+        ),
     });
     if let Some(resume) = &request.resume {
         let method = restore_method(init, harness);
@@ -4674,6 +4914,7 @@ fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
                 id: group.id.clone(),
                 label: group.label.to_owned(),
                 // variant descriptions only restate their thinking level
+                provider: first.provider.clone(),
                 description: None,
                 reasoning_levels: group.variants.iter().map(|(level, _)| *level).collect(),
                 options: first.options.clone(),
@@ -7623,6 +7864,44 @@ mod tests {
         );
     }
 
+    /// Hermes names a model `<provider>:<model>` and labels it `<Provider> ·
+    /// <model>`: the picker gets the model as its name and the provider
+    /// apart, named as people say it; a provider the map doesn't know keeps
+    /// the agent's own wording. A label without the shape stays as it is.
+    #[test]
+    fn a_provider_glued_to_a_models_label_rides_apart() {
+        let response = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "anthropic:claude-fable-5.1",
+                    "options": [
+                        { "value": "anthropic:claude-fable-5.1", "name": "Anthropic \u{b7} claude-fable-5.1" },
+                        { "value": "openai-codex:gpt-6-luna", "name": "ChatGPT or Codex Subscription \u{b7} gpt-6-luna" },
+                        { "value": "nous-portal:hermes-4-405b", "name": "Nous Portal Plus \u{b7} hermes-4-405b" },
+                        { "value": "local-model", "name": "Local Model" },
+                    ],
+                },
+            ],
+        });
+        let models = models_from_session(&response, &[]);
+        let row = |id: &str| models.iter().find(|m| m.id == id).unwrap_or_else(|| panic!("{id}"));
+        let fable = row("anthropic:claude-fable-5.1");
+        assert_eq!(fable.label, "claude-fable-5.1");
+        assert_eq!(fable.provider.as_ref().map(|p| (p.id.as_str(), p.name.as_str())), Some(("anthropic", "Anthropic")));
+        let luna = row("openai-codex:gpt-6-luna");
+        assert_eq!(luna.label, "gpt-6-luna");
+        assert_eq!(luna.provider.as_ref().map(|p| p.name.as_str()), Some("Codex"));
+        let nous = row("nous-portal:hermes-4-405b");
+        assert_eq!(nous.provider.as_ref().map(|p| p.name.as_str()), Some("Nous Portal Plus"));
+        let plain = row("local-model");
+        assert_eq!(plain.label, "Local Model");
+        assert!(plain.provider.is_none());
+    }
+
     #[test]
     fn model_1m_variants_collapse_into_a_context_window_trait() {
         let response = json!({
@@ -8142,6 +8421,7 @@ mod mcp_injection_tests {
             env: [("ZERON_IPC_PORT".to_owned(), "27654".to_owned())]
                 .into_iter()
                 .collect(),
+            http: None,
         };
         let servers = acp_mcp_servers(Some(&mcp));
         assert_eq!(
@@ -8161,14 +8441,16 @@ mod mcp_injection_tests {
             command: "/opt/zeron/zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         let extra = zeron_proto::McpServer {
             name: "plugin-focus".into(),
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec![],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
-        let servers = acp_session_mcp_servers(Some(&zeron), std::slice::from_ref(&extra));
+        let servers = acp_session_mcp_servers(Some(&zeron), std::slice::from_ref(&extra), false);
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[0]["name"], "zeron");
         assert_eq!(
@@ -8180,6 +8462,35 @@ mod mcp_injection_tests {
                 "env": [{ "name": "FOCUS", "value": "1" }],
             })
         );
-        assert_eq!(acp_session_mcp_servers(None, &[extra]).len(), 1);
+        assert_eq!(acp_session_mcp_servers(None, &[extra], false).len(), 1);
+    }
+
+    /// An agent that takes HTTP servers gets the engine's endpoint for
+    /// Zeron's own (no process); one that doesn't gets the stdio proxy.
+    #[test]
+    fn zeron_s_server_is_http_only_where_the_agent_takes_it() {
+        let zeron = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron-engine".into(),
+            args: vec!["mcp-proxy".into()],
+            env: [("ZERON_MCP_TOKEN".to_owned(), "t".to_owned())].into_iter().collect(),
+            http: Some(zeron_proto::McpHttp {
+                url: "http://127.0.0.1:4321/mcp".into(),
+                headers: [("Authorization".to_owned(), "Bearer t".to_owned())]
+                    .into_iter()
+                    .collect(),
+            }),
+        };
+        let http = acp_session_mcp_servers(Some(&zeron), &[], true);
+        assert_eq!(http[0]["type"], "http");
+        assert_eq!(http[0]["url"], "http://127.0.0.1:4321/mcp");
+        assert_eq!(http[0]["headers"], json!([{ "name": "Authorization", "value": "Bearer t" }]));
+        let stdio = acp_session_mcp_servers(Some(&zeron), &[], false);
+        assert_eq!(stdio[0]["command"], "/opt/zeron/zeron-engine");
+        assert_eq!(stdio[0]["args"], json!(["mcp-proxy"]));
+        assert!(stdio[0].get("type").is_none());
+        let init = json!({ "agentCapabilities": { "mcpCapabilities": { "http": true } } });
+        assert!(takes_http_mcp(&init));
+        assert!(!takes_http_mcp(&json!({ "agentCapabilities": {} })));
     }
 }

@@ -96,6 +96,10 @@ pub struct Engine {
     /// the next window's when that window closes.
     tasks: RefCell<Option<TaskSpawner>>,
     supervising: Cell<bool>,
+    /// What starts this app's engine: ahead of the first window
+    /// ([`start_ahead`]), then whenever the supervisor finds none. One, so
+    /// the two never start an engine each.
+    spawner: RefCell<Spawner>,
 }
 
 thread_local! {
@@ -119,6 +123,18 @@ pub fn install(cx: &mut WindowContext) {
     if !engine.supervising.get() {
         engine.supervising.set(true);
         cx.tasks.spawn(engine.clone().supervise());
+    }
+}
+
+/// Starts the engine now if none is running (none holds its data dir), as
+/// the launch begins, rather than once the first window is up and its
+/// supervisor finds none: the engine starts up beside the window's.
+pub fn start_ahead() {
+    let engine = get();
+    if let Ok(config) = &engine.config
+        && !zeron_launch::data_dir_held(&config.data_dir)
+    {
+        engine.spawner.borrow_mut().start_if_due(config);
     }
 }
 
@@ -154,7 +170,13 @@ impl Engine {
             unreachable_listeners: RefCell::default(),
             tasks: RefCell::default(),
             supervising: Cell::new(false),
+            spawner: RefCell::new(Spawner::new()),
         }
+    }
+
+    /// Whether this app started an engine that is likely still coming up.
+    pub fn started_engine(&self) -> bool {
+        self.spawner.borrow().starting()
     }
 
     /// Where the engine's IPC is (its port and data folder, which holds its
@@ -288,16 +310,36 @@ impl Engine {
         self.follow_session();
     }
 
+    /// Whether this device keeps its chats local while signed in.
+    pub fn keeps_chats_local(&self) -> bool {
+        self.data_dir().is_some_and(|dir| zeron_proto::keeps_chats_local(&dir))
+    }
+
+    /// Keep this device's chats local while signed in, or sync them again:
+    /// saved for the engine's next start, and the engine started again now
+    /// if its workspace no longer follows (see [`manager::needs_restart`]).
+    pub fn keep_chats_local(&self, on: bool) -> Result<(), String> {
+        let dir = self.data_dir().ok_or("offline")?;
+        zeron_proto::set_keep_chats_local(&dir, on).map_err(|error| error.to_string())?;
+        self.follow_session();
+        Ok(())
+    }
+
     fn follow_session(&self) {
         let scope = self.scope.borrow().clone();
-        if self.restarting.get() || !manager::needs_restart(scope.as_deref(), self.signed_in.get()) {
+        let keep_local = self.keeps_chats_local();
+        if self.restarting.get() || !manager::needs_restart(scope.as_deref(), self.signed_in.get(), keep_local) {
             return;
         }
         let Some(rpc) = self.rpc.borrow().clone() else {
             return;
         };
         self.restarting.set(true);
-        eprintln!("zeron-zgx: engine: signed in on a local workspace; starting it again to sync");
+        if keep_local {
+            eprintln!("zeron-zgx: engine: chats kept on this device; starting it again on the local workspace");
+        } else {
+            eprintln!("zeron-zgx: engine: signed in on a local workspace; starting it again to sync");
+        }
         self.spawn(async move {
             // It answers, then stops; the connection ends and a new engine
             // is started in its place.
@@ -314,7 +356,6 @@ impl Engine {
         let Ok(config) = &self.config else {
             return;
         };
-        let mut spawner = Spawner::new();
         let mut delay = Duration::from_millis(250);
         let mut said = None::<String>;
         let mut said_unreachable = false;
@@ -327,6 +368,12 @@ impl Engine {
             // which that engine replaced as it started again).
             let stale = refused.as_ref() == Some(&token);
             let mut refused_now = false;
+            // No engine holds the data dir (a launch after a restart of the
+            // computer, or after the engine stopped): none is running, so
+            // one is started before dialling, not once a dial is refused.
+            if !zeron_launch::data_dir_held(&config.data_dir) {
+                self.spawner.borrow_mut().start_if_due(config);
+            }
             match rpc::connect(config.port, token.clone()).await {
                 Ok(rpc) => {
                     delay = Duration::from_millis(250);
@@ -358,10 +405,12 @@ impl Engine {
                 }
                 Err(DialError::Refused) => {
                     refused = None;
-                    // (Started one, or an engine is about to let go of the
-                    // data dir: it's a moment away, not worth backing off.)
-                    if spawner.start_if_due(config) || spawner.held() {
-                        delay = Duration::from_millis(500);
+                    // (Started one, one this app started is still coming up,
+                    // or an engine is about to let go of the data dir: it's a
+                    // moment away, not worth backing off.)
+                    let mut spawner = self.spawner.borrow_mut();
+                    if spawner.start_if_due(config) || spawner.held() || spawner.starting() {
+                        delay = Duration::from_millis(100);
                     }
                 }
                 // A new engine is writing its token: try again shortly. The

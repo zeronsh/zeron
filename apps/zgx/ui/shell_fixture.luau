@@ -611,10 +611,20 @@ end
 -- and the project made arriving a beat after the answer, as the engine
 -- tells the sessions.
 local projects_stub = require("@account/projects") :: any
+-- How long the engine takes to answer (`fixture.slow_folders`: as a real
+-- one listing a big folder, long enough for a page's loading rows to show).
+local answer_ms = 0
+ui.command {
+	id = "fixture.slow_folders",
+	title = "Fixture: an engine slow to list folders",
+	run = function()
+		answer_ms = 600
+	end,
+}
 local function answer(value: any): any
 	return {
 		after = function(_, ok: (any) -> (), fail: ((any) -> ())?)
-			ui.after(0, function()
+			ui.after(answer_ms, function()
 				if type(value) == "table" and value.refused then
 					if fail then
 						fail(value.refused)

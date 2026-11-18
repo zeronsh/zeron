@@ -66,6 +66,9 @@ return function()
 	local store = require("@app/screens/chat/store") :: any
 	store.catalog_on = function() end
 	store.load_catalog = function() end
+	-- (A session opened from a page is told to the chat store first, which
+	-- asks the host to watch it: no host here.)
+	store.open = function() end
 	store.catalog:set({
 		state = "ready",
 		complete = true,

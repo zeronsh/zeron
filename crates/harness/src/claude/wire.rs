@@ -183,6 +183,16 @@ pub(crate) struct MessageFrame {
     /// `usage_limit_reached`.
     #[serde(default)]
     pub api_error_params: Option<Value>,
+    /// Bookkeeping frame, not a person typing. Image scale notes ride this.
+    /// (`isMeta` in a saved transcript; the live stream spells its fields in
+    /// snake case.)
+    #[serde(default, rename = "isMeta", alias = "is_meta")]
+    pub is_meta: bool,
+    /// Structured tool outcome. An image result repeats its bytes here when
+    /// the content blocks do not. (`toolUseResult` in a saved transcript,
+    /// `tool_use_result` on the live stream.)
+    #[serde(default, rename = "toolUseResult", alias = "tool_use_result")]
+    pub tool_use_result: Option<Value>,
 }
 
 impl MessageFrame {

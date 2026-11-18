@@ -52,10 +52,20 @@ local dock = require("@self/composer_dock")
 local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
+local Tooltip = require("@self/tooltip")
 local VoiceWave = require("@self/voice_wave").VoiceWave
 local context_usage = require("@self/context_usage")
-local motion = require("@self/motion")
+local TextMetrics = require("@self/composer_metrics")
+local Draft = require("@self/draft_text")
+local Layout = require("@self/composer_layout")
+local ComposerMotion = require("@self/composer_motion")
 local EditorMenu = require("@self/editor_menu")
+
+type ViewGeometry = {
+	height: number, header_height: number, tray_inset: number,
+	text: { left: number, right: number, top: number, height: number },
+	controls: Layout.Controls,
+}
 
 -- What the model's context holds, as its agent reports it: the tokens in
 -- it and the window's size (either may be missing).
@@ -96,12 +106,25 @@ export type FixedMachine = {
 	on_choose: (size: string) -> (),
 	note: (() -> string?)?,
 }
--- Where an existing chat works (`branch_fixed`).
--- (`cloud`: it runs on a Cloud machine, the chip's glyph Cloud's;
--- `restarting`: that machine restarting on a size picked, the glyph a
--- restart's.)
-export type Fixed = { device: string?, name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string?, cloud: boolean?, restarting: boolean? }
+-- Where an existing chat works (`branch_fixed`). On Cloud (`cloud`): a
+-- machine of its own, and what it reaches (`reach`: "devices" | "isolated",
+-- nil while not known); `restarting`: that machine restarting on a size
+-- picked, the chip's glyph a restart's.
+export type Fixed = {
+	device: string?,
+	name: string?,
+	worktree: boolean,
+	project: string?,
+	hue: string?,
+	src: string?,
+	emoji: string?,
+	cloud: boolean?,
+	reach: string?,
+	restarting: boolean?,
+}
+export type Sizes = { rest: number, target: number, presented: number, active: boolean, ready: boolean, settling: boolean, context: number }
 export type Props = {
+	on_sizes: ((sizes: Sizes) -> ())?,
 	value: State<string>,
 	placeholder: (string | Message)?,
 	-- What sends (the shipping app's setting): "enter", ↩ sends and ⇧↩
@@ -128,9 +151,12 @@ export type Props = {
 	-- A turn is running: Send becomes Stop while the draft is empty, and
 	-- queues what is typed.
 	running: State<boolean>?,
-	-- What the agent may do unasked: "supervised", "edits" or "full"; and
-	-- plan mode (explore and propose before changing anything).
+	-- What the agent may do unasked: "supervised", "edits", "auto" or
+	-- "full"; and plan mode (explore and propose before changing anything).
 	access: State<string?>?,
+	-- The chat's agent has an auto mode of its own (Claude Code's, Codex's
+	-- auto-review): the picker offers Auto.
+	access_auto: (() -> boolean)?,
 	plan: State<boolean>?,
 	-- The model (a ModelPicker: its agents' tabs, its models, its reasoning,
 	-- Fast mode and its other options' picks).
@@ -151,7 +177,8 @@ export type Props = {
 	default_model: (() -> string?)?,
 	-- A model's agent's accounts, putting one in use, and asking after them
 	-- again (ds.ModelPicker's).
-	accounts: ((harness: string, model: string) -> { ModelPicker.Account }?)?,
+	accounts: ((harness: string, model: string, provider: string?) -> { ModelPicker.Account }?)?,
+	account_group: ((harness: string, provider: string?) -> ModelPicker.AccountGroup?)?,
 	on_account: ((harness: string, id: string) -> ())?,
 	on_accounts_open: (() -> ())?,
 	-- The model picker opening (its catalog asked after again), and an
@@ -190,14 +217,21 @@ export type Props = {
 	branches_empty: ((query: string) -> Dropdown.Empty)?,
 	-- Where an existing chat works, fixed (its branch, live, whether its
 	-- folder is a worktree, and its project's name, hue and artwork): the
-	-- chip says so and opens nothing, as a chat can't move. Nil (a new
-	-- chat): the picker.
+	-- chip says so, and its panel shows where it works with nothing to
+	-- change, as a chat can't move; but a Cloud chat's reach, which
+	-- `on_reach` changes. Nil (a new chat): the picker.
 	branch_fixed: (() -> Fixed?)?,
 	-- An existing chat on Cloud: its chip opens the Machine menu (the new
 	-- chat's sizes, as its Work in lists them), the size it's on chosen,
 	-- `on_choose` told a pick, and `note` said under the sizes (what a pick
 	-- does to the machine). Only while `branch_fixed` says `cloud`.
 	fixed_machine: FixedMachine?,
+	on_reach: ((reach: string) -> ())?,
+	-- On Cloud, what a new chat's machine reaches ("devices" | "isolated";
+	-- nil: `reach_default`, the account's). No default (an edge that can't
+	-- keep one), no choice.
+	reach: State<string?>?,
+	reach_default: (() -> string?)?,
 	on_send: ((text: string) -> ())?,
 	on_stop: (() -> ())?,
 	-- A bare Escape no one else took (no mention list, question or
@@ -327,39 +361,6 @@ export type Props = {
 	mention_sections: { [string]: { { id: string, label: any } } }?,
 }
 
--- Zeron's geometry. The one line: 47 points inside the hairline, the text
--- centred in it. Opened out: the text box (16 above the text, 4 below)
--- between its floor and cap, then the controls' row (2, a 32-point chip
--- zone, 8). Round controls are 28 across, concentric with the pill's
--- corner: on one line (a pill, its corner half its height) centred in it,
--- as far from its sides as from its foot; opened out, as far in from the
--- side and the foot as the pill's corner (inside its hairline) is round
--- less theirs.
-local LINE = 22
-local ONE_LINE = 47
-local TEXT_TOP, TEXT_BOTTOM, TEXT_MIN, TEXT_MAX = 16, 4, 76, 260
-local ACTIONS = 42
-local HAIRLINES = 2
-local CONTROL = 28
-local INSET_LINE = (ONE_LINE - CONTROL) / 2
-local function open_inset(): number
-	return control.nest("$zeron.composer.radius", 1) - CONTROL / 2
-end
--- The controls' row opened out: its 42 points, or more where a rounder
--- pill (a template's) sets its controls further in from the foot, so they
--- keep the room over them they have at Zeron's own corner (its controls'
--- top 3 under the row's) rather than rising into the text.
-local ACTIONS_OVER = 3
-local function actions(): number
-	return math.max(ACTIONS, open_inset() + CONTROL + ACTIONS_OVER)
-end
--- The draft's own inset either side on one line, and opened out.
-local TEXT_SIDE = 8
-local TEXT_OPEN_SIDE = 16
--- Opened out, the pill folds back to one line only once the text is this
--- much narrower than the line holds, so a width at the boundary cannot
--- flicker between the two.
-local HYSTERESIS = 32
 -- How wide where-it-works stays before the access mode folds: its project's
 -- name (to PROJECT_MAX) and BRANCH_KEEP of the branch's, with the chip's
 -- own room (its padding, the glyph, the gaps, the chevron); until
@@ -418,23 +419,32 @@ end
 -- The access modes, as Zeron offers them; their icons (Central Icons,
 -- centralicons.com, round outlined, radius 2, stroke 1.5) say what each
 -- does: it waits for you (a raised hand), edits go through (a pencil with
--- sparkles), nothing is held back (an open padlock). (Made as they're
--- read, in the locale's words.)
-local function ACCESS(): { Dropdown.Item }
-	return {
-	worded({ value = "supervised", icon = "access-supervised" }, {
-		label = "ds.composer.access.supervised",
-		description = "ds.composer.access.supervised_hint",
-	}),
-	worded({ value = "edits", icon = "access-edits" }, {
-		label = "ds.composer.access.edits",
-		description = "ds.composer.access.edits_hint",
-	}),
-	worded({ value = "full", icon = "access-full" }, {
+-- sparkles), the agent's reviewer vets each action (a shield), nothing is
+-- held back (an open padlock). Auto only where the agent has one (`auto`),
+-- or while it's the mode chosen. (Made as they're read, in the locale's
+-- words.)
+local function ACCESS(auto: boolean, chosen: string?): { Dropdown.Item }
+	local items = {
+		worded({ value = "supervised", icon = "access-supervised" }, {
+			label = "ds.composer.access.supervised",
+			description = "ds.composer.access.supervised_hint",
+		}),
+		worded({ value = "edits", icon = "access-edits" }, {
+			label = "ds.composer.access.edits",
+			description = "ds.composer.access.edits_hint",
+		}),
+	}
+	if auto or chosen == "auto" then
+		table.insert(items, worded({ value = "auto", icon = "shield-check", disabled = not auto }, {
+			label = if auto then "ds.composer.access.auto" else "ds.composer.access.auto_unavailable",
+			description = if auto then "ds.composer.access.auto_hint" else "ds.composer.access.auto_unavailable_hint",
+		}))
+	end
+	table.insert(items, worded({ value = "full", icon = "access-full" }, {
 		label = "ds.composer.access.full",
 		description = "ds.composer.access.full_hint",
-	}),
-	}
+	}))
+	return items
 end
 
 -- Plan mode's row at the access panel's foot: an item's shape, its icon on
@@ -490,6 +500,21 @@ local function CHECKOUTS(): { Choice }
 	}
 end
 
+-- What a Cloud chat's machine reaches, as Zeron offers it: the person's
+-- other devices, or nothing past itself and the chats it starts.
+local function REACHES(): { Choice }
+	return {
+	worded({ value = "devices", icon = "monitor" }, {
+		label = "ds.composer.reach.devices",
+		description = "ds.composer.reach.devices_hint",
+	}),
+	worded({ value = "isolated", icon = "shield-check" }, {
+		label = "ds.composer.reach.isolated",
+		description = "ds.composer.reach.isolated_hint",
+	}),
+	}
+end
+
 -- A menu row, the menus' own: compact, full width, washed under the
 -- pointer.
 local function menu_row(props: ContainerProps): Node
@@ -518,12 +543,70 @@ local function list_of(given: any): any
 	return given or {}
 end
 
+-- A choice's own tile (a project's hue or artwork), else its icon: one or
+-- the other, following the choice. (`ink`: the icon's, a row's that can't
+-- change.)
+local function choice_mark(current: () -> Choice, ink: string?): Node
+	return ui.presence(function(): string
+		local c = current()
+		return if c.hue or c.src or c.emoji then "tile" else "icon"
+	end, function(kind: string): Node
+		if kind == "tile" then
+			return Tile {
+				label = function(): string?
+					return current().label
+				end,
+				hue = function(): string?
+					return current().hue
+				end,
+				src = function(): string?
+					return current().src
+				end,
+				emoji = function(): string?
+					return current().emoji
+				end,
+				-- (A project's choice: its tile `.project-icon`.)
+				project = function(): string?
+					return (current() :: any).project
+				end,
+				size = 18,
+			}
+		end
+		return glyph(function(): Icon.Name
+			return current().icon or "monitor"
+		end, ink)
+	end)
+end
+
+-- A row of the panel's head saying a choice that can't be changed (where
+-- an existing chat works): a submenu row's mark and name, dimmed, opening
+-- nothing.
+local function fixed_row(label: Message, current: () -> Choice): Node
+	return ui.menu_item(Menu.look {
+		label = label,
+		disabled = true,
+		cursor = "default",
+		hover = {},
+		active = {},
+		choice_mark(current, "$text.disabled"),
+		FadeText {
+			function()
+				return current().label
+			end,
+			text_size = "$font.size.md",
+			color = "$text.disabled",
+			grow = 1,
+		},
+	})
+end
+
 local function submenu(
 	siblings: { State<boolean> },
 	label: Message,
 	value: State<string?>,
 	choices: { Choice } | () -> { Choice },
-	fallback: number,
+	-- The row shown while nothing is chosen (a function follows a default).
+	fallback: number | () -> number,
 	-- (A string: Dropdown names its field by it only so.)
 	search: string?,
 	actions: { Dropdown.Action }?,
@@ -532,7 +615,9 @@ local function submenu(
 	-- A list that says more than names (the Machine row's): its panel's
 	-- width (260 else), a head over the list, what ends each row, and how
 	-- the row it opens from names the choice made.
-	more: Submenu?
+	more: Submenu?,
+	-- Told of a pick, after `value` takes it.
+	on_choose: ((v: string) -> ())?
 ): Node
 	local function current(): Choice
 		local v = value:get()
@@ -545,7 +630,8 @@ local function submenu(
 			end
 		end
 		-- (None yet, as a list still coming: a blank row.)
-		return listed[fallback] or listed[1] or { value = "", label = "" }
+		local at: number = if type(fallback) == "function" then fallback() else fallback
+		return listed[at] or listed[1] or { value = "", label = "" }
 	end
 	local own: State<boolean>? = nil
 	local function close_siblings()
@@ -557,6 +643,7 @@ local function submenu(
 	end
 	return Dropdown {
 		on_open = close_siblings,
+		on_choose = on_choose,
 		value = value,
 		items = choices,
 		actions = actions,
@@ -597,37 +684,7 @@ local function submenu(
 						end
 					end
 				end,
-				-- The choice's own tile (a project's hue or artwork), else its
-				-- icon: one or the other, following the choice.
-				ui.presence(function(): string
-					local c = current()
-					return if c.hue or c.src or c.emoji then "tile" else "icon"
-				end, function(kind: string): Node
-					if kind == "tile" then
-						return Tile {
-							label = function(): string?
-								return current().label
-							end,
-							hue = function(): string?
-								return current().hue
-							end,
-							src = function(): string?
-								return current().src
-							end,
-							emoji = function(): string?
-								return current().emoji
-							end,
-							-- (A project's choice: its tile `.project-icon`.)
-							project = function(): string?
-								return (current() :: any).project
-							end,
-							size = 18,
-						}
-					end
-					return glyph(function(): Icon.Name
-						return current().icon or "monitor"
-					end)
-				end),
+				choice_mark(current),
 				FadeText {
 					function()
 						local c = current()
@@ -755,8 +812,9 @@ local function on_cloud(device: State<string?>?, devices: any): boolean
 end
 
 -- The head of where-it-works's panel: "Work in", then the device it runs
--- on, the project there and the checkout, each a row opening its choices
--- beside the panel (the project's with "New project" under them).
+-- on, the project there and the checkout (on Cloud, what its machine
+-- reaches instead), each a row opening its choices beside the panel (the
+-- project's with "New project" under them).
 local function work_in(
 	project: State<string?>?,
 	projects: ({ Project } | State<{ Project }> | () -> { Project })?,
@@ -765,7 +823,9 @@ local function work_in(
 	device: State<string?>?,
 	devices: ({ Device } | State<{ Device }> | () -> { Device })?,
 	machine: State<string?>?,
-	machines: ({ Choice } | State<{ Choice }> | () -> { Choice })?
+	machines: ({ Choice } | State<{ Choice }> | () -> { Choice })?,
+	reach: State<string?>?,
+	reach_default: (() -> string?)?
 ): Node
 	local siblings: { State<boolean> } = {}
 	local rows: { Node } = {
@@ -869,6 +929,65 @@ local function work_in(
 			ui.show(function(): boolean
 				return on_cloud(device, devices) and #(list_of(machines) :: { Choice }) > 0
 			end, submenu(siblings, locale.t("ds.composer.machine.label"), machine, machines :: any, 1, nil, nil, nil, MACHINE_MORE))
+		)
+	end
+	if reach and reach_default then
+		-- On Cloud, in the checkout's place: whether its machine reaches your
+		-- other devices (none chosen: the account's default).
+		table.insert(
+			rows,
+			ui.show(function(): boolean
+				return on_cloud(device, devices) and reach_default() ~= nil
+			end, submenu(siblings, locale.t("ds.composer.reach.label"), reach, REACHES, function(): number
+				return if reach_default() == "isolated" then 2 else 1
+			end))
+		)
+	end
+	return ui.column { w_full = true, table.unpack(rows) }
+end
+
+-- The same head for an existing chat, which can't move: where it works,
+-- said in rows that open nothing; and on Cloud, what its machine reaches,
+-- which `on_reach` changes (shown at once, the chat's own following).
+local function fixed_work_in(fixed: () -> Fixed?, on_reach: ((reach: string) -> ())?): Node
+	local function f(): Fixed
+		return fixed() or { worktree = false }
+	end
+	local rows: { Node } = {
+		Menu.Heading { locale.t("ds.composer.work_in") },
+		ui.show(function(): boolean
+			return f().device ~= nil
+		end, fixed_row(locale.t("ds.composer.device.label"), function(): Choice
+			local it = f()
+			return { value = it.device or "", label = it.device or "", icon = if it.cloud then "cloud" else "monitor" }
+		end)),
+		fixed_row(locale.t("ds.composer.project.label"), function(): Choice
+			local it = f()
+			if it.project then
+				return { value = it.project, label = it.project, hue = it.hue, src = it.src, emoji = it.emoji }
+			end
+			return worded({ value = NO_PROJECT, icon = "folder" }, { label = "ds.composer.project.none" })
+		end),
+		ui.show(function(): boolean
+			local it = f()
+			return it.project ~= nil and not it.cloud
+		end, fixed_row(locale.t("ds.composer.checkout.label"), function(): Choice
+			return CHECKOUTS()[if f().worktree then 2 else 1]
+		end)),
+	}
+	if on_reach then
+		local reach = ui.use_state(nil :: string?)
+		ui.effect(function()
+			local now = f().reach
+			if reach:peek() ~= now then
+				reach:set(now)
+			end
+		end)
+		table.insert(
+			rows,
+			ui.show(function(): boolean
+				return f().cloud == true and f().reach ~= nil
+			end, submenu({}, locale.t("ds.composer.reach.label"), reach, REACHES, 1, nil, nil, nil, nil, on_reach))
 		)
 	end
 	return ui.column { w_full = true, table.unpack(rows) }
@@ -1105,14 +1224,6 @@ fn fill(input: FillInput) -> vec4<f32> {
 local lightboxes = 0
 
 return ui.component(function(props: Props): Node
-	-- Opened out, the controls' inset: from the theme's corner, as this one
-	-- is built.
-	local INSET_OPEN = open_inset()
-	-- On the tray, the chips' inset from the pill's edge above them, the
-	-- tray's foot and its sides: the pill's own controls' (+ and Send sit
-	-- this far in from its edge, its hairline and INSET_OPEN), so the row
-	-- keeps the pill's spacing and its chips line up with those buttons.
-	local TRAY_INSET = INSET_OPEN + HAIRLINES / 2
 	-- On the tray, the step under the pill and above the tray's foot (one
 	-- token: the footer's margins and the tray's height both read it), and
 	-- how far the tray tucks up behind the pill, its top hidden there.
@@ -1141,8 +1252,28 @@ return ui.component(function(props: Props): Node
 		return if props.keep then ui.state(`composer:{props.keep}:{key}`, initial) else ui.use_state(initial)
 	end
 	local pill_w = kept("pill_w", 0)
-	local line_w = kept("line_w", 0)
-	local wrapped_h = kept("wrapped_h", 0)
+	local metrics = TextMetrics.use {
+		value = value,
+		keep = props.keep,
+		editor = field,
+		width = function(peek: boolean?): number
+			-- The surface's content box excludes its two hairlines. Both
+			-- expanded text insets come out of that, never the eased field.
+			return Layout.measurement(if peek then pill_w:peek() else pill_w:get()).width
+		end,
+		-- Past the cap a draft is measured no more: its size changes nothing
+		-- (Layout.estimate). The type's line height changed (tracked), it is
+		-- measured again.
+		estimate = function(line_height: number): Layout.Sample?
+			local line = ui.theme.get("zeron.composer.line")
+			if type(line) == "number" and math.abs(line - line_height) > 0.01 then
+				return nil
+			end
+			-- Its line breaks counted where it's held, up to the cap's.
+			local capped = Layout.capped_lines(line_height)
+			return Layout.estimate_lines(1 + #value:find("\n", { limit = capped - 1 }), line_height)
+		end,
+	}
 	local head_h_seen = kept("head_h", 0)
 	local trailing_seen = kept("trailing_w", 0)
 	local footer_w = kept("footer_w", 0)
@@ -1181,10 +1312,19 @@ return ui.component(function(props: Props): Node
 	end
 
 	local function has_text(): boolean
-		return string.find(value:get(), "%S") ~= nil
+		return Draft.has_text(value)
 	end
 	local function disabled(): boolean
 		return read(props.disabled) == true
+	end
+	-- Auto is chosen on an agent without it ("Auto unavailable"): nothing is
+	-- sent until another mode or agent is picked (the engine would refuse
+	-- the run).
+	local function access_blocked(): boolean
+		return props.access ~= nil
+			and props.access_auto ~= nil
+			and props.access:get() == "auto"
+			and not props.access_auto()
 	end
 	local function dictating(): boolean
 		return props.dictating ~= nil and props.dictating:get()
@@ -1246,6 +1386,9 @@ return ui.component(function(props: Props): Node
 		if not string.find(text, "%S") and not has_cargo() then
 			return
 		end
+		if access_blocked() then
+			return
+		end
 		if props.on_send then
 			props.on_send(text)
 		end
@@ -1294,128 +1437,62 @@ return ui.component(function(props: Props): Node
 		return (if w > 0 then w else 1000) < NARROW
 	end
 
-	-- One line or opened out. On one line the text has the pill less the
-	-- leading control and the trailing ones; opened out, it folds back only
-	-- once comfortably short again. Anything over the draft opens it out.
-	-- The controls at the right, as measured; until they are (a composer
-	-- just made, a reload's), their usual two (the microphone and Send),
-	-- so the text is laid out where it rests from the first frame rather
-	-- than easing in from the full width.
-	local function trailing_w(): number
-		local w = trailing_seen:get()
-		return if w > 0 then w else CONTROL * 2 + 8
+	-- A pure calculation owns all target geometry. The effect commits the
+	-- explicit text-hysteresis state; rendering/computeds mutate no history.
+	local previous_text_expanded = ui.use_state(read(props.expanded) == true)
+	local function layout_input(): Layout.Input
+		local _ = ui.theme.current:get()
+		return {
+			width = pill_w:get(),
+			-- Retain the last complete sample while a request is stale.
+			sample = metrics.sample:get(),
+			trailing_width = trailing_seen:get(),
+			control_corner = control.nest("$zeron.composer.radius", Layout.BORDER),
+			header_height = head_h_seen:get(),
+			header_gap = head_gap(),
+			expanded = read(props.expanded) == true,
+			cargo = has_cargo(),
+			asking = asking(),
+			dictating = dictating(),
+			multiline = Draft.multiline(value),
+		}
 	end
-	local function expanded(): boolean
-		return read(props.expanded) == true
-	end
-	local was_open = expanded()
-	local open = ui.computed(function(): boolean
-		-- Dictating, the words land in the draft over the track.
-		if expanded() or has_cargo() or asking() or dictating() then
-			return true
-		end
-		local text = value:get()
-		local width = pill_w:get()
-		local tail = trailing_w()
-		local need = line_w:get()
-		if width <= 0 then
-			return false
-		end
-		local room = width - HAIRLINES - (INSET_LINE + CONTROL + TEXT_SIDE) - (TEXT_SIDE + tail + INSET_LINE)
-		local want
-		if string.find(text, "\n") then
-			want = true
-		elseif was_open then
-			want = need > room - HYSTERESIS
-		else
-			want = need > room
-		end
-		was_open = want
-		return want
-	end)
-
-	-- What is over the draft: nothing, or its measured height.
-	local head_h = ui.computed(function(): number
-		if not has_cargo() and not asking() then
-			return 0
-		end
-		return head_h_seen:get()
-	end)
-	-- The text box opened out: the wrapped text with its insets, between
-	-- the floor and the cap.
-	local box = ui.computed(function(): number
-		local h = math.max(wrapped_h:get(), LINE)
-		return math.clamp(h + TEXT_TOP + TEXT_BOTTOM, TEXT_MIN, TEXT_MAX)
-	end)
-	local HEAD_GAP = head_gap()
-	local height = ui.computed(function(): number
-		if open:get() then
-			local head = head_h:get()
-			-- With something over it, the draft's box starts under that
-			-- with the strip's own gap rather than the pill's top.
-			return head + (if head > 0 then box:get() - TEXT_TOP + HEAD_GAP else box:get()) + actions() + HAIRLINES
-		end
-		return ONE_LINE + HAIRLINES
-	end)
-	-- Where the text sits: beside the controls on one line, over them
-	-- opened out, under whatever is over it.
-	local text_left = ui.computed(function(): number
-		return if open:get() then TEXT_OPEN_SIDE else INSET_LINE + CONTROL + TEXT_SIDE
-	end)
-	local text_right = ui.computed(function(): number
-		return if open:get() then TEXT_OPEN_SIDE else TEXT_SIDE + trailing_w() + INSET_LINE
-	end)
-	local text_top = ui.computed(function(): number
-		if not open:get() then
-			return (ONE_LINE - LINE) / 2
-		end
-		local head = head_h:get()
-		return if head > 0 then head + HEAD_GAP else TEXT_TOP
-	end)
-	local text_h = ui.computed(function(): number
-		return if open:get() then box:get() - TEXT_TOP - TEXT_BOTTOM else LINE
-	end)
-	local EASE: TweenOptions = { duration = 220, ease = "out(3)" }
-	-- Each of the pill's measures as it shows: eased (EASE) as it grows or
-	-- shrinks in place; at once for a moment after `snap` moves (what
-	-- settles its size, measured, lands over a frame or two), and with
-	-- motion reduced.
-	local SNAP_MS = 400
-	local snap_seen = if props.snap then props.snap:peek() else nil
-	local snap_until = 0
-	local function at_once(): boolean
-		if props.snap then
-			local n = props.snap:get()
-			if n ~= snap_seen then
-				snap_seen = n
-				snap_until = ui.now() + SNAP_MS
+	local target_geometry = ui.use_state(Layout.calculate(layout_input(), previous_text_expanded:peek()))
+	ui.effect(function()
+		local next = Layout.calculate(layout_input(), previous_text_expanded:peek())
+		ui.batch(function()
+			previous_text_expanded:set(next.next_text_expanded)
+			-- Only a target laid out differently: a pane resized changes the
+			-- widths layout applies itself, and a new target at each of its
+			-- frames woke the motion, its frame and every binding of it.
+			if not Layout.same_target(target_geometry:peek(), next) then
+				target_geometry:set(next)
 			end
-		end
-		return motion.reduced_now() or ui.now() < snap_until
-	end
-	local function eased(src: ReadOnlyState<number>): State<number>
-		local value = ui.use_state(src:peek())
-		local run: any = nil
-		ui.effect(function()
-			local v = src:get()
-			local now = at_once()
-			if run then
-				run:cancel()
-				run = nil
-			end
-			if now or math.abs(value:peek() - v) < 0.01 then
-				value:set(v)
-				return
-			end
-			run = anime.animate(value, { value = v, duration = EASE.duration, ease = EASE.ease })
 		end)
-		return value
-	end
-	-- (One on a line, another opened out.)
-	local function by_open(line: number, opened: number): State<number>
-		return eased(ui.computed(function(): number
-			return if open:get() then opened else line
-		end))
+	end)
+	local settlement = ui.computed(function()
+		local metrics_now = metrics.result:get()
+		local actual = pill.height
+		return { revision = metrics_now.revision,
+			status = if metrics_now.status == "ready" and actual ~= nil
+				and math.abs(actual - target_geometry:get().height) < 0.5 then "ready" else "pending" }
+	end)
+	local transition = ComposerMotion.use(target_geometry, props.snap, settlement)
+	local frame_geometry = transition.frame
+	-- Width is applied by layout, not a view binding. Project the presented
+	-- snapshot once so width/measurement metadata alone cannot wake every
+	-- height, inset and control binding in each split composer.
+	local view_geometry = ui.computed(function(): ViewGeometry
+		local g = frame_geometry:get()
+		return { height = g.height, header_height = g.header_height,
+			text = { left = g.text.left, right = g.text.right, top = g.text.top, height = g.text.height },
+			controls = g.controls, tray_inset = g.tray_inset }
+	end)
+	-- Every binding reads the same frame snapshot; none starts an animation.
+	local function presented(select: (ViewGeometry) -> number): () -> number
+		return function(): number
+			return select(view_geometry:get())
+		end
 	end
 
 	-- +, as a secondary button: a fill of its own, so it reads as a control
@@ -1592,6 +1669,7 @@ return ui.component(function(props: Props): Node
 			model_label = props.model_label,
 			default_model = props.default_model,
 			accounts = props.accounts,
+			account_group = props.account_group,
 			on_account = props.on_account,
 			on_accounts_open = props.on_accounts_open,
 			on_open = props.on_models_open,
@@ -1621,7 +1699,10 @@ return ui.component(function(props: Props): Node
 				end
 				else nil,
 			value = props.access,
-			items = ACCESS,
+			items = function(): { Dropdown.Item }
+				local chosen = props.access and props.access:get()
+				return ACCESS(props.access_auto ~= nil and props.access_auto(), chosen)
+			end,
 			tone = "chip",
 			label = locale.t("ds.composer.access.label") :: any,
 			search = false,
@@ -1653,20 +1734,41 @@ return ui.component(function(props: Props): Node
 		on_click = props.on_dictate,
 		Icon { name = "microphone", size = 18 },
 	})
-	local send_button = Button {
-		shape = "pill",
-		size = "sm",
-		icon = true,
-		label = function()
-			return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
-		end,
-		disabled = function()
-			return disabled() or not (has_text() or has_cargo() or dictating())
-		end,
-		on_press = if spoken then spoken.on_send_press else nil,
-		on_click = send,
-		Icon { name = "arrow-up", size = 14 },
-	}
+	local function send_control(): Node
+		return Button {
+			shape = "pill",
+			size = "sm",
+			icon = true,
+			label = function()
+				return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
+			end,
+			disabled = function()
+				return disabled() or access_blocked() or not (has_text() or has_cargo() or dictating())
+			end,
+			on_press = if spoken then spoken.on_send_press else nil,
+			on_click = send,
+			Icon { name = "arrow-up", size = 14 },
+		}
+	end
+	-- Held by an unavailable Auto, it says why when rested on. (A tooltip is
+	-- set once, not followed, and a disabled button hears no pointer: the
+	-- held one is a button of its own under a box that carries the words.)
+	local send_button = ui.show(
+		access_blocked,
+		ui.div {
+			relative = true,
+			send_control(),
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				tooltip = Tooltip { locale.t("ds.composer.send_auto_unavailable") },
+			},
+		},
+		send_control()
+	)
 	local stop_button = Button {
 		shape = "pill",
 		size = "sm",
@@ -1784,9 +1886,9 @@ return ui.component(function(props: Props): Node
 		return ui.div {
 			absolute = true,
 			-- (Insets take points: the control, the sides, and a breath.)
-			left = by_open(INSET_LINE + CONTROL + 8, INSET_OPEN + CONTROL + 8),
-			right = by_open(INSET_LINE + CONTROL * 2 + 8 + 8, INSET_OPEN + CONTROL * 2 + 8 + 8),
-			bottom = by_open(INSET_LINE, INSET_OPEN),
+			left = presented(function(g) return g.controls.voice.left end),
+			right = presented(function(g) return g.controls.voice.right end),
+			bottom = presented(function(g) return g.controls.voice.bottom end),
 			h = "$zeron.composer.voice.h",
 			ref = track_w,
 			overflow = "hidden",
@@ -1961,14 +2063,14 @@ return ui.component(function(props: Props): Node
 		on_resize = measure(pill_w, "w"),
 		relative = true,
 		w_full = true,
-		h = eased(height),
+		h = presented(function(g) return g.height end),
 		overflow = "hidden",
 		-- (Its glass, edge and shadow are the frame's, round it and the deck
 		-- over it: one surface. Its own corner only clips what's in it, and
 		-- its edge, clear, keeps the room the frame's takes, so everything in
 		-- it sits where it always has.)
 		rounded = "$zeron.composer.radius",
-		border = 1,
+		border = Layout.BORDER,
 		border_color = "#00000000",
 		-- (Neither `on_files` nor its overlay: files are what's around it to
 		-- take, the drop going on up to it.)
@@ -1999,44 +2101,21 @@ return ui.component(function(props: Props): Node
 			focus_on_press = false,
 			on_press = to_draft,
 		},
-		-- The measures: the draft on one line, and wrapped as it would be
-		-- opened out (a mark after it, so a last empty line counts).
-		ui.text {
-			on_resize = measure(line_w, "w"),
-			absolute = true,
-			left = 0,
-			top = 0,
-			opacity = 0,
-			pointer_events = "none",
-			text_size = "$zeron.composer.text",
-			line_height = "$zeron.composer.line",
-			function()
-				return value:get()
-			end,
+		-- Measure the natural header inside a separate presented clip. The
+		-- clip's animated height must never feed the header measurement.
+		ui.div {
+			absolute = true, left = 0, right = 0, top = 0,
+			h = presented(function(g) return g.header_height end),
+			overflow = "hidden",
+			head,
 		},
-		ui.text {
-			on_resize = measure(wrapped_h, "h"),
-			absolute = true,
-			left = TEXT_OPEN_SIDE,
-			right = TEXT_OPEN_SIDE,
-			top = 0,
-			opacity = 0,
-			pointer_events = "none",
-			wrap = true,
-			text_size = "$zeron.composer.text",
-			line_height = "$zeron.composer.line",
-			function()
-				return value:get() .. "\u{200B}"
-			end,
-		},
-		head,
 		-- The draft.
 		ui.div {
 			absolute = true,
-			left = eased(text_left),
-			right = eased(text_right),
-			top = eased(text_top),
-			h = eased(text_h),
+			left = presented(function(g) return g.text.left end),
+			right = presented(function(g) return g.text.right end),
+			top = presented(function(g) return g.text.top end),
+			h = presented(function(g) return g.text.height end),
 			ui.textarea(EditorMenu.on({
 				ref = field,
 				value = value,
@@ -2195,8 +2274,8 @@ return ui.component(function(props: Props): Node
 		-- The controls, on the pill's foot.
 		ui.div {
 			absolute = true,
-			left = by_open(INSET_LINE, INSET_OPEN),
-			bottom = by_open(INSET_LINE, INSET_OPEN),
+			left = presented(function(g) return g.controls.leading.left end),
+			bottom = presented(function(g) return g.controls.leading.bottom end),
 			ui.show(function()
 				return not asking()
 			end, attach),
@@ -2205,10 +2284,10 @@ return ui.component(function(props: Props): Node
 		ui.row {
 			on_resize = measure(trailing_seen, "w"),
 			absolute = true,
-			right = by_open(INSET_LINE, INSET_OPEN),
+			right = presented(function(g) return g.controls.trailing.right end),
 			-- (Its row is 32: the control centred in it.)
-			bottom = by_open(INSET_LINE - 2, INSET_OPEN - 2),
-			h = 32,
+			bottom = presented(function(g) return g.controls.trailing.bottom end),
+			h = presented(function(g) return g.controls.trailing.height end),
 			items = "center",
 			gap = "$space.2",
 			ui.show(asking, ask_controls()),
@@ -2267,7 +2346,9 @@ return ui.component(function(props: Props): Node
 						props.device,
 						props.devices :: any,
 						props.machine,
-						props.machines :: any
+						props.machines :: any,
+						props.reach,
+						props.reach_default
 					)
 					else nil
 			end
@@ -2343,6 +2424,29 @@ return ui.component(function(props: Props): Node
 				end
 				return nil
 			end
+			-- The chip: [glyph] device › project › branch, washed under the
+			-- pointer and while its panel is open, as a chip is.
+			local function chip(menu: Dropdown.Menu, label: Message | () -> string, place: Place): Node
+				return ui.button {
+					label = label :: any,
+					h = CHIP_H,
+					px = "$zeron.space.tight",
+					gap = "$zeron.space.tight",
+					items = "center",
+					min_w = 0,
+					rounded = CHIP_RADIUS,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.medium",
+					bg = function(): string
+						return if menu.open:get() then "$hover" else "#00000000"
+					end,
+					color = "$text.tertiary",
+					hover = { bg = "$hover", color = "$text.secondary" },
+					active = { bg = "$pressed", color = "$text.secondary" },
+					on_click = menu.toggle,
+					table.unpack(place_line(place)),
+				}
+			end
 			local picker = Dropdown {
 				value = props.branch,
 				label = locale.t("ds.composer.branch.label") :: any,
@@ -2353,104 +2457,76 @@ return ui.component(function(props: Props): Node
 				list_when = in_project,
 				width = 280,
 				head = head_node(),
-				-- The chip: [tile] project › [glyph] branch, washed under the
-				-- pointer and while its panel is open, as a chip is.
 				trigger = function(menu: Dropdown.Menu): Node
-					return ui.button {
-						label = locale.t("ds.composer.branch.label"),
-						h = CHIP_H,
-						px = "$zeron.space.tight",
-						gap = "$zeron.space.tight",
-						items = "center",
-						min_w = 0,
-						rounded = CHIP_RADIUS,
-						text_size = "$font.size.sm",
-						weight = "$font.weight.medium",
-						bg = function(): string
-							return if menu.open:get() then "$hover" else "#00000000"
-						end,
-						color = "$text.tertiary",
-						hover = { bg = "$hover", color = "$text.secondary" },
-						active = { bg = "$pressed", color = "$text.secondary" },
-						on_click = menu.toggle,
-						table.unpack(place_line {
-							device = chosen_device,
-							project = chosen_project,
-							in_project = in_project,
-							branch = branch_name,
-							glyph = runs_in,
-							folded = folded,
-							on_measures = place_measures,
-						}),
-					}
-				end,
-			}
-			-- An existing chat's: where it works, said, opening nothing.
-			local fixed = props.branch_fixed
-			local function fixed_row(menu: Dropdown.Menu?): Node
-				local row = ui.row {
-					h = CHIP_H,
-					px = "$zeron.space.tight",
-					gap = "$zeron.space.tight",
-					items = "center",
-					min_w = 0,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					color = "$text.tertiary",
-					label = function(): string
-						local f = fixed()
-						return locale.s("ds.composer.branch.fixed", { name = if f and f.name then f.name else "" })
-					end,
-					table.unpack(place_line {
-						device = function(): string?
-							local f = fixed()
-							return if f then f.device else nil
-						end,
-						project = function(): Project?
-							local f = fixed()
-							if f and f.project then
-								return { value = f.project, label = f.project, hue = f.hue, src = f.src, emoji = f.emoji }
-							end
-							return nil
-						end,
-						in_project = function(): boolean
-							return true
-						end,
-						branch = function(): string
-							local f = fixed()
-							return if f and f.name then f.name else locale.s("ds.composer.branch.no_ref")
-						end,
-						glyph = function(): Icon.Name?
-							local f = fixed()
-							if f and f.cloud then
-								return if f.restarting then "restart" else "cloud"
-							end
-							return if f and f.worktree then "worktree" else nil
-						end,
+					return chip(menu, locale.t("ds.composer.branch.label"), {
+						device = chosen_device,
+						project = chosen_project,
+						in_project = in_project,
+						branch = branch_name,
+						glyph = runs_in,
 						folded = folded,
 						on_measures = place_measures,
-					}),
-				}
-				if not menu then
-					return row
-				end
-				-- On Cloud: a chip, washed under the pointer and while its
-				-- sizes are open, as the new chat's is.
-				return ui.button {
-					label = locale.t("ds.composer.machine.change"),
-					h = CHIP_H,
-					-- (The row inside keeps the chip's own inset.)
-					p = 0,
-					items = "center",
-					min_w = 0,
-					rounded = CHIP_RADIUS,
-					bg = function(): string
-						return if menu.open:get() then "$hover" else "#00000000"
+					})
+				end,
+			}
+			-- An existing chat's: where it works, said; its panel says so too
+			-- (nothing there to change, as a chat can't move), but for what a
+			-- Cloud chat's machine reaches, and on Cloud with sizes to offer
+			-- (`fixed_machine`), the size it's on, under where it works.
+			local fixed = props.branch_fixed
+			-- The fixed chip's line (built for each chip: a node lives in one
+			-- place).
+			local function fixed_place(f_of: () -> Fixed?): Place
+				return {
+					device = function(): string?
+						local f = f_of()
+						return if f then f.device else nil
 					end,
-					hover = { bg = "$hover" },
-					active = { bg = "$pressed" },
-					on_click = menu.toggle,
-					row,
+					project = function(): Project?
+						local f = f_of()
+						if f and f.project then
+							return { value = f.project, label = f.project, hue = f.hue, src = f.src, emoji = f.emoji }
+						end
+						return nil
+					end,
+					in_project = function(): boolean
+						return true
+					end,
+					branch = function(): string
+						local f = f_of()
+						return if f and f.name then f.name else locale.s("ds.composer.branch.no_ref")
+					end,
+					-- Where it runs off the branch: Cloud's machine (restarting
+					-- on a size picked, a restart's), a worktree, or the
+					-- project's own folder.
+					glyph = function(): Icon.Name?
+						local f = f_of()
+						if f and f.cloud then
+							return if f.restarting then "restart" else "cloud"
+						end
+						return if f and f.worktree then "worktree" else nil
+					end,
+					folded = folded,
+					on_measures = place_measures,
+				}
+			end
+			local function where_menu(f_of: () -> Fixed?): Node
+				return Dropdown {
+					value = ui.use_state(nil :: string?),
+					label = locale.t("ds.composer.branch.label") :: any,
+					items = {},
+					search = false,
+					list_when = function(): boolean
+						return false
+					end,
+					width = 280,
+					head = fixed_work_in(f_of, props.on_reach),
+					trigger = function(menu: Dropdown.Menu): Node
+						return chip(menu, function(): string
+							local f = f_of()
+							return locale.s("ds.composer.branch.fixed", { name = if f and f.name then f.name else "" })
+						end, fixed_place(f_of))
+					end,
 				}
 			end
 			local fm = props.fixed_machine
@@ -2469,7 +2545,7 @@ return ui.component(function(props: Props): Node
 					label = locale.t("ds.composer.machine.label") :: any,
 					search = false,
 					width = MACHINE_W,
-					head = machine_head(),
+					head = ui.column { w_full = true, fixed_work_in(fixed_fn, props.on_reach), machine_head() },
 					trailing_item = MACHINE_MORE.trailing,
 					extra = if note
 						then ui.row {
@@ -2492,11 +2568,11 @@ return ui.component(function(props: Props): Node
 						end
 						else nil,
 					trigger = function(menu: Dropdown.Menu): Node
-						return fixed_row(menu)
+						return chip(menu, locale.t("ds.composer.machine.change"), fixed_place(fixed_fn))
 					end,
-				}, fixed_row(nil))
+				}, where_menu(fixed_fn))
 			elseif fixed then
-				static = fixed_row(nil)
+				static = where_menu(fixed)
 			end
 			table.insert(
 				left,
@@ -2527,7 +2603,7 @@ return ui.component(function(props: Props): Node
 				return if on_tray() then `${TRAY_GAP}` else 0
 			end :: any,
 			px = function(): any
-				return if on_tray() then ui.raw(TRAY_INSET, "the pill's controls' inset") else "$zeron.space.snug"
+				return if on_tray() then ui.raw(view_geometry:get().tray_inset, "the pill's controls' inset") else "$zeron.space.snug"
 			end :: any,
 			items = "center",
 			gap = "$space.1",
@@ -2657,6 +2733,7 @@ return ui.component(function(props: Props): Node
 
 	-- The pill (the mentions' popover anchored on it: its panel opens at
 	-- the caret inside), its trays behind, the footer under.
+	local footer_size, deck_size, outer_size = ui.ref(), ui.ref(), ui.ref()
 	local body = ui.column {
 		w_full = true,
 		relative = true,
@@ -2667,7 +2744,7 @@ return ui.component(function(props: Props): Node
 		-- footer, tucked behind the pill (its top hidden under it, its sides
 		-- the pill's), so the chips sit on the composer's surface rather than
 		-- on the art. They sit as far in from its sides as the pill's own
-		-- controls sit in it (TRAY_INSET), a tight step (TRAY_GAP) below the
+		-- controls sit in it, a tight step (TRAY_GAP) below the
 		-- pill and above its foot; its height is theirs (tray_h), its corner
 		-- the trays'.
 		ui.presence(function(): string?
@@ -2735,10 +2812,10 @@ return ui.component(function(props: Props): Node
 					return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
 				end,
 			},
-			trays,
+			ui.column { ref = deck_size, w_full = true, shrink = 0, trays },
 			ui.popover(m.popover(surface)),
 		},
-		if props.bare then nil else footer,
+		ui.column { ref = footer_size, w_full = true, shrink = 0, if props.bare then nil else footer },
 		-- Folded, what waits on the agent: a pill floating just over the
 		-- composer's middle, out of the layout (the conversation shows under
 		-- it, as under "Scroll to end", which it moves aside for).
@@ -2756,7 +2833,49 @@ return ui.component(function(props: Props): Node
 			else nil,
 	}
 
+	if props.on_sizes then
+		local on_sizes = props.on_sizes
+		-- Each its own computed, so what changes and leaves it the same (the
+		-- pill's width, a keystroke, a new metrics revision) wakes nothing.
+		local rest = ui.computed(function(): number
+			local _ = ui.theme.current:get()
+			return Layout.calculate({
+				-- (Its height is the same at any width: it is never measured.)
+				width = pill_w:peek(), sample = nil, trailing_width = trailing_seen:get(),
+				control_corner = control.nest("$zeron.composer.radius", Layout.BORDER),
+				header_height = 0, header_gap = 0, expanded = read(props.expanded) == true,
+				cargo = false, asking = false, dictating = false, multiline = false,
+			}, false).height
+		end)
+		local ready = ui.computed(function(): boolean
+			return settlement:get().status == "ready"
+		end)
+		local target_h = ui.computed(function(): number
+			return target_geometry:get().height
+		end)
+		local last: Sizes? = nil
+		ui.effect(function()
+			local footer_h, deck_h, actual = footer_size.height, deck_size.height, outer_size.height
+			local context = if props.snap then props.snap:get() else 0
+			if footer_h == nil or deck_h == nil or not actual or actual <= 0 then
+				return
+			end
+			local sizes: Sizes = { rest = rest:get() + footer_h + deck_h, target = target_h:get() + footer_h + deck_h,
+				presented = actual, active = transition.active:get(), ready = ready:get(),
+				settling = transition.settling:get(), context = context }
+			local was = last
+			if was and was.rest == sizes.rest and was.target == sizes.target and was.presented == sizes.presented
+				and was.active == sizes.active and was.ready == sizes.ready and was.settling == sizes.settling
+				and was.context == sizes.context then
+				return
+			end
+			last = sizes
+			on_sizes(sizes)
+		end)
+	end
+
 	return ui.column {
+		ref = outer_size,
 		w_full = true,
 		gap = 0,
 		body,

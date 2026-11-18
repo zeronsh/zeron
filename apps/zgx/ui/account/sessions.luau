@@ -77,6 +77,11 @@ export type Chat = {
 	-- woke (Unix seconds).
 	sleep_until: number?,
 	woke: number?,
+	-- The last turn its agent finished (an opaque mark, nil before its
+	-- first), and whether its session row was fresh as that was read: what
+	-- the "finished" chime rings on moving (screens/settings/chimes).
+	turn: string?,
+	turn_fresh: boolean?,
 }
 export type WaitingOn = { id: string, kind: string, label: string }
 -- A side chat: a chat under another (its `parent`).

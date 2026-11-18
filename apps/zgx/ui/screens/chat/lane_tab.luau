@@ -33,6 +33,7 @@ local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
+local Draft = require("@ds/draft_text")
 -- (The chat page's places in its chats, which a split's panes share.)
 local Shared = require("@app/screens/chat/shared")
 local Asks = require("@app/screens/chat/asks")
@@ -298,22 +299,53 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		-- picks, one draft per chat (screens/chat/shared), shown here and
 		-- written back as they change, wherever it's kept. Never the focused
 		-- chat's: the focus moving changes nothing this shows.)
+		--
+		-- Each side's write is told to the other by its length (`pulled`,
+		-- `pushed`), so its echo isn't read back: both read the whole draft
+		-- and compared it at every keystroke, both ways (3 ms a key at
+		-- 30,000 lines). By length, so a write that changed nothing, and so
+		-- came back as no run, never hides the next change. `known`: this
+		-- pane's draft's length as last seen, so the mirror from the chat's
+		-- draft reads this one's only where the lengths agree.
+		local pulled, pushed, known = nil :: number?, nil :: number?, -1
 		ui.effect(function()
+			Shared.track_draft_of(chat)
+			local echo = pushed
+			pushed = nil
+			local size = Shared.draft_size_of(chat)
+			if echo ~= nil and size == echo then
+				return
+			end
 			local d = Shared.draft_of(chat)
-			if draft:peek() ~= d.text then
+			if size ~= known or draft:peek() ~= d.text then
+				pulled, known = size, size
 				draft:set(d.text)
 			end
 			chosen:set(d.chosen)
 		end)
+		local first = true
 		ui.effect(function()
-			local text = draft:get()
-			if Shared.draft_of(chat).text ~= text then
-				Shared.set_draft_of(chat, "text", text)
+			local size = Draft.size(draft)
+			known = size
+			local echo = pulled
+			pulled = nil
+			if echo ~= nil and size == echo then
+				return
 			end
+			-- (Typed: it differs. Made: it may not.)
+			local text = draft:peek()
+			if first then
+				first = false
+				if Shared.draft_of(chat).text == text then
+					return
+				end
+			end
+			pushed = size
+			Shared.set_draft_of(chat, "text", text)
 		end)
 		ui.effect(function()
 			local picked = chosen:get()
-			if Shared.draft_of(chat).chosen ~= picked then
+			if Shared.chosen_of(chat) ~= picked then
 				Shared.set_draft_of(chat, "chosen", picked)
 			end
 		end)
@@ -733,13 +765,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			key = `chat_lane_{chat}`,
 			text = draft,
 			agent = function(): string?
-				local chosen = model:get()
-				for _, m in store.catalog:get().models do
-					if m.value == chosen then
-						return m.harness
-					end
-				end
-				return nil
+				return Completions.agent_of(model:get(), if unsent() then nil else session:get())
 			end,
 			target = function(): any
 				if unsent() then
@@ -826,6 +852,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		placeholder = placeholder or locale.s(if split or own then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
+		access_auto = function(): boolean
+			return store.offers_auto(model:get())
+		end,
 		plan = plan,
 		model = model,
 		effort = effort,
@@ -856,7 +885,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			if mine then
 				return mine
 			end
-			local link = machine.cloud_link(string.find(draft:get(), "%S") ~= nil)
+			local link = machine.cloud_link(Draft.has_text(draft))
 			return if link then LinkNotice.of { cloud = link } else nil
 		end),
 		on_dismiss_notice = function()
@@ -876,6 +905,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return store.catalog:get().models
 		end,
 		accounts = accounts.accounts,
+		account_group = accounts.account_group,
 		on_account = accounts.on_account,
 		on_accounts_open = accounts.on_accounts_open,
 		-- The picker opened: the host looks again at agents short of
@@ -1621,10 +1651,18 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	local pictures = ReplyImages.for_session(lane_session)
 	local sent_pictures = ReplyImages.for_attachments(function(): any
 		local s = lane_session()
-		if not s then
+		if s then
+			return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
+		end
+		-- A subagent's lane has no chat of its own (its doc is its parent's
+		-- child): the pictures its tools kept are files on its parent's
+		-- host, read as the parent's are.
+		local parent = data.parent
+		local open = store.session:get()
+		if not parent or not open or open.id ~= parent or open.state == "missing" then
 			return nil
 		end
-		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
+		return { id = open.id, device = open.device, cwd = open.cwd, here = sessions.here:get() }
 	end)
 	-- The session whose panel it's in (the page's): where a file it links
 	-- opens, and a subagent it spawned.

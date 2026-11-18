@@ -53,6 +53,7 @@ impl Harness for HeldHarness {
             reasoning_levels: vec![],
             options: vec![],
             default: false,
+            provider: None,
         };
         Ok(vec![model("claude-opus-5-5", "Opus 5.5"), model("haiku", "Haiku")])
     }

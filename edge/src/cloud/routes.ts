@@ -15,11 +15,13 @@
  *   PUT    /cloud/{orgId}/projects/{spaceId}       add/update a project (user)
  *   DELETE /cloud/{orgId}/projects/{spaceId}       remove a project + its sessions (user)
  *   GET    /cloud/{orgId}/sessions                 sessions (user)
- *   POST   /cloud/{orgId}/sessions                 {chatId, spaceId, machine?}: a machine for a new chat (user)
+ *   POST   /cloud/{orgId}/sessions                 {chatId, spaceId, machine?, reach?}: a machine for a new chat (user)
  *   PUT    /cloud/{orgId}/machine                  {machine}: the default for new sessions (user)
+ *   PUT    /cloud/{orgId}/reach                    {reach}: the default reach for new sessions (user)
  *   POST   /cloud/{orgId}/sessions/{chatId}/wake   {machine?, wake?}: wake, or pick its size asleep (user)
  *   POST   /cloud/{orgId}/sessions/{chatId}/retry  {machine?}: retry; a fresh machine once its data expired (user)
  *   POST   /cloud/{orgId}/sessions/{chatId}/sleep  (user)
+ *   POST   /cloud/{orgId}/sessions/{chatId}/reach  {reach}: devices | isolated (user only, never a machine)
  *   DELETE /cloud/{orgId}/sessions/{chatId}        delete that session's machine (user)
  *   POST   /runner/enroll                  pre-bearer: one-time code → key
  *   POST   /runner/token                   pre-bearer: signed ts → runner JWT
@@ -35,6 +37,7 @@
 import type { Verified } from "../auth";
 import type { Env } from "../env";
 import { json, jsonError, readJsonBody } from "../http";
+import { isRunnerReach } from "../registry-runner";
 import type { CloudResult, RepoInput } from "./cloud-account";
 import type { SandboxMachine } from "./sandbox-provider";
 import { isEdgeOrigin } from "./install-script";
@@ -256,6 +259,7 @@ const machineOfBody = (body: unknown): { readonly machine?: SandboxMachine } | "
 };
 
 const BAD_MACHINE = `Expected machine: ${MACHINES.map((m) => m.id).join(" | ")}.`;
+const BAD_REACH = "Expected reach: devices | isolated.";
 
 /** `/cloud/*` (user bearer) and `/runner/heartbeat` (runner bearer). */
 export const handleCloudRoute = async (
@@ -356,7 +360,15 @@ export const handleCloudRoute = async (
     // An unconfigured deployment still answers status, so the UI can hide
     // the enable button instead of erroring.
     if (!ns) {
-      return json({ state: "off", awakeSessions: 0, maxAwakeSessions: 0, available: false, machines: MACHINES, machine: parseMachine(undefined) });
+      return json({
+        state: "off",
+        awakeSessions: 0,
+        maxAwakeSessions: 0,
+        available: false,
+        machines: MACHINES,
+        machine: parseMachine(undefined),
+        reach: "devices"
+      });
     }
     const available = cloudAvailable(env);
     return rpc(async () => {
@@ -443,6 +455,13 @@ export const handleCloudRoute = async (
     return rpc(() => stub.setDefaultMachine(caller, machine));
   }
 
+  if (rest.length === 1 && rest[0] === "reach" && request.method === "PUT") {
+    const body = await readJsonBody(request, MAX_RUNNER_BODY);
+    if (!isObject(body) || !isRunnerReach(body.reach)) return jsonError(400, "bad_request", BAD_REACH);
+    const reach = body.reach;
+    return rpc(() => stub.setDefaultReach(caller, reach));
+  }
+
   if (rest[0] === "sessions") {
     const sessionRpc = <T>(run: () => Promise<CloudResult<T>>) =>
       rpc(async () => {
@@ -472,7 +491,7 @@ export const handleCloudRoute = async (
         }
         return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config, picked.machine));
       }
-      const { chatId, spaceId, repo, branch } = body;
+      const { chatId, spaceId, repo, branch, reach } = body;
       if (typeof chatId !== "string" || !ID_RE.test(chatId)) return jsonError(400, "bad_request", "Bad chatId.");
       if (typeof spaceId !== "string" || !ID_RE.test(spaceId)) return jsonError(400, "bad_request", "Bad spaceId.");
       // The repository (the project's GitHub origin) and the branch the
@@ -481,8 +500,10 @@ export const handleCloudRoute = async (
       if (branch !== undefined && (typeof branch !== "string" || branch.length > 255)) {
         return jsonError(400, "bad_request", "Bad branch.");
       }
+      // What it reaches: the composer's pick, or the account's default.
+      if (reach !== undefined && !isRunnerReach(reach)) return jsonError(400, "bad_request", BAD_REACH);
       return sessionRpc(() =>
-        stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch, undefined, picked.machine)
+        stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch, undefined, picked.machine, reach)
       );
     }
     const chatId = rest[1];
@@ -497,6 +518,12 @@ export const handleCloudRoute = async (
         return sessionRpc(() => stub.wakeSession(caller, chatId, options));
       }
       if (rest[2] === "sleep") return sessionRpc(() => stub.sleepSession(caller, chatId));
+      if (rest[2] === "reach") {
+        const body = await readJsonBody(request, MAX_RUNNER_BODY);
+        if (!isObject(body) || !isRunnerReach(body.reach)) return jsonError(400, "bad_request", BAD_REACH);
+        const reach = body.reach;
+        return sessionRpc(() => stub.setSessionReach(caller, chatId, reach));
+      }
       if (rest[2] === "retry") {
         if (!isEdgeOrigin(edgeUrl)) return jsonError(500, "misconfigured", "Bad CLOUD_EDGE_URL.");
         const picked = machineOfBody(await readJsonBody(request, MAX_RUNNER_BODY));
@@ -516,10 +543,9 @@ export const handleCloudRoute = async (
  * sends wake a session; dials (viewing a chat) never do. The DO is the
  * caller's own, so another user's device id is simply not found there.
  *
- * A Cloud machine's runner wakes a session too, but only one it started (its
- * delegate): the agent there sent work to a side chat on a machine that went
- * to sleep. The account DO checks the parentage, as it does for every other
- * session action a runner takes.
+ * A Cloud machine's runner wakes a session too: its agent sent work to a
+ * chat (a delegate, or any other of the person's Cloud chats) on a machine
+ * that went to sleep.
  */
 export const autoWakeCloudDevice = (
   env: Pick<Env, "CLOUD_ACCOUNTS" | "CLOUD_ACCESS" | "AUTH_MODE">,

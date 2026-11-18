@@ -13,14 +13,21 @@
 //!                                chat runs there):
 //!                                { state, available, device?, credits?,
 //!                                  error?, failed_action?, awake, max_awake,
-//!                                  machines, machine? }; `machines` is empty
+//!                                  machines, machine?, reach? }; `machines` is empty
 //!                                from an edge that predates machine choice,
 //!                                each { id, name, vcpu, memory_gb, disk_gb,
 //!                                rate } (`rate`: credits relative to standard)
 //!   cloud.set_machine({ machine })  the size new chats start on; the status
+//!   cloud.set_reach({ reach })   what new Cloud chats reach (`devices`: the
+//!                                person's other devices; `isolated`: only
+//!                                their own machine): the status
+//!   cloud.set_session_reach({ chat, reach })
+//!                                what one Cloud chat reaches: its session.
+//!                                Only ever the person's: the engine takes
+//!                                it from this app alone.
 //!   cloud.sessions               the Cloud sessions, each { chat, device, state,
 //!                                space, repo?, error?, failed_action?,
-//!                                machine?, stage?, disk?, wake_blocked?,
+//!                                machine?, reach?, stage?, disk?, wake_blocked?,
 //!                                expires?, restored? }; disk: { used, capacity,
 //!                                level }; wake_blocked: { reason, needed };
 //!                                expires (and restored: when its machine last
@@ -102,6 +109,24 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             crate::plugins::preview::refuse("cloud.set_machine")?;
             let status = call("CloudSetMachine", json!({ "machine": machine.ok_or("invalid")? })).await?;
             Ok(status_value(&status))
+        }
+    });
+    host.async_action("cloud.set_reach", |args| {
+        let reach = args.field("reach").map(text).filter(|r| is_reach(r));
+        async move {
+            crate::plugins::preview::refuse("cloud.set_reach")?;
+            let status = call("CloudSetReach", json!({ "reach": reach.ok_or("invalid")? })).await?;
+            Ok(status_value(&status))
+        }
+    });
+    host.async_action("cloud.set_session_reach", |args| {
+        let chat = args.field("chat").map(text).filter(|c| !c.is_empty());
+        let reach = args.field("reach").map(text).filter(|r| is_reach(r));
+        async move {
+            crate::plugins::preview::refuse("cloud.set_session_reach")?;
+            let params = json!({ "chatId": chat.ok_or("invalid")?, "reach": reach.ok_or("invalid")? });
+            let session = call("CloudSessionSetReach", params).await?;
+            Ok(session_value(&session))
         }
     });
     host.async_action("cloud.usage", |args| {
@@ -247,7 +272,13 @@ fn status_value(s: &Json) -> Value {
         ("max_awake", num(&s["maxAwakeSessions"])),
         ("machines", machines_value(&s["machines"])),
         ("machine", str_or_nil(&s["machine"])),
+        ("reach", str_or_nil(&s["reach"])),
     ])
+}
+
+/// What a Cloud chat may reach (crates/proto `CloudReach`).
+fn is_reach(reach: &str) -> bool {
+    matches!(reach, "devices" | "isolated")
 }
 
 fn machines_value(list: &Json) -> Value {
@@ -300,6 +331,7 @@ fn session_value(s: &Json) -> Value {
         ("error", str_or_nil(&s["error"])),
         ("failed_action", str_or_nil(&s["failedAction"])),
         ("machine", str_or_nil(&s["machine"])),
+        ("reach", str_or_nil(&s["reach"])),
         ("stage", str_or_nil(&s["stage"])),
         ("disk", disk),
         ("wake_blocked", blocked),
@@ -489,20 +521,22 @@ mod tests {
 
     #[test]
     fn machines_and_a_session_read_as_the_scripts_expect() {
-        let status = json!({ "state": "ready", "available": true, "deviceId": "cloud-1", "machine": "large",
+        let status = json!({ "state": "ready", "available": true, "deviceId": "cloud-1", "machine": "large", "reach": "isolated",
             "machines": [{ "id": "xlarge", "name": "Extra large", "vcpu": 8, "memoryGB": 32, "diskGiB": 400, "creditMultiplier": 5.56 }] });
         let out: Json = serde_json::from_str(&status_value(&status).to_json()).unwrap();
         assert_eq!(out["machine"], "large");
+        assert_eq!(out["reach"], "isolated");
         assert_eq!(out["machines"][0]["disk_gb"], 400.0);
         assert_eq!(out["machines"][0]["memory_gb"], 32.0);
         assert_eq!(out["machines"][0]["rate"], 5.56);
 
-        let session = json!({ "chatId": "c1", "deviceId": "cloud-s1", "state": "sleeping", "repo": "acme/atlas", "machine": "default",
+        let session = json!({ "chatId": "c1", "deviceId": "cloud-s1", "state": "sleeping", "repo": "acme/atlas", "machine": "default", "reach": "devices",
             "disk": { "usedGiB": 41.5, "capacityGiB": 50, "level": "warn" },
             "wakeBlocked": { "reason": "disk_too_small", "neededGiB": 150 },
             "expiresAt": 1_800_000_000_000_i64, "storeRecoveredAt": 1_799_000_000_000_i64 });
         let out: Json = serde_json::from_str(&session_value(&session).to_json()).unwrap();
         assert_eq!(out["chat"], "c1");
+        assert_eq!(out["reach"], "devices");
         assert_eq!(out["disk"]["used"], 41.5);
         assert_eq!(out["disk"]["level"], "warn");
         assert_eq!(out["wake_blocked"]["needed"], 150.0);
@@ -515,12 +549,22 @@ mod tests {
         let out: Json = serde_json::from_str(&status_value(&json!({ "state": "ready", "available": true })).to_json()).unwrap();
         assert_eq!(out["machines"].as_array().map(Vec::len), Some(0));
         assert!(out["machine"].is_null());
+        assert!(out["reach"].is_null());
         let out: Json = serde_json::from_str(&session_value(&json!({ "chatId": "c", "deviceId": "d", "state": "ready" })).to_json()).unwrap();
         assert!(out["disk"].is_null());
         assert!(out["wake_blocked"].is_null());
         assert!(out["expires"].is_null());
         assert!(out["restored"].is_null());
         assert!(out["machine"].is_null());
+        assert!(out["reach"].is_null());
+    }
+
+    #[test]
+    fn only_the_two_reaches_are_asked_for() {
+        assert!(is_reach("devices"));
+        assert!(is_reach("isolated"));
+        assert!(!is_reach("everything"));
+        assert!(!is_reach(""));
     }
 
     #[test]

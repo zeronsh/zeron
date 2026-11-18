@@ -213,6 +213,8 @@ pub struct DocsStore {
     sync_jobs_changed: tokio::sync::watch::Sender<u64>,
     /// Bumped whenever `chat_outbox` gains rows (a durable batch to send).
     outbox_changed: tokio::sync::watch::Sender<u64>,
+    /// The docs whose outbox rows were added since [`Self::take_outbox_changes`].
+    outbox_changed_docs: Mutex<HashSet<String>>,
 }
 
 impl DocsStore {
@@ -273,6 +275,7 @@ impl DocsStore {
             recovery,
             sync_jobs_changed: tokio::sync::watch::Sender::new(0),
             outbox_changed: tokio::sync::watch::Sender::new(0),
+            outbox_changed_docs: Mutex::new(HashSet::new()),
         })
     }
 
@@ -292,8 +295,28 @@ impl DocsStore {
         self.sync_jobs_changed.send_modify(|v| *v = v.wrapping_add(1));
     }
 
-    fn note_outbox_changed(&self) {
+    fn note_outbox_changed(&self, doc_id: &str) {
+        {
+            let mut docs = self
+                .outbox_changed_docs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !docs.contains(doc_id) {
+                docs.insert(doc_id.to_string());
+            }
+        }
         self.outbox_changed.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    /// Which docs had outbox rows added since the last call: the change
+    /// signal ([`Self::watch_outbox`]) says only that some did.
+    pub fn take_outbox_changes(&self) -> HashSet<String> {
+        std::mem::take(
+            &mut *self
+                .outbox_changed_docs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     /// What this open found and did, when the file was damaged.
@@ -342,7 +365,7 @@ impl DocsStore {
             params![doc_id, batch_id, bytes],
         );
         if matches!(result, Ok(n) if n > 0) {
-            self.note_outbox_changed();
+            self.note_outbox_changed(doc_id);
         }
         if result.is_err() {
             self.failed_publications
@@ -459,6 +482,26 @@ impl DocsStore {
         store_blocking(|| self.acknowledge_chat_update_blocking(doc_id, batch_id))
     }
 
+    /// [`Self::acknowledge_chat_update`] for several rows, in one transaction.
+    pub fn acknowledge_chat_updates(&self, doc_id: &str, batch_ids: &[String]) -> Result<(), StoreError> {
+        if batch_ids.is_empty() {
+            return Ok(());
+        }
+        store_blocking(|| {
+            let mut conn = self.conn();
+            let tx = conn.transaction()?;
+            {
+                let mut delete =
+                    tx.prepare_cached("DELETE FROM chat_outbox WHERE doc_id=?1 AND batch_id=?2")?;
+                for batch_id in batch_ids {
+                    delete.execute(params![doc_id, batch_id])?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     fn acknowledge_chat_update_blocking(
         &self,
         doc_id: &str,
@@ -518,7 +561,7 @@ impl DocsStore {
         }
         tx.commit()?;
         if !updates.is_empty() {
-            self.note_outbox_changed();
+            self.note_outbox_changed(doc_id);
         }
         Ok(())
     }

@@ -13,7 +13,19 @@
 //!                link? } }
 //!                (an agent from the ACP registry, as it says it is),
 //!                accounts = { { id, email, plan, session, week, active,
-//!                               invalid?, invalid_reason? } } } } }
+//!                               switchable, provider?, invalid?,
+//!                               invalid_reason? } },
+//!                groups?, login_for? } } }
+//! An agent that keeps a login per model provider (Pi, OpenCode, Hermes)
+//! also carries `groups`, its accounts by provider (`provider_groups`):
+//! `{ { id, name, accounts, login?, key?, hint?, read_only } }`, each with
+//! its own one in use and its own ways to add one (`login`, who Zeron signs
+//! you in to; `key`, who issues the API key it adds; neither: `hint` says
+//! how the agent does), and
+//! `login_for`, the provider its sign-in under way is for. `agents.logins`
+//! says each such agent's providers, `{ [harness] = { [provider] = { name,
+//! login?, key? } } }`, for a composer's Account row; `agents.on_device` rows carry
+//! their `provider` and its `group` name.
 //! Each agent carries all it shows, so a page keys its rows by `id` and an
 //! account by its `id`, and they update in place. (`session` and `week` are
 //! the plan's two windows, 0 to 1; `mark` is the design system's name for
@@ -28,6 +40,14 @@
 //!   agents.cancel(id) (an action)  gives up that sign-in
 //!   agents.sign_in({ id, method }) the same, by the method an agent from the
 //!                                  ACP registry offers (`login_methods`)
+//!   agents.sign_in({ id, provider }) the same, to one model provider of an
+//!                                  agent that keeps a login per provider
+//!   agents.rename({ id, account, name }) an API key's name; rejects with
+//!                                  the engine's words
+//!   agents.add_key({ id, provider, key, name? }) an API key for one such provider,
+//!                                  on this Mac's agent only (`remote` with
+//!                                  another device shown), checked with the
+//!                                  provider; rejects with the engine's words
 //!   agents.set_key({ id, var, value })  a key such an agent reads from its
 //!                                  environment (a `login_methods` kind
 //!                                  "env_var"), kept there; failed
@@ -118,6 +138,9 @@ struct Login {
     page: Option<String>,
     /// A device code it showed, to check against that page.
     pairing: Option<String>,
+    /// The model provider it signs in to, for an agent that keeps a login
+    /// per provider (its group's add row shows it); none: the agent's own.
+    provider: Option<String>,
 }
 
 /// An agent from the ACP registry's sign-in, as it says it is
@@ -199,6 +222,8 @@ thread_local! {
     /// (`{ ["acp.<id>"] = svg }`): ds/agent_mark finds an agent's icon there
     /// by its harness, so no caller has to carry it.
     static ICONS_SHARED: RefCell<Vec<Shared>> = RefCell::default();
+    /// `agents.logins`, held for every window's scripts.
+    static LOGINS_SHARED: RefCell<Vec<Shared>> = RefCell::default();
 }
 
 /// Keeps the icons a harness list carries (agents from the ACP registry).
@@ -276,6 +301,8 @@ pub fn install(host: &ScriptHost) {
     let agents = AGENTS.with(Rc::clone);
     agents.shared.borrow_mut().push(host.shared("agents", agents.value()));
     agents.device_shared.borrow_mut().push(host.shared("agents.on_device", agents.device_value()));
+    // (What never changes: each per-provider agent's sign-ins.)
+    LOGINS_SHARED.with(|shared| shared.borrow_mut().push(host.shared("agents.logins", logins_value())));
     ICONS_SHARED.with(|shared| shared.borrow_mut().push(host.shared("agent_icons", icons_value())));
     if agents.shared.borrow().len() == 1 {
         // Usage moves as turns run: looked at again while the app is open.
@@ -358,12 +385,64 @@ pub fn install(host: &ScriptHost) {
     let a = agents.clone();
     host.async_action("agents.sign_in", move |args| {
         let a = a.clone();
-        // `id`, or `{ id, method }` (a registry agent's method of its choosing).
-        let (id, method) = match args.field("id") {
-            Some(id) => (text(&id), args.field("method").map(text).filter(|m| !m.is_empty())),
-            None => (text(&args), None),
+        // `id`, or `{ id, method }` (a registry agent's method of its
+        // choosing), or `{ id, provider }` (one model provider's login of an
+        // agent that keeps one per provider).
+        let field = |key: &str| args.field(key).map(text).filter(|m| !m.is_empty());
+        let (id, method, provider) = match args.field("id") {
+            Some(id) => (text(&id), field("method"), field("provider")),
+            None => (text(&args), None, None),
         };
-        async move { crate::plugins::preview::refuse("agents.sign_in")?; a.sign_in(id, method).await.map_err(String::from) }
+        async move {
+            crate::plugins::preview::refuse("agents.sign_in")?;
+            a.sign_in(id, method, provider).await.map_err(String::from)
+        }
+    });
+    // An API key for one provider of an agent that keeps a login per
+    // provider: this Mac's agents only (a key never goes to another
+    // device), rejecting with why not in the engine's words — which never
+    // hold the key.
+    let a = agents.clone();
+    host.async_action("agents.add_key", move |args| {
+        let a = a.clone();
+        let id = args.field("id").map(text).unwrap_or_default();
+        let provider = args.field("provider").map(text).unwrap_or_default();
+        let key = args.field("key").map(text).unwrap_or_default();
+        let name = args.field("name").map(text).filter(|n| !n.trim().is_empty());
+        async move {
+            crate::plugins::preview::refuse("agents.add_key")?;
+            a.add_key(id, provider, key, name).await
+        }
+    });
+    // An API key for Cloud's agents (Settings → Providers with Cloud
+    // shown): kept by the vault, authorized for the account's Cloud device
+    // (`device`), the key every Cloud machine uses from its next turn.
+    // Rejects with the engine's words, which never hold the key.
+    let a = agents.clone();
+    host.async_action("agents.cloud_key", move |args| {
+        let a = a.clone();
+        let provider = args.field("provider").map(text).unwrap_or_default();
+        let key = args.field("key").map(text).unwrap_or_default().trim().to_string();
+        let device = args.field("device").map(text).unwrap_or_default();
+        async move {
+            crate::plugins::preview::refuse("agents.cloud_key")?;
+            let params = cloud_key_params(&provider, &key, &device)?;
+            engine::get().call("VaultPutApiKey", params).await.map_err(|error| engine::outcome(&error).to_string())?;
+            a.load_accounts(true).await;
+            Ok(Value::Nil)
+        }
+    });
+    // An API key's name (no secret: on whichever device shows it), rejecting
+    // with the engine's words.
+    let a = agents.clone();
+    host.async_action("agents.rename", move |args| {
+        let a = a.clone();
+        let (id, account) = harness_and_account(&args);
+        let name = args.field("name").map(text).unwrap_or_default();
+        async move {
+            crate::plugins::preview::refuse("agents.rename")?;
+            a.rename(id, account, name).await
+        }
     });
     let a = agents.clone();
     host.async_action("agents.set_key", move |args| {
@@ -504,6 +583,90 @@ pub(crate) fn glyph(id: &str) -> Option<String> {
     }
 }
 
+/// `id` as the engine's harness (an agent from the ACP registry's too).
+fn harness_id(id: &str) -> Option<zeron_proto::HarnessId> {
+    serde_json::from_value(json!(id)).ok()
+}
+
+/// One provider's accounts of an agent that keeps a login per model provider.
+#[derive(Debug, PartialEq)]
+struct Group {
+    /// Its provider's id (`openai-codex`, `anthropic`): its accounts'
+    /// `provider`, a sign-in's and a key's.
+    provider: String,
+    /// The provider ("ChatGPT", "Anthropic", "OpenRouter").
+    name: String,
+    /// Its accounts: indices into the agent's list, in its order.
+    rows: Vec<usize>,
+    /// Who Zeron signs you in to for it ("ChatGPT", "Claude"): none where it
+    /// can't.
+    login: Option<String>,
+    /// Who issues the API key Zeron adds for it ("OpenRouter"): none where
+    /// it adds none.
+    key: Option<String>,
+}
+
+/// An agent's accounts by provider: first every provider Zeron signs in to,
+/// in its order, then those it adds API keys for, then any other its
+/// accounts are on, in the order they come. A provider with none yet is
+/// one to add (its sign-in or key). An account naming no provider (an
+/// older engine's) is in the first group.
+fn provider_groups(harness: zeron_proto::HarnessId, accounts: &[Json]) -> Vec<Group> {
+    use zeron_proto::providers::{account_group_label, api_key_option, api_key_options, login_option, login_options};
+    let mut order: Vec<String> = login_options(harness).into_iter().filter_map(|o| o.provider.map(String::from)).collect();
+    for option in api_key_options(harness) {
+        if !order.iter().any(|p| p == option.provider) {
+            order.push(option.provider.to_owned());
+        }
+    }
+    let first = order.first().cloned().unwrap_or_default();
+    let providers: Vec<String> =
+        accounts.iter().map(|a| a["provider"].as_str().map(String::from).unwrap_or_else(|| first.clone())).collect();
+    for provider in &providers {
+        if !order.contains(provider) {
+            order.push(provider.clone());
+        }
+    }
+    order
+        .into_iter()
+        .map(|provider| {
+            let rows: Vec<usize> = (0..accounts.len()).filter(|&i| providers[i] == provider).collect();
+            Group {
+                name: account_group_label(harness, &provider),
+                login: login_option(harness, &provider).map(|o| o.label.to_owned()),
+                key: api_key_option(harness, &provider).map(|o| o.label.to_owned()),
+                rows,
+                provider,
+            }
+        })
+        .filter(|g| !g.rows.is_empty() || g.login.is_some() || g.key.is_some())
+        .collect()
+}
+
+/// Each per-provider agent's providers Zeron adds to, for a composer's
+/// Account row to offer (`agents.logins`): `{ [harness] = { [provider] = {
+/// name, login?, key? } } }` — who it signs you in to, who issues the key.
+fn logins_value() -> Value {
+    use zeron_proto::providers::{groups_by_provider, PROVIDERS};
+    let by = PROVIDERS.iter().filter(|(h, _, _)| groups_by_provider(*h)).filter_map(|(harness, _, _)| {
+        let id = serde_json::to_value(harness).ok()?.as_str()?.to_owned();
+        let groups: Vec<(String, Value)> = provider_groups(*harness, &[])
+            .into_iter()
+            .map(|g| {
+                let value = Value::record([
+                    ("name", Value::from(g.name.as_str())),
+                    ("login", g.login.as_deref().map_or(Value::Nil, Value::from)),
+                    ("key", g.key.as_deref().map_or(Value::Nil, Value::from)),
+                ]);
+                (g.provider, value)
+            })
+            .collect();
+        Some((id, Value::record(groups.iter().map(|(k, v)| (k.as_str(), v.clone())))))
+    });
+    let by: Vec<(String, Value)> = by.collect();
+    Value::record(by.iter().map(|(k, v)| (k.as_str(), v.clone())))
+}
+
 /// The sign-in an agent's Add account starts: an agent signing into several
 /// providers starts its first (crates/proto/src/providers.rs
 /// `login_options`), the one the shipping app lists first.
@@ -592,9 +755,41 @@ impl Agents {
                     Some(login) if login.failed => "failed",
                     _ => "idle",
                 };
+                // An agent that keeps a login per model provider: its
+                // accounts by provider, each group with its own in use and
+                // its own way to add one (nil: one group, as ever).
+                let groups = harness_id(id).filter(|h| zeron_proto::providers::groups_by_provider(*h)).map(|harness| {
+                    let list = accounts.get(id).map(Vec::as_slice).unwrap_or_default();
+                    let read_only = !zeron_proto::providers::switches_accounts(harness);
+                    let groups: Vec<Value> = provider_groups(harness, list)
+                        .into_iter()
+                        .map(|g| {
+                            let rows: Vec<Value> = g.rows.iter().map(|&i| account_value(&list[i])).collect();
+                            Value::record([
+                                ("id", Value::from(g.provider.as_str())),
+                                ("name", Value::from(g.name.as_str())),
+                                ("login", g.login.as_deref().map_or(Value::Nil, Value::from)),
+                                ("key", g.key.as_deref().map_or(Value::Nil, Value::from)),
+                                ("read_only", Value::Bool(read_only)),
+                                ("accounts", Value::List(rows.into())),
+                            ])
+                        })
+                        .collect();
+                    Value::List(groups.into())
+                });
                 Value::record([
                     ("id", Value::from(id)),
                     ("name", Value::from(h["name"].as_str().unwrap_or(id))),
+                    ("groups", groups.unwrap_or(Value::Nil)),
+                    // Which provider's group the sign-in under way is for.
+                    (
+                        "login_for",
+                        logins
+                            .get(id)
+                            .and_then(|l| l.provider.as_deref())
+                            .filter(|_| login != "idle")
+                            .map_or(Value::Nil, Value::from),
+                    ),
                     ("mark", mark(id).map_or(Value::Nil, Value::from)),
                     // An agent added from the ACP registry: its one-ink icon
                     // (it has no mark), and no accounts of Zeron's to show.
@@ -1000,6 +1195,11 @@ impl Agents {
         let params = addressed_to(target, json!({ "harness": id, "accountId": account }));
         match engine::get().call("ActivateAgentAccount", params).await {
             Ok(snapshot) => {
+                // (Told against the list from before the row moved, so the
+                // switch counts as a change: the model list follows it.)
+                if let (Some(before), Some(device)) = (before, self.device_accounts.borrow_mut().get_mut(&key)) {
+                    device.accounts = before;
+                }
                 self.keep_device(key.clone(), &snapshot);
                 if self.target.borrow().as_deref().unwrap_or_default() == key {
                     self.take_accounts(&snapshot);
@@ -1079,7 +1279,10 @@ impl Agents {
 
     /// A new account: the engine's sign-in (`StartAgentLogin`), its page
     /// opened, then asked after (`PollAgentLogin`) until it lands or fails.
-    async fn sign_in(self: Rc<Self>, id: String, method: Option<String>) -> Result<Value, Outcome> {
+    async fn sign_in(self: Rc<Self>, id: String, method: Option<String>, provider: Option<String>) -> Result<Value, Outcome> {
+        // The provider asked for (one the engine can't sign in to says why),
+        // else the agent's first.
+        let provider = provider.or_else(|| login_provider(&id).map(String::from));
         // The device it's on, for all of it (the page may show another).
         let device = self.target.borrow().clone();
         let device = device.as_deref();
@@ -1095,11 +1298,12 @@ impl Agents {
             login.page = None;
             login.pairing = None;
             login.target = device.map(Into::into);
+            login.provider = provider.clone();
             login.generation
         };
         self.publish();
         let mut params = json!({ "harness": id });
-        if let Some(provider) = login_provider(&id) {
+        if let Some(provider) = &provider {
             params["provider"] = json!(provider);
         }
         // (A registry agent's method of its choosing, in the same field.)
@@ -1293,7 +1497,41 @@ impl Agents {
         }
     }
 
-    async fn account_call(&self, method: &'static str, id: String, account: String) -> Result<Value, Outcome> {
+    /// `AddAgentApiKey` on this Mac's engine — never addressed elsewhere:
+    /// with another device shown, refused here, the key sent nowhere.
+    async fn add_key(&self, id: String, provider: String, key: String, name: Option<String>) -> Result<Value, String> {
+        if self.target.borrow().is_some() {
+            return Err("remote".into());
+        }
+        let params = json!({ "harness": id, "provider": provider, "key": key, "name": name });
+        match engine::get().call("AddAgentApiKey", params).await {
+            Ok(snapshot) => {
+                self.take_accounts(&snapshot);
+                Ok(Value::Nil)
+            }
+            // (The engine's words never hold the key; they aren't printed.)
+            Err(error) if engine::outcome(&error) == "offline" => Err("offline".into()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `RenameAgentAccount`, on the device shown.
+    async fn rename(&self, id: String, account: String, name: String) -> Result<Value, String> {
+        let params = self.addressed(json!({ "harness": id, "accountId": account, "name": name }));
+        match engine::get().call("RenameAgentAccount", params).await {
+            Ok(snapshot) => {
+                self.take_accounts(&snapshot);
+                Ok(Value::Nil)
+            }
+            Err(error) if engine::outcome(&error) == "offline" => Err("offline".into()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A switch or a removal on the device shown, rejecting with why not in
+    /// the engine's words (`offline` when it can't be reached), for the
+    /// page to say: a refusal is never silent.
+    async fn account_call(&self, method: &'static str, id: String, account: String) -> Result<Value, String> {
         match engine::get()
             .call(method, self.addressed(json!({ "harness": id, "accountId": account })))
             .await
@@ -1304,7 +1542,7 @@ impl Agents {
             }
             Err(error) => {
                 eprintln!("zeron-zgx: agents: {method} failed: {error}");
-                Err(fail(&error))
+                Err(if fail(&error) == "offline" { "offline".into() } else { error })
             }
         }
     }
@@ -1550,6 +1788,15 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
         ("session", Value::from(session)),
         ("week", Value::from(week_used)),
         ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
+        ("switchable", Value::Bool(can_switch(account))),
+        ("provider", account["provider"].as_str().map_or(Value::Nil, Value::from)),
+        // An API key: no plan, so no windows to show; named by someone, or
+        // going by its last four.
+        ("key", Value::Bool(account["authKind"].as_str() == Some("api-key"))),
+        (
+            "named",
+            Value::Bool(account["authKind"].as_str() == Some("api-key") && account["displayName"].as_str().is_some()),
+        ),
     ];
     if invalid(account) {
         fields.push(("invalid", Value::Bool(true)));
@@ -1606,14 +1853,14 @@ fn changed_logins(before: &[Json], after: &[Json]) -> Vec<String> {
         by
     }
     let (before, after) = (logins(before), logins(after));
-    let mut changed: Vec<String> = before
+    // (Each agent once, however many of its rows moved.)
+    let changed: std::collections::BTreeSet<String> = before
         .keys()
         .chain(after.keys())
         .filter(|h| before.get(*h) != after.get(*h))
         .cloned()
         .collect();
-    changed.dedup();
-    changed
+    changed.into_iter().collect()
 }
 
 /// Forced usage asks the provider: not more often than this.
@@ -1665,18 +1912,18 @@ fn device_accounts_value(accounts: &[Json]) -> Value {
             ("email", Value::from(account_name(account))),
             ("plan", Value::from(account["planLabel"].as_str().unwrap_or(""))),
             ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
-            (
-                "can_switch",
-                // (Never to a key its provider rejected: the engine refuses
-                // that switch anyway.)
-                Value::Bool(
-                    account["switchable"].as_bool().unwrap_or(false)
-                        && !invalid(account)
-                        && zeron_proto::providers::switches_accounts(id),
-                ),
-            ),
+            // (Never to a key its provider rejected: the engine refuses that
+            // switch anyway.)
+            ("can_switch", Value::Bool(can_switch(account) && !invalid(account))),
             ("windows", Value::List(windows.into())),
         ];
+        // Its model provider, where its agent keeps a login per provider
+        // (the Account row shows only the model's provider's), and what
+        // that provider's group is called.
+        if let Some(provider) = account["provider"].as_str().filter(|_| zeron_proto::providers::groups_by_provider(id)) {
+            fields.push(("provider", Value::from(provider)));
+            fields.push(("group", Value::from(zeron_proto::providers::account_group_label(id, provider).as_str())));
+        }
         if let Some(error) = account["invalidReason"].as_str().filter(|_| invalid(account)).or(account["usageError"].as_str()) {
             fields.push(("error", Value::from(error)));
         }
@@ -1692,6 +1939,13 @@ fn device_accounts_value(accounts: &[Json]) -> Value {
 /// can be removed, never switched to.
 fn invalid(account: &Json) -> bool {
     account["invalid"].as_bool().unwrap_or(false)
+}
+
+/// Whether an account can be put in use: one the engine can swap to, of an
+/// agent whose logins Zeron switches (never Hermes' own pool).
+fn can_switch(account: &Json) -> bool {
+    account["switchable"].as_bool().unwrap_or(false)
+        && account["harness"].as_str().and_then(harness_id).is_some_and(zeron_proto::providers::switches_accounts)
 }
 
 /// What an account goes by.
@@ -1738,6 +1992,20 @@ fn epoch_secs(s: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
+    /// A Cloud API key goes to the vault for the account's Cloud device:
+    /// Anthropic's or OpenAI's only, a real key, Cloud on.
+    #[test]
+    fn a_cloud_key_is_one_cloud_runs_for_its_device() {
+        let ok = cloud_key_params("anthropic-key", "sk-ant-123", "cloud-acct").unwrap();
+        assert_eq!(ok, json!({ "provider": "anthropic-key", "key": "sk-ant-123", "authorizedDevices": ["cloud-acct"] }));
+        assert!(cloud_key_params("openai-key", "sk-1", "d").is_ok());
+        assert!(cloud_key_params("claude", "sk", "d").is_err(), "a login isn't a key");
+        assert!(cloud_key_params("anthropic-key", "", "d").is_err());
+        assert!(cloud_key_params("anthropic-key", "a\nb", "d").is_err());
+        assert!(cloud_key_params("anthropic-key", &"k".repeat(5000), "d").is_err());
+        assert!(cloud_key_params("anthropic-key", "sk", "").is_err(), "Cloud off");
+    }
+
     /// Pi signed in to Claude, or another login put in use: Pi's models are
     /// looked up again. Usage moving, or another agent's, isn't Pi's change.
     #[test]
@@ -1765,6 +2033,16 @@ mod tests {
         assert_eq!(changed_logins(&before, &switched), ["codex"]);
         // Signed out of everything: that agent too.
         assert_eq!(changed_logins(&before, &[row("codex", "c1", true, 0.2)]), ["pi"]);
+        // Two agents changed at once: each named once, whatever the order.
+        let both = vec![row("pi", "chatgpt-b", true, 0.1), row("codex", "c2", true, 0.2)];
+        assert_eq!(changed_logins(&before, &both), ["codex", "pi"]);
+        // A switch from the composer, told against the list before its row
+        // moved (as switch_on does): a change, so the models follow.
+        let mut optimistic = before.clone();
+        optimistic.push(row("pi", "chatgpt-c", false, 0.0));
+        let mut engine_said = optimistic.clone();
+        mark_switched(&mut engine_said, "pi", "chatgpt-c");
+        assert_eq!(changed_logins(&optimistic, &engine_said), ["pi"]);
     }
 
     #[test]
@@ -1809,6 +2087,63 @@ mod tests {
         let hermes = value.field("hermes").expect("hermes").list().to_vec();
         assert!(!hermes[0].field("can_switch").is_some_and(Value::truthy));
         assert_eq!(hermes[0].field("error").map(text).as_deref(), Some("no"));
+    }
+
+    #[test]
+    fn a_per_provider_agents_accounts_group_by_provider() {
+        let pi = harness_id("pi").unwrap();
+        let accounts = [
+            json!({ "id": "c1", "harness": "pi", "provider": "anthropic", "active": true }),
+            json!({ "id": "o1", "harness": "pi", "provider": "openai-codex", "active": false }),
+            json!({ "id": "o2", "harness": "pi", "provider": "openai-codex", "active": true }),
+            json!({ "id": "k1", "harness": "pi", "provider": "kimi-coding", "active": true }),
+        ];
+        let groups = provider_groups(pi, &accounts);
+        let shape: Vec<(&str, &str, Vec<usize>, Option<&str>, Option<&str>)> = groups
+            .iter()
+            .map(|g| (g.provider.as_str(), g.name.as_str(), g.rows.clone(), g.login.as_deref(), g.key.as_deref()))
+            .collect();
+        assert_eq!(&shape[..3], &[
+            // Zeron's own sign-ins first, in their order (Anthropic takes
+            // a Claude sign-in and an API key alike)…
+            ("openai-codex", "ChatGPT", vec![1, 2], Some("ChatGPT"), None),
+            ("anthropic", "Anthropic", vec![0], Some("Claude"), Some("Anthropic")),
+            // …one without accounts yet is one to add…
+            ("github-copilot", "GitHub Copilot", vec![], Some("GitHub Copilot"), None),
+        ]);
+        // …then the providers it adds keys for…
+        assert!(shape.iter().any(|g| g.0 == "openrouter" && g.4 == Some("OpenRouter") && g.2.is_empty()));
+        // …then one it adds neither to, its accounts still listed.
+        let kimi = shape.last().unwrap();
+        assert_eq!((kimi.0, kimi.2.clone(), kimi.3, kimi.4), ("kimi-coding", vec![3], None, None));
+        // An older engine's row, naming no provider: the first group's.
+        let old = provider_groups(pi, &[json!({ "id": "x", "harness": "pi" })]);
+        assert_eq!(old[0].rows, [0]);
+    }
+
+    #[test]
+    fn a_device_says_each_accounts_provider_where_its_agent_keeps_one_per_provider() {
+        let value = device_accounts_value(&[
+            json!({ "id": "o1", "harness": "pi", "provider": "openai-codex", "active": true, "switchable": true }),
+            json!({ "id": "g1", "harness": "pi", "provider": "github-copilot", "active": true, "switchable": true }),
+            json!({ "id": "x1", "harness": "grok", "provider": "issuer", "active": true, "switchable": true }),
+        ]);
+        let pi = value.field("pi").expect("pi").list().to_vec();
+        assert_eq!(pi[0].field("provider").map(text).as_deref(), Some("openai-codex"));
+        assert_eq!(pi[0].field("group").map(text).as_deref(), Some("ChatGPT"));
+        assert_eq!(pi[1].field("group").map(text).as_deref(), Some("GitHub Copilot"));
+        // (Grok's issuer is no model provider: one group.)
+        let grok = value.field("grok").expect("grok").list().to_vec();
+        assert!(grok[0].field("provider").is_none());
+        // Each per-provider agent's providers, for the Account row to offer.
+        let logins = logins_value();
+        let pi_logins = logins.field("pi").expect("pi");
+        let copilot = pi_logins.field("github-copilot").expect("copilot");
+        assert_eq!(copilot.field("login").map(text).as_deref(), Some("GitHub Copilot"));
+        let openrouter = pi_logins.field("openrouter").expect("openrouter");
+        assert_eq!(openrouter.field("key").map(text).as_deref(), Some("OpenRouter"));
+        assert!(!openrouter.field("login").is_some_and(|v| v.truthy()));
+        assert!(logins.field("claude-code").is_none());
     }
 
     #[test]
@@ -1973,6 +2308,22 @@ pub(crate) fn shown_target() -> Option<String> {
 }
 
 /// `params` addressed to the device Providers shows.
+/// `VaultPutApiKey`'s params for a Cloud API key: Anthropic's or OpenAI's
+/// alone, a key that's there and no longer than any key is, for the
+/// account's Cloud device. Else why not.
+pub(crate) fn cloud_key_params(provider: &str, key: &str, device: &str) -> Result<Json, String> {
+    if !matches!(provider, "anthropic-key" | "openai-key") {
+        return Err("Cloud takes Anthropic and OpenAI keys".into());
+    }
+    if key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control) {
+        return Err("That isn't an API key".into());
+    }
+    if device.is_empty() {
+        return Err("Turn Cloud on in Settings → Cloud first".into());
+    }
+    Ok(json!({ "provider": provider, "key": key, "authorizedDevices": [device] }))
+}
+
 pub(crate) fn addressed_to_shown(params: Json) -> Json {
     addressed_to(shown_target().as_deref(), params)
 }

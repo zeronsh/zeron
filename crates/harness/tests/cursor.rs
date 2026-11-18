@@ -330,6 +330,8 @@ async fn happy_path_maps_shim_frames_and_tags_subagents() {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     }));
 
@@ -727,6 +729,7 @@ async fn mcp_injection_reaches_shim_on_new_and_resumed_runs() {
             command: "/path with spaces/zeron".into(),
             args: vec!["mcp".into()],
             env: [("ZERON_CHAT_ID".into(), "origin-chat".into())].into(),
+            http: None,
         });
         let (controls, _steer, _token) = controls();
         let events = run_to_first_done(&harness(), req, controls).await;

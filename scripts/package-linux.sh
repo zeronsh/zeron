@@ -112,7 +112,7 @@ install -m 644 "$ROOT/dist/zeron.desktop" "$STAGE/zeron.desktop"
 install -m 644 "$ROOT/dist/zeron.png" "$STAGE/zeron.png"
 install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"
 mkdir -p "$STAGE/licenses/fonts"
-cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
+cp "$ROOT/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
 cp "$ROOT/crates/voice/NOTICE.md" "$STAGE/licenses/parakeet-v3.txt"
 if [[ -n "$ZGX_VERSION" ]]; then
   # The scripts and Zeron's own plugins, as scripts/package-zgx-macos.sh: read

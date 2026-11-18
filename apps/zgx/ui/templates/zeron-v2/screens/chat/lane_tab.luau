@@ -6,7 +6,12 @@
 -- chat is its transcript and a composer of its own (its draft its own, not
 -- the chat page's); a subagent's is its transcript alone, to read.
 --
---   LaneTab { tab = { id, kind = "side_chat" | "subagent", chat, title } }
+--   LaneTab { tab = { id, kind = "side_chat" | "subagent" | "read", chat, title } }
+--
+-- `read`: a live chat's transcript alone, to read (the Control room's Chat
+-- tab: the Brain dump's), its working row its own, `data.foot` the room
+-- kept clear at its foot (what floats over it there), `data.live` whether
+-- it shows (kept built while hidden: the reply being written held).
 
 local ds = require("@ds")
 local Dictation = require("@app/screens/chat/dictation")
@@ -29,6 +34,7 @@ local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
+local Draft = require("@ds/draft_text")
 local Carried = require("@app/screens/chat/carried")
 local Completions = require("@app/screens/chat/completions")
 local Invocations = require("@app/screens/chat/invocations")
@@ -37,6 +43,7 @@ local Asks = require("@app/screens/chat/asks")
 local CardHold = require("@app/screens/chat/card_hold")
 local Appshots = require("@app/screens/chat/appshots")
 local DropOverlay = require("@ds/drop_overlay")
+local Hold = require("@ds/hold")
 local orchestration = require("@account/orchestration")
 local decide = require("@ds/orch_decide")
 
@@ -85,6 +92,21 @@ function M.icon(_tab: any): string
 	return "side-chat"
 end
 
+-- A `Composer`'s model picker, asked for from elsewhere (the sidebar's
+-- "Brain dump model…", on the way to the Control room): opened by that
+-- composer, at once if it's there, else as it comes.
+local model_wanted = ui.state("chat_lane_model_wanted", nil :: string?)
+-- (How soon after opening its picker a composer let go hands it on, ms.)
+local HAND_ON = 1000
+-- (When it was asked: a request no composer took soon is let go, never
+-- opening a picker later out of nowhere.)
+local wanted_at = -math.huge
+local WANT_FOR = 3000
+function M.open_model_when(slot: string)
+	wanted_at = ui.now()
+	model_wanted:set(slot)
+end
+
 -- A side chat's composer: the chat page's (ds.Composer), its footer the
 -- same row: the access mode, where it works, the model. Its draft is its
 -- own. Its picks start as its chat has them (the engine's `harness/model`,
@@ -101,7 +123,8 @@ end
 -- notice line, above it, never over it.
 -- `take`: what a send does instead of messaging the chat (the Control
 -- room's Capture: a dump): told the words as they'd be sent and what they
--- carry (Carried.pack's `attachments`), it returns a promise; the draft
+-- carry (Carried.pack's `attachments`, then its references as
+-- `{ kind = "ref", ref }`), it returns a promise; the draft
 -- clears as it goes and comes back, with its chips, if it fails. It's
 -- told the pickers' picks too (`picks()`: model, its agent, effort…), and a
 -- pick made there is the chat's at once (`store.configure`), as on the chat
@@ -112,7 +135,19 @@ end
 -- checkout, branch); the model and agent always show.
 export type Take = (text: string, attachments: { any }, picks: { [string]: any }) -> any
 export type Footer = { access: boolean?, place: boolean? }
-local function composer(chat: string, view: any, name: string, focus: State<number>, take: Take?, placeholder: string?, footer: Footer?): Node
+-- A second placement of a page's composer (the Control room's floating
+-- one): the same draft, chips and picks as the first, shown another way.
+-- `mirror`: the first one keeps the chat's picks and edits, this one only
+-- shows them. `bare`: no footer and no chips over the draft (one line).
+-- `expanded`: opened out from the start. `on_escape`: Escape's, first.
+-- `on_focus`: told as its field takes the keys and lets them go (either
+-- placement's, so the keys can follow it from one to the other).
+export type Form = { mirror: boolean?, bare: boolean?, expanded: boolean?, on_escape: (() -> boolean)?, on_focus: ((focused: boolean) -> ())? }
+-- (`picker`: bumped, its model picker opens (a page composer's, for
+-- `open_model_when`); its own otherwise. `own`: a lane that shows a chat
+-- of its own (`data.own`: an orchestrator's page), the chat page's words.)
+local function composer(chat: string, view: any, name: string, focus: State<number>, take: Take?, placeholder: string?, footer: Footer?, form: Form?, picker: State<number>?, own: boolean?): Node
+	local mirror = form ~= nil and form.mirror == true
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -181,22 +216,25 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	}
 	-- A tab closed mid-edit lets go of the edit, and made again finds its row
 	-- no longer held: the draft it set aside back. (A row gone is another
-	-- matter: it keeps the words, and saving says so.)
-	ui.effect(function()
-		local e = editing:get()
-		local s = session:get()
-		if not e or not s or s.state == "loading" then
-			return
-		end
-		for _, row in s.queue or {} do
-			if row.id == e.item and not row.editing then
-				ui.batch(function()
-					editing:set(nil)
-					draft:set(e.aside)
-				end)
+	-- matter: it keeps the words, and saving says so.) (A mirror leaves
+	-- that to the first placement.)
+	if not mirror then
+		ui.effect(function()
+			local e = editing:get()
+			local s = session:get()
+			if not e or not s or s.state == "loading" then
+				return
 			end
-		end
-	end)
+			for _, row in s.queue or {} do
+				if row.id == e.item and not row.editing then
+					ui.batch(function()
+						editing:set(nil)
+						draft:set(e.aside)
+					end)
+				end
+			end
+		end)
+	end
 	local running = ui.computed(function(): boolean
 		local s = session:get()
 		return s ~= nil and s.running == true
@@ -443,7 +481,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- A page's own composer (`take`): a pick is the chat's at once, as on
 	-- the chat page (screens/chat/composer), never only with the next send.
 	-- (What the chat runs with already, or was seeded from it, isn't a pick.)
-	if take then
+	-- (A mirror only shows them: the first placement makes them the chat's.)
+	if take and not mirror then
 		ui.effect(function()
 			local m, e, f, o = model:get(), effort:get(), fast:get(), options:get()
 			local s = session:get()
@@ -513,7 +552,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end)
 	end
 	-- What `@`, `/` and `$` offer, as the chat page's.
-	local open_model = ui.use_state(0)
+	local open_model = picker or ui.use_state(0)
 	local function run_command(command: string)
 		if command == "model" then
 			open_model:add(1)
@@ -525,13 +564,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		key = `chat_lane_{chat}`,
 		text = draft,
 		agent = function(): string?
-			local chosen = model:get()
-			for _, m in store.catalog:get().models do
-				if m.value == chosen then
-					return m.harness
-				end
-			end
-			return nil
+			return Completions.agent_of(model:get(), if unsent() then nil else session:get())
 		end,
 		target = function(): any
 			if unsent() then
@@ -592,9 +625,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		focus = focus,
 		value = draft,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
-		placeholder = placeholder or locale.s("chat.lane_tab.placeholder"),
+		-- (A lane that shows a chat of its own: the chat page's words.)
+		placeholder = placeholder or locale.s(if own then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
+		access_auto = function(): boolean
+			return store.offers_auto(model:get())
+		end,
 		plan = plan,
 		model = model,
 		effort = effort,
@@ -606,6 +643,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return prefs.send_with:get()
 		end,
 		on_escape = function(): boolean
+			if form and form.on_escape and form.on_escape() then
+				return true
+			end
 			return store.escape_chat(chat, running:peek())
 		end,
 		disabled = function(): boolean
@@ -622,7 +662,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			if mine then
 				return mine
 			end
-			local link = machine.cloud_link(string.find(draft:get(), "%S") ~= nil)
+			local link = machine.cloud_link(Draft.has_text(draft))
 			return if link then LinkNotice.of { cloud = link } else nil
 		end),
 		on_dismiss_notice = function()
@@ -639,6 +679,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return store.catalog:get().models
 		end,
 		accounts = accounts.accounts,
+		account_group = accounts.account_group,
 		on_account = accounts.on_account,
 		on_accounts_open = accounts.on_accounts_open,
 		-- The picker opened: the host looks again at agents short of
@@ -721,7 +762,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- Taken by its page (a dump): the words and what they carry, never
 			-- a message of the chat's.
 			if take then
-				take(prompt, pack.attachments, picks()):after(function() end, function(err: any)
+				-- (Its references go too, each `{ kind = "ref", ref }` after
+				-- the files: the page splits them off, ds/orch_ref.)
+				local carry = table.clone(pack.attachments)
+				for _, r in pack.refs do
+					table.insert(carry, { kind = "ref", ref = r })
+				end
+				take(prompt, carry, picks()):after(function() end, function(err: any)
 					ui.batch(function()
 						draft:set(text)
 						quotes:set(said_quotes)
@@ -820,6 +867,17 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			p[k] = nil
 		end
 	end
+	-- (Another placement's form: one line with nothing over it or under it,
+	-- or opened out from the start.)
+	if form and form.bare then
+		p.cargo, p.bare = nil, true
+	end
+	if form and form.expanded then
+		p.expanded = true
+	end
+	if form and form.on_focus then
+		p.on_field_focus = form.on_focus
+	end
 	return ds.Composer(p :: any)
 end
 
@@ -863,33 +921,297 @@ local function focus_of(slot: string): State<number>
 	end
 	return f
 end
+-- A page composer's draft for `chat`, the words (a side chat's too), as
+-- every placement of it shows them.
+function M.draft(chat: string): State<string>
+	return ui.state(`chat_lane_draft_{chat}`, "")
+end
+
+-- Gives `slot`'s page composer the keys (its first placement's).
+function M.focus(slot: string)
+	M.wake(slot)
+	focus_of(slot):add(1)
+end
+
+-- A `lazy` page composer's slot whose chat is watched: only once it's
+-- used (the pointer over it, the keys in it, its model asked for). Till
+-- then its chat's transcript isn't taken in at all (the Control room's
+-- Capture never shows it: the Brain dump's, hundreds of messages).
+local woken = ui.state("chat_lane_woken", {} :: { [string]: boolean })
+function M.wake(slot: string)
+	if not woken:peek()[slot] then
+		woken:set_key({ slot }, true)
+	end
+end
+function M.woken(slot: string): boolean
+	return woken:peek()[slot] == true
+end
 
 -- A chat's composer on a page of its own, outside the panel's tabs (the
--- default layout's `LaneTab.Composer`, as v2 draws a side chat's): bound to
--- chat `chat` in `slot`, its session watched while it shows, its sends
--- taken by `take` where given (the Control room's Capture: each a dump).
-M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, take: Take?, placeholder: string?, footer: Footer?, drop: boolean?, id: string? }): Node
+-- default layout's `LaneTab.Composer`, as v2 draws a side chat's): bound
+-- to chat `chat` in `slot` (its session watched while it shows, so its
+-- model, agent and access are the chat's and change it), its sends taken by `take` where given (the Control room's Capture:
+-- each a dump). Laid in the page's flow, as wide as what holds it.
+--
+--   LaneTab.Composer { chat = function() return id end, slot = "capture",
+--     take = function(text, attachments) return promise end,
+--     placeholder = "Dump anything" }
+--
+-- A second placement of the same composer (`mirror = true`, the same
+-- `slot`): one composer shown in two places, its draft, chips and picks
+-- the first one's. Its focus is its own (`focus`); `bare()` while it's one
+-- line with nothing over or under it, opened out otherwise; `on_escape`
+-- has Escape first; `on_open_model` is asked for while it's bare and its
+-- model picker is wanted (`/model`, the sidebar's): it opens out, then
+-- the picker. While a mirror shows, the model picker asked for from
+-- elsewhere opens in it rather than in the first (likely out of view).
+-- The slot's session is watched while either is there.
+local holders: { [string]: number } = {}
+local mirrors: { [string]: number } = {}
+-- Each slot's mirrors' `shown` (one kept built while out of sight).
+local mirror_shown: { [string]: { () -> boolean } } = {}
+local function any_mirror_shown(slot: string): boolean
+	for _, shown in mirror_shown[slot] or {} do
+		if shown() then
+			return true
+		end
+	end
+	return false
+end
+M.Composer = ui.component(function(props: {
+	chat: () -> string?,
+	slot: string,
+	take: Take?,
+	placeholder: string?,
+	footer: Footer?,
+	drop: boolean?,
+	id: string?,
+	mirror: boolean?,
+	focus: State<number>?,
+	bare: (() -> boolean)?,
+	on_escape: (() -> boolean)?,
+	on_open_model: (() -> ())?,
+	on_focus: ((focused: boolean) -> ())?,
+	lazy: boolean?,
+	-- Its chat's row and send path alone, no transcript watched (Capture's:
+	-- it never shows one). Every placement of a slot passes the same.
+	session_only: boolean?,
+	-- A mirror kept built while out of sight (the Control room's floating
+	-- composer, hidden on Overview with Capture in view): whether it shows.
+	-- Only one that shows takes the model picker from the first.
+	shown: (() -> boolean)?,
+}): Node
 	local slot = props.slot
+	local mirror = props.mirror == true
+	local lazy = props.lazy == true
+	local mirror_showing = props.shown or function(): boolean
+		return true
+	end
 	local view = lanes.view(slot)
+	-- Lazy, till it's used: its session as the chats list has it (its
+	-- agent and model, at rest), so its picker shows the chat's model and
+	-- a pick is the chat's at once; the host's whole session (its effort,
+	-- its queue) once it's woken.
+	if lazy then
+		local host_view = view
+		local at_rest = ui.computed(function(): any
+			local id = props.chat()
+			if not id then
+				return nil
+			end
+			local row: any = nil
+			local now = sessions.now:get()
+			for _, list in { now.chats or {}, now.archived or {} } do
+				for _, c in list do
+					if c.id == id then
+						row = c
+					end
+				end
+			end
+			if not row then
+				return nil
+			end
+			local model: string? = row.model
+			local harness: string? = row.harness
+			if model and not string.find(model, "/", 1, true) then
+				if harness then
+					model = `{harness}/{model}`
+				else
+					-- (A row naming its model alone: the catalog's entry for it.)
+					for _, m in store.catalog:get().models or {} do
+						if string.sub(m.value, -(#model + 1)) == `/{model}` then
+							model, harness = m.value, m.harness
+							break
+						end
+					end
+				end
+			end
+			return { id = id, state = "ready", device = row.device, harness = harness, model = model, running = false }
+		end)
+		view = {
+			session = ui.computed(function(): any
+				if woken:get()[slot] then
+					return host_view.session:get()
+				end
+				return at_rest:get()
+			end),
+			messages = host_view.messages,
+			draft = host_view.draft,
+		}
+	end
+	-- (Lazy: its chat watched once it's used, `M.wake`.)
+	local on_focus = props.on_focus
+	if lazy then
+		local told = props.on_focus
+		on_focus = function(focused: boolean)
+			if focused then
+				M.wake(slot)
+			end
+			if told then
+				told(focused)
+			end
+		end
+	end
 	-- (Its focus, by its slot: a drop zone of its, around it or anywhere on
-	-- its page, gives it the keys as something lands.)
-	local focus = focus_of(slot)
+	-- its page, gives it the keys as something lands. A mirror's, its own.)
+	local focus = props.focus or focus_of(slot)
+	local open_model = ui.use_state(0)
+	holders[slot] = (holders[slot] or 0) + 1
+	if mirror then
+		mirrors[slot] = (mirrors[slot] or 0) + 1
+		local list = mirror_shown[slot] or {}
+		table.insert(list, mirror_showing)
+		mirror_shown[slot] = list
+	end
 	ui.effect(function()
-		lanes.watch(slot, props.chat())
+		local id = props.chat()
+		if lazy and not woken:get()[slot] then
+			return
+		end
+		lanes.watch(slot, id, nil, nil, props.session_only)
+	end)
+	-- (Bare, its picker wanted: opened out first, then the picker, once
+	-- the opened-out form is made.)
+	local bare = props.bare
+	if mirror and bare then
+		local seen = open_model:peek()
+		local again = false
+		ui.effect(function()
+			local n = open_model:get()
+			if n == seen then
+				return
+			end
+			seen = n
+			if again then
+				again = false
+				return
+			end
+			if bare() and props.on_open_model then
+				props.on_open_model()
+				ui.after(0, function()
+					ui.after(0, function()
+						again = true
+						open_model:add(1)
+					end)
+				end)
+			end
+		end)
+	end
+	-- (Taken a frame on, once its composer and its picker are made, and
+	-- only by one still there. A page coming may make it again as it lays
+	-- itself out: one let go just after it opened its picker hands the
+	-- request on to the next.)
+	local alive = true
+	local opened_at = -math.huge
+	ui.effect(function()
+		if model_wanted:get() == slot and props.chat() then
+			M.wake(slot)
+			ui.after(0, function()
+				ui.after(0, function()
+					-- (A mirror showing takes it: it's the one in view.)
+					local mine = if mirror then mirror_showing() else not any_mirror_shown(slot)
+					if alive and mine and model_wanted:peek() == slot then
+						model_wanted:set(nil)
+						if ui.now() - wanted_at < WANT_FOR then
+							opened_at = ui.now()
+							open_model:add(1)
+						end
+					end
+				end)
+			end)
+		end
 	end)
 	ui.on_cleanup(function()
-		lanes.watch(slot, nil)
+		alive = false
+		if ui.now() - opened_at < HAND_ON then
+			model_wanted:set(slot)
+		end
+		-- (The slot's session let go with the last placement of it, never
+		-- under another still showing.)
+		local left = (holders[slot] or 1) - 1
+		holders[slot] = if left > 0 then left else nil
+		if mirror then
+			local m = (mirrors[slot] or 1) - 1
+			mirrors[slot] = if m > 0 then m else nil
+			local list = mirror_shown[slot] or {}
+			local at = table.find(list, mirror_showing)
+			if at then
+				table.remove(list, at)
+			end
+			mirror_shown[slot] = if #list > 0 then list else nil
+		end
+		if left <= 0 then
+			-- (A lazy one never used watched nothing.)
+			if not lazy or woken:peek()[slot] then
+				lanes.watch(slot, nil)
+			end
+			if woken:peek()[slot] then
+				woken:set_key({ slot }, nil)
+			end
+		end
 	end)
+	local function build(id: string, form: Form?): Node
+		local c = composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder, props.footer, form, open_model)
+		return if props.drop then M.DropZone { slot = slot, chat = props.chat, focus = props.focus, place = if mirror then "mirror" else nil, c } else c
+	end
+	-- (A real swap: the chat it's bound to, once known; a mirror's form,
+	-- bare or opened out, as it changes.)
 	return ui.presence(function(): string
-		return props.chat() or ""
-	end, function(id: string): Node
-		if id == "" then
+		local id = props.chat() or ""
+		if mirror and bare and id ~= "" then
+			return if bare() then `{id}#bare` else `{id}#open`
+		end
+		return id
+	end, function(key: string): Node
+		if key == "" then
 			return ui.div {}
 		end
+		local id, how = nil, nil
+		if mirror and bare then
+			id, how = string.match(key, "^(.-)#(%a+)$")
+		end
+		local form: Form? = nil
+		if id and how then
+			local f: Form = { mirror = true, bare = how == "bare", expanded = how == "open", on_escape = props.on_escape, on_focus = on_focus }
+			form = f
+		else
+			id = key
+			if mirror or on_focus then
+				local f: Form = { mirror = mirror, on_escape = props.on_escape, on_focus = on_focus }
+				form = f
+			end
+		end
 		-- (Its `id` is the component's node's: zgx gives it there.)
+		-- (Lazy: the pointer coming over it wakes its chat, so its picks are
+		-- the chat's by the time one is pressed.)
 		return ui.column {
 			w_full = true,
-			if props.drop then M.DropZone { slot = slot, chat = props.chat, composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder, props.footer) } else composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder, props.footer),
+			on_hover = if lazy then function(inside: boolean)
+				if inside then
+					M.wake(slot)
+				end
+			end else nil,
+			build(id :: string, form),
 		}
 	end, { w_full = true })
 end)
@@ -900,16 +1222,22 @@ end)
 -- send with it, the chat page's own overlays saying so while they're over
 -- it; its composer takes the keys as one lands. A page puts it round as
 -- much as it likes (the Control room: all of Capture); `LaneTab.Composer`'s
--- `drop = true`, round the composer alone.
+-- `drop = true`, round the composer alone. Round a second placement of
+-- the composer (a mirror's): `focus`, that one's, and `place`, a name of
+-- its own for the zone (its overlays its own, the draft the same). `refs`:
+-- it takes the Control room's references too (ds/orch_ref, dragged from
+-- its widgets: a chip each, sent with the dump), "Drop to reference" while
+-- one is over it.
 --
---   LaneTab.DropZone { slot = "control-capture", chat = function() return id end, node }
-M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, [number]: Node }): Node
+--   LaneTab.DropZone { slot = "control-capture", chat = function() return id end, refs = true, node }
+M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, focus: State<number>?, place: string?, refs: boolean?, [number]: Node }): Node
 	local slot = props.slot
-	local focus = focus_of(slot)
+	local focus = props.focus or focus_of(slot)
+	local suffix = if props.place then `-{props.place}` else ""
 	local body = ui.presence(function(): string
 		return props.chat() or ""
 	end, function(id: string): Node
-		local zone_name = `lane.{slot}`
+		local zone_name = if props.place then `lane.{slot}.{props.place}` else `lane.{slot}`
 		local node: { [any]: any } = { w_full = true, relative = true }
 		for _, child in ipairs(props :: any) do
 			table.insert(node, child)
@@ -917,14 +1245,17 @@ M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, [
 		if id == "" then
 			return ui.column(node :: any)
 		end
-		local zone, carrying, carrying_session = Shared.own_drop_zone(zone_name, id, function()
+		local zone, carrying, carrying_session, carrying_ref = Shared.own_drop_zone(zone_name, id, function()
 			focus:add(1)
-		end)
+		end, props.refs)
 		for k, v in zone do
 			node[k] = v
 		end
-		table.insert(node, DropOverlay { shown = carrying, id = `lane-drop-{slot}` })
-		table.insert(node, DropOverlay { shown = carrying_session, id = `lane-drop-mention-{slot}`, label = ui.t("chat.composer.drop_to_mention") :: any })
+		table.insert(node, DropOverlay { shown = carrying, id = `lane-drop-{slot}{suffix}` })
+		table.insert(node, DropOverlay { shown = carrying_session, id = `lane-drop-mention-{slot}{suffix}`, label = ui.t("chat.composer.drop_to_mention") :: any })
+		if props.refs then
+			table.insert(node, DropOverlay { shown = carrying_ref, id = `lane-drop-ref-{slot}{suffix}`, label = ui.t("chat.composer.drop_to_reference") :: any, tone = "accent" })
+		end
 		return ui.column(node :: any)
 	end, { w_full = true })
 	return body
@@ -934,6 +1265,8 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	local tab = props.tab
 	local slot, chat = tab.id, tab.chat
 	local data = tab.data or {}
+	-- (Its transcript alone, no composer of its own.)
+	local reading = tab.kind == "subagent" or tab.kind == "read"
 	local view = lanes.view(slot)
 	-- Files, and the files pane's, carried over it, dropped anywhere on it, as
 	-- on the chat page: chips on its own draft (a sidebar chat, mentioned), its
@@ -968,6 +1301,14 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	local offset = ui.state(`chat_lane_offset_{slot}`, T.PAST_END)
 	local anchor = ui.state(`chat_lane_anchor_{slot}`, nil :: any)
 	local dock_h = ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
+	-- (A `read` tab kept built while hidden, `data.live`: the reply being
+	-- written held meanwhile, ds/hold; its rows not written to.)
+	local reply: any = view.draft
+	if tab.kind == "read" and data.live then
+		reply = Hold.computed(data.live, function(): any
+			return view.draft:get()
+		end, "chat")
+	end
 	local room = Dock.room(function(): number
 		return dock_h:get()
 	end)
@@ -978,10 +1319,18 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	local pictures = ReplyImages.for_session(lane_session)
 	local sent_pictures = ReplyImages.for_attachments(function(): any
 		local s = lane_session()
-		if not s then
+		if s then
+			return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
+		end
+		-- A subagent's lane has no chat of its own (its doc is its parent's
+		-- child): the pictures its tools kept are files on its parent's
+		-- host, read as the parent's are.
+		local parent = data.parent
+		local open = store.session:get()
+		if not parent or not open or open.id ~= parent or open.state == "missing" then
 			return nil
 		end
-		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
+		return { id = open.id, device = open.device, cwd = open.cwd, here = sessions.here:get() }
 	end)
 	-- The session whose panel it's in (the page's): where a file it links
 	-- opens, and a subagent it spawned.
@@ -1023,10 +1372,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			return prefs.conversation_width:get()
 		end,
 		messages = view.messages,
-		draft = view.draft,
+		draft = reply,
 		offset = offset,
 		keep = anchor,
-		foot = if tab.kind == "subagent" then nil else room.foot,
+		foot = if tab.kind == "read" then data.foot elseif tab.kind == "subagent" then nil else room.foot,
 		compact = function(): boolean
 			return prefs.compact_transcript:get()
 		end,
@@ -1103,8 +1452,8 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			return view.session:peek()
 		end),
 	}
-	if tab.kind == "subagent" then
-		return ui.column { id = `lane-{slot}`, class = "lane-tab subagent-tab", provide = { session = chat }, grow = 1, w_full = true, min_h = 0, transcript }
+	if reading then
+		return ui.column { id = `lane-{slot}`, class = if tab.kind == "read" then "lane-tab read-tab" else "lane-tab subagent-tab", provide = { session = chat }, grow = 1, w_full = true, min_h = 0, relative = true, transcript }
 	end
 	return ui.column {
 		id = `lane-{slot}`,
@@ -1134,7 +1483,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					pb = Dock.page_pad(),
 					ui.column { w_full = true, grow = 1, min_h = 0, relative = true, transcript },
 				},
-				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus), id = `lane-composer-{slot}` },
+				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, nil, nil, nil, nil, nil, data.own == true), id = `lane-composer-{slot}` },
 			}
 			for k, v in zone do
 				body[k] = v

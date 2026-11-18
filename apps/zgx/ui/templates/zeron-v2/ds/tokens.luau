@@ -295,7 +295,8 @@ function M.setup()
 				-- one's least tile; how long (as wide as tall, at least) and how
 				-- wide (as tall, at most) before it's cut; a run's tray (its
 				-- inset, so the corner is the picture's plus it, and its tallest
-				-- row); the controls' inset from the corner.
+				-- row); the controls' inset from the corner; a tool's result
+				-- picture's thumbnail (its widest and tallest).
 				picture = {
 					w = 660,
 					h = 420,
@@ -306,6 +307,7 @@ function M.setup()
 					wide = 5,
 					tray = { inset = 4, row = 300 },
 					control = { inset = 6 },
+					thumb = { w = 240, h = 160 },
 				},
 			},
 			-- Reasoning effort, a colour a level, cool to warm as it rises: mid
@@ -344,7 +346,10 @@ function M.setup()
 			-- less, the tree hides and comes over the file instead.
 			-- Files carried over a chat: the scrim over all of it (Zeron's at
 			-- two thirds; the light theme's own in its file).
-			drop = { scrim = "#00000066" },
+			-- An element carried over Capture to be referenced: the zone washed
+			-- and ringed in the accent, its label on an accent pill (either
+			-- theme: the accent is each theme's own).
+			drop = { scrim = "#00000066", ref = { wash = "alpha({accent}, 0.12)", edge = "alpha({accent}, 0.8)" } },
 			files = {
 				guide = "alpha({text.primary}, 0.24)",
 				drop = "alpha({accent}, 0.14)",

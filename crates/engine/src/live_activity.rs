@@ -170,7 +170,15 @@ mod tests {
     }
 
     fn result(id: &str) -> AgentEvent {
-        AgentEvent::ToolResult { id: id.into(), is_error: false, output: None, diff: None, exit_code: None }
+        AgentEvent::ToolResult {
+            id: id.into(),
+            is_error: false,
+            output: None,
+            diff: None,
+            exit_code: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
+        }
     }
 
     #[test]

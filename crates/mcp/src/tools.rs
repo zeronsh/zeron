@@ -23,6 +23,7 @@ use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
 mod orchestration;
+mod commands;
 mod plugins;
 mod themes;
 pub use orchestration::Role;
@@ -34,6 +35,8 @@ const MAX_BATCH: usize = 32;
 /// Cloud runs these agents (Codex and Claude Code): a Cloud chat's harness.
 const CLOUD_HARNESSES: &[HarnessId] = &[HarnessId::ClaudeCode, HarnessId::Codex];
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
+/// A device seen this recently is online (the app's sidebar says the same).
+const ONLINE_SECS: i64 = 70;
 const MAX_WAIT: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +60,8 @@ pub struct Tools {
     role: std::sync::RwLock<Option<Role>>,
     /// The role's built-in instructions, read with it.
     role_prompt: std::sync::RwLock<Option<String>>,
+    /// Each device's folder after this chat's last command there.
+    command_state: commands::CommandState,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -89,7 +94,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_devices",
-            description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device.",
+            description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device. `online`: seen in the last 70 s (always true for this one); run_command reaches any online device.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
@@ -152,12 +157,12 @@ fn catalog() -> Vec<ToolDef> {
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "description": "Never wider than the sandbox of the chat you are speaking from: more is lowered to it (accessCapped)." },
-                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to the access of the chat you are speaking from, and never exceeds it: more is lowered to it (the reply's accessCapped says so)." },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "auto", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, auto lets the agent's own reviewer (Claude Code's auto mode, Codex's auto-review) approve safe actions and ask about the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to the access of the chat you are speaking from, and never exceeds it: more is lowered to it (the reply's accessCapped says so)." },
                     "plan": { "type": "boolean", "default": false, "description": "Plan mode: explore and propose a plan before changing anything. Only for harnesses with supportsPlan." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
-                    "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine." },
+                    "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine, unless device or project names another of the person's devices." },
                     "item": { "type": "string", "description": "Crew threads: the board item it works on (one item per thread)." },
                     "role": { "type": "string", "description": "Crew threads: a short role, e.g. \"auth PR\"." },
                     "machine": { "type": "string", "description": "Only with cloud: the size of Cloud machine it starts on, a size id (small, default, large, xlarge; the ones offered are those of Settings → Cloud → Default machine, each with its vCPU, memory, disk and credit multiplier). Kept as the chat's own: it wakes on the same size. Omitted: the account's default machine. An unknown id fails, listing the valid ones. From a Cloud chat, no bigger than that chat's own machine." },
@@ -310,6 +315,7 @@ fn catalog() -> Vec<ToolDef> {
     tools.extend(orchestration::catalog());
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
+    tools.extend(commands::catalog());
     tools
 }
 
@@ -836,6 +842,7 @@ impl Tools {
             plugins: Default::default(),
             role: Default::default(),
             role_prompt: Default::default(),
+            command_state: Default::default(),
         }
     }
 
@@ -864,6 +871,11 @@ impl Tools {
                 // `ask` is for a chat's agent; the rest by role.
                 orchestration::ASK | orchestration::PROGRESS => in_chat,
                 name if orchestration::NAMES.contains(&name) => role.offers(name),
+                // The Brain dump routes and never acts: no shell of its own
+                // (its CLI's are taken away too), none through here.
+                name if commands::NAMES.contains(&name) => {
+                    !matches!(role, orchestration::Role::BrainDump { .. })
+                }
                 _ => true,
             })
             .collect()
@@ -917,6 +929,9 @@ impl Tools {
             }
             plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
                 return self.template_packages(name, args).await;
+            }
+            command if commands::NAMES.contains(&command) => {
+                return self.commands(command, args).await;
             }
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
@@ -993,12 +1008,15 @@ impl Tools {
     async fn list_devices(&self) -> anyhow::Result<Value> {
         let (devices, local) =
             tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
+        let now = chrono::Utc::now();
         Ok(json!({
             "devices": devices.iter().map(|d| json!({
                 "id": d.id,
                 "name": d.name,
                 "platform": d.platform,
                 "local": d.id == local,
+                "online": d.id == local
+                    || d.last_seen_at.is_some_and(|at| now - at <= chrono::Duration::seconds(ONLINE_SECS)),
                 "lastSeenAt": d.last_seen_at,
                 "version": d.version,
             })).collect::<Vec<_>>()
@@ -3214,6 +3232,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(last_kind(&world), (json!("brain-dump-fake"), json!("subagent")));
+    }
+
+    /// A run served by the engine's own endpoint gets tools made with no
+    /// lookup: its first request reads the chat's role, so an orchestrator
+    /// is offered its tools there too; the Brain dump never a shell.
+    #[tokio::test]
+    async fn roles_are_read_on_the_first_request_and_the_brain_dump_runs_no_commands() {
+        let orchestrator = |id: &str, kind: &str| {
+            json!({"id": id, "kind": kind, "name": "O", "hue": 1,
+                "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z"})
+        };
+        let world = Arc::new(World {
+            orchestrators: Some(json!([
+                orchestrator("chat-alpha-1", "standard"),
+                orchestrator("chat-brain-1", "brainDump"),
+            ])),
+            ..Default::default()
+        });
+        let listed = |tools: &Tools| -> Vec<String> {
+            tools.list().into_iter().map(|t| t.name.to_owned()).collect()
+        };
+        let names = |reply: &Value| -> Vec<String> {
+            reply["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let lead = tools(world.clone(), origin("chat-alpha-1"));
+        assert!(!listed(&lead).iter().any(|n| n == orchestration::CREW_ADD), "not read yet");
+        let reply = crate::jsonrpc::handle_request(&lead, json!(1), "tools/list", Value::Null).await;
+        assert!(names(&reply).iter().any(|n| n == orchestration::CREW_ADD));
+        assert!(names(&reply).iter().any(|n| n == commands::RUN_COMMAND));
+
+        let dump = tools(world.clone(), origin("chat-brain-1"));
+        let reply = crate::jsonrpc::handle_request(&dump, json!(1), "tools/list", Value::Null).await;
+        let offered = names(&reply);
+        assert!(offered.iter().any(|n| n == orchestration::ROUTE));
+        for command in commands::NAMES {
+            assert!(!offered.iter().any(|n| n == command), "{command}");
+        }
+        let refused =
+            crate::jsonrpc::handle_request(&dump, json!(2), "tools/call", json!({"name": "run_command", "arguments": {"command": "true"}}))
+                .await;
+        assert!(refused.get("result").is_none_or(|r| r["isError"] == true), "{refused}");
     }
 
     #[tokio::test]

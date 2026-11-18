@@ -40,6 +40,58 @@ enum Verdict {
 const NOT_HTTP_INITIAL_BACKOFF: Duration = Duration::from_secs(4);
 /// How often discovery scans while something Zeron started is alive.
 const SCAN_CADENCE: Duration = Duration::from_secs(2);
+/// The longest discovery waits between scans while only processes left
+/// running (an agent's warm session, a server left up) keep it going and
+/// nothing about them changes: see [`ScanPace`].
+const SCAN_RESTING_MAX: Duration = Duration::from_secs(30);
+
+/// What keeps discovery scanning: a live run or terminal, or processes a
+/// chat started that are still alive (`owned`: which ones, and what they
+/// listen on, as a signature).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Activity {
+    live: bool,
+    owned: Option<u64>,
+}
+
+impl Activity {
+    fn active(&self) -> bool {
+        self.live || self.owned.is_some()
+    }
+}
+
+/// The wait before discovery's next scan. Every [`SCAN_CADENCE`] while a run
+/// works or a terminal is open, or while what's alive changes. Once only
+/// processes left running keep it going, unchanged — an agent's warm
+/// session, which an engine at rest holds for every recent chat — each scan
+/// waits twice as long as the last, up to [`SCAN_RESTING_MAX`]: a scan reads
+/// every process on the machine, and its every-2-s cadence was most of an
+/// idle engine's work. A run or terminal starting, the chats changing, or an
+/// open preview losing its process wakes it at once
+/// ([`PreviewService::rescan`]).
+#[derive(Default)]
+struct ScanPace {
+    resting: u32,
+    last: Option<Activity>,
+}
+
+impl ScanPace {
+    fn next(&mut self, activity: Activity) -> Duration {
+        let unchanged = self.last.replace(activity) == Some(activity);
+        if activity.live || !unchanged {
+            self.resting = 0;
+            return SCAN_CADENCE;
+        }
+        self.resting = self.resting.saturating_add(1).min(8);
+        (SCAN_CADENCE * 2u32.pow(self.resting)).min(SCAN_RESTING_MAX)
+    }
+
+    /// A wake: the next scan starts over at the full cadence.
+    fn reset(&mut self) {
+        self.resting = 0;
+        self.last = None;
+    }
+}
 const NOT_HTTP_MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// (servers already confirmed HTTP, listeners to probe this cycle)
@@ -139,7 +191,7 @@ pub type Projects = Arc<dyn Fn() -> Scope + Send + Sync>;
 fn candidates(
     scope: Scope,
     origins: &mut discovery::Origins,
-) -> Option<(Vec<(PathBuf, discovery::Listener)>, bool)> {
+) -> Option<(Vec<(PathBuf, discovery::Listener)>, Activity)> {
     let Scope {
         chats,
         terminals,
@@ -164,7 +216,7 @@ fn candidates(
         .into_iter()
         .collect();
     if roots.is_empty() {
-        return Some((Vec::new(), live));
+        return Some((Vec::new(), Activity { live, owned: None }));
     }
     roots.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     // The origins a listed server can have (see the filter below).
@@ -174,8 +226,20 @@ fn candidates(
         _ => false,
     };
     let owned = discovery::owned(origins, &accept)?;
-    let active = live || !owned.is_empty();
     let listeners = discovery::owned_listeners(origins, &owned)?;
+    let active = Activity {
+        live,
+        owned: (!owned.is_empty()).then(|| {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            owned.signature().hash(&mut hasher);
+            let mut ports: Vec<(u32, SocketAddr)> =
+                listeners.iter().map(|l| (l.pid, l.address)).collect();
+            ports.sort_unstable();
+            ports.hash(&mut hasher);
+            hasher.finish()
+        }),
+    };
     Some((
         listeners
             .into_iter()
@@ -373,14 +437,16 @@ impl PreviewService {
         let catalog = self.0.catalog.clone();
         let stop = self.0.stop.clone();
         let wake = self.0.scan_wake.clone();
-        // Every 2 s while anything Zeron started here is alive (a run, a
-        // terminal, or a process either left running): a server one starts
-        // is listed within one cadence, as before. With none alive no
+        // Every 2 s while a run or terminal is alive, or what a chat left
+        // running changes: a server one starts is listed within one
+        // cadence, as before. While only unchanged processes left running
+        // keep it going, it slows down ([`ScanPace`]). With none alive no
         // listener could be listed, so the scan parks until a run or
         // terminal changes state, or an open preview loses its process.
         let scanner = tokio::spawn(async move {
             let mut memory = ProbeMemory::default();
             let mut origins = discovery::Origins::default();
+            let mut pace = ScanPace::default();
             loop {
                 let memory = &mut memory;
                 let origins = &mut origins;
@@ -404,11 +470,11 @@ impl PreviewService {
                             tracing::debug!(
                                 "preview scan could not read processes; keeping the last result"
                             );
-                            return true;
+                            return Activity { live: true, owned: None };
                         }
                         Err(error) => {
                             tracing::warn!(%error, "preview scan failed; keeping the last result");
-                            return true;
+                            return Activity { live: true, owned: None };
                         }
                     };
                     let (mut servers, probe) = memory.plan(candidates, Instant::now());
@@ -432,12 +498,22 @@ impl PreviewService {
                     }
                     active
                 };
-                let active = tokio::select! { _ = stop.cancelled() => break, active = scan => active };
-                if active {
-                    // (A wake meanwhile is served by this cadence.)
-                    tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(SCAN_CADENCE) => {} }
-                } else {
+                let activity = tokio::select! { _ = stop.cancelled() => break, activity = scan => activity };
+                if !activity.active() {
+                    pace.reset();
                     tokio::select! { _ = stop.cancelled() => break, _ = wake.notified() => {} }
+                    continue;
+                }
+                let wait = pace.next(activity);
+                if wait <= SCAN_CADENCE {
+                    // (A wake meanwhile is served by this cadence.)
+                    tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(wait) => {} }
+                } else {
+                    tokio::select! {
+                        _ = stop.cancelled() => break,
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = wake.notified() => pace.reset(),
+                    }
                 }
             }
         });
@@ -612,9 +688,9 @@ mod tests {
         let mut origins = discovery::Origins::default();
         let (found, active) = candidates(scope(false), &mut origins).unwrap();
         assert!(found.is_empty());
-        assert!(!active, "nothing of this chat runs: nothing to scan for");
+        assert!(!active.active(), "nothing of this chat runs: nothing to scan for");
         let (_, active) = candidates(scope(true), &mut origins).unwrap();
-        assert!(active, "a live run keeps the cadence before its process exists");
+        assert!(active.active(), "a live run keeps the cadence before its process exists");
 
         // What an agent of this chat starts: a listener in its folder.
         struct Kill(std::process::Child);
@@ -640,7 +716,9 @@ mod tests {
         std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line).unwrap();
         let port: u16 = line.trim().parse().unwrap();
         let (found, active) = candidates(scope(false), &mut origins).unwrap();
-        assert!(active, "a process the chat started is alive");
+        assert!(active.active() && !active.live, "a process the chat started is alive");
+        let (_, again) = candidates(scope(false), &mut origins).unwrap();
+        assert_eq!(again, active, "the same process, listening the same: unchanged");
         assert!(
             found.iter().any(|(_, l)| l.address.port() == port
                 && l.pid == server.0.id()
@@ -650,7 +728,28 @@ mod tests {
         );
         drop(server);
         let (found, active) = candidates(scope(false), &mut origins).unwrap();
-        assert!(found.is_empty() && !active, "gone with its process");
+        assert!(found.is_empty() && !active.active(), "gone with its process");
+    }
+    #[test]
+    fn scans_slow_down_only_while_what_runs_is_unchanged() {
+        let warm = Activity { live: false, owned: Some(1) };
+        let mut pace = ScanPace::default();
+        assert_eq!(pace.next(warm), SCAN_CADENCE, "first sight of it");
+        let waits: Vec<_> = (0..6).map(|_| pace.next(warm).as_secs()).collect();
+        assert_eq!(waits, [4, 8, 16, 30, 30, 30]);
+        // A process starting or exiting, or a new listener: full cadence.
+        assert_eq!(pace.next(Activity { live: false, owned: Some(2) }), SCAN_CADENCE);
+        assert_eq!(pace.next(Activity { live: false, owned: Some(2) }).as_secs(), 4);
+        // A run working keeps the cadence however long nothing changes.
+        let live = Activity { live: true, owned: Some(2) };
+        for _ in 0..5 {
+            assert_eq!(pace.next(live), SCAN_CADENCE);
+        }
+        // A wake starts over.
+        assert_eq!(pace.next(warm), SCAN_CADENCE);
+        assert_eq!(pace.next(warm).as_secs(), 4);
+        pace.reset();
+        assert_eq!(pace.next(warm), SCAN_CADENCE);
     }
     #[test]
     fn backoff_is_capped() {

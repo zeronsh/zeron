@@ -69,6 +69,24 @@ const PRESENCE_FRESH_MS: i64 = 45_000;
 /// run for devices whose heartbeat is stale, so the steady state (healthy
 /// room, fresh beats) sends no extra traffic.
 const RELAY_PROBE_INTERVAL_MS: u64 = 30_000;
+/// How often to ask the relay about a device last heard from `quiet_ms` ago.
+/// A device that just went quiet is most likely a starved heartbeat (what the
+/// probe exists to catch), so it's asked every [`RELAY_PROBE_INTERVAL_MS`]; one
+/// gone for hours or days (a closed laptop, a Cloud machine asleep) is
+/// genuinely offline, and asking every 30 s, for each such device on the
+/// account, was most of a signed-in engine's idle network work. Its coming
+/// back is heard from its own heartbeat and boot stamp, not from this probe.
+fn relay_probe_every(quiet_ms: i64) -> std::time::Duration {
+    const MINUTE: i64 = 60_000;
+    let secs = match quiet_ms {
+        ms if ms < 10 * MINUTE => RELAY_PROBE_INTERVAL_MS / 1000,
+        ms if ms < 60 * MINUTE => 120,
+        ms if ms < 24 * 60 * MINUTE => 300,
+        _ => 600,
+    };
+    std::time::Duration::from_secs(secs)
+}
+
 /// Per-request timeout for a relay-status probe.
 const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Debounce window for local snapshot saves after a change.
@@ -2273,10 +2291,12 @@ fn merge_sessions(device_id: &str, rows: &[Session], local: &[Session]) -> Vec<S
 /// point the device is, for every purpose the app has, genuinely offline.
 /// Steady state (healthy room, fresh heartbeats) probes nothing.
 async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tick.tick().await; // consume the immediate first tick
+    // On the beat grid (`zeron_sync::wake`): it wakes with the sockets' pings.
+    let mut tick =
+        zeron_sync::wake::beat_interval(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
     let client = reqwest::Client::new();
+    // When each device was last probed (epoch ms).
+    let mut probed: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     loop {
         tick.tick().await;
         let Some(inner) = weak.upgrade() else { return };
@@ -2290,16 +2310,32 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
                 continue;
             };
             let seen = lock(&inner.presence_seen);
+            // (Deleted devices aren't listed: a retired Cloud machine is never asked.)
+            probed.retain(|id, _| devices.iter().any(|d| &d.id == id));
             devices
                 .into_iter()
                 .filter(|d| d.id != self_id)
                 .filter(|d| {
-                    seen.get(&d.id)
-                        .is_none_or(|ms| now.saturating_sub(*ms) >= PRESENCE_FRESH_MS)
+                    let heard = seen
+                        .get(&d.id)
+                        .copied()
+                        .into_iter()
+                        .chain(d.last_seen_at.map(|at| at.timestamp_millis()))
+                        .max();
+                    if heard.is_some_and(|ms| now.saturating_sub(ms) < PRESENCE_FRESH_MS) {
+                        return false;
+                    }
+                    let quiet = heard.map_or(i64::MAX, |ms| now.saturating_sub(ms));
+                    probed.get(&d.id).is_none_or(|at| {
+                        now.saturating_sub(*at) >= relay_probe_every(quiet).as_millis() as i64
+                    })
                 })
                 .map(|d| d.id)
                 .collect()
         };
+        for id in &stale {
+            probed.insert(id.clone(), now);
+        }
         drop(inner);
         if stale.is_empty() {
             continue;
@@ -2351,10 +2387,14 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
 /// and refreshes presence every [`PRESENCE_INTERVAL_MS`]. Holds only a weak
 /// handle so a dropped host tears the task down.
 async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::Receiver<u64>) {
+    // Presence is other devices' and ours to them, through the edge: a
+    // local profile (no edge, this device alone) has none to refresh.
+    let synced = weak
+        .upgrade()
+        .is_some_and(|inner| inner.config.edge.is_some());
+    // On the beat grid, with the sockets' pings (`zeron_sync::wake`).
     let mut presence =
-        tokio::time::interval(std::time::Duration::from_millis(PRESENCE_INTERVAL_MS));
-    presence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    presence.tick().await; // consume the immediate first tick
+        zeron_sync::wake::beat_interval(std::time::Duration::from_millis(PRESENCE_INTERVAL_MS));
     let mut save_deadline: Option<tokio::time::Instant> = None;
     let mut last_change = tokio::time::Instant::now();
     // When the oldest row delta not yet in a whole save was written.
@@ -2403,7 +2443,7 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
                     oldest_delta = None;
                 }
             }
-            _ = presence.tick() => {
+            _ = presence.tick(), if synced => {
                 let Some(inner) = weak.upgrade() else { break };
                 inner.presence_tick();
                 // Re-publish on the same cadence: remote heartbeats decay when a
@@ -2558,7 +2598,22 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::{device_name_on_boot, linked_worktree_root};
+
+    #[test]
+    fn relay_probes_slow_down_with_how_long_a_device_has_been_gone() {
+        let minute = 60_000;
+        assert_eq!(relay_probe_every(0).as_secs(), 30);
+        assert_eq!(relay_probe_every(9 * minute).as_secs(), 30);
+        assert_eq!(relay_probe_every(30 * minute).as_secs(), 120);
+        assert_eq!(relay_probe_every(5 * 60 * minute).as_secs(), 300);
+        assert_eq!(relay_probe_every(3 * 24 * 60 * minute).as_secs(), 600);
+        assert_eq!(
+            relay_probe_every(i64::MAX).as_secs(),
+            600,
+            "never heard from"
+        );
+    }
+    use super::{device_name_on_boot, linked_worktree_root, relay_probe_every};
 
     #[tokio::test]
     async fn registry_http_sync_retains_dns_cause() {

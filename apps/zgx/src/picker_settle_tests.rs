@@ -32,3 +32,42 @@ fn a_device_that_doesnt_answer_leaves_the_picker_at_rest_once_settled() {
     assert!(!app.clock.wants_frame(), "settled: nothing breathes, no frames asked for");
     assert!(app.target("role:button \"Model\"").is_ok(), "the model chip still there");
 }
+
+/// New project's pages show breathing rows while a device lists a folder:
+/// once it has, and the palette closed, nothing breathes on. (Each page left
+/// its five breathing for good, so the window asked for every frame of the
+/// display for as long as it was open: a project added through the palette
+/// kept an idle window waking ~120 times a second.)
+#[test]
+fn new_projects_loading_rows_stop_breathing_once_loaded() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
+    let mut app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+    app.ui.scene.borrow_mut().resize(1200., 800.);
+    app.frames(30);
+    assert_eq!(app.error(), None, "the shell failed");
+    // (No chat working: its ring would breathe throughout.)
+    assert!(app.host.run_command("fixture.no_sessions"));
+    app.frames(60);
+    assert!(!app.clock.wants_frame(), "at rest before: no frames asked for");
+    assert!(app.host.run_command("fixture.slow_folders"));
+    assert!(app.host.run_command("shell.new_project"));
+    app.frames(30);
+    let option = |label: &str| format!("#palette-list >> role:option \"{label}\"");
+    // This Mac's places, then Home's folders: each page listed slowly, its
+    // loading rows breathing meanwhile.
+    for (pick, then) in [("MacBook Pro", "Home"), ("Home", "code")] {
+        app.click(&option(pick));
+        app.frames(20);
+        assert!(app.clock.wants_frame(), "loading {pick}: its rows breathe");
+        let next = option(then);
+        assert!(app.wait_until(|app| app.find(&next).is_some()), "{then} listed");
+    }
+    app.frames(60);
+    assert_eq!(app.error(), None);
+    for _ in 0..4 {
+        app.key(zgx::input::Key::Escape);
+        app.frames(30);
+    }
+    app.frames(60);
+    assert!(!app.clock.wants_frame(), "loaded and closed: nothing breathes, no frames asked for");
+}

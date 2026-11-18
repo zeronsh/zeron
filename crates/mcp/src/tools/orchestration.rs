@@ -1006,6 +1006,16 @@ impl Tools {
         role
     }
 
+    /// The role read, if it hasn't been yet: the engine's own endpoint
+    /// ([`crate::http`]) makes a run's tools without a lookup, so its first
+    /// request reads it (the stdio server reads it as it starts).
+    pub async fn ensure_role(&self) {
+        let known = self.role.read().unwrap_or_else(|e| e.into_inner()).is_some();
+        if !known {
+            self.resolve_role().await;
+        }
+    }
+
     /// Zeron's built-in instructions for this chat's role, when it has one.
     pub fn role_instructions(&self) -> Option<String> {
         self.role_prompt.read().unwrap_or_else(|e| e.into_inner()).clone()
