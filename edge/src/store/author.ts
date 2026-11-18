@@ -26,7 +26,7 @@
  */
 import type { Env } from "../env";
 import { STORE_DATA } from "./data";
-import { authorCard, authorsOf, listingState, ownerCard, publisherId, versionInfo } from "./cards";
+import { authorCard, authorsOf, listingState, ownerCard, publisherId, publisherIds, versionInfo } from "./cards";
 import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, rateLimited, refusedBody } from "./http";
 import { authenticatePublisher, keyInScope, readBody } from "./principal";
@@ -52,7 +52,7 @@ export const handleMyPlugins = async (request: Request, env: Env, db: D1Database
           .all<VersionRow>()
       ).results
     : [];
-  const authors = await authorsOf(env, [publisher.userId]);
+  const [authors, publishers] = await Promise.all([authorsOf(env, [publisher.userId]), publisherIds([publisher.userId, ...versions.map((v) => v.publisher_id)])]);
   const author = authorCard(authors[publisher.userId]!);
   return answer({
     publisher_id: await publisherId(publisher.userId),
@@ -64,6 +64,9 @@ export const handleMyPlugins = async (request: Request, env: Env, db: D1Database
         listing: listingState(p),
         versions: own.map((v) => ({
           ...versionInfo(v, true),
+          // The account that published it, fixed at publish: a plugin
+          // transferred in raises no notice for its former owner's versions.
+          publisher_id: publishers.get(v.publisher_id)!,
           // A deploy key's name is its account's: a version a former owner
           // published shows none to whoever owns the plugin now.
           ...(v.publisher_id === publisher.userId ? {} : { deploy_key: null }),

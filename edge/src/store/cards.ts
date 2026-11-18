@@ -30,6 +30,12 @@ export const publisherId = async (userId: string): Promise<string> => {
   return `pub_${[...digest].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32)}`;
 };
 
+/** Each of `userIds`' publisher id, by user id. */
+export const publisherIds = async (userIds: readonly string[]): Promise<Map<string, string>> => {
+  const unique = [...new Set(userIds)];
+  return new Map(await Promise.all(unique.map(async (u) => [u, await publisherId(u)] as const)));
+};
+
 /** An ISO time (the user directory keeps WorkOS's) as ms since the epoch,
  * as every time in a store answer is (amendment 35); null if it isn't one. */
 export const epochMs = (iso: string | null | undefined): number | null => {

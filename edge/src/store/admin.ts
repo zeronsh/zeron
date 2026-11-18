@@ -33,7 +33,7 @@
  */
 import type { Env } from "../env";
 import { userDirectoryStub } from "../user-directory";
-import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, reviewOf, versionInfo } from "./cards";
+import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, publisherIds, reviewOf, versionInfo } from "./cards";
 import { ASK_PATHS, type ConsentItem, askParts, askPartsOf, asksChanged, consentDiff } from "./consent";
 import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
@@ -605,6 +605,7 @@ const adminPlugin = async (env: Env, db: D1Database, id: string): Promise<Respon
     authorsOf(env, [plugin.owner_id])
   ]);
   const owner = authors[plugin.owner_id]!;
+  const publishers = await publisherIds(versions.results.map((v) => v.publisher_id));
   return answer({
     plugin: {
       ...ownerCard(plugin, versions.results[0], authorCard(owner)),
@@ -615,6 +616,7 @@ const adminPlugin = async (env: Env, db: D1Database, id: string): Promise<Respon
     owner: { id: owner.id, username: owner.username, user_id: plugin.owner_id, created_at: owner.createdAt },
     versions: versions.results.map((v) => ({
       ...versionInfo(v, true),
+      publisher_id: publishers.get(v.publisher_id)!,
       superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null
     })),
     // As /admin/reports gives them.

@@ -90,6 +90,31 @@ describe("an author's own view", () => {
   });
 });
 
+describe("who published each version", () => {
+  it("names each version's publisher to its owner and staff, fixed at publish: a transfer changes none", async () => {
+    const a = await author();
+    const b = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: b.username })).status).toBe(200);
+    expect((await publish(b.userId, id, await makePackage({ id, version: "1.1.0", signer: b.signer }))).status).toBe(201);
+    const [pa, pb] = [await publisherId(a.userId), await publisherId(b.userId)];
+    const byVersion = (versions: { version: string; publisher_id?: string }[]) => Object.fromEntries(versions.map((v) => [v.version, v.publisher_id]));
+    const mine = ((await (await call(b.userId, "GET", "/store/v1/me/plugins")).json()) as any).plugins.find((p: { id: string }) => p.id === id);
+    expect(byVersion(mine.versions)).toEqual({ "1.1.0": pb, "1.0.0": pa });
+    const staff = (await (await adminCall("GET", `/store/v1/admin/plugins/${id}`)).json()) as any;
+    expect(byVersion(staff.versions)).toEqual({ "1.1.0": pb, "1.0.0": pa });
+    // Nobody else reads it per version: not the public, not the former owner.
+    for (const path of [`/store/v1/plugins/${id}`, `/store/v1/plugins/${id}/versions`]) {
+      const versions = ((await (await call(a.userId, "GET", path)).json()) as any).versions as Record<string, unknown>[];
+      expect(versions.length, path).toBeGreaterThan(0);
+      for (const v of versions) expect(v, path).not.toHaveProperty("publisher_id");
+    }
+    expect(await (await call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.0.0`)).json()).not.toHaveProperty("publisher_id");
+    expect(((await (await call(a.userId, "GET", "/store/v1/me/plugins")).json()) as any).plugins.find((p: { id: string }) => p.id === id)).toBeUndefined();
+  });
+});
+
 describe("store answers", () => {
   it("give every time as ms since the epoch", async () => {
     const a = await author();
