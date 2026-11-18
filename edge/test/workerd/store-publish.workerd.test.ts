@@ -126,6 +126,56 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     expect(await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM object_orphans WHERE key LIKE ?").bind(`%/${id}/%`).first("n")).toBe(0);
   });
 
+  it("writes back an object a sweep deleted after the retry wrote it and before its row landed", async () => {
+    const a = await author();
+    const id = uniqueId("retry");
+    const pkg = await makePackage({ id, version: "1.0.0", signer: a.signer });
+    const request = () => new Request(`https://edge.test/store/v1/plugins/${id}/versions`, { method: "POST", headers: { authorization: `Bearer ${a.userId}` }, body: pkg });
+    const failing = new Proxy(env.STORE_DB, {
+      get: (target, prop) => (prop === "batch" ? () => Promise.reject(new Error("D1 is down")) : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target))
+    }) as D1Database;
+    // An earlier attempt left its objects, recorded more than an hour ago.
+    await expect(handlePublish(request(), env as never, failing, env.PLUGIN_STORE, id)).rejects.toThrow("D1 is down");
+    await env.STORE_DB.prepare("UPDATE object_orphans SET at = ? WHERE key LIKE ?").bind(Date.now() - 2 * ORPHAN_GRACE_MS, `%/${id}/%`).run();
+    // The sweep claims a record, finds no row and no fresh record, and is
+    // about to delete: held there.
+    let reached!: () => void;
+    const atDelete = new Promise<void>((resolve) => (reached = resolve));
+    let release!: () => void;
+    const go = new Promise<void>((resolve) => (release = resolve));
+    const sweepBucket = new Proxy(env.PLUGIN_STORE, {
+      get: (target, prop) =>
+        prop === "delete"
+          ? async (key: string) => {
+              reached();
+              await go;
+              return target.delete(key);
+            }
+          : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target)
+    }) as R2Bucket;
+    const sweep = collectOrphans(env.STORE_DB, sweepBucket, Date.now());
+    await atDelete;
+    // The retry: it refreshes the records and writes the objects; the
+    // sweep's delete lands then, before the retry's batch.
+    const slow = new Proxy(env.STORE_DB, {
+      get: (target, prop) =>
+        prop === "batch"
+          ? async (statements: D1PreparedStatement[]) => {
+              release();
+              expect(await sweep).toBe(1);
+              return target.batch(statements);
+            }
+          : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target)
+    }) as D1Database;
+    expect((await handlePublish(request(), env as never, slow, env.PLUGIN_STORE, id)).status).toBe(201);
+    // Both objects are there and served.
+    const sha = (await env.STORE_DB.prepare("SELECT package_sha256 FROM versions WHERE plugin_id = ?").bind(id).first<string>("package_sha256"))!;
+    expect(await env.PLUGIN_STORE.head(`pkg/${id}/1.0.0/${sha}.zeron-plugin`)).not.toBeNull();
+    expect(await env.PLUGIN_STORE.head(`files/${id}/1.0.0/${sha}.bin`)).not.toBeNull();
+    expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/versions/1.0.0/package`)).status).toBe(200);
+    expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/files/1.0.0/init.luau`)).status).toBe(200);
+  });
+
   it("keeps an orphan record for its grace, and deletes what no row names after it", async () => {
     const key = `pkg/${uniqueId("gone")}/1.0.0/${"0".repeat(64)}.zeron-plugin`;
     await env.PLUGIN_STORE.put(key, "x");

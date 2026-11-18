@@ -180,11 +180,12 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   // left behind can't lose them to it while its batch is on the way. The
   // batch clears the records once a row names the objects.
   await recordObjects(db, [pkgKey, blobKey]);
+  const writes: readonly (readonly [string, () => Promise<unknown>])[] = [
+    [pkgKey, () => bucket.put(pkgKey, body, { sha256: pkg.sha256, httpMetadata: { contentType: "application/octet-stream" } })],
+    [blobKey, () => bucket.put(blobKey, pkg.blob, { httpMetadata: { contentType: "application/octet-stream" } })]
+  ];
   try {
-    await Promise.all([
-      bucket.put(pkgKey, body, { sha256: pkg.sha256, httpMetadata: { contentType: "application/octet-stream" } }),
-      bucket.put(blobKey, pkg.blob, { httpMetadata: { contentType: "application/octet-stream" } })
-    ]);
+    await Promise.all(writes.map(([, write]) => write()));
 
     const files: [string, number, number, string, FileKind][] = [];
     let at = 0;
@@ -237,7 +238,16 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     .prepare("SELECT version, status, package_sha256 FROM versions WHERE plugin_id = ? AND precedence = ?")
     .bind(id, precedence)
     .first<{ version: string; status: string; package_sha256: string }>();
-  if (landed?.package_sha256 === pkg.sha256) return accepted(id, landed.version, landed.status, checks);
+  if (landed?.package_sha256 === pkg.sha256) {
+    // A sweep that judged an earlier attempt's record before this publish
+    // refreshed it may have deleted an object after this publish wrote it.
+    // Now that the row names the objects, write back any that is gone (this
+    // publish still has the bytes). A sweep checks for a row before it
+    // deletes, so the only delete that can still follow is one already
+    // decided and slower than this publish's batch and these HEADs.
+    for (const [key, write] of writes) if ((await bucket.head(key)) === null) await write();
+    return accepted(id, landed.version, landed.status, checks);
+  }
 
   // Lost: to another publish of this version, or to a change since the
   // checks above. Its objects are the sweep's to delete, once no row names them.
