@@ -988,7 +988,8 @@ fn listing_cases() -> Value {
         ("the mark: Spanish oficial with Cyrillic letters", "name", "\u{43e}fi\u{441}ial"),
         ("the mark: Spanish verificado with a digit 0", "name", "Verificad0"),
         ("the mark: Russian official theme in the accusative", "description", "\u{423}\u{441}\u{442}\u{430}\u{43d}\u{43e}\u{432}\u{438}\u{442}\u{435} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e} \u{442}\u{435}\u{43c}\u{443}."),
-        ("the mark: Russian official plugin in the genitive", "description", "\u{414}\u{43b}\u{44f} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{433}\u{43e} \u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{430} Git."),
+        ("the mark: Russian for the official Git plugin, someone else's, is fine", "description", "\u{414}\u{43b}\u{44f} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{433}\u{43e} \u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{430} Git."),
+        ("the mark: Russian official plugin for Git", "description", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d} \u{434}\u{43b}\u{44f} Git."),
         ("the mark: Spanish oficial with a Cyrillic o near cliente", "description", "Cliente \u{43e}ficial para Git."),
         ("the mark: Russian officially is fine", "name", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e} \u{43d}\u{435}\u{442}"),
         ("the mark: Russian not an official app is fine", "description", "\u{42d}\u{442}\u{43e} \u{43d}\u{435} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{435} \u{43f}\u{440}\u{438}\u{43b}\u{43e}\u{436}\u{435}\u{43d}\u{438}\u{435}."),
@@ -1055,6 +1056,26 @@ fn listing_cases() -> Value {
             None => format!("corpus: dodge {lang} {n:02}"),
         };
         cases.push((name, m, files.clone()));
+    }
+    // The identity lane's corpus for 011fd8af2 (mark_corpus_3.json): each
+    // entry's field and expectation as it gives them; two pass by decision.
+    let corpus3: Value = serde_json::from_str(include_str!("mark_corpus_3.json")).expect("the third mark corpus");
+    let decided: [(&str, &str); 2] = [
+        ("Plugin verifie", "unaccented, it's also French 'vérifie', 'checks'"),
+        ("\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e} \u{438} \u{431}\u{435}\u{437}\u{43e}\u{43f}\u{430}\u{441}\u{43d}\u{43e}", "the adverb 'officially', as English 'officially' isn't refused"),
+    ];
+    for kind in ["honest", "dodges"] {
+        for (n, row) in corpus3[kind].as_array().into_iter().flatten().enumerate() {
+            let (lang, field, expect, text) = (row["lang"].as_str().unwrap_or_default(), row["field"].as_str().unwrap_or("description"), row["expect"].as_str().unwrap_or_default(), row["text"].as_str().unwrap_or_default());
+            let mut m = base.clone();
+            m[field] = json!(text);
+            let name = match (expect, decided.iter().find(|(t, _)| *t == text)) {
+                ("pass", _) => format!("corpus3: {kind} {lang} {n:03} ({field}) is fine"),
+                (_, Some((_, why))) => format!("corpus3: {kind} {lang} {n:03} ({field}) passes by decision ({why}), so is fine"),
+                _ => format!("corpus3: {kind} {lang} {n:03} ({field})"),
+            };
+            cases.push((name, m, files.clone()));
+        }
     }
     // Keywords: neither the mark (any language a keyword can write, a part
     // or its parts joined) nor "zeron"; no badge lifts it.
@@ -1333,12 +1354,23 @@ fn data() -> Value {
                 })
                 .collect::<serde_json::Map<_, _>>(),
             "description": {
-                "about": "In a description, only a glyph refuses anywhere. A mark word is refused only when said of the plugin itself. Read the folded text (and its spaced runs read as words) as words: each run of characters that aren't separators is a word, but each Han ideograph (U+3400–4DBF, U+4E00–9FFF, U+F900–FAFF, U+20000–3134F) is a word by itself. The mark words here: words spelled as mark_claims reads them (lookalikes and all); each word of languages whose description is 'folded' (where it is, substring or whole, any script's letters as the boundary); 'accented' ones the same in the text read with accents kept; 'never' ones only by 'alone' below; a with_kana word as a 'folded' one when it is the only CJK in the text (no other Han ideograph, kana or Hangul: '公式Git'); and ambiguous, as substrings, for rules 2 and 4 and 'alone' only. Each occurrence covers the words it overlaps. It's refused when: (4) the words directly before it read as one of store_words, or the words directly after it do (nothing in sentence_ends between); else not when the word directly before it is one of negations, or (in a word that holds it) the characters directly before it are; else (1, alone) every word of its sentence (sentence_ends bound it) is one it covers, for any of them; or (1, first) its first word is the text's first word, for a mark word not matched as a substring (Chinese, Japanese and Korean put the modifier first: '検証済みのコミット' are verified commits); or (3) the word directly before it is one of subject_words (not for ambiguous); or (2) a word or phrase of plugin_words (whole words in order, or substrings where substring), or for a mark word one of claims_zeron.description.standing_other as a substring ('官方认证'), has at most two words between it and the occurrence, and nothing in sentence_ends between them. Words and phrases of these lists are compared in the reading's own form (folded, or with accents kept). The listing cases named 'description:' hold both sides to it.",
+                "about": "In a description, only a glyph refuses anywhere; a mark word only when said of the plugin itself (crates/engine/src/plugins/mark.rs, Reading::said_of, is the reference). Read the folded text (and its spaced runs read as words) as words: each run of characters that aren't separators is a word, but each Han ideograph (U+3400–4DBF, U+4E00–9FFF, U+F900–FAFF, U+20000–3134F) is a word by itself. A sentence is bounded by sentence_ends. Candidates and their kind: MARK: words spelled as mark_claims reads them; languages words whose description is 'folded'; 'accented' ones in the text read with accents kept; a with_kana word that is the only CJK in the text (no other Han, kana or Hangul). NAME-ONLY: languages words whose description is 'never' and that have neither with_kana nor before. AMBIGUOUS: ambiguous, and the languages words with with_kana or before, as substrings. For each occurrence (covering the words it overlaps), in order: (4) refused when the words directly before it, or directly after it, read as one of store_words; else (negation) not refused when a word of negations is among the four words before it in its sentence, or ends the characters before it inside its word, or one of negations_after is after it in its sentence; else (platform) not refused when it is a verified word (its folded text begins with or holds one of verified_stems) and the word directly after it in its sentence is one of platform_words; else (alone) refused when every word of its sentence is one it covers. Then by kind. MARK is refused when: it ends its sentence and directly before it is one of conjunctions, subject_words or predicate_before, or one of list_marks ends the characters before it in its sentence (spaces aside); or (first) for a mark word not matched as a substring, every word before it in the text is one of articles or holds no letter or digit; or (3) the word directly before it is one of subject_words; or the word before it is one of conjunctions and the word after it one of by_words; or (2, near) below. NAME-ONLY is refused when: the word directly before it is one of subject_words; or (first, as above) and the word after it is one of conjunctions; or it ends its sentence and the word before it is one of conjunctions or holds a plugin_words entry. AMBIGUOUS is refused when it ends its sentence after one of list_marks or conjunctions, or (2, near). (2, near): a plugin_words entry (whole words in order, a last word ending in '*' a stem; or a substring where substring), or for a MARK one of claims_zeron.description.standing_other as a substring, with nothing in sentence_ends between, either after it with at most two words between and none of them one of relation_words nor any of relation_after among the characters between, or directly before it with no word between, or overlapping it; and the phrase not someone else's thing: walking back from the phrase's first word (skipping at most two articles), no word of relation_words; no relation_before_zh ending the characters before it (separators aside); no relation_after beginning the characters after the plugin word (separators aside). Words and phrases of these lists are compared in the reading's own form (folded, or with accents kept). The listing cases named 'description:', 'corpus:' and 'corpus3:' hold both sides to it.",
                 "plugin_words": super::mark::PLUGIN_WORDS.iter().map(|(lang, substring, words)| (lang.to_string(), json!({ "substring": substring, "words": words }))).collect::<serde_json::Map<_, _>>(),
                 "subject_words": super::mark::SUBJECT_WORDS,
                 "negations": super::mark::NEGATIONS,
                 "sentence_ends": super::mark::SENTENCE_ENDS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
                 "store_words": super::mark::STORE_WORDS,
+                "articles": super::mark::ARTICLES,
+                "relation_words": super::mark::RELATION_WORDS,
+                "relation_before_zh": super::mark::RELATION_BEFORE_ZH,
+                "relation_after": super::mark::RELATION_AFTER,
+                "platform_words": super::mark::PLATFORM_WORDS,
+                "verified_stems": super::mark::VERIFIED_STEMS,
+                "conjunctions": super::mark::CONJUNCTIONS,
+                "by_words": super::mark::BY_WORDS,
+                "predicate_before": super::mark::PREDICATE_BEFORE,
+                "list_marks": super::mark::LIST_MARKS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "negations_after": super::mark::NEGATIONS_AFTER,
                 "ambiguous": super::mark::AMBIGUOUS,
             },
         },

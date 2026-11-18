@@ -206,7 +206,7 @@ pub const STANDING_OTHER: &[&str] = &[
 /// are claims only beside "zeron" ([`STANDING_OTHER`]).
 pub const AMBIGUOUS: &[&str] = &[
     "\u{516c}\u{5f0f}", "\u{516c}\u{8a8d}", "\u{acf5}\u{c2dd}", "\u{acf5}\u{c778}",
-    "\u{5df2}\u{8ba4}\u{8bc1}", "\u{5df2}\u{8a8d}\u{8b49}", "\u{8a8d}\u{8a3c}\u{6e08}", "\u{c778}\u{c99d}\u{b428}",
+    "\u{5df2}\u{8ba4}\u{8bc1}", "\u{5df2}\u{8a8d}\u{8b49}", "\u{8a8d}\u{8a3c}\u{6e08}", "\u{c778}\u{c99d}\u{b428}", "\u{ac80}\u{c99d}\u{b41c}",
 ];
 
 /// Words for the plugin itself, by language (rule 2), folded as the text
@@ -228,7 +228,7 @@ pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
         "\u{432}\u{435}\u{440}\u{441}\u{438}*", "\u{438}\u{43d}\u{442}\u{435}\u{433}\u{440}\u{430}\u{446}\u{438}*",
         "\u{442}\u{435}\u{43c}\u{430}", "\u{442}\u{435}\u{43c}\u{44b}", "\u{442}\u{435}\u{43c}\u{435}", "\u{442}\u{435}\u{43c}\u{443}", "\u{442}\u{435}\u{43c}\u{43e}\u{439}",
     ]),
-    ("zh", true, &["\u{63d2}\u{4ef6}", "\u{6269}\u{5c55}", "\u{64f4}\u{5c55}", "\u{5ba2}\u{6237}\u{7aef}", "\u{5ba2}\u{6236}\u{7aef}", "\u{5e94}\u{7528}", "\u{61c9}\u{7528}", "\u{5de5}\u{5177}", "\u{4e3b}\u{9898}", "\u{4e3b}\u{984c}", "\u{7248}\u{672c}", "\u{96c6}\u{6210}"]),
+    ("zh", true, &["\u{51fa}\u{54c1}", "\u{4ea7}\u{54c1}", "\u{7522}\u{54c1}", "\u{63d2}\u{4ef6}", "\u{6269}\u{5c55}", "\u{64f4}\u{5c55}", "\u{5ba2}\u{6237}\u{7aef}", "\u{5ba2}\u{6236}\u{7aef}", "\u{5e94}\u{7528}", "\u{61c9}\u{7528}", "\u{5de5}\u{5177}", "\u{4e3b}\u{9898}", "\u{4e3b}\u{984c}", "\u{7248}\u{672c}", "\u{96c6}\u{6210}"]),
     ("ja", true, &["\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{62e1}\u{5f35}", "\u{30a2}\u{30d7}\u{30ea}", "\u{30af}\u{30e9}\u{30a4}\u{30a2}\u{30f3}\u{30c8}", "\u{30c4}\u{30fc}\u{30eb}", "\u{30c6}\u{30fc}\u{30de}", "\u{30d1}\u{30c3}\u{30b1}\u{30fc}\u{30b8}", "\u{30d0}\u{30fc}\u{30b8}\u{30e7}\u{30f3}", "\u{9023}\u{643a}"]),
     ("ko", true, &["\u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{d655}\u{c7a5}", "\u{c571}", "\u{d074}\u{b77c}\u{c774}\u{c5b8}\u{d2b8}", "\u{b3c4}\u{ad6c}", "\u{d14c}\u{b9c8}", "\u{d328}\u{d0a4}\u{c9c0}", "\u{bc84}\u{c804}", "\u{d1b5}\u{d569}"]),
 ];
@@ -237,7 +237,7 @@ pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
 /// (rule 3: "is verified", "now official"). Not Italian "è" nor
 /// Portuguese "é": folded, both are "e", "and".
 pub const SUBJECT_WORDS: &[&str] = &[
-    "is", "are", "was", "were", "be", "been", "now", "fully", "officially",
+    "is", "are", "was", "were", "be", "been", "now", "fully", "officially", "completely", "totally", "100",
     "es", "son", "est\u{e1}", "est\u{e1}n", "fue", "ahora", "totalmente", "oficialmente",
     "est", "sont", "\u{e9}t\u{e9}", "maintenant", "enti\u{e8}rement", "officiellement",
     "ist", "sind", "wurde", "jetzt", "vollst\u{e4}ndig",
@@ -246,6 +246,65 @@ pub const SUBJECT_WORDS: &[&str] = &[
     "\u{442}\u{435}\u{43f}\u{435}\u{440}\u{44c}", "\u{43f}\u{43e}\u{43b}\u{43d}\u{43e}\u{441}\u{442}\u{44c}\u{44e}", "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}", "\u{44f}\u{432}\u{43b}\u{44f}\u{435}\u{442}\u{441}\u{44f}",
     "\u{662f}", "\u{5df2}\u{7ecf}", "\u{5df2}\u{7d93}", "\u{73b0}\u{5728}", "\u{73fe}\u{5728}", "\u{5b8c}\u{5168}", "\u{6b63}\u{5f0f}",
 ];
+
+/// Articles and possessives a noun phrase may begin with: skipped to find
+/// what stands before it, and before a text's first word.
+pub const ARTICLES: &[&str] = &[
+    "the", "a", "an", "your", "our", "this", "my", "its", "el", "la", "los", "las", "un", "una", "le", "les", "l", "une", "der", "die", "das", "den",
+    "dem", "des", "ein", "eine", "einem", "einen", "einer", "il", "lo", "gli", "i", "uno", "o", "os", "as", "um", "uma", "del", "du",
+];
+
+/// A word that makes the noun phrase after it someone else's thing ("connects
+/// to the official Slack app", "con la app oficial", "mit der offiziellen
+/// App", "к официальному приложению"): rule 2 says nothing there.
+pub const RELATION_WORDS: &[&str] = &[
+    "to", "with", "alongside", "for", "into", "via", "from", "like", "using", "uses", "use", "wraps", "wrapping", "around", "calls", "opens", "open", "supports",
+    "connects", "syncs", "integrates", "talks", "works", "extends", "imports", "launches", "shows", "displays", "mirrors", "replaces", "against",
+    "con", "a", "para", "desde", "usa", "abre", "avec", "pour", "depuis", "utilise", "ouvre", "mit", "zu", "f\u{fc}r", "nutzt", "\u{f6}ffnet",
+    "per", "da", "apre", "com", "\u{441}", "\u{441}\u{43e}", "\u{43a}", "\u{434}\u{43b}\u{44f}", "\u{447}\u{435}\u{440}\u{435}\u{437}",
+    // A preposition and an article in one: to the, with the.
+    "al", "au", "aux", "ao", "aos", "\u{e0}s", "zum", "zur", "all", "alla", "allo", "alle", "agli", "ai", "col", "coi", "sul", "sulla", "nel", "nella",
+];
+
+/// Before a mark word that ends its sentence, these say it of the subject
+/// ("It's verified.", "We're official."): with the conjunctions and
+/// subject words. Ending a sentence after anything else ("los commits
+/// verificados") it describes some other noun.
+pub const PREDICATE_BEFORE: &[&str] = &["s", "re"];
+
+/// The same in Chinese, directly before the phrase ("连接官方 Slack 应用"),
+/// and after the word for the thing in Japanese and Korean ("公式 Slack アプリ
+/// と連携", "공식 Slack 앱과 연동").
+pub const RELATION_BEFORE_ZH: &[&str] = &[
+    "\u{8fde}\u{63a5}", "\u{9023}\u{63a5}", "\u{652f}\u{6301}", "\u{517c}\u{5bb9}", "\u{914d}\u{5408}", "\u{5bf9}\u{63a5}", "\u{5c0d}\u{63a5}", "\u{642d}\u{914d}",
+    "\u{9002}\u{914d}", "\u{9069}\u{914d}", "\u{4e0e}", "\u{8207}", "\u{548c}", "\u{8ddf}", "\u{6253}\u{5f00}", "\u{6253}\u{958b}", "\u{4f7f}\u{7528}",
+];
+pub const RELATION_AFTER: &[&str] = &["\u{3068}", "\u{306b}", "\u{acfc}", "\u{c640}", "\u{c5d0}"];
+
+/// After a "verified" word, a platform it was checked with ("verified
+/// against Node 22", "Verificado con Node 22"): a changelog line, not the
+/// mark.
+pub const PLATFORM_WORDS: &[&str] = &["against", "with", "on", "under", "con", "avec", "sur", "mit", "auf", "gegen", "com", "su", "\u{441}", "\u{43d}\u{430}"];
+
+/// How the "verified" words begin, folded (the "official" ones don't take a
+/// platform).
+pub const VERIFIED_STEMS: &[&str] = &[
+    "verifi", "verific", "gepruf", "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}", "\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}", "\u{9a8c}\u{8bc1}", "\u{9a57}\u{8b49}",
+    "\u{691c}\u{8a3c}", "\u{ac80}\u{c99d}",
+];
+
+/// Joining words: a mark word after one and before "by …" says it of the
+/// subject ("trusted and verified by our team").
+pub const CONJUNCTIONS: &[&str] = &["and", "or", "y", "et", "ou", "und", "oder", "e", "\u{438}", "\u{438}\u{43b}\u{438}"];
+pub const BY_WORDS: &[&str] = &["by", "por", "par", "von", "da", "\u{43e}\u{442}"];
+
+/// After one of these at a sentence's end, a word that alone isn't the mark
+/// is ("快速、安全、已认证。", "安全・高速・公式。").
+pub const LIST_MARKS: &[char] = &['\u{3001}', '\u{30fb}', ',', '\u{ff0c}'];
+
+/// Negations after a word in Japanese and Korean ("Linear の公式連携ではありま
+/// せん", "공식 통합이 아닙니다").
+pub const NEGATIONS_AFTER: &[&str] = &["\u{3067}\u{306f}\u{3042}\u{308a}\u{307e}\u{305b}\u{3093}", "\u{3067}\u{306f}\u{306a}\u{3044}", "\u{3058}\u{3083}\u{306a}\u{3044}", "\u{c544}\u{b2d9}\u{b2c8}\u{b2e4}", "\u{c544}\u{b2c8}\u{b2e4}", "\u{c544}\u{b2cc}", "\u{c544}\u{b2d8}"];
 
 /// A negation directly before a mark word lifts rules 1 to 3 ("not
 /// official", "cliente no oficial", "非官方客户端", "비공식"); in a script
@@ -527,7 +586,7 @@ fn name_mark(text: &str) -> Option<String> {
         let wanted = folded_word(word);
         let said = readings.iter().any(|reading| {
             let reading = Reading::new(reading.clone(), folded_word);
-            spans(&reading.text, &wanted, true).into_iter().any(|span| reading.said_of(span, true, false))
+            spans(&reading.text, &wanted, true).into_iter().any(|span| reading.said_of(span, Kind::Ambiguous, false))
         });
         if said {
             return Some((*word).to_owned());
@@ -713,67 +772,151 @@ impl Reading {
     }
 
     /// Whether a mark word at `span` is said of the plugin itself (or of
-    /// the store, or Zeron). `ambiguous`: a word that alone isn't the mark
-    /// (rule 2, 4, and alone as a sentence). `first_word`: whether being the
-    /// text's first word says it (not in Chinese, Japanese and Korean, which
-    /// put the modifier first: "検証済みのコミット" are verified commits).
+    /// the store, or Zeron).
     fn said_of_plugin(&self, span: (usize, usize), ambiguous: bool) -> bool {
-        self.said_of(span, ambiguous, !ambiguous)
+        self.said_of(span, if ambiguous { Kind::Ambiguous } else { Kind::Mark }, !ambiguous)
     }
 
-    fn said_of(&self, span: (usize, usize), ambiguous: bool, first_word: bool) -> bool {
+    fn word_is(&self, at: usize, list: &[&str]) -> bool {
+        let (a, b) = self.words[at];
+        list.iter().any(|w| same_word(&self.text[a..b], &(self.form)(w)))
+    }
+
+    /// The sentence holding `span`: (from, to) in characters.
+    fn sentence(&self, span: (usize, usize)) -> (usize, usize) {
+        let from = self.text[..span.0].iter().rposition(|c| SENTENCE_ENDS.contains(c)).map_or(0, |at| at + 1);
+        let to = self.text[span.1..].iter().position(|c| SENTENCE_ENDS.contains(c)).map_or(self.text.len(), |at| span.1 + at);
+        (from, to)
+    }
+
+    /// Whether `span`, read as `kind`, says the mark of the plugin itself.
+    /// `first_word`: whether standing first says it (not in Chinese,
+    /// Japanese and Korean, which put the modifier first: "検証済みのコミット"
+    /// are verified commits).
+    fn said_of(&self, span: (usize, usize), kind: Kind, first_word: bool) -> bool {
         let Some((first, last)) = self.covers(span) else { return false };
+        let (from, to) = self.sentence(span);
+        let in_sentence = |n: usize| self.words[n].0 >= from && self.words[n].1 <= to;
         // 4: beside "zeron", "the store", "the plugin store". No negation
         // lifts it.
         if STORE_WORDS.iter().any(|w| self.before_is(first, w) || self.after_is(last, w)) {
             return true;
         }
-        // A negation directly before lifts 1 to 3: the word before, or (in
-        // a script that doesn't space words) inside this word.
+        // A negation lifts the rest: within four words before it in its
+        // sentence, inside its word (非公式), or after it in Japanese and
+        // Korean (ではありません, 아닙니다).
         let inside: Vec<char> = self.text[self.words[first].0..span.0].to_vec();
-        if NEGATIONS.iter().any(|n| self.before_is(first, n) || (!inside.is_empty() && inside.ends_with(&(self.form)(n)))) {
+        let before = (first.saturating_sub(4)..first).filter(|n| in_sentence(*n)).any(|n| self.word_is(n, NEGATIONS));
+        let after: Vec<char> = self.text[span.1..to].to_vec();
+        if before
+            || NEGATIONS.iter().any(|n| !inside.is_empty() && inside.ends_with(&(self.form)(n)))
+            || NEGATIONS_AFTER.iter().any(|n| !spans(&after, &(self.form)(n), true).is_empty())
+        {
             return false;
         }
-        // 1: alone as a sentence (any of them); or the text's first word.
+        // A "verified" word checked with a platform: a changelog line.
+        let said: Vec<char> = mark_text(&self.text[span.0..span.1].iter().collect::<String>()).chars().collect();
+        let verified = VERIFIED_STEMS.iter().any(|stem| {
+            let stem: Vec<char> = mark_text(stem).chars().collect();
+            said.starts_with(&stem) || !spans(&said, &stem, true).is_empty()
+        });
+        if verified && last + 1 < self.words.len() && in_sentence(last + 1) && self.word_is(last + 1, PLATFORM_WORDS) {
+            return false;
+        }
+        // Alone as a sentence: any of them.
         if self.alone((first, last), span) {
             return true;
         }
-        if !ambiguous {
-            if first_word && first == 0 {
-                return true;
+        let after_conjunction = first > 0 && in_sentence(first - 1) && self.word_is(first - 1, CONJUNCTIONS);
+        let listed_before = self.text[from..span.0].iter().rev().find(|c| !c.is_whitespace()).is_some_and(|c| LIST_MARKS.contains(c));
+        let predicate_before = after_conjunction || listed_before || (first > 0 && in_sentence(first - 1) && (self.word_is(first - 1, PREDICATE_BEFORE) || self.word_is(first - 1, SUBJECT_WORDS)));
+        let at_end = !(last + 1..self.words.len()).any(in_sentence);
+        let plugin_before = first > 0 && in_sentence(first - 1) && {
+            let (a, b) = self.words[first - 1];
+            let word = &self.text[a..b];
+            PLUGIN_WORDS.iter().any(|(_, substring, words)| {
+                words.iter().any(|w| {
+                    let (w, stem) = listed(w);
+                    let w = (self.form)(w);
+                    if *substring { !spans(word, &w, true).is_empty() } else { word == w.as_slice() || (stem && word.starts_with(&w)) }
+                })
+            })
+        };
+        let by_after = last + 1 < self.words.len() && in_sentence(last + 1) && self.word_is(last + 1, BY_WORDS);
+        let subject = first > 0 && in_sentence(first - 1) && SUBJECT_WORDS.iter().any(|w| self.before_is(first, w));
+        let first_in_text = (0..first).all(|n| self.word_is(n, ARTICLES) || !self.text[self.words[n].0..self.words[n].1].iter().any(|c| any_word(Some(c))));
+        match kind {
+            Kind::Mark => {
+                // Ending its sentence ("Safe, fast and verified.", "It's
+                // verified."), first (articles and symbols aside), after a
+                // word that says it of the subject, or after "and" with "by
+                // …" after it.
+                (at_end && predicate_before) || (first_word && first_in_text) || subject || (after_conjunction && by_after) || self.near_plugin((first, last), span, false)
             }
-            // 3: directly after a word that says it of the subject.
-            if SUBJECT_WORDS.iter().any(|w| self.before_is(first, w)) {
-                return true;
+            // Also an ordinary word: only where that can't be ("ist
+            // verifiziert"; first, and joined to another: "Offiziell und
+            // sicher").
+            Kind::NameOnly => {
+                let conjunction_after = last + 1 < self.words.len() && in_sentence(last + 1) && self.word_is(last + 1, CONJUNCTIONS);
+                subject || (first_word && first_in_text && conjunction_after) || (at_end && (after_conjunction || plugin_before))
             }
+            Kind::Ambiguous => (at_end && (listed_before || after_conjunction)) || self.near_plugin((first, last), span, true),
         }
-        // 2: within two words of a word for the plugin (or, for a mark word,
-        // of a word that says it's certified: "官方认证"), nothing ending a
-        // sentence between.
+    }
+
+    /// Rule 2: within two words before a word for the plugin, or directly
+    /// after one ("cliente oficial"); for a mark word, a word that says it's
+    /// certified counts too ("官方认证"). Nothing ending a sentence between,
+    /// and not when the phrase is someone else's: a relation word before it
+    /// ("connects to the official Slack app"), or after the word for the
+    /// thing in Japanese and Korean ("アプリと", "앱과").
+    fn near_plugin(&self, (first, last): (usize, usize), span: (usize, usize), ambiguous: bool) -> bool {
         let certified: &[&str] = if ambiguous { &[] } else { STANDING_OTHER };
-        let neighbours = PLUGIN_WORDS.iter().map(|(lang, substring, words)| (*lang, *substring, *words)).chain(std::iter::once(("standing", true, certified)));
-        neighbours.into_iter().any(|(_, substring, words)| {
+        let neighbours = PLUGIN_WORDS.iter().map(|(_, substring, words)| (*substring, *words)).chain(std::iter::once((true, certified)));
+        neighbours.into_iter().any(|(substring, words)| {
             words.iter().any(|word| {
                 let (word, stem) = listed(word);
                 let wanted = (self.form)(word);
-                let found: Vec<(usize, usize)> = if substring {
-                    spans(&self.text, &wanted, true)
-                } else {
-                    self.phrase_spans(&wanted, stem)
-                };
+                let found: Vec<(usize, usize)> = if substring { spans(&self.text, &wanted, true) } else { self.phrase_spans(&wanted, stem) };
                 found.into_iter().any(|other| {
                     let Some((o_first, o_last)) = self.covers(other) else { return false };
-                    let (gap, from, to) = if o_first > last {
-                        (o_first - last - 1, span.1, other.0)
+                    let near = if o_first > last {
+                        // (Not across a relation: "公式 Slack アプリと連携"'s
+                        // 連携 is with the app.)
+                        let between: Vec<char> = self.text[span.1..other.0].to_vec();
+                        let related = RELATION_AFTER.iter().any(|r| !spans(&between, &(self.form)(r), true).is_empty())
+                            || (last + 1..o_first).any(|n| self.word_is(n, RELATION_WORDS));
+                        o_first - last - 1 <= 2 && !self.sentence_end_in(span.1, other.0) && !related
                     } else if first > o_last {
-                        (first - o_last - 1, other.1, span.0)
+                        first - o_last - 1 == 0 && !self.sentence_end_in(other.1, span.0)
                     } else {
-                        (0, 0, 0)
+                        true
                     };
-                    gap <= 2 && !self.sentence_end_in(from, to)
+                    near && !self.someone_elses(first.min(o_first), span.0.min(other.0), other.1)
                 })
             })
         })
+    }
+
+    /// Whether the phrase starting at word `start` (character `start_at`),
+    /// its thing ending at `thing_end`, is someone else's thing.
+    fn someone_elses(&self, start: usize, start_at: usize, thing_end: usize) -> bool {
+        let mut at = start;
+        let mut skipped = 0;
+        while at > 0 && !self.sentence_end_in(self.words[at - 1].1, self.words[at].0) {
+            at -= 1;
+            if self.word_is(at, RELATION_WORDS) {
+                return true;
+            }
+            if !self.word_is(at, ARTICLES) || skipped == 2 {
+                break;
+            }
+            skipped += 1;
+        }
+        let before: Vec<char> = self.text[..start_at].iter().copied().collect::<Vec<_>>();
+        let before: Vec<char> = before.iter().rev().skip_while(|c| separator(**c)).copied().collect::<Vec<_>>().into_iter().rev().collect();
+        let after: Vec<char> = self.text[thing_end..].iter().copied().skip_while(|c| separator(*c)).collect();
+        RELATION_BEFORE_ZH.iter().any(|r| before.ends_with(&(self.form)(r))) || RELATION_AFTER.iter().any(|r| after.starts_with(&(self.form)(r)))
     }
 
     /// Whether every word of the sentence holding `span` is one it covers.
@@ -801,6 +944,17 @@ impl Reading {
             .map(|at| (self.words[at].0, self.words[at + parts.len() - 1].1))
             .collect()
     }
+}
+
+/// How a candidate is read in a description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A mark word.
+    Mark,
+    /// Also an ordinary word ("verifiziert", "verifies").
+    NameOnly,
+    /// Alone not the mark (公式, 已认证): near a word for the plugin, or ending a list.
+    Ambiguous,
 }
 
 /// Whether a word of a text is `word`: the same, or (for "zeron") spelled
@@ -839,12 +993,14 @@ fn description_mark(text: &str) -> Option<String> {
                 let (listed_word, stem) = listed(word.word);
                 let lone = word.with_kana && lone_cjk(&reading.text, &folded_word(listed_word));
                 let said = |span: &(usize, usize)| match word.description {
-                    InDescription::Folded => reading.said_of(*span, false, !substring),
+                    InDescription::Folded => reading.said_of(*span, Kind::Mark, !substring),
                     // 公式 alone among Latin: the mark, wherever it stands.
-                    InDescription::NameOnly if lone => reading.said_of(*span, false, true),
-                    // An ordinary word too: only alone as a sentence
-                    // ("Verifiziert.", "Offiziell.").
-                    InDescription::NameOnly => reading.covers(*span).is_some_and(|words| reading.alone(words, *span)),
+                    InDescription::NameOnly if lone => reading.said_of(*span, Kind::Mark, true),
+                    // 公式 and 공식 beside other CJK: near the plugin, or
+                    // ending a list.
+                    InDescription::NameOnly if word.with_kana || !word.before.is_empty() => reading.said_of(*span, Kind::Ambiguous, false),
+                    // An ordinary word too ("Verifiziert.", "ist verifiziert").
+                    InDescription::NameOnly => reading.said_of(*span, Kind::NameOnly, !substring),
                     InDescription::Accented => false,
                 };
                 if let Some((start, end)) = spelled_spans(&reading.text, &folded_word(listed_word), *substring, stem).into_iter().find(said) {
@@ -1245,7 +1401,7 @@ mod tests {
         // Descriptions: said of the plugin, in any case form.
         for text in [
             "\u{423}\u{441}\u{442}\u{430}\u{43d}\u{43e}\u{432}\u{438}\u{442}\u{435} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e} \u{442}\u{435}\u{43c}\u{443}.",
-            "\u{414}\u{43b}\u{44f} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{433}\u{43e} \u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{430} Git.",
+            "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d} \u{434}\u{43b}\u{44f} Git.",
             "Cliente \u{43e}ficial para Git.",
         ] {
             assert!(mark_claim(text, false).is_some(), "{text}");
