@@ -834,7 +834,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				size = "sm",
 				on_click = function()
 					browse.show_keyword(k)
-					nav.back()
+					nav.show_browse()
 				end,
 			})
 		end
@@ -913,7 +913,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 									local name = if type(a) == "table" and type(a.username) == "string" then a.username else ""
 									if name ~= "" then
 										browse.show_author(name)
-										nav.back()
+										nav.show_browse()
 									end
 								end,
 							},

@@ -10,6 +10,8 @@
 --                           `by_link`: a link opened it (`nav.linked()`)
 --   nav.open_publish(id)    publishing one of yours (Yours its way back)
 --   nav.back()              the tabs again
+--   nav.show_browse()       Browse, wherever a page was opened from (what
+--                           a plugin's keyword or publisher narrowed it to)
 --   nav.arrive()            for a visit: the tabs, unless something opened
 --                           a page as Settings came up (a link)
 
@@ -58,6 +60,13 @@ end
 function M.back()
 	opened:set(false)
 	linked:set(nil)
+	M.view:set("catalog")
+end
+
+function M.show_browse()
+	opened:set(false)
+	linked:set(nil)
+	M.tab:set("browse")
 	M.view:set("catalog")
 end
 

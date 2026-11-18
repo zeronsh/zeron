@@ -297,6 +297,11 @@ function M.badges(card: () -> store.Card): Node
 	return ui.row {
 		gap = "$space.1",
 		items = "center",
+		-- (In a very narrow column they give way with the name, rather
+		-- than leave it no room at all.)
+		shrink = 1,
+		min_w = 0,
+		overflow = "hidden",
 		M.verified_mark(card),
 		ui.each(list, function(name: string): Node
 			return ds.Badge {
@@ -652,11 +657,9 @@ local function feature(first: store.Card, _i: number, now: State<store.Card>): N
 		description = function(): string
 			return now:get().summary or ""
 		end,
-		-- (A list row's head: its tile at a row's size.)
+		-- (A list row's head: its tile at a row's size. No mark: the store
+		-- features only plugins it has verified, so it would say nothing.)
 		lead = M.Tile { card = now, size = 32 },
-		badge = M.verified_mark(function(): store.Card
-			return now:get()
-		end),
 		on_click = function()
 			nav.open_listing(now:peek().id)
 		end,
