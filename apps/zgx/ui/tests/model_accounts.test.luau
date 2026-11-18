@@ -91,6 +91,33 @@ test("a chat on another computer reads that computer's accounts", function()
 	expect(app:state("calls")).to_contain("switch_on:box:claude-code:b2")
 end)
 
+-- A chat on a Cloud machine: its accounts are Cloud's, the vault's (as
+-- Settings → Providers shows them under Cloud), never the machine's own,
+-- which isn't asked (it would be woken).
+test("a chat on a Cloud machine reads and switches Cloud's accounts", function()
+	local app = with_accounts({
+		[""] = { ["claude-code"] = accounts() },
+		cloud = {
+			["claude-code"] = {
+				{ id = "v1", email = "team@example.test", plan = "Max", active = true, can_switch = true, windows = { window("Week", 0.4) } },
+				{ id = "v2", email = "spare@example.test", plan = "Pro", active = false, can_switch = true, windows = {} },
+			},
+		},
+	})
+	app:set_state("chat_device", "cloud-f60cde46")
+	app:frames(10)
+	expect(app:state("calls")).to_contain("watch_device:cloud")
+	expect(string.find(app:state("calls"), "watch_device:cloud-f60cde46", 1, true)).to_be(nil)
+	app:click('role:button "Model"')
+	app:frames(30)
+	expect(app:tree("#model-picker-account")).to_contain("team@example.test")
+	app:click("#model-picker-account")
+	app:frames(30)
+	app:click('~"spare@example.test"')
+	app:frames(30)
+	expect(app:state("calls")).to_contain("switch_on:cloud:claude-code:v2")
+end)
+
 test("a computer whose accounts haven't come has neither, and is asked", function()
 	local app = with_accounts(here(accounts()))
 	app:set_state("chat_device", "somewhere-else")
@@ -167,4 +194,35 @@ test("an agent with no accounts has neither", function()
 	app:click('role:button "Model"')
 	app:frames(30)
 	expect(app:has("#model-picker-account")).to_be(false)
+end)
+
+-- A line's box (x, y, w, h) in the tree: the first line holding `find`.
+local function box_of(app: any, find: string): { y: number, h: number }?
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(find, 1, true) then
+			local _, y, _, h = line:match("(%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+			if y then
+				return { y = tonumber(y) :: number, h = tonumber(h) :: number }
+			end
+		end
+	end
+	return nil
+end
+
+test("an agent Zeron can't add an account to ends its list at its last account", function()
+	-- (Claude Code: no "Add … account" action, so no rule and no gap under
+	-- the last row.)
+	local app = with_accounts(here(accounts()))
+	app:click('role:button "Model"')
+	app:frames(30)
+	app:click("#model-picker-account")
+	app:frames(30)
+	local list = box_of(app, ' listbox "Account"') :: any
+	local last = box_of(app, ' option "work@example.test') :: any
+	expect(list).never.to_be_nil()
+	expect(last).never.to_be_nil()
+	-- The list's foot is the last row's, give or take the list's own inset.
+	local under = (list.y + list.h) - (last.y + last.h)
+	expect(under <= 8).to_be(true)
+	expect(app:error()).to_be(nil)
 end)

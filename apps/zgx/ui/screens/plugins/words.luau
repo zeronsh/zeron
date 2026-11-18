@@ -298,6 +298,9 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "map-arrow-right", "plugins.words.permission.navigate.title")
 	elseif permission == "compose" then
 		return line(false, "chat-round-line", "plugins.words.permission.compose.title", "plugins.words.permission.compose.detail")
+	elseif permission == "draft" then
+		-- (What you type, read as you type it: said plainly.)
+		return line(false, "pen", "plugins.words.permission.draft.title", "plugins.words.permission.draft.detail")
 	elseif permission == "network" then
 		-- The places it names (any site, with "*"), those on this device or
 		-- your network said so, and risky then.

@@ -35,7 +35,8 @@
 --                           ({ project }; `take_project()` reads and clears);
 --                           otherwise the composer keeps the one last
 --                           picked on the new-chat page
---   route.settings(page?)   to settings (a page's id; "general" first)
+--   route.settings(page?)   to settings (a page's id; else the one shown
+--                           last, General at first)
 --   route.leave_settings()  back where the chats were
 --   route.plugin_page(plugin, page)  to a plugin's page (`plugin`, `page`:
 --                           ids); the chats stay as they were under it
@@ -404,12 +405,28 @@ M.projects = steady(function(): { Choice }
 	return out
 end)
 
+-- What a session opened here is told before the route moves (the chat page's
+-- store sets it: it watches that chat), in one step with the move: what
+-- follows both, the route and the chat shown (the composer, the page), then
+-- sees them change together and runs once, rather than once for the route and
+-- again as the chat follows it. (The page goes on watching what its route
+-- says: opened another way, back or by a link, the chat follows a step later.)
+M.opening = nil :: ((id: string) -> ())?
+
 function M.open_session(id: string)
 	local r = at()
 	if r.name == "session" and r.params.id == id then
 		return
 	end
-	go("session", { id = id })
+	local opening = M.opening
+	if not opening then
+		go("session", { id = id })
+		return
+	end
+	ui.batch(function()
+		opening(id)
+		go("session", { id = id })
+	end)
 end
 
 -- Launched (not the scripts reloaded), it starts where it was left (see
@@ -503,6 +520,18 @@ ui.effect(function()
 	end
 	if last:peek() ~= r.path then
 		last:set(r.path)
+	end
+end)
+
+local settings_page = ui.persist("shell_settings_page", nil :: string?)
+ui.effect(function()
+	local r = here()
+	local page: string = r.params.page
+	if r.name ~= "settings" or page == "profile" then
+		return
+	end
+	if settings_page:peek() ~= page then
+		settings_page:set(page)
 	end
 end)
 
@@ -645,12 +674,18 @@ function M.choose_project(id: string?)
 	chosen:set(id)
 end
 
--- To settings (a page's id; the one open, else General). Its pages take
--- one step of the history between them (one replaces another), so a step
--- back from any of them is back to the chats.
+local function reopened(): string
+	local list: any = (require :: any)("@app/screens/shell/settings")
+	local shown = settings_page:peek()
+	return if shown and list.page(shown) then shown else "general"
+end
+
+-- To settings (a page's id; the one open, else the one shown last, else
+-- General). Its pages take one step of the history between them (one
+-- replaces another), so a step back from any of them is back to the chats.
 function M.settings(page: string?)
 	local r = at()
-	local to = page or (if r.name == "settings" then r.params.page else nil) or "general"
+	local to = page or (if r.name == "settings" then r.params.page else nil) or reopened()
 	if r.name == "settings" then
 		if r.params.page ~= to then
 			go("settings", { page = to }, true)

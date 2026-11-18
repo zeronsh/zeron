@@ -28,6 +28,8 @@ tokio.workspace = true
 futures.workspace = true
 zeron-term-link.workspace = true
 async-trait.workspace = true
+# Agents' Zeron MCP tools, served by the engine itself (`zeron_mcp::http`).
+zeron-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
@@ -74,7 +76,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
-zeron-mcp.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
 # Paused-clock tests (the 30-minute idle reaper).
 tokio = { workspace = true, features = ["test-util"] }

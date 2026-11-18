@@ -1,0 +1,99 @@
+---
+import { ANDROID_APK, APP_STORE, DESKTOP_BUILDS, FALLBACK_VERSION, INSTALL_COMMAND, RELEASE_NOTES_URL, type BuildId } from "../../data/releases.ts";
+import { buildUrl } from "../../lib/downloads.ts";
+import Button from "../ui/Button.astro";
+import CopyCommand from "../ui/CopyCommand.astro";
+import PlatformMark from "../ui/PlatformMark.astro";
+
+const builds = Object.entries(DESKTOP_BUILDS) as [BuildId, (typeof DESKTOP_BUILDS)[BuildId]][];
+---
+
+<section class="section" aria-labelledby="downloads-title">
+  <div class="wrap" id="downloads">
+    <div class="head">
+      <div>
+        <h2 id="downloads-title" class="statement"><b>Download Zeron.</b> Free and open source for macOS, Windows, Linux, iOS and Android.</h2>
+        <p class="lead version" hidden>The latest release is <span data-release-version></span>.</p>
+      </div>
+      <Button id="closing-download" href="#downloads" size="lg" data-download="long"><span data-download-label>Download</span></Button>
+    </div>
+
+    <div class="table">
+      <h3>Desktop</h3>
+      <ul>
+        {
+          builds.map(([id, build]) => (
+            <li>
+              <PlatformMark platform={build.platform} />
+              <span class="name">{build.name}</span>
+              <span class="detail">{build.detail}</span>
+              <Button tone="secondary" size="sm" href={buildUrl(FALLBACK_VERSION, id)} data-build={id}>Download</Button>
+            </li>
+          ))
+        }
+      </ul>
+      <h3>Mobile</h3>
+      <ul>
+        <li>
+          <PlatformMark platform="ios" />
+          <span class="name">iOS</span>
+          <span class="detail">iPhone · iPad</span>
+          <Button tone="secondary" size="sm" id="ios-download" href={APP_STORE}>App Store</Button>
+        </li>
+        <li>
+          <PlatformMark platform="android" />
+          <span class="name">Android</span>
+          <span class="detail">arm64 · apk</span>
+          <Button tone="secondary" size="sm" id="android-download" href={ANDROID_APK}>Download</Button>
+        </li>
+      </ul>
+      <h3>Server</h3>
+      <div class="server">
+        <CopyCommand command={INSTALL_COMMAND} />
+        <p>Installs the headless engine on a Linux server and runs it as a background service.</p>
+      </div>
+    </div>
+    <p class="notes"><a href={RELEASE_NOTES_URL}>Release notes and checksums</a></p>
+  </div>
+</section>
+
+<script>
+  // The sentence about the latest release shows once downloads.ts has it.
+  for (const el of document.querySelectorAll<HTMLElement>("[data-release-version]")) {
+    new MutationObserver(() => {
+      const line = el.closest<HTMLElement>(".version");
+      if (line && el.textContent) line.hidden = false;
+    }).observe(el, { childList: true });
+  }
+</script>
+
+<style>
+  .head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 24px 48px; }
+  .lead { margin-top: 14px; max-width: 34em; }
+  .table {
+    display: grid;
+    grid-template-columns: minmax(120px, 0.34fr) minmax(0, 1fr);
+    margin-top: clamp(32px, 4vw, 48px);
+    border-top: 1px solid var(--line);
+  }
+  .table > * { padding-block: 20px; border-bottom: 1px solid var(--line); }
+  .table h3 { padding-top: 30px; font-size: 15.5px; }
+  li { display: flex; align-items: center; gap: 12px; min-height: 44px; }
+  li + li { border-top: 1px solid var(--line); }
+  .name { font-size: 15px; font-weight: 500; }
+  .detail { font-size: 13.5px; color: var(--text-3); white-space: nowrap; }
+  li :global(.button) { margin-left: auto; }
+  li :global(.platform-mark) { color: var(--text-2); }
+  .server p { margin-top: 10px; font-size: 14px; color: var(--text-3); }
+  .notes { margin-top: 20px; font-size: 14px; }
+  .notes a { color: var(--text-2); text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 4px; transition: color 0.12s; }
+  .notes a:hover { color: var(--text); }
+  @media (max-width: 720px) {
+    .table { grid-template-columns: minmax(0, 1fr); }
+    .table h3 { padding-bottom: 0; border-bottom: 0; }
+    .table ul, .table .server { padding-top: 10px; }
+  }
+  @media (max-width: 420px) {
+    .detail { font-size: 12.5px; white-space: normal; }
+  }
+</style>

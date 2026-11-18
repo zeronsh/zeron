@@ -33,10 +33,9 @@ local Skeleton = require("@self/skeleton")
 local Launcher = require("@self/mention_launcher")
 
 local M = {}
--- Prints the caret and each choice to the host's log (debugging the keys).
-M.debug = false
 
 local tokens = require("@self/mention_tokens")
+local Draft = require("@self/draft_text")
 local locale = require("@self/locale")
 
 export type Trigger = tokens.Trigger
@@ -103,6 +102,10 @@ function M.use(opts: Use)
 	-- The token whose list was put away (Escape, a click away from it), by
 	-- where it starts, for each draft (`key`): that token's alone, see below.
 	local dismissed = ui.use_state({} :: { [any]: number })
+	-- The draft as it was when its list was put away, and at each keystroke
+	-- while it stays away (nil otherwise): whether its trigger was typed
+	-- again reads it then alone, not a long draft at every keystroke.
+	local was_text: string? = nil
 	local function key_now(): any
 		return if opts.key then opts.key() else ""
 	end
@@ -112,6 +115,9 @@ function M.use(opts: Use)
 	end
 	local function dismiss(key: any, from: number?)
 		local all = dismissed:peek()
+		if from ~= nil then
+			was_text = opts.value:peek()
+		end
 		if all[key] ~= from then
 			local next = table.clone(all)
 			next[key] = from
@@ -120,7 +126,7 @@ function M.use(opts: Use)
 	end
 	local active = ui.use_state(1)
 	local token = ui.computed(function(): Token?
-		local t = M.token(opts.value:get(), caret:get())
+		local t = Draft.token(opts.value, caret:get())
 		if t and opts.enabled and not opts.enabled(t.trigger) then
 			return nil
 		end
@@ -259,21 +265,27 @@ function M.use(opts: Use)
 	-- (moved, the token deleted), or its trigger typed again, and the next
 	-- token's list opens. Typed further at, it stays away. (Another chat's draft shown in
 	-- its place: that draft's own, kept with it.)
-	local was_text = opts.value:peek()
 	local was_key = key_now()
 	ui.effect(function()
 		local t = token:get()
-		local text = opts.value:get()
+		Draft.track(opts.value)
 		local key = key_now()
+		local moved = key ~= was_key
+		was_key = key
+		local gone = dismissed:peek()[key]
+		if gone == nil then
+			was_text = nil
+			return
+		end
+		local text = opts.value:get()
 		-- (The draft just as it was with the token's trigger put in: that
 		-- trigger was typed.)
 		local typed = t ~= nil
+			and was_text ~= nil
 			and #text == #was_text + 1
 			and string.sub(text, 1, t.from) .. string.sub(text, t.from + 2) == was_text
-		local moved = key ~= was_key
-		was_text, was_key = text, key
-		local gone = dismissed:peek()[key]
-		if gone == nil or moved then
+		was_text = text
+		if moved then
 			return
 		end
 		if t == nil or t.from ~= gone or typed then
@@ -285,11 +297,12 @@ function M.use(opts: Use)
 	-- path with it.
 	local refs = ui.use_state({} :: { [string]: string })
 	ui.effect(function()
-		local now = opts.value:get()
+		-- (Each looked for where the draft is held, not copied out of it.)
+		Draft.track(opts.value)
 		local kept = refs:peek()
 		local stale: { string } = {}
 		for tok in kept do
-			if not string.find(now, tok, 1, true) then
+			if #opts.value:find(tok, { limit = 1 }) == 0 then
 				table.insert(stale, tok)
 			end
 		end
@@ -312,10 +325,6 @@ function M.use(opts: Use)
 		if not from or not to or not text or not tok then
 			return
 		end
-		if M.debug then
-			local a, b = el:selection_bytes()
-			print(`[mentions] choose from {from} to {to} (field selection {a}..{b}) text {string.sub(now, 1, 80)}`)
-		end
 		-- The path the new token stands for, in place of the old one's.
 		local old = string.sub(now, from + 1, to)
 		local next = table.clone(refs:peek())
@@ -326,10 +335,6 @@ function M.use(opts: Use)
 		refs:set(next)
 		el:set_selection_bytes(from, to)
 		el:replace_selection(text)
-		if M.debug then
-			local a, b = el:selection_bytes()
-			print(`[mentions] after: selection {a}..{b} text {string.sub(opts.value:peek(), 1, 80)}`)
-		end
 		-- The caret is past what was put in (the field says so on its next
 		-- caret event; said here too, so the list goes with the token at
 		-- once). The token's session is over; the next trigger opens one.
@@ -386,9 +391,6 @@ function M.use(opts: Use)
 		return false
 	end
 	local function on_caret(_line: number, _column: number, _anchor: number, focus: number)
-		if M.debug then
-			print(`[mentions] caret {focus} text {string.sub(opts.value:peek(), 1, 80)}`)
-		end
 		caret:set(focus)
 	end
 	-- The field's focus and blur (`on_focus`, `on_blur`).

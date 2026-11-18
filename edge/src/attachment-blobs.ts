@@ -7,8 +7,8 @@
  * deletes the object once its own copy is on disk.
  *
  * Who may touch an object: the key is under the caller's own user id, so only
- * that user's bearers can name it, and a Cloud machine is admitted only for a
- * chat it hosts (or a delegate it started; runner-access.ts).
+ * that user's bearers can name it, and a Cloud machine is admitted as its
+ * session's reach allows (runner-access.ts).
  *
  * Retention: the machine's DELETE is the normal end. The bucket's lifecycle
  * rule on `attachments/` (30 days, see docs/design/cloud-attachments.md) catches
@@ -85,8 +85,8 @@ export const handleAttachmentBlob = async (
   chatId: string,
   uploadId: string
 ): Promise<Response> => {
-  const notHost = await runnerChatGate(env, auth, chatId);
-  if (notHost) return notHost;
+  const admission = await runnerChatGate(env, auth, chatId);
+  if (admission.refused) return admission.refused;
   const key = attachmentKey(auth.userId, chatId, uploadId);
 
   switch (request.method) {

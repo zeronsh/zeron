@@ -761,6 +761,8 @@ mod tests {
         assert!(none.zeron_data.is_none() && none.volumes.is_empty());
     }
 
+    // (Unix only: its sysfs fixture names files `0000:01:00.0`, which Windows refuses.)
+    #[cfg(unix)]
     #[test]
     fn linux_batteries_and_nvidia_gpus_read_from_sysfs_and_proc() {
         let root = tempfile::tempdir().unwrap();

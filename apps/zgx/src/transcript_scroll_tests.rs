@@ -18,7 +18,7 @@ fn ui() -> PathBuf {
 }
 
 /// Each text in the transcript's view, by its words: its top.
-fn shown(app: &mut TestApp) -> Vec<(String, f32)> {
+pub(crate) fn shown(app: &mut TestApp) -> Vec<(String, f32)> {
     let view = app.bounds("transcript");
     let tree = app.tree();
     let mut out = Vec::new();
@@ -47,7 +47,7 @@ fn shown(app: &mut TestApp) -> Vec<(String, f32)> {
 
 /// How far what shows moved between two looks (the median of the texts seen
 /// in both), and how many were seen in both.
-fn moved(before: &[(String, f32)], after: &[(String, f32)]) -> (Option<f32>, usize) {
+pub(crate) fn moved(before: &[(String, f32)], after: &[(String, f32)]) -> (Option<f32>, usize) {
     let mut deltas: Vec<f32> = before
         .iter()
         .filter_map(|(words, y)| after.iter().find(|(w, _)| w == words).map(|(_, y2)| y2 - y))
