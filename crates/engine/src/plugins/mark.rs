@@ -216,6 +216,8 @@ pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
     ("en", false, &[
         "plugin", "plugins", "plug-in", "extension", "extensions", "add-on", "add-ons", "addon", "addons", "integration", "integrations", "client",
         "app", "apps", "tool", "tools", "theme", "themes", "package", "packages", "version", "versions", "release", "releases", "build", "builds",
+        // What plugins are called.
+        "editor", "previewer", "viewer", "formatter", "linter", "bridge", "connector", "helper", "helpers", "wrapper", "bot", "widget", "panel",
     ]),
     ("es", false, &["complemento", "complementos", "extensi\u{f3}n", "extensiones", "cliente", "aplicaci\u{f3}n", "herramienta", "herramientas", "tema", "temas", "paquete", "versi\u{f3}n", "integraci\u{f3}n"]),
     ("fr", false, &["module", "modules", "outil", "outils", "th\u{e8}me", "th\u{e8}mes", "paquet", "int\u{e9}gration", "application"]),
@@ -237,7 +239,7 @@ pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
 /// (rule 3: "is verified", "now official"). Not Italian "è" nor
 /// Portuguese "é": folded, both are "e", "and".
 pub const SUBJECT_WORDS: &[&str] = &[
-    "is", "are", "was", "were", "be", "been", "now", "fully", "officially", "completely", "totally", "100",
+    "is", "are", "was", "were", "be", "been", "now", "fully", "officially", "completely", "totally", "truly", "100",
     "es", "son", "est\u{e1}", "est\u{e1}n", "fue", "ahora", "totalmente", "oficialmente",
     "est", "sont", "\u{e9}t\u{e9}", "maintenant", "enti\u{e8}rement", "officiellement",
     "ist", "sind", "wurde", "jetzt", "vollst\u{e4}ndig",
@@ -281,22 +283,28 @@ pub const RELATION_BEFORE_ZH: &[&str] = &[
 ];
 pub const RELATION_AFTER: &[&str] = &["\u{3068}", "\u{306b}", "\u{acfc}", "\u{c640}", "\u{c5d0}"];
 
-/// After a "verified" word, a platform it was checked with ("verified
-/// against Node 22", "Verificado con Node 22"): a changelog line, not the
-/// mark.
-pub const PLATFORM_WORDS: &[&str] = &["against", "with", "on", "under", "con", "avec", "sur", "mit", "auf", "gegen", "com", "su", "\u{441}", "\u{43d}\u{430}"];
-
-/// How the "verified" words begin, folded (the "official" ones don't take a
-/// platform).
-pub const VERIFIED_STEMS: &[&str] = &[
-    "verifi", "verific", "gepruf", "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}", "\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}", "\u{9a8c}\u{8bc1}", "\u{9a57}\u{8b49}",
-    "\u{691c}\u{8a3c}", "\u{ac80}\u{c99d}",
+/// Directly after a mark word, a word that gives it an object: it describes
+/// a test or someone else's thing ("verified against Node 22", "is verified
+/// on macOS 15", "Verificado con Node 22", "officiel pour Slack"), and rules 1
+/// to 3 say nothing.
+pub const OBJECT_WORDS: &[&str] = &[
+    "against", "with", "on", "under", "for", "in", "from", "con", "para", "en", "avec", "sur", "pour", "dans", "mit", "auf", "gegen", "f\u{fc}r", "im",
+    "com", "em", "su", "per", "in", "\u{441}", "\u{43d}\u{430}", "\u{434}\u{43b}\u{44f}", "\u{432}", "\u{432}\u{43e}",
 ];
 
-/// Joining words: a mark word after one and before "by …" says it of the
-/// subject ("trusted and verified by our team").
-pub const CONJUNCTIONS: &[&str] = &["and", "or", "y", "et", "ou", "und", "oder", "e", "\u{438}", "\u{438}\u{43b}\u{438}"];
+/// "by" after a mark word lifts rules 1 to 3 too ("verified by GitHub"),
+/// unless what follows is the publisher speaking of itself or an authority
+/// ([`AUTHORITIES`]: "verified by our team").
 pub const BY_WORDS: &[&str] = &["by", "por", "par", "von", "da", "\u{43e}\u{442}"];
+pub const AUTHORITIES: &[&str] = &[
+    "us", "our", "we", "team", "staff", "experts", "reviewers", "maintainers", "developers", "nosotros", "nuestro", "nuestros", "nuestra", "equipo",
+    "nous", "notre", "nos", "\u{e9}quipe", "uns", "unserem", "unserer", "unser", "team", "noi", "nostro", "nostra", "squadra", "n\u{f3}s", "nossa", "nosso", "equipe",
+    "\u{43d}\u{430}\u{43c}\u{438}", "\u{43d}\u{430}\u{448}\u{435}\u{439}", "\u{43a}\u{43e}\u{43c}\u{430}\u{43d}\u{434}\u{43e}\u{439}",
+];
+
+/// Joining words: ending a sentence after one, a mark word says it of the
+/// subject ("Safe, fast and verified.").
+pub const CONJUNCTIONS: &[&str] = &["and", "or", "y", "et", "ou", "und", "oder", "e", "\u{438}", "\u{438}\u{43b}\u{438}"];
 
 /// After one of these at a sentence's end, a word that alone isn't the mark
 /// is ("快速、安全、已认证。", "安全・高速・公式。").
@@ -814,23 +822,6 @@ impl Reading {
         {
             return false;
         }
-        // A "verified" word checked with a platform: a changelog line.
-        let said: Vec<char> = mark_text(&self.text[span.0..span.1].iter().collect::<String>()).chars().collect();
-        let verified = VERIFIED_STEMS.iter().any(|stem| {
-            let stem: Vec<char> = mark_text(stem).chars().collect();
-            said.starts_with(&stem) || !spans(&said, &stem, true).is_empty()
-        });
-        if verified && last + 1 < self.words.len() && in_sentence(last + 1) && self.word_is(last + 1, PLATFORM_WORDS) {
-            return false;
-        }
-        // Alone as a sentence: any of them.
-        if self.alone((first, last), span) {
-            return true;
-        }
-        let after_conjunction = first > 0 && in_sentence(first - 1) && self.word_is(first - 1, CONJUNCTIONS);
-        let listed_before = self.text[from..span.0].iter().rev().find(|c| !c.is_whitespace()).is_some_and(|c| LIST_MARKS.contains(c));
-        let predicate_before = after_conjunction || listed_before || (first > 0 && in_sentence(first - 1) && (self.word_is(first - 1, PREDICATE_BEFORE) || self.word_is(first - 1, SUBJECT_WORDS)));
-        let at_end = !(last + 1..self.words.len()).any(in_sentence);
         let plugin_before = first > 0 && in_sentence(first - 1) && {
             let (a, b) = self.words[first - 1];
             let word = &self.text[a..b];
@@ -842,7 +833,35 @@ impl Reading {
                 })
             })
         };
-        let by_after = last + 1 < self.words.len() && in_sentence(last + 1) && self.word_is(last + 1, BY_WORDS);
+        // A word that gives it an object ("verified against Node 22"), or
+        // "by" and someone other than the publisher or an authority
+        // ("verified by GitHub"): a test, or someone else's thing.
+        // (Not after a word for the plugin: "Cliente oficial para Git" —
+        // "para Git" belongs to the client.)
+        let next = (last + 1 < self.words.len() && in_sentence(last + 1) && !plugin_before).then_some(last + 1);
+        if next.is_some_and(|n| self.word_is(n, OBJECT_WORDS)) {
+            return false;
+        }
+        if let Some(by) = next.filter(|n| self.word_is(*n, BY_WORDS)) {
+            let mut who = by + 1;
+            while who < self.words.len() && in_sentence(who) && self.word_is(who, ARTICLES) {
+                who += 1;
+            }
+            let authority = who < self.words.len() && in_sentence(who) && self.word_is(who, AUTHORITIES);
+            if !authority {
+                return false;
+            }
+            return true;
+        }
+        // Alone as a sentence: any of them.
+        if self.alone((first, last), span) {
+            return true;
+        }
+        let after_conjunction = first > 0 && in_sentence(first - 1) && self.word_is(first - 1, CONJUNCTIONS);
+        let listed_before = self.text[from..span.0].iter().rev().find(|c| !c.is_whitespace()).is_some_and(|c| LIST_MARKS.contains(c));
+        let predicate_before = after_conjunction || listed_before || (first > 0 && in_sentence(first - 1) && (self.word_is(first - 1, PREDICATE_BEFORE) || self.word_is(first - 1, SUBJECT_WORDS)));
+        let at_end = !(last + 1..self.words.len()).any(in_sentence);
+
         let subject = first > 0 && in_sentence(first - 1) && SUBJECT_WORDS.iter().any(|w| self.before_is(first, w));
         let first_in_text = (0..first).all(|n| self.word_is(n, ARTICLES) || !self.text[self.words[n].0..self.words[n].1].iter().any(|c| any_word(Some(c))));
         match kind {
@@ -851,7 +870,7 @@ impl Reading {
                 // verified."), first (articles and symbols aside), after a
                 // word that says it of the subject, or after "and" with "by
                 // …" after it.
-                (at_end && predicate_before) || (first_word && first_in_text) || subject || (after_conjunction && by_after) || self.near_plugin((first, last), span, false)
+                (at_end && predicate_before) || (first_word && first_in_text) || subject || self.near_plugin((first, last), span, false)
             }
             // Also an ordinary word: only where that can't be ("ist
             // verifiziert"; first, and joined to another: "Offiziell und

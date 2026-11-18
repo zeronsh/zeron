@@ -499,7 +499,7 @@ pub fn check(
         problems.push(Problem::new(
             BAD_LISTING,
             Some("name"),
-            format!("Its name says \"{claim}\": only the store marks a plugin verified"),
+            format!("Its name says \"{claim}\": only the store marks a plugin verified or official. Name it for what it does, without that word"),
         ));
     } else if claims_zeron_in_name(&manifest.name).is_some() {
         warnings.push(Problem::new(
@@ -562,7 +562,7 @@ pub fn check(
         problems.push(Problem::new(
             BAD_LISTING,
             Some("description"),
-            format!("Its description says \"{claim}\": only the store marks a plugin verified"),
+            format!("Its description says \"{claim}\" of the plugin itself: only the store marks a plugin verified or official. Say what it does instead, or say whose thing it is (\"works with the official Slack app\")"),
         ));
     } else if let Some(claim) = claims_zeron(description) {
         warnings.push(Problem::new(
@@ -671,7 +671,7 @@ pub fn check(
                 problems.push(Problem::new(
                     BAD_LISTING,
                     Some("keywords"),
-                    format!("Keyword \"{keyword}\" says \"{claim}\": a keyword may say neither the store's mark nor Zeron"),
+                    format!("Keyword \"{keyword}\" says \"{claim}\": a keyword may say neither the store's mark nor Zeron. Drop it, or use a word for what the plugin does"),
                 ));
             }
         }
