@@ -454,3 +454,46 @@ test("Templates' head where its action fits is as it always was", function()
 		expect(`{width} head={tonumber(cy) - tonumber(ty)}`).to_be(`{width} head=52`)
 	end
 end)
+
+-- At every width from 400 to 1100, a catalog's action is whole and inside
+-- its card: beside the tabs ending on the line's content edge (never
+-- clipped), or on its own line one step under the rule. Plugins' Install
+-- and Themes' Import theme (longer: Themes' tabs alone run wide), the
+-- decision taken from the action's own width against the room it got,
+-- whatever the font measures.
+test("a catalog's action is whole and inside its card at every width from 400 to 1100", function()
+	for _, case in { { fx = "plugins_fixture.luau", tabs = "Plugins", action = "Install" }, { fx = "themes_fixture.luau", cmd = "themes", tabs = "Themes", action = "Import" } } do
+		for width = 400, 1100, 20 do
+			local app = mount(case.fx)
+			app:resize(width, 900)
+			app:frames(10)
+			if case.cmd then
+				app:command(case.cmd)
+			end
+			app:frames(30)
+			local tree = app:tree()
+			local cx, _, cw = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+			local _, ty, _, th = tree:match(`tablist "{case.tabs}" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)`)
+			local ax, ay, aw
+			local shown = 0
+			for line in tree:gmatch(`[^\n]*button "{case.action}[^\n]*`) do
+				if not line:find("hidden", 1, true) then
+					shown += 1
+					ax, ay, aw = line:match(' (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x')
+				end
+			end
+			local at = `{case.tabs} {width}`
+			assert(cx and ty and ax, `{at}: {tree}`)
+			expect(`{at} shown={shown}`).to_be(`{at} shown=1`)
+			local right = tonumber(cx) + tonumber(cw)
+			local edge = tonumber(ax) + tonumber(aw)
+			local beside = math.abs(tonumber(ay) - tonumber(ty)) < tonumber(th)
+			-- (Whole: ending on or before the line's content edge, the card's
+			-- words' inset in from its side.)
+			expect(`{at} whole={edge <= right - 12}`).to_be(`{at} whole=true`)
+			if not beside then
+				expect(`{at} step={tonumber(ay) - (tonumber(ty) + tonumber(th))}`).to_be(`{at} step=16`)
+			end
+		end
+	end
+end)

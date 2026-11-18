@@ -1441,10 +1441,18 @@ local CatalogHead = ui.component(function(props: { catalog: CatalogProps, tab: S
 		local n = needed:get()
 		return n <= 0 or head_w:get() >= n
 	end
-	-- (Beside the tabs and short of its own width: the head it needs.)
+	-- (Beside the tabs and short of its own width: the head it needs. A
+	-- shortfall seen before the head's own width is known waits for it: the
+	-- action's box can be laid out, and squeezed, first.)
+	local short_waiting = 0
 	local function check()
 		if inner_w and outer_w and action_fits() and inner_w - outer_w > 0.5 then
-			needed:set(head_w:peek() + (inner_w - outer_w))
+			local head = head_w:peek()
+			if head > 0 then
+				needed:set(head + (inner_w - outer_w))
+			else
+				short_waiting = inner_w - outer_w
+			end
 		end
 	end
 	local function action(beside: boolean): Node?
@@ -1456,8 +1464,10 @@ local CatalogHead = ui.component(function(props: { catalog: CatalogProps, tab: S
 			return node
 		end
 		-- (Kept in its place while under the rule, collapsed to none and
-		-- unseen: measured all the while, never built again.)
-		return ui.div {
+		-- unseen: measured all the while, never built again. A row, so the
+		-- action inside keeps its own width however little room the box
+		-- has: what it lacks is the shortfall.)
+		return ui.row {
 			shrink = 1,
 			min_w = 0,
 			overflow = "hidden",
@@ -1489,6 +1499,10 @@ local CatalogHead = ui.component(function(props: { catalog: CatalogProps, tab: S
 		on_resize = function(size: { w: number, h: number })
 			if math.abs(size.w - head_w:peek()) >= 0.5 then
 				head_w:set(size.w)
+			end
+			if short_waiting > 0 and size.w > 0 then
+				needed:set(size.w + short_waiting)
+				short_waiting = 0
 			end
 		end,
 		ui.row {
