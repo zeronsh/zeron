@@ -7,6 +7,8 @@ import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { PNG, Publisher, startRealEdge, type RealEdge } from "./real-edge.ts";
 import { rawElements } from "../../src/lib/store/security.ts";
+import { Edge } from "../../src/lib/store/edge.ts";
+import { catalogAsks } from "../catalog-asks.ts";
 
 /** A page runs only the site's own script files: no inline script, no handler, no javascript: link. */
 function inert(body: string) {
@@ -322,6 +324,15 @@ describe("the catalog, from the edge's real listing", () => {
     }
     // A listed version not verified shows its pictures too: it's the store's as much as any.
     expect((await edge.site("/plugins/theme-sync/files/0.1.0/icon.svg")).status).toBe(200);
+  });
+});
+
+describe("what the site's pages ask of the catalog (ac4fc5d3f), from the edge", () => {
+  test("a category's top, new this week, keywords: each the lists' own answer", async () => {
+    // (The site's client, its binding the edge's own address: public reads only, as the pages make them.)
+    const client = new Edge({ fetch: (r) => fetch(new URL(`${new URL(r.url).pathname}${new URL(r.url).search}`, edge.url), { method: r.method, headers: r.headers }) }, new Request(`${edge.origin}/plugins`));
+    if (process.env.E2E_OLD_EDGE) return;
+    await catalogAsks(client);
   });
 });
 

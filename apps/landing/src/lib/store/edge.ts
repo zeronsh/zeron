@@ -12,6 +12,7 @@ import type {
   DeployKey,
   EdgeError,
   ErrorWord,
+  KeywordCount,
   MyPlugins,
   PluginDetail,
   QueuePage,
@@ -131,8 +132,17 @@ export class Edge {
     }
   }
 
-  categories(): Promise<Result<{ categories: Category[] }>> {
-    return this.#json(`/store/v1/categories`);
+  /** The categories, each with its count; with `top` (1 to 4), its most installed plugins too. */
+  categories(top?: 1 | 2 | 3 | 4): Promise<Result<{ categories: Category[] }>> {
+    return this.#json(`/store/v1/categories${top ? `?top=${top}` : ""}`);
+  }
+
+  /** The keywords listed plugins carry (in a category, if one is named), most used first. */
+  keywords(query: { category?: string; limit?: number } = {}): Promise<Result<{ keywords: KeywordCount[] }>> {
+    const params = new URLSearchParams();
+    if (query.category) params.set("category", query.category);
+    if (query.limit) params.set("limit", String(query.limit));
+    return this.#json(`/store/v1/keywords${params.size ? `?${params}` : ""}`);
   }
 
   /**

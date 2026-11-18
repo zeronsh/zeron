@@ -219,6 +219,8 @@ export interface VersionsPage {
 export interface Stats {
   plugins: number;
   verified: number;
+  /** Listed plugins first listed in the last seven days (ac4fc5d3f; an edge before b2094a93e leaves it out). */
+  new_7d?: number;
 }
 
 export interface CatalogPage {
@@ -239,6 +241,14 @@ export interface Category {
   name: string;
   /** How many listed plugins it holds. */
   count?: number;
+  /** With `?top=n`: its n most installed plugins, as `?category=<id>&sort=popular` lists them (ac4fc5d3f). */
+  top?: PluginCard[];
+}
+
+/** A keyword and how many listed plugins carry it (`/store/v1/keywords`, ac4fc5d3f): the list's total for `?keyword=`. */
+export interface KeywordCount {
+  keyword: string;
+  count: number;
 }
 
 // ── The signed-in web session (/auth/web/session) ───────────────────────

@@ -766,14 +766,36 @@ async function route(request: Request): Promise<Response> {
   if (state.down) return fail(503, "unknown", "The store is down (the fake's own switch).");
   const [, , a, b, c, d, e] = parts;
 
-  if (a === "categories" && method === "GET") {
-    // (Each with how many listed plugins it holds.)
-    const counted = CATEGORIES.map((c) => ({ ...c, count: state.plugins.filter((p) => listed(p) && card(p).categories.includes(c.id)).length }));
-    return json({ categories: counted }, 200, { "cache-control": "public, max-age=300" });
+  if (a === "categories" && b === undefined && method === "GET") {
+    // (Each with how many listed plugins it holds; with `top`, its n most installed, as the list's popular order has them: ac4fc5d3f.)
+    const topText = url.searchParams.get("top");
+    if (topText !== null && !/^[1-4]$/.test(topText)) return fail(400, "bad_request", "top is 1 to 4.");
+    const counted = await Promise.all(
+      CATEGORIES.map(async (c) => ({
+        ...c,
+        count: state.plugins.filter((p) => listed(p) && card(p).categories.includes(c.id)).length,
+        ...(topText ? { top: ((await catalog(new URL(`https://fake.invalid/?category=${c.id}&sort=popular&limit=${topText}`)).json()) as { items: unknown[] }).items } : {}),
+      })),
+    );
+    return json({ categories: counted }, 200, { "cache-control": "public, max-age=60" });
+  }
+  if (a === "keywords" && b === undefined && method === "GET") {
+    // (Most used first, ties by keyword; each count the list's total for ?keyword=: ac4fc5d3f.)
+    const category = url.searchParams.get("category");
+    const limitText = url.searchParams.get("limit");
+    if (category !== null && !CATEGORIES.some((c) => c.id === category)) return fail(400, "bad_request", "Unknown category.");
+    if (limitText !== null && !(/^\d{1,2}$/.test(limitText) && Number(limitText) >= 1 && Number(limitText) <= 24)) return fail(400, "bad_request", "limit is 1 to 24.");
+    const counts = new Map<string, number>();
+    for (const p of state.plugins.filter(listed).filter((p) => !category || card(p).categories.includes(category))) {
+      for (const k of new Set(card(p).keywords.map((k) => k.toLowerCase()))) counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    const keywords = [...counts].map(([keyword, count]) => ({ keyword, count })).sort((x, y) => y.count - x.count || (x.keyword < y.keyword ? -1 : x.keyword > y.keyword ? 1 : 0));
+    return json({ keywords: keywords.slice(0, Number(limitText ?? 24)) }, 200, { "cache-control": "public, max-age=60" });
   }
   if (a === "stats" && method === "GET") {
     const all = state.plugins.filter(listed);
-    return json({ plugins: all.length, verified: all.filter((p) => latest(p)!.verified).length }, 200, { "cache-control": "public, max-age=30" });
+    // (new_7d: listed plugins first listed in the last seven days: ac4fc5d3f.)
+    return json({ plugins: all.length, verified: all.filter((p) => latest(p)!.verified).length, new_7d: all.filter((p) => listedAt(p)! >= NOW - 7 * DAY).length }, 200, { "cache-control": "public, max-age=30" });
   }
   if (a === "plugins" && b === undefined && method === "GET") return catalog(url);
   if (a === "plugins" && b && c === undefined && method === "GET") {
