@@ -163,3 +163,77 @@ test("a notice's Deploy keys opens Settings → Plugins on Yours, from any page 
 	expect(app:state("plugins_tab")).to_be("yours")
 	expect(app:has(`{PAGE} >> #keys-new`)).to_be(true)
 end)
+
+-- `zeron://open/plugin/<id>?version=<v>` (src/links.rs tells `version`
+-- beside `plugin`): the page with that version chosen. Install acts on it
+-- and names it; one the store has but that takes no new installs, or one
+-- it hasn't, leaves Install off and says why. A version that doesn't read
+-- as one, or keys besides `version`, change nothing.
+local function versioned(app: any, seq: number, id: string, version: string?, extra: { [string]: any }?)
+	local l: { [string]: any } = { seq = seq, plugin = id, version = version }
+	for k, v in extra or {} do
+		l[k] = v
+	end
+	app:set_state("app.link", l)
+	app:frames(10)
+	app:wait(`{PAGE} >> #store-offer`, { timeout_ms = 3000 })
+	-- (Past the link's arming, as the consent window's Allow.)
+	app:wait("#never-there", { timeout_ms = 1000 })
+	app:frames(10)
+end
+
+test("a link that chooses a version opens the page with Install acting on it, named", function()
+	local app = shell()
+	versioned(app, 1, "focus-timer", "1.0.0")
+	local offer = app:tree(`{PAGE} >> #store-offer`)
+	expect(offer).to_contain('button "Install 1.0.0"')
+	expect(app:tree(`{PAGE} >> #store-install`)).never.to_contain("disabled")
+	-- (1.0.0 is verified: no line saying it isn't.)
+	expect(app:has(`{PAGE} >> #store-verified-line`)).to_be(false)
+	expect(calls(app)).never.to_contain("install")
+end)
+
+-- The page says the chosen version's state: an unverified one its line,
+-- with the verified one to install instead.
+test("a link to a version the store hasn't verified says so of that version", function()
+	local app = shell()
+	app:command("store_stub.bump")
+	versioned(app, 1, "focus-timer", "1.3.0")
+	expect(app:tree(`{PAGE} >> #store-offer`)).to_contain('button "Install 1.3.0"')
+	expect(app:tree(`{PAGE} >> #store-verified-line`)).to_contain("1.3.0 isn't verified yet")
+	expect(app:has(`{PAGE} >> #store-verified-line >> role:button "Install 1.2.0 instead"`)).to_be(true)
+end)
+
+test("a link to a version that takes no new installs, or one the store hasn't, leaves Install off and says why", function()
+	local app = shell()
+	versioned(app, 1, "focus-timer", "1.1.0")
+	expect(app:tree(`{PAGE} >> #store-install`)).to_contain("disabled")
+	expect(app:tree(`{PAGE} >> #store-offer`)).to_contain('button "Install 1.1.0"')
+	expect(app:tree(`{PAGE} >> #store-state`)).to_contain("1.1.0 takes no new installs: replaced by 1.2.0 before it was")
+	-- One the store hasn't: asked of it, and said.
+	versioned(app, 2, "focus-timer", "9.9.9")
+	app:wait(`{PAGE} >> "The store has no version 9.9.9 of it."`, { timeout_ms = 3000 })
+	expect(calls(app)).to_contain("version:focus-timer:9.9.9")
+	expect(app:tree(`{PAGE} >> #store-install`)).to_contain("disabled")
+end)
+
+test("a link whose version doesn't read as one opens the page as if it chose none", function()
+	local app = shell()
+	versioned(app, 1, "focus-timer", "../../etc")
+	local offer = app:tree(`{PAGE} >> #store-offer`)
+	expect(offer).to_contain('button "Install"')
+	expect(offer).never.to_contain("../../etc")
+	expect(app:tree(`{PAGE} >> #store-install`)).never.to_contain("disabled")
+	expect(calls(app)).never.to_contain("version:")
+end)
+
+test("keys besides a link's version change nothing", function()
+	local app = shell()
+	versioned(app, 1, "focus-timer", "1.0.0", { install = true, from = "web" })
+	expect(app:tree(`{PAGE} >> #store-offer`)).to_contain('button "Install 1.0.0"')
+	expect(calls(app)).never.to_contain("install")
+	-- And a later link to the page without one: the page's own Install.
+	versioned(app, 2, "focus-timer", nil, { install = true })
+	expect(app:tree(`{PAGE} >> #store-offer`)).to_contain('button "Install"')
+	expect(app:tree(`{PAGE} >> #store-offer`)).never.to_contain("Install 1.0.0")
+end)

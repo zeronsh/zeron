@@ -710,6 +710,10 @@ export type RowProps = {
 	-- At the detail line's end, while it shows: a small action of its own
 	-- (a plugin's Update), so the row's control stays the same on every row.
 	detail_action: Node?,
+	-- Whether `detail_action` shows: the line then shows for it, with the
+	-- detail's words or none (a version's Install, on a row with nothing
+	-- else to say). Without it, the line shows only with words.
+	detail_action_shows: (() -> boolean)?,
 	-- The sentence's own link, right after the detail's last word and
 	-- wrapping with it as one sentence does (Publish… after where a plugin
 	-- stands in the store): a link in the text's own ink, underlined.
@@ -872,7 +876,7 @@ function M.Row(props: RowProps): Node
 		if props.detail
 			then ui.show(function(): boolean
 				local d = control.value(props.detail)
-				return type(d) == "string" and d ~= ""
+				return (type(d) == "string" and d ~= "") or (props.detail_action_shows ~= nil and props.detail_action_shows())
 			end, if props.detail_link
 				-- (One rich paragraph, the link its last span, is the drawing
 				-- this wants: zgx-asks/rich-span-boundary-break. Meanwhile the

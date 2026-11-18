@@ -7,17 +7,23 @@
 //!   zeron://open/chat/<id>?workspace=<locator>
 //!                                   a chat's link, opened only in the
 //!                                   workspace it came from
-//!   zeron://open/plugin/<id>        a plugin of the store ("Install in
+//!   zeron://open/plugin/<id>[?version=<v>]
+//!                                   a plugin of the store ("Install in
 //!                                   Zeron" on its web page): its page in
-//!                                   Settings → Plugins, Install ready. It
+//!                                   Settings → Plugins, Install ready (for
+//!                                   version <v> when it names one). It
 //!                                   only ever names a store id, checked as
 //!                                   a plugin's id is (never a URL, a path
-//!                                   or a file), and never installs: the
-//!                                   person does, from the page
+//!                                   or a file), and a version only as a
+//!                                   version reads anywhere (else none);
+//!                                   other query keys are ignored. It never
+//!                                   installs: the person does, from the
+//!                                   page
 //!
 //! What to open goes to the scripts as shared `app.link`,
-//! `{ seq, chat?, settings?, tab?, plugin? }` (`tab`: Settings → Plugins'
-//! tab, for the host's own buttons, never from a link) (`seq` moving with each), which the
+//! `{ seq, chat?, settings?, tab?, plugin?, version? }` (`tab`: Settings →
+//! Plugins' tab, for the host's own buttons, never from a link; `version`,
+//! a plugin link's) (`seq` moving with each), which the
 //! shell's route follows (ui/screens/shell/route.luau). The beta registers
 //! for them (`sh.zeron.app`'s `zeron` scheme: dist/macos/Info.plist,
 //! dist/zeron.desktop, dist/windows/zeron.iss, the whole scheme, so a new
@@ -35,8 +41,8 @@ use zgx_script::{ScriptHost, Shared, Value};
 pub enum Target {
     Chat(String),
     Settings(&'static str),
-    /// A store plugin's page, by its id.
-    Plugin(String),
+    /// A store plugin's page, by its id, with the version a link chose.
+    Plugin(String, Option<String>),
     /// A tab of Settings → Plugins ("yours": what a notice's button opens).
     PluginsTab(&'static str),
 }
@@ -53,20 +59,35 @@ fn store_id(id: &str) -> bool {
         && bytes[1..].iter().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
 }
 
-/// The store id a plugin link names: exactly `zeron://open/plugin/<id>`,
-/// a trailing `/` allowed; anything more (a query, a fragment, another
-/// part, an escape) is no plugin link.
-fn plugin_link(url: &str) -> Option<String> {
+/// The store id a plugin link names, `zeron://open/plugin/<id>` (a
+/// trailing `/` allowed), and the version its query chooses (`?version=`,
+/// as a version reads anywhere, else none; other keys ignored). Anything
+/// more in its path (a fragment, another part, an escape) is no plugin
+/// link.
+fn plugin_link(url: &str) -> Option<(String, Option<String>)> {
     let rest = url.strip_prefix(PLUGIN_LINK)?;
-    let id = rest.strip_suffix('/').unwrap_or(rest);
-    store_id(id).then(|| id.to_owned())
+    let (path, query) = match rest.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (rest, None),
+    };
+    let id = path.strip_suffix('/').unwrap_or(path);
+    if !store_id(id) || query.is_some_and(|q| q.contains('#')) {
+        return None;
+    }
+    let version = query
+        .into_iter()
+        .flat_map(|q| q.split('&'))
+        .find_map(|pair| pair.strip_prefix("version="))
+        .filter(|v| crate::plugins::consent::version_reads(v))
+        .map(str::to_owned);
+    Some((id.to_owned(), version))
 }
 
 /// What `url` asks for: the target and, for a conversation link, the
 /// workspace it belongs to. None for anything else.
 pub fn parse(url: &str) -> Option<(Target, Option<String>)> {
-    if let Some(id) = plugin_link(url) {
-        return Some((Target::Plugin(id), None));
+    if let Some((id, version)) = plugin_link(url) {
+        return Some((Target::Plugin(id, version), None));
     }
     if url.starts_with(PLUGIN_LINK) {
         return None;
@@ -121,7 +142,7 @@ pub fn open(url: &str) {
     let Some(workspace) = workspace else {
         // (A plugin's page, asked from a web page: Zeron comes forward on
         // it, as for a banner. LaunchServices may already have.)
-        if matches!(target, Target::Plugin(_)) {
+        if matches!(target, Target::Plugin(..)) {
             activate();
         }
         tell(target);
@@ -186,7 +207,12 @@ fn tell(target: Target) {
     match target {
         Target::Chat(id) => fields.push(("chat", Value::from(id.as_str()))),
         Target::Settings(page) => fields.push(("settings", Value::from(page))),
-        Target::Plugin(id) => fields.push(("plugin", Value::from(id.as_str()))),
+        Target::Plugin(id, version) => {
+            fields.push(("plugin", Value::from(id.as_str())));
+            if let Some(version) = version {
+                fields.push(("version", Value::from(version.as_str())));
+            }
+        }
         Target::PluginsTab(tab) => {
             fields.push(("settings", Value::from("plugins")));
             fields.push(("tab", Value::from(tab)));
@@ -258,10 +284,10 @@ mod tests {
             ("zeron://open/plugin/a1", "a1"),
             ("zeron://open/plugin/9lives", "9lives"),
         ] {
-            assert_eq!(parse(url), Some((Target::Plugin(id.into()), None)), "{url}");
+            assert_eq!(parse(url), Some((Target::Plugin(id.into(), None), None)), "{url}");
         }
         let forty = "a".repeat(40);
-        assert_eq!(parse(&format!("{PLUGIN_LINK}{forty}")), Some((Target::Plugin(forty.clone()), None)));
+        assert_eq!(parse(&format!("{PLUGIN_LINK}{forty}")), Some((Target::Plugin(forty.clone(), None), None)));
         for url in [
             "zeron://open/plugin/",
             "zeron://open/plugin/a",
@@ -271,8 +297,9 @@ mod tests {
             "zeron://open/plugin/focus%2Ftimer",
             "zeron://open/plugin/focus/../../etc",
             "zeron://open/plugin/focus/settings",
-            "zeron://open/plugin/focus?install=1",
             "zeron://open/plugin/focus#install",
+            "zeron://open/plugin/focus?version=1.2.0#install",
+            "zeron://open/plugin/focus/settings?version=1.2.0",
             "zeron://open/plugin/https://evil.example/x.zeron-plugin",
             "zeron://open/plugin/file:///tmp/x.zeron-plugin",
             "zeron://open/plugin/focus timer",
@@ -286,11 +313,42 @@ mod tests {
         assert_eq!(parse(&format!("{PLUGIN_LINK}{forty}a")), None, "41 characters");
     }
 
+    /// A plugin link may choose a version (`?version=`): taken only as a
+    /// version reads anywhere, else the page opens as with none; any other
+    /// key is ignored.
+    #[test]
+    fn a_plugin_link_may_choose_a_version() {
+        let page = |id: &str, version: Option<&str>| Some((Target::Plugin(id.into(), version.map(str::to_owned)), None));
+        for (url, version) in [
+            ("zeron://open/plugin/focus?version=1.2.0", Some("1.2.0")),
+            ("zeron://open/plugin/focus/?version=0.3.0-beta.1", Some("0.3.0-beta.1")),
+            ("zeron://open/plugin/focus?install=1&version=1.2.0&from=web", Some("1.2.0")),
+            // Other keys alone: none chosen.
+            ("zeron://open/plugin/focus?install=1", None),
+            ("zeron://open/plugin/focus?", None),
+            // Not a version: as if the link had none.
+            ("zeron://open/plugin/focus?version=", None),
+            ("zeron://open/plugin/focus?version=1.2.0%20", None),
+            ("zeron://open/plugin/focus?version=../../etc", None),
+            ("zeron://open/plugin/focus?version=1.2.0;rm", None),
+            ("zeron://open/plugin/focus?version=https://evil.example", None),
+        ] {
+            assert_eq!(parse(url), page("focus", version), "{url}");
+        }
+        let long = format!("zeron://open/plugin/focus?version=1.{}", "0".repeat(40));
+        assert_eq!(parse(&long), page("focus", None), "longer than a version");
+        // Told to the scripts beside its plugin.
+        tell(Target::Plugin("focus".into(), Some("1.2.0".into())));
+        assert_eq!((field("plugin").as_deref(), field("version").as_deref()), (Some("focus"), Some("1.2.0")));
+        tell(Target::Plugin("focus".into(), None));
+        assert_eq!(field("version"), None);
+    }
+
     /// Told to the scripts as `plugin`, and kept for a main window that
     /// comes up later (a cold start, or signed out until set up).
     #[test]
     fn a_plugin_link_opens_its_page_and_is_kept_for_a_window_to_come() {
-        tell(Target::Plugin("focus-timer".into()));
+        tell(Target::Plugin("focus-timer".into(), None));
         assert_eq!(field("plugin").as_deref(), Some("focus-timer"));
         assert_eq!(last(), (None, None));
         // (A window installed now starts from it: `install` reads `LAST`.)

@@ -7,7 +7,9 @@
 --   nav.view:get()          "catalog" | "store:<id>" | "publish:<id>"
 --   nav.tab                 the tab shown: "installed" | "yours" | "browse"
 --   nav.open_listing(id)    a store plugin's page (Browse its way back);
---                           `by_link`: a link opened it (`nav.linked()`)
+--                           `by_link`: a link opened it (`nav.linked()`),
+--                           `version` the one the link chose
+--                           (`nav.linked_version(id)`, tracked)
 --   nav.open_publish(id)    publishing one of yours (Yours its way back)
 --   nav.back()              the tabs again
 --   nav.show_browse()       Browse, wherever a page was opened from (what
@@ -27,6 +29,9 @@ local opened = ui.state("plugins_view_opened", false)
 -- anywhere else from it: its page's action waits a moment before it takes
 -- a click (screens/plugins/listing), as the consent window's Allow does.
 local linked = ui.state("plugins_view_linked", nil :: string?)
+-- The version a link chose on that page (`?version=`): its Install acts
+-- on it and the page says its state. Gone with the link's page.
+local linked_version = ui.state("plugins_view_linked_version", nil :: string?)
 
 -- (Only an id a store id could be, as a plugin's id is: anything else is
 -- no page at all.)
@@ -34,7 +39,12 @@ local function valid(id: string): boolean
 	return #id >= 2 and #id <= 40 and string.match(id, "^[a-z0-9][a-z0-9%-]*$") ~= nil
 end
 
-function M.open_listing(id: string, from_outside: boolean?, by_link: boolean?)
+-- (A version as a version reads anywhere: the host's check, again.)
+local function version_reads(v: string): boolean
+	return #v >= 1 and #v <= 32 and string.match(v, "^[%w%.%+%-]+$") ~= nil
+end
+
+function M.open_listing(id: string, from_outside: boolean?, by_link: boolean?, version: string?)
 	if not valid(id) then
 		return
 	end
@@ -42,11 +52,18 @@ function M.open_listing(id: string, from_outside: boolean?, by_link: boolean?)
 	M.view:set(`store:{id}`)
 	opened:set(from_outside == true)
 	linked:set(if by_link then id else nil)
+	linked_version:set(if by_link and type(version) == "string" and version_reads(version) then version else nil)
 end
 
 -- Whether a link opened plugin `id`'s page (read as the page shows).
 function M.linked(id: string): boolean
 	return linked:peek() == id
+end
+
+-- The version a link chose on plugin `id`'s page, or nil (read as the
+-- page shows: a later link to it may choose another).
+function M.linked_version(id: string): string?
+	return if linked:get() == id then linked_version:get() else nil
 end
 
 function M.open_publish(id: string)
@@ -57,11 +74,13 @@ function M.open_publish(id: string)
 	M.view:set(`publish:{id}`)
 	opened:set(false)
 	linked:set(nil)
+	linked_version:set(nil)
 end
 
 function M.back()
 	opened:set(false)
 	linked:set(nil)
+	linked_version:set(nil)
 	M.view:set("catalog")
 end
 
@@ -73,6 +92,7 @@ function M.show_tab(tab: string)
 	end
 	opened:set(false)
 	linked:set(nil)
+	linked_version:set(nil)
 	M.tab:set(tab)
 	M.view:set("catalog")
 end

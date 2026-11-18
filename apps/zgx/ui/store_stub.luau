@@ -519,6 +519,18 @@ stub.versions = function(id: string, cursor: string?, limit: number?): any
 		return { versions = out, total = #e.versions, next_cursor = if from + n < #e.versions then tostring(from + n) else nil }
 	end)
 end
+-- One version's record, as the store gives it; one it hasn't, `not_found`.
+stub.version = function(id: string, version: string): any
+	note(`version:{id}:{version}`)
+	return answer(function(): any
+		for _, v in entry(id).versions do
+			if v.version == version then
+				return v
+			end
+		end
+		error({ message = "not_found" }, 0)
+	end)
+end
 stub.categories = function(): any
 	note("categories")
 	return answer(function(): any

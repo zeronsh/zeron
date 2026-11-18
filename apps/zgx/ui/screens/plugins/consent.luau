@@ -124,6 +124,13 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 		elseif type(it.source.verified_alternative) == "table" then it.source.verified_alternative.version
 		else nil
 	local alternative: string? = if type(offered) == "string" and offered ~= "" then offered else nil
+	-- The version an update replaces here, when its own record said
+	-- verified (the engine's `source.replaced`): named, as the update
+	-- sheet names it.
+	local replaced: any = if type(it.source) == "table" then it.source.replaced else nil
+	local replaced_verified: string? = if type(replaced) == "table" and replaced.verified == true and type(replaced.version) == "string" and string.match(replaced.version, "^[%w%.%+%-]+$") and #replaced.version <= 32
+		then replaced.version
+		else nil
 	-- Asking again for nothing beyond what was allowed (an unverified
 	-- version always asks): the engine says so; one line.
 	local nothing_new = it.nothing_new == true
@@ -304,7 +311,9 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 							-- under the words as the update sheet's does: an update
 							-- from a verified version says so; else the verified one
 							-- offered is named. Neither: the title alone.)
-							body = if type(it.update) == "table" and it.update.installed_verified == true
+							body = if replaced_verified
+								then ui.t("plugins.store.installed_was_verified", { installed = replaced_verified })
+								elseif type(it.update) == "table" and it.update.installed_verified == true
 								then ui.t("plugins.store.installed_was_verified_plain")
 								elseif alternative and not elsewhere then ui.t("plugins.store.newest_verified_is", { version = alternative })
 								else nil,

@@ -328,7 +328,7 @@ test("a store version the store hasn't verified asks even for nothing new, warns
 	local sheet = app:tree("#consent")
 	expect(app:tree("#consent-unverified")).to_contain("Zeron hasn't verified 1.3.0 yet.")
 	-- (It updates one that was: said, as the update sheet says it.)
-	expect(app:tree("#consent-unverified")).to_contain("The version you have was verified.")
+	expect(app:tree("#consent-unverified")).to_contain("The version you have, 1.2.0, was verified.")
 	-- Nothing beyond what was allowed: said, not listed again.
 	expect(sheet).to_contain("It asks for nothing beyond what you allowed.")
 	-- Allow still answers; the verified one is the other way.
@@ -362,7 +362,7 @@ end)
 -- the update sheet's: a body says what the action rests on (the version
 -- you have was verified; else the verified one offered).
 test("the store warning's action is under its words, whether an update or a first install", function()
-	for _, case in { { "timer", "The version you have was verified.", "Install 1.2.1 instead" }, { "fresh", "0.0.9 is the newest version Zeron has verified.", "Install 0.0.9 instead" } } do
+	for _, case in { { "timer", "The version you have, 1.2.0, was verified.", "Install 1.2.1 instead" }, { "fresh", "0.0.9 is the newest version Zeron has verified.", "Install 0.0.9 instead" } } do
 		local app = open()
 		app:command(case[1])
 		app:frames(20)

@@ -431,8 +431,15 @@ local UpdateLink = ui.component(function(props: { now: State<any> }): Node
 	end, ds.Settings.InlineLink {
 		-- (A row's inline link, doing something here: a button.)
 		role = "button",
+		-- (One the store hasn't verified: "Update…", a question follows in
+		-- the consent window, as "Publish…" and "New key…" say. Verified,
+		-- one click.)
 		label = function(): string
-			return if busy() then ui.t("plugins.page.updating"):get() else ui.t("plugins.page.update"):get()
+			if busy() then
+				return ui.t("plugins.page.updating"):get()
+			end
+			local u: any = now:get().update
+			return if type(u) == "table" and u.verified == false then ui.t("plugins.page.update_asks"):get() else ui.t("plugins.page.update"):get()
 		end,
 		focusable = function(): boolean
 			return not busy()

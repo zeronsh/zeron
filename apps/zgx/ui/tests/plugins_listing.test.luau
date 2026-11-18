@@ -725,7 +725,9 @@ test("a store plugin's page chooses which updates it takes here: the same as thi
 	app:command("store.install_done")
 	app:command("store.allowed")
 	settle(app)
-	expect(app:tree("#store-updates")).to_contain('text "Same as this computer (Newest version)"')
+	expect(app:tree("#store-updates")).to_contain('text "Same as this computer"')
+	-- What's in effect, named once, in the line under it.
+	expect(app:tree()).to_contain("Follows this computer: newest version.")
 	local y = tonumber((app:tree("#store-updates"):match(" %-?[%d.]+,(%-?[%d.]+) "))) or 0
 	app:scroll("#fixture-scroll", y - 400)
 	app:frames(10)
@@ -734,12 +736,18 @@ test("a store plugin's page chooses which updates it takes here: the same as thi
 	app:click('role:menuitem "Verified versions only"')
 	settle(app)
 	expect(calls(app)).to_contain("updates:focus-timer:verified")
+	-- Its own choice: the plain line.
+	expect(app:tree()).to_contain("Which new versions it updates to on this computer.")
 	-- Back to the device's: its own choice cleared.
 	app:click("#store-updates")
 	app:frames(10)
-	app:click('role:menuitem "Same as this computer (Newest version)"')
+	app:click('role:menuitem "Same as this computer"')
 	settle(app)
 	expect(calls(app)).to_contain("updates:focus-timer:default")
+	-- The computer's choice changed: said as what it now follows.
+	app:set_state("plugins.store_updates", { device = "verified", plugins = {} })
+	settle(app)
+	expect(app:tree()).to_contain("Follows this computer: verified versions only.")
 	-- An unverified one it leaves waiting is said on its row in Installed,
 	-- never taken unasked.
 	app:command("store.update_held")
@@ -797,7 +805,8 @@ test("an unverified update is said on its row, and its Update stages it for the 
 	app:click('role:tab "Installed"')
 	settle(app)
 	expect(app:tree()).to_contain("1.3.0 is out, not verified yet.")
-	app:click('role:button "Update"')
+	-- (A question follows: "Update…".)
+	app:click('role:button "Update…"')
 	settle(app, 600)
 	expect(calls(app)).to_contain("update:focus-timer")
 	expect(calls(app)).never.to_contain("update:focus-timer:verified_only")
@@ -879,6 +888,33 @@ test("a plugin's versions each carry their badge beside the number, in the publi
 	assert(nx and bx, tree)
 	expect(tonumber(bx) :: number > tonumber(nx) + tonumber(nw)).to_be(true)
 	expect(math.abs(tonumber(by) - tonumber(ny)) <= 3).to_be(true)
-	-- No Install on a replaced one; only the newest unverified one takes it.
-	expect(app:count('.store-version >> role:button "Install"') <= 6).to_be(true)
+	-- Install on every row that can be installed, the newest unverified
+	-- one too (beside the head's button); none on a replaced one.
+	local function row_of(version: string, next_version: string): string
+		local from = string.find(tree, `text "{version}"`, 1, true) or 0
+		local to = string.find(tree, `text "{next_version}"`, 1, true) or #tree
+		return string.sub(tree, from, to)
+	end
+	expect(row_of("10.20.30", "10.20.29")).to_contain('button "Install"')
+	expect(row_of("10.20.29", "10.20.28")).to_contain('button "Install"')
+	expect(row_of("10.20.28", "10.20.27")).never.to_contain('button "Install"')
+end)
+
+-- The version this device has says "Installed" where Install would be.
+test("the installed version's row says Installed where Install would be", function()
+	local app = page("Focus timer")
+	app:click('#store-offer >> role:button "Install"')
+	app:command("store.install_done")
+	app:command("store.allowed")
+	settle(app)
+	app:scroll("#fixture-scroll", 1e6)
+	settle(app)
+	local tree = app:tree('role:group "Versions"')
+	local from = string.find(tree, 'text "1.2.0"', 1, true) or 0
+	local to = string.find(tree, 'text "1.1.0"', 1, true) or #tree
+	local row = string.sub(tree, from, to)
+	expect(row).to_contain('text "Installed"')
+	expect(row).never.to_contain('button "Install"')
+	-- (1.0.0, verified, can be installed instead.)
+	expect(string.sub(tree, string.find(tree, 'text "1.0.0"', 1, true) or 0)).to_contain('button "Install"')
 end)

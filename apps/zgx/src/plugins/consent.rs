@@ -124,8 +124,9 @@ fn invisible(c: char) -> bool {
 
 /// The plugin as the sheet shows it: its own words bounded and plain
 /// (`plain`), its version only if it reads as one.
-/// Whether `version` reads as a version (`1.2.0`, `0.3.0-beta.1`).
-fn version_reads(version: &str) -> bool {
+/// Whether `version` reads as a version (`1.2.0`, `0.3.0-beta.1`): a
+/// version anywhere the app shows or takes one (a link's too).
+pub(crate) fn version_reads(version: &str) -> bool {
     (1..=VERSION).contains(&version.len()) && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
 }
 

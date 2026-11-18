@@ -176,7 +176,9 @@ local PLUGINS: { [string]: any } = {
 		hash = "timer-13",
 		status = "pending",
 		author = { kind = "verified", username = "ada" },
-		source = { kind = "store", id = "focus-timer", publisher = "ada", verified = false },
+		-- (What it replaces here, its own record verified: the engine's
+		-- `source.replaced`.)
+		source = { kind = "store", id = "focus-timer", publisher = "ada", verified = false, replaced = { version = "1.2.0", verified = true } },
 		permissions = { "ui.add" },
 		allowed = { "ui.add" },
 		ask = {},
