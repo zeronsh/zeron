@@ -9,6 +9,7 @@ use super::capability;
 use super::files::hash_files;
 use super::manifest::{MANIFEST_FILE, Manifest, McpSpec, ToolSpec, UiSpec, check_id};
 use super::signing::{FileHashes, SigCheck, check, content_hash};
+use super::install::{Source, StoreSource};
 use super::status::{Author, Decision, Facts, State, Status, Verdict, decide};
 
 pub const UNSIGNED: &str = "It isn't signed";
@@ -188,6 +189,13 @@ pub struct PluginItem {
     /// (`capability::Diff`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub digest_diff: Option<serde_json::Value>,
+    /// From the store: its installed version was blocked by the store
+    /// (`{version, reason, at, overridden}`, `status::Blocked`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<serde_json::Value>,
+    /// From the store: this device takes its pre-releases.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub prerelease: bool,
 }
 
 /// The SVG a manifest names as its icon (`"icon": "icon.svg"`), read
@@ -216,11 +224,24 @@ pub struct Entry {
     pub verdict: Verdict,
     /// Its capability record.
     pub record: serde_json::Value,
+    /// What a decision about it is bound to: its signing key, or for a
+    /// plugin installed from the store, its owner there
+    /// (`StoreSource::binding`).
+    pub binding: Option<String>,
+    /// The store's record of it, when it came from the store and is what
+    /// the store vouched for.
+    pub store: Option<StoreSource>,
 }
 
 impl Entry {
+    /// The key its signature checks out with.
     pub fn key(&self) -> Option<&str> {
         self.inspected.key()
+    }
+
+    /// What its decision is bound to (`binding`).
+    pub fn binding(&self) -> Option<&str> {
+        self.binding.as_deref()
     }
 
     pub fn mcp(&self) -> Option<&McpSpec> {
@@ -239,15 +260,47 @@ impl Entry {
             broken: self.item.status == Status::Broken,
             asked: &self.item.permissions,
             author: &self.item.author,
-            key: self.key(),
+            key: self.binding(),
             hash: &self.item.hash,
             record: &self.record,
         }
     }
 }
 
-/// Build the entry for an inspected folder whose author is resolved.
+/// The store's record of the plugin in `inspected`, when it was installed
+/// from the store and is still exactly what the store vouched for: its
+/// signature checks out (by the key the record names, when it names one)
+/// and its content hash is the record's. Who made it is then who owns it
+/// in the store; anything else (edited since, or another source) is told
+/// by its signature, as any plugin's is.
+pub fn store_record(inspected: &Inspected) -> Option<StoreSource> {
+    let source = Source::load(&inspected.dir)?;
+    let store = source.store()?.clone();
+    let key = inspected.key()?;
+    let vouched = !store.publisher.trim().is_empty()
+        && super::store::publisher_id(&store.publisher_id)
+        && !inspected.hash.is_empty()
+        && store.hash == inspected.hash
+        && store.id == inspected.folder
+        && store.key.as_deref().is_none_or(|k| k == key);
+    vouched.then_some(store)
+}
+
+/// A store plugin's author: who owns it in the store.
+pub fn store_author(store: &StoreSource) -> Author {
+    Author::Verified { username: Some(store.publisher.trim().to_owned()), mine: false }
+}
+
+/// Build the entry for an inspected folder whose author is resolved, its
+/// decision bound to its signing key.
 pub fn entry(inspected: Inspected, author: Author, state: &State) -> Entry {
+    let binding = inspected.key().map(str::to_owned);
+    entry_bound(inspected, author, binding, None, state)
+}
+
+/// [`entry`] for a plugin whose decision is bound to `binding` (a store
+/// plugin's owner, `store` its record).
+pub fn entry_bound(inspected: Inspected, author: Author, binding: Option<String>, store: Option<StoreSource>, state: &State) -> Entry {
     // Keyed by folder: a manifest whose id differs is broken anyway.
     let id = inspected.folder.clone();
     let own = state.own.contains(&id);
@@ -260,7 +313,7 @@ pub fn entry(inspected: Inspected, author: Author, state: &State) -> Entry {
             broken: inspected.error.is_some(),
             asked: &permissions,
             author: &author,
-            key: inspected.key(),
+            key: binding.as_deref(),
             hash: &inspected.hash,
             record: &record,
         },
@@ -297,12 +350,16 @@ pub fn entry(inspected: Inspected, author: Author, state: &State) -> Entry {
         icon_svg: manifest.and_then(|m| icon_svg(&inspected.dir, &m.raw)),
         digest: capability::digest(&record),
         digest_diff: verdict.diff.clone(),
+        blocked: state.blocked.get(&id).map(|b| serde_json::json!(b)),
+        prerelease: state.prerelease.contains(&id),
     };
     Entry {
         item,
         inspected,
         verdict,
         record,
+        binding,
+        store,
     }
 }
 

@@ -34,10 +34,15 @@ local words = require("@app/screens/plugins/words")
 local plugin_settings = require("@app/screens/plugins/settings")
 local devices_page = require("@app/screens/settings/devices")
 local visits = require("@app/screens/settings/visits")
+local nav = require("@app/screens/plugins/nav")
+local browse = require("@app/screens/plugins/browse")
+local listing = require("@app/screens/plugins/listing")
+local publish = require("@app/screens/plugins/publish")
 
 local M = {}
 
-local tab = ui.state("plugins_tab", "installed")
+-- (Kept where a link reaches it too: screens/plugins/nav.)
+local tab = nav.tab
 local query = ui.state("plugins_query", "")
 -- The plugin Remove was asked of, and its device (nil: this one), kept as
 -- the dialog opened.
@@ -396,36 +401,28 @@ local UpdateLink = ui.component(function(props: { now: State<any> }): Node
 	return ui.show(function(): boolean
 		local it: any = now:get()
 		return type(it.update) == "table" and it.update.refused == nil and not it.builtin and kind(it) ~= "broken"
-	end, ui.row {
+	end, ds.Settings.InlineLink {
+		-- (A row's inline link, doing something here: a button.)
 		role = "button",
-		label = ui.t("plugins.page.update"),
+		label = function(): string
+			return if busy() then ui.t("plugins.page.updating"):get() else ui.t("plugins.page.update"):get()
+		end,
 		focusable = function(): boolean
 			return not busy()
 		end,
 		disabled = busy,
-		shrink = 0,
-		cursor = "pointer",
-		color = "$text.primary",
-		hover = { color = "$accent" },
 		on_click = function()
 			if not busy() then
 				update(now:peek().id, now:peek().name)
 			end
 		end,
-		ui.text {
-			function(): string
-				return if busy() then ui.t("plugins.page.updating"):get() else ui.t("plugins.page.update"):get()
-			end,
-			text_size = "$font.size.sm",
-			line_height = "$font.line.sm",
-			weight = "$font.weight.medium",
-			underline = true,
-			underline_offset = 4,
-		},
 	})
 end)
 
 local function row(p: state.Item, _i: number, now: State<any>): Node
+	-- (Rows are built for their tab: Yours' own plugins, made on this
+	-- device, say where they stand in the store.)
+	local publishing = tab:peek() == "yours" and device_now() == nil and (p.own == true or p.author.kind == "you") and not (p :: any).builtin
 	return ds.Settings.Row {
 		label = function(): string
 			return now:get().name
@@ -450,9 +447,22 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 		-- (Someone else's: a newer version found where it came from.)
 		detail = function(): string?
 			local it = now:get()
+			if publishing then
+				return publish.summary(it.id) or ui.t("plugins.store.summary.unknown"):get()
+			end
 			return words.grants(it) or words.update(it)
 		end,
-		detail_action = UpdateLink { now = now },
+		detail_action = if publishing then nil else UpdateLink { now = now },
+		-- (Publish… is its sentence's own link: right after its last word,
+		-- wrapping with it.)
+		detail_link = if publishing
+			then {
+				label = ui.t("plugins.store.publish_link"),
+				on_click = function()
+					nav.open_publish(now:peek().id)
+				end,
+			}
+			else nil,
 		truncate = true,
 		-- Its version, centred on the row beside its controls; before it,
 		-- Unverified for one whose maker Zeron can't vouch for.
@@ -626,34 +636,7 @@ end
 -- The page: ds.Settings.Catalog's search, tabs, card and states (the
 -- Templates page is the same), with this page's device choice, rows, empty
 -- state, offline states and dialogs.
-function M.View(): Node
-	-- Once a visit: another device shown is looked at again (its list as
-	-- it is now; it may have been away).
-	visits.once("plugins", function()
-		local d = device()
-		if d then
-			state.target(d)
-		end
-	end)
-	-- As a device is shown: its plugins' sources, for a newer version.
-	local shown_id = ui.computed(function(): string
-		return device() or ""
-	end)
-	ui.effect(function()
-		shown_id:get()
-		check_updates()
-	end)
-	-- A device shown that was away coming back: looked at again.
-	local was_online: boolean? = nil
-	ui.effect(function()
-		local d = shown_device()
-		local id = device()
-		local online = d ~= nil and d.online ~= false
-		if id and online and was_online == false and state.remote:peek().state == "offline" then
-			state.target(id)
-		end
-		was_online = if id then online else nil
-	end)
+local function catalog(): Node
 	return ds.Settings.Catalog {
 		title = ui.t("plugins.page.title"),
 		description = ui.t("plugins.page.description"),
@@ -667,6 +650,7 @@ function M.View(): Node
 			options = {
 				{ value = "installed", label = ui.t("plugins.page.installed"), count = count("installed") },
 				{ value = "yours", label = ui.t("plugins.page.yours"), count = count("yours") },
+				{ value = "browse", label = ui.t("plugins.store.browse") },
 			},
 		},
 		-- (No New for now: your own plugins arrive by an agent or the
@@ -705,6 +689,12 @@ function M.View(): Node
 			end,
 			away = away_notice,
 		},
+		-- The store, searched on its own terms (screens/plugins/browse).
+		views = {
+			browse = function(): Node
+				return browse.View {}
+			end,
+		},
 		found = found,
 		row = row,
 		-- (By device and id: another device's rows are its own.)
@@ -713,6 +703,73 @@ function M.View(): Node
 		end,
 		none = none,
 		overlays = dialogs(),
+	}
+end
+
+-- What a store plugin's page and publishing one of yours need of this
+-- page: the device shown, its name, whether it's away, and its outcomes.
+local here = {
+	device = device,
+	device_name = device_name,
+	away = away,
+	settled = settled,
+	failed = failed,
+}
+
+function M.View(): Node
+	-- Once a visit: another device shown is looked at again (its list as
+	-- it is now; it may have been away). The page opens on its tabs, unless
+	-- a link opened a plugin's page as Settings came up.
+	visits.once("plugins", function()
+		nav.arrive()
+		local d = device()
+		if d then
+			state.target(d)
+		end
+	end)
+	-- As a device is shown: its plugins' sources, for a newer version.
+	local shown_id = ui.computed(function(): string
+		return device() or ""
+	end)
+	ui.effect(function()
+		shown_id:get()
+		check_updates()
+	end)
+	-- Yours shown: where your plugins stand in the store, read again.
+	ui.effect(function()
+		if tab:get() == "yours" and nav.view:get() == "catalog" then
+			publish.load()
+		end
+	end)
+	-- A device shown that was away coming back: looked at again.
+	local was_online: boolean? = nil
+	ui.effect(function()
+		local d = shown_device()
+		local id = device()
+		local online = d ~= nil and d.online ~= false
+		if id and online and was_online == false and state.remote:peek().state == "offline" then
+			state.target(id)
+		end
+		was_online = if id then online else nil
+	end)
+	-- Its tabs, or one plugin's page under them (a store plugin, or
+	-- publishing one of yours), each on the page's middle.
+	return ui.column {
+		w_full = true,
+		items = "center",
+		ui.presence(function(): string
+			return nav.view:get()
+		end, function(v: string): Node
+			local id = string.match(v, "^store:(.+)$")
+			if id then
+				return ui.column { w_full = true, items = "center", listing.Page { plugin = id, here = here } }
+			end
+			local own = string.match(v, "^publish:(.+)$")
+			if own then
+				return ui.column { w_full = true, items = "center", publish.Page { plugin = own, here = here } }
+			end
+			return ui.column { w_full = true, items = "center", catalog() }
+		end, { w_full = true, enter = { opacity = { 0, 1 }, y = { 6, 0 }, duration = 160 }, exit = { opacity = 0, duration = 80 }, mode = "wait" }),
 	}
 end
 

@@ -1,6 +1,6 @@
 # Example plugins
 
-Twelve plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
+Fourteen plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
 
 | Folder | Proves | Asks for | Who signs it |
 |---|---|---|---|
@@ -14,6 +14,7 @@ Twelve plugins, each proving one thing Zeron's plugins can do. They are **not bu
 | `ping` | A message between two of your devices, and back | `ui.add`, `devices` | you, installed on both devices |
 | `session-status` | A node placed in each chat's header that reads its session (`zeron.need("session")`); placed where there's none, Settings says why | `ui.add`, `sessions.read` | you |
 | `settings-demo` | Settings declared in its manifest, drawn by Zeron as its own page (Settings → Greeter), read with `zeron.setting(id)` and heard with `zeron.on_setting` | `ui.add` | you |
+| `settings-page` | A settings page the plugin draws itself (`zeron.settings_page`, Settings → Snippets), under the rows its manifest declares: a list you edit, the one chosen open under it, rows that come with a choice, a field's error, an action and its result, a declared setting set from the page. The page to copy (docs/plugins.md, "Settings pages"); src/plugins/settings_page_tests runs it | `ui.add`, `compose` | you |
 
 Each folder has its manifest (`zeron-plugin.json`), its `init.luau`, and a copy of Zeron's helpers (`zeron.luau`, from `apps/zgx/plugins-sdk/`), which `zeron plugin new` puts in every new plugin.
 

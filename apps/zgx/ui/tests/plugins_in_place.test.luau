@@ -341,3 +341,35 @@ test("with the account's setup unfinished it says so, and the plugins load once 
 	expect(tree).never.to_contain("Finish setting up your account")
 	expect(tree).to_contain("Compact sidebar")
 end)
+
+test("Update, a row's inline link, shows the app's focus ring when the keys reach it", function()
+	local app = open()
+	app:command("update_found")
+	app:frames(20)
+	-- From the search, Tab on until the link has the focus.
+	-- (At rest, its words underlined.)
+	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(true)
+	app:click('role:textbox "Search plugins"')
+	app:frames(5)
+	local reached = false
+	for _ = 1, 30 do
+		app:key("Tab")
+		app:frames(3)
+		if app:tree('role:button "Update"'):find("focused", 1, true) then
+			reached = true
+			break
+		end
+	end
+	expect(reached).to_be(true)
+	-- (The one inline link, its focus style the app's ring: control.ring.)
+	expect(app:tree(".settings-inline-link")).to_contain('button "Update"')
+	expect(app:tree(".settings-inline-link")).to_contain("focused")
+	-- Focused, the ring says it's the control: no underline while it holds
+	-- the focus, the words where they were; back as focus leaves.
+	expect(app:has(".settings-inline-link >> .inline-link-plain")).to_be(true)
+	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(false)
+	app:key("Tab")
+	app:frames(3)
+	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(true)
+	expect(app:has(".settings-inline-link >> .inline-link-plain")).to_be(false)
+end)

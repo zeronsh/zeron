@@ -1,0 +1,198 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 846952297..79c534a25 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -143,6 +143,13 @@ jobs:
+     with:
+       pass-key: ${{ fromJSON(needs.plan.outputs.keys).edge || '' }}
+ 
++  store-e2e:
++    needs: [plan, admit]
++    if: fromJSON(needs.plan.outputs.suites).store-e2e
++    uses: ./.github/workflows/plugin-store-e2e.yml
++    with:
++      pass-key: ${{ fromJSON(needs.plan.outputs.keys).store-e2e || '' }}
++
+   installer:
+     needs: [plan, admit]
+     if: fromJSON(needs.plan.outputs.suites).installer
+@@ -209,7 +216,7 @@ jobs:
+ 
+   result:
+     name: CI result
+-    needs: [plan, admit, linux-core, cursor, edge, installer, voice, windows, macos, ios, android, zgx]
++    needs: [plan, admit, linux-core, cursor, edge, store-e2e, installer, voice, windows, macos, ios, android, zgx]
+     if: always()
+     runs-on: ubuntu-24.04
+     timeout-minutes: 5
+diff --git a/.github/workflows/plugin-store-e2e.yml b/.github/workflows/plugin-store-e2e.yml
+new file mode 100644
+index 000000000..a793032bc
+--- /dev/null
++++ b/.github/workflows/plugin-store-e2e.yml
+@@ -0,0 +1,44 @@
++name: Plugin store end to end
++
++# Called by ci.yml when the store's code changes on either side: the edge
++# (edge/), the engine's plugin and sign-in code, the CLI, the shared data
++# file, or this harness. scripts/plugin-store-e2e/run.sh runs the edge worker
++# locally (its bundle in Miniflare, the store's D1 migrations, local R2, a
++# WorkOS fake) and real `zeron headless` engines and the real CLI against it:
++# publish, review, install, update, deploy keys, takedown, transfer and the
++# refusals. Under a minute once built; nothing leaves the runner.
++on:
++  workflow_call:
++    inputs:
++      pass-key:
++        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
++        type: string
++        default: ''
++
++permissions:
++  contents: read
++
++jobs:
++  store-e2e:
++    runs-on: ubuntu-24.04
++    timeout-minutes: 30
++    steps:
++      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
++      - uses: ./.github/actions/linux-ci
++        with:
++          # Its own key: it builds `zeron` and the engine's tests, not core's graph.
++          rust-cache: store-e2e
++          save-rust-cache: 'true'
++      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
++        with:
++          node-version: 24
++          cache: npm
++          cache-dependency-path: edge/package-lock.json
++      - name: The store, end to end (engine, CLI and the edge worker)
++        run: scripts/plugin-store-e2e/run.sh
++      - name: Record the pass (CI skips this job while its inputs stay the same)
++        if: inputs.pass-key != ''
++        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
++        with:
++          path: rust-toolchain.toml
++          key: ${{ inputs.pass-key }}-store-e2e
+diff --git a/scripts/ci/plan.py b/scripts/ci/plan.py
+index 79c916b0e..51f9f5c57 100644
+--- a/scripts/ci/plan.py
++++ b/scripts/ci/plan.py
+@@ -56,6 +56,7 @@ SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
+     "core": [("core-tests", "linux")],  # ui-tests.yml
+     "cursor": [("cursor-compatibility", "linux")],  # cursor-compatibility.yml
+     "edge": [("edge", "linux")],  # preview-tests.yml
++    "store-e2e": [("store-e2e", "linux")],  # plugin-store-e2e.yml
+     "installer": [("desktop-entry", "linux")],  # linux-installer.yml
+     "voice": [("offline-linux", "linux"), ("windows-runtime", "windows")],  # voice-tests.yml
+     "windows": [("tests", "windows"), ("app", "windows")],  # windows.yml
+@@ -107,12 +108,22 @@ ZGX_CORE = [
+     "crates/proto/**", "crates/update/**", "crates/visual/**", "crates/visual-gpu/**",
+ ]
+ 
++# (The worker's code is its .ts files: edge/src/install.sh is served by it but tested by "installer".)
++STORE_E2E_PATHS = ["edge/src/*.ts", "edge/migrations/store/**", "edge/package.json", "edge/package-lock.json",
++                   "edge/wrangler.jsonc", "crates/engine/src/plugins/**", "crates/engine/src/auth.rs",
++                   "crates/engine/tests/plugin_store_e2e.rs", "crates/plugin-guard/**", "crates/rpc/**",
++                   "crates/cli/**", "apps/zeron/src/**", "docs/plugin-store-data.json",
++                   "scripts/plugin-store-e2e/**", ".github/workflows/plugin-store-e2e.yml"]
++
+ BROAD: dict[str, list[str]] = {
+     "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**",
+                      ".github/workflows/ui-tests.yml"],
+     "cursor": CARGO + ["crates/harness/**", "crates/doc/**", "crates/engine/**",
+                        "scripts/*cursor-sdk*", ".github/workflows/cursor-*.yml"],
+     "edge": ["edge/**", ".github/workflows/preview-tests.yml"],
++    # The plugin store end to end: the edge and the engine side of it (plugins,
++    # sign-in, the CLI), the shared data file and the harness.
++    "store-e2e": CARGO + STORE_E2E_PATHS,
+     "installer": ["edge/src/install.sh", "scripts/package-linux.sh", "scripts/test-linux-desktop-entry.sh",
+                   "scripts/ci/apt-install.sh", "dist/zeron.desktop", "dist/zeron.png",
+                   ".github/workflows/linux-installer.yml"],
+diff --git a/scripts/ci/reuse.py b/scripts/ci/reuse.py
+index 1a46a928d..44502aa6a 100644
+--- a/scripts/ci/reuse.py
++++ b/scripts/ci/reuse.py
+@@ -62,6 +62,8 @@ SUITE_INPUTS: dict[str, list[str]] = {
+     "core": [".github/workflows/ui-tests.yml", "scripts/ci/test-core.sh"] + LINUX_SETUP + NEXTEST,
+     "cursor": [".github/workflows/cursor-compatibility.yml", "scripts/*cursor-sdk*", "crates/harness/src/cursor/**"],
+     "edge": [".github/workflows/preview-tests.yml", "edge/**"],
++    "store-e2e": [".github/workflows/plugin-store-e2e.yml", "scripts/plugin-store-e2e/**", "edge/**",
++                  "docs/plugin-store-data.json"] + LINUX_SETUP,
+     "installer": [".github/workflows/linux-installer.yml", "edge/src/install.sh", "scripts/package-linux.sh",
+                   "scripts/test-linux-desktop-entry.sh", "dist/zeron.desktop", "dist/zeron.png",
+                   "scripts/ci/apt-install.sh"],
+@@ -88,6 +90,8 @@ SUITE_PACKAGES: dict[str, list[str]] = {
+     "macos": ["zeron-update", "zeron-preview", "zeron-text", "zeron"],
+     "ios": ["zeron-mobile", "zeron-text", "zeron-markdown", "zeron-client"],
+     "android": ["zeron-mobile"],
++    # The `zeron` binary the harness runs, and the engine whose test drives it.
++    "store-e2e": ["zeron", "zeron-engine"],
+     # zeron-engine's plugin tests, and the root crates apps/zgx builds against.
+     "zgx": ["zeron-engine", "zatex", "zeron-theme", "zeron-preview-label", "zeron-cli", "zeron-launch",
+             "zeron-notify", "zeron-proto", "zeron-update", "zeron-visual", "zeron-plugin-guard",
+diff --git a/scripts/tests/test_ci_plan.py b/scripts/tests/test_ci_plan.py
+index c59e5a22f..c4bec10f7 100644
+--- a/scripts/tests/test_ci_plan.py
++++ b/scripts/tests/test_ci_plan.py
+@@ -70,7 +70,7 @@ class PlanTests(unittest.TestCase):
+ 
+     def test_lockfile_runs_every_rust_suite(self):
+         suites = plan.plan(files("Cargo.lock"), "fast")
+-        self.assertEqual(selected(suites), {"core", "cursor", "windows", "macos", "ios", "android", "zgx"})
++        self.assertEqual(selected(suites), {"core", "cursor", "store-e2e", "windows", "macos", "ios", "android", "zgx"})
+ 
+     def test_mobile_core_selects_ios_and_android(self):
+         suites = plan.plan(files("crates/sync/src/lib.rs", patch="+let x = 1;"), "fast")
+@@ -106,11 +106,19 @@ class PlanTests(unittest.TestCase):
+         self.assertIn("zgx", selected(plan.plan(files("crates/visual/src/lib.rs"), "fast")))
+ 
+     def test_edge_and_installer(self):
+-        self.assertEqual(selected(plan.plan(files("edge/src/coordinator.ts"), "fast")), {"edge"})
++        self.assertEqual(selected(plan.plan(files("edge/src/coordinator.ts"), "fast")), {"edge", "store-e2e"})
+         self.assertEqual(selected(plan.plan(files("edge/src/install.sh"), "fast")), {"edge", "installer"})
+         # The macOS suite no longer runs the edge's preview server (that was the old app's fixture).
+         self.assertFalse(plan.plan(files("edge/package-lock.json"), "full")["macos"])
+ 
++    def test_the_store_end_to_end_runs_for_either_side(self):
++        for path in ["edge/src/store/publish.ts", "crates/engine/src/plugins/store/device.rs", "apps/zeron/src/store_cli.rs",
++                     "scripts/plugin-store-e2e/edge.mjs", "docs/plugin-store-data.json"]:
++            self.assertTrue(plan.plan(files(path), "fast")["store-e2e"], path)
++        self.assertFalse(plan.plan(files("crates/engine/src/sessions.rs"), "fast")["store-e2e"])
++        self.assertFalse(plan.plan(files("README.md"), "full")["store-e2e"])
++        self.assertFalse(plan.plan(files("edge/src/install.sh"), "full")["store-e2e"])
++
+     def test_version_bumps_select_nothing(self):
+         bump = [{"filename": "Cargo.toml", "patch": '@@ -37 +37 @@\n-version = "0.2.126"\n+version = "0.2.127"'},
+                 {"filename": "Cargo.lock", "patch": ' name = "zeron-engine"\n-version = "0.2.126"\n+version = "0.2.127"'}]
+@@ -154,15 +162,15 @@ class PlanTests(unittest.TestCase):
+     def test_reservation(self):
+         suites = plan.plan(files("Cargo.lock"), "full", nightly=True)
+         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
+-        # result + core + cursor + voice + ios-core + apk + zgx-linux; voice runtime + windows x2;
+-        # native + ios-tests + zgx-macos
+-        self.assertEqual(counts, {"linux": 7, "windows": 3, "macos": 3})
++        # result + core + cursor + store-e2e + voice + ios-core + apk + zgx-linux; voice runtime +
++        # windows x2; native + ios-tests + zgx-macos
++        self.assertEqual(counts, {"linux": 8, "windows": 3, "macos": 3})
+         main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
+-        self.assertEqual(main["linux"], 8)  # + android publish
+-        self.assertEqual(plan.format_reservation(counts), "linux=7 windows=3 macos=3")
++        self.assertEqual(main["linux"], 9)  # + android publish
++        self.assertEqual(plan.format_reservation(counts), "linux=8 windows=3 macos=3")
+         daytime = plan.reservation(plan.jobs_to_run(plan.plan(files("Cargo.lock"), "full")), "push",
+                                    "refs/heads/main")
+-        self.assertEqual(daytime, {"linux": 7, "windows": 2, "macos": 3})  # no voice
++        self.assertEqual(daytime, {"linux": 8, "windows": 2, "macos": 3})  # no voice
+         self.assertEqual(plan.reservation(plan.jobs_to_run({s: False for s in plan.SUITE_JOBS}), "push",
+                                           "refs/heads/main"),
+                          {"linux": 1, "windows": 0, "macos": 0})
+@@ -176,6 +184,7 @@ class WorkflowConsistencyTests(unittest.TestCase):
+         "core": ("ui-tests.yml", ["core-tests"]),
+         "cursor": ("cursor-compatibility.yml", ["cursor-compatibility"]),
+         "edge": ("preview-tests.yml", ["edge"]),
++        "store-e2e": ("plugin-store-e2e.yml", ["store-e2e"]),
+         "installer": ("linux-installer.yml", ["desktop-entry"]),
+         "voice": ("voice-tests.yml", ["offline-linux", "windows-runtime"]),
+         "windows": ("windows.yml", ["tests", "app"]),

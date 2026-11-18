@@ -1,0 +1,16 @@
+{
+  "settings": {
+    "items": {
+      "title": "Items",
+      "description": "What it keeps. Each one is listed here.",
+      "add": "Add item",
+      "new": "New item",
+      "remove": "Remove {name}",
+      "empty": {
+        "title": "No items yet",
+        "body": "Add one, and it's listed here.",
+        "action": "Add your first item"
+      }
+    }
+  }
+}

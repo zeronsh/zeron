@@ -116,6 +116,89 @@ pub fn cost_words(cost: &Json) -> Option<String> {
     (frame > BUDGET_PER_FRAME_MS).then(|| format!("Slow: {} ms in one frame (keep it under {} ms)", ms(frame), ms(BUDGET_PER_FRAME_MS)))
 }
 
+/// The most style hints `plugin_status` gives.
+pub const MAX_HINTS: usize = 20;
+
+/// What a plugin's Luau uses that's off Zeron's design system, as hints for
+/// an agent (`plugin_status { page = "settings" }`), never a block: a raw
+/// colour, text size, corner or spacing where a token goes, and a settings
+/// page not built from `@ds/settings`. Read from its files as written (its
+/// own, not the SDK's copy), comments left out; each `{ file, line, text,
+/// hint }`, [`MAX_HINTS`] at most, and how many more there were.
+pub fn style_hints(dir: &Path) -> (Vec<Json>, usize) {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else if name.ends_with(".luau") && !(name == "zeron.luau" && d == dir) {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let (mut hints, mut more) = (Vec::new(), 0);
+    let mut draws_page = false;
+    let mut uses_settings = false;
+    for path in &files {
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let rel = path.strip_prefix(dir).unwrap_or(path).display().to_string();
+        draws_page |= text.contains("settings_page");
+        uses_settings |= text.contains("@ds/settings") || text.contains("ds.Settings");
+        for (at, line) in text.lines().enumerate() {
+            let code = line.split("--").next().unwrap_or("");
+            if let Some(hint) = style_hint(code) {
+                if hints.len() < MAX_HINTS {
+                    hints.push(json!({ "file": rel, "line": at + 1, "text": line.trim(), "hint": hint }));
+                } else {
+                    more += 1;
+                }
+            }
+        }
+    }
+    if draws_page && !uses_settings {
+        hints.insert(0, json!({ "hint": "Its settings page doesn't use @ds/settings: build it from Settings.Section, Settings.Group and Settings.Row, as Zeron's pages are." }));
+    }
+    (hints, more)
+}
+
+/// What one line of Luau sets off the system, if anything.
+fn style_hint(code: &str) -> Option<&'static str> {
+    // `name = <value>`: each assignment on the line, by its name.
+    let mut rest = code;
+    while let Some(eq) = rest.find('=') {
+        let (before, after) = (&rest[..eq], &rest[eq + 1..]);
+        rest = after;
+        // (Not `==`, `~=`, `<=`, `>=`.)
+        if after.starts_with('=') || before.ends_with(['=', '~', '<', '>']) {
+            continue;
+        }
+        let name = before.trim_end().rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).next().unwrap_or("");
+        let value = after.trim_start();
+        let raw_colour = value.starts_with("\"#") || value.starts_with("'#") || value.starts_with("\"rgb") || value.starts_with("'rgb");
+        let number = value.chars().next().is_some_and(|c| c.is_ascii_digit()) && !value.starts_with('0');
+        match name {
+            "color" | "bg" | "border_color" | "outline_color" | "fill" | "stroke" | "tint" | "caret_color" | "selection_color" if raw_colour => {
+                return Some("A raw colour: use a token ($text.primary, $text.secondary, $text.tertiary, $accent, $border, $zeron.settings.card, $zeron.tone.<tone>.ink), so it follows the theme.");
+            }
+            "text_size" if number => return Some("A raw text size: use $font.size.sm (a row's description), $font.size.md (a row's name) or another $font.size token."),
+            "line_height" if number => return Some("A raw line height: use the $font.line token of its size ($font.line.sm, $font.line.md)."),
+            "rounded" if number => return Some("A raw corner: use $radius.sm…$radius.xl; inside something rounded, its corner less the inset."),
+            "p" | "px" | "py" | "pt" | "pb" | "pl" | "pr" | "gap" | "m" | "mx" | "my" | "mt" | "mb" | "ml" | "mr" if number => {
+                return Some("Raw spacing: use $space.1…$space.8 (a row's own is $space.4 across, $space.3 down).");
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// A box in the window, in points.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Region {
@@ -229,6 +312,34 @@ mod tests {
         for bad in ["file:///etc/passwd", "javascript:alert(1)", "zeron://settings", "https://", "https:///x", "https://a b", "ftp://x"] {
             assert!(!web_link(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn what_a_plugin_draws_off_the_system_is_said_as_hints() {
+        let dir = std::env::temp_dir().join(format!("zgx-style-hints-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("parts")).unwrap();
+        std::fs::write(dir.join("zeron.luau"), "local x = ui.div { bg = \"#ff0000\" }\n").unwrap();
+        std::fs::write(
+            dir.join("init.luau"),
+            "zeron.settings_page { build = function()\n\treturn ui.column {\n\t\tbg = \"#1f1f1f\", -- a card\n\t\tp = 12,\n\t\tgap = \"$space.2\",\n\t\trounded = 0,\n\t\tui.text { \"Hi\", text_size = 13, color = \"$text.secondary\" },\n\t\t-- color = \"#000\" in a comment\n\t\tif n == 3 then nil else nil,\n\t}\nend }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("parts/row.luau"), "return ui.div { border_color = 'rgb(1,2,3)', w = 220 }\n").unwrap();
+        let (hints, more) = style_hints(&dir);
+        let at: Vec<(String, u64)> = hints.iter().filter(|h| h.get("line").is_some()).map(|h| (h["file"].as_str().unwrap().to_string(), h["line"].as_u64().unwrap())).collect();
+        assert_eq!(at, [("init.luau".into(), 3), ("init.luau".into(), 4), ("init.luau".into(), 7), ("parts/row.luau".into(), 1)], "{hints:#?}");
+        assert!(hints[0]["hint"].as_str().unwrap().contains("@ds/settings"), "a page not built from Zeron's settings parts");
+        assert!(hints[1]["hint"].as_str().unwrap().starts_with("A raw colour"));
+        assert_eq!(more, 0);
+        // Built from them: no such hint.
+        std::fs::write(dir.join("parts/page.luau"), "local Settings = require(\"@ds/settings\")\n").unwrap();
+        assert!(style_hints(&dir).0.iter().all(|h| h.get("line").is_some()));
+        // At most 20, the rest counted.
+        std::fs::write(dir.join("parts/many.luau"), "ui.div { p = 3 }\n".repeat(30)).unwrap();
+        let (hints, more) = style_hints(&dir);
+        assert_eq!((hints.len(), more), (MAX_HINTS, 34 - MAX_HINTS));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

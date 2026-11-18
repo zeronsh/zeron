@@ -27,7 +27,8 @@ return function(props: Props): Node
 		w_full = true,
 		items = p.items,
 		gap = p.gap,
-		Text { title, style = "label", tone = "tertiary", grow = 1 },
+		-- (Its heading level with it: the words are the heading, not the row.)
+		Text { title, style = "label", tone = "tertiary", grow = 1, heading = p.heading },
 		trail,
 	}
 end

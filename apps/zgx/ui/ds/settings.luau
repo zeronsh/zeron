@@ -39,6 +39,9 @@ local M = {}
 -- The least a row's words keep before its control drops under them, so a
 -- narrow window never squeezes them to a letter a line.
 local MIN_TEXT = 180
+-- (The same least, for a screen of its own laying its words beside a
+-- control: a store plugin's head.)
+M.MIN_TEXT = MIN_TEXT
 -- The chevron at the end of a row that leads somewhere.
 local CHEVRON = 14
 -- Where the search glyph's ink starts inside its box at a small field's
@@ -69,6 +72,10 @@ export type PageProps = {
 	-- is about). Short of room, it goes under the title either way.
 	trail: Node?,
 	trail_top: boolean?,
+	-- Its header (the title, the line under it, what's at its end) out of
+	-- plugins' reach (`hook = false`), what's under it left as it's given
+	-- (a page some of which a plugin draws: Settings, a plugin's own).
+	private_head: boolean?,
 	-- Something that stands beside the page's groups (a profile's card, a
 	-- preview of what the fields make): a column of `aside_w` at the right,
 	-- its top on the first group's; `aside_top`, over the groups instead,
@@ -137,6 +144,7 @@ function M.Page(props: PageProps): Node
 		max_w = ui.theme.get("zeron.settings.measure") :: number?,
 		gap = "$space.6",
 		ui.row {
+			hook = if props.private_head then false else nil,
 			-- Inset to the rows' text, as a section's title is: the page's
 			-- words line up down one edge, the cards hang past it.
 			px = M.inset(),
@@ -173,9 +181,19 @@ function M.Page(props: PageProps): Node
 end
 
 export type SectionProps = {
-	title: (string | Message)?,
-	description: (string | Message)?,
+	-- (A function of either follows what it reads: a title that's an
+	-- item's name as it's renamed.)
+	title: (string | Message | () -> string)?,
+	description: (string | Message | () -> string)?,
 	trail: Node?,
+	-- The trail centred on the title's line without adding to its height
+	-- (a 24 action beside a 14 title): title to description 4 and title
+	-- to card 8 with or without one (the plugin store's pages). Without it,
+	-- the title's row is as tall as its trail, as Settings' sections have it.
+	-- It's a ghost (xs): its words end on the content edge, text lined up
+	-- with text, and its wash hangs past by its end padding, showing under
+	-- the pointer and the ring.
+	trail_on_line: boolean?,
 	[number]: Child,
 }
 
@@ -191,7 +209,25 @@ function M.Section(props: SectionProps): Node
 			-- title stands over what it names.
 			px = M.inset(),
 			gap = "$space.1",
-			if props.title then SectionTitle { props.title, trail = props.trail, heading = 2 } else nil,
+			if props.title
+				then SectionTitle {
+					props.title,
+					trail = if props.trail and props.trail_on_line
+						then ui.column {
+							-- (A line high, the trail centred in it, standing out
+							-- of it above and below alike; and past the content
+							-- edge by a ghost xs button's end padding, so its
+							-- words, not its box, end on it.)
+							h = "$font.line.xs",
+							shrink = 0,
+							justify = "center",
+							mr = ui.raw(-((ui.theme.get("zeron.space.tight") :: number?) or 6), "a ghost xs trail's end padding: its words on the content edge, its wash past it"),
+							props.trail,
+						}
+						else props.trail,
+					heading = 2,
+				}
+				else nil,
 			if props.description then Hint { props.description } else nil,
 		}
 	end
@@ -325,8 +361,49 @@ export type EachListOptions = {
 	text: ((item: any) -> string)?,
 }
 
-function M.EachList(list: State<{ any }>, row: (item: any, i: State<number>, now: State<any>) -> Node, opts: EachListOptions): Node
+-- `EachList`'s rows alone, for a card of the caller's (a Catalog's,
+-- under its search): the same list, hairlines and building of only what
+-- shows. `wash`: each row washed edge to edge under the pointer
+-- (`CatalogRow`), as a Catalog's rows are.
+export type ListRowsOptions = EachListOptions & { wash: boolean? }
+
+function M.ListRows(list: State<{ any }>, row: (item: any, i: State<number>, now: State<any>) -> Node, opts: ListRowsOptions): Node
 	local text = opts.text
+	return ui.list {
+		data = list,
+		key = opts.key,
+		heights = function(): { number }
+			local out: { number } = {}
+			for i, item in list:get() do
+				out[i] = opts.height(item) + (if i > 1 then 1 else 0)
+			end
+			return out
+		end,
+		row_text = if text
+			then function(i: number): string
+				local item = list:peek()[i]
+				return if item ~= nil then text(item) else ""
+			end
+			else nil,
+		w_full = true,
+		virtualize = "ancestor",
+		row = function(item: any, i: State<number>, now: State<any>): Node
+			local made = row(item, i, now)
+			return ui.column {
+				w_full = true,
+				ui.show(
+					function(): boolean
+						return i:get() > 1
+					end,
+					M.Rule()
+				),
+				if opts.wash then CatalogRow { row = made } else made,
+			}
+		end,
+	}
+end
+
+function M.EachList(list: State<{ any }>, row: (item: any, i: State<number>, now: State<any>) -> Node, opts: EachListOptions): Node
 	return ui.show(
 		function(): boolean
 			return #list:get() > 0
@@ -338,37 +415,7 @@ function M.EachList(list: State<{ any }>, row: (item: any, i: State<number>, now
 			border = 1,
 			border_color = "$zeron.settings.edge",
 			overflow = "hidden",
-			ui.list {
-				data = list,
-				key = opts.key,
-				heights = function(): { number }
-					local out: { number } = {}
-					for i, item in list:get() do
-						out[i] = opts.height(item) + (if i > 1 then 1 else 0)
-					end
-					return out
-				end,
-				row_text = if text
-					then function(i: number): string
-						local item = list:peek()[i]
-						return if item ~= nil then text(item) else ""
-					end
-					else nil,
-				w_full = true,
-				virtualize = "ancestor",
-				row = function(item: any, i: State<number>, now: State<any>): Node
-					return ui.column {
-						w_full = true,
-						ui.show(
-							function(): boolean
-								return i:get() > 1
-							end,
-							M.Rule()
-						),
-						row(item, i, now),
-					}
-				end,
-			},
+			M.ListRows(list, row, opts),
 		}
 	)
 end
@@ -377,14 +424,257 @@ end
 -- so its height is known; a line with nothing to say still takes its height):
 -- its padding round its words or its `lead`, at the row's least. In the
 -- window's text size, which scales the lines.
-function M.truncated_row_h(lead: number?): number
+-- The way back from a page under another (an agent of the registry, a
+-- plugin of the store): the page it came from, a quiet link led by a
+-- chevron over the title. `label` names that page.
+export type BackProps = { label: string | Message, on_click: () -> () }
+
+function M.Back(props: BackProps): Node
+	local label = props.label
+	return ui.row {
+		self = "start",
+		gap = "$space.1",
+		items = "center",
+		cursor = "pointer",
+		role = "button",
+		focusable = true,
+		label = locale.t("ds.settings.back", {
+			page = function(): string
+				return if type(label) == "string" then label else (label :: any):get()
+			end,
+		}),
+		color = "$text.tertiary",
+		hover = { color = "$text.primary" },
+		-- (A link's ring, as ds.Link draws it: rounded round its words.)
+		rounded = "$radius.sm",
+		focus = control.ring,
+		on_click = props.on_click,
+		Icon { name = "alt-arrow-left", size = 14 },
+		ui.text { label, text_size = "$font.size.sm", line_height = "$font.line.sm" },
+	}
+end
+
+-- A page under another: where it stands (`Back`), over the page, at a
+-- Settings page's measure, on its parent's middle.
+function M.SubPage(props: { where: Node, [number]: Child }): Node
+	local children: { any } = {}
+	for _, c in ipairs(props :: any) do
+		table.insert(children, c)
+	end
+	return ui.column {
+		w_full = true,
+		self = "center",
+		-- (A theme number, read as it is built: max_w takes points.)
+		max_w = ui.theme.get("zeron.settings.measure") :: number?,
+		gap = "$space.4",
+		props.where,
+		table.unpack(children),
+	}
+end
+
+-- (`byline`: with a Row's byline over that line, a line more.)
+function M.truncated_row_h(lead: number?, byline: boolean?): number
 	local scaled = look.text_theme() or {}
 	local function token(name: string, default: number): number
 		return scaled[name] or (ui.theme.get(name) :: number?) or default
 	end
 	local words = token("font.line.md", 18) + token("zeron.space.hair", 2) + token("font.line.sm", 16)
+	if byline then
+		words += token("zeron.space.hair", 2) + token("font.line.sm", 16)
+	end
 	return math.max(token("zeron.settings.row", 52), 2 * token("space.3", 12) + math.max(words, lead or 0))
 end
+
+-- One thing set apart, a card of its own that opens it (the plugin store's
+-- featured plugins): its tile beside its name over who made it (a list
+-- row's head), then two lines of what it is, on the card's text edge. One
+-- height whatever it says (the two lines held for it); its width a shelf's
+-- (ds/shelf, `M.FEATURE_MIN` its least: the tile, and a name and its two
+-- lines a readable measure beside and under it). The whole card is one
+-- target; under the pointer it takes the rows' wash, edge to edge inside
+-- its edge, its corner the card's less that edge.
+M.FEATURE_MIN = 180
+export type FeatureProps = {
+	label: string | Message | () -> string,
+	byline: (string | Message | () -> string)?,
+	description: (string | Message | () -> string)?,
+	lead: Node?,
+	badge: Node?,
+	on_click: () -> (),
+}
+
+-- (The card round a Feature and its skeleton.)
+local function feature_card(props: { [any]: any }): Node
+	props.w_full = true
+	props.rounded = "$radius.xl"
+	props.bg = material.pick("$zeron.settings.tint", "$zeron.settings.card")
+	props.border = 1
+	props.border_color = "$zeron.settings.edge"
+	props.overflow = "hidden"
+	return ui.column(props)
+end
+
+function M.Feature(props: FeatureProps): Node
+	local line_sm = (ui.theme.get("font.line.sm") :: number?) or 16
+	return feature_card {
+		class = "settings-feature",
+		ui.column {
+			role = "button",
+			label = props.label,
+			focusable = true,
+			cursor = "pointer",
+			w_full = true,
+			p = "$space.4",
+			gap = "$space.3",
+			rounded = ui.raw(control.nest("$radius.xl", 1), "the card's corner less its edge"),
+			hover = { bg = "$hover" },
+			active = { bg = "$pressed" },
+			focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 },
+			on_click = props.on_click,
+			ui.row {
+				w_full = true,
+				gap = "$space.3",
+				items = "center",
+				props.lead,
+				ui.column {
+					grow = 1,
+					min_w = 0,
+					gap = "$zeron.space.hair",
+					ui.row {
+						gap = "$space.2",
+						items = "center",
+						min_w = 0,
+						FadeText {
+							props.label,
+							shrink = 1,
+							min_w = 0,
+							text_size = "$font.size.md",
+							line_height = "$font.line.md",
+							weight = "$font.weight.medium",
+							color = "$text.primary",
+						},
+						props.badge,
+					},
+					FadeText { props.byline or "", min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
+				},
+			},
+			-- (Two lines held whatever it says: one height for every card.)
+			ui.text {
+				props.description or "",
+				w_full = true,
+				h = ui.raw(2 * line_sm, "two lines of the small type"),
+				wrap = true,
+				lines = 2,
+				-- (Cut at its second line's end, said so: "…".)
+				truncate = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
+			},
+		},
+	}
+end
+
+-- A `Feature` still on its way: its card and shape, its tile, name, who
+-- made it and two lines held in the skeleton's wash, in the very boxes the
+-- card has, so it is the card's height and nothing under it moves when the
+-- card comes. `still`: at rest, not breathing (it has waited long enough).
+function M.FeatureSkeleton(props: { still: boolean?, lead: number? }?): Node
+	local still = props and props.still
+	local lead = (props and props.lead) or 32
+	local line_sm = (ui.theme.get("font.line.sm") :: number?) or 16
+	local function line(w: any, h: string, bar: number?): Node
+		return ui.div { h = h, w_full = true, justify = "center", skeleton.Bar { w = w, h = bar, still = still } }
+	end
+	return feature_card {
+		class = "settings-feature-skeleton",
+		aria_hidden = true,
+		ui.column {
+			w_full = true,
+			p = "$space.4",
+			gap = "$space.3",
+			ui.row {
+				w_full = true,
+				gap = "$space.3",
+				items = "center",
+				skeleton.Bar { w = lead, h = lead, rounded = "$radius.md", still = still },
+				ui.column {
+					grow = 1,
+					min_w = 0,
+					gap = "$zeron.space.hair",
+					line(96, "$font.line.md", nil),
+					line(72, "$font.line.sm", 8),
+				},
+			},
+			ui.column {
+				w_full = true,
+				h = ui.raw(2 * line_sm, "two lines of the small type"),
+				line("90%", "$font.line.sm", 8),
+				line("60%", "$font.line.sm", 8),
+			},
+		},
+	}
+end
+
+
+-- A row's inline link (a sentence's own Publish…, a plugin's Update): its
+-- words in the small type, medium, the text's ink and the accent under the
+-- pointer (the row's own, as Installed's Update has always had it),
+-- underlined, with the app's focus ring for the keys. The one look every
+-- row's link has (`detail_link`, and `detail_action`'s links). (The line 2
+-- under the baseline: at 4 it falls on the bottom of the text's 16 line,
+-- where zgx clips it, zgx-asks/text-underline.)
+-- `role`: "link" to go somewhere (the default), "button" to do something.
+export type InlineLinkProps = {
+	label: string | Message | () -> string,
+	on_click: () -> (),
+	role: ("link" | "button")?,
+	focusable: (boolean | () -> boolean)?,
+	disabled: (boolean | () -> boolean)?,
+}
+-- (Focused, the ring says it's the control: the underline goes while it
+-- holds the focus, back as focus leaves, the words where they were. Its
+-- words are one of two texts, the same type and box, by whether it's
+-- focused: `.inline-link-underlined`, `.inline-link-plain`.)
+M.InlineLink = ui.component(function(props: InlineLinkProps): Node
+	local focused = ui.use_state(false)
+	local function words(underlined: boolean): Node
+		return ui.text {
+			props.label,
+			class = if underlined then "inline-link-underlined" else "inline-link-plain",
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			weight = "$font.weight.medium",
+			underline = underlined,
+			underline_offset = if underlined then 2 else nil,
+		}
+	end
+	return ui.row {
+		class = "settings-inline-link",
+		role = props.role or "link",
+		label = props.label,
+		focusable = if props.focusable == nil then true else props.focusable,
+		disabled = props.disabled,
+		shrink = 0,
+		cursor = "pointer",
+		color = "$text.primary",
+		hover = { color = "$accent" },
+		focus = control.ring,
+		on_focus = function()
+			focused:set(true)
+		end,
+		on_blur = function()
+			focused:set(false)
+		end,
+		on_click = props.on_click,
+		ui.show(function(): boolean
+			return not focused:get()
+		end, words(true)),
+		ui.show(function(): boolean
+			return focused:get()
+		end, words(false)),
+	}
+end)
 
 export type RowProps = {
 	label: string | Message | () -> string,
@@ -408,6 +698,12 @@ export type RowProps = {
 	disabled: Props_disabled,
 	-- The name in the danger's ink (Sign out, Delete account).
 	danger: boolean?,
+	-- The name in the secondary ink and the regular weight: a note among
+	-- rows (a store check's advice), not a thing of its own.
+	quiet: boolean?,
+	-- The description's ink, where not the tertiary (a key about to end,
+	-- in the warning's).
+	description_ink: (string | () -> string)?,
 	-- The name and its line under it each on one line, fading at the end
 	-- where they don't fit, and the control kept beside them (an address, a
 	-- path, a list of repositories): never wrapped under.
@@ -425,6 +721,10 @@ export type RowProps = {
 	-- At the detail line's end, while it shows: a small action of its own
 	-- (a plugin's Update), so the row's control stays the same on every row.
 	detail_action: Node?,
+	-- The sentence's own link, right after the detail's last word and
+	-- wrapping with it as one sentence does (Publish… after where a plugin
+	-- stands in the store): a link in the text's own ink, underlined.
+	detail_link: { label: string | Message, on_click: () -> () }?,
 }
 
 function M.Row(props: RowProps): Node
@@ -463,8 +763,8 @@ function M.Row(props: RowProps): Node
 					props.label,
 					text_size = "$font.size.md",
 					line_height = "$font.line.md",
-					weight = "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
+					weight = if props.quiet then "$font.weight.regular" else "$font.weight.medium",
+					color = if props.danger then "$zeron.tone.danger.ink" elseif props.quiet then "$text.secondary" else "$text.primary",
 					wrap = true,
 				},
 			props.badge,
@@ -485,29 +785,58 @@ function M.Row(props: RowProps): Node
 			elseif props.description and props.truncate
 			then FadeText { props.description, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
 			elseif props.description
-			then ui.text { props.description, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
+			then ui.text { props.description, text_size = "$font.size.sm", line_height = "$font.line.sm", color = props.description_ink or "$text.tertiary", wrap = true }
 			else nil,
 		if props.detail
 			then ui.show(function(): boolean
 				local d = control.value(props.detail)
 				return type(d) == "string" and d ~= ""
-			end, ui.row {
-				w_full = true,
-				gap = "$space.3",
-				items = "start",
-				ui.text {
-					function(): string
-						return control.value(props.detail) or ""
-					end,
-					grow = 1,
-					min_w = 0,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.tertiary",
-					wrap = true,
-				},
-				props.detail_action,
-			})
+			end, if props.detail_link
+				-- (One rich paragraph, the link its last span, is the drawing
+				-- this wants: zgx-asks/rich-span-boundary-break. Meanwhile the
+				-- sentence and its link are two boxes: the link a word's space
+				-- after the sentence when it fits there, else on the next line
+				-- at the sentence's start, as a word that doesn't fit goes.)
+				then ui.row {
+					w_full = true,
+					flex_wrap = true,
+					-- (A word's space between them, none between lines: the
+					-- theme's number, as `gap_x` drops a token,
+					-- zgx-asks/gap-axis-tokens.)
+					gap_x = ui.raw(ui.theme.get("space.1") :: number, "gap_x drops a token (zgx-asks/gap-axis-tokens): $space.1 read as its number"),
+					gap_y = 0,
+					items = "end",
+					ui.text {
+						function(): string
+							return control.value(props.detail) or ""
+						end,
+						class = "settings-detail",
+						shrink = 1,
+						min_w = 0,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.tertiary",
+						wrap = true,
+					},
+					M.InlineLink { label = props.detail_link.label, on_click = props.detail_link.on_click },
+				}
+				else ui.row {
+					w_full = true,
+					gap = "$space.3",
+					items = "start",
+					ui.text {
+						function(): string
+							return control.value(props.detail) or ""
+						end,
+						grow = 1,
+						min_w = 0,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.tertiary",
+						wrap = true,
+					},
+					props.detail_action,
+				})
 			else nil,
 	}
 	local lead: Node? = props.lead
@@ -902,7 +1231,68 @@ export type CatalogProps = {
 	none: (tab: string) -> Node,
 	hint: { id: string?, text: string | Message }?,
 	overlays: { Node }?,
+	-- Tabs the page draws itself under the tabs, by value, in place of the
+	-- card and of `states` (a catalog from elsewhere, searched on its own
+	-- terms: Plugins' Browse). Each is built as its tab is chosen; it has
+	-- the same card to hand, `Settings.CatalogCard`.
+	views: { [string]: () -> Node }?,
 }
+
+-- A Catalog's card: its search heading it (a quiet field inset evenly,
+-- its corner the card's less its edge and that inset, for its focus
+-- ring, as the board's), then, under a hairline, what the page puts
+-- there: `filters` (a bar of choices that narrow it, inset as the rows'
+-- words are) and its `body` (the rows, or what it says instead).
+export type CatalogCardProps = {
+	id: string?,
+	search: { value: State<string>, placeholder: string | Message },
+	-- At the search's end, on its line: what narrows it besides its words
+	-- (an active keyword's token).
+	search_trail: Node?,
+	filters: Node?,
+	body: Node,
+}
+
+function M.CatalogCard(props: CatalogCardProps): Node
+	local search = ui.row {
+		w_full = true,
+		shrink = 0,
+		p = "$space.1",
+		gap = "$space.2",
+		items = "center",
+		theme = { radius = { md = control.nest("$radius.xl", 1, "$space.1") } },
+		-- (Its glyph's ink on the rows' edge, over their tiles: the rows' inset
+		-- less the card's edge, this inset and the glyph's own side bearing.)
+		SearchField {
+			value = props.search.value,
+			placeholder = props.search.placeholder,
+			name = props.search.placeholder,
+			size = "sm",
+			quiet = true,
+			w_full = props.search_trail == nil,
+			grow = if props.search_trail then 1 else nil,
+			pl = M.TEXT_INSET - 1 - ((ui.theme.get("space.1") :: number?) or 4) - SEARCH_INK,
+		},
+		-- (What else narrows it, ending on the rows' controls' edge.)
+		if props.search_trail
+			then ui.row { shrink = 0, items = "center", pr = ui.raw(M.TEXT_INSET - 1 - ((ui.theme.get("space.1") :: number?) or 4), "the rows' 16 inset, less this bar's own"), props.search_trail }
+			else nil,
+	}
+	return ui.column {
+		id = props.id,
+		w_full = true,
+		rounded = "$radius.xl",
+		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
+		border = 1,
+		border_color = "$zeron.settings.edge",
+		overflow = "hidden",
+		search,
+		M.Rule(),
+		if props.filters then props.filters else nil,
+		if props.filters then M.Rule() else nil,
+		props.body,
+	}
+end
 
 -- The tabs' far end: New, and Import… before it when the page has one.
 local function trail(props: CatalogProps): Node?
@@ -984,39 +1374,13 @@ function M.Catalog(props: CatalogProps): Node
 		end
 		return rows()
 	end
-	-- The search heading the card: a quiet field inset evenly, its corner the
-	-- card's less its edge and that inset (for its focus ring), as the board's.
-	local search = ui.div {
-		w_full = true,
-		shrink = 0,
-		p = "$space.1",
-		theme = { radius = { md = control.nest("$radius.xl", 1, "$space.1") } },
-		-- (Its glyph's ink on the rows' edge, over their tiles: the rows' inset
-		-- less the card's edge, this inset and the glyph's own side bearing.)
-		SearchField {
-			value = query,
-			placeholder = props.search.placeholder,
-			name = props.search.placeholder,
-			size = "sm",
-			quiet = true,
-			w_full = true,
-			pl = M.TEXT_INSET - 1 - ((ui.theme.get("space.1") :: number?) or 4) - SEARCH_INK,
-		},
-	}
 	local function card(): Node
-		return ui.column {
+		return M.CatalogCard {
 			id = "catalog-card",
-			w_full = true,
-			rounded = "$radius.xl",
-			bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
-			border = 1,
-			border_color = "$zeron.settings.edge",
-			overflow = "hidden",
-			search,
-			M.Rule(),
+			search = props.search,
 			-- One swap for what's under it: a tab is a page of its own; within
 			-- it, found or not. (Asked again with rows showing, they stay.)
-			ui.presence(function(): string
+			body = ui.presence(function(): string
 				local s = props.status()
 				if #props.found:get() > 0 then
 					return `list:{tab:get()}`
@@ -1028,6 +1392,10 @@ function M.Catalog(props: CatalogProps): Node
 		}
 	end
 	local function body(key: string): Node
+		local view = string.match(key, "^view:(.+)$")
+		if view and props.views and props.views[view] then
+			return props.views[view]()
+		end
 		local own = props.states and props.states[key]
 		if own then
 			return own()
@@ -1061,6 +1429,10 @@ function M.Catalog(props: CatalogProps): Node
 		-- The card (searched, loading or not), or a state of the page's own
 		-- in its place.
 		ui.presence(function(): string
+			local t = tab:get()
+			if props.views and props.views[t] then
+				return `view:{t}`
+			end
 			local s = props.status()
 			return if props.states and props.states[s] then s else "card"
 		end, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),

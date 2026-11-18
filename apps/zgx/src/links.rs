@@ -7,12 +7,23 @@
 //!   zeron://open/chat/<id>?workspace=<locator>
 //!                                   a chat's link, opened only in the
 //!                                   workspace it came from
+//!   zeron://open/plugin/<id>        a plugin of the store ("Install in
+//!                                   Zeron" on its web page): its page in
+//!                                   Settings → Plugins, Install ready. It
+//!                                   only ever names a store id, checked as
+//!                                   a plugin's id is (never a URL, a path
+//!                                   or a file), and never installs: the
+//!                                   person does, from the page
 //!
 //! What to open goes to the scripts as shared `app.link`,
-//! `{ seq, chat?, settings? }` (`seq` moving with each), which the shell's
-//! route follows (ui/screens/shell/route.luau). The beta registers for them
-//! (`sh.zeron.app`'s `zeron` scheme, src/main.rs); a launch with a link
-//! (`zeron <url>`) opens it too.
+//! `{ seq, chat?, settings?, plugin? }` (`seq` moving with each), which the
+//! shell's route follows (ui/screens/shell/route.luau). The beta registers
+//! for them (`sh.zeron.app`'s `zeron` scheme: dist/macos/Info.plist,
+//! dist/zeron.desktop, dist/windows/zeron.iss, the whole scheme, so a new
+//! path needs nothing new there); a launch with a link (`zeron <url>`)
+//! opens it too. A link that arrives before the main window is up (a cold
+//! start, or signed out: sign-in and setup come first) is kept, and the
+//! main window opens it as it comes up (`LAST`).
 
 use std::cell::{Cell, RefCell};
 
@@ -23,11 +34,40 @@ use zgx_script::{ScriptHost, Shared, Value};
 pub enum Target {
     Chat(String),
     Settings(&'static str),
+    /// A store plugin's page, by its id.
+    Plugin(String),
+}
+
+/// What a plugin link starts with.
+const PLUGIN_LINK: &str = "zeron://open/plugin/";
+
+/// A store id, as a plugin's id is (crates/engine plugins/manifest.rs
+/// `check_id`): `^[a-z0-9][a-z0-9-]{1,39}$`.
+fn store_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    (2..=40).contains(&bytes.len())
+        && matches!(bytes[0], b'a'..=b'z' | b'0'..=b'9')
+        && bytes[1..].iter().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+}
+
+/// The store id a plugin link names: exactly `zeron://open/plugin/<id>`,
+/// a trailing `/` allowed; anything more (a query, a fragment, another
+/// part, an escape) is no plugin link.
+fn plugin_link(url: &str) -> Option<String> {
+    let rest = url.strip_prefix(PLUGIN_LINK)?;
+    let id = rest.strip_suffix('/').unwrap_or(rest);
+    store_id(id).then(|| id.to_owned())
 }
 
 /// What `url` asks for: the target and, for a conversation link, the
 /// workspace it belongs to. None for anything else.
 pub fn parse(url: &str) -> Option<(Target, Option<String>)> {
+    if let Some(id) = plugin_link(url) {
+        return Some((Target::Plugin(id), None));
+    }
+    if url.starts_with(PLUGIN_LINK) {
+        return None;
+    }
     if let Some(target) = zeron_notify::link_target(url) {
         return Some(if target == zeron_notify::AGENT_UPDATES_TARGET {
             (Target::Settings("providers"), None)
@@ -45,10 +85,27 @@ thread_local! {
     static LAST: RefCell<Value> = RefCell::new(Value::record([("seq", Value::from(0.0))]));
 }
 
-/// A window's `app.link`.
+/// A window's `app.link`, and `app.link_followed(seq)`: the main window
+/// followed that link, so a window made later (after signing out and in)
+/// isn't sent to it again.
 pub fn install(host: &ScriptHost) {
     let last = LAST.with(|l| l.borrow().clone());
     WINDOWS.with(|w| w.borrow_mut().push(host.shared("app.link", last)));
+    host.action("app.link_followed", |seq| {
+        if let Value::Num(seq) = seq {
+            followed(seq);
+        }
+    });
+}
+
+/// The link numbered `seq` was followed: kept as its number alone.
+fn followed(seq: f64) {
+    LAST.with(|l| {
+        let mut last = l.borrow_mut();
+        if matches!(last.field("seq"), Some(Value::Num(n)) if *n == seq) {
+            *last = Value::record([("seq", Value::from(seq))]);
+        }
+    });
 }
 
 /// Open `url`: a banner's target at once; a chat's link once the engine says
@@ -59,6 +116,11 @@ pub fn open(url: &str) {
         return;
     };
     let Some(workspace) = workspace else {
+        // (A plugin's page, asked from a web page: Zeron comes forward on
+        // it, as for a banner. LaunchServices may already have.)
+        if matches!(target, Target::Plugin(_)) {
+            activate();
+        }
         tell(target);
         return;
     };
@@ -115,6 +177,7 @@ fn tell(target: Target) {
     match target {
         Target::Chat(id) => fields.push(("chat", Value::from(id.as_str()))),
         Target::Settings(page) => fields.push(("settings", Value::from(page))),
+        Target::Plugin(id) => fields.push(("plugin", Value::from(id.as_str()))),
     }
     let value = Value::record(fields);
     LAST.with(|l| *l.borrow_mut() = value.clone());
@@ -129,16 +192,16 @@ fn tell(target: Target) {
 mod tests {
     use super::*;
 
-    fn last() -> (Option<String>, Option<String>) {
-        LAST.with(|l| {
-            let l = l.borrow();
-            let text = |k: &str| match l.field(k) {
-                Some(Value::Str(s)) => Some(s.to_string()),
-                Some(Value::Text(s)) => Some(s.to_string()),
-                _ => None,
-            };
-            (text("chat"), text("settings"))
+    fn field(k: &str) -> Option<String> {
+        LAST.with(|l| match l.borrow().field(k) {
+            Some(Value::Str(s)) => Some(s.to_string()),
+            Some(Value::Text(s)) => Some(s.to_string()),
+            _ => None,
         })
+    }
+
+    fn last() -> (Option<String>, Option<String>) {
+        (field("chat"), field("settings"))
     }
 
     /// A banner clicked in this process (macOS hands the click to the app,
@@ -162,5 +225,62 @@ mod tests {
         assert_eq!(parse(&link), Some((Target::Chat("c 1".into()), Some("abc".into()))));
         assert_eq!(parse("https://example.com"), None);
         assert_eq!(parse("zeron://open/chat/id"), None);
+    }
+
+    /// A plugin's link names a store id and nothing else: its page, never a
+    /// URL, a path, a file or anything to run.
+    #[test]
+    fn a_plugin_link_names_a_store_id_alone() {
+        for (url, id) in [
+            ("zeron://open/plugin/focus-timer", "focus-timer"),
+            ("zeron://open/plugin/focus-timer/", "focus-timer"),
+            ("zeron://open/plugin/a1", "a1"),
+            ("zeron://open/plugin/9lives", "9lives"),
+        ] {
+            assert_eq!(parse(url), Some((Target::Plugin(id.into()), None)), "{url}");
+        }
+        let forty = "a".repeat(40);
+        assert_eq!(parse(&format!("{PLUGIN_LINK}{forty}")), Some((Target::Plugin(forty.clone()), None)));
+        for url in [
+            "zeron://open/plugin/",
+            "zeron://open/plugin/a",
+            "zeron://open/plugin/Focus",
+            "zeron://open/plugin/-focus",
+            "zeron://open/plugin/focus_timer",
+            "zeron://open/plugin/focus%2Ftimer",
+            "zeron://open/plugin/focus/../../etc",
+            "zeron://open/plugin/focus/settings",
+            "zeron://open/plugin/focus?install=1",
+            "zeron://open/plugin/focus#install",
+            "zeron://open/plugin/https://evil.example/x.zeron-plugin",
+            "zeron://open/plugin/file:///tmp/x.zeron-plugin",
+            "zeron://open/plugin/focus timer",
+            "zeron://open/plugin/fócus",
+            "zeron://open/plugin//focus",
+            "ZERON://open/plugin/focus",
+            "zeron://open/plugins/focus",
+        ] {
+            assert_eq!(parse(url), None, "{url}");
+        }
+        assert_eq!(parse(&format!("{PLUGIN_LINK}{forty}a")), None, "41 characters");
+    }
+
+    /// Told to the scripts as `plugin`, and kept for a main window that
+    /// comes up later (a cold start, or signed out until set up).
+    #[test]
+    fn a_plugin_link_opens_its_page_and_is_kept_for_a_window_to_come() {
+        tell(Target::Plugin("focus-timer".into()));
+        assert_eq!(field("plugin").as_deref(), Some("focus-timer"));
+        assert_eq!(last(), (None, None));
+        // (A window installed now starts from it: `install` reads `LAST`.)
+        let kept = LAST.with(|l| l.borrow().clone());
+        let Some(Value::Num(seq)) = kept.field("seq").cloned() else { panic!("{kept:?}") };
+        assert!(seq >= 1.0);
+        // Followed by the main window: a later window isn't sent there again.
+        followed(seq - 1.0);
+        assert_eq!(field("plugin").as_deref(), Some("focus-timer"), "only the link it followed");
+        followed(seq);
+        assert_eq!(field("plugin"), None);
+        assert!(matches!(LAST.with(|l| l.borrow().field("seq").cloned()), Some(Value::Num(n)) if n == seq));
     }
 }

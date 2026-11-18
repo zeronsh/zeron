@@ -1,0 +1,19 @@
+{
+  "id": "settings-page",
+  "name": "Snippets",
+  "version": "1.0.0",
+  "description": "Text you use often, a click away in the message box. Its settings page is drawn by the plugin itself: the example to copy.",
+  "icon": "icon.svg",
+  "entry": "init.luau",
+  "permissions": ["ui.add", "compose"],
+  "settings_description": "Text you use often, a click away in the message box.",
+  "settings": [
+    { "id": "show", "kind": "switch", "section": "Message box", "label": "Show the Snippets button", "description": "Beside the message box's other buttons.", "default": true },
+    { "id": "insert", "kind": "choice", "style": "segmented", "section": "Message box", "label": "A snippet goes",
+      "options": [
+        { "value": "after", "label": "After the draft", "description": "After what you've written, on a line of its own." },
+        { "value": "replace", "label": "In its place", "description": "In place of what you've written." }
+      ],
+      "default": "after" }
+  ]
+}

@@ -20,7 +20,10 @@ export type Props = {
 	value: State<any>,
 	options: { Option },
 	look: Look?,
-	size: ("sm" | "md")?,
+	-- `xs`: a filter row's pills (the plugin store's categories), at the
+	-- design system's xs height (24, as Button's and IconButton's) with
+	-- 8 either side of the words, so more of them fit beside each other.
+	size: ("xs" | "sm" | "md")?,
 	-- What assistive technology calls the list.
 	label: Label?,
 	-- The hairline under underline tabs, across the row's whole width.
@@ -43,7 +46,8 @@ return ui.component(function(props: Props): Node
 	local look: Look = props.look or "underline"
 	local size = props.size or "md"
 	local pill = look == "pill"
-	local H = if pill then (if size == "sm" then 26 else 30) else (if size == "sm" then 32 else 36)
+	local small = size == "sm" or size == "xs"
+	local H = if pill then (if size == "xs" then 24 elseif size == "sm" then 26 else 30) else (if small then 32 else 36)
 	local refs: { any } = {}
 	local tabs: { Node } = {}
 	local index = ui.computed(function(): number
@@ -64,7 +68,33 @@ return ui.component(function(props: Props): Node
 			props.on_change(o.value)
 		end
 	end
-	for _, o in props.options do
+	-- The tab an arrow (Home, End) moves to from the `from`th, past
+	-- disabled ones; nil for another key, or none to move to.
+	local function step(from: number, key: string): number?
+		local list = props.options
+		local function open(at: number): boolean
+			return list[at] ~= nil and not list[at].disabled
+		end
+		if key == "Home" or key == "End" then
+			local first, last, by = if key == "Home" then 1 else #list, if key == "Home" then #list else 1, if key == "Home" then 1 else -1
+			for at = first, last, by do
+				if open(at) then
+					return if at ~= from then at else nil
+				end
+			end
+			return nil
+		end
+		local by = if key == "ArrowRight" then 1 elseif key == "ArrowLeft" then -1 else 0
+		if by == 0 then
+			return nil
+		end
+		local at = from + by
+		while list[at] and not open(at) do
+			at += by
+		end
+		return if open(at) then at else nil
+	end
+	for i, o in props.options do
 		local ref = ui.ref()
 		table.insert(refs, ref)
 		local function chosen(): boolean
@@ -103,7 +133,7 @@ return ui.component(function(props: Props): Node
 				disabled = o.disabled,
 				cursor = if o.disabled then nil else "pointer",
 				h = H,
-				px = if pill then "$space.3" else "$space.1",
+				px = if pill then (if size == "xs" then "$space.2" else "$space.3") else "$space.1",
 				gap = "$zeron.space.tight",
 				items = "center",
 				shrink = 0,
@@ -124,18 +154,29 @@ return ui.component(function(props: Props): Node
 				on_click = function()
 					choose(o)
 				end,
-				on_focus = function()
-					choose(o)
+				-- The arrows, Home and End choose the tab they move to; zgx's
+				-- tab list moves the focus there (not handled here). Focus
+				-- that only arrives (Tab into the list, or handed on as what
+				-- had it goes away) chooses nothing.
+				on_key = function(e: any): boolean
+					if e.shift or e.ctrl or e.alt or e.meta or e.cmd then
+						return false
+					end
+					local to = step(i, e.key)
+					if to then
+						choose(props.options[to])
+					end
+					return false
 				end,
 				if pill
 					then TabStrip.Wash(function(): boolean
 						return hovered:get() and not chosen()
 					end)
 					else nil,
-				if o.icon then ui.div { y = -0.5, Icon { name = o.icon, size = if size == "sm" then 14 else 16 } } else nil,
+				if o.icon then ui.div { y = -0.5, Icon { name = o.icon, size = if small then 14 else 16 } } else nil,
 				ui.text {
 					o.label,
-					text_size = if size == "sm" then "$font.size.sm" else "$font.size.md",
+					text_size = if small then "$font.size.sm" else "$font.size.md",
 					weight = "$font.weight.medium",
 				},
 				count,

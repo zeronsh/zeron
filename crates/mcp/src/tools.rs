@@ -888,6 +888,9 @@ impl Tools {
             plugins::INSTALL_PLUGIN => return self.install_plugin(args).await,
             plugins::UPDATE_PLUGIN => return self.update_plugin(args).await,
             plugins::EXPORT_PLUGIN => return self.export_plugin(args).await,
+            plugins::SEARCH_PLUGINS => return self.search_plugins(args).await,
+            plugins::GET_STORE_PLUGIN => return self.get_store_plugin(args).await,
+            plugins::CHECK_PLUGIN => return self.check_plugin(args).await,
             plugins::LIST_TEMPLATES
             | plugins::CREATE_TEMPLATE
             | plugins::USE_TEMPLATE

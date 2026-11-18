@@ -42,7 +42,17 @@ pub fn run_engine_command(command: EngineCommand) -> anyhow::Result<()> {
         EngineCommand::Plugin(command) => {
             let runtime = tokio::runtime::Runtime::new()?;
             let config = engine_config_from_env();
-            runtime.block_on(plugin_cli::run(command, config.ipc_port, &config.data_dir))
+            let ran = runtime.block_on(plugin_cli::run(command, config.ipc_port, &config.data_dir));
+            // A store command's failure: one line, and its own exit code
+            // (`store_cli`), for a CI job to act on.
+            if let Err(error) = &ran
+                && let Some(exit) = error.downcast_ref::<crate::store_cli::Exit>()
+            {
+                eprintln!("error: {}", exit.message);
+                drop(runtime);
+                std::process::exit(exit.code);
+            }
+            ran
         }
         EngineCommand::Template(command) => {
             let runtime = tokio::runtime::Runtime::new()?;

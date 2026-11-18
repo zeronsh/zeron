@@ -604,6 +604,8 @@ mod tests {
             "~\"Allow\"",
             "#x >> @app/screens/chat",
             ".plugin-tab.plugin-github",
+            // (Another plugin's settings page's place: its own plugin's alone.)
+            ".plugin-settings.plugin-github",
             ".plugin-unverified",
             "\"open",
         ] {

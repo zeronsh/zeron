@@ -16,6 +16,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [windows-caption-buttons](windows-caption-buttons/ASK.md) | Windows' caption glyphs stay the system's light or dark (invisible on a light Zeron on a dark system), come from an icon font (tofu on Windows 10), disagree with their hit test when the window is zoomed, are fixed at 32 tall, and Maximise shows on a fixed-size window. |
 | [windows-popup-backdrop](windows-popup-backdrop/ASK.md) | A popup's glass on Windows blurs nothing: a wallpaper's dither shows sharp through the model picker. Zeron draws the menus' glass solid there meanwhile. |
 | [windows-transparency](windows-transparency/ASK.md) | Windows' Transparency effects aren't reported (`ui.prefers.reduced_transparency` is always false there). Zeron watches the registry meanwhile. |
+| [private-reactive-regions](private-reactive-regions/ASK.md) | A plugin can replace, or add beside, rows on another plugin's Settings page (and parts of Cloud and Billing): what a `ui.presence`, `ui.show` or `ui.each` builds inside a `hook = false` element isn't kept from plugins' targets. |
 
 ## Medium: users meet it now and then, or a feature waits on it
 
@@ -26,6 +27,8 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [atomic-selection](atomic-selection/ASK.md) | A selection that starts inside a formula copies half its TeX. |
 | [web-snapshot](web-snapshot/ASK.md) | The browser panel can't attach a picture of the page. |
 | [markdown-offsets](markdown-offsets/ASK.md) | Review comments on a Markdown preview can't anchor to the block that holds their line. |
+| [rich-span-boundary-break](rich-span-boundary-break/ASK.md) | A rich paragraph that must break at the boundary between two spans breaks the next span's word in two instead (a sentence's own link, Publish… in Yours, cut across lines). Zeron draws that link as a box after the sentence meanwhile. |
+| [text-underline](text-underline/ASK.md) | A text's underline is clipped by its own line box: offset 4 on a small 16 pt line draws nothing (every inline link in Zeron's rows read as bold words). Zeron underlines its row links 2 under the baseline meanwhile. |
 
 ## Developers of Zeron (and of any zgx app)
 
@@ -37,6 +40,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 | Ask | |
 |---|---|
+| [gap-axis-tokens](gap-axis-tokens/ASK.md) | `gap_x = "$space.1"` spaces nothing, a token `gap` overrides a number `gap_y`, and `min_h` given a token is ignored (every `Settings.Row`'s 52 least, so rows are their content's height), while the design lint asks for the token. Zeron passes `gap_x`'s number through `ui.raw` meanwhile. |
 | [editor-menu-items](editor-menu-items/ASK.md) | Zeron's own text menu (ds/editor_menu) has no spelling guesses: zgx's `editor_spell::menu_items` is crate-private. Ask: a public way to get the guesses for the word at a point and apply one. |
 | [plugin-time](plugin-time/ASK.md) | A slow plugin can't be timed or blamed. |
 | [tooltip-function](tooltip-function/ASK.md) | A tooltip can't follow a state in place. |
@@ -70,6 +74,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [markdown-parse-cost](markdown-parse-cost/ASK.md) | `ui.markdown(text, { key, lazy, first })` (#1380, `0dff42bf5`), in Zeron's pin. Adopted: ds/markdown's windowed path parses lazily (pending blocks held by `hint`/`lines`, a find's block `first`); a 400-block reply's landing frame 39.6M → 21.5M instructions (`ui/tests/lazy_markdown.test.luau`). |
 | [fullscreen-toolbar-strip](fullscreen-toolbar-strip/ASK.md) | Fixed on zgx main `465858d8` (#1413): the inset toolbar hidden in full screen. In Zeron's pin `0e6c32f4`; checked in code (hidden on will-enter, shown on did-exit, only zgx's inset toolbar); the full-screen look is for a person to check. A failed entry into full screen once left the toolbar hidden: #1414 (`33e02879`) gives it back 2 s later, in the pin `a2c9cf1e6`. |
 | [stale-paint-mounted-mid-scroll](stale-paint-mounted-mid-scroll/ASK.md) | A move that repaints also damages where the content was (#1368, `c43b4e5ee`). In Zeron's pin `f6506b6e6`; the app's 90 ms hover rest is gone (ds/transcript), `ui/tests/hover_lane.test.luau` kept. |
+| [ancestor-list-fading-in](ancestor-list-fading-in/ASK.md) | Fixed in zgx PR #2360; in Zeron's pin `7f66d42fb` (the earlier pin `b80a8af1c` with that fix alone); adopted: Browse's tests build rows without scrolling, and fail on the old pin. |
 | [focus-restore](focus-restore/ASK.md) | Fixed in zgx `f3b6b53e`; in Zeron's pin `aaa304eb2`, focus test un-ignored. |
 | [cjk-font-fallback](cjk-font-fallback/ASK.md) | Fixed on zgx main (`f9e2dbce`, PingFang at Regular). In Zeron's pin `03270165c`. |
 | [stranded-stretch](stranded-stretch/ASK.md) | Fixed on zgx main `03270165c`; `zgx inspect node` reports scroll offset vs range and any stretch. In Zeron's pin. |

@@ -59,6 +59,13 @@ pub const SHARED_READ: &[(&str, Option<&str>)] = &[
     ("window.blur", None),
 ];
 
+/// What the person sets that the design system follows (Appearance's glass,
+/// accent, accent throughout, text size and fonts, reduce motion; General's
+/// hiding email addresses), each shared read only as
+/// `zeron.preference.<key>`: the design system lent to each plugin draws by
+/// the app's values (ui/ds/preference.luau), and none can change them.
+pub const PREFERENCES: &[&str] = &["frosted", "accent", "accent_throughout", "text_size", "interface_font", "code_font", "motion_reduce", "private_text_hidden"];
+
 /// What plugins may change of the app's own shared state, and the grant
 /// each needs: the sidebar's filter (`{ statuses, by }`, the shell's), for
 /// a plugin allowed "ui.change" on the sidebar or its rows (it's one virtual
@@ -80,7 +87,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
 pub const NEVER_REPLACED: &[&str] = &["@app/screens/plugins", "@app/screens/shell/settings"];
 
 /// Each plugin's own actions (`plugin.<id>.<name>`).
-pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "open_url", "notify", "cost", "run", "db", "service_call", "agents", "menu_run", "compose_comment", "draft", "draft_of", "file", "block"];
+pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "setting_set", "setting_folder", "settings_page", "open_url", "notify", "cost", "run", "db", "service_call", "agents", "menu_run", "compose_comment", "draft", "draft_of", "file", "block"];
 /// Each plugin's own shared state, to read (`plugin.<id>.<name>`).
 pub const OWN_SHARED: &[&str] = &["calls", "inbox", "records", "github", "store", "settings", "locales", "menu_items", "composed", "drafts"];
 
@@ -97,6 +104,13 @@ pub fn tab_selector(id: &str) -> String {
 /// Where plugin `id`'s pages are drawn, as the SDK places them.
 pub fn page_selector(id: &str) -> String {
     format!(".plugin-page.plugin-{id}")
+}
+
+/// Where plugin `id`'s settings page of its own is drawn (`zeron.settings_page`,
+/// after its declared rows), as the SDK places it: every plugin may fill its
+/// own, as settings need no permission.
+pub fn settings_selector(id: &str) -> String {
+    format!(".plugin-settings.plugin-{id}")
 }
 
 /// May `module` be replaced by a plugin allowed "ui.replace"? Granted as
@@ -201,7 +215,8 @@ fn classes(target: &str) -> impl Iterator<Item = &str> {
 /// What a plugin asking `permissions` (all allowed), with these `change`
 /// targets and `replace` modules, may do.
 pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace: &[String]) -> Vec<Capability> {
-    let mut out = vec![own(id)];
+    // Its own calls, and its own settings page's placeholder (no permission).
+    let mut out = vec![own(id), Capability::OverrideElement(settings_selector(id))];
     let named = |name: &str| Capability::Named(name.into());
     for permission in permissions {
         match permission.as_str() {
@@ -281,9 +296,44 @@ mod tests {
         v.iter().map(|x| x.to_string()).collect()
     }
 
+    /// Its own settings page's placeholder, every plugin's.
+    fn mine(id: &str) -> Capability {
+        Capability::OverrideElement(settings_selector(id))
+    }
+
+    /// Every preference the design system keeps (`preference.kept`) is one
+    /// the host shares with plugins, and no other: else a plugin's copy of
+    /// the design system would sit at its default whatever the person chose.
+    #[test]
+    fn every_preference_the_design_system_follows_is_shared_with_plugins() {
+        let ds = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/ds");
+        let mut kept: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&ds).unwrap().flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            for part in text.split("preference.kept(ui.persist(\"").skip(1) {
+                kept.push(part.split('"').next().unwrap().to_string());
+            }
+        }
+        kept.sort();
+        kept.dedup();
+        let mut shared: Vec<String> = PREFERENCES.iter().map(|k| k.to_string()).collect();
+        shared.sort();
+        assert_eq!(kept, shared);
+    }
+
+    #[test]
+    fn every_plugin_fills_its_own_settings_page_and_no_other() {
+        let got = capabilities("ledger", &[], &[], &[]);
+        assert!(got.contains(&Capability::OverrideElement(".plugin-settings.plugin-ledger".into())));
+        assert!(!got.iter().any(|c| matches!(c, Capability::OverrideElement(t) if t.contains("plugin-other"))));
+        // Nor is another's ever given by a manifest's `ui.change`.
+        assert!(!change_target(".plugin-settings.plugin-other"));
+        assert!(!change_target(".plugin-settings-page"));
+    }
+
     #[test]
     fn a_plugin_with_nothing_allowed_reaches_only_its_own() {
-        assert_eq!(capabilities("focus", &[], &[], &[]), vec![own("focus")]);
+        assert_eq!(capabilities("focus", &[], &[], &[]), vec![own("focus"), mine("focus")]);
     }
 
     #[test]
@@ -298,6 +348,7 @@ mod tests {
             got,
             vec![
                 own("focus"),
+                mine("focus"),
                 Capability::Named("zeron.ui.add".into()),
                 Capability::OverrideElement(".session-row".into()),
                 Capability::Named("zeron.sidebar.filter".into()),
@@ -322,7 +373,7 @@ mod tests {
                 "@ds/button",
             ]),
         );
-        assert_eq!(got, vec![own("x"), Capability::OverrideModule("@app/screens/shell/sidebar".into())]);
+        assert_eq!(got, vec![own("x"), mine("x"), Capability::OverrideModule("@app/screens/shell/sidebar".into())]);
     }
 
     #[test]
@@ -332,6 +383,7 @@ mod tests {
             got,
             vec![
                 own("prs"),
+                mine("prs"),
                 Capability::OverrideElement(".plugin-tab.plugin-prs".into()),
                 Capability::OverrideElement(".plugin-page.plugin-prs".into()),
             ]
@@ -373,6 +425,7 @@ mod tests {
             got,
             vec![
                 own("x"),
+                mine("x"),
                 Capability::OverrideElement("#composer-toolbar".into()),
                 Capability::OverrideElement("hook:sidebar.sessions".into()),
                 Capability::OverrideElement("\"Send @ once\"".into()),
@@ -404,7 +457,7 @@ mod tests {
     #[test]
     fn only_draft_reads_the_draft() {
         let draft = Capability::Named("zeron.draft".into());
-        assert_eq!(capabilities("stash", &s(&["draft"]), &[], &[]), vec![own("stash"), draft.clone()]);
+        assert_eq!(capabilities("stash", &s(&["draft"]), &[], &[]), vec![own("stash"), mine("stash"), draft.clone()]);
         assert!(!capabilities("x", &s(&["compose"]), &[], &[]).contains(&draft));
         assert!(SHARED_READ.contains(&("zeron.draft", Some("zeron.draft"))));
     }
@@ -412,7 +465,7 @@ mod tests {
     #[test]
     fn listed_targets_without_the_permission_give_nothing() {
         let got = capabilities("x", &[], &s(&["#titlebar-actions"]), &s(&["@app/screens/chat"]));
-        assert_eq!(got, vec![own("x")]);
+        assert_eq!(got, vec![own("x"), mine("x")]);
     }
 
     /// Allowing and claiming a plugin, and installing someone else's

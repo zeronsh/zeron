@@ -594,10 +594,50 @@ local FAILURES: { [string]: boolean } = {
 	different_plugin = true,
 	up_to_date = true,
 	no_source = true,
+	-- (The plugin store's, as the engine says them: every word of
+	-- docs/plugins.md "Reason words".)
+	incompatible = true,
+	store_unreachable = true,
+	not_in_store = true,
+	store_mismatch = true,
+	store_error = true,
+	signed_out = true,
+	review = true,
+	changed = true,
+	not_published = true,
+	step_up_required = true,
+	bad_package = true,
+	id_reserved = true,
+	not_semver = true,
+	missing_readme = true,
+	missing_listing = true,
+	bad_listing = true,
+	too_large = true,
+	binary_file = true,
+	no_notes = true,
+	needs_username = true,
+	id_taken = true,
+	version_exists = true,
+	suspended = true,
+	key_not_allowed = true,
+	key_revoked = true,
+	key_expired = true,
+	invalid_signature = true,
+	unauthenticated = true,
+	stale_request = true,
+	replayed_request = true,
+	body_mismatch = true,
+	too_many_keys = true,
+	key_taken = true,
+	invalid_name = true,
+	invalid_expiry = true,
+	invalid_proof = true,
+	bad_csrf = true,
 }
 
 function M.failure(message: string): string
-	local reason = string.match(message, "^([%l_]+): ")
+	-- (`"<reason>: <words>"`, or the reason alone, as an answer's `error`.)
+	local reason = string.match(message, "^([%l_]+): ") or string.match(message, "^([%l_]+)$")
 	if reason and FAILURES[reason] then
 		return s("plugins.failure." .. reason)
 	end

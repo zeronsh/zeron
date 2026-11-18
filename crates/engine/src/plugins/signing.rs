@@ -188,6 +188,11 @@ impl SigningKey {
             .map(|pair| Self { pair })
     }
 
+    /// The key whose 32-byte ed25519 seed is `seed` (a deploy key's).
+    pub fn from_seed(seed: &[u8]) -> Option<Self> {
+        Ed25519KeyPair::from_seed_unchecked(seed).ok().map(|pair| Self { pair })
+    }
+
     pub fn generate() -> Result<(Self, Vec<u8>), String> {
         let rng = ring::rand::SystemRandom::new();
         let der = Ed25519KeyPair::generate_pkcs8(&rng)

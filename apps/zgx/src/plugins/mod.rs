@@ -41,6 +41,7 @@ pub mod records;
 pub mod surfaces;
 pub mod github;
 pub mod store;
+pub mod catalog;
 pub mod commands;
 pub mod db;
 pub mod settings;
@@ -302,6 +303,10 @@ pub struct Bridge {
     watches: RefCell<Vec<crate::engine::rpc::SetUpWatch>>,
     pub(crate) consent: RefCell<Option<consent::Consent>>,
     reviewed: Cell<bool>,
+    /// The plugins whose folder dialog (`plugin.<id>.setting_folder`) is open.
+    folder_asking: RefCell<HashSet<String>>,
+    /// How often each plugin's page sets its own values (`settings::Pace`).
+    settings_pace: RefCell<settings::Pace>,
     /// Another device's plugins, shown by Settings → Plugins' switcher
     /// (`plugins.remote`; never loaded here).
     pub(crate) remote: remote::Remote,
@@ -331,6 +336,9 @@ pub fn expose_surface(host: &ScriptHost) {
     }
     for (key, capability) in grants::SHARED_READ {
         host.expose_shared_read(*key, capability.map(|c| Capability::Named(c.into())));
+    }
+    for key in grants::PREFERENCES {
+        host.expose_shared_read(format!("zeron.preference.{key}"), None);
     }
     for (key, capability) in grants::SHARED_WRITE {
         host.expose_shared(*key, Some(Capability::Named((*capability).into())));
@@ -640,6 +648,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         watches: RefCell::default(),
         consent: RefCell::default(),
         reviewed: Cell::new(false),
+        folder_asking: RefCell::default(),
+        settings_pace: RefCell::default(),
         remote: remote::Remote::new(host.shared("plugins.remote", remote::Remote::initial())),
         me: RefCell::default(),
         first_load: Cell::new(true),
@@ -1203,6 +1213,68 @@ pub(crate) fn forget_state(host: &ScriptHost, id: &str) {
     }
 }
 
+/// The plugins Settings follows the settings of (`settings::Book::sync`):
+/// those loading now, and one that failed and is withdrawn (`failed` says
+/// why) while it drew a settings page of its own (`draws_own`): its page
+/// stays, Zeron's rows on it, and why it stopped said in its box's place.
+/// (Each withdrawn one, with why, is the second list.)
+pub(crate) fn settings_on(
+    items: &[Item],
+    loading: &HashSet<String>,
+    mut failed: impl FnMut(&Item) -> Option<String>,
+    draws_own: impl Fn(&str) -> bool,
+) -> (Vec<settings::On>, Vec<(String, String)>) {
+    let (mut on, mut stopped) = (Vec::new(), Vec::new());
+    for i in items {
+        let followed = if loading.contains(i.id()) {
+            true
+        } else if i.status() == "on" && draws_own(i.id())
+            && let Some(why) = failed(i)
+        {
+            stopped.push((i.id().to_string(), why));
+            true
+        } else {
+            false
+        };
+        if followed {
+            on.push(settings::On {
+                id: i.id().to_string(),
+                name: i.name().to_string(),
+                hash: i.hash().to_string(),
+                // Zeron's own, as the engine says (shipped in the app,
+                // allowed as it ships, never edited).
+                builtin: i.json["builtin"].as_bool() == Some(true),
+            });
+        }
+    }
+    (on, stopped)
+}
+
+/// What an agent's `plugin_status` asks of the window (the engine's
+/// `@status` / `@snapshot` call's args): where its nodes are, or (`page =
+/// "settings"`) its settings page, opening Settings on it only with `open`.
+#[derive(Debug, PartialEq)]
+pub(crate) enum StatusAsk {
+    Window,
+    Settings { open: bool },
+}
+
+/// `args` as the window takes them, or why not: a page is `"settings"` or
+/// none, and `open` goes with that page alone (it moves the person's window
+/// to Settings: only where the docs say it does). As the MCP tool and the
+/// engine check them.
+pub(crate) fn status_ask(args: &Json) -> Result<StatusAsk, String> {
+    let open = args["open"].as_bool().unwrap_or(false);
+    match &args["page"] {
+        Json::Null => match open {
+            true => Err("open goes with page: \"settings\"".into()),
+            false => Ok(StatusAsk::Window),
+        },
+        page if page == "settings" => Ok(StatusAsk::Settings { open }),
+        _ => Err("page is \"settings\" (its settings page), or left out".into()),
+    }
+}
+
 /// What a plugin needed, as a person would say it: "a session".
 /// What Settings → Plugins says of a plugin's node that couldn't show at
 /// `at`: what it needed that the place doesn't give, or its error.
@@ -1492,6 +1564,17 @@ impl Bridge {
         if !self.first_load.get() {
             self.reload();
         }
+        // Each plugin has said again, as it loaded, whether it draws a
+        // settings page of its own: one a new version no longer draws goes.
+        // (After this turn, as what they said is taken: in that order.)
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            let Some(b) = me.upgrade() else { return };
+            let went = b.settings.borrow_mut().settle();
+            if went {
+                b.publish_settings(true, &[]);
+            }
+        });
     }
 
     fn reload(&self) {
@@ -2012,6 +2095,12 @@ impl Bridge {
             problem.field("need").map(text).as_deref(),
             &problem.field("error").map(text).unwrap_or_default(),
         );
+        self.say_problem(plugin, words);
+    }
+
+    /// `words`, a plugin's problem, on its row (once, as of its version).
+    fn say_problem(&self, plugin: &str, words: String) {
+        let Some(item) = self.item(plugin) else { return };
         let mut problems = self.problems.borrow_mut();
         if problems.get(plugin).is_some_and(|(hash, said)| hash == item.hash() && *said == words) {
             return;
@@ -2102,7 +2191,11 @@ impl Bridge {
         }
         // An agent asking where the plugin's nodes are (`plugin_status`).
         if let Some(tool @ ("@status" | "@snapshot")) = call["tool"].as_str() {
-            self.status_call(&plugin, id, tool == "@snapshot");
+            match status_ask(&call["args"]) {
+                Ok(StatusAsk::Settings { open }) => self.settings_status(&plugin, id, tool == "@snapshot", open),
+                Ok(StatusAsk::Window) => self.status_call(&plugin, id, tool == "@snapshot"),
+                Err(why) => answer_tool(id, false, Json::Null, why),
+            }
             return;
         }
         let loaded = self.loaded.borrow().iter().any(|p| p.name == plugin && plugin != "templates");
@@ -2418,6 +2511,82 @@ impl Bridge {
                 }
             }
         });
+        // Its page of its own in Settings (`zeron.settings_page`): declared,
+        // with the words search finds it by, and how each build went.
+        host.action(format!("plugin.{id}.settings_page"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                if let Some(b) = me.upgrade() {
+                    // (Told from a load or a build: taken after it.)
+                    let (me, plugin, asked) = (Rc::downgrade(&b), plugin.clone(), value_json(&asked));
+                    b.tasks.spawn(async move {
+                        if let Some(b) = me.upgrade() {
+                            b.settings_page(&plugin, &asked);
+                        }
+                    });
+                }
+            }
+        });
+        // One of its own settings, set from its page: checked as Zeron's
+        // page checks it, kept, and told to it as any change is. A promise
+        // of the value it holds now, or why not.
+        host.async_action(format!("plugin.{id}.setting_set"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                async move {
+                    let b = me.upgrade().ok_or("The window closed")?;
+                    let asked = value_json(&asked);
+                    let id = asked["id"].as_str().unwrap_or_default().to_string();
+                    if !b.settings_pace.borrow_mut().allow(&plugin, Instant::now()) {
+                        return Err(format!("Too many changes at once: {} a second at most", settings::PACED));
+                    }
+                    let changed = b.settings.borrow_mut().set_own(&plugin, &id, &asked["value"])?;
+                    if changed {
+                        b.publish_settings(true, std::slice::from_ref(&plugin));
+                    }
+                    let now = b.settings.borrow().values(&plugin).get(&id).cloned().unwrap_or(Json::Null);
+                    Ok(json_value(&now))
+                }
+            }
+        });
+        // One of its folder settings, chosen by the person in the window's
+        // dialog (a plugin never sets a folder itself). A promise of the
+        // folder chosen, or nil.
+        host.async_action(format!("plugin.{id}.setting_folder"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                async move {
+                    let asked = value_json(&asked);
+                    let id = asked["id"].as_str().unwrap_or_default().to_string();
+                    let (dialogs, title) = {
+                        let b = me.upgrade().ok_or("The window closed")?;
+                        let label = b.settings.borrow().folder_label(&plugin, &id)?;
+                        // The system's dialog, outside the window: asked from
+                        // its settings page as it shows (the person there,
+                        // choosing), one at a time.
+                        if !settings::page_shown(&b.route(), &plugin) {
+                            return Err("A folder is chosen from its settings page, while it shows".to_string());
+                        }
+                        if !b.folder_asking.borrow_mut().insert(plugin.clone()) {
+                            return Err("Its folder dialog is open already".to_string());
+                        }
+                        let name = b.item(&plugin).map(|i| i.name().to_string()).unwrap_or_else(|| plugin.clone());
+                        (b.dialogs.clone(), format!("{name}: {label}"))
+                    };
+                    let chosen = dialogs.open_folder(zgx_desktop::FileDialogOptions::new(title)).await.map_err(|e| e.to_string());
+                    if let Some(b) = me.upgrade() {
+                        b.folder_asking.borrow_mut().remove(&plugin);
+                    }
+                    let Some(path) = chosen? else { return Ok(Value::Nil) };
+                    let path = path.to_string_lossy().to_string();
+                    let b = me.upgrade().ok_or("The window closed")?;
+                    b.setting_set(&json!({ "plugin": plugin, "id": id, "value": path }))?;
+                    Ok(Value::from(path.as_str()))
+                }
+            }
+        });
         host.action(format!("plugin.{id}.store_set"), {
             let (me, plugin) = (me.clone(), plugin.clone());
             move |asked| {
@@ -2716,23 +2885,19 @@ impl Bridge {
     /// published as they change (with no borrow held: plugins' effects and
     /// the sidebar's run at once).
     fn sync_settings(&self, items: &[Item], loading: &HashSet<String>) {
-        let on: Vec<settings::On> = items
-            .iter()
-            .filter(|i| loading.contains(i.id()))
-            .map(|i| settings::On {
-                id: i.id().to_string(),
-                name: i.name().to_string(),
-                hash: i.hash().to_string(),
-                // Zeron's own, as the engine says (shipped in the app,
-                // allowed as it ships, never edited).
-                builtin: i.json["builtin"].as_bool() == Some(true),
-            })
-            .collect();
+        let (on, stopped) = {
+            let mut failed = self.failed_plugins.borrow_mut();
+            let book = self.settings.borrow();
+            settings_on(items, loading, |i| failed.holds(i.id(), i.hash()).then(|| failed.why(i.id()).unwrap_or_default().to_string()), |id| book.page_problem(id).is_some())
+        };
         let snapshots: HashMap<String, PathBuf> = items
             .iter()
             .filter_map(|i| Some((i.id().to_string(), PathBuf::from(i.json["snapshot"].as_str()?))))
             .collect();
-        let changed = self.settings.borrow_mut().sync(&on, |id| snapshots.get(id).and_then(|s| settings::manifest_in(s)));
+        let mut changed = self.settings.borrow_mut().sync(&on, |id| snapshots.get(id).and_then(|s| settings::manifest_in(s)));
+        for (id, why) in &stopped {
+            changed.list |= self.settings.borrow_mut().page_built(id, Some(why));
+        }
         self.publish_settings(changed.list, &changed.values);
     }
 
@@ -2753,6 +2918,42 @@ impl Bridge {
         }
         for (shared, value) in own {
             shared.set(value);
+        }
+    }
+
+    /// What a plugin's SDK says of its page of its own in Settings:
+    /// `{ op = "declare", keywords }` as it loads, `{ op = "built", error? }`
+    /// after each build. A failed build is said in the page's place, on its
+    /// row and to `plugin_status`; one that builds again clears what it said.
+    fn settings_page(&self, plugin: &str, asked: &Json) {
+        let Some(item) = self.item(plugin) else { return };
+        let changed = match asked["op"].as_str() {
+            Some("declare") => self.settings.borrow_mut().declare_page(plugin, &asked["keywords"]),
+            Some("built") => {
+                let error = asked["error"].as_str().filter(|e| !e.trim().is_empty());
+                let changed = self.settings.borrow_mut().page_built(plugin, error.map(recovery::first_line).as_deref());
+                let words = |e: &str| format!("{}'s settings page couldn't be shown: {}", item.name(), recovery::first_line(e));
+                match error {
+                    Some(e) if changed => {
+                        eprintln!("zeron-zgx: plugin {plugin}: its settings page failed: {e}");
+                        self.say_problem(plugin, words(e));
+                    }
+                    // (Built again: what its row said of the page goes.)
+                    None if changed => {
+                        let ours = self.problems.borrow().get(plugin).is_some_and(|(_, said)| said.starts_with(&format!("{}'s settings page", item.name())));
+                        if ours {
+                            self.problems.borrow_mut().remove(plugin);
+                            self.publish_page();
+                        }
+                    }
+                    _ => {}
+                }
+                changed
+            }
+            _ => false,
+        };
+        if changed {
+            self.publish_settings(true, &[]);
         }
     }
 
@@ -3008,6 +3209,14 @@ impl Bridge {
         if let Some(pages) = self.pages.borrow().get(plugin) {
             out["pages"] = json!(pages);
         }
+        // Its settings page of its own (`zeron.settings_page`): how it last
+        // built, and where Settings lists it.
+        if let Some(problem) = self.settings.borrow().page_problem(plugin) {
+            out["settings_page"] = json!({ "page": settings::page_id(plugin), "built": problem.is_none() });
+            if let Some(problem) = problem {
+                out["settings_page"]["problem"] = json!(problem);
+            }
+        }
         // Each of its contributions, as zgx counts it now.
         let contributions: Vec<Json> = self
             .host
@@ -3036,6 +3245,100 @@ impl Bridge {
             return;
         }
         self.push_call(plugin, id, "where", vec![("snapshot", Value::from(snapshot))]);
+    }
+
+    /// The window's route, as the app shares it (`zeron.route`).
+    fn route(&self) -> Json {
+        value_json(&self.host.shared("zeron.route", Value::Nil).signal().with_untracked(Value::clone))
+    }
+
+    /// An agent's `plugin_status { page = "settings" }`: the host's part,
+    /// what its Luau uses off the design system (hints, never a block), and,
+    /// with `snapshot`, a picture of its settings page as Settings shows it,
+    /// Zeron's header and rows over what it draws, to set beside Zeron's
+    /// own pages, if the window shows the page; with `open`, Settings is
+    /// opened on it first (the answer says so). Never moved otherwise.
+    fn settings_status(&self, plugin: &str, id: String, snapshot: bool, open: bool) {
+        let mut out = self.host_status(plugin);
+        let page = settings::page_id(plugin);
+        if let Some(dir) = self.item(plugin).and_then(|i| i.json["snapshot"].as_str().map(PathBuf::from)) {
+            let (hints, more) = surfaces::style_hints(&dir);
+            out["hints"] = json!(hints);
+            if more > 0 {
+                out["hints_more"] = json!(more);
+            }
+        }
+        let listed = self.settings.borrow().list().as_array().into_iter().flatten().any(|e| e["plugin"] == plugin);
+        if !listed {
+            out["snapshot_error"] = json!("It has no settings page now: declare settings in its manifest, or draw a page with zeron.settings_page (and it must be on).");
+            answer_tool(id, true, out, String::new());
+            return;
+        }
+        if !snapshot {
+            answer_tool(id, true, out, String::new());
+            return;
+        }
+        let shown = settings::page_shown(&self.route(), plugin);
+        if !shown && !open {
+            out["snapshot_error"] = json!(format!("Its settings page isn't showing in the window. Ask again with open: true to open Settings on it ({page}), or have the person open it."));
+            answer_tool(id, true, out, String::new());
+            return;
+        }
+        if !shown {
+            self.request("open", "", json_value(&json!({ "settings": page })));
+            out["opened"] = json!(format!("Settings opened on its page ({page}) to picture it"));
+        }
+        // (Pictured once it has shown and its plugin has drawn: a moment.)
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            zgx::timer::sleep(Duration::from_millis(if shown { 50 } else { 700 })).await;
+            let Some(b) = me.upgrade() else { return };
+            match b.picture_settings_page(&page) {
+                Ok(said) => {
+                    for (k, v) in said.as_object().into_iter().flatten() {
+                        out[k] = v.clone();
+                    }
+                }
+                Err(why) => out["snapshot_error"] = json!(why),
+            }
+            answer_tool(id, true, out, String::new());
+        });
+    }
+
+    /// The settings page open (`page`) as the window shows it, saved for the
+    /// agent: the page's column, cut to what of it the window shows.
+    fn picture_settings_page(&self, page: &str) -> Result<Json, String> {
+        if !settings::page_shown(&self.route(), page.trim_start_matches("plugin-")) {
+            return Err("Settings didn't open on its page".into());
+        }
+        let ui = self.ui.upgrade().ok_or("The window is closed")?;
+        let node = self.view.borrow().as_ref().and_then(|v| v.find("settings-page")).ok_or("Settings isn't showing")?;
+        let root = ui.root();
+        let image = ui.snapshot(root, SNAPSHOT_WIDTH).ok_or("The window isn't showing")?;
+        let (window, column) = {
+            let scene = ui.scene.borrow();
+            (scene.bounds(root), scene.bounds(node))
+        };
+        if window.width <= 0. {
+            return Err("The window isn't laid out".into());
+        }
+        let scale = image.width() as f32 / window.width;
+        let found = [surfaces::Region { x: column.x, y: column.y, w: column.width, h: column.height }];
+        let region = surfaces::around(&found, 0., window.width, window.height).ok_or("Its page isn't in the window")?;
+        let (w, h, pixels) = surfaces::crop(image.pixels(), image.width(), image.height(), region, scale);
+        let plugin = page.trim_start_matches("plugin-");
+        let dir = engine::data_dir().ok_or("Zeron's data folder isn't known")?.join("plugins").join(".snapshots");
+        let path = dir.join(format!("{plugin}.settings.png"));
+        surfaces::save_png(&path, w, h, &pixels)?;
+        let mut out = json!({
+            "snapshot": path.display().to_string(),
+            "snapshot_region": { "x": region.x, "y": region.y, "w": region.w, "h": region.h },
+            "snapshot_note": "Its settings page as Settings shows it: Zeron's header and rows, then what it draws. Set it beside one of Zeron's own pages (Settings → Notifications, say) and match them.",
+        });
+        if column.height > region.h + 0.5 {
+            out["snapshot_note"] = json!(format!("Its settings page as Settings shows it, the top {:.0} of its {:.0} points (the rest is past the window's foot). Zeron's header and rows, then what it draws.", region.h, column.height));
+        }
+        Ok(out)
     }
 
     /// The plugin's account of where it is, with the host's, and a picture
@@ -3239,6 +3542,17 @@ impl Bridge {
                         }
                         (Some(path), _) => json!({ "path": path }),
                         (None, Some(url)) => json!({ "url": url }),
+                        // A plugin of the store, by its id (and the version
+                        // its page showed): the engine fetches it from the
+                        // store and verifies it against the store's record.
+                        (None, None) if given("store").is_some() => {
+                            let id = given("store").and_then(|id| catalog::store_id(&id)).ok_or("not_found")?;
+                            let mut store = json!({ "store": id });
+                            if let Some(v) = given("version").filter(|v| v.len() <= 128) {
+                                store["version"] = json!(v);
+                            }
+                            store
+                        }
                         _ => return Err("Choose a plugin file or paste a link".into()),
                     };
                     let reply = call_on(&me, device, "InstallPlugin", params).await?;
@@ -3296,6 +3610,9 @@ impl Bridge {
                 }
             }
         });
+        // The plugin store: its catalog, your own plugins in it, and what
+        // the engine does for it (src/plugins/catalog.rs).
+        catalog::install(host, me.clone());
         host.action("plugins.menu", {
             let me = me.clone();
             move |arg| {
@@ -3565,7 +3882,7 @@ async fn template_call(method: &str, params: Json) -> Result<Json, String> {
     crate::auth::after_setup(|| call(method, params.clone())).await
 }
 
-async fn call(method: &str, params: Json) -> Result<Json, String> {
+pub(super) async fn call(method: &str, params: Json) -> Result<Json, String> {
     engine::get().call(method, params).await.map_err(|e| {
         // The engine's own words where it gave some; "offline" as the app says it.
         if e == "offline" || e == "closed" { engine::outcome(&e).to_string() } else { e }
@@ -3593,7 +3910,7 @@ fn set_off_action(host: &ScriptHost, me: Weak<Bridge>) {
     });
 }
 
-async fn call_on(me: &Weak<Bridge>, device: Option<String>, method: &str, params: Json) -> Result<Json, String> {
+pub(super) async fn call_on(me: &Weak<Bridge>, device: Option<String>, method: &str, params: Json) -> Result<Json, String> {
     let Some(device) = device else { return call(method, params).await };
     call(method, remote::addressed(Some(&device), params)).await.map_err(|error| {
         if !remote::unreachable(&error) {
@@ -3801,6 +4118,8 @@ mod tests {
 mod loading_tests;
 #[cfg(test)]
 mod examples_tests;
+#[cfg(test)]
+mod settings_page_tests;
 #[cfg(test)]
 mod hotkeys_tests;
 #[cfg(test)]
