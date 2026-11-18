@@ -50,6 +50,7 @@ pub(crate) fn claude_slot(accounts: &AgentAccounts, uuid: &str, email: &str, acc
         saved_at: now_ms(),
         created_at: None,
         store_key: None,
+        user_id: None,
     };
     accounts.write_slot(&slot).unwrap();
     slot.id
@@ -67,6 +68,7 @@ pub(crate) fn codex_slot(accounts: &AgentAccounts, workspace: &str, email: &str,
         saved_at: now_ms(),
         created_at: None,
         store_key: None,
+        user_id: None,
     };
     accounts.write_slot(&slot).unwrap();
     slot.id

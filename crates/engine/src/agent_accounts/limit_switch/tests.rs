@@ -25,6 +25,8 @@ fn row(id: &str, harness: HarnessId, windows: Vec<AgentUsageWindow>, fetched_ago
         switchable: true,
         saved_at: None,
         provider: None,
+        invalid: false,
+        invalid_reason: None,
     }
 }
 
@@ -223,4 +225,20 @@ async fn a_chat_pinned_before_its_limit_goes_back_to_its_pin() {
     assert_eq!(record.from_account.as_deref(), Some(b.as_str()));
     accounts.end_limit_switch(CHAT);
     assert_eq!(accounts.pinned_account(HarnessId::ClaudeCode, CHAT), Some(b));
+}
+
+
+#[test]
+fn an_account_its_provider_rejected_is_never_switched_to() {
+    // (A Cursor key the provider rejected, or any login marked invalid.)
+    let w = || vec![AgentUsageWindow { label: "5-hour".into(), used_fraction: 0.2, resets_at: None }];
+    let mut bad = row("bad", HarnessId::ClaudeCode, w(), 0);
+    bad.invalid = true;
+    bad.invalid_reason = Some("Key rejected — sign in again".into());
+    let good = row("good", HarnessId::ClaudeCode, w(), 0);
+    let accounts = [bad, good];
+    let pick = super::pick_switch_account(&accounts, HarnessId::ClaudeCode, &[], now_ms(), |_| true);
+    assert_eq!(pick.map(|a| a.id.as_str()), Some("good"));
+    let only_bad = [accounts[0].clone()];
+    assert!(super::pick_switch_account(&only_bad, HarnessId::ClaudeCode, &[], now_ms(), |_| true).is_none());
 }

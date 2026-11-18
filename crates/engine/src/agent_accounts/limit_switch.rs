@@ -103,7 +103,7 @@ fn signed_out(error: &str) -> bool {
 }
 
 /// The account of `harness` a limited chat continues on: switchable, a
-/// subscription login (never an API key), one `runnable` says a chat can
+/// subscription login (never an API key, never one its provider rejected), one `runnable` says a chat can
 /// run on, not in `exclude`, with quota now ([`headroom`]); the most
 /// headroom wins, the page's order breaking ties.
 pub fn pick_switch_account<'a>(
@@ -117,6 +117,8 @@ pub fn pick_switch_account<'a>(
         .iter()
         .filter(|a| a.harness == harness && a.switchable && !exclude.contains(&a.id.as_str()))
         .filter(|a| a.auth_kind != Some(AgentAuthKind::ApiKey))
+        // (Never one its provider rejected.)
+        .filter(|a| !a.invalid)
         .filter_map(|a| Some((a, headroom(a, now)?)))
         .filter(|(a, _)| runnable(a))
         .fold(None, |best: Option<(&AgentAccount, f32)>, (a, room)| match best {
