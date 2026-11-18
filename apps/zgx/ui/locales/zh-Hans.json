@@ -3827,6 +3827,8 @@
       "too_large": "它超出了商店允许的大小。",
       "binary_file": "它包含一个既不是文本也不是图片的文件。",
       "no_notes": "CHANGELOG.md 里没有这个版本的内容。",
+      "raw_html": "其中有 HTML，商店会按原样显示。",
+      "footnote": "其中有脚注，商店会按原样显示。",
       "needs_username": "请先设定用户名：商店里的每个插件都署名 @某人。",
       "id_taken": "已经有人用这个 id 发布了插件。",
       "version_exists": "这个版本你已经发送过了。请换一个新版本号。",
@@ -3962,6 +3964,8 @@
         "too_large": "它超出了商店允许的大小。去掉不需要的内容。",
         "binary_file": "它包含一个既不是文本也不是图片的文件：审核人员会仔细查看。",
         "no_notes": "CHANGELOG.md 里没有这个版本的内容：更新时大家看不到说明。",
+        "raw_html": "其中有 HTML，商店会按原样显示。图片和标题请用 Markdown。",
+        "footnote": "其中有脚注，商店会按原样显示。请把注释直接写进正文。",
         "other": "这里有些内容不符合商店的要求。",
         "missing_listing": {
           "icon": "添加一个 SVG 图标，并在 zeron-plugin.json 里写明（\"icon\"）。",

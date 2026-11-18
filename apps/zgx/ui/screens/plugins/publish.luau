@@ -126,7 +126,7 @@ local function fix_of(p: any): string
 	local rule, field = p.rule, p.field
 	if (rule == "missing_listing" or rule == "bad_listing") and type(field) == "string" and FIELDS[field] then
 		return ui.t(`plugins.store.fix.{rule}.{field}`):get()
-	elseif rule == "missing_readme" or rule == "not_semver" or rule == "id_reserved" or rule == "too_large" or rule == "binary_file" or rule == "no_notes" or rule == "not_newer" or rule == "version_exists" then
+	elseif rule == "missing_readme" or rule == "not_semver" or rule == "id_reserved" or rule == "too_large" or rule == "binary_file" or rule == "no_notes" or rule == "raw_html" or rule == "footnote" or rule == "not_newer" or rule == "version_exists" then
 		return ui.t(`plugins.store.fix.{rule}`):get()
 	end
 	return if type(p.words) == "string" and p.words ~= "" then string.sub(p.words, 1, 400) else ui.t("plugins.store.fix.other"):get()
