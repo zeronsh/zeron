@@ -95,9 +95,10 @@ const isControl = (ch: string): boolean => {
  * any variation selector but U+FE0F directly after a character with the
  * Emoji property ("⭐️"). */
 const UNSEEN = /[\p{Cc}\p{Cf}]|(?!\p{Variation_Selector})\p{Default_Ignorable_Code_Point}|(?!\u{fe0f})\p{Variation_Selector}|(?<!\p{Emoji})\u{fe0f}/u;
-/** Every default-ignorable character, variation selectors included: gone
- * before the mark's word test, so none can split a word. */
-const IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
+/** Every default-ignorable character, variation selectors included, and
+ * every enclosing mark (Me: a keycap's, a circle's), which the fold keeps:
+ * gone before the mark's word test, so none can split a word. */
+const IGNORABLE = /[\p{Default_Ignorable_Code_Point}\p{Me}]/gu;
 
 /**
  * The store's mark (amendment 45): a listing's name or description may not
@@ -162,7 +163,7 @@ const EDGE_GLYPHS: readonly string[] = ["\u{221a}", "\u{10102}"];
  * Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ", "VER1F1ED", "OFFlClAL", "V.E.R.I.F.I.E.D.").
  */
 export const markClaim = (text: string, lookalikes = true): string | undefined => {
-  // Nothing drawn between its letters splits a word.
+  // Nothing drawn between its letters, or around one, splits a word.
   const folded = markText(text).replace(IGNORABLE, "");
   const glyph = [...folded].find((ch) => MARK_GLYPHS.includes(ch) || (lookalikes && EDGE_GLYPHS.includes(ch)));
   if (glyph !== undefined) return glyph;
