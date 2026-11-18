@@ -94,6 +94,7 @@ import { json, jsonError } from "./http";
 import { adminAuthorized } from "./cloud/billing";
 import { foldUsername } from "./username";
 import { deleteUserBlobs } from "./user-images";
+import { ZERON_BADGE, pluginsClaimingZeron } from "./store/zeron-claims";
 
 export const USER_DIRECTORY_NAME = "users1";
 
@@ -2166,7 +2167,8 @@ const earnedBadgeError = (id: string): Response =>
 const handleBadgeRoute = async (
   request: Request,
   directory: DurableObjectStub<UserDirectory>,
-  action: string
+  action: string,
+  storeDb: D1Database | undefined
 ): Promise<Response> => {
   if (action === "") {
     if (request.method === "GET") return json({ badges: await directory.listBadges() });
@@ -2213,7 +2215,20 @@ const handleBadgeRoute = async (
     );
   }
   const ids = userIds === "all" ? "all" : [...new Set(userIds as string[])];
-  if (action === "revoke") return json({ revoked: await directory.revokeBadge(body.badgeId, ids as string[]) });
+  if (action === "revoke") {
+    // Zeron's own badge doesn't leave an account whose plugins still say
+    // they're Zeron's own (store/zeron-claims.ts): those first.
+    if (body.badgeId === ZERON_BADGE && storeDb) {
+      const plugins = await pluginsClaimingZeron(storeDb, ids as string[]);
+      if (plugins.length > 0) {
+        return json(
+          { error: "claims_zeron", message: "Their plugins say they're Zeron's own: transfer them to Zeron's account, or take those versions down, first.", plugins },
+          409
+        );
+      }
+    }
+    return json({ revoked: await directory.revokeBadge(body.badgeId, ids as string[]) });
+  }
   if (isEarnedBadge(body.badgeId)) {
     if (ids === "all") return earnedBadgeError(body.badgeId);
     return json({ granted: await directory.restoreEarnedBadge(body.badgeId, ids) });
@@ -2298,7 +2313,7 @@ export const handleUserDirectoryRoute = async (
     }
     const directory = userDirectoryStub(env);
     if (!directory) return jsonError(503, "unavailable", "The user directory isn't set up on this server.");
-    if (badgeAction !== undefined) return handleBadgeRoute(request, directory, badgeAction);
+    if (badgeAction !== undefined) return handleBadgeRoute(request, directory, badgeAction, env.STORE_DB);
     if (usernameAction !== undefined) return handleUsernameAdminRoute(request, directory, usernameAction);
     if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET only.");
     const csv = url.searchParams.get("format") === "csv";

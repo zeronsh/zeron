@@ -176,14 +176,28 @@ export const markClaim = (text: string): string | undefined => {
   return SPELLED.find(([, re]) => readings.some((r) => re.test(r)))?.[0];
 };
 
+/** Each phrase only Zeron's own plugins may use, spelled as the mark's
+ * words are: each letter itself or a look-alike (where the table has them),
+ * its apostrophe any of ' ’ ʼ, and each space any run of separators (but
+ * an apostrophe), as the data file's rule reads them. */
+const APOSTROPHE = "['\\u{2019}\\u{2bc}]";
+const PHRASE_SPACE = `(?:(?!${APOSTROPHE})${SEPARATOR})+`;
+const ZERON_SPELLED: readonly (readonly [string, RegExp])[] = ZERON_PHRASES.map((phrase) => {
+  const body = phrase
+    .split(" ")
+    .map((word) => [...word].map((ch) => (ch === "'" ? APOSTROPHE : /[a-z]/.test(ch) ? letterPattern(ch) : charClass([ch]))).join(""))
+    .join(PHRASE_SPACE);
+  return [phrase, new RegExp(`(?<![A-Za-z0-9])${body}(?![A-Za-z0-9])`, "u")] as const;
+});
+
 /** Which of the phrases only Zeron's own plugins may use `text` says, if
- * any: folded as `markClaim` folds, ’ and ʼ read as an apostrophe, each run
- * of separators but the apostrophe read as one space, the phrase whole. */
+ * any: folded as `markClaim` folds, spelled as the mark's words may be, in
+ * the text or with its spaced single characters read as one word ("Git by
+ * Zer0n", "Git by Zеron", "Z.E.R.O.N. approved"). */
 export const claimsZeron = (text: string): string | undefined => {
-  const plain = folded(text)
-    .replace(/[\u{2019}\u{2bc}]/gu, "'")
-    .replace(new RegExp(`(?:(?!')${SEPARATOR})+`, "gu"), " ");
-  return ZERON_PHRASES.find((phrase) => whole(plain, phrase));
+  const plain = folded(text);
+  const readings = [plain, unspaced(plain)];
+  return ZERON_SPELLED.find(([, re]) => readings.some((r) => re.test(r)))?.[0];
 };
 
 /** (The fold of a path, as the store and devices compare paths: paths.ts.) */

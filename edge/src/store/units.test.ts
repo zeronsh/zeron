@@ -4,7 +4,7 @@ import { isText, readmePictures } from "./checks";
 import { askParts, askPartsOf, asksChanged, consentDiff, consentItem, fullControl, heldToItsOwnRules } from "./consent";
 import { canonicalJson, formatFloat, parseJsonText } from "./json";
 import type { JsonObject } from "./json";
-import { changelogNotes, checkListing, listingOf, markClaim } from "./listing";
+import { changelogNotes, checkListing, claimsZeron, listingOf, markClaim } from "./listing";
 import { firstCollision } from "./paths";
 import { readManifest } from "./manifest";
 import { PAYLOAD_PREFIX, decodeBase64, inspectPackageJson, sha256Hex, signaturePayload, verifyPackage } from "./package";
@@ -252,6 +252,25 @@ describe("store listing: the mark (amendment 45)", () => {
     expect(problems({ name: "Оfficial Focus" })).toEqual([["name", 'Its name says "official": only the store marks a plugin verified']]);
     expect(problems({ description: "The vеrified board." })).toEqual([["description", 'Its description says "verified": only the store marks a plugin verified']]);
     expect(problems({ name: "Focus", description: "Boards." })).toEqual([]);
+  });
+});
+
+describe("store listing: claims of being Zeron's own", () => {
+  it("reads each phrase as the mark's words are read", () => {
+    for (const text of [
+      "Git by Zeron", "Git by Zer0n", "Git by Z\u{435}ron", "z e r o n approved", "Z.E.R.O.N. approved", "Git by Z e r o n",
+      "Zeron  -  certified", "the zeron\u{2019}s own board", "Zeron\u{2bc}s own", "Notes from Zer\u{fe0f}on"
+    ]) {
+      expect(claimsZeron(text), JSON.stringify(text)).toBeDefined();
+    }
+  });
+
+  // (Letters the shared table has no look-alikes for yet, b y z n among
+  // them, read only as themselves: "Git bу Zeron", "Git by ᴢᴇʀᴏɴ" wait on it.)
+  it("leaves what is only about Zeron alone", () => {
+    for (const text of ["Themes for Zeron", "Zeronaut", "Zeron notes", "A board by Zenon", "Lazeron approved", "by zeronaut", "from zero n"]) {
+      expect(claimsZeron(text), JSON.stringify(text)).toBeUndefined();
+    }
   });
 });
 

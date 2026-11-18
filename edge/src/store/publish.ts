@@ -31,6 +31,7 @@ import { type FileKind, fileKind, isText, runChecks } from "./checks";
 import { type ConsentItem, consentItem } from "./consent";
 import { VERSION_ORDER, auditIfChanged, filesKey, packageKey, pluginRow, relist } from "./db";
 import { authorsOf } from "./cards";
+import { ZERON_BADGE } from "./zeron-claims";
 import { purgeCatalog } from "./purge";
 import { fail, answer, rateLimited, refusedBody } from "./http";
 import { type Listing, type Problem, checkListing, listingOf } from "./listing";
@@ -132,11 +133,7 @@ const refusal = (e: PackageRefusal): Response => {
 /** A listing problem as the publish error: its rule word is the error word
  * (`id_reserved` 403, `too_large` 413, the rest 400), with every problem
  * found, so one upload shows them all. */
-/** The badge Zeron's own publishers carry (contract 44–45): granted by an
- * operator at the edge only; nothing a publisher sends sets it. */
-export const ZERON_BADGE = "maintainer";
-
-const isZeronsOwn = async (env: Env, userId: string): Promise<boolean> =>
+export const isZeronsOwn = async (env: Env, userId: string): Promise<boolean> =>
   ((await authorsOf(env, [userId]))[userId]?.badges ?? []).some((b) => b.id === ZERON_BADGE);
 
 const listingRefusal = (first: Problem, all: readonly Problem[]): Response =>

@@ -39,6 +39,8 @@ import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supe
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
 import { dropFromDeployKeys, readBody, requireAdmin } from "./principal";
 import { purgeCatalog, purgeTakedowns } from "./purge";
+import { isZeronsOwn } from "./publish";
+import { pluginsClaimingZeron } from "./zeron-claims";
 import { isUnused, releaseId } from "./release";
 import { SITE_IDS } from "./listing";
 import { decodeSegment } from "./serve";
@@ -568,6 +570,10 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
       const to = username && directory ? await directory.userIdForUsername(username) : undefined;
       if (!to) return fail(400, "bad_request", "to_username is a member's username.");
       if (to === plugin.owner_id) return fail(409, "invalid_state", "They already own it.");
+      // A plugin that says it's Zeron's own goes only to an account that is.
+      if (!(await isZeronsOwn(env, to)) && (await pluginsClaimingZeron(db, [plugin.owner_id], id)).length > 0) {
+        return fail(409, "claims_zeron", "Its listing says it's Zeron's own, and they don't carry Zeron's badge: take down or remove those versions first.");
+      }
       conflict = await change(
         db,
         // Its new owner holds it from now (a deploy key's `all` never takes it
