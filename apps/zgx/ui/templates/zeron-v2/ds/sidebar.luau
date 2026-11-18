@@ -57,6 +57,7 @@ local People = require("@self/people")
 local EditorMenu = require("@self/editor_menu")
 local OrchHue = require("@self/orch_hue")
 local badge = require("@self/badge")
+local trace = require("@self/orch_perf_trace")
 
 export type Session = {
 	id: string,
@@ -1054,12 +1055,35 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (Through a computed of its own: the row's bindings wake when its
 	-- session's table changes, not whenever any session's does. A caller
 	-- that keeps a session's table while it's the same keeps them asleep.)
+	-- (Two sessions' tables saying the same, a few levels down: one handed
+	-- back as a new table, the whole list written again, keeps the one held.)
+	local function same_row(a: any, b: any, depth: number): boolean
+		if rawequal(a, b) then
+			return true
+		end
+		if type(a) ~= "table" or type(b) ~= "table" or depth <= 0 then
+			return false
+		end
+		for k, v in a do
+			if not same_row(v, b[k], depth - 1) then
+				return false
+			end
+		end
+		for k in b do
+			if a[k] == nil then
+				return false
+			end
+		end
+		return true
+	end
 	local function now_of(s: Session): () -> Session
 		local last = s
 		local row = ui.computed(function(): Session
 			local cur = index:get().by_id[s.id]
-			if cur then
+			if cur and not same_row(cur, last, 4) then
 				last = cur
+				-- (Counted: tests/whole_list's "one status, one row".)
+				trace.hit("sidebar.row")
 			end
 			return last
 		end)

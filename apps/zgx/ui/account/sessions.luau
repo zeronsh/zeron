@@ -145,14 +145,48 @@ M.now = ui.shared("sessions", {
 -- Its parts, each followed on its own: a chat's message changes `chats`
 -- (every few seconds while chats run), and what reads only the projects,
 -- the devices or the places doesn't run again for it. Read one of these,
--- not `now:get().projects`, where the part is all that's used.
-M.projects = ui.computed(function(): { Project }
+-- not `now:get().projects`, where the part is all that's used. (Each keeps
+-- the table it gave while what's in it is the same, so a push that hands
+-- the part back as a new table, the whole value written again, wakes
+-- nothing that reads it.)
+local function same(a: any, b: any, depth: number): boolean
+	if rawequal(a, b) then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" or depth <= 0 then
+		return false
+	end
+	for k, v in a do
+		if not same(v, b[k], depth - 1) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+local function part<T>(read: () -> T): any
+	local last: any = nil
+	local has = false
+	return ui.computed(function(): T
+		local v = read()
+		if has and same(last, v, 6) then
+			return last
+		end
+		last, has = v, true
+		return v
+	end)
+end
+M.projects = part(function(): { Project }
 	return M.now:get().projects
 end)
-M.devices = ui.computed(function(): { Device }
+M.devices = part(function(): { Device }
 	return M.now:get().devices
 end)
-M.places = ui.computed(function(): Places
+M.places = part(function(): Places
 	return M.now:get().places
 end)
 M.here = ui.computed(function(): string?
@@ -161,7 +195,7 @@ end)
 M.state = ui.computed(function(): string
 	return M.now:get().state
 end)
-M.archived = ui.computed(function(): { Chat }
+M.archived = part(function(): { Chat }
 	return M.now:get().archived or {}
 end)
 M.connection = ui.computed(function(): string?

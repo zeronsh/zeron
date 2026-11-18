@@ -9,6 +9,9 @@
 --   rows.item(id)      a board item by id
 --   rows.orchestrator(id)  an orchestrator by id
 --   rows.name(id)      a thread's or orchestrator's name (ds/orch_name)
+--   rows.hue(id)       the hue a chat wears (data.hue_of's rule)
+--   rows.title(id)     an orchestrator's name, else the chat's title
+--                      (data.name_of's rule)
 --   rows.ask(chat)     the chat's open ask (its latest; a quiet one, a
 --                      chase, is none), as data.open_asks has it
 --
@@ -49,10 +52,39 @@ local function read(ix: Index, id: string?): any
 end
 
 -- `seen` (id → row) taken in: each row not the one held bumps its id.
+-- Whether two rows say the same (their fields, and the tables in them a few
+-- levels down): a push that hands back an unchanged row as a new table (a
+-- whole value written again, its rows read anew) wakes nobody.
+local function same(a: any, b: any, depth: number): boolean
+	if rawequal(a, b) then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" or depth <= 0 then
+		return false
+	end
+	for k, v in a do
+		if not same(v, b[k], depth - 1) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+M.same = same
+
 local function take(ix: Index, seen: { [string]: any })
 	local bump: { string } = {}
 	for id, row in seen do
-		if ix.rows[id] ~= row then
+		local was = ix.rows[id]
+		if was ~= row then
+			-- (The same row as a new table: the one held stays, nobody woken.)
+			if was ~= nil and same(was, row, 4) then
+				continue
+			end
 			ix.rows[id] = row
 			table.insert(bump, id)
 		end
@@ -81,6 +113,9 @@ local members = index("member")
 local items = index("item")
 local asks = index("ask")
 local leads = index("orchestrator")
+-- Each chat's orchestrator by its crew rows, released or not (the first
+-- one listing it, as data.hue_of looks it up).
+local crew_lead = index("crew_lead")
 
 -- An archived row whose own field doesn't say so is marked in a copy, the
 -- same copy while the row is the same (data.chats's rule, kept stable).
@@ -146,6 +181,16 @@ local function leads_of(now: any): { [string]: any }
 	return out
 end
 
+local function crew_leads_of(now: any): { [string]: any }
+	local out: { [string]: any } = {}
+	for _, m in (now and now.crew) or {} do
+		if m.chat_id and out[m.chat_id] == nil then
+			out[m.chat_id] = m.orchestrator_id
+		end
+	end
+	return out
+end
+
 local function items_of(now: any): { [string]: any }
 	local out: { [string]: any } = {}
 	for _, it in (now and now.items) or {} do
@@ -162,6 +207,7 @@ do
 	take(items, items_of(now))
 	take(asks, asks_of(now))
 	take(leads, leads_of(now))
+	take(crew_lead, crew_leads_of(now))
 end
 
 ui.effect(function()
@@ -173,6 +219,7 @@ ui.effect(function()
 	take(items, items_of(now))
 	take(asks, asks_of(now))
 	take(leads, leads_of(now))
+	take(crew_lead, crew_leads_of(now))
 end)
 
 function M.chat(id: string?): any
@@ -198,6 +245,42 @@ function M.name(id: string): string
 	local m = read(members, id)
 	local item = if m and m.item_id then read(items, m.item_id) else nil
 	return Name.thread(chat, m, item, id)
+end
+function M.hue(id: string?): number?
+	if not id then
+		return nil
+	end
+	local o = read(leads, id)
+	if o then
+		return o.hue
+	end
+	local lead = read(crew_lead, id)
+	if lead then
+		local lo = read(leads, lead)
+		if lo then
+			return lo.hue
+		end
+	end
+	-- (A chat under an orchestrator's chat, not (yet) in its crew.)
+	local c = read(chats, id)
+	if c and c.parent then
+		local po = read(leads, c.parent)
+		if po then
+			return po.hue
+		end
+	end
+	return nil
+end
+function M.title(id: string?): string?
+	if not id then
+		return nil
+	end
+	local o = read(leads, id)
+	if o then
+		return o.name
+	end
+	local c = read(chats, id)
+	return if c then c.title else nil
 end
 function M.ask(chat: string?): any
 	return read(asks, chat)

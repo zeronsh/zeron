@@ -1928,7 +1928,13 @@ M.View = ui.component(function(props: {
 				return if i and not settled:peek() and s.awake[i] then 0 else 1
 			end,
 			status.StatusIcon {
+				-- (Its own chat's state, read by itself when the page gives a
+				-- reader of one chat (account/rows): a push wakes the glyph of
+				-- the chat it changed, not every glyph on the web.)
 				kind = function(): any
+					if props.chat then
+						return model.status_of(props.chat(item.id))
+					end
 					status_tick:get()
 					return state_of(item.id)
 				end,
